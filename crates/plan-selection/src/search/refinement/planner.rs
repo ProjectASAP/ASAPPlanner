@@ -1890,7 +1890,7 @@ mod tests {
         assert!(weighted[0] > original[0] + 2.0);
     }
 
-    // Uncertified memory is not free: a 1200-tumbling window shared state must not beat
+    // Uncertified memory is not free: a 1200-tumbling-window shared state must not beat
     // two much smaller same-family states solely by saving one activation.
     #[test]
     fn baseline_prices_uncertified_tumbling_window_storage_without_changing_bounds() {

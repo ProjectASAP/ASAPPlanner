@@ -115,7 +115,7 @@ async fn per_sample_updates_build_the_materialized_tumbling_window_the_plan_refr
         .collect();
 
     // The executor's tumbling-window build: the samples bound at the plan's `Scan`,
-    // its `TimeRange` keeping the tumbling window's window.
+    // its `TimeRange` keeping the time range the tumbling window covers.
     let compiled = compile(dag, &[], &[output.node_id as u64]).unwrap();
     let build = compiled
         .instantiate(Arc::new(time_series_tables(dag, &samples)))
@@ -305,7 +305,7 @@ async fn tumbling_windows_installed_from_per_sample_states_answer_the_query() {
     // Every materialized tumbling window, built sample by sample and installed as a batch.
     let mut tumbling_windows = BTreeMap::new();
     for output in &plan.materialized_views().unwrap() {
-        // The tumbling window's window, `(start_ms, end_ms]`, at this evaluation.
+        // The time range the tumbling window covers, `(start_ms, end_ms]`, at this evaluation.
         let (start_ms, end_ms) = output.inputs.raw_data_windows()[0].bounds_ms(EVALUATION_MS);
         // The view node's family and output schema, from the plan.
         let node = dag.nodes.iter().find(|n| n.id == output.node_id).unwrap();

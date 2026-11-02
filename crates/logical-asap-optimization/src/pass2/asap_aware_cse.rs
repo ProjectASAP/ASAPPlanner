@@ -2570,11 +2570,7 @@ mod tests {
             .into_iter()
             .find(|n| matches!(n.asap(), Some(ASAPOp::SummaryAgg { .. })))
             .expect("a build");
-        assert_eq!(
-            splittable_window_ms(&build),
-            None,
-            "one anchored shift"
-        );
+        assert_eq!(splittable_window_ms(&build), None, "one anchored shift");
         // Put an `offset 1m` shift between the range and its anchored shift.
         let restacked = build
             .with_new_children(|range| {

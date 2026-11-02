@@ -1,4 +1,4 @@
-//! Planner-level summary-window tumbling window primitives.
+//! Planner-level tumbling-window layout and window-edge coverage.
 //!
 //! These values describe tumbling-window layout and window-edge coverage. They do not
 //! identify a runtime library, process, placement, shard layout, storage
@@ -184,6 +184,29 @@ mod tests {
             serde_json::to_value(WindowEdgeCoverage::TumblingWindowAligned).unwrap(),
             serde_json::json!({"kind": "pane_aligned"})
         );
+        for (error, wire) in [
+            (
+                TumblingWindowCoverageError::ZeroTumblingWindowWidth,
+                serde_json::json!("ZeroPaneWidth"),
+            ),
+            (
+                TumblingWindowCoverageError::UnknownTumblingWindowOrigin,
+                serde_json::json!("UnknownPaneOrigin"),
+            ),
+            (
+                TumblingWindowCoverageError::PhaseMismatch {
+                    tumbling_window_phase_ms: 1,
+                    query_phase_ms: 2,
+                },
+                serde_json::json!({"PhaseMismatch": {"pane_phase_ms": 1, "query_phase_ms": 2}}),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(&error).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_value::<TumblingWindowCoverageError>(wire).unwrap(),
+                error
+            );
+        }
         let json = serde_json::json!({
             "kind": "exact_boundary_residual", "executor": "runtime", "source": "raw"
         });

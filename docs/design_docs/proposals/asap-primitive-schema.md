@@ -665,7 +665,7 @@ With an exact target, the planner can keep all latencies per job in one maintain
 
 - **Implemented.** All children must be state with exactly one state field and identical schemas.
 - **Coverage.** It also requires equal `definition`s and selections that do not overlap, and computes the merged coverage.
-- **Newest tumbling windows:** an optional `newest_tumbling_windows: n` merges only the newest `n` tumbling windows of the one `SummaryTumblingWindowChain` the merge reads (`1 ≤ n <` its tumbling-window count). Its coverage is one build over those tumbling windows' window, so one chain kept for the longest window serves every query whose window, on the same tumbling windows, ends at the same time and is shorter.
+- **Newest tumbling windows:** an optional `newest_tumbling_windows: n` merges only the newest `n` tumbling windows of the one `SummaryTumblingWindowChain` the merge reads (`1 ≤ n <` its tumbling-window count). Its coverage is one build over the time range those tumbling windows cover, so one chain kept for the longest window serves every query whose window, on the same tumbling windows, ends at the same time and is shorter.
 - **Rollup:** an optional `group_by` field, so one operator does both merge and rollup. It lists the input's group columns the output is keyed by; `None` keeps the input's groups. A rollup merges every input state, so it does not take `newest_tumbling_windows`; it reads a merge of the newest tumbling windows instead:
 
 ```rust

@@ -486,7 +486,7 @@ async fn q2_tumbling_window_chain_serves_q1_through_newest_tumbling_windows_and_
                 newest_tumbling_windows_rolled_up(roots)
                     && sketch_of(operator(&roots[0])) == Some(algorithm)
             })
-            .unwrap_or_else(|| panic!("no {algorithm:?} newest-tumbling windows rollup candidate"));
+            .unwrap_or_else(|| panic!("no {algorithm:?} newest-tumbling-windows rollup candidate"));
         let q1 = answers(operator(&roots[0]));
         let values = values_in(5 * MINUTE_MS, None);
         assert_eq!(q1.len(), 1, "{id}");

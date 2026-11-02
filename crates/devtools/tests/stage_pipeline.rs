@@ -1176,7 +1176,7 @@ fn workload_file_with_a_range_evaluation_is_planned() {
             ..Default::default()
         };
         let kept = asap_physical_asap_optimization::optimize_physical_asap(
-            "kept-tumbling_windows",
+            "kept-tumbling-windows",
             &recompose_guarantees(&windowed).unwrap(),
             &entries,
             &data,

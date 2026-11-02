@@ -44,10 +44,12 @@ test('a collapsed chain is one node; expanded, one build, range and shift per tu
   const collapsed = call('stageLaneElements', dag, { physical: true, queryIds });
   assert.ok(nodesOf(collapsed).some((e) => e.data.id === `n${chain.id}` && e.data.expandable));
   const expanded = call('stageLaneElements', dag, { physical: true, queryIds, expandedChains: [chain.id] });
-  const tumbling_windows = nodesOf(expanded).filter((e) => e.data.tumblingWindowOf === chain.id);
-  assert.equal(tumbling_windows.filter((e) => e.data.kind === 'tumbling_window').length, body.tumbling_window_count);
-  assert.equal(tumbling_windows.filter((e) => e.data.kind === 'TimeRange').length, body.tumbling_window_count);
-  assert.equal(tumbling_windows.filter((e) => e.data.kind === 'TimeShift').length, body.tumbling_window_count - 1);
+  const tumblingWindows = nodesOf(expanded).filter((e) => e.data.tumblingWindowOf === chain.id);
+  assert.equal(tumblingWindows.filter((e) => e.data.kind === 'tumblingWindow').length, body.tumbling_window_count);
+  assert.equal(tumblingWindows.filter((e) => e.data.kind === 'TimeRange').length, body.tumbling_window_count);
+  assert.equal(tumblingWindows.filter((e) => e.data.kind === 'TimeShift').length, body.tumbling_window_count - 1);
+  // Each expanded node carries the one class app.js styles with a dashed border.
+  assert.ok(tumblingWindows.every((e) => e.classes.split(' ').includes('tumblingWindow')));
   const ids = new Set(nodesOf(expanded).map((e) => e.data.id));
   for (const edge of edgesOf(expanded)) {
     assert.ok(ids.has(edge.data.source) && ids.has(edge.data.target), edge.data.id);
@@ -100,7 +102,7 @@ test('a query keeps its own nodes and a node its neighborhood', () => {
 test('materialized views group by tumbling-window chain', () => {
   const groups = call('materializedViewGroups', doc);
   assert.equal(groups.length, 6);
-  assert.equal(groups.reduce((n, g) => n + g.tumbling_windows.length, 0), doc.stage3_plan_selection.materialized_views.length);
+  assert.equal(groups.reduce((n, g) => n + g.tumblingWindows.length, 0), doc.stage3_plan_selection.materialized_views.length);
   assert.equal(groups[0].tumblingWindowsText, `${body.tumbling_window_count} × 20 s`);
 });
 
@@ -222,7 +224,9 @@ test('a document written before the tumbling-window rename (#1163) upgrades to t
     .replaceAll('"tumbling_window_width_ms"', '"pane_width_ms"')
     .replaceAll('"tumbling_window_count"', '"pane_count"')
     .replaceAll('"newest_tumbling_windows"', '"newest_panes"')
-    .replaceAll('"tumbling_window_retention_ms"', '"pane_retention_ms"'));
+    .replaceAll('"tumbling_window_retention_ms"', '"pane_retention_ms"')
+    .replaceAll('"tumbling_window_width_domain"', '"pane_width_domain"')
+    .replaceAll('"tumbling_window_widths_pending"', '"pane_widths_pending"'));
   assert.ok(JSON.stringify(old).includes('"PaneChain"'));
   assert.deepEqual(call('upgradeTumblingWindowNames', old), doc);
 });

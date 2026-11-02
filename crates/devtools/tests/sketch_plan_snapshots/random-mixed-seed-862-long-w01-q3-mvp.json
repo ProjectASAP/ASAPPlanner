@@ -11440,7 +11440,7 @@
         "1": {
           "cost_per_second": 0.0000190019900264,
           "cpu_core_seconds_per_second": 0.0002,
-          "detail": "build DDSketch in 300 panes of 1000 ms for 10000 groups: 100000 rows x (1 + depth 1); x 1.0000/s; keeps 16518880000 bytes",
+          "detail": "build DDSketch in 300 tumbling windows of 1000 ms for 10000 groups: 100000 rows x (1 + depth 1); x 1.0000/s; keeps 16518880000 bytes",
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
           "price_source": "analytical",
@@ -13416,6 +13416,6 @@
       ],
       "scalar_roots": []
     },
-    "display_name": "Q1 Sum acc + DDSketch ×300 panes + Count acc · ingestion time: DDSketch for Q1, 300 × 1s panes"
+    "display_name": "Q1 Sum acc + DDSketch ×300 tumbling windows + Count acc · ingestion time: DDSketch for Q1, 300 × 1s tumbling windows"
   }
 }

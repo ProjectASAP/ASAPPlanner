@@ -5,7 +5,8 @@
 const STAGE_PIPELINE_FORMAT = 'asap-stage-pipeline/v1';
 
 // Documents written before #1163 name the tumbling-window chain `PaneChain`,
-// its fields `pane_*` and the memo origin `panes` (`Panes` in older MILP
+// its fields `pane_*`, the planning report's `pane_width_domain` and
+// `pane_widths_pending`, and the memo origin `panes` (`Panes` in older MILP
 // search reports); renames them in place to today's names, keeping each
 // object's key order, so the rest of the viewer reads one set of names.
 // Remove once no document the viewer must open predates #1163.
@@ -738,7 +739,7 @@ function stageQueryReach(lane) {
   return reach;
 }
 
-// A tumbling window's window relative to the evaluation time `t`: tumbling window `k` (0 is the
+// The time range a tumbling window covers, relative to the evaluation time `t`: tumbling window `k` (0 is the
 // newest) of width `width` covers "t−(k+1)·width … t−k·width".
 function tumblingWindowTimeText(k, width) {
   const end = k === 0 ? 't' : `t−${durationText(k * width)}`;
@@ -794,16 +795,16 @@ function stageLaneElements(dag, options) {
       const width = body.tumbling_window_width_ms;
       for (let k = 0; k < body.tumbling_window_count; k += 1) {
         const id = `n${node.id}p${k}`;
-        const common = { tumblingWindowOf: node.id, tumbling_window: k, reachedBy: queries, rootFor: [], timing: node.timing, node: node.raw };
+        const common = { tumblingWindowOf: node.id, tumblingWindowIndex: k, reachedBy: queries, rootFor: [], timing: node.timing, node: node.raw };
         if (k > 0) {
           nodes.push({ data: Object.assign({ id: `${id}s`, nodeId: `${node.id}p${k}s`, kind: 'TimeShift', group: group('TimeShift'),
-            label: `TimeShift\nshift: ${durationText(k * width)}` }, common), classes: `tumbling window ${timingClass(node.timing)}`.trim() });
+            label: `TimeShift\nshift: ${durationText(k * width)}` }, common), classes: `tumblingWindow ${timingClass(node.timing)}`.trim() });
         }
         nodes.push({ data: Object.assign({ id: `${id}r`, nodeId: `${node.id}p${k}r`, kind: 'TimeRange', group: group('TimeRange'),
-          label: `TimeRange\nrange: ${durationText(width)}` }, common), classes: `tumbling window ${timingClass(node.timing)}`.trim() });
-        nodes.push({ data: Object.assign({ id, nodeId: `${node.id}p${k}`, kind: 'tumbling_window', group: 'summary',
+          label: `TimeRange\nrange: ${durationText(width)}` }, common), classes: `tumblingWindow ${timingClass(node.timing)}`.trim() });
+        nodes.push({ data: Object.assign({ id, nodeId: `${node.id}p${k}`, kind: 'tumblingWindow', group: 'summary',
           label: [`tumbling window ${k + 1} of ${body.tumbling_window_count}`, `summary: ${summaryFamilyText(body.family)}`, `window ${tumblingWindowTimeText(k, width)}`,
-            'click to collapse'].join('\n') }, common), classes: `tumbling window ${timingClass(node.timing)}`.trim() });
+            'click to collapse'].join('\n') }, common), classes: `tumblingWindow ${timingClass(node.timing)}`.trim() });
       }
       return;
     }
@@ -831,21 +832,21 @@ function stageLaneElements(dag, options) {
     const into = expanded.has(e.consumer);
     const from = expanded.has(e.producer);
     if (!into && !from) { edge(`e${index}`, `n${e.producer}`, `n${e.consumer}`, e.raw); return; }
-    // An expanded chain's input feeds each tumbling window's window; each tumbling window feeds
+    // An expanded chain's input feeds each tumbling window's TimeRange; each tumbling window feeds
     // the chain's readers.
-    const tumbling_windows = (chain) => byId.get(chain).body.tumbling_window_count;
+    const tumblingWindowCount = (chain) => byId.get(chain).body.tumbling_window_count;
     if (into) {
-      for (let k = 0; k < tumbling_windows(e.consumer); k += 1) {
-        const tumbling_window = `n${e.consumer}p${k}`;
-        edge(`e${index}p${k}`, `n${e.producer}`, k > 0 ? `${tumbling_window}s` : `${tumbling_window}r`, e.raw);
-        if (k > 0) edge(`e${index}p${k}s`, `${tumbling_window}s`, `${tumbling_window}r`, null);
-        edge(`e${index}p${k}r`, `${tumbling_window}r`, tumbling_window, null);
+      for (let k = 0; k < tumblingWindowCount(e.consumer); k += 1) {
+        const tumblingWindowId = `n${e.consumer}p${k}`;
+        edge(`e${index}p${k}`, `n${e.producer}`, k > 0 ? `${tumblingWindowId}s` : `${tumblingWindowId}r`, e.raw);
+        if (k > 0) edge(`e${index}p${k}s`, `${tumblingWindowId}s`, `${tumblingWindowId}r`, null);
+        edge(`e${index}p${k}r`, `${tumblingWindowId}r`, tumblingWindowId, null);
       }
     }
     if (from) {
       // A merge of the chain's newest tumbling windows reads only those.
       const consumer = byId.get(e.consumer);
-      const read = (consumer && consumer.body && consumer.body.newest_tumbling_windows) || tumbling_windows(e.producer);
+      const read = (consumer && consumer.body && consumer.body.newest_tumbling_windows) || tumblingWindowCount(e.producer);
       for (let k = 0; k < read; k += 1) {
         edge(`e${index}q${k}`, `n${e.producer}p${k}`, into ? `n${e.consumer}p0r` : `n${e.consumer}`, e.raw);
       }
@@ -1015,7 +1016,7 @@ function materializedViewRows(doc) {
     const node = nodes.get(output.stage2_node_id);
     const [kind, body] = node ? stageOperatorParts(node.payload) : ['—', {}];
     const summary = kind === 'SummaryAgg' || kind === 'SummaryTumblingWindowChain' ? summaryFamilyText(body.family) : '';
-    const tumbling_window = kind === 'SummaryTumblingWindowChain' && typeof output.installed_position === 'number'
+    const tumblingWindow = kind === 'SummaryTumblingWindowChain' && typeof output.installed_position === 'number'
       ? `tumbling window ${output.installed_position + 1} of ${output.installed_count} (newest first), ${durationText(body.tumbling_window_width_ms)} wide` : '—';
     const cost = perNode[String(output.stage2_node_id)];
     return {
@@ -1023,7 +1024,7 @@ function materializedViewRows(doc) {
       stage2NodeId: node ? output.stage2_node_id : null,
       definition: output.coverage.definition_id,
       kind: summary ? `${kind} · ${summary}` : kind,
-      tumbling_window,
+      tumblingWindow,
       refresh: output.refresh === 'at_ingestion' ? 'at ingestion' : 'on first read (kept across evaluations)',
       inputs: `${output.inputs.raw_data_windows.length} raw-data window(s)` +
         (output.inputs.materialized_views.length ? `, views ${output.inputs.materialized_views.join(', ')}` : ''),
@@ -1054,22 +1055,22 @@ function materializedViewGroups(doc) {
   });
   const joined = (values) => [...new Set(values)].join(', ');
   return groups.map((key) => {
-    const tumbling_windows = byNode.get(key).slice().sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
-    const first = tumbling_windows[0];
+    const tumblingWindows = byNode.get(key).slice().sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+    const first = tumblingWindows[0];
     const node = nodes.get(first.stage2NodeId);
     const [kind, body] = node ? stageOperatorParts(node.payload) : ['—', {}];
-    const retention = tumbling_windows.map((p) => p.retention);
+    const retention = tumblingWindows.map((p) => p.retention);
     return {
       stage2NodeId: first.stage2NodeId,
-      nodeIds: tumbling_windows.map((p) => p.nodeId),
-      definition: joined(tumbling_windows.map((p) => p.definition)),
+      nodeIds: tumblingWindows.map((p) => p.nodeId),
+      definition: joined(tumblingWindows.map((p) => p.definition)),
       kind: first.kind,
       tumblingWindowsText: kind === 'SummaryTumblingWindowChain' ? `${body.tumbling_window_count} × ${durationText(body.tumbling_window_width_ms)}` : '—',
-      refresh: joined(tumbling_windows.map((p) => p.refresh)),
+      refresh: joined(tumblingWindows.map((p) => p.refresh)),
       retention: new Set(retention).size === 1 ? retention[0] : `${retention[0]} … ${retention[retention.length - 1]}`,
       cost: first.cost,
       readBy: first.readBy,
-      tumbling_windows,
+      tumblingWindows,
     };
   });
 }

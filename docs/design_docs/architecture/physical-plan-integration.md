@@ -293,7 +293,7 @@ the selector in `rate(http_requests_total[5m])` lowers to `PromqlRange` with
 `range_millis = 300000`. Evidence carries series count, evaluation-step count,
 value kind, and the maximum samples in one per-series range. CPU visits every
 input sample; local memory is `series × max_window_samples_per_series ×
-sample_width`. This query-time range buffer is not a tumbling, sliding, tumbling window,
+sample_width`. This query-time range buffer is not a tumbling-window, sliding-window
 or exponential-histogram layout for maintaining a summary.
 
 ### `PromqlSubquery { range_millis, resolution_millis }`

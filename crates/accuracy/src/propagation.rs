@@ -611,7 +611,7 @@ fn rolled_up_guarantee(node: &OperatorNode) -> Option<Option<AccuracyGuarantee>>
 
 /// The guarantee of an estimate or finalized value read from merged
 /// tumbling windows ([`merged_chain`]): the guarantee of the same read of one
-/// build over the merged tumbling windows' window ([`merged_window_build`]: the whole
+/// build over the merged tumbling windows' time range ([`merged_window_build`]: the whole
 /// chain's, or its newest tumbling windows') when the
 /// family's merged error for that read is exact or the same as that build's
 /// (the family-capability table); none when it is approximate (evidence
@@ -647,7 +647,7 @@ fn merged_tumbling_windows_guarantee(node: &OperatorNode) -> Option<Option<Accur
     let Ok(mut window_build) = merged_window_build(state) else {
         return Some(None);
     };
-    // The merged tumbling windows' window range over the chain's input carries the
+    // The merged tumbling windows' time range over the chain's input carries the
     // guarantee composed over that input.
     let ASAPOp::SummaryTumblingWindowChain { child: input, .. } = chain.asap()? else {
         return Some(None);

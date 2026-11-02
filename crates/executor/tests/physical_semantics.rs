@@ -651,13 +651,13 @@ fn kll_partial_merge_and_multiple_evaluations_preserve_population() {
 #[test]
 fn compacted_kll_tumbling_windows_merge_within_the_calibrated_rank_error() {
     use planner_types::ir::schema::{SketchAlgorithm, SketchKind, SketchParams, SketchStatistic};
-    const TUMBLING_WINDOWS: u64 = 60;
-    const PER_TUMBLING_WINDOW: u64 = 1000;
+    const TUMBLING_WINDOW_COUNT: u64 = 60;
+    const ROWS_PER_TUMBLING_WINDOW: u64 = 1000;
     const K: u32 = 200;
     // The planner's empirical 99% KLL rank error, `2.296 / k^0.9723`
     // (`asap_logical_asap_optimization`'s `kll_rank_error_99`).
     let bound = 2.296 / f64::from(K).powf(0.9723);
-    let n = (TUMBLING_WINDOWS * PER_TUMBLING_WINDOW) as f64;
+    let n = (TUMBLING_WINDOW_COUNT * ROWS_PER_TUMBLING_WINDOW) as f64;
     let input = schema(&[("v", DataType::Float64, false)]);
     let family = FieldDataType::Sketch(
         SketchKind::new(
@@ -674,13 +674,13 @@ fn compacted_kll_tumbling_windows_merge_within_the_calibrated_rank_error() {
     };
     let state = build().schema();
     let mut dag = PhysicalDAG::default();
-    for tumbling_window in 0..TUMBLING_WINDOWS {
+    for tumbling_window in 0..TUMBLING_WINDOW_COUNT {
         // Tumbling window `p` holds `[p, p + 1) * 1000`, as tumbling windows of a
         // rising value would, so a lost tumbling window shifts every rank.
-        let rows = (0..PER_TUMBLING_WINDOW)
+        let rows = (0..ROWS_PER_TUMBLING_WINDOW)
             .map(|j| {
                 vec![Value::Float64(
-                    (tumbling_window * PER_TUMBLING_WINDOW + j) as f64,
+                    (tumbling_window * ROWS_PER_TUMBLING_WINDOW + j) as f64,
                 )]
             })
             .collect();
@@ -695,17 +695,17 @@ fn compacted_kll_tumbling_windows_merge_within_the_calibrated_rank_error() {
         )
         .unwrap();
         dag.add(
-            TUMBLING_WINDOWS + tumbling_window,
+            TUMBLING_WINDOW_COUNT + tumbling_window,
             vec![tumbling_window],
             build(),
         )
         .unwrap();
     }
-    let union = 2 * TUMBLING_WINDOWS;
+    let union = 2 * TUMBLING_WINDOW_COUNT;
     dag.add(
         union,
-        (TUMBLING_WINDOWS..2 * TUMBLING_WINDOWS).collect(),
-        Operator::union(state.clone(), TUMBLING_WINDOWS as usize).unwrap(),
+        (TUMBLING_WINDOW_COUNT..2 * TUMBLING_WINDOW_COUNT).collect(),
+        Operator::union(state.clone(), TUMBLING_WINDOW_COUNT as usize).unwrap(),
     )
     .unwrap();
     dag.add(

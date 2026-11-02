@@ -33,7 +33,7 @@
       { selector: 'node:selected', style: { 'overlay-color': tok('--accent'), 'overlay-opacity': 0.14, 'overlay-padding': 5 } },
       { selector: 'edge', style: { width: 1.6, 'line-color': tok('--edge'), 'target-arrow-color': tok('--edge'), 'target-arrow-shape': 'triangle', 'curve-style': 'bezier', 'arrow-scale': 0.9 } },
       { selector: '.dimmed', style: { opacity: 0.15 } },
-      { selector: 'node.tumbling_window', style: { 'border-style': 'dashed' } },
+      { selector: 'node.tumblingWindow', style: { 'border-style': 'dashed' } },
       { selector: 'edge:selected', style: { 'line-color': tok('--accent'), 'target-arrow-color': tok('--accent'), width: 2.6 } },
     ];
   }
@@ -79,7 +79,7 @@
   // other node is shown and its upstream and downstream highlighted.
   function tapNode(d, i) {
     if (d.expandable) { expandedOf(drawn[i].dag).add(d.nodeId); redraw(i); showNode(d, i); return; }
-    if (d.kind === 'tumbling_window') { expandedOf(drawn[i].dag).delete(d.tumblingWindowOf); redraw(i); return; }
+    if (d.kind === 'tumblingWindow') { expandedOf(drawn[i].dag).delete(d.tumblingWindowOf); redraw(i); return; }
     showNode(d, i);
     dim(i, new Set(stageNeighborhoodIds(laneElements[i], d.id)));
   }
@@ -121,7 +121,7 @@
     }
     if (d.rootFor && d.rootFor.length) items.push(['query root of', d.rootFor.join(', ')]);
     if (d.reachedBy) items.push(['queries reaching it', d.reachedBy.join(', ') || 'none']);
-    if (d.tumblingWindowOf !== undefined) items.push(['tumbling window', `${d.tumbling_window + 1} of ${body.tumbling_window_count} of SummaryTumblingWindowChain ${d.tumblingWindowOf}, window ${tumblingWindowTimeText(d.tumbling_window, body.tumbling_window_width_ms)}`]);
+    if (d.tumblingWindowOf !== undefined) items.push(['tumbling window', `${d.tumblingWindowIndex + 1} of ${body.tumbling_window_count} of SummaryTumblingWindowChain ${d.tumblingWindowOf}, window ${tumblingWindowTimeText(d.tumbling_window, body.tumbling_window_width_ms)}`]);
     if (d.expandable) items.push(['tumbling windows', `${body.tumbling_window_count} × ${durationText(body.tumbling_window_width_ms)} (click the chain to show them, a tumbling window to hide them)`]);
     if (d.timing !== undefined) items.push(['runs at', formatTiming(d.timing)]);
     if (n.materialization) items.push(['materialization', compactWire(n.materialization)]);
@@ -346,19 +346,19 @@
       return;
     }
     const groups = materializedViewGroups(doc);
-    const count = groups.reduce((n, g) => n + g.tumbling_windows.length, 0);
+    const count = groups.reduce((n, g) => n + g.tumblingWindows.length, 0);
     $('views-meta').innerHTML = selection.materialized_views_error
       ? `<span class="error">no installable plan: ${esc(selection.materialized_views_error)}</span>`
       : `<b>${count}</b> materialized view${count === 1 ? '' : 's'} in <b>${groups.length}</b> group${groups.length === 1 ? '' : 's'} of <b>${esc(selection.selected_candidate)}</b>` +
         (count ? '' : ': nothing is kept across evaluations; every query computes at query time');
-    const tumbling_windows = (g) => (g.tumbling_windows.length > 1
-      ? `<details><summary>${esc(g.tumbling_windows.length)} installed nodes</summary><ul>${g.tumbling_windows.map((p) => `<li>node ${esc(p.nodeId)} · ${esc(p.tumbling_window)} · window ${esc(p.window)} · kept ${esc(p.retention)}</li>`).join('')}</ul></details>`
-      : `node ${esc(g.tumbling_windows[0].nodeId)} · window ${esc(g.tumbling_windows[0].window)}`);
+    const tumblingWindowsCell = (g) => (g.tumblingWindows.length > 1
+      ? `<details><summary>${esc(g.tumblingWindows.length)} installed nodes</summary><ul>${g.tumblingWindows.map((p) => `<li>node ${esc(p.nodeId)} · ${esc(p.tumblingWindow)} · window ${esc(p.window)} · kept ${esc(p.retention)}</li>`).join('')}</ul></details>`
+      : `node ${esc(g.tumblingWindows[0].nodeId)} · window ${esc(g.tumblingWindows[0].window)}`);
     $('materializedViews').innerHTML = groups.length ? table(
       ['Stage 2 node', 'definition', 'kind', 'tumbling windows', 'refresh', 'retention', 'installed', 'Stage 3 cost', 'read by'],
       groups.map((g) => `<tr class="clickable" tabindex="0" data-node="${g.stage2NodeId === null ? '' : esc(g.stage2NodeId)}"><td>${g.stage2NodeId === null ? '—' : esc(g.stage2NodeId)}</td>` +
         `<td class="wrap">${esc(g.definition)}</td><td class="wrap">${esc(g.kind)}</td><td>${esc(g.tumblingWindowsText)}</td><td>${esc(g.refresh)}</td>` +
-        `<td>${esc(g.retention)}</td><td class="wrap">${tumbling_windows(g)}</td><td class="wrap">${esc(g.cost)}</td><td class="wrap">${esc(g.readBy.join(', ') || '—')}</td></tr>`).join('')) : '';
+        `<td>${esc(g.retention)}</td><td class="wrap">${tumblingWindowsCell(g)}</td><td class="wrap">${esc(g.cost)}</td><td class="wrap">${esc(g.readBy.join(', ') || '—')}</td></tr>`).join('')) : '';
     $('materializedViews').querySelectorAll('tr.clickable').forEach((tr) => {
       const pick = (e) => { if (e && e.target && e.target.closest && e.target.closest('details')) return; if (tr.dataset.node !== '') selectStage2Node(Number(tr.dataset.node)); };
       tr.addEventListener('click', pick);

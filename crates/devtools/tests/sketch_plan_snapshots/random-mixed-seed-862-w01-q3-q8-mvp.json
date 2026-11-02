@@ -5370,7 +5370,7 @@
         "1": {
           "cost_per_second": 6.3775772514e-6,
           "cpu_core_seconds_per_second": 0.0002,
-          "detail": "build DDSketch in 100 panes of 1000 ms for 10000 groups: 100000 rows x (1 + depth 1); x 1.0000/s; keeps 5542880000 bytes",
+          "detail": "build DDSketch in 100 tumbling windows of 1000 ms for 10000 groups: 100000 rows x (1 + depth 1); x 1.0000/s; keeps 5542880000 bytes",
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
           "price_source": "analytical",
@@ -5406,7 +5406,7 @@
         "13": {
           "cost_per_second": 2.86570103968e-8,
           "cpu_core_seconds_per_second": 0.0002,
-          "detail": "build exact Rate accumulator in 40 panes of 30000 ms for 10000 groups: 100000 rows x (1 + depth 1); x 1.0000/s; keeps 22960000 bytes",
+          "detail": "build exact Rate accumulator in 40 tumbling windows of 30000 ms for 10000 groups: 100000 rows x (1 + depth 1); x 1.0000/s; keeps 22960000 bytes",
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
           "price_source": "analytical",
@@ -8359,6 +8359,6 @@
       ],
       "scalar_roots": []
     },
-    "display_name": "Q1 Sum acc + DDSketch ×100 panes + Count acc · Q2 Rate acc ×40 panes · ingestion time: DDSketch for Q1, 100 × 1s panes, Rate acc for Q2, 40 × 30s panes"
+    "display_name": "Q1 Sum acc + DDSketch ×100 tumbling windows + Count acc · Q2 Rate acc ×40 tumbling windows · ingestion time: DDSketch for Q1, 100 × 1s tumbling windows, Rate acc for Q2, 40 × 30s tumbling windows"
   }
 }

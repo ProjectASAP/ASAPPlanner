@@ -34,7 +34,7 @@ These suites contain the nine viewer workload examples and 30 mixed ASAPQuery wo
 
 ## Baseline
 
-The existing four-case run is complete. Its frozen executable is `/mydata/asap-final-validation/stage-pipeline-final-composed-budget`; raw artifacts are under `/mydata/tumbling_window-compression-validation/before`. All four plans cover every query with enforced guarantees and no stored-output error.
+The existing four-case run is complete. Its frozen executable is `/mydata/asap-final-validation/stage-pipeline-final-composed-budget`; raw artifacts are under `/mydata/pane-compression-validation/before`. All four plans cover every query with enforced guarantees and no stored-output error.
 
 | Workload | Queries accepted | Wall seconds | Peak RSS KiB | Physical configurations | Compatible connections | Peak MILP variables | Modeled cost/second |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -96,7 +96,7 @@ Reported cumulative phase times, in seconds (before → after):
 
 These phase values are the emitted report counters. Interrupted preparation rounds may not be fully attributed to individual phases; their sum therefore does not equal whole-process wall time. Wall time and peak RSS cover the complete process. Do not treat every reported phase reduction as a measured reduction in all work of that kind.
 
-Artifacts: `/mydata/tumbling_window-compression-validation/{before,after-final}/results.json`, full plan JSON and GNU time logs in the same directories, and `comparison-final.md` with all before/after counters. Single runs do not establish statistical significance. Costs and accuracy are validated planner-model results, not measured stream-runtime performance.
+Artifacts: `/mydata/pane-compression-validation/{before,after-final}/results.json`, full plan JSON and GNU time logs in the same directories, and `comparison-final.md` with all before/after counters. Single runs do not establish statistical significance. Costs and accuracy are validated planner-model results, not measured stream-runtime performance.
 
 ### Broader acceptance
 
@@ -112,6 +112,6 @@ The regression suite found a genuine optimization regression outside window plan
 
 Revision `fe171f64` bypasses tumbling-window-domain expansion when the initial computations contain neither a positive range window nor an existing tumbling-window chain. It searches the complete candidate domain directly; at-rest status alone does not disable tumbling window planning. The same SQL fixture now passes the original sharing test and selects one shared KLL with exactly the baseline cost. Its report records 58 evaluations, `optimal`, one `Complete` round, and no pending widths. This fix avoids repeated identical-domain searches rather than increasing the budget or relaxing correctness checks.
 
-The final frozen executable is `/mydata/tumbling_window-compression-validation/stage-pipeline-after-gate-final`, SHA-256 `a3234d62d2a6717e3772aba240959f6a224a4e1e031fe9cba27854079f8622f2`, built from `fe171f64`. SQL before/after artifacts are `/tmp/identical-sql-{before,after,gate-fixed}.json`; the unchanged integration test log is `/tmp/sql-sharing-tumbling_window-gate-after.log`.
+The final frozen executable is `/mydata/pane-compression-validation/stage-pipeline-after-gate-final`, SHA-256 `a3234d62d2a6717e3772aba240959f6a224a4e1e031fe9cba27854079f8622f2`, built from `fe171f64`. SQL before/after artifacts are `/tmp/identical-sql-{before,after,gate-fixed}.json`; the unchanged integration test log is `/tmp/sql-sharing-pane-gate-after.log`.
 
-A fresh 30-second mixed-workload check on this final executable accepted all nine queries and retained the same modeled cost, 0.0000016046445458277792 per second. Its interrupted expansion report preserves `monetary_cost`, calibration scope `not_required`, factor 1, and the inventory source `Expanding { max_parts: 8 }` with 2,733 configurations and 49,897 connections. Pending widths still suppress global optimality certificates. Artifacts are in `/mydata/tumbling_window-compression-validation/final-gate-check/`. This targeted follow-up verifies the route/report fixes; the four-case measurements and 39-workload acceptance above remain attributed to their original frozen binary, not this later revision.
+A fresh 30-second mixed-workload check on this final executable accepted all nine queries and retained the same modeled cost, 0.0000016046445458277792 per second. Its interrupted expansion report preserves `monetary_cost`, calibration scope `not_required`, factor 1, and the inventory source `Expanding { max_parts: 8 }` with 2,733 configurations and 49,897 connections. Pending widths still suppress global optimality certificates. Artifacts are in `/mydata/pane-compression-validation/final-gate-check/`. This targeted follow-up verifies the route/report fixes; the four-case measurements and 39-workload acceptance above remain attributed to their original frozen binary, not this later revision.

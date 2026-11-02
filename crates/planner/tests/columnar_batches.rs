@@ -71,7 +71,7 @@ async fn a_tumbling_window_is_built_from_arrow_columns_with_one_label_entry_per_
                 .1
         })
         .unwrap();
-    // The tumbling window's window at this evaluation, `(start_ms, end_ms]`.
+    // The time range the tumbling window covers at this evaluation, `(start_ms, end_ms]`.
     let (start_ms, end_ms) = output.inputs.raw_data_windows()[0].bounds_ms(EVALUATION_MS);
     // Feed both series within the selected tumbling window, whose width is an optimizer
     // decision. Keep distinct millisecond timestamps even for very fine tumbling windows.
@@ -136,7 +136,7 @@ async fn a_tumbling_window_is_built_from_arrow_columns_with_one_label_entry_per_
     assert_eq!(input.num_rows(), expected_rows);
 
     // The executor's tumbling-window build over the `latency_ms` raw data bound at
-    // the `Scan`; its `TimeRange` keeps the tumbling window's window.
+    // the `Scan`; its `TimeRange` keeps the time range the tumbling window covers.
     let compiled = compile(&plan.dag, &[], &[output.node_id as u64]).unwrap();
     let store = InMemoryDataStore::default()
         .with_raw_data(

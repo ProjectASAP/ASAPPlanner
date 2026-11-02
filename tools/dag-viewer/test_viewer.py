@@ -618,7 +618,7 @@ class WorkloadViewTests(unittest.TestCase):
         first = rows[0]
         self.assertEqual(first["definition"], stored[0]["coverage"]["definition_id"])
         self.assertTrue(first["kind"].startswith("SummaryTumblingWindowChain · "), first["kind"])
-        self.assertRegex(first["tumbling_window"], r"^tumbling window 1 of \d+ \(newest first\), ")
+        self.assertRegex(first["tumblingWindow"], r"^tumbling window 1 of \d+ \(newest first\), ")
         self.assertEqual(first["refresh"], "at ingestion")
         self.assertTrue(all(r["stage2NodeId"] is not None and r["readBy"] for r in rows))
         # q1 and q2 share one tumbling-window chain of exact sums.
@@ -703,7 +703,7 @@ class TumblingWindowsAndPathsTests(unittest.TestCase):
         tumbling_windows = [e for e in lane_nodes(elements) if e["data"].get("tumblingWindowOf") == chain_id]
         kinds = sorted(e["data"]["kind"] for e in tumbling_windows)
         # One build, one TimeRange per tumbling window; a TimeShift for every tumbling window but the newest.
-        self.assertEqual(kinds.count("tumbling_window"), count)
+        self.assertEqual(kinds.count("tumblingWindow"), count)
         self.assertEqual(kinds.count("TimeRange"), count)
         self.assertEqual(kinds.count("TimeShift"), count - 1)
         newest = self.node(elements, f"n{chain_id}p0")
@@ -715,7 +715,7 @@ class TumblingWindowsAndPathsTests(unittest.TestCase):
         self.assertIn("shift: 20 s", shift["data"]["label"])
         edges = [(e["data"]["source"], e["data"]["target"]) for e in lane_edges(elements)]
         child = f"n{self.body['child']}"
-        # The chain's input feeds every tumbling window's window; every tumbling window feeds the chain's readers.
+        # The chain's input feeds every tumbling window's TimeRange; every tumbling window feeds the chain's readers.
         self.assertIn((child, f"n{chain_id}p0r"), edges)
         self.assertIn((child, f"n{chain_id}p1s"), edges)
         self.assertIn((f"n{chain_id}p1s", f"n{chain_id}p1r"), edges)
@@ -765,14 +765,14 @@ class TumblingWindowsAndPathsTests(unittest.TestCase):
     def test_materialized_views_group_by_tumbling_window_chain(self):
         groups = self.js.call("materializedViewGroups", self.doc)
         self.assertEqual(len(groups), 6)
-        self.assertEqual(sum(len(g["tumbling_windows"]) for g in groups), len(self.doc["stage3_plan_selection"]["materialized_views"]))
+        self.assertEqual(sum(len(g["tumblingWindows"]) for g in groups), len(self.doc["stage3_plan_selection"]["materialized_views"]))
         first = groups[0]
         self.assertEqual(first["stage2NodeId"], self.chain["id"])
         self.assertEqual(first["tumblingWindowsText"], "30 × 20 s")
         self.assertEqual((first["refresh"], first["retention"]), ("at ingestion", "10 min"))
         self.assertEqual(first["readBy"], ["q1", "q2"])
-        self.assertEqual(first["tumbling_windows"][0]["window"], "t−20 s … t")
-        self.assertEqual(first["tumbling_windows"][1]["window"], "t−40 s … t−20 s")
+        self.assertEqual(first["tumblingWindows"][0]["window"], "t−20 s … t")
+        self.assertEqual(first["tumblingWindows"][1]["window"], "t−40 s … t−20 s")
 
 
 class WorkloadSetTests(unittest.TestCase):
@@ -1255,7 +1255,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(len(self.memo_ids(js, "g2")), 13)
         self.assertIn("Memo group G2", self.text(js, "details"))
         self.assertIn("20 (13 listed): 2 Pass1, 9 TumblingWindows, 9 SharedBuild", self.text(js, "details"))
-        self.assertIn("selected plan#2 rate accumulator over G6's tumbling windows, variant 1 (TumblingWindows)", self.text(js, "details"))
+        self.assertIn("selected plan#2 rate accumulator over G6's panes, variant 1 (TumblingWindows)", self.text(js, "details"))
         self.tap_memo(js, "g2")
         self.assertEqual(len(self.memo_ids(js, "g2")), 3)
 

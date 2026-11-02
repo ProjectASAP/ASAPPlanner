@@ -1170,7 +1170,7 @@ fn union_general(mut boxes: Vec<SelectionBox>) -> Vec<SelectionBox> {
     boxes
 }
 
-/// Tumbling window coverage has identical column predicates and pairwise disjoint time
+/// Tumbling-window coverage has identical column predicates and pairwise disjoint time
 /// intervals. Sort once and join adjacent intervals, rather than removing one
 /// element from a large vector for every tumbling window. General multidimensional or
 /// overlapping coverage continues through the existing exact union algorithm.

@@ -30,7 +30,7 @@ pub fn whole_window_build(chain: &OperatorNode) -> Result<OperatorNode, SchemaDe
     crate::ir::operator::tumbling_window_chain::whole_window_build(chain)
 }
 
-/// `tumbling_window_chain::tumbling window`.
+/// `tumbling_window_chain::tumbling_window`.
 pub fn tumbling_window(
     chain: &OperatorNode,
     index: u32,

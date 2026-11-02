@@ -34,7 +34,7 @@ use std::{
     },
 };
 
-const TUMBLING_WINDOW_MS: i64 = 60_000;
+const TUMBLING_WINDOW_WIDTH_MS: i64 = 60_000;
 
 fn family(k: u32) -> FieldDataType {
     FieldDataType::Sketch(
@@ -89,13 +89,13 @@ fn fixture() -> Fixture {
         .map(|i| {
             let shifted = new(asap_types::ir::Operator::NonASAP(NonASAPOp::TimeShift {
                 shift: TimeShift {
-                    offset_ms: i * TUMBLING_WINDOW_MS,
+                    offset_ms: i * TUMBLING_WINDOW_WIDTH_MS,
                     at: None,
                 },
                 child: scan.clone(),
             }));
             let range = new(asap_types::ir::Operator::NonASAP(NonASAPOp::TimeRange {
-                range: std::time::Duration::from_millis(TUMBLING_WINDOW_MS as u64),
+                range: std::time::Duration::from_millis(TUMBLING_WINDOW_WIDTH_MS as u64),
                 kind: TimeRangeKind::Range,
                 child: shifted,
             }));
@@ -139,7 +139,7 @@ fn fixture() -> Fixture {
                     Some(NonASAPOp::TimeShift { shift, .. }) => shift.offset_ms,
                     _ => unreachable!("a tumbling window reads a shifted range"),
                 };
-                tumbling_window_ids[(shift / TUMBLING_WINDOW_MS) as usize] = id;
+                tumbling_window_ids[(shift / TUMBLING_WINDOW_WIDTH_MS) as usize] = id;
             }
             asap_types::ir::Operator::ASAP(ASAPOp::SummaryMerge { .. }) => merge = id,
             asap_types::ir::Operator::ASAP(ASAPOp::SummaryEstimate {
@@ -202,8 +202,8 @@ fn summary(batch: &Batch) -> Arc<dyn AggregateCore> {
         })
         .expect("missing KLL")
 }
-/// Tumbling window `tumbling window`'s state, built by `maintenance` (the newest tumbling window's build) in
-/// the ingestion run of `(tumbling window, tumbling window + 1]` minutes.
+/// Tumbling window `tumbling_window`'s state, built by `maintenance` (the newest tumbling window's build) in
+/// the ingestion run of `(tumbling_window, tumbling_window + 1]` minutes.
 fn tumbling_window_state(maintenance: &CompiledPhysicalDAG, tumbling_window: i64) -> Batch {
     // Twenty samples in each (start,end] one-minute tumbling window; k=200 avoids
     // compaction so quantiles and sample counts have deterministic oracles.
@@ -211,7 +211,7 @@ fn tumbling_window_state(maintenance: &CompiledPhysicalDAG, tumbling_window: i64
     let rows = (0..20)
         .map(|i| {
             vec![
-                Value::Timestamp(tumbling_window * TUMBLING_WINDOW_MS + 1 + i * 1000),
+                Value::Timestamp(tumbling_window * TUMBLING_WINDOW_WIDTH_MS + 1 + i * 1000),
                 Value::Float64((tumbling_window * 20 + i) as f64),
             ]
         })
@@ -229,8 +229,8 @@ fn tumbling_window_state(maintenance: &CompiledPhysicalDAG, tumbling_window: i64
         maintenance,
         store,
         Scope::Ingestion {
-            window_start_ms: tumbling_window * TUMBLING_WINDOW_MS,
-            window_end_ms: (tumbling_window + 1) * TUMBLING_WINDOW_MS,
+            window_start_ms: tumbling_window * TUMBLING_WINDOW_WIDTH_MS,
+            window_end_ms: (tumbling_window + 1) * TUMBLING_WINDOW_WIDTH_MS,
         },
     );
     state[0][0].clone()
@@ -352,7 +352,7 @@ fn five_tumbling_windows_roundtrip_and_shared_merge_runs_once() {
             )
         };
         let scope = Scope::Query { evaluation_time_ms };
-        // A five-tumbling window deployment cannot bind only four materialized views.
+        // A five-tumbling-window deployment cannot bind only four materialized views.
         let missing = try_execute(&compiled, bind(4), scope.clone())
             .err()
             .unwrap();
@@ -488,7 +488,7 @@ impl asap_executor::sources::DataStore for DefinitionStore {
     }
 }
 
-/// A store keyed only by `(definition_id, time range)` answers the five-tumbling window
+/// A store keyed only by `(definition_id, time range)` answers the five-tumbling-window
 /// query: the five tumbling windows share one definition and request the five
 /// one-minute ranges that tile the window, and the answers equal those of
 /// binding each tumbling window's state to its node.
@@ -510,7 +510,10 @@ fn a_store_keyed_by_definition_and_time_range_answers_the_tumbling_windows() {
             (
                 (
                     definition.clone(),
-                    (m * TUMBLING_WINDOW_MS, (m + 1) * TUMBLING_WINDOW_MS),
+                    (
+                        m * TUMBLING_WINDOW_WIDTH_MS,
+                        (m + 1) * TUMBLING_WINDOW_WIDTH_MS,
+                    ),
                 ),
                 tumbling_windows[m as usize].clone(),
             )
@@ -551,7 +554,10 @@ fn a_store_keyed_by_definition_and_time_range_answers_the_tumbling_windows() {
     assert_eq!(
         requested,
         (0..5)
-            .map(|m| (m * TUMBLING_WINDOW_MS, (m + 1) * TUMBLING_WINDOW_MS))
+            .map(|m| (
+                m * TUMBLING_WINDOW_WIDTH_MS,
+                (m + 1) * TUMBLING_WINDOW_WIDTH_MS
+            ))
             .collect::<Vec<_>>()
     );
     // View `i` holds the tumbling window ending `i` minutes before the evaluation time.

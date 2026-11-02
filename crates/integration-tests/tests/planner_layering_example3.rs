@@ -612,7 +612,7 @@ fn stage3_plan_selection_b_tumbling_windows_rebuilt_at_query_time_add_the_merge(
                         .iter()
                         .any(|(_, _, f, _)| (*f != WindowForm::None) == tumbling_windows)
             })
-            .unwrap_or_else(|| panic!("{algorithm} tumbling windows={tumbling_windows}"))
+            .unwrap_or_else(|| panic!("{algorithm} tumbling_windows={tumbling_windows}"))
     };
     let whole = cost(with("Kll", false)).unwrap();
     let tumbling_windows = cost(with("Kll", true)).unwrap();

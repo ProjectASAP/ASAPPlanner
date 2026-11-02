@@ -27,7 +27,7 @@ a different summary, materialization, or realization framework.
 Once Stage 2 materialization (#509) owns summary-maintenance decisions,
 ASAPPlanner may decide that a logical summary should be incrementally
 maintained: new data updates existing summary state. It may also select the
-planner-visible window realization—such as tumbling, sliding/tumbling windows, or an
+planner-visible window realization—such as tumbling windows, sliding windows over tumbling windows, or an
 exponential histogram—because those alternatives have different accuracy,
 CPU, memory, and I/O behavior.
 

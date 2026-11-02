@@ -71,7 +71,7 @@ pub(in crate::search) fn extract(
     extract_scan_class(configured, context, false)
 }
 
-/// A second restricted proposal keeps the newest-tumbling window scan class separate from
+/// A second restricted proposal keeps the newest-tumbling-window scan class separate from
 /// ordinary full-window scans. The full candidate graph is never changed.
 pub(in crate::search) fn extract_latest_tumbling_windows(
     configured: &PhysicalCandidatesWithCosts,
@@ -1802,7 +1802,7 @@ mod tests {
                     }
                     if mode == Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory) {
                         // The same physical scan may feed either a full-window
-                        // rebuild or a newest-tumbling window refresh. Keep these priced
+                        // rebuild or a newest-tumbling-window refresh. Keep these priced
                         // domains distinct, and validate each selected binding.
                         let normal_chain =
                             PhysicalCandidateId(configured.physical.candidates.len());

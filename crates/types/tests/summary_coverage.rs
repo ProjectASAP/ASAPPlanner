@@ -126,7 +126,7 @@ fn tumbling_window(shift_ms: i64, predicates: Vec<Predicate>) -> Rc<OperatorNode
     kll(tumbling_window_rows(shift_ms, predicates), "value")
 }
 
-/// Exact counter-increase tumbling window over the same rows as [`tumbling window`].
+/// Exact counter-increase tumbling window over the same rows as [`tumbling_window`].
 fn increase_tumbling_window(shift_ms: i64, predicates: Vec<Predicate>) -> Rc<OperatorNode> {
     summary(
         tumbling_window_rows(shift_ms, predicates),
@@ -359,9 +359,9 @@ fn counter_tumbling_windows_merge_only_disjoint_in_time() {
 /// twice still overlaps.
 #[test]
 fn a_day_of_minute_tumbling_windows_merges_into_one_window() {
-    const TUMBLING_WINDOWS: i64 = 1_440;
-    let day = relative(-TUMBLING_WINDOWS * 60_000, 0);
-    let newest_first: Vec<_> = (0..TUMBLING_WINDOWS)
+    const TUMBLING_WINDOW_COUNT: i64 = 1_440;
+    let day = relative(-TUMBLING_WINDOW_COUNT * 60_000, 0);
+    let newest_first: Vec<_> = (0..TUMBLING_WINDOW_COUNT)
         .map(|i| tumbling_window(i * 60_000, vec![]))
         .collect();
     let oldest_first: Vec<_> = newest_first.iter().rev().cloned().collect();
@@ -373,7 +373,7 @@ fn a_day_of_minute_tumbling_windows_merges_into_one_window() {
         assert_eq!(selection.len(), 1);
         assert_eq!(selection[0].relative_time(), day);
     }
-    let counters: Vec<_> = (0..TUMBLING_WINDOWS)
+    let counters: Vec<_> = (0..TUMBLING_WINDOW_COUNT)
         .map(|i| increase_tumbling_window(i * 60_000, vec![]))
         .collect();
     assert_eq!(

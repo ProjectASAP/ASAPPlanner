@@ -490,7 +490,7 @@ mod tests {
         assert!(selected.node_of(*chains[0]).is_some());
         // Validate this exact selected shared graph. Bounded search incumbents
         // need not choose it, and synthetic activation prices are never bills.
-        physical.plan.id = "shared-tumbling_window-regression".into();
+        physical.plan.id = "shared-tumbling-window-regression".into();
         let mut evaluator = crate::PlanSelector::new(
             &entries,
             &data,

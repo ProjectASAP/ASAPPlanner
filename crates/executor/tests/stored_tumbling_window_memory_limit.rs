@@ -15,7 +15,7 @@ use futures::{executor::block_on, StreamExt};
 use std::sync::Arc;
 
 const SERIES: u32 = 1_000;
-const TUMBLING_WINDOWS: usize = 12;
+const TUMBLING_WINDOW_COUNT: usize = 12;
 /// Samples per state: past 1,024 a k = 200 KLL holds its whole item buffer.
 const SAMPLES: u32 = 1_100;
 
@@ -83,14 +83,14 @@ fn tumbling_window_of(series_count: u32) -> (Arc<Schema>, Batch) {
     (schema, batch)
 }
 
-/// Merges `TUMBLING WINDOWS` copies of one stored tumbling window per series under `max_bytes`.
+/// Merges `TUMBLING_WINDOW_COUNT` copies of one stored tumbling window per series under `max_bytes`.
 fn merge_stored_tumbling_windows(max_bytes: usize) -> Result<usize, Error> {
     let (schema, tumbling_window) = tumbling_window();
     let mut dag = PhysicalDAG::default();
     dag.add(
         0,
         vec![],
-        Operator::source(schema.clone(), vec![tumbling_window; TUMBLING_WINDOWS]).unwrap(),
+        Operator::source(schema.clone(), vec![tumbling_window; TUMBLING_WINDOW_COUNT]).unwrap(),
     )
     .unwrap();
     dag.add(
@@ -271,7 +271,7 @@ fn a_merge_passing_stored_states_through_does_not_charge_them() {
     assert_eq!(rows.unwrap(), 2_000);
 }
 
-/// A deployment's own data store (not `InMemoryDataStore`): returns `TUMBLING WINDOWS`
+/// A deployment's own data store (not `InMemoryDataStore`): returns `TUMBLING_WINDOW_COUNT`
 /// copies of one stored tumbling window for every materialized view read.
 struct StoredTumblingWindows {
     tumbling_window: Batch,
@@ -291,10 +291,11 @@ impl asap_executor::sources::DataStore for StoredTumblingWindows {
         _: &asap_executor::sources::MaterializedViewRequest,
         _: RunContext,
     ) -> Result<asap_executor::runtime::OutputStream<'_, Batch>, Error> {
-        Ok(
-            futures::stream::iter(vec![Ok(self.tumbling_window.clone()); TUMBLING_WINDOWS])
-                .boxed_local(),
-        )
+        Ok(futures::stream::iter(vec![
+            Ok(self.tumbling_window.clone());
+            TUMBLING_WINDOW_COUNT
+        ])
+        .boxed_local())
     }
 }
 

@@ -228,7 +228,7 @@ retained_sketches = retained_tumbling_windows * materializations
 cpu = updates*C_update + merges*C_merge + queries*C_query
 ```
 
-A tumbling window has one tumbling window per query and no merge. A shared sliding-window
+A query whose window equals its interval keeps one tumbling window per query and merges nothing. A shared sliding-window
 plan has one materialization; a natural per-query deployment has one per
 distinct window. Retained memory is measured bytes per sketch multiplied by
 retained sketches, outside the CPU equation.

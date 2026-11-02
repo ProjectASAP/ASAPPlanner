@@ -364,7 +364,7 @@ pub(crate) fn expand_tumbling_window_chains_in_workload_before(
 }
 
 /// The untimed `node` with `timing` written into it and into every untimed
-/// node below it: the nodes [`tumbling window`] created, over the chain's input, which
+/// node below it: the nodes [`tumbling_window`] created, over the chain's input, which
 /// the timing pass already timed.
 fn timed_like(node: &Rc<OperatorNode>, timing: ExecutionTiming) -> OperatorNode {
     OperatorNode::with_schema(

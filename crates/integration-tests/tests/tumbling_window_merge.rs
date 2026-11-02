@@ -32,8 +32,8 @@ use asap_types::physical::{Materialization, Medium};
 use asap_types::test_support::compile_physical_asap_dag_with_node_ids;
 
 const EVALUATION_MS: i64 = 300_000;
-const TUMBLING_WINDOW_MS: i64 = 60_000;
-const TUMBLING_WINDOWS: i64 = 5;
+const TUMBLING_WINDOW_WIDTH_MS: i64 = 60_000;
+const TUMBLING_WINDOW_COUNT: i64 = 5;
 
 /// An explicit supported single-build fixture for the tumbling-window merge rules.
 fn single_build(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
@@ -71,18 +71,18 @@ fn tumbling_windows(root: &Rc<OperatorNode>) -> (Rc<OperatorNode>, Vec<Rc<Operat
     let Some(NonASAPOp::TimeRange { kind, child, .. }) = agg.children()[0].non_asap() else {
         panic!("expected a raw time range under the summary");
     };
-    let tumbling_windows: Vec<_> = (0..TUMBLING_WINDOWS)
+    let tumbling_windows: Vec<_> = (0..TUMBLING_WINDOW_COUNT)
         .map(|i| {
             let shifted = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeShift {
                 shift: TimeShift {
-                    offset_ms: i * TUMBLING_WINDOW_MS,
+                    offset_ms: i * TUMBLING_WINDOW_WIDTH_MS,
                     at: None,
                 },
                 child: child.clone(),
             }))
             .unwrap();
             let range = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
-                range: std::time::Duration::from_millis(TUMBLING_WINDOW_MS as u64),
+                range: std::time::Duration::from_millis(TUMBLING_WINDOW_WIDTH_MS as u64),
                 kind: *kind,
                 child: shifted,
             }))
@@ -107,7 +107,8 @@ fn tumbling_windows(root: &Rc<OperatorNode>) -> (Rc<OperatorNode>, Vec<Rc<Operat
 /// into the tumbling windows the executor runs.
 fn planned_tumbling_windows(root: &Rc<OperatorNode>) -> (Rc<OperatorNode>, Rc<OperatorNode>) {
     let roots = [QueryRoot::Operator(Rc::clone(root))];
-    let rule_candidates = tumbling_window_candidates(&roots, &[Some(TUMBLING_WINDOW_MS as u64)]);
+    let rule_candidates =
+        tumbling_window_candidates(&roots, &[Some(TUMBLING_WINDOW_WIDTH_MS as u64)]);
     let [rule_candidate] = rule_candidates.as_slice() else {
         panic!("one build to split: {rule_candidates:?}")
     };
@@ -116,7 +117,7 @@ fn planned_tumbling_windows(root: &Rc<OperatorNode>) -> (Rc<OperatorNode>, Rc<Op
             rule_candidate.tumbling_window_width_ms,
             rule_candidate.tumbling_window_count
         ),
-        (TUMBLING_WINDOW_MS as u64, 5)
+        (TUMBLING_WINDOW_WIDTH_MS as u64, 5)
     );
     let mut pass2_candidates =
         window_composition_pass2_candidates(&roots, &rule_candidates).unwrap();
@@ -159,9 +160,9 @@ type RawDataSample = (&'static str, i64, f64);
 fn samples(phase_ms: i64) -> Vec<RawDataSample> {
     let mut rows = vec![];
     for (s, series) in ["a", "b"].into_iter().enumerate() {
-        for minute in 0..TUMBLING_WINDOWS {
+        for minute in 0..TUMBLING_WINDOW_COUNT {
             for j in 0..4 {
-                let ts = minute * TUMBLING_WINDOW_MS + j * 15_000 + phase_ms;
+                let ts = minute * TUMBLING_WINDOW_WIDTH_MS + j * 15_000 + phase_ms;
                 rows.push((series, ts, (s * 100) as f64 + (minute * 4 + j + 1) as f64));
             }
         }
@@ -181,7 +182,7 @@ fn export(root: &Rc<OperatorNode>, assignment: &MaterializationAssignment) -> Ex
     let compiled = compile_physical_asap_dag_with_node_ids(&timed).unwrap();
     let tumbling_window = |node: &OperatorNode| -> i64 {
         match node.children()[0].non_asap() {
-            Some(NonASAPOp::TimeShift { shift, .. }) => shift.offset_ms / TUMBLING_WINDOW_MS,
+            Some(NonASAPOp::TimeShift { shift, .. }) => shift.offset_ms / TUMBLING_WINDOW_WIDTH_MS,
             _ => 0,
         }
     };
@@ -327,12 +328,12 @@ fn execute_retained_as(
     let mut store = InMemoryDataStore::default();
     for &(build, tumbling_window) in &exported.builds {
         let plan = compile(&exported.dag, &[], &[build]).unwrap();
-        let end = EVALUATION_MS - tumbling_window * TUMBLING_WINDOW_MS;
+        let end = EVALUATION_MS - tumbling_window * TUMBLING_WINDOW_WIDTH_MS;
         let rows = run(
             &plan,
             raw_store(&exported.dag, samples),
             Scope::Ingestion {
-                window_start_ms: end - TUMBLING_WINDOW_MS,
+                window_start_ms: end - TUMBLING_WINDOW_WIDTH_MS,
                 window_end_ms: end,
             },
         );
@@ -492,7 +493,7 @@ fn offset_counter_window_ends_at_the_offset() {
         let plain = whole_build_values_at(&format!("{function}(m[5m])"), EVALUATION_MS, &samples);
         let shifted = whole_build_values_at(
             &format!("{function}(m[5m] offset 1m)"),
-            EVALUATION_MS + TUMBLING_WINDOW_MS,
+            EVALUATION_MS + TUMBLING_WINDOW_WIDTH_MS,
             &samples,
         );
         assert_eq!(shifted, plain, "{function}");
@@ -511,19 +512,19 @@ fn anchored_counter_window_ends_at_the_anchor() {
         let at_300 = whole_build_values_at(&format!("{function}(m[5m])"), EVALUATION_MS, &samples);
         let at_240 = whole_build_values_at(
             &format!("{function}(m[5m])"),
-            EVALUATION_MS - TUMBLING_WINDOW_MS,
+            EVALUATION_MS - TUMBLING_WINDOW_WIDTH_MS,
             &samples,
         );
         assert_ne!(at_300, at_240, "{function}: the two windows differ");
         let anchored = whole_build_values_at(
             &format!("{function}(m[5m] @ 300)"),
-            EVALUATION_MS + TUMBLING_WINDOW_MS,
+            EVALUATION_MS + TUMBLING_WINDOW_WIDTH_MS,
             &samples,
         );
         assert_eq!(anchored, at_300, "{function} @ 300");
         let anchored_offset = whole_build_values_at(
             &format!("{function}(m[5m] @ 300 offset 1m)"),
-            EVALUATION_MS + TUMBLING_WINDOW_MS,
+            EVALUATION_MS + TUMBLING_WINDOW_WIDTH_MS,
             &samples,
         );
         assert_eq!(anchored_offset, at_240, "{function} @ 300 offset 1m");
@@ -572,7 +573,7 @@ fn exact_increase_over_tumbling_windows_matches_single_build() {
 /// matches one 5-minute build.
 #[test]
 fn exact_increase_over_an_empty_middle_tumbling_window_matches_single_build() {
-    let middle = 2 * TUMBLING_WINDOW_MS..3 * TUMBLING_WINDOW_MS;
+    let middle = 2 * TUMBLING_WINDOW_WIDTH_MS..3 * TUMBLING_WINDOW_WIDTH_MS;
     for emptied in [&["a"][..], &["a", "b"]] {
         let gapped: Vec<RawDataSample> = samples(0)
             .into_iter()
@@ -630,14 +631,14 @@ fn tumbling_windows_at(
         .map(|&(shift, width)| {
             let shifted = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeShift {
                 shift: TimeShift {
-                    offset_ms: shift * TUMBLING_WINDOW_MS,
+                    offset_ms: shift * TUMBLING_WINDOW_WIDTH_MS,
                     at: None,
                 },
                 child: child.clone(),
             }))
             .unwrap();
             let range = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
-                range: std::time::Duration::from_millis((width * TUMBLING_WINDOW_MS) as u64),
+                range: std::time::Duration::from_millis((width * TUMBLING_WINDOW_WIDTH_MS) as u64),
                 kind: *kind,
                 child: shifted,
             }))
@@ -685,7 +686,7 @@ fn newest_tumbling_windows_of_a_shared_chain_match_a_separate_chain() {
         )),
         QueryRoot::Operator(single_build("quantile_over_time(0.99, m[5m])", accuracy)),
     ];
-    let grid = Some(TUMBLING_WINDOW_MS as u64);
+    let grid = Some(TUMBLING_WINDOW_WIDTH_MS as u64);
     let rule_candidates = tumbling_window_candidates(&roots, &[grid, grid]);
     assert_eq!(rule_candidates.len(), 2, "{rule_candidates:?}");
     let pass2_candidates = window_composition_pass2_candidates(&roots, &rule_candidates).unwrap();
@@ -770,13 +771,15 @@ fn queries_at_different_intervals_read_one_chain_of_the_finer_tumbling_windows()
         .iter()
         .map(|root| QueryRoot::Operator(Rc::clone(root)))
         .collect();
-    let rule_candidates =
-        tumbling_window_candidates(&roots, &[Some(30_000), Some(TUMBLING_WINDOW_MS as u64)]);
+    let rule_candidates = tumbling_window_candidates(
+        &roots,
+        &[Some(30_000), Some(TUMBLING_WINDOW_WIDTH_MS as u64)],
+    );
     let widths: Vec<u64> = rule_candidates
         .iter()
         .map(|c| c.tumbling_window_width_ms)
         .collect();
-    assert_eq!(widths, [30_000, TUMBLING_WINDOW_MS as u64]);
+    assert_eq!(widths, [30_000, TUMBLING_WINDOW_WIDTH_MS as u64]);
     let shared = window_composition_pass2_candidates(&roots, &rule_candidates)
         .unwrap()
         .into_iter()
@@ -836,13 +839,15 @@ fn queries_at_60_and_90_seconds_read_one_chain_of_30_second_tumbling_windows() {
         .iter()
         .map(|root| QueryRoot::Operator(Rc::clone(root)))
         .collect();
-    let rule_candidates =
-        tumbling_window_candidates(&roots, &[Some(TUMBLING_WINDOW_MS as u64), Some(90_000)]);
+    let rule_candidates = tumbling_window_candidates(
+        &roots,
+        &[Some(TUMBLING_WINDOW_WIDTH_MS as u64), Some(90_000)],
+    );
     let widths: Vec<(u64, u32)> = rule_candidates
         .iter()
         .map(|c| (c.tumbling_window_width_ms, c.tumbling_window_count))
         .collect();
-    assert_eq!(widths, [(TUMBLING_WINDOW_MS as u64, 5), (90_000, 2)]);
+    assert_eq!(widths, [(TUMBLING_WINDOW_WIDTH_MS as u64, 5), (90_000, 2)]);
     let shared = window_composition_pass2_candidates(&roots, &rule_candidates)
         .unwrap()
         .into_iter()

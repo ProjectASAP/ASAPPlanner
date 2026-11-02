@@ -225,7 +225,7 @@
         "1": {
           "cost_per_second": 0.464,
           "cpu_core_seconds_per_second": 2e-6,
-          "detail": "build exact Rate accumulator in 5 panes of 60000 ms for 1000 groups: 1000 rows x (1 + depth 1); x 1.0000/s; keeps 3696000 bytes",
+          "detail": "build exact Rate accumulator in 5 tumbling windows of 60000 ms for 1000 groups: 1000 rows x (1 + depth 1); x 1.0000/s; keeps 3696000 bytes",
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
           "price_source": "analytical",
@@ -1019,6 +1019,6 @@
       ],
       "scalar_roots": []
     },
-    "display_name": "Q1 Sum acc + Rate acc ×5 panes · ingestion time: Rate acc for Q1, 5 × 1m panes"
+    "display_name": "Q1 Sum acc + Rate acc ×5 tumbling windows · ingestion time: Rate acc for Q1, 5 × 1m tumbling windows"
   }
 }

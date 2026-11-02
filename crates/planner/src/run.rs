@@ -636,8 +636,8 @@ fn calibration_is_frozen(cost_inputs: &asap_cost::CostInputs) -> bool {
 }
 
 /// Tumbling-window rules require a temporal range below a summary build: a positive
-/// `Range` window, or an existing tumbling-window chain. Instant lookback selectors are
-/// not splittable tumbling windows.
+/// `Range` window, or an existing tumbling-window chain. Instant lookback selectors
+/// have no range to split into tumbling windows.
 fn has_splittable_window(initial: &DagOfLogicalMemoGroups) -> bool {
     initial.groups.iter().any(|group| {
         matches!(

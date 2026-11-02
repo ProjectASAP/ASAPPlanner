@@ -71,7 +71,7 @@ To run it, see [RUNNING.md](RUNNING.md).
   series, or one shared instance. A standalone scalar query (`time()`,
   `scalar(v)`, `1 + 2`) is a dashed `Scalar` node over the nodes it reads.
   Query roots have a thick border. A node that several queries' roots reach
-  says `shared ×n`. A `SummaryTumblingWindowChain` is one node (`30 tumbling_windows × 20 s`); clicking
+  says `shared ×n`. A `SummaryTumblingWindowChain` is one node (`30 tumbling windows × 20 s`); clicking
   it draws its tumbling windows, newest first, each a `TimeShift` by its offset (none
   for the newest), a `TimeRange` of one tumbling window and the tumbling window's build with its
   window (`window t−40 s … t−20 s`), and clicking a tumbling window folds them back.
@@ -123,7 +123,7 @@ To run it, see [RUNNING.md](RUNNING.md).
   count (`745 candidates (64 listed)` when the document lists only some) and
   the queries it is the root of; its implementation candidates sit inside
   it, bordered by origin (Pass1, SharedBuild, SummaryResult, SummaryInput,
-  Tumbling windows, Rollup, TopKReuse, WidenedScans), with a double border and
+  TumblingWindows, Rollup, TopKReuse, WidenedScans), with a double border and
   `✚ new` when the step added them. An edge goes from each candidate to
   each child group it reads (at Stage 0, which has no candidates, from the
   group). Readers sit above what they read. A group listing more than 12
