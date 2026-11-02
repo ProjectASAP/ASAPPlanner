@@ -495,6 +495,60 @@
       ],
       "cost_model": "aws-fargate-us-east-1",
       "accuracy_guarantees": "enforced"
+    },
+    {
+      "id": "paper-rangeheavy-first7",
+      "name": "Paper W-RangeHeavy · first 7 queries",
+      "description": "The first seven PromQL queries of the paper's W-RangeHeavy workload: a sum and five quantile ranks (0.5 to 0.99) by job, every second, and a top-32 of 15-minute sums by label_0 every minute, over one gauge of 10,000 series sampled every 5 ms (ε = 0.05, δ = 0.01).",
+      "source": "The first seven repeating queries of the paper's W-RangeHeavy workload (appendix E), with its data workload unchanged. Planned with raw data retained (without it the candidate catalog is infeasible), Fargate prices and accuracy guarantees enforced.",
+      "deployment_capabilities": {
+        "raw_data_retained": true,
+        "query_time_results_retained": false
+      },
+      "cost_model": "aws-fargate-us-east-1",
+      "accuracy_guarantees": "enforced",
+      "workloads": [
+        {
+          "id": "workload-01",
+          "file": "paper-rangeheavy-first7/workload-01.json",
+          "query_labels": [
+            "q01-sum",
+            "q02-quantile-0.5",
+            "q03-quantile-0.75",
+            "q04-quantile-0.9",
+            "q05-quantile-0.95",
+            "q06-quantile-0.99",
+            "q07-topk-sum-15m"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "paper-rollupheavy-first7",
+      "name": "Paper W-RollupHeavy · first 7 queries",
+      "description": "The first seven SQL queries of the paper's W-RollupHeavy workload: COUNT(DISTINCT src_addr) over the flows table by dst_subnet, dst_port, (dst_subnet, proto) and (dst_port, proto), over 5- and 15-minute windows, every minute (relative ε = 0.05 per value, δ = 0.05).",
+      "source": "The first seven repeating queries of the paper's W-RollupHeavy workload (appendix E), with its data workload and its http and flows tables (tables.json) unchanged. Planned with raw data retained, Fargate prices and accuracy guarantees enforced.",
+      "deployment_capabilities": {
+        "raw_data_retained": true,
+        "query_time_results_retained": false
+      },
+      "cost_model": "aws-fargate-us-east-1",
+      "accuracy_guarantees": "enforced",
+      "workloads": [
+        {
+          "id": "workload-01",
+          "file": "paper-rollupheavy-first7/workload-01.json",
+          "query_labels": [
+            "q01-distinct-subnet-5m",
+            "q02-distinct-subnet-15m",
+            "q03-distinct-port-5m",
+            "q04-distinct-port-15m",
+            "q05-distinct-subnet-proto-5m",
+            "q06-distinct-subnet-proto-15m",
+            "q07-distinct-port-proto-5m"
+          ]
+        }
+      ]
     }
   ]
 }
