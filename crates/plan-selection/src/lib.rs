@@ -400,7 +400,9 @@ mod tests {
     use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
     use asap_types::ir::schema::{GroupingStrategy, SketchKind};
     use asap_types::ir::{ExprSemantics, ScalarExpr};
-    use asap_types::workload::{DataArrival, LabelSetDistinctValues, MetricType, SourceFacts};
+    use asap_types::workload::{
+        DataArrival, LabelSetDistinctValues, PrometheusMetricType, SourceFacts,
+    };
 
     /// `G` of `root` over `data` ([`values_per_result`]).
     fn values_of(root: &QueryRoot, data: &DataWorkload) -> Option<u64> {
@@ -466,7 +468,10 @@ mod tests {
     }
 
     /// `data` with each of `types`' metrics declared of its type.
-    fn with_metric_types(mut data: DataWorkload, types: &[(&str, MetricType)]) -> DataWorkload {
+    fn with_metric_types(
+        mut data: DataWorkload,
+        types: &[(&str, PrometheusMetricType)],
+    ) -> DataWorkload {
         for (metric, metric_type) in types {
             data.sources
                 .entry(metric.to_string())
@@ -602,13 +607,13 @@ mod tests {
     /// the top-k still needs evidence about its output.
     #[test]
     fn count_min_over_raw_data_samples_needs_a_declared_counter() {
-        use asap_types::workload::MetricType;
+        use asap_types::workload::PrometheusMetricType;
         let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
-        let with_types = |types: &[(&str, MetricType)]| with_metric_types(data(), types);
+        let with_types = |types: &[(&str, PrometheusMetricType)]| with_metric_types(data(), types);
         for (types, admitted) in [
-            (vec![("m", MetricType::Counter)], true),
-            (vec![("m", MetricType::Gauge)], false),
-            (vec![("m_total", MetricType::Counter)], false),
+            (vec![("m", PrometheusMetricType::Counter)], true),
+            (vec![("m", PrometheusMetricType::Gauge)], false),
+            (vec![("m_total", PrometheusMetricType::Counter)], false),
             (vec![], false),
         ] {
             let data = with_types(&types);
@@ -700,8 +705,10 @@ mod tests {
                 .map(|c| c.id.as_str())
                 .collect();
             assert!(!count_min.is_empty(), "{query}");
-            for (metric_type, admitted) in [(MetricType::Counter, true), (MetricType::Gauge, false)]
-            {
+            for (metric_type, admitted) in [
+                (PrometheusMetricType::Counter, true),
+                (PrometheusMetricType::Gauge, false),
+            ] {
                 let data = with_metric_types(data(), &[("data_total", metric_type)]);
                 let rejected = match select_among_plans(
                     &candidates,
@@ -727,6 +734,60 @@ mod tests {
         }
     }
 
+    /// The `_sum` series of a declared histogram family is a counter: with
+    /// only the family `latency` declared a histogram, the Count-Min-with-heap
+    /// top-k of `topk(10, sum by (job) (increase(latency_sum[5m])))` passes
+    /// the weight check. Undeclared, or with `latency` a gauge, it does not
+    /// (issue #1165).
+    #[test]
+    fn count_min_over_a_declared_histograms_sum_series_is_admitted() {
+        let target = AccuracyTarget::max_error(0.01)
+            .failure_probability(0.001)
+            .accuracy_metric(AccuracyMetric::ABSOLUTE_STREAM_L1);
+        let query = "topk(10, sum by (job) (increase(latency_sum[5m])))";
+        let candidates = all_candidates(query, &target);
+        let count_min: Vec<&str> = candidates
+            .iter()
+            .filter(|c| count_min_builds(c).contains(&SketchAlgorithm::CmsWithHeap))
+            .map(|c| c.id.as_str())
+            .collect();
+        assert!(!count_min.is_empty());
+        for (family_type, admitted) in [
+            (Some(PrometheusMetricType::Histogram), true),
+            (Some(PrometheusMetricType::Gauge), false),
+            (None, false),
+        ] {
+            let mut data = data();
+            data.sources.insert(
+                "latency".into(),
+                SourceFacts {
+                    series_count: Some(10_000),
+                    metric_type: family_type,
+                    ..SourceFacts::default()
+                },
+            );
+            let rejected = match select_among_plans(
+                &candidates,
+                &[entry_with(target.clone(), repeating(10_000))],
+                &data,
+                SelectionModels::builtin(),
+            ) {
+                Ok(selection) => selection.rejected,
+                Err(ErrorSelectingPlan::NoValidCandidate(rejected)) => rejected,
+                Err(error) => panic!("{family_type:?}: {error}"),
+            };
+            for id in &count_min {
+                let weights_rejected = rejected.iter().any(|r| {
+                    &r.id == id && r.cause == RejectionCause::CountMinWeightsNotProvenNonNegative
+                });
+                assert_eq!(
+                    weights_rejected, !admitted,
+                    "latency declared {family_type:?}, {id}: {rejected:?}"
+                );
+            }
+        }
+    }
+
     /// A gauge declared non-negative
     /// ([`SourceFacts::values_non_negative`]) proves its raw data samples, and
     /// plain sums of them, non-negative: the Count-Min-with-heap top-k of
@@ -741,7 +802,7 @@ mod tests {
         let target = AccuracyTarget::max_error(0.01)
             .failure_probability(0.001)
             .accuracy_metric(AccuracyMetric::ABSOLUTE_STREAM_L1);
-        let mut gauge = with_metric_types(data(), &[("m", MetricType::Gauge)]);
+        let mut gauge = with_metric_types(data(), &[("m", PrometheusMetricType::Gauge)]);
         gauge.sources.get_mut("m").unwrap().values_non_negative = true;
         for (query, admitted) in [
             ("topk by (job) (10, sum_over_time(m[1m]))", true),
@@ -873,7 +934,7 @@ mod tests {
         );
         let node = lower_promql("sum(m)", AccuracyTarget::exact());
         let root = QueryRoot::Operator(Rc::new((*node).clone().with_guarantee(Some(gated))));
-        let with = |types: &[(&str, MetricType)]| with_metric_types(data(), types);
+        let with = |types: &[(&str, PrometheusMetricType)]| with_metric_types(data(), types);
         let bound = |data: &DataWorkload| {
             bound_of(&root, data, &SelectionModels::builtin())
                 .unwrap()
@@ -881,10 +942,13 @@ mod tests {
                 .error
                 .evaluate()
         };
-        assert_eq!(bound(&with(&[("m", MetricType::Counter)])), Some(0.01));
+        assert_eq!(
+            bound(&with(&[("m", PrometheusMetricType::Counter)])),
+            Some(0.01)
+        );
         for types in [
-            vec![("m", MetricType::Gauge)],
-            vec![("m_total", MetricType::Counter)],
+            vec![("m", PrometheusMetricType::Gauge)],
+            vec![("m_total", PrometheusMetricType::Counter)],
             vec![],
         ] {
             assert_eq!(bound(&with(&types)), None, "{types:?}");
@@ -944,7 +1008,7 @@ mod tests {
     #[test]
     fn confirmed_weights_rewrite_only_the_summary_update() {
         use asap_types::ir::schema::NonNegativeWeightProof;
-        use asap_types::workload::MetricType;
+        use asap_types::workload::PrometheusMetricType;
         let p2 = &candidates()[1];
         let domains = |roots: &[QueryRoot]| -> Vec<WeightDomain> {
             roots
@@ -961,7 +1025,7 @@ mod tests {
             domains(&p2.roots),
             [WeightDomain::RawDataSamplesOfMetric { metric: "m".into() }]
         );
-        let counter = with_metric_types(data(), &[("m", MetricType::Counter)]);
+        let counter = with_metric_types(data(), &[("m", PrometheusMetricType::Counter)]);
         let confirmed = with_confirmed_weights(&p2.roots, &counter);
         assert_eq!(
             domains(&confirmed),
@@ -969,7 +1033,7 @@ mod tests {
                 proof: NonNegativeWeightProof::CounterRawDataSamples
             }]
         );
-        let mut gauge = with_metric_types(data(), &[("m", MetricType::Gauge)]);
+        let mut gauge = with_metric_types(data(), &[("m", PrometheusMetricType::Gauge)]);
         gauge.sources.get_mut("m").unwrap().values_non_negative = true;
         assert_eq!(
             domains(&with_confirmed_weights(&p2.roots, &gauge)),
@@ -1312,12 +1376,12 @@ mod tests {
     /// priced: its per-node costs cover its DAG and sum to its total.
     #[test]
     fn a_declared_counter_prices_the_count_min_heap_candidate() {
-        use asap_types::workload::MetricType;
+        use asap_types::workload::PrometheusMetricType;
         let candidates = candidates();
         let target = AccuracyTarget::max_error(0.01)
             .failure_probability(0.001)
             .accuracy_metric(AccuracyMetric::ABSOLUTE_STREAM_L1);
-        let counter = with_metric_types(data(), &[("m", MetricType::Counter)]);
+        let counter = with_metric_types(data(), &[("m", PrometheusMetricType::Counter)]);
         let selection = select_among_plans(
             &candidates,
             &[entry_with(target, repeating(10_000))],
@@ -1992,7 +2056,7 @@ mod tests {
     /// the target's metric admits the sketches.
     #[test]
     fn a_bound_in_another_metric_misses_the_target() {
-        let counter = with_metric_types(data(), &[("m", MetricType::Counter)]);
+        let counter = with_metric_types(data(), &[("m", PrometheusMetricType::Counter)]);
         let target = AccuracyTarget::max_error(0.5)
             .failure_probability(0.5)
             .accuracy_metric(AccuracyMetric::ABSOLUTE_STREAM_L1);
@@ -2127,7 +2191,7 @@ mod tests {
         let target = AccuracyTarget::max_error(0.01)
             .failure_probability(0.001)
             .accuracy_metric(AccuracyMetric::ABSOLUTE_STREAM_L1);
-        let gauge = with_metric_types(data(), &[("m", MetricType::Gauge)]);
+        let gauge = with_metric_types(data(), &[("m", PrometheusMetricType::Gauge)]);
         for accuracy in [
             &AcceptsEveryOutput as &dyn AccuracyModel,
             &BuiltinAccuracyModel,
@@ -2164,7 +2228,7 @@ mod tests {
         let target = AccuracyTarget::max_error(0.01)
             .failure_probability(0.001)
             .accuracy_metric(AccuracyMetric::ABSOLUTE_STREAM_L1);
-        let gauge = with_metric_types(data(), &[("m", MetricType::Gauge)]);
+        let gauge = with_metric_types(data(), &[("m", PrometheusMetricType::Gauge)]);
         let settings = CostInputs {
             ..CostInputs::default()
         };
@@ -2271,7 +2335,7 @@ mod tests {
         let target = AccuracyTarget::max_error(0.01)
             .failure_probability(0.001)
             .accuracy_metric(AccuracyMetric::ABSOLUTE_STREAM_L1);
-        let gauge = with_metric_types(data(), &[("m", MetricType::Gauge)]);
+        let gauge = with_metric_types(data(), &[("m", PrometheusMetricType::Gauge)]);
         let mut p2 = candidates().into_iter().find(|c| c.id == "P2").unwrap();
         p2.roots = p2
             .roots
@@ -2519,7 +2583,7 @@ mod tests {
             let ddsketch = ddsketch_candidates(&candidates);
             assert!(!ddsketch.is_empty(), "{query}");
             for values_non_negative in [true, false] {
-                let mut data = with_metric_types(data(), &[("x", MetricType::Gauge)]);
+                let mut data = with_metric_types(data(), &[("x", PrometheusMetricType::Gauge)]);
                 data.sources.get_mut("x").unwrap().values_non_negative = values_non_negative;
                 let selection = select_among_plans(
                     &candidates,
@@ -2567,7 +2631,7 @@ mod tests {
                 candidates.iter().all(|c| !has_summary_estimate(c)),
                 "{query}: a sketch candidate is offered"
             );
-            let mut data = with_metric_types(data(), &[("x", MetricType::Gauge)]);
+            let mut data = with_metric_types(data(), &[("x", PrometheusMetricType::Gauge)]);
             data.sources.get_mut("x").unwrap().values_non_negative = true;
             let selection = select_among_plans(
                 &candidates,
@@ -2596,7 +2660,7 @@ mod tests {
         for function in ["rate", "irate"] {
             let query = format!("topk(10, {function}(data_total[5m]))");
             let candidates = all_candidates(&query, &target);
-            let data = with_metric_types(data(), &[("data_total", MetricType::Counter)]);
+            let data = with_metric_types(data(), &[("data_total", PrometheusMetricType::Counter)]);
             let selection = select_among_plans(
                 &candidates,
                 &[entry_with(target.clone(), repeating(10_000))],

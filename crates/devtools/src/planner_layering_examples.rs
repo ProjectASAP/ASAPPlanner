@@ -4,8 +4,8 @@
 
 use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
 use asap_types::workload::{
-    BatchEntry, DataArrival, DataWorkload, DurationMs, MetricType, PlanningWorkload,
-    Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload, RepeatedDemand,
+    BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability,
+    PrometheusMetricType, Query, QueryLanguage, QueryRequirements, QueryWorkload, RepeatedDemand,
     RepeatingEntry, RepetitionInterval, SourceFacts, SqlDialect, TimestampMs,
 };
 
@@ -78,7 +78,7 @@ pub fn example1() -> PlanningWorkload {
             data.sources
                 .get_mut(EXAMPLE1_METRIC)
                 .expect("the shared source")
-                .metric_type = Some(MetricType::Counter);
+                .metric_type = Some(PrometheusMetricType::Counter);
             data
         }),
     }
