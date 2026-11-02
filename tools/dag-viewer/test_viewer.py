@@ -1192,8 +1192,8 @@ class AppTests(unittest.TestCase):
         meta = js.eval("__els['enum-meta'].textContent")
         self.assertIn("Pass 1: 49", meta)
         self.assertIn("listed: all 49 Pass 1 DAGs", meta)
-        # The selected choice is over the last step (concrete states), not Pass 1.
-        self.assertIn("over the concrete states memo", meta)
+        # The selected choice is over the last step (Pass 2), not Pass 1.
+        self.assertIn("over the Pass 2 memo", meta)
         self.assertNotIn("✓ selected", js.eval("__els.enumRows.innerHTML"))
         self.assertEqual(js.eval("__els.enumRows.innerHTML").count("<li>"), 49)
         before = self.ev(js, "__rendered.cy1")
@@ -1301,6 +1301,10 @@ class AppTests(unittest.TestCase):
         doc = json.loads(MEMO_REAL.read_text())
         js = self.page("?doc=r.json", {"r.json": json.dumps(doc)})
         steps = [s["step"] for s in doc["memo"]["steps"]]
+        # The viewer drops an older document's window-composition step
+        # (`upgradeMemoSteps`).
+        if "concrete_states" in steps:
+            steps = [s for s in steps if s != "pass2"]
         js.eval(f"window.MemoView.selectStep({steps.index('stage0')})")
         groups = [e for e in self.ev(js, "__rendered.cyMemo") if e["data"].get("kind") == "group"]
         self.assertEqual(len(groups), 7)

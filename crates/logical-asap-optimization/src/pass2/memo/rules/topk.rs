@@ -4,21 +4,21 @@ use super::reuse::{append_producer, append_reader, eligible, replace};
 use super::shared_producer::{add_shared_producer_candidates, Reader, SharedProducer};
 use crate::pass2::asap_aware_cse::topk_reuse_candidates;
 use crate::pass2::memo::check_generation_deadline;
-use crate::pass2::memo::state_groups::StateGroupExpansionError;
+use crate::pass2::memo::state_groups::Pass2RuleError;
 use asap_types::ir::operator::{AggIntent, Reduction};
 use asap_types::ir::properties::AccuracyGuarantee;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot};
 use asap_types::stages::MemoGroupId;
-use asap_types::stages::{MemoCandidates, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{Memo, OriginOfCandidateForMemoGroup};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Instant;
 
 pub(crate) fn add_topk_candidates(
-    memo: &mut MemoCandidates,
+    memo: &mut Memo,
     deadline: Option<Instant>,
-) -> Result<usize, StateGroupExpansionError> {
+) -> Result<usize, Pass2RuleError> {
     add_shared_producer_candidates(
         memo,
         &mut TopKRankings {
@@ -52,9 +52,9 @@ impl SharedProducer for TopKRankings {
 
     fn sets(
         &mut self,
-        memo: &MemoCandidates,
+        memo: &Memo,
         deadline: Option<Instant>,
-    ) -> Result<Vec<Vec<Reader<Rc<OperatorNode>>>>, StateGroupExpansionError> {
+    ) -> Result<Vec<Vec<Reader<Rc<OperatorNode>>>>, Pass2RuleError> {
         let mut owners = HashMap::new();
         let mut roots = Vec::new();
         for (group, entry) in memo.groups.iter().enumerate() {
@@ -97,7 +97,7 @@ impl SharedProducer for TopKRankings {
         &self,
         set: &[Reader<Rc<OperatorNode>>],
         _deadline: Option<Instant>,
-    ) -> Result<Vec<SharedRanking>, StateGroupExpansionError> {
+    ) -> Result<Vec<SharedRanking>, Pass2RuleError> {
         // The largest `k` holds every smaller top-k, so it serves the set.
         Ok(vec![SharedRanking {
             ranking: Rc::clone(&set[0].need),
@@ -107,10 +107,10 @@ impl SharedProducer for TopKRankings {
 
     fn derive(
         &mut self,
-        memo: &mut MemoCandidates,
+        memo: &mut Memo,
         reader: &Reader<Rc<OperatorNode>>,
         covering: &SharedRanking,
-    ) -> Result<usize, StateGroupExpansionError> {
+    ) -> Result<usize, Pass2RuleError> {
         // Interning the ranking is idempotent, so every reader of the set
         // reads the producer the first one interned.
         let Some(input_group) = memo.groups[covering.reader_groups[0]]
@@ -134,7 +134,7 @@ impl SharedProducer for TopKRankings {
             .collect();
         let sort = covering.ranking.children()[0]
             .with_new_children(|_| Rc::clone(&input))
-            .map_err(|error| StateGroupExpansionError::ReuseRule(error.to_string()))?;
+            .map_err(|error| Pass2RuleError::ReuseRule(error.to_string()))?;
         let sort_group = append_producer(
             memo,
             Rc::new(sort),
@@ -146,7 +146,7 @@ impl SharedProducer for TopKRankings {
         let ranking = covering
             .ranking
             .with_new_children(|_| Rc::clone(&sort))
-            .map_err(|error| StateGroupExpansionError::ReuseRule(error.to_string()))?;
+            .map_err(|error| Pass2RuleError::ReuseRule(error.to_string()))?;
         let ranking_group = append_producer(
             memo,
             Rc::new(ranking),
@@ -175,19 +175,19 @@ impl SharedProducer for TopKRankings {
             partition_by: keys.clone(),
             child: Rc::clone(&ranking),
         }))
-        .map_err(|error| StateGroupExpansionError::ReuseRule(error.to_string()))?;
+        .map_err(|error| Pass2RuleError::ReuseRule(error.to_string()))?;
         let columns = asap_types::ir::schema::topk::ranked_row_projection(
             &ranking,
             &Reduction::Reduce(keys.clone()),
             &logical.schema.fields[keys.len()].name,
         )
-        .map_err(|error| StateGroupExpansionError::ReuseRule(error.to_string()))?;
+        .map_err(|error| Pass2RuleError::ReuseRule(error.to_string()))?;
         let reader = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
             cols: columns,
             qualifier: None,
             child: limited,
         }))
-        .map_err(|error| StateGroupExpansionError::ReuseRule(error.to_string()))?;
+        .map_err(|error| Pass2RuleError::ReuseRule(error.to_string()))?;
         Ok(usize::from(append_reader(
             memo,
             owner,
@@ -199,10 +199,10 @@ impl SharedProducer for TopKRankings {
 }
 
 fn exact_input_group(
-    memo: &mut MemoCandidates,
+    memo: &mut Memo,
     group: MemoGroupId,
     known: &mut HashMap<MemoGroupId, Option<MemoGroupId>>,
-) -> Result<Option<MemoGroupId>, StateGroupExpansionError> {
+) -> Result<Option<MemoGroupId>, Pass2RuleError> {
     if let Some(result) = known.get(&group) {
         return Ok(*result);
     }

@@ -8,7 +8,7 @@
 // stages.js.
 
 // Memo steps in pipeline order, with the names the header uses.
-const MEMO_STEP_NAMES = { stage0: 'Stage 0', pass1: 'Pass 1', pass2: 'Pass 2', concrete_states: 'concrete states' };
+const MEMO_STEP_NAMES = { stage0: 'Stage 0', pass1: 'Pass 1', pass2: 'Pass 2' };
 
 function memoStepName(step) {
   return MEMO_STEP_NAMES[step] || step;

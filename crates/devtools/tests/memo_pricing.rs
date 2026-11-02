@@ -13,7 +13,7 @@ use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_planner::PlanningModels;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::QueryRoot;
-use asap_types::stages::MemoCandidates;
+use asap_types::stages::Memo;
 use asap_types::workload::{
     DataWorkload, DurationMs, PlanningWorkload, Predictability, Query, QueryLanguage,
     QueryRequirements, QueryWorkload, QueryWorkloadEntry, RepeatedDemand, RepeatingEntry,
@@ -62,7 +62,7 @@ struct Planned {
     roots: Vec<QueryRoot>,
     entries: Vec<QueryWorkloadEntry>,
     data: DataWorkload,
-    memo: MemoCandidates,
+    memo: Memo,
 }
 
 /// `stage_pipeline` lowers each series' identity as a column

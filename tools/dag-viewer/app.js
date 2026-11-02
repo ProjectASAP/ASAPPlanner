@@ -251,6 +251,7 @@
   // Show one stage document; `source` names it, `story` explains it.
   function showDocument(data, source, story) {
     upgradeTumblingWindowNames(data);
+    upgradeMemoSteps(data);
     const errors = validateStagePipeline(data).concat(validateMemoEnumeration(data));
     if (!errors.length && typeof validateMemo === 'function') errors.push(...validateMemo(data.memo, data.workload.queries.length));
     if (errors.length) throw new Error(errors.slice(0, 3).join('; '));

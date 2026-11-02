@@ -2257,7 +2257,7 @@ fn ranking(child: &Rc<OperatorNode>, by: &Reduction, k: usize) -> Option<Rc<Oper
     let Reduction::Reduce(keys) = by else {
         return None;
     };
-    let value = crate::pass1::realization::ranked_column(child).ok()?;
+    let value = asap_types::ir::schema::topk::ranked_column(child).ok()?;
     let sorted = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Sort {
         keys: vec![SortKey {
             expr: ScalarExpr::Column(value),
@@ -2377,7 +2377,7 @@ mod tests {
             asap_types::ir::properties::AccuracyTarget::max_error(0.01).failure_probability(0.001),
         );
         let inventory = generate_per_computation_candidates(
-            &crate::pass2::memo::generate_dag_of_logical_memo_groups(&[QueryRoot::Operator(
+            &crate::stage0::generate_dag_of_logical_memo_groups(&[QueryRoot::Operator(
                 with_promql_series_identity(&root).unwrap(),
             )]),
         )
@@ -2442,7 +2442,7 @@ mod tests {
             })
             .collect();
         let inventory = generate_per_computation_candidates(
-            &crate::pass2::memo::generate_dag_of_logical_memo_groups(&roots),
+            &crate::stage0::generate_dag_of_logical_memo_groups(&roots),
         )
         .unwrap();
         let choice: Vec<usize> = inventory
@@ -3522,7 +3522,7 @@ mod tests {
         };
         use asap_types::stages::HowToComputeAggregateMeasure as C;
         let inventory = generate_per_computation_candidates(
-            &crate::pass2::memo::generate_dag_of_logical_memo_groups(
+            &crate::stage0::generate_dag_of_logical_memo_groups(
                 &[
                     "topk by (job) (5, sum_over_time(m[1m]))",
                     "topk by (job) (10, sum_over_time(m[1m]))",

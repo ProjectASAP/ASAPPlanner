@@ -21,7 +21,7 @@ use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot};
 use asap_types::physical::PhysicalWorkloadPlan;
-use asap_types::stages::MemoCandidates;
+use asap_types::stages::Memo;
 use asap_types::stages::MemoGroupId;
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
@@ -80,7 +80,7 @@ const TIE_TOLERANCE: f64 = 1e-9;
 /// is `stage0_roots[i]` with workload entry `entries[i]`; its operator
 /// references are replaced by their root groups' composed DAGs.
 pub fn price_choices(
-    memo: &MemoCandidates,
+    memo: &Memo,
     choices: &[ChosenCandidatePerMemoGroup],
     stage0_roots: &[QueryRoot],
     entries: &[QueryWorkloadEntry],
@@ -254,7 +254,7 @@ pub struct EnumeratedChoice {
 }
 
 /// `stage_pipeline --exhaustive`: the first `max_choices` choices of the
-/// selected round's memo (`run.memo_steps.concrete_states`), each composed,
+/// selected round's Pass 2 memo (`run.logical_asap_candidates`), each composed,
 /// implemented by Stage 2 with every materialization assignment, and all
 /// their physical plans priced together by the reference pricer.
 #[derive(Debug)]
@@ -279,7 +279,7 @@ pub fn reference_enumeration(
     max_choices: usize,
 ) -> Option<ReferenceEnumeration> {
     use asap_logical_asap_optimization::enumerate;
-    let memo = &run.memo_steps.as_ref()?.concrete_states;
+    let memo = &run.logical_asap_candidates.as_ref()?.memo;
     let enumeration = enumerate(memo, max_choices.saturating_add(1));
     let capped = !enumeration.complete || enumeration.all_chosen_candidates.len() > max_choices;
     let root_groups = root_groups_of_queries(memo, stage0_roots);
@@ -326,7 +326,7 @@ pub fn reference_enumeration(
 /// `query_roots`) reads when its root is one operator, else the group
 /// whose node is the reference.
 fn root_groups_of_queries(
-    memo: &MemoCandidates,
+    memo: &Memo,
     stage0_roots: &[QueryRoot],
 ) -> Result<Vec<Vec<MemoGroupId>>, String> {
     stage0_roots
@@ -362,7 +362,7 @@ fn root_groups_of_queries(
 /// equal one (the memo's group nodes are the frontends' nodes with common
 /// sub-DAGs shared).
 fn group_of(
-    memo: &MemoCandidates,
+    memo: &Memo,
     groups: &[MemoGroupId],
     node: &Rc<OperatorNode>,
     query: usize,

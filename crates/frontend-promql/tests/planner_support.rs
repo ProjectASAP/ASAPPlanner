@@ -9,7 +9,7 @@ use crate::support::declared_data;
 
 /// Every planning stage's output for the single query `root` at `accuracy`,
 /// with the built-in models.
-pub fn run_stage1_to_stage3(
+pub fn run_all_stages(
     root: Rc<OperatorNode>,
     accuracy: AccuracyTarget,
 ) -> asap_planner::PlanningRun {
@@ -36,7 +36,7 @@ pub fn run_stage1_to_stage3(
 /// The logical DAG the planner pipeline selects for the single query `root`
 /// at `accuracy`.
 pub fn selected_dag(root: Rc<OperatorNode>, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
-    let run = run_stage1_to_stage3(root, accuracy);
+    let run = run_all_stages(root, accuracy);
     match run.selected_plan.as_deref().expect("a plan is selected") {
         [asap_types::ir::QueryRoot::Operator(node)] => Rc::clone(node),
         other => panic!("one operator root: {other:?}"),

@@ -1,24 +1,22 @@
-//! Stage 1, Pass 1's output, which Pass 2 extends: the memo groups with
-//! their Pass 1 candidates, and the computation targets they were built
-//! from.
+//! Stage 1, Pass 1's output, which Pass 2 extends (the memo groups with
+//! their Pass 1 candidates), and the computation-target types Pass 1 builds
+//! those candidates from.
 
 use std::rc::Rc;
 
-use super::{MemoCandidates, MemoGroupId, PrunedCandidate};
+use super::{Memo, MemoGroupId, PrunedCandidate};
 use crate::ir::schema::{ExactKind, SketchAlgorithm};
 use crate::ir::{OperatorNode, Predicate};
 
 /// Stage 1, Pass 1's output: the workload's memo groups, each with its
-/// Pass 1 candidates, and the computation targets they were built from.
-/// It is also Pass 2's input.
+/// Pass 1 candidates, and the candidates Pass 1 pruned. It is also Pass 2's
+/// input.
 #[derive(Debug, Clone)]
 pub struct PerComputationLogicalMemoCandidates {
     /// The groups moved from the [`DagOfLogicalMemoGroups`](super::DagOfLogicalMemoGroups),
     /// its query roots, and every group's candidates (origin
     /// [`Pass1`](super::OriginOfCandidateForMemoGroup::Pass1)).
-    pub memo: MemoCandidates,
-    /// One per aggregate measure: what Pass 1 chose among.
-    pub computation_targets: Vec<ComputationTarget>,
+    pub memo: Memo,
     /// The ways to compute a target's measure that Pass 1 pruned, each on
     /// its target's aggregate group, in pruning order.
     pub pruned_candidates: Vec<PrunedCandidate<HowToComputeAggregateMeasure>>,
@@ -108,9 +106,8 @@ pub struct ComputationTarget {
 /// outer target's aggregate, measure, filter and `HAVING`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FusedComputation {
-    /// The indices in
-    /// [`PerComputationLogicalMemoCandidates::computation_targets`] of the targets
-    /// it absorbs: the one directly beneath, then, for a whole-expression
+    /// Indices, into Pass 1's computation-target list, of the targets it
+    /// absorbs: the one directly beneath, then, for a whole-expression
     /// heap over the raw data samples beneath a grouped sum of per-series sums or
     /// counts (`topk(k, sum by (G) (sum_over_time(m[W])))`), the per-series
     /// target beneath that, then the targets any of these targets' own fused

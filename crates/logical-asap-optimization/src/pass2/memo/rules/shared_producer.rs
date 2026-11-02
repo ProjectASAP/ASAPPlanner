@@ -5,8 +5,8 @@
 //! decides. Identical expressions are the trivial case, shared by memo group
 //! identity, and add no candidates here.
 use crate::pass2::memo::check_generation_deadline;
-use crate::pass2::memo::state_groups::StateGroupExpansionError;
-use asap_types::stages::MemoCandidates;
+use crate::pass2::memo::state_groups::Pass2RuleError;
+use asap_types::stages::Memo;
 use std::time::Instant;
 
 /// One reader of a kind of shared producer: its memo group and its need.
@@ -25,23 +25,23 @@ pub(in crate::pass2::memo) trait SharedProducer {
     /// one producer; in memo order.
     fn sets(
         &mut self,
-        memo: &MemoCandidates,
+        memo: &Memo,
         deadline: Option<Instant>,
-    ) -> Result<Vec<Vec<Reader<Self::Need>>>, StateGroupExpansionError>;
+    ) -> Result<Vec<Vec<Reader<Self::Need>>>, Pass2RuleError>;
     /// The coverings to offer the readers of `set`.
     fn coverings(
         &self,
         set: &[Reader<Self::Need>],
         deadline: Option<Instant>,
-    ) -> Result<Vec<Self::Covering>, StateGroupExpansionError>;
+    ) -> Result<Vec<Self::Covering>, Pass2RuleError>;
     /// Adds `reader`'s derivation from the producer at `covering`, if that
     /// producer serves it; the number of candidates added.
     fn derive(
         &mut self,
-        memo: &mut MemoCandidates,
+        memo: &mut Memo,
         reader: &Reader<Self::Need>,
         covering: &Self::Covering,
-    ) -> Result<usize, StateGroupExpansionError>;
+    ) -> Result<usize, Pass2RuleError>;
 }
 
 /// Whether `set`'s readers belong to two or more groups; a set inside one
@@ -53,10 +53,10 @@ pub(in crate::pass2::memo) fn spans_groups<N>(set: &[Reader<N>]) -> bool {
 /// Gives every reader of a set spanning two or more groups its derivation
 /// from each of the set's coverings; the number of candidates added.
 pub(in crate::pass2::memo) fn add_shared_producer_candidates<P: SharedProducer>(
-    memo: &mut MemoCandidates,
+    memo: &mut Memo,
     producer: &mut P,
     deadline: Option<Instant>,
-) -> Result<usize, StateGroupExpansionError> {
+) -> Result<usize, Pass2RuleError> {
     check_generation_deadline(deadline)?;
     let mut added = 0;
     for set in producer.sets(memo, deadline)? {

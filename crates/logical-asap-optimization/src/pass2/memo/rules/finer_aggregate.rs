@@ -4,10 +4,10 @@
 use super::reuse::append_reader;
 use crate::pass2::finer_aggregate::match_finer;
 use crate::pass2::memo::check_generation_deadline;
-use crate::pass2::memo::state_groups::StateGroupExpansionError;
+use crate::pass2::memo::state_groups::Pass2RuleError;
 use asap_types::ir::operator::{AggIntent, Reduction};
 use asap_types::ir::{NonASAPOp, Operator, OperatorNode, OperatorResultKind};
-use asap_types::stages::{MemoCandidates, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{Memo, OriginOfCandidateForMemoGroup};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Instant;
@@ -71,9 +71,9 @@ fn value_rollup(measure: &AggIntent, col: usize, global: bool) -> Option<AggInte
 }
 
 pub(crate) fn add_finer_aggregate_candidates(
-    memo: &mut MemoCandidates,
+    memo: &mut Memo,
     deadline: Option<Instant>,
-) -> Result<usize, StateGroupExpansionError> {
+) -> Result<usize, Pass2RuleError> {
     // Only aggregates of equal measures can match; bucket by them (the
     // first levels of the paper's filter tree) instead of trying all pairs.
     let mut buckets: HashMap<String, Vec<usize>> = HashMap::new();
@@ -101,11 +101,7 @@ pub(crate) fn add_finer_aggregate_candidates(
 
 /// Adds to group `owner` a read of group `finer`'s result when it computes
 /// `owner`'s aggregate; the number of candidates added (0 or 1).
-fn add_read(
-    memo: &mut MemoCandidates,
-    owner: usize,
-    finer: usize,
-) -> Result<usize, StateGroupExpansionError> {
+fn add_read(memo: &mut Memo, owner: usize, finer: usize) -> Result<usize, Pass2RuleError> {
     let query_node = Rc::clone(&memo.groups[owner].logical_node);
     let finer_node = Rc::clone(&memo.groups[finer].logical_node);
     let (Some(query), Some(fine)) = (Aggregate::of(&query_node), Aggregate::of(&finer_node)) else {
@@ -136,9 +132,8 @@ fn add_read(
     let Some(measures) = measures else {
         return Ok(0);
     };
-    let reuse_error = |error: asap_types::ir::SchemaDerivationError| {
-        StateGroupExpansionError::ReuseRule(error.to_string())
-    };
+    let reuse_error =
+        |error: asap_types::ir::SchemaDerivationError| Pass2RuleError::ReuseRule(error.to_string());
     let rows = match matched.compensating_filter {
         Some(pred) => OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Filter {
             pred,

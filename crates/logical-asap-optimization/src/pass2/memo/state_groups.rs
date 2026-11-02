@@ -12,11 +12,13 @@ use std::time::Instant;
 
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
 
-use asap_types::stages::{CandidateForMemoGroup, MemoCandidates, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{CandidateForMemoGroup, Memo, OriginOfCandidateForMemoGroup};
 use asap_types::stages::{MemoGroup, MemoGroupId};
 
+/// Why Pass 2's rules failed on a memo: its precondition check, a rule
+/// (2–9), or the shared summary-state groups (10).
 #[derive(Debug, thiserror::Error)]
-pub enum StateGroupExpansionError {
+pub enum Pass2RuleError {
     #[error(transparent)]
     DeadlineExceeded(#[from] asap_types::stages::CandidateGenerationTimeout),
     #[error("memo group and candidate vectors have different lengths")]
@@ -48,7 +50,7 @@ struct BuildReaders {
 /// Rejects a memo the Pass 2 rules cannot extend: mismatched or
 /// out-of-range group references, shared summary-state groups already
 /// added, or cyclic dependencies. Pass 2 checks this before its rules.
-pub(crate) fn check_unexpanded_memo(memo: &MemoCandidates) -> Result<(), StateGroupExpansionError> {
+pub(crate) fn check_unexpanded_memo(memo: &Memo) -> Result<(), Pass2RuleError> {
     validate_references(memo)?;
     if memo.groups.iter().any(|group| {
         matches!(
@@ -56,10 +58,10 @@ pub(crate) fn check_unexpanded_memo(memo: &MemoCandidates) -> Result<(), StateGr
             Some(ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. })
         )
     }) {
-        return Err(StateGroupExpansionError::AlreadyExpanded);
+        return Err(Pass2RuleError::AlreadyExpanded);
     }
     if memo.topological_order().is_none() {
-        return Err(StateGroupExpansionError::CyclicDependencies);
+        return Err(Pass2RuleError::CyclicDependencies);
     }
     Ok(())
 }
@@ -71,19 +73,19 @@ pub(crate) fn check_unexpanded_memo(memo: &MemoCandidates) -> Result<(), StateGr
 /// parents and the queries it may serve. On error, discard `memo`: it may
 /// hold partial work.
 pub(crate) fn add_shared_summary_state_groups(
-    memo: &mut MemoCandidates,
+    memo: &mut Memo,
     deadline: Option<Instant>,
-) -> Result<(), StateGroupExpansionError> {
+) -> Result<(), Pass2RuleError> {
     add_shared_summary_state_groups_with_index(memo, deadline, true)
 }
 
 /// `indexed` looks builds up by fingerprint; otherwise by a linear scan
 /// (the reference the index is tested against).
 fn add_shared_summary_state_groups_with_index(
-    memo: &mut MemoCandidates,
+    memo: &mut Memo,
     deadline: Option<Instant>,
     indexed: bool,
-) -> Result<(), StateGroupExpansionError> {
+) -> Result<(), Pass2RuleError> {
     let mut builds: Vec<BuildReaders> = Vec::new();
     let mut build_index: HashMap<Option<BuildFingerprint>, Vec<usize>> = HashMap::new();
     for (group, candidates) in memo.candidates.iter().enumerate() {
@@ -128,8 +130,7 @@ fn add_shared_summary_state_groups_with_index(
             continue;
         }
         let state_group = MemoGroupId(
-            u32::try_from(memo.groups.len())
-                .map_err(|_| StateGroupExpansionError::TooManyGroups)?,
+            u32::try_from(memo.groups.len()).map_err(|_| Pass2RuleError::TooManyGroups)?,
         );
         let mut queries: Vec<_> = build
             .readers
@@ -213,13 +214,13 @@ fn add_shared_summary_state_groups_with_index(
         }
     }
     if memo.topological_order().is_none() {
-        return Err(StateGroupExpansionError::CyclicDependencies);
+        return Err(Pass2RuleError::CyclicDependencies);
     }
     // The chosen representative input may now serve additional queries through
     // state reuse; propagate potential reach along the expanded dependency DAG.
     for group in memo
         .topological_order()
-        .ok_or(StateGroupExpansionError::CyclicDependencies)?
+        .ok_or(Pass2RuleError::CyclicDependencies)?
         .into_iter()
         .rev()
     {
@@ -245,12 +246,12 @@ fn add_shared_summary_state_groups_with_index(
     Ok(())
 }
 
-fn validate_references(memo: &MemoCandidates) -> Result<(), StateGroupExpansionError> {
+fn validate_references(memo: &Memo) -> Result<(), Pass2RuleError> {
     if memo.groups.len() != memo.candidates.len() {
-        return Err(StateGroupExpansionError::MismatchedGroups);
+        return Err(Pass2RuleError::MismatchedGroups);
     }
     if memo.groups.len() > u32::MAX as usize {
-        return Err(StateGroupExpansionError::TooManyGroups);
+        return Err(Pass2RuleError::TooManyGroups);
     }
     for group in &memo.groups {
         if group
@@ -259,7 +260,7 @@ fn validate_references(memo: &MemoCandidates) -> Result<(), StateGroupExpansionE
             .chain(&group.parents)
             .any(|id| id.0 as usize >= memo.groups.len())
         {
-            return Err(StateGroupExpansionError::InvalidGroupReference);
+            return Err(Pass2RuleError::InvalidGroupReference);
         }
     }
     for candidate in memo.candidates.iter().flatten() {
@@ -269,14 +270,14 @@ fn validate_references(memo: &MemoCandidates) -> Result<(), StateGroupExpansionE
             .chain(&candidate.fused_groups)
             .any(|id| id.0 as usize >= memo.groups.len())
         {
-            return Err(StateGroupExpansionError::InvalidGroupReference);
+            return Err(Pass2RuleError::InvalidGroupReference);
         }
     }
     Ok(())
 }
 
 pub(super) fn simple_build(
-    memo: &MemoCandidates,
+    memo: &Memo,
     candidate: &CandidateForMemoGroup,
 ) -> Option<(Rc<OperatorNode>, Vec<MemoGroupId>)> {
     let mut builds = direct_input_builds(memo, candidate);
@@ -284,7 +285,7 @@ pub(super) fn simple_build(
 }
 
 pub(super) fn direct_input_builds(
-    memo: &MemoCandidates,
+    memo: &Memo,
     candidate: &CandidateForMemoGroup,
 ) -> Vec<(Rc<OperatorNode>, Vec<MemoGroupId>)> {
     if !matches!(
@@ -461,14 +462,14 @@ fn replace_node(
 mod tests {
     use super::*;
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
-    use crate::pass2::memo::generate_dag_of_logical_memo_groups;
     use crate::pass2::memo::groups::try_populate_pass1;
+    use crate::stage0::generate_dag_of_logical_memo_groups;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::QueryRoot;
 
     /// An expanded memo with what its shared summary-state step added.
     struct Expanded {
-        memo: MemoCandidates,
+        memo: Memo,
         /// The groups the shared summary-state step added.
         state_groups: Vec<MemoGroupId>,
         /// The candidates it added to reader groups.
@@ -477,7 +478,7 @@ mod tests {
 
     /// Pass 2 after local window composition, over the complete tumbling-window-width
     /// domain, as the Pass 2 entry runs it.
-    fn expand(memo: MemoCandidates) -> Result<Expanded, StateGroupExpansionError> {
+    fn expand(memo: Memo) -> Result<Expanded, Pass2RuleError> {
         let memo = crate::test_support::sharing_rules_and_shared_state_groups(
             memo,
             super::super::shared_configurations::TumblingWindowWidthDomain::Complete,
@@ -485,7 +486,7 @@ mod tests {
         Ok(expanded(memo))
     }
 
-    fn expanded(memo: MemoCandidates) -> Expanded {
+    fn expanded(memo: Memo) -> Expanded {
         let state_groups = crate::test_support::shared_summary_state_groups(&memo);
         // Before this step no candidate is a shared build; after it, each
         // state group has one and each added reader candidate is one.
@@ -564,15 +565,15 @@ mod tests {
                 super::super::shared_configurations::TumblingWindowWidthDomain::Complete,
                 Some(Instant::now())
             ),
-            Err(StateGroupExpansionError::DeadlineExceeded(_))
+            Err(Pass2RuleError::DeadlineExceeded(_))
         ));
     }
 
-    fn workload(queries: &[(&str, f64)]) -> MemoCandidates {
+    fn workload(queries: &[(&str, f64)]) -> Memo {
         workload_with_identity(queries, false)
     }
 
-    fn workload_with_identity(queries: &[(&str, f64)], identity: bool) -> MemoCandidates {
+    fn workload_with_identity(queries: &[(&str, f64)], identity: bool) -> Memo {
         let roots: Vec<_> = queries
             .iter()
             .map(|(query, error)| {
@@ -646,7 +647,7 @@ mod tests {
         }
         assert!(matches!(
             expand(expanded.memo),
-            Err(StateGroupExpansionError::AlreadyExpanded)
+            Err(Pass2RuleError::AlreadyExpanded)
         ));
     }
 
@@ -685,7 +686,7 @@ mod tests {
         assert_eq!(expanded.memo.groups.len(), count);
     }
 
-    fn with_local_tumbling_windows(mut memo: MemoCandidates, grids: &[u64]) -> MemoCandidates {
+    fn with_local_tumbling_windows(mut memo: Memo, grids: &[u64]) -> Memo {
         use crate::pass2::asap_aware_cse::{
             tumbling_window_candidates, window_composition_pass2_candidates,
         };
@@ -895,7 +896,7 @@ mod tests {
 
     /// The groups `group`'s candidates read, directly or through the
     /// candidates of the groups they read.
-    fn groups_read_by(memo: &MemoCandidates, group: usize) -> HashSet<usize> {
+    fn groups_read_by(memo: &Memo, group: usize) -> HashSet<usize> {
         let mut read = HashSet::new();
         let mut pending = vec![group];
         while let Some(group) = pending.pop() {
@@ -968,7 +969,7 @@ mod tests {
         assert_eq!(memo.topological_order(), None);
         assert!(matches!(
             check_unexpanded_memo(&memo),
-            Err(StateGroupExpansionError::CyclicDependencies)
+            Err(Pass2RuleError::CyclicDependencies)
         ));
     }
 
@@ -1046,7 +1047,7 @@ mod tests {
         }
         assert!(matches!(
             expand(expanded.memo),
-            Err(StateGroupExpansionError::AlreadyExpanded)
+            Err(Pass2RuleError::AlreadyExpanded)
         ));
     }
 
@@ -1624,7 +1625,7 @@ mod tests {
         memo.groups[0].child_groups.push(MemoGroupId(u32::MAX));
         assert!(matches!(
             expand(memo),
-            Err(StateGroupExpansionError::InvalidGroupReference)
+            Err(Pass2RuleError::InvalidGroupReference)
         ));
     }
 }

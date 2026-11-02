@@ -114,17 +114,19 @@
 //     `pruned_candidates_not_enumerated` (rejections naming no enumerated
 //     candidate) and `pruned_candidate_count_by_cause`.
 // `memo` (unless `--no-memo`) is the memo the search built, from the
-// planning round whose plan was selected (`MemoSteps`): `nodes`, one node
+// planning round whose plan was selected: `nodes`, one node
 // table for the whole section (`MemoNodes`: each distinct node once, matched
 // by its serialized JSON, children as indices into the table and before
 // their parents); `steps`, one per
 // memo step in pipeline order (`stage0`: the frontends' DAG hash-consed,
 // groups without candidates; `pass1`: Pass 1's candidates, with the
-// accuracy-scoped sizes; `pass2`: local window composition's tumbling window
-// candidates; `concrete_states`: the Pass 2 memo rules (scan labels,
-// summary inputs, top-k reuse, finer aggregates, rollups, summary results,
-// state configurations) and the concrete summary-state groups, the memo the
-// search selects from). Each step lists its groups (`id`, `label`,
+// accuracy-scoped sizes (`PlanningRun::per_computation_candidates`);
+// `pass2`: Pass 2's output (`PlanningRun::logical_asap_candidates`): local
+// window composition, the Pass 2 memo rules (scan labels, summary inputs,
+// top-k reuse, finer aggregates, rollups, summary results, state
+// configurations) and the concrete summary-state groups, the memo the
+// search selects from; each candidate's `origin` names the rule that made
+// it). Each step lists its groups (`id`, `label`,
 // `children`, `parents`, `queries`, `roots_of`, the group's `node` in
 // `nodes`) and their
 // candidates (`candidate_count`, `candidate_count_by_origin`, and the first
@@ -289,16 +291,18 @@ use asap_plan_selection::reference_pricer::{Rejection, WholePlanSelection};
 use asap_plan_selection::{
     large_peak_memory_warning, AcceptedAccuracy, ErrorSelectingPlan, Selection,
 };
-use asap_planner::MemoSteps;
-use asap_planner::{installable_plan_of, PlanSearchSettings, PlanningModels, SelectionError};
+use asap_planner::{
+    installable_plan_of, selected_chosen_candidates, PlanSearchSettings, PlanningModels,
+    PlanningRun, SelectionError,
+};
 use asap_types::ir::flat::{flatten, FlatDag, FlatNode, NodeId};
 use asap_types::ir::operator::node::OperatorNode;
 use asap_types::ir::properties::{default_metric_for_root, AccuracyMetric, AccuracyTarget};
 use asap_types::ir::QueryRoot;
 use asap_types::physical::PhysicalWorkloadPlan;
-use asap_types::stages::PerComputationLogicalMemoCandidates;
 use asap_types::stages::{queries_rooted_at, MemoGroupId};
-use asap_types::stages::{MemoCandidates, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{Memo, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{PerComputationLogicalMemoCandidates, PhysicalASAPMemoCandidates};
 use asap_types::workload::{
     BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Query, QueryLanguage,
     QueryRecurrence, QueryRequirements, QueryWorkload, QueryWorkloadEntry, RepeatedDemand,
@@ -769,10 +773,11 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         .ok()
         .and_then(|run| {
             let pass1 = &run.run.per_computation_candidates.as_ref()?.memo;
-            Some((run.run.memo_steps.as_ref()?, pass1))
+            let pass2 = &run.run.logical_asap_candidates.as_ref()?.memo;
+            Some((pass1, pass2, &run.run))
         })
         .filter(|_| write_memo)
-        .map(|(steps, pass1)| {
+        .map(|(pass1, pass2, planning_run)| {
             let pricing = Pricing {
                 stage0_roots: &roots,
                 entries: &entries,
@@ -784,7 +789,13 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                     .and_then(|run| run.run.selection.as_ref().ok())
                     .map(SelectedBaseline::of),
             };
-            memo_json(steps, pass1, &memo_caps, &pricing)
+            memo_json(
+                pass1,
+                pass2,
+                &selected_choice(planning_run),
+                &memo_caps,
+                &pricing,
+            )
         });
     let mut document = document_of(described, &roots, &entries, result, max_displayed)?;
     if let Some(memo) = memo {
@@ -1052,7 +1063,6 @@ fn stage_pipeline(
         }
         _ => stage3["materialized_views"] = json!([]),
     }
-    let memo_steps = run.run.memo_steps.as_ref();
     let mut document = json!({
         "format": "asap-stage-pipeline/v1",
         "workload": { "queries": queries },
@@ -1067,7 +1077,7 @@ fn stage_pipeline(
         "stage2_physical_asap_optimization": {
             "candidates": physical,
             "pruned": pruned,
-            "pruned_candidates": stage2_pruned_candidates_json(memo_steps),
+            "pruned_candidates": stage2_pruned_candidates_json(run.run.physical_asap_candidates.as_ref()),
         },
         "stage3_plan_selection": stage3,
         "planning_report": serde_json::to_value(&run.run.report).unwrap_or(Value::Null),
@@ -1249,17 +1259,17 @@ fn pass1_pruned_candidates_json(pass1: Option<&PerComputationLogicalMemoCandidat
 /// operator nodes), the node's `operator` label, whether it is an
 /// `implementation_root`, its `timing` and `materialization`, and the
 /// `reason` (`PruneReason`, e.g.
-/// `RawDataNotRetained`). Empty without memo steps.
-fn stage2_pruned_candidates_json(steps: Option<&MemoSteps>) -> Vec<Value> {
-    let Some(steps) = steps else {
+/// `RawDataNotRetained`). Empty without a Stage 2 output.
+fn stage2_pruned_candidates_json(stage2: Option<&PhysicalASAPMemoCandidates>) -> Vec<Value> {
+    let Some(stage2) = stage2 else {
         return Vec::new();
     };
-    steps
-        .stage2_pruned_candidates
+    stage2
+        .pruned_candidates
         .iter()
         .map(|pruned| {
             let key = &pruned.candidate;
-            let node = &steps.stage2_operator_nodes[key.operator_node.0];
+            let node = &stage2.operator_nodes_of_candidates_for_memo_groups[key.operator_node.0];
             let flat = export(&[QueryRoot::Operator(node.physical_node.clone())]);
             json!({
                 "group": pruned.group.0,
@@ -1610,19 +1620,39 @@ struct Pricing<'a> {
     selected: Option<SelectedBaseline>,
 }
 
-/// The document's `memo` section: the memo after each step, the selected
-/// plan's choice over the last step's memo, and the candidate DAGs each
-/// step's memo stands for (`memo::enumeration::enumerate`; each listed
-/// choice composed by `memo::enumeration::build_logical_asap_dags_from_chosen_candidates`).
-/// `pass1` is the memo after Pass 1.
+/// The selected plan's candidate for each group of the Pass 2 memo
+/// (`run.logical_asap_candidates`), or why there is none: the selection's
+/// error when no plan was selected or Stage 2 could not build it.
+fn selected_choice(run: &PlanningRun) -> Result<ChosenCandidatePerMemoGroup, String> {
+    match (
+        &run.selection,
+        &run.logical_asap_candidates,
+        &run.physical_asap_candidates,
+    ) {
+        (Ok(selection), Some(logical), Some(physical)) => {
+            selected_chosen_candidates(&logical.memo, physical, &selection.selected_dag)
+        }
+        (Err(error), _, _) => Err(format!("no plan was selected: {error}")),
+        _ => Err("no plan was selected".into()),
+    }
+}
+
+/// The document's `memo` section: the memo after each stage or pass, the
+/// selected plan's choice over the last step's memo (`selected`), and the
+/// candidate DAGs each step's memo stands for
+/// (`memo::enumeration::enumerate`; each listed choice composed by
+/// `memo::enumeration::build_logical_asap_dags_from_chosen_candidates`).
+/// `pass1` is Pass 1's memo, `pass2` Pass 2's (the memo Stage 2
+/// implements).
 fn memo_json(
-    steps: &MemoSteps,
-    pass1: &MemoCandidates,
+    pass1: &Memo,
+    pass2: &Memo,
+    selected: &Result<ChosenCandidatePerMemoGroup, String>,
     caps: &MemoCaps,
     pricing: &Pricing<'_>,
 ) -> Value {
     // Stage 0's groups are Pass 1's, without candidates.
-    let stage0 = MemoCandidates {
+    let stage0 = Memo {
         groups: pass1.groups.clone(),
         query_roots: pass1.query_roots.clone(),
         candidates: vec![Vec::new(); pass1.groups.len()],
@@ -1630,19 +1660,10 @@ fn memo_json(
     let named = [
         ("stage0", "Stage 0, the frontends' DAG hash-consed", &stage0),
         ("pass1", "Stage 1, Pass 1", pass1),
-        (
-            "pass2",
-            "Stage 1, Pass 2: local window composition",
-            &steps.pass2,
-        ),
-        (
-            "concrete_states",
-            "Stage 1, Pass 2 rules and concrete state groups",
-            &steps.concrete_states,
-        ),
+        ("pass2", "Stage 1, Pass 2", pass2),
     ];
     let mut table = MemoNodes::default();
-    let mut previous: Option<&MemoCandidates> = None;
+    let mut previous: Option<&Memo> = None;
     let mut json_steps = Vec::new();
     let mut per_step = serde_json::Map::new();
     // The last step (with candidates) enumerated completely within `enumerated`.
@@ -1668,9 +1689,8 @@ fn memo_json(
             json!({ "count": enumeration.all_chosen_candidates.len(), "complete": enumeration.complete }),
         );
     }
-    let last = &steps.concrete_states;
-    let (step, memo) = listed.unwrap_or(("concrete_states", last));
-    let selected = steps.selected_chosen_candidates.as_ref().ok();
+    let (step, memo) = listed.unwrap_or(("pass2", pass2));
+    let chosen = selected.as_ref().ok();
     let enumerated = enumerate(memo, caps.enumerated).all_chosen_candidates;
     let priced = (caps.choices_to_price > 0).then(|| {
         price_choices(
@@ -1693,7 +1713,7 @@ fn memo_json(
                 "accuracy_budget_parts_1": choice.iter().all(|(group, &candidate)| {
                     memo.candidates[group.0 as usize][candidate].accuracy_budget_parts == 1
                 }),
-                "selected": step == "concrete_states" && selected == Some(choice),
+                "selected": step == "pass2" && chosen == Some(choice),
             });
             match build_logical_asap_dags_from_chosen_candidates(memo, choice) {
                 Ok(roots) => {
@@ -1725,7 +1745,7 @@ fn memo_json(
     let mut memo = json!({
         "nodes": table.nodes,
         "steps": json_steps,
-        "selected_choice": selected.map_or(Value::Null, choice_json),
+        "selected_choice": chosen.map_or(Value::Null, choice_json),
         "enumeration": {
             "step": step,
             "per_step": per_step,
@@ -1734,7 +1754,7 @@ fn memo_json(
             "priced": priced,
         },
     });
-    if let Err(reason) = &steps.selected_chosen_candidates {
+    if let Err(reason) = selected {
         memo["selected_choice_unavailable"] = json!(reason);
     }
     memo
@@ -1797,8 +1817,8 @@ impl MemoNodes {
 /// children.
 fn memo_groups_json(
     table: &mut MemoNodes,
-    memo: &MemoCandidates,
-    previous: Option<&MemoCandidates>,
+    memo: &Memo,
+    previous: Option<&Memo>,
     max_candidates: usize,
 ) -> Vec<Value> {
     let ids = |groups: &[MemoGroupId]| groups.iter().map(|g| g.0).collect::<Vec<_>>();

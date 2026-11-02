@@ -159,8 +159,8 @@ also Stage 2's decision and is not in the assignment.
 that is not set explicitly `materialization` where the DAG allows it; a
 `MatAtIngestion` default over a sub-DAG that can only run at query time leaves
 that sub-DAG `NotMaterialized` instead of failing (the default applies to
-`SummaryAgg` and `MaintainPopulation` nodes). `validate_at_ingestion` and
-`planned_data_state` use it to check, at planning time and without keeping
+`SummaryAgg` and `MaintainPopulation` nodes). The test helpers `validate_at_ingestion` and
+`planned_data_state` (feature `test-support`) use it to check, at planning time and without keeping
 anything, that a candidate stays valid when every sub-DAG is `MatAtIngestion`.
 
 ## Exported DAG

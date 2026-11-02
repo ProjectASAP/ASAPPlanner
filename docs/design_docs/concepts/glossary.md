@@ -24,6 +24,10 @@ A logical plan representation that can contain ASAP primitives, alongside relati
 
 One legal Post-ASAP alternative for answering an intent. Planner preserves alternatives for downstream selection rather than committing to one.
 
+## Memo
+
+The memo groups (the distinct logical sub-expressions of the workload), each query's root over them, and each group's candidate implementations. Stage 1 builds it and Stage 2 implements it. Code: `Memo`, `MemoGroup`, `CandidateForMemoGroup` (`asap_types::stages`).
+
 ## Summary
 
 Maintained state, exact or approximate, that can answer some query intent more efficiently than raw data. A sketch is one kind of approximate summary.

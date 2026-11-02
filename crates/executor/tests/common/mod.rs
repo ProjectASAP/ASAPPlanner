@@ -24,7 +24,7 @@ pub fn selected_dag(
     root: Rc<OperatorNode>,
     accuracy: planner_types::ir::properties::AccuracyTarget,
 ) -> Rc<OperatorNode> {
-    let run = run_stage1_to_stage3(root, accuracy);
+    let run = run_all_stages(root, accuracy);
     let [QueryRoot::Operator(selected)] = run
         .selected_plan
         .as_deref()
@@ -69,7 +69,7 @@ pub fn computation_candidates(root: Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
         .collect()
 }
 
-fn run_stage1_to_stage3(
+fn run_all_stages(
     root: Rc<OperatorNode>,
     accuracy: planner_types::ir::properties::AccuracyTarget,
 ) -> asap_planner::PlanningRun {

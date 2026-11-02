@@ -24,10 +24,10 @@ use asap_types::ir::{OperatorNode, QueryRoot};
 use super::rules::reuse::replace;
 use crate::pass1::per_computation_candidates::PerComputationCandidateError;
 use asap_accuracy::propagation::recompose_guarantees;
-use asap_types::stages::MemoCandidates;
+use asap_types::stages::Memo;
 use asap_types::stages::MemoGroupId;
 
-/// One candidate (an index into `MemoCandidates::candidates[group]`) for each
+/// One candidate (an index into `Memo::candidates[group]`) for each
 /// group it names. [`build_logical_asap_dags_from_chosen_candidates`] gives a group it does not name its first
 /// candidate.
 pub type ChosenCandidatePerMemoGroup = BTreeMap<MemoGroupId, usize>;
@@ -67,9 +67,9 @@ pub enum ErrorBuildingLogicalASAPDagsFromChosenCandidates {
 /// Every choice of one candidate per needed group, starting from the query
 /// roots, stopping after `limit` choices. A choice whose candidates read
 /// each other in a cycle composes no DAG and is left out.
-pub fn enumerate(memo: &MemoCandidates, limit: usize) -> AllChosenCandidatesPerMemoGroup {
+pub fn enumerate(memo: &Memo, limit: usize) -> AllChosenCandidatesPerMemoGroup {
     fn walk(
-        memo: &MemoCandidates,
+        memo: &Memo,
         mut pending: Vec<MemoGroupId>,
         chosen_candidates: &mut ChosenCandidatePerMemoGroup,
         limit: usize,
@@ -131,12 +131,12 @@ pub fn enumerate(memo: &MemoCandidates, limit: usize) -> AllChosenCandidatesPerM
 /// in plan reconstruction. A scalar query's expression is not rebuilt: its
 /// operator roots are root groups like any other query's.
 pub fn build_logical_asap_dags_from_chosen_candidates(
-    memo: &MemoCandidates,
+    memo: &Memo,
     chosen_candidates: &ChosenCandidatePerMemoGroup,
 ) -> Result<Vec<(MemoGroupId, Rc<OperatorNode>)>, ErrorBuildingLogicalASAPDagsFromChosenCandidates>
 {
     fn composed(
-        memo: &MemoCandidates,
+        memo: &Memo,
         group: MemoGroupId,
         chosen_candidates: &ChosenCandidatePerMemoGroup,
         done: &mut HashMap<MemoGroupId, Rc<OperatorNode>>,
@@ -211,7 +211,7 @@ pub fn build_logical_asap_dags_from_chosen_candidates(
 
 /// Whether `from` is `to` or reads it through the candidates `chosen_candidates` names.
 fn reaches(
-    memo: &MemoCandidates,
+    memo: &Memo,
     chosen_candidates: &ChosenCandidatePerMemoGroup,
     from: MemoGroupId,
     to: MemoGroupId,
@@ -232,6 +232,6 @@ fn reaches(
     false
 }
 
-fn root_groups(memo: &MemoCandidates) -> impl DoubleEndedIterator<Item = MemoGroupId> {
+fn root_groups(memo: &Memo) -> impl DoubleEndedIterator<Item = MemoGroupId> {
     asap_types::stages::root_groups(&memo.query_roots).into_iter()
 }

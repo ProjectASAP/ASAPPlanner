@@ -17,8 +17,8 @@ use crate::pass2::memo::shared_configurations::{
     shared_size, state_size_configurations, tumbling_window_configurations_before,
     TumblingWindowConfiguration, TumblingWindowRequirement, TumblingWindowWidthDomain,
 };
-use crate::pass2::memo::state_groups::{same_range_input, simple_build, StateGroupExpansionError};
-use asap_types::stages::MemoCandidates;
+use crate::pass2::memo::state_groups::{same_range_input, simple_build, Pass2RuleError};
+use asap_types::stages::Memo;
 
 /// `resized` (a rewrite of `original` with the same shape) with each node
 /// that is a child group's node in `original` put back, and the nodes above
@@ -104,19 +104,19 @@ struct SummaryStates {
 }
 
 pub(crate) fn add_state_configuration_candidates_in_domain(
-    memo: &mut MemoCandidates,
+    memo: &mut Memo,
     domain: TumblingWindowWidthDomain,
     deadline: Option<Instant>,
-) -> Result<(), StateGroupExpansionError> {
+) -> Result<(), Pass2RuleError> {
     expand_configurations(memo, true, domain, deadline).map(|_| ())
 }
 
 fn expand_configurations(
-    memo: &mut MemoCandidates,
+    memo: &mut Memo,
     deduplicate_requests: bool,
     domain: TumblingWindowWidthDomain,
     deadline: Option<Instant>,
-) -> Result<usize, StateGroupExpansionError> {
+) -> Result<usize, Pass2RuleError> {
     let mut states = SummaryStates {
         deduplicate_requests,
         domain,
@@ -134,9 +134,9 @@ impl SharedProducer for SummaryStates {
 
     fn sets(
         &mut self,
-        memo: &MemoCandidates,
+        memo: &Memo,
         deadline: Option<Instant>,
-    ) -> Result<Vec<Vec<Reader<StateNeed>>>, StateGroupExpansionError> {
+    ) -> Result<Vec<Vec<Reader<StateNeed>>>, Pass2RuleError> {
         let mut sets: Vec<Vec<Reader<StateNeed>>> = Vec::new();
         for (group, candidates) in memo.candidates.iter().enumerate() {
             check_generation_deadline(deadline)?;
@@ -220,7 +220,7 @@ impl SharedProducer for SummaryStates {
         &self,
         set: &[Reader<StateNeed>],
         deadline: Option<Instant>,
-    ) -> Result<Vec<StateCovering>, StateGroupExpansionError> {
+    ) -> Result<Vec<StateCovering>, Pass2RuleError> {
         let tumbling_window_requirements: Option<Vec<_>> = set
             .iter()
             .map(|reader| tumbling_window_requirement(&reader.need))
@@ -270,10 +270,10 @@ impl SharedProducer for SummaryStates {
 
     fn derive(
         &mut self,
-        memo: &mut MemoCandidates,
+        memo: &mut Memo,
         reader: &Reader<StateNeed>,
         covering: &StateCovering,
-    ) -> Result<usize, StateGroupExpansionError> {
+    ) -> Result<usize, Pass2RuleError> {
         let need = &reader.need;
         let serves = match covering {
             StateCovering::TumblingWindows { configuration, .. } => configuration
@@ -322,8 +322,8 @@ impl SharedProducer for SummaryStates {
             .iter()
             .map(|group| Rc::as_ptr(&memo.groups[group.0 as usize].logical_node))
             .collect();
-        let roots = result
-            .map_err(|error| StateGroupExpansionError::StateConfiguration(error.to_string()))?;
+        let roots =
+            result.map_err(|error| Pass2RuleError::StateConfiguration(error.to_string()))?;
         let [QueryRoot::Operator(node)] = roots.as_slice() else {
             unreachable!("operator rewrite")
         };
@@ -334,7 +334,7 @@ impl SharedProducer for SummaryStates {
             || original.root_node.schema.unique_keys != node.schema.unique_keys
             || (original.root_node.schema.closed && !node.schema.closed)
         {
-            return Err(StateGroupExpansionError::StateConfiguration(
+            return Err(Pass2RuleError::StateConfiguration(
                 "state rewrite changed the reader output contract".into(),
             ));
         }
@@ -372,11 +372,11 @@ impl SharedProducer for SummaryStates {
 /// sets (`layouts`), so a configuration index of one set never matches
 /// another's.
 fn assign_normalized_layouts(
-    memo: &MemoCandidates,
+    memo: &Memo,
     set: &mut [Reader<StateNeed>],
     layouts: &mut Vec<(usize, usize, FlatDag)>,
     deadline: Option<Instant>,
-) -> Result<(), StateGroupExpansionError> {
+) -> Result<(), Pass2RuleError> {
     let Some(requirements) = set
         .iter()
         .map(|reader| tumbling_window_requirement(&reader.need))
@@ -401,10 +401,10 @@ fn assign_normalized_layouts(
             1,
             count,
         )
-        .map_err(|error| StateGroupExpansionError::StateConfiguration(error.to_string()))?;
+        .map_err(|error| Pass2RuleError::StateConfiguration(error.to_string()))?;
         let flat = flatten(&normalized).0;
         let signature = serde_json::to_string(&flat)
-            .map_err(|error| StateGroupExpansionError::StateConfiguration(error.to_string()))?;
+            .map_err(|error| Pass2RuleError::StateConfiguration(error.to_string()))?;
         let indices = layout_keys.entry((reader.group, signature)).or_default();
         let existing = indices.iter().copied().find(|&index| {
             let (group, candidate, previous) = &layouts[index];
@@ -425,9 +425,9 @@ fn assign_normalized_layouts(
     Ok(())
 }
 
-fn graph_signature(node: &Rc<OperatorNode>) -> Result<String, StateGroupExpansionError> {
+fn graph_signature(node: &Rc<OperatorNode>) -> Result<String, Pass2RuleError> {
     serde_json::to_string(&flatten(&[QueryRoot::Operator(Rc::clone(node))]).0)
-        .map_err(|error| StateGroupExpansionError::StateConfiguration(error.to_string()))
+        .map_err(|error| Pass2RuleError::StateConfiguration(error.to_string()))
 }
 
 fn tumbling_window_requirement(reader: &StateNeed) -> Option<TumblingWindowRequirement> {
@@ -530,8 +530,8 @@ fn compatible(left: &StateNeed, right: &StateNeed) -> bool {
 mod tests {
     use super::*;
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
-    use crate::pass2::memo::generate_dag_of_logical_memo_groups;
     use crate::pass2::memo::groups::try_populate_pass1;
+    use crate::stage0::generate_dag_of_logical_memo_groups;
     use crate::test_support::{entry_with, lower_promql};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::workload::{QueryRecurrence, RepeatedDemand, RepetitionInterval};
@@ -578,7 +578,7 @@ mod tests {
             optimized_rewrites < exhaustive_rewrites,
             "{optimized_rewrites} versus {exhaustive_rewrites}"
         );
-        let signatures = |memo: &MemoCandidates| -> Vec<HashSet<String>> {
+        let signatures = |memo: &Memo| -> Vec<HashSet<String>> {
             memo.candidates
                 .iter()
                 .map(|candidates| {

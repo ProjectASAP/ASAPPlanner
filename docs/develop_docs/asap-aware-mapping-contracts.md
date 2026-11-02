@@ -18,7 +18,7 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
 | Stage 2 (`generate_physical_asap_memo_candidates`; a selected plan built by `Stage2AssignmentRealizer`) | the same operators, with a `Materialization` on each summary build | every node timed from the candidate's `MaterializationAssignment` |
 
 - Structurally equal sub-DAGs are interned before Stage 1
-  (`pass2/cse.rs` in `asap_logical_asap_optimization`), so Stage 1 compares nodes by structure and Pass 2
+  (`stage0/cse.rs` in `asap_logical_asap_optimization`), so Stage 1 compares nodes by structure and Pass 2
   matches readers structurally, never by pointer.
 - Timing is applied with `apply_materialization_timings`, which validates
   every data-state edge. A violation is an `ExecutionDataStateError`:

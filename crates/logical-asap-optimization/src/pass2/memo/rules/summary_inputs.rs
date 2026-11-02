@@ -3,17 +3,17 @@
 //! identity, rather than assuming that a projection is an identity operation.
 use super::reuse::{append_producer, append_reader, eligible, replace};
 use crate::pass2::memo::check_generation_deadline;
-use crate::pass2::memo::state_groups::StateGroupExpansionError;
+use crate::pass2::memo::state_groups::Pass2RuleError;
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
-use asap_types::stages::{MemoCandidates, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{Memo, OriginOfCandidateForMemoGroup};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Instant;
 
 pub(crate) fn factor_summary_inputs(
-    memo: &mut MemoCandidates,
+    memo: &mut Memo,
     deadline: Option<Instant>,
-) -> Result<(), StateGroupExpansionError> {
+) -> Result<(), Pass2RuleError> {
     check_generation_deadline(deadline)?;
     let originals: Vec<_> = memo
         .candidates
@@ -70,12 +70,12 @@ pub(crate) fn factor_summary_inputs(
 }
 
 fn canonical_preprocessing(
-    memo: &mut MemoCandidates,
+    memo: &mut Memo,
     node: &Rc<OperatorNode>,
     boundaries: &HashSet<*const OperatorNode>,
     queries: &[usize],
     replacements: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
-) -> Result<bool, StateGroupExpansionError> {
+) -> Result<bool, Pass2RuleError> {
     if replacements.contains_key(&Rc::as_ptr(node)) {
         return Ok(true);
     }

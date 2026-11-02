@@ -2,7 +2,7 @@
 //! group (design steps 1 and 2, Pass 1 part).
 //!
 //! Groups are the workload's logical DAG interned by
-//! [`crate::pass2::cse::share_common_sub_dags`], the identical-expression rule's legality
+//! [`crate::stage0::cse::share_common_sub_dags`], the identical-expression rule's legality
 //! included: structurally equal nodes are one group when sharing them is
 //! legal: an ASAP node, or a non-ASAP node that returns the same rows for
 //! the same input rows (`NonASAPOp::is_shareable_when_equal`).
@@ -46,7 +46,7 @@ use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 
 use super::candidates::CandidatePopulationError;
 use asap_types::stages::{
-    CandidateForMemoGroup, DagOfLogicalMemoGroups, MemoCandidates, MemoGroup, MemoGroupId,
+    CandidateForMemoGroup, DagOfLogicalMemoGroups, Memo, MemoGroup, MemoGroupId,
     OriginOfCandidateForMemoGroup,
 };
 
@@ -56,7 +56,7 @@ use asap_types::stages::{
 pub fn try_populate_pass1(
     initial: DagOfLogicalMemoGroups,
     per_computation: &PerComputationCandidates,
-) -> Result<MemoCandidates, CandidatePopulationError> {
+) -> Result<Memo, CandidatePopulationError> {
     if !per_computation.walked(&initial) {
         return Err(CandidatePopulationError::RootDependenciesChanged);
     }
@@ -81,7 +81,7 @@ pub fn try_populate_pass1(
         }
     }
     let candidates = pass1_candidates(per_computation, &initial.groups);
-    Ok(MemoCandidates {
+    Ok(Memo {
         groups: initial.groups,
         query_roots: initial.query_roots,
         candidates,
@@ -464,7 +464,7 @@ impl NodeToStructuralIdCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pass2::memo::generate_dag_of_logical_memo_groups;
+    use crate::stage0::generate_dag_of_logical_memo_groups;
 
     #[test]
     fn structural_keys_preserve_nonfinite_and_signed_zero_literals() {
@@ -510,11 +510,11 @@ mod tests {
     fn populate_pass1(
         initial: DagOfLogicalMemoGroups,
         inventory: &PerComputationCandidates,
-    ) -> MemoCandidates {
+    ) -> Memo {
         try_populate_pass1(initial, inventory).unwrap()
     }
 
-    fn memo_of(inventory: &PerComputationCandidates) -> MemoCandidates {
+    fn memo_of(inventory: &PerComputationCandidates) -> Memo {
         let roots: Vec<_> = inventory.roots.clone();
         populate_pass1(generate_dag_of_logical_memo_groups(&roots), inventory)
     }
@@ -616,7 +616,7 @@ mod tests {
     }
 
     /// The memo of PromQL `queries`, each with accuracy target `target`.
-    fn memo(queries: &[&str], target: AccuracyTarget) -> MemoCandidates {
+    fn memo(queries: &[&str], target: AccuracyTarget) -> Memo {
         let roots: Vec<_> = queries
             .iter()
             .map(|q| QueryRoot::Operator(lower_promql(q, target.clone())))
@@ -629,7 +629,7 @@ mod tests {
 
     /// The group of the first node of `kind` reached from query `q`'s root,
     /// walking down the groups' first children.
-    fn group_of_kind(memo: &MemoCandidates, q: usize, kind: &str) -> usize {
+    fn group_of_kind(memo: &Memo, q: usize, kind: &str) -> usize {
         let mut g = memo.query_roots[q].as_operator().unwrap().0 as usize;
         while memo.groups[g].logical_node.operator.kind_name() != kind {
             g = memo.groups[g].child_groups[0].0 as usize;
@@ -811,7 +811,7 @@ mod tests {
 
     /// The sketch candidates of `memo`'s group `g`: each one's summary and
     /// accuracy budget parts.
-    fn sketch_shares(memo: &MemoCandidates, g: usize) -> Vec<(String, usize)> {
+    fn sketch_shares(memo: &Memo, g: usize) -> Vec<(String, usize)> {
         memo.candidates[g]
             .iter()
             .filter(|c| !algorithms(c).is_empty())
@@ -1016,7 +1016,7 @@ mod tests {
     /// composition derives), and each child group's node is matched by a
     /// candidate of that group in turn.
     struct Combination<'a> {
-        memo: &'a MemoCandidates,
+        memo: &'a Memo,
         matched: HashMap<(usize, *const OperatorNode), bool>,
         own: HashMap<*const OperatorNode, (Rc<OperatorNode>, serde_json::Value)>,
     }

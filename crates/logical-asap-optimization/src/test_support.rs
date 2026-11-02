@@ -15,11 +15,11 @@ pub use crate::pass2::asap_aware_cse::{
     window_composition_pass2_candidates, window_composition_shared_chain_candidates,
     with_union_scan_labels,
 };
-pub use crate::pass2::cse::share_common_sub_dags;
 pub use crate::pass2::memo::groups::try_populate_pass1;
 pub use crate::pass2::memo::window_candidates::{
     add_local_window_composition, add_local_window_composition_in_domain,
 };
+pub use crate::stage0::cse::share_common_sub_dags;
 
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::OperatorNode;
@@ -34,12 +34,9 @@ use asap_types::workload::{
 /// Production runs these through
 /// [`generate_logical_asap_memo_candidates`](crate::pass2::logical_memo_candidates::generate_logical_asap_memo_candidates).
 pub fn sharing_rules_and_shared_state_groups(
-    mut memo: asap_types::stages::MemoCandidates,
+    mut memo: asap_types::stages::Memo,
     domain: crate::pass2::memo::shared_configurations::TumblingWindowWidthDomain,
-) -> Result<
-    asap_types::stages::MemoCandidates,
-    crate::pass2::memo::state_groups::StateGroupExpansionError,
-> {
+) -> Result<asap_types::stages::Memo, crate::pass2::memo::state_groups::Pass2RuleError> {
     crate::pass2::logical_memo_candidates::apply_sharing_rules(&mut memo, domain, None)?;
     crate::pass2::memo::state_groups::add_shared_summary_state_groups(&mut memo, None)?;
     Ok(memo)
@@ -50,7 +47,7 @@ pub fn sharing_rules_and_shared_state_groups(
 /// shared build (origin `SharedBuild`); no other group's candidates are
 /// only that.
 pub fn shared_summary_state_groups(
-    memo: &asap_types::stages::MemoCandidates,
+    memo: &asap_types::stages::Memo,
 ) -> Vec<asap_types::stages::MemoGroupId> {
     memo.candidates
         .iter()
@@ -257,7 +254,7 @@ pub fn cms_summary(query: &str) -> OperatorNode {
     let root = lower_promql(query, target);
     // Inspect each local computation choice under the built-in deployment.
     let per_computation = generate_per_computation_candidates(
-        &crate::pass2::memo::generate_dag_of_logical_memo_groups(&[QueryRoot::Operator(root)]),
+        &crate::stage0::generate_dag_of_logical_memo_groups(&[QueryRoot::Operator(root)]),
     )
     .unwrap()
     .without_unsupported_summaries(None);

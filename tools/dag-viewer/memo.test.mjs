@@ -230,7 +230,7 @@ test('a node shared by groups is stored once, and memoNodeDag rebuilds each DAG 
 // and 19 Pass 1 candidates where #1005 measured 8 and 26 without it.
 const REAL = new URL('examples/memo-ratio-of-quantiles.json', here);
 test('the real example: 7 groups at Stage 0, 19 candidates after Pass 1, G2 TumblingWindows and SharedBuild counts on the last step', { skip: !existsSync(REAL) }, () => {
-  const doc = JSON.parse(readFileSync(REAL, 'utf8'));
+  const doc = call('upgradeMemoSteps', JSON.parse(readFileSync(REAL, 'utf8')));
   const memo = doc.memo;
   assert.deepEqual(call('validateMemo', memo, doc.workload.queries.length), []);
   const steps = memo.steps.map((s) => s.step);

@@ -2260,8 +2260,8 @@ async fn an_undeclared_gauges_merged_ddsketch_tumbling_windows_get_no_relative_b
 /// The summaries Pass 1 pruned planning `workload` (PromQL) with `models`
 /// because no query reading them can meet its target
 /// ([`PruneReason::NoErrorBoundForQueryTarget`]), as the facade's planning
-/// run reports them (`MemoSteps::pass1_pruned_candidates`): each family's
-/// name (e.g. `"Kll"`).
+/// run reports them (`PlanningRun::per_computation_candidates`, its
+/// `pruned_candidates`): each family's name (e.g. `"Kll"`).
 fn pass1_pruned_for_no_error_bound(
     workload: &PlanningWorkload,
     models: PlanningModels<'_>,

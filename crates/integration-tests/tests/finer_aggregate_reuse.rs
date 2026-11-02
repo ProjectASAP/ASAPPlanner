@@ -9,7 +9,7 @@ use asap_logical_asap_optimization::{
     TumblingWindowWidthDomain,
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
-use asap_types::stages::{CandidateForMemoGroup, MemoCandidates, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{CandidateForMemoGroup, Memo, OriginOfCandidateForMemoGroup};
 use serde_json::json;
 use std::path::Path;
 
@@ -43,7 +43,7 @@ fn workload(queries: &[String]) -> FuzzWorkload {
 }
 
 /// The expanded candidate memo of `queries`, as plan selection receives it.
-fn expanded(queries: &[String]) -> MemoCandidates {
+fn expanded(queries: &[String]) -> Memo {
     let roots: Vec<_> = Planner::new(FuzzSettings::default())
         .lower(&workload(queries))
         .unwrap()
@@ -63,7 +63,7 @@ fn expanded(queries: &[String]) -> MemoCandidates {
 }
 
 /// The aggregate group of query `query` alone and its rollup candidates.
-fn rollups(memo: &MemoCandidates, query: usize) -> (usize, Vec<&CandidateForMemoGroup>) {
+fn rollups(memo: &Memo, query: usize) -> (usize, Vec<&CandidateForMemoGroup>) {
     let owner = memo
         .groups
         .iter()
@@ -121,7 +121,7 @@ fn row_sets() -> Vec<Vec<Vec<Value>>> {
 }
 
 /// The candidate gives the original query's rows on every row set.
-fn assert_same_rows(memo: &MemoCandidates, owner: usize, candidate: &CandidateForMemoGroup) {
+fn assert_same_rows(memo: &Memo, owner: usize, candidate: &CandidateForMemoGroup) {
     let sorted = |rows: Vec<Vec<Value>>| {
         let mut rows: Vec<_> = rows.iter().map(|row| format!("{row:?}")).collect();
         rows.sort();
@@ -211,7 +211,7 @@ fn filtered_kll_states_merge() {
             })
         })
         .expect("a candidate merging the filtered finer states");
-    let own_kll = |memo: &MemoCandidates, owner: usize| {
+    let own_kll = |memo: &Memo, owner: usize| {
         memo.candidates[owner]
             .iter()
             .find(|candidate| {

@@ -77,6 +77,7 @@ impl ProducerSetInterner {
 
 /// Count physical producer-list storage separately from logical connections.
 /// Distinct input positions remain distinct even when their storage is shared.
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ProducerStorageMetrics {
     pub logical_connections: usize,
@@ -84,6 +85,7 @@ pub struct ProducerStorageMetrics {
     pub stored_producer_ids: usize,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub fn producer_storage_metrics(
     physical: &super::PhysicalASAPMemoCandidates,
 ) -> ProducerStorageMetrics {

@@ -9,16 +9,16 @@ use asap_accuracy::propagation::recompose_guarantees;
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot};
 
-use crate::pass2::memo::state_groups::{boundary_groups, simple_build, StateGroupExpansionError};
-use asap_types::stages::{CandidateForMemoGroup, MemoCandidates, OriginOfCandidateForMemoGroup};
+use crate::pass2::memo::state_groups::{boundary_groups, simple_build, Pass2RuleError};
+use asap_types::stages::{CandidateForMemoGroup, Memo, OriginOfCandidateForMemoGroup};
 use asap_types::stages::{MemoGroup, MemoGroupId};
 
 /// Preserve local implementations and append readers over union-label inputs.
 /// Parent/query reachability is rebuilt by the enclosing state-group expansion.
 pub(crate) fn add_scan_label_candidates(
-    memo: &mut MemoCandidates,
+    memo: &mut Memo,
     deadline: Option<Instant>,
-) -> Result<usize, StateGroupExpansionError> {
+) -> Result<usize, Pass2RuleError> {
     check_generation_deadline(deadline)?;
     let mut owners = Vec::new();
     let mut roots = Vec::new();
@@ -65,7 +65,7 @@ pub(crate) fn add_scan_label_candidates(
         }
     }
     let Some(widened) = crate::pass2::asap_aware_cse::with_union_scan_labels(&roots)
-        .map_err(|error| StateGroupExpansionError::ScanLabelWidening(error.to_string()))?
+        .map_err(|error| Pass2RuleError::ScanLabelWidening(error.to_string()))?
     else {
         return Ok(0);
     };
@@ -77,7 +77,7 @@ pub(crate) fn add_scan_label_candidates(
     // would map it back to its own group: a candidate reading the group it
     // implements.
     let unwidened = recompose_guarantees(&roots)
-        .map_err(|error| StateGroupExpansionError::ScanLabelWidening(error.to_string()))?;
+        .map_err(|error| Pass2RuleError::ScanLabelWidening(error.to_string()))?;
     let mut added = 0;
     let mut canonical = HashMap::new();
     for (((group, index), root), unwidened) in owners.into_iter().zip(widened).zip(unwidened) {
@@ -113,7 +113,7 @@ pub(crate) fn add_scan_label_candidates(
                     qualifier: None,
                     child: node,
                 }))
-                .map_err(|error| StateGroupExpansionError::ScanLabelWidening(error.to_string()))?;
+                .map_err(|error| Pass2RuleError::ScanLabelWidening(error.to_string()))?;
             if !same_output_contract(&original.root_node, &node) {
                 continue;
             }
@@ -179,10 +179,10 @@ fn same_source_node(left: &OperatorNode, right: &OperatorNode) -> bool {
 
 fn intern_inputs(
     node: &Rc<OperatorNode>,
-    memo: &mut MemoCandidates,
+    memo: &mut Memo,
     queries: &[usize],
     done: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
-) -> Result<Rc<OperatorNode>, StateGroupExpansionError> {
+) -> Result<Rc<OperatorNode>, Pass2RuleError> {
     if let Some(known) = done.get(&Rc::as_ptr(node)) {
         return Ok(Rc::clone(known));
     }
@@ -208,8 +208,7 @@ fn intern_inputs(
             Rc::clone(&existing.logical_node)
         } else {
             // The new group's id must fit a `MemoGroupId`.
-            u32::try_from(memo.groups.len())
-                .map_err(|_| StateGroupExpansionError::TooManyGroups)?;
+            u32::try_from(memo.groups.len()).map_err(|_| Pass2RuleError::TooManyGroups)?;
             let mut seen = HashSet::new();
             let inputs: Vec<_> = rewritten
                 .children()

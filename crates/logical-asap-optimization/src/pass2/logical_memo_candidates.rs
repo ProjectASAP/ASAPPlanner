@@ -11,10 +11,10 @@ use crate::pass2::memo::rules::{
 };
 use crate::pass2::memo::shared_configurations::TumblingWindowWidthDomain;
 use crate::pass2::memo::state_groups::{
-    add_shared_summary_state_groups, check_unexpanded_memo, StateGroupExpansionError,
+    add_shared_summary_state_groups, check_unexpanded_memo, Pass2RuleError,
 };
 use crate::pass2::memo::window_candidates::extend_local_window_composition;
-use asap_types::stages::MemoCandidates;
+use asap_types::stages::Memo;
 use asap_types::stages::PerComputationLogicalMemoCandidates;
 use asap_types::stages::{CandidateGenerationTimeout, LogicalASAPMemoCandidates};
 use asap_types::workload::QueryWorkloadEntry;
@@ -25,7 +25,7 @@ use asap_types::workload::QueryWorkloadEntry;
 /// then reruns the other rules on a copy.
 #[derive(Debug, Clone)]
 pub struct Pass2RoundState {
-    unexpanded_memo: MemoCandidates,
+    unexpanded_memo: Memo,
     previous_domain: Option<TumblingWindowWidthDomain>,
 }
 
@@ -36,12 +36,6 @@ impl Pass2RoundState {
             unexpanded_memo: pass1.memo,
             previous_domain: None,
         }
-    }
-
-    /// The memo after the last round's local window composition, before
-    /// the other Pass 2 rules (Pass 1's memo before the first round).
-    pub fn unexpanded_memo(&self) -> &MemoCandidates {
-        &self.unexpanded_memo
     }
 }
 
@@ -56,7 +50,7 @@ pub enum LogicalASAPMemoCandidatesError {
     /// [`Pass2RoundState`] already holds this round's tumbling-window widths and stays
     /// usable for the next round.
     #[error(transparent)]
-    Expansion(#[from] StateGroupExpansionError),
+    Expansion(#[from] Pass2RuleError),
 }
 
 /// Stage 1, Pass 2 for one tumbling-window-width round: adds to `round`'s memo the
@@ -89,10 +83,10 @@ pub fn generate_logical_asap_memo_candidates(
 
 /// Pass 2's rules 2–9, in order, on a memo after local window composition.
 pub(crate) fn apply_sharing_rules(
-    memo: &mut MemoCandidates,
+    memo: &mut Memo,
     domain: TumblingWindowWidthDomain,
     deadline: Option<Instant>,
-) -> Result<(), StateGroupExpansionError> {
+) -> Result<(), Pass2RuleError> {
     check_generation_deadline(deadline)?;
     check_unexpanded_memo(memo)?;
     // 2. Scan widening.

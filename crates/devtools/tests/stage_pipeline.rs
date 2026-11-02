@@ -2454,7 +2454,7 @@ fn memo_section_lists_each_step_the_selected_choice_and_the_enumeration() {
     let memo = &document["memo"];
     let steps = memo["steps"].as_array().unwrap();
     let names: Vec<_> = steps.iter().map(|s| s["step"].as_str().unwrap()).collect();
-    assert_eq!(names, ["stage0", "pass1", "pass2", "concrete_states"]);
+    assert_eq!(names, ["stage0", "pass1", "pass2"]);
     let candidates = |step: &Value| -> u64 {
         step["groups"]
             .as_array()
@@ -2484,14 +2484,14 @@ fn memo_section_lists_each_step_the_selected_choice_and_the_enumeration() {
     );
     // The listed step is the last one enumerated completely within 200
     // choices (Stage 0 has no candidates to choose), else the last step.
-    let listed = ["pass1", "pass2", "concrete_states"]
+    let listed = ["pass1", "pass2"]
         .into_iter()
         .rfind(|step| {
             per_step[step]["complete"] == true && per_step[step]["count"].as_u64().unwrap() <= 200
         })
-        .unwrap_or("concrete_states");
+        .unwrap_or("pass2");
     assert_eq!(memo["enumeration"]["step"], listed);
-    if listed != "concrete_states" {
+    if listed != "pass2" {
         assert_eq!(
             memo["enumeration"]["choices"].as_array().unwrap().len() as u64,
             per_step[listed]["count"].as_u64().unwrap()
