@@ -65,7 +65,9 @@ use crate::ir::properties::execution_data_state::{
     DataPrimitive, ExecutionDataState, ExecutionDataStateError, ExecutionTiming,
 };
 use crate::ir::schema::{DataType, FieldDataType, Schema};
-use crate::physical::materialization::{Materialization, Medium};
+use crate::physical::materialization::Materialization;
+#[cfg(any(test, feature = "test-support"))]
+use crate::physical::materialization::Medium;
 
 /// The materialization option of each sub-DAG (#509 §Materialization:
 /// "Materialization decides, for each sub-DAG, whether its output is
@@ -349,6 +351,7 @@ pub fn apply_materialization_timings_to_roots(
 /// candidate before it is assembled into a workload DAG: a candidate must stay
 /// executable if materialization later puts its states at ingestion time.
 /// Nothing is kept.
+#[cfg(any(test, feature = "test-support"))]
 pub fn validate_at_ingestion(
     root: &Rc<OperatorNode>,
     root_timing: ExecutionTiming,
@@ -364,6 +367,7 @@ pub fn validate_at_ingestion(
 /// the DAG allows it, when its consumer runs at `consumer` — the planning-time answer to
 /// "what does this candidate's output look like", consistent with
 /// [`validate_at_ingestion`].
+#[cfg(any(test, feature = "test-support"))]
 pub fn planned_data_state(
     node: &Rc<OperatorNode>,
     consumer: ExecutionTiming,
@@ -378,6 +382,7 @@ pub fn planned_data_state(
 }
 
 /// The assignment of [`validate_at_ingestion`] and [`planned_data_state`].
+#[cfg(any(test, feature = "test-support"))]
 fn all_at_ingestion() -> MaterializationAssignment {
     MaterializationAssignment::with_default(Materialization::MatAtIngestion(Medium::Memory))
 }

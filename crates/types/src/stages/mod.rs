@@ -27,11 +27,12 @@ pub use per_computation_logical_memo_candidates::{
     HowToComputeAggregateMeasure, PerComputationLogicalMemoCandidates,
 };
 pub use physical::{
-    output_references, producer_storage_metrics, CandidateForMemoGroupId, DagOfSelectedCandidates,
+    output_references, CandidateForMemoGroupId, DagOfSelectedCandidates,
     OperatorNodeOfCandidateForMemoGroup, OperatorNodeOfCandidateForMemoGroupId,
     PhysicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateId, PhysicalCandidateKey,
-    ProducerCandidates, ProducerSetInterner, ProducerStorageMetrics, ReaderConstraint,
-    SelectedEdge, SelectedNodeId,
+    ProducerCandidates, ProducerSetInterner, ReaderConstraint, SelectedEdge, SelectedNodeId,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use physical::{producer_storage_metrics, ProducerStorageMetrics};
 pub use pruning::{PruneReason, PrunedCandidate};
 pub use realizer::{AssignmentRealizer, PhysicalCandidateError, RealizedPlan};

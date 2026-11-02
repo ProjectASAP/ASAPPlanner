@@ -13,6 +13,6 @@ pub use memo_candidates::{
     OperatorNodeOfCandidateForMemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidate,
     PhysicalCandidateKey,
 };
-pub use producers::{
-    producer_storage_metrics, ProducerCandidates, ProducerSetInterner, ProducerStorageMetrics,
-};
+#[cfg(any(test, feature = "test-support"))]
+pub use producers::{producer_storage_metrics, ProducerStorageMetrics};
+pub use producers::{ProducerCandidates, ProducerSetInterner};
