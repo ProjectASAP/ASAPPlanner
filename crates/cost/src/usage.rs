@@ -1487,9 +1487,9 @@ fn merged_states(
     })
 }
 
-/// The tumbling windows a chain in `retention_ms` ([`tumbling_window_retention_ms`]) keeps
-/// completed: its retention over its tumbling-window width, at least its tumbling-window count.
-fn retained_tumbling_windows(
+/// The panes a chain in `retention_ms` ([`tumbling_window_retention_ms`]) keeps
+/// completed: its retention over its pane width, at least its pane count.
+pub fn retained_tumbling_windows(
     node: &asap_types::ir::physical_export::PhysicalASAPDAGNode,
     retention_ms: &BTreeMap<PhysicalASAPNodeId, u64>,
 ) -> u64 {
@@ -1546,7 +1546,7 @@ pub fn query_reach(
 /// The window an ingestion-time grouping `node` maintains: a tumbling-window chain's
 /// tumbling windows, or the time range below it (through filters, projections and
 /// time shifts). `None` when there is none.
-fn maintained_window_ms(
+pub fn maintained_window_ms(
     node: PhysicalASAPNodeId,
     nodes: &NodeMap<'_>,
     producers_of: &HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
