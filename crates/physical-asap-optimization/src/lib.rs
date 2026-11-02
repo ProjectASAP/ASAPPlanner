@@ -61,8 +61,9 @@
 //!   as Prometheus assumes (it rejects out-of-order samples). Table (SQL)
 //!   sources and mixed data, whose at-rest part may load in any order, are
 //!   not taken to be ordered;
-//! * it is a tumbling-pane chain whose readers of known phase all evaluate
-//!   on its pane boundaries, anchored at the epoch, or a whole-window build whose readers
+//! * it is a tumbling-pane chain whose readers all evaluate on its pane
+//!   boundaries, anchored at the epoch (each fixed interval a multiple of the
+//!   pane width, and each known phase on that grid), or a whole-window build whose readers
 //!   all run at one fixed interval with agreeing declared phases, over a
 //!   window that is not shifted and whose evaluations all end on the grid
 //!   of its width anchored at the epoch (the interval and a declared phase
@@ -201,6 +202,11 @@ pub(crate) enum IngestionPruneReason {
     /// which are anchored at the epoch (e.g. 20 s panes read at phase 5 s):
     /// built once each, its panes cannot end at every evaluation.
     PanesOffPhase,
+    /// A tumbling-window chain read at a fixed interval that its width does
+    /// not divide (e.g. 15 s tumbling windows read every 10 s): built once
+    /// each on the grid anchored at the epoch, its tumbling windows cannot
+    /// end at every evaluation.
+    PanesOffInterval,
     /// Something below it can only run at query time.
     UpstreamAtQueryTime(String),
     /// It is not a summary build (e.g. a shared `Scan`): only a summary's
@@ -815,9 +821,12 @@ fn ingestion_eligibility(
     }
     if let Some(tumbling_window_width_ms) = chain_pane_width_ms {
         // A chain's panes are built once each, on the grid anchored at the
-        // epoch (the plan carries no pane origin): every reader of known
-        // phase must evaluate on its boundaries. A reader of unknown phase
-        // is taken to run on them (`builds_one_pane_per_evaluation`).
+        // epoch (the plan carries no pane origin): every reader must
+        // evaluate on its boundaries. A reader at a fixed interval needs an
+        // interval the width divides, whatever its phase; a reader of known
+        // phase also needs that phase on the grid. A reader of unknown phase
+        // is taken to run at multiples of its interval (phase 0), as for a
+        // whole-window build below.
         let epoch_panes = PaneLayout {
             tumbling_window_width_ms,
             pane_origin_ms: Some(0),
@@ -826,6 +835,12 @@ fn ingestion_eligibility(
             let QueryRecurrence::Repeated(demand) = &d.recurrence else {
                 continue;
             };
+            if d.recurrence
+                .fixed_interval_ms()
+                .is_some_and(|interval_ms| !interval_ms.is_multiple_of(tumbling_window_width_ms))
+            {
+                return Err(Why::PanesOffInterval);
+            }
             let reader = plan_pane_phase(demand, tumbling_window_width_ms)
                 .map_err(|_| Why::PanesOffPhase)?;
             let Some(phase_ms) = reader.pane_origin_ms else {
@@ -1849,6 +1864,56 @@ mod tests {
         assert_eq!(
             at_ingestion([at(30_000), every_minute()]),
             Err(Why::PanesOffPhase)
+        );
+    }
+
+    /// A chain of 1-min tumbling windows, anchored at the epoch, read every
+    /// 90 s ends a window at only every other evaluation (#1173), with or
+    /// without a declared phase on the grid: it is maintained at ingestion
+    /// time only when every reader's interval is a multiple of its width.
+    #[test]
+    fn a_tumbling_window_chain_is_maintained_only_on_its_readers_intervals() {
+        use IngestionPruneReason as Why;
+        let root = in_panes(summary_root("quantile_over_time(0.99, m[5m])"));
+        let every = |interval_ms: u64| QueryWorkloadEntry {
+            recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(
+                RepetitionInterval(interval_ms as u32),
+            )),
+            ..every_minute()
+        };
+        let every_at_phase_0 = |interval_ms: u64| QueryWorkloadEntry {
+            recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+                interval: RepetitionInterval(interval_ms as u32),
+                evaluation_phase: TimestampMs(0),
+            }),
+            ..every_minute()
+        };
+        let at_ingestion = |demands: [QueryWorkloadEntry; 2]| {
+            let mut cache = HashMap::new();
+            // One chain read by both queries.
+            let implemented = map_roots(&[root.clone(), root.clone()], &mut |n| {
+                implement(n, &mut cache)
+            })
+            .unwrap();
+            materialization_candidates(&implemented, &demands, &arriving(), false)
+                .into_iter()
+                .find(|c| {
+                    matches!(
+                        c.node.asap(),
+                        Some(ASAPOp::SummaryTumblingWindowChain { .. })
+                    )
+                })
+                .expect("the chain is a materialization candidate")
+                .at_ingestion
+        };
+        assert_eq!(at_ingestion([every_minute(), every(2 * MINUTE)]), Ok(()));
+        assert_eq!(
+            at_ingestion([every_minute(), every(90_000)]),
+            Err(Why::PanesOffInterval)
+        );
+        assert_eq!(
+            at_ingestion([every_minute(), every_at_phase_0(90_000)]),
+            Err(Why::PanesOffInterval)
         );
     }
 

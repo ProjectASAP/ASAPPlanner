@@ -849,6 +849,101 @@ async fn assert_answers_as_reference_without_raw_data(
     }
 }
 
+/// The same exact query twice, one copy every 10 s and one every 15 s
+/// (hash-consed into one memo group), on a deployment that keeps no raw
+/// data. A tumbling-window chain is built at ingestion time once per
+/// tumbling window, on the grid of its width anchored at the epoch, so a
+/// chain either copy reads must have a width dividing that copy's interval:
+/// a 15 s chain read every 10 s ends up to 10 s before the evaluation
+/// (#1173). Every evaluation of both copies over one minute answers as the
+/// query-time reference.
+#[tokio::test]
+async fn queries_at_two_intervals_read_chains_on_their_own_grids() {
+    for query in [
+        "sum by (job) (rate(m[1m]))",
+        "sum by (job) (sum_over_time(m[1m]))",
+    ] {
+        assert_copies_at_intervals_answer_as_reference(query, &[10_000, 15_000]).await;
+    }
+}
+
+/// Copies of `query`, copy `q` every `intervals_ms[q]`, over 6 ingesting
+/// series of `m` sampled every second, on a deployment that keeps no raw
+/// data. Run by a runtime that refreshes each ingestion tumbling window
+/// once, on the grid of its width anchored at the epoch, every evaluation
+/// of every copy over one minute answers as the query-time reference.
+async fn assert_copies_at_intervals_answer_as_reference(query: &str, intervals_ms: &[i64]) {
+    let entries: Vec<String> = intervals_ms
+        .iter()
+        .map(|interval_ms| {
+            format!(
+                r#"{{"query": {query:?},
+                  "demand": {{"fixed_interval": {interval_ms}}},
+                  "requirements": {{}},
+                  "predictability": {{"predictable": {{"known_at": null}}}}}}"#
+            )
+        })
+        .collect();
+    let workload: PlanningWorkload = serde_json::from_str(&format!(
+        r#"{{"query_workload": {{"language": "promql", "repeating_queries": [{}]}},
+            "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 6.0}}}},
+              "sources": {{"m": {{"series_count": 6, "sample_interval": 1000}}}}}}}}"#,
+        entries.join(",")
+    ))
+    .unwrap();
+    // A deployment that keeps no raw data samples: the windows are views.
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: false,
+        ..DeploymentCapabilities::default()
+    };
+    let plan_json = plan_json_for(workload, &capabilities).await;
+    // Samples of `m`, `job` a (instances 1-3) and b (4-6), every second
+    // from 2 minutes before `EVALUATION_MS` to past the last evaluation;
+    // each value distinct, so a window off by a second answers differently.
+    let samples: Vec<RawDataSample> = (1..=6i64)
+        .flat_map(|instance| {
+            (0..200i64).map(move |step| RawDataSample {
+                labels: BTreeMap::from([
+                    ("__name__".to_string(), "m".to_string()),
+                    (
+                        "job".to_string(),
+                        if instance <= 3 { "a" } else { "b" }.to_string(),
+                    ),
+                    ("instance".to_string(), instance.to_string()),
+                ]),
+                timestamp_ms: EVALUATION_MS - 120_000 + step * 1_000,
+                value: (instance * 1000 + step * step % 997) as f64,
+            })
+        })
+        .collect();
+    // Every evaluation of every copy over one minute, in time order.
+    let mut evaluations: Vec<(usize, i64)> = intervals_ms
+        .iter()
+        .enumerate()
+        .flat_map(|(query, &interval_ms)| {
+            (0..=60_000 / interval_ms).map(move |k| (query, EVALUATION_MS + k * interval_ms))
+        })
+        .collect();
+    evaluations.sort_by_key(|&(query, evaluation_ms)| (evaluation_ms, query));
+    // The states stored across every evaluation.
+    let mut store = SummaryStore::new();
+    for (copy, evaluation_ms) in evaluations {
+        let run = run_data_plane_on(
+            &plan_json,
+            &samples,
+            evaluation_ms,
+            &mut store,
+            IngestionBuilds::Tumbling,
+        );
+        assert_eq!(run.answers_per_query[copy].len(), 2, "one answer per job");
+        assert_eq!(
+            run.answers_per_query[copy], run.reference_answers_per_query[copy],
+            "{query}, copy {copy} (every {} ms) at {evaluation_ms}",
+            intervals_ms[copy]
+        );
+    }
+}
+
 /// A plan file of another DAG wire version is refused, and so is the
 /// reference of a tampered plan file, with an error rather than a panic.
 #[tokio::test]
