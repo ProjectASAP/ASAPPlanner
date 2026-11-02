@@ -825,8 +825,8 @@ fn ingestion_eligibility(
         // evaluate on its boundaries. A reader at a fixed interval needs an
         // interval the width divides, whatever its phase; a reader of known
         // phase also needs that phase on the grid. A reader of unknown phase
-        // is taken to run at multiples of its interval
-        // (`builds_one_pane_per_evaluation`).
+        // is taken to run at multiples of its interval (phase 0), as for a
+        // whole-window build below.
         let epoch_panes = PaneLayout {
             tumbling_window_width_ms,
             pane_origin_ms: Some(0),
