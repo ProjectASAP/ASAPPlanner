@@ -1,6 +1,8 @@
 //! #1095 Steps 3–6: the group selection MILP behind [`select_plan`](crate::select_plan),
-//! on while the internal switch [`STAGE3_SEARCH_ENV`] is `milp` (the old
-//! engine stays the default until C6; there is no fallback between them).
+//! Stage 3's default search (#1095 C6). Inputs it does not price yet (cost
+//! models 2 and 3) are an `UnsupportedCostModel` error; `ASAP_STAGE3_SEARCH=old`
+//! runs the old engine instead ([`milp_search_enabled`]). There is no
+//! fallback between the two engines.
 //!
 //! One MILP solve and one realization, no loop:
 //! 1. the MILP's inputs (candidate dominance, execution contexts, accuracy
@@ -48,14 +50,17 @@ use crate::report::{
     Selection,
 };
 
-/// The environment variable that switches Stage 3 to the new search:
-/// `ASAP_STAGE3_SEARCH=milp`. Any other value, or none, keeps the old
-/// engine (until #1095 C6 makes the new search the default).
+/// The environment variable that switches Stage 3 back to the old engine:
+/// `ASAP_STAGE3_SEARCH=old`. Unset, or any other value, runs the group MILP
+/// (#1095 C6), which returns `UnsupportedCostModel` for inputs it does not
+/// price yet (cost models 2 and 3, or a measured operation cost table
+/// without a frozen calibration factor).
 pub(crate) const STAGE3_SEARCH_ENV: &str = "ASAP_STAGE3_SEARCH";
 
-/// Whether [`STAGE3_SEARCH_ENV`] turns the new search on.
+/// Whether Stage 3 runs the group MILP: always, unless
+/// [`STAGE3_SEARCH_ENV`] is `old`.
 pub(crate) fn milp_search_enabled() -> bool {
-    std::env::var(STAGE3_SEARCH_ENV).is_ok_and(|value| value == "milp")
+    std::env::var(STAGE3_SEARCH_ENV).as_deref() != Ok("old")
 }
 
 /// The largest relative difference between the objective and `plan_cost`

@@ -74,9 +74,10 @@
 //     `pruned_candidates` and `search_report` (`SearchReport`: `status`,
 //     `cost_lower_bound_per_second`, MILP size and timings, and
 //     `inexact_objective` when the new search's objective and `plan_cost`
-//     differ over terms the MILP encodes inexactly). With the environment
-//     variable `ASAP_STAGE3_SEARCH=milp`, Stage 3 runs #1095's selection MILP
-//     instead of the old engine (until it becomes the default); `error` when no
+//     differ over terms the MILP encodes inexactly). Stage 3 runs #1095's
+//     selection MILP, which supports cost model 1 only (cost models 2 and 3
+//     are an `UnsupportedCostModel` error); `ASAP_STAGE3_SEARCH=old` runs the
+//     old engine instead; `error` when no
 //     plan was selected. `tumbling_window_retention_ms` maps each pane chain the
 //     selected plan keeps beyond one evaluation (by node id in `P1`) to how
 //     far back the runtime must keep its tumbling windows (`RealizedPlan::tumbling_window_retention_ms`).

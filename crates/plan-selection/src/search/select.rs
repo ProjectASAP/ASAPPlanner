@@ -3,8 +3,8 @@
 //! refinement loop (cost models 1 and 2 with a frozen calibration) or the
 //! bounded objective traversal (cost model 3, or a measured cost table
 //! without a frozen factor). #1095 replaces the engine; this interface stays.
-//! With `ASAP_STAGE3_SEARCH=milp` the new search runs instead
-//! ([`crate::select`]), until #1095 C6 makes it the default.
+//! The group MILP ([`crate::select`]) is the default; this engine runs only
+//! with `ASAP_STAGE3_SEARCH=old`.
 
 use std::time::{Duration, Instant};
 
@@ -55,7 +55,7 @@ pub fn select_plan(
     cost_inputs
         .validate()
         .map_err(ErrorSelectingPlan::InvalidSettings)?;
-    // #1095 C5: the new search, behind its internal switch until C6.
+    // #1095 C6: the group MILP is the default.
     if crate::select::milp_search_enabled() {
         return crate::select::select_plan_with_milp(
             physical,
