@@ -3,7 +3,7 @@
 //! of all private states in the enclosing query.
 use super::reuse::{append_producer, append_reader, eligible, replace};
 use crate::pass2::memo::check_generation_deadline;
-use crate::pass2::memo::state_groups::{direct_input_builds, StateGroupExpansionError};
+use crate::pass2::memo::state_groups::{direct_input_builds, Pass2RuleError};
 use asap_types::ir::{ASAPOp, OperatorNode};
 use asap_types::stages::{MemoCandidates, OriginOfCandidateForMemoGroup};
 use std::collections::{HashMap, HashSet};
@@ -13,7 +13,7 @@ use std::time::Instant;
 pub(crate) fn factor_summary_results(
     memo: &mut MemoCandidates,
     deadline: Option<Instant>,
-) -> Result<usize, StateGroupExpansionError> {
+) -> Result<usize, Pass2RuleError> {
     check_generation_deadline(deadline)?;
     let originals: Vec<_> = memo
         .candidates

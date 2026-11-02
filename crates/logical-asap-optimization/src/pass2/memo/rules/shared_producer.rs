@@ -5,7 +5,7 @@
 //! decides. Identical expressions are the trivial case, shared by memo group
 //! identity, and add no candidates here.
 use crate::pass2::memo::check_generation_deadline;
-use crate::pass2::memo::state_groups::StateGroupExpansionError;
+use crate::pass2::memo::state_groups::Pass2RuleError;
 use asap_types::stages::MemoCandidates;
 use std::time::Instant;
 
@@ -27,13 +27,13 @@ pub(in crate::pass2::memo) trait SharedProducer {
         &mut self,
         memo: &MemoCandidates,
         deadline: Option<Instant>,
-    ) -> Result<Vec<Vec<Reader<Self::Need>>>, StateGroupExpansionError>;
+    ) -> Result<Vec<Vec<Reader<Self::Need>>>, Pass2RuleError>;
     /// The coverings to offer the readers of `set`.
     fn coverings(
         &self,
         set: &[Reader<Self::Need>],
         deadline: Option<Instant>,
-    ) -> Result<Vec<Self::Covering>, StateGroupExpansionError>;
+    ) -> Result<Vec<Self::Covering>, Pass2RuleError>;
     /// Adds `reader`'s derivation from the producer at `covering`, if that
     /// producer serves it; the number of candidates added.
     fn derive(
@@ -41,7 +41,7 @@ pub(in crate::pass2::memo) trait SharedProducer {
         memo: &mut MemoCandidates,
         reader: &Reader<Self::Need>,
         covering: &Self::Covering,
-    ) -> Result<usize, StateGroupExpansionError>;
+    ) -> Result<usize, Pass2RuleError>;
 }
 
 /// Whether `set`'s readers belong to two or more groups; a set inside one
@@ -56,7 +56,7 @@ pub(in crate::pass2::memo) fn add_shared_producer_candidates<P: SharedProducer>(
     memo: &mut MemoCandidates,
     producer: &mut P,
     deadline: Option<Instant>,
-) -> Result<usize, StateGroupExpansionError> {
+) -> Result<usize, Pass2RuleError> {
     check_generation_deadline(deadline)?;
     let mut added = 0;
     for set in producer.sets(memo, deadline)? {

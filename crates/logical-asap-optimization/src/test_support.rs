@@ -36,10 +36,7 @@ use asap_types::workload::{
 pub fn sharing_rules_and_shared_state_groups(
     mut memo: asap_types::stages::MemoCandidates,
     domain: crate::pass2::memo::shared_configurations::TumblingWindowWidthDomain,
-) -> Result<
-    asap_types::stages::MemoCandidates,
-    crate::pass2::memo::state_groups::StateGroupExpansionError,
-> {
+) -> Result<asap_types::stages::MemoCandidates, crate::pass2::memo::state_groups::Pass2RuleError> {
     crate::pass2::logical_memo_candidates::apply_sharing_rules(&mut memo, domain, None)?;
     crate::pass2::memo::state_groups::add_shared_summary_state_groups(&mut memo, None)?;
     Ok(memo)

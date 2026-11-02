@@ -4,7 +4,7 @@ use super::reuse::{
 };
 use crate::pass2::asap_aware_cse::{rollup_candidate_for, rollup_pass2_candidates};
 use crate::pass2::memo::check_generation_deadline;
-use crate::pass2::memo::state_groups::{simple_build, StateGroupExpansionError};
+use crate::pass2::memo::state_groups::{simple_build, Pass2RuleError};
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{
     ASAPOp, NonASAPOp, Operator, OperatorNode, ProjectItem, QueryRoot, ScalarExpr,
@@ -17,7 +17,7 @@ use std::time::Instant;
 pub(crate) fn add_rollup_candidates(
     memo: &mut MemoCandidates,
     deadline: Option<Instant>,
-) -> Result<usize, StateGroupExpansionError> {
+) -> Result<usize, Pass2RuleError> {
     check_generation_deadline(deadline)?;
     let mut candidates = Vec::new();
     for (group, entries) in memo.candidates.iter().enumerate() {
@@ -75,7 +75,7 @@ pub(crate) fn add_rollup_candidates(
                 })
             );
             let rewritten = rollup_pass2_candidates(&roots, &[rule])
-                .map_err(|error| StateGroupExpansionError::ReuseRule(error.to_string()))?;
+                .map_err(|error| Pass2RuleError::ReuseRule(error.to_string()))?;
             let Some(result) = rewritten.into_iter().next() else {
                 continue;
             };
@@ -201,7 +201,7 @@ pub(crate) fn add_rollup_candidates(
                             qualifier: None,
                             child: Rc::clone(&canonical),
                         }))
-                        .map_err(|error| StateGroupExpansionError::ReuseRule(error.to_string()))?
+                        .map_err(|error| Pass2RuleError::ReuseRule(error.to_string()))?
                     } else {
                         replace(
                             &fine_node,
@@ -228,7 +228,7 @@ pub(crate) fn add_rollup_candidates(
 pub(crate) fn add_window_rollup_candidates(
     memo: &mut MemoCandidates,
     deadline: Option<Instant>,
-) -> Result<usize, StateGroupExpansionError> {
+) -> Result<usize, Pass2RuleError> {
     check_generation_deadline(deadline)?;
     use crate::pass2::asap_aware_cse::{
         tumbling_window_candidates, window_composition_shared_chain_candidates,

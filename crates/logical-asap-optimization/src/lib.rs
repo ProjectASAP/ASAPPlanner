@@ -92,7 +92,7 @@ pub use pass2::memo::candidates::CandidatePopulationError;
 pub use pass2::memo::shared_configurations::{
     TumblingWindowWidthDomain, TumblingWindowWidthFrontier,
 };
-pub use pass2::memo::state_groups::StateGroupExpansionError;
+pub use pass2::memo::state_groups::Pass2RuleError;
 // The CandidateLogicalASAPDAGs a memo stands for (developer tools'
 // reference pricing).
 pub use pass2::memo::enumeration::{

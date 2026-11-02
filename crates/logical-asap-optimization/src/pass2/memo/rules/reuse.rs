@@ -1,6 +1,6 @@
 //! Shared boundary handling for producer-level reuse rules. Rule outputs retain
 //! canonical input identities after guarantee recomposition rebuilds their DAGs.
-use crate::pass2::memo::state_groups::{boundary_groups, StateGroupExpansionError};
+use crate::pass2::memo::state_groups::{boundary_groups, Pass2RuleError};
 use asap_types::ir::OperatorNode;
 use asap_types::stages::{CandidateForMemoGroup, MemoCandidates, OriginOfCandidateForMemoGroup};
 use asap_types::stages::{MemoGroup, MemoGroupId};
@@ -97,7 +97,7 @@ pub(in crate::pass2::memo) fn append_producer(
     queries: &[usize],
     origin: OriginOfCandidateForMemoGroup,
     accuracy_budget_parts: usize,
-) -> Result<MemoGroupId, StateGroupExpansionError> {
+) -> Result<MemoGroupId, Pass2RuleError> {
     // Reuse only dedicated producer groups. A logical result group can contain
     // other implementations and cannot enforce this producer's exact contract.
     let root_groups = asap_types::stages::root_groups(&memo.query_roots);
@@ -110,9 +110,8 @@ pub(in crate::pass2::memo) fn append_producer(
     }) {
         return Ok(MemoGroupId(index as u32));
     }
-    let id = MemoGroupId(
-        u32::try_from(memo.groups.len()).map_err(|_| StateGroupExpansionError::TooManyGroups)?,
-    );
+    let id =
+        MemoGroupId(u32::try_from(memo.groups.len()).map_err(|_| Pass2RuleError::TooManyGroups)?);
     let node = Rc::new((*node).clone());
     let boundaries = memo
         .groups
@@ -143,14 +142,14 @@ pub(in crate::pass2::memo) fn append_reader(
     original: &CandidateForMemoGroup,
     node: Rc<OperatorNode>,
     origin: OriginOfCandidateForMemoGroup,
-) -> Result<bool, StateGroupExpansionError> {
+) -> Result<bool, Pass2RuleError> {
     if original.root_node.schema.fields != node.schema.fields
         || original.root_node.schema.time_index != node.schema.time_index
         || original.root_node.schema.unique_keys != node.schema.unique_keys
         || (original.root_node.schema.closed && !node.schema.closed)
         || original.root_node.result_kind != node.result_kind
     {
-        return Err(StateGroupExpansionError::ReuseRule(format!(
+        return Err(Pass2RuleError::ReuseRule(format!(
             "reuse changed the reader output contract ({origin:?}): expected {:?}, got {:?}",
             original.root_node.schema, node.schema
         )));
