@@ -74,6 +74,9 @@ pub enum RejectionCause {
     LatencyOverRepeatInterval,
     /// Under cost model 3, its usage is over one of the cluster's limits.
     OverClusterCapacity,
+    /// Its cost overflows the cost model's arithmetic, so it cannot be
+    /// priced.
+    CostNotRepresentable,
     /// Under cost models 1 and 2, its price is higher than the selected
     /// candidate's.
     Costlier,
@@ -94,8 +97,8 @@ pub enum RejectionCause {
 
 impl RejectionCause {
     /// Whether the candidate failed a check (accuracy, latency bound,
-    /// repeat interval or cluster capacity) rather than losing under the
-    /// cost model.
+    /// repeat interval, cluster capacity or a representable cost) rather
+    /// than losing under the cost model.
     pub fn failed_a_check(self) -> bool {
         matches!(
             self,
@@ -106,6 +109,7 @@ impl RejectionCause {
                 | Self::LatencyOverRepeatInterval
                 | Self::OverClusterCapacity
                 | Self::Infeasible
+                | Self::CostNotRepresentable
         )
     }
 }

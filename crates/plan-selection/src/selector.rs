@@ -17,7 +17,7 @@ use crate::checks::{accuracy_check, accuracy_targets, latency_violation};
 use crate::report::{
     AcceptedAccuracy, ErrorSelectingPlan, Rejection, RejectionCause, WholePlanSelection,
 };
-use crate::SelectionModels;
+use crate::{AnalyticalCostError, SelectionModels};
 use asap_cost::{
     kept_tumbling_window_chains, node_map, plan_cost, query_reach, tumbling_window_retention_ms,
 };
@@ -57,12 +57,33 @@ pub(crate) fn select_among_plans(
     if selector.needs_calibration() {
         let mut fit = CalibrationFit::default();
         for candidate in cands {
-            fit.add(selector.calibration_fit(candidate)?);
+            match selector.calibration_fit(candidate) {
+                // Rejected below when offered.
+                Err(ErrorSelectingPlan::Cost {
+                    error: AnalyticalCostError::Overflow,
+                    ..
+                }) => {}
+                fit_or_error => fit.add(fit_or_error?),
+            }
         }
         selector.set_calibration(fit);
     }
+    // An unpriceable candidate is rejected, as the search rejects it
+    // (`cost_not_representable`), rather than failing the selection.
     for candidate in cands {
-        selector.offer(candidate)?;
+        match selector.offer(candidate) {
+            Err(
+                error @ ErrorSelectingPlan::Cost {
+                    error: AnalyticalCostError::Overflow,
+                    ..
+                },
+            ) => selector.reject(
+                &candidate.id,
+                RejectionCause::CostNotRepresentable,
+                error.to_string(),
+            ),
+            result => result?,
+        }
     }
     selector.finish().map(|(selection, _)| selection)
 }

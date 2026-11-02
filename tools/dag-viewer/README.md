@@ -337,7 +337,8 @@ are ignored, `stage_pipeline`'s default.
   (`accuracy_target_missed`,
   `count_min_weights_not_proven_non_negative`,
   `no_accuracy_guarantee`, `latency_bound_exceeded`,
-  `latency_over_repeat_interval`, `over_cluster_capacity`) or a loss under
+  `latency_over_repeat_interval`, `over_cluster_capacity`,
+  `cost_not_representable`) or a loss under
   the cost model (`costlier`, `slower`, `more_memory`,
   `tied_lost_on_enumeration_order`).
 - `accuracy_guarantees` is `ignored` (`stage_pipeline`'s default: Stage 3
