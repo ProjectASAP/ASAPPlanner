@@ -4,7 +4,7 @@
 
 ## 1. Motivation and Challenges
 
-ASAP primitives increase both the opportunities for query optimization and the difficulty of searching for a good plan. A quantile, for example, may be computed directly or estimated from a summary. Several quantiles may use the same summary, and several windows may use overlapping sets of panes. The cost of one query therefore depends on decisions made for other queries. Selecting the cheapest implementation of each query independently can miss the cheapest workload plan.
+ASAP primitives increase both the opportunities for query optimization and the difficulty of searching for a good plan. A quantile, for example, may be computed directly or estimated from a summary. Several quantiles may use the same summary, and several windows may use overlapping sets of tumbling windows. The cost of one query therefore depends on decisions made for other queries. Selecting the cheapest implementation of each query independently can miss the cheapest workload plan.
 
 ASAPPlanner also optimizes for **workload patterns**, including repeated queries, their evaluation frequencies and alignment, and overlap among their windows. The unit of optimization is therefore a workload over time, not just a set of queries executed once. These patterns introduce further choices about when to recompute, which consumers can share an execution, and which intermediate states to maintain or retain across evaluations.
 
@@ -15,7 +15,7 @@ Q1: P95(X[15m]), evaluated every 1m
 Q2: P99(X[15m]), evaluated every 5m
 ```
 
-Over 60 aligned minute ticks, separate query-time KLL builds require 60 + 12 executions. A compatible shared build can serve both queries at the 12 common query evaluation events, reducing the total to 60 builds. Another supported candidate may maintain 1m panes at ingestion and merge them at evaluation, trading update and retained-state costs against repeated whole-window construction. Eligible retained-state candidates introduce refresh and lifetime choices as well. Repetition alone does not make an earlier window's state valid for a later window; reuse must preserve coverage and freshness.
+Over 60 aligned minute ticks, separate query-time KLL builds require 60 + 12 executions. A compatible shared build can serve both queries at the 12 common query evaluation events, reducing the total to 60 builds. Another supported candidate may maintain 1m tumbling windows at ingestion and merge them at evaluation, trading update and retained-state costs against repeated whole-window construction. Eligible retained-state candidates introduce refresh and lifetime choices as well. Repetition alone does not make an earlier window's state valid for a later window; reuse must preserve coverage and freshness.
 
 The search space therefore grows across algorithm, configuration, consumer sharing, materialization, and temporal reuse choices together. Selecting a producer's consumers can change its execution frequency and required retention, so these decisions cannot be priced independently. Explicitly expanding every query evaluation event can further multiply the optimization model's size, even when query texts and algorithm candidates remain unchanged. Workload-pattern optimization thus adds both a combinatorial planning challenge and a need for compact representation of repeated execution demand.
 
@@ -114,31 +114,31 @@ G99 += EstimateQuantile(0.99, G_KLL)
 
 Conventional CSE discovers identical computations. ASAP-aware CSE also exposes common intermediate state for different results. It creates or reuses a state group without merging `G95` and `G99`.
 
-Window rules can similarly introduce a pane-state group and a merge candidate:
+Window rules can similarly introduce a tumbling-window-state group and a merge candidate:
 
 ```text
-G_panes: aligned 1m KLL panes covering 15m
-G_KLL += MergeLatest15(G_panes)
+G_tumbling_windows: aligned 1m KLL tumbling windows covering 15m
+G_KLL += MergeLatest15(G_tumbling_windows)
 ```
 
 ### Stage 2: expand physical candidates
 
 Non-summary query-time materialization must be a query output or have a selected immediate consumer used by only one query; the materialized node itself must have multiple query readers. These connection-dependent constraints match Stage 2's highest-shared-node rule and are enforced in MILP. Summary-state eligibility remains separate.
 
-Physical rules provide executable operators, configurations, and materialization assignments for the generated computations. For example, a supported pane implementation can maintain state at ingestion and merge it at evaluation. This introduces two timing decisions within the same query, rather than one materialization choice for the whole query. Eligibility that depends on consumers is checked against the selected connections; considering every potential consumer at once could incorrectly reject a useful candidate.
+Physical rules provide executable operators, configurations, and materialization assignments for the generated computations. For example, a supported tumbling window implementation can maintain state at ingestion and merge it at evaluation. This introduces two timing decisions within the same query, rather than one materialization choice for the whole query. Eligibility that depends on consumers is checked against the selected connections; considering every potential consumer at once could incorrectly reject a useful candidate.
 
-For the running example, assume evaluations occur at aligned minute boundaries and the deployment supports ingestion-time pane maintenance. Stage 2 can expand the state groups as follows; `s` is a generated KLL capacity:
+For the running example, assume evaluations occur at aligned minute boundaries and the deployment supports ingestion-time tumbling window maintenance. Stage 2 can expand the state groups as follows; `s` is a generated KLL capacity:
 
 ```text
 Group     Physical candidate     Computation                 Materialization
-G_panes   P_ingest(s)             Maintain aligned 1m panes   MatAtIngestion(Memory)
-G_KLL     K_merge(s)              MergeLatest15(G_panes)      MatAtQuery(Memory)
+G_tumbling_windows   P_ingest(s)             Maintain aligned 1m tumbling windows   MatAtIngestion(Memory)
+G_KLL     K_merge(s)              MergeLatest15(G_tumbling_windows)      MatAtQuery(Memory)
 G_KLL     K_build(s)              BuildKLL(G_input, 15m)      MatAtQuery(Memory)
 G95       E95                    EstimateQuantile(.95, G_KLL) NotMaterialized
 G99       E99                    EstimateQuantile(.99, G_KLL) NotMaterialized
 ```
 
-`P_ingest(s)` retains the panes needed to cover the 15m window. `K_merge(s)` constructs window state from those panes at evaluation; `K_build(s)` instead builds window state from available raw input. Each candidate records its input requirements and costs. The estimators can use either compatible state candidate. Exact and local KLL candidates from Pass 1 also receive supported physical implementations and remain available. Stage 2 has generated choices; it has not yet selected a build or connected an estimator to it.
+`P_ingest(s)` retains the tumbling windows needed to cover the 15m window. `K_merge(s)` constructs window state from those tumbling windows at evaluation; `K_build(s)` instead builds window state from available raw input. Each candidate records its input requirements and costs. The estimators can use either compatible state candidate. Exact and local KLL candidates from Pass 1 also receive supported physical implementations and remain available. Stage 2 has generated choices; it has not yet selected a build or connected an estimator to it.
 
 Window semantics, algorithms, and materialization remain separate dimensions. Their definitions and support restrictions belong in [Window and Materialization Choices](window-materialization-choices.md).
 
@@ -146,16 +146,16 @@ Window semantics, algorithms, and materialization remain separate dimensions. Th
 
 Selection chooses physical candidates and connects their required inputs until every query root is covered. Several consumers may connect to one KLL candidate or to different candidates from `G_KLL`. The selected graph is reconstructed as a `PhysicalASAPDAG` and validated. This is where implementation costs are compared jointly; the earlier rules expose the choices on which that comparison depends.
 
-Suppose the pane-based choice has the lowest modeled cost among feasible plans, and capacity `s*` satisfies both queries after pane merges. Stage 3 selects `P_ingest(s*)`, `K_merge(s*)`, `E95`, and `E99`, together with their required upstream input, and chooses these connections:
+Suppose the tumbling-window-based choice has the lowest modeled cost among feasible plans, and capacity `s*` satisfies both queries after tumbling-window merges. Stage 3 selects `P_ingest(s*)`, `K_merge(s*)`, `E95`, and `E99`, together with their required upstream input, and chooses these connections:
 
 ```text
 Selected input for X
         │
         ▼
-P_ingest(s*)              maintain 1m panes at ingestion
+P_ingest(s*)              maintain 1m tumbling windows at ingestion
         │
         ▼
-K_merge(s*)               merge the latest 15 panes at evaluation
+K_merge(s*)               merge the latest 15 tumbling windows at evaluation
         ├───────────────┐
         ▼               ▼
        E95             E99
@@ -164,7 +164,7 @@ K_merge(s*)               merge the latest 15 panes at evaluation
        Q1              Q2
 ```
 
-For a common evaluation of Q1 and Q2, the selected merge state serves both estimators. Pane maintenance is charged once for the shared pane chain, and merge work once per common evaluation; each estimator contributes its own extraction cost. `K_build(s*)` and the exact/local candidates are unselected in this example. If timing or accuracy prevents this sharing, Stage 3 may connect the estimators to different candidates from `G_KLL`. Thus Stage 2 enumerates executable choices, while Stage 3 determines which choices execute and which consumers share them.
+For a common evaluation of Q1 and Q2, the selected merge state serves both estimators. Tumbling window maintenance is charged once for the shared tumbling-window chain, and merge work once per common evaluation; each estimator contributes its own extraction cost. `K_build(s*)` and the exact/local candidates are unselected in this example. If timing or accuracy prevents this sharing, Stage 3 may connect the estimators to different candidates from `G_KLL`. Thus Stage 2 enumerates executable choices, while Stage 3 determines which choices execute and which consumers share them.
 
 ## 4. Cost Model
 
@@ -180,7 +180,7 @@ The current evaluator owns shared raw retention; explicit retention candidates a
 
 Fixed request overhead does not affect plan selection. If query `q` executes `N_q` times over the accounting horizon with fixed per-request cost `h_q`, add `Σ_q N_q × h_q` to the reported total after optimization. Its resource usage still counts against applicable budgets. Any overhead that changes with implementation or connections belongs in the corresponding decision-dependent cost model instead.
 
-The following cases make the accounting concrete. Let `B` be the cost of one whole-window KLL build, `M` one pane merge, and `E95` and `E99` the extraction costs. These are illustrative work charges; retained and temporary resources are accounted for separately over the same horizon.
+The following cases make the accounting concrete. Let `B` be the cost of one whole-window KLL build, `M` one tumbling-window merge, and `E95` and `E99` the extraction costs. These are illustrative work charges; retained and temporary resources are accounted for separately over the same horizon.
 
 | Case | Selected execution | Cost accounting |
 | --- | --- | --- |
@@ -188,8 +188,8 @@ The following cases make the accounting concrete. Let `B` be the cost of one who
 | Shared query-time build | Q1 and Q2 use one compatible build in a common evaluation. | `B + E95 + E99`. Query-local state is charged for its actual lifetime. |
 | Repeated common evaluations | Both queries evaluate together `n` times; state is discarded after each evaluation. | `n × (B + E95 + E99)`. Selecting one candidate does not mean building only once over the entire horizon. |
 | Different evaluation timestamps | Q1 evaluates every minute; Q2 every five minutes on the same grid. Both use a 15m window. | Over 15 evaluation ticks, a shareable query-local build executes 15 times, with 15 P95 extractions and 3 P99 extractions: `15B + 15E95 + 3E99`. This assumes sharing at the three common timestamps; an earlier window state cannot automatically answer a later window. |
-| Ingestion-maintained panes | One pane chain feeds a shared query-time merge and both estimators. | Ingestion updates and pane retention are charged once for the chain. Add `n × (M + E95 + E99)` for `n` common evaluations, plus query-local merge memory. |
-| State retained across evaluations | An eligible pane-chain candidate uses `MatAtQueryKeptAcrossEvaluations(Memory)`. | Charge initial construction, required refresh/update work, retained memory/storage over its lifetime, and evaluation work. Reuse does not eliminate freshness maintenance; generate this case only when supported. |
+| Ingestion-maintained tumbling windows | One tumbling-window chain feeds a shared query-time merge and both estimators. | Ingestion updates and tumbling-window retention are charged once for the chain. Add `n × (M + E95 + E99)` for `n` common evaluations, plus query-local merge memory. |
+| State retained across evaluations | An eligible tumbling-window-chain candidate uses `MatAtQueryKeptAcrossEvaluations(Memory)`. | Charge initial construction, required refresh/update work, retained memory/storage over its lifetime, and evaluation work. Reuse does not eliminate freshness maintenance; generate this case only when supported. |
 | Multiple selected candidates in one group | Some consumers use a small KLL state and others a separate large state. | Charge each selected state's build/update and retention, then each consumer's local work. Equal group identity does not collapse two physical candidates into one charge. |
 | Shared raw-data retention | Two consumers need 5m and 15m of the same raw source and compatible retention scope. | Both consumers connect to `Retain15m` in `G_raw[d]`. Charge that candidate once; reads and intermediate KLL state have separate owners. |
 | Per-request overhead | Two requests share computation but still require separate response handling. | Report fixed overhead as `Σ_q N_q × h_q`; omit this constant from the optimization objective but retain its applicable resource usage. Decision-dependent overhead stays in the optimization model. |
@@ -202,7 +202,7 @@ The direct-cost objective computes the total modeled cost of the selected execut
 
 Direct pricing currently covers certified query-time exact and fixed sketch configurations, including KMV, KLL, DDS, Count-Min, CountSketch, Theta, and source-certified HLL. Every sketch arrives at its final size: Pass 1 sizes it for its readers' failure probabilities over the values their targets cover, Pass 2 shares it at its strictest reader's size, and Stage 3 never resizes, so precomputed prices stay valid. Matching schedules use a compact demand model. Mixed fixed intervals, known/unknown phases, estimated rates, scheduled requests, one-off requests and range evaluations use finite demand atoms following the evaluator's accounting policy. Different fixed intervals add; an unknown phase joins the first selected known phase on its interval; estimates add; nonrepeating demand uses the largest selected batch. These rules describe the configured cost model, not a new runtime scheduler. The production encoding needs neither a query-subset table nor an integer rate lattice. There is one production mixed-schedule encoding; the former subset and lattice encoders are removed. Behavioral selection tests use the current encoder and compare against separately computed evaluator costs. The model includes raw retention, request overhead, and latency-dependent temporary state, and checks the decoded total against the complete DAG evaluator. Accuracy still requires full output validation.
 
-Direct pane pricing covers query-time rebuilding, eligible state retained across evaluations, and fixed-retention ingestion maintenance. Source-certified HLL panes use the same population and failure-probability checks as HLL whole-window builds. Rebuilt state pays for execution demand and temporary lifetime; retained state pays for resident panes and refreshes. Ingestion work is excluded from query latency; the maximum compaction delay among reached ingestion states contributes to query latency and temporary holding cost.
+Direct tumbling window pricing covers query-time rebuilding, eligible state retained across evaluations, and fixed-retention ingestion maintenance. Source-certified HLL tumbling windows use the same population and failure-probability checks as HLL whole-window builds. Rebuilt state pays for execution demand and temporary lifetime; retained state pays for resident tumbling windows and refreshes. Ingestion work is excluded from query latency; the maximum compaction delay among reached ingestion states contributes to query latency and temporary holding cost.
 
 **Producer-dependent prices are joint decisions.** For each supported candidate, costing derives finite local pricing options from complete ordered tuples of its producers' priced output interfaces. Executable binary operations and relational joins preserve input positions even when two positions use the same producer. Shared ingestion ancestors contribute their work once to a worker-count certificate. An option records local CPU/state costs, output statistics, upstream work and the resulting certified worker count. For example, two producer configurations requiring 0.9 and 2.4 CPU-seconds per ingestion second produce one-worker and three-worker options; their compaction delays need not agree. A downstream reader can likewise have different merge/extraction costs for different state capacities. The optimizer retains these options rather than keeping only the first price class.
 
@@ -210,7 +210,7 @@ Let `price[c,k]` select pricing option `k` of candidate `c`. Require `Σ_k price
 
 Local interface generation deduplicates identical outputs, costs and upstream-work certificates; it does not enumerate complete workload DAGs. It covers supported single-input and multi-input operators and timing configurations. Acyclic catalogs use dependency order; catalogs with potential cycles propagate local interfaces for at most the candidate count, sufficient for every legal acyclic dependency depth. Query-time upstream work is not part of an ingestion worker certificate, preventing irrelevant path histories from multiplying equivalent interfaces. Final DAG ordering and one pricing option per physical candidate exclude cyclic executions. All legal scan-lookback classes participate jointly, with exact context matching on each scan connection; sharing one wider scan across narrower consumers requires an additional maximum-demand witness and remains outside this encoding. Uncertified operators or domains exceeding the finite interface/tuple/time budget use the existing validated fallback. Generation reserves time for fallback rather than consuming the entire planning budget. Joint and fixed-price extraction share that reserved deadline. Unsupported profiles, including schedule-atom construction timeouts, skip the optional direct proposal and continue through validated search; invalid profile errors remain fatal. A worker count is derived from the selected upstream work, not an independently tunable cluster size. The bounded production seed uses the first interchangeable execution copy while retaining all its pricing options; the full search retains every copy. This is a restricted proposal, not a proof that additional copies are unnecessary. Reports distinguish joint price-option solves from fixed-profile direct solves.
 
-Range demand distinguishes evaluations from requests. Query-local state follows the union of evaluation offsets, while eligible query-kept state refreshes once per request. Pane pricing options carry retention-span tiers: a selected tier must cover every selected reader and have a reader witnessing that maximum. This prevents both undercharging long ranges and charging retention demanded only by unselected readers. Existing pane alignment, freshness and materialization restrictions still apply.
+Range demand distinguishes evaluations from requests. Query-local state follows the union of evaluation offsets, while eligible query-kept state refreshes once per request. Tumbling window pricing options carry retention-span tiers: a selected tier must cover every selected reader and have a reader witnessing that maximum. This prevents both undercharging long ranges and charging retention demanded only by unselected readers. Existing tumbling-window alignment, freshness and materialization restrictions still apply.
 
 For a nonmaterialized node, let `A` be its normalized average holding time, `r_q` binary query reach, `e_q` the evaluation rate, and `L_q` query latency. Encode `Σ e_q × r_q × A = Σ e_q × r_q × L_q` by linearizing each binary/continuous product. Multiplying `A` by each selected execution-demand atom is linearized similarly. This models finite nonnegative rates without enumerating denominators or reader subsets. When all reached readers have zero expected demand, holding time falls back to the longest reader latency, matching the evaluator. Materialized state uses the longest reached-query latency.
 
@@ -278,17 +278,17 @@ r[q,c]                                    ∈ {0,1}   candidate c provides query
 
 Connection variables exist only for compatible producer–consumer requirements. Capacity and materialization belong to candidate configuration, so selection needs no separate copy or instance variables.
 
-#### Pane width is an optimization decision
+#### Tumbling-window width is an optimization decision
 
-The query's window width is fixed semantics. The pane width is a physical decision, selected jointly with retention, summary capacity, materialization, and consumer connections. Do not restrict the search to a few manually chosen widths and describe the result as optimal over all supported pane widths.
+The query's window width is fixed semantics. The tumbling-window width is a physical decision, selected jointly with retention, summary capacity, materialization, and consumer connections. Do not restrict the search to a few manually chosen widths and describe the result as optimal over all supported tumbling-window widths.
 
-For the supported whole-pane, aligned reconstruction algorithm, use the declared time resolution (currently integer milliseconds). Derive the complete legal width set from the window boundaries and evaluation grid. For example, a 15m window evaluated every 1m admits positive integer-millisecond divisors of 60,000, subject to alignment, offset, representable pane counts, and physical eligibility. A 5m pane alone cannot serve every minute endpoint. Different compatible reader subsets can select different widths.
+For the supported whole-tumbling window, aligned reconstruction algorithm, use the declared time resolution (currently integer milliseconds). Derive the complete legal width set from the window boundaries and evaluation grid. For example, a 15m window evaluated every 1m admits positive integer-millisecond divisors of 60,000, subject to alignment, offset, representable tumbling-window counts, and physical eligibility. A 5m tumbling window alone cannot serve every minute endpoint. Different compatible reader subsets can select different widths.
 
-This finite domain has an exact MILP encoding: activate width-specific configurations with binary decisions. If a single chain is represented by mutually exclusive width configurations, `sum_d u[d] = active` and its selected width is `sum_d d*u[d]`. The candidate graph encodes the same choice through configuration-specific candidate activations and compatible connections. Multiple chains may be active, so there is no single workload-wide pane-width variable.
+This finite domain has an exact MILP encoding: activate width-specific configurations with binary decisions. If a single chain is represented by mutually exclusive width configurations, `sum_d u[d] = active` and its selected width is `sum_d d*u[d]`. The candidate graph encodes the same choice through configuration-specific candidate activations and compatible connections. Multiple chains may be active, so there is no single workload-wide tumbling-window-width variable.
 
-Precompute each configuration's local resource estimates and reader compatibility. A free integer width by itself would leave nonlinear terms such as `window_width / pane_width` and arbitrary measured size/cost functions; it would not make the current model a valid MILP. Complete discrete encoding avoids that issue. Prune widths only with a proof covering costs, accuracy, and sharing interfaces; a candidate-count cap must be reported as a restricted domain.
+Precompute each configuration's local resource estimates and reader compatibility. A free integer width by itself would leave nonlinear terms such as `window_width / tumbling_window_width` and arbitrary measured size/cost functions; it would not make the current model a valid MILP. Complete discrete encoding avoids that issue. Prune widths only with a proof covering costs, accuracy, and sharing interfaces; a candidate-count cap must be reported as a restricted domain.
 
-A proven optimum applies to all generated legal widths and the other configured finite decisions under the encoded model. A planning-budget stop returns a validated incumbent and an available certified bound, not a globally optimal pane width. This does not claim optimality over unsupported boundary reconstruction, new window algorithms, or every possible sketch capacity.
+A proven optimum applies to all generated legal widths and the other configured finite decisions under the encoded model. A planning-budget stop returns a validated incumbent and an available certified bound, not a globally optimal tumbling-window width. This does not claim optimality over unsupported boundary reconstruction, new window algorithms, or every possible sketch capacity.
 
 #### Auxiliary variables: `order`, `run`, and `need`
 
@@ -453,7 +453,7 @@ connect[producer,consumer,requirement]
     ≤ compatible[producer,consumer,requirement]
 ```
 
-These checks include supported modes, deployment capabilities, pane alignment and coverage, retention guarantees, and producer/consumer timing. Omitting invalid candidates and connections implements the same restrictions. For example, an ingestion-maintained candidate cannot depend on data available only at query time, and a 15m consumer cannot connect to a raw-retention candidate covering only 5m.
+These checks include supported modes, deployment capabilities, tumbling-window alignment and coverage, retention guarantees, and producer/consumer timing. Omitting invalid candidates and connections implements the same restrictions. For example, an ingestion-maintained candidate cannot depend on data available only at query time, and a 15m consumer cannot connect to a raw-retention candidate covering only 5m.
 
 Consumer-dependent freshness, invalidation, and lifetime checks may involve several selected connections; pairwise compatibility alone does not establish them. Such checks require a valid joint linear encoding or the feasibility cuts defined below. Retained-state candidates are eligible only with a defined refresh/update policy and its cost. The query-time `run` equations do not constitute an ingestion or retained-state model.
 
@@ -499,7 +499,7 @@ These bounds conservatively allow all selected candidates' allocations to overla
 
 For each query `q`, the configured evaluator must establish latency at or below `Latency_limit[q]` for all required query evaluation events under the declared deployment assumptions. The latency quantity must match the requirement, including any freshness or ingestion-to-visibility component. CPU-time summed over the workload is not query latency, and `order[c]` is not an execution schedule.
 
-Where the configured latency model has a valid linear encoding, include it directly. Otherwise evaluate the selected graph and add a feasibility cut for a failing assignment. For instance, if a particular query-time build path exceeds Q1's deadline but an ingestion-maintained pane path does not, the failing path is excluded without excluding the pane choice. A focused path cut is valid only if omitted choices cannot repair its latency; otherwise use the full-assignment cut below.
+Where the configured latency model has a valid linear encoding, include it directly. Otherwise evaluate the selected graph and add a feasibility cut for a failing assignment. For instance, if a particular query-time build path exceeds Q1's deadline but an ingestion-maintained tumbling window path does not, the failing path is excluded without excluding the tumbling window choice. A focused path cut is valid only if omitted choices cannot repair its latency; otherwise use the full-assignment cut below.
 
 #### Feasibility cuts for checks without a direct linear encoding
 
@@ -545,13 +545,13 @@ Search reductions must preserve joint choices. A candidate that costs more alone
 
 Bounded fixed-calibration search first attempts to obtain a validated seed from a smaller reader-grid/GCD width domain using the same engine, then progressively adds legal widths toward the complete domain. A cached divisor frontier skips rounds that introduce no new width. Logical expansion reuses the pre-state-expansion memo and generates newly introduced window expressions; state expansion, physical inventory, and the MILP are rebuilt for each attempted domain. This is not incremental MILP solving. Only a definite budget stop may fall back to that validated seed; internal errors remain errors. Exhaustive archives and complete-catalog calibration skip this seed phase. Reports distinguish complete-domain generation from exhaustive assignment traversal, and a seed fallback supplies no full-domain optimum or gap certificate. Generation and model construction cooperate with the deadline; individual evaluator calls may overrun it.
 
-Three complementary reductions control dense pane inventories:
+Three complementary reductions control dense tumbling window inventories:
 
 - **Compatibility memoization and producer-list sharing.** Cache exact compatibility subproblems and intern identical ordered producer lists. Separate input positions still have separate connection decisions. This reduces repeated checking and storage, not the logical edge count or MILP variable count by itself.
-- **Terminal reader factoring.** Equivalent unary summary estimators and exact-accumulator finalizers used only by query outputs can become one reader template with the union of their compatible producers. Equality includes operator parameters, result contracts, timing, materialization, local cost, input contracts, and output eligibility. Each output retains an independent binding through execution scopes; consumers may still choose different producers. Internal readers and pane-merge operators are excluded. In particular, merges with different pane counts are not interchangeable.
+- **Terminal reader factoring.** Equivalent unary summary estimators and exact-accumulator finalizers used only by query outputs can become one reader template with the union of their compatible producers. Equality includes operator parameters, result contracts, timing, materialization, local cost, input contracts, and output eligibility. Each output retains an independent binding through execution scopes; consumers may still choose different producers. Internal readers and tumbling-window-merge operators are excluded. In particular, merges with different tumbling-window counts are not interchangeable.
 - **Progressive width generation.** Spend the shared planning budget on successively larger finite domains and retain the best validated incumbent across rounds. Report attempted domains and pending widths. A restricted-domain lower bound or gap is not a certificate for the complete domain; only a completed full-domain solve can provide that certificate.
 
-The first two reductions preserve the represented choices under their stated contracts; the third controls work before a timeout and may leave choices unexplored. General cost-based DP compression needs a richer boundary contract covering sharing, resource use, accuracy, and execution demand; it is not implied by compatibility memoization. Fine pane widths cannot be discarded merely because their local cost is high.
+The first two reductions preserve the represented choices under their stated contracts; the third controls work before a timeout and may leave choices unexplored. General cost-based DP compression needs a richer boundary contract covering sharing, resource use, accuracy, and execution demand; it is not implied by compatibility memoization. Fine tumbling-window widths cannot be discarded merely because their local cost is high.
 
 Within the seed budget, the same MILP can also hold a validated plan's computations and producer connections fixed and try supported query-time materializations. The normal evaluator measures whether retaining a shared result avoids enough repeated upstream work to reduce cost. These limited proposals use the existing solve/evaluation budgets; their bounds and infeasibility apply only to the restricted proposal, never to the full search. This does not create another selector or an optimality claim for the seed.
 
@@ -598,7 +598,7 @@ Generate memo candidates and compatible connections
 
 The MILP retains shared producer activation, configuration, consumer assignment, connection-dependent demand, and global resource constraints. Local plans can replace their internal decisions only if boundary compatibility, cost ownership, and all cross-region constraints are preserved, including acyclicity after expansion. Shared raw retention is a boundary decision even when the computation regions otherwise appear independent. Nonseparable pricing or scheduling interactions must likewise remain represented jointly.
 
-Pane width follows the same rule. A pane chain used exclusively inside a region can be optimized locally over its generated legal widths. A chain potentially shared across regions must expose its width, coverage, materialization, and guarantees as boundary configurations. Fixing each query's locally cheapest width before joint selection can discard the globally cheapest shared chain.
+Tumbling-window width follows the same rule. A tumbling-window chain used exclusively inside a region can be optimized locally over its generated legal widths. A chain potentially shared across regions must expose its width, coverage, materialization, and guarantees as boundary configurations. Fixing each query's locally cheapest width before joint selection can discard the globally cheapest shared chain.
 
 ### Independent components and global budgets
 
@@ -636,7 +636,7 @@ The candidate memo and its Pass 2 rules belong in `logical-asap-optimization`; p
 
 Evaluation must distinguish generation coverage from selection correctness. Small workloads are exhaustively enumerated over candidate subsets and compatible connections under the same inventory, then compared with MILP results. Cases include multiple selected candidates in one group, shared build costs, separate execution scopes, fusion outputs, and composed accuracy/resource requirements. Scaling experiments measure candidate and connection counts, generation and solve time, planner memory, and validated execution savings. Together these measurements establish whether the representation avoids repeated search work and whether joint selection justifies its planning cost.
 
-For decomposition, compare the original MILP, DP-compressed MILP, and exhaustive enumeration on small inventories. They must agree on feasible optima under the same models. Include shared build ownership, differing evaluation alignments, global memory budgets, competing pane widths, external reuse opportunities, and expansion-time acyclicity. Measure local DP time, boundary-state/frontier sizes, candidate and connection counts before/after compression, and total planning time; fewer MILP variables alone do not establish a speedup.
+For decomposition, compare the original MILP, DP-compressed MILP, and exhaustive enumeration on small inventories. They must agree on feasible optima under the same models. Include shared build ownership, differing evaluation alignments, global memory budgets, competing tumbling-window widths, external reuse opportunities, and expansion-time acyclicity. Measure local DP time, boundary-state/frontier sizes, candidate and connection counts before/after compression, and total planning time; fewer MILP variables alone do not establish a speedup.
 
 ### Expected planning performance and execution benefits
 

@@ -69,7 +69,7 @@ fn materialized_count(dag: &PhysicalASAPDAG) -> usize {
         .count()
 }
 
-/// Without raw data Stage 3 selects ingestion-time panes; the facade's
+/// Without raw data Stage 3 selects ingestion-time tumbling windows; the facade's
 /// export carries that selection rather than resetting every node to
 /// query time.
 #[tokio::test]
@@ -79,7 +79,7 @@ async fn export_carries_the_selected_materialization() {
     let dag = output.physical_asap_dag().expect("exports");
     assert!(
         materialized_count(&dag) > 0,
-        "the selected panes are stored"
+        "the selected tumbling windows are stored"
     );
     assert!(dag
         .nodes
@@ -109,7 +109,7 @@ async fn installable(workload: &PlanningWorkload) -> InstallablePlan {
     installable_with_report(workload).await.0
 }
 
-fn pane_chain_count(dag: &PhysicalASAPDAG) -> usize {
+fn tumbling_window_chain_count(dag: &PhysicalASAPDAG) -> usize {
     dag.nodes
         .iter()
         .filter(|n| {
@@ -121,19 +121,19 @@ fn pane_chain_count(dag: &PhysicalASAPDAG) -> usize {
         .count()
 }
 
-/// The installable plan expands its selected pane width into contiguous
-/// panes, each a materialized view refreshed at ingestion time, and
+/// The installable plan expands its selected tumbling-window width into contiguous
+/// tumbling windows, each a materialized view refreshed at ingestion time, and
 /// the executor compiles it. The stage export keeps the chain for costing
 /// and display. Its one query is answered by the DAG's one root.
 #[tokio::test]
-async fn installable_plan_has_its_pane_chains_expanded() {
+async fn installable_plan_has_its_tumbling_window_chains_expanded() {
     let workload = example4b();
     let (installed, report) = installable_with_report(&workload).await;
     installed.validate().unwrap();
     let plan = &installed;
     let dag = &installed.dag;
     let views = plan.materialized_views().unwrap();
-    assert_eq!(pane_chain_count(dag), 0);
+    assert_eq!(tumbling_window_chain_count(dag), 0);
     assert_eq!(materialized_count(dag), views.len());
     let roots: Vec<u64> = dag.roots.iter().map(|&r| r as u64).collect();
     let compiled = compile(dag, &views, &roots).expect("the executor compiles it");
@@ -146,7 +146,7 @@ async fn installable_plan_has_its_pane_chains_expanded() {
     let refreshed: BTreeSet<u64> = views.iter().map(|v| v.node_id as u64).collect();
     let slots: BTreeSet<u64> = compiled.input_slots().map(|(id, _)| id).collect();
     assert_eq!(slots, refreshed);
-    assert_pane_coverage(plan, dag.roots[0], 0, 3_600_000);
+    assert_tumbling_window_coverage(plan, dag.roots[0], 0, 3_600_000);
     assert!(
         plan.raw_data_retention().unwrap().is_empty(),
         "no raw data kept"
@@ -156,7 +156,7 @@ async fn installable_plan_has_its_pane_chains_expanded() {
 
     let staged = plan_for_stages(&workload).await;
     assert_eq!(
-        pane_chain_count(&staged),
+        tumbling_window_chain_count(&staged),
         1,
         "the stage export keeps the chain"
     );
@@ -235,10 +235,10 @@ fn repeating(queries: &[&str]) -> PlanningWorkload {
     .unwrap()
 }
 
-/// p99 and p50 over the same 60 minutes share one chain of panes: the
-/// installable plan materializes one shared set of panes.
+/// p99 and p50 over the same 60 minutes share one chain of tumbling windows: the
+/// installable plan materializes one shared set of tumbling windows.
 #[tokio::test]
-async fn two_queries_on_one_chain_store_its_panes_once() {
+async fn two_queries_on_one_chain_store_its_tumbling_windows_once() {
     let plan = installable(&repeating(&[
         "quantile_over_time(0.99, latency_ms[60m])",
         "quantile_over_time(0.5, latency_ms[60m])",
@@ -259,7 +259,7 @@ async fn two_queries_on_one_chain_store_its_panes_once() {
         views_below(plan.dag.roots[1])
     );
     assert_eq!(views_below(plan.dag.roots[0]).len(), views.len());
-    assert_pane_coverage(&plan, plan.dag.roots[0], 0, 3_600_000);
+    assert_tumbling_window_coverage(&plan, plan.dag.roots[0], 0, 3_600_000);
 }
 
 /// Planned with raw data kept (everything at query time), so each query's
@@ -324,11 +324,11 @@ async fn raw_data_windows_of_unsupported_shapes_are_refused() {
 }
 
 /// Example 4b answered as the last hour at 10-minute steps (a range
-/// evaluation): each selected pane view is kept for the hour its window reads
+/// evaluation): each selected tumbling window view is kept for the hour its window reads
 /// plus the hour the range spans, 7,200,000 ms, as Stage 3 records for the
 /// chain (`Selection::tumbling_window_retention_ms`); without the range, for the hour.
 #[tokio::test]
-async fn stored_panes_carry_stage3_pane_retention() {
+async fn stored_tumbling_windows_carry_stage3_tumbling_window_retention() {
     let mut workload = example4b();
     let plain = installable(&workload).await;
     assert!(plain
@@ -341,7 +341,7 @@ async fn stored_panes_carry_stage3_pane_retention() {
         serde_json::json!({"step_ms": 600000, "span_ms": 3600000});
     workload = serde_json::from_value(json).unwrap();
     let ranged = installable(&workload).await;
-    assert_pane_coverage(&ranged, ranged.dag.roots[0], 0, 3_600_000);
+    assert_tumbling_window_coverage(&ranged, ranged.dag.roots[0], 0, 3_600_000);
     assert!(ranged
         .materialized_views()
         .unwrap()
@@ -356,7 +356,7 @@ async fn stored_panes_carry_stage3_pane_retention() {
             .collect::<Vec<_>>(),
         [7_200_000]
     );
-    // A plan file that keeps a pane for less than it reads is refused.
+    // A plan file that keeps a tumbling window for less than it reads is refused.
     let mut short = ranged.clone();
     let view = ranged.materialized_views().unwrap()[0].node_id;
     short
@@ -374,20 +374,20 @@ async fn stored_panes_carry_stage3_pane_retention() {
     ));
 }
 
-/// A chain over an offset input keeps its panes for its window plus the
+/// A chain over an offset input keeps its tumbling windows for its window plus the
 /// offset: `[60m] offset 10m` reaches 70 minutes back (4,200,000 ms), the
 /// unshifted query's chain 60 minutes (3,600,000 ms). Each materialized view
 /// carries its own node's requirement; a runtime that keeps the twins'
-/// identical panes once keeps them for the larger one.
+/// identical tumbling windows once keeps them for the larger one.
 #[tokio::test]
-async fn an_offset_chain_keeps_its_panes_for_its_window_plus_the_offset() {
+async fn an_offset_chain_keeps_its_tumbling_windows_for_its_window_plus_the_offset() {
     let plan = installable(&repeating(&[
         "quantile_over_time(0.99, latency_ms[60m])",
         "quantile_over_time(0.99, latency_ms[60m] offset 10m)",
     ]))
     .await;
-    assert_pane_coverage(&plan, plan.dag.roots[0], 0, 3_600_000);
-    assert_pane_coverage(&plan, plan.dag.roots[1], 600_000, 4_200_000);
+    assert_tumbling_window_coverage(&plan, plan.dag.roots[0], 0, 3_600_000);
+    assert_tumbling_window_coverage(&plan, plan.dag.roots[1], 600_000, 4_200_000);
     let below: Vec<_> = plan
         .dag
         .roots
@@ -401,14 +401,19 @@ async fn an_offset_chain_keeps_its_panes_for_its_window_plus_the_offset() {
             .filter(|(_, nodes)| nodes.contains(&view.node_id))
             .map(|(retention, _)| retention)
             .max()
-            .expect("materialized pane is consumed");
+            .expect("materialized tumbling window is consumed");
         assert_eq!(view.retention_ms(), required);
     }
     plan.validate().unwrap();
 }
 
-/// Any selected legal pane width must cover the requested interval exactly.
-fn assert_pane_coverage(plan: &InstallablePlan, root: PhysicalASAPNodeId, start: i64, end: i64) {
+/// Any selected legal tumbling-window width must cover the requested interval exactly.
+fn assert_tumbling_window_coverage(
+    plan: &InstallablePlan,
+    root: PhysicalASAPNodeId,
+    start: i64,
+    end: i64,
+) {
     let below = nodes_below(&plan.dag, root);
     let mut intervals: Vec<_> = plan
         .materialized_views()
@@ -417,7 +422,7 @@ fn assert_pane_coverage(plan: &InstallablePlan, root: PhysicalASAPNodeId, start:
         .filter(|view| below.contains(&view.node_id))
         .map(|view| {
             let [window] = view.inputs.raw_data_windows() else {
-                panic!("pane reads one raw interval: {:?}", view.inputs);
+                panic!("tumbling window reads one raw interval: {:?}", view.inputs);
             };
             assert!(window.width_ms() > 0 && 600_000 % window.width_ms() == 0);
             (

@@ -1,5 +1,5 @@
 //! The facade's orchestration of the planning stages (#1047): Stage 0
-//! (the memo of logical groups), Pass 1, then per pane-width round Pass 2 →
+//! (the memo of logical groups), Pass 1, then per tumbling-window-width round Pass 2 →
 //! Stage 2 → Stage 3, and finally the selected plan built through Stage 2's
 //! realizer. No stage calls another; the facade owns the deadline and splits
 //! it per round (#1048).
@@ -20,7 +20,7 @@ use asap_logical_asap_optimization::{
     generate_per_computation_logical_memo_candidates, PerComputationCandidateError,
     PerComputationLogicalMemoCandidatesError,
 };
-use asap_logical_asap_optimization::{PaneWidthDomain, PaneWidthFrontier};
+use asap_logical_asap_optimization::{TumblingWindowWidthDomain, TumblingWindowWidthFrontier};
 use asap_physical_asap_optimization::{
     generate_physical_asap_memo_candidates, Stage2AssignmentRealizer,
 };
@@ -46,7 +46,7 @@ const DEFAULT_TIME_LIMIT_MS: u64 = 30_000;
 /// The seed-width round's share of the remaining budget, and its cap.
 const SEED_ROUND_SHARE: u32 = 4;
 const SEED_ROUND_MAX: Duration = Duration::from_secs(5);
-/// An intermediate pane-width round's budget cap.
+/// An intermediate tumbling-window-width round's budget cap.
 const INTERMEDIATE_ROUND_MAX: Duration = Duration::from_secs(5);
 /// The least budget left after Pass 1 for the seed round to run first.
 const SEED_ROUND_MIN_REMAINING: Duration = Duration::from_secs(1);
@@ -55,7 +55,7 @@ const SEED_ROUND_MIN_REMAINING: Duration = Duration::from_secs(1);
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PlanSearchSettings {
     /// The whole planning budget, Pass 1 included, in milliseconds; default
-    /// 30 s. The facade splits it over the pane-width rounds, and each
+    /// 30 s. The facade splits it over the tumbling-window-width rounds, and each
     /// stage stops at its round's deadline (an evaluation in progress may
     /// overrun it).
     pub time_limit_ms: Option<u64>,
@@ -72,7 +72,7 @@ pub struct PlanSearchSettings {
 /// [`PlanningRun::per_computation_candidates`], without candidates.
 #[derive(Debug, Clone)]
 pub struct MemoSteps {
-    /// After local window composition (pane candidates).
+    /// After local window composition (tumbling-window candidates).
     pub pass2: MemoCandidates,
     /// After concrete summary-state group expansion: the memo Stage 2
     /// implements.
@@ -114,11 +114,11 @@ pub enum SelectionError {
     DeadlineReached,
 }
 
-/// One pane-width round, as the facade ran it.
+/// One tumbling-window-width round, as the facade ran it.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct PlanningRoundReport {
-    /// The round's pane-width domain (`SeedGrids`, `Complete`, ...).
-    pub pane_width_domain: String,
+    /// The round's tumbling-window-width domain (`SeedGrids`, `Complete`, ...).
+    pub tumbling_window_width_domain: String,
     /// Pass 2's output: memo groups and their candidates.
     pub memo_groups: usize,
     pub logical_candidates: usize,
@@ -147,9 +147,9 @@ pub struct PlanningReport {
     pub rounds: Vec<PlanningRoundReport>,
     /// The round whose selection is the plan (index into `rounds`).
     pub selected_round: Option<usize>,
-    /// Some legal pane widths were not searched: the plan is the best over
+    /// Some legal tumbling-window widths were not searched: the plan is the best over
     /// the widths searched, not over all of them.
-    pub pane_widths_pending: bool,
+    pub tumbling_window_widths_pending: bool,
     /// The whole budget, in milliseconds.
     pub time_limit_ms: u64,
 }
@@ -169,7 +169,7 @@ pub struct PlanningRun {
     pub physical_asap_candidates: Option<PhysicalASAPMemoCandidates>,
     /// Stage 3's selection.
     pub selection: Result<Selection, SelectionError>,
-    /// The selected plan as Stage 2 built it, with its pane retention.
+    /// The selected plan as Stage 2 built it, with its tumbling-window retention.
     pub selected_physical_plan: Option<RealizedPlan>,
     /// The plan to run: the selected plan's roots with the weight proofs
     /// Stage 3 made applied.
@@ -208,7 +208,7 @@ pub fn run_planning(
     }
     // Stage 0: the memo of logical groups.
     let initial = generate_dag_of_logical_memo_groups(&roots);
-    let has_pane_window = has_pane_window(&initial);
+    let has_splittable_window = has_splittable_window(&initial);
     let has_groups = !initial.groups.is_empty();
     // Pass 1: the per-computation candidates the deployment can run and
     // some query can use.
@@ -282,7 +282,7 @@ pub fn run_planning(
     let mut last: Option<Round> = None;
     let mut final_error: Option<SelectionError> = None;
     let mut completed_full_domain = false;
-    let mut run_round = |domain: PaneWidthDomain,
+    let mut run_round = |domain: TumblingWindowWidthDomain,
                          deadline: Option<Instant>,
                          state: &mut Option<Pass2RoundState>,
                          report: &mut PlanningReport|
@@ -325,12 +325,12 @@ pub fn run_planning(
             deadline.saturating_duration_since(Instant::now())
         })
     };
-    let seed_enabled = has_pane_window
+    let seed_enabled = has_splittable_window
         && calibration_is_frozen(models.cost_inputs)
         && remaining() >= SEED_ROUND_MIN_REMAINING;
     if !seed_enabled {
         let end = run_round(
-            PaneWidthDomain::Complete,
+            TumblingWindowWidthDomain::Complete,
             global_deadline,
             &mut state,
             &mut report,
@@ -343,7 +343,7 @@ pub fn run_planning(
         let seed_deadline =
             Instant::now().checked_add((remaining() / SEED_ROUND_SHARE).min(SEED_ROUND_MAX));
         let end = run_round(
-            PaneWidthDomain::SeedGrids,
+            TumblingWindowWidthDomain::SeedGrids,
             seed_deadline,
             &mut state,
             &mut report,
@@ -351,13 +351,13 @@ pub fn run_planning(
         if let Some(error) = end.fatal {
             final_error = Some(error);
         }
-        // A literal-only workload has no computation in which pane rules
+        // A literal-only workload has no computation in which tumbling-window rules
         // can fire.
         let grids = entries
             .iter()
             .filter_map(|entry| entry.evaluation_grid_ms())
             .filter(|_| has_groups);
-        let mut frontier = PaneWidthFrontier::new(grids, global_deadline);
+        let mut frontier = TumblingWindowWidthFrontier::new(grids, global_deadline);
         while final_error.is_none() && state.is_some() && !remaining().is_zero() {
             let domain = match frontier
                 .as_mut()
@@ -366,7 +366,7 @@ pub fn run_planning(
                 Ok(Ok(Some(domain))) => domain,
                 Ok(Ok(None)) | Ok(Err(_)) | Err(_) => break,
             };
-            let complete = domain == PaneWidthDomain::Complete;
+            let complete = domain == TumblingWindowWidthDomain::Complete;
             let deadline = if complete {
                 global_deadline
             } else {
@@ -382,7 +382,7 @@ pub fn run_planning(
             }
         }
     }
-    report.pane_widths_pending = !completed_full_domain;
+    report.tumbling_window_widths_pending = !completed_full_domain;
 
     let (chosen, selected) = match (final_error, best) {
         (Some(error), best) => {
@@ -467,14 +467,14 @@ struct RoundOutcome {
     end: RoundEnd,
 }
 
-/// One pane-width round: Pass 2 over `state` for `domain`, Stage 2, then
+/// One tumbling-window-width round: Pass 2 over `state` for `domain`, Stage 2, then
 /// Stage 3, each stopping at `deadline`. A Pass 2 timeout in local window
 /// composition leaves `state` unusable, so it is dropped. With `inspect`,
 /// the round keeps a copy of the memo after local window composition.
 #[allow(clippy::too_many_arguments)]
 fn plan_round(
     state: &mut Option<Pass2RoundState>,
-    domain: PaneWidthDomain,
+    domain: TumblingWindowWidthDomain,
     deadline: Option<Instant>,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
@@ -484,7 +484,7 @@ fn plan_round(
     inspect: bool,
 ) -> RoundOutcome {
     let mut report = PlanningRoundReport {
-        pane_width_domain: format!("{domain:?}"),
+        tumbling_window_width_domain: format!("{domain:?}"),
         memo_groups: 0,
         logical_candidates: 0,
         operator_nodes: 0,
@@ -581,7 +581,9 @@ fn plan_round(
                 | ErrorSelectingPlan::EvaluationDeadlineExceeded => None,
                 // An infeasible restricted catalog does not make the complete
                 // one infeasible.
-                ErrorSelectingPlan::NoValidCandidate(_) if domain != PaneWidthDomain::Complete => {
+                ErrorSelectingPlan::NoValidCandidate(_)
+                    if domain != TumblingWindowWidthDomain::Complete =>
+                {
                     None
                 }
                 error => Some(SelectionError::Selection(clone_error(error))),
@@ -633,10 +635,10 @@ fn calibration_is_frozen(cost_inputs: &asap_cost::CostInputs) -> bool {
         || cost_inputs.measured_operation_costs.operators.is_empty()
 }
 
-/// Pane rules require a temporal range below a summary build: a positive
-/// `Range` window, or an existing pane chain. Instant lookback selectors are
-/// not splittable panes.
-fn has_pane_window(initial: &DagOfLogicalMemoGroups) -> bool {
+/// Tumbling-window rules require a temporal range below a summary build: a positive
+/// `Range` window, or an existing tumbling-window chain. Instant lookback selectors are
+/// not splittable tumbling windows.
+fn has_splittable_window(initial: &DagOfLogicalMemoGroups) -> bool {
     initial.groups.iter().any(|group| {
         matches!(
             group.logical_node.non_asap(),
@@ -728,7 +730,7 @@ fn selected_chosen_candidates(
 /// runtime; a root with no such representation is planned over its labels
 /// alone), through [`run_planning`] with every entry's accuracy target. The
 /// output is the selected plan's roots, with the weight proofs plan
-/// selection made applied, and its pane retention.
+/// selection made applied, and its tumbling-window retention.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Stage1ToStage3Pass;
 

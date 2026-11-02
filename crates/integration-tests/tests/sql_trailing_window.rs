@@ -1,6 +1,6 @@
 //! A SQL trailing window, `WHERE ts >= now() - INTERVAL 'w'` on the table's
 //! time index, plans like a PromQL range selector `m[w]`: Pass 2 builds its
-//! summaries in tumbling panes, Stage 2 maintains them at ingestion time,
+//! summaries in tumbling windows, Stage 2 maintains them at ingestion time,
 //! a deployment that keeps no raw data still gets a plan, and Stage 3 prices
 //! each scan by its window.
 
@@ -105,7 +105,7 @@ async fn run(deployment: &DeploymentCapabilities) -> Run {
         compose_logical_candidate, generate_per_computation_candidates,
     };
     use asap_logical_asap_optimization::test_support::{
-        pane_candidates, window_composition_pass2_candidates,
+        tumbling_window_candidates, window_composition_pass2_candidates,
     };
     use asap_types::stages::HowToComputeAggregateMeasure;
     let local = generate_per_computation_candidates(
@@ -138,14 +138,16 @@ async fn run(deployment: &DeploymentCapabilities) -> Run {
         .entries()
         .map(|entry| entry.evaluation_grid_ms())
         .collect::<Vec<_>>();
-    let panes = pane_candidates(&summary, &grids);
-    assert_eq!(panes.len(), WINDOWS_MS.len());
+    let tumbling_windows = tumbling_window_candidates(&summary, &grids);
+    assert_eq!(tumbling_windows.len(), WINDOWS_MS.len());
     let mut candidates = vec![exact, summary.clone()];
     candidates.extend(
-        window_composition_pass2_candidates(&summary, &panes)
+        window_composition_pass2_candidates(&summary, &tumbling_windows)
             .unwrap()
             .into_iter()
-            .filter(|candidate| candidate.pane_candidates.len() == panes.len())
+            .filter(|candidate| {
+                candidate.tumbling_window_candidates.len() == tumbling_windows.len()
+            })
             .map(|candidate| candidate.roots.unwrap()),
     );
     let settings = CostInputs::default();
@@ -159,10 +161,10 @@ async fn run(deployment: &DeploymentCapabilities) -> Run {
     )
 }
 
-/// Pass 2 offers each query's distinct-count sketch in tumbling panes, and
-/// Stage 2 maintains a pane chain at ingestion time, as for `m[5m]`.
+/// Pass 2 offers each query's distinct-count sketch in tumbling windows, and
+/// Stage 2 maintains a tumbling-window chain at ingestion time, as for `m[5m]`.
 #[tokio::test]
-async fn sql_windows_get_tumbling_panes_and_ingestion_time_builds() {
+async fn sql_windows_get_tumbling_windows_and_ingestion_time_builds() {
     let run = run(&DeploymentCapabilities::default()).await;
     for (query, window_ms) in WINDOWS_MS.iter().enumerate() {
         let tumbling = run.logical.iter().any(|c| {
@@ -173,7 +175,7 @@ async fn sql_windows_get_tumbling_panes_and_ingestion_time_builds() {
         });
         assert!(
             tumbling,
-            "query {query} ({window_ms} ms) has no pane candidate"
+            "query {query} ({window_ms} ms) has no tumbling-window candidate"
         );
     }
     let at_ingestion = run.physical.iter().any(|p| {
@@ -184,7 +186,10 @@ async fn sql_windows_get_tumbling_panes_and_ingestion_time_builds() {
             ) && runs_at_ingestion(p, n.id)
         })
     });
-    assert!(at_ingestion, "no pane chain maintained at ingestion time");
+    assert!(
+        at_ingestion,
+        "no tumbling-window chain maintained at ingestion time"
+    );
 }
 
 /// Without raw data at query time, the ingestion-time builds still answer

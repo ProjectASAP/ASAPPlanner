@@ -150,15 +150,15 @@ impl Batch {
 
     /// The batch of `columns` in `schema`, one per field, without running
     /// the DAG: how a runtime installs states it built sample by sample
-    /// (a sealed [`crate::StateColumnUpdater`]) as a stored pane. Bad input
+    /// (a sealed [`crate::StateColumnUpdater`]) as a stored tumbling window. Bad input
     /// when a column's count, layout, length or nullability differs from
     /// the schema, a dictionary holds a NULL value (a NULL is a NULL key),
     /// a summary field's states are of another family, or a state index is
     /// NULL or past its states.
     ///
-    /// A stored pane has one row per group: the caller must not repeat a
+    /// A stored tumbling window has one row per group: the caller must not repeat a
     /// group's labels (two rows of one series would be merged as two
-    /// panes of it). This is not checked, as it would cost a pass grouping
+    /// tumbling windows of it). This is not checked, as it would cost a pass grouping
     /// every row.
     pub fn try_from_columns(schema: SchemaRef, columns: Vec<BatchColumn>) -> Result<Self, Error> {
         validate_schema(&schema)?;
@@ -575,7 +575,7 @@ impl Batch {
     }
 
     /// Records that something outside any run (the caller of a plan, a
-    /// store of panes) holds this batch's states, so runs that read them
+    /// store of tumbling windows) holds this batch's states, so runs that read them
     /// are not charged for them again. States a run copies or creates from
     /// them are new state columns and are charged.
     pub(crate) fn mark_states_held_outside_run(&self) {
@@ -839,7 +839,7 @@ mod tests {
         );
     }
 
-    // A runtime can share batches, stored panes included, across threads.
+    // A runtime can share batches, stored tumbling windows included, across threads.
     #[test]
     fn batches_and_state_columns_are_send_and_sync() {
         fn shareable<T: Send + Sync>() {}
@@ -999,7 +999,7 @@ mod tests {
         assert!(nulls.is_valid(0) && nulls.is_null(1));
     }
 
-    // A filter that keeps few rows keeps only their states: a pane filtered
+    // A filter that keeps few rows keeps only their states: a tumbling window filtered
     // to two of ten series holds two states, not ten.
     #[test]
     fn a_selective_filter_compacts_its_state_column() {

@@ -44,8 +44,8 @@ pub enum Relation {
     /// (`Aggregate` over `q`'s result) or a sketch rollup (`SummaryMerge`
     /// with `group_by` over `q`'s state).
     CoarserGrouping,
-    /// (d) `q'` = `q` over a shorter window on the same pane grid: derived
-    /// by merging the newest panes of `q`'s pane chain.
+    /// (d) `q'` = `q` over a shorter window on the same tumbling-window grid: derived
+    /// by merging the newest tumbling windows of `q`'s tumbling-window chain.
     NestedShorterWindow,
     /// (e) `q'` = `q` at another quantile rank: derived by one more
     /// estimate from `q`'s sketch.
@@ -75,8 +75,8 @@ pub enum Relation {
     /// the division with `q` read from `q`'s result.
     BinaryOverResult,
     /// (m) `q'` = `q` over a longer window that is a multiple of it:
-    /// derived by lengthening `q`'s pane chain, which `q` reads the newest
-    /// panes of.
+    /// derived by lengthening `q`'s tumbling-window chain, which `q` reads the newest
+    /// tumbling windows of.
     LongerWindow,
     /// (n) `q'` = `q` over a longer window and grouped by one key fewer:
     /// derived by a rollup over (m)'s derivation.
@@ -245,9 +245,9 @@ pub enum Witness {
     /// `q`'s root estimate reading a `SummaryMerge` with `group_by` the
     /// `labels` columns over its state, when the family merges groups.
     SketchRollup { labels: Vec<String> },
-    /// `q`'s `SummaryMerge` over a pane chain merging only the newest panes
+    /// `q`'s `SummaryMerge` over a tumbling-window chain merging only the newest tumbling windows
     /// covering `window_ms`.
-    NewestPanes { window_ms: u64 },
+    NewestTumblingWindows { window_ms: u64 },
     /// `q`'s topmost quantile estimate (or exact quantile aggregate) at rank
     /// `to` instead of `from`.
     QuantileRank { from: f64, to: f64 },
@@ -257,8 +257,8 @@ pub enum Witness {
     /// `q`'s root estimate over a `SummaryMerge` of its state and the state
     /// of `W`'s last query (the other selection, added to `W`).
     UnionWithLast,
-    /// `q`'s pane chain lengthened to cover `window_ms`: every reader of
-    /// the chain in `W`'s plan merges its old newest panes of the longer
+    /// `q`'s tumbling-window chain lengthened to cover `window_ms`: every reader of
+    /// the chain in `W`'s plan merges its old newest tumbling windows of the longer
     /// chain, and `q'` merges all of them, then applies `rollup` when set.
     LongerWindow {
         window_ms: u64,
@@ -447,7 +447,7 @@ pub fn derive(relation: Relation, workload: &FuzzWorkload, target: usize) -> Opt
             let spec = match q.spec.as_ref()? {
                 QuerySpec::Promql(spec) => {
                     // A counter's rate and increase read the window length
-                    // and its boundary samples, not only merged pane state.
+                    // and its boundary samples, not only merged tumbling-window state.
                     if matches!(spec.range?, RangeFunction::Rate | RangeFunction::Increase) {
                         return None;
                     }
@@ -465,7 +465,10 @@ pub fn derive(relation: Relation, workload: &FuzzWorkload, target: usize) -> Opt
                 QuerySpec::Promql(s) => s.window_ms,
                 QuerySpec::Sql(s) => s.window_ms,
             };
-            derived(q.with_spec(spec), vec![Witness::NewestPanes { window_ms }])
+            derived(
+                q.with_spec(spec),
+                vec![Witness::NewestTumblingWindows { window_ms }],
+            )
         }
         Relation::OtherQuantileRank => {
             let (spec, from) = match q.spec.as_ref()? {
@@ -684,7 +687,7 @@ pub fn derive(relation: Relation, workload: &FuzzWorkload, target: usize) -> Opt
             let (longer, window_ms) = match q.spec.as_ref()? {
                 QuerySpec::Promql(spec) => {
                     // As for (d): rate and increase read more than merged
-                    // pane state.
+                    // tumbling-window state.
                     if matches!(spec.range?, RangeFunction::Rate | RangeFunction::Increase) {
                         return None;
                     }
@@ -1150,8 +1153,10 @@ pub fn witness_root(
             .map_err(|e| format!("rollup estimate: {e}"))?;
             with_root_estimate(q_root, estimate, &dropped)
         }
-        Witness::NewestPanes { window_ms } => {
-            rewrite_root(q_root, "summary merge over a pane chain", |node| {
+        Witness::NewestTumblingWindows { window_ms } => rewrite_root(
+            q_root,
+            "summary merge over a tumbling-window chain",
+            |node| {
                 let Some(ASAPOp::SummaryMerge {
                     children,
                     newest_tumbling_windows: None,
@@ -1171,22 +1176,22 @@ pub fn witness_root(
                 else {
                     return None;
                 };
-                let panes = window_ms / tumbling_window_width_ms;
+                let tumbling_windows = window_ms / tumbling_window_width_ms;
                 (window_ms % tumbling_window_width_ms == 0
-                    && panes >= 1
-                    && (panes as u32) < *tumbling_window_count)
+                    && tumbling_windows >= 1
+                    && (tumbling_windows as u32) < *tumbling_window_count)
                     .then(|| {
                         with_operator(
                             node,
                             Operator::ASAP(ASAPOp::SummaryMerge {
                                 children: children.clone(),
-                                newest_tumbling_windows: Some(panes as u32),
+                                newest_tumbling_windows: Some(tumbling_windows as u32),
                                 group_by: group_by.clone(),
                             }),
                         )
                     })
-            })
-        }
+            },
+        ),
         Witness::QuantileRank { from, to } => {
             let mut done = false;
             rewrite_root(q_root, "quantile estimate", |node| {
@@ -1448,8 +1453,8 @@ fn collect(
     }
 }
 
-/// `W`'s roots with the pane chain `q` merges whole lengthened to cover
-/// `window_ms`, every merge of it reading its old newest panes of the
+/// `W`'s roots with the tumbling-window chain `q` merges whole lengthened to cover
+/// `window_ms`, every merge of it reading its old newest tumbling windows of the
 /// longer chain; and `q`'s root merging the whole longer chain.
 fn longer_chain_roots(
     base_roots: &[QueryRoot],
@@ -1467,14 +1472,14 @@ fn longer_chain_roots(
         )
     };
     let merge = find_first(q_root, &whole_chain_merge)
-        .ok_or("q's plan has no summary merge over a pane chain")?;
+        .ok_or("q's plan has no summary merge over a tumbling-window chain")?;
     // Lengthening one of several chains (say, an SQL idiom's exact row
     // count beside its statistic) would leave the others at q's window.
     let mut merges = Vec::new();
     collect(q_root, &whole_chain_merge, &mut merges);
     if merges.len() > 1 {
         return Err(format!(
-            "q's plan merges {} pane chains whole",
+            "q's plan merges {} tumbling-window chains whole",
             merges.len()
         ));
     }
@@ -1489,14 +1494,14 @@ fn longer_chain_roots(
         ..
     }) = &mut operator
     else {
-        unreachable!("found a pane chain");
+        unreachable!("found a tumbling-window chain");
     };
     let old_count = *tumbling_window_count;
     if !window_ms.is_multiple_of(*tumbling_window_width_ms)
         || window_ms / *tumbling_window_width_ms <= old_count as u64
     {
         return Err(format!(
-            "q's chain of {old_count} panes of {tumbling_window_width_ms} ms does not extend to {window_ms} ms"
+            "q's chain of {old_count} tumbling windows of {tumbling_window_width_ms} ms does not extend to {window_ms} ms"
         ));
     }
     *tumbling_window_count = (window_ms / *tumbling_window_width_ms) as u32;
@@ -1970,7 +1975,7 @@ mod tests {
                 op: RollupOp::Sum
             }
         );
-        // A counter's rate reads more than merged panes: no nested window.
+        // A counter's rate reads more than merged tumbling windows: no nested window.
         assert_eq!(text(Relation::NestedShorterWindow), None);
         assert_eq!(text(Relation::OtherQuantileRank), None);
         assert_eq!(
@@ -2078,7 +2083,7 @@ mod tests {
                 text: "(sum by (job, instance) (rate(m_counter[5m]))) * 300".into()
             }]
         );
-        // As for (d), a rate's window is not merged pane state.
+        // As for (d), a rate's window is not merged tumbling-window state.
         assert_eq!(text(&rate, Relation::LongerWindow), None);
 
         let mut sum = sum_by(&["job", "instance"]);

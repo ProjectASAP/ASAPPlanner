@@ -344,7 +344,7 @@ fn threshold_witness_prices_over_the_result() {
     ));
 }
 
-/// (m): a longer window lengthens q's pane chain of exact sums.
+/// (m): a longer window lengthens q's tumbling-window chain of exact sums.
 #[test]
 fn longer_window_witness_prices_over_a_lengthened_chain() {
     let q = promql(

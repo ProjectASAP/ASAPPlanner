@@ -19,7 +19,7 @@ A new sketch that Pass 1 can offer for an intent.
    table (`SketchAlgorithm::capability`), read unchanged by
    `FamilyCapability::of_per_instance_sketch`
    (`crates/types/src/ir/schema/family_capability.rs`). Pass 2's sharing,
-   pane and rollup rules read only this table. Which readouts the executor
+   tumbling window and rollup rules read only this table. Which readouts the executor
    evaluates is its own declaration, `EVALUATED_READOUTS`
    (`crates/executor/src/capability.rs`); add the family's readouts there
    once the executor answers them.
@@ -47,7 +47,7 @@ Tests: a Pass 1 test in `crates/logical-asap-optimization/tests/per_computation_
 that the intent gets the new candidate (and that a deployment without it
 prunes it with `UnsupportedByDeployment`); an estimator test beside the
 estimator; an execution test in `crates/integration-tests/tests/` such as
-`frequency_execution.rs` or `kll_pane_execution.rs`.
+`frequency_execution.rs` or `kll_tumbling_window_execution.rs`.
 
 ## 2. Add a Pass 2 rule
 

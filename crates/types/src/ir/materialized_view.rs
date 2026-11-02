@@ -577,11 +577,11 @@ impl PhysicalASAPDAG {
     }
 
     /// Sets `retention_ms` on every materialized view and every query-time
-    /// `Scan` of an installed DAG (pane chains expanded), and returns the
+    /// `Scan` of an installed DAG (tumbling-window chains expanded), and returns the
     /// views ([`Self::materialized_views`]); `Err` when `deadline` passes.
     ///
-    /// A view takes `pane_retention_ms_by_node`'s value (Stage 3's retention
-    /// of a pane's chain: its offset plus its window plus the longest
+    /// A view takes `tumbling_window_retention_ms_by_node`'s value (Stage 3's retention
+    /// of a tumbling window's chain: its offset plus its window plus the longest
     /// range-evaluation span of its readers); otherwise how far back its
     /// data reaches, plus, for a view built from other views, its readers'
     /// longest range-evaluation span (`reader_span_ms_by_node`). Then each
@@ -597,14 +597,14 @@ impl PhysicalASAPDAG {
     /// range-evaluation span, and at least the retention of every view
     /// refreshed on first read from it (which may be refreshed for its
     /// oldest step); `None` when its window is unbounded. In an installed
-    /// DAG a chain kept across evaluations is its expanded panes, so its
-    /// scan keeps the reach of all of them: reusing a pane refreshed at an
+    /// DAG a chain kept across evaluations is its expanded tumbling windows, so its
+    /// scan keeps the reach of all of them: reusing a tumbling window refreshed at an
     /// earlier evaluation is optional, and a restart or an older range step
-    /// refreshes older panes from raw data. (Stage 3 prices a kept chain on
-    /// the unexpanded DAG as reading its newest pane.)
+    /// refreshes older tumbling windows from raw data. (Stage 3 prices a kept chain on
+    /// the unexpanded DAG as reading its newest tumbling window.)
     pub fn set_retention(
         &mut self,
-        pane_retention_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
+        tumbling_window_retention_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
         reader_span_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
         deadline: Option<Instant>,
     ) -> Result<Vec<MaterializedView>, InstallableDagError> {
@@ -623,7 +623,7 @@ impl PhysicalASAPDAG {
                     .copied()
                     .unwrap_or(0),
             };
-            view.retention_ms = pane_retention_ms_by_node
+            view.retention_ms = tumbling_window_retention_ms_by_node
                 .get(&view.node_id)
                 .copied()
                 .unwrap_or(reach_ms + span_ms);
@@ -728,7 +728,7 @@ impl PhysicalASAPDAG {
     }
 
     /// Checks that every raw-data window the DAG reads (each `TimeRange`,
-    /// and each `SummaryTumblingWindowChain`'s pane, reading a `Scan` without passing another
+    /// and each `SummaryTumblingWindowChain`'s tumbling window, reading a `Scan` without passing another
     /// `TimeRange`) has a supported shape
     /// ([`InstallableDagError::UnsupportedRawDataWindow`]). O(nodes + edges)
     /// plus the depth below each window.
@@ -997,9 +997,9 @@ impl<'a> ViewIndex<'a> {
     }
 
     /// The window of width `width_ms` that `time_range` (a `TimeRange`, or
-    /// a `SummaryTumblingWindowChain`'s pane) reads from the `Scan` below it, and that
+    /// a `SummaryTumblingWindowChain`'s tumbling window) reads from the `Scan` below it, and that
     /// `Scan`, or why its shape is unsupported. It does not allocate or
-    /// compile every pane in a chain.
+    /// compile every tumbling window in a chain.
     fn raw_window_below(
         &self,
         time_range: PhysicalASAPNodeId,

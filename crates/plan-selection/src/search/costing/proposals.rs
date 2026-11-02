@@ -125,8 +125,8 @@ impl TemplateCatalog {
             _ => lookback,
         };
         let lookback = match node.asap() {
-            // Query-time construction reads all panes' source rows. Reuse the
-            // compact SummaryTumblingWindowChain formula in asap_cost::node_usage without expanding panes.
+            // Query-time construction reads all tumbling windows' source rows. Reuse the
+            // compact SummaryTumblingWindowChain formula in asap_cost::node_usage without expanding tumbling windows.
             Some(ASAPOp::SummaryTumblingWindowChain {
                 tumbling_window_width_ms,
                 tumbling_window_count,
@@ -287,10 +287,10 @@ mod tests {
             .candidates
             .iter()
             .all(|candidate| candidate.local_cost == 0.0));
-        // A query-time pane chain reads its full window, not an unbounded
+        // A query-time tumbling-window chain reads its full window, not an unbounded
         // source. Price it compactly; a missing horizon previously made every
-        // pane estimate zero and wrongly favored it over priced whole builds.
-        let pane_id = configured
+        // tumbling-window estimate zero and wrongly favored it over priced whole builds.
+        let tumbling_window_id = configured
             .nodes_for_tests()
             .iter()
             .enumerate()
@@ -300,7 +300,7 @@ mod tests {
                 .then_some(id)
             })
             .unwrap();
-        let build = configured.node(pane_id);
+        let build = configured.node(tumbling_window_id);
         let Some(ASAPOp::SummaryAgg {
             child,
             family,
@@ -315,7 +315,7 @@ mod tests {
         let Some(NonASAPOp::TimeRange { child: source, .. }) = child.non_asap() else {
             unreachable!()
         };
-        let pane = OperatorNode::new_shared(asap_types::ir::Operator::ASAP(
+        let tumbling_window = OperatorNode::new_shared(asap_types::ir::Operator::ASAP(
             ASAPOp::SummaryTumblingWindowChain {
                 child: Rc::clone(source),
                 family: family.clone(),
@@ -328,13 +328,16 @@ mod tests {
             },
         ))
         .unwrap();
-        configured.set_node_for_tests(pane_id, pane);
-        let pane_estimates = estimate_costs(&configured, &context);
+        configured.set_node_for_tests(tumbling_window_id, tumbling_window);
+        let tumbling_window_estimates = estimate_costs(&configured, &context);
         assert!(
-            pane_estimates[pane_id] > 0.0,
-            "query-time pane build must not look free"
+            tumbling_window_estimates[tumbling_window_id] > 0.0,
+            "query-time tumbling-window build must not look free"
         );
-        assert_eq!(configured.dag.candidates[pane_id].local_cost, 0.0);
+        assert_eq!(
+            configured.dag.candidates[tumbling_window_id].local_cost,
+            0.0
+        );
 
         // Deadline cancellation merely omits advisory priorities; no inventory
         // or feasibility fact is changed by incomplete heuristic work.

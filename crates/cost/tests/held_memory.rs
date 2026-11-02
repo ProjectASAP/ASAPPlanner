@@ -4,7 +4,9 @@
 
 use asap_cost::execution_demand::evaluation_rate;
 use asap_cost::ResourceUnitCost;
-use asap_cost::{kept_pane_chains, node_map, plan_cost, CostInputs, CostModel, PlanCost};
+use asap_cost::{
+    kept_tumbling_window_chains, node_map, plan_cost, CostInputs, CostModel, PlanCost,
+};
 use asap_logical_asap_optimization::test_support::lower_promql;
 use asap_physical_asap_optimization::optimize_physical_asap;
 use asap_types::ir::physical_export::PhysicalASAPDAG;
@@ -54,7 +56,7 @@ fn cost(dag: &PhysicalASAPDAG, cost_per_memory_byte_second: f64) -> PlanCost {
     plan_cost(
         dag,
         &nodes,
-        &kept_pane_chains(dag),
+        &kept_tumbling_window_chains(dag),
         &recurrence(),
         &[],
         &data(),

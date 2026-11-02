@@ -381,7 +381,7 @@ fn stage2_physical_asap_optimization_b_tumbling_kll_has_b1_and_b2() {
 
 /// B3 runs nothing at ingestion time; it keeps the tumbling KLLs it builds at query time.
 /// Implementer addition: kept for the readers' 5-min look-back, it is
-/// priced as building one 1-min pane per evaluation, so it reads a fifth of
+/// priced as building one 1-min tumbling window per evaluation, so it reads a fifth of
 /// B2's raw data and keeps a fifth of it on disk.
 #[test]
 fn stage2_physical_asap_optimization_b_b3_keeps_query_time_windows() {
@@ -435,7 +435,7 @@ fn pattern_b_under(cost_model: CostModel) -> Run {
 }
 
 /// The candidates the cost models choose between: the exact plan, the KLL
-/// rebuilt over the whole window at query time and B1 (the panes maintained at ingestion time).
+/// rebuilt over the whole window at query time and B1 (the tumbling windows maintained at ingestion time).
 struct PatternBCandidates {
     exact: String,
     whole_window_kll: String,
@@ -443,7 +443,7 @@ struct PatternBCandidates {
 }
 
 fn pattern_b_candidates(run: &Run) -> PatternBCandidates {
-    let panes = options_of(run, tumbling(), 1);
+    let tumbling_windows = options_of(run, tumbling(), 1);
     PatternBCandidates {
         exact: run
             .physical
@@ -455,7 +455,7 @@ fn pattern_b_candidates(run: &Run) -> PatternBCandidates {
         whole_window_kll: options_of(run, Some(WindowForm::None), 1)[&NotMaterialized]
             .0
             .clone(),
-        b1: panes[&MatAtIngestion].0.clone(),
+        b1: tumbling_windows[&MatAtIngestion].0.clone(),
     }
 }
 
@@ -471,13 +471,13 @@ fn cluster(memory_gb: u64, objective: ClusterObjective) -> CostModel {
 
 /// Each cost model chooses what its deployment pays for. Cost model 1
 /// (usage over time) picks the KLL rebuilt every minute: it uses memory only
-/// while it runs, and B1 pays for 5.2 GB of panes every second. Cost model 2
+/// while it runs, and B1 pays for 5.2 GB of tumbling windows every second. Cost model 2
 /// (provisioned capacity) picks the exact plan: every candidate needs one
 /// core for its evaluation, and the exact plan's peak memory (192 MB of
 /// per-series values) is the smallest, while the KLL's 1M states, each
 /// grown for its 20 samples, take 1 GB at once. Cost model 3 (own cluster,
 /// lowest latency) picks B1 when its 6.1 GB fit, since merging maintained
-/// panes takes 7 ms against 126 ms for rebuilding; in 4 GB, B1 is invalid
+/// tumbling windows takes 7 ms against 126 ms for rebuilding; in 4 GB, B1 is invalid
 /// and the KLL is fastest.
 #[test]
 fn stage3_plan_selection_b_cost_models_choose_differently() {

@@ -340,7 +340,7 @@ pub mod planning {
             })
             .collect()
     }
-    /// Pass 1, local panes for `entries`' recurrences and every Pass 2 rule
+    /// Pass 1, local tumbling windows for `entries`' recurrences and every Pass 2 rule
     /// on the seed grids (no query pruning). Rule tests read a group's
     /// candidates by `OriginOfCandidateForMemoGroup`.
     pub fn expanded_memo(
@@ -351,7 +351,7 @@ pub mod planning {
         use asap_logical_asap_optimization::test_support::{
             add_local_window_composition, try_populate_pass1,
         };
-        use asap_logical_asap_optimization::PaneWidthDomain;
+        use asap_logical_asap_optimization::TumblingWindowWidthDomain;
         let initial = asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots);
         let inventory = generate_per_computation_candidates(
             &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
@@ -361,7 +361,7 @@ pub mod planning {
         add_local_window_composition(&mut memo, entries);
         asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(
             memo,
-            PaneWidthDomain::SeedGrids,
+            TumblingWindowWidthDomain::SeedGrids,
         )
         .unwrap()
     }

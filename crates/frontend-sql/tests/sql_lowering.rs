@@ -3175,7 +3175,7 @@ fn trailing_window(node: &OperatorNode) -> Option<(std::time::Duration, &Operato
 
 // A trailing window on the table's time column is the query's lookback, the
 // same `TimeRange` a PromQL range selector lowers to, so Pass 2 can build it
-// in panes and Stage 2 at ingestion time. Other conjuncts stay on the `Scan`.
+// in tumbling windows and Stage 2 at ingestion time. Other conjuncts stay on the `Scan`.
 #[tokio::test]
 async fn trailing_window_on_the_time_column_lowers_to_a_time_range() {
     for (sql, window_ms) in [
@@ -3218,7 +3218,7 @@ async fn trailing_window_on_the_time_column_lowers_to_a_time_range() {
 // predicates: an upper bound alone, a month-long (variable) interval, a
 // window under `OR`, a window on another column, two windows, and a window on
 // a table without a time index. A window next to another condition on
-// `now()` stays one too: that condition would read other rows in a pane or
+// `now()` stays one too: that condition would read other rows in a tumbling window or
 // at ingestion time.
 #[tokio::test]
 async fn other_time_conditions_stay_scan_predicates() {

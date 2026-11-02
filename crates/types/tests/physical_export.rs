@@ -423,7 +423,7 @@ fn exports_summary_over_summary_as_typed_precompute_edges() {
     assert_eq!(dependency.grouping(), GroupingEdgeCompatibility::Identical);
     assert_eq!(
         dependency.window(),
-        WindowEdgeCompatibility::RequiresAlignedPanePhaseOrExactWindowEdgeResidual
+        WindowEdgeCompatibility::RequiresAlignedTumblingWindowPhaseOrExactWindowEdgeResidual
     );
     assert!(matches!(
         dependency.intermediate_schema().fields[0].dtype,

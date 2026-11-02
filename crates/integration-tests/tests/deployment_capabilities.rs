@@ -130,13 +130,13 @@ fn pattern_b_with_p50() -> asap_types::workload::PlanningWorkload {
     workload
 }
 
-/// One explicitly shared KLL pane chain, passed through normal physical rules.
-fn shared_pane_configurations(deployment: &DeploymentCapabilities) -> Run {
+/// One explicitly shared KLL tumbling-window chain, passed through normal physical rules.
+fn shared_tumbling_window_configurations(deployment: &DeploymentCapabilities) -> Run {
     use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
     use asap_logical_asap_optimization::test_support::{
-        pane_candidates, window_composition_pass2_candidates,
+        tumbling_window_candidates, window_composition_pass2_candidates,
     };
     use asap_types::ir::QueryRoot;
     use asap_types::stages::HowToComputeAggregateMeasure;
@@ -176,9 +176,9 @@ fn shared_pane_configurations(deployment: &DeploymentCapabilities) -> Run {
     .into_iter()
     .map(|(_, node)| QueryRoot::Operator(node))
     .collect::<Vec<_>>();
-    let panes = pane_candidates(&shared, &[Some(60_000), Some(60_000)]);
-    assert_eq!(panes.len(), 1, "both estimators share one build");
-    let pane_roots = window_composition_pass2_candidates(&shared, &panes)
+    let tumbling_windows = tumbling_window_candidates(&shared, &[Some(60_000), Some(60_000)]);
+    assert_eq!(tumbling_windows.len(), 1, "both estimators share one build");
+    let tumbling_window_roots = window_composition_pass2_candidates(&shared, &tumbling_windows)
         .unwrap()
         .remove(0)
         .roots
@@ -187,7 +187,7 @@ fn shared_pane_configurations(deployment: &DeploymentCapabilities) -> Run {
     run_explicit_candidates(
         &workload,
         original,
-        vec![pane_roots],
+        vec![tumbling_window_roots],
         asap_planner::PlanningModels::builtin()
             .with_cost_inputs(&settings)
             .with_deployment_capabilities(deployment),
@@ -197,7 +197,7 @@ fn shared_pane_configurations(deployment: &DeploymentCapabilities) -> Run {
 /// Physical candidate ids with their cost per second.
 type CandidateCosts = Vec<(String, f64)>;
 
-/// The per-second cost of every physical candidate whose pane chain both
+/// The per-second cost of every physical candidate whose tumbling-window chain both
 /// panels read is materialized at query time: shared within one evaluation
 /// (`MatAtQuery`), and kept across evaluations
 /// (`MatAtQueryKeptAcrossEvaluations`, which Stage 3 prices as such).
@@ -232,7 +232,7 @@ fn shared_chain_costs(run: &Run) -> (CandidateCosts, CandidateCosts) {
 /// With query-time results retained, a chain two panels read is offered
 /// both ways: shared within one evaluation (rebuilt from the 5-min window
 /// every minute, then reused by both panels) and kept across evaluations
-/// (B3: one new pane per evaluation, the 4 older panes held in memory
+/// (B3: one new tumbling window per evaluation, the 4 older tumbling windows held in memory
 /// between evaluations). Holding 1M per-series KLLs between evaluations
 /// costs far more than rebuilding them, so the shared option is cheaper
 /// and the kept one is not selected. Without query-time retention, the
@@ -243,7 +243,7 @@ fn query_time_results_retained_still_offers_the_chain_shared_within_one_evaluati
         query_time_results_retained: true,
         ..DeploymentCapabilities::default()
     };
-    let run = shared_pane_configurations(&keeping);
+    let run = shared_tumbling_window_configurations(&keeping);
     let (within_one, kept) = shared_chain_costs(&run);
     assert!(!within_one.is_empty(), "no shared option: kept {kept:?}");
     assert!(!kept.is_empty(), "no kept option: shared {within_one:?}");
@@ -264,7 +264,7 @@ fn query_time_results_retained_still_offers_the_chain_shared_within_one_evaluati
     );
     assert_selects_cheapest_valid(&run);
 
-    let (_, kept) = shared_chain_costs(&shared_pane_configurations(
+    let (_, kept) = shared_chain_costs(&shared_tumbling_window_configurations(
         &DeploymentCapabilities::default(),
     ));
     assert!(kept.is_empty(), "{kept:?}");

@@ -8,7 +8,7 @@
 //! `MatAtQueryKeptAcrossEvaluations(medium)`.
 //! [`MaterializationAssignment`] records that option per sub-DAG, named by
 //! the node whose output would be stored (any node: a summary state, a
-//! population, or e.g. the tumbling-window panes of #509 Example 4), and
+//! population, or e.g. the tumbling windows of #509 Example 4), and
 //! [`apply_materialization_timings`] expands it into a timing on every node:
 //!
 //! - `SummaryEstimate` and `EvaluatePopulation` run at query time;
@@ -1218,10 +1218,10 @@ mod tests {
     /// can only run at query time cannot be stored at ingestion time.
     #[test]
     fn any_node_may_be_materialized() {
-        let panes = max(scan());
-        let root = max(Rc::clone(&panes));
+        let tumbling_windows = max(scan());
+        let root = max(Rc::clone(&tumbling_windows));
         let mut assignment = MaterializationAssignment::default();
-        assignment.set(&panes, AT_INGESTION);
+        assignment.set(&tumbling_windows, AT_INGESTION);
         let timed =
             apply_materialization_timings(&root, &assignment, &mut NodeToTimedNodeCache::new())
                 .unwrap();

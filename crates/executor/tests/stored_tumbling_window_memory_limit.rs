@@ -1,4 +1,4 @@
-//! Stored panes are immutable states the store holds and shares: a query
+//! Stored tumbling windows are immutable states the store holds and shares: a query
 //! that reads them is not charged for those states again, only for what it
 //! allocates. A merge over them still charges the states it creates.
 use asap_executor::arrow::array::{DictionaryArray, UInt32Array};
@@ -15,18 +15,18 @@ use futures::{executor::block_on, StreamExt};
 use std::sync::Arc;
 
 const SERIES: u32 = 1_000;
-const PANES: usize = 12;
+const TUMBLING_WINDOWS: usize = 12;
 /// Samples per state: past 1,024 a k = 200 KLL holds its whole item buffer.
 const SAMPLES: u32 = 1_100;
 
-/// One pane of `SERIES` KLL states (k = 200, about 11 kB charged each, so
-/// about 11 MB per pane), keyed by series.
-fn pane() -> (Arc<Schema>, Batch) {
-    pane_of(SERIES)
+/// One tumbling window of `SERIES` KLL states (k = 200, about 11 kB charged each, so
+/// about 11 MB per tumbling window), keyed by series.
+fn tumbling_window() -> (Arc<Schema>, Batch) {
+    tumbling_window_of(SERIES)
 }
 
-/// One pane of `series` KLL states (k = 200), keyed by series.
-fn pane_of(series_count: u32) -> (Arc<Schema>, Batch) {
+/// One tumbling window of `series` KLL states (k = 200), keyed by series.
+fn tumbling_window_of(series_count: u32) -> (Arc<Schema>, Batch) {
     let family = FieldDataType::Sketch(
         SketchKind::new(
             SketchAlgorithm::Kll,
@@ -83,14 +83,14 @@ fn pane_of(series_count: u32) -> (Arc<Schema>, Batch) {
     (schema, batch)
 }
 
-/// Merges `PANES` copies of one stored pane per series under `max_bytes`.
-fn merge_stored_panes(max_bytes: usize) -> Result<usize, Error> {
-    let (schema, pane) = pane();
+/// Merges `TUMBLING WINDOWS` copies of one stored tumbling window per series under `max_bytes`.
+fn merge_stored_tumbling_windows(max_bytes: usize) -> Result<usize, Error> {
+    let (schema, tumbling_window) = tumbling_window();
     let mut dag = PhysicalDAG::default();
     dag.add(
         0,
         vec![],
-        Operator::source(schema.clone(), vec![pane; PANES]).unwrap(),
+        Operator::source(schema.clone(), vec![tumbling_window; TUMBLING_WINDOWS]).unwrap(),
     )
     .unwrap();
     dag.add(
@@ -119,36 +119,39 @@ fn merge_stored_panes(max_bytes: usize) -> Result<usize, Error> {
     })
 }
 
-// Twelve stored panes hold about 130 MB of states, which charging them per
+// Twelve stored tumbling windows hold about 130 MB of states, which charging them per
 // read would put far past a 32 MiB limit. The merge allocates one state per
 // series (about 11 MB), so it fits.
 #[test]
-fn reading_stored_panes_does_not_charge_their_states() {
-    assert_eq!(merge_stored_panes(32 << 20).unwrap(), SERIES as usize);
+fn reading_stored_tumbling_windows_does_not_charge_their_states() {
+    assert_eq!(
+        merge_stored_tumbling_windows(32 << 20).unwrap(),
+        SERIES as usize
+    );
 }
 
 // The merged states themselves (about 11 MB) do not fit in 4 MiB.
 #[test]
 fn a_merge_that_allocates_past_the_limit_still_fails() {
     assert!(matches!(
-        merge_stored_panes(4 << 20),
+        merge_stored_tumbling_windows(4 << 20),
         Err(Error::MemoryLimit)
     ));
 }
 
-// A Limit keeping 49% of a stored pane of 2,000 KLLs (about 21 MB of
+// A Limit keeping 49% of a stored tumbling window of 2,000 KLLs (about 21 MB of
 // states) compacts its state column, and the compacted column shares the
 // stored sketches by pointer: under an 8 MiB limit it is charged for the
 // pointers, not the sketches. Keeping 51% (no compaction) fits too.
 #[test]
-fn compacting_a_stored_pane_does_not_charge_its_shared_sketches() {
+fn compacting_a_stored_tumbling_window_does_not_charge_its_shared_sketches() {
     for kept in [980, 1_020] {
-        let (schema, pane) = pane_of(2_000);
+        let (schema, tumbling_window) = tumbling_window_of(2_000);
         let mut dag = PhysicalDAG::default();
         dag.add(
             0,
             vec![],
-            Operator::source(schema.clone(), vec![pane]).unwrap(),
+            Operator::source(schema.clone(), vec![tumbling_window]).unwrap(),
         )
         .unwrap();
         dag.add(
@@ -179,14 +182,14 @@ fn compacting_a_stored_pane_does_not_charge_its_shared_sketches() {
     }
 }
 
-// topk over several panes: a Sort concatenates two stored panes of 1,000
+// topk over several tumbling windows: a Sort concatenates two stored tumbling windows of 1,000
 // KLLs (about 21 MB of states), then a Limit keeps 49% and compacts the
 // concatenated column. Both derivations share the stored sketches by
 // pointer, so the run fits in 8 MiB.
 #[test]
-fn sorting_then_limiting_stored_panes_does_not_charge_their_sketches() {
-    let (schema, first) = pane_of(SERIES);
-    let (_, second) = pane_of(SERIES);
+fn sorting_then_limiting_stored_tumbling_windows_does_not_charge_their_sketches() {
+    let (schema, first) = tumbling_window_of(SERIES);
+    let (_, second) = tumbling_window_of(SERIES);
     let mut dag = PhysicalDAG::default();
     dag.add(
         0,
@@ -228,17 +231,17 @@ fn sorting_then_limiting_stored_panes_does_not_charge_their_sketches() {
     assert_eq!(rows.unwrap(), 980);
 }
 
-// A merge over one stored pane of 2,000 KLLs (about 21 MB of states), one
+// A merge over one stored tumbling window of 2,000 KLLs (about 21 MB of states), one
 // state per series: every state passes through unchanged, shared by
 // pointer, so the merge fits in 8 MiB.
 #[test]
 fn a_merge_passing_stored_states_through_does_not_charge_them() {
-    let (schema, pane) = pane_of(2_000);
+    let (schema, tumbling_window) = tumbling_window_of(2_000);
     let mut dag = PhysicalDAG::default();
     dag.add(
         0,
         vec![],
-        Operator::source(schema.clone(), vec![pane]).unwrap(),
+        Operator::source(schema.clone(), vec![tumbling_window]).unwrap(),
     )
     .unwrap();
     dag.add(
@@ -268,12 +271,12 @@ fn a_merge_passing_stored_states_through_does_not_charge_them() {
     assert_eq!(rows.unwrap(), 2_000);
 }
 
-/// A deployment's own data store (not `InMemoryDataStore`): returns `PANES`
-/// copies of one stored pane for every materialized view read.
-struct StoredPanes {
-    pane: Batch,
+/// A deployment's own data store (not `InMemoryDataStore`): returns `TUMBLING WINDOWS`
+/// copies of one stored tumbling window for every materialized view read.
+struct StoredTumblingWindows {
+    tumbling_window: Batch,
 }
-impl asap_executor::sources::DataStore for StoredPanes {
+impl asap_executor::sources::DataStore for StoredTumblingWindows {
     fn read_raw_data(
         &self,
         source: &asap_executor::planner::ir::operator::Source,
@@ -288,14 +291,17 @@ impl asap_executor::sources::DataStore for StoredPanes {
         _: &asap_executor::sources::MaterializedViewRequest,
         _: RunContext,
     ) -> Result<asap_executor::runtime::OutputStream<'_, Batch>, Error> {
-        Ok(futures::stream::iter(vec![Ok(self.pane.clone()); PANES]).boxed_local())
+        Ok(
+            futures::stream::iter(vec![Ok(self.tumbling_window.clone()); TUMBLING_WINDOWS])
+                .boxed_local(),
+        )
     }
 }
 
-/// `SummaryMerge` (node 1) over the materialized view of a pane (node 0):
-/// the pane's KLLs per series, built over a minute of raw samples of
+/// `SummaryMerge` (node 1) over the materialized view of a tumbling window (node 0):
+/// the tumbling window's KLLs per series, built over a minute of raw samples of
 /// `latency` (`Scan` node 2, `TimeRange` node 3).
-fn merge_over_a_stored_pane(
+fn merge_over_a_stored_tumbling_window(
     schema: &Schema,
 ) -> asap_executor::planner::ir::physical_export::PhysicalASAPDAG {
     use asap_executor::planner::ir::operator::{GroupKeys, Reduction, Source};
@@ -395,18 +401,18 @@ fn merge_over_a_stored_pane(
 }
 
 // A materialized view slot's states are the store's whatever store returns them: the
-// merge over twelve stored panes from a deployment's own store fits the
+// merge over twelve stored tumbling windows from a deployment's own store fits the
 // 32 MiB limit, as it does over `Operator::source`.
 #[test]
 fn a_materialized_view_providers_states_are_not_charged_to_the_run() {
     use asap_executor::physical_planner::{compile, test_support::views_at};
-    let (schema, pane) = pane();
-    let mut dag = merge_over_a_stored_pane(&schema);
+    let (schema, tumbling_window) = tumbling_window();
+    let mut dag = merge_over_a_stored_tumbling_window(&schema);
     let views = views_at(&mut dag, &[0]).unwrap();
     let compiled = compile(&dag, &views, &[1]).unwrap();
     assert_eq!(compiled.operator_name(0), Some("MaterializedView"));
     let dag = compiled
-        .instantiate(Arc::new(StoredPanes { pane }))
+        .instantiate(Arc::new(StoredTumblingWindows { tumbling_window }))
         .unwrap();
     let context = RunContext::new(
         Scope::Query {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run or summarize frozen-binary pane-search benchmarks without rebuilding.
+"""Run or summarize frozen-binary tumbling-window-search benchmarks without rebuilding.
 
 Linux /usr/bin/time measures whole-process peak RSS. Search counters describe
 reported domains and must not be confused with a complete-catalog optimum.
@@ -61,12 +61,12 @@ def inputs(entry, budget):
 
 
 def domain_certificate_valid(report):
-    pending = report.get("pane_widths_pending") is True
+    pending = report.get("tumbling_window_widths_pending") is True
     if pending and (report.get("lower_bound") is not None or report.get("relative_gap") is not None
                     or any(report.get(key) is True for key in
                            ("full_catalog_completed", "catalog_exhausted", "evaluation_complete"))):
         return False
-    incomplete = pending or ("pane_widths_pending" in report and not report.get("full_catalog_completed"))
+    incomplete = pending or ("tumbling_window_widths_pending" in report and not report.get("full_catalog_completed"))
     return not (incomplete and report.get("status") == "optimal")
 
 
@@ -180,7 +180,7 @@ def compare(args):
     old = {r["workload"]: r for r in before["results"]}
     if set(old) != {r["workload"] for r in after["results"]}:
         raise ValueError("Comparison requires the same completed workload set")
-    lines = ["# Pane-search benchmark comparison", "",
+    lines = ["# Tumbling-window-search benchmark comparison", "",
              f"Before binary: `{before['binary_sha256']}`. After binary: `{after['binary_sha256']}`.", "",
              "Single-run measurements; execution cost and accuracy are planner-model results, not measured stream execution.", "",
              "| Workload | Metric | Before | After | Change |", "|---|---|---:|---:|---:|"]
@@ -231,7 +231,7 @@ def compare(args):
                     b = None
             change = f"{(b / a - 1) * 100:+.2f}%" if type(a) in (int, float) and a != 0 and type(b) in (int, float) else "—"
             lines.append(f"| {row['workload']} | {key} | {a if a is not None else 'unreported'} | {b if b is not None else 'unreported'} | {change} |")
-        domain_keys = ("status", "pane_width_rounds", "inventory_pane_width_domain", "pane_widths_pending", "full_catalog_completed", "catalog_exhausted", "evaluation_complete")
+        domain_keys = ("status", "tumbling_window_width_rounds", "inventory_tumbling_window_width_domain", "tumbling_window_widths_pending", "full_catalog_completed", "catalog_exhausted", "evaluation_complete")
         for key in (() if args.quality_only else domain_keys):
             lines.append(f"| {row['workload']} | {key} | {previous['search'].get(key, 'unreported')} | {row['search'].get(key, 'unreported')} | — |")
     if not args.quality_only:

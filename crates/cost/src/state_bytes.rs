@@ -274,7 +274,7 @@ mod tests {
 
     /// An exact accumulator's state is priced at the executor's per-group
     /// state, 56 bytes for every kind (a counter's state alone is 48), so a
-    /// pane chain of exact sums keeps 56 bytes per pane and group.
+    /// tumbling-window chain of exact sums keeps 56 bytes per tumbling window and group.
     #[test]
     fn exact_state_is_priced_at_the_executors_state_size() {
         use asap_types::ir::schema::{ExactKind, ExactParams};
@@ -320,7 +320,7 @@ mod tests {
             )
             .1
         };
-        // Ten Pareto(2) samples (scale 1), one 1 s pane of a 10 Hz series.
+        // Ten Pareto(2) samples (scale 1), one 1 s tumbling window of a 10 Hz series.
         let pareto: Vec<f64> = (0..10)
             .map(|i| (1.0 - (f64::from(i) + 0.5) / 10.0).powf(-0.5))
             .collect();
@@ -472,7 +472,7 @@ mod tests {
     /// samples it sees, not its full capacity: its fixed struct and level
     /// array, plus the item array the library starts empty and doubles from
     /// 16 items as samples arrive, up to `compute_max_capacity(k, 8)`. E.g.
-    /// a 10 s pane of a series sampled every 15 s sees one sample: 744 + 128
+    /// a 10 s tumbling window of a series sampled every 15 s sees one sample: 744 + 128
     /// = 872 bytes, where the full capacity at `k` = 269 is 1,206 items.
     #[test]
     fn kll_state_bytes_grow_with_the_samples_it_sees() {

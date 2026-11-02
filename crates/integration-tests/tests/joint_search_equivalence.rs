@@ -136,7 +136,7 @@ fn run_workload(
     run
 }
 
-// Bounded runs can stop at different progressive pane-width domains. Compare
+// Bounded runs can stop at different progressive tumbling-window-width domains. Compare
 // validated output semantics here, not inventory sizes from different catalogs.
 // Fixed-catalog terminal/producer scaling is tested in candidates::scopes.
 #[test]

@@ -25,14 +25,14 @@ fn pipeline() -> Run {
 }
 
 // Explicit rule fixtures: vary Q2's three documented algorithms while Q1
-// stays exact, and exercise source sharing and ten-second panes. This is not
+// stays exact, and exercise source sharing and ten-second tumbling windows. This is not
 // a production workload search or an exhaustive memo archive.
 fn rule_fixture(workload: &asap_types::workload::PlanningWorkload) -> Run {
     use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
     use asap_logical_asap_optimization::test_support::{
-        pane_candidates, window_composition_pass2_candidates,
+        tumbling_window_candidates, window_composition_pass2_candidates,
     };
     use asap_types::stages::HowToComputeAggregateMeasure;
     let roots = lower_promql(workload);
@@ -65,9 +65,9 @@ fn rule_fixture(workload: &asap_types::workload::PlanningWorkload) -> Run {
         }
         let whole = unshare(&compose_logical_candidate(&local, &choice).unwrap());
         let mut windows = vec![whole.clone()];
-        let panes = pane_candidates(&whole, &[Some(10_000), Some(10_000)]);
+        let tumbling_windows = tumbling_window_candidates(&whole, &[Some(10_000), Some(10_000)]);
         windows.extend(
-            window_composition_pass2_candidates(&whole, &panes)
+            window_composition_pass2_candidates(&whole, &tumbling_windows)
                 .unwrap()
                 .into_iter()
                 .map(|candidate| candidate.roots.unwrap()),
@@ -151,7 +151,7 @@ fn sketch_options(dag: &impl ExportedDag, nodes: &HashSet<NodeId>) -> BTreeSet<Q
 }
 
 /// Whether every summary of `dag` is built over its whole window: no
-/// tumbling panes (Pass 2's window-composition rule).
+/// tumbling windows (Pass 2's window-composition rule).
 fn whole_windows(dag: &impl ExportedDag) -> bool {
     dag.node_ids().into_iter().all(|id| {
         !matches!(
@@ -178,7 +178,7 @@ fn classify(dag: &impl ExportedDag, query_roots: &[NodeId]) -> (Q2Option, bool) 
 
 /// The candidate with Q2 `option` whose queries share no node and whose
 /// summaries are built over whole windows (Pass 2 adds shared-input and
-/// tumbling-pane variants of each).
+/// tumbling-window variants of each).
 fn physical_with(run: &Run, option: Q2Option) -> &Physical {
     let mut found = run
         .physical
@@ -258,7 +258,7 @@ fn stage0_query_language_frontends_queries_do_not_share_nodes() {
 
 /// Pass 1 gives 1 × 3 = 3 candidates without a shared input: Q2's top-k is
 /// exact, Count-Min + heap or CountSketch + heap. (Pass 2 adds shared-input
-/// and tumbling-pane variants of each.)
+/// and tumbling-window variants of each.)
 #[test]
 fn stage1_logical_asap_optimization_has_three_pass1_candidates() {
     let run = pipeline();
@@ -276,7 +276,7 @@ fn stage1_logical_asap_optimization_has_three_pass1_candidates() {
 }
 
 /// Q1 is exact in every candidate: no sketch build or estimate is reachable
-/// from its root (its rate may be merged from exact tumbling panes).
+/// from its root (its rate may be merged from exact tumbling windows).
 #[test]
 fn stage1_logical_asap_optimization_q1_is_always_exact() {
     let run = pipeline();
@@ -367,11 +367,11 @@ fn stage1_logical_asap_optimization_keeps_independent_and_shared_variants() {
 }
 
 /// Pass 2's window-composition rule builds Q1's rate and Q2's option in six
-/// 10-s tumbling panes (the gcd of the 1-min window and the 10-s interval),
+/// 10-s tumbling windows (the gcd of the 1-min window and the 10-s interval),
 /// each alone and both together, next to the whole-window candidates: 27
 /// candidates in all.
 #[test]
-fn stage1_logical_asap_optimization_window_composition_adds_10s_tumbling_panes() {
+fn stage1_logical_asap_optimization_window_composition_adds_10s_tumbling_windows() {
     let run = pipeline();
     let mut chains = BTreeSet::new();
     for c in &run.logical {
@@ -438,7 +438,7 @@ fn stage1_logical_asap_optimization_candidates_are_valid_and_uniquely_named() {
 
 /// No candidate is discarded before plan selection: each logical candidate
 /// keeps one physical candidate with nothing materialized, 3 of them
-/// without a shared input or tumbling panes.
+/// without a shared input or tumbling windows.
 #[test]
 fn stage2_physical_asap_optimization_keeps_every_logical_candidate() {
     let run = pipeline();
@@ -450,7 +450,7 @@ fn stage2_physical_asap_optimization_keeps_every_logical_candidate() {
 }
 
 /// Each physical candidate keeps its logical Q2 option, and one with
-/// nothing materialized keeps its input sharing. Maintaining Q2's panes at
+/// nothing materialized keeps its input sharing. Maintaining Q2's tumbling windows at
 /// ingestion time splits a scan Q1 reads at query time, one copy per phase.
 #[test]
 fn stage2_physical_asap_optimization_preserves_logical_choices() {
@@ -556,11 +556,11 @@ fn stage2_physical_asap_optimization_summary_topk_is_build_then_estimate() {
     }
 }
 
-/// Only tumbling panes can be maintained at ingestion time: the
+/// Only tumbling windows can be maintained at ingestion time: the
 /// whole-window builds' fixed interval has no phase, and no summary is read
-/// by both queries. Q1's rate panes are counter states, which need each
+/// by both queries. Q1's rate tumbling windows are counter states, which need each
 /// series' samples in time order; continuously ingesting PromQL data is
-/// taken to arrive in that order, so they are maintained too. Each pane
+/// taken to arrive in that order, so they are maintained too. Each tumbling window
 /// chain is maintained or not independently: a logical candidate with `c`
 /// chains has `2^c` physical candidates. A shared input (the highest node
 /// both queries read: the scan, or the time range above it) is also built
@@ -568,7 +568,7 @@ fn stage2_physical_asap_optimization_summary_topk_is_build_then_estimate() {
 /// with every chain at query time, since a chain maintained at ingestion
 /// time leaves one query reading the input at query time.
 #[test]
-fn stage2_physical_asap_optimization_materializes_only_panes_at_ingestion() {
+fn stage2_physical_asap_optimization_materializes_only_tumbling_windows_at_ingestion() {
     let run = pipeline();
     let mut counter_maintained = 0;
     let mut shared_once = 0;
@@ -580,7 +580,7 @@ fn stage2_physical_asap_optimization_materializes_only_panes_at_ingestion() {
                     let Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { family, .. }) =
                         p.dag().payload(n.id)
                     else {
-                        panic!("{}: {:?} is not a pane chain", p.id, n.id)
+                        panic!("{}: {:?} is not a tumbling-window chain", p.id, n.id)
                     };
                     if matches!(
                         family,
@@ -616,7 +616,10 @@ fn stage2_physical_asap_optimization_materializes_only_panes_at_ingestion() {
             }
         }
     }
-    assert!(counter_maintained > 0, "Q1's rate panes are maintained");
+    assert!(
+        counter_maintained > 0,
+        "Q1's rate tumbling windows are maintained"
+    );
     assert!(
         shared_once > 0,
         "explicit shared-source fixtures are materialized"
@@ -780,12 +783,12 @@ fn stage3_plan_selection_shared_input_ties_up_to_rounding_unless_built_once() {
     );
 }
 
-/// Tumbling panes rebuilt at every evaluation cost more than the whole
-/// window: the panes read the same rows and update the same states, and
-/// merging them adds work. Heap panes are invalid like their whole-window
+/// Tumbling windows rebuilt at every evaluation cost more than the whole
+/// window: the tumbling windows read the same rows and update the same states, and
+/// merging them adds work. Heap tumbling windows are invalid like their whole-window
 /// builds (and their merged top-k is only approximate).
 #[test]
-fn stage3_plan_selection_tumbling_panes_at_query_time_cost_more() {
+fn stage3_plan_selection_tumbling_windows_at_query_time_cost_more() {
     let run = pipeline();
     let selected = run.cost(&run.selection.selected).unwrap();
     let invalid = run.invalid();

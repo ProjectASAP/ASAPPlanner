@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::ir::operator::operator_properties::{BinaryOpKind, JoinKind, Reduction, Source};
-use asap_types::ir::operator::pane_chain::{merged_chain, merged_window_build};
+use asap_types::ir::operator::tumbling_window_chain::{merged_chain, merged_window_build};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::guarantee::{
     AccuracyGuarantee, AccuracyMetric, BoundExpr, CompositionOperator, GuaranteeSource,
@@ -406,7 +406,7 @@ pub fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
     if let Some(guarantee) = rolled_up_guarantee(node) {
         return guarantee;
     }
-    if let Some(guarantee) = merged_panes_guarantee(node) {
+    if let Some(guarantee) = merged_tumbling_windows_guarantee(node) {
         return guarantee;
     }
     let exact = |node: &OperatorNode| {
@@ -610,14 +610,14 @@ fn rolled_up_guarantee(node: &OperatorNode) -> Option<Option<AccuracyGuarantee>>
 }
 
 /// The guarantee of an estimate or finalized value read from merged
-/// tumbling panes ([`merged_chain`]): the guarantee of the same read of one
-/// build over the merged panes' window ([`merged_window_build`]: the whole
-/// chain's, or its newest panes') when the
+/// tumbling windows ([`merged_chain`]): the guarantee of the same read of one
+/// build over the merged tumbling windows' window ([`merged_window_build`]: the whole
+/// chain's, or its newest tumbling windows') when the
 /// family's merged error for that read is exact or the same as that build's
 /// (the family-capability table); none when it is approximate (evidence
 /// only, for plan selection to judge) or the family has no merge. `None` for
-/// any node that does not read merged panes.
-fn merged_panes_guarantee(node: &OperatorNode) -> Option<Option<AccuracyGuarantee>> {
+/// any node that does not read merged tumbling windows.
+fn merged_tumbling_windows_guarantee(node: &OperatorNode) -> Option<Option<AccuracyGuarantee>> {
     let (state, merged) = match node.asap()? {
         ASAPOp::SummaryEstimate {
             summary_input,
@@ -647,7 +647,7 @@ fn merged_panes_guarantee(node: &OperatorNode) -> Option<Option<AccuracyGuarante
     let Ok(mut window_build) = merged_window_build(state) else {
         return Some(None);
     };
-    // The merged panes' window range over the chain's input carries the
+    // The merged tumbling windows' window range over the chain's input carries the
     // guarantee composed over that input.
     let ASAPOp::SummaryTumblingWindowChain { child: input, .. } = chain.asap()? else {
         return Some(None);
@@ -750,7 +750,7 @@ pub(crate) fn fold_stats(
 /// heap estimate whose update weights carry the
 /// [`WeightDomain::RawDataSamplesOfMetric`] requirement keep it, and so does a
 /// quantile estimate of those values, built over the raw window or merged
-/// from its tumbling panes: it is one of them, or between two of them, so it
+/// from its tumbling windows: it is one of them, or between two of them, so it
 /// shares their sign. Anything else (rate, arithmetic, other
 /// functions) ends it. Only the sign of the values is read from it.
 pub(crate) fn estimates_raw_data_samples_of(node: &OperatorNode) -> Option<String> {
@@ -771,9 +771,9 @@ pub(crate) fn estimates_raw_data_samples_of(node: &OperatorNode) -> Option<Strin
             _ => None,
         },
         // Only a φ in [0, 1] picks one of the values; outside it the answer
-        // is -Inf or +Inf, whatever their sign. Merged tumbling panes of one
+        // is -Inf or +Inf, whatever their sign. Merged tumbling windows of one
         // definition ([`merged_chain`]) are read through their `SummaryTumblingWindowChain`:
-        // a quantile of the merged state is still one of the panes'
+        // a quantile of the merged state is still one of the tumbling windows'
         // samples, or between two of them.
         Operator::ASAP(ASAPOp::SummaryEstimate {
             summary_input,

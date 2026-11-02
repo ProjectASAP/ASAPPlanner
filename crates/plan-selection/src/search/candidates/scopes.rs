@@ -366,7 +366,7 @@ mod tests {
     }
 
     // Fix the producer catalog independently of planning budgets and progressive
-    // pane domains. Root-only readers need one optional binding per output;
+    // tumbling-window domains. Root-only readers need one optional binding per output;
     // producers stay constant and producer connections grow exactly linearly.
     // Output-to-copy assignment choices are intentionally N*N, not claimed linear.
     #[test]

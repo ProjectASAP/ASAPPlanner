@@ -121,15 +121,15 @@ fn latency_where(pred: ScalarExpr) -> Rc<OperatorNode> {
     kll(filter(table(), pred), "latency")
 }
 
-/// Tumbling pane: `TimeRange(1m)` over `TimeShift(shift)` over `m`.
-fn pane(shift_ms: i64, predicates: Vec<Predicate>) -> Rc<OperatorNode> {
-    kll(pane_rows(shift_ms, predicates), "value")
+/// Tumbling window: `TimeRange(1m)` over `TimeShift(shift)` over `m`.
+fn tumbling_window(shift_ms: i64, predicates: Vec<Predicate>) -> Rc<OperatorNode> {
+    kll(tumbling_window_rows(shift_ms, predicates), "value")
 }
 
-/// Exact counter-increase pane over the same rows as [`pane`].
-fn increase_pane(shift_ms: i64, predicates: Vec<Predicate>) -> Rc<OperatorNode> {
+/// Exact counter-increase tumbling window over the same rows as [`tumbling window`].
+fn increase_tumbling_window(shift_ms: i64, predicates: Vec<Predicate>) -> Rc<OperatorNode> {
     summary(
-        pane_rows(shift_ms, predicates),
+        tumbling_window_rows(shift_ms, predicates),
         "value",
         FieldDataType::ExactAggregate(ExactKind::Increase, ExactParams::Increase),
     )
@@ -155,7 +155,7 @@ fn window(shift_ms: i64, width_ms: u64) -> Rc<OperatorNode> {
     kll(range, "value")
 }
 
-fn pane_rows(shift_ms: i64, predicates: Vec<Predicate>) -> Rc<OperatorNode> {
+fn tumbling_window_rows(shift_ms: i64, predicates: Vec<Predicate>) -> Rc<OperatorNode> {
     let shifted = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeShift {
         shift: TimeShift {
             offset_ms: shift_ms,
@@ -303,11 +303,11 @@ fn qualified_columns_stay_distinct() {
     );
 }
 
-/// Panes take their time from `TimeRange` over `TimeShift`: adjacent panes
-/// join, a gap stays two boxes, and the same pane twice overlaps.
+/// Tumbling windows take their time from `TimeRange` over `TimeShift`: adjacent tumbling windows
+/// join, a gap stays two boxes, and the same tumbling window twice overlaps.
 #[test]
-fn time_panes_merge_and_keep_gaps() {
-    let first = pane(0, vec![]);
+fn time_tumbling_windows_merge_and_keep_gaps() {
+    let first = tumbling_window(0, vec![]);
     assert_eq!(
         first.coverage().unwrap().selection()[0].relative_time(),
         relative(-60_000, 0)
@@ -316,12 +316,12 @@ fn time_panes_merge_and_keep_gaps() {
         first.coverage().unwrap().definition().children()[0],
         first.children()[0].children()[0].children()[0]
     ));
-    let joined = merge(vec![first.clone(), pane(60_000, vec![])]).unwrap();
+    let joined = merge(vec![first.clone(), tumbling_window(60_000, vec![])]).unwrap();
     assert_eq!(
         joined.coverage().unwrap().selection(),
         vec![SelectionBox::new(Default::default(), relative(-120_000, 0))]
     );
-    let gapped = merge(vec![first.clone(), pane(120_000, vec![])]).unwrap();
+    let gapped = merge(vec![first.clone(), tumbling_window(120_000, vec![])]).unwrap();
     assert_eq!(gapped.coverage().unwrap().selection().len(), 2);
     assert_eq!(
         rejected(vec![first.clone(), first]),
@@ -331,20 +331,20 @@ fn time_panes_merge_and_keep_gaps() {
     );
 }
 
-/// Counter panes merge only when their time windows are disjoint: states
+/// Counter tumbling-window merge only when their time windows are disjoint: states
 /// disjoint by a label but over the same window would interleave in time.
 #[test]
-fn counter_panes_merge_only_disjoint_in_time() {
+fn counter_tumbling_windows_merge_only_disjoint_in_time() {
     let joined = merge(vec![
-        increase_pane(0, vec![]),
-        increase_pane(60_000, vec![]),
+        increase_tumbling_window(0, vec![]),
+        increase_tumbling_window(60_000, vec![]),
     ])
     .unwrap();
     assert_eq!(
         joined.coverage().unwrap().selection()[0].relative_time(),
         relative(-120_000, 0)
     );
-    let by_job = |job| increase_pane(0, vec![Predicate(eq(2, job))]);
+    let by_job = |job| increase_tumbling_window(0, vec![Predicate(eq(2, job))]);
     assert_eq!(
         rejected(vec![by_job("api"), by_job("web")]),
         CoverageError::InputsOverlap {
@@ -353,33 +353,35 @@ fn counter_panes_merge_only_disjoint_in_time() {
     );
 }
 
-/// A day of one-minute panes (1,440 inputs) merges into one window, in
+/// A day of one-minute tumbling windows (1,440 inputs) merges into one window, in
 /// either order: the inputs' windows are sorted and only neighbours are
-/// compared, so the check is O(n log n), not all pairs. A pane listed
+/// compared, so the check is O(n log n), not all pairs. A tumbling window listed
 /// twice still overlaps.
 #[test]
-fn a_day_of_minute_panes_merges_into_one_window() {
-    const PANES: i64 = 1_440;
-    let day = relative(-PANES * 60_000, 0);
-    let newest_first: Vec<_> = (0..PANES).map(|i| pane(i * 60_000, vec![])).collect();
+fn a_day_of_minute_tumbling_windows_merges_into_one_window() {
+    const TUMBLING_WINDOWS: i64 = 1_440;
+    let day = relative(-TUMBLING_WINDOWS * 60_000, 0);
+    let newest_first: Vec<_> = (0..TUMBLING_WINDOWS)
+        .map(|i| tumbling_window(i * 60_000, vec![]))
+        .collect();
     let oldest_first: Vec<_> = newest_first.iter().rev().cloned().collect();
-    for panes in [newest_first.clone(), oldest_first] {
-        let merged = merge(panes).unwrap();
+    for tumbling_windows in [newest_first.clone(), oldest_first] {
+        let merged = merge(tumbling_windows).unwrap();
         merged.validate_structure().unwrap();
         let coverage = merged.coverage().unwrap();
         let selection = coverage.selection();
         assert_eq!(selection.len(), 1);
         assert_eq!(selection[0].relative_time(), day);
     }
-    let counters: Vec<_> = (0..PANES)
-        .map(|i| increase_pane(i * 60_000, vec![]))
+    let counters: Vec<_> = (0..TUMBLING_WINDOWS)
+        .map(|i| increase_tumbling_window(i * 60_000, vec![]))
         .collect();
     assert_eq!(
         merge(counters).unwrap().coverage().unwrap().selection()[0].relative_time(),
         day
     );
     let mut repeated = newest_first;
-    repeated.push(pane(30 * 60_000, vec![]));
+    repeated.push(tumbling_window(30 * 60_000, vec![]));
     assert_eq!(
         rejected(repeated),
         CoverageError::InputsOverlap {
@@ -424,7 +426,7 @@ fn a_long_window_spanning_others_is_rejected() {
 /// Label matchers on the scan lift like any filter.
 #[test]
 fn scan_predicates_lift() {
-    let api = pane(0, vec![Predicate(eq(2, "api"))]);
+    let api = tumbling_window(0, vec![Predicate(eq(2, "api"))]);
     let coverage = api.coverage().unwrap();
     assert_eq!(
         coverage.selection()[0].columns()[&column("job")],
@@ -435,7 +437,7 @@ fn scan_predicates_lift() {
         scan.non_asap(),
         Some(NonASAPOp::Scan { predicates, .. }) if predicates.is_empty()
     ));
-    merge(vec![api, pane(0, vec![Predicate(eq(2, "web"))])]).unwrap();
+    merge(vec![api, tumbling_window(0, vec![Predicate(eq(2, "web"))])]).unwrap();
 }
 
 /// Value ranges are selections: `latency < 100` and `latency >= 100` are
@@ -556,12 +558,12 @@ fn merges_nest() {
 #[test]
 fn timing_does_not_block_merges() {
     let ingested = Rc::new(
-        (*pane(60_000, vec![]))
+        (*tumbling_window(60_000, vec![]))
             .clone()
             .with_timing(Some(ExecutionTiming::IngestionTime)),
     );
     let queried = Rc::new(
-        (*pane(0, vec![]))
+        (*tumbling_window(0, vec![]))
             .clone()
             .with_timing(Some(ExecutionTiming::QueryTime)),
     );
@@ -679,7 +681,7 @@ fn partly_lifted_scan_predicates_keep_only_the_rest() {
         semantics: ExprSemantics::Promql,
     };
     let job = |name: &str| {
-        pane(
+        tumbling_window(
             0,
             vec![Predicate(ScalarExpr::BoolAnd(vec![
                 eq(2, name),
@@ -803,24 +805,31 @@ fn equal_definitions_get_equal_ids() {
     let us = latency_where(eq(REGION, "us"));
     let eu = latency_where(eq(REGION, "eu"));
     assert_eq!(id(&us), id(&eu));
-    let ingested = (*pane(0, vec![]))
+    let ingested = (*tumbling_window(0, vec![]))
         .clone()
         .with_timing(Some(ExecutionTiming::IngestionTime));
-    assert_eq!(id(&ingested), id(&pane(60_000, vec![])));
+    assert_eq!(id(&ingested), id(&tumbling_window(60_000, vec![])));
     assert_eq!(id(&ingested).len(), 32);
     let size = kll(filter(table(), eq(REGION, "eu")), "size");
     assert_ne!(id(&size), id(&eu));
-    assert_ne!(id(&pane(0, vec![])), id(&increase_pane(0, vec![])));
-    assert_ne!(id(&pane(0, vec![])), id(&us));
+    assert_ne!(
+        id(&tumbling_window(0, vec![])),
+        id(&increase_tumbling_window(0, vec![]))
+    );
+    assert_ne!(id(&tumbling_window(0, vec![])), id(&us));
 }
 
-/// Six 10-minute panes at offsets 0 to 50 minutes share one definition id,
+/// Six 10-minute tumbling windows at offsets 0 to 50 minutes share one definition id,
 /// each with its own time selection `(-(i + 1) · 10m, -i · 10m]`; their
 /// merge has the same id and the hour as its selection.
 #[test]
-fn panes_of_an_hour_share_one_definition_with_distinct_times() {
-    let panes: Vec<Rc<OperatorNode>> = (0..6).map(|i| window(i * 600_000, 600_000)).collect();
-    let coverages: Vec<_> = panes.iter().map(|pane| coverage_of(pane)).collect();
+fn tumbling_windows_of_an_hour_share_one_definition_with_distinct_times() {
+    let tumbling_windows: Vec<Rc<OperatorNode>> =
+        (0..6).map(|i| window(i * 600_000, 600_000)).collect();
+    let coverages: Vec<_> = tumbling_windows
+        .iter()
+        .map(|tumbling_window| coverage_of(tumbling_window))
+        .collect();
     for (i, coverage) in coverages.iter().enumerate() {
         let i = i as i64;
         assert_eq!(definition_id(coverage), definition_id(&coverages[0]));
@@ -832,7 +841,7 @@ fn panes_of_an_hour_share_one_definition_with_distinct_times() {
             )]
         );
     }
-    let hour = coverage_of(&merge(panes).unwrap());
+    let hour = coverage_of(&merge(tumbling_windows).unwrap());
     assert_eq!(definition_id(&hour), definition_id(&coverages[0]));
     assert_eq!(
         hour.selection(),
@@ -950,7 +959,7 @@ fn a_rollup_covers_the_coarser_build() {
 /// the `job` label covers a build by `job` over the same series.
 #[test]
 fn a_rollup_of_per_series_states_covers_the_build_by_its_labels() {
-    let rows = pane_rows(0, vec![]);
+    let rows = tumbling_window_rows(0, vec![]);
     let job = rows.schema.column_id("job").unwrap();
     let per_series = grouped(rows.clone(), kll_family(), Reduction::PerEntity);
     let state_job = per_series.schema.column_id("job").unwrap();
@@ -983,7 +992,7 @@ fn invalid_rollups_fail_construction() {
         (ExactKind::IRate, ExactParams::IRate),
     ] {
         let state = grouped(
-            pane_rows(0, vec![]),
+            tumbling_window_rows(0, vec![]),
             FieldDataType::ExactAggregate(kind, params),
             Reduction::by(vec![2]),
         );

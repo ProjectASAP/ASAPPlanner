@@ -275,7 +275,7 @@ lists each stage's input and output types.
 | DAG of logical memo groups | `DagOfLogicalMemoGroups` | Stage 0's groups, before any implementation choice: the workload's logical DAG hash-consed (below). |
 | Memo candidates | `MemoCandidates` | The groups, and the candidates for each memo group (`candidates[group]`). Pass 1 creates it from the DAG of logical memo groups; the Pass 2 rules add candidates and groups. |
 | Candidate for a memo group | `CandidateForMemoGroup` | One way to implement a group over child groups. `fused_groups`: for a fused computation, the groups it absorbs beyond the group whose candidate it is; empty otherwise. `root_node`: its own nodes, down to the nodes of the groups it reads. `input_groups`: the groups it reads, whose implementations are chosen separately. `origin`: the rule that made it (`OriginOfCandidateForMemoGroup`, below). `accuracy_budget_parts`: the number of equal shares of the accuracy budget its summaries are sized for, 1 for the whole budget and `n` when it is one of `n` approximate inputs of a query. |
-| Concrete summary-state group | a `MemoGroup` whose node is a `SummaryAgg` or a `SummaryTumblingWindowChain` | One summary state at one size, or one pane chain at one layout, that several readers may share. A choice several groups depend on, such as a shared size or a pane grid, is one concrete group per value, when two or more readers may read that value, and each of them gets a candidate reading that group: of two readers needing a KLL with `k ≥ 345` and `k ≥ 200`, both may read a group `KLL(345)`, and the second may also keep its own private `KLL(200)`. Choosing a value is choosing a group, so the memo has no separate type for such a choice. The other Pass 2 rules add groups too (below). |
+| Concrete summary-state group | a `MemoGroup` whose node is a `SummaryAgg` or a `SummaryTumblingWindowChain` | One summary state at one size, or one tumbling-window chain at one layout, that several readers may share. A choice several groups depend on, such as a shared size or a tumbling-window grid, is one concrete group per value, when two or more readers may read that value, and each of them gets a candidate reading that group: of two readers needing a KLL with `k ≥ 345` and `k ≥ 200`, both may read a group `KLL(345)`, and the second may also keep its own private `KLL(200)`. Choosing a value is choosing a group, so the memo has no separate type for such a choice. The other Pass 2 rules add groups too (below). |
 
 **Stage 0: hash-consing.** Hash-consing merges structurally equal nodes into
 one. It makes no implementation choice, so this section counts it as Stage 0
@@ -305,13 +305,13 @@ They may still read one shared child group.
 made it in `OriginOfCandidateForMemoGroup`. Rules add candidates and keep the existing
 ones. A rule that shares a producer (a widened scan, a canonical
 preprocessing, a ranking, a finer aggregate, a summary readout, a summary
-state or pane chain) also adds one group for it, with one candidate of the
+state or tumbling-window chain) also adds one group for it, with one candidate of the
 rule's origin, and gives each reader a candidate that reads that group.
 
 | `OriginOfCandidateForMemoGroup` | Added by | Candidates |
 |---|---|---|
 | `Pass1` | `try_populate_pass1` (`pass2/memo/groups.rs`) | Every Pass 1 choice of the group's measures: exact, exact accumulator, each summary family and size, and fused computations. Each summary choice comes at every `accuracy_budget_parts` from 1 to the most approximate inputs a query reaching the group has. A fused candidate implements the groups it absorbs only when no other reader needs them; otherwise they stay groups of their own. |
-| `Panes` | Window composition: `add_local_window_composition` and `extend_local_window_composition` (`pass2/memo/window_candidates.rs`) | A window summary computed from tumbling panes, at each pane width the reader's evaluation grid allows. The pane chain stays private to the candidate. |
+| `TumblingWindows` | Window composition: `add_local_window_composition` and `extend_local_window_composition` (`pass2/memo/window_candidates.rs`) | A window summary computed from tumbling windows, at each tumbling-window width the reader's evaluation grid allows. The tumbling-window chain stays private to the candidate. |
 | `WidenedScans` | Scan widening: `add_scan_label_candidates` (`pass2/memo/rules/scan_labels.rs`) | A reader of a metric's scans widened to a shared label set, read through a `Project`. |
 | `SummaryInput` | `factor_summary_inputs` (`pass2/memo/rules/summary_inputs.rs`) | Canonical value preprocessing feeding a summary build. |
 | `TopKReuse` | Exact top-k reuse: `add_topk_candidates` (`pass2/memo/rules/topk.rs`) | One ranking (`Limit(k_max)` over `Sort`), and each top-k reading its first `k` rows from it. |
@@ -321,7 +321,7 @@ rule's origin, and gives each reader a candidate that reads that group.
 
 The state-configuration rule (`pass2/memo/rules/shared_configuration_readers.rs`) runs just
 before the shared builds are found. It rewrites readers to each shared size
-and to the newest panes of each pane chain layout they may read, so that
+and to the newest tumbling windows of each tumbling-window chain layout they may read, so that
 equal builds appear, and a rewrite keeps the origin of the candidate it
 rewrites.
 
@@ -332,7 +332,7 @@ instead of whole candidates:
 |---|---|
 | 0 | Hash-conses the frontends' roots into groups (`DagOfLogicalMemoGroups`). |
 | 1, Pass 1 | Emits the candidates for each memo group: exact, exact accumulator, each summary family and size, fused computations. |
-| 1, Pass 2 | Each rule adds candidates to groups. Identical expression is group identity (nothing to add). Summary capability: a reader reading a concrete summary-state group shared with other groups, one group per shared size. Window composition: tumbling panes, and the newest panes of a shared chain, one concrete group per chain layout (grid, longest window, size). Rollup and exact top-k reuse: a candidate that reads another group (a finer grouping, a ranking). Scan widening: a reader of a metric's scans widened to a shared label set. |
+| 1, Pass 2 | Each rule adds candidates to groups. Identical expression is group identity (nothing to add). Summary capability: a reader reading a concrete summary-state group shared with other groups, one group per shared size. Window composition: tumbling windows, and the newest tumbling windows of a shared chain, one concrete group per chain layout (grid, longest window, size). Rollup and exact top-k reuse: a candidate that reads another group (a finer grouping, a ranking). Scan widening: a reader of a metric's scans widened to a shared label set. |
 | 2 | Chooses each candidate's materialization, once for a group however many parents read it. A scan read through one window is built once; one read through different windows may also be read per reader. |
 | 3 | Chooses one candidate per needed group, and costs each candidate's own nodes, per node, given its readers; plan-level charges are added once per plan. A source's retained raw data is a concrete group `raw window(S, H)`, one per distinct lookback `H` of the source's query-time readers (a window plus any offset); its storage of `H` of raw data is charged once when it is chosen (planned). |
 
@@ -388,7 +388,7 @@ target's 0.001 divided over the source's 10,000 series. The memo stands for 7 ×
 - 33 size at least one operand's summary for half of the budget.
 
 **Step 3, Stage 1 Pass 2: window composition.** The groups stay the same 7.
-G2 and G4 get 120 `Panes` candidates each (6 summary candidates × 20 pane
+G2 and G4 get 120 `TumblingWindows` candidates each (6 summary candidates × 20 tumbling window
 widths, from 1 s to 60 s, that divide one minute), 127 candidates each in
 all; the memo has 259 candidates.
 
@@ -396,7 +396,7 @@ all; the memo has 259 candidates.
 (rules 2–9 of `generate_logical_asap_memo_candidates`, then
 `add_shared_summary_state_groups`):
 - 354 groups: the 7 above; 336 `SummaryTumblingWindowChain` groups (7 summary configurations
-  × 48 pane layouts, with pane widths from 20 ms to 60 s); 7 `SummaryAgg`
+  × 48 tumbling-window layouts, with tumbling-window widths from 20 ms to 60 s); 7 `SummaryAgg`
   state groups (the 6 summaries above and a KLL with `k` 1156,
   `failure_probability` 1e-7); 2 `SummaryAgg` groups for G6's sum and count
   accumulators; and 2 `FinalizeExactAccumulator` groups (G6's sum and count
@@ -406,7 +406,7 @@ all; the memo has 259 candidates.
   rule rewrote to the shared configurations with `k` 567, 1156 and 1184; each
   keeps `accuracy_budget_parts` 1, and the `k` 1184 one composes the same DAG as the
   `accuracy_budget_parts` 2 KLL),
-  336 `Panes` and 345 `SharedBuild`. G6 has 3: `Pass1`, `SummaryResult` and
+  336 `TumblingWindows` and 345 `SharedBuild`. G6 has 3: `Pass1`, `SummaryResult` and
   `SharedBuild`.
 - Enumeration stops at `stage_pipeline`'s default limit of 1,000 candidate
   DAGs (`--memo-enumeration-limit`), as it does after step 3.
@@ -426,7 +426,7 @@ with accuracy guarantees enforced and the `aws-fargate-us-east-1` cost model).
 production does (with the series-identity column) and reads the memo from the
 production run. It asserts the Stage 0 and Pass 1 numbers above. The last
 step is the memo of the planning round whose plan was selected, so it depends
-on the time budget; the test runs one round over the complete pane-width
+on the time budget; the test runs one round over the complete tumbling-window-width
 domain, which gives 438 groups and 2158 candidates.
 
 #### Algorithm: memo to candidate DAGs
@@ -500,7 +500,7 @@ recursion depth is the number of needed groups, and memory holds at most
 #### How the search uses the memo
 
 Hash-cons the workload into groups; generate each group's candidates (Pass 1,
-then the Pass 2 transformations), and expand shared sizes, pane horizons and
+then the Pass 2 transformations), and expand shared sizes, tumbling-window horizons and
 (planned) raw windows into concrete groups, so that choosing a threshold is
 choosing a group; choose one candidate per needed group; compose the choice
 into one plan and check and cost it with Stage 2 and Stage 3. The search is a
@@ -510,9 +510,9 @@ Stage 3 validate and cost it, and each validated cost constrains the MILP
 again (evaluator-backed refinement). Stage 3 realizes each proposed choice
 through Stage 2's `AssignmentRealizer`, which the facade builds and passes in,
 so Stage 3 does not depend on the Stage 2 crate. The facade first finds an
-incumbent (the best validated plan so far) in a round over seed pane grids,
-then exposes finer pane widths in later rounds, each round running Pass 2,
-Stage 2 and Stage 3; only a completed round over the full pane-width domain
+incumbent (the best validated plan so far) in a round over seed tumbling-window grids,
+then exposes finer tumbling-window widths in later rounds, each round running Pass 2,
+Stage 2 and Stage 3; only a completed round over the full tumbling-window-width domain
 bounds the declared search space, and otherwise the result is the best
 validated plan found. On tiny catalogs, tests check that this
 bounded search selects the same plan cost as a complete traversal of the same
@@ -532,9 +532,9 @@ candidates is in `crates/plan-selection/src/search/`.
 | Stage 0 | `generate_dag_of_logical_memo_groups` → `DagOfLogicalMemoGroups`, `MemoGroup`, `MemoGroupId` | `pass2/memo.rs` (the types: `asap_types::stages`); hash-consing is `share_common_sub_dags` in `pass2/cse.rs` |
 | Pass 1 | `generate_per_computation_logical_memo_candidates` → `PerComputationLogicalMemoCandidates` (with `ComputationTarget` and `HowToComputeAggregateMeasure`, in `asap_types::stages`), the one entry: inside it, the computation targets (walking the memo groups), the summaries the deployment does not support and those no query can use pruned, the candidates attached to the groups (`try_populate_pass1`), then the accuracy-scoped sizes | `pass1/logical_memo_candidates.rs`; `pass1/per_computation_candidates.rs`; `pass2/memo/groups.rs` |
 | Memo types | `DagOfLogicalMemoGroups`, `PerComputationLogicalMemoCandidates` (with `ComputationTarget`, `FusedComputation`, `HavingEntry`, `HavingPlacement`, `HowToComputeAggregateMeasure`), `MemoCandidates`, `CandidateForMemoGroup`, `OriginOfCandidateForMemoGroup`, `LogicalASAPMemoCandidates`, `CandidateGenerationTimeout`, `root_groups`, `queries_rooted_at` | `crates/types/src/stages/` (`asap_types::stages`) |
-| Pass 2 | `generate_logical_asap_memo_candidates` → `LogicalASAPMemoCandidates`, one pane-width round over a `Pass2RoundState` (kept between rounds: the memo after step 1 and before the rules, and the widths already generated). It calls in this order: 1. window composition for the round's new widths (`extend_local_window_composition`); 2–9. the rules in `pass2/memo/rules/`: scan widening, summary inputs, top-k reuse, finer aggregate, rollup, window rollup, summary results, state configurations; 10. `add_shared_summary_state_groups`, the shared builds | `pass2/logical_memo_candidates.rs` (`LogicalASAPMemoCandidates` itself: `asap_types::stages`); `pass2/memo/window_candidates.rs`, `pass2/memo/rules/`, `pass2/memo/state_groups.rs`, `pass2/memo/shared_configurations.rs` |
+| Pass 2 | `generate_logical_asap_memo_candidates` → `LogicalASAPMemoCandidates`, one tumbling-window-width round over a `Pass2RoundState` (kept between rounds: the memo after step 1 and before the rules, and the widths already generated). It calls in this order: 1. window composition for the round's new widths (`extend_local_window_composition`); 2–9. the rules in `pass2/memo/rules/`: scan widening, summary inputs, top-k reuse, finer aggregate, rollup, window rollup, summary results, state configurations; 10. `add_shared_summary_state_groups`, the shared builds | `pass2/logical_memo_candidates.rs` (`LogicalASAPMemoCandidates` itself: `asap_types::stages`); `pass2/memo/window_candidates.rs`, `pass2/memo/rules/`, `pass2/memo/state_groups.rs`, `pass2/memo/shared_configurations.rs` |
 | Memo to candidate DAGs | `enumerate`, `build_logical_asap_dags_from_chosen_candidates`, `ChosenCandidatePerMemoGroup`, `AllChosenCandidatesPerMemoGroup`, `ErrorBuildingLogicalASAPDagsFromChosenCandidates` | `pass2/memo/enumeration.rs` (re-exported at the crate root) |
-| Production memo build and search | The facade's `run_planning` builds the DAG of logical memo groups and runs Pass 1 (`generate_per_computation_logical_memo_candidates`) once; then, for each pane-width round, `generate_logical_asap_memo_candidates` (the `Pass2RoundState` is kept between rounds), `generate_physical_asap_memo_candidates` and Stage 3's `select_plan`. It keeps the best round's selection (`asap_cost::PlanRanking`) and builds that plan with Stage 2's `AssignmentRealizer::realize`. Behind `select_plan`: `candidates/`, `milp/` and `refinement/` | `crates/planner/src/run.rs`; `crates/plan-selection/src/search/` |
+| Production memo build and search | The facade's `run_planning` builds the DAG of logical memo groups and runs Pass 1 (`generate_per_computation_logical_memo_candidates`) once; then, for each tumbling-window-width round, `generate_logical_asap_memo_candidates` (the `Pass2RoundState` is kept between rounds), `generate_physical_asap_memo_candidates` and Stage 3's `select_plan`. It keeps the best round's selection (`asap_cost::PlanRanking`) and builds that plan with Stage 2's `AssignmentRealizer::realize`. Behind `select_plan`: `candidates/`, `milp/` and `refinement/` | `crates/planner/src/run.rs`; `crates/plan-selection/src/search/` |
 
 ## ASAPPlanner Detailed Design: Planning Stages and their decisions/Strategies
 
@@ -605,9 +605,9 @@ the memo path's entry points.
 | 0. Frontends | Query text, language → one logical root per query, carrying its accuracy target | Same: a `QueryRoot` per query | `lower_promql_query_workload`, `lower_sql_dialect` (`asap-frontend-*`); `plan_installable` (`asap_planner`) runs the frontends and Stages 1–3 on the user input |
 | 1, Pass 1 | Logical roots; the deployment's supported summaries → the Pass 1 inventory, every computation's candidates (`PerComputationCandidates`, now Pass 1's crate-private working form) | Logical roots → `DagOfLogicalMemoGroups` (hash-consed `MemoGroup`s); with the Pass 1 inventory, less the summaries the deployment does not support and those no query reading them can use → `PerComputationLogicalMemoCandidates`: the `MemoCandidates` (each group's `CandidateForMemoGroup`s, with the accuracy-scoped sizes), the computation targets and the pruned candidates (`PrunedCandidate<HowToComputeAggregateMeasure>`) | `generate_dag_of_logical_memo_groups`, `generate_per_computation_logical_memo_candidates` |
 | 1, Pass 2 | One Pass 1 choice per computation → that choice rewritten by each sharing rule, every subset of sharing choices (no longer in the code) | `MemoCandidates`; the entries' recurrence and range steps → the same memo with each rule's candidates added to the groups they implement | the memo rules (`pass2/memo/rules/`), `pass2::memo::window_candidates` |
-| 1, concrete summary-state groups | (part of Pass 2) | `MemoCandidates` → the memo with concrete summary-state groups: one group per shared size or pane layout that readers can read | `add_shared_summary_state_groups`, Pass 2's last step; the Pass 2 output is `LogicalASAPMemoCandidates` (`generate_logical_asap_memo_candidates`) |
+| 1, concrete summary-state groups | (part of Pass 2) | `MemoCandidates` → the memo with concrete summary-state groups: one group per shared size or tumbling-window layout that readers can read | `add_shared_summary_state_groups`, Pass 2's last step; the Pass 2 output is `LogicalASAPMemoCandidates` (`generate_logical_asap_memo_candidates`) |
 | 2 | One whole-workload logical candidate; entries (recurrence, predictability), `DataWorkload`, query-time retention → its physical candidates, one per materialization assignment | `LogicalASAPMemoCandidates`; entries, `DataWorkload`, query-time and raw-data retention → `PhysicalASAPMemoCandidates`: every operator node of every candidate with each allowed timing and materialization (one physical candidate each, no copies), the producers of each input, reader constraints (each applied to every selected run of its candidate), and the pruned candidates (`PrunedCandidate<PhysicalCandidateKey>`) | `generate_physical_asap_memo_candidates` (`asap_physical_asap_optimization`) |
-| 3 | Every physical candidate; accuracy targets, accuracy model and evidence, cost model → one plan | `PhysicalASAPMemoCandidates`; entries, `DataWorkload`, `AccuracyCheckInputs`, `CostInputs`, Stage 2's realizer, a deadline → `Selection`: the selected plan (`selected_dag`, a `DagOfSelectedCandidates`: one node per run of a candidate, so a candidate recomputed by two readers or shared as two instances over different inputs is two nodes, with an edge per input), its cost, the accepted accuracy per query and the search report | `select_plan` (`asap_plan_selection`); the facade (`run_planning`, output `PlanningRun`) runs it per pane-width round and builds the selected `PhysicalWorkloadPlan` with `AssignmentRealizer::realize`, one plan node per selected node |
+| 3 | Every physical candidate; accuracy targets, accuracy model and evidence, cost model → one plan | `PhysicalASAPMemoCandidates`; entries, `DataWorkload`, `AccuracyCheckInputs`, `CostInputs`, Stage 2's realizer, a deadline → `Selection`: the selected plan (`selected_dag`, a `DagOfSelectedCandidates`: one node per run of a candidate, so a candidate recomputed by two readers or shared as two instances over different inputs is two nodes, with an edge per input), its cost, the accepted accuracy per query and the search report | `select_plan` (`asap_plan_selection`); the facade (`run_planning`, output `PlanningRun`) runs it per tumbling-window-width round and builds the selected `PhysicalWorkloadPlan` with `AssignmentRealizer::realize`, one plan node per selected node |
 | 4. Execution | The selected `PhysicalASAPDAG` → query results | Same: an `InstallablePlan` (`{dag, query_texts}`) → query results | The deployment runtime installs the `InstallablePlan` |
 
 What changed with the memo:
@@ -845,8 +845,8 @@ Pass 1 attaches the family to its memo group, it creates one sized candidate
 per split of the accuracy budget: `accuracy_budget_parts` from 1 to the most
 approximate inputs of a query reaching the group, each sized by the accuracy
 model for its share. Pass 2 never resizes a summary for its own readers: a
-pane chain inherits the size of the build it replaces (a merge of equal-size
-panes keeps the guarantee when the family's merged error is `Exact` or
+tumbling-window chain inherits the size of the build it replaces (a merge of equal-size
+tumbling windows keeps the guarantee when the family's merged error is `Exact` or
 `AsIfBuiltOverUnion`), and a build shared by several readers takes the
 strictest reader's size, one state group per distinct size. The failure
 probability is part of Pass 1's size too
@@ -1112,46 +1112,46 @@ flowchart TB
 ```
 
 The planner implements a subset of the window-composition rule today:
-`Tumbling(L)` only, as a `SummaryTumblingWindowChain` (one node for all its panes) read
+`Tumbling(L)` only, as a `SummaryTumblingWindowChain` (one node for all its tumbling windows) read
 through a `SummaryMerge`, with `L = gcd(W_q, E_q)` for each query. Two or
 more queries share one chain when their builds have the same family (at any
 size), the same summary input data and the same output column names, and
 their windows end at the same time. Two shared grids are offered: the
-finest of their own pane widths, for the queries whose widths it divides
+finest of their own tumbling-window widths, for the queries whose widths it divides
 (never finer than a chain some query builds anyway), and the gcd of all
-their widths, even when it is finer than every query's own panes (1-min and
-90-s panes share 30-s panes). Queries that repeat at different intervals
-read the same panes, each at its own cadence. Finer panes mean more states
-kept and more panes merged, so Stage 3's pricing decides which grid, if
-any, pays; no pane-count limit is imposed beyond the pane count fitting in
+their widths, even when it is finer than every query's own tumbling windows (1-min and
+90-s tumbling windows share 30-s tumbling windows). Queries that repeat at different intervals
+read the same tumbling windows, each at its own cadence. Finer tumbling windows mean more states
+kept and more tumbling windows merged, so Stage 3's pricing decides which grid, if
+any, pays; no tumbling-window-count limit is imposed beyond the tumbling-window count fitting in
 32 bits. The chain covers the longest window and is sized
 for all of them, each parameter at its largest value among them, as the
 summary-capability rule sizes a shared build. Each query merges only the
-newest panes covering its own window (`SummaryMerge.newest_tumbling_windows`), since a
+newest tumbling windows covering its own window (`SummaryMerge.newest_tumbling_windows`), since a
 shorter window ending at the same time is the newest part of the longest.
 For example, `quantile_over_time(0.5, m[1m])` and
 `quantile_over_time(0.9, m[5m])`, both every 10 s, read one chain of thirty
-10-s KLL panes: the 1-min query merges the newest 6, the 5-min query all
+10-s KLL tumbling windows: the 1-min query merges the newest 6, the 5-min query all
 30. And `quantile_over_time(0.5, m[15m])` every 1 min and every 5 min read
-one chain of fifteen 1-min panes instead of fifteen 1-min and three 5-min
-panes. A query grouped by fewer keys also reads the chain of a finer
-grouping whose window is at least its own, on panes that divide its own,
+one chain of fifteen 1-min tumbling windows instead of fifteen 1-min and three 5-min
+tumbling windows. A query grouped by fewer keys also reads the chain of a finer
+grouping whose window is at least its own, on tumbling windows that divide its own,
 when the family merges states of different groups: it merges its newest
-panes, then rolls the groups up into its own (a regrouping `SummaryMerge`
-over the newest-panes merge). For example, `SELECT city,
+tumbling windows, then rolls the groups up into its own (a regrouping `SummaryMerge`
+over the newest-tumbling-window merge). For example, `SELECT city,
 percentile_cont(0.9) … INTERVAL '20' MINUTE GROUP BY city` and the global
 p50 and p90 over the last 5 minutes, both every 10 s, read one chain of 120
-per-city 10-s KLL panes: the 5-minute query merges each city's newest 30,
+per-city 10-s KLL tumbling windows: the 5-minute query merges each city's newest 30,
 then all cities into one state that answers both its percentiles. The chain
 is sized for every reader, here both queries' ε. A rollup to no keys over
 a SQL table's states stands for a global SQL aggregate, so it has one
 state, empty over no rows. A family that merges exactly keeps each query's
-guarantee, since a merge of fewer panes is one build over the shorter
+guarantee, since a merge of fewer tumbling windows is one build over the shorter
 window, and each query fails with at most the shared state's failure
-probability. Stage 3 prices each merge by the panes it reads, at its
+probability. Stage 3 prices each merge by the tumbling windows it reads, at its
 query's rate. The per-query chains stay candidates too. A chain read at different intervals is not kept across
 evaluations from query time: that option needs every reader to build one
-new pane per evaluation. Long-window segments, sliding windows and
+new tumbling window per evaluation. Long-window segments, sliding windows and
 Exponential Histograms are not implemented yet.
 
 ### 2. Physical ASAP-aware optimization
@@ -1216,21 +1216,21 @@ only, since raw rows are not maintained at ingestion time. Below an
 ingestion-time build it stays `NotMaterialized`: the ingestion side reads
 its own copy. A `MatAtQuery` state is reused within one evaluation only. When the
 deployment's capabilities declare `query_time_results_retained`, a
-tumbling-pane chain that builds exactly one new pane per evaluation also gets
-`MatAtQueryKeptAcrossEvaluations(Memory)`: the panes built at query time are
+tumbling-window chain that builds exactly one new tumbling window per evaluation also gets
+`MatAtQueryKeptAcrossEvaluations(Memory)`: the tumbling windows built at query time are
 kept for the next evaluations. Nothing is placed on disk yet.
 
 A runtime builds every ingestion-time state on the grid of its width anchored
 at the epoch, so an ingestion-time build must end on that grid at every
-evaluation of its readers. For a pane chain, the pane width divides each
+evaluation of its readers. For a tumbling-window chain, the tumbling-window width divides each
 known evaluation phase. For a whole-window build (one window per evaluation,
-no pane chain), the readers share one fixed interval, their declared phases
+no tumbling-window chain), the readers share one fixed interval, their declared phases
 agree, and the interval and a declared phase are multiples of the window:
 `m[5m]` every 5 minutes is one tumbling 5-minute window maintained at
-ingestion time and read at each evaluation, as a one-pane chain would be, while `m[20s]` every 20 s at phase
-5 s, or every 30 s, is not kept whole (Pass 2 offers 5 s or 10 s panes). A
+ingestion time and read at each evaluation, as a one-tumbling-window chain would be, while `m[20s]` every 20 s at phase
+5 s, or every 30 s, is not kept whole (Pass 2 offers 5 s or 10 s tumbling windows). A
 reader whose phase is not declared is taken to evaluate at multiples of its
-interval, as for a pane chain.
+interval, as for a tumbling-window chain.
 
 #### Physical operator implementation
 

@@ -1,6 +1,6 @@
-//! Planner-level summary-window pane primitives.
+//! Planner-level summary-window tumbling window primitives.
 //!
-//! These values describe pane layout and window-edge coverage. They do not
+//! These values describe tumbling-window layout and window-edge coverage. They do not
 //! identify a runtime library, process, placement, shard layout, storage
 //! backend, or deployment instance; those choices belong to downstream
 //! physical compilation.
@@ -8,51 +8,55 @@
 use asap_types::workload::RepeatedDemand;
 use serde::{Deserialize, Serialize};
 
-/// Concrete pane phase recorded in a catalog layout or inventory snapshot.
+/// Concrete tumbling-window phase recorded in a catalog layout or inventory snapshot.
 /// Milliseconds are canonical throughout the shared contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaneLayout {
-    // Named `pane_width_ms` before #1163.
-    #[serde(alias = "pane_width_ms")]
+pub struct TumblingWindowLayout {
+    // The deployed wire contract keeps the names from before #1163.
+    #[serde(rename = "pane_width_ms", alias = "tumbling_window_width_ms")]
     pub tumbling_window_width_ms: u64,
-    /// Unix timestamp of a pane edge. `None` means the runtime has not
+    /// Unix timestamp of a tumbling-window edge. `None` means the runtime has not
     /// established an origin and therefore cannot claim full coverage.
-    pub pane_origin_ms: Option<i64>,
+    #[serde(rename = "pane_origin_ms")]
+    pub tumbling_window_origin_ms: Option<i64>,
 }
 
-/// How a query obtains exact values for partial panes at its two window edges.
+/// How a query obtains exact values for partial tumbling windows at its two window edges.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WindowEdgeCoverage {
-    PaneAligned,
+    // Wire name kept from before #1163.
+    #[serde(rename = "pane_aligned")]
+    TumblingWindowAligned,
     #[serde(rename = "exact_boundary_residual")]
-    ExactWindowEdgeResidual {
-        executor: String,
-        source: String,
-    },
+    ExactWindowEdgeResidual { executor: String, source: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PaneCoverageError {
-    ZeroPaneWidth,
-    UnknownPaneOrigin,
+// Wire names kept from before #1163.
+pub enum TumblingWindowCoverageError {
+    #[serde(rename = "ZeroPaneWidth")]
+    ZeroTumblingWindowWidth,
+    #[serde(rename = "UnknownPaneOrigin")]
+    UnknownTumblingWindowOrigin,
     UnknownEvaluationPhase,
     PhaseMismatch {
-        pane_phase_ms: u64,
+        #[serde(rename = "pane_phase_ms")]
+        tumbling_window_phase_ms: u64,
         query_phase_ms: u64,
     },
 }
 
-/// Validate that a pane-only evaluation covers a query exactly. A mismatched
+/// Validate that a tumbling-window-only evaluation covers a query exactly. A mismatched
 /// phase is sound only when the physical plan explicitly supplies an exact
-/// residual for the partial edge panes.
-pub fn validate_pane_coverage(
-    layout: &PaneLayout,
+/// residual for the partial edge tumbling windows.
+pub fn validate_tumbling_window_coverage(
+    layout: &TumblingWindowLayout,
     evaluation_time_ms: Option<i64>,
     edge_coverage: &WindowEdgeCoverage,
-) -> Result<(), PaneCoverageError> {
+) -> Result<(), TumblingWindowCoverageError> {
     if layout.tumbling_window_width_ms == 0 {
-        return Err(PaneCoverageError::ZeroPaneWidth);
+        return Err(TumblingWindowCoverageError::ZeroTumblingWindowWidth);
     }
     if matches!(
         edge_coverage,
@@ -61,32 +65,33 @@ pub fn validate_pane_coverage(
         return Ok(());
     }
     let origin = layout
-        .pane_origin_ms
-        .ok_or(PaneCoverageError::UnknownPaneOrigin)?;
-    let evaluation = evaluation_time_ms.ok_or(PaneCoverageError::UnknownEvaluationPhase)?;
+        .tumbling_window_origin_ms
+        .ok_or(TumblingWindowCoverageError::UnknownTumblingWindowOrigin)?;
+    let evaluation =
+        evaluation_time_ms.ok_or(TumblingWindowCoverageError::UnknownEvaluationPhase)?;
     let width = layout.tumbling_window_width_ms as i64;
-    let pane_phase_ms = origin.rem_euclid(width) as u64;
+    let tumbling_window_phase_ms = origin.rem_euclid(width) as u64;
     let query_phase_ms = evaluation.rem_euclid(width) as u64;
-    if pane_phase_ms == query_phase_ms {
+    if tumbling_window_phase_ms == query_phase_ms {
         Ok(())
     } else {
-        Err(PaneCoverageError::PhaseMismatch {
-            pane_phase_ms,
+        Err(TumblingWindowCoverageError::PhaseMismatch {
+            tumbling_window_phase_ms,
             query_phase_ms,
         })
     }
 }
 
-/// Select a query-aligned pane origin from workload recurrence. A plain fixed
+/// Select a query-aligned tumbling-window origin from workload recurrence. A plain fixed
 /// interval has cadence but no phase, so it remains unknown. Every timestamp
-/// in an explicit schedule must have the same phase for one pane layout to
+/// in an explicit schedule must have the same phase for one tumbling-window layout to
 /// serve all occurrences.
-pub(crate) fn plan_pane_phase(
+pub(crate) fn plan_tumbling_window_phase(
     demand: &RepeatedDemand,
     tumbling_window_width_ms: u64,
-) -> Result<PaneLayout, PaneCoverageError> {
+) -> Result<TumblingWindowLayout, TumblingWindowCoverageError> {
     if tumbling_window_width_ms == 0 {
-        return Err(PaneCoverageError::ZeroPaneWidth);
+        return Err(TumblingWindowCoverageError::ZeroTumblingWindowWidth);
     }
     let phase = match demand {
         RepeatedDemand::FixedIntervalAt {
@@ -102,9 +107,9 @@ pub(crate) fn plan_pane_phase(
         }
         RepeatedDemand::FixedInterval(_) | RepeatedDemand::EstimatedRate(_) => None,
     };
-    Ok(PaneLayout {
+    Ok(TumblingWindowLayout {
         tumbling_window_width_ms,
-        pane_origin_ms: phase.and_then(|value| i64::try_from(value).ok()),
+        tumbling_window_origin_ms: phase.and_then(|value| i64::try_from(value).ok()),
     })
 }
 
@@ -113,19 +118,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pane_only_evaluation_rejects_source_and_query_phase_mismatch() {
-        let layout = PaneLayout {
+    fn tumbling_window_only_evaluation_rejects_source_and_query_phase_mismatch() {
+        let layout = TumblingWindowLayout {
             tumbling_window_width_ms: 60_000,
-            pane_origin_ms: Some(26_000),
+            tumbling_window_origin_ms: Some(26_000),
         };
         assert_eq!(
-            validate_pane_coverage(&layout, Some(56_000), &WindowEdgeCoverage::PaneAligned),
-            Err(PaneCoverageError::PhaseMismatch {
-                pane_phase_ms: 26_000,
+            validate_tumbling_window_coverage(
+                &layout,
+                Some(56_000),
+                &WindowEdgeCoverage::TumblingWindowAligned
+            ),
+            Err(TumblingWindowCoverageError::PhaseMismatch {
+                tumbling_window_phase_ms: 26_000,
                 query_phase_ms: 56_000,
             })
         );
-        assert!(validate_pane_coverage(
+        assert!(validate_tumbling_window_coverage(
             &layout,
             Some(56_000),
             &WindowEdgeCoverage::ExactWindowEdgeResidual {
@@ -143,30 +152,38 @@ mod tests {
             evaluation_phase: asap_types::workload::TimestampMs(56_000),
         };
         assert_eq!(
-            plan_pane_phase(&demand, 60_000).unwrap(),
-            PaneLayout {
+            plan_tumbling_window_phase(&demand, 60_000).unwrap(),
+            TumblingWindowLayout {
                 tumbling_window_width_ms: 60_000,
-                pane_origin_ms: Some(56_000),
+                tumbling_window_origin_ms: Some(56_000),
             }
         );
         assert_eq!(
-            plan_pane_phase(
+            plan_tumbling_window_phase(
                 &RepeatedDemand::FixedInterval(asap_types::workload::RepetitionInterval(60_000)),
                 60_000,
             )
             .unwrap()
-            .pane_origin_ms,
+            .tumbling_window_origin_ms,
             None
         );
     }
 
-    // Renamed pane APIs still read and emit the deployed wire contract.
+    // Renamed tumbling window APIs still read and emit the deployed wire contract.
     #[test]
     fn window_edge_names_preserve_wire_values() {
-        let layout: PaneLayout = serde_json::from_value(serde_json::json!({
-            "tumbling_window_width_ms": 1000, "pane_origin_ms": 0
+        let layout: TumblingWindowLayout = serde_json::from_value(serde_json::json!({
+            "pane_width_ms": 1000, "pane_origin_ms": 0
         }))
         .unwrap();
+        assert_eq!(
+            serde_json::to_value(&layout).unwrap(),
+            serde_json::json!({"pane_width_ms": 1000, "pane_origin_ms": 0})
+        );
+        assert_eq!(
+            serde_json::to_value(WindowEdgeCoverage::TumblingWindowAligned).unwrap(),
+            serde_json::json!({"kind": "pane_aligned"})
+        );
         let json = serde_json::json!({
             "kind": "exact_boundary_residual", "executor": "runtime", "source": "raw"
         });
@@ -176,6 +193,6 @@ mod tests {
             WindowEdgeCoverage::ExactWindowEdgeResidual { .. }
         ));
         assert_eq!(serde_json::to_value(&coverage).unwrap(), json);
-        assert!(validate_pane_coverage(&layout, Some(1500), &coverage).is_ok());
+        assert!(validate_tumbling_window_coverage(&layout, Some(1500), &coverage).is_ok());
     }
 }

@@ -32,9 +32,9 @@ Only the plan, which must not change between runs:
 
 Floats are rounded to 12 significant digits. Everything about the search
 except whether it proved the plan optimal is left out: candidate ids (such as
-`pane-round-12-joint-plan-1`), the search report's counters, bounds and timings, the Stage 1 and Stage 2
+`tumbling_window-round-12-joint-plan-1`), the search report's counters, bounds and timings, the Stage 1 and Stage 2
 candidate lists, and the memo (`stage_pipeline` runs with `--no-memo`). These
-vary from run to run because the search's pane-width rounds have wall-clock
+vary from run to run because the search's tumbling-window-width rounds have wall-clock
 budgets, so a different round can find the same plan.
 
 ## Sketch plan snapshots
@@ -74,7 +74,7 @@ The test also fails, instead of recording a snapshot, in these cases:
 
 - A query's search was ended by a wall-clock budget: its status is
   `time_limit`, or planning used the whole 240 s limit. Its plan would then
-  depend on machine speed. Only the final pane round's status is checked: an
+  depend on machine speed. Only the final tumbling window round's status is checked: an
   earlier round cut short by its own wall-clock budget is not reported.
 - A snapshot file has no matching checked query in `corpus.json`.
 - `stage_pipeline` crashed.

@@ -300,7 +300,7 @@ pub(crate) fn distinct_guarantee(params: &SketchParams, source: &str) -> Option<
                 "variance": "1.35 F0^2 / k",
                 "hash_assumption": "independent_uniform_layer_hashes",
                 "mode": "standard",
-                "population_scope": "complete_evaluation_including_merged_panes"}),
+                "population_scope": "complete_evaluation_including_merged_tumbling_windows"}),
             query: "Cardinality".into(),
         }],
     ))

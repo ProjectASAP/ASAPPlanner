@@ -18,8 +18,8 @@ whose expectation needs a feature that is not in the stack yet is
 | Stage | Doc (#509) | MVP (this spec) |
 |---|---|---|
 | Query-language frontends | 1 workload `LogicalDAG` | same |
-| Logical ASAP-aware optimization | Pass 1 (3) × identical-expression rule (2) × window-composition rule (3 × 3) = **54** | Pass 1 (3), each with 2 identical-expression candidates and 6 window-composition candidates (Q1's rate and Q2's option in six 10-s tumbling panes, alone or both, each also with a shared scan) = **27**. Sliding windows are not implemented. |
-| Physical ASAP-aware optimization | Materialization options per window form = **156** | Physical operator implementation, plus materialization: each logical candidate with every sub-DAG `NotMaterialized` (27: the doc's Raw plans, with panes rebuilt at every refresh), each pane chain also `MatAtIngestion(Memory)` (30 more), and each shared input built once per evaluation, `MatAtQuery(Memory)`, with every pane chain at query time (15 more) = **72** |
+| Logical ASAP-aware optimization | Pass 1 (3) × identical-expression rule (2) × window-composition rule (3 × 3) = **54** | Pass 1 (3), each with 2 identical-expression candidates and 6 window-composition candidates (Q1's rate and Q2's option in six 10-s tumbling windows, alone or both, each also with a shared scan) = **27**. Sliding windows are not implemented. |
+| Physical ASAP-aware optimization | Materialization options per window form = **156** | Physical operator implementation, plus materialization: each logical candidate with every sub-DAG `NotMaterialized` (27: the doc's Raw plans, with tumbling windows rebuilt at every refresh), each tumbling-window chain also `MatAtIngestion(Memory)` (30 more), and each shared input built once per evaluation, `MatAtQuery(Memory)`, with every tumbling-window chain at query time (15 more) = **72** |
 | Plan selection | 1 plan | 1 plan |
 
 Every MVP candidate is one of the doc's candidates: in logical ASAP-aware
@@ -111,9 +111,9 @@ Invariants:
 
 * Every logical candidate keeps its all-`NotMaterialized` physical candidate,
   and none is pruned, so no candidate is dropped before plan selection. A
-  logical candidate with `n` pane chains has 2ⁿ physical candidates: each
+  logical candidate with `n` tumbling-window chains has 2ⁿ physical candidates: each
   chain `NotMaterialized` or `MatAtIngestion(Memory)` (ids `P<n>-m<k>`).
-  Only pane chains are placed at ingestion time; Q1's rate panes may be,
+  Only tumbling-window chains are placed at ingestion time; Q1's rate tumbling windows may be,
   because continuously ingesting PromQL data is taken to arrive in time
   order per series. A logical candidate with a shared input has one more:
   the highest node both queries read (the scan, or the time range above
@@ -141,13 +141,13 @@ Invariants:
 | P10 | invalid | Count-Min + heap: a top-*k* output has no guarantee (a heap's bound is per item frequency, not top-*k* membership), and the deployment has no evidence that it meets the target |
 | P19 | invalid | CountSketch + heap: the same reason |
 
-The 48 heap candidates (whole window or panes, rebuilt or maintained,
+The 48 heap candidates (whole window or tumbling windows, rebuilt or maintained,
 with or without a shared input built once) are invalid for that reason; the
 other 23 exact candidates are valid but costlier. Count-Min's weights are the raw samples of `http_requests_total`,
 which the workload declares a counter, so they are proven non-negative;
 without that declaration Count-Min is also rejected on its weights. Exact
-panes rebuilt at every refresh cost 7.79, and maintaining a query's exact
-panes at ingestion time costs about 54.0.
+tumbling windows rebuilt at every refresh cost 7.79, and maintaining a query's exact
+tumbling windows at ingestion time costs about 54.0.
 
 Invariants:
 
@@ -189,7 +189,7 @@ per evaluation, within its 100 ms.
    The planner also reads "physical operator implementation" from the
    physical ASAP-aware optimization section ("TopK as a sort followed by a
    limit"), and enumerates materialization for summary builds and shared
-   inputs: each pane chain is `NotMaterialized` or `MatAtIngestion(Memory)`,
+   inputs: each tumbling-window chain is `NotMaterialized` or `MatAtIngestion(Memory)`,
    and the highest node both queries read is `NotMaterialized` or
    `MatAtQuery(Memory)`.
 5. **Where exact top-*k* becomes sort + limit.** The Pass 1 diagram draws
@@ -209,7 +209,7 @@ per evaluation, within its 100 ms.
 8. **Latency.** The doc says an exact top 10 rebuilt at every refresh "may
    miss" 100 ms. With the illustrative calibration it takes about 46 ms, so
    the exact plan meets the bound.
-9. **Accuracy of Count-Min heap merges.** The heap panes are invalid like
+9. **Accuracy of Count-Min heap merges.** The heap tumbling windows are invalid like
    their whole-window builds, so the approximate merge is never judged.
 10. **Input sharing in Pass 2.** The doc gives each Pass 1 candidate "2 input
     choices (separate or shared)". Following Algorithm 2 line 31 (one

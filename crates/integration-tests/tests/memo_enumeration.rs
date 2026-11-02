@@ -10,11 +10,11 @@
 //! Pass 1) and `PlanningRun::memo_steps` (the other steps).
 //!
 //! **Which round's memo.** The default search plans in rounds of growing
-//! pane-width domains and records the memo of the round whose plan it
+//! tumbling-window-width domains and records the memo of the round whose plan it
 //! selected, so its last step depends on the time budget (the seed-grid
 //! round when a debug build runs out of it; round 5 of the release run that
 //! made the doc's document, 354 groups and 1738 candidates). The ratio test
-//! runs one round over the complete pane-width domain (a search with fewer
+//! runs one round over the complete tumbling-window-width domain (a search with fewer
 //! than 4 evaluations has no progressive rounds), so its last step is the
 //! same on every machine. Stage 0 and Pass 1 are the same in every round.
 //!
@@ -127,7 +127,7 @@ impl asap_accuracy::AccuracyModel for AcceptsNoOutput {
     }
 }
 
-/// Rounds up to the complete pane-width domain, with a time limit a slow
+/// Rounds up to the complete tumbling-window-width domain, with a time limit a slow
 /// machine's Pass 2 does not reach. Stage 3 may use the whole budget: when
 /// it validates no plan, it searches until the deadline; the memo steps are
 /// recorded either way.
@@ -344,7 +344,7 @@ fn ratio_of_quantiles_production_memo() {
     // groups: no query has a guarantee through `/` and `+` over a KLL rank
     // error or a DDSketch relative one. The memo below is planned with a
     // model that prunes none and accepts no output, so its summaries stay
-    // and its last round, over the complete pane-width domain, is recorded.
+    // and its last round, over the complete tumbling-window-width domain, is recorded.
     let enforced = production_run(&ratio_of_quantiles(), PlanSearchSettings::default());
     assert_eq!(candidate_count(pass1_memo(&enforced)), 7);
     let models = PlanningModels::builtin().with_accuracy(&AcceptsNoOutput);
@@ -368,7 +368,7 @@ fn ratio_of_quantiles_production_memo() {
         ),
         (25, 9, 9, 4)
     );
-    // The last step, over the complete pane-width domain.
+    // The last step, over the complete tumbling-window-width domain.
     let last = &steps.concrete_states;
     assert_eq!(last.groups.len(), 255);
     assert_eq!(candidate_count(last), 1243);

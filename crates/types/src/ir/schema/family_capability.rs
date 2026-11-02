@@ -159,7 +159,7 @@ impl FamilyCapability {
                 // reset handling (`IncreaseAccumulator::merge_pair`).
                 E::Rate | E::Increase => (Some(DisjointInTime), &[]),
                 // IRate reads the last two samples of the window, which a
-                // pane does not keep across its boundary.
+                // tumbling window does not keep across its boundary.
                 E::IRate => (None, &[]),
             },
             // A Hydra answers per subpopulation from a shared grid of the

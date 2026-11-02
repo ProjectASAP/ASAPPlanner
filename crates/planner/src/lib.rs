@@ -6,7 +6,7 @@
 //! ```
 //!
 //! The default pass, [`Stage1ToStage3Pass`], orchestrates the stages
-//! ([`run_planning`]): Stage 0 and Pass 1, then per pane-width round Pass 2,
+//! ([`run_planning`]): Stage 0 and Pass 1, then per tumbling-window-width round Pass 2,
 //! Stage 2 (`generate_physical_asap_memo_candidates`) and Stage 3
 //! (`asap_plan_selection::select_plan`), and builds the selected plan through
 //! Stage 2's realizer. The stages never call each other.

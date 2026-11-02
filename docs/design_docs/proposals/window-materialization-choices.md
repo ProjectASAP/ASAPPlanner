@@ -9,18 +9,18 @@ This document separates window semantics, implementation, and materialization wh
 Keep these dimensions separate:
 
 - **Semantics:** requested window width, offset, evaluation timestamps, and alignment.
-- **Implementation:** raw recomputation, supported direct sliding state, fixed-width panes, or an EH algorithm.
+- **Implementation:** raw recomputation, supported direct sliding state, fixed-width tumbling windows, or an EH algorithm.
 - **Materialization:** when each internal state is computed and how long it is retained.
 
-A pane is an aligned, non-overlapping fixed-width interval and its aggregate/summary state. An EH bucket represents a portion of the stream under an exponential histogram algorithm, with algorithm-specific merge, expiration, and error rules.
+A tumbling window is an aligned, non-overlapping fixed-width interval and its aggregate/summary state. An EH bucket represents a portion of the stream under an exponential histogram algorithm, with algorithm-specific merge, expiration, and error rules.
 
 | Implementation | Ingestion, when maintained there | Evaluation |
 | --- | --- | --- |
 | Direct sliding-window state | Add data and remove expired contributions. | Read state and compute result. |
-| Pane-based | Update panes and evict expired panes. | Merge required panes and compute result. |
+| Tumbling-window-based | Update tumbling windows and evict expired tumbling windows. | Merge required tumbling windows and compute result. |
 | EH-based | Update, merge, and evict buckets. | Estimate the window result. |
 
-This table describes possible strategies. Current pane support does not imply general direct sliding-state or EH support. Offer only executable candidates. Multiple pane widths can coexist; alignment, coverage, mergeability, retention, and error contracts determine legality. A 15m window evaluated every 1m can use 1m panes; complete 5m panes alone generally cannot cover every endpoint.
+This table describes possible strategies. Current tumbling window support does not imply general direct sliding-state or EH support. Offer only executable candidates. Multiple tumbling-window widths can coexist; alignment, coverage, mergeability, retention, and error contracts determine legality. A 15m window evaluated every 1m can use 1m tumbling windows; complete 5m tumbling windows alone generally cannot cover every endpoint.
 
-Use existing `Materialization` options: `NotMaterialized`, `MatAtQuery(Memory)`, `MatAtIngestion(Memory)`, and `MatAtQueryKeptAcrossEvaluations(Memory)`. Assign them to eligible internal nodes, not necessarily the entire query. For example, maintain panes at ingestion and merge at query time. Generate only supported assignments: retained query-time state currently requires deployment capability and an eligible pane chain. Ingestion timing and upstream dependencies must satisfy Stage 2 rules.
+Use existing `Materialization` options: `NotMaterialized`, `MatAtQuery(Memory)`, `MatAtIngestion(Memory)`, and `MatAtQueryKeptAcrossEvaluations(Memory)`. Assign them to eligible internal nodes, not necessarily the entire query. For example, maintain tumbling windows at ingestion and merge at query time. Generate only supported assignments: retained query-time state currently requires deployment capability and an eligible tumbling-window chain. Ingestion timing and upstream dependencies must satisfy Stage 2 rules.
 

@@ -174,7 +174,7 @@ mod tests {
     use asap_logical_asap_optimization::test_support::lower_promql;
     use asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups;
     use asap_logical_asap_optimization::test_support::try_populate_pass1;
-    use asap_logical_asap_optimization::PaneWidthDomain;
+    use asap_logical_asap_optimization::TumblingWindowWidthDomain;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
     use asap_types::ir::QueryRoot;
@@ -221,7 +221,7 @@ mod tests {
                 .unwrap();
         let memo = sharing_rules_and_shared_state_groups(
             try_populate_pass1(initial, &candidates).unwrap(),
-            PaneWidthDomain::Complete,
+            TumblingWindowWidthDomain::Complete,
         )
         .unwrap();
         let source = build_candidate_inventory(&memo, &outputs, |_| Ok(7.0)).unwrap();

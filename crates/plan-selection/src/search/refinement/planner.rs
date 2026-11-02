@@ -455,7 +455,7 @@ fn direct_cost_seed(
     configured: &PhysicalCandidatesWithCosts,
     context: &CandidatePlanningContext<'_>,
     seed_exclusions: &[asap_types::stages::PhysicalCandidateId],
-    latest_panes: bool,
+    latest_tumbling_windows: bool,
 ) -> Result<
     Option<(
         crate::search::candidates::dag::DagOfPhysicalCandidatesWithCosts,
@@ -465,11 +465,11 @@ fn direct_cost_seed(
 > {
     use crate::search::candidates::dag::ReaderConstraint;
     use crate::search::costing::direct_profile::{
-        extract, extract_latest_panes, DirectProfileError,
+        extract, extract_latest_tumbling_windows, DirectProfileError,
     };
     use asap_types::stages::PhysicalCandidateId;
-    let extracted = if latest_panes {
-        extract_latest_panes(configured, context)
+    let extracted = if latest_tumbling_windows {
+        extract_latest_tumbling_windows(configured, context)
     } else {
         extract(configured, context)
     };
@@ -751,18 +751,17 @@ fn accuracy_baseline(
         .iter()
         .enumerate()
         .map(|(id, candidate)| {
-            candidate
-                .local_cost
-                .max(estimated_costs[id])
-                .max(retained_pane_priority_cost(
+            candidate.local_cost.max(estimated_costs[id]).max(
+                retained_tumbling_window_priority_cost(
                     configured.node(id),
                     &configured.physical.candidates[id],
                     context,
-                ))
+                ),
+            )
         })
         .collect();
     // Feasibility seeds compare retained states; cost-only seeds compare query
-    // work. Large unrelated pane residency must not make CPU savings smaller
+    // work. Large unrelated tumbling window residency must not make CPU savings smaller
     // than the structural node-count tie-break when accuracy is ignored.
     let mut positive_costs: Vec<_> = proposal_costs
         .iter()
@@ -797,7 +796,7 @@ fn accuracy_baseline(
             let cost_priority = if reference_cost > 0.0 {
                 let relative = proposal_costs[id] / reference_cost;
                 // Preserve ordering beyond the normal linear range, without
-                // letting a very fine unused pane destroy numerical scaling.
+                // letting a very fine unused tumbling window destroy numerical scaling.
                 preference
                     * if relative <= 1000.0 {
                         relative
@@ -839,7 +838,7 @@ fn accuracy_baseline(
                 }) || (node.guarantee.is_none()
                     && matches!(node.asap(), Some(ASAPOp::SummaryEstimate { .. }))));
             // Highest-shared-node eligibility depends on chosen consumers.
-            // Start with explicit build/pane materialization; optional shared
+            // Start with explicit build/tumbling window materialization; optional shared
             // non-summary materializations remain in the complete search.
             let contextual_materialization =
                 !context.models.accuracy.may_accept_regardless_of_guarantee()
@@ -855,9 +854,9 @@ fn accuracy_baseline(
                     node.non_asap(),
                     Some(asap_types::ir::NonASAPOp::Project { .. })
                 );
-            // Unpriced pane pipelines are not free. Prefer candidates whose
+            // Unpriced tumbling window pipelines are not free. Prefer candidates whose
             // local query work can be priced for the initial proposal; the
-            // complete search retains every legal pane and its certified bound.
+            // complete search retains every legal tumbling window and its certified bound.
             let unknown_work_priority = if context.models.accuracy.may_accept_regardless_of_guarantee()
                 && configured.physical.candidates[id].timing
                     == asap_types::ir::properties::ExecutionTiming::QueryTime
@@ -904,7 +903,7 @@ fn raw_scan_with_shifts(node: &asap_types::ir::OperatorNode) -> bool {
 
 // A heuristic memory charge, never a lower bound or an evaluator replacement.
 // Group/cardinality and producer choices remain authoritative after selection.
-fn retained_pane_priority_cost(
+fn retained_tumbling_window_priority_cost(
     node: &std::rc::Rc<asap_types::ir::OperatorNode>,
     configuration: &asap_types::stages::PhysicalCandidate,
     context: &CandidatePlanningContext<'_>,
@@ -1156,7 +1155,7 @@ mod tests {
     use asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups;
     use asap_logical_asap_optimization::test_support::try_populate_pass1;
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
-    use asap_logical_asap_optimization::PaneWidthDomain;
+    use asap_logical_asap_optimization::TumblingWindowWidthDomain;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
     use asap_types::ir::{ASAPOp, OperatorNode};
@@ -1194,7 +1193,7 @@ mod tests {
         .unwrap();
         let mut memo = sharing_rules_and_shared_state_groups(
             try_populate_pass1(initial, &generated).unwrap(),
-            PaneWidthDomain::Complete,
+            TumblingWindowWidthDomain::Complete,
         )
         .unwrap();
         // Keep the real generated shared KLL readers to bound this evaluator
@@ -1334,10 +1333,12 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(!reasons.is_empty());
-        for latest_panes in [false, true] {
-            assert!(direct_cost_seed(&configured, &context, &[], latest_panes)
-                .unwrap()
-                .is_none());
+        for latest_tumbling_windows in [false, true] {
+            assert!(
+                direct_cost_seed(&configured, &context, &[], latest_tumbling_windows)
+                    .unwrap()
+                    .is_none()
+            );
         }
         // Malformed demand is a real input error, not an unsupported model.
         let mut invalid_entries = entries.clone();
@@ -1349,15 +1350,18 @@ mod tests {
             ..context
         };
         assert!(joint_cost_seed(&configured, &invalid_context, &[], &mut reasons).is_err());
-        for latest_panes in [false, true] {
-            assert!(direct_cost_seed(&configured, &invalid_context, &[], latest_panes).is_err());
+        for latest_tumbling_windows in [false, true] {
+            assert!(
+                direct_cost_seed(&configured, &invalid_context, &[], latest_tumbling_windows)
+                    .is_err()
+            );
         }
     }
 
-    // One logical group can serve a repeated reader through panes and an
-    // unpredictable reader locally; only selected pane consumers need eligibility.
+    // One logical group can serve a repeated reader through tumbling windows and an
+    // unpredictable reader locally; only selected tumbling window consumers need eligibility.
     #[test]
-    fn nongridded_reader_does_not_veto_another_readers_ingestion_panes() {
+    fn nongridded_reader_does_not_veto_another_readers_ingestion_tumbling_windows() {
         use crate::search::milp::model::select_candidates;
         use asap_types::ir::properties::ExecutionTiming;
         let (_, original, mut entries, mut data) = fixture();
@@ -1379,7 +1383,7 @@ mod tests {
         asap_logical_asap_optimization::test_support::add_local_window_composition_in_domain(
             &mut memo,
             &entries,
-            asap_logical_asap_optimization::PaneWidthDomain::SeedGrids,
+            asap_logical_asap_optimization::TumblingWindowWidthDomain::SeedGrids,
         );
         let source = build_candidate_inventory(&memo, &[output, output], |_| Ok(0.0)).unwrap();
         let models = SelectionModels::builtin();
@@ -1391,7 +1395,7 @@ mod tests {
             &asap_logical_asap_optimization::DeploymentCapabilities::default(),
         )
         .unwrap();
-        let has_panes: Vec<_> = configured
+        let has_tumbling_windows: Vec<_> = configured
             .nodes_for_tests()
             .iter()
             .map(|node| {
@@ -1402,10 +1406,10 @@ mod tests {
             .collect();
         configured.dag.query_roots[0]
             .candidates
-            .retain(|id| has_panes[id.0]);
+            .retain(|id| has_tumbling_windows[id.0]);
         configured.dag.query_roots[1]
             .candidates
-            .retain(|id| !has_panes[id.0]);
+            .retain(|id| !has_tumbling_windows[id.0]);
         assert!(!configured.dag.query_roots[0].candidates.is_empty());
         let allowed: Vec<_> = configured
             .nodes_for_tests()
@@ -1423,7 +1427,7 @@ mod tests {
         }
         let selected = select_candidates(&configured.dag)
             .unwrap()
-            .expect("repeated reader still has an ingestion pane plan");
+            .expect("repeated reader still has an ingestion tumbling window plan");
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
@@ -1447,7 +1451,7 @@ mod tests {
         configured.dag.query_roots[1].candidates = configured.dag.query_roots[0].candidates.clone();
         assert!(
             select_candidates(&configured.dag).unwrap().is_none(),
-            "unpredictable reader cannot bind to ingestion-only panes"
+            "unpredictable reader cannot bind to ingestion-only tumbling windows"
         );
     }
 
@@ -1466,7 +1470,7 @@ mod tests {
                 .unwrap();
         let memo = sharing_rules_and_shared_state_groups(
             try_populate_pass1(initial, &generated).unwrap(),
-            PaneWidthDomain::Complete,
+            TumblingWindowWidthDomain::Complete,
         )
         .unwrap();
         let source = build_candidate_inventory(&memo, &[output], |_| Ok(0.0)).unwrap();
@@ -1571,7 +1575,8 @@ mod tests {
         asap_logical_asap_optimization::test_support::add_local_window_composition(
             &mut memo, &entries,
         );
-        let memo = sharing_rules_and_shared_state_groups(memo, PaneWidthDomain::Complete).unwrap();
+        let memo = sharing_rules_and_shared_state_groups(memo, TumblingWindowWidthDomain::Complete)
+            .unwrap();
         let source = build_candidate_inventory(&memo, &outputs, |_| Ok(0.0)).unwrap();
         let deployment = asap_logical_asap_optimization::DeploymentCapabilities {
             raw_data_retained: false,
@@ -1862,7 +1867,7 @@ mod tests {
         assert_eq!(configured.dag.candidates[0].local_cost, 100.0);
     }
 
-    // An irrelevant extremely fine pane must not erase the cost distinction
+    // An irrelevant extremely fine tumbling window must not erase the cost distinction
     // between ordinary state configurations in the feasible-plan heuristic.
     #[test]
     fn baseline_cost_scale_is_not_diluted_by_an_outlier() {
@@ -1885,10 +1890,10 @@ mod tests {
         assert!(weighted[0] > original[0] + 2.0);
     }
 
-    // Uncertified memory is not free: a 1200-pane shared state must not beat
+    // Uncertified memory is not free: a 1200-tumbling window shared state must not beat
     // two much smaller same-family states solely by saving one activation.
     #[test]
-    fn baseline_prices_uncertified_pane_storage_without_changing_bounds() {
+    fn baseline_prices_uncertified_tumbling_window_storage_without_changing_bounds() {
         use asap_types::ir::{NonASAPOp, Operator};
         use asap_types::physical::Medium;
         let (mut configured, roots, entries, data) = fixture();

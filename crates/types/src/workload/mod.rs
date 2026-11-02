@@ -363,7 +363,7 @@ pub struct QueryWorkloadEntry {
     pub recurrence: QueryRecurrence,
     /// How each run is answered as a range request, one evaluation per
     /// step; `None` (the default) for one evaluation per run. Stage 1 and
-    /// Stage 2 keep pane widths on its step grid, and Stage 3 prices
+    /// Stage 2 keep tumbling-window widths on its step grid, and Stage 3 prices
     /// [`RangeEvaluation::evaluations_per_request`] evaluations per run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range_evaluation: Option<RangeEvaluation>,
@@ -561,7 +561,7 @@ pub struct SourceFacts {
     pub stream_norms: Option<StreamNorms>,
     /// Upper bound on the distinct items any one distinct-count summary over
     /// the source's own rows counts in one complete evaluation, including
-    /// every merged pane. One bound serves every query over the source, so
+    /// every merged tumbling window. One bound serves every query over the source, so
     /// it must hold for the longest evaluation window any of them uses; a
     /// filter or a shorter window only lowers it. Each group's own items
     /// count separately: the bound is per output row. The deployment must

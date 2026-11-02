@@ -1,10 +1,14 @@
-//! Local pane candidates generated from compatible reader grids. Selected
+//! Local tumbling-window candidates generated from compatible reader grids. Selected
 //! connections, not the union of potential consumers, determine eligibility.
 #[cfg(test)]
-use super::shared_configurations::pane_width_divisors;
-use super::shared_configurations::{pane_width_domain_before, PaneWidthDomain};
+use super::shared_configurations::tumbling_window_width_divisors;
+use super::shared_configurations::{
+    tumbling_window_width_domain_before, TumblingWindowWidthDomain,
+};
 use super::{check_generation_deadline, CandidateGenerationTimeout};
-use crate::pass2::asap_aware_cse::{pane_candidates, window_composition_pass2_candidates};
+use crate::pass2::asap_aware_cse::{
+    tumbling_window_candidates, window_composition_pass2_candidates,
+};
 use asap_types::ir::flat::flatten;
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::stages::{
@@ -22,14 +26,14 @@ use std::time::Instant;
 /// chosen consumers, including ingestion alignment and range evaluation steps.
 #[cfg(any(test, feature = "test-support"))]
 pub fn add_local_window_composition(memo: &mut Memo, entries: &[QueryWorkloadEntry]) {
-    add_local_window_composition_in_domain(memo, entries, PaneWidthDomain::Complete);
+    add_local_window_composition_in_domain(memo, entries, TumblingWindowWidthDomain::Complete);
 }
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn add_local_window_composition_in_domain(
     memo: &mut Memo,
     entries: &[QueryWorkloadEntry],
-    domain: PaneWidthDomain,
+    domain: TumblingWindowWidthDomain,
 ) {
     try_add_local_window_composition_in_domain(memo, entries, domain, None)
         .expect("generation without a deadline cannot time out");
@@ -40,24 +44,24 @@ pub fn add_local_window_composition_in_domain(
 pub(crate) fn try_add_local_window_composition_in_domain(
     memo: &mut Memo,
     entries: &[QueryWorkloadEntry],
-    domain: PaneWidthDomain,
+    domain: TumblingWindowWidthDomain,
     deadline: Option<Instant>,
 ) -> Result<(), CandidateGenerationTimeout> {
     extend_local_window_composition(memo, entries, None, domain, deadline)
 }
 
-/// Extend a pre-state-expansion memo with only newly exposed pane widths.
+/// Extend a pre-state-expansion memo with only newly exposed tumbling-window widths.
 /// `previous` must describe widths already generated for this memo.
 pub(crate) fn extend_local_window_composition(
     memo: &mut Memo,
     entries: &[QueryWorkloadEntry],
-    previous: Option<PaneWidthDomain>,
-    domain: PaneWidthDomain,
+    previous: Option<TumblingWindowWidthDomain>,
+    domain: TumblingWindowWidthDomain,
     deadline: Option<Instant>,
 ) -> Result<(), CandidateGenerationTimeout> {
     check_generation_deadline(deadline)?;
     // Flatten each existing/generated graph once. Repeatedly flattening the
-    // growing candidate list makes a complete pane-width domain quadratic.
+    // growing candidate list makes a complete tumbling-window-width domain quadratic.
     let mut known: HashMap<(usize, String), Vec<usize>> = HashMap::new();
     for (group, candidates) in memo.candidates.iter().enumerate() {
         check_generation_deadline(deadline)?;
@@ -69,7 +73,7 @@ pub(crate) fn extend_local_window_composition(
         }
     }
     for (group, candidate) in
-        local_pane_candidates_delta(memo, entries, previous, domain, deadline)?
+        local_tumbling_window_candidates_delta(memo, entries, previous, domain, deadline)?
     {
         check_generation_deadline(deadline)?;
         let Ok(signature) = candidate_signature(&candidate) else {
@@ -93,31 +97,36 @@ pub(crate) fn extend_local_window_composition(
     Ok(())
 }
 
-/// Expand legal pane widths while preserving canonical memo inputs.
+/// Expand legal tumbling-window widths while preserving canonical memo inputs.
 #[cfg(test)]
-fn local_pane_candidates(
+fn local_tumbling_window_candidates(
     memo: &Memo,
     entries: &[QueryWorkloadEntry],
 ) -> Vec<(usize, CandidateForMemoGroup)> {
-    local_pane_candidates_before(memo, entries, PaneWidthDomain::Complete, None)
-        .expect("generation without a deadline cannot time out")
+    local_tumbling_window_candidates_before(
+        memo,
+        entries,
+        TumblingWindowWidthDomain::Complete,
+        None,
+    )
+    .expect("generation without a deadline cannot time out")
 }
 
 #[cfg(test)]
-fn local_pane_candidates_before(
+fn local_tumbling_window_candidates_before(
     memo: &Memo,
     entries: &[QueryWorkloadEntry],
-    domain: PaneWidthDomain,
+    domain: TumblingWindowWidthDomain,
     deadline: Option<Instant>,
 ) -> Result<Vec<(usize, CandidateForMemoGroup)>, CandidateGenerationTimeout> {
-    local_pane_candidates_delta(memo, entries, None, domain, deadline)
+    local_tumbling_window_candidates_delta(memo, entries, None, domain, deadline)
 }
 
-fn local_pane_candidates_delta(
+fn local_tumbling_window_candidates_delta(
     memo: &Memo,
     entries: &[QueryWorkloadEntry],
-    previous: Option<PaneWidthDomain>,
-    domain: PaneWidthDomain,
+    previous: Option<TumblingWindowWidthDomain>,
+    domain: TumblingWindowWidthDomain,
     deadline: Option<Instant>,
 ) -> Result<Vec<(usize, CandidateForMemoGroup)>, CandidateGenerationTimeout> {
     check_generation_deadline(deadline)?;
@@ -125,7 +134,7 @@ fn local_pane_candidates_delta(
     let mut own: Vec<(usize, CandidateForMemoGroup)> = Vec::new();
     for (g, group) in memo.groups.iter().enumerate() {
         check_generation_deadline(deadline)?;
-        let grids = pane_width_domain_before(
+        let grids = tumbling_window_width_domain_before(
             group
                 .queries
                 .iter()
@@ -135,7 +144,7 @@ fn local_pane_candidates_delta(
         )?;
         let previous_widths = previous
             .map(|previous| {
-                pane_width_domain_before(
+                tumbling_window_width_domain_before(
                     group
                         .queries
                         .iter()
@@ -170,11 +179,12 @@ fn local_pane_candidates_delta(
                     })
                     .collect::<Vec<_>>();
                 let roots = [QueryRoot::Operator(Rc::clone(&candidate.root_node))];
-                let panes = pane_candidates(&roots, &[Some(grid)]);
-                if panes.is_empty() {
+                let tumbling_windows = tumbling_window_candidates(&roots, &[Some(grid)]);
+                if tumbling_windows.is_empty() {
                     continue;
                 }
-                let Ok(pass2_candidates) = window_composition_pass2_candidates(&roots, &panes)
+                let Ok(pass2_candidates) =
+                    window_composition_pass2_candidates(&roots, &tumbling_windows)
                 else {
                     continue;
                 };
@@ -189,7 +199,7 @@ fn local_pane_candidates_delta(
                     // Guarantee recomposition can clone unchanged source scans.
                     // Restore only an unambiguous original scan with the same full
                     // source/schema/execution contract; scans have intrinsic exact
-                    // semantics. Otherwise the pane's canonical input disappears.
+                    // semantics. Otherwise the tumbling window's canonical input disappears.
                     let mut restored = HashMap::new();
                     for rewritten in OperatorNode::reachable(node) {
                         check_generation_deadline(deadline)?;
@@ -258,15 +268,15 @@ fn restore_scan_boundaries(
 
 // Union of complete divisor domains covers individual readers and every
 // compatible subset: common widths belong to each reader's divisor domain.
-// Nongridded potential consumers do not veto a repeated reader's panes.
+// Nongridded potential consumers do not veto a repeated reader's tumbling windows.
 #[cfg(test)]
 fn compatible_reader_grids(group: &MemoGroup, entries: &[QueryWorkloadEntry]) -> Vec<u64> {
-    super::shared_configurations::pane_width_domain(
+    super::shared_configurations::tumbling_window_width_domain(
         group
             .queries
             .iter()
             .filter_map(|&query| entries.get(query)?.evaluation_grid_ms()),
-        PaneWidthDomain::Complete,
+        TumblingWindowWidthDomain::Complete,
     )
 }
 
@@ -358,7 +368,7 @@ mod tests {
         assert!(try_add_local_window_composition_in_domain(
             &mut memo,
             &entries,
-            PaneWidthDomain::Complete,
+            TumblingWindowWidthDomain::Complete,
             Some(Instant::now())
         )
         .is_err());
@@ -374,14 +384,14 @@ mod tests {
         let mut incremental = base.clone();
         let mut previous = None;
         for domain in [
-            PaneWidthDomain::SeedGrids,
-            PaneWidthDomain::Expanding { max_parts: 4 },
-            PaneWidthDomain::Expanding { max_parts: 8 },
-            PaneWidthDomain::Complete,
+            TumblingWindowWidthDomain::SeedGrids,
+            TumblingWindowWidthDomain::Expanding { max_parts: 4 },
+            TumblingWindowWidthDomain::Expanding { max_parts: 8 },
+            TumblingWindowWidthDomain::Complete,
         ] {
             extend_local_window_composition(&mut incremental, &entries, previous, domain, None)
                 .unwrap();
-            assert!(local_pane_candidates_delta(
+            assert!(local_tumbling_window_candidates_delta(
                 &incremental,
                 &entries,
                 Some(domain),
@@ -431,11 +441,11 @@ mod tests {
         (memo, entries)
     }
 
-    // A nongridded potential reader cannot eliminate another reader's panes.
+    // A nongridded potential reader cannot eliminate another reader's tumbling windows.
     #[test]
-    fn nongridded_potential_reader_preserves_local_pane_candidates() {
+    fn nongridded_potential_reader_preserves_local_tumbling_window_candidates() {
         let (memo, entries) = fixture(&[repeated(60_000), QueryRecurrence::Unknown]);
-        let candidates = local_pane_candidates(&memo, &entries);
+        let candidates = local_tumbling_window_candidates(&memo, &entries);
         assert!(!candidates.is_empty());
         assert!(candidates.iter().all(
             |(_, candidate)| candidate.origin == OriginOfCandidateForMemoGroup::TumblingWindows
@@ -453,9 +463,9 @@ mod tests {
         let group = &memo.groups[memo.query_roots[0].as_operator().unwrap().0 as usize];
         assert_eq!(
             compatible_reader_grids(group, &entries),
-            pane_width_divisors(120_000)
+            tumbling_window_width_divisors(120_000)
                 .into_iter()
-                .chain(pane_width_divisors(180_000))
+                .chain(tumbling_window_width_divisors(180_000))
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect::<Vec<_>>()

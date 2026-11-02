@@ -37,7 +37,7 @@ pub fn insufficient_counter_raw_data_samples(
             .is_some_and(|state| state.insufficient_counter_raw_data_samples(statistic, None))
 }
 
-/// Merge already selected exact panes and read one population. `None` means
+/// Merge already selected exact tumbling windows and read one population. `None` means
 /// the population is absent from the result: a counter with too few samples,
 /// or an empty MIN/MAX.
 pub fn exact_evaluation(

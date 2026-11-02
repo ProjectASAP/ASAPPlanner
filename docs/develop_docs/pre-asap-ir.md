@@ -437,7 +437,7 @@ rate(http_requests_total[5m])
 ```
 
 A SQL trailing window on the scanned table's time index lowers to the same `Range` node
-over the `Scan`, so its summaries get the same tumbling panes and ingestion-time builds:
+over the `Scan`, so its summaries get the same tumbling windows and ingestion-time builds:
 
 ```sql
 SELECT COUNT(DISTINCT src_ip) FROM flows WHERE ts >= now() - INTERVAL '5 minutes'
@@ -450,7 +450,7 @@ on the table's `time_index`, with a fixed-length `w` (days and smaller; a month 
 length). It reads the window with PromQL's range timing, `(T - w, T]` at evaluation time
 `T`: the start is exclusive for `>=` too, so a row stamped exactly `T - w` is not read, and rows
 later than `T` have not arrived yet. Any other time condition stays a `Scan` predicate, and so
-does the window itself when another conjunct also reads `now()` (in a pane or at ingestion time
+does the window itself when another conjunct also reads `now()` (in a tumbling window or at ingestion time
 that conjunct would read other rows).
 
 **Fields:**
@@ -462,7 +462,7 @@ that conjunct would read other rows).
 
 PromQL `offset` / `@` time shift on a selector — a pass-through wrapper that moves *when*
 the child is evaluated but leaves its schema unchanged. Pass 2 also shifts a SQL table's
-`Scan` this way for each tumbling pane of a trailing window.
+`Scan` this way for each tumbling window of a trailing window.
 
 ```promql
 up offset 5m

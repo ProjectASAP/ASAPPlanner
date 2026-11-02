@@ -11,7 +11,7 @@ pub use crate::pass1::per_computation_candidates::{
     compose_logical_candidate, generate_per_computation_candidates, PerComputationCandidates,
 };
 pub use crate::pass2::asap_aware_cse::{
-    pane_candidates, rollup_candidates, rollup_pass2_candidates,
+    rollup_candidates, rollup_pass2_candidates, tumbling_window_candidates,
     window_composition_pass2_candidates, window_composition_shared_chain_candidates,
     with_union_scan_labels,
 };
@@ -35,7 +35,7 @@ use asap_types::workload::{
 /// [`generate_logical_asap_memo_candidates`](crate::pass2::logical_memo_candidates::generate_logical_asap_memo_candidates).
 pub fn sharing_rules_and_shared_state_groups(
     mut memo: asap_types::stages::MemoCandidates,
-    domain: crate::pass2::memo::shared_configurations::PaneWidthDomain,
+    domain: crate::pass2::memo::shared_configurations::TumblingWindowWidthDomain,
 ) -> Result<
     asap_types::stages::MemoCandidates,
     crate::pass2::memo::state_groups::StateGroupExpansionError,

@@ -95,7 +95,7 @@ Based on our requirement, each field should contain the following information.
      The sketch candidates are `summary_candidates(intent)` in `crates/logical-asap-optimization/src/pass1/realization.rs`; exact accumulators come from Pass 1's `ExactAccumulator` candidates in `pass1/per_computation_candidates.rs`; the evaluations are `SketchStatistic` ([§6.5](#65-update-input-and-evaluations-irschemasketchrs-iroperatormaintained_populationrs)).
 
    - **Time window aggregation intents**: whether states built over smaller windows can answer a larger one. This depends on how the family combines states:
-     - **Merge** (`SummaryMerge`, §5.6): states over disjoint panes combine into the state of their union, e.g. two 1-minute KLL states answer a 2-minute quantile. Requires a mergeable family.
+     - **Merge** (`SummaryMerge`, §5.6): states over disjoint tumbling windows combine into the state of their union, e.g. two 1-minute KLL states answer a 2-minute quantile. Requires a mergeable family.
      - **Subtract** (`SummarySubtract`, reserved): a sliding window as a larger state minus an older one. Only families with an inverse (e.g. exact `Sum`/`Count`, CMS) can do this.
 
      Which inputs may be merged is decided by coverage (§4), not by the schema. 
@@ -296,7 +296,7 @@ In the worked example, `latency < 100` and `region = 'us'` move into `selection`
 
 **When two definitions are equal.** Merging (§5.6) requires equal definitions.
 
-- They must have the same structure. Planning details are ignored: `timing`, `guarantee` and `coverage_cache`. So a pane built at ingestion time can merge with one built at query time.
+- They must have the same structure. Planning details are ignored: `timing`, `guarantee` and `coverage_cache`. So a tumbling window built at ingestion time can merge with one built at query time.
 - `SummaryUpdate.weight_domain` is compared too. It is computed from the rest, so it differs only if something is wrong.
 - States over different tables never merge: a KLL over `m1` and one over `m2` have different definitions. To combine tables, put a `UNION ALL` with a column that marks the source table below one `SummaryAgg`; that column can then be used in `selection` or in the grouping.
 
@@ -383,7 +383,7 @@ Any other shape stays in `definition`:
 | **Absolute** (later) | an interval on the timestamp column | `ts >= t0 AND ts < t1` → `ts ∈ [t0, t1)` |
 
 - PromQL windows exclude their start, so relative windows are open on the left. A SQL trailing window takes the same timing, `>=` included.
-- Window composition ([Pass 2](planner-layering.md#pass-2-asap-aware-common-subexpression-elimination) of logical optimization) builds its tumbling panes this way: a 3-minute window as panes `(−1m, 0]`, `(−2m, −1m]`, `(−3m, −2m]`, so pane times are derived, not declared (#601).
+- Window composition ([Pass 2](planner-layering.md#pass-2-asap-aware-common-subexpression-elimination) of logical optimization) builds its tumbling windows this way: a 3-minute window as tumbling windows `(−1m, 0]`, `(−2m, −1m]`, `(−3m, −2m]`, so tumbling window times are derived, not declared (#601).
 - An instant `TimeRange` (latest sample per series) does not pick rows by time, so it stays in `definition`. The walk also stops there, so for now the label matchers of an instant selector stay in `definition` too; lifting them is planned together with `rate` (Rule 1).
 - The IR cannot yet write a timestamp constant, so absolute SQL time filters stay in `definition` for now.
 - Absolute and relative time are never compared: a state over `(−1m, 0]` and one over `ts ∈ [t0, t1)` are treated as possibly overlapping.
@@ -413,7 +413,7 @@ Any other shape stays in `definition`:
 | `c` | filter conditions on the walk (after splitting at `AND`), including `SummaryAgg.filter` and `Scan.predicates` | a few |
 | `f` | columns in the widest schema on the walk | tens |
 | `v` | values in one value set (`IN` list) | a few |
-| `n` | inputs of a `SummaryMerge` | panes per window, regions, … |
+| `n` | inputs of a `SummaryMerge` | tumbling windows per window, regions, … |
 | `b` | boxes in one input's selection | 1 for a `SummaryAgg` |
 | `N` | nodes in a `definition` | the sub-DAG size |
 
@@ -432,7 +432,7 @@ Any other shape stays in `definition`:
 | no overlap | `O(n²·b²·f·v²)` | every pair of inputs, every pair of boxes, every shared column |
 | union of selections | `O((n·b)³)` box comparisons, worst case | joins boxes that differ in only one dimension whose union is again one constraint (touching time windows, touching value ranges, or value sets of one column), until nothing more joins; each join restarts the scan |
 
-For the common cases this is small: `n` one-minute panes in time order have one box each with no columns, so the merge costs `O(n·N·f)` for the definitions, `O(n²)` for overlap and `O(n²)` for the union. Nested merges keep `n` small: a merge of merges compares only its direct inputs, whose coverage is cached.
+For the common cases this is small: `n` one-minute tumbling windows in time order have one box each with no columns, so the merge costs `O(n·N·f)` for the definitions, `O(n²)` for overlap and `O(n²)` for the union. Nested merges keep `n` small: a merge of merges compares only its direct inputs, whose coverage is cached.
 
 ### 4.3 What coverage does not contain
 
@@ -665,20 +665,20 @@ With an exact target, the planner can keep all latencies per job in one maintain
 
 - **Implemented.** All children must be state with exactly one state field and identical schemas.
 - **Coverage.** It also requires equal `definition`s and selections that do not overlap, and computes the merged coverage.
-- **Newest panes:** an optional `newest_tumbling_windows: n` merges only the newest `n` panes of the one `SummaryTumblingWindowChain` the merge reads (`1 ≤ n <` its pane count). Its coverage is one build over those panes' window, so one chain kept for the longest window serves every query whose window, on the same panes, ends at the same time and is shorter.
-- **Rollup:** an optional `group_by` field, so one operator does both merge and rollup. It lists the input's group columns the output is keyed by; `None` keeps the input's groups. A rollup merges every input state, so it does not take `newest_tumbling_windows`; it reads a merge of the newest panes instead:
+- **Newest tumbling windows:** an optional `newest_tumbling_windows: n` merges only the newest `n` tumbling windows of the one `SummaryTumblingWindowChain` the merge reads (`1 ≤ n <` its tumbling-window count). Its coverage is one build over those tumbling windows' window, so one chain kept for the longest window serves every query whose window, on the same tumbling windows, ends at the same time and is shorter.
+- **Rollup:** an optional `group_by` field, so one operator does both merge and rollup. It lists the input's group columns the output is keyed by; `None` keeps the input's groups. A rollup merges every input state, so it does not take `newest_tumbling_windows`; it reads a merge of the newest tumbling windows instead:
 
 ```rust
 SummaryMerge { children: Vec<C>, newest_tumbling_windows: Option<u32>, group_by: Option<Vec<ColumnId>> }
 ```
 
-**Example A: time panes.** p99 of each series of metric `m` over the last 2 minutes:
+**Example A: time tumbling windows.** p99 of each series of metric `m` over the last 2 minutes:
 
 ```promql
 quantile_over_time(0.99, m[2m])
 ```
 
-Window composition (Pass 2) can answer it from two one-minute panes, one KLL per series in each, merged. Both panes read the same `Scan`.
+Window composition (Pass 2) can answer it from two one-minute tumbling windows, one KLL per series in each, merged. Both tumbling windows read the same `Scan`.
 
 ```text
                            ( next operator )
@@ -692,7 +692,7 @@ Window composition (Pass 2) can answer it from two one-minute panes, one KLL per
                  │  State: series labels,            │  State: series labels,
                  │  state Sketch(KLL k=200)          │  state Sketch(KLL k=200)
                  │                                   │
-     [[ SummaryAgg ]]  pane 0             [[ SummaryAgg ]]  pane 1
+     [[ SummaryAgg ]]  tumbling window 0             [[ SummaryAgg ]]  tumbling window 1
      KLL k=200, per series                KLL k=200, per series
      selection: time (−1m, 0]             selection: time (−2m, −1m]
                  ▲                                   ▲
@@ -708,12 +708,12 @@ Window composition (Pass 2) can answer it from two one-minute panes, one KLL per
                               [ Scan m ]
 ```
 
-Both panes have the same `definition` (`SummaryAgg` over `Scan m`), and their time ranges touch, so the merge covers one continuous range:
+Both tumbling windows have the same `definition` (`SummaryAgg` over `Scan m`), and their time ranges touch, so the merge covers one continuous range:
 
 ```text
 time      −2m           −1m            0
-pane 1     (─────────────]
-pane 0                   (─────────────]
+tumbling window 1     (─────────────]
+tumbling window 0                   (─────────────]
 merge      (───────────────────────────]
 ```
 
@@ -988,7 +988,7 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
     SummaryMerge {
         /// The states to merge; all have the same schema.
         children: Vec<C>,
-        /// Merge only the newest `n` panes of the one `SummaryTumblingWindowChain` read;
+        /// Merge only the newest `n` tumbling windows of the one `SummaryTumblingWindowChain` read;
         /// `None` merges every input state. Not with `group_by`.
         newest_tumbling_windows: Option<u32>,
         /// A rollup: the input's group columns the merged states are keyed
@@ -1391,7 +1391,7 @@ pub enum Constraint {
 impl SummaryCoverage {
     /// Computes the coverage of a summary node from its sub-DAG (§4.2.2).
     /// Errors: `NotSummary` for a node that is not a `SummaryAgg`,
-    /// `SummaryTumblingWindowChain` or `SummaryMerge`; `PaneChainExpansion` for a `SummaryTumblingWindowChain`
+    /// `SummaryTumblingWindowChain` or `SummaryMerge`; `TumblingWindowChainExpansion` for a `SummaryTumblingWindowChain`
     /// that does not expand to one build over its whole window; for a
     /// merge, an input's own error, `EmptyMerge` (no inputs),
     /// `DefinitionMismatch` (inputs compute different things) or

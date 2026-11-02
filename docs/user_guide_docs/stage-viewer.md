@@ -32,7 +32,7 @@ what the workload is. Start with:
 - **1 · dashboard panels**: two dashboard panels; the all-exact
   plan wins.
 - **3b · live p99 panel**: the whole-window KLL beats exact and
-  the panes.
+  the tumbling windows.
 - **Ratio of quantiles (memo after each step)**: `avg by (job) (quantile_over_time(0.5, data[5m]) /
   quantile_over_time(0.5, data[5m]) + quantile_over_time(0.9, data[5m]))`.
   This one shows the memo: 7 groups, and 7 × 7 = 49 complete DAGs after
@@ -67,7 +67,7 @@ In the lanes:
   summary operators;
 - a thick border marks a query's result, and `shared ×n` marks a node that n
   queries read;
-- click a `SummaryTumblingWindowChain` node to unfold its panes, and click again to fold them.
+- click a `SummaryTumblingWindowChain` node to unfold its tumbling windows, and click again to fold them.
 
 To follow one query, pick it in **highlight query**: everything it does not
 reach dims, in the lanes and in the Memo. Click a node to see its details;

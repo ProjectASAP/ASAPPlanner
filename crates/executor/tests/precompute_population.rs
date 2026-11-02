@@ -244,7 +244,7 @@ fn sum_state(value: f64) -> Arc<dyn asap_executor::AggregateCore> {
     Arc::new(state)
 }
 
-// Only an explicit merge may collapse distinct pane updates before finalization.
+// Only an explicit merge may collapse distinct tumbling window updates before finalization.
 #[test]
 fn precompute_merge_requires_a_family_with_a_sound_merge() {
     // IRate reads the window's last two samples, so the family-capability
@@ -258,7 +258,7 @@ fn precompute_merge_requires_a_family_with_a_sound_merge() {
 }
 
 #[test]
-fn explicit_merge_changes_pane_cardinality() {
+fn explicit_merge_changes_tumbling_window_cardinality() {
     let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
     for (merge, expected) in [(false, vec![2., 7.]), (true, vec![9.])] {
         let program = state_dag(family.clone(), None, merge);

@@ -74,7 +74,7 @@ fn run_b() -> Run {
         compose_logical_candidate, generate_per_computation_candidates,
     };
     use asap_logical_asap_optimization::test_support::{
-        pane_candidates, window_composition_pass2_candidates,
+        tumbling_window_candidates, window_composition_pass2_candidates,
     };
     use asap_types::stages::HowToComputeAggregateMeasure;
     let workload = pattern_b();
@@ -92,8 +92,8 @@ fn run_b() -> Run {
             continue;
         }
         let whole: Vec<_> = compose_logical_candidate(&local, &[option]).unwrap();
-        let panes = pane_candidates(&whole, &[Some(PATTERN_B_INTERVAL_MS)]);
-        let chain = window_composition_pass2_candidates(&whole, &panes)
+        let tumbling_windows = tumbling_window_candidates(&whole, &[Some(PATTERN_B_INTERVAL_MS)]);
+        let chain = window_composition_pass2_candidates(&whole, &tumbling_windows)
             .unwrap()
             .remove(0)
             .roots
@@ -455,7 +455,7 @@ fn stage1_logical_asap_optimization_b_window_composition_adds_sliding_and_tumbli
 }
 
 /// Each summary option of Pass 1 (KLL and DDSketch, both mergeable) also
-/// comes as 1-min tumbling panes, gcd(5 min, 1 min), merged five at a time
+/// comes as 1-min tumbling windows, gcd(5 min, 1 min), merged five at a time
 /// before its p99 estimate; the whole-window builds are kept and read no
 /// merge. Exact has no summary to split: 2 options × 2 forms + exact = 5.
 #[test]
@@ -591,38 +591,45 @@ fn stage3_plan_selection_b_selects_cheapest_valid() {
     assert_each_node_charged_per_consuming_query(&run);
 }
 
-/// With nothing materialized, the 1-min KLL panes are all rebuilt at every
+/// With nothing materialized, the 1-min KLL tumbling windows are all rebuilt at every
 /// evaluation: they read the same 5 minutes of samples and update the same
-/// states as one whole-window KLL, and merging five panes per series adds
+/// states as one whole-window KLL, and merging five tumbling windows per series adds
 /// 1M × 5 operations a minute. Each evaluation also holds its states while
-/// it runs: the whole window's 1M KLLs, or the five panes' 5M smaller ones,
+/// it runs: the whole window's 1M KLLs, or the five tumbling windows' 5M smaller ones,
 /// for the evaluation's latency. So whole-window KLL is selected at 2.363 per
-/// second and the panes cost 3.611; exact costs 2.458. DDSketch, whole or in
-/// panes, misses the rank target.
+/// second and the tumbling windows cost 3.611; exact costs 2.458. DDSketch, whole or in
+/// tumbling windows, misses the rank target.
 #[test]
-fn stage3_plan_selection_b_panes_rebuilt_at_query_time_add_the_merge() {
+fn stage3_plan_selection_b_tumbling_windows_rebuilt_at_query_time_add_the_merge() {
     let run = run_b();
     let cost = |c: &Logical| run.cost(&run.physical_of(c).next().unwrap().id);
-    let with = |algorithm: &str, panes: bool| {
+    let with = |algorithm: &str, tumbling_windows: bool| {
         run.logical
             .iter()
             .find(|c| {
                 query_option(&c.dag, &c.query_roots, 0) == algorithm
                     && windowed_builds(c)
                         .iter()
-                        .any(|(_, _, f, _)| (*f != WindowForm::None) == panes)
+                        .any(|(_, _, f, _)| (*f != WindowForm::None) == tumbling_windows)
             })
-            .unwrap_or_else(|| panic!("{algorithm} panes={panes}"))
+            .unwrap_or_else(|| panic!("{algorithm} tumbling windows={tumbling_windows}"))
     };
     let whole = cost(with("Kll", false)).unwrap();
-    let panes = cost(with("Kll", true)).unwrap();
+    let tumbling_windows = cost(with("Kll", true)).unwrap();
     assert!((whole - 2.362_500_025_2).abs() < 1e-9, "{whole}");
-    assert!((panes - 3.611_233_350_8).abs() < 1e-9, "{panes}");
+    assert!(
+        (tumbling_windows - 3.611_233_350_8).abs() < 1e-9,
+        "{tumbling_windows}"
+    );
     assert_eq!(
         run.selection.selected,
         run.physical_of(with("Kll", false)).next().unwrap().id
     );
-    for panes in [false, true] {
-        assert_eq!(cost(with("DDSketch", panes)), None, "panes={panes}");
+    for tumbling_windows in [false, true] {
+        assert_eq!(
+            cost(with("DDSketch", tumbling_windows)),
+            None,
+            "tumbling_windows={tumbling_windows}"
+        );
     }
 }

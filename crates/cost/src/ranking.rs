@@ -1,5 +1,5 @@
 //! How a cost model orders valid plans ([`PlanRanking`]): Stage 3 ranks its
-//! candidates with it, and the facade picks the best of its pane-width
+//! candidates with it, and the facade picks the best of its tumbling-window-width
 //! rounds' selections with it (#1047).
 use std::cmp::Ordering;
 

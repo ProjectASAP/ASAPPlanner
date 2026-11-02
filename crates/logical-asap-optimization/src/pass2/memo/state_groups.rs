@@ -1,7 +1,7 @@
 //! Opt-in concrete summary-state groups for the candidate-connection planner.
 //!
-//! Simple summary builds and pane chains directly over canonical input groups
-//! gain finite compatible sizes and pane horizons before exact state interning.
+//! Simple summary builds and tumbling-window chains directly over canonical input groups
+//! gain finite compatible sizes and tumbling-window horizons before exact state interning.
 //! Concrete state identity includes capacity, guarantee, update/filter semantics,
 //! and materialization. Supported private projections/filters gain explicit input groups.
 
@@ -475,12 +475,12 @@ mod tests {
         added_reader_candidates: usize,
     }
 
-    /// Pass 2 after local window composition, over the complete pane-width
+    /// Pass 2 after local window composition, over the complete tumbling-window-width
     /// domain, as the Pass 2 entry runs it.
     fn expand(memo: MemoCandidates) -> Result<Expanded, StateGroupExpansionError> {
         let memo = crate::test_support::sharing_rules_and_shared_state_groups(
             memo,
-            super::super::shared_configurations::PaneWidthDomain::Complete,
+            super::super::shared_configurations::TumblingWindowWidthDomain::Complete,
         )?;
         Ok(expanded(memo))
     }
@@ -506,7 +506,7 @@ mod tests {
     // linear state lookup and compare every generated candidate and state.
     #[test]
     fn indexed_state_interning_preserves_linear_catalog() {
-        let memo = with_local_panes(
+        let memo = with_local_tumbling_windows(
             workload(&[
                 ("quantile_over_time(0.95, latency[5m])", 0.01),
                 ("quantile_over_time(0.99, latency[15m])", 0.02),
@@ -514,7 +514,7 @@ mod tests {
             ]),
             &[6, 6, 6],
         );
-        let domain = super::super::shared_configurations::PaneWidthDomain::Complete;
+        let domain = super::super::shared_configurations::TumblingWindowWidthDomain::Complete;
         let mut memo = memo;
         crate::pass2::logical_memo_candidates::apply_sharing_rules(&mut memo, domain, None)
             .unwrap();
@@ -561,7 +561,7 @@ mod tests {
         assert!(matches!(
             crate::pass2::logical_memo_candidates::apply_sharing_rules(
                 &mut memo,
-                super::super::shared_configurations::PaneWidthDomain::Complete,
+                super::super::shared_configurations::TumblingWindowWidthDomain::Complete,
                 Some(Instant::now())
             ),
             Err(StateGroupExpansionError::DeadlineExceeded(_))
@@ -685,8 +685,10 @@ mod tests {
         assert_eq!(expanded.memo.groups.len(), count);
     }
 
-    fn with_local_panes(mut memo: MemoCandidates, grids: &[u64]) -> MemoCandidates {
-        use crate::pass2::asap_aware_cse::{pane_candidates, window_composition_pass2_candidates};
+    fn with_local_tumbling_windows(mut memo: MemoCandidates, grids: &[u64]) -> MemoCandidates {
+        use crate::pass2::asap_aware_cse::{
+            tumbling_window_candidates, window_composition_pass2_candidates,
+        };
 
         let boundaries: HashMap<_, _> = memo
             .groups
@@ -698,11 +700,11 @@ mod tests {
             let grid = grids[memo.groups[group].queries[0]];
             for candidate in memo.candidates[group].clone() {
                 let roots = vec![QueryRoot::Operator(Rc::clone(&candidate.root_node))];
-                let panes = pane_candidates(&roots, &[Some(grid)]);
-                if panes.len() != 1 {
+                let tumbling_windows = tumbling_window_candidates(&roots, &[Some(grid)]);
+                if tumbling_windows.len() != 1 {
                     continue;
                 }
-                let rewritten = window_composition_pass2_candidates(&roots, &panes)
+                let rewritten = window_composition_pass2_candidates(&roots, &tumbling_windows)
                     .unwrap()
                     .remove(0)
                     .roots
@@ -710,9 +712,9 @@ mod tests {
                 let QueryRoot::Operator(node) = &rewritten[0] else {
                     unreachable!()
                 };
-                // Pane rewriting recomposes guarantees; restore the original
+                // Tumbling window rewriting recomposes guarantees; restore the original
                 // canonical scan boundary rather than making it a private input.
-                let input = panes[0].build.children()[0].children()[0].clone();
+                let input = tumbling_windows[0].build.children()[0].children()[0].clone();
                 let chain = OperatorNode::reachable(node)
                     .into_iter()
                     .find(|node| {
@@ -720,21 +722,21 @@ mod tests {
                     })
                     .unwrap();
                 let node = replace_node(node, chain.children()[0], &input);
-                let mut pane = candidate;
-                pane.root_node = Rc::clone(&node);
-                pane.input_groups = boundary_groups(&node, &boundaries);
-                pane.origin = OriginOfCandidateForMemoGroup::TumblingWindows;
-                memo.candidates[group].push(pane);
+                let mut tumbling_window = candidate;
+                tumbling_window.root_node = Rc::clone(&node);
+                tumbling_window.input_groups = boundary_groups(&node, &boundaries);
+                tumbling_window.origin = OriginOfCandidateForMemoGroup::TumblingWindows;
+                memo.candidates[group].push(tumbling_window);
             }
         }
         memo
     }
 
-    // Different label projections can consume one wider pane state through
+    // Different label projections can consume one wider tumbling-window state through
     // typed reader projections; no original scan needs to contain the union.
     #[test]
-    fn disjoint_scan_labels_share_a_union_pane_state_with_typed_readers() {
-        let original = with_local_panes(
+    fn disjoint_scan_labels_share_a_union_tumbling_window_state_with_typed_readers() {
+        let original = with_local_tumbling_windows(
             workload(&[
                 ("avg by (job) (quantile_over_time(0.95, latency[5m]))", 0.01),
                 (
@@ -824,8 +826,8 @@ mod tests {
     // Widening shifts identity's position but must retain its full typed field
     // and remap the source's unique key rather than treating it as a plain label.
     #[test]
-    fn widened_pane_inputs_preserve_series_identity_and_keys() {
-        let memo = with_local_panes(
+    fn widened_tumbling_window_inputs_preserve_series_identity_and_keys() {
+        let memo = with_local_tumbling_windows(
             workload_with_identity(
                 &[
                     ("avg by (job) (quantile_over_time(0.95, latency[5m]))", 0.01),
@@ -857,7 +859,7 @@ mod tests {
                             .any(|field| field.name == *name)
                     })
             })
-            .expect("identity-carrying union pane state");
+            .expect("identity-carrying union tumbling-window state");
         let input = state.logical_node.children()[0];
         assert!(input.schema.has_promql_series_identity());
         let identity = input
@@ -928,7 +930,7 @@ mod tests {
             let mut memo = workload_with_identity(&queries, true);
             crate::pass2::logical_memo_candidates::apply_sharing_rules(
                 &mut memo,
-                super::super::shared_configurations::PaneWidthDomain::Complete,
+                super::super::shared_configurations::TumblingWindowWidthDomain::Complete,
                 None,
             )
             .unwrap();
@@ -973,7 +975,7 @@ mod tests {
     // Label widening must not erase source predicates in order to create reuse.
     #[test]
     fn scan_label_widening_keeps_different_filters_separate() {
-        let original = with_local_panes(
+        let original = with_local_tumbling_windows(
             workload(&[
                 (
                     "avg by (job) (quantile_over_time(0.95, latency{env=\"a\"}[5m]))",
@@ -993,23 +995,23 @@ mod tests {
             .all(|id| expanded.memo.groups[id.0 as usize].queries.len() == 1));
     }
 
-    // Real pane rewrites expose one identical chain to distinct quantile readers.
+    // Real tumbling window rewrites expose one identical chain to distinct quantile readers.
     #[test]
-    fn identical_local_pane_chains_share_state_without_removing_local_choices() {
-        let original = with_local_panes(
+    fn identical_local_tumbling_window_chains_share_state_without_removing_local_choices() {
+        let original = with_local_tumbling_windows(
             workload(&[
                 ("quantile_over_time(0.95, latency[5m])", 0.01),
                 ("quantile_over_time(0.99, latency[5m])", 0.01),
             ]),
             &[60_000, 60_000],
         );
-        let local_panes = original
+        let local_tumbling_windows = original
             .candidates
             .iter()
             .flatten()
             .filter(|candidate| candidate.origin == OriginOfCandidateForMemoGroup::TumblingWindows)
             .count();
-        assert!(local_panes >= 2);
+        assert!(local_tumbling_windows >= 2);
         let expanded = expand(original.clone()).unwrap();
         let chains: Vec<_> = expanded
             .state_groups
@@ -1050,8 +1052,8 @@ mod tests {
 
     // A finer grid and longer horizon serves a shorter reader through newest_tumbling_windows.
     #[test]
-    fn different_pane_grids_and_horizons_gain_explicit_newest_pane_readers() {
-        let original = with_local_panes(
+    fn different_tumbling_window_grids_and_horizons_gain_explicit_newest_tumbling_window_readers() {
+        let original = with_local_tumbling_windows(
             workload(&[
                 ("quantile_over_time(0.95, latency[5m])", 0.01),
                 ("quantile_over_time(0.99, latency[15m])", 0.02),
@@ -1279,7 +1281,7 @@ mod tests {
                 .any(|after| Rc::ptr_eq(&before.root_node, &after.root_node))));
     }
 
-    // A global SQL-window quantile can consume newest panes of a longer,
+    // A global SQL-window quantile can consume newest tumbling windows of a longer,
     // finer-grouped chain through the existing regrouping rule.
     #[test]
     fn grouped_window_rollup_exposes_one_finer_chain() {
@@ -1323,7 +1325,7 @@ mod tests {
         let generated =
             generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
                 .unwrap();
-        let memo = with_local_panes(
+        let memo = with_local_tumbling_windows(
             try_populate_pass1(initial, &generated).unwrap(),
             &[10_000, 10_000],
         );

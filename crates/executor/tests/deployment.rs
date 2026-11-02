@@ -364,8 +364,8 @@ fn deep_plain_count_sketch_estimates_meet_the_certified_bound() {
     }
 }
 
-// Panes merge cell by cell: every pane seeds row `r` the same way, so merging
-// two panes equals building the union in one pane.
+// Tumbling-window merge cell by cell: every tumbling window seeds row `r` the same way, so merging
+// two tumbling windows equals building the union in one tumbling window.
 #[test]
 fn plain_count_sketch_merge_equals_union_build() {
     let family = plain_count_sketch(1_001, 7);

@@ -13,7 +13,7 @@ edition = "2021"
 [dependencies]
 asap-accuracy = { path = "../accuracy" }
 asap-types = { path = "../types" }
-# The pane retention of a realized plan (`AssignmentRealizer::realize`).
+# The tumbling-window retention of a realized plan (`AssignmentRealizer::realize`).
 asap-cost = { path = "../cost" }
 rmp-serde = "1"
 serde = { version = "1", features = ["derive"] }
@@ -22,7 +22,7 @@ thiserror = "2"
 
 [features]
 # Exposes `test_support` (single-candidate realization, operator
-# implementation, pane coverage, and `test_support::catalog`: catalog
+# implementation, tumbling window coverage, and `test_support::catalog`: catalog
 # internals plan selection's unit tests exercise with its solver), for other
 # crates' tests. Tests also enumerate whole workloads with the reference pricer.
 test-support = ["reference-pricer"]

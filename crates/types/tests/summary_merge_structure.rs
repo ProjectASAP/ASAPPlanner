@@ -65,9 +65,9 @@ fn family_state(family: FieldDataType, region: &str) -> Rc<OperatorNode> {
     }))
     .unwrap()
 }
-/// Two KLL panes compose into one typed logical state without timing assignment.
+/// Two KLL tumbling windows compose into one typed logical state without timing assignment.
 #[test]
-fn compatible_panes_merge_structurally() {
+fn compatible_tumbling_windows_merge_structurally() {
     let root = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
         children: vec![state(200, "us"), state(200, "eu")],
         newest_tumbling_windows: None,
@@ -77,7 +77,7 @@ fn compatible_panes_merge_structurally() {
     root.validate_structure().unwrap();
     assert_eq!(root.schema.fields.len(), 1);
 }
-/// An empty merge, raw rows and differently sized state cannot masquerade as compatible panes.
+/// An empty merge, raw rows and differently sized state cannot masquerade as compatible tumbling windows.
 #[test]
 fn incompatible_merge_inputs_fail() {
     for children in [
@@ -189,7 +189,7 @@ fn family_capability_table() {
             Some(MayOverlap),
             vec![],
         ),
-        // Counter panes merge exactly when ordered and disjoint in time.
+        // Counter tumbling-window merge exactly when ordered and disjoint in time.
         (
             exact(ExactKind::Rate, ExactParams::Rate),
             Some(DisjointInTime),
@@ -695,13 +695,13 @@ fn idempotent_families_merge_overlapping_states() {
     }
 }
 
-/// `SummaryMerge` takes the timing of its consumer, and reads pane states
+/// `SummaryMerge` takes the timing of its consumer, and reads tumbling-window states
 /// stored at ingestion time (#509 Example 3/4 Pattern B1) or built at query
-/// time (B2). Merging at ingestion time needs every pane at ingestion time.
+/// time (B2). Merging at ingestion time needs every tumbling window at ingestion time.
 #[test]
 fn summary_merge_timing() {
-    let panes = [state(200, "us"), state(200, "eu")];
-    let root = merge(panes.to_vec()).unwrap();
+    let tumbling_windows = [state(200, "us"), state(200, "eu")];
+    let root = merge(tumbling_windows.to_vec()).unwrap();
     let timings = |assignment: &MaterializationAssignment| {
         let timed =
             apply_materialization_timings(&root, assignment, &mut NodeToTimedNodeCache::new())
@@ -721,16 +721,16 @@ fn summary_merge_timing() {
         (QueryTime, vec![QueryTime, QueryTime])
     );
     let at_ingestion = Materialization::MatAtIngestion(Medium::Memory);
-    let mut stored_panes = MaterializationAssignment::default();
-    for pane in &panes {
-        stored_panes.set(pane, at_ingestion);
+    let mut stored_tumbling_windows = MaterializationAssignment::default();
+    for tumbling_window in &tumbling_windows {
+        stored_tumbling_windows.set(tumbling_window, at_ingestion);
     }
     assert_eq!(
-        timings(&stored_panes),
+        timings(&stored_tumbling_windows),
         (QueryTime, vec![IngestionTime, IngestionTime])
     );
     // A `SummaryAgg` without an assignment runs at query time, so a merge
-    // stored at ingestion time needs its panes there too.
+    // stored at ingestion time needs its tumbling windows there too.
     let mut only_merge = MaterializationAssignment::default();
     only_merge.set(&root, at_ingestion);
     assert!(

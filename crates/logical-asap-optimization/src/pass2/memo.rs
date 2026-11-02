@@ -14,7 +14,7 @@ pub(crate) mod rules;
 pub(crate) mod shared_configurations;
 /// Concrete summary-state groups exposed by sharing rules.
 pub(crate) mod state_groups;
-/// Local pane candidates with selected-reader grid configurations.
+/// Local tumbling-window candidates with selected-reader grid configurations.
 pub(crate) mod window_candidates;
 
 use std::collections::{HashMap, HashSet};

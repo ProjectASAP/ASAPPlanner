@@ -6,7 +6,7 @@ use asap_executor::values::Value;
 use asap_logical_asap_optimization::generate_dag_of_logical_memo_groups;
 use asap_logical_asap_optimization::{
     test_support::{generate_per_computation_candidates, try_populate_pass1},
-    PaneWidthDomain,
+    TumblingWindowWidthDomain,
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
 use asap_types::stages::{CandidateForMemoGroup, MemoCandidates, OriginOfCandidateForMemoGroup};
@@ -57,7 +57,7 @@ fn expanded(queries: &[String]) -> MemoCandidates {
     let memo = try_populate_pass1(initial, &inventory).unwrap();
     asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(
         memo,
-        PaneWidthDomain::SeedGrids,
+        TumblingWindowWidthDomain::SeedGrids,
     )
     .unwrap()
 }

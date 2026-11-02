@@ -21,7 +21,7 @@ pub const DEFAULT_REFERENCE_CHOICES: usize = 10_000;
 pub struct PlanningStagesRun {
     /// The query-language frontends' roots, one per workload entry.
     pub stage0_query_language_frontends: Vec<QueryRoot>,
-    /// The facade's run: Pass 1, the pane-width rounds and the selection.
+    /// The facade's run: Pass 1, the tumbling-window-width rounds and the selection.
     pub run: PlanningRun,
     /// `--exhaustive`: the selected round's memo choices, each implemented
     /// by Stage 2 and all priced by the reference pricer.

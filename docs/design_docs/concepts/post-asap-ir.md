@@ -49,7 +49,7 @@ Implemented:
   union; its coverage check rejects inputs whose selections overlap. With
   `group_by` (a rollup) the output is keyed by those input group columns, and
   each output state merges the input states of its key; `newest_tumbling_windows`
-  merges only the newest panes of one pane chain, never with `group_by`. The timing pass does
+  merges only the newest tumbling windows of one tumbling-window chain, never with `group_by`. The timing pass does
   not place it yet (`ExecutionDataStateError::UnimplementedOperator`).
 
 Reserved (migrated but unimplemented; schema derivation rejects them with
@@ -117,7 +117,7 @@ gives each sub-DAG one of three options: `NotMaterialized`,
 [`MaterializationAssignment`](../../../crates/types/src/ir/properties/timing.rs) records
 the option per sub-DAG, named by the node whose output would be stored. Any
 node may be named: a summary state, a population, or, as in #509 Example 4,
-the tumbling-window panes a query reads. `set(node, materialization)` assigns
+the tumbling windows a query reads. `set(node, materialization)` assigns
 one, and every other sub-DAG is `NotMaterialized`. Choosing the options is
 Stage 2's job (#604); until then the planner materializes nothing.
 `apply_materialization_timings(root, &assignment, &mut NodeToTimedNodeCache)` then writes a

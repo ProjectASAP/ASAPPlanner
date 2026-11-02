@@ -106,7 +106,7 @@ impl ExactAccumulator {
 
     /// The earliest sample time of a counter (Rate/Increase) state, over
     /// all its populations; `None` for an empty or non-counter state.
-    /// Counter states merge pairwise in time order, so a merge of panes
+    /// Counter states merge pairwise in time order, so a merge of tumbling windows
     /// orders them by this first.
     pub fn earliest_sample_ms(&self) -> Option<i64> {
         std::iter::once(&self.scalar)
@@ -456,7 +456,7 @@ mod tests {
         SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
     }
 
-    // Stored Sum preserves low-order increments across updates, persistence and pane merge.
+    // Stored Sum preserves low-order increments across updates, persistence and tumbling-window merge.
     #[test]
     fn stored_sum_is_compensated() {
         let mut state = ExactAccumulator::new(sum(), false).unwrap();

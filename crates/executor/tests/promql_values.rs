@@ -195,7 +195,7 @@ fn exact_state_schema(family: planner_types::ir::schema::FieldDataType) -> Schem
     Arc::new(schema)
 }
 
-/// Merge stored exact panes per series and finalize them; a counter (`Rate`,
+/// Merge stored exact tumbling windows per series and finalize them; a counter (`Rate`,
 /// `Increase`) over the `lookback_ms` window ending at the evaluation time.
 fn compile_exact_evaluation(
     family: planner_types::ir::schema::FieldDataType,
@@ -519,10 +519,10 @@ fn scalar_broadcast_rejects_colliding_result_labels_after_recovery() {
     );
 }
 
-// Persisted exact evaluation graphs, rather than the storage adapter, merge panes,
+// Persisted exact evaluation graphs, rather than the storage adapter, merge tumbling windows,
 // finalize each population, and preserve the requested metric-name semantics.
 #[test]
-fn exact_state_evaluations_recover_and_finalize_panes() {
+fn exact_state_evaluations_recover_and_finalize_tumbling_windows() {
     use asap_executor::factory::create_planner_accumulator;
     use planner_types::ir::schema::*;
 

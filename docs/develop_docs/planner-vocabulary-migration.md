@@ -20,10 +20,10 @@ names.
 | `pre_asap::binder` | `asap_frontend_common::schema_resolver` |
 | `Binder` | removed; the free function below |
 | `Binder::bind`, `Binder::bind_with_inherited` | `schema_resolver::resolve_schema_with_inherited` |
-| `PanePhaseBinding` | `PaneLayout` |
+| `TumblingWindowPhaseBinding` | `TumblingWindowLayout` |
 | `BoundaryCoverage` | `WindowEdgeCoverage` |
 | `ExactBoundaryResidual` | `ExactWindowEdgeResidual` |
-| `WindowEdgeCompatibility::RequiresAlignedPanePhaseOrExactBoundaryResidual` | `WindowEdgeCompatibility::RequiresAlignedPanePhaseOrExactWindowEdgeResidual` |
+| `WindowEdgeCompatibility::RequiresAlignedTumblingWindowPhaseOrExactBoundaryResidual` | `WindowEdgeCompatibility::RequiresAlignedTumblingWindowPhaseOrExactWindowEdgeResidual` |
 | `resources::boundary` | `resources::physical_handoff` |
 | `BoundaryKind` | `PhysicalHandoffKind` |
 | `BoundaryResources` | `PhysicalHandoffBytes` |
@@ -50,7 +50,7 @@ contracts remain the same.
 
 Existing JSON needs no migration. Serde retains the `boundaries` and
 `per_boundary` keys, `exact_boundary_residual` tag, and
-`RequiresAlignedPanePhaseOrExactBoundaryResidual` value. The planner-cost JSON
+`RequiresAlignedTumblingWindowPhaseOrExactBoundaryResidual` value. The planner-cost JSON
 input still uses `boundaries`. Resource explanation labels (`boundary:<id>:<dimension>`)
 and the `physical-boundary-bytes-v1` model version also remain unchanged. These
 are compatibility labels, not the names to use in new Rust code.

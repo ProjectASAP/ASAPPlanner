@@ -154,7 +154,7 @@ fn size_for_failure_probability(
 mod tests {
     use super::*;
     use crate::pass2::memo::generate_dag_of_logical_memo_groups;
-    use crate::pass2::memo::shared_configurations::PaneWidthDomain;
+    use crate::pass2::memo::shared_configurations::TumblingWindowWidthDomain;
     use crate::test_support::{
         lower_promql, shared_summary_state_groups, sharing_rules_and_shared_state_groups,
     };
@@ -314,7 +314,9 @@ mod tests {
             ],
             &data(Some(10_000)),
         );
-        let memo = sharing_rules_and_shared_state_groups(memo, PaneWidthDomain::SeedGrids).unwrap();
+        let memo =
+            sharing_rules_and_shared_state_groups(memo, TumblingWindowWidthDomain::SeedGrids)
+                .unwrap();
         let found = kll_failure_probabilities(
             shared_summary_state_groups(&memo)
                 .iter()

@@ -350,7 +350,7 @@ impl StateColumnUpdater {
     }
 
     /// Merge `other`, an updater of the same family whose groups have the
-    /// same numbers (another shard of one pane), into this one, group by
+    /// same numbers (another shard of one tumbling window), into this one, group by
     /// group; a group only `other` has is added.
     ///
     /// For a counter (rate, increase), each group's samples in the two

@@ -1,15 +1,15 @@
-//! Tumbling-pane window summaries: what an [`ASAPOp::SummaryTumblingWindowChain`] computes,
+//! Tumbling-window summaries: what an [`ASAPOp::SummaryTumblingWindowChain`] computes,
 //! as the plain `SummaryAgg` nodes it stands for.
 //!
-//! A chain of `n` panes of width `w` over `child` is pane `i` (newest first,
+//! A chain of `n` tumbling windows of width `w` over `child` is tumbling window `i` (newest first,
 //! `0 ≤ i < n`): the chain's `SummaryAgg` over a range `TimeRange(w)` over
 //! `child` shifted back by `i·w`. A `SummaryMerge` over the chain is the
 //! state of one build over `TimeRange(n·w)` (`whole_window_build`) when
 //! the family merges (the family-capability table), and the executor runs
-//! the chain as its panes (`expand_pane_chains`). A merge of only the
-//! newest `m < n` panes (`SummaryMerge::newest_tumbling_windows`) is the state of one
+//! the chain as its tumbling windows (`expand_tumbling_window_chains`). A merge of only the
+//! newest `m < n` tumbling windows (`SummaryMerge::newest_tumbling_windows`) is the state of one
 //! build over `TimeRange(m·w)` ([`merged_window_build`]): one chain kept for
-//! the longest window serves every query whose window, on the same panes,
+//! the longest window serves every query whose window, on the same tumbling windows,
 //! ends at the same time and is shorter.
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -29,7 +29,7 @@ fn invalid(message: &str) -> SchemaDerivationError {
 
 /// The `SummaryTumblingWindowChain` a summary-state node carries merged: the chain itself,
 /// or the one chain a `SummaryMerge` that keeps its groups reads, in full
-/// or its newest panes (`merged_pane_count`). `None` for any other node,
+/// or its newest tumbling windows (`merged_tumbling_window_count`). `None` for any other node,
 /// a rollup (regrouping merge) included.
 pub fn merged_chain(state: &OperatorNode) -> Option<&OperatorNode> {
     match state.asap()? {
@@ -53,10 +53,10 @@ pub fn merged_chain(state: &OperatorNode) -> Option<&OperatorNode> {
     }
 }
 
-/// How many of its chain's panes, newest first, a summary-state node with
+/// How many of its chain's tumbling windows, newest first, a summary-state node with
 /// a [`merged_chain`] merges: the merge's `newest_tumbling_windows`, otherwise the
 /// chain's `tumbling_window_count`. `None` for any other node.
-fn merged_pane_count(state: &OperatorNode) -> Option<u32> {
+fn merged_tumbling_window_count(state: &OperatorNode) -> Option<u32> {
     let Some(ASAPOp::SummaryTumblingWindowChain {
         tumbling_window_count,
         ..
@@ -74,7 +74,7 @@ fn merged_pane_count(state: &OperatorNode) -> Option<u32> {
 }
 
 /// The `SummaryAgg` over `TimeRange(tumbling_window_count · tumbling_window_width_ms)` over the
-/// chain's input whose state the merged panes of `chain` equal.
+/// chain's input whose state the merged tumbling windows of `chain` equal.
 pub(crate) fn whole_window_build(
     chain: &OperatorNode,
 ) -> Result<OperatorNode, SchemaDerivationError> {
@@ -83,26 +83,28 @@ pub(crate) fn whole_window_build(
         ..
     }) = chain.asap()
     else {
-        return Err(invalid("expected a pane chain"));
+        return Err(invalid("expected a tumbling-window chain"));
     };
-    newest_panes_build(chain, *tumbling_window_count)
+    newest_tumbling_windows_build(chain, *tumbling_window_count)
 }
 
 /// The `SummaryAgg` whose state a summary-state node with a
-/// [`merged_chain`] carries: one build over the window of the panes it
-/// merges (`merged_pane_count`).
+/// [`merged_chain`] carries: one build over the window of the tumbling windows it
+/// merges (`merged_tumbling_window_count`).
 pub fn merged_window_build(state: &OperatorNode) -> Result<OperatorNode, SchemaDerivationError> {
     let (Some(chain), Some(tumbling_window_count)) =
-        (merged_chain(state), merged_pane_count(state))
+        (merged_chain(state), merged_tumbling_window_count(state))
     else {
-        return Err(invalid("expected merged panes of one pane chain"));
+        return Err(invalid(
+            "expected merged tumbling windows of one tumbling-window chain",
+        ));
     };
-    newest_panes_build(chain, tumbling_window_count)
+    newest_tumbling_windows_build(chain, tumbling_window_count)
 }
 
 /// The `SummaryAgg` over `TimeRange(tumbling_window_count · tumbling_window_width_ms)` over the
-/// chain's input: the state of the chain's newest `tumbling_window_count` panes.
-fn newest_panes_build(
+/// chain's input: the state of the chain's newest `tumbling_window_count` tumbling windows.
+fn newest_tumbling_windows_build(
     chain: &OperatorNode,
     tumbling_window_count: u32,
 ) -> Result<OperatorNode, SchemaDerivationError> {
@@ -112,18 +114,18 @@ fn newest_panes_build(
         ..
     }) = chain.asap()
     else {
-        return Err(invalid("expected a pane chain"));
+        return Err(invalid("expected a tumbling-window chain"));
     };
     let window = tumbling_window_width_ms
         .checked_mul(u64::from(tumbling_window_count))
-        .ok_or_else(|| invalid("pane chain window overflows"))?;
+        .ok_or_else(|| invalid("tumbling-window chain window overflows"))?;
     build_over(chain, range(Rc::clone(child), window)?)
 }
 
-/// Pane `index` (0 = newest) of `chain`: its `SummaryAgg` over the range
+/// Tumbling window `index` (0 = newest) of `chain`: its `SummaryAgg` over the range
 /// `TimeRange(tumbling_window_width_ms)` ending `index · tumbling_window_width_ms` before the
 /// chain's input.
-pub(crate) fn pane(
+pub(crate) fn tumbling_window(
     chain: &OperatorNode,
     index: u32,
 ) -> Result<OperatorNode, SchemaDerivationError> {
@@ -133,10 +135,10 @@ pub(crate) fn pane(
         ..
     }) = chain.asap()
     else {
-        return Err(invalid("expected a pane chain"));
+        return Err(invalid("expected a tumbling-window chain"));
     };
     let back = i64::try_from(tumbling_window_width_ms.saturating_mul(u64::from(index)))
-        .map_err(|_| invalid("pane offset overflows"))?;
+        .map_err(|_| invalid("tumbling window offset overflows"))?;
     build_over(
         chain,
         range(shifted(child, back)?, *tumbling_window_width_ms)?,
@@ -161,7 +163,7 @@ fn shifted(
                 offset_ms: shift
                     .offset_ms
                     .checked_add(back_ms)
-                    .ok_or_else(|| invalid("pane offset overflows"))?,
+                    .ok_or_else(|| invalid("tumbling window offset overflows"))?,
                 at: shift.at,
             },
             input,
@@ -205,7 +207,7 @@ fn build_over(
         ..
     }) = chain.asap()
     else {
-        return Err(invalid("expected a pane chain"));
+        return Err(invalid("expected a tumbling-window chain"));
     };
     let mut build = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryAgg {
         child: input,
@@ -224,48 +226,48 @@ fn build_over(
 
 /// Expansion failure distinguishes invalid IR from an interrupted valid plan.
 #[derive(Debug, thiserror::Error)]
-pub enum PaneChainExpansionError {
+pub enum TumblingWindowChainExpansionError {
     #[error(transparent)]
     Invalid(#[from] SchemaDerivationError),
-    #[error("planning deadline exceeded expanding pane chains")]
+    #[error("planning deadline exceeded expanding tumbling-window chains")]
     DeadlineExceeded,
 }
 
-fn without_deadline(error: PaneChainExpansionError) -> SchemaDerivationError {
+fn without_deadline(error: TumblingWindowChainExpansionError) -> SchemaDerivationError {
     match error {
-        PaneChainExpansionError::Invalid(error) => error,
-        PaneChainExpansionError::DeadlineExceeded => {
+        TumblingWindowChainExpansionError::Invalid(error) => error,
+        TumblingWindowChainExpansionError::DeadlineExceeded => {
             unreachable!("no expansion deadline was supplied")
         }
     }
 }
 
-/// `root` with every `SummaryTumblingWindowChain` expanded into its panes: a `SummaryMerge`
-/// reads each pane of each chain it read, newest first, as plain
-/// `SummaryAgg` nodes the executor runs; a merge of the newest `n` panes
+/// `root` with every `SummaryTumblingWindowChain` expanded into its tumbling windows: a `SummaryMerge`
+/// reads each tumbling window of each chain it read, newest first, as plain
+/// `SummaryAgg` nodes the executor runs; a merge of the newest `n` tumbling windows
 /// reads the first `n`, the same nodes a merge of the whole chain reads. Every other node keeps its
-/// guarantee, timing and materialization. Each pane takes its chain's
+/// guarantee, timing and materialization. Each tumbling window takes its chain's
 /// timing and materialization, and the range and shift it reads take the
 /// chain's timing: a chain materialized at ingestion time expands into
-/// panes each built and stored at ingestion time. Expanding before timings
-/// are applied leaves the panes untimed. A chain read by anything but a
+/// tumbling windows each built and stored at ingestion time. Expanding before timings
+/// are applied leaves the tumbling windows untimed. A chain read by anything but a
 /// `SummaryMerge` is an error.
 #[cfg(any(test, feature = "test-support"))]
-pub fn expand_pane_chains(
+pub fn expand_tumbling_window_chains(
     root: &Rc<OperatorNode>,
 ) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
     expand(root, &mut NodeToExpandedNodeCache::default()).map_err(without_deadline)
 }
 
-/// A workload with its pane chains expanded
-/// ([`expand_pane_chains_in_workload`]).
+/// A workload with its tumbling-window chains expanded
+/// ([`expand_tumbling_window_chains_in_workload`]).
 #[derive(Debug, Clone)]
-pub struct PaneChainExpansion {
+pub struct TumblingWindowChainExpansion {
     /// The workload's roots, in order, with every chain expanded.
     pub roots: Vec<QueryRoot>,
-    /// Each expanded chain with its panes some merge reads, newest first,
+    /// Each expanded chain with its tumbling windows some merge reads, newest first,
     /// in the order the chains were first reached.
-    pub chains: Vec<ExpandedPaneChain>,
+    pub chains: Vec<ExpandedTumblingWindowChain>,
     /// Every other node of the input workload the expansion reached, with
     /// the node that replaces it (itself when nothing below it changed),
     /// so a caller can carry what it knows about a node to the expanded
@@ -274,33 +276,33 @@ pub struct PaneChainExpansion {
 }
 
 /// One expanded chain: the `SummaryTumblingWindowChain` node of the input workload and the
-/// `SummaryAgg` panes that replace it.
+/// `SummaryAgg` tumbling windows that replace it.
 #[derive(Debug, Clone)]
-pub struct ExpandedPaneChain {
+pub struct ExpandedTumblingWindowChain {
     /// The chain node, as the input workload holds it.
     pub chain: Rc<OperatorNode>,
-    /// Its panes in the expanded workload that some merge reads, newest
+    /// Its tumbling windows in the expanded workload that some merge reads, newest
     /// first.
-    pub panes: Vec<Rc<OperatorNode>>,
+    pub tumbling_windows: Vec<Rc<OperatorNode>>,
 }
 
-/// `expand_pane_chains` over every root of one workload, with one cache, so
+/// `expand_tumbling_window_chains` over every root of one workload, with one cache, so
 /// a node several roots share stays one node and a chain several merges
-/// read expands into one set of panes. A standalone scalar root has the
-/// operators it reads expanded. Also returns each chain's panes, so a
+/// read expands into one set of tumbling windows. A standalone scalar root has the
+/// operators it reads expanded. Also returns each chain's tumbling windows, so a
 /// caller can carry what it knows about a chain (e.g. its retention) to
 /// them.
-pub fn expand_pane_chains_in_workload(
+pub fn expand_tumbling_window_chains_in_workload(
     roots: &[QueryRoot],
-) -> Result<PaneChainExpansion, SchemaDerivationError> {
-    expand_pane_chains_in_workload_before(roots, None).map_err(without_deadline)
+) -> Result<TumblingWindowChainExpansion, SchemaDerivationError> {
+    expand_tumbling_window_chains_in_workload_before(roots, None).map_err(without_deadline)
 }
 
-/// Expand the same legal pane domain, abandoning partial expansion on timeout.
-pub(crate) fn expand_pane_chains_in_workload_before(
+/// Expand the same legal tumbling-window domain, abandoning partial expansion on timeout.
+pub(crate) fn expand_tumbling_window_chains_in_workload_before(
     roots: &[QueryRoot],
     deadline: Option<Instant>,
-) -> Result<PaneChainExpansion, PaneChainExpansionError> {
+) -> Result<TumblingWindowChainExpansion, TumblingWindowChainExpansionError> {
     let mut cache = NodeToExpandedNodeCache {
         deadline,
         ..Default::default()
@@ -336,17 +338,25 @@ pub(crate) fn expand_pane_chains_in_workload_before(
                 }) => *tumbling_window_count,
                 _ => unreachable!("only chains are recorded"),
             };
-            let panes = (0..tumbling_window_count)
-                .map_while(|index| cache.pane_of.get(&(Rc::as_ptr(&chain), index)).cloned())
+            let tumbling_windows = (0..tumbling_window_count)
+                .map_while(|index| {
+                    cache
+                        .tumbling_window_of
+                        .get(&(Rc::as_ptr(&chain), index))
+                        .cloned()
+                })
                 .collect();
-            ExpandedPaneChain { chain, panes }
+            ExpandedTumblingWindowChain {
+                chain,
+                tumbling_windows,
+            }
         })
         .collect();
     // Catalog assembly follows expansion and is part of the same budget.
     if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-        return Err(PaneChainExpansionError::DeadlineExceeded);
+        return Err(TumblingWindowChainExpansionError::DeadlineExceeded);
     }
-    Ok(PaneChainExpansion {
+    Ok(TumblingWindowChainExpansion {
         roots,
         chains,
         expanded_nodes: cache.expanded,
@@ -354,7 +364,7 @@ pub(crate) fn expand_pane_chains_in_workload_before(
 }
 
 /// The untimed `node` with `timing` written into it and into every untimed
-/// node below it: the nodes [`pane`] created, over the chain's input, which
+/// node below it: the nodes [`tumbling window`] created, over the chain's input, which
 /// the timing pass already timed.
 fn timed_like(node: &Rc<OperatorNode>, timing: ExecutionTiming) -> OperatorNode {
     OperatorNode::with_schema(
@@ -370,13 +380,13 @@ fn timed_like(node: &Rc<OperatorNode>, timing: ExecutionTiming) -> OperatorNode 
 }
 
 /// What one expansion has built: each expanded node by its input's
-/// address, and each pane by its chain's address and index, so a chain two
-/// merges read expands into one set of panes.
+/// address, and each tumbling window by its chain's address and index, so a chain two
+/// merges read expands into one set of tumbling windows.
 #[derive(Default)]
 struct NodeToExpandedNodeCache {
     deadline: Option<Instant>,
     expanded_node_of: HashMap<*const OperatorNode, Rc<OperatorNode>>,
-    pane_of: HashMap<(*const OperatorNode, u32), Rc<OperatorNode>>,
+    tumbling_window_of: HashMap<(*const OperatorNode, u32), Rc<OperatorNode>>,
     /// Each chain expanded, in the order first reached.
     chains: Vec<Rc<OperatorNode>>,
     /// Each expanded node with its input, in the order expanded.
@@ -384,12 +394,12 @@ struct NodeToExpandedNodeCache {
 }
 
 impl NodeToExpandedNodeCache {
-    fn check_deadline(&self) -> Result<(), PaneChainExpansionError> {
+    fn check_deadline(&self) -> Result<(), TumblingWindowChainExpansionError> {
         if self
             .deadline
             .is_some_and(|deadline| Instant::now() >= deadline)
         {
-            Err(PaneChainExpansionError::DeadlineExceeded)
+            Err(TumblingWindowChainExpansionError::DeadlineExceeded)
         } else {
             Ok(())
         }
@@ -399,14 +409,16 @@ impl NodeToExpandedNodeCache {
 fn expand(
     node: &Rc<OperatorNode>,
     cache: &mut NodeToExpandedNodeCache,
-) -> Result<Rc<OperatorNode>, PaneChainExpansionError> {
+) -> Result<Rc<OperatorNode>, TumblingWindowChainExpansionError> {
     cache.check_deadline()?;
     if let Some(done) = cache.expanded_node_of.get(&Rc::as_ptr(node)) {
         return Ok(Rc::clone(done));
     }
     let out = match &node.operator {
         Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => {
-            return Err(invalid("a pane chain is read only through a summary merge").into())
+            return Err(
+                invalid("a tumbling-window chain is read only through a summary merge").into(),
+            )
         }
         Operator::ASAP(ASAPOp::SummaryMerge {
             children,
@@ -423,23 +435,25 @@ fn expand(
                         for index in 0..newest_tumbling_windows.unwrap_or(*tumbling_window_count) {
                             cache.check_deadline()?;
                             let key = (Rc::as_ptr(child), index);
-                            if let Some(done) = cache.pane_of.get(&key) {
+                            if let Some(done) = cache.tumbling_window_of.get(&key) {
                                 inputs.push(Rc::clone(done));
                                 continue;
                             }
-                            let pane = Rc::new(pane(child, index)?);
-                            let pane = match child.timing {
+                            let tumbling_window = Rc::new(tumbling_window(child, index)?);
+                            let tumbling_window = match child.timing {
                                 Some(timing) => Rc::new(
-                                    timed_like(&pane, timing)
+                                    timed_like(&tumbling_window, timing)
                                         .with_materialization(child.materialization),
                                 ),
-                                None => pane,
+                                None => tumbling_window,
                             };
                             if index == 0 {
                                 cache.chains.push(Rc::clone(child));
                             }
-                            cache.pane_of.insert(key, Rc::clone(&pane));
-                            inputs.push(pane);
+                            cache
+                                .tumbling_window_of
+                                .insert(key, Rc::clone(&tumbling_window));
+                            inputs.push(tumbling_window);
                         }
                     }
                     _ => inputs.push(expand(child, cache)?),

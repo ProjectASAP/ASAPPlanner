@@ -338,7 +338,7 @@ pub fn consumers(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, Vec<Consu
 /// its readers: once per second at ingestion time (`MatAtIngestion`), at
 /// the combined rate of the queries reaching it (`MatAtQuery`,
 /// [`evaluation_rate`]), or once per request of those queries for a chain
-/// kept across evaluations, whose request builds only its newest pane
+/// kept across evaluations, whose request builds only its newest tumbling window
 /// however many range steps it evaluates. `range_evaluations[q]` is query
 /// `q`'s range evaluation (none when missing). A `NotMaterialized` node is computed once per
 /// consumer that reaches it ([`consumers`]), at that consumer's rate. A consumer is a query

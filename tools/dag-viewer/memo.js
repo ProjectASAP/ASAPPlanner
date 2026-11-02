@@ -314,7 +314,7 @@ function memoStepElements(memo, s, options) {
 
   // Rank rows, highest rank on top; a rank wider than the row width wraps.
   // The row width grows with the drawing's area so that a step with
-  // hundreds of groups (one pane-chain group per grid) stays roughly as
+  // hundreds of groups (one tumbling-window-chain group per grid) stays roughly as
   // wide as it is tall, readable when the panel fits it.
   const area = boxes.reduce((n, b) => n + (b.width + MEMO_ITEM.groupGap) * (b.height + MEMO_ITEM.rowGap), 0);
   const rowWidth = Math.max(MEMO_ITEM.rowWidth, Math.sqrt(area) * 1.8);

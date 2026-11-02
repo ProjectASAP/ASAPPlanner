@@ -131,6 +131,6 @@ maintenance-policy admission remain deployment/planning contracts; this
 compiler does not discover storage or silently change a selected maintenance
 strategy.
 
-Pane construction and geometry belong to deployment. A deployment refreshes
-each pane view once per pane and returns the pane states from its store; the
+Tumbling window construction and geometry belong to deployment. A deployment refreshes
+each tumbling window view once per tumbling window and returns the tumbling-window states from its store; the
 query DAG merges and reads them out as computation.

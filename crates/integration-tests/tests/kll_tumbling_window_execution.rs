@@ -1,4 +1,4 @@
-//! Maintenance -> stored pane state -> independently bound query execution.
+//! Maintenance -> stored tumbling-window state -> independently bound query execution.
 use crate::physical_common;
 use asap_executor::sources::InMemoryDataStore;
 use asap_executor::{
@@ -34,7 +34,7 @@ use std::{
     },
 };
 
-const PANE_MS: i64 = 60_000;
+const TUMBLING_WINDOW_MS: i64 = 60_000;
 
 fn family(k: u32) -> FieldDataType {
     FieldDataType::Sketch(
@@ -65,12 +65,12 @@ fn query_scope() -> Scope {
     }
 }
 
-/// p50 and p99 of one KLL (k = 200) merged from five one-minute panes of
-/// `t`, each pane a materialized view.
+/// p50 and p99 of one KLL (k = 200) merged from five one-minute tumbling windows of
+/// `t`, each tumbling window a materialized view.
 struct Fixture {
     dag: PhysicalASAPDAG,
-    /// Pane `i` reads the minute ending `i` minutes before the evaluation time.
-    panes: Vec<u64>,
+    /// Tumbling window `i` reads the minute ending `i` minutes before the evaluation time.
+    tumbling_windows: Vec<u64>,
     views: Vec<MaterializedView>,
     merge: u64,
     p50: u64,
@@ -85,17 +85,17 @@ fn fixture() -> Fixture {
         predicates: vec![],
         schema: table_schema(),
     }));
-    let panes: Vec<Rc<OperatorNode>> = (0..5)
+    let tumbling_windows: Vec<Rc<OperatorNode>> = (0..5)
         .map(|i| {
             let shifted = new(asap_types::ir::Operator::NonASAP(NonASAPOp::TimeShift {
                 shift: TimeShift {
-                    offset_ms: i * PANE_MS,
+                    offset_ms: i * TUMBLING_WINDOW_MS,
                     at: None,
                 },
                 child: scan.clone(),
             }));
             let range = new(asap_types::ir::Operator::NonASAP(NonASAPOp::TimeRange {
-                range: std::time::Duration::from_millis(PANE_MS as u64),
+                range: std::time::Duration::from_millis(TUMBLING_WINDOW_MS as u64),
                 kind: TimeRangeKind::Range,
                 child: shifted,
             }));
@@ -110,7 +110,7 @@ fn fixture() -> Fixture {
         })
         .collect();
     let merge = new(asap_types::ir::Operator::ASAP(ASAPOp::SummaryMerge {
-        children: panes.clone(),
+        children: tumbling_windows.clone(),
         newest_tumbling_windows: None,
         group_by: None,
     }));
@@ -129,7 +129,7 @@ fn fixture() -> Fixture {
     )
     .unwrap();
     let compiled = compile_physical_asap_workload_with_node_ids(&roots).unwrap();
-    let mut pane_ids = vec![0; 5];
+    let mut tumbling_window_ids = vec![0; 5];
     let (mut merge, mut p50, mut p99) = (0, 0, 0);
     for node in &compiled.dag.nodes {
         let id = node.id as u64;
@@ -137,9 +137,9 @@ fn fixture() -> Fixture {
             asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg { child, .. }) => {
                 let shift = match child.children()[0].non_asap() {
                     Some(NonASAPOp::TimeShift { shift, .. }) => shift.offset_ms,
-                    _ => unreachable!("a pane reads a shifted range"),
+                    _ => unreachable!("a tumbling window reads a shifted range"),
                 };
-                pane_ids[(shift / PANE_MS) as usize] = id;
+                tumbling_window_ids[(shift / TUMBLING_WINDOW_MS) as usize] = id;
             }
             asap_types::ir::Operator::ASAP(ASAPOp::SummaryMerge { .. }) => merge = id,
             asap_types::ir::Operator::ASAP(ASAPOp::SummaryEstimate {
@@ -153,10 +153,10 @@ fn fixture() -> Fixture {
         }
     }
     let mut dag = compiled.dag;
-    let views = views_at(&mut dag, &pane_ids).unwrap();
+    let views = views_at(&mut dag, &tumbling_window_ids).unwrap();
     Fixture {
         dag,
-        panes: pane_ids,
+        tumbling_windows: tumbling_window_ids,
         views,
         merge,
         p50,
@@ -202,17 +202,17 @@ fn summary(batch: &Batch) -> Arc<dyn AggregateCore> {
         })
         .expect("missing KLL")
 }
-/// Pane `pane`'s state, built by `maintenance` (the newest pane's build) in
-/// the ingestion run of `(pane, pane + 1]` minutes.
-fn pane_state(maintenance: &CompiledPhysicalDAG, pane: i64) -> Batch {
-    // Twenty samples in each (start,end] one-minute pane; k=200 avoids
+/// Tumbling window `tumbling window`'s state, built by `maintenance` (the newest tumbling window's build) in
+/// the ingestion run of `(tumbling window, tumbling window + 1]` minutes.
+fn tumbling_window_state(maintenance: &CompiledPhysicalDAG, tumbling_window: i64) -> Batch {
+    // Twenty samples in each (start,end] one-minute tumbling window; k=200 avoids
     // compaction so quantiles and sample counts have deterministic oracles.
     let schema = Arc::new(table_schema());
     let rows = (0..20)
         .map(|i| {
             vec![
-                Value::Timestamp(pane * PANE_MS + 1 + i * 1000),
-                Value::Float64((pane * 20 + i) as f64),
+                Value::Timestamp(tumbling_window * TUMBLING_WINDOW_MS + 1 + i * 1000),
+                Value::Float64((tumbling_window * 20 + i) as f64),
             ]
         })
         .collect();
@@ -229,8 +229,8 @@ fn pane_state(maintenance: &CompiledPhysicalDAG, pane: i64) -> Batch {
         maintenance,
         store,
         Scope::Ingestion {
-            window_start_ms: pane * PANE_MS,
-            window_end_ms: (pane + 1) * PANE_MS,
+            window_start_ms: tumbling_window * TUMBLING_WINDOW_MS,
+            window_end_ms: (tumbling_window + 1) * TUMBLING_WINDOW_MS,
         },
     );
     state[0][0].clone()
@@ -294,12 +294,14 @@ impl PhysicalOperator<Batch, SchemaRef> for CountStarts {
 /// Actual codec bytes survive destruction of maintenance state; one shared
 /// native merge supplies p50, p99 and the population-count oracle per run.
 #[test]
-fn five_panes_roundtrip_and_shared_merge_runs_once() {
+fn five_tumbling_windows_roundtrip_and_shared_merge_runs_once() {
     let fixture = fixture();
-    let maintenance = compile(&fixture.dag, &[], &[fixture.panes[0]]).unwrap();
-    let panes: Vec<Batch> = (0..6).map(|pane| pane_state(&maintenance, pane)).collect();
+    let maintenance = compile(&fixture.dag, &[], &[fixture.tumbling_windows[0]]).unwrap();
+    let tumbling_windows: Vec<Batch> = (0..6)
+        .map(|tumbling_window| tumbling_window_state(&maintenance, tumbling_window))
+        .collect();
     drop(maintenance);
-    let schema = schema_of(&fixture.dag, fixture.panes[0]);
+    let schema = schema_of(&fixture.dag, fixture.tumbling_windows[0]);
     let merge = Operator::summary_merge(schema.clone(), 0, vec![]).unwrap();
     let compiled = compile(
         &fixture.dag,
@@ -307,15 +309,15 @@ fn five_panes_roundtrip_and_shared_merge_runs_once() {
         &[fixture.merge, fixture.p50, fixture.p99],
     )
     .unwrap();
-    let layout = asap_physical_asap_optimization::test_support::PaneLayout {
+    let layout = asap_physical_asap_optimization::test_support::TumblingWindowLayout {
         tumbling_window_width_ms: 60_000,
-        pane_origin_ms: Some(0),
+        tumbling_window_origin_ms: Some(0),
     };
     assert!(
-        asap_physical_asap_optimization::test_support::validate_pane_coverage(
+        asap_physical_asap_optimization::test_support::validate_tumbling_window_coverage(
             &layout,
             Some(330_000),
-            &asap_physical_asap_optimization::test_support::WindowEdgeCoverage::PaneAligned
+            &asap_physical_asap_optimization::test_support::WindowEdgeCoverage::TumblingWindowAligned
         )
         .is_err(),
         "moving window edges require residual computation"
@@ -323,31 +325,34 @@ fn five_panes_roundtrip_and_shared_merge_runs_once() {
     for offset in [0, 1] {
         let restored = restore(
             schema.clone(),
-            &panes[offset..offset + 5]
+            &tumbling_windows[offset..offset + 5]
                 .iter()
                 .map(summary)
                 .collect::<Vec<_>>(),
         );
         let evaluation_time_ms = (5 + offset as i64) * 60_000;
-        asap_physical_asap_optimization::test_support::validate_pane_coverage(
+        asap_physical_asap_optimization::test_support::validate_tumbling_window_coverage(
             &layout,
             Some(evaluation_time_ms),
-            &asap_physical_asap_optimization::test_support::WindowEdgeCoverage::PaneAligned,
+            &asap_physical_asap_optimization::test_support::WindowEdgeCoverage::TumblingWindowAligned,
         )
         .unwrap();
-        // View `i` holds the pane ending `i` minutes before the evaluation time.
+        // View `i` holds the tumbling window ending `i` minutes before the evaluation time.
         let bind = |count: usize| {
-            fixture.panes[..count].iter().enumerate().fold(
+            fixture.tumbling_windows[..count].iter().enumerate().fold(
                 InMemoryDataStore::default(),
                 |store, (i, &view)| {
                     store
-                        .with_materialized_view(view as usize, vec![panes[offset + 4 - i].clone()])
+                        .with_materialized_view(
+                            view as usize,
+                            vec![tumbling_windows[offset + 4 - i].clone()],
+                        )
                         .unwrap()
                 },
             )
         };
         let scope = Scope::Query { evaluation_time_ms };
-        // A five-pane deployment cannot bind only four materialized views.
+        // A five-tumbling window deployment cannot bind only four materialized views.
         let missing = try_execute(&compiled, bind(4), scope.clone())
             .err()
             .unwrap();
@@ -413,9 +418,9 @@ fn five_panes_roundtrip_and_shared_merge_runs_once() {
 /// Relabelled KLL parameters, a view bound in another schema and a missing
 /// view fail explicitly.
 #[test]
-fn panes_reject_parameters_schema_and_missing_binding() {
+fn tumbling_windows_reject_parameters_schema_and_missing_binding() {
     let fixture = fixture();
-    let schema = schema_of(&fixture.dag, fixture.panes[0]);
+    let schema = schema_of(&fixture.dag, fixture.tumbling_windows[0]);
     let wrong = Value::Summary {
         family: family(200),
         state: Arc::new(DatasketchesKLLAccumulator::new(128)),
@@ -432,14 +437,15 @@ fn panes_reject_parameters_schema_and_missing_binding() {
     let raw = Arc::new(table_schema());
     let raw_rows =
         Batch::try_new(raw, vec![vec![Value::Timestamp(1), Value::Float64(1.)]]).unwrap();
-    let store = fixture
-        .panes
-        .iter()
-        .fold(InMemoryDataStore::default(), |store, &view| {
-            store
-                .with_materialized_view(view as usize, vec![raw_rows.clone()])
-                .unwrap()
-        });
+    let store =
+        fixture
+            .tumbling_windows
+            .iter()
+            .fold(InMemoryDataStore::default(), |store, &view| {
+                store
+                    .with_materialized_view(view as usize, vec![raw_rows.clone()])
+                    .unwrap()
+            });
     let relabelled = try_execute(&compiled, store, query_scope()).err().unwrap();
     assert!(
         relabelled.to_string().contains("another schema"),
@@ -482,16 +488,18 @@ impl asap_executor::sources::DataStore for DefinitionStore {
     }
 }
 
-/// A store keyed only by `(definition_id, time range)` answers the five-pane
-/// query: the five panes share one definition and request the five
+/// A store keyed only by `(definition_id, time range)` answers the five-tumbling window
+/// query: the five tumbling windows share one definition and request the five
 /// one-minute ranges that tile the window, and the answers equal those of
-/// binding each pane's state to its node.
+/// binding each tumbling window's state to its node.
 #[test]
-fn a_store_keyed_by_definition_and_time_range_answers_the_panes() {
+fn a_store_keyed_by_definition_and_time_range_answers_the_tumbling_windows() {
     let fixture = fixture();
-    let maintenance = compile(&fixture.dag, &[], &[fixture.panes[0]]).unwrap();
-    // The state of the pane of minute `m`, `(m, m + 1]` minutes.
-    let panes: Vec<Batch> = (0..5).map(|m| pane_state(&maintenance, m)).collect();
+    let maintenance = compile(&fixture.dag, &[], &[fixture.tumbling_windows[0]]).unwrap();
+    // The state of the tumbling window of minute `m`, `(m, m + 1]` minutes.
+    let tumbling_windows: Vec<Batch> = (0..5)
+        .map(|m| tumbling_window_state(&maintenance, m))
+        .collect();
     let definition = fixture.views[0].coverage().definition_id().to_owned();
     assert!(fixture
         .views
@@ -500,8 +508,11 @@ fn a_store_keyed_by_definition_and_time_range_answers_the_panes() {
     let states = (0..5)
         .map(|m| {
             (
-                (definition.clone(), (m * PANE_MS, (m + 1) * PANE_MS)),
-                panes[m as usize].clone(),
+                (
+                    definition.clone(),
+                    (m * TUMBLING_WINDOW_MS, (m + 1) * TUMBLING_WINDOW_MS),
+                ),
+                tumbling_windows[m as usize].clone(),
             )
         })
         .collect();
@@ -540,20 +551,18 @@ fn a_store_keyed_by_definition_and_time_range_answers_the_panes() {
     assert_eq!(
         requested,
         (0..5)
-            .map(|m| (m * PANE_MS, (m + 1) * PANE_MS))
+            .map(|m| (m * TUMBLING_WINDOW_MS, (m + 1) * TUMBLING_WINDOW_MS))
             .collect::<Vec<_>>()
     );
-    // View `i` holds the pane ending `i` minutes before the evaluation time.
-    let by_node =
-        fixture
-            .panes
-            .iter()
-            .enumerate()
-            .fold(InMemoryDataStore::default(), |store, (i, &view)| {
-                store
-                    .with_materialized_view(view as usize, vec![panes[4 - i].clone()])
-                    .unwrap()
-            });
+    // View `i` holds the tumbling window ending `i` minutes before the evaluation time.
+    let by_node = fixture.tumbling_windows.iter().enumerate().fold(
+        InMemoryDataStore::default(),
+        |store, (i, &view)| {
+            store
+                .with_materialized_view(view as usize, vec![tumbling_windows[4 - i].clone()])
+                .unwrap()
+        },
+    );
     let by_node: Vec<Vec<Vec<Value>>> = physical_common::execute(&compiled, by_node, scope)
         .iter()
         .map(|batches| batches.iter().flat_map(Batch::to_rows).collect())

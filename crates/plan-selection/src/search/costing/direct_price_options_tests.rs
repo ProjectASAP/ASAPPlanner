@@ -378,7 +378,8 @@ fn producer_worker_buckets_remain_joint_choices_and_match_evaluator() {
         let ingestion = ingestion
             || (matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }))
                 && mode == Materialization::MatAtIngestion(Medium::Memory));
-        let pane = matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }));
+        let tumbling_window =
+            matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }));
         let mut inputs = Vec::new();
         node.operator
             .map_children(|child| inputs.push(append(child.clone(), configured, ingestion, mode)));
@@ -390,7 +391,7 @@ fn producer_worker_buckets_remain_joint_choices_and_match_evaluator() {
             } else {
                 ExecutionTiming::QueryTime
             },
-            if pane {
+            if tumbling_window {
                 mode
             } else {
                 Materialization::NotMaterialized
@@ -427,11 +428,14 @@ fn producer_worker_buckets_remain_joint_choices_and_match_evaluator() {
         })
         .unwrap();
     let roots: Vec<_> = compose_logical_candidate(&generated, &[choice]).unwrap();
-    let pane_rules =
-        asap_logical_asap_optimization::test_support::pane_candidates(&roots, &[Some(60_000)]);
+    let tumbling_window_rules =
+        asap_logical_asap_optimization::test_support::tumbling_window_candidates(
+            &roots,
+            &[Some(60_000)],
+        );
     let roots = asap_logical_asap_optimization::test_support::window_composition_pass2_candidates(
         &roots,
-        &pane_rules,
+        &tumbling_window_rules,
     )
     .unwrap()
     .pop()
@@ -472,7 +476,7 @@ fn producer_worker_buckets_remain_joint_choices_and_match_evaluator() {
         Some(NonASAPOp::Scan { .. })
     ));
     // This tests the pricing kernel, not executor installation of a projection
-    // below a pane. Both producers return exactly the same stream. The identity projection
+    // below a tumbling window. Both producers return exactly the same stream. The identity projection
     // adds ingestion CPU without changing rows, values, or source identity.
     let source = configured.node(raw_producer.0).clone();
     let projected = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {

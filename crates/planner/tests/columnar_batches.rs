@@ -1,5 +1,5 @@
 //! A runtime's samples reach the executor as Arrow columns (issue #762):
-//! the planner-layering #509 Example 4b plan, one pane built by the
+//! the planner-layering #509 Example 4b plan, one tumbling window built by the
 //! executor from a time series' raw data whose batch the runtime built as
 //! Arrow columns, each series' identity stored once, through the public
 //! batch API only.
@@ -30,7 +30,7 @@ use time_series::{series_identity, RawDataSample};
 const EVALUATION_MS: i64 = 3_600_000;
 
 #[tokio::test]
-async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
+async fn a_tumbling_window_is_built_from_arrow_columns_with_one_label_entry_per_series() {
     // What the user writes: p99 of `latency_ms` over the last hour, every
     // 10 minutes, at rank error 0.01, over 1,000 series sampled every second.
     let workload: PlanningWorkload = serde_json::from_str(
@@ -45,14 +45,14 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
               "sources": {"latency_ms": {"series_count": 1000, "sample_interval": 1000}}}}"#,
     )
     .unwrap();
-    // The deployment keeps no raw data samples, so every pane is built at
+    // The deployment keeps no raw data samples, so every tumbling window is built at
     // ingestion and materialized.
     let capabilities = DeploymentCapabilities {
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
     };
-    // The installable plan: the selected DAG and its materialized KLL panes.
-    // Pane width is chosen by the optimizer.
+    // The installable plan: the selected DAG and its materialized KLL tumbling windows.
+    // Tumbling-window width is chosen by the optimizer.
     let plan = plan_installable(UserInput::new(
         &workload,
         FrontendInput::Promql,
@@ -61,7 +61,7 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
     .await
     .unwrap()
     .0;
-    // The newest pane: its node, and the raw-data window it reads.
+    // The newest tumbling window: its node, and the raw-data window it reads.
     let views = plan.materialized_views().unwrap();
     let output = views
         .iter()
@@ -71,10 +71,10 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
                 .1
         })
         .unwrap();
-    // The pane's window at this evaluation, `(start_ms, end_ms]`.
+    // The tumbling window's window at this evaluation, `(start_ms, end_ms]`.
     let (start_ms, end_ms) = output.inputs.raw_data_windows()[0].bounds_ms(EVALUATION_MS);
-    // Feed both series within the selected pane, whose width is an optimizer
-    // decision. Keep distinct millisecond timestamps even for very fine panes.
+    // Feed both series within the selected tumbling window, whose width is an optimizer
+    // decision. Keep distinct millisecond timestamps even for very fine tumbling windows.
     let width_ms = end_ms - start_ms;
     assert!(width_ms > 0);
     let samples_per_series = width_ms.min(60);
@@ -135,8 +135,8 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
     let input = Batch::try_from_columns(schema.clone(), columns).unwrap();
     assert_eq!(input.num_rows(), expected_rows);
 
-    // The executor's pane build over the `latency_ms` raw data bound at
-    // the `Scan`; its `TimeRange` keeps the pane's window.
+    // The executor's tumbling-window build over the `latency_ms` raw data bound at
+    // the `Scan`; its `TimeRange` keeps the tumbling window's window.
     let compiled = compile(&plan.dag, &[], &[output.node_id as u64]).unwrap();
     let store = InMemoryDataStore::default()
         .with_raw_data(
@@ -147,7 +147,7 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
             vec![input],
         )
         .unwrap();
-    // The build, ready to run in the pane's ingestion window.
+    // The build, ready to run in the tumbling window's ingestion window.
     let build = compiled.instantiate(Arc::new(store)).unwrap();
     let context = RunContext::new(
         Scope::Ingestion {
@@ -157,8 +157,8 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
         Limits::default(),
     )
     .unwrap();
-    // The built pane: one row per series, its KLL in a state column.
-    let pane = build
+    // The built tumbling window: one row per series, its KLL in a state column.
+    let tumbling_window = build
         .execute(compiled.roots(), context)
         .unwrap()
         .remove(0)
@@ -166,12 +166,12 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
         .await
         .unwrap()
         .unwrap();
-    let state_column = pane
+    let state_column = tumbling_window
         .schema()
         .fields
         .iter()
         .position(|field| !field.is_plain())
         .unwrap();
-    assert_eq!(pane.num_rows(), 2);
-    assert_eq!(pane.state_column(state_column).unwrap().len(), 2);
+    assert_eq!(tumbling_window.num_rows(), 2);
+    assert_eq!(tumbling_window.state_column(state_column).unwrap().len(), 2);
 }

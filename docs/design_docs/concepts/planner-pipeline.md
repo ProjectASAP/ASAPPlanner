@@ -11,7 +11,7 @@ stage.
     Logical DAG (Pre-ASAP IR): exact, language-independent query intent
             | Stage 1: logical ASAP-aware optimization
             |   Pass 1: exact or a summary per computation
-            |   Pass 2: share, split into panes, or reuse across computations
+            |   Pass 2: share, split into tumbling windows, or reuse across computations
             v
     Logical ASAP candidates (Post-ASAP IR, untimed)
             | Stage 2: physical ASAP-aware optimization

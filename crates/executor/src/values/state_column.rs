@@ -18,7 +18,7 @@ pub struct StateColumn {
     /// Memory the states hold: each state's own footprint, plus each state
     /// shared by several states (one Hydra grid) once.
     state_memory_bytes: usize,
-    /// Whether something outside the run holds these states (a stored pane
+    /// Whether something outside the run holds these states (a stored tumbling window
     /// handed to a plan as a source): immutable and shared, so a run that
     /// reads them is not charged for them. Set once, never cleared.
     held_outside_run: AtomicBool,

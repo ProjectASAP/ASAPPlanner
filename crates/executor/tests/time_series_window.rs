@@ -251,7 +251,7 @@ fn an_instant_window_whose_latest_sample_is_stale_has_no_row() {
 }
 
 // In an ingestion run a window ends at the run's `window_end_ms`, whatever
-// the shifts below it: the run builds the pane the shifts select.
+// the shifts below it: the run builds the tumbling window the shifts select.
 #[test]
 fn an_ingestion_run_builds_the_window_ending_at_its_end() {
     let dag = window_over(1_000, TimeRangeKind::Range, 5_000);

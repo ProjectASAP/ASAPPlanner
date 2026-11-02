@@ -226,8 +226,8 @@ pub enum CoverageError {
     /// A `SummaryTumblingWindowChain` that does not expand to one build over its whole
     /// window (its window overflows, or the build does not derive): bad
     /// input.
-    #[error("pane chain does not expand to one build over its whole window: {reason}")]
-    PaneChainExpansion { reason: String },
+    #[error("tumbling-window chain does not expand to one build over its whole window: {reason}")]
+    TumblingWindowChainExpansion { reason: String },
     /// A `SummaryMerge` without inputs: bad input.
     #[error("summary merge requires at least one input")]
     EmptyMerge,
@@ -269,7 +269,7 @@ pub(crate) type NodeToSummaryCoverageCache = HashMap<*const OperatorNode, Summar
 impl SummaryCoverage {
     /// Coverage of a `SummaryAgg`, `SummaryTumblingWindowChain` or `SummaryMerge`. A chain
     /// covers what one build over its whole window does, and a merge of its
-    /// newest panes what one build over their window does. A merge fails unless
+    /// newest tumbling windows what one build over their window does. A merge fails unless
     /// every input has the same definition and their selections are
     /// pairwise disjoint; a family whose merge is idempotent
     /// ([`MergeInputRule::MayOverlap`] in the family-capability
@@ -310,27 +310,27 @@ impl SummaryCoverage {
         }
         let coverage = match node.asap() {
             Some(ASAPOp::SummaryAgg { .. }) => of_summary_agg(node),
-            // Back-to-back panes cover the whole window one build over it
+            // Back-to-back tumbling windows cover the whole window one build over it
             // would.
             Some(ASAPOp::SummaryTumblingWindowChain { .. }) => of_summary_agg(
-                &crate::ir::operator::pane_chain::whole_window_build(node).map_err(|error| {
-                    CoverageError::PaneChainExpansion {
+                &crate::ir::operator::tumbling_window_chain::whole_window_build(node).map_err(
+                    |error| CoverageError::TumblingWindowChainExpansion {
                         reason: error.to_string(),
-                    }
-                })?,
+                    },
+                )?,
             ),
-            // The newest panes of one chain cover what one build over their
+            // The newest tumbling windows of one chain cover what one build over their
             // window does.
             Some(ASAPOp::SummaryMerge {
                 newest_tumbling_windows: Some(_),
                 group_by: None,
                 ..
             }) => of_summary_agg(
-                &crate::ir::operator::pane_chain::merged_window_build(node).map_err(|error| {
-                    CoverageError::PaneChainExpansion {
+                &crate::ir::operator::tumbling_window_chain::merged_window_build(node).map_err(
+                    |error| CoverageError::TumblingWindowChainExpansion {
                         reason: error.to_string(),
-                    }
-                })?,
+                    },
+                )?,
             ),
             Some(ASAPOp::SummaryMerge {
                 children, group_by, ..
@@ -1170,9 +1170,9 @@ fn union_general(mut boxes: Vec<SelectionBox>) -> Vec<SelectionBox> {
     boxes
 }
 
-/// Pane coverage has identical column predicates and pairwise disjoint time
+/// Tumbling window coverage has identical column predicates and pairwise disjoint time
 /// intervals. Sort once and join adjacent intervals, rather than removing one
-/// element from a large vector for every pane. General multidimensional or
+/// element from a large vector for every tumbling window. General multidimensional or
 /// overlapping coverage continues through the existing exact union algorithm.
 fn union_ordered_time_boxes(boxes: &[SelectionBox]) -> Option<Vec<SelectionBox>> {
     let first = boxes.first()?;
@@ -1299,10 +1299,10 @@ fn touching<T: Clone>(
 }
 
 #[cfg(test)]
-mod pane_union_tests {
+mod tumbling_window_union_tests {
     use super::*;
 
-    fn pane(start: i64, end: i64) -> SelectionBox {
+    fn tumbling_window(start: i64, end: i64) -> SelectionBox {
         SelectionBox {
             relative_time: Some((Bound::Excluded(start), Bound::Included(end))),
             ..Default::default()
@@ -1310,9 +1310,12 @@ mod pane_union_tests {
     }
 
     #[test]
-    fn large_reverse_ordered_pane_union_is_one_exact_interval() {
-        let panes: Vec<_> = (0..75_000).rev().map(|i| pane(i, i + 1)).collect();
-        assert_eq!(union(panes), vec![pane(0, 75_000)]);
+    fn large_reverse_ordered_tumbling_window_union_is_one_exact_interval() {
+        let tumbling_windows: Vec<_> = (0..75_000)
+            .rev()
+            .map(|i| tumbling_window(i, i + 1))
+            .collect();
+        assert_eq!(union(tumbling_windows), vec![tumbling_window(0, 75_000)]);
     }
 
     #[test]
@@ -1362,20 +1365,28 @@ mod pane_union_tests {
     #[test]
     fn sorted_union_preserves_gaps_boundaries_and_original_group_order() {
         assert_eq!(
-            union(vec![pane(10, 11), pane(1, 2), pane(0, 1), pane(11, 12)]),
-            vec![pane(10, 12), pane(0, 2)]
+            union(vec![
+                tumbling_window(10, 11),
+                tumbling_window(1, 2),
+                tumbling_window(0, 1),
+                tumbling_window(11, 12)
+            ]),
+            vec![tumbling_window(10, 12), tumbling_window(0, 2)]
         );
         let missing_endpoint = SelectionBox {
             relative_time: Some((Bound::Excluded(0), Bound::Excluded(1))),
             ..Default::default()
         };
         assert_eq!(
-            union(vec![missing_endpoint.clone(), pane(1, 2)]),
-            vec![missing_endpoint, pane(1, 2)]
+            union(vec![missing_endpoint.clone(), tumbling_window(1, 2)]),
+            vec![missing_endpoint, tumbling_window(1, 2)]
         );
-        let overlaps = vec![pane(0, 2), pane(1, 3)];
+        let overlaps = vec![tumbling_window(0, 2), tumbling_window(1, 3)];
         assert!(union_ordered_time_boxes(&overlaps).is_none());
         assert_eq!(union(overlaps.clone()), overlaps);
-        assert_eq!(union(vec![pane(0, 1), pane(0, 1)]), vec![pane(0, 1)]);
+        assert_eq!(
+            union(vec![tumbling_window(0, 1), tumbling_window(0, 1)]),
+            vec![tumbling_window(0, 1)]
+        );
     }
 }

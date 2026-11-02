@@ -61,8 +61,8 @@
 //!   evaluated together, so each distinct interval counts once.
 //! * A `MatAtIngestion` node runs as data arrives: it is priced over one
 //!   second of arriving rows, once per second, whatever its readers' rates.
-//!   A tumbling-pane chain maintained this way updates only its newest
-//!   pane: each arriving row is placed in it and updates it.
+//!   A tumbling-window chain maintained this way updates only its newest
+//!   tumbling window: each arriving row is placed in it and updates it.
 //! * A query repeating every `I` ms runs `1000 / I` times per second, and an
 //!   estimated rate runs at that rate. One-off, scheduled and unknown
 //!   queries are spread over the settings' `non_repeating_query_horizon_seconds`
@@ -72,7 +72,7 @@
 //! ([`ResourceUsage::average_memory_bytes`](asap_cost::ResourceUsage::average_memory_bytes)), at
 //! `cost_per_memory_byte_second` per byte per second. A `MatAtIngestion`
 //! node keeps its state every second: twice for a whole window (the window
-//! being built and the completed one queries read) and `N + 1` panes for a
+//! being built and the completed one queries read) and `N + 1` tumbling windows for a
 //! chain of `N` (the `N` the query merges and the one being built). A
 //! `MatAtQuery` node's state is reused only within one evaluation, so it is
 //! held only while that evaluation runs: its bytes times the latency of the
@@ -83,11 +83,11 @@
 //! materialized node reading it (directly or through other
 //! `NotMaterialized` nodes), its bytes times the latency of the longest
 //! query reading that node, at the node's rate, as a `MatAtQuery` state is.
-//! A `MatAtQueryKeptAcrossEvaluations` tumbling-pane chain (#509 Example
+//! A `MatAtQueryKeptAcrossEvaluations` tumbling-window chain (#509 Example
 //! 4's B3, offered by Stage 2 when the deployment keeps query-time results,
 //! `DeploymentCapabilities::query_time_results_retained`) is kept across
-//! evaluations: each evaluation scans one pane of raw data and builds the
-//! newest pane, and the `N − 1` older panes, which complete the readers'
+//! evaluations: each evaluation scans one tumbling window of raw data and builds the
+//! newest tumbling window, and the `N − 1` older tumbling windows, which complete the readers'
 //! look-back, are kept every second (in memory, all `N` at the peak). When
 //! Stage 2 offers both query-time options for a chain, plan selection
 //! prices each and the cheaper wins.
@@ -103,14 +103,14 @@
 //!   request; a `MatAtIngestion` state is maintained as before, and the
 //!   merge and estimate over it run once per step;
 //! * a chain kept across evaluations is built once per request: Stage 2
-//!   offers it only when the requests repeat at its pane width, so in the
-//!   steady state each request builds its newest pane and every other pane
+//!   offers it only when the requests repeat at its tumbling-window width, so in the
+//!   steady state each request builds its newest tumbling window and every other tumbling window
 //!   any of its steps reads was built by an earlier request or step;
-//! * a pane chain kept beyond one evaluation (ingestion time or kept
+//! * a tumbling-window chain kept beyond one evaluation (ingestion time or kept
 //!   across evaluations) retains its input's offset plus its window plus
 //!   the longest `span_ms` among its readers (`RealizedPlan::tumbling_window_retention_ms`),
-//!   so the earliest step of the next request still finds its panes: that
-//!   many more panes are kept every second.
+//!   so the earliest step of the next request still finds its tumbling windows: that
+//!   many more tumbling windows are kept every second.
 //!
 //! Latency stays per evaluation (one step). Without a range evaluation
 //! `S = 1` and the retention is the window, so every price is as above.
@@ -125,9 +125,9 @@
 //! count; summary build and estimation are priced as rows × sketch depth and
 //! groups × k. A query-time scan reads the longest window above it (a time
 //! shift moves a window without widening it); a time shift is free, and a
-//! time range is priced by the rows it keeps. A tumbling-pane chain is
+//! time range is priced by the rows it keeps. A tumbling-window chain is
 //! priced as one build over its whole window plus one operation per row to
-//! place it in its pane, and keeps one state per group and pane; a merge
+//! place it in its tumbling window, and keeps one state per group and tumbling window; a merge
 //! costs one operation per state it reads. Kept state is sized by its bytes: a sketch by its parameters, a
 //! fixed-size exact accumulator (sum, count, min, max, rate, ...) as one
 //! value per group, and exact state that grows with the data (quantile,
@@ -322,7 +322,7 @@ mod tests {
     use asap_accuracy::estimators::hll;
     use asap_accuracy::propagation::root_guarantee;
     use asap_cost::execution_demand::evaluation_rate;
-    use asap_cost::{kept_pane_chains, node_map, plan_cost, NodeMap};
+    use asap_cost::{kept_tumbling_window_chains, node_map, plan_cost, NodeMap};
     use asap_cost::{
         CalibrationFit, ClusterLimits, ClusterObjective, CostInputs, CostModel, NodePriceSource,
         OperatorKind, PlanCost, ResourceUsage, COST_SOURCE, MEASURED_COST_SOURCE,
@@ -377,7 +377,7 @@ mod tests {
         Ok(at(fit.factor())?.0)
     }
 
-    /// [`self_calibrated_cost`] with `dag`'s node map and kept pane chains.
+    /// [`self_calibrated_cost`] with `dag`'s node map and kept tumbling-window chains.
     fn price(
         dag: &PhysicalASAPDAG,
         recurrence: &[QueryRecurrence],
@@ -387,7 +387,7 @@ mod tests {
         self_calibrated_cost(
             dag,
             &node_map(dag),
-            &kept_pane_chains(dag),
+            &kept_tumbling_window_chains(dag),
             recurrence,
             &[],
             data,
@@ -3871,7 +3871,7 @@ mod tests {
     /// read is not checked.
     #[test]
     fn invalid_settings_are_rejected() {
-        let candidates = pane_candidates(10_000.0);
+        let candidates = tumbling_window_candidates(10_000.0);
         let select = |settings: &CostInputs| {
             select_among_plans(
                 &candidates,
@@ -3914,7 +3914,7 @@ mod tests {
 
     const MINUTE: u32 = 60_000;
 
-    /// The p99 target [`pane_candidates`] are sized for.
+    /// The p99 target [`tumbling_window_candidates`] are sized for.
     fn p99_target() -> AccuracyTarget {
         AccuracyTarget::max_error(0.01)
             .failure_probability(0.001)
@@ -3941,19 +3941,20 @@ mod tests {
     }
 
     /// The physical candidates of a per-series p99 over 5 min with its KLL
-    /// in five 1-min tumbling panes, every minute over data arriving at
+    /// in five 1-min tumbling windows, every minute over data arriving at
     /// `rows_per_s`: rebuilt at query time (B2), then maintained at
     /// ingestion time (B1).
-    fn pane_candidates(rows_per_s: f64) -> Vec<PhysicalWorkloadPlan> {
-        let candidates = pane_candidates_for(rows_per_s, &DeploymentCapabilities::default());
+    fn tumbling_window_candidates(rows_per_s: f64) -> Vec<PhysicalWorkloadPlan> {
+        let candidates =
+            tumbling_window_candidates_for(rows_per_s, &DeploymentCapabilities::default());
         assert_eq!(candidates.len(), 2);
         candidates
     }
 
-    /// [`pane_candidates`] for a deployment with `deployment`'s
+    /// [`tumbling_window_candidates`] for a deployment with `deployment`'s
     /// capabilities: B2, B1, then, when it keeps query-time results, B3
     /// (built at query time and kept across evaluations).
-    fn pane_candidates_for(
+    fn tumbling_window_candidates_for(
         rows_per_s: f64,
         deployment: &DeploymentCapabilities,
     ) -> Vec<PhysicalWorkloadPlan> {
@@ -3982,10 +3983,11 @@ mod tests {
             )
             .unwrap();
         let roots = sized_as_pass1(&roots, &[p99_target()], &arriving(rows_per_s));
-        let rule_candidates = asap_logical_asap_optimization::test_support::pane_candidates(
-            &roots,
-            &[Some(u64::from(MINUTE))],
-        );
+        let rule_candidates =
+            asap_logical_asap_optimization::test_support::tumbling_window_candidates(
+                &roots,
+                &[Some(u64::from(MINUTE))],
+            );
         let roots =
             asap_logical_asap_optimization::test_support::window_composition_pass2_candidates(
                 &roots,
@@ -4031,18 +4033,18 @@ mod tests {
 
     /// `query_time_results_retained` gates keeping a query-time result across
     /// evaluations, and only that. Without it, Stage 2 offers the 1-min
-    /// panes of a query repeating every minute rebuilt (B2) or maintained
+    /// tumbling windows of a query repeating every minute rebuilt (B2) or maintained
     /// (B1); with it, also built at query time and kept (B3,
     /// `MatAtQueryKeptAcrossEvaluations`). B3 is computed once per
-    /// evaluation, reads one pane (1 min) of raw data, keeps that much raw
-    /// data on disk, and holds its 4 older panes in memory between
+    /// evaluation, reads one tumbling window (1 min) of raw data, keeps that much raw
+    /// data on disk, and holds its 4 older tumbling windows in memory between
     /// evaluations (on disk, if it were placed there). The same chain
     /// `MatAtQuery` is reused only within one evaluation: the scan reads the
     /// 5-min window and nothing is kept between evaluations.
     #[test]
-    fn query_time_results_retained_keeps_a_pane_chain_across_evaluations() {
-        assert_eq!(pane_candidates(10_000.0).len(), 2);
-        let candidates = pane_candidates_for(10_000.0, &keeping_query_time_results());
+    fn query_time_results_retained_keeps_a_tumbling_window_chain_across_evaluations() {
+        assert_eq!(tumbling_window_candidates(10_000.0).len(), 2);
+        let candidates = tumbling_window_candidates_for(10_000.0, &keeping_query_time_results());
         assert_eq!(candidates.len(), 3);
         let b2 = &candidates[0].dag;
         let b3 = &candidates[2].dag;
@@ -4076,7 +4078,7 @@ mod tests {
         else {
             unreachable!()
         };
-        // Each pane sees its series' 60 samples: the one minute of 10 000
+        // Each tumbling window sees its series' 60 samples: the one minute of 10 000
         // rows per second over 10 000 series it reads.
         let samples = StateInputRows {
             rows_per_state: Some(60),
@@ -4090,7 +4092,7 @@ mod tests {
         assert!(chain_cost
             .detail
             .contains(&format!("keeps {between} bytes across evaluations")));
-        // On disk, the same N − 1 older panes are kept.
+        // On disk, the same N − 1 older tumbling windows are kept.
         let on_disk = with_chain(Materialization::MatAtQueryKeptAcrossEvaluations(
             Medium::Disk,
         ));
@@ -4117,13 +4119,14 @@ mod tests {
         )
     }
 
-    /// #509 Example 4, B1: maintained at ingestion time, a chain of N panes
-    /// pays the update of the newest pane only, one second of arriving rows
-    /// once per second, and keeps N + 1 panes (the N the query merges and
+    /// #509 Example 4, B1: maintained at ingestion time, a chain of N tumbling windows
+    /// pays the update of the newest tumbling window only, one second of arriving rows
+    /// once per second, and keeps N + 1 tumbling windows (the N the query merges and
     /// the one being built) per series.
     #[test]
-    fn a_chain_at_ingestion_pays_the_newest_pane_and_keeps_n_plus_one_panes() {
-        let candidates = pane_candidates(10_000.0);
+    fn a_chain_at_ingestion_pays_the_newest_tumbling_window_and_keeps_n_plus_one_tumbling_windows()
+    {
+        let candidates = tumbling_window_candidates(10_000.0);
         let dag = &candidates[1].dag;
         let chain = node_of(dag, is_chain);
         let Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
@@ -4135,7 +4138,7 @@ mod tests {
             unreachable!()
         };
         assert_eq!(*tumbling_window_count, 5);
-        // Each pane sees its series' 60 samples: one minute of 10 000 rows
+        // Each tumbling window sees its series' 60 samples: one minute of 10 000 rows
         // per second over 10 000 series.
         let samples = StateInputRows {
             rows_per_state: Some(60),
@@ -4175,13 +4178,13 @@ mod tests {
     }
 
     /// The latency check (S6, sketch-bench cost model §5): a query's
-    /// latency is its query-time work on one core. Rebuilding the panes at
+    /// latency is its query-time work on one core. Rebuilding the tumbling windows at
     /// query time (B2) takes longer than merging the maintained ones (B1);
     /// with a bound between the two, B2 is rejected as invalid with its
     /// latency and B1 is selected.
     #[test]
     fn a_candidate_over_a_querys_latency_bound_is_rejected_with_its_latency() {
-        let candidates = pane_candidates(10_000.0);
+        let candidates = tumbling_window_candidates(10_000.0);
         let latency = |c: &PhysicalWorkloadPlan| {
             let cost = price(
                 &c.dag,
@@ -4225,13 +4228,13 @@ mod tests {
     /// A query evaluated every minute whose evaluation takes longer than a
     /// minute never keeps up, so even without a latency bound the
     /// candidate is invalid. Over data fast enough that rebuilding the
-    /// panes at query time (B2) takes over a minute while merging the
+    /// tumbling windows at query time (B2) takes over a minute while merging the
     /// maintained ones (B1) does not, B2 is rejected with its latency and
     /// the interval, and B1 is selected.
     #[test]
     fn a_candidate_slower_than_a_querys_repeat_interval_is_rejected_without_a_bound() {
         let rows_per_s = 1e9;
-        let candidates = pane_candidates(rows_per_s);
+        let candidates = tumbling_window_candidates(rows_per_s);
         let latency = |c: &PhysicalWorkloadPlan| {
             price(
                 &c.dag,
@@ -4281,7 +4284,7 @@ mod tests {
     #[test]
     fn a_one_time_query_has_no_repeat_interval_to_keep_up_with() {
         let rows_per_s = 1e9;
-        let candidates = pane_candidates(rows_per_s);
+        let candidates = tumbling_window_candidates(rows_per_s);
         let once = QueryWorkloadEntry {
             recurrence: QueryRecurrence::OneTime {
                 invocations: 1,
@@ -4310,7 +4313,7 @@ mod tests {
     #[test]
     fn a_broken_latency_bound_is_reported_before_the_repeat_interval() {
         let rows_per_s = 1e9;
-        let candidates = pane_candidates(rows_per_s);
+        let candidates = tumbling_window_candidates(rows_per_s);
         let mut bounded = QueryWorkloadEntry {
             recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
                 interval: asap_types::workload::RepetitionInterval(MINUTE),
@@ -4349,7 +4352,7 @@ mod tests {
     #[test]
     fn ingestion_work_over_one_core_adds_the_newest_windows_compaction() {
         let latency = |rows_per_s: f64| {
-            let candidates = pane_candidates(rows_per_s);
+            let candidates = tumbling_window_candidates(rows_per_s);
             price(
                 &candidates[1].dag,
                 &[repeating(MINUTE)],
@@ -4376,7 +4379,7 @@ mod tests {
     /// instead of one operation.
     #[test]
     fn compaction_prices_merges_from_the_measured_merge() {
-        let candidates = pane_candidates(1e10);
+        let candidates = tumbling_window_candidates(1e10);
         let dag = &candidates[1].dag;
         let kll = dag
             .nodes
@@ -4460,7 +4463,7 @@ mod tests {
                 |u| u.disk_bytes as f64,
             ),
         ];
-        for candidate in pane_candidates(10_000.0) {
+        for candidate in tumbling_window_candidates(10_000.0) {
             for (set, used) in resources {
                 let cost = price(
                     &candidate.dag,
@@ -4487,7 +4490,7 @@ mod tests {
 
     /// Cost model 2 prices the candidate's peaks per second: provisioned
     /// memory, cores and disk; its nodes carry no price. B1 (maintained
-    /// panes) needs a core for ingestion and one for the query; B2 (rebuilt
+    /// tumbling windows) needs a core for ingestion and one for the query; B2 (rebuilt
     /// at query time) one.
     #[test]
     fn provisioned_capacity_prices_peak_memory_cores_and_disk() {
@@ -4496,7 +4499,7 @@ mod tests {
             ..ResourceUnitCost::illustrative()
         };
         let settings = under(CostModel::ProvisionedCapacity(prices.clone()));
-        let candidates = pane_candidates(10_000.0);
+        let candidates = tumbling_window_candidates(10_000.0);
         let cores: Vec<u32> = candidates
             .iter()
             .map(|candidate| {
@@ -4530,7 +4533,7 @@ mod tests {
             cpu_cores,
             objective: ClusterObjective::LowestLatency,
         };
-        let candidates = pane_candidates(10_000.0);
+        let candidates = tumbling_window_candidates(10_000.0);
         let select = |cpu_cores| {
             let settings = under(CostModel::ClusterCapacity(limits(cpu_cores)));
             select_among_plans(
@@ -4587,7 +4590,7 @@ mod tests {
     /// less disk than B2's raw data leaves only B1.
     #[test]
     fn cluster_capacity_rejects_a_candidate_over_its_disk() {
-        let candidates = pane_candidates(10_000.0);
+        let candidates = tumbling_window_candidates(10_000.0);
         let select = |disk_bytes| {
             let settings = under(CostModel::ClusterCapacity(ClusterLimits {
                 memory_bytes: u64::MAX,
@@ -4679,7 +4682,7 @@ mod tests {
     /// Under the Pareto front neither dominates the other: both are on it.
     #[test]
     fn cluster_objectives_keep_the_earlier_of_tied_candidates() {
-        let b2 = pane_candidates(10_000.0).remove(0);
+        let b2 = tumbling_window_candidates(10_000.0).remove(0);
         let twin = PhysicalWorkloadPlan {
             id: format!("{}-twin", b2.id),
             ..b2.clone()
@@ -4719,8 +4722,8 @@ mod tests {
 
     /// Every Pass 2 window-composition candidate of a per-series p50 over
     /// 2 min and a p99 over 5 min, both every minute, with both builds in
-    /// 1-min panes: `shared` picks one chain read by both (the 2-min query
-    /// merging its newest 2 panes) or a chain each. Its physical candidate
+    /// 1-min tumbling windows: `shared` picks one chain read by both (the 2-min query
+    /// merging its newest 2 tumbling windows) or a chain each. Its physical candidate
     /// with every chain maintained at ingestion time.
     fn nested_windows_at_ingestion(shared: bool, rows_per_s: f64) -> PhysicalWorkloadPlan {
         let queries = [
@@ -4765,10 +4768,11 @@ mod tests {
             })
             .collect();
         let roots: Vec<_> = pcc::compose_logical_candidate(&inventory, &kll).unwrap();
-        let rule_candidates = asap_logical_asap_optimization::test_support::pane_candidates(
-            &roots,
-            &queries.map(|(_, interval_ms)| Some(u64::from(interval_ms))),
-        );
+        let rule_candidates =
+            asap_logical_asap_optimization::test_support::tumbling_window_candidates(
+                &roots,
+                &queries.map(|(_, interval_ms)| Some(u64::from(interval_ms))),
+            );
         let roots =
             asap_logical_asap_optimization::test_support::window_composition_pass2_candidates(
                 &roots,
@@ -4776,7 +4780,9 @@ mod tests {
             )
             .unwrap()
             .into_iter()
-            .find(|c| c.pane_candidates.len() == 2 && c.shared_chains.is_empty() != shared)
+            .find(|c| {
+                c.tumbling_window_candidates.len() == 2 && c.shared_chains.is_empty() != shared
+            })
             .unwrap()
             .roots
             .unwrap();
@@ -4805,12 +4811,12 @@ mod tests {
         .unwrap()
     }
 
-    /// One chain of 5 panes maintained at ingestion time serves a 5-min and
-    /// a 2-min window: the 2-min query's merge reads its newest 2 panes per
+    /// One chain of 5 tumbling windows maintained at ingestion time serves a 5-min and
+    /// a 2-min window: the 2-min query's merge reads its newest 2 tumbling windows per
     /// series, the 5-min query's all 5, and the plan costs less than a chain
-    /// per query, since each arriving row updates one pane instead of two.
+    /// per query, since each arriving row updates one tumbling window instead of two.
     #[test]
-    fn a_merge_of_the_newest_panes_is_priced_by_the_panes_it_reads() {
+    fn a_merge_of_the_newest_tumbling_windows_is_priced_by_the_tumbling_windows_it_reads() {
         let rows_per_s = 10_000.0;
         let shared = nested_windows_at_ingestion(true, rows_per_s);
         let chains: Vec<_> = shared
@@ -4854,9 +4860,9 @@ mod tests {
         );
     }
 
-    /// A 10-min quantile every minute (10 × 1-min panes) and one every 5
-    /// min (2 × 5-min panes), maintained at ingestion time: one chain of
-    /// 1-min panes serves both, the 5-min query merging all 10 panes once
+    /// A 10-min quantile every minute (10 × 1-min tumbling windows) and one every 5
+    /// min (2 × 5-min tumbling windows), maintained at ingestion time: one chain of
+    /// 1-min tumbling windows serves both, the 5-min query merging all 10 tumbling windows once
     /// per 5 min, and costs less than a chain per query.
     #[test]
     fn queries_at_different_intervals_share_one_chain_at_ingestion_time() {
@@ -4894,7 +4900,7 @@ mod tests {
             separate_cost.cost_per_second
         );
         assert!(cost.usage.average_memory_bytes < separate_cost.usage.average_memory_bytes);
-        // Each query merges all 10 panes per series at its own rate: once
+        // Each query merges all 10 tumbling windows per series at its own rate: once
         // a minute and once per 5 min.
         let mut merges: Vec<(u64, String)> = shared
             .dag
@@ -4919,9 +4925,9 @@ mod tests {
         assert!(merges[1].1.starts_with("0.0167/s"), "{merges:?}");
     }
 
-    /// A 1-hour quantile every minute (60 × 1-min panes) and every 45 s
-    /// (80 × 45-s panes) can share only a chain at their gcd, 240 × 15-s
-    /// panes. Maintained at ingestion time it keeps more states than both
+    /// A 1-hour quantile every minute (60 × 1-min tumbling windows) and every 45 s
+    /// (80 × 45-s tumbling windows) can share only a chain at their gcd, 240 × 15-s
+    /// tumbling windows. Maintained at ingestion time it keeps more states than both
     /// per-query chains together, so it is priced higher than the
     /// per-query chains maintained at ingestion time.
     #[test]
@@ -4966,12 +4972,12 @@ mod tests {
 
     /// With more than one ingest worker, each worker beyond the first holds
     /// its own partial copy of a maintained state's newest window: B1's
-    /// peak memory grows by (k − 1) panes of states, its average memory
+    /// peak memory grows by (k − 1) tumbling windows of states, its average memory
     /// (and so cost model 1's price) does not.
     #[test]
     fn partial_copies_of_the_newest_window_add_to_peak_memory() {
         let rows_per_s = 1e9;
-        let b1 = pane_candidates(rows_per_s).remove(1);
+        let b1 = tumbling_window_candidates(rows_per_s).remove(1);
         let chain = node_of(&b1.dag, is_chain);
         let cost = price(
             &b1.dag,
@@ -4983,7 +4989,7 @@ mod tests {
         let detail = &cost.per_node[&chain].detail;
         let workers = cost.usage.peak_cpu_cores - 1;
         assert!(workers > 1, "{workers}");
-        // The chain keeps 6 panes (5 read and the one being built).
+        // The chain keeps 6 tumbling windows (5 read and the one being built).
         let kept: u64 = detail
             .split("; keeps ")
             .nth(1)
@@ -5258,8 +5264,8 @@ mod tests {
         })
     }
 
-    /// The exact rebuild of [`quantile_candidates`] and the KLL pane
-    /// candidates ([`pane_candidates`]: B2 rebuilt at query time, B1
+    /// The exact rebuild of [`quantile_candidates`] and the KLL tumbling window
+    /// candidates ([`tumbling_window_candidates`]: B2 rebuilt at query time, B1
     /// maintained at ingestion time), with the KLL's parameters.
     fn exact_and_kll() -> (Vec<PhysicalWorkloadPlan>, SketchParams) {
         let mut candidates: Vec<_> = quantile_candidates()
@@ -5268,7 +5274,7 @@ mod tests {
             .collect();
         assert_eq!(candidates.len(), 1);
         candidates[0].id = "EXACT".to_string();
-        candidates.extend(pane_candidates(10_000.0));
+        candidates.extend(tumbling_window_candidates(10_000.0));
         let kll = candidates[2]
             .dag
             .nodes
@@ -5280,7 +5286,7 @@ mod tests {
                 }) => Some(kind.params().clone()),
                 _ => None,
             })
-            .expect("a KLL pane chain");
+            .expect("a KLL tumbling-window chain");
         (candidates, kll)
     }
 
@@ -5319,7 +5325,7 @@ mod tests {
             plan_cost(
                 &candidate.dag,
                 &node_map(&candidate.dag),
-                &kept_pane_chains(&candidate.dag),
+                &kept_tumbling_window_chains(&candidate.dag),
                 &[repeating(MINUTE)],
                 &[],
                 &arriving(10_000.0),
@@ -5550,7 +5556,7 @@ mod tests {
             let cost = self_calibrated_cost(
                 &candidate.dag,
                 &node_map(&candidate.dag),
-                &kept_pane_chains(&candidate.dag),
+                &kept_tumbling_window_chains(&candidate.dag),
                 std::slice::from_ref(&recurrence),
                 &[range],
                 &data(),
@@ -5605,7 +5611,7 @@ mod tests {
     /// in place of the bytes the formulas derive from its parameters.
     #[test]
     fn measured_state_bytes_size_the_kept_state() {
-        let candidates = pane_candidates(10_000.0);
+        let candidates = tumbling_window_candidates(10_000.0);
         let maintained = &candidates[1];
         let kll = maintained
             .dag
@@ -5635,7 +5641,7 @@ mod tests {
             .average_memory_bytes
         };
         let formula = memory(None);
-        // The formula's state: each pane sees its series' 60 samples (one
+        // The formula's state: each tumbling window sees its series' 60 samples (one
         // minute of 10 000 rows per second over 10 000 series).
         let samples = StateInputRows {
             rows_per_state: Some(60),
@@ -5646,10 +5652,10 @@ mod tests {
     }
 
     // Oversized state configurations must be rejected as unrepresentable,
-    // never wrap to a cheap candidate or panic while pricing pane choices.
+    // never wrap to a cheap candidate or panic while pricing tumbling window choices.
     #[test]
-    fn pane_state_byte_overflow_returns_a_cost_error() {
-        for candidate in pane_candidates(10_000.0) {
+    fn tumbling_window_state_byte_overflow_returns_a_cost_error() {
+        for candidate in tumbling_window_candidates(10_000.0) {
             let kll = candidate
                 .dag
                 .nodes

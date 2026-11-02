@@ -109,7 +109,7 @@ fn samples() -> Vec<(&'static str, &'static str, i64, f64)> {
 }
 
 /// Execute `root` at query time over the `samples` bound as raw data at its
-/// `Scan`; each `TimeRange` keeps its own window (a tumbling pane's moved
+/// `Scan`; each `TimeRange` keeps its own window (a tumbling window's moved
 /// back by the `TimeShift` below it).
 fn execute(root: &Rc<OperatorNode>) -> Vec<String> {
     let timed = apply_materialization_timings(
@@ -118,8 +118,10 @@ fn execute(root: &Rc<OperatorNode>) -> Vec<String> {
         &mut NodeToTimedNodeCache::new(),
     )
     .unwrap();
-    // Tumbling panes run as their panes, each over its own window.
-    let timed = asap_types::ir::operator::pane_chain::expand_pane_chains(&timed).unwrap();
+    // Tumbling windows run as their tumbling windows, each over its own window.
+    let timed =
+        asap_types::ir::operator::tumbling_window_chain::expand_tumbling_window_chains(&timed)
+            .unwrap();
     let dag = compile_physical_asap_dag(&timed).unwrap();
     let store = physical_common::raw_data_store(&dag, |_, schema| {
         samples()
@@ -272,7 +274,7 @@ fn own_candidates<'a>(
 /// same per-job sums.
 #[test]
 fn nested_sum_merge_is_selected_and_answers_as_the_nested_sums() {
-    // Evaluated once, so no tumbling-pane candidates.
+    // Evaluated once, so no tumbling-window candidates.
     let query = "sum by (job) (sum_over_time(m[5m]))";
     let memo = memo(&exact_queries(&[query]), QueryRecurrence::Unknown);
     let variants: Vec<_> = choices(&memo, &[OriginOfCandidateForMemoGroup::Pass1])

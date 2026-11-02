@@ -15,6 +15,8 @@ const TUMBLING_WINDOW_RENAMES = Object.freeze({
   pane_count: 'tumbling_window_count',
   newest_panes: 'newest_tumbling_windows',
   pane_retention_ms: 'tumbling_window_retention_ms',
+  pane_width_domain: 'tumbling_window_width_domain',
+  pane_widths_pending: 'tumbling_window_widths_pending',
 });
 const ORIGIN_RENAMES = Object.freeze({ panes: 'tumbling_windows', Panes: 'TumblingWindows' });
 const has = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
@@ -586,8 +588,8 @@ function searchText(doc) {
   }
   const planning = doc.planning_report;
   if (planning && Array.isArray(planning.rounds)) {
-    parts.push(`${planning.rounds.length} pane-width round${planning.rounds.length === 1 ? '' : 's'} (${planning.rounds.map((r) => r.pane_width_domain).join(', ')})`);
-    if (planning.pane_widths_pending) parts.push('some pane widths not searched');
+    parts.push(`${planning.rounds.length} tumbling-window-width round${planning.rounds.length === 1 ? '' : 's'} (${planning.rounds.map((r) => r.tumbling_window_width_domain).join(', ')})`);
+    if (planning.tumbling_window_widths_pending) parts.push('some tumbling-window widths not searched');
   }
   const counts = selectionTable(doc).pruned_candidate_count_by_cause;
   if (doc.search === 'exhaustive' && counts && Object.keys(counts).length) {
@@ -700,11 +702,11 @@ function stageNodeLines(operator, inputSchema) {
       break;
     case 'SummaryEstimate': lines.push(`query: ${compactWire(op.query)}`); break;
     case 'SummaryMerge':
-      if (op.newest_tumbling_windows) lines.push(`newest ${op.newest_tumbling_windows} panes`);
+      if (op.newest_tumbling_windows) lines.push(`newest ${op.newest_tumbling_windows} tumbling windows`);
       break;
     case 'SummaryTumblingWindowChain':
       lines.push(`summary: ${summaryFamilyText(op.family)}`);
-      lines.push(`${op.tumbling_window_count} panes × ${durationText(op.tumbling_window_width_ms)}`);
+      lines.push(`${op.tumbling_window_count} tumbling windows × ${durationText(op.tumbling_window_width_ms)}`);
       if (grouping) lines.push(grouping);
       break;
     default: break;
@@ -736,9 +738,9 @@ function stageQueryReach(lane) {
   return reach;
 }
 
-// A pane's window relative to the evaluation time `t`: pane `k` (0 is the
+// A tumbling window's window relative to the evaluation time `t`: tumbling window `k` (0 is the
 // newest) of width `width` covers "t−(k+1)·width … t−k·width".
-function paneWindowText(k, width) {
+function tumblingWindowTimeText(k, width) {
   const end = k === 0 ? 't' : `t−${durationText(k * width)}`;
   return `t−${durationText((k + 1) * width)} … ${end}`;
 }
@@ -760,9 +762,9 @@ function timingClass(timing) {
 // nodes show their timing), `costPerNode` (the candidate's Stage 3
 // `per_node` costs), `queryIds` (the workload's query ids, to mark each
 // query's root), `expandedChains` (ids of SummaryTumblingWindowChain nodes to draw as their
-// panes: per pane `k`, newest first, a TimeShift by k panes (`n<id>p<k>s`,
-// none for the newest), a TimeRange of one pane (`n<id>p<k>r`) and the
-// pane's build (`n<id>p<k>`), each pane fed by the chain's input and read by
+// tumbling windows: per tumbling window `k`, newest first, a TimeShift by k tumbling windows (`n<id>p<k>s`,
+// none for the newest), a TimeRange of one tumbling window (`n<id>p<k>r`) and the
+// tumbling window's build (`n<id>p<k>`), each tumbling window fed by the chain's input and read by
 // the chain's readers). Display only: the document keeps the chain.
 function stageLaneElements(dag, options) {
   const { physical = false, costPerNode = null, queryIds = [], expandedChains = [] } = options || {};
@@ -792,16 +794,16 @@ function stageLaneElements(dag, options) {
       const width = body.tumbling_window_width_ms;
       for (let k = 0; k < body.tumbling_window_count; k += 1) {
         const id = `n${node.id}p${k}`;
-        const common = { paneOf: node.id, pane: k, reachedBy: queries, rootFor: [], timing: node.timing, node: node.raw };
+        const common = { tumblingWindowOf: node.id, tumbling_window: k, reachedBy: queries, rootFor: [], timing: node.timing, node: node.raw };
         if (k > 0) {
           nodes.push({ data: Object.assign({ id: `${id}s`, nodeId: `${node.id}p${k}s`, kind: 'TimeShift', group: group('TimeShift'),
-            label: `TimeShift\nshift: ${durationText(k * width)}` }, common), classes: `pane ${timingClass(node.timing)}`.trim() });
+            label: `TimeShift\nshift: ${durationText(k * width)}` }, common), classes: `tumbling window ${timingClass(node.timing)}`.trim() });
         }
         nodes.push({ data: Object.assign({ id: `${id}r`, nodeId: `${node.id}p${k}r`, kind: 'TimeRange', group: group('TimeRange'),
-          label: `TimeRange\nrange: ${durationText(width)}` }, common), classes: `pane ${timingClass(node.timing)}`.trim() });
-        nodes.push({ data: Object.assign({ id, nodeId: `${node.id}p${k}`, kind: 'pane', group: 'summary',
-          label: [`pane ${k + 1} of ${body.tumbling_window_count}`, `summary: ${summaryFamilyText(body.family)}`, `window ${paneWindowText(k, width)}`,
-            'click to collapse'].join('\n') }, common), classes: `pane ${timingClass(node.timing)}`.trim() });
+          label: `TimeRange\nrange: ${durationText(width)}` }, common), classes: `tumbling window ${timingClass(node.timing)}`.trim() });
+        nodes.push({ data: Object.assign({ id, nodeId: `${node.id}p${k}`, kind: 'tumbling_window', group: 'summary',
+          label: [`tumbling window ${k + 1} of ${body.tumbling_window_count}`, `summary: ${summaryFamilyText(body.family)}`, `window ${tumblingWindowTimeText(k, width)}`,
+            'click to collapse'].join('\n') }, common), classes: `tumbling window ${timingClass(node.timing)}`.trim() });
       }
       return;
     }
@@ -829,21 +831,21 @@ function stageLaneElements(dag, options) {
     const into = expanded.has(e.consumer);
     const from = expanded.has(e.producer);
     if (!into && !from) { edge(`e${index}`, `n${e.producer}`, `n${e.consumer}`, e.raw); return; }
-    // An expanded chain's input feeds each pane's window; each pane feeds
+    // An expanded chain's input feeds each tumbling window's window; each tumbling window feeds
     // the chain's readers.
-    const panes = (chain) => byId.get(chain).body.tumbling_window_count;
+    const tumbling_windows = (chain) => byId.get(chain).body.tumbling_window_count;
     if (into) {
-      for (let k = 0; k < panes(e.consumer); k += 1) {
-        const pane = `n${e.consumer}p${k}`;
-        edge(`e${index}p${k}`, `n${e.producer}`, k > 0 ? `${pane}s` : `${pane}r`, e.raw);
-        if (k > 0) edge(`e${index}p${k}s`, `${pane}s`, `${pane}r`, null);
-        edge(`e${index}p${k}r`, `${pane}r`, pane, null);
+      for (let k = 0; k < tumbling_windows(e.consumer); k += 1) {
+        const tumbling_window = `n${e.consumer}p${k}`;
+        edge(`e${index}p${k}`, `n${e.producer}`, k > 0 ? `${tumbling_window}s` : `${tumbling_window}r`, e.raw);
+        if (k > 0) edge(`e${index}p${k}s`, `${tumbling_window}s`, `${tumbling_window}r`, null);
+        edge(`e${index}p${k}r`, `${tumbling_window}r`, tumbling_window, null);
       }
     }
     if (from) {
-      // A merge of the chain's newest panes reads only those.
+      // A merge of the chain's newest tumbling windows reads only those.
       const consumer = byId.get(e.consumer);
-      const read = (consumer && consumer.body && consumer.body.newest_tumbling_windows) || panes(e.producer);
+      const read = (consumer && consumer.body && consumer.body.newest_tumbling_windows) || tumbling_windows(e.producer);
       for (let k = 0; k < read; k += 1) {
         edge(`e${index}q${k}`, `n${e.producer}p${k}`, into ? `n${e.consumer}p0r` : `n${e.consumer}`, e.raw);
       }
@@ -997,8 +999,8 @@ function physicalReaders(dag, nodeId, queryIds) {
 }
 
 // The selected plan's materialized views as table rows: the coverage's
-// definition, the Stage 2 node's operator and summary parameters, its pane
-// (a pane chain's panes, newest first), how and when it is refreshed, its
+// definition, the Stage 2 node's operator and summary parameters, its tumbling window
+// (a tumbling-window chain's tumbling windows, newest first), how and when it is refreshed, its
 // retention, the Stage 3 cost of its Stage 2 node and the queries that read
 // it. Empty without a selection.
 function materializedViewRows(doc) {
@@ -1013,15 +1015,15 @@ function materializedViewRows(doc) {
     const node = nodes.get(output.stage2_node_id);
     const [kind, body] = node ? stageOperatorParts(node.payload) : ['—', {}];
     const summary = kind === 'SummaryAgg' || kind === 'SummaryTumblingWindowChain' ? summaryFamilyText(body.family) : '';
-    const pane = kind === 'SummaryTumblingWindowChain' && typeof output.installed_position === 'number'
-      ? `pane ${output.installed_position + 1} of ${output.installed_count} (newest first), ${durationText(body.tumbling_window_width_ms)} wide` : '—';
+    const tumbling_window = kind === 'SummaryTumblingWindowChain' && typeof output.installed_position === 'number'
+      ? `tumbling window ${output.installed_position + 1} of ${output.installed_count} (newest first), ${durationText(body.tumbling_window_width_ms)} wide` : '—';
     const cost = perNode[String(output.stage2_node_id)];
     return {
       nodeId: output.node_id,
       stage2NodeId: node ? output.stage2_node_id : null,
       definition: output.coverage.definition_id,
       kind: summary ? `${kind} · ${summary}` : kind,
-      pane,
+      tumbling_window,
       refresh: output.refresh === 'at_ingestion' ? 'at ingestion' : 'on first read (kept across evaluations)',
       inputs: `${output.inputs.raw_data_windows.length} raw-data window(s)` +
         (output.inputs.materialized_views.length ? `, views ${output.inputs.materialized_views.join(', ')}` : ''),
@@ -1035,10 +1037,10 @@ function materializedViewRows(doc) {
 }
 
 // The selected plan's materialized views grouped by the Stage 2 node they are
-// installed from: one group per pane chain (its panes, newest first, with
+// installed from: one group per tumbling-window chain (its tumbling windows, newest first, with
 // "count × width"), one per other node. Each group has its Stage 2 node,
 // definition(s), kind, how it is refreshed, its retention (a range when the
-// panes differ), the Stage 3 cost and the queries that read it.
+// tumbling windows differ), the Stage 3 cost and the queries that read it.
 function materializedViewGroups(doc) {
   const rows = materializedViewRows(doc);
   const candidate = ((doc.stage2_physical_asap_optimization || {}).candidates || []).find((c) => c.id === selectionTable(doc).selected_candidate);
@@ -1052,22 +1054,22 @@ function materializedViewGroups(doc) {
   });
   const joined = (values) => [...new Set(values)].join(', ');
   return groups.map((key) => {
-    const panes = byNode.get(key).slice().sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
-    const first = panes[0];
+    const tumbling_windows = byNode.get(key).slice().sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+    const first = tumbling_windows[0];
     const node = nodes.get(first.stage2NodeId);
     const [kind, body] = node ? stageOperatorParts(node.payload) : ['—', {}];
-    const retention = panes.map((p) => p.retention);
+    const retention = tumbling_windows.map((p) => p.retention);
     return {
       stage2NodeId: first.stage2NodeId,
-      nodeIds: panes.map((p) => p.nodeId),
-      definition: joined(panes.map((p) => p.definition)),
+      nodeIds: tumbling_windows.map((p) => p.nodeId),
+      definition: joined(tumbling_windows.map((p) => p.definition)),
       kind: first.kind,
-      panesText: kind === 'SummaryTumblingWindowChain' ? `${body.tumbling_window_count} × ${durationText(body.tumbling_window_width_ms)}` : '—',
-      refresh: joined(panes.map((p) => p.refresh)),
+      tumblingWindowsText: kind === 'SummaryTumblingWindowChain' ? `${body.tumbling_window_count} × ${durationText(body.tumbling_window_width_ms)}` : '—',
+      refresh: joined(tumbling_windows.map((p) => p.refresh)),
       retention: new Set(retention).size === 1 ? retention[0] : `${retention[0]} … ${retention[retention.length - 1]}`,
       cost: first.cost,
       readBy: first.readBy,
-      panes,
+      tumbling_windows,
     };
   });
 }
@@ -1171,7 +1173,7 @@ function validateMemoPlan(plan, queryCount) {
   return errors;
 }
 
-// A coupling site's chosen threshold as text: a shared build's size, a pane
+// A coupling site's chosen threshold as text: a shared build's size, a tumbling window
 // chain's grid, a scan's label set or a raw horizon.
 function couplingThresholdText(kind, threshold) {
   const t = threshold || {};
@@ -1180,7 +1182,7 @@ function couplingThresholdText(kind, threshold) {
       if ('state' in t) return `finer state ${summaryFamilyText(t.state)}`;
       if (!t.params) return 'exact accumulator (no size)';
       return [Object.keys(t.params)[0]].concat(wireParams(t.params)).join(' · ');
-    case 'SummaryTumblingWindowChain': return `${durationText(t.tumbling_window_width_ms)} panes over ${durationText(t.longest_window_ms)} · ${summaryFamilyText(t.family)}`;
+    case 'SummaryTumblingWindowChain': return `${durationText(t.tumbling_window_width_ms)} tumbling windows over ${durationText(t.longest_window_ms)} · ${summaryFamilyText(t.family)}`;
     case 'ScanLabels': return `labels ${(t.labels || []).join(', ') || 'none'}`;
     case 'RawHorizon': return `raw horizon ${durationText(t.horizon_ms)}`;
     default: return compactWire(threshold);

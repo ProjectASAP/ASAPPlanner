@@ -646,18 +646,18 @@ fn kll_partial_merge_and_multiple_evaluations_preserve_population() {
     }
 }
 
-// KLL panes that each compact merge into a state within the calibrated
-// single-build rank error: 60 panes of 1000 values at k = 200.
+// KLL tumbling windows that each compact merge into a state within the calibrated
+// single-build rank error: 60 tumbling windows of 1000 values at k = 200.
 #[test]
-fn compacted_kll_panes_merge_within_the_calibrated_rank_error() {
+fn compacted_kll_tumbling_windows_merge_within_the_calibrated_rank_error() {
     use planner_types::ir::schema::{SketchAlgorithm, SketchKind, SketchParams, SketchStatistic};
-    const PANES: u64 = 60;
-    const PER_PANE: u64 = 1000;
+    const TUMBLING_WINDOWS: u64 = 60;
+    const PER_TUMBLING_WINDOW: u64 = 1000;
     const K: u32 = 200;
     // The planner's empirical 99% KLL rank error, `2.296 / k^0.9723`
     // (`asap_logical_asap_optimization`'s `kll_rank_error_99`).
     let bound = 2.296 / f64::from(K).powf(0.9723);
-    let n = (PANES * PER_PANE) as f64;
+    let n = (TUMBLING_WINDOWS * PER_TUMBLING_WINDOW) as f64;
     let input = schema(&[("v", DataType::Float64, false)]);
     let family = FieldDataType::Sketch(
         SketchKind::new(
@@ -674,14 +674,18 @@ fn compacted_kll_panes_merge_within_the_calibrated_rank_error() {
     };
     let state = build().schema();
     let mut dag = PhysicalDAG::default();
-    for pane in 0..PANES {
-        // Pane `p` holds `[p, p + 1) * 1000`, as tumbling panes of a
-        // rising value would, so a lost pane shifts every rank.
-        let rows = (0..PER_PANE)
-            .map(|j| vec![Value::Float64((pane * PER_PANE + j) as f64)])
+    for tumbling_window in 0..TUMBLING_WINDOWS {
+        // Tumbling window `p` holds `[p, p + 1) * 1000`, as tumbling windows of a
+        // rising value would, so a lost tumbling window shifts every rank.
+        let rows = (0..PER_TUMBLING_WINDOW)
+            .map(|j| {
+                vec![Value::Float64(
+                    (tumbling_window * PER_TUMBLING_WINDOW + j) as f64,
+                )]
+            })
             .collect();
         dag.add(
-            pane,
+            tumbling_window,
             vec![],
             Operator::source(
                 input.clone(),
@@ -690,13 +694,18 @@ fn compacted_kll_panes_merge_within_the_calibrated_rank_error() {
             .unwrap(),
         )
         .unwrap();
-        dag.add(PANES + pane, vec![pane], build()).unwrap();
+        dag.add(
+            TUMBLING_WINDOWS + tumbling_window,
+            vec![tumbling_window],
+            build(),
+        )
+        .unwrap();
     }
-    let union = 2 * PANES;
+    let union = 2 * TUMBLING_WINDOWS;
     dag.add(
         union,
-        (PANES..2 * PANES).collect(),
-        Operator::union(state.clone(), PANES as usize).unwrap(),
+        (TUMBLING_WINDOWS..2 * TUMBLING_WINDOWS).collect(),
+        Operator::union(state.clone(), TUMBLING_WINDOWS as usize).unwrap(),
     )
     .unwrap();
     dag.add(
@@ -732,11 +741,11 @@ fn compacted_kll_panes_merge_within_the_calibrated_rank_error() {
     }
 }
 
-// Counter panes merged in any input order (here A, C, B) give the increase
-// of one build over the whole window, including the jumps between panes
+// Counter tumbling windows merged in any input order (here A, C, B) give the increase
+// of one build over the whole window, including the jumps between tumbling windows
 // and a counter reset inside B.
 #[test]
-fn counter_panes_merge_in_any_order() {
+fn counter_tumbling_windows_merge_in_any_order() {
     use asap_executor::summary_kernels::exact::ExactAccumulator;
     use planner_types::ir::schema::{ExactKind, ExactParams};
     let input = schema(&[
@@ -772,7 +781,7 @@ fn counter_panes_merge_in_any_order() {
             .unwrap()
     };
     let mut dag = PhysicalDAG::default();
-    // Panes A = [0, 4), B = [4, 8), C = [8, 12), added as A, C, B.
+    // Tumbling windows A = [0, 4), B = [4, 8), C = [8, 12), added as A, C, B.
     for (id, range) in [(0, 0..4), (1, 8..12), (2, 4..8), (3, 0..12)] {
         let batch = Batch::try_new(input.clone(), samples(range)).unwrap();
         dag.add(

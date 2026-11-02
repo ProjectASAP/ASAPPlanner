@@ -28,8 +28,8 @@ and [frontend dependencies](#frontend-specific-dependencies).
 
 | Output | Fields or contents | Meaning |
 |---|---|---|
-| `PlanOutput` | `plans`: one `QueryPlan { entry_index, root }` per query; `selection`: Stage 3's `Selection` (`selected_dag`, `nodes_with_proven_non_negative_weights`, `cost`, `accepted_accuracy_per_query`, `pruned_candidates`, `search_report`), set by the default pass `Stage1ToStage3Pass`; `tumbling_window_retention_ms`: how long each kept pane chain keeps its panes; standalone scalar queries in `scalar_roots` and `scalar_plans` | The selected plan; `physical_asap_dag()` exports it as one `PhysicalASAPDAG` |
-| `PlanningRun` (from `asap_planner::run_planning`) | Every stage's output: Pass 1's per-computation candidates, the selected round's Pass 2 and Stage 2 outputs (with Stage 2's pruned candidates), the selection, the selected plan, the memo after each step and a report per pane-width round | For callers that inspect or display the alternatives |
+| `PlanOutput` | `plans`: one `QueryPlan { entry_index, root }` per query; `selection`: Stage 3's `Selection` (`selected_dag`, `nodes_with_proven_non_negative_weights`, `cost`, `accepted_accuracy_per_query`, `pruned_candidates`, `search_report`), set by the default pass `Stage1ToStage3Pass`; `tumbling_window_retention_ms`: how long each kept tumbling-window chain keeps its tumbling windows; standalone scalar queries in `scalar_roots` and `scalar_plans` | The selected plan; `physical_asap_dag()` exports it as one `PhysicalASAPDAG` |
+| `PlanningRun` (from `asap_planner::run_planning`) | Every stage's output: Pass 1's per-computation candidates, the selected round's Pass 2 and Stage 2 outputs (with Stage 2's pruned candidates), the selection, the selected plan, the memo after each step and a report per tumbling-window-width round | For callers that inspect or display the alternatives |
 
 The selected plan is a planning artifact. ASAPPlanner does **not** deploy
 it; downstream systems compile it, choose placement and storage, deploy state
@@ -58,7 +58,7 @@ flowchart TD
     D["data_workload: ingesting; up sampled every 15 s"]
     M["PlanningModels: accuracy model, cost model, deployment capabilities"]
     F["Stage 0: PromQL lowering → one OperatorNode root"]
-    S1["Stage 1: exact accumulator or plain exact; panes"]
+    S1["Stage 1: exact accumulator or plain exact; tumbling windows"]
     S2["Stage 2: each summary build at query time or maintained at ingestion time"]
     S3["Stage 3: check and price every physical candidate; select one"]
     B["Backend: compile, deploy and execute the selected plan"]
@@ -303,7 +303,7 @@ alternative stays visible in `PlanningRun`.
 ```text
 PlanningWorkload + frontend dependencies + PlanningModels
     -> Stage 0: frontend lowering, one root per normalized query entry
-    -> Stage 1: Pass 1 per-computation candidates, Pass 2 sharing, panes, reuse
+    -> Stage 1: Pass 1 per-computation candidates, Pass 2 sharing, tumbling windows, reuse
     -> Stage 2: one physical candidate per materialization assignment
     -> Stage 3: check, measure and select
     -> PlanOutput

@@ -110,7 +110,7 @@ fn compile_internal(
     deadline: Option<std::time::Instant>,
 ) -> Result<CompiledPhysicalDAG, Error> {
     preflight_depth(dag, deadline)?;
-    // A pane chain stands for its panes; the deployment binds each pane's
+    // A tumbling-window chain stands for its tumbling windows; the deployment binds each tumbling window's
     // raw input, so it runs only once expanded.
     if let Some(node) = dag.nodes.iter().find(|n| {
         matches!(
@@ -119,8 +119,8 @@ fn compile_internal(
         )
     }) {
         return Err(invalid(format!(
-            "node {}: a SummaryTumblingWindowChain runs as its panes; expand it with \
-             `asap_types::ir::operator::pane_chain::expand_pane_chains` before compiling",
+            "node {}: a SummaryTumblingWindowChain runs as its tumbling windows; expand it with \
+             `asap_types::ir::operator::tumbling_window_chain::expand_tumbling_window_chains` before compiling",
             node.id
         )));
     }
@@ -189,7 +189,7 @@ fn compile_internal(
         }
     }
     // Each view's and each `Scan`'s window, the DAG indexed once for all:
-    // a materialized pane chain has a view per pane.
+    // a materialized tumbling-window chain has a view per tumbling window.
     let view_windows = dag.view_windows(views.iter().map(|view| view.node_id));
     let scan_windows = dag.scan_windows(
         dag.nodes
@@ -496,7 +496,7 @@ fn compile_internal(
                         "per-entity summary requires a resolved raw time range",
                     ));
                 };
-                // A tumbling pane reads its window through `TimeShift`s; the
+                // A tumbling window reads its window through `TimeShift`s; the
                 // deployment supplies the shifted raw rows.
                 let source = below_time_shifts(child, |node| node.non_asap(), Ok)?;
                 let Some(NonASAPOp::Scan { schema, .. }) = source.non_asap() else {
@@ -627,7 +627,7 @@ fn compile_internal(
                     .ok_or_else(|| invalid(format!("node {id}: summary merge requires inputs")))?;
                 require_sound_merge(input).map_err(|e| invalid(format!("node {id}: {e}")))?;
                 if output.time_index.is_some() {
-                    // Pane timestamps describe their own builds. The merged
+                    // Tumbling window timestamps describe their own builds. The merged
                     // state covers this evaluation's window, so merge by
                     // series identity and attach the run scope's timestamp,
                     // as a per-series `SummaryAgg` does.
@@ -657,7 +657,7 @@ fn compile_internal(
                     continue;
                 }
             }
-            // A window over a table or a time series (and a tumbling pane's
+            // A window over a table or a time series (and a tumbling window's
             // shift under it) runs natively on the time column.
             if let Some(operator) = time_window_operator(id, &nodes, &dependencies, &schemas)
                 .map_err(|error| invalid(format!("node {id}: {error}")))?
@@ -714,7 +714,7 @@ fn built_from_relation(state: &OperatorNode) -> bool {
 /// each series' (each label set's) latest row. A `TimeShift` only moves
 /// the window its `TimeRange` reads (the range above applies its offset),
 /// so it passes the rows through; a shift is meaningful only under a
-/// range, the shape the frontends and Pass 2's tumbling panes build. An
+/// range, the shape the frontends and Pass 2's tumbling windows build. An
 /// `@` anchor has no lowering, so a range or shift over one gets `None` and
 /// the node fails compilation; an instant window over a table is refused.
 fn time_window_operator(
@@ -830,7 +830,7 @@ pub(crate) fn below_time_shifts<'a, N, C: 'a>(
 /// lookback)`: it ends `offset` ms before the evaluation time and spans
 /// `lookback` ms. It is the union of the range windows the evaluation
 /// reads, each moved back by the time shifts below its range: one range for
-/// a single build, back-to-back panes for merged tumbling panes. `None`
+/// a single build, back-to-back tumbling windows for merged tumbling windows. `None`
 /// without a range; an error when the ranges do not form one window.
 fn counter_window(
     id: NodeId,
@@ -1645,7 +1645,7 @@ mod compilation_deadline_tests {
 
     /// `window_count` one-minute windows over one table `Scan`, the `i`-th
     /// shifted `i` minutes back, each window a root (the shape of a
-    /// pane-expanded DAG), with the roots' node ids.
+    /// tumbling-window-expanded DAG), with the roots' node ids.
     fn shifted_windows_over_one_scan(window_count: i64) -> (PhysicalASAPDAG, Vec<NodeId>) {
         use planner_types::ir::operator::{Source, TimeShift};
         use planner_types::ir::physical_export::compile_physical_asap_workload;
@@ -1795,7 +1795,7 @@ pub mod test_support {
     /// not a view is marked `MatAtIngestion`, and it and every node below it
     /// run at ingestion time (their outputs and outgoing edges); then every
     /// view's `retention_ms` is set ([`PhysicalASAPDAG::set_retention`])
-    /// with no pane or range-evaluation span. For tests that bind states at
+    /// with no tumbling window or range-evaluation span. For tests that bind states at
     /// those nodes, as a deployment binds its views.
     pub fn views_at(
         dag: &mut PhysicalASAPDAG,

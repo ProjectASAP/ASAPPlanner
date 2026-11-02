@@ -267,7 +267,7 @@ configuration or candidate is needed.
 `AccuracyEvidenceProvider` supplies estimator contracts, operand domains
 and propagation evidence. The evidence must cover the population to which the
 claimed guarantee applies: sources, filters, grouping, evaluation windows and
-all merged panes. Evidence for a narrower population cannot silently certify
+all merged tumbling windows. Evidence for a narrower population cannot silently certify
 a wider one. Data-workload facts are declared: the planner has no clock, so the caller
 drops facts that no longer hold before planning.
 
@@ -287,7 +287,7 @@ an observation into a guarantee.
 
 A deployment declares `DataWorkload.sources[source].max_distinct_per_evaluation`
 for the source the distinct count reads. It asserts an enforced maximum
-distinct population per evaluation, including all merged panes; the classic
+distinct population per evaluation, including all merged tumbling windows; the classic
 estimator and independent uniform bucket hashing are the model's
 assumptions. Stage 1 sizes the precision from the query or allocated local
 target and leaves the failure probability symbolic, as

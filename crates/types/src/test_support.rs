@@ -8,7 +8,9 @@ use std::time::Instant;
 use crate::ir::materialized_view::RawDataWindow;
 use crate::ir::operator::maintained_population::CurrentSeriesInput;
 use crate::ir::operator::node::Operator;
-use crate::ir::operator::pane_chain::{PaneChainExpansion, PaneChainExpansionError};
+use crate::ir::operator::tumbling_window_chain::{
+    TumblingWindowChainExpansion, TumblingWindowChainExpansionError,
+};
 use crate::ir::physical_export::{PhysicalASAPCompilationError, PhysicalASAPDAGCompilation};
 use crate::ir::properties::summary_coverage::SummaryCoverage;
 use crate::ir::properties::timing::NodeToTimedNodeCache;
@@ -23,22 +25,27 @@ pub fn definition_id(coverage: &SummaryCoverage) -> String {
     coverage.definition_id()
 }
 
-/// `pane_chain::whole_window_build`.
+/// `tumbling_window_chain::whole_window_build`.
 pub fn whole_window_build(chain: &OperatorNode) -> Result<OperatorNode, SchemaDerivationError> {
-    crate::ir::operator::pane_chain::whole_window_build(chain)
+    crate::ir::operator::tumbling_window_chain::whole_window_build(chain)
 }
 
-/// `pane_chain::pane`.
-pub fn pane(chain: &OperatorNode, index: u32) -> Result<OperatorNode, SchemaDerivationError> {
-    crate::ir::operator::pane_chain::pane(chain, index)
+/// `tumbling_window_chain::tumbling window`.
+pub fn tumbling_window(
+    chain: &OperatorNode,
+    index: u32,
+) -> Result<OperatorNode, SchemaDerivationError> {
+    crate::ir::operator::tumbling_window_chain::tumbling_window(chain, index)
 }
 
-/// `pane_chain::expand_pane_chains_in_workload_before`.
-pub fn expand_pane_chains_in_workload_before(
+/// `tumbling_window_chain::expand_tumbling_window_chains_in_workload_before`.
+pub fn expand_tumbling_window_chains_in_workload_before(
     roots: &[QueryRoot],
     deadline: Option<Instant>,
-) -> Result<PaneChainExpansion, PaneChainExpansionError> {
-    crate::ir::operator::pane_chain::expand_pane_chains_in_workload_before(roots, deadline)
+) -> Result<TumblingWindowChainExpansion, TumblingWindowChainExpansionError> {
+    crate::ir::operator::tumbling_window_chain::expand_tumbling_window_chains_in_workload_before(
+        roots, deadline,
+    )
 }
 
 /// `physical_export::compile_physical_asap_dag_with_node_ids`.
