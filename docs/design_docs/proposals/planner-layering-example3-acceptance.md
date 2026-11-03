@@ -7,17 +7,19 @@ windows" and the Pass 2 section. Tests:
 `crates/integration-tests/tests/planner_layering_example3.rs` (helpers in
 `tests/planner_layering_common/`; the Example 3/4 workloads and the stage
 pipeline in `asap_devtools::{planner_layering_examples, planning_stages}`).
-Devtool: `stage_pipeline --example planner-layering-3a` and
-`planner-layering-3b`, with `--enforce-accuracy-guarantees` (without it,
-`stage_pipeline` ignores accuracy guarantees and DDSketch is not rejected). Both run every candidate (2,187 physical for 3a:
+Devtool: `asap_planner --workload
+tools/dag-viewer/workloads/planner-layering/example3a.json --run-until stage3`
+and the same with `example3b.json` (with `--ignore-accuracy-guarantees`,
+DDSketch is not rejected). Both run every candidate (2,187 physical for 3a:
 243 from Pass 1, each with 3 Pass 2 shared-input candidates, 972 logical,
 and each shared input also built once per evaluation) through plan
-selection; `--max-displayed` (default 64) limits only how many the document
-shows, so 3a selects P485: KLL for all five queries.
+selection; in the former `stage_pipeline` (a historical record),
+`--max-displayed` (default 64) limited only how many the document showed,
+so 3a selects P485: KLL for all five queries.
 
 This spec was written by a test designer who does not implement the stages.
 Tests run the stages through `planner_layering_common::run_stages`, which
-calls `run_planning_stages`, the pipeline `stage_pipeline` runs. A test
+calls `run_planning_stages`, the pipeline `asap_planner` runs. A test
 that needs a missing feature is `#[ignore]`d with the PR that delivers it.
 
 ## Workload

@@ -1,8 +1,8 @@
 # Planner snapshots
 
 The planner has no reference answer to test against, so CI pins what it
-produces. For each query in a corpus, the plan that `stage_pipeline` selects
-(default search) is committed as a snapshot. The `Corpus snapshots` workflow
+produces. For each query in a corpus, the plan that `asap_planner
+--run-until stage3` selects is committed as a snapshot. The `Corpus snapshots` workflow
 checks them nightly on `main` (and on demand from the Actions tab, for any
 branch); a change to any of these plans fails it until the snapshots are
 regenerated and the change is explained.
@@ -11,7 +11,7 @@ regenerated and the change is explained.
 
 `crates/devtools/tests/corpus_snapshots/<corpus>/`:
 
-- `corpus.json`: the inputs shared by the corpus's queries (`stage_pipeline_args`,
+- `corpus.json`: the inputs shared by the corpus's queries (`asap_planner_args`,
   the repeating-query entry and the `data_workload`), and the queries, each
   with a stable `id`. Each query is planned on its own. A query with a
   `skip_reason` entry (saying why) is skipped and has no snapshot.
@@ -31,24 +31,23 @@ Only the plan, which must not change between runs:
   embedded search report, and the causes and reasons of the rejections.
 
 Floats are rounded to 12 significant digits. Everything about the search
-except whether it proved the plan optimal is left out: candidate ids (such as
-`pane-round-12-joint-plan-1`), the search report's counters, bounds and timings, the Stage 1 and Stage 2
-candidate lists, and the memo (`stage_pipeline` runs with `--no-memo`). These
-vary from run to run because the search's tumbling-window-width rounds have wall-clock
-budgets, so a different round can find the same plan.
+except whether it proved the plan optimal is left out: the search report's
+counters, bounds and timings, the Stage 1 and Stage 2 candidate lists, and
+the memo. Timings vary from run to run, and the rest describes how the plan
+was found, not the plan.
 
 ## Sketch plan snapshots
 
 The corpus queries carry no accuracy target, so their plans are exact.
 `crates/devtools/tests/sketch_plan_snapshots/` pins the plans of workloads
-that select sketches: `manifest.json` lists each workload (a workload file or
-built-in example, its deployment, and whether accuracy guarantees are
+that select sketches: `manifest.json` lists each workload (a workload file, its deployment
+capabilities and cost inputs files, and whether accuracy guarantees are
 enforced), and `<id>.json` is its snapshot, holding the same fields as a
 corpus snapshot plus every query's text and the `search_status`. The test,
 `sketch_plans_match_snapshots`, is in the same `corpus_snapshots` binary and
 runs nightly with it; the two tests never run at once. Every workload must end
-with status `optimal`: a search stopped by any budget may select another plan
-on a slower machine, so any other status fails. Regenerate with:
+with status `optimal`, unless the manifest gives it a
+`deadline_reached_reason`; any other status fails. Regenerate with:
 
 ```sh
 UPDATE_SNAPSHOTS=1 cargo test --release -p asap-devtools --test corpus_snapshots -- --ignored sketch_plans_match_snapshots
@@ -57,7 +56,7 @@ UPDATE_SNAPSHOTS=1 cargo test --release -p asap-devtools --test corpus_snapshots
 ## When the check fails
 
 The test names each changed query and its first differing line. CI uploads
-the regenerated snapshots, with each one's full `stage_pipeline` document
+the regenerated snapshots, with each one's full `asap_planner` document
 (`<id>.document.json`, which [`tools/dag-viewer`](../../tools/dag-viewer/README.md)
 opens), as the `corpus-snapshots` artifact.
 
@@ -72,16 +71,12 @@ the PR description.
 
 The test also fails, instead of recording a snapshot, in these cases:
 
-- A query's search was ended by a wall-clock budget: its status is
-  `time_limit`, or planning used the whole 240 s limit. Its plan would then
-  depend on machine speed. Only the final tumbling-window-width round's status is checked: an
-  earlier round cut short by its own wall-clock budget is not reported.
 - A snapshot file has no matching checked query in `corpus.json`.
-- `stage_pipeline` crashed.
+- `asap_planner` failed.
 
 ## Adding queries
 
 Add the query to `corpus.json` with a new `id` and regenerate. Before you
-commit, run the check twice, plus once on one core (`taskset -c 0`), and confirm
-it passes each time. Keep each query well under the 240 s limit on one core
-with a release build; otherwise give it a `skip_reason`.
+commit, run the check twice and confirm it passes each time. Planning has no
+time limit, so a query that takes minutes in a release build slows every
+nightly run; give such a query a `skip_reason`.

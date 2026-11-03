@@ -38,12 +38,12 @@ structure, three statistics of one input over the same 1-min window:
 `distinct_over_time(flows_src_ip[1m])`,
 `entropy_over_time(flows_src_ip[1m])` and `l2_over_time(flows_src_ip[1m])`,
 with Q1–Q3's targets and a 15-s `sample_interval` on `flows_src_ip`. The
-`stage_pipeline --example planner-layering-2 --enforce-accuracy-guarantees` document plans the SQL
+`asap_planner --workload tools/dag-viewer/workloads/planner-layering/example2.json --sql-catalog-table <flows> --run-until stage3` document plans the SQL
 workload itself.
 
 ## Expected candidates per stage
 
-| Stage | Doc | Planner (SQL workload, `stage_pipeline --example planner-layering-2 --enforce-accuracy-guarantees`) |
+| Stage | Doc | Planner (SQL workload, `asap_planner --workload tools/dag-viewer/workloads/planner-layering/example2.json --sql-catalog-table <flows> --run-until stage3`) |
 |---|---|---|
 | Query-language frontends | One summary-free DAG: `Distinct`, `Entropy`, `L2` over `flows.src_ip`, last 1 m | Same. Q1 is a distinct count; Q2 is `Entropy` and Q3 is `L2` over the per-source counts, each with an exact population count for the empty-input NULL. |
 | Logical ASAP-aware optimization, Pass 1 | Each computation: exact, a specialized summary, UnivMon. 3 × 3 × 3 = **27** | Q1: exact, HLL, KMV, UnivMon (no Theta: `asap_sketchlib` has no Theta sketch). Q2, Q3: exact, UnivMon (no specialized entropy or norm summary). 4 × 2 × 2 = **16** |
@@ -154,8 +154,10 @@ strictest size.
 
 ## Devtool
 
-`stage_pipeline --example planner-layering-2 --enforce-accuracy-guarantees`
-plans the SQL workload with the `flows(ts, src_ip)` catalog (without the
-flag, `stage_pipeline` ignores accuracy guarantees, and none of the plans
-below is rejected for its guarantee). The stage viewer has no tab for it; open the
+`asap_planner --workload tools/dag-viewer/workloads/planner-layering/example2.json
+--sql-catalog-table <flows> --run-until stage3 --format json`, where `<flows>`
+is the `flows` table of `tools/dag-viewer/workloads/planner-layering/tables.json`,
+plans the SQL workload with the `flows(ts, src_ip)` catalog (with
+`--ignore-accuracy-guarantees`, none of the plans below is rejected for its
+guarantee). The stage viewer has no tab for it; open the
 document with **Open stage document…**.

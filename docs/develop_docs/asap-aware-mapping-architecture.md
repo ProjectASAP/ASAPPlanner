@@ -26,7 +26,7 @@ in `asap-integration-tests` (`crate_graph`) checks these edges with
 | `asap-plan-selection` (`crates/plan-selection`) | Stage 3: `select_plan` over Stage 2's output; accuracy and latency checks, pricing candidates with `asap-cost` |
 | `asap-planner` (`crates/planner`) | The facade: `e2e_plan` runs Stage 0, then the optimization pass (`Stage1ToStage3Pass` by default), which orchestrates Stages 1–3 (`run_planning`); the planning models (`PlanningModels`) and the `OptimizationPass` trait |
 | `asap-executor` (`crates/executor`) | Stage 4, the reference executor: operators and summary kernels over `asap_sketchlib`; it runs a `PhysicalASAPDAG` |
-| `asap-devtools` | `stage_pipeline` and the other inspection tools, the design-doc example workloads (`planner_layering_examples`) and the candidate labels |
+| `asap-devtools` | `asap_planner` and the other inspection tools, the design-doc example workloads (`planner_layering_examples`) and the candidate labels |
 
 ```text
 asap-types ◄── frontends (Stage 0)
@@ -110,8 +110,7 @@ The unwired maintained-population rule has been removed as well; no Stage 1 pass
    limits. It measures the valid ones and selects one under the cost model;
    ties keep enumeration order.
 
-No stage caps the candidates it plans; `stage_pipeline` caps only what it
-displays and refuses workloads over `--max-combinations`.
+No stage caps the candidates it plans, and neither does `asap_planner`.
 
 ## Verification
 
@@ -124,5 +123,6 @@ displays and refuses workloads over `--max-combinations`.
   the design document's examples through every stage;
   `reuse_rules.rs`, `deployment_capabilities.rs`, `materialization_e2e.rs`
   and `stage1_logical_asap_optimization.rs` cover single rules end to end.
-- `crates/devtools/tests/stage_pipeline.rs` checks the stage document and the
-  committed viewer example.
+- `crates/devtools/tests/asap_planner.rs` checks the stage document and the
+  committed viewer examples; `asap_planner_acceptance.rs` checks
+  `--run-until` and the refused flags.

@@ -50,7 +50,7 @@ target.
 | Plan selection | `plan-selection` | Stage 3: accuracy and latency checks, costing and selection; the planning models and the Stage 1 to Stage 3 driver |
 | Planner facade | `planner` | `e2e_plan`: Stage 0 followed by Stages 1–3 |
 | Executor | `executor` | Stage 4: runs a `PhysicalASAPDAG` over `asap_sketchlib` summaries; no stage crate depends on it |
-| Developer inspection | `devtools` | `stage_pipeline` and the Stage Viewer documents, corpus coverage tools |
+| Developer inspection | `devtools` | `asap_planner` and the Stage Viewer documents, corpus coverage tools |
 | End-to-end validation | `integration-tests` | Verify behavior across frontends, stages and execution |
 
 ## Inputs and outputs

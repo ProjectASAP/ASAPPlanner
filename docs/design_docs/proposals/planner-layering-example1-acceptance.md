@@ -4,10 +4,10 @@ Audience: planner designers and the implementers of the planning stages.
 Source: [planner-layering.md](planner-layering.md), "Example 1: Aggregation over
 dimensions". Tests: `crates/integration-tests/tests/planner_layering_example1.rs`
 (helpers in `tests/planner_layering_common/`). Viewer fixture:
-`tools/dag-viewer/examples/planner-layering-example1.json`, written by
-`stage_pipeline --example planner-layering-1 --exhaustive
---enforce-accuracy-guarantees --max-displayed 100` (`stage_pipeline` ignores
-accuracy guarantees without the flag).
+`tools/dag-viewer/examples/planner-layering-example1.json`, written by the
+former `stage_pipeline --example planner-layering-1 --exhaustive
+--enforce-accuracy-guarantees --max-displayed 100` (a historical record;
+`stage_pipeline` ignored accuracy guarantees without the flag).
 
 This spec was written by a test designer before the stages existed. A test
 whose expectation needs a feature that is not in the stack yet is
