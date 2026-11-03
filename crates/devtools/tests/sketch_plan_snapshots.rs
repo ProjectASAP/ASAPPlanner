@@ -23,11 +23,7 @@
 //! select a different plan on a slower machine. Only a search that proves its
 //! plan optimal is independent of speed, so every workload must end with
 //! status `optimal` and no tumbling-window width left unsearched; any other ending
-//! fails instead of being recorded. A workload with a
-//! `deadline_reached_reason` in the manifest may instead end with status
-//! `deadline_reached` (no tumbling-window width left unsearched); its snapshot records
-//! that status, so the plan, cost and status must still match. Each
-//! kept workload gave the same plan in three runs and on one core.
+//! fails instead of being recorded. Each kept workload gave the same plan in three runs and on one core.
 //! Workloads whose search stops at a budget (the raw-retained memo examples,
 //! full random-mixed workloads, three or more quantile queries over 10,000
 //! series, the `or` and `COUNT(DISTINCT)` workloads, single quantiles under
@@ -146,12 +142,7 @@ fn sketch_plans_match_snapshots() {
             ));
             continue;
         }
-        // A `deadline_reached_reason` accepts a search that ended at its
-        // deadline after every tumbling-window width; plan and cost are still compared.
-        let deadline_accepted = entry.get("deadline_reached_reason").is_some()
-            && search_status(&document) == "deadline_reached"
-            && document["planning_report"]["tumbling_window_widths_pending"] != json!(true);
-        if !proven_optimal(&document) && !deadline_accepted {
+        if !proven_optimal(&document) {
             failures.push(format!(
                 "{id}: the plan is not proven optimal (status {}, tumbling-window widths \
                  pending {}), so a round's budget may have chosen it; drop the \

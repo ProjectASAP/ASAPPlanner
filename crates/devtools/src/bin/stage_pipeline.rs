@@ -404,7 +404,8 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut cost_inputs_path: Option<String> = None;
     let mut enforce_accuracy_guarantees = false;
     let mut exhaustive = false;
-    // `--milp-time-limit-s` limits the MILP search.
+    // `--milp-time-limit-s` bounds the facade's planning budget (Pass 2 and
+    // its rounds); Stage 3's MILP always runs to optimality (#1185).
     let mut milp_time_limit_ms: Option<u64> = None;
     let mut max_combinations_given = false;
     let mut write_memo = true;

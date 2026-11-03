@@ -1142,11 +1142,11 @@
       "stage2_node_id": 1
     }
   ],
-  "proven_optimal": false,
+  "proven_optimal": true,
   "queries": [
     "quantile_over_time(0.99, data[5m])"
   ],
-  "search_status": "deadline_reached",
+  "search_status": "optimal",
   "selected": {
     "accepted": [
       {

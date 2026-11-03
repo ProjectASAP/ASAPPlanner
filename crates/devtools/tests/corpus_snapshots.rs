@@ -111,8 +111,9 @@ fn hit_time_limit(document: &Value) -> bool {
     report["pass1_ms"].as_f64().unwrap_or(0.0) + rounds >= limit
 }
 
-/// The selected plan's search status (`optimal` or `deadline_reached`), or
-/// null without a plan.
+/// The selected plan's search status (`optimal`; `deadline_reached` in
+/// documents from before the MILP ran without a time limit), or null
+/// without a plan.
 fn search_status(document: &Value) -> &Value {
     &document["stage3_plan_selection"]["search_report"]["status"]
 }

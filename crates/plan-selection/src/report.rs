@@ -283,11 +283,9 @@ impl SearchReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchStatus {
-    /// The search proved the plan optimal over the catalog it was given.
+    /// The search proved the plan optimal over the catalog it was given
+    /// (the only outcome: the solve has no time limit).
     Optimal,
-    /// The search stopped at the deadline (or another solver limit) with a
-    /// validated plan; the gap to the lower bound may be above zero.
-    DeadlineReached,
 }
 
 /// Why Stage 3 selected no plan.
@@ -316,9 +314,6 @@ pub enum ErrorSelectingPlan {
     },
     #[error("no valid candidate: {0:?}")]
     NoValidCandidate(Vec<Rejection>),
-    /// The search stopped at the deadline before it found a validated plan.
-    #[error("no plan by the deadline: {0}")]
-    NoPlanByDeadline(String),
     /// Stage 2 rejected a plan Stage 3 decoded from its catalog: a Stage 2
     /// catalog bug.
     #[error("the realizer rejected the selected plan: {0}")]

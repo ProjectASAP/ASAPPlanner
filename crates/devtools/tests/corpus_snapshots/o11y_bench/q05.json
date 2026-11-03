@@ -2,7 +2,7 @@
   "accuracy_guarantees": "enforced",
   "materialized_views": [],
   "materialized_views_error": "raw-data window of node 1 is unsupported: a subquery or a TimeShift above the range",
-  "proven_optimal": false,
+  "proven_optimal": true,
   "query": "max_over_time((sum(rate(http_requests_total{job=\"order-service\",status=~\"5..\"}[5m])) / sum(rate(http_requests_total{job=\"order-service\"}[5m])))[6h:1m])",
   "selected": {
     "accepted": [

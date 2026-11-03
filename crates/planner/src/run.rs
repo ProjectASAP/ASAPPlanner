@@ -506,7 +506,6 @@ fn plan_round(
         &models.accuracy_check_inputs(),
         models.cost_inputs,
         realizer,
-        deadline,
     );
     report.stage3_ms = elapsed_ms(started);
     let fatal = match &selection {
@@ -517,8 +516,7 @@ fn plan_round(
         Err(error) => {
             report.error = Some(error.to_string());
             match error {
-                ErrorSelectingPlan::NoPlanByDeadline(_)
-                | ErrorSelectingPlan::EvaluationDeadlineExceeded => None,
+                ErrorSelectingPlan::EvaluationDeadlineExceeded => None,
                 // An infeasible restricted catalog does not make the complete
                 // one infeasible.
                 ErrorSelectingPlan::NoValidCandidate(_)

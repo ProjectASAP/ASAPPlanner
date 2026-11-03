@@ -65,10 +65,6 @@ pub(crate) enum SelectionMilpError {
     EntryCount { roots: usize, entries: usize },
     /// No plan meets every row.
     Infeasible,
-    /// HiGHS stopped (at the deadline) without an integral incumbent.
-    NoSolution { status: String },
-    /// The deadline passed before the solve.
-    DeadlineReached,
     /// A rate or another number `asap-cost` could not compute.
     Cost(String),
     /// HiGHS failed.
@@ -84,6 +80,19 @@ pub(crate) struct SelectionMilpOptions {
     /// Solve each independent part alone ([`independent_parts`]); off only
     /// to compare with one solve in tests.
     pub(crate) split_into_parts: bool,
+    /// HiGHS's threads (its `threads` option). One thread makes ties among
+    /// plans of equal cost break the same way on every run.
+    pub(crate) highs_threads: i32,
+}
+
+impl Default for SelectionMilpOptions {
+    fn default() -> Self {
+        Self {
+            enforce_accuracy: true,
+            split_into_parts: true,
+            highs_threads: 1,
+        }
+    }
 }
 
 /// Which part of the model a variable or row belongs to, for the size
@@ -277,6 +286,8 @@ pub(crate) struct SelectionMilp<'a> {
         BTreeMap<(usize, PhysicalCandidateId, usize), Vec<(ResultSlot, Variable)>>,
     /// [`SelectionMilpOptions::split_into_parts`].
     pub(crate) split_into_parts: bool,
+    /// [`SelectionMilpOptions::highs_threads`].
+    pub(crate) highs_threads: i32,
 }
 
 /// Variables and rows of one model.
@@ -291,26 +302,15 @@ pub(crate) struct SelectionMilpSize {
     pub(crate) inexact: BTreeMap<&'static str, usize>,
 }
 
-/// How the solve ended with a plan.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SelectionMilpStatus {
-    Optimal,
-    /// HiGHS's time limit (the deadline), with an integral incumbent.
-    TimeLimit,
-}
-
-/// The raw solution, ready to decode.
+/// The raw solution of a solve run to proven optimality, ready to decode.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SelectionMilpSolution {
-    pub(crate) status: SelectionMilpStatus,
     /// The objective: cost per second without the request fees.
     pub(crate) cost_per_second: f64,
     /// The request fees per second, the same for every plan.
     pub(crate) request_cost_per_second: f64,
     /// HiGHS's dual bound on `cost_per_second`.
     pub(crate) cost_lower_bound_per_second: f64,
-    /// HiGHS's relative gap.
-    pub(crate) relative_gap: f64,
     /// Per context, the options with `p[ctx, c] = 1`.
     pub(crate) chosen: Vec<BTreeSet<PhysicalCandidateId>>,
     /// The shareable candidates with `x[m] = 1`.
@@ -508,6 +508,7 @@ pub(crate) fn build_selection_milp<'a>(
         window_cache: HashMap::new(),
         slot_links: BTreeMap::new(),
         split_into_parts: options.split_into_parts,
+        highs_threads: options.highs_threads,
     };
     choice_variables(&mut milp);
     structural_rows(&mut milp);
@@ -1820,7 +1821,6 @@ pub(crate) struct PartSolve {
     pub(crate) variables: usize,
     pub(crate) binaries: usize,
     pub(crate) rows: usize,
-    pub(crate) status: String,
     pub(crate) solve_ms: u64,
     /// HiGHS's dual bound on the part's objective (cost per second).
     pub(crate) dual_bound_per_second: f64,
@@ -1837,10 +1837,9 @@ struct PartModel {
     queries: usize,
 }
 
-/// A part solved: its columns' values, the HiGHS objective and dual bound
-/// (cost per second), and the status.
+/// A part solved to proven optimality: its columns' values, and the HiGHS
+/// objective and dual bound (cost per second).
 struct SolvedPart {
-    status: SelectionMilpStatus,
     columns: Vec<f64>,
     objective_per_second: f64,
     dual_bound_per_second: f64,
@@ -1849,27 +1848,18 @@ struct SolvedPart {
 
 /// Solves `milp` with HiGHS, one solve per independent part
 /// ([`independent_parts`]) when `split_into_parts`, each part from the warm
-/// start with its share of the time left before `deadline` (by variables).
+/// start and run to proven optimality (no time limit).
 pub(crate) fn solve_selection_milp(
     milp: SelectionMilp<'_>,
-    deadline: Option<Instant>,
     build_ms: u64,
 ) -> Result<SelectionMilpSolution, SelectionMilpError> {
     let size = milp.size();
+    let highs_threads = milp.highs_threads;
     let warm_started = Instant::now();
-    let search_budget = Instant::now()
-        + deadline
-            .map(|deadline| deadline.saturating_duration_since(Instant::now()) / 5)
-            .unwrap_or(WARM_START_MOST_TIME)
-            .min(WARM_START_MOST_TIME);
     let completion = super::completion::Completion::new(&milp);
-    let start = warm_start::warm_start(&milp, &completion, Some(search_budget));
+    let start = warm_start::warm_start(&milp, &completion);
     let warm_start_ms = warm_started.elapsed().as_millis() as u64;
     let warm_start_cost_per_second = start.as_ref().map(|start| start.cost_per_second);
-    // The diagnosis's LP solves do not count against the deadline: it is
-    // pushed back by their time.
-    #[cfg(feature = "lp-diagnosis")]
-    let diagnosis_started = Instant::now();
     #[cfg(feature = "lp-diagnosis")]
     let diagnosis = {
         let column_of: HashMap<Variable, usize> = milp
@@ -1889,8 +1879,6 @@ pub(crate) fn solve_selection_milp(
         super::lp_diagnosis::Diagnosis::run(&milp, start_columns.as_deref())
             .map(|diagnosis| (diagnosis, start_columns))
     };
-    #[cfg(feature = "lp-diagnosis")]
-    let deadline = deadline.map(|deadline| deadline + diagnosis_started.elapsed());
     let parts = if milp.split_into_parts {
         independent_parts(&milp)
     } else {
@@ -1977,24 +1965,10 @@ pub(crate) fn solve_selection_milp(
         }
         models
     };
-    // Smallest first: time a small part leaves goes to the larger ones.
-    let mut order: Vec<usize> = (0..models.len()).collect();
-    order.sort_by_key(|&index| models[index].columns.len());
-    let mut remaining_columns: usize = models.iter().map(|model| model.columns.len()).sum();
-    let mut models: Vec<Option<PartModel>> = models.into_iter().map(Some).collect();
     let mut columns = vec![0.0; column_count];
-    let mut solved_parts: Vec<Option<SolvedPart>> = (0..models.len()).map(|_| None).collect();
+    let mut solved_parts: Vec<SolvedPart> = Vec::with_capacity(models.len());
     let started = Instant::now();
-    for index in order {
-        let model = models[index].take().expect("solved once");
-        let share = model.columns.len().max(1) as f64 / remaining_columns.max(1) as f64;
-        remaining_columns -= model.columns.len();
-        let part_deadline = deadline.map(|deadline| {
-            Instant::now()
-                + deadline
-                    .saturating_duration_since(Instant::now())
-                    .mul_f64(share)
-        });
+    for model in models {
         let start = start_columns.as_ref().map(|start| {
             model
                 .columns
@@ -2003,25 +1977,13 @@ pub(crate) fn solve_selection_milp(
                 .collect::<Vec<f64>>()
         });
         let part_columns = model.columns.clone();
-        let solved = solve_part(model, start, part_deadline)?;
+        let solved = solve_part(model, start, highs_threads)?;
         for (&column, &value) in part_columns.iter().zip(&solved.columns) {
             columns[column] = value;
         }
-        solved_parts[index] = Some(solved);
+        solved_parts.push(solved);
     }
     let solve_ms = started.elapsed().as_millis() as u64;
-    let solved_parts: Vec<SolvedPart> = solved_parts
-        .into_iter()
-        .map(|part| part.expect("every part solved"))
-        .collect();
-    let status = if solved_parts
-        .iter()
-        .all(|part| part.status == SelectionMilpStatus::Optimal)
-    {
-        SelectionMilpStatus::Optimal
-    } else {
-        SelectionMilpStatus::TimeLimit
-    };
     let highs_objective: f64 = solved_parts
         .iter()
         .map(|part| part.objective_per_second)
@@ -2030,17 +1992,10 @@ pub(crate) fn solve_selection_milp(
         .iter()
         .map(|part| part.dual_bound_per_second)
         .sum();
-    let relative_gap = match status {
-        SelectionMilpStatus::Optimal => 0.0,
-        SelectionMilpStatus::TimeLimit => {
-            (highs_objective - dual_bound) / highs_objective.abs().max(f64::MIN_POSITIVE)
-        }
-    };
     // The objective of the integral plan: the incumbent's binaries,
     // rounded, with every continuous variable at its cheapest value (the
     // solver's own value carries its tolerances, relative to the scaled
-    // objective). At the deadline, HiGHS's incumbent objective (an upper
-    // bound) when the completion does not apply.
+    // objective). HiGHS's objective when the completion does not apply.
     let objective_value = match completion.complete_columns(&columns) {
         Ok(completed) => completed.cost_per_second,
         Err(reason) => {
@@ -2061,16 +2016,13 @@ pub(crate) fn solve_selection_milp(
                 .map(|completed| completed.columns.as_slice()),
             objective_value,
             dual_bound,
-            &format!("{status:?}"),
         );
     }
     let on = |variable: Variable| columns[column_of[&variable]] > 0.5;
     Ok(SelectionMilpSolution {
-        status,
         cost_per_second: objective_value,
         request_cost_per_second,
         cost_lower_bound_per_second: dual_bound,
-        relative_gap,
         chosen: choice
             .iter()
             .map(|options| {
@@ -2104,12 +2056,12 @@ pub(crate) fn solve_selection_milp(
     })
 }
 
-/// Solves one part once with HiGHS, from `start` (its columns' values) when
-/// given, with the time left before `deadline` as its time limit.
+/// Solves one part once with HiGHS to proven optimality, from `start` (its
+/// columns' values) when given, on `highs_threads` threads.
 fn solve_part(
     model: PartModel,
     start: Option<Vec<f64>>,
-    deadline: Option<Instant>,
+    highs_threads: i32,
 ) -> Result<SolvedPart, SelectionMilpError> {
     let PartModel {
         variables,
@@ -2144,25 +2096,11 @@ fn solve_part(
     model.set_option("output_flag", false);
     // HiGHS's MIP search is mostly serial; a thread per core costs
     // gigabytes of address space on a large host (#1036 under 8 GB).
-    model.set_option("threads", HIGHS_THREADS);
-    let started_with_plan = start.is_some();
+    model.set_option("threads", highs_threads);
     if let Some(start) = &start {
         model
             .try_set_solution(Some(start), None, None, None)
             .map_err(|status| SelectionMilpError::Solver(format!("warm start: {status:?}")))?;
-    }
-    let mut only_read_back = false;
-    if let Some(deadline) = deadline {
-        let seconds = deadline
-            .saturating_duration_since(Instant::now())
-            .as_secs_f64();
-        if seconds <= 0.0 {
-            if !started_with_plan {
-                return Err(SelectionMilpError::DeadlineReached);
-            }
-            only_read_back = true;
-        }
-        model.set_option("time_limit", seconds.max(MOMENT_TO_READ_THE_START_S));
     }
     let started = Instant::now();
     let solved = model
@@ -2170,23 +2108,19 @@ fn solve_part(
         .map_err(|status| SelectionMilpError::Solver(format!("{status:?}")))?;
     let solve_ms = started.elapsed().as_millis() as u64;
     use highs::{HighsModelStatus, HighsSolutionStatus};
-    let status = match solved.status() {
-        HighsModelStatus::Optimal if only_read_back => SelectionMilpStatus::TimeLimit,
-        HighsModelStatus::Optimal => SelectionMilpStatus::Optimal,
+    // No limit is set, so HiGHS stops only at proven optimality or
+    // infeasibility; any other status is a solver failure.
+    match solved.status() {
+        HighsModelStatus::Optimal => {}
         HighsModelStatus::Infeasible | HighsModelStatus::UnboundedOrInfeasible => {
             return Err(SelectionMilpError::Infeasible)
         }
-        HighsModelStatus::ReachedTimeLimit
-        | HighsModelStatus::ReachedInterrupt
-        | HighsModelStatus::ReachedIterationLimit
-        | HighsModelStatus::ReachedMemoryLimit
-        | HighsModelStatus::ReachedSolutionLimit => SelectionMilpStatus::TimeLimit,
         other => return Err(SelectionMilpError::Solver(format!("{other:?}"))),
-    };
+    }
     if solved.primal_solution_status() != HighsSolutionStatus::Feasible {
-        return Err(SelectionMilpError::NoSolution {
-            status: format!("{:?}", solved.status()),
-        });
+        return Err(SelectionMilpError::Solver(
+            "HiGHS reported an optimal status without a feasible solution".into(),
+        ));
     }
     // HiGHS leaves `mip_dual_bound` at 0 for a part without binaries (an
     // LP): its optimal objective is its bound.
@@ -2194,13 +2128,10 @@ fn solve_part(
         solved
             .double_info_value(c"mip_dual_bound")
             .unwrap_or(f64::NAN)
-    } else if status == SelectionMilpStatus::Optimal {
-        solved.objective_value()
     } else {
-        f64::NAN
+        solved.objective_value()
     } / scale;
     Ok(SolvedPart {
-        status,
         columns: solved.get_solution().columns().to_vec(),
         objective_per_second: solved.objective_value() / scale,
         dual_bound_per_second: dual_bound,
@@ -2209,21 +2140,11 @@ fn solve_part(
             variables: part_columns.len(),
             binaries,
             rows: row_count,
-            status: format!("{status:?}"),
             solve_ms,
             dual_bound_per_second: dual_bound,
         },
     })
 }
-
-/// HiGHS's threads (its `threads` option).
-pub(crate) const HIGHS_THREADS: i32 = 4;
-
-/// HiGHS's time limit when the warm start used up the time to the deadline.
-const MOMENT_TO_READ_THE_START_S: f64 = 1e-3;
-
-/// The most time the warm start takes.
-const WARM_START_MOST_TIME: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The factor the objective is multiplied by for HiGHS: the warm start's
 /// cost becomes about 1,000, its largest coefficient at most 10⁷; without

@@ -35,11 +35,6 @@ use crate::checks::guarantee_check;
 use crate::report::RejectionCause;
 use crate::SelectionModels;
 
-/// The most outputs one candidate (or query) is built as for one set of
-/// approximate candidates; beyond it the set is unusable
-/// ([`UnusableReason::NotChecked`]).
-pub(crate) const MAX_COMPOSITIONS: usize = 64;
-
 /// What the accuracy rows (#1095 §2.0 row 9) are built from.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AccuracyPositions {
@@ -375,9 +370,7 @@ impl Checker<'_> {
             }
             per_reference.push(distinct_for_readers(outputs, &mut before.keys));
         }
-        let Some(roots) = self.roots(&per_reference) else {
-            return Outcome::Fails(UnusableReason::NotChecked);
-        };
+        let roots = self.roots(&per_reference);
         let mut outcome = Outcome::Exact;
         for root in roots {
             if root_guarantee(&root).is_some_and(|g| g.is_exact()) {
@@ -402,24 +395,22 @@ impl Checker<'_> {
         outcome
     }
 
-    /// The query roots over each combination of `per_reference`'s outputs;
-    /// `None` beyond [`MAX_COMPOSITIONS`].
-    fn roots(&self, per_reference: &[Vec<Rc<OperatorNode>>]) -> Option<Vec<QueryRoot>> {
-        let combinations = combinations(per_reference)?;
-        Some(
-            combinations
-                .into_iter()
-                .map(|chosen| match self.root {
-                    QueryRoot::Operator(_) => QueryRoot::Operator(chosen[0].clone()),
-                    QueryRoot::Scalar(expr) => {
-                        let mut next = chosen.into_iter();
-                        QueryRoot::Scalar(expr.map_operator_refs(&mut |_| {
+    /// The query roots over each combination of `per_reference`'s outputs.
+    fn roots(&self, per_reference: &[Vec<Rc<OperatorNode>>]) -> Vec<QueryRoot> {
+        combinations(per_reference)
+            .into_iter()
+            .map(|chosen| match self.root {
+                QueryRoot::Operator(_) => QueryRoot::Operator(chosen[0].clone()),
+                QueryRoot::Scalar(expr) => {
+                    let mut next = chosen.into_iter();
+                    QueryRoot::Scalar(
+                        expr.map_operator_refs(&mut |_| {
                             next.next().expect("one output per reference")
-                        }))
-                    }
-                })
-                .collect(),
-        )
+                        }),
+                    )
+                }
+            })
+            .collect()
     }
 
     /// `class`'s node with an exact guarantee, built once.
@@ -540,7 +531,7 @@ impl Checker<'_> {
 /// timing and materialization and its guarantee composed again; outputs the
 /// same for their readers kept once.
 fn rebuilt(node: &Rc<OperatorNode>, per_input: &[Vec<Rc<OperatorNode>>], keys: &mut Keys) -> Built {
-    let combinations = combinations(per_input).ok_or(UnusableReason::NotChecked)?;
+    let combinations = combinations(per_input);
     let mut outputs = Vec::with_capacity(combinations.len());
     for chosen in combinations {
         let mut next = chosen.into_iter();
@@ -558,14 +549,10 @@ fn rebuilt(node: &Rc<OperatorNode>, per_input: &[Vec<Rc<OperatorNode>>], keys: &
     Ok(distinct_for_readers(outputs, keys))
 }
 
-/// Every choice of one entry per list, in order; `None` beyond
-/// [`MAX_COMPOSITIONS`]. One empty list gives none.
-fn combinations<T: Clone>(lists: &[Vec<T>]) -> Option<Vec<Vec<T>>> {
+/// Every choice of one entry per list, in order. One empty list gives none.
+fn combinations<T: Clone>(lists: &[Vec<T>]) -> Vec<Vec<T>> {
     let mut combinations: Vec<Vec<T>> = vec![Vec::new()];
     for list in lists {
-        if combinations.len().saturating_mul(list.len()) > MAX_COMPOSITIONS {
-            return None;
-        }
         combinations = combinations
             .into_iter()
             .flat_map(|prefix| {
@@ -577,7 +564,7 @@ fn combinations<T: Clone>(lists: &[Vec<T>]) -> Option<Vec<Vec<T>>> {
             })
             .collect();
     }
-    Some(combinations)
+    combinations
 }
 
 /// `outputs` with outputs the same for their readers kept once (the
