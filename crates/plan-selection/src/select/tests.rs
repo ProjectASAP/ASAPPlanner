@@ -39,7 +39,7 @@ fn non_negative(mut fixture: Fixture) -> Fixture {
     fixture
 }
 
-// The new search's selection: an optimal, valid plan whose cost is
+// The group selection MILP's selection: an optimal, valid plan whose cost is
 // `plan_cost`'s, the MILP's size and every query's accepted accuracy. The
 // ratio of quantiles is a regression of #1127: the A1 rows admitted two
 // KLL sketches at parts = 2, whose rank errors compose no guarantee through
@@ -146,7 +146,7 @@ fn an_accuracy_miss_is_an_error() {
     }
 }
 
-// Cost models 2 and 3 are not supported by the new search.
+// Cost models 2 and 3 are not supported by the group selection MILP (#888).
 #[test]
 fn cost_model_2_is_unsupported() {
     let fixture = shared_sum();

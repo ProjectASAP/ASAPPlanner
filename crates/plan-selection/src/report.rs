@@ -232,7 +232,7 @@ pub struct Selection {
 pub struct SearchReport {
     pub status: SearchStatus,
     /// The solver's lower bound on the selected plan's cost per second;
-    /// `None` when the search proves none (e.g. under cost model 3).
+    /// `None` when the solver's dual bound is not finite.
     pub cost_lower_bound_per_second: Option<f64>,
     /// The largest MILP the search built.
     pub milp_variables: usize,
@@ -244,7 +244,7 @@ pub struct SearchReport {
     /// the selection MILP's objective and the model encoded some cost terms
     /// inexactly (open questions on #1095, e.g. the working-memory term), so
     /// the plan is returned with its cost equality unproven. `None` when
-    /// the two are equal (within a relative 10⁻⁶) or the old search ran. A
+    /// the two are equal (within a relative 10⁻⁶). A
     /// difference with no inexact term is an error
     /// ([`ErrorSelectingPlan::ObjectiveDiffersFromPlanCost`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -281,8 +281,8 @@ impl SearchReport {
 pub enum SearchStatus {
     /// The search proved the plan optimal over the catalog it was given.
     Optimal,
-    /// The search stopped at the deadline with a validated plan; the gap to
-    /// the lower bound may be above zero.
+    /// The search stopped at the deadline (or another solver limit) with a
+    /// validated plan; the gap to the lower bound may be above zero.
     DeadlineReached,
 }
 

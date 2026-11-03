@@ -73,7 +73,7 @@
 //     `guarantee_check_rejection`, the sketches read and a one-line summary),
 //     `pruned_candidates` and `search_report` (`SearchReport`: `status`,
 //     `cost_lower_bound_per_second`, MILP size and timings, and
-//     `inexact_objective` when the new search's objective and `plan_cost`
+//     `inexact_objective` when the selection MILP's objective and `plan_cost`
 //     differ over terms the MILP encodes inexactly). Stage 3 runs #1095's
 //     selection MILP, which supports cost model 1 only (cost models 2 and 3
 //     are an `UnsupportedCostModel` error, #888); `error` when no

@@ -503,21 +503,19 @@ Hash-cons the workload into groups; generate each group's candidates (Pass 1,
 then the Pass 2 transformations), and expand shared sizes, tumbling-window horizons and
 (planned) raw windows into concrete groups, so that choosing a threshold is
 choosing a group; choose one candidate per needed group; compose the choice
-into one plan and check and cost it with Stage 2 and Stage 3. The search is a
-candidate-connection search: a MILP (mixed-integer linear program) over the graph of candidates and the
-groups they read proposes a choice from local cost bounds, Stage 2 and
-Stage 3 validate and cost it, and each validated cost constrains the MILP
-again (evaluator-backed refinement). Stage 3 realizes each proposed choice
-through Stage 2's `AssignmentRealizer`, which the facade builds and passes in,
+into one plan and check and cost it with Stage 2 and Stage 3. The search is
+the group selection MILP (mixed-integer linear program, #1095): it chooses one
+candidate per memo group and execution context, with each shareable candidate
+charged once, and is solved once; it prices cost model 1 only (cost models 2
+and 3 are an `UnsupportedCostModel` error, #888). Stage 3 realizes the chosen
+plan through Stage 2's `AssignmentRealizer`, which the facade builds and passes in,
 so Stage 3 does not depend on the Stage 2 crate. The facade first finds an
 incumbent (the best validated plan so far) in a round over seed tumbling-window grids,
 then exposes finer tumbling-window widths in later rounds, each round running Pass 2,
 Stage 2 and Stage 3; only a completed round over the full tumbling-window-width domain
 bounds the declared search space, and otherwise the result is the best
-validated plan found. On tiny catalogs, tests check that this
-bounded search selects the same plan cost as a complete traversal of the same
-catalog under every cost model, and that the MILP's selection matches an
-independent enumeration of the candidate graph.
+validated plan found. Stage 3 checks that `plan_cost` of the realized plan
+equals the MILP's objective, and that every query's accuracy and latency hold.
 
 #### Memo code interface
 
@@ -525,7 +523,7 @@ The memo rules are in `crates/logical-asap-optimization/src/` (module
 `pass2::memo`, crate-private: the crate root re-exports each entry point); the memo types Stage 1 hands Stage 2 are in
 `crates/types/src/stages/` (`asap_types::stages`); the facade that runs the
 stages is in `crates/planner/src/run.rs`; the search over Stage 2's
-candidates is in `crates/plan-selection/src/search/`.
+candidates is in `crates/plan-selection/src/` (`select.rs`, `groups/`, `milp/`).
 
 | Step | Entry point | Path |
 |---|---|---|

@@ -181,7 +181,10 @@
 //!
 //! [`CostInputs::cost_model`](asap_cost::CostInputs::cost_model) (the cost inputs [`select_plan`] receives) chooses how
 //! usage becomes a choice; the default is cost model 1 with
-//! [`ResourceUnitCost::illustrative`](asap_cost::ResourceUnitCost::illustrative):
+//! [`ResourceUnitCost::illustrative`](asap_cost::ResourceUnitCost::illustrative).
+//! [`select_plan`] searches under cost model 1 only; cost models 2 and 3
+//! are an `UnsupportedCostModel` error until #888 (the whole-plan reference
+//! pricer still ranks plans under all three):
 //!
 //! * [`CostModel::UsageOverTime`](asap_cost::CostModel::UsageOverTime) (cost model 1, pay-as-you-go): each
 //!   node's CPU operations, scanned bytes and memory byte-seconds per second
