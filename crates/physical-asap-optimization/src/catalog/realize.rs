@@ -20,8 +20,8 @@ use super::reconstruction::{
     output_contract_satisfied, paired_node_identities, reconstruct_selected_candidates,
 };
 
-/// Realize `selected` with `materializations[i]` requested for selected
-/// node `i` (a test may request another than its candidate's). Output
+/// Realize `selected` with each selected node at its candidate's
+/// materialization. Output
 /// references must follow `map_operator_refs` traversal of the original
 /// roots in workload order (one reference for an operator root). Repeated
 /// scalar references remain separate positions; literal-only scalar roots
@@ -29,7 +29,6 @@ use super::reconstruction::{
 pub fn materialize_selected_candidates(
     physical_candidates: &PhysicalASAPMemoCandidates,
     selected: &DagOfSelectedCandidates,
-    materializations: &[Materialization],
     original_roots: &[QueryRoot],
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
@@ -39,9 +38,12 @@ pub fn materialize_selected_candidates(
         return Err("workload entries and query roots differ in length".into());
     }
     let rebuilt = reconstruct_selected_candidates(physical_candidates, selected)?;
-    if materializations.len() != rebuilt.operator_node_of_selected_node.len() {
-        return Err("materialization vector must be indexed by selected node".into());
-    }
+    // `reconstruct_selected_candidates` checked every selected candidate exists.
+    let materializations: Vec<_> = selected
+        .candidate_of_node
+        .iter()
+        .map(|id| physical_candidates.candidates[id.0].materialization)
+        .collect();
     let mut node_by_pointer = HashMap::new();
     for (node, operator_node) in rebuilt.operator_node_of_selected_node.iter().enumerate() {
         node_by_pointer.insert(Rc::as_ptr(operator_node), node);
@@ -140,34 +142,16 @@ pub struct Stage2AssignmentRealizer<'a> {
 }
 
 impl AssignmentRealizer for Stage2AssignmentRealizer<'_> {
-    /// `materialize_selected_candidates` with each selected node at its
-    /// candidate's materialization; each node also keeps its candidate's
-    /// timing.
+    /// `materialize_selected_candidates`; each node also keeps its
+    /// candidate's timing.
     fn realize(
         &self,
         physical: &PhysicalASAPMemoCandidates,
         selected: &DagOfSelectedCandidates,
     ) -> Result<RealizedPlan, PhysicalCandidateError> {
-        let materializations = selected
-            .candidate_of_node
-            .iter()
-            .map(|id| {
-                physical
-                    .candidates
-                    .get(id.0)
-                    .map(|candidate| candidate.materialization)
-                    .ok_or_else(|| {
-                        PhysicalCandidateError::InvalidOrUnsupported(format!(
-                            "selected candidate {} does not exist",
-                            id.0
-                        ))
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
         let realized = materialize_selected_candidates(
             physical,
             selected,
-            &materializations,
             self.original_roots,
             self.entries,
             self.data,
@@ -331,21 +315,9 @@ mod tests {
         };
         let realizer: &dyn AssignmentRealizer = &realizer;
 
-        let materializations: Vec<_> = selected
-            .candidate_of_node
-            .iter()
-            .map(|id| physical.candidates[id.0].materialization)
-            .collect();
-        let direct = materialize_selected_candidates(
-            &physical,
-            &selected,
-            &materializations,
-            &roots,
-            &entries,
-            &data,
-            false,
-        )
-        .unwrap();
+        let direct =
+            materialize_selected_candidates(&physical, &selected, &roots, &entries, &data, false)
+                .unwrap();
         let through_trait = realizer.realize(&physical, &selected).unwrap();
         assert_eq!(
             format!("{:?}", direct.plan),
