@@ -16,9 +16,7 @@ pub use crate::pass2::asap_aware_cse::{
     with_union_scan_labels,
 };
 pub use crate::pass2::memo::groups::try_populate_pass1;
-pub use crate::pass2::memo::window_candidates::{
-    add_local_window_composition, add_local_window_composition_in_domain,
-};
+pub use crate::pass2::memo::window_candidates::add_local_window_composition;
 pub use crate::stage0::cse::share_common_sub_dags;
 
 use asap_types::ir::properties::AccuracyTarget;
@@ -29,16 +27,15 @@ use asap_types::workload::{
 };
 
 /// Pass 2 after local window composition, on a memo the test composed
-/// itself (or not at all): rules 2–9 for `domain`, then
+/// itself (or not at all): rules 2–9, then
 /// `add_shared_summary_state_groups`.
 /// Production runs these through
 /// [`generate_logical_asap_memo_candidates`](crate::pass2::logical_memo_candidates::generate_logical_asap_memo_candidates).
 pub fn sharing_rules_and_shared_state_groups(
     mut memo: asap_types::stages::Memo,
-    domain: crate::pass2::memo::shared_configurations::TumblingWindowWidthDomain,
 ) -> Result<asap_types::stages::Memo, crate::pass2::memo::state_groups::Pass2RuleError> {
-    crate::pass2::logical_memo_candidates::apply_sharing_rules(&mut memo, domain, None)?;
-    crate::pass2::memo::state_groups::add_shared_summary_state_groups(&mut memo, None)?;
+    crate::pass2::logical_memo_candidates::apply_sharing_rules(&mut memo)?;
+    crate::pass2::memo::state_groups::add_shared_summary_state_groups(&mut memo)?;
     Ok(memo)
 }
 

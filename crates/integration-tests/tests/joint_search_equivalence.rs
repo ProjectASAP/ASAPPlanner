@@ -74,17 +74,13 @@ fn run(
     data: &DataWorkload,
     models: PlanningModels<'_>,
     _exhaustive: bool,
-    budget_ms: u64,
 ) -> PlanningRun {
     run_planning(
         roots.to_vec(),
         entries,
         data,
         models,
-        PlanSearchSettings {
-            time_limit_ms: Some(budget_ms),
-            inspect: false,
-        },
+        PlanSearchSettings::default(),
     )
     .unwrap()
 }
@@ -130,14 +126,11 @@ fn run_workload(
             .with_cost_inputs(settings)
             .with_deployment_capabilities(deployment),
         false,
-        10_000,
     );
     assert_valid(&run, entries.len());
     run
 }
 
-// Bounded runs can stop at different progressive tumbling-window-width domains. Compare
-// validated output semantics here, not inventory sizes from different catalogs.
 // Fixed-catalog terminal/producer scaling is tested in candidates::scopes.
 #[test]
 #[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
@@ -262,33 +255,12 @@ fn custom_accuracy_policy_is_respected() {
         workload.data_workload.as_ref().unwrap(),
         PlanningModels::builtin().with_accuracy(&policy),
         false,
-        10_000,
     );
     assert_valid(&result, 1);
     assert!(
         policy.0.get() > 0,
         "the supplied accuracy policy must evaluate outputs"
     );
-}
-
-// Exhausting the entire budget before planning yields an explicit diagnostic,
-// never an unvalidated plan advertised as a warm-start incumbent.
-#[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
-fn zero_budget_returns_no_unvalidated_plan() {
-    let workload = workload_of(&[("m", 60_000)], AccuracyTarget::exact());
-    let roots = lower_promql_roots(&workload).unwrap();
-    let entries: Vec<_> = workload.query_workload.entries().collect();
-    let run = run(
-        &roots,
-        &entries,
-        workload.data_workload.as_ref().unwrap(),
-        PlanningModels::builtin(),
-        false,
-        0,
-    );
-    assert!(run.selected_physical_plan.is_none());
-    assert!(run.selection.unwrap_err().to_string().contains("budget"));
 }
 
 // The SQL frontend keeps repeated and different-window COUNT DISTINCT outputs.
@@ -309,7 +281,6 @@ fn repeated_sql_queries_preserve_separate_output_references() {
         workload.data_workload.as_ref().unwrap(),
         PlanningModels::builtin(),
         false,
-        10_000,
     );
     assert_valid(&run, 3);
 }
@@ -343,7 +314,6 @@ fn rootless_request_overhead_respects_capacity_and_latency() {
             workload.data_workload.as_ref().unwrap(),
             PlanningModels::builtin().with_cost_inputs(&settings),
             false,
-            10_000,
         );
         assert!(result.selection.is_err());
         assert!(result.selected_physical_plan.is_none());
@@ -367,7 +337,6 @@ fn unsupported_exact_operation_never_returns_an_unvalidated_plan() {
         workload.data_workload.as_ref().unwrap(),
         PlanningModels::builtin(),
         false,
-        10_000,
     );
     assert!(result.selection.is_err());
     assert!(result.selected_physical_plan.is_none());

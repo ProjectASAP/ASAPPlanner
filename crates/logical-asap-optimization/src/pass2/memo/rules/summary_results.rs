@@ -2,19 +2,13 @@
 //! choose a state configuration independently, without enumerating combinations
 //! of all private states in the enclosing query.
 use super::reuse::{append_producer, append_reader, eligible, replace};
-use crate::pass2::memo::check_generation_deadline;
 use crate::pass2::memo::state_groups::{direct_input_builds, Pass2RuleError};
 use asap_types::ir::{ASAPOp, OperatorNode};
 use asap_types::stages::{Memo, OriginOfCandidateForMemoGroup};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::time::Instant;
 
-pub(crate) fn factor_summary_results(
-    memo: &mut Memo,
-    deadline: Option<Instant>,
-) -> Result<usize, Pass2RuleError> {
-    check_generation_deadline(deadline)?;
+pub(crate) fn factor_summary_results(memo: &mut Memo) -> Result<usize, Pass2RuleError> {
     let originals: Vec<_> = memo
         .candidates
         .iter()
@@ -28,7 +22,6 @@ pub(crate) fn factor_summary_results(
         .collect();
     let mut added = 0;
     for (owner, original) in originals {
-        check_generation_deadline(deadline)?;
         let builds = direct_input_builds(memo, &original);
         if builds.len() < 2 {
             continue;
@@ -44,7 +37,6 @@ pub(crate) fn factor_summary_results(
         let mut seen = HashSet::new();
         let mut readouts = Vec::new();
         while let Some(node) = pending.pop() {
-            check_generation_deadline(deadline)?;
             if boundaries.contains(&Rc::as_ptr(&node)) || !seen.insert(Rc::as_ptr(&node)) {
                 continue;
             }
@@ -71,7 +63,6 @@ pub(crate) fn factor_summary_results(
         let queries = memo.groups[owner].queries.clone();
         let mut replacements = HashMap::new();
         for readout in readouts {
-            check_generation_deadline(deadline)?;
             let group = append_producer(
                 memo,
                 Rc::clone(&readout),
@@ -95,6 +86,5 @@ pub(crate) fn factor_summary_results(
             OriginOfCandidateForMemoGroup::SummaryResult,
         )?);
     }
-    check_generation_deadline(deadline)?;
     Ok(added)
 }

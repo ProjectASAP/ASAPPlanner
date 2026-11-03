@@ -1,33 +1,27 @@
 //! The facade's orchestration of the planning stages (#1047): Stage 0
-//! (the memo of logical groups), Pass 1, then per tumbling-window-width round Pass 2 →
-//! Stage 2 → Stage 3, and finally the selected plan built through Stage 2's
-//! realizer. No stage calls another; the facade owns the deadline and splits
-//! it per round (#1048).
+//! (the memo of logical groups), Pass 1, Pass 2, Stage 2, Stage 3, and
+//! finally the selected plan built through Stage 2's realizer. No stage
+//! calls another, and none has a deadline: each runs to completion.
 
 use asap_logical_asap_optimization::generate_dag_of_logical_memo_groups;
 use asap_types::stages::PerComputationLogicalMemoCandidates;
 use std::collections::HashSet;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use asap_cost::PlanRanking;
+use asap_logical_asap_optimization::generate_logical_asap_memo_candidates;
 use asap_logical_asap_optimization::ChosenCandidatePerMemoGroup;
 use asap_logical_asap_optimization::DeploymentCapabilitiesError;
-use asap_logical_asap_optimization::{
-    generate_logical_asap_memo_candidates, LogicalASAPMemoCandidatesError, Pass2RoundState,
-};
 use asap_logical_asap_optimization::{
     generate_per_computation_logical_memo_candidates, PerComputationCandidateError,
     PerComputationLogicalMemoCandidatesError,
 };
-use asap_logical_asap_optimization::{TumblingWindowWidthDomain, TumblingWindowWidthFrontier};
 use asap_physical_asap_optimization::{
     generate_physical_asap_memo_candidates, Stage2AssignmentRealizer,
 };
 use asap_plan_selection::{select_plan, ErrorSelectingPlan, SearchReport, Selection};
 use asap_types::ir::schema::schema_support::with_promql_series_identity;
-use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot, TimeRangeKind};
-use asap_types::stages::DagOfLogicalMemoGroups;
+use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::stages::{
     AssignmentRealizer, CandidateForMemoGroupId, DagOfSelectedCandidates,
     LogicalASAPMemoCandidates, Memo, MemoGroupId, PhysicalASAPMemoCandidates,
@@ -40,24 +34,9 @@ use crate::pass::{
     OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, PlanningModels, QueryPlan,
 };
 
-/// The planning budget when [`PlanSearchSettings::time_limit_ms`] is unset.
-const DEFAULT_TIME_LIMIT_MS: u64 = 30_000;
-/// The seed-width round's share of the remaining budget, and its cap.
-const SEED_ROUND_SHARE: u32 = 4;
-const SEED_ROUND_MAX: Duration = Duration::from_secs(5);
-/// An intermediate tumbling-window-width round's budget cap.
-const INTERMEDIATE_ROUND_MAX: Duration = Duration::from_secs(5);
-/// The least budget left after Pass 1 for the seed round to run first.
-const SEED_ROUND_MIN_REMAINING: Duration = Duration::from_secs(1);
-
 /// How the facade searches.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PlanSearchSettings {
-    /// The whole planning budget, Pass 1 included, in milliseconds; default
-    /// 30 s. The facade splits it over the tumbling-window-width rounds, and each
-    /// stage stops at its round's deadline (an evaluation in progress may
-    /// overrun it).
-    pub time_limit_ms: Option<u64>,
     /// Keep Pass 1's output for inspection (`stage_pipeline`, the DAG
     /// viewer): [`PlanningRun::per_computation_candidates`]. Default off:
     /// production planning copies no memo.
@@ -72,10 +51,10 @@ pub enum SelectionError {
     /// workload.
     #[error("deployment capabilities: {0}")]
     InvalidDeploymentCapabilities(DeploymentCapabilitiesError),
-    /// Pass 1's memo candidates or a round's Pass 2 failed.
+    /// Pass 1's memo candidates or Pass 2 failed.
     #[error("logical ASAP-aware optimization: {0}")]
     LogicalASAPCandidates(String),
-    /// A round's Stage 2 failed.
+    /// Stage 2 failed.
     #[error("physical ASAP-aware optimization: {0}")]
     PhysicalASAPCandidates(String),
     /// Stage 3 selected no plan.
@@ -84,16 +63,13 @@ pub enum SelectionError {
     /// Stage 2 could not build the plan Stage 3 selected.
     #[error("building the selected plan: {0}")]
     Realization(PhysicalCandidateError),
-    /// The budget ended before any round selected a plan.
-    #[error("the planning budget ended before a plan was selected")]
-    DeadlineReached,
 }
 
-/// One tumbling-window-width round, as the facade ran it.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-pub struct PlanningRoundReport {
-    /// The round's tumbling-window-width domain (`SeedGrids`, `Complete`, ...).
-    pub tumbling_window_width_domain: String,
+/// What the facade did: each stage's counts and time.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct PlanningReport {
+    /// Stage 0 and Pass 1, in milliseconds.
+    pub pass1_ms: f64,
     /// Pass 2's output: memo groups and their candidates.
     pub memo_groups: usize,
     pub logical_candidates: usize,
@@ -110,23 +86,6 @@ pub struct PlanningRoundReport {
     pub stage3_ms: f64,
     /// Stage 3's search report, when it selected a plan.
     pub search_report: Option<SearchReport>,
-    /// Why the round selected no plan.
-    pub error: Option<String>,
-}
-
-/// What the facade did: per stage and round, its counts and timings.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
-pub struct PlanningReport {
-    /// Stage 0 and Pass 1, in milliseconds.
-    pub pass1_ms: f64,
-    pub rounds: Vec<PlanningRoundReport>,
-    /// The round whose selection is the plan (index into `rounds`).
-    pub selected_round: Option<usize>,
-    /// Some legal tumbling-window widths were not searched: the plan is the best over
-    /// the widths searched, not over all of them.
-    pub tumbling_window_widths_pending: bool,
-    /// The whole budget, in milliseconds.
-    pub time_limit_ms: u64,
 }
 
 /// Every stage's output for one workload ([`run_planning`]).
@@ -136,11 +95,10 @@ pub struct PlanningRun {
     /// candidates and the pruned candidates.
     /// `None` when Pass 1 failed or without [`PlanSearchSettings::inspect`].
     pub per_computation_candidates: Option<PerComputationLogicalMemoCandidates>,
-    /// The selected round's Pass 2 output (the last round's when none is
-    /// selected).
+    /// Pass 2's output, when it ran.
     pub logical_asap_candidates: Option<LogicalASAPMemoCandidates>,
-    /// The selected round's Stage 2 output (the last round's when none is
-    /// selected): the catalog `selection`'s candidate ids index.
+    /// Stage 2's output, when it ran: the catalog `selection`'s candidate
+    /// ids index.
     pub physical_asap_candidates: Option<PhysicalASAPMemoCandidates>,
     /// Stage 3's selection.
     pub selection: Result<Selection, SelectionError>,
@@ -150,14 +108,6 @@ pub struct PlanningRun {
     /// Stage 3 made applied.
     pub selected_plan: Option<Vec<QueryRoot>>,
     pub report: PlanningReport,
-}
-
-/// One round's outputs.
-struct Round {
-    index: usize,
-    logical: LogicalASAPMemoCandidates,
-    physical: PhysicalASAPMemoCandidates,
-    selection: Result<Selection, SelectionError>,
 }
 
 /// Run the planning stages over the frontends' `roots` (query `i` is
@@ -171,15 +121,11 @@ pub fn run_planning(
     settings: PlanSearchSettings,
 ) -> Result<PlanningRun, PerComputationCandidateError> {
     let started = Instant::now();
-    let time_limit_ms = settings.time_limit_ms.unwrap_or(DEFAULT_TIME_LIMIT_MS);
-    let global_deadline = started.checked_add(Duration::from_millis(time_limit_ms));
     for root in &roots {
         root.validate_structure()?;
     }
     // Stage 0: the memo of logical groups.
     let initial = generate_dag_of_logical_memo_groups(&roots);
-    let has_splittable_window = has_splittable_window(&initial);
-    let has_groups = !initial.groups.is_empty();
     // Pass 1: the per-computation candidates the deployment can run and
     // some query can use.
     let accuracy_targets: Vec<_> = entries
@@ -197,7 +143,6 @@ pub fn run_planning(
             .deployment_capabilities
             .supported_summaries
             .as_deref(),
-        global_deadline,
     );
     // A query Pass 1 cannot plan is an input error.
     let pass1 = match pass1 {
@@ -205,411 +150,110 @@ pub fn run_planning(
         pass1 => pass1,
     };
     let mut report = PlanningReport {
-        time_limit_ms,
+        pass1_ms: elapsed_ms(started),
         ..PlanningReport::default()
     };
-    let mut run = PlanningRun {
-        per_computation_candidates: pass1.as_ref().ok().filter(|_| settings.inspect).cloned(),
-        logical_asap_candidates: None,
-        physical_asap_candidates: None,
-        selection: Err(SelectionError::DeadlineReached),
-        selected_physical_plan: None,
-        selected_plan: None,
-        report: PlanningReport::default(),
-    };
-    if let Err(error) = models.deployment_capabilities.validate(data) {
-        run.selection = Err(SelectionError::InvalidDeploymentCapabilities(error));
-        run.report = report;
-        return Ok(run);
-    }
-    let pass1 = match pass1 {
-        Ok(pass1) => pass1,
-        Err(error) => {
-            // A Pass 1 deadline is the planning budget running out.
-            run.selection = Err(match error {
-                PerComputationLogicalMemoCandidatesError::Timeout(_) => {
-                    SelectionError::DeadlineReached
-                }
-                error => SelectionError::LogicalASAPCandidates(error.to_string()),
-            });
-            report.pass1_ms = elapsed_ms(started);
-            run.report = report;
-            return Ok(run);
-        }
-    };
-    report.pass1_ms = elapsed_ms(started);
-    let mut state = Some(Pass2RoundState::new(pass1));
-
+    let per_computation_candidates = pass1.as_ref().ok().filter(|_| settings.inspect).cloned();
     let realizer = Stage2AssignmentRealizer {
         original_roots: &roots,
         entries,
         data,
         query_time_results_retained: models.deployment_capabilities.query_time_results_retained,
     };
-    let ranking = PlanRanking::of(&models.cost_inputs.cost_model);
-    let mut best: Option<Round> = None;
-    let mut last: Option<Round> = None;
-    let mut final_error: Option<SelectionError> = None;
-    let mut completed_full_domain = false;
-    let mut run_round = |domain: TumblingWindowWidthDomain,
-                         deadline: Option<Instant>,
-                         state: &mut Option<Pass2RoundState>,
-                         report: &mut PlanningReport|
-     -> RoundEnd {
-        let index = report.rounds.len();
-        let outcome = plan_round(
-            state, domain, deadline, entries, data, &models, &realizer, index,
+    let mut logical_asap_candidates = None;
+    let mut physical_asap_candidates = None;
+    let mut selected_physical_plan = None;
+    let mut selected_plan = None;
+    let selection = (|| {
+        models
+            .deployment_capabilities
+            .validate(data)
+            .map_err(SelectionError::InvalidDeploymentCapabilities)?;
+        let pass1 =
+            pass1.map_err(|error| SelectionError::LogicalASAPCandidates(error.to_string()))?;
+        // Pass 2: local window composition over every legal
+        // tumbling-window width, then the sharing rules.
+        let started = Instant::now();
+        let logical = generate_logical_asap_memo_candidates(pass1, entries);
+        report.pass2_ms = elapsed_ms(started);
+        let logical = logical_asap_candidates.insert(
+            logical.map_err(|error| SelectionError::LogicalASAPCandidates(error.to_string()))?,
         );
-        report.rounds.push(outcome.report);
-        let Some(round) = outcome.round else {
-            return outcome.end;
-        };
-        match &round.selection {
-            Ok(selection) => {
-                let replaces = best.as_ref().is_none_or(|best| {
-                    let best = best.selection.as_ref().expect("best round selected");
-                    !ranking.better(&best.cost, &selection.cost)
-                });
-                if replaces {
-                    best = Some(round);
-                } else {
-                    last = Some(round);
-                }
-            }
-            Err(_) => last = Some(round),
-        }
-        outcome.end
-    };
-
-    let remaining = || {
-        global_deadline.map_or(Duration::MAX, |deadline| {
-            deadline.saturating_duration_since(Instant::now())
-        })
-    };
-    let seed_enabled = has_splittable_window
-        && calibration_is_frozen(models.cost_inputs)
-        && remaining() >= SEED_ROUND_MIN_REMAINING;
-    if !seed_enabled {
-        let end = run_round(
-            TumblingWindowWidthDomain::Complete,
-            global_deadline,
-            &mut state,
-            &mut report,
-        );
-        completed_full_domain = end.completed;
-        if let Some(error) = end.fatal {
-            final_error = Some(error);
-        }
-    } else {
-        let seed_deadline =
-            Instant::now().checked_add((remaining() / SEED_ROUND_SHARE).min(SEED_ROUND_MAX));
-        let end = run_round(
-            TumblingWindowWidthDomain::SeedGrids,
-            seed_deadline,
-            &mut state,
-            &mut report,
-        );
-        if let Some(error) = end.fatal {
-            final_error = Some(error);
-        }
-        // A literal-only workload has no computation in which tumbling-window rules
-        // can fire.
-        let grids = entries
-            .iter()
-            .filter_map(|entry| entry.evaluation_grid_ms())
-            .filter(|_| has_groups);
-        let mut frontier = TumblingWindowWidthFrontier::new(grids, global_deadline);
-        while final_error.is_none() && state.is_some() && !remaining().is_zero() {
-            let domain = match frontier
-                .as_mut()
-                .map(|frontier| frontier.next_domain(global_deadline))
-            {
-                Ok(Ok(Some(domain))) => domain,
-                Ok(Ok(None)) | Ok(Err(_)) | Err(_) => break,
-            };
-            let complete = domain == TumblingWindowWidthDomain::Complete;
-            let deadline = if complete {
-                global_deadline
-            } else {
-                Instant::now().checked_add(remaining().min(INTERMEDIATE_ROUND_MAX))
-            };
-            let end = run_round(domain, deadline, &mut state, &mut report);
-            if let Some(error) = end.fatal {
-                final_error = Some(error);
-            }
-            if complete {
-                completed_full_domain = end.completed;
-                break;
-            }
-        }
-    }
-    report.tumbling_window_widths_pending = !completed_full_domain;
-
-    let (chosen, selected) = match (final_error, best) {
-        (Some(error), best) => {
-            run.selection = Err(error);
-            (last.or(best), false)
-        }
-        (None, Some(best)) => (Some(best), true),
-        (None, None) => {
-            let mut last = last;
-            run.selection = Err(last
-                .as_mut()
-                .and_then(|round| {
-                    std::mem::replace(&mut round.selection, Err(SelectionError::DeadlineReached))
-                        .err()
-                })
-                .unwrap_or(SelectionError::DeadlineReached));
-            (last, false)
-        }
-    };
-    let Some(round) = chosen else {
-        run.report = report;
-        return Ok(run);
-    };
-    if let (true, Ok(selection)) = (selected, round.selection) {
-        report.selected_round = Some(round.index);
-        match realizer.realize(&round.physical, &selection.selected_dag) {
-            Ok(realized) => {
-                let proven: HashSet<*const OperatorNode> = selection
-                    .nodes_with_proven_non_negative_weights
-                    .iter()
-                    .filter_map(|node| realized.operator_node_of_selected_node.get(node.0))
-                    .map(Rc::as_ptr)
-                    .collect();
-                run.selected_plan = Some(with_confirmed_weights_at(
-                    &realized.plan.roots,
-                    data,
-                    &|node| proven.contains(&Rc::as_ptr(node)),
-                ));
-                run.selected_physical_plan = Some(realized);
-                run.selection = Ok(selection);
-            }
-            Err(error) => run.selection = Err(SelectionError::Realization(error)),
-        }
-    }
-    run.logical_asap_candidates = Some(round.logical);
-    run.physical_asap_candidates = Some(round.physical);
-    run.report = report;
-    Ok(run)
-}
-
-/// How a round ended, for the round loop.
-struct RoundEnd {
-    /// The round ran Pass 2, Stage 2 and Stage 3 to the end (with or
-    /// without a plan).
-    completed: bool,
-    /// An error that ends planning: the complete catalog is infeasible, or
-    /// a stage failed for a reason other than its deadline.
-    fatal: Option<SelectionError>,
-}
-
-struct RoundOutcome {
-    round: Option<Round>,
-    report: PlanningRoundReport,
-    end: RoundEnd,
-}
-
-/// One tumbling-window-width round: Pass 2 over `state` for `domain`, Stage 2, then
-/// Stage 3, each stopping at `deadline`. A Pass 2 timeout in local window
-/// composition leaves `state` unusable, so it is dropped.
-#[allow(clippy::too_many_arguments)]
-fn plan_round(
-    state: &mut Option<Pass2RoundState>,
-    domain: TumblingWindowWidthDomain,
-    deadline: Option<Instant>,
-    entries: &[QueryWorkloadEntry],
-    data: &DataWorkload,
-    models: &PlanningModels<'_>,
-    realizer: &dyn AssignmentRealizer,
-    index: usize,
-) -> RoundOutcome {
-    let mut report = PlanningRoundReport {
-        tumbling_window_width_domain: format!("{domain:?}"),
-        memo_groups: 0,
-        logical_candidates: 0,
-        operator_nodes: 0,
-        physical_candidates: 0,
-        physical_producer_links: 0,
-        stage2_pruned_candidates: 0,
-        pass2_ms: 0.0,
-        stage2_ms: 0.0,
-        stage3_ms: 0.0,
-        search_report: None,
-        error: None,
-    };
-    let stopped = |report: PlanningRoundReport, fatal: Option<SelectionError>| RoundOutcome {
-        round: None,
-        report,
-        end: RoundEnd {
-            completed: false,
-            fatal,
-        },
-    };
-    let Some(round_state) = state.as_mut() else {
-        report.error = Some("Pass 2's round state was dropped".into());
-        return stopped(report, None);
-    };
-    let started = Instant::now();
-    let logical = generate_logical_asap_memo_candidates(round_state, entries, domain, deadline);
-    report.pass2_ms = elapsed_ms(started);
-    let logical = match logical {
-        Ok(logical) => logical,
-        Err(error) => {
-            report.error = Some(error.to_string());
-            if matches!(
-                error,
-                LogicalASAPMemoCandidatesError::LocalWindowComposition(_)
-            ) {
-                *state = None;
-            }
-            let fatal =
-                (!past(deadline)).then(|| SelectionError::LogicalASAPCandidates(error.to_string()));
-            return stopped(report, fatal);
-        }
-    };
-    report.memo_groups = logical.memo.groups.len();
-    report.logical_candidates = logical.memo.candidates.iter().map(Vec::len).sum();
-    let started = Instant::now();
-    let physical = generate_physical_asap_memo_candidates(
-        &logical,
-        entries,
-        data,
-        models.deployment_capabilities.query_time_results_retained,
-        models.deployment_capabilities.raw_data_retained,
-        deadline,
-    );
-    report.stage2_ms = elapsed_ms(started);
-    let physical = match physical {
-        Ok(physical) => physical,
-        Err(error) => {
-            report.error = Some(error.to_string());
-            let fatal = (!error.is_deadline_exceeded())
-                .then(|| SelectionError::PhysicalASAPCandidates(error.to_string()));
-            return stopped(report, fatal);
-        }
-    };
-    report.operator_nodes = physical.operator_nodes_of_candidates_for_memo_groups.len();
-    report.physical_candidates = physical.candidates.len();
-    report.physical_producer_links = physical
-        .candidates
-        .iter()
-        .flat_map(|candidate| &candidate.producer_candidates_per_input)
-        .map(|producers| producers.len())
-        .sum();
-    report.stage2_pruned_candidates = physical.pruned_candidates.len();
-    let started = Instant::now();
-    let selection = select_plan(
-        &physical,
-        entries,
-        data,
-        &models.accuracy_check_inputs(),
-        models.cost_inputs,
-        realizer,
-    );
-    report.stage3_ms = elapsed_ms(started);
-    let fatal = match &selection {
-        Ok(selection) => {
-            report.search_report = Some(selection.search_report.clone());
-            None
-        }
-        Err(error) => {
-            report.error = Some(error.to_string());
-            match error {
-                ErrorSelectingPlan::EvaluationDeadlineExceeded => None,
-                // An infeasible restricted catalog does not make the complete
-                // one infeasible.
-                ErrorSelectingPlan::NoValidCandidate(_)
-                    if domain != TumblingWindowWidthDomain::Complete =>
-                {
-                    None
-                }
-                error => Some(SelectionError::Selection(clone_error(error))),
-            }
-        }
-    };
-    RoundOutcome {
-        round: Some(Round {
-            index,
+        report.memo_groups = logical.memo.groups.len();
+        report.logical_candidates = logical.memo.candidates.iter().map(Vec::len).sum();
+        // Stage 2.
+        let started = Instant::now();
+        let physical = generate_physical_asap_memo_candidates(
             logical,
+            entries,
+            data,
+            models.deployment_capabilities.query_time_results_retained,
+            models.deployment_capabilities.raw_data_retained,
+        );
+        report.stage2_ms = elapsed_ms(started);
+        let physical = physical_asap_candidates.insert(
+            physical.map_err(|error| SelectionError::PhysicalASAPCandidates(error.to_string()))?,
+        );
+        report.operator_nodes = physical.operator_nodes_of_candidates_for_memo_groups.len();
+        report.physical_candidates = physical.candidates.len();
+        report.physical_producer_links = physical
+            .candidates
+            .iter()
+            .flat_map(|candidate| &candidate.producer_candidates_per_input)
+            .map(|producers| producers.len())
+            .sum();
+        report.stage2_pruned_candidates = physical.pruned_candidates.len();
+        // Stage 3.
+        let started = Instant::now();
+        let selection = select_plan(
             physical,
-            selection: selection.map_err(SelectionError::Selection),
-        }),
+            entries,
+            data,
+            &models.accuracy_check_inputs(),
+            models.cost_inputs,
+            &realizer,
+        );
+        report.stage3_ms = elapsed_ms(started);
+        let selection = selection.map_err(SelectionError::Selection)?;
+        report.search_report = Some(selection.search_report.clone());
+        // The selected plan, as Stage 2 builds it.
+        let realized = realizer
+            .realize(physical, &selection.selected_dag)
+            .map_err(SelectionError::Realization)?;
+        let proven: HashSet<*const OperatorNode> = selection
+            .nodes_with_proven_non_negative_weights
+            .iter()
+            .filter_map(|node| realized.operator_node_of_selected_node.get(node.0))
+            .map(Rc::as_ptr)
+            .collect();
+        selected_plan = Some(with_confirmed_weights_at(
+            &realized.plan.roots,
+            data,
+            &|node| proven.contains(&Rc::as_ptr(node)),
+        ));
+        selected_physical_plan = Some(realized);
+        Ok(selection)
+    })();
+    Ok(PlanningRun {
+        per_computation_candidates,
+        logical_asap_candidates,
+        physical_asap_candidates,
+        selection,
+        selected_physical_plan,
+        selected_plan,
         report,
-        end: RoundEnd {
-            completed: true,
-            fatal,
-        },
-    }
-}
-
-/// `error` again, for the fatal-error record (the round keeps the original).
-fn clone_error(error: &ErrorSelectingPlan) -> ErrorSelectingPlan {
-    match error {
-        ErrorSelectingPlan::NoValidCandidate(rejected) => {
-            ErrorSelectingPlan::NoValidCandidate(rejected.clone())
-        }
-        ErrorSelectingPlan::RealizerRejected(reason) => {
-            ErrorSelectingPlan::RealizerRejected(reason.clone())
-        }
-        ErrorSelectingPlan::UnsupportedCostModel(model) => {
-            ErrorSelectingPlan::UnsupportedCostModel(model.clone())
-        }
-        &ErrorSelectingPlan::ObjectiveDiffersFromPlanCost {
-            objective_per_second,
-            plan_cost_per_second,
-        } => ErrorSelectingPlan::ObjectiveDiffersFromPlanCost {
-            objective_per_second,
-            plan_cost_per_second,
-        },
-        ErrorSelectingPlan::SelectedPlanFailedCheck { cause, reason } => {
-            ErrorSelectingPlan::SelectedPlanFailedCheck {
-                cause: *cause,
-                reason: reason.clone(),
-            }
-        }
-        error => ErrorSelectingPlan::Solver(error.to_string()),
-    }
-}
-
-fn past(deadline: Option<Instant>) -> bool {
-    deadline.is_some_and(|deadline| Instant::now() >= deadline)
+    })
 }
 
 fn elapsed_ms(started: Instant) -> f64 {
     started.elapsed().as_secs_f64() * 1000.0
 }
 
-/// Whether Stage 3 prices with one fixed calibration factor: a frozen factor
-/// is given, or no operator is measured. Only then is the seed-width round
-/// comparable with later rounds.
-fn calibration_is_frozen(cost_inputs: &asap_cost::CostInputs) -> bool {
-    cost_inputs.frozen_calibration_factor.is_some()
-        || cost_inputs.measured_operation_costs.operators.is_empty()
-}
-
-/// Tumbling-window rules require a temporal range below a summary build: a positive
-/// `Range` window, or an existing tumbling-window chain. Instant lookback selectors
-/// have no range to split into tumbling windows.
-fn has_splittable_window(initial: &DagOfLogicalMemoGroups) -> bool {
-    initial.groups.iter().any(|group| {
-        matches!(
-            group.logical_node.non_asap(),
-            Some(NonASAPOp::TimeRange {
-                kind: TimeRangeKind::Range, range, ..
-            }) if !range.is_zero()
-        ) || matches!(
-            group.logical_node.asap(),
-            Some(ASAPOp::SummaryTumblingWindowChain { .. })
-        )
-    })
-}
-
 /// The selected plan's memo candidate for each group it uses: the memo
 /// candidate whose root each selected node's candidate is. Factoring may give several
 /// memo candidates of a group one root (identical terminal readers of
 /// different inputs); the one reading the selected producers' groups is taken.
-/// `memo` and `physical` are the selected round's
+/// `memo` and `physical` are the run's
 /// ([`PlanningRun::logical_asap_candidates`]'s memo and
 /// [`PlanningRun::physical_asap_candidates`]); `selected` is the selection's
 /// `selected_dag`. An error says why the plan is not one candidate per group.

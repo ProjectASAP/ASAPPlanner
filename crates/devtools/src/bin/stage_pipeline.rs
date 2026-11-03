@@ -24,11 +24,10 @@
 // Writes an `asap-stage-pipeline/v1` document (tools/dag-viewer) with the
 // four planner stages as the facade runs them (`asap_planner::run_planning`).
 // The default document keeps the selected plan; `--exhaustive` adds the
-// reference enumeration: the selected round's memo choices, each implemented
+// reference enumeration: Pass 2's memo choices, each implemented
 // by Stage 2 with every materialization assignment, all priced by the
 // reference pricer (`asap_plan_selection::reference_pricer`), under
-// `reference_pricing`. `--milp-time-limit-s` bounds planning; a timeout keeps
-// the best plan found, never an optimality claim for unexplored candidates.
+// `reference_pricing`.
 // Unlike `plan_installable`'s default settings, Stage 3 ignores accuracy
 // guarantees unless `--enforce-accuracy-guarantees` is given (below);
 // `accuracy_guarantees` is `"ignored"` or `"enforced"`.
@@ -49,7 +48,7 @@
 //     built it, then under `--exhaustive` each enumerated choice's physical
 //     plans `E<n>-<k>`; an enumerated choice Stage 2 cannot implement is
 //     listed under `pruned` with the reason. `pruned_candidates` lists the
-//     physical candidates Stage 2 pruned in the selected round
+//     physical candidates Stage 2 pruned
 //     (`PhysicalASAPMemoCandidates::pruned_candidates`): each with its memo
 //     `group`, `operator_node`, `operator`, `implementation_root`, `timing`,
 //     `materialization` and `reason` (`PruneReason`:
@@ -61,7 +60,7 @@
 //     rejected ones taking each cause in turn;
 //   - stage3_plan_selection: Stage 3's `Selection`: `selected_dag`
 //     (`DagOfSelectedCandidates`: `candidate_of_node`, the candidate id of
-//     the selected round's Stage 2 output each node runs, one node per run;
+//     Stage 2's output each node runs, one node per run;
 //     `edges`, each `producer` node feeding input `input` of a `consumer`
 //     node; and `node_of_output_reference`),
 //     `nodes_with_proven_non_negative_weights`, the plan's `cost` (its
@@ -97,9 +96,8 @@
 //     and the plan's peak memory when over 10^12 bytes and the cost model
 //     declares no memory capacity (`large_peak_memory_warning`); absent when
 //     there are none;
-//   - planning_report: the facade's `PlanningReport`: Pass 1's time and, per
-//     tumbling-window-width round, Pass 2's and Stage 2's counts and each stage's time,
-//     with Stage 3's search report or error;
+//   - planning_report: the facade's `PlanningReport`: each stage's time,
+//     Pass 2's and Stage 2's counts, and Stage 3's search report;
 //   - reference_pricing (with `--exhaustive`): the reference pricer's
 //     selection among the enumerated plans, named as Stage 3's `Selection`
 //     names its fields: the shown candidates' `cost_per_candidate` and
@@ -114,7 +112,7 @@
 //     `pruned_candidates_not_enumerated` (rejections naming no enumerated
 //     candidate) and `pruned_candidate_count_by_cause`.
 // `memo` (unless `--no-memo`) is the memo the search built, from the
-// planning round whose plan was selected: `nodes`, one node
+// planning run: `nodes`, one node
 // table for the whole section (`MemoNodes`: each distinct node once, matched
 // by its serialized JSON, children as indices into the table and before
 // their parents); `steps`, one per
@@ -315,7 +313,7 @@ const USAGE: &str =
 [--name <name>]... [--table <json>...] [--max-error <f64> --failure-probability <f64> --accuracy-metric <metric>] [--sample-interval-ms <u64>] [--series-count <u64>] [--rows-per-second <f64>] [--rows-held <u64>])) \
 [--cost-model usage-over-time|aws-fargate-us-east-1|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
 --cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory]] \
-[--cost-inputs <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>]] [--milp-time-limit-s <f64>] [--max-displayed <n>] \
+[--cost-inputs <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>]] [--max-displayed <n>] \
 [--no-memo] [--max-memo-candidates <n>] [--memo-enumeration-limit <n>] [--max-enumerated <n>] [--price-enumerated <n>] --out <file>";
 
 /// Default evaluator-assignment budget for an exhaustive archive run.
@@ -404,9 +402,6 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut cost_inputs_path: Option<String> = None;
     let mut enforce_accuracy_guarantees = false;
     let mut exhaustive = false;
-    // `--milp-time-limit-s` bounds the facade's planning budget (Pass 2 and
-    // its rounds); Stage 3's MILP always runs to optimality (#1185).
-    let mut milp_time_limit_ms: Option<u64> = None;
     let mut max_combinations_given = false;
     let mut write_memo = true;
     let mut memo_caps = MemoCaps {
@@ -488,12 +483,6 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             }
             "--price-enumerated" => {
                 memo_caps.choices_to_price = value()?.parse().map_err(|e| format!("{e}"))?
-            }
-            "--milp-time-limit-s" => {
-                let seconds: f64 = value()?
-                    .parse()
-                    .map_err(|e| format!("--milp-time-limit-s: {e}"))?;
-                milp_time_limit_ms = Some((seconds * 1e3) as u64);
             }
             other => return Err(format!("unknown argument {other}").into()),
         }
@@ -746,10 +735,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         &data,
         models,
         // The document shows every stage's memo.
-        PlanSearchSettings {
-            time_limit_ms: milp_time_limit_ms,
-            inspect: true,
-        },
+        PlanSearchSettings { inspect: true },
         exhaustive.then_some(max_combinations),
     );
     // A rate, increase or irate over a declared gauge, or an aggregation of
@@ -1407,7 +1393,7 @@ fn accepted_json(queries: &[AcceptedAccuracy]) -> Value {
 }
 
 /// Stage 3's selection ([`Selection`]): the selected DAG over the selected
-/// round's Stage 2 candidates (one node per run of a candidate), the nodes
+/// Stage 2 candidates (one node per run of a candidate), the nodes
 /// whose weights it proved non-negative, the plan's cost, the accuracy accepted per query, the
 /// candidates it pruned and its search report; `error` when the facade
 /// selected no plan.

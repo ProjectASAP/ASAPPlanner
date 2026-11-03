@@ -4,10 +4,8 @@
 //! from it as one more candidate; its own candidates stay, so plan selection
 //! decides. Identical expressions are the trivial case, shared by memo group
 //! identity, and add no candidates here.
-use crate::pass2::memo::check_generation_deadline;
 use crate::pass2::memo::state_groups::Pass2RuleError;
 use asap_types::stages::Memo;
-use std::time::Instant;
 
 /// One reader of a kind of shared producer: its memo group and its need.
 pub(in crate::pass2::memo) struct Reader<N> {
@@ -23,17 +21,9 @@ pub(in crate::pass2::memo) trait SharedProducer {
     type Covering;
     /// The memo's readers of this kind, in sets whose members can all read
     /// one producer; in memo order.
-    fn sets(
-        &mut self,
-        memo: &Memo,
-        deadline: Option<Instant>,
-    ) -> Result<Vec<Vec<Reader<Self::Need>>>, Pass2RuleError>;
+    fn sets(&mut self, memo: &Memo) -> Result<Vec<Vec<Reader<Self::Need>>>, Pass2RuleError>;
     /// The coverings to offer the readers of `set`.
-    fn coverings(
-        &self,
-        set: &[Reader<Self::Need>],
-        deadline: Option<Instant>,
-    ) -> Result<Vec<Self::Covering>, Pass2RuleError>;
+    fn coverings(&self, set: &[Reader<Self::Need>]) -> Result<Vec<Self::Covering>, Pass2RuleError>;
     /// Adds `reader`'s derivation from the producer at `covering`, if that
     /// producer serves it; the number of candidates added.
     fn derive(
@@ -55,23 +45,18 @@ pub(in crate::pass2::memo) fn spans_groups<N>(set: &[Reader<N>]) -> bool {
 pub(in crate::pass2::memo) fn add_shared_producer_candidates<P: SharedProducer>(
     memo: &mut Memo,
     producer: &mut P,
-    deadline: Option<Instant>,
 ) -> Result<usize, Pass2RuleError> {
-    check_generation_deadline(deadline)?;
     let mut added = 0;
-    for set in producer.sets(memo, deadline)? {
-        check_generation_deadline(deadline)?;
+    for set in producer.sets(memo)? {
         if !spans_groups(&set) {
             continue;
         }
-        let coverings = producer.coverings(&set, deadline)?;
+        let coverings = producer.coverings(&set)?;
         for reader in &set {
             for covering in &coverings {
-                check_generation_deadline(deadline)?;
                 added += producer.derive(memo, reader, covering)?;
             }
         }
     }
-    check_generation_deadline(deadline)?;
     Ok(added)
 }

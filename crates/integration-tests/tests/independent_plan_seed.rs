@@ -50,10 +50,7 @@ fn cost(queries: &[String]) -> f64 {
         &entries,
         &w.data,
         models,
-        PlanSearchSettings {
-            time_limit_ms: Some(30_000),
-            inspect: false,
-        },
+        PlanSearchSettings::default(),
         None,
     )
     .unwrap();

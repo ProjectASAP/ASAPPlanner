@@ -87,15 +87,9 @@ pub use pass1::{
     generate_per_computation_logical_memo_candidates, PerComputationCandidateError,
     PerComputationLogicalMemoCandidatesError,
 };
-// Pass 2: its entry, the state it keeps between tumbling-window-width rounds, and the
-// tumbling-window-width domain of a round.
-pub use pass2::logical_memo_candidates::{
-    generate_logical_asap_memo_candidates, LogicalASAPMemoCandidatesError, Pass2RoundState,
-};
+// Pass 2: its entry and its error.
+pub use pass2::logical_memo_candidates::generate_logical_asap_memo_candidates;
 pub use pass2::memo::candidates::CandidatePopulationError;
-pub use pass2::memo::shared_configurations::{
-    TumblingWindowWidthDomain, TumblingWindowWidthFrontier,
-};
 pub use pass2::memo::state_groups::Pass2RuleError;
 // The CandidateLogicalASAPDAGs a memo stands for (developer tools'
 // reference pricing).

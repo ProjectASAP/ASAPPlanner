@@ -178,10 +178,7 @@ fn production_distinct_rollup_finds_shared_kmv() {
         &entries,
         data,
         PlanningModels::builtin().with_cost_inputs(&settings),
-        asap_planner::PlanSearchSettings {
-            time_limit_ms: Some(30_000),
-            inspect: false,
-        },
+        asap_planner::PlanSearchSettings::default(),
     )
     .unwrap();
     let selection = run

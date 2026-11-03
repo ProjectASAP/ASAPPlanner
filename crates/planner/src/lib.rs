@@ -32,8 +32,8 @@ pub use pass::{
     PassNameConflict, PassRegistry, PlanOutput, PlanningModels, QueryPlan,
 };
 pub use run::{
-    run_planning, selected_chosen_candidates, PlanSearchSettings, PlanningReport,
-    PlanningRoundReport, PlanningRun, SelectionError, Stage1ToStage3Pass,
+    run_planning, selected_chosen_candidates, PlanSearchSettings, PlanningReport, PlanningRun,
+    SelectionError, Stage1ToStage3Pass,
 };
 
 mod installable;

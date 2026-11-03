@@ -51,10 +51,7 @@ fn cost(w: &FuzzWorkload) -> f64 {
         &entries,
         &w.data,
         models,
-        PlanSearchSettings {
-            time_limit_ms: Some(30_000),
-            inspect: false,
-        },
+        PlanSearchSettings::default(),
         None,
     )
     .unwrap();
@@ -205,9 +202,8 @@ fn sql_count_topk_has_a_fused_raw_row_heap() {
 /// prevent an exact sum from rolling up the finer sum's output.
 #[test]
 fn exact_rollup_catalog_crosses_identical_per_series_average() {
-    use asap_logical_asap_optimization::{
-        test_support::{generate_per_computation_candidates, try_populate_pass1},
-        TumblingWindowWidthDomain,
+    use asap_logical_asap_optimization::test_support::{
+        generate_per_computation_candidates, try_populate_pass1,
     };
     use asap_types::stages::OriginOfCandidateForMemoGroup;
     let roots: Vec<_> = Planner::new(FuzzSettings::default())
@@ -222,11 +218,8 @@ fn exact_rollup_catalog_crosses_identical_per_series_average() {
     .unwrap();
     let memo = try_populate_pass1(initial, &inventory).unwrap();
     let expanded =
-        asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(
-            memo,
-            TumblingWindowWidthDomain::SeedGrids,
-        )
-        .unwrap();
+        asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(memo)
+            .unwrap();
     let owner = expanded.query_roots[1].as_operator().unwrap().0 as usize;
     assert!(
         expanded.candidates[owner]
@@ -243,9 +236,8 @@ use crate::physical_common;
 #[test]
 fn filtered_group_preserves_sql_empty_and_null_semantics() {
     use asap_executor::values::Value;
-    use asap_logical_asap_optimization::{
-        test_support::{generate_per_computation_candidates, try_populate_pass1},
-        TumblingWindowWidthDomain,
+    use asap_logical_asap_optimization::test_support::{
+        generate_per_computation_candidates, try_populate_pass1,
     };
     use asap_types::ir::{operator::AggIntent, NonASAPOp};
     use asap_types::stages::OriginOfCandidateForMemoGroup;
@@ -261,11 +253,8 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
     .unwrap();
     let memo = try_populate_pass1(initial, &inventory).unwrap();
     let expanded =
-        asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(
-            memo,
-            TumblingWindowWidthDomain::SeedGrids,
-        )
-        .unwrap();
+        asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(memo)
+            .unwrap();
     let (owner, candidate) = expanded.candidates.iter().enumerate().flat_map(|(owner, candidates)| candidates.iter().map(move |c| (owner,c)))
         .find(|(_, c)| c.origin == OriginOfCandidateForMemoGroup::Rollup && matches!(c.root_node.non_asap(), Some(NonASAPOp::Aggregate { measures, child, .. })
             if matches!(measures.as_slice(), [AggIntent::Min { .. }]) && matches!(child.non_asap(), Some(NonASAPOp::Filter { .. }))))
@@ -401,9 +390,8 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
 #[test]
 fn sql_count_rollup_executes_with_integer_results() {
     use asap_executor::values::Value;
-    use asap_logical_asap_optimization::{
-        test_support::{generate_per_computation_candidates, try_populate_pass1},
-        TumblingWindowWidthDomain,
+    use asap_logical_asap_optimization::test_support::{
+        generate_per_computation_candidates, try_populate_pass1,
     };
     use asap_types::ir::ASAPOp;
     use asap_types::stages::OriginOfCandidateForMemoGroup;
@@ -430,7 +418,6 @@ fn sql_count_rollup_executes_with_integer_results() {
         let expanded =
             asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(
                 memo,
-                TumblingWindowWidthDomain::SeedGrids,
             )
             .unwrap();
         let (owner, candidate) = expanded
@@ -531,9 +518,8 @@ fn sql_sum_shares_nested_windows_and_slower_readers() {
 /// #923: sketches over an inner range function expose the same finer rollup.
 #[test]
 fn sketch_rollup_crosses_inner_range_function() {
-    use asap_logical_asap_optimization::{
-        test_support::{generate_per_computation_candidates, try_populate_pass1},
-        TumblingWindowWidthDomain,
+    use asap_logical_asap_optimization::test_support::{
+        generate_per_computation_candidates, try_populate_pass1,
     };
     use asap_types::stages::OriginOfCandidateForMemoGroup;
     let mut w = workload(923);
@@ -554,11 +540,8 @@ fn sketch_rollup_crosses_inner_range_function() {
     .unwrap();
     let memo = try_populate_pass1(initial, &inventory).unwrap();
     let expanded =
-        asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(
-            memo,
-            TumblingWindowWidthDomain::SeedGrids,
-        )
-        .unwrap();
+        asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(memo)
+            .unwrap();
     let owner = expanded.query_roots[1].as_operator().unwrap().0 as usize;
     assert!(expanded.candidates[owner]
         .iter()

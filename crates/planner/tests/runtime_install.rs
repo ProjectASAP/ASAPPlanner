@@ -2283,10 +2283,7 @@ fn pass1_pruned_for_no_error_bound(
         &entries,
         &data,
         models,
-        PlanSearchSettings {
-            time_limit_ms: Some(5_000),
-            inspect: true,
-        },
+        PlanSearchSettings { inspect: true },
     )
     .unwrap();
     run.per_computation_candidates

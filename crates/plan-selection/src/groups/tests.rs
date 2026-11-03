@@ -1,7 +1,6 @@
 use std::rc::Rc;
 
 use super::*;
-use asap_logical_asap_optimization::TumblingWindowWidthDomain;
 use asap_types::ir::properties::{AccuracyMetric, BoundExpr, ProbabilityExpr};
 use asap_types::ir::scalar::expr_ir::ScalarValue;
 use asap_types::ir::schema::SketchAlgorithm;
@@ -547,20 +546,12 @@ struct ThroughStages1And2 {
 /// through Stage 1 and Stage 2 as the facade runs them, over the complete pane-width domain, with raw data and
 /// query-time results retained.
 fn through_stages_1_and_2(queries: &[&str]) -> ThroughStages1And2 {
-    through_stages_1_and_2_over(queries, TumblingWindowWidthDomain::Complete)
-}
-
-/// [`through_stages_1_and_2`] over the pane-width domain `domain`.
-fn through_stages_1_and_2_over(
-    queries: &[&str],
-    domain: TumblingWindowWidthDomain,
-) -> ThroughStages1And2 {
     use asap_logical_asap_optimization::test_support::lower_promql;
     let roots: Vec<QueryRoot> = queries
         .iter()
         .map(|query| QueryRoot::Operator(lower_promql(query, target())))
         .collect();
-    through_stages_1_and_2_of(roots, domain)
+    through_stages_1_and_2_of(roots)
 }
 
 /// The accuracy target of [`through_stages_1_and_2`]'s queries.
@@ -568,14 +559,11 @@ fn target() -> asap_types::ir::properties::AccuracyTarget {
     asap_types::ir::properties::AccuracyTarget::max_error(0.01).failure_probability(0.01)
 }
 
-/// [`through_stages_1_and_2_over`] for query roots `roots`.
-fn through_stages_1_and_2_of(
-    roots: Vec<QueryRoot>,
-    domain: TumblingWindowWidthDomain,
-) -> ThroughStages1And2 {
+/// [`through_stages_1_and_2`] for query roots `roots`.
+fn through_stages_1_and_2_of(roots: Vec<QueryRoot>) -> ThroughStages1And2 {
+    use asap_logical_asap_optimization::generate_logical_asap_memo_candidates;
     use asap_logical_asap_optimization::generate_per_computation_logical_memo_candidates;
     use asap_logical_asap_optimization::test_support::entry_with;
-    use asap_logical_asap_optimization::{generate_logical_asap_memo_candidates, Pass2RoundState};
     use asap_types::workload::{
         DurationMs, Predictability, QueryRecurrence, RepeatedDemand, RepetitionInterval,
     };
@@ -601,14 +589,11 @@ fn through_stages_1_and_2_of(
         &asap_accuracy::NoAccuracyEvidence,
         &data,
         None,
-        None,
     )
     .unwrap();
-    let mut round = Pass2RoundState::new(pass1);
-    let logical =
-        generate_logical_asap_memo_candidates(&mut round, &entries, domain, None).unwrap();
+    let logical = generate_logical_asap_memo_candidates(pass1, &entries).unwrap();
     let physical = asap_physical_asap_optimization::generate_physical_asap_memo_candidates(
-        &logical, &entries, &data, true, true, None,
+        &logical, &entries, &data, true, true,
     )
     .unwrap();
     // Stage 2 copies each node's `accuracy_budget_parts` from its memo
@@ -783,14 +768,11 @@ fn ratio_weights_come_from_the_composition() {
 // for the whole budget (`α = ε`) never serves the quotient's denominator.
 #[test]
 fn one_pane_chain_serves_a_ratio_and_its_operands() {
-    let stages = through_stages_1_and_2_over(
-        &[
-            "quantile_over_time(0.9, m[5m]) / quantile_over_time(0.5, m[5m])",
-            "quantile_over_time(0.9, m[5m])",
-            "quantile_over_time(0.5, m[5m])",
-        ],
-        TumblingWindowWidthDomain::SeedGrids,
-    );
+    let stages = through_stages_1_and_2(&[
+        "quantile_over_time(0.9, m[5m]) / quantile_over_time(0.5, m[5m])",
+        "quantile_over_time(0.9, m[5m])",
+        "quantile_over_time(0.5, m[5m])",
+    ]);
     let inputs = prepare_milp_inputs(
         &stages.physical,
         &stages.entries,
@@ -894,7 +876,7 @@ fn kept_builds_match_fresh_builds(queries: &[&str]) -> MilpInputs {
 
 /// [`kept_builds_match_fresh_builds`] for query roots `roots`.
 fn kept_builds_match_fresh_builds_of(roots: Vec<QueryRoot>) -> MilpInputs {
-    let stages = through_stages_1_and_2_of(roots, TumblingWindowWidthDomain::SeedGrids);
+    let stages = through_stages_1_and_2_of(roots);
     let prepare = |fresh: bool| {
         accuracy_positions::FRESH_BUILDS.with(|cell| cell.set(fresh));
         let inputs = prepare_milp_inputs(

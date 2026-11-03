@@ -3,14 +3,12 @@
 //! rows, then merge them into the query's groups with each measure's rollup.
 use super::reuse::append_reader;
 use crate::pass2::finer_aggregate::match_finer;
-use crate::pass2::memo::check_generation_deadline;
 use crate::pass2::memo::state_groups::Pass2RuleError;
 use asap_types::ir::operator::{AggIntent, Reduction};
 use asap_types::ir::{NonASAPOp, Operator, OperatorNode, OperatorResultKind};
 use asap_types::stages::{Memo, OriginOfCandidateForMemoGroup};
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::Instant;
 
 /// A memo group's SQL aggregate: no `without`, measure filter or `HAVING`.
 struct Aggregate<'a> {
@@ -70,10 +68,7 @@ fn value_rollup(measure: &AggIntent, col: usize, global: bool) -> Option<AggInte
     }
 }
 
-pub(crate) fn add_finer_aggregate_candidates(
-    memo: &mut Memo,
-    deadline: Option<Instant>,
-) -> Result<usize, Pass2RuleError> {
+pub(crate) fn add_finer_aggregate_candidates(memo: &mut Memo) -> Result<usize, Pass2RuleError> {
     // Only aggregates of equal measures can match; bucket by them (the
     // first levels of the paper's filter tree) instead of trying all pairs.
     let mut buckets: HashMap<String, Vec<usize>> = HashMap::new();
@@ -89,7 +84,6 @@ pub(crate) fn add_finer_aggregate_candidates(
     for groups in buckets.values() {
         for &owner in groups {
             for &finer in groups {
-                check_generation_deadline(deadline)?;
                 if owner != finer {
                     added += add_read(memo, owner, finer)?;
                 }

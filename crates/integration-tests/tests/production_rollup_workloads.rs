@@ -79,10 +79,7 @@ fn production(
         entries,
         data,
         PlanningModels::builtin().with_cost_inputs(&settings),
-        PlanSearchSettings {
-            time_limit_ms: Some(30_000),
-            inspect: false,
-        },
+        PlanSearchSettings::default(),
     )
     .unwrap()
 }
