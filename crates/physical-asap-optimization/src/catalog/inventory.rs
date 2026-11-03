@@ -299,13 +299,8 @@ impl ImmediateCandidateBuilder<'_> {
                 reason: "assigned execution timing or materialization",
             });
         }
-        let mut inputs = Vec::new();
-        node.operator.map_children(|child| {
-            inputs.push(Rc::clone(child));
-            Rc::clone(child)
-        });
         let mut requirements = Vec::new();
-        for input in inputs {
+        for input in super::reconstruction::ordered_inputs(node) {
             let producers = if let Some(&group) = self.boundaries.get(&Rc::as_ptr(&input)) {
                 self.used_boundaries.insert(group);
                 let key = MemoGroupOutputKey::new(group, &input)
