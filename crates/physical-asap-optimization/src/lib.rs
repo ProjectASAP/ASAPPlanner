@@ -113,7 +113,6 @@
 //! build → estimate. Every node keeps the guarantee Stage 1 composed for it.
 mod catalog;
 mod split_by_timing;
-mod summary_window;
 
 pub use catalog::{
     generate_physical_asap_memo_candidates, CandidateInventoryError, ConfigurationError,
@@ -140,7 +139,6 @@ use asap_types::workload::{
     DataArrival, DataWorkload, Predictability, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
 };
 use split_by_timing::split_shared_by_timing;
-use summary_window::plan_tumbling_window_phase;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -462,38 +460,29 @@ pub fn optimize_physical_asap_assigned(
     query_time_results_retained: bool,
     choose: &mut dyn FnMut(&[usize]) -> Option<Materialization>,
 ) -> Result<Option<PhysicalWorkloadPlan>, PhysicalASAPOptimizationError> {
-    let mut rejected = false;
-    let plan = optimize_physical_asap_chosen(
+    optimize_physical_asap_chosen(
         from_logical,
         roots,
         entries,
         data,
         query_time_results_retained,
-        &mut |_, readers, options| {
-            choose(readers)
-                .filter(|m| options.contains(m))
-                .unwrap_or_else(|| {
-                    rejected = true;
-                    options[0]
-                })
-        },
-    )?;
-    Ok(plan.filter(|_| !rejected))
+        &mut |_, readers, _| choose(readers),
+    )
 }
 
 /// [`optimize_physical_asap_chosen`]'s choice per materialization
 /// candidate: from the logical node it implements, its readers and its
-/// options.
+/// options. `None` rejects the assignment.
 pub(crate) type ChooseMaterialization<'a> =
-    dyn FnMut(*const OperatorNode, &[usize], &[Materialization]) -> Materialization + 'a;
+    dyn FnMut(*const OperatorNode, &[usize], &[Materialization]) -> Option<Materialization> + 'a;
 
 /// Stage 2 for one CandidateLogicalASAPDAG and one materialization
 /// assignment chosen node by node: `choose(logical, readers, options)`
 /// gives the option for each materialization candidate, `logical` being
 /// the address of the logical node of `roots` it implements (null when it
 /// implements none, e.g. a node the implementation adds) and `readers` the
-/// queries that read it. `None` when a chosen option is not one of the
-/// candidate's, or the assignment materializes a build at ingestion time
+/// queries that read it. `None` when `choose` rejects, a chosen option is
+/// not one of the candidate's, or the assignment materializes a build at ingestion time
 /// above one at query time. The search that decodes one plan from a model
 /// solution uses it to build that plan alone, not every assignment.
 pub(crate) fn optimize_physical_asap_chosen(
@@ -517,10 +506,11 @@ pub(crate) fn optimize_physical_asap_chosen(
             .copied()
             .unwrap_or(std::ptr::null());
         let options = mat_candidate.options();
-        let m = choose(logical, &mat_candidate.readers, &options);
-        if !options.contains(&m) {
+        let Some(m) =
+            choose(logical, &mat_candidate.readers, &options).filter(|m| options.contains(m))
+        else {
             return Ok(None);
-        }
+        };
         assignment.push(m);
     }
     let nodes: Vec<_> = mat_candidates.iter().map(|c| Rc::clone(&c.node)).collect();
@@ -755,6 +745,30 @@ fn reads_only_time_series(node: &OperatorNode) -> bool {
     match node.non_asap() {
         Some(NonASAPOp::Scan { source, .. }) => matches!(source, Source::TimeSeries { .. }),
         _ => node.children().iter().all(|c| reads_only_time_series(c)),
+    }
+}
+
+/// The phase (modulo `tumbling_window_width_ms`, nonzero) of every evaluation
+/// of `demand`, if known. A plain fixed interval has cadence but no phase, so
+/// it is unknown. An explicit schedule has one only when every timestamp in
+/// it has the same phase.
+fn plan_tumbling_window_phase(
+    demand: &RepeatedDemand,
+    tumbling_window_width_ms: u64,
+) -> Option<u64> {
+    match demand {
+        RepeatedDemand::FixedIntervalAt {
+            evaluation_phase, ..
+        } => Some(evaluation_phase.0 % tumbling_window_width_ms),
+        RepeatedDemand::Scheduled(times) => {
+            let first = times.first().map(|t| t.0 % tumbling_window_width_ms);
+            first.filter(|phase| {
+                times
+                    .iter()
+                    .all(|t| t.0 % tumbling_window_width_ms == *phase)
+            })
+        }
+        RepeatedDemand::FixedInterval(_) | RepeatedDemand::EstimatedRate(_) => None,
     }
 }
 
@@ -1021,17 +1035,9 @@ pub(crate) fn implement_candidate_operators(
     root: &Rc<OperatorNode>,
     inputs: &[Rc<OperatorNode>],
 ) -> Result<Rc<OperatorNode>, PhysicalASAPOptimizationError> {
-    // The memo guarantees these; the inventory rejects a root aliasing an input.
+    // The inventory rejects a root aliasing an input; an input outside the
+    // subtree is unused here and rejected by the inventory as `InvalidMemo`.
     debug_assert!(!inputs.iter().any(|input| Rc::ptr_eq(input, root)));
-    debug_assert!({
-        let reachable: HashSet<_> = OperatorNode::reachable(root)
-            .iter()
-            .map(Rc::as_ptr)
-            .collect();
-        inputs
-            .iter()
-            .all(|input| reachable.contains(&Rc::as_ptr(input)))
-    });
     let mut implementations = inputs
         .iter()
         .map(|input| (Rc::as_ptr(input), Rc::clone(input)))
@@ -1162,15 +1168,18 @@ fn rebuilt(
 /// operators, and the tumbling-window-coverage check.
 #[cfg(feature = "test-support")]
 pub mod test_support {
-    use std::rc::Rc;
-
     use asap_types::ir::{OperatorNode, QueryRoot};
+    use asap_types::physical::Materialization;
     use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
     use crate::{PhysicalASAPOptimizationError, PhysicalWorkloadPlan};
 
     pub use crate::catalog::test_support as catalog;
     pub use crate::split_by_timing::split_shared_by_timing;
+
+    /// A choice per materialization candidate; see `optimize_physical_asap_chosen`.
+    pub type ChooseMaterialization<'a> =
+        dyn FnMut(*const OperatorNode, &[usize], &[Materialization]) -> Materialization + 'a;
 
     /// See `optimize_physical_asap_chosen` in this crate.
     pub fn optimize_physical_asap_chosen(
@@ -1179,7 +1188,7 @@ pub mod test_support {
         entries: &[QueryWorkloadEntry],
         data: &DataWorkload,
         query_time_results_retained: bool,
-        choose: &mut crate::ChooseMaterialization<'_>,
+        choose: &mut ChooseMaterialization<'_>,
     ) -> Result<Option<PhysicalWorkloadPlan>, PhysicalASAPOptimizationError> {
         crate::optimize_physical_asap_chosen(
             from_logical,
@@ -1187,16 +1196,8 @@ pub mod test_support {
             entries,
             data,
             query_time_results_retained,
-            choose,
+            &mut |logical, readers, options| Some(choose(logical, readers, options)),
         )
-    }
-
-    /// See `implement_candidate_operators` in this crate.
-    pub fn implement_candidate_operators(
-        root: &Rc<OperatorNode>,
-        inputs: &[Rc<OperatorNode>],
-    ) -> Result<Rc<OperatorNode>, PhysicalASAPOptimizationError> {
-        crate::implement_candidate_operators(root, inputs)
     }
 }
 
@@ -2415,5 +2416,30 @@ mod tests {
             MINUTE,
             [&at(0), &unknown_phase, &at(30_000)]
         ));
+    }
+
+    // A known evaluation phase is reduced modulo the width; a bare interval has none.
+    #[test]
+    fn repeated_dashboard_phase_selects_query_aligned_origin() {
+        use asap_types::workload::{RepetitionInterval, TimestampMs};
+        let at = |phase| RepeatedDemand::FixedIntervalAt {
+            interval: RepetitionInterval(60_000),
+            evaluation_phase: TimestampMs(phase),
+        };
+        assert_eq!(
+            plan_tumbling_window_phase(&at(56_000), 60_000),
+            Some(56_000)
+        );
+        assert_eq!(
+            plan_tumbling_window_phase(&at(176_000), 60_000),
+            Some(56_000)
+        );
+        assert_eq!(
+            plan_tumbling_window_phase(
+                &RepeatedDemand::FixedInterval(RepetitionInterval(60_000)),
+                60_000,
+            ),
+            None
+        );
     }
 }

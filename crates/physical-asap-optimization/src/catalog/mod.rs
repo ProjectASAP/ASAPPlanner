@@ -178,7 +178,7 @@ pub mod test_support {
     pub use super::inventory::{
         build_candidate_inventory_before, build_with_compatible_producers_cache, CandidateInventory,
     };
-    pub use super::pruning::{prune, usable_candidates};
+    pub use super::pruning::usable_candidates;
     pub use super::realize::{materialize_selected_candidates, restore_query_roots};
     pub use super::reconstruction::{
         ordered_inputs, output_contract_satisfied, paired_node_identities,
