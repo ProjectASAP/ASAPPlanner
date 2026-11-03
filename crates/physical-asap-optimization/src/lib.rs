@@ -140,10 +140,7 @@ use asap_types::workload::{
     DataArrival, DataWorkload, Predictability, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
 };
 use split_by_timing::split_shared_by_timing;
-use summary_window::{
-    plan_tumbling_window_phase, validate_tumbling_window_coverage, TumblingWindowLayout,
-    WindowEdgeCoverage,
-};
+use summary_window::plan_tumbling_window_phase;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -832,10 +829,6 @@ fn ingestion_eligibility(
         // phase also needs that phase on the grid. A reader of unknown phase
         // is taken to run at multiples of its interval (phase 0), as for a
         // whole-window build below.
-        let epoch_tumbling_windows = TumblingWindowLayout {
-            tumbling_window_width_ms,
-            tumbling_window_origin_ms: Some(0),
-        };
         for d in demands.iter().flatten() {
             let QueryRecurrence::Repeated(demand) = &d.recurrence else {
                 continue;
@@ -846,21 +839,20 @@ fn ingestion_eligibility(
             {
                 return Err(Why::TumblingWindowsOffInterval);
             }
-            let reader = plan_tumbling_window_phase(demand, tumbling_window_width_ms)
-                .map_err(|_| Why::TumblingWindowsOffPhase)?;
-            let Some(phase_ms) = reader.tumbling_window_origin_ms else {
+            if tumbling_window_width_ms == 0 {
+                return Err(Why::TumblingWindowsOffPhase);
+            }
+            let Some(phase_ms) = plan_tumbling_window_phase(demand, tumbling_window_width_ms)
+            else {
                 if matches!(demand, RepeatedDemand::Scheduled(_)) {
                     // A schedule whose times are not all on one tumbling-window phase.
                     return Err(Why::TumblingWindowsOffPhase);
                 }
                 continue;
             };
-            validate_tumbling_window_coverage(
-                &epoch_tumbling_windows,
-                Some(phase_ms),
-                &WindowEdgeCoverage::TumblingWindowAligned,
-            )
-            .map_err(|_| Why::TumblingWindowsOffPhase)?;
+            if phase_ms % tumbling_window_width_ms != 0 {
+                return Err(Why::TumblingWindowsOffPhase);
+            }
         }
         return Ok(());
     }
@@ -1196,10 +1188,6 @@ pub mod test_support {
 
     pub use crate::catalog::test_support as catalog;
     pub use crate::split_by_timing::split_shared_by_timing;
-    pub use crate::summary_window::{
-        validate_tumbling_window_coverage, TumblingWindowCoverageError, TumblingWindowLayout,
-        WindowEdgeCoverage,
-    };
 
     /// See `optimize_physical_asap_chosen` in this crate.
     pub fn optimize_physical_asap_chosen(
