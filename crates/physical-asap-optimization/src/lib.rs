@@ -550,7 +550,7 @@ fn assigned_candidate(
     }
     let operators: Vec<Rc<OperatorNode>> = implemented
         .iter()
-        .flat_map(|root| root_operators(root).into_iter().cloned())
+        .flat_map(|root| root.operator_refs().into_iter().cloned())
         .collect();
     let (split, options) = split_shared_by_timing(&operators, &options);
     let replaced: HashMap<_, _> = operators
@@ -657,14 +657,6 @@ fn check_summary_range_steps(
     Ok(())
 }
 
-/// The operator nodes `root` reads.
-fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
-    match root {
-        QueryRoot::Operator(node) => vec![node],
-        QueryRoot::Scalar(expr) => expr.operator_refs(),
-    }
-}
-
 /// Whether `node` is a summary build (`SummaryAgg` or `SummaryTumblingWindowChain`).
 fn is_summary_build(node: &OperatorNode) -> bool {
     matches!(
@@ -692,7 +684,7 @@ pub(crate) fn materialization_candidates(
     let mut consumers: HashMap<*const OperatorNode, Vec<*const OperatorNode>> = HashMap::new();
     let mut root_nodes: HashSet<*const OperatorNode> = HashSet::new();
     for (query, root) in roots.iter().enumerate() {
-        for operator in root_operators(root) {
+        for operator in root.operator_refs() {
             root_nodes.insert(Rc::as_ptr(operator));
             for node in OperatorNode::reachable(operator) {
                 let entry = readers.entry(Rc::as_ptr(&node)).or_default();
@@ -1602,7 +1594,8 @@ mod tests {
     #[test]
     fn selected_reader_eligibility_ignores_optional_unpredictable_consumers() {
         let root = in_tumbling_windows(summary_root("quantile_over_time(0.99, m[5m])"));
-        let node = root_operators(&root)
+        let node = root
+            .operator_refs()
             .into_iter()
             .flat_map(OperatorNode::reachable)
             .find(|node| matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. })))
@@ -1665,7 +1658,8 @@ mod tests {
     fn selected_reader_eligibility_checks_phase_and_range_compatibility() {
         use asap_types::workload::RangeEvaluation;
         let root = in_tumbling_windows(summary_root("quantile_over_time(0.99, m[5m])"));
-        let node = root_operators(&root)
+        let node = root
+            .operator_refs()
             .into_iter()
             .flat_map(OperatorNode::reachable)
             .find(|node| matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. })))
@@ -1759,7 +1753,7 @@ mod tests {
     /// The distinct nodes of `kind` the candidate's roots read.
     fn node_of(candidate: &PhysicalWorkloadPlan, kind: &str) -> Vec<Rc<OperatorNode>> {
         let mut nodes: Vec<Rc<OperatorNode>> = Vec::new();
-        for root in candidate.roots.iter().flat_map(root_operators) {
+        for root in candidate.roots.iter().flat_map(QueryRoot::operator_refs) {
             for node in OperatorNode::reachable(root) {
                 if node.operator.kind_name() == kind && !nodes.iter().any(|n| Rc::ptr_eq(n, &node))
                 {

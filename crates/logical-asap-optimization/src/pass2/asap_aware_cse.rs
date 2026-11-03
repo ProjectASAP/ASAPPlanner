@@ -144,7 +144,7 @@ pub fn with_union_scan_labels(
 ) -> Result<Option<Vec<QueryRoot>>, PerComputationCandidateError> {
     let mut nodes = Vec::new();
     let mut seen = HashSet::new();
-    for node in roots.iter().flat_map(root_operators) {
+    for node in roots.iter().flat_map(QueryRoot::operator_refs) {
         collect_children_first(node, &mut seen, &mut nodes);
     }
     // Each metric's union schema, `None` once two of its scans conflict.
@@ -246,7 +246,7 @@ pub fn with_union_scan_labels(
     let mut out = Vec::with_capacity(roots.len());
     for query_root in roots {
         let mut mapped = HashMap::new();
-        for node in root_operators(query_root) {
+        for node in query_root.operator_refs() {
             let Some(narrow) = narrowed(&widened[&Rc::as_ptr(node)], &node.schema)? else {
                 return Ok(None);
             };
@@ -504,13 +504,13 @@ pub fn tumbling_window_candidates(
 ) -> Vec<TumblingWindowCandidate> {
     let mut nodes = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for node in roots.iter().flat_map(root_operators) {
+    for node in roots.iter().flat_map(QueryRoot::operator_refs) {
         collect_children_first(node, &mut seen, &mut nodes);
     }
     let reach: Vec<std::collections::HashSet<*const OperatorNode>> = roots
         .iter()
         .map(|root| {
-            root_operators(root)
+            root.operator_refs()
                 .into_iter()
                 .flat_map(OperatorNode::reachable)
                 .map(|node| Rc::as_ptr(&node))
@@ -825,7 +825,7 @@ fn rollable_tumbling_window_candidates(
 ) -> Vec<bool> {
     let mut nodes = Vec::new();
     let mut seen = HashSet::new();
-    for node in roots.iter().flat_map(root_operators) {
+    for node in roots.iter().flat_map(QueryRoot::operator_refs) {
         collect_children_first(node, &mut seen, &mut nodes);
     }
     let mut readers: HashMap<*const OperatorNode, Vec<&Rc<OperatorNode>>> = HashMap::new();
@@ -1424,7 +1424,7 @@ fn rollup_candidates_of(
 ) -> Vec<RollupCandidate> {
     let mut nodes = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for node in roots.iter().flat_map(root_operators) {
+    for node in roots.iter().flat_map(QueryRoot::operator_refs) {
         collect_children_first(node, &mut seen, &mut nodes);
     }
     let mut readers: HashMap<*const OperatorNode, Vec<&Rc<OperatorNode>>> = HashMap::new();
@@ -2010,7 +2010,7 @@ pub fn rollup_pass2_candidates(
             // replaced.
             let mut replaced: HashMap<*const OperatorNode, Rc<OperatorNode>> = roots
                 .iter()
-                .flat_map(root_operators)
+                .flat_map(QueryRoot::operator_refs)
                 .flat_map(OperatorNode::reachable)
                 .filter_map(|node| match node.asap() {
                     Some(ASAPOp::FinalizeExactAccumulator { child }) => {
@@ -2190,7 +2190,7 @@ pub(crate) struct TopKReuseCandidate {
 pub(crate) fn topk_reuse_candidates(roots: &[QueryRoot]) -> Vec<TopKReuseCandidate> {
     let mut nodes = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for node in roots.iter().flat_map(root_operators) {
+    for node in roots.iter().flat_map(QueryRoot::operator_refs) {
         collect_children_first(node, &mut seen, &mut nodes);
     }
     let mut groups: Vec<Vec<Rc<OperatorNode>>> = Vec::new();
@@ -2275,13 +2275,6 @@ fn ranking(child: &Rc<OperatorNode>, by: &Reduction, k: usize) -> Option<Rc<Oper
         child: sorted,
     }))
     .ok()
-}
-
-fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
-    match root {
-        QueryRoot::Operator(node) => vec![node],
-        QueryRoot::Scalar(expr) => expr.operator_refs(),
-    }
 }
 
 #[cfg(test)]
@@ -2463,7 +2456,7 @@ mod tests {
         let mut out: Vec<(*const OperatorNode, u32)> = Vec::new();
         for node in roots
             .iter()
-            .flat_map(root_operators)
+            .flat_map(QueryRoot::operator_refs)
             .flat_map(OperatorNode::reachable)
         {
             if let Some(ASAPOp::SummaryAgg {

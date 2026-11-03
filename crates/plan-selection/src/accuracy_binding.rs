@@ -23,14 +23,6 @@ use asap_types::workload::DataWorkload;
 use crate::SelectionModels;
 use asap_types::workload::bounds::declared_non_negative;
 
-/// The operator nodes a query root reads.
-pub(crate) fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
-    match root {
-        QueryRoot::Operator(node) => vec![node],
-        QueryRoot::Scalar(expr) => expr.operator_refs(),
-    }
-}
-
 /// [`root_guarantee`] with the statistics Stage 1 left symbolic bound:
 /// - the input row count, `series` ([`series_read`](asap_types::workload::bounds::series_read) of `root`);
 /// - each source's stream norm ([`source_norm_statistic`]), from the data
@@ -183,7 +175,8 @@ fn operand_domain_bounds(
     if let QueryRoot::Scalar(expr) = root {
         scalar_domain_operations(expr, &|_| None, &mut operations);
     }
-    let nodes: Vec<Rc<OperatorNode>> = root_operators(root)
+    let nodes: Vec<Rc<OperatorNode>> = root
+        .operator_refs()
         .iter()
         .flat_map(|node| OperatorNode::reachable(node))
         .collect();

@@ -319,7 +319,7 @@ pub(crate) fn sized_as_pass1(
 mod tests {
     use super::*;
     use crate::accuracy_binding::bound_root_guarantee;
-    use crate::accuracy_binding::{bind_statistics, root_operators, workload_statistic};
+    use crate::accuracy_binding::{bind_statistics, workload_statistic};
     use crate::checks::guarantee_check;
     use crate::checks::{accuracy_check, CheckFailure};
     use crate::report::WholePlanSelection;
@@ -854,7 +854,7 @@ mod tests {
                 // The proof the executor reads.
                 let proofs: Vec<WeightDomain> = with_confirmed_weights(&candidate.roots, &gauge)
                     .iter()
-                    .flat_map(root_operators)
+                    .flat_map(QueryRoot::operator_refs)
                     .flat_map(OperatorNode::reachable)
                     .filter_map(|n| match n.asap() {
                         Some(ASAPOp::SummaryAgg {
@@ -1027,7 +1027,7 @@ mod tests {
         let domains = |roots: &[QueryRoot]| -> Vec<WeightDomain> {
             roots
                 .iter()
-                .flat_map(root_operators)
+                .flat_map(QueryRoot::operator_refs)
                 .flat_map(OperatorNode::reachable)
                 .filter_map(|n| match n.asap() {
                     Some(ASAPOp::SummaryAgg { input, .. }) => Some(input.weight_domain.clone()),
@@ -1332,7 +1332,7 @@ mod tests {
     fn kll_params(roots: &[QueryRoot]) -> Vec<SketchParams> {
         roots
             .iter()
-            .flat_map(root_operators)
+            .flat_map(QueryRoot::operator_refs)
             .flat_map(OperatorNode::reachable)
             .filter_map(|node| match node.asap() {
                 Some(ASAPOp::SummaryAgg {

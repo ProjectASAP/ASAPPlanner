@@ -174,20 +174,11 @@ impl AssignmentRealizer for Stage2AssignmentRealizer<'_> {
     }
 }
 
-pub fn ordered_output_references(roots: &[QueryRoot]) -> Vec<Rc<OperatorNode>> {
-    let mut references = Vec::new();
-    for root in roots {
-        match root {
-            QueryRoot::Operator(node) => references.push(Rc::clone(node)),
-            QueryRoot::Scalar(expression) => {
-                expression.map_operator_refs(&mut |node| {
-                    references.push(Rc::clone(node));
-                    Rc::clone(node)
-                });
-            }
-        }
-    }
-    references
+fn ordered_output_references(roots: &[QueryRoot]) -> Vec<Rc<OperatorNode>> {
+    asap_types::stages::output_references(roots)
+        .into_iter()
+        .map(|(_, node)| node)
+        .collect()
 }
 
 pub fn restore_query_roots(

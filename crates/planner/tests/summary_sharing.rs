@@ -173,7 +173,7 @@ fn shared_kll_candidate(workload: &PlanningWorkload) -> asap_types::physical::Ph
             let mut trial = vec![0; choices.len()];
             trial[index] = *choice;
             compose_logical_candidate(&inventory, &trial).unwrap().iter().any(|root| {
-                root_operators(root).into_iter().flat_map(OperatorNode::reachable).any(|node| {
+                root.operator_refs().into_iter().flat_map(OperatorNode::reachable).any(|node| {
                     matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }) if matches!(kind.params(), SketchParams::Kll { .. }))
                 })
             })
@@ -244,14 +244,6 @@ fn reads_sketch(root: &Rc<OperatorNode>) -> bool {
             })
         )
     })
-}
-
-/// The operator sub-DAGs a query root reads.
-fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
-    match root {
-        QueryRoot::Operator(node) => vec![node],
-        QueryRoot::Scalar(expr) => expr.operator_refs(),
-    }
 }
 
 async fn plan_sql(queries: &[&str]) -> PlanOutput {
@@ -351,7 +343,7 @@ fn quantiles_with_equal_params_share_one_producer() {
         .roots
         .iter()
         .map(|root| {
-            root_operators(root)
+            root.operator_refs()
                 .into_iter()
                 .flat_map(OperatorNode::reachable)
                 .filter(|node| matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. })))
@@ -607,7 +599,7 @@ fn combined_scalar_references_keep_summary_candidates() {
         0.01,
     )]);
     for both in candidates.iter().skip(1) {
-        let refs = root_operators(&both.roots[0]);
+        let refs = both.roots[0].operator_refs();
         assert_eq!(refs.len(), 2);
         assert!(
             refs.into_iter().all(reads_sketch),
