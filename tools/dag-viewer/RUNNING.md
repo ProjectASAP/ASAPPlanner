@@ -5,7 +5,9 @@ cd ASAPPlanner
 python3 tools/dag-viewer/server.py
 ```
 
-Open:
+The server builds `asap_planner` (`--skip-build` reuses a built one), plans
+the example tabs it has not planned yet (`--regenerate` plans them again),
+and serves the page. Open:
 
 ```text
 http://localhost:8000/

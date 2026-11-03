@@ -1,0 +1,83 @@
+{
+  "query_workload": {
+    "language": {
+      "sql": "datafusion_sql"
+    },
+    "query_batch": null,
+    "repeating_queries": [
+      {
+        "query": "SELECT COUNT(DISTINCT src_ip) FROM flows WHERE ts >= now() - INTERVAL '1 minute'",
+        "demand": {
+          "fixed_interval": 10000
+        },
+        "requirements": {
+          "accuracy": {
+            "max_error": 0.02,
+            "failure_probability": 0.01,
+            "accuracy_scope": "whole_result"
+          },
+          "max_latency_ms": null
+        },
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        }
+      },
+      {
+        "query": "SELECT -SUM(p * LN(p)) FROM (SELECT COUNT(*) * 1.0 / SUM(COUNT(*)) OVER () AS p FROM flows WHERE ts >= now() - INTERVAL '1 minute' GROUP BY src_ip)",
+        "demand": {
+          "fixed_interval": 10000
+        },
+        "requirements": {
+          "accuracy": {
+            "max_error": 0.05,
+            "failure_probability": 0.01,
+            "accuracy_scope": "whole_result"
+          },
+          "max_latency_ms": null
+        },
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        }
+      },
+      {
+        "query": "SELECT SQRT(SUM(CAST(c AS DOUBLE) * CAST(c AS DOUBLE))) FROM (SELECT src_ip, COUNT(*) AS c FROM flows WHERE ts >= now() - INTERVAL '1 minute' GROUP BY src_ip)",
+        "demand": {
+          "fixed_interval": 10000
+        },
+        "requirements": {
+          "accuracy": {
+            "max_error": 0.01,
+            "failure_probability": 0.01,
+            "accuracy_scope": "whole_result"
+          },
+          "max_latency_ms": null
+        },
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        }
+      }
+    ]
+  },
+  "data_workload": {
+    "arrival": {
+      "ingesting": {
+        "rows_per_second": 66666.66666666667
+      }
+    },
+    "sources": {
+      "flows": {
+        "series_count": 10000000,
+        "metric_type": null,
+        "sample_interval": null,
+        "stream_norms": null,
+        "max_distinct_per_evaluation": null
+      }
+    }
+  }
+}

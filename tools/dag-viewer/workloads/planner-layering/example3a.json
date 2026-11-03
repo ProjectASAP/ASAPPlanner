@@ -1,0 +1,99 @@
+{
+  "query_workload": {
+    "language": "promql",
+    "query_batch": [
+      {
+        "query": "quantile_over_time(0.99, latency_ms[5y])",
+        "requirements": {
+          "accuracy": {
+            "accuracy_metric": "rank",
+            "max_error": 0.005,
+            "failure_probability": 0.01,
+            "accuracy_scope": "whole_result"
+          },
+          "max_latency_ms": null
+        },
+        "predictability": "ad_hoc",
+        "invocations": 1,
+        "execute_at": 1767225600000
+      },
+      {
+        "query": "quantile_over_time(0.99, latency_ms[1y])",
+        "requirements": {
+          "accuracy": {
+            "accuracy_metric": "rank",
+            "max_error": 0.005,
+            "failure_probability": 0.01,
+            "accuracy_scope": "whole_result"
+          },
+          "max_latency_ms": null
+        },
+        "predictability": "ad_hoc",
+        "invocations": 1,
+        "execute_at": 1767225600000
+      },
+      {
+        "query": "quantile_over_time(0.99, latency_ms[1y] offset 1y)",
+        "requirements": {
+          "accuracy": {
+            "accuracy_metric": "rank",
+            "max_error": 0.005,
+            "failure_probability": 0.01,
+            "accuracy_scope": "whole_result"
+          },
+          "max_latency_ms": null
+        },
+        "predictability": "ad_hoc",
+        "invocations": 1,
+        "execute_at": 1767225600000
+      },
+      {
+        "query": "quantile_over_time(0.99, latency_ms[1y] offset 2y)",
+        "requirements": {
+          "accuracy": {
+            "accuracy_metric": "rank",
+            "max_error": 0.005,
+            "failure_probability": 0.01,
+            "accuracy_scope": "whole_result"
+          },
+          "max_latency_ms": null
+        },
+        "predictability": "ad_hoc",
+        "invocations": 1,
+        "execute_at": 1767225600000
+      },
+      {
+        "query": "quantile_over_time(0.99, latency_ms[3y] offset 2y)",
+        "requirements": {
+          "accuracy": {
+            "accuracy_metric": "rank",
+            "max_error": 0.005,
+            "failure_probability": 0.01,
+            "accuracy_scope": "whole_result"
+          },
+          "max_latency_ms": null
+        },
+        "predictability": "ad_hoc",
+        "invocations": 1,
+        "execute_at": 1767225600000
+      }
+    ],
+    "repeating_queries": null
+  },
+  "data_workload": {
+    "arrival": {
+      "mixed": {
+        "rows_per_second": 66666.66666666667
+      }
+    },
+    "sources": {
+      "latency_ms": {
+        "series_count": 1000000,
+        "metric_type": null,
+        "sample_interval": 15000,
+        "stream_norms": null,
+        "max_distinct_per_evaluation": null
+      }
+    }
+  }
+}

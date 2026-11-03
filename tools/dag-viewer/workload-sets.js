@@ -1,10 +1,9 @@
 // Workload sets: the PlanningWorkload files listed in workloads/index.json,
 // one table per set. Clicking a workload plans it through the local server
-// (`stage_pipeline --workload`, default search, the set's deployment
-// capabilities, a SQL workload's tables from the tables.json next to its
-// file) and shows the stage lanes. Without the server, a workload
-// with a precomputed stage document (`document`) opens that document; the
-// others are marked as needing the server.
+// (`asap_planner`, with the set's deployment capabilities, cost model,
+// accuracy guarantee mode and a SQL workload's tables from the tables.json
+// next to its file) and shows the stage lanes. Without the server, the
+// workloads are marked as needing it.
 (function () {
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -24,11 +23,11 @@
     return parts.join(', ') || 'default deployment capabilities';
   }
 
-  // How a set's workloads are planned: the search, its deployment
-  // capabilities, cost model and accuracy guarantee mode (ignored, as
-  // stage_pipeline does by default, unless the set says "enforced").
+  // How a set's workloads are planned: its deployment capabilities, cost
+  // model and accuracy guarantee mode (ignored unless the set says
+  // "enforced").
   function plannedWith(set) {
-    return `default search, ${capabilitiesText(set.deployment_capabilities)}${set.cost_model ? `, cost model ${set.cost_model}` : ''}` +
+    return `${capabilitiesText(set.deployment_capabilities)}${set.cost_model ? `, cost model ${set.cost_model}` : ''}` +
       `, accuracy guarantees ${set.accuracy_guarantees === 'enforced' ? 'enforced' : 'ignored'}`;
   }
 
@@ -45,8 +44,7 @@
       const sources = Object.keys(((workload.data_workload || {}).sources) || {});
       const read = sources.filter((name) => queriesNaming(name, queries.map((q, k) => ({ id: labels[k], text: q.text }))).length);
       const list = queries.map((q, k) => `<li><code>${esc(q.text)}</code> <span class="req">${esc(labels[k])} · ${esc(q.runs)} · accuracy ${esc(q.accuracy)}</span></li>`).join('');
-      const offline = entry.document ? 'precomputed' : 'needs the server';
-      const status = serverUp ? 'plan' : offline;
+      const status = serverUp ? 'plan' : 'needs the server';
       return `<tr class="clickable" tabindex="0" data-index="${index}"><td>${esc(entry.id)}</td><td>${queries.length}</td>` +
         `<td class="wrap">${esc(labels.join(', '))}<details><summary>queries</summary><ul>${list}</ul></details></td>` +
         `<td class="wrap">${esc(read.join(', ') || '—')}</td><td><span class="chip${status === 'needs the server' ? ' invalid' : ''}">${esc(status)}</span></td></tr>`;
@@ -61,7 +59,7 @@
 
   // The SQL tables a workload reads: a PlanningWorkload declares none, so a
   // SQL workload's are in the tables.json next to its file (an array of
-  // stage_pipeline `--table` declarations). Null for a PromQL workload.
+  // asap_planner `--sql-catalog-table` declarations). Null for a PromQL workload.
   function sqlTables(file, workload) {
     const language = ((workload || {}).query_workload || {}).language;
     if (!language || typeof language !== 'object' || !('sql' in language)) return Promise.resolve(null);
@@ -74,19 +72,14 @@
     const source = `${set.id} / ${entry.id}`;
     const story = `${set.name || set.id}, ${entry.id}: planned with the ${plannedWith(set)}.`;
     if (!serverUp) {
-      if (entry.document) window.StageViewer.loadDocument(entry.document, `${source} (precomputed)`, story);
-      else $('setsServer').textContent = `${entry.id} needs the server: start server.py`;
+      $('setsServer').textContent = `${entry.id} needs the server: start server.py`;
       return;
     }
     $('setsServer').textContent = `planning ${entry.id}…`;
     sqlTables(entry.file, workload)
       .then((tables) => window.StageViewer.planWorkload(workload, set.deployment_capabilities || null, source, story, set.cost_model || null, set.accuracy_guarantees || null, tables))
       .then(() => { $('setsServer').textContent = 'planned by the local server'; })
-      .catch((err) => {
-        // Fall back to the precomputed document when the server cannot plan.
-        $('setsServer').textContent = `the server could not plan ${entry.id}: ${err.message}`;
-        if (entry.document) window.StageViewer.loadDocument(entry.document, `${source} (precomputed)`, story);
-      });
+      .catch((err) => { $('setsServer').textContent = `the server could not plan ${entry.id}: ${err.message}`; });
   }
 
   function show(open) {
@@ -106,7 +99,7 @@
     const files = sets.flatMap((set) => set.workloads.map((entry) => entry.file));
     return Promise.all([status, ...files.map((file) => json(`workloads/${file}`).then((w) => workloads.set(file, w)).catch(() => {}))]).then(([up]) => {
       serverUp = up;
-      $('setsServer').textContent = up ? 'click a workload to plan it with the local server' : 'no server: precomputed workloads only';
+      $('setsServer').textContent = up ? 'click a workload to plan it with the local server' : 'no server: start server.py to plan a workload';
       $('setPick').innerHTML = sets.map((set) => `<option value="${esc(set.id)}">${esc(set.name || set.id)} (${set.workloads.length})</option>`).join('');
       $('setsToggle').hidden = false;
       renderSet(sets[0]);

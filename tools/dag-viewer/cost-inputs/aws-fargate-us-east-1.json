@@ -1,0 +1,12 @@
+{
+  "cost_model": {
+    "usage_over_time": {
+      "cost_per_cpu_op": 1.1243999999999999e-14,
+      "cost_per_disk_byte_second": 0.0,
+      "cost_per_memory_byte_second": 1.150183379650116e-15,
+      "cost_per_provisioned_cpu_core_second": 0.0,
+      "cost_per_provisioned_memory_byte_second": 0.0,
+      "cost_per_scanned_byte": 1.1243999999999999e-15
+    }
+  }
+}

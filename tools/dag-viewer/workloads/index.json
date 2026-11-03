@@ -24,8 +24,7 @@
             "q07-topk-sum",
             "q08-topk-count",
             "q09-rate"
-          ],
-          "document": "examples/random-mixed-seed-862-workload-01.json"
+          ]
         },
         {
           "id": "workload-02",
@@ -189,8 +188,7 @@
             "q07-topk-sum",
             "q08-topk-count",
             "q09-rate"
-          ],
-          "document": "examples/random-mixed-seed-862-x5-workload-01.json"
+          ]
         },
         {
           "id": "workload-02",
@@ -354,8 +352,7 @@
             "q07-topk-sum",
             "q08-topk-count",
             "q09-rate"
-          ],
-          "document": "examples/random-mixed-seed-862-long-workload-01.json"
+          ]
         },
         {
           "id": "workload-02",

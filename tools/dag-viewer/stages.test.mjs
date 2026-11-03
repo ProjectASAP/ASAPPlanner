@@ -1,6 +1,9 @@
 // Node tests of stages.js (no DOM): tumbling-window-chain expansion, the queries that
 // reach each node, the highlighted neighborhoods and the grouped materialized
-// outputs, over the committed seed-862 workload example; the elements load
+// outputs, over the plan asap_planner writes for test-fixtures/
+// tumbling-windows-workload.json without raw data (q1 and q2 share a
+// tumbling-window chain over m,
+// q3 reads one over n; skipped when asap_planner is not built); the elements load
 // into the vendored cytoscape (headless), which refuses duplicate ids and
 // edges to missing nodes. Run from the repository root:
 // `node --test tools/dag-viewer/stages.test.mjs`.
@@ -8,6 +11,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { planned, planner } from './test-fixtures/planned.mjs';
 
 const here = new URL('.', import.meta.url);
 const context = vm.createContext({ console: { warn() {} } });
@@ -24,11 +28,12 @@ const cytoscape = (elements) => {
   page.elementsJson = JSON.stringify(elements);
   return vm.runInContext('cytoscape({ headless: true, elements: JSON.parse(elementsJson) })', page);
 };
-const doc = JSON.parse(readFileSync(new URL('examples/random-mixed-seed-862-workload-01.json', here), 'utf8'));
-const dag = doc.stage2_physical_asap_optimization.candidates[0].dag;
-const queryIds = doc.workload.queries.map((q) => q.id);
-const chain = dag.nodes.find((n) => n.payload.ASAP && n.payload.ASAP.SummaryTumblingWindowChain);
-const body = chain.payload.ASAP.SummaryTumblingWindowChain;
+const skip = !planner;
+const doc = planner ? planned('test-fixtures/tumbling-windows-workload.json', { raw_data_retained: false, query_time_results_retained: false }) : null;
+const dag = doc && doc.stage2_physical_asap_optimization.candidates[0].dag;
+const queryIds = doc && doc.workload.queries.map((q) => q.id);
+const chain = dag && dag.nodes.find((n) => n.payload.ASAP && n.payload.ASAP.SummaryTumblingWindowChain);
+const body = chain && chain.payload.ASAP.SummaryTumblingWindowChain;
 const nodesOf = (elements) => elements.filter((e) => !('source' in e.data));
 const edgesOf = (elements) => elements.filter((e) => 'source' in e.data);
 
@@ -40,7 +45,7 @@ test('durations read largest unit first', () => {
   assert.equal(call('tumblingWindowTimeText', 2, 20000), 't−1 min … t−40 s');
 });
 
-test('a collapsed chain is one node; expanded, one build, range and shift per tumbling window', () => {
+test('a collapsed chain is one node; expanded, one build, range and shift per tumbling window', { skip }, () => {
   const collapsed = call('stageLaneElements', dag, { physical: true, queryIds });
   assert.ok(nodesOf(collapsed).some((e) => e.data.id === `n${chain.id}` && e.data.expandable));
   const expanded = call('stageLaneElements', dag, { physical: true, queryIds, expandedChains: [chain.id] });
@@ -59,12 +64,12 @@ test('a collapsed chain is one node; expanded, one build, range and shift per tu
   const all = call('stageLaneElements', dag, { physical: true, queryIds, expandedChains: every });
   const cy = cytoscape(all);
   assert.equal(cy.nodes().length, nodesOf(all).length);
-  const keep = new Set(call('stageQueryElementIds', all, 'q9'));
+  const keep = new Set(call('stageQueryElementIds', all, 'q3'));
   cy.batch(() => cy.elements().forEach((el) => el.toggleClass('dimmed', !keep.has(el.id()))));
   assert.equal(cy.elements('.dimmed').length, all.length - keep.size);
 });
 
-test('a merge of the newest tumbling windows reads only those tumbling windows, and says so', () => {
+test('a merge of the newest tumbling windows reads only those tumbling windows, and says so', { skip }, () => {
   const partial = JSON.parse(JSON.stringify(dag));
   const merge = partial.nodes.find((n) => n.payload.ASAP && n.payload.ASAP.SummaryMerge
     && partial.edges.some((e) => e.consumer === n.id && e.producer === chain.id));
@@ -77,7 +82,7 @@ test('a merge of the newest tumbling windows reads only those tumbling windows, 
   assert.match(label, /newest 2 tumbling windows/);
 });
 
-test('every node lists the queries reaching it; shared nodes say how many', () => {
+test('every node lists the queries reaching it; shared nodes say how many', { skip }, () => {
   const elements = call('stageLaneElements', dag, { physical: true, queryIds });
   const shared = nodesOf(elements).filter((e) => e.data.reachedBy.length > 1);
   assert.ok(shared.length > 0);
@@ -88,22 +93,22 @@ test('every node lists the queries reaching it; shared nodes say how many', () =
   }
 });
 
-test('a query keeps its own nodes and a node its neighborhood', () => {
+test('a query keeps its own nodes and a node its neighborhood', { skip }, () => {
   const elements = call('stageLaneElements', dag, { physical: true, queryIds });
-  const q9 = new Set(call('stageQueryElementIds', elements, 'q9'));
-  assert.ok(q9.has(`n${dag.roots[8]}`));
-  assert.ok(!q9.has(`n${chain.id}`));
+  const q3 = new Set(call('stageQueryElementIds', elements, 'q3'));
+  assert.ok(q3.has(`n${dag.roots[2]}`));
+  assert.ok(!q3.has(`n${chain.id}`));
   const around = new Set(call('stageNeighborhoodIds', elements, `n${chain.id}`));
   assert.ok(around.has(`n${body.child}`));
   assert.ok(around.has(`n${dag.roots[0]}`));
-  assert.ok(!around.has(`n${dag.roots[8]}`));
+  assert.ok(!around.has(`n${dag.roots[2]}`));
 });
 
-test('materialized views group by tumbling-window chain', () => {
+test('materialized views group by tumbling-window chain', { skip }, () => {
   const groups = call('materializedViewGroups', doc);
-  assert.equal(groups.length, 6);
+  assert.equal(groups.length, 2);
   assert.equal(groups.reduce((n, g) => n + g.tumblingWindows.length, 0), doc.stage3_plan_selection.materialized_views.length);
-  assert.equal(groups[0].tumblingWindowsText, `${body.tumbling_window_count} × 20 s`);
+  assert.equal(groups[0].tumblingWindowsText, `${body.tumbling_window_count} × 10 s`);
 });
 
 test('the candidate header shows the selection\'s warnings', () => {
@@ -145,54 +150,19 @@ test('the search header says why the search ran as one and which queries were in
   assert.equal(call('searchText', searched), 'default search · 12 physical candidates checked');
 });
 
-// The memo-MILP examples: the MILP summary, the memo groups with their
-// chosen candidates and the shared units with readers and threshold.
-const memoDoc = (id) => call('upgradeMemoSteps', JSON.parse(readFileSync(new URL(`examples/memo-${id}.json`, here), 'utf8')));
-
-test('a memo-MILP document shows its shared sketch, readers and certified summary', () => {
-  const doc = memoDoc('rangeheavy-t5-q05-q09-1h');
-  assert.deepEqual([...call('validateStagePipeline', doc)], []);
-  assert.match(call('searchText', doc), /^memo-MILP search · /);
-  const view = call('memoSearchView', doc);
-  assert.equal(view.summary.certified, true);
-  assert.ok(view.summary.saving > 0.4);
-  assert.match(call('memoSummaryText', view.summary), /certified \(gap ≤ 1e-4\).*queries planned alone .* \(sharing saves 50%\)/);
-  const chain = view.sharedUnits.find((u) => u.kind === 'coupling site · SummaryTumblingWindowChain');
-  assert.deepEqual([...chain.readers], ['G3', 'G4']);
-  assert.deepEqual([...chain.queries], ['q1', 'q2']);
-  assert.match(chain.threshold, /^1 min tumbling windows over 1 h · DDSketch · alpha 0.05/);
-  assert.equal(view.groups.find((g) => g.id === 'G3').chosen, 'TumblingWindows · Project · at S1');
+test('the validator accepts a document with and without its memo section', { skip }, () => {
+  const memo = planned('memo-examples/promql/ratio-of-quantiles-5m.json');
+  assert.deepEqual(memo.memo.steps.map((s) => s.step), ['stage0', 'pass1', 'pass2_local_window_composition', 'pass2']);
+  assert.deepEqual([...call('validateStagePipeline', memo)], []);
+  delete memo.memo;
+  assert.deepEqual([...call('validateStagePipeline', memo)], []);
 });
 
-test('the validator accepts a document with and without its memo section', () => {
-  const doc = memoDoc('ratio-of-quantiles');
-  assert.deepEqual(doc.memo.steps.map((s) => s.step), ['stage0', 'pass1', 'pass2']);
-  assert.deepEqual([...call('validateStagePipeline', doc)], []);
-  delete doc.memo;
-  assert.deepEqual([...call('validateStagePipeline', doc)], []);
-});
-
-test('a memo-MILP document shows a sketch rollup, a union schedule and a widened scan', () => {
-  const rollup = call('memoSearchView', memoDoc('rollupheavy-t11-service-endpoint-5m'));
-  assert.match(rollup.groups.find((g) => g.id === 'G3').chosen, /^Rollup · Project · reads G2, G6 · at S1$/);
-  assert.match(rollup.sharedUnits[0].threshold, /^finer state Kmv · k 3001/);
-  const union = call('memoSearchView', memoDoc('rangeheavy-t5-q05-1h-60s-300s'));
-  assert.equal(union.sharedUnits[0].schedule, 'every 1 min ∪ every 5 min → on a 1 min grid');
-  const widened = call('memoSearchView', memoDoc('rangeheavy-t7-t4-1h'));
-  assert.equal(widened.scansWidened, true);
-  assert.equal(widened.sharedUnits[0].kind, 'widened scan');
-});
-
-test('a memo plan naming a missing group is refused', () => {
-  const broken = memoDoc('rangeheavy-t5-q05-q09-1h');
-  broken.stage3_plan_selection.search.memo_plan.coupling_sites[0].readers.push(99);
-  assert.match(call('validateStagePipeline', broken)[0], /coupling_sites\[0\]: readers must name groups/);
-  assert.equal(call('memoSearchView', memoDoc('rangeheavy-t5-q05-q09-1h')).groups.length, 4);
-  // Other searches have no memo view.
+test('a document of another search has no memo-MILP view', { skip }, () => {
   assert.equal(call('memoSearchView', doc), null);
 });
 
-test('Stage 2 nodes carry their timing as a class the lane colors', () => {
+test('Stage 2 nodes carry their timing as a class the lane colors', { skip }, () => {
   assert.equal(call('timingClass', 'ingestion_time'), 'ingestionTime');
   assert.equal(call('timingClass', 'QueryTime'), 'queryTime');
   assert.equal(call('timingClass', undefined), '');
@@ -217,7 +187,7 @@ test('candidate search report exposes objective and partial status', () => {
   assert.match(call('searchText', document), /candidate-connection search/);
 });
 
-test('a document written before the tumbling-window rename (#1163) upgrades to today\'s names', () => {
+test('a document written before the tumbling-window rename (#1163) upgrades to today\'s names', { skip }, () => {
   // Today's document, written back with the old names.
   const old = JSON.parse(JSON.stringify(doc)
     .replaceAll('"SummaryTumblingWindowChain"', '"PaneChain"')

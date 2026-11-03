@@ -1,5 +1,5 @@
 // The Enumerated DAGs panel: `memo.enumeration` of an asap-stage-pipeline/v1
-// document, the complete candidate DAGs the memo stands for, as `stage_pipeline`
+// document, the complete candidate DAGs the memo stands for, as `asap_planner`
 // enumerated and composed them. The document holds each listed choice's DAG
 // as its `roots` in the memo's node table (`memo.nodes`), so the page
 // composes nothing: a clicked row's DAG (memoNodeDag) is drawn in the Stage 1
@@ -8,7 +8,7 @@
 // stages.js.
 
 // Memo steps in pipeline order, with the names the header uses.
-const MEMO_STEP_NAMES = { stage0: 'Stage 0', pass1: 'Pass 1', pass2: 'Pass 2' };
+const MEMO_STEP_NAMES = { stage0: 'Stage 0', pass1: 'Pass 1', pass2_local_window_composition: 'local window composition', pass2: 'Pass 2' };
 
 function memoStepName(step) {
   return MEMO_STEP_NAMES[step] || step;

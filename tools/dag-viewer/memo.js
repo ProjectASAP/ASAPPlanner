@@ -1,5 +1,5 @@
 // The Memo view of the Stage Viewer: the document's optional `memo` section
-// (written by `stage_pipeline`) drawn after each memo step, one tab per
+// (written by `asap_planner`) drawn after each memo step, one tab per
 // step. Each memo group is a box holding its implementation candidates; an
 // edge goes from a candidate to each child group it reads. The functions up
 // to `memoViewController` are DOM-free (memo.test.mjs and test_viewer.py run
@@ -24,7 +24,7 @@
 // group's entries of both.
 
 // Memo steps in pipeline order; a step production does not run is omitted.
-const MEMO_STEPS = ['stage0', 'pass1', 'pass2'];
+const MEMO_STEPS = ['stage0', 'pass1', 'pass2_local_window_composition', 'pass2'];
 
 // `OriginOfCandidateForMemoGroup` (snake_case in the document), its Rust name, and the
 // border color of its candidates (mid tones, readable in both themes).
@@ -67,7 +67,7 @@ function validateMemo(memo, queryCount) {
   if (memo === undefined) return [];
   if (!memo || typeof memo !== 'object' || Array.isArray(memo)) return ['memo must be an object'];
   if (!Array.isArray(memo.steps) || memo.steps.length === 0) return ['memo.steps must be a non-empty array'];
-  if (!Array.isArray(memo.nodes)) return ['memo.nodes must be an array (a memo section written before the node table: regenerate the document with stage_pipeline)'];
+  if (!Array.isArray(memo.nodes)) return ['memo.nodes must be an array (a memo section written before the node table: regenerate the document with asap_planner)'];
   const errors = validateLogicalDag({ nodes: memo.nodes, roots: [] }, 'memo.nodes', 0);
   let previous = -1;
   memo.steps.forEach((step, s) => {

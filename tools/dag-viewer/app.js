@@ -342,7 +342,7 @@
       return;
     }
     if (selection.materialized_views === undefined) {
-      $('views-meta').textContent = 'this document has no materialized views section; write it again with the current stage_pipeline';
+      $('views-meta').textContent = 'this document has no materialized views section; write it again with the current asap_planner';
       $('materializedViews').innerHTML = '';
       return;
     }
@@ -423,26 +423,23 @@
     loadUrl(example.file, example.file, example.story);
   }
 
-  // Documents from outside the example list (a file, the editor) clear the
-  // tab. Returns whether the document was shown.
+  // Documents from outside the example list (an opened file) clear the tab.
   function showExternal(data, source) {
     ++loading;
     pressTab(null);
     try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { /* ignore */ }
     try {
       showDocument(data, source, '');
-      return true;
     } catch (err) {
       showError(err);
-      return false;
     }
   }
 
-  // Plan a `PlanningWorkload` JSON with the local server (`stage_pipeline
-  // --workload`, default search) under `deploymentCapabilities` and
-  // `costModel` (null: the defaults), with accuracy guarantees ignored
-  // unless `accuracyGuarantees` is "enforced", and the SQL `tables` it reads
-  // (`--table` declarations; null for none), and show the document.
+  // Plan a `PlanningWorkload` JSON with the local server (`asap_planner`)
+  // under `deploymentCapabilities` and `costModel` (null: the defaults),
+  // with accuracy guarantees ignored unless `accuracyGuarantees` is
+  // "enforced", and the SQL `tables` it reads (`--sql-catalog-table`
+  // declarations; null for none), and show the document.
   // Resolves to whether it was shown; rejects when the server could not plan it.
   function planWorkload(workload, deploymentCapabilities, source, story, costModel, accuracyGuarantees, tables) {
     const ticket = ++loading;
@@ -489,11 +486,7 @@
   new MutationObserver(restyle).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
   $('details').innerHTML = HINT;
 
-  window.StageViewer = {
-    showDocument: showExternal,
-    planWorkload,
-    loadDocument: (url, source, story) => { pressTab(null); return loadUrl(url, source, story); },
-  };
+  window.StageViewer = { planWorkload };
 
   // `?doc=<path>` opens one document; otherwise the examples listed in
   // examples.json, starting from `#<id>` or the first.

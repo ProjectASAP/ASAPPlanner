@@ -14,7 +14,9 @@ for (const file of ['node-style.js', 'stages.js', 'enumeration.js']) {
 }
 const call = (name, ...args) => JSON.parse(JSON.stringify(context[name](...args)));
 const read = (path) => JSON.parse(readFileSync(new URL(path, here), 'utf8'));
-const example1 = read('examples/planner-layering-example1.json');
+// enumeration.js reads only a document's `memo`: Example 1's two queries
+// stand for the rest of the document.
+const example1 = { workload: { queries: [{ id: 'q1' }, { id: 'q2' }] } };
 const priced = () => ({ ...structuredClone(example1), ...read('test-fixtures/memo-enumeration-small.json') });
 // The same memo as a run without --price-enumerated writes it.
 const unpriced = () => {
