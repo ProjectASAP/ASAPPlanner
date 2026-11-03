@@ -8,9 +8,8 @@ use asap_frontend_common::ResolveDAGError;
 /// unified IR).
 ///
 /// Carries no PromQL type — the SQL front end never depends on the PromQL
-/// parser. The language-neutral variants (`UnsupportedFeature` / `WrongLanguage`
-/// / `Convert`) are mirrored by `asap_frontend_promql::PromqlError` rather
-/// than shared, so neither front end pulls the other's parser.
+/// parser. The language-neutral variants (`UnsupportedFeature` / `Convert`) are
+/// mirrored by `asap_frontend_promql::PromqlError` rather than shared, so neither front end pulls the other's parser.
 #[derive(Debug)]
 pub enum SqlError {
     /// DataFusion failed to parse / plan the SQL query.
@@ -26,8 +25,6 @@ pub enum SqlError {
     /// A structural feature (JOIN type / subquery / derived table) not
     /// supported in this version.
     UnsupportedFeature(String),
-    /// The workload's query language is not SQL.
-    WrongLanguage(String),
     /// Resolving the name-based tree failed (name resolution against the
     /// bound schema, or schema derivation).
     Convert(ResolveDAGError),
@@ -42,7 +39,6 @@ impl fmt::Display for SqlError {
             Self::InvalidExpression(m) => write!(f, "invalid expression: {m}"),
             Self::UnsupportedDialect(d) => write!(f, "unsupported SQL dialect: {d}"),
             Self::UnsupportedFeature(m) => write!(f, "unsupported feature: {m}"),
-            Self::WrongLanguage(l) => write!(f, "unsupported query language: {l}"),
             Self::Convert(e) => write!(f, "column resolution failed: {e}"),
         }
     }
