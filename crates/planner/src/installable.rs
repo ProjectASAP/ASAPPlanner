@@ -367,11 +367,8 @@ impl InstallablePlan {
         tumbling_window_retention_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
         reader_span_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
     ) -> Result<Self, InstallablePlanError> {
-        let views = dag.set_retention(
-            tumbling_window_retention_ms_by_node,
-            reader_span_ms_by_node,
-            None,
-        )?;
+        let views =
+            dag.set_retention(tumbling_window_retention_ms_by_node, reader_span_ms_by_node)?;
         check_queries(&dag, &query_texts)?;
         executor_compiles(&dag, &views)?;
         let plan = InstallablePlan {

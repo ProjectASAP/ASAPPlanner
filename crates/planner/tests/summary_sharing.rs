@@ -155,8 +155,8 @@ fn composed_summary_candidates(
     (candidates, selection)
 }
 
-/// Construct a legal shared-KLL candidate explicitly. Sharing capability must
-/// not depend on which prefix a time-limited optimization search visits.
+/// Construct a legal shared-KLL candidate explicitly, independent of the
+/// plan the search selects.
 fn shared_kll_candidate(workload: &PlanningWorkload) -> asap_types::physical::PhysicalWorkloadPlan {
     use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,

@@ -2298,14 +2298,11 @@ fn pass1_pruned_for_no_error_bound(
         .collect()
 }
 
-/// `error` says plan selection found no valid plan: no candidate is valid,
-/// or none was validated by the deadline. Not a solver, realizer or input
-/// failure.
+/// `error` says plan selection found no valid plan: no candidate is valid.
+/// Not a solver, realizer or input failure.
 fn assert_plan_selection_selected_none(error: &str) {
     assert!(
-        error.contains("plan selection: no valid candidate")
-            || error.contains("plan selection: no plan by the deadline")
-            || error.contains("the planning budget ended before a plan was selected"),
+        error.contains("plan selection: no valid candidate"),
         "{error}"
     );
 }

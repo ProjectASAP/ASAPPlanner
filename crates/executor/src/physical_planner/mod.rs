@@ -61,29 +61,7 @@ pub fn compile(
     views: &[MaterializedView],
     roots: &[NodeId],
 ) -> Result<CompiledPhysicalDAG, Error> {
-    compile_before(dag, views, roots, None)
-}
-
-/// Compile with cooperative cancellation between planning operations. The
-/// ordinary runtime compiler delegates here without a deadline.
-pub fn compile_before(
-    dag: &PhysicalASAPDAG,
-    views: &[MaterializedView],
-    roots: &[NodeId],
-    deadline: Option<std::time::Instant>,
-) -> Result<CompiledPhysicalDAG, Error> {
-    check_compile_deadline(deadline)?;
-    let compiled = compile_internal(dag, views, roots, deadline)?;
-    check_compile_deadline(deadline)?;
-    Ok(compiled)
-}
-
-fn check_compile_deadline(deadline: Option<std::time::Instant>) -> Result<(), Error> {
-    if deadline.is_some_and(|limit| std::time::Instant::now() >= limit) {
-        Err(Error::CompilationDeadlineExceeded)
-    } else {
-        Ok(())
-    }
+    compile_internal(dag, views, roots)
 }
 
 #[cfg(test)]
@@ -107,9 +85,8 @@ fn compile_internal(
     dag: &PhysicalASAPDAG,
     views: &[MaterializedView],
     roots: &[NodeId],
-    deadline: Option<std::time::Instant>,
 ) -> Result<CompiledPhysicalDAG, Error> {
-    preflight_depth(dag, deadline)?;
+    preflight_depth(dag)?;
     // A tumbling-window chain stands for its tumbling windows; the deployment binds each tumbling window's
     // raw input, so it runs only once expanded.
     if let Some(node) = dag.nodes.iter().find(|n| {
@@ -128,7 +105,7 @@ fn compile_internal(
     if let Some(node) = dag.nodes.iter().find(|n| n.id as u64 > u64::from(u32::MAX)) {
         return Err(invalid(format!("Planner node ID {} exceeds u32", node.id)));
     }
-    let restored = logical::restore_before(dag, deadline)?;
+    let restored = logical::restore(dag)?;
     dag.validate().map_err(|e| invalid(e.to_string()))?;
     let nodes = dag
         .nodes
@@ -150,7 +127,6 @@ fn compile_internal(
         )
     });
     for edge in edges {
-        check_compile_deadline(deadline)?;
         dependencies
             .entry(edge.consumer as u64)
             .or_default()
@@ -170,7 +146,6 @@ fn compile_internal(
     let mut seen = BTreeSet::new();
     let mut pending = roots.iter().map(|&id| (id, false)).collect::<Vec<_>>();
     while let Some((id, expanded)) = pending.pop() {
-        check_compile_deadline(deadline)?;
         if expanded {
             ordered.push(id);
             continue;
@@ -201,7 +176,6 @@ fn compile_internal(
     let compile_roots: BTreeSet<NodeId> = roots.iter().copied().collect();
     let mut physical_dag = CompiledPhysicalDAG::new(roots.to_vec());
     for id in ordered {
-        check_compile_deadline(deadline)?;
         let node = nodes[&id];
         let auxiliary = helper_id(id, 0)?;
         let output = Arc::new(node.output_schema.clone());
@@ -1494,10 +1468,7 @@ fn expression(
 }
 
 // Bound recursion before invoking the upstream recursive provenance validator.
-fn preflight_depth(
-    dag: &PhysicalASAPDAG,
-    deadline: Option<std::time::Instant>,
-) -> Result<(), Error> {
+fn preflight_depth(dag: &PhysicalASAPDAG) -> Result<(), Error> {
     let mut remaining = dag
         .nodes
         .iter()
@@ -1508,7 +1479,6 @@ fn preflight_depth(
     }
     let mut consumers = BTreeMap::<_, Vec<_>>::new();
     for edge in &dag.edges {
-        check_compile_deadline(deadline)?;
         if !remaining.contains_key(&edge.producer) {
             return Err(invalid("missing Planner edge producer"));
         }
@@ -1528,7 +1498,6 @@ fn preflight_depth(
     let mut depths = BTreeMap::new();
     let mut visited = 0;
     while let Some(id) = ready.pop_front() {
-        check_compile_deadline(deadline)?;
         visited += 1;
         let depth = *depths.get(&id).unwrap_or(&1usize);
         if depth > 128 {
@@ -1608,7 +1577,7 @@ fn local_scalar(expr: &ScalarExpr<PhysicalASAPNodeId>) -> Result<ScalarExpr, Err
 }
 
 #[cfg(test)]
-mod compilation_deadline_tests {
+mod compilation_tests {
     use super::*;
     use std::time::{Duration, Instant};
 
@@ -1621,26 +1590,13 @@ mod compilation_deadline_tests {
         }
     }
 
+    /// An empty DAG (no roots) is invalid.
     #[test]
-    #[ignore = "flaky: depends on a wall-clock deadline (#1067)"]
-    fn expired_compilation_is_distinct_from_invalid_graph() {
-        let dag = empty_dag();
+    fn an_empty_dag_is_invalid() {
         assert!(matches!(
-            compile_before(&dag, &[], &[], Some(Instant::now())),
-            Err(Error::CompilationDeadlineExceeded)
+            compile(&empty_dag(), &[], &[]),
+            Err(Error::Invalid(_))
         ));
-        let unbounded = compile(&dag, &[], &[]).err();
-        assert!(matches!(unbounded, Some(Error::Invalid(_))));
-        assert_eq!(
-            unbounded,
-            compile_before(
-                &dag,
-                &[],
-                &[],
-                Some(Instant::now() + Duration::from_secs(1)),
-            )
-            .err()
-        );
     }
 
     /// `window_count` one-minute windows over one table `Scan`, the `i`-th
@@ -1751,36 +1707,9 @@ mod compilation_deadline_tests {
     #[ignore = "slow: run by hand"]
     fn many_windows_over_one_scan_compile_in_linear_time() {
         let (dag, roots) = shifted_windows_over_one_scan(20_000);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        compile_before(&dag, &[], &roots, Some(deadline)).unwrap();
-    }
-
-    #[test]
-    #[ignore = "flaky: depends on a wall-clock deadline (#1067)"]
-    fn large_compilation_observes_deadline_during_preflight() {
-        use planner_types::ir::properties::ExecutionDataState;
-        use planner_types::physical::Materialization;
-        let schema = planner_types::ir::schema::Schema::new(vec![]);
-        let mut dag = empty_dag();
-        dag.nodes = (0..100_000)
-            .map(|id| PhysicalASAPDAGNode {
-                id,
-                payload: Payload::NonASAP(NonASAPOp::Values {
-                    schema: schema.clone(),
-                    rows: vec![],
-                }),
-                output_state: ExecutionDataState::QUERY_ROWS,
-                materialization: Materialization::NotMaterialized,
-                output_schema: schema.clone(),
-                guarantee: None,
-                retention_ms: None,
-            })
-            .collect();
-        let deadline = Instant::now() + Duration::from_millis(1);
-        assert!(matches!(
-            compile_before(&dag, &[], &[], Some(deadline)),
-            Err(Error::CompilationDeadlineExceeded)
-        ));
+        let started = Instant::now();
+        compile(&dag, &[], &roots).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 }
 
@@ -1840,7 +1769,7 @@ pub mod test_support {
             }
         }
         let views = dag
-            .set_retention(&HashMap::new(), &HashMap::new(), None)
+            .set_retention(&HashMap::new(), &HashMap::new())
             .map_err(|error| invalid(error.to_string()))?;
         nodes
             .iter()

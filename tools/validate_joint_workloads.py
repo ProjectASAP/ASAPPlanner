@@ -3,7 +3,7 @@
 
 Build stage_pipeline, copy it to a fixed path, then pass that path here. The
 binary SHA records exactly what ran even if another build updates the workspace.
-Planning uses a cooperative 30s budget and an external 90s process deadline.
+Each planning process is stopped after 90 s.
 """
 import argparse
 import concurrent.futures
@@ -50,7 +50,6 @@ def run(entry):
         '/usr/bin/time', '-v', '-o', str(timing),
         'timeout', '90s', str(binary),
         '--workload', str(repo / 'tools/dag-viewer' / entry['workload']),
-        '--milp-time-limit-s', '30',
         '--cost-model', entry['cost_model'], '--enforce-accuracy-guarantees',
         '--deployment-capabilities', json.dumps(entry['deployment_capabilities']),
         '--out', str(plan_path),

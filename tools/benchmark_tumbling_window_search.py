@@ -135,7 +135,6 @@ def run_one(entry, args):
     command = ["/usr/bin/time", "-v", "-o", str(output / (name + ".time")),
                "timeout", f"{args.timeout}s", str(binary),
                "--workload", str(VIEWER / entry["workload"]),
-               "--milp-time-limit-s", str(args.budget),
                "--cost-model", entry["cost_model"], "--enforce-accuracy-guarantees",
                "--deployment-capabilities", json.dumps(entry["deployment_capabilities"]),
                "--out", str(artifact)]

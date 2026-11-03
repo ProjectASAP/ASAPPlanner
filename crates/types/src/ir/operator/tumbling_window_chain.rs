@@ -13,7 +13,7 @@
 //! ends at the same time and is shorter.
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::asap::ASAPOp;
 use super::node::{Operator, OperatorNode};
@@ -224,24 +224,6 @@ fn build_over(
     Ok(build)
 }
 
-/// Expansion failure distinguishes invalid IR from an interrupted valid plan.
-#[derive(Debug, thiserror::Error)]
-pub enum TumblingWindowChainExpansionError {
-    #[error(transparent)]
-    Invalid(#[from] SchemaDerivationError),
-    #[error("planning deadline exceeded expanding tumbling-window chains")]
-    DeadlineExceeded,
-}
-
-fn without_deadline(error: TumblingWindowChainExpansionError) -> SchemaDerivationError {
-    match error {
-        TumblingWindowChainExpansionError::Invalid(error) => error,
-        TumblingWindowChainExpansionError::DeadlineExceeded => {
-            unreachable!("no expansion deadline was supplied")
-        }
-    }
-}
-
 /// `root` with every `SummaryTumblingWindowChain` expanded into its tumbling windows: a `SummaryMerge`
 /// reads each tumbling window of each chain it read, newest first, as plain
 /// `SummaryAgg` nodes the executor runs; a merge of the newest `n` tumbling windows
@@ -256,7 +238,7 @@ fn without_deadline(error: TumblingWindowChainExpansionError) -> SchemaDerivatio
 pub fn expand_tumbling_window_chains(
     root: &Rc<OperatorNode>,
 ) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
-    expand(root, &mut NodeToExpandedNodeCache::default()).map_err(without_deadline)
+    expand(root, &mut NodeToExpandedNodeCache::default())
 }
 
 /// A workload with its tumbling-window chains expanded
@@ -295,19 +277,7 @@ pub struct ExpandedTumblingWindowChain {
 pub fn expand_tumbling_window_chains_in_workload(
     roots: &[QueryRoot],
 ) -> Result<TumblingWindowChainExpansion, SchemaDerivationError> {
-    expand_tumbling_window_chains_in_workload_before(roots, None).map_err(without_deadline)
-}
-
-/// Expand the same legal tumbling-window domain, abandoning partial expansion on timeout.
-pub(crate) fn expand_tumbling_window_chains_in_workload_before(
-    roots: &[QueryRoot],
-    deadline: Option<Instant>,
-) -> Result<TumblingWindowChainExpansion, TumblingWindowChainExpansionError> {
-    let mut cache = NodeToExpandedNodeCache {
-        deadline,
-        ..Default::default()
-    };
-    cache.check_deadline()?;
+    let mut cache = NodeToExpandedNodeCache::default();
     let roots = roots
         .iter()
         .map(|root| match root {
@@ -352,10 +322,6 @@ pub(crate) fn expand_tumbling_window_chains_in_workload_before(
             }
         })
         .collect();
-    // Catalog assembly follows expansion and is part of the same budget.
-    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-        return Err(TumblingWindowChainExpansionError::DeadlineExceeded);
-    }
     Ok(TumblingWindowChainExpansion {
         roots,
         chains,
@@ -384,7 +350,6 @@ fn timed_like(node: &Rc<OperatorNode>, timing: ExecutionTiming) -> OperatorNode 
 /// merges read expands into one set of tumbling windows.
 #[derive(Default)]
 struct NodeToExpandedNodeCache {
-    deadline: Option<Instant>,
     expanded_node_of: HashMap<*const OperatorNode, Rc<OperatorNode>>,
     tumbling_window_of: HashMap<(*const OperatorNode, u32), Rc<OperatorNode>>,
     /// Each chain expanded, in the order first reached.
@@ -393,32 +358,18 @@ struct NodeToExpandedNodeCache {
     expanded: Vec<(Rc<OperatorNode>, Rc<OperatorNode>)>,
 }
 
-impl NodeToExpandedNodeCache {
-    fn check_deadline(&self) -> Result<(), TumblingWindowChainExpansionError> {
-        if self
-            .deadline
-            .is_some_and(|deadline| Instant::now() >= deadline)
-        {
-            Err(TumblingWindowChainExpansionError::DeadlineExceeded)
-        } else {
-            Ok(())
-        }
-    }
-}
-
 fn expand(
     node: &Rc<OperatorNode>,
     cache: &mut NodeToExpandedNodeCache,
-) -> Result<Rc<OperatorNode>, TumblingWindowChainExpansionError> {
-    cache.check_deadline()?;
+) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
     if let Some(done) = cache.expanded_node_of.get(&Rc::as_ptr(node)) {
         return Ok(Rc::clone(done));
     }
     let out = match &node.operator {
         Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => {
-            return Err(
-                invalid("a tumbling-window chain is read only through a summary merge").into(),
-            )
+            return Err(invalid(
+                "a tumbling-window chain is read only through a summary merge",
+            ))
         }
         Operator::ASAP(ASAPOp::SummaryMerge {
             children,
@@ -433,7 +384,6 @@ fn expand(
                         ..
                     }) => {
                         for index in 0..newest_tumbling_windows.unwrap_or(*tumbling_window_count) {
-                            cache.check_deadline()?;
                             let key = (Rc::as_ptr(child), index);
                             if let Some(done) = cache.tumbling_window_of.get(&key) {
                                 inputs.push(Rc::clone(done));

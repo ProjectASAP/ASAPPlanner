@@ -127,9 +127,7 @@ fn execute(
     evaluation_time_ms: i64,
 ) -> (Vec<f64>, Vec<u64>) {
     let mut dag = dag.clone();
-    let views = dag
-        .set_retention(&HashMap::new(), &HashMap::new(), None)
-        .unwrap();
+    let views = dag.set_retention(&HashMap::new(), &HashMap::new()).unwrap();
     let raw = |dag: &PhysicalASAPDAG| {
         physical_common::raw_data_store(dag, |source, schema| {
             let Source::TimeSeries { metric } = source else {

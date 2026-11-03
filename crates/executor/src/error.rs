@@ -1,8 +1,6 @@
 use crate::plan::NodeId;
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
-    #[error("physical compilation deadline exceeded")]
-    CompilationDeadlineExceeded,
     #[error("invalid DAG: {0}")]
     Invalid(String),
     #[error("operator failed: {0}")]

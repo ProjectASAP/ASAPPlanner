@@ -3,21 +3,17 @@
 //! public API stays as narrow as its production users need. Each forwards
 //! to the crate-private function of the same name.
 use std::rc::Rc;
-use std::time::Instant;
 
 use crate::ir::materialized_view::RawDataWindow;
 use crate::ir::operator::maintained_population::CurrentSeriesInput;
 use crate::ir::operator::node::Operator;
-use crate::ir::operator::tumbling_window_chain::{
-    TumblingWindowChainExpansion, TumblingWindowChainExpansionError,
-};
-use crate::ir::physical_export::{PhysicalASAPCompilationError, PhysicalASAPDAGCompilation};
+use crate::ir::physical_export::PhysicalASAPDAGCompilation;
 use crate::ir::properties::summary_coverage::SummaryCoverage;
 use crate::ir::properties::timing::NodeToTimedNodeCache;
 use crate::ir::properties::ExecutionDataStateError;
 use crate::ir::schema::Schema;
 use crate::ir::{ASAPOp, NonASAPOp};
-use crate::ir::{OperatorNode, QueryRoot, SchemaDerivationError};
+use crate::ir::{OperatorNode, SchemaDerivationError};
 use crate::physical::Materialization;
 
 /// `SummaryCoverage::definition_id`.
@@ -38,29 +34,11 @@ pub fn tumbling_window(
     crate::ir::operator::tumbling_window_chain::tumbling_window(chain, index)
 }
 
-/// `tumbling_window_chain::expand_tumbling_window_chains_in_workload_before`.
-pub fn expand_tumbling_window_chains_in_workload_before(
-    roots: &[QueryRoot],
-    deadline: Option<Instant>,
-) -> Result<TumblingWindowChainExpansion, TumblingWindowChainExpansionError> {
-    crate::ir::operator::tumbling_window_chain::expand_tumbling_window_chains_in_workload_before(
-        roots, deadline,
-    )
-}
-
 /// `physical_export::compile_physical_asap_dag_with_node_ids`.
 pub fn compile_physical_asap_dag_with_node_ids(
     root: &Rc<OperatorNode>,
 ) -> Result<PhysicalASAPDAGCompilation, ExecutionDataStateError> {
     crate::ir::physical_export::compile_physical_asap_dag_with_node_ids(root)
-}
-
-/// `physical_export::compile_physical_asap_workload_with_node_ids_before`.
-pub fn compile_physical_asap_workload_with_node_ids_before(
-    roots: &[QueryRoot],
-    deadline: Option<Instant>,
-) -> Result<PhysicalASAPDAGCompilation, PhysicalASAPCompilationError> {
-    crate::ir::physical_export::compile_physical_asap_workload_with_node_ids_before(roots, deadline)
 }
 
 /// `Operator::output_schema`.

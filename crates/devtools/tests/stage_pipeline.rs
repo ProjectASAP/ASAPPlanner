@@ -649,11 +649,10 @@ fn document_of(args: &[&str]) -> Value {
     document
 }
 
-/// CLI planning includes local candidate generation in the same budget/report
-/// as the production planner, rather than bypassing the timer via from_pass1.
+/// CLI planning reports Pass 1's time as the production planner does.
 #[test]
 #[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
-fn cli_accounts_for_pass1_generation_in_the_planning_budget() {
+fn cli_reports_pass1_generation_time() {
     let document = document_of(&["--promql", "sum(data)"]);
     let selection = &document["stage3_plan_selection"];
     assert!(selects_a_plan(selection), "{selection}");
@@ -1444,8 +1443,8 @@ fn workload_examples_preserve_data_and_valid_materialized_views() {
         .filter(|e| e.get("workload").is_some())
         .collect();
     assert_eq!(workload_examples.len(), 10);
-    // Each production search has a wall-clock budget. Bound fixture
-    // concurrency so this acceptance test does not starve its own solvers.
+    // Bound fixture concurrency so this acceptance test does not starve its
+    // own solvers.
     for batch in workload_examples.chunks(2) {
         std::thread::scope(|scope| {
             for example in batch {
@@ -1558,9 +1557,8 @@ fn check_candidate_example(document: Value, _committed: Value, example: &Value) 
         example["id"]
     );
     let report = &document["planning_report"];
-    let round = &report["rounds"][report["selected_round"].as_u64().unwrap() as usize];
     assert!(
-        round["physical_candidates"].as_u64().unwrap() > 0,
+        report["physical_candidates"].as_u64().unwrap() > 0,
         "{report}"
     );
 }
@@ -2064,30 +2062,6 @@ fn search_flag_is_rejected() {
     }
 }
 
-/// A zero planning budget is accepted for the default engine; it must not claim optimality.
-#[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
-fn milp_time_limit_is_reported() {
-    let document = document_of(&["--promql", "sum(m)", "--milp-time-limit-s", "0"]);
-    let selection = &document["stage3_plan_selection"];
-    assert!(!selects_a_plan(selection), "{selection}");
-    // The facade's report keeps the budget and selects no round.
-    let report = &document["planning_report"];
-    assert!(
-        report.is_object(),
-        "budget stop retains its report: {selection}"
-    );
-    assert_eq!(report["time_limit_ms"], 0);
-    assert!(report["selected_round"].is_null(), "{report}");
-    assert!(
-        selection["error"]
-            .as_str()
-            .unwrap()
-            .contains("planning budget"),
-        "{selection}"
-    );
-}
-
 /// The memo search's document names its selected plan's logical candidate
 /// under the id its physical candidates read (`from_logical`), as the
 /// viewer's validator requires: the brute force numbers its logical plans,
@@ -2576,7 +2550,7 @@ fn document_with_milp_search(args: &[&str]) -> Value {
 
 /// #1095 C5: with the group selection MILP, example 1 and the RangeHeavy T5
 /// q0.5 + q0.9 workload select a plan through the real pipeline, solved to
-/// optimality or stopped at the deadline, whose `plan_cost` equals the MILP's objective exactly (the
+/// optimality, whose `plan_cost` equals the MILP's objective exactly (the
 /// search errors on a difference and reports `inexact_objective` when the
 /// model encoded a term inexactly) and which passes every query's accuracy
 /// check.
@@ -2689,7 +2663,7 @@ fn milp_search_selects_checked_plans_on_ratio_and_rollupheavy() {
 /// #1095 C5: on RangeHeavy T8+T5 (`q0.9 / q0.5` with both operands also
 /// queried alone), the group selection MILP selects a DDSketch plan that passes every
 /// query's accuracy check (the A1 rows admitted KLL there, which the check
-/// rejects). Which chains it shares depends on the deadline; the weights
+/// rejects). The weights
 /// that let one chain serve all three queries are checked in
 /// `groups::tests::one_pane_chain_serves_a_ratio_and_its_operands`.
 #[test]
