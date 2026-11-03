@@ -1,5 +1,6 @@
 //! Expand compatible readers at finite shared sizes and tumbling-window horizons before
 //! interning concrete states. Local candidates remain available.
+use crate::stage0::cse::same_value;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -15,7 +16,9 @@ use crate::pass2::memo::shared_configurations::{
     shared_size, state_size_configurations, tumbling_window_configurations,
     TumblingWindowConfiguration, TumblingWindowRequirement,
 };
-use crate::pass2::memo::state_groups::{same_range_input, simple_build, Pass2RuleError};
+use crate::pass2::memo::state_groups::{
+    boundary_ptrs, same_range_input, simple_build, Pass2RuleError,
+};
 use asap_types::stages::Memo;
 
 /// `resized` (a rewrite of `original` with the same shape) with each node
@@ -293,11 +296,7 @@ impl SharedProducer for SummaryStates {
                 with_resized_build(&roots, &need.build, family.clone())
             }
         };
-        let boundaries: HashSet<_> = original
-            .input_groups
-            .iter()
-            .map(|group| Rc::as_ptr(&memo.groups[group.0 as usize].logical_node))
-            .collect();
+        let boundaries = boundary_ptrs(memo, &original);
         let roots =
             result.map_err(|error| Pass2RuleError::StateConfiguration(error.to_string()))?;
         let [QueryRoot::Operator(node)] = roots.as_slice() else {
@@ -432,7 +431,7 @@ fn tumbling_window_requirement(reader: &StateNeed) -> Option<TumblingWindowRequi
 /// Whether a build of `family` serves a reader of `reader`: the size both
 /// share is `family` itself.
 fn serves_size(family: &FieldDataType, reader: &FieldDataType) -> bool {
-    shared_size(family, reader).is_some_and(|joined| same_family(&joined, family))
+    shared_size(family, reader).is_some_and(|joined| same_value(&joined, family))
 }
 
 /// The shares of the budget a build of `family` is sized for: the most of
@@ -444,10 +443,6 @@ fn covered_parts(family: &FieldDataType, set: &[Reader<StateNeed>]) -> usize {
         .map(|reader| reader.need.accuracy_budget_parts)
         .max()
         .unwrap_or(1)
-}
-
-fn same_family(left: &FieldDataType, right: &FieldDataType) -> bool {
-    left == right && serde_json::to_string(left).ok() == serde_json::to_string(right).ok()
 }
 
 fn compatible(left: &StateNeed, right: &StateNeed) -> bool {
@@ -484,7 +479,7 @@ fn compatible(left: &StateNeed, right: &StateNeed) -> bool {
         }
         let mut schema = reader.build.schema.clone();
         for field in &mut schema.fields {
-            if same_family(&field.dtype, &reader.family) {
+            if same_value(&field.dtype, &reader.family) {
                 field.dtype = left.family.clone();
             }
         }

@@ -27,8 +27,6 @@ pub enum Pass2RuleError {
     CyclicDependencies,
     #[error("explicit summary-state groups have already been introduced")]
     AlreadyExpanded,
-    #[error("a previously discovered reader no longer exposes its summary boundary")]
-    InvalidReaderBoundary,
     #[error("scan-label candidate expansion: {0}")]
     ScanLabelWidening(String),
     #[error("state configuration expansion: {0}")]
@@ -338,6 +336,37 @@ pub(super) fn boundary_groups(
         }
     }
     found
+}
+
+/// The nodes of `candidate`'s input groups, where its own nodes end.
+pub(super) fn boundary_ptrs(
+    memo: &Memo,
+    candidate: &CandidateForMemoGroup,
+) -> HashSet<*const OperatorNode> {
+    candidate
+        .input_groups
+        .iter()
+        .map(|group| Rc::as_ptr(&memo.groups[group.0 as usize].logical_node))
+        .collect()
+}
+
+/// `root` and the nodes beneath it down to `boundaries` (excluded), each
+/// once, in depth-first order (last child first).
+pub(super) fn nodes_within(
+    root: &Rc<OperatorNode>,
+    boundaries: &HashSet<*const OperatorNode>,
+) -> Vec<Rc<OperatorNode>> {
+    let mut pending = vec![Rc::clone(root)];
+    let mut seen = HashSet::new();
+    let mut nodes = Vec::new();
+    while let Some(node) = pending.pop() {
+        if boundaries.contains(&Rc::as_ptr(&node)) || !seen.insert(Rc::as_ptr(&node)) {
+            continue;
+        }
+        pending.extend(node.children().into_iter().cloned());
+        nodes.push(node);
+    }
+    nodes
 }
 
 // Hashing narrows comparisons only; full strict equality below remains the
