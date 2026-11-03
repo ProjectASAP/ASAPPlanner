@@ -23,7 +23,7 @@
 //! candidates' contexts apart), the timings, the warm start's cost, the
 //! objective, `plan_cost` and the dual bound (measurement only).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 use asap_cost::{kept_tumbling_window_chains, node_map, plan_cost, CostInputs};
@@ -106,9 +106,10 @@ pub fn select_plan(
             split_into_parts: true,
         },
     )
-    .map_err(selection_error)?;
+    .map_err(|error| selection_error(error, &inputs))?;
     let build_ms = construction_started.elapsed().as_millis() as u64;
-    let solution = solve_selection_milp(milp, deadline, build_ms).map_err(selection_error)?;
+    let solution = solve_selection_milp(milp, deadline, build_ms)
+        .map_err(|error| selection_error(error, &inputs))?;
 
     let validation_started = Instant::now();
     let chosen = ChosenCandidates {
@@ -212,8 +213,10 @@ pub fn select_plan(
     })
 }
 
-/// The selection MILP's error as Stage 3's.
-fn selection_error(error: SelectionMilpError) -> ErrorSelectingPlan {
+/// The selection MILP's error as Stage 3's. An infeasible MILP also names
+/// why candidates were left out unpriced: a missing source fact there is
+/// usually the cause, and "infeasible" alone hides it.
+fn selection_error(error: SelectionMilpError, inputs: &MilpInputs) -> ErrorSelectingPlan {
     let infeasible = |id: String, cause: RejectionCause, reason: String| {
         ErrorSelectingPlan::NoValidCandidate(vec![Rejection { id, cause, reason }])
     };
@@ -226,13 +229,21 @@ fn selection_error(error: SelectionMilpError) -> ErrorSelectingPlan {
             roots,
             entries,
         },
-        SelectionMilpError::Infeasible => infeasible(
-            "workload".into(),
-            RejectionCause::Infeasible,
-            "no plan meets every query's accuracy target, latency bound and the reader \
-             constraints together (the selection MILP is infeasible)"
-                .into(),
-        ),
+        SelectionMilpError::Infeasible => {
+            let unpriced: BTreeSet<&str> = inputs
+                .candidate_data
+                .iter()
+                .filter_map(|data| data.usage.as_ref().err().map(String::as_str))
+                .collect();
+            let mut reason = "no plan meets every query's accuracy target, latency bound and \
+                              the reader constraints together (the selection MILP is infeasible)"
+                .to_string();
+            if !unpriced.is_empty() {
+                reason += "; candidates left out because they could not be priced: ";
+                reason += &unpriced.into_iter().collect::<Vec<_>>().join("; ");
+            }
+            infeasible("workload".into(), RejectionCause::Infeasible, reason)
+        }
         SelectionMilpError::NoSolution { status } => ErrorSelectingPlan::NoPlanByDeadline(format!(
             "HiGHS stopped ({status}) without an integral plan"
         )),

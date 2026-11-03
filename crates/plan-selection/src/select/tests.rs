@@ -173,3 +173,23 @@ fn cost_model_2_is_unsupported() {
         Err(ErrorSelectingPlan::UnsupportedCostModel(_))
     ));
 }
+
+// With no fact bounding `m`'s rows, no candidate can be priced and the MILP
+// is infeasible; the rejection names the missing fact, not only
+// "infeasible" (the DAG viewer shows it).
+#[test]
+fn an_unpriceable_workload_names_the_missing_fact() {
+    let mut fixture = shared_sum();
+    fixture.data = asap_types::workload::DataWorkload::default();
+    let stage2 = realizer(&fixture);
+    match select(&fixture, &BuiltinAccuracyModel, &stage2) {
+        Err(ErrorSelectingPlan::NoValidCandidate(rejected)) => {
+            let reasons = format!("{rejected:?}");
+            assert!(
+                reasons.contains("pricing source m needs an arrival rate"),
+                "{reasons}"
+            )
+        }
+        other => panic!("{other:?}"),
+    }
+}
