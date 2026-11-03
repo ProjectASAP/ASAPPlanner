@@ -214,11 +214,7 @@ mod tests {
     }
 
     fn concat(children: Vec<Rc<OperatorNode>>) -> Rc<OperatorNode> {
-        OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Concat {
-            children,
-            discriminator_unique_key: None,
-        }))
-        .unwrap()
+        OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Concat { children })).unwrap()
     }
 
     fn finalize(child: Rc<OperatorNode>) -> Rc<OperatorNode> {
@@ -241,7 +237,6 @@ mod tests {
                 max(estimate(agg(Rc::clone(&shared), kll()))),
                 max(Rc::clone(&shared)),
             ],
-            discriminator_unique_key: None,
         }))
         .unwrap();
         assert_eq!(
@@ -276,7 +271,6 @@ mod tests {
         let summary = agg(Rc::clone(&shared), kll());
         let root = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Concat {
             children: vec![max(estimate(Rc::clone(&summary))), max(Rc::clone(&shared))],
-            discriminator_unique_key: None,
         }))
         .unwrap();
         let mut assignment = MaterializationAssignment::default();

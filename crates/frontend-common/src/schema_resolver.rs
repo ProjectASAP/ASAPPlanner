@@ -61,8 +61,8 @@ fn push_ref_name(c: &ColumnRef, out: &mut Vec<String>) {
 /// positionally — every place a front end puts a name-based reference:
 /// `Scan.predicates`, `Aggregate`'s `reduction`/`having`/per-measure `col`,
 /// `Dedup.cols`, `PromqlSeriesSample.by`, `Filter.pred`, `Project.cols`,
-/// `Sort`/`Limit`/`SQLWindowFunc` keys, `Join.pred`, `PromqlRelabel.value`,
-/// `Concat.discriminator_unique_key`. Operators referenced from scalar
+/// `Sort`/`Limit`/`SQLWindowFunc` keys, `Join.pred`, `PromqlRelabel.value`.
+/// Operators referenced from scalar
 /// positions (`scalar(v)`, subqueries) are walked too, as the old
 /// `PromqlScalarFromVector` operator child was. Sorted and deduplicated.
 pub(crate) fn collect_referenced_columns(tree: &UnresolvedOp) -> Vec<String> {
@@ -184,19 +184,7 @@ pub(crate) fn collect_referenced_columns(tree: &UnresolvedOp) -> Vec<String> {
             | U::PromqlSubquery { child, .. }
             | U::TimeRange { child, .. }
             | U::TimeShift { child, .. } => walk(child, out),
-            U::Concat {
-                children,
-                discriminator_unique_key,
-            } => {
-                // An own-field `ColumnRef` must be seeded like `Dedup.cols`, or
-                // a discriminator column referenced nowhere else in the tree is
-                // absent from the usage-derived schema and fails `NotFound` later.
-                if let Some(key) = discriminator_unique_key {
-                    push_ref_name(key.discriminator(), out);
-                    key.inner_key().iter().for_each(|c| push_ref_name(c, out));
-                }
-                children.iter().for_each(|c| walk(c, out));
-            }
+            U::Concat { children } => children.iter().for_each(|c| walk(c, out)),
             U::SetOp { left, right, .. } => {
                 walk(left, out);
                 walk(right, out);
@@ -295,20 +283,6 @@ mod tests {
         };
         let schema = resolve_schema(&tree);
         assert!(schema.column_id("host").is_some());
-    }
-
-    // A `Concat`'s discriminator key columns, even ones referenced nowhere
-    // else, are seeded like `Dedup.cols` (issue #228 review).
-    #[test]
-    fn concat_discriminator_key_is_seeded_into_the_resolver_schema() {
-        let tree = UnresolvedOp::concat_with_discriminator(
-            vec![src("m")],
-            ColumnRef::Named("phi".into()),
-            vec![ColumnRef::Named("host".into())],
-        );
-        let schema = resolve_schema(&tree);
-        assert!(schema.column_id("phi").is_some(), "discriminator seeded");
-        assert!(schema.column_id("host").is_some(), "inner_key seeded");
     }
 
     // Inherited names are seeded alongside the tree's own references; plain

@@ -679,8 +679,6 @@ histogram_quantiles(rate(http_request_duration_seconds_bucket[5m]), "le", 0.5, 0
 
 **Fields:**
 - `children` — the union-compatible branches to concatenate; must be non-empty.
-- `discriminator_unique_key` — an optional caller-proven compound unique key
-  `(discriminator, inner_key)` over the output; nothing verifies the claim.
 
 ## Scalar-position nodes
 

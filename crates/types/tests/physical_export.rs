@@ -657,7 +657,6 @@ fn a_view_window_is_the_union_of_the_windows_below_it() {
             window_over(&scan, 5 * minute_ms, None),
             window_over(&scan, 60 * minute_ms, Some(offset)),
         ],
-        discriminator_unique_key: None,
     }))
     .unwrap();
     let (dag, scan_id) = exported_with_scan(vec![both]);
@@ -724,7 +723,6 @@ fn high_fan_in_edges_preserve_multiplicity_without_order_dependence() {
         id: count,
         payload: Operator::NonASAP(NonASAPOp::Concat {
             children: inputs.clone(),
-            discriminator_unique_key: None,
         }),
         output_state: ExecutionDataState::QUERY_ROWS,
         materialization: Materialization::NotMaterialized,

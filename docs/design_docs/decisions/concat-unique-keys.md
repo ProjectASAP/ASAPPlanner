@@ -1,5 +1,9 @@
 # `Concat` and `unique_keys`: the discriminator override (issue #228)
 
+> **Reverted (#1096)**: `discriminator_unique_key` and `ConcatDiscriminatorKey`
+> were removed. No production path ever set the key, so `Concat` always drops
+> `unique_keys` (Option 2 below). Re-add Option 1 when a call site needs it.
+>
 > Status: accepted decision for the implementation described here. The
 > legacy `replacement.rs` and `explanation.rs` it mentions have been removed.
 

@@ -1597,7 +1597,6 @@ mod tests {
         let second = duplicate(&candidate.root_node, &boundaries);
         let combined =
             OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Concat {
-                discriminator_unique_key: None,
                 children: vec![Rc::clone(&candidate.root_node), second],
             }))
             .unwrap();
