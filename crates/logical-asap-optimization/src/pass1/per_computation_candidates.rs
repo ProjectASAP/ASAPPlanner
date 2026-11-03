@@ -239,7 +239,7 @@ impl PerComputationCandidates {
     /// and each query's root over the same groups. Its targets' group ids
     /// then name `dag`'s groups.
     pub(crate) fn walked(&self, dag: &DagOfLogicalMemoGroups) -> bool {
-        use crate::pass2::memo::NodeToStructuralIdCache;
+        use super::memo_population::NodeToStructuralIdCache;
         let mut structural_ids = NodeToStructuralIdCache::default();
         let group_of: HashMap<*const OperatorNode, MemoGroupId> = self
             .logical_nodes

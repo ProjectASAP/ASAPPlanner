@@ -13,12 +13,12 @@ use asap_accuracy::sizing::{
 };
 use asap_accuracy::{AccuracyEvidenceProvider, AccuracyModel};
 
+use super::memo_population::try_populate_pass1;
+use super::memo_population::CandidatePopulationError;
 use crate::deployment_capabilities::SupportedSummary;
 use crate::pass1::per_computation_candidates::{
     generate_per_computation_candidates, PerComputationCandidateError,
 };
-use crate::pass2::memo::candidates::CandidatePopulationError;
-use crate::pass2::memo::groups::try_populate_pass1;
 use asap_types::stages::{
     DagOfLogicalMemoGroups, Memo, PerComputationLogicalMemoCandidates, PrunedCandidate,
 };

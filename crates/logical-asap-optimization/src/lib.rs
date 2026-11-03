@@ -88,8 +88,8 @@ pub use pass1::{
     PerComputationLogicalMemoCandidatesError,
 };
 // Pass 2: its entry and its error.
+pub use pass1::memo_population::CandidatePopulationError;
 pub use pass2::logical_memo_candidates::generate_logical_asap_memo_candidates;
-pub use pass2::memo::candidates::CandidatePopulationError;
 pub use pass2::memo::state_groups::Pass2RuleError;
 // The CandidateLogicalASAPDAGs a memo stands for (developer tools'
 // reference pricing).
