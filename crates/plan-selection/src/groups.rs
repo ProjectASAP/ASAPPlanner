@@ -1234,6 +1234,13 @@ fn add_unions(kinds: &[ScanWindow], windows: &mut Vec<ScanWindow>) {
             windows.push(window);
         }
     };
+    // Every union of the kinds is enumerated (#1185: no cap); a shift past
+    // the word size would silently enumerate nothing.
+    assert!(
+        kinds.len() < usize::BITS as usize,
+        "a scan run with {} window kinds has too many unions to enumerate",
+        kinds.len()
+    );
     for set in 1usize..(1 << kinds.len()) {
         push(window_union(
             (0..kinds.len())

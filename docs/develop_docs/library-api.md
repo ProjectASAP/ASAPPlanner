@@ -192,7 +192,6 @@ asap_plan_selection::select_plan(
     accuracy_checks: &AccuracyCheckInputs<'_>,   // accuracy model and evidence
     cost_inputs: &CostInputs,
     realizer: &dyn AssignmentRealizer,           // Stage 2's, e.g. Stage2AssignmentRealizer
-    deadline: Option<Instant>,
 ) -> Result<Selection, ErrorSelectingPlan>
 ```
 

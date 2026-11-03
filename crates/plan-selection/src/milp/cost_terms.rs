@@ -623,6 +623,10 @@ fn window_terms(
                 sigma.push(or);
             }
             let mut terms = Vec::new();
+            assert!(
+                count < usize::BITS as usize,
+                "a scan run with {count} window kinds has too many unions to encode"
+            );
             for set in 1usize..(1 << count) {
                 let window = scan_window_read_at(
                     (0..count)
