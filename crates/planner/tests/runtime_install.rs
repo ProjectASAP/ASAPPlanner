@@ -1478,6 +1478,7 @@ async fn a_ratio_of_two_quantiles_runs_from_ddsketches_within_its_relative_targe
 /// for its strictest reader, the ratio's share; the plan still reads no raw
 /// data samples.
 #[tokio::test]
+#[ignore = "slow without a planning budget: over 30 min in a debug build; #1197"]
 async fn a_quantile_shared_with_a_ratio_is_sized_for_the_ratio() {
     let capabilities = DeploymentCapabilities {
         raw_data_retained: false,

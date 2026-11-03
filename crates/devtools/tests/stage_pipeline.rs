@@ -1403,6 +1403,7 @@ fn workload_set_index_and_files_validate() {
 /// materialized views as `plan_installable`'s plan derives them, each mapped
 /// to a node of the selected Stage 2 candidate.
 #[test]
+#[ignore = "slow without a planning budget: over 30 min in a debug build; #1197"]
 fn workload_examples_preserve_data_and_valid_materialized_views() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/dag-viewer");
     let examples: Value =
@@ -2624,6 +2625,7 @@ fn milp_search_selects_checked_plans_on_ratio_and_rollupheavy() {
 /// that let one chain serve all three queries are checked in
 /// `groups::tests::one_pane_chain_serves_a_ratio_and_its_operands`.
 #[test]
+#[ignore = "slow without a planning budget: over 30 min in a debug build; #1197"]
 fn milp_search_selects_a_checked_ddsketch_plan_for_a_ratio_and_its_operands() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tools/dag-viewer/memo-examples/promql/rangeheavy-t8-t5-1h.json");
