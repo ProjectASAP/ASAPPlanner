@@ -503,21 +503,19 @@ Hash-cons the workload into groups; generate each group's candidates (Pass 1,
 then the Pass 2 transformations), and expand shared sizes, tumbling-window horizons and
 (planned) raw windows into concrete groups, so that choosing a threshold is
 choosing a group; choose one candidate per needed group; compose the choice
-into one plan and check and cost it with Stage 2 and Stage 3. The search is a
-candidate-connection search: a MILP (mixed-integer linear program) over the graph of candidates and the
-groups they read proposes a choice from local cost bounds, Stage 2 and
-Stage 3 validate and cost it, and each validated cost constrains the MILP
-again (evaluator-backed refinement). Stage 3 realizes each proposed choice
-through Stage 2's `AssignmentRealizer`, which the facade builds and passes in,
+into one plan and check and cost it with Stage 2 and Stage 3. The search is
+the group selection MILP (mixed-integer linear program, #1095): it chooses one
+candidate per memo group and execution context, with each shareable candidate
+charged once, and is solved once; it prices cost model 1 only (cost models 2
+and 3 are an `UnsupportedCostModel` error, #888). Stage 3 realizes the chosen
+plan through Stage 2's `AssignmentRealizer`, which the facade builds and passes in,
 so Stage 3 does not depend on the Stage 2 crate. The facade first finds an
 incumbent (the best validated plan so far) in a round over seed tumbling-window grids,
 then exposes finer tumbling-window widths in later rounds, each round running Pass 2,
 Stage 2 and Stage 3; only a completed round over the full tumbling-window-width domain
 bounds the declared search space, and otherwise the result is the best
-validated plan found. On tiny catalogs, tests check that this
-bounded search selects the same plan cost as a complete traversal of the same
-catalog under every cost model, and that the MILP's selection matches an
-independent enumeration of the candidate graph.
+validated plan found. Stage 3 checks that `plan_cost` of the realized plan
+equals the MILP's objective, and that every query's accuracy and latency hold.
 
 #### Memo code interface
 
@@ -525,7 +523,7 @@ The memo rules are in `crates/logical-asap-optimization/src/` (module
 `pass2::memo`, crate-private: the crate root re-exports each entry point); the memo types Stage 1 hands Stage 2 are in
 `crates/types/src/stages/` (`asap_types::stages`); the facade that runs the
 stages is in `crates/planner/src/run.rs`; the search over Stage 2's
-candidates is in `crates/plan-selection/src/search/`.
+candidates is in `crates/plan-selection/src/` (`select.rs`, `groups/`, `milp/`).
 
 | Step | Entry point | Path |
 |---|---|---|
@@ -534,7 +532,7 @@ candidates is in `crates/plan-selection/src/search/`.
 | Memo types | `DagOfLogicalMemoGroups`, `PerComputationLogicalMemoCandidates`, `HowToComputeAggregateMeasure`, Pass 1's working types (`ComputationTarget`, `FusedComputation`, `HavingEntry`, `HavingPlacement`), `Memo`, `CandidateForMemoGroup`, `OriginOfCandidateForMemoGroup`, `LogicalASAPMemoCandidates`, `CandidateGenerationTimeout`, `root_groups`, `queries_rooted_at` | `crates/types/src/stages/` (`asap_types::stages`) |
 | Pass 2 | `generate_logical_asap_memo_candidates` → `LogicalASAPMemoCandidates`, one tumbling-window-width round over a `Pass2RoundState` (kept between rounds: the memo after step 1 and before the rules, and the widths already generated). It calls in this order: 1. window composition for the round's new widths (`extend_local_window_composition`); 2–9. the rules in `pass2/memo/rules/`: scan widening, summary inputs, top-k reuse, finer aggregate, rollup, window rollup, summary results, state configurations; 10. `add_shared_summary_state_groups`, the shared builds | `pass2/logical_memo_candidates.rs` (`LogicalASAPMemoCandidates` itself: `asap_types::stages`); `pass2/memo/window_candidates.rs`, `pass2/memo/rules/`, `pass2/memo/state_groups.rs`, `pass2/memo/shared_configurations.rs` |
 | Memo to candidate DAGs | `enumerate`, `build_logical_asap_dags_from_chosen_candidates`, `ChosenCandidatePerMemoGroup`, `AllChosenCandidatesPerMemoGroup`, `ErrorBuildingLogicalASAPDagsFromChosenCandidates` | `pass2/memo/enumeration.rs` (re-exported at the crate root) |
-| Production memo build and search | The facade's `run_planning` builds the DAG of logical memo groups and runs Pass 1 (`generate_per_computation_logical_memo_candidates`) once; then, for each tumbling-window-width round, `generate_logical_asap_memo_candidates` (the `Pass2RoundState` is kept between rounds), `generate_physical_asap_memo_candidates` and Stage 3's `select_plan`. It keeps the best round's selection (`asap_cost::PlanRanking`) and builds that plan with Stage 2's `AssignmentRealizer::realize`. Behind `select_plan`: `candidates/`, `milp/` and `refinement/` | `crates/planner/src/run.rs`; `crates/plan-selection/src/search/` |
+| Production memo build and search | The facade's `run_planning` builds the DAG of logical memo groups and runs Pass 1 (`generate_per_computation_logical_memo_candidates`) once; then, for each tumbling-window-width round, `generate_logical_asap_memo_candidates` (the `Pass2RoundState` is kept between rounds), `generate_physical_asap_memo_candidates` and Stage 3's `select_plan`. It keeps the best round's selection (`asap_cost::PlanRanking`) and builds that plan with Stage 2's `AssignmentRealizer::realize`. Behind `select_plan`: the group selection MILP (#1095), `groups/` and `milp/` | `crates/planner/src/run.rs`; `crates/plan-selection/src/select.rs` |
 
 ## ASAPPlanner Detailed Design: Planning Stages and their decisions/Strategies
 

@@ -777,8 +777,8 @@ fn ratio_weights_come_from_the_composition() {
 
 // RangeHeavy T8+T5's shape: `q0.9 / q0.5` with both operands also queried
 // alone. One DDSketch pane chain sized for two shares of the budget serves
-// both quotient operands and both lone quantiles, as today's engine plans
-// it: the check accepts the quotient over it (`(α + α)/(1 − α) ≤ ε` at
+// both quotient operands and both lone quantiles, as the old Stage 3
+// engine planned it: the check accepts the quotient over it (`(α + α)/(1 − α) ≤ ε` at
 // `α = 1 − (1 + ε)^{−1/2}`), so it weighs 1 for every query. A chain sized
 // for the whole budget (`α = ε`) never serves the quotient's denominator.
 #[test]

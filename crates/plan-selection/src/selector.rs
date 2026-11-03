@@ -1,7 +1,6 @@
 //! Choosing among whole checked plans: [`PlanSelector`] and
-//! [`select_among_plans`]. Today's engine evaluates each plan it proposes
-//! with it, and the reference pricer (feature `reference-pricer`) selects
-//! among enumerated plans with it.
+//! [`select_among_plans`]. The reference pricer (feature `reference-pricer`)
+//! selects among enumerated plans with it.
 
 use std::collections::BTreeMap;
 

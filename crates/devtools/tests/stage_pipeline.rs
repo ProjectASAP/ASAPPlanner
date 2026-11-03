@@ -2553,8 +2553,8 @@ fn memo_section_lists_each_step_the_selected_choice_and_the_enumeration() {
     assert!(document.get("memo").is_none());
 }
 
-/// `stage_pipeline`'s document with Stage 3's new search forced on
-/// (`ASAP_STAGE3_SEARCH=milp`, #1095), set on the child process only.
+/// `stage_pipeline`'s document for `args`, run with Stage 3's group
+/// selection MILP (#1095).
 fn document_with_milp_search(args: &[&str]) -> Value {
     static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2563,7 +2563,6 @@ fn document_with_milp_search(args: &[&str]) -> Value {
         std::process::id(),
     ));
     let status = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
-        .env("ASAP_STAGE3_SEARCH", "milp")
         .args(args)
         .arg("--out")
         .arg(&out)
@@ -2575,7 +2574,7 @@ fn document_with_milp_search(args: &[&str]) -> Value {
     document
 }
 
-/// #1095 C5: with the new search on, example 1 and the RangeHeavy T5
+/// #1095 C5: with the group selection MILP, example 1 and the RangeHeavy T5
 /// q0.5 + q0.9 workload select a plan through the real pipeline, solved to
 /// optimality or stopped at the deadline, whose `plan_cost` equals the MILP's objective exactly (the
 /// search errors on a difference and reports `inexact_objective` when the
@@ -2627,7 +2626,7 @@ fn milp_search_objective_equals_plan_cost_on_example1_and_rangeheavy() {
     }
 }
 
-/// #1127 regressions: with the new search on and guarantees enforced, the
+/// #1127 regressions: with the group selection MILP and guarantees enforced, the
 /// memo examples on which the A1 rows admitted a plan that `satisfies`
 /// rejects now select a plan that passes every query's accuracy check:
 /// ratio-of-quantiles (KLL rank errors compose no guarantee through the
@@ -2691,7 +2690,7 @@ fn milp_search_selects_checked_plans_on_ratio_and_rollupheavy() {
 }
 
 /// #1095 C5: on RangeHeavy T8+T5 (`q0.9 / q0.5` with both operands also
-/// queried alone), the new search selects a DDSketch plan that passes every
+/// queried alone), the group selection MILP selects a DDSketch plan that passes every
 /// query's accuracy check (the A1 rows admitted KLL there, which the check
 /// rejects). Which chains it shares depends on the deadline; the weights
 /// that let one chain serve all three queries are checked in
