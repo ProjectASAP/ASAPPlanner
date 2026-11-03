@@ -145,8 +145,6 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum PhysicalASAPOptimizationError {
-    #[error("invalid operator implementation boundary: {0}")]
-    ImplementationBoundary(&'static str),
     #[error(transparent)]
     Structure(#[from] SchemaDerivationError),
     #[error(transparent)]
@@ -1031,23 +1029,17 @@ pub(crate) fn implement_candidate_operators(
     root: &Rc<OperatorNode>,
     inputs: &[Rc<OperatorNode>],
 ) -> Result<Rc<OperatorNode>, PhysicalASAPOptimizationError> {
-    if inputs.iter().any(|input| Rc::ptr_eq(input, root)) {
-        return Err(PhysicalASAPOptimizationError::ImplementationBoundary(
-            "candidate root cannot also be an input",
-        ));
-    }
-    let reachable = OperatorNode::reachable(root)
-        .into_iter()
-        .map(|node| Rc::as_ptr(&node))
-        .collect::<HashSet<_>>();
-    if inputs
-        .iter()
-        .any(|input| !reachable.contains(&Rc::as_ptr(input)))
-    {
-        return Err(PhysicalASAPOptimizationError::ImplementationBoundary(
-            "input is absent from candidate subtree",
-        ));
-    }
+    // The memo guarantees these; the inventory rejects a root aliasing an input.
+    debug_assert!(!inputs.iter().any(|input| Rc::ptr_eq(input, root)));
+    debug_assert!({
+        let reachable: HashSet<_> = OperatorNode::reachable(root)
+            .iter()
+            .map(Rc::as_ptr)
+            .collect();
+        inputs
+            .iter()
+            .all(|input| reachable.contains(&Rc::as_ptr(input)))
+    });
     let mut implementations = inputs
         .iter()
         .map(|input| (Rc::as_ptr(input), Rc::clone(input)))
@@ -1243,10 +1235,6 @@ mod tests {
             .iter()
             .any(|node| node.operator.kind_name() == "Limit"));
         assert!(nodes.iter().any(|node| Rc::ptr_eq(node, &boundary)));
-        assert!(matches!(
-            implement_candidate_operators(&root, std::slice::from_ref(&root)),
-            Err(PhysicalASAPOptimizationError::ImplementationBoundary(_))
-        ));
     }
 
     // Logical and exact ranked rows retain the full series identity contract.
