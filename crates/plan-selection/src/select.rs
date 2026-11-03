@@ -105,7 +105,9 @@ pub fn select_plan(
     )
     .map_err(selection_error)?;
     let build_ms = construction_started.elapsed().as_millis() as u64;
-    let solution = solve_selection_milp(milp, build_ms).map_err(selection_error)?;
+    let solution = solve_selection_milp(milp, build_ms).map_err(|error| {
+        with_uncostable_reasons(selection_error(error), &inputs, &pruned_candidates)
+    })?;
 
     let validation_started = Instant::now();
     let chosen = ChosenCandidates {
@@ -226,6 +228,41 @@ fn selection_error(error: SelectionMilpError) -> ErrorSelectingPlan {
             ErrorSelectingPlan::Solver(reason)
         }
     }
+}
+
+/// An infeasible selection with the reasons `asap-cost` could not cost
+/// the candidates the model left out (e.g. a source missing the fact its
+/// pricing needs), each once in candidate order: those candidates may be
+/// why no plan is left.
+fn with_uncostable_reasons(
+    error: ErrorSelectingPlan,
+    inputs: &MilpInputs,
+    pruned_candidates: &[PrunedCandidate<PhysicalCandidateId>],
+) -> ErrorSelectingPlan {
+    let ErrorSelectingPlan::NoValidCandidate(mut rejections) = error else {
+        return error;
+    };
+    let mut reasons: Vec<&str> = Vec::new();
+    for pruned in pruned_candidates {
+        if pruned.reason != PruneReason::UsageNotCostable {
+            continue;
+        }
+        if let Err(reason) = &inputs.candidate_data[pruned.candidate.0].usage {
+            if !reasons.contains(&reason.as_str()) {
+                reasons.push(reason);
+            }
+        }
+    }
+    if let Some(rejection) = rejections.first_mut() {
+        if !reasons.is_empty() {
+            rejection.reason = format!(
+                "{}; candidates left out because they could not be costed: {}",
+                rejection.reason,
+                reasons.join("; ")
+            );
+        }
+    }
+    ErrorSelectingPlan::NoValidCandidate(rejections)
 }
 
 /// What Stage 3 removes before the MILP: dominated candidates, and those
