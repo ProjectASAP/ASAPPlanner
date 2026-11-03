@@ -10,17 +10,16 @@
 //! that query's snapshot. Regenerate with
 //! `UPDATE_SNAPSHOTS=1 cargo test --release -p asap-devtools --test corpus_snapshots -- --ignored`.
 //!
+//! Each query is planned by `asap_planner --run-until stage3`: one exact
+//! search over every legal tumbling-window width, with no time limit.
+//!
 //! A snapshot holds only the plan, never the search that found it: the
 //! selected plan's DAG (Stage 2 candidate `P1`) and display name, its cost
 //! and accepted accuracy per query, the materialized views, tumbling-window retention,
 //! and whether the search proved the plan optimal; for a query that does not
-//! plan, the error. Candidate ids, round and evaluation counters, timings, the
-//! Stage 1 and Stage 2 candidate lists and the memo vary from run to run
-//! (round budgets are wall-clock), so they are left out. Floats are rounded
-//! to 12 significant digits. A run that the time limit stopped fails instead
-//! of being recorded, unless the query has a `time_limit_reason` in the
-//! manifest (its plan is then recorded and compared as usual); a query with a
-//! `skip_reason` is skipped.
+//! plan, the error. Candidate ids, timings, the Stage 1 and Stage 2
+//! candidate lists and the memo are left out. Floats are rounded to 12
+//! significant digits. A query with a `skip_reason` is skipped.
 //!
 //! The same binary holds the sketch plan snapshots (`sketch_plan_snapshots.rs`),
 //! which reuse these helpers on multi-query workloads with accuracy targets.
@@ -32,10 +31,6 @@ use serde_json::{json, Map, Value};
 
 #[path = "sketch_plan_snapshots.rs"]
 mod sketch_plan_snapshots;
-
-/// Per query. The slowest kept queries take about 60 s on one core, so this
-/// leaves room for a slower CI runner while still failing a runaway search.
-const TIME_LIMIT_S: &str = "240";
 
 /// Held for the whole of each planner snapshot test, so the corpus and
 /// sketch plan tests do not run at once (`--include-ignored` would otherwise
@@ -59,24 +54,24 @@ fn workload(corpus: &Value, query: &str) -> Value {
     })
 }
 
-/// Runs `stage_pipeline` (without the memo section) on `workload`; panics
-/// (a planner crash) on failure.
+/// Runs `asap_planner` on `workload`; panics (a planner crash) on failure.
 fn plan(workload: &Value, args: &[String], scratch: &Path) -> Value {
     let input = scratch.join("workload.json");
     std::fs::write(&input, workload.to_string()).unwrap();
     let mut input_args = vec!["--workload".to_owned(), input.display().to_string()];
     input_args.extend_from_slice(args);
-    stage_pipeline(&input_args, scratch)
+    asap_planner(&input_args, scratch)
 }
 
-/// Runs `stage_pipeline` (without the memo section, under the
-/// [`TIME_LIMIT_S`] budget) with `args`, which name its input; panics (a
+/// Runs `asap_planner --run-until stage3 --format json` with `args`, which
+/// name its input (paths relative to the repository root); panics (a
 /// planner crash) on failure.
-fn stage_pipeline(args: &[String], scratch: &Path) -> Value {
+fn asap_planner(args: &[String], scratch: &Path) -> Value {
     let output = scratch.join("document.json");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_asap_planner"));
     command
-        .args(["--milp-time-limit-s", TIME_LIMIT_S, "--no-memo"])
+        .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .args(["--run-until", "stage3", "--format", "json"])
         .args(args)
         .arg("--out")
         .arg(&output);
@@ -89,39 +84,15 @@ fn stage_pipeline(args: &[String], scratch: &Path) -> Value {
     serde_json::from_str(&std::fs::read_to_string(output).unwrap()).unwrap()
 }
 
-/// Whether the wall-clock budget ended the search: planning (Pass 1 and
-/// every tumbling-window-width round) used the whole budget. A round cut short by its
-/// own budget is not visible in the report.
-fn hit_time_limit(document: &Value) -> bool {
-    let report = &document["planning_report"];
-    let Some(limit) = report["time_limit_ms"].as_f64() else {
-        return false;
-    };
-    let rounds: f64 = report["rounds"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|round| {
-            ["pass2_ms", "stage2_ms", "stage3_ms"]
-                .iter()
-                .filter_map(|key| round[*key].as_f64())
-                .sum::<f64>()
-        })
-        .sum();
-    report["pass1_ms"].as_f64().unwrap_or(0.0) + rounds >= limit
-}
-
 /// The selected plan's search status (`optimal` or `deadline_reached`), or
 /// null without a plan.
 fn search_status(document: &Value) -> &Value {
     &document["stage3_plan_selection"]["search_report"]["status"]
 }
 
-/// Whether the plan is proven optimal: its search says so and every legal
-/// tumbling-window width was searched.
+/// Whether the search proved the plan optimal.
 fn proven_optimal(document: &Value) -> bool {
     search_status(document) == "optimal"
-        && document["planning_report"]["tumbling_window_widths_pending"] != json!(true)
 }
 
 /// `value` with every non-integer number rounded to 12 significant digits.
@@ -139,7 +110,7 @@ fn rounded(value: &Value) -> Value {
     }
 }
 
-/// The stable part of a one-query `stage_pipeline` document: the query, the
+/// The stable part of a one-query `asap_planner` document: the query, the
 /// selected plan and its cost, or why there is none. See the module docs.
 fn snapshot_of(document: &Value) -> Value {
     let mut snapshot = plan_snapshot(document);
@@ -252,7 +223,7 @@ fn corpus_plans_match_snapshots() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let update = std::env::var_os("UPDATE_SNAPSHOTS").is_some();
     // Regenerated snapshots of failing queries, with their full
-    // `stage_pipeline` documents for the DAG viewer, for CI to upload.
+    // `asap_planner` documents for the DAG viewer, for CI to upload.
     // Each corpus clears only its own directory: the sketch plan test writes
     // beside them.
     let regenerated = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("corpus_snapshots");
@@ -272,7 +243,7 @@ fn corpus_plans_match_snapshots() {
             serde_json::from_str(&std::fs::read_to_string(dir.join("corpus.json")).unwrap())
                 .unwrap();
         let args: Vec<String> =
-            serde_json::from_value(corpus["stage_pipeline_args"].clone()).unwrap();
+            serde_json::from_value(corpus["asap_planner_args"].clone()).unwrap();
         // A query with a `skip_reason` is not planned.
         let queries: Vec<&Value> = corpus["queries"]
             .as_array()
@@ -300,15 +271,6 @@ fn corpus_plans_match_snapshots() {
                 &args,
                 &scratch,
             );
-            // A `time_limit_reason` accepts a run the time limit ended; the
-            // plan and cost are still compared with the snapshot.
-            if hit_time_limit(&document) && query.get("time_limit_reason").is_none() {
-                failures.push(format!(
-                    "{name}/{id}: the {TIME_LIMIT_S} s time limit ended the search, \
-                     so its plan depends on machine speed"
-                ));
-                continue;
-            }
             let actual = serde_json::to_string_pretty(&snapshot_of(&document)).unwrap() + "\n";
             let path = dir.join(format!("{id}.json"));
             if update {
@@ -403,36 +365,13 @@ fn snapshot_of_a_failed_query() {
     );
 }
 
-/// Planning that used its whole wall-clock budget is detected; planning
-/// within it, or with no report, is not.
+/// Only an optimal search proves the plan optimal.
 #[test]
-fn time_limit_detection() {
-    let report = |pass1: f64, stage3: f64| {
-        json!({"planning_report": {
-            "pass1_ms": pass1, "time_limit_ms": 1000,
-            "rounds": [{"pass2_ms": 1.0, "stage2_ms": 1.0, "stage3_ms": stage3}],
-        }})
-    };
-    assert!(hit_time_limit(&report(10.0, 990.0)));
-    assert!(!hit_time_limit(&report(10.0, 12.0)));
-    assert!(!hit_time_limit(
-        &json!({"stage3_plan_selection": {"error": "x"}})
-    ));
-}
-
-/// An optimal search proves the plan optimal only when no legal tumbling-window width
-/// was left unsearched.
-#[test]
-fn proven_optimal_needs_every_tumbling_window_width() {
-    let document = |status: &str, pending: bool| {
-        json!({
-            "stage3_plan_selection": {"search_report": {"status": status}},
-            "planning_report": {"tumbling_window_widths_pending": pending},
-        })
-    };
-    assert!(proven_optimal(&document("optimal", false)));
-    assert!(!proven_optimal(&document("optimal", true)));
-    assert!(!proven_optimal(&document("deadline_reached", false)));
+fn proven_optimal_needs_an_optimal_search() {
+    let document =
+        |status: &str| json!({"stage3_plan_selection": {"search_report": {"status": status}}});
+    assert!(proven_optimal(&document("optimal")));
+    assert!(!proven_optimal(&document("deadline_reached")));
 }
 
 /// The failure message names the first differing JSON path.

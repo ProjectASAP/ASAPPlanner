@@ -41,7 +41,7 @@ use thiserror::Error;
 
 /// What the deployment's executor can run and keep. Planning reads it in
 /// Stage 1 (`supported_summaries`), Stage 2 (`query_time_results_retained`)
-/// and Stage 3 (`raw_data_retained`). It is data only; `stage_pipeline` reads it from
+/// and Stage 3 (`raw_data_retained`). It is data only; `asap_planner` reads it from
 /// `--deployment-capabilities <json>` and shows it in the stage document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]

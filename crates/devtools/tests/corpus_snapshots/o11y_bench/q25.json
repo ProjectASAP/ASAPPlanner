@@ -4562,7 +4562,7 @@
       "stage2_node_id": 7
     }
   ],
-  "proven_optimal": false,
+  "proven_optimal": true,
   "query": "sum(rate(http_requests_total{status=~\"5..\",job=~\"user-service|order-service|payment-service\"}[1h])) / sum(rate(http_requests_total{job=~\"user-service|order-service|payment-service\"}[1h]))",
   "selected": {
     "accepted": [

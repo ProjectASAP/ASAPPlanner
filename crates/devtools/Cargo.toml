@@ -17,13 +17,13 @@ asap-physical-asap-optimization = { path = "../physical-asap-optimization", feat
 asap-cost = { path = "../cost" }
 asap-plan-selection = { path = "../plan-selection", features = ["reference-pricer"] }
 # The installable plan of the selected candidate (`installable_plan_of`),
-# whose stored outputs `stage_pipeline` writes.
+# whose stored outputs `asap_planner` writes.
 asap-planner = { path = "../planner" }
-# The executor's supported summary families, which `stage_pipeline` plans
+# The executor's supported summary families, which `asap_planner` plans
 # with when the deployment declares none, as `plan_installable` does.
 asap-executor = { path = "../executor" }
 
-# Used by the show_ir / stage_pipeline / variant_coverage bins (catalog schemas,
+# Used by the asap_planner / variant_coverage bins (catalog schemas,
 # async SQL path, JSON output) and by the topk_ir / canonical_examples
 # examples. Regular deps, not dev-deps: `[[bin]]` targets can't see dev-deps.
 asap-types = { path = "../types" }

@@ -58,7 +58,7 @@ pub struct PlanSearchSettings {
     /// stage stops at its round's deadline (an evaluation in progress may
     /// overrun it).
     pub time_limit_ms: Option<u64>,
-    /// Keep Pass 1's output for inspection (`stage_pipeline`, the DAG
+    /// Keep Pass 1's output for inspection (`asap_planner`, the DAG
     /// viewer): [`PlanningRun::per_computation_candidates`]. Default off:
     /// production planning copies no memo.
     pub inspect: bool,

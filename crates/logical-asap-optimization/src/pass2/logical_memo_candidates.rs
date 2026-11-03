@@ -37,6 +37,12 @@ impl Pass2RoundState {
             previous_domain: None,
         }
     }
+
+    /// The memo after local window composition and before the other rules
+    /// (`asap_planner` prints it).
+    pub fn unexpanded_memo(&self) -> &Memo {
+        &self.unexpanded_memo
+    }
 }
 
 /// Why [`generate_logical_asap_memo_candidates`] failed.

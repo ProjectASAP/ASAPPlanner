@@ -3,8 +3,8 @@
 A metamorphic fuzz tester for **missed reuse and sharing** in the planner.
 
 A missed-reuse bug is a plan that no candidate rule generates. The answers are
-still correct, and `stage_pipeline --exhaustive` cannot see the bug, because it
-only searches the generated candidates. Example (#903): Q1 is
+still correct, and no search over the generated candidates can see the bug,
+because it only searches the generated candidates. Example (#903): Q1 is
 `quantile_over_time(0.9, data[5m])` with an exact target, and Q2 is the same
 query at ε = 0.01. The planner builds a KLL for Q2 (0.166 per second) instead
 of reading Q1's exact result (0.144 per second).
@@ -33,7 +33,7 @@ A run writes these files:
   design-doc coverage table below with this run's status.
 - `findings/<id>-<relation>.md`: one issue draft per distinct shrunk violation,
   in the `asap-issue-authoring` layout. It starts with the example (both
-  workloads, both `stage_pipeline` commands, the costs, the selected and
+  workloads, both `asap_planner` commands, the costs, the selected and
   witness plans, and the violated relation). Next to it are
   `<id>-base.workload.json` and `<id>-related.workload.json`.
   **Nothing is filed**: a person reads the drafts, checks them against the open

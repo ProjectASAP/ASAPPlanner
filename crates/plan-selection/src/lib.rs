@@ -239,7 +239,7 @@
 //! No memory limit applies outside cost model 3, where the cluster's memory
 //! is declared ([`ClusterLimits::memory_bytes`](asap_cost::ClusterLimits::memory_bytes)); without one, a selected
 //! plan whose peak memory is over `LARGE_PEAK_MEMORY_BYTES` (10^12) gets a
-//! warning, which `stage_pipeline` reports ([`large_peak_memory_warning`]).
+//! warning, which `asap_planner` reports ([`large_peak_memory_warning`]).
 
 #[cfg(test)]
 use asap_types::workload::RepeatedDemand;
@@ -270,8 +270,8 @@ pub(crate) use selector::select_among_plans;
 
 /// The whole-workload reference pricer (feature `reference-pricer`): the
 /// selector Stage 3 used before the memo search, over whole physical plans
-/// a developer tool enumerates (`stage_pipeline --exhaustive` and
-/// `--price-enumerated`, `planner_fuzz`). Not part of Stage 3's interface.
+/// a developer tool enumerates (`asap_devtools::memo_pricing`,
+/// `planner_fuzz`). Not part of Stage 3's interface.
 #[cfg(feature = "reference-pricer")]
 pub mod reference_pricer {
     pub use crate::report::{Rejection, WholePlanSelection};

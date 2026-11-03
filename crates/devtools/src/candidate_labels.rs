@@ -1,5 +1,5 @@
 //! Display labels for the planning stages' candidates, for the
-//! `stage_pipeline` viewer document and the `print_planning_stages` text
+//! `asap_planner` viewer document and text
 //! only. Planning never reads them: they
 //! are pure functions of the candidates' planning data (the logical roots
 //! and the materialization assignment).
@@ -273,7 +273,7 @@ fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
 }
 
 /// One node's operator kind with its sketch family and parameters, its
-/// summary query, its time range and its pane layout, when it has them: e.g.
+/// summary query, its time range and its tumbling-window layout, when it has them: e.g.
 /// `SummaryAgg Kll(k=200)`, `SummaryEstimate Quantile(q=0.5)`.
 pub fn node_label(node: &asap_types::ir::flat::FlatNode) -> String {
     let operator = serde_json::to_value(&node.operator).unwrap_or_default();
@@ -364,8 +364,8 @@ fn find_details(value: &Value, details: &mut Vec<String>, depth: usize) {
                     }
                     // A time range's length, e.g. `60s`.
                     "range" => details.push(duration_text(field)),
-                    // A window, and a pane chain's layout.
-                    "window" | "pane_width_ms" | "pane_count" => {
+                    // A window, and a tumbling-window chain's layout.
+                    "window" | "tumbling_window_width_ms" | "tumbling_window_count" => {
                         details.push(format!("{key}={field}"))
                     }
                     _ => find_details(field, details, depth + 1),

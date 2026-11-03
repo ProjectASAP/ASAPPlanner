@@ -10,24 +10,21 @@
 //! diff.
 //!
 //! `tests/sketch_plan_snapshots/manifest.json` lists each workload by id:
-//! its `workload` file (or built-in `example`) relative to the repository
-//! root, SQL `tables`, `deployment`, and whether accuracy guarantees are
-//! `ignored` (enforced otherwise). `<id>.json` beside it is its snapshot,
+//! its `workload` file relative to the repository root, SQL `tables`,
+//! `deployment` (the `asap_planner` arguments of its deployment
+//! capabilities and cost inputs, files in `deployments/`), and whether
+//! accuracy guarantees are `ignored` (enforced otherwise). `<id>.json` beside it is its snapshot,
 //! the corpus snapshot of the selected plan plus every query's text and the
 //! search status. Workloads copied from elsewhere live in `workloads/`.
 //! Regenerate with
 //! `UPDATE_SNAPSHOTS=1 cargo test --release -p asap-devtools --test corpus_snapshots -- --ignored sketch_plans_match_snapshots`.
 //!
-//! The search's seed and tumbling-window-width rounds have wall-clock budgets (5 s
-//! each), so a search that stops at a budget, of time or of evaluations, can
-//! select a different plan on a slower machine. Only a search that proves its
-//! plan optimal is independent of speed, so every workload must end with
-//! status `optimal` and no tumbling-window width left unsearched; any other ending
-//! fails instead of being recorded. A workload with a
-//! `deadline_reached_reason` in the manifest may instead end with status
-//! `deadline_reached` (no tumbling-window width left unsearched); its snapshot records
-//! that status, so the plan, cost and status must still match. Each
-//! kept workload gave the same plan in three runs and on one core.
+//! Each workload is planned by `asap_planner --run-until stage3`: one
+//! search over every legal tumbling-window width, with no time limit. Every workload
+//! must end with status `optimal`; any other ending fails instead of being
+//! recorded. A workload with a `deadline_reached_reason` in the manifest may
+//! instead end with status `deadline_reached`; its snapshot records that
+//! status, so the plan, cost and status must still match.
 //! Workloads whose search stops at a budget (the raw-retained memo examples,
 //! full random-mixed workloads, three or more quantile queries over 10,000
 //! series, the `or` and `COUNT(DISTINCT)` workloads, single quantiles under
@@ -38,8 +35,8 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 
 use super::{
-    first_difference, first_differing_path, hit_time_limit, plan_snapshot, proven_optimal, rounded,
-    search_status, stage_pipeline,
+    asap_planner, first_difference, first_differing_path, plan_snapshot, proven_optimal, rounded,
+    search_status,
 };
 
 fn repository_root() -> PathBuf {
@@ -50,23 +47,19 @@ fn snapshots_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/sketch_plan_snapshots")
 }
 
-/// The `stage_pipeline` arguments for `entry` under `manifest`'s deployments.
+/// The `asap_planner` arguments for `entry` under `manifest`'s deployments.
 fn arguments(manifest: &Value, entry: &Value) -> Vec<String> {
     let path = |key: &str| repository_root().join(entry[key].as_str().unwrap());
     let mut args = Vec::new();
-    match (entry["workload"].as_str(), entry["example"].as_str()) {
-        (Some(_), None) => args.extend([
-            "--workload".to_owned(),
-            path("workload").display().to_string(),
-        ]),
-        (None, Some(example)) => args.extend(["--example".to_owned(), example.to_owned()]),
-        _ => panic!("{entry}: give exactly one of `workload` and `example`"),
-    }
+    args.extend([
+        "--workload".to_owned(),
+        path("workload").display().to_string(),
+    ]);
     if entry.get("tables").is_some() {
         let tables: Vec<Value> =
             serde_json::from_str(&std::fs::read_to_string(path("tables")).unwrap()).unwrap();
         for table in tables {
-            args.extend(["--table".to_owned(), table.to_string()]);
+            args.extend(["--sql-catalog-table".to_owned(), table.to_string()]);
         }
     }
     let deployment = entry["deployment"].as_str().unwrap();
@@ -75,8 +68,8 @@ fn arguments(manifest: &Value, entry: &Value) -> Vec<String> {
             .unwrap_or_else(|_| panic!("{entry}: unknown deployment {deployment}"));
     args.extend(deployment);
     match entry["accuracy_guarantees"].as_str() {
-        None | Some("enforced") => args.push("--enforce-accuracy-guarantees".to_owned()),
-        Some("ignored") => {}
+        None | Some("enforced") => {}
+        Some("ignored") => args.push("--ignore-accuracy-guarantees".to_owned()),
         Some(other) => {
             panic!("{entry}: accuracy_guarantees must be enforced or ignored, not {other}")
         }
@@ -84,7 +77,7 @@ fn arguments(manifest: &Value, entry: &Value) -> Vec<String> {
     args
 }
 
-/// The stable part of a `stage_pipeline` document: every query's text, the
+/// The stable part of an `asap_planner` document: every query's text, the
 /// selected plan (see [`plan_snapshot`]) and how its search ended.
 fn snapshot_of(document: &Value) -> Value {
     let mut snapshot = plan_snapshot(document);
@@ -137,27 +130,15 @@ fn sketch_plans_match_snapshots() {
 
     for entry in entries {
         let id = entry["id"].as_str().unwrap();
-        let document = stage_pipeline(&arguments(&manifest, entry), &scratch);
-        if hit_time_limit(&document) {
-            failures.push(format!(
-                "{id}: the {} s time limit ended the search, so its plan depends on \
-                 machine speed",
-                super::TIME_LIMIT_S
-            ));
-            continue;
-        }
-        // A `deadline_reached_reason` accepts a search that ended at its
-        // deadline after every tumbling-window width; plan and cost are still compared.
+        let document = asap_planner(&arguments(&manifest, entry), &scratch);
+        // A `deadline_reached_reason` accepts a search that did not prove
+        // its plan optimal; plan, cost and status are still compared.
         let deadline_accepted = entry.get("deadline_reached_reason").is_some()
-            && search_status(&document) == "deadline_reached"
-            && document["planning_report"]["tumbling_window_widths_pending"] != json!(true);
+            && search_status(&document) == "deadline_reached";
         if !proven_optimal(&document) && !deadline_accepted {
             failures.push(format!(
-                "{id}: the plan is not proven optimal (status {}, tumbling-window widths \
-                 pending {}), so a round's budget may have chosen it; drop the \
-                 workload or make it smaller",
+                "{id}: the plan is not proven optimal (status {})",
                 search_status(&document),
-                document["planning_report"]["tumbling_window_widths_pending"]
             ));
             continue;
         }
@@ -219,9 +200,12 @@ fn manifest_entries_build_their_arguments() {
             }
         }
         let args = arguments(&manifest, entry);
+        for path in args.iter().skip(2).filter(|arg| arg.ends_with(".json")) {
+            assert!(repository_root().join(path).is_file(), "{entry}: no {path}");
+        }
         assert_eq!(
-            args.iter().any(|a| a == "--enforce-accuracy-guarantees"),
-            entry["accuracy_guarantees"] != json!("ignored")
+            args.iter().any(|a| a == "--ignore-accuracy-guarantees"),
+            entry["accuracy_guarantees"] == json!("ignored")
         );
     }
 }

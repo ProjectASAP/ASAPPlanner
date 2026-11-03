@@ -59,7 +59,7 @@ use crate::planning_stages::{
 use generate::QuerySpec;
 
 /// The language of a fuzz workload: one per workload, as one
-/// `stage_pipeline --workload` file has.
+/// `asap_planner --workload` file has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Language {
@@ -121,7 +121,7 @@ impl FuzzQuery {
 }
 
 /// A workload the tester plans: queries in one language, the data facts,
-/// the SQL tables they read (`stage_pipeline --table` objects) and whether
+/// the SQL tables they read (`asap_planner --sql-catalog-table` objects) and whether
 /// the deployment keeps raw data.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FuzzWorkload {
@@ -142,7 +142,7 @@ pub struct FuzzWorkload {
 }
 
 impl FuzzWorkload {
-    /// The `PlanningWorkload` (`stage_pipeline --workload` file) of these
+    /// The `PlanningWorkload` (`asap_planner --workload` file) of these
     /// queries.
     pub fn planning_workload(&self) -> PlanningWorkload {
         PlanningWorkload {
@@ -217,28 +217,26 @@ impl FuzzWorkload {
         }
     }
 
-    /// The `stage_pipeline` invocation that plans this workload, saved as
-    /// `workload_file`, with `settings`.
-    /// Its output document is `<workload_file stem>.out.json`.
-    pub fn stage_pipeline_command(&self, workload_file: &str, settings: &FuzzSettings) -> String {
+    /// The `asap_planner` invocation (a bash command) that plans this
+    /// workload, saved as `workload_file`, with `settings`' accuracy
+    /// guarantees; `asap_planner` has no exhaustive search. Its output
+    /// document is `<workload_file stem>.out.json`.
+    pub fn asap_planner_command(&self, workload_file: &str, settings: &FuzzSettings) -> String {
         let mut command = format!(
-            "cargo run -p asap-devtools --bin stage_pipeline -- --workload {workload_file}"
+            "cargo run -p asap-devtools --bin asap_planner -- --workload {workload_file} \
+             --run-until stage3 --format json"
         );
         for table in &self.tables {
-            command.push_str(&format!(" \\\n  --table '{table}'"));
+            command.push_str(&format!(" \\\n  --sql-catalog-table '{table}'"));
         }
-        if settings.enforce_accuracy_guarantees {
-            command.push_str(" --enforce-accuracy-guarantees");
+        if !settings.enforce_accuracy_guarantees {
+            command.push_str(" --ignore-accuracy-guarantees");
         }
         if !self.raw_data_retained || self.query_time_results_retained {
             command.push_str(&format!(
-                " --deployment-capabilities '{{\"raw_data_retained\": {}, \"query_time_results_retained\": {}}}'",
+                " --deployment-capabilities <(echo '{{\"raw_data_retained\": {}, \"query_time_results_retained\": {}}}')",
                 self.raw_data_retained, self.query_time_results_retained
             ));
-        }
-        match settings.search {
-            SearchKind::CandidateConnections => {}
-            SearchKind::Exhaustive => command.push_str(" --exhaustive"),
         }
         let stem = workload_file.strip_suffix(".json").unwrap_or(workload_file);
         command.push_str(&format!(" --out {stem}.out.json"));
@@ -302,11 +300,11 @@ pub fn read_seed_file(path: &std::path::Path) -> Result<FuzzWorkload, String> {
     })
 }
 
-/// Which search plans each workload (`stage_pipeline`'s choices).
+/// Which search plans each workload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SearchKind {
-    /// Joint candidate-connection planning (`stage_pipeline`'s default).
+    /// Joint candidate-connection planning, the facade's search.
     CandidateConnections,
     /// Every generated candidate (`--exhaustive`), up to
     /// [`EXHAUSTIVE_MAX_COMBINATIONS`].
@@ -414,8 +412,7 @@ impl Planner {
         }
     }
 
-    /// `workload` planned by the configured search, as `stage_pipeline`
-    /// plans it.
+    /// `workload` planned by the configured search.
     pub fn plan(&mut self, workload: &FuzzWorkload) -> Result<Rc<Planned>, String> {
         let key = serde_json::to_string(workload).expect("a workload serializes");
         if let Some(planned) = self.cache.get(&key) {

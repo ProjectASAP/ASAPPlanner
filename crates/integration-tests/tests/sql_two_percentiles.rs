@@ -82,8 +82,8 @@ async fn run(queries: &[&str]) -> Run {
         .unwrap_or_else(|e| panic!("{}: {e}", entry.query.0));
         roots.push(QueryRoot::Operator(root));
     }
-    // Every output accepted whatever its guarantee, as `stage_pipeline`
-    // plans by default: this test checks the answers against the bound.
+    // Every output accepted whatever its guarantee: this test checks the
+    // answers against the bound.
     let settings = CostInputs {
         ..CostInputs::default()
     };

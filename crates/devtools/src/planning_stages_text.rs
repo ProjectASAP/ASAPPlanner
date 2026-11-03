@@ -1,11 +1,11 @@
-//! Every planner stage's output as plain text: `stage_pipeline --text`.
-//! It prints the frontends' roots (Stage 0), the memo after each step (its
-//! groups, then Pass 1's `PerComputationLogicalMemoCandidates`, the memo
-//! after Pass 2's local window composition, and Pass 2's
-//! `LogicalASAPMemoCandidates`, Stage 2's input), the selected memo choice,
-//! Stage 2's `PhysicalASAPMemoCandidates` (Stage 3's input), Stage 3's
-//! `Selection` with each node's cost and each query's accepted accuracy,
-//! and optionally the enumerated memo choices. Planning never reads it.
+//! The planner stages' output as plain text: `asap_planner --format text`.
+//! It prints, up to the run's last stage, the frontends' roots and their
+//! memo groups (Stage 0), Pass 1's `PerComputationLogicalMemoCandidates`,
+//! the memo after Pass 2's local window composition and Pass 2's
+//! `LogicalASAPMemoCandidates` (Stage 2's input), Stage 2's
+//! `PhysicalASAPMemoCandidates` (Stage 3's input), and Stage 3's
+//! `Selection` with the selected memo choice, each node's cost and each
+//! query's accepted accuracy. Planning never reads it.
 //!
 //! Notation: `G<n>` is memo group `n` and `G<n>[<i>]` its candidate `i`;
 //! `O<n>` is Stage 2's operator node `n` and `C<n>` physical candidate `n`;
@@ -17,73 +17,57 @@
 //! G1:  TimeRange 60s     <- G0
 //! G2:  Aggregate rate()  <- G1
 //!     [0]  Pass1       FinalizeExactAccumulator ← SummaryAgg                                       inputs=[G1]
-//!     [1]  Panes  new  FinalizeExactAccumulator ← SummaryMerge ← PaneChain pane_count=6 pane_width_ms=10000  inputs=[G0]
+//!     [1]  TumblingWindows  new  FinalizeExactAccumulator ← SummaryMerge ← SummaryTumblingWindowChain tumbling_window_count=6 tumbling_window_width_ms=10000  inputs=[G0]
 //! ```
 
 use std::collections::HashSet;
 use std::fmt::Write;
 use std::rc::Rc;
 
-use asap_logical_asap_optimization::{build_logical_asap_dags_from_chosen_candidates, enumerate};
+use asap_planner::selected_chosen_candidates;
 use asap_types::ir::flat::flatten;
 use asap_types::ir::{OperatorNode, QueryRoot};
-use asap_types::stages::{MemoCandidates, MemoGroupId, PhysicalASAPMemoCandidates};
+use asap_types::stages::{Memo, MemoGroupId, PhysicalASAPMemoCandidates};
 
 use crate::candidate_labels::node_label;
-use crate::planning_stages::PlanningStagesRun;
+use crate::planning_stages::{PlanningStagesRun, RunUntil};
 
-/// Every stage's output of `stages` (planned with
-/// `PlanSearchSettings::inspect`) as text, one section per stage boundary;
-/// with `enumerated`, also the first that many memo choices over Stage 2's
-/// input memo, each with its composed DAG. A stage that did not run is
-/// reported as missing.
-pub fn planning_stages_text(stages: &PlanningStagesRun, enumerated: Option<usize>) -> String {
+/// The output of every stage `stages` ran, as text, one section per stage
+/// boundary. A failure ends the text with its error.
+pub fn planning_stages_text(stages: &PlanningStagesRun) -> String {
     let mut out = String::new();
     let run = &stages.run;
+    let until = stages.run_until;
+    // Why the next stage has no output (a failure, not the stop point).
+    let failure = |out: &mut String| {
+        if let Err(error) = &run.selection {
+            let _ = writeln!(out, "\nerror: {error}");
+        }
+    };
 
     section(
         &mut out,
         "Stage 0 output: the frontends' roots (Vec<QueryRoot>)",
     );
     write_dag(&mut out, &stages.stage0_query_language_frontends);
-
-    let Some(pass1) = &run.per_computation_candidates else {
-        let _ = writeln!(out, "\n(no Pass 1 output)");
-        return out;
-    };
     section(
         &mut out,
         "Stage 0 → Stage 1: DagOfLogicalMemoGroups (the roots hash-consed)",
     );
-    write_memo(&mut out, &pass1.memo, None, false);
+    write_memo(&mut out, &stages.stage0_memo_groups, None, false);
+    if until == RunUntil::Stage0 {
+        return out;
+    }
 
+    let Some(pass1) = &run.per_computation_candidates else {
+        failure(&mut out);
+        return out;
+    };
     section(
         &mut out,
         "Stage 1 Pass 1 output: PerComputationLogicalMemoCandidates",
     );
     write_memo(&mut out, &pass1.memo, None, true);
-    let _ = writeln!(out, "computation_targets:");
-    let rows = pass1
-        .computation_targets
-        .iter()
-        .map(|target| {
-            let fused = target
-                .fused_computation
-                .as_ref()
-                .map_or(String::new(), |fused| {
-                    format!("fused: {:?}", fused.ways_to_compute)
-                });
-            vec![
-                format!(
-                    "G{} measure {}:",
-                    target.aggregate_group.0, target.measure_index
-                ),
-                format!("{:?}", target.ways_to_compute),
-                fused,
-            ]
-        })
-        .collect();
-    write_rows(&mut out, "    ", rows);
     let _ = writeln!(
         out,
         "pruned_candidates ({}):",
@@ -101,63 +85,60 @@ pub fn planning_stages_text(stages: &PlanningStagesRun, enumerated: Option<usize
         })
         .collect();
     write_rows(&mut out, "    ", rows);
-
-    let mut previous = &pass1.memo;
-    if let Some(steps) = &run.memo_steps {
-        section(
-            &mut out,
-            "Stage 1 Pass 2, after local window composition (pane candidates)",
-        );
-        write_memo(&mut out, &steps.pass2, Some(previous), true);
-        previous = &steps.pass2;
-    }
-    match &run.logical_asap_candidates {
-        Some(logical) => {
-            section(
-                &mut out,
-                "Stage 1 Pass 2 output = Stage 2 input: LogicalASAPMemoCandidates",
-            );
-            write_memo(&mut out, &logical.memo, Some(previous), true);
-        }
-        None => {
-            let _ = writeln!(out, "\n(no Pass 2 output)");
-        }
-    }
-    if let Some(steps) = &run.memo_steps {
-        match &steps.selected_chosen_candidates {
-            Ok(choice) => {
-                let _ = writeln!(out, "selected choice: {}", choice_text(choice));
-            }
-            Err(reason) => {
-                let _ = writeln!(out, "selected choice unavailable: {reason}");
-            }
-        }
+    if until == RunUntil::Pass1 {
+        return out;
     }
 
-    match &run.physical_asap_candidates {
-        Some(physical) => {
-            section(
-                &mut out,
-                "Stage 2 output = Stage 3 input: PhysicalASAPMemoCandidates",
-            );
-            write_physical(&mut out, physical);
-        }
-        None => {
-            let _ = writeln!(out, "\n(no Stage 2 output)");
-        }
+    let (Some(pass2), Some(logical)) = (
+        &stages.pass2_local_window_composition,
+        &run.logical_asap_candidates,
+    ) else {
+        failure(&mut out);
+        return out;
+    };
+    section(
+        &mut out,
+        "Stage 1 Pass 2, after local window composition (tumbling-window candidates)",
+    );
+    write_memo(&mut out, pass2, Some(&pass1.memo), true);
+    section(
+        &mut out,
+        "Stage 1 Pass 2 output = Stage 2 input: LogicalASAPMemoCandidates",
+    );
+    write_memo(&mut out, &logical.memo, Some(pass2), true);
+    if until == RunUntil::Pass2 {
+        return out;
+    }
+
+    let Some(physical) = &run.physical_asap_candidates else {
+        failure(&mut out);
+        return out;
+    };
+    section(
+        &mut out,
+        "Stage 2 output = Stage 3 input: PhysicalASAPMemoCandidates",
+    );
+    write_physical(&mut out, physical);
+    if until == RunUntil::Stage2 {
+        return out;
     }
 
     section(&mut out, "Stage 3 output: Selection");
-    write_selection(&mut out, stages);
-
-    if let (Some(limit), Some(steps)) = (enumerated, &run.memo_steps) {
-        write_enumeration(
-            &mut out,
-            &steps.concrete_states,
-            &steps.selected_chosen_candidates,
-            limit,
-        );
+    let chosen = match &run.selection {
+        Ok(selection) => {
+            selected_chosen_candidates(&logical.memo, physical, &selection.selected_dag)
+        }
+        Err(_) => Err("no plan was selected".into()),
+    };
+    match &chosen {
+        Ok(choice) => {
+            let _ = writeln!(out, "selected choice: {}", choice_text(choice));
+        }
+        Err(reason) => {
+            let _ = writeln!(out, "selected choice unavailable: {reason}");
+        }
     }
+    write_selection(&mut out, stages);
     out
 }
 
@@ -255,12 +236,7 @@ fn choice_text(choice: &asap_logical_asap_optimization::ChosenCandidatePerMemoGr
 /// `new` when `previous` (the memo at the step before) has no candidate of
 /// that group with the same node and inputs, chain and input groups (fused
 /// groups, and accuracy budget parts when more than one).
-fn write_memo(
-    out: &mut String,
-    memo: &MemoCandidates,
-    previous: Option<&MemoCandidates>,
-    with_candidates: bool,
-) {
+fn write_memo(out: &mut String, memo: &Memo, previous: Option<&Memo>, with_candidates: bool) {
     // The group lines share one set of column widths, with each group's
     // candidates printed under its line.
     let group_rows: Vec<Vec<String>> = memo
@@ -536,49 +512,6 @@ fn write_selection(out: &mut String, stages: &PlanningStagesRun) {
     }
 }
 
-/// The first `limit` memo choices over `memo` (Stage 2's input), each with
-/// the selected one marked and its composed DAG.
-fn write_enumeration(
-    out: &mut String,
-    memo: &MemoCandidates,
-    selected: &Result<asap_logical_asap_optimization::ChosenCandidatePerMemoGroup, String>,
-    limit: usize,
-) {
-    let enumeration = enumerate(memo, limit);
-    section(
-        out,
-        &format!(
-            "Memo choices over Stage 2's input: {} listed{}",
-            enumeration.all_chosen_candidates.len(),
-            if enumeration.complete {
-                " (all)"
-            } else {
-                ", more not listed"
-            }
-        ),
-    );
-    for (index, choice) in enumeration.all_chosen_candidates.iter().enumerate() {
-        let mark = if selected.as_ref().ok() == Some(choice) {
-            "  <== selected"
-        } else {
-            ""
-        };
-        let _ = writeln!(out, "\nE{}  {}{mark}", index + 1, choice_text(choice));
-        match build_logical_asap_dags_from_chosen_candidates(memo, choice) {
-            Ok(roots) => {
-                let roots: Vec<QueryRoot> = roots
-                    .into_iter()
-                    .map(|(_, node)| QueryRoot::Operator(node))
-                    .collect();
-                write_dag(out, &roots);
-            }
-            Err(error) => {
-                let _ = writeln!(out, "error: {error}");
-            }
-        }
-    }
-}
-
 /// The label of `node`'s own operator, without its children.
 fn root_label(node: &Rc<OperatorNode>) -> String {
     let (flat, _) = flatten(&[QueryRoot::Operator(node.clone())]);
@@ -587,11 +520,7 @@ fn root_label(node: &Rc<OperatorNode>) -> String {
 
 /// A candidate's own nodes, from `root` down to its `input_groups`' nodes
 /// (excluded), root first, joined by " ← ".
-fn chain_label(
-    memo: &MemoCandidates,
-    root: &Rc<OperatorNode>,
-    input_groups: &[MemoGroupId],
-) -> String {
+fn chain_label(memo: &Memo, root: &Rc<OperatorNode>, input_groups: &[MemoGroupId]) -> String {
     let (flat, originals) = flatten(&[QueryRoot::Operator(root.clone())]);
     let is_input = |id: usize| {
         input_groups
@@ -622,13 +551,13 @@ fn chain_label(
 mod tests {
     use super::*;
     use crate::planner_layering_examples::example1;
-    use crate::planning_stages::{lower_promql_roots, run_search_over};
-    use asap_planner::{PlanSearchSettings, PlanningModels};
+    use crate::planning_stages::{lower_promql_roots, run_stages_until};
+    use asap_planner::PlanningModels;
     use asap_types::workload::Query;
 
     /// One repeating `sum(rate(...[1m]))` query: every section is printed,
-    /// Pass 2 adds pane candidates with their layout, Stage 2 offers the
-    /// pane chain at ingestion time, and the enumeration lists the choices.
+    /// Pass 2 adds tumbling-window candidates with their layout, Stage 2 offers
+    /// the tumbling-window chain at ingestion time, and Stage 3 names the selected choice.
     #[test]
     fn prints_every_stage_of_a_repeating_rate_query() {
         let mut workload = example1();
@@ -637,20 +566,16 @@ mod tests {
         queries[0].query = Query("sum by (job) (rate(http_requests_total[1m]))".into());
         let roots = lower_promql_roots(&workload).unwrap();
         let entries: Vec<_> = workload.query_workload.entries().collect();
-        let stages = run_search_over(
+        let stages = run_stages_until(
             roots,
             &entries,
             &workload.data_workload.clone().unwrap(),
             PlanningModels::builtin(),
-            PlanSearchSettings {
-                inspect: true,
-                ..PlanSearchSettings::default()
-            },
-            None,
+            RunUntil::Stage3,
         )
         .unwrap();
 
-        let text = planning_stages_text(&stages, Some(2));
+        let text = planning_stages_text(&stages);
 
         for heading in [
             "Stage 0 output",
@@ -660,20 +585,28 @@ mod tests {
             "Stage 2 input: LogicalASAPMemoCandidates",
             "Stage 3 input: PhysicalASAPMemoCandidates",
             "Stage 3 output: Selection",
-            "Memo choices over Stage 2's input: 2 listed, more not listed",
         ] {
             assert!(text.contains(heading), "missing {heading}:\n{text}");
         }
         // A group line names its operator and the groups it reads.
         assert!(text.contains("G1:  TimeRange 60s     <- G0\n"), "{text}");
-        // Pass 2 adds a pane candidate reading the scan, its layout in its chain.
-        assert!(text.contains(
-            "    [1]   Panes  new  FinalizeExactAccumulator ← SummaryMerge ← PaneChain pane_count=6 pane_width_ms=10000  inputs=[G0]\n"
-        ), "{text}");
-        // Stage 2 offers the pane chain at ingestion time, read from the
+        // The line containing every one of `parts`, columns aside.
+        let has_line = |parts: &[&str]| {
+            text.lines()
+                .any(|line| parts.iter().all(|part| line.contains(part)))
+        };
+        // Pass 2 adds a tumbling-window candidate reading the scan, its layout in its chain.
+        assert!(
+            has_line(&[
+                "TumblingWindows  new  FinalizeExactAccumulator ← SummaryMerge ← SummaryTumblingWindowChain tumbling_window_count=6 tumbling_window_width_ms=10000",
+                "inputs=[G0]",
+            ]),
+            "{text}"
+        );
+        // Stage 2 offers the tumbling-window chain at ingestion time, read from the
         // ingestion-time scan.
         assert!(
-            text.contains("IngestionTime  MatAtIngestion(Memory)          <- {C1}\n"),
+            has_line(&["IngestionTime  MatAtIngestion(Memory)", "<- {C1}"]),
             "{text}"
         );
         assert!(
