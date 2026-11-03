@@ -16,7 +16,8 @@ use crate::checks::{accuracy_check, accuracy_targets, latency_violation};
 use crate::report::{
     AcceptedAccuracy, ErrorSelectingPlan, Rejection, RejectionCause, WholePlanSelection,
 };
-use crate::{AnalyticalCostError, SelectionModels};
+use crate::SelectionModels;
+use asap_cost::analytical::AnalyticalCostError;
 use asap_cost::{
     kept_tumbling_window_chains, node_map, plan_cost, query_reach, tumbling_window_retention_ms,
 };
