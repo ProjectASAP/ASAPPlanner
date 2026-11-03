@@ -1,6 +1,5 @@
 //! A feasible starting plan for the group selection MILP (#1095 §2.0,
-//! "Solving strategy" step 1), so HiGHS starts with an incumbent and a
-//! deadline yields a plan.
+//! "Solving strategy" step 1), so HiGHS starts with an incumbent.
 //!
 //! **Each query's cheapest plan.** Queries are planned one after another
 //! into one plan. A query's plan is derived from its output references
@@ -25,7 +24,6 @@
 //! reversed, are costed exactly by the MILP's own rows and objective
 //! ([`Completion`]); the cheapest feasible one is the start.
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::time::Instant;
 
 use asap_cost::execution_demand::evaluation_rate;
 use asap_types::stages::{output_references, PhysicalCandidateId, ReaderConstraint};
@@ -83,19 +81,19 @@ enum Undo {
     SlotRead(usize, PhysicalCandidateId, usize),
 }
 
-/// A feasible plan (module documentation), or `None` when none was found
-/// before `budget`.
+/// A feasible plan (module documentation), or `None` when none was found.
+/// It tries a fixed number of query orders ([`MORE_ORDERS`]), so every run
+/// starts from the same plan.
 pub(crate) fn warm_start(
     milp: &SelectionMilp<'_>,
     completion: &Completion,
-    budget: Option<Instant>,
 ) -> Option<StartingPlan> {
     let estimates = Estimates::new(milp);
     let mut best: Option<StartingPlan> = None;
     let count = milp.query_count();
     let mut orders: Vec<Vec<usize>> = vec![(0..count).collect(), (0..count).rev().collect()];
-    // More orders, while the budget lasts: a fixed pseudo-random sequence
-    // of permutations, so runs are reproducible.
+    // More orders: a fixed pseudo-random sequence of permutations, so runs
+    // are reproducible.
     let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
     for _ in 0..MORE_ORDERS {
         let mut order: Vec<usize> = (0..count).collect();
@@ -112,11 +110,8 @@ pub(crate) fn warm_start(
     // queries that may reach it.
     let strategies = [(false, false), (true, false), (true, true)];
     let mut tried = 0;
-    'orders: for order in &orders {
+    for order in &orders {
         for &(share, amortized) in &strategies {
-            if budget.is_some_and(|budget| Instant::now() >= budget) && best.is_some() {
-                break 'orders;
-            }
             tried += 1;
             let Some(plan) =
                 sequential_plan(milp, &estimates, order, share, amortized, &BTreeSet::new())
@@ -162,7 +157,7 @@ pub(crate) fn warm_start(
     sharable.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     let mut preferred: BTreeSet<PhysicalCandidateId> = BTreeSet::new();
     for (_, m) in sharable {
-        if best.is_none() || budget.is_some_and(|budget| Instant::now() >= budget) {
+        if best.is_none() {
             break;
         }
         let mut trial = preferred.clone();
@@ -193,8 +188,7 @@ pub(crate) fn warm_start(
     best
 }
 
-/// The pseudo-random orders tried after workload order and its reverse,
-/// within the budget.
+/// The pseudo-random orders tried after workload order and its reverse.
 const MORE_ORDERS: usize = 30;
 
 /// The plan's binaries: `p[ctx, c]` and `x[m]` set to 1.

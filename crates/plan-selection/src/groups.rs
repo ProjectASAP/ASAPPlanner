@@ -33,8 +33,8 @@
 //!   grow with the range-evaluation span of the queries reaching it
 //!   ([`asap_cost::tumbling_window_retention_ms`], [`asap_cost::retained_tumbling_windows`]).
 //!
-//! Every combination of these options is costed (at most
-//! [`MAX_CONTEXTS`]); a combination `asap-cost` cannot cost is skipped
+//! Every combination of these options is costed; a combination
+//! `asap-cost` cannot cost is skipped
 //! (no plan can use it). When the numbers agree, the usage is
 //! plan-independent; otherwise [`CandidateData::usage_depends_on`] says which
 //! options changed it, and [`CandidateData::usage`] holds the first costed
@@ -124,11 +124,6 @@ use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 use crate::SelectionModels;
 
 use asap_types::stages::{PhysicalCandidateId, ReaderConstraint};
-
-/// The most contexts (combinations of producer outputs, scan windows and
-/// pane retentions) one candidate is costed under; beyond it the candidate's usage
-/// is marked [`UsageContext::TooManyContexts`].
-pub(crate) const MAX_CONTEXTS: usize = 256;
 
 /// What the MILP is built from (module documentation).
 #[derive(Debug, Clone)]
@@ -233,11 +228,6 @@ impl Default for CandidateData {
     }
 }
 
-/// The most producer choices [`CandidateData::usage_per_producers`] lists; beyond
-/// it the candidate's usage is marked [`UsageContext::TooManyContexts`] and
-/// its first costed usage stands for every choice.
-pub(crate) const MAX_PRODUCER_CHOICES: usize = 256;
-
 /// One candidate's usage, from [`asap_cost::node_usage`] (module
 /// documentation).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -300,8 +290,6 @@ pub(crate) enum UsageContext {
     /// window from a source without `rows_held`); the usage is the first
     /// costed one's.
     UncostableContext,
-    /// More than [`MAX_CONTEXTS`] combinations: not all were costed.
-    TooManyContexts,
 }
 
 /// A candidate dominance deleted.
@@ -330,9 +318,8 @@ pub(crate) enum UnusableReason {
     /// Some output's guarantee misses the target
     /// ([`RejectionCause::AccuracyTargetMissed`](crate::report::RejectionCause::AccuracyTargetMissed)).
     AccuracyTargetMissed,
-    /// Not checked, so not usable: more than
-    /// [`accuracy_positions::MAX_COMPOSITIONS`] outputs to build, or a node
-    /// that does not rebuild over its producers.
+    /// Not checked, so not usable: a node that does not rebuild over its
+    /// producers.
     NotChecked,
 }
 
@@ -1129,7 +1116,7 @@ fn window_read_through(path: &[&PhysicalASAPDAGNode]) -> ScanWindow {
 /// windows (one per path through time shifts) and, per execution context,
 /// the unions of the window kinds its readers there read (one scan run read
 /// by several readers reads the union, `PhysicalASAPDAG::scan_window`):
-/// every union of up to [`MAX_WINDOW_KINDS`] kinds, else the union of all.
+/// every union of the kinds.
 /// A read as an output or as a shareable candidate's own input is
 /// `Unbounded`. Distinct; `Unbounded` alone when nothing reads it.
 fn scan_window_options(
@@ -1239,13 +1226,7 @@ fn window_contains(outer: ScanWindow, inner: ScanWindow) -> bool {
     }
 }
 
-/// The most window kinds of one scan run whose every union is costed (and
-/// encoded exactly, [`crate::milp::cost_terms`]); beyond it only the union
-/// of all.
-pub(crate) const MAX_WINDOW_KINDS: usize = 4;
-
-/// Adds to `windows` every union of a nonempty subset of `kinds` (only the
-/// union of all beyond [`MAX_WINDOW_KINDS`]).
+/// Adds to `windows` every union of a nonempty subset of `kinds`.
 fn add_unions(kinds: &[ScanWindow], windows: &mut Vec<ScanWindow>) {
     use crate::milp::cost_terms::scan_window_read_at as window_union;
     let mut push = |window: ScanWindow| {
@@ -1253,10 +1234,6 @@ fn add_unions(kinds: &[ScanWindow], windows: &mut Vec<ScanWindow>) {
             windows.push(window);
         }
     };
-    if kinds.len() > MAX_WINDOW_KINDS {
-        push(window_union(kinds.iter().copied()));
-        return;
-    }
     for set in 1usize..(1 << kinds.len()) {
         push(window_union(
             (0..kinds.len())
@@ -1624,12 +1601,12 @@ fn candidate_data(
             .map(Vec::len)
             .chain([windows.len(), retained.len()])
             .try_fold(1usize, |total, options| total.checked_mul(options))
-            .unwrap_or(usize::MAX);
+            .expect("the number of context combinations fits in usize");
         // Each costed combination: its usage, its output, and its picks
         // (the option per input, the window and the retained panes).
         let mut costed: Vec<(CandidateUsage, ProducerOutput<'_>, Picks)> = Vec::new();
         let mut error = None;
-        for index in 0..combinations.min(MAX_CONTEXTS) {
+        for index in 0..combinations {
             let mut rest = index;
             let mut pick = |options: usize| {
                 let picked = rest % options;
@@ -1787,48 +1764,45 @@ fn candidate_data(
                 .try_fold(1usize, |total, producers| {
                     total.checked_mul(producers.len())
                 })
-                .unwrap_or(usize::MAX);
-            if choices > MAX_PRODUCER_CHOICES {
-                depends_on.push(UsageContext::TooManyContexts);
-            } else {
-                for index in 0..choices {
-                    let mut rest = index;
-                    let chosen: Vec<&(ProducerChoice, Vec<usize>)> = options_of_producers
-                        .iter()
-                        .map(|producers| {
-                            let picked = &producers[rest % producers.len()];
-                            rest /= producers.len();
-                            picked
-                        })
-                        .collect();
-                    let matching: Vec<&(CandidateUsage, usize)> = costed
-                        .iter()
-                        .zip(&given)
-                        .filter(|((_, _, picks), _)| {
-                            inputs_changing_usage.iter().zip(&chosen).all(
-                                |(&input, (_, options))| options.contains(&picks.options[input]),
-                            )
-                        })
-                        .map(|(_, gives)| gives)
-                        .collect();
-                    let costliest = matching.iter().copied().max_by(|a, b| {
-                        let total = |usage: &CandidateUsage| {
-                            usage.cost_per_execution.unwrap_or(0.0)
-                                + usage.standing_cost_per_second.unwrap_or(0.0)
-                                + usage.work_ms_per_execution
-                        };
-                        total(&a.0).total_cmp(&total(&b.0))
-                    });
-                    if matching.iter().any(|gives| Some(*gives) != costliest) {
-                        result[class.0].producer_usage_ambiguous = true;
-                    }
-                    result[class.0].usage_per_producers.push((
-                        chosen.iter().map(|(choice, _)| *choice).collect(),
-                        costliest.copied(),
-                    ));
+                .expect("the number of producer choices fits in usize");
+            for index in 0..choices {
+                let mut rest = index;
+                let chosen: Vec<&(ProducerChoice, Vec<usize>)> = options_of_producers
+                    .iter()
+                    .map(|producers| {
+                        let picked = &producers[rest % producers.len()];
+                        rest /= producers.len();
+                        picked
+                    })
+                    .collect();
+                let matching: Vec<&(CandidateUsage, usize)> = costed
+                    .iter()
+                    .zip(&given)
+                    .filter(|((_, _, picks), _)| {
+                        inputs_changing_usage
+                            .iter()
+                            .zip(&chosen)
+                            .all(|(&input, (_, options))| options.contains(&picks.options[input]))
+                    })
+                    .map(|(_, gives)| gives)
+                    .collect();
+                let costliest = matching.iter().copied().max_by(|a, b| {
+                    let total = |usage: &CandidateUsage| {
+                        usage.cost_per_execution.unwrap_or(0.0)
+                            + usage.standing_cost_per_second.unwrap_or(0.0)
+                            + usage.work_ms_per_execution
+                    };
+                    total(&a.0).total_cmp(&total(&b.0))
+                });
+                if matching.iter().any(|gives| Some(*gives) != costliest) {
+                    result[class.0].producer_usage_ambiguous = true;
                 }
-                result[class.0].inputs_changing_usage = inputs_changing_usage;
+                result[class.0].usage_per_producers.push((
+                    chosen.iter().map(|(choice, _)| *choice).collect(),
+                    costliest.copied(),
+                ));
             }
+            result[class.0].inputs_changing_usage = inputs_changing_usage;
         }
         if retained.len() > 1 {
             let retained_changes_usage = changes(&|a: &Picks, b: &Picks| {
@@ -1885,9 +1859,6 @@ fn candidate_data(
         }
         if uncostable_context {
             depends_on.push(UsageContext::UncostableContext);
-        }
-        if combinations > MAX_CONTEXTS {
-            depends_on.push(UsageContext::TooManyContexts);
         }
         result[class.0].output_count = produced.len();
         outputs[class.0] = Some(Ok(produced));

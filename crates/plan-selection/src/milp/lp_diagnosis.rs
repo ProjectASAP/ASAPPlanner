@@ -14,25 +14,22 @@
 //! - `runs`: the charged `p` and `x` variables with the largest difference
 //!   between the incumbent and the LP, with their values in both.
 //!
-//! The deadline is pushed back by the diagnosis's time, so the MILP keeps
-//! its budget; a diagnosed run's wall time (and the facade's later rounds)
-//! is still not comparable with an undiagnosed one.
+//! A diagnosed run's wall time is not comparable with an undiagnosed one.
+//! The LPs and the root node run without a time limit: an LP solve and a
+//! one-node MIP solve end on their own.
 use std::collections::BTreeMap;
 use std::time::Instant;
 
 use good_lp::solvers::highs::highs;
 use good_lp::{constraint, variable, Constraint, Expression, ProblemVariables, SolverModel};
 
-use super::model::{objective_scale, SelectionMilp, HIGHS_THREADS};
+use super::model::{objective_scale, SelectionMilp};
 
 /// The environment variable naming the file the diagnosis appends to.
 const DIAGNOSIS_ENV: &str = "ASAP_STAGE3_LP_DIAGNOSIS";
 
 /// The runs listed per solve.
 const RUNS_SHOWN: usize = 40;
-
-/// The time limit of each LP and of the root node.
-const LP_TIME_LIMIT_S: f64 = 300.0;
 
 /// One LP (or root node) solved.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -114,8 +111,7 @@ impl Diagnosis {
                 .with_all(rows);
             let mut model = problem.try_into_inner().expect("a HiGHS model");
             model.set_option("output_flag", false);
-            model.set_option("threads", HIGHS_THREADS);
-            model.set_option("time_limit", LP_TIME_LIMIT_S);
+            model.set_option("threads", milp.highs_threads);
             if root {
                 // The root node, then stop: its bound is the root bound.
                 model.set_option("mip_max_nodes", 1);
@@ -227,7 +223,6 @@ impl Diagnosis {
         incumbent: Option<&[f64]>,
         objective_per_second: f64,
         dual_bound_per_second: f64,
-        status: &str,
     ) {
         let by_family = |columns: Option<&[f64]>| -> Option<BTreeMap<&'static str, f64>> {
             let columns = columns.filter(|columns| !columns.is_empty())?;
@@ -264,7 +259,6 @@ impl Diagnosis {
         let line = serde_json::json!({
             "runs": runs,
             "variables": self.column_families.len(),
-            "status": status,
             "objective_per_second": objective_per_second,
             "dual_bound_per_second": dual_bound_per_second,
             "lp": self.lp,

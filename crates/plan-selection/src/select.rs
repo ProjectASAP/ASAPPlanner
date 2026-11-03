@@ -5,16 +5,15 @@
 //!
 //! One MILP solve and one realization, no loop:
 //! 1. the MILP's inputs (candidate dominance, execution contexts, accuracy
-//!    weights) and the model, solved once with HiGHS from a warm start,
-//!    the deadline as its time limit;
+//!    weights) and the model, solved once with HiGHS from a warm start to
+//!    proven optimality (no time limit);
 //! 2. the solution decoded into a [`DagOfSelectedCandidates`]
 //!    ([`crate::milp::decode`]) and validated against the catalog;
 //! 3. the plan realized once through the injected realizer: a rejection is
 //!    a Stage 2 catalog bug ([`ErrorSelectingPlan::RealizerRejected`]);
 //! 4. exact checks: `asap_cost::plan_cost` of the realized plan minus the
-//!    request fees equals the objective within a relative 10⁻⁶ at
-//!    `Optimal`, and is at most the objective at the deadline (otherwise an
-//!    error, or, when the model encoded some term inexactly,
+//!    request fees equals the objective within a relative 10⁻⁶ (otherwise
+//!    an error, or, when the model encoded some term inexactly,
 //!    [`SearchReport::inexact_objective`]); every query's accuracy
 //!    (`satisfies`) and latency hold, or it is an error.
 //!
@@ -41,7 +40,6 @@ use crate::groups::{prepare_milp_inputs_with, MilpInputs};
 use crate::milp::decode::{decode, ChosenCandidates};
 use crate::milp::model::{
     build_selection_milp, solve_selection_milp, SelectionMilpError, SelectionMilpOptions,
-    SelectionMilpStatus,
 };
 use crate::models::{AccuracyCheckInputs, SelectionModels};
 use crate::report::{
@@ -59,10 +57,10 @@ const COST_EQUALITY_TOLERANCE: f64 = 1e-6;
 /// target (`accuracy_checks`) and latency bound, and priced under
 /// `cost_inputs`. `entries[q]` is query `q`'s workload entry (accuracy
 /// target, latency bound, recurrence); `data` the data workload with its
-/// bounds. `deadline` is the only budget.
+/// bounds. The solve has no time limit: it runs to proven optimality.
 ///
-/// Err: invalid or unsupported cost inputs, an infeasible catalog, no plan
-/// by the deadline, or the realizer rejected the selected plan
+/// Err: invalid or unsupported cost inputs, an infeasible catalog, a
+/// solver failure, or the realizer rejected the selected plan
 /// ([`ErrorSelectingPlan::RealizerRejected`]: a Stage 2 catalog bug).
 pub fn select_plan(
     physical: &PhysicalASAPMemoCandidates,
@@ -71,7 +69,6 @@ pub fn select_plan(
     accuracy_checks: &AccuracyCheckInputs<'_>,
     cost_inputs: &CostInputs,
     realizer: &dyn AssignmentRealizer,
-    deadline: Option<Instant>,
 ) -> Result<Selection, ErrorSelectingPlan> {
     cost_inputs
         .validate()
@@ -103,12 +100,12 @@ pub fn select_plan(
         cost_inputs,
         SelectionMilpOptions {
             enforce_accuracy,
-            split_into_parts: true,
+            ..SelectionMilpOptions::default()
         },
     )
     .map_err(selection_error)?;
     let build_ms = construction_started.elapsed().as_millis() as u64;
-    let solution = solve_selection_milp(milp, deadline, build_ms).map_err(selection_error)?;
+    let solution = solve_selection_milp(milp, build_ms).map_err(selection_error)?;
 
     let validation_started = Instant::now();
     let chosen = ChosenCandidates {
@@ -147,12 +144,7 @@ pub fn select_plan(
     let objective_per_second = solution.cost_per_second;
     let difference = (objective_per_second - plan_cost_per_second).abs();
     let tolerance = COST_EQUALITY_TOLERANCE * plan_cost_per_second.abs().max(f64::MIN_POSITIVE);
-    // At the deadline the incumbent's auxiliary variables may sit above
-    // their true values: the objective is an upper bound on `plan_cost`.
-    let within = match solution.status {
-        SelectionMilpStatus::Optimal => difference <= tolerance,
-        SelectionMilpStatus::TimeLimit => plan_cost_per_second <= objective_per_second + tolerance,
-    };
+    let within = difference <= tolerance;
     report_run(&solution, objective_per_second, plan_cost_per_second);
     let inexact_objective = if within {
         None
@@ -192,10 +184,7 @@ pub fn select_plan(
         accepted_accuracy_per_query,
         pruned_candidates,
         search_report: SearchReport {
-            status: match solution.status {
-                SelectionMilpStatus::Optimal => SearchStatus::Optimal,
-                SelectionMilpStatus::TimeLimit => SearchStatus::DeadlineReached,
-            },
+            status: SearchStatus::Optimal,
             // The dual bound is on the objective, which leaves out the
             // request fees every plan pays; the selection's cost has them.
             cost_lower_bound_per_second: solution
@@ -233,12 +222,6 @@ fn selection_error(error: SelectionMilpError) -> ErrorSelectingPlan {
              constraints together (the selection MILP is infeasible)"
                 .into(),
         ),
-        SelectionMilpError::NoSolution { status } => ErrorSelectingPlan::NoPlanByDeadline(format!(
-            "HiGHS stopped ({status}) without an integral plan"
-        )),
-        SelectionMilpError::DeadlineReached => {
-            ErrorSelectingPlan::NoPlanByDeadline("the deadline passed before the solve".into())
-        }
         SelectionMilpError::Cost(reason) | SelectionMilpError::Solver(reason) => {
             ErrorSelectingPlan::Solver(reason)
         }
@@ -326,7 +309,6 @@ fn report_run(
         return;
     };
     let line = serde_json::json!({
-        "status": format!("{:?}", solution.status),
         "variables": solution.size.variables,
         "binaries": solution.size.binaries,
         "rows": solution.size.rows,
@@ -341,7 +323,6 @@ fn report_run(
         "objective_per_second": objective_per_second,
         "plan_cost_per_second": plan_cost_per_second,
         "dual_bound_per_second": solution.cost_lower_bound_per_second,
-        "relative_gap": solution.relative_gap,
         "parts": solution.parts,
     });
     use std::io::Write;

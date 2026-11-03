@@ -2605,13 +2605,10 @@ fn milp_search_objective_equals_plan_cost_on_example1_and_rangeheavy() {
         let selection = &document["stage3_plan_selection"];
         assert!(selects_a_plan(selection), "{args:?}: {selection}");
         let report = &selection["search_report"];
-        // Optimal or not by the deadline, the selected plan's `plan_cost`
-        // equals the MILP's objective: the search errors on a difference,
-        // and no term is encoded inexactly here.
-        assert!(
-            report["status"] == "optimal" || report["status"] == "deadline_reached",
-            "{args:?}: {report}"
-        );
+        // The MILP runs to proven optimality, and the selected plan's
+        // `plan_cost` equals its objective: the search errors on a
+        // difference, and no term is encoded inexactly here.
+        assert_eq!(report["status"], "optimal", "{args:?}: {report}");
         assert!(
             report.get("inexact_objective").is_none(),
             "{args:?}: {report}"

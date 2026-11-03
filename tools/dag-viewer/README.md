@@ -356,7 +356,8 @@ are ignored, `stage_pipeline`'s default.
   materialization assignment and all priced by the reference pricer.
   `--max-combinations` bounds the choices enumerated.
 - `stage3_plan_selection.search_report` reports how the search ended
-  (`optimal` or `deadline_reached`), its cost lower bound when it has one,
+  (`optimal`; documents from before the MILP ran without a time limit may
+  say `deadline_reached`), its cost lower bound when it has one,
   the MILP's size and the model, solver and validation times. Historical
   committed documents with the earlier Stage 3 section (`costs`,
   `selected`, `rejected`, `search`) remain readable.
