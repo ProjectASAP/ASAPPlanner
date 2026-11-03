@@ -437,11 +437,8 @@ pub fn optimize_physical_asap(
     data: &DataWorkload,
     query_time_results_retained: bool,
 ) -> Result<Vec<PhysicalWorkloadPlan>, PhysicalASAPOptimizationError> {
-    let mut cache = HashMap::new();
-    let implemented = map_roots(roots, &mut |node| implement(node, &mut cache))?;
-    let mat_candidates =
-        materialization_candidates(&implemented, entries, data, query_time_results_retained);
-    check_tumbling_windows_on_range_steps(&mat_candidates, entries)?;
+    let (implemented, _, mat_candidates) =
+        implement_and_find_candidates(roots, entries, data, query_time_results_retained)?;
     materialization_assignments(&mat_candidates)
         .map(|assignment| {
             assigned_candidate(from_logical, &implemented, &mat_candidates, assignment)
@@ -467,23 +464,23 @@ pub fn optimize_physical_asap_assigned(
     query_time_results_retained: bool,
     choose: &mut dyn FnMut(&[usize]) -> Option<Materialization>,
 ) -> Result<Option<PhysicalWorkloadPlan>, PhysicalASAPOptimizationError> {
-    let mut cache = HashMap::new();
-    let implemented = map_roots(roots, &mut |node| implement(node, &mut cache))?;
-    let mat_candidates =
-        materialization_candidates(&implemented, entries, data, query_time_results_retained);
-    check_tumbling_windows_on_range_steps(&mat_candidates, entries)?;
-    let mut assignment = Vec::with_capacity(mat_candidates.len());
-    for mat_candidate in &mat_candidates {
-        match choose(&mat_candidate.readers) {
-            Some(m) if mat_candidate.options().contains(&m) => assignment.push(m),
-            _ => return Ok(None),
-        }
-    }
-    let nodes: Vec<_> = mat_candidates.iter().map(|c| Rc::clone(&c.node)).collect();
-    if !down_closed(&mat_candidates, &candidates_below(&nodes), &assignment) {
-        return Ok(None);
-    }
-    assigned_candidate(from_logical, &implemented, &mat_candidates, assignment).map(Some)
+    let mut rejected = false;
+    let plan = optimize_physical_asap_chosen(
+        from_logical,
+        roots,
+        entries,
+        data,
+        query_time_results_retained,
+        &mut |_, readers, options| {
+            choose(readers)
+                .filter(|m| options.contains(m))
+                .unwrap_or_else(|| {
+                    rejected = true;
+                    options[0]
+                })
+        },
+    )?;
+    Ok(plan.filter(|_| !rejected))
 }
 
 /// [`optimize_physical_asap_chosen`]'s choice per materialization
@@ -509,15 +506,12 @@ pub(crate) fn optimize_physical_asap_chosen(
     query_time_results_retained: bool,
     choose: &mut ChooseMaterialization<'_>,
 ) -> Result<Option<PhysicalWorkloadPlan>, PhysicalASAPOptimizationError> {
-    let mut cache = HashMap::new();
-    let implemented = map_roots(roots, &mut |node| implement(node, &mut cache))?;
+    let (implemented, cache, mat_candidates) =
+        implement_and_find_candidates(roots, entries, data, query_time_results_retained)?;
     let logical_of: HashMap<*const OperatorNode, *const OperatorNode> = cache
         .iter()
         .map(|(logical, implemented)| (Rc::as_ptr(implemented), *logical))
         .collect();
-    let mat_candidates =
-        materialization_candidates(&implemented, entries, data, query_time_results_retained);
-    check_tumbling_windows_on_range_steps(&mat_candidates, entries)?;
     let mut assignment = Vec::with_capacity(mat_candidates.len());
     for mat_candidate in &mat_candidates {
         let logical = logical_of
@@ -596,22 +590,27 @@ fn assigned_candidate(
     })
 }
 
-/// The number of physical candidates [`optimize_physical_asap`] returns for
-/// `roots`, without building them; `Err` when a candidate cannot be
-/// implemented.
-#[cfg(test)]
-fn physical_candidate_count(
+/// `roots` implemented, the implementation of each logical node, and the
+/// materialization candidates of the implemented roots.
+fn implement_and_find_candidates(
     roots: &[QueryRoot],
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     query_time_results_retained: bool,
-) -> Result<usize, PhysicalASAPOptimizationError> {
+) -> Result<
+    (
+        Vec<QueryRoot>,
+        NodeToImplementedNodeCache,
+        Vec<MaterializationCandidate>,
+    ),
+    PhysicalASAPOptimizationError,
+> {
     let mut cache = HashMap::new();
     let implemented = map_roots(roots, &mut |node| implement(node, &mut cache))?;
     let mat_candidates =
         materialization_candidates(&implemented, entries, data, query_time_results_retained);
     check_tumbling_windows_on_range_steps(&mat_candidates, entries)?;
-    Ok(materialization_assignments(&mat_candidates).count())
+    Ok((implemented, cache, mat_candidates))
 }
 
 /// `Err` for the first tumbling-window chain whose tumbling-window width does not
@@ -2225,13 +2224,6 @@ mod tests {
             "tumbling-window width 60000 ms does not divide the 30000 ms step of a range \
              evaluation that reads it"
         );
-        assert!(physical_candidate_count(
-            std::slice::from_ref(&root),
-            &[stepping(30_000)],
-            &arriving(),
-            false,
-        )
-        .is_err());
         assert_eq!(implement_for(stepping(2 * MINUTE)).unwrap().len(), 2);
         // A one-step range (span 0) is one evaluation per request, at the
         // refresh: its step is not read.
