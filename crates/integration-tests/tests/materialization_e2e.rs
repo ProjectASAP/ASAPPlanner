@@ -290,7 +290,6 @@ const INGESTION_WINDOW: Scope = Scope::Ingestion {
 /// selectors keeps only label sets present on both sides (none when
 /// disjoint), at either placement, and never becomes aligned maintenance.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn arithmetic_over_different_selectors_matches_prometheus() {
     // The selected root reads the outer `sum`'s exact state through its
     // finalize.

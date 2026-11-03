@@ -244,7 +244,6 @@ async fn sql_window_and_filtered_aggregate_types() {
 /// finalized sum above it) is the cheapest plan, so both roots read one
 /// state. No replacement dag is constructed by the test.
 #[tokio::test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn batch_planning_replaces_summary_operators() {
     use asap_executor::values::Value;
     use asap_planner::PlanningModels;

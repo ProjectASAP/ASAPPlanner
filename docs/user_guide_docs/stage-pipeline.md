@@ -25,13 +25,12 @@ cargo run --release -p asap-devtools --bin stage_pipeline -- \
   --promql 'sum_over_time(requests[5m])' \
   --series-count 1000 --sample-interval-ms 15000 \
   --enforce-accuracy-guarantees \
-  --milp-time-limit-s 30 \
   --out plan.json
 ```
 
 The `--` separates Cargo options from planner options. `--out` is required.
 Release builds are recommended for planning-performance measurements. Initial
-compilation can take several minutes and is separate from the planning budget.
+compilation can take several minutes and is separate from planning time.
 
 Alternatively, build once and run the binary directly:
 
@@ -54,7 +53,6 @@ cargo run --release -p asap-devtools --bin stage_pipeline -- \
   --deployment-capabilities '{"raw_data_retained":true,"query_time_results_retained":false}' \
   --cost-model aws-fargate-us-east-1 \
   --enforce-accuracy-guarantees \
-  --milp-time-limit-s 280 \
   --out rangeheavy-plan.json
 ```
 
@@ -76,10 +74,9 @@ for workload, source-fact, and SQL examples.
 | Option | Meaning |
 | --- | --- |
 | `--enforce-accuracy-guarantees` | Enforce the queries' accuracy requirements. Without it, this inspection tool ignores accuracy guarantees, although executability checks still apply. |
-| `--milp-time-limit-s 280` | Set the planning time budget in seconds. A timeout may return a validated incumbent or no selected plan; it does not establish optimality. |
 | `--cost-model aws-fargate-us-east-1` | Compare plans using the configured AWS Fargate pricing model. Other supported names are `usage-over-time`, `provisioned-capacity`, and `cluster-capacity`. |
 | `--max-displayed 64` | Limit candidates shown in the document; this is not a search budget. |
-| `--exhaustive --max-combinations 10000` | Enumerate up to this many memo choices of the selected round, implement each with Stage 2 and price every resulting plan with the whole-workload reference pricer; its selection, costs and rejections are under `reference_pricing`. It is a reference, not Stage 3's search. |
+| `--exhaustive --max-combinations 10000` | Enumerate up to this many memo choices of Pass 2's memo, implement each with Stage 2 and price every resulting plan with the whole-workload reference pricer; its selection, costs and rejections are under `reference_pricing`. It is a reference, not Stage 3's search. |
 | `--cost-inputs cost_inputs.json` | Load the cost inputs (`CostInputs` JSON) instead of `--cost-model`, cluster flags, or `--measured-operation-costs`. |
 | `--no-memo` | Leave out the `memo` section (the memo after each step and the enumerated candidate DAGs), for a smaller document. |
 | `--price-enumerated 50` | Cost the first 50 enumerated candidate DAGs through Stage 2 and Stage 3, and flag any cheaper than the selected plan. Off by default. |
@@ -107,10 +104,10 @@ PY
 
 The document format is `asap-stage-pipeline/v1`. Check `selected_dag`,
 `cost`, `search_report` and any `error` in `stage3_plan_selection`, and the
-per-round counts and times in `planning_report`. A written JSON document
+counts and times in `planning_report`. A written JSON document
 alone does not mean planning succeeded: `selected_dag` may be null.
-A selected plan is not necessarily a proven optimum; inspect the search
-status (`search_report.status`) and the lower bound. Costs are model predictions, not measured
+The search status (`search_report.status`) of a selected plan is `optimal`:
+the plan is optimal over the candidates Stage 2 generated. Costs are model predictions, not measured
 execution times or an actual cloud bill.
 
 ## Troubleshooting

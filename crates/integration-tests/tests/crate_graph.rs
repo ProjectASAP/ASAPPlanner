@@ -168,7 +168,6 @@ fn crate_graph_violations(metadata: &Value) -> Vec<String> {
 }
 
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn workspace_crate_graph_follows_the_target_graph() {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let manifest = concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml");

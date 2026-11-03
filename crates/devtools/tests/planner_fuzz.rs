@@ -140,7 +140,6 @@ fn exact_duplicate_of_a_shared_query_holds() {
 /// A bounded worker campaign writes the summary with the design-doc coverage
 /// table and one draft per finding, including cases stopped by its time limit.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn campaign_writes_summary_coverage_and_drafts() {
     use asap_devtools::planner_fuzz::report::{run_campaign, Campaign};
     let out = Path::new(env!("CARGO_TARGET_TMPDIR"))

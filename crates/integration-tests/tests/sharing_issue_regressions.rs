@@ -76,7 +76,6 @@ fn exact_coarse_sum_reuses_fine_sum() {
 
 /// #924: the 1m sum reads the newest tumbling window of the existing 2m chain.
 #[test]
-#[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
 fn nested_exact_sum_reuses_newest_tumbling_windows() {
     let related = workload(924);
     let mut base = related.clone();
@@ -91,7 +90,6 @@ fn nested_exact_sum_reuses_newest_tumbling_windows() {
 
 /// #925: the slower copy reads the same maintained sum.
 #[test]
-#[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
 fn slower_repeat_reuses_faster_sum() {
     let related = workload(925);
     let mut base = related.clone();
@@ -106,7 +104,6 @@ fn slower_repeat_reuses_faster_sum() {
 
 /// #902: the filtered reader avoids its independent scan and aggregation.
 #[test]
-#[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
 fn grouped_filtered_quantile_plans() {
     assert!(
         cost(&workload(902)) < 0.25,
@@ -472,7 +469,6 @@ fn sql_count_rollup_executes_with_integer_results() {
 
 /// #922: duplicate exact TopK readers share their result and inner window work.
 #[test]
-#[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
 fn duplicate_exact_topk_shares_work() {
     let mut w = workload(924);
     for query in &mut w.queries {
@@ -487,7 +483,6 @@ fn duplicate_exact_topk_shares_work() {
 
 /// #924/#925 SQL variants: nested windows and slower readers reuse one sum.
 #[test]
-#[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
 fn sql_sum_shares_nested_windows_and_slower_readers() {
     let mut w = workload(922);
     w.queries.truncate(1);

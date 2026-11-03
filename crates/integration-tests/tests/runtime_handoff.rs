@@ -73,7 +73,6 @@ fn materialized_count(dag: &PhysicalASAPDAG) -> usize {
 /// export carries that selection rather than resetting every node to
 /// query time.
 #[tokio::test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn export_carries_the_selected_materialization() {
     let capabilities = without_raw_data();
     let output = plan(&example4b(), &capabilities).await;
@@ -127,7 +126,6 @@ fn tumbling_window_chain_count(dag: &PhysicalASAPDAG) -> usize {
 /// the executor compiles it. The stage export keeps the chain for costing
 /// and display. Its one query is answered by the DAG's one root.
 #[tokio::test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn installable_plan_has_its_tumbling_window_chains_expanded() {
     let workload = example4b();
     let (installed, report) = installable_with_report(&workload).await;
@@ -195,7 +193,6 @@ fn summary_builds(dag: &PhysicalASAPDAG) -> Vec<String> {
 /// with the same parameters, every node at query time and nothing materialized,
 /// with the same queries bound to its roots.
 #[tokio::test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn reference_plan_runs_the_installable_plan_at_query_time() {
     let plan = installable(&example4b()).await;
     let reference = query_time_reference(&plan).expect("re-times");
@@ -241,7 +238,6 @@ fn repeating(queries: &[&str]) -> PlanningWorkload {
 /// p99 and p50 over the same 60 minutes share one chain of tumbling windows: the
 /// installable plan materializes one shared set of tumbling windows.
 #[tokio::test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn two_queries_on_one_chain_store_its_tumbling_windows_once() {
     let plan = installable(&repeating(&[
         "quantile_over_time(0.99, latency_ms[60m])",
@@ -285,7 +281,6 @@ async fn installable_at_query_time(query: &str) -> Result<InstallablePlan, PlanE
 /// which no ingestion run can build in time), is refused with its reason,
 /// not passed on with a wrong window or dropped; a plain range is listed.
 #[tokio::test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn raw_data_windows_of_unsupported_shapes_are_refused() {
     for (query, reason) in [
         (
@@ -333,7 +328,6 @@ async fn raw_data_windows_of_unsupported_shapes_are_refused() {
 /// plus the hour the range spans, 7,200,000 ms, as Stage 3 records for the
 /// chain (`Selection::tumbling_window_retention_ms`); without the range, for the hour.
 #[tokio::test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn stored_tumbling_windows_carry_stage3_tumbling_window_retention() {
     let mut workload = example4b();
     let plain = installable(&workload).await;
@@ -386,7 +380,6 @@ async fn stored_tumbling_windows_carry_stage3_tumbling_window_retention() {
 /// carries its own node's requirement; a runtime that keeps the twins'
 /// identical tumbling windows once keeps them for the larger one.
 #[tokio::test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn an_offset_chain_keeps_its_tumbling_windows_for_its_window_plus_the_offset() {
     let plan = installable(&repeating(&[
         "quantile_over_time(0.99, latency_ms[60m])",
@@ -464,7 +457,6 @@ fn nodes_below(dag: &PhysicalASAPDAG, root: PhysicalASAPNodeId) -> BTreeSet<Phys
 /// A standalone scalar query (`scalar(sum(latency_ms))`) has no DAG node
 /// to answer it through the public API, so it is refused with its entry.
 #[tokio::test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn a_scalar_query_is_refused() {
     match installable_at_query_time("scalar(sum(latency_ms))").await {
         Err(PlanError::Installable(InstallablePlanError::UnsupportedQueryRoot {

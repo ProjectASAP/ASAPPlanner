@@ -267,7 +267,6 @@ fn global_population_aggregate_of_no_members_is_empty() {
 
 // Scalar operands on either side apply to every grouped value, including negation.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn scalar_literal_arithmetic_applies_to_grouped_values() {
     // sum_over_time over 5m per job: api = 4 + 1 + 7 + 2 = 14, db = 5.
     for (query, expected) in [
@@ -295,7 +294,6 @@ fn scalar_literal_arithmetic_applies_to_grouped_values() {
 // Grouped vectors match one-to-one on labels; unmatched groups are dropped and
 // unchecked division by zero yields +Inf as in PromQL.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn grouped_vector_arithmetic_matches_labels() {
     let samples: &[RawDataSample] = &[
         ("a", "api", "x", 10_000, 6.),
@@ -317,7 +315,6 @@ fn grouped_vector_arithmetic_matches_labels() {
 // Exact observation counts finalize to the Float64 value PromQL declares,
 // then roll up per job: api has 2 + 1 + 1 samples in 5m, db has 1.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn exact_count_finalizes_to_declared_float_value() {
     let dag = exact_dag("sum by (job) (count_over_time(m[5m]))");
     assert_eq!(
@@ -366,7 +363,6 @@ fn assert_rows(actual: &BTreeMap<String, f64>, expected: &[(&str, f64)], query: 
 // for φ outside [0, 1], NaN for a NaN φ. The 0.8, 0.2 and NaN rows are Prometheus's own expected
 // values for `quantile without(point)` over the same series.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn exact_grouped_quantile_matches_prometheus() {
     let (inf, nan) = (f64::INFINITY, f64::NAN);
     for (query, expected) in [
@@ -417,7 +413,6 @@ fn exact_grouped_quantile_matches_prometheus() {
 // Prometheus; a group of one series returns that series' value for any φ in
 // [0, 1].
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn exact_grouped_quantile_of_no_series_is_empty() {
     for query in ["quantile by (job) (0.5, data)", "quantile(0.5, data)"] {
         let rows = run(&exact_dag(query), &[], 60_000).unwrap();
@@ -455,7 +450,6 @@ fn with_kind(
 // A comparison Binary over grouped values keeps the groups whose comparison
 // holds, with their value, on either side of the literal; `bool` yields 1 or 0.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn grouped_comparisons_filter_or_return_bool() {
     for (query, expected) in [
         (
@@ -478,7 +472,6 @@ fn grouped_comparisons_filter_or_return_bool() {
 // A `bool` comparison Binary over per-series evaluations matches one-to-one and
 // drops the metric name; a filter keeps the surviving left value.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn per_series_comparisons_filter_or_return_bool() {
     use planner_types::ir::operator::BinaryOpKind::*;
     use planner_types::ir::scalar::CompareOpKind::*;
@@ -555,7 +548,6 @@ fn counter(
 // drops the metric name, as Prometheus does. An overflowing stored sum fails
 // the checked division instead of returning +Inf.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn per_series_average_divides_stored_sum_by_count() {
     let dag = exact_dag("avg_over_time(m[5m])");
     assert_eq!(
@@ -578,7 +570,6 @@ fn per_series_average_divides_stored_sum_by_count() {
 // Unmatched series are dropped; x/0 is +Inf and 0/0 is NaN; an empty side
 // yields an empty vector.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn per_series_rate_ratio_matches_prometheus() {
     // Window (0, 300s]: first sample at 60s, extrapolated 60s to the start
     // (durationToZero is exactly 60s too), so rate = (last - first) * 1.25 / 300.
@@ -612,7 +603,6 @@ fn per_series_rate_ratio_matches_prometheus() {
 // A literal operand applies to every stored per-series value, on either side,
 // and drops the metric name.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn per_series_scalar_arithmetic_applies_to_stored_evaluations() {
     let samples = counter("m", "api", 10., 10.).collect::<Vec<_>>();
     // rate = 40 * 1.25 / 300 = 1/6.
@@ -633,7 +623,6 @@ fn per_series_scalar_arithmetic_applies_to_stored_evaluations() {
 // A literal operand drops the metric name; series that then share a label set
 // are an error, as in Prometheus, rather than duplicate output series.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn per_series_scalar_arithmetic_rejects_label_sets_equal_without_the_name() {
     let dag = exact_dag("sum_over_time(m[5m]) * 2");
     let samples = counter("m", "api", 10., 10.)
@@ -673,7 +662,6 @@ fn with_vector_match(
 // `on` and `ignoring` reduce each side to the matching labels, which become
 // the result's labels; a duplicate match group on either side is an error.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn per_series_vector_matching_follows_on_and_ignoring() {
     use planner_types::ir::operator::VectorMatchKind;
     let samples = counter("a", "api", 10., 10.)

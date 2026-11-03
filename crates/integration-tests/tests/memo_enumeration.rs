@@ -313,7 +313,6 @@ fn assert_pass1_memo_and_whole_workload_plans(
 /// The example's memo after each production step, and the `accuracy_budget_parts`
 /// of the state-configuration rule's rewrites (one test: one planning run).
 #[test]
-#[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
 fn ratio_of_quantiles_production_memo() {
     // With the built-in model, Pass 1 prunes every summary of the quantile
     // groups: no query has a guarantee through `/` and `+` over a KLL rank
@@ -405,7 +404,6 @@ fn ratio_of_quantiles_production_memo() {
 /// that take no KLL (the memo's is sized for the whole result, the
 /// inventory's per value), with the default search.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn shared_quantiles_pass1_memo_and_whole_workload_plans() {
     let workload = with_queries(
         &[

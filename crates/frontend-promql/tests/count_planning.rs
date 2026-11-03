@@ -40,7 +40,6 @@ fn grouped_count_offers_hydra_but_selection_keeps_per_group_state() {
 
 // Exact series and temporal counts must select a count accumulator, not distinct or sum.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn exact_counts_select_count_accumulators() {
     for query in ["count(up)", "count by(job)(up)", "count_over_time(up[5m])"] {
         let root = lower_promql(query, AccuracyTarget::exact()).unwrap();
