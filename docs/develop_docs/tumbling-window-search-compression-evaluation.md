@@ -1,5 +1,7 @@
 # Tumbling-window-search compression evaluation
 
+> Historical: this report predates #1185, which removed the planning budget and the tumbling-window-width rounds; the planner now searches every width in one pass.
+
 This report is for planner developers. It separates three changes: storing repeated producer lists once, factoring equivalent candidate connections, and spending a bounded search budget across progressively larger tumbling-window-width domains. Storage compression alone does not reduce the number of MILP variables. Searching fewer widths before a timeout does not prove equivalence to the complete domain.
 
 ## Reproduction

@@ -289,7 +289,7 @@ fn run_stages_over(
 ) -> Run {
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap_or_default();
-    // The facade's run, with the reference pricer over the selected round's
+    // The facade's run, with the reference pricer over the Stage 2
     // memo choices: the whole-plan costs and rejections these tests read.
     let run = run_planning_stages_over(roots, &entries, &data, None, models)
         .expect("planning stages run");

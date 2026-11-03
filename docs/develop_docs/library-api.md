@@ -166,8 +166,7 @@ example, see `lineitem_catalog` in [the planner's end-to-end tests](../../crates
 `asap_planner::e2e_plan` runs the whole planner: the query-language frontends
 (Stage 0), then the default optimization pass `Stage1ToStage3Pass`, which runs
 logical ASAP-aware optimization (Stage 1), physical ASAP-aware optimization
-(Stage 2) and plan selection (Stage 3): Pass 1 once, then Pass 2, Stage 2
-and Stage 3 per tumbling-window-width round, keeping the best round's plan.
+(Stage 2) and plan selection (Stage 3), each once, with no time limit.
 
 ```text
 asap_planner::e2e_plan(input: UserInput<'_>) -> Result<PlanOutput, PlanError>   // async
@@ -181,10 +180,10 @@ asap_planner::run_planning(
     entries: &[QueryWorkloadEntry],   // one per root: accuracy, latency bound, recurrence
     data: &DataWorkload,
     models: PlanningModels<'_>,
-    settings: PlanSearchSettings,     // time_limit_ms, default 30 s; inspect, default off
+    settings: PlanSearchSettings,     // inspect, default off
 ) -> Result<PlanningRun, PerComputationCandidateError>
 
-// Stage 3 alone, over one round's Stage 2 output:
+// Stage 3 alone, over Stage 2's output:
 asap_plan_selection::select_plan(
     physical: &PhysicalASAPMemoCandidates,
     entries: &[QueryWorkloadEntry],
@@ -207,7 +206,7 @@ asap_plan_selection::select_plan(
 | `PlanOutput.plans` | One `QueryPlan { entry_index, root }` per query, in `QueryWorkload::entries()` order |
 | `PlanOutput.selection` | `Some` with Stage 3's `Selection` under the default pass: `selected_dag`, `nodes_with_proven_non_negative_weights`, `cost` (the selected plan's `PlanCost` with its `ResourceUsage` and `cost_per_second`, `None` under cost model 3), `accepted_accuracy_per_query`, `pruned_candidates` and `search_report` |
 | `PlanOutput.tumbling_window_retention_ms` | For each tumbling-window chain the selected plan keeps beyond one evaluation, by node id, how long its tumbling windows are kept (`RealizedPlan::tumbling_window_retention_ms`) |
-| `PlanningRun` | `per_computation_candidates`, the selected round's `logical_asap_candidates` and `physical_asap_candidates`, `selection`, `selected_physical_plan` (`RealizedPlan`), `selected_plan` (the roots to run) and `report` (per round: counts and Pass 2, Stage 2 and Stage 3 times); `per_computation_candidates` is kept only with `PlanSearchSettings::inspect`; `asap_planner::selected_chosen_candidates` reads the selected plan as one candidate per group of `logical_asap_candidates.memo` |
+| `PlanningRun` | `per_computation_candidates`, `logical_asap_candidates`, `physical_asap_candidates`, `selection`, `selected_physical_plan` (`RealizedPlan`), `selected_plan` (the roots to run) and `report` (Pass 2's and Stage 2's counts and each stage's time); `per_computation_candidates` is kept only with `PlanSearchSettings::inspect`; `asap_planner::selected_chosen_candidates` reads the selected plan as one candidate per group of `logical_asap_candidates.memo` |
 | `PlanOutput::physical_asap_dag()` | The planned queries as one `PhysicalASAPDAG`, timed with the default `MaterializationAssignment` (see [Export](#export)) |
 
 Each candidate's `ResourceUsage` holds its usage without prices:

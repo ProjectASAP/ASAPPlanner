@@ -164,7 +164,6 @@ fn controlled_distinct_rollup_prices_the_original_workload() {
 
 // The production entrypoint must find a sketch rollup under the viewer budget.
 #[test]
-#[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
 fn production_distinct_rollup_finds_shared_kmv() {
     let (workload, roots) = fixture();
     let entries: Vec<_> = workload.query_workload.entries().collect();
@@ -178,10 +177,7 @@ fn production_distinct_rollup_finds_shared_kmv() {
         &entries,
         data,
         PlanningModels::builtin().with_cost_inputs(&settings),
-        asap_planner::PlanSearchSettings {
-            time_limit_ms: Some(30_000),
-            inspect: false,
-        },
+        asap_planner::PlanSearchSettings::default(),
     )
     .unwrap();
     let selection = run

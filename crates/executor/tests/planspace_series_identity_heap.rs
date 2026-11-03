@@ -59,7 +59,6 @@ fn carries_identity(root: &Rc<OperatorNode>) -> bool {
 const CURRENT_SERIES_TOPK: &str = "topk by(job)(1, m)";
 
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn selection_never_commits_a_series_identity_heap() {
     let accuracy = AccuracyTarget::max_error(0.1);
     let root = lower(CURRENT_SERIES_TOPK, &accuracy);

@@ -254,7 +254,7 @@ pub struct EnumeratedChoice {
 }
 
 /// `stage_pipeline --exhaustive`: the first `max_choices` choices of the
-/// selected round's Pass 2 memo (`run.logical_asap_candidates`), each composed,
+/// Pass 2 memo (`run.logical_asap_candidates`), each composed,
 /// implemented by Stage 2 with every materialization assignment, and all
 /// their physical plans priced together by the reference pricer.
 #[derive(Debug)]

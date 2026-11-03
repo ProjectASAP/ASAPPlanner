@@ -5,12 +5,6 @@ use std::rc::Rc;
 
 use crate::ir::{OperatorNode, QueryRoot};
 
-/// Candidate generation stopped before its finite catalog was complete.
-/// Callers must discard the partial catalog and cannot certify optimality from it.
-#[derive(Debug, Clone, Copy, thiserror::Error)]
-#[error("candidate generation deadline exceeded")]
-pub struct CandidateGenerationTimeout;
-
 /// A group, by index in the memo's groups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MemoGroupId(pub u32);

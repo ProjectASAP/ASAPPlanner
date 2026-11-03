@@ -85,10 +85,9 @@ fn through_stages_over(
     ingesting: bool,
     values_non_negative: bool,
 ) -> Fixture {
+    use asap_logical_asap_optimization::generate_logical_asap_memo_candidates;
     use asap_logical_asap_optimization::generate_per_computation_logical_memo_candidates;
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
-    use asap_logical_asap_optimization::TumblingWindowWidthDomain;
-    use asap_logical_asap_optimization::{generate_logical_asap_memo_candidates, Pass2RoundState};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::workload::{
         Predictability, QueryRecurrence, RepeatedDemand, RepetitionInterval,
@@ -138,24 +137,15 @@ fn through_stages_over(
         &asap_accuracy::NoAccuracyEvidence,
         &data,
         None,
-        None,
     )
     .unwrap();
-    let mut round = Pass2RoundState::new(pass1);
-    let logical = generate_logical_asap_memo_candidates(
-        &mut round,
-        &entries,
-        TumblingWindowWidthDomain::Complete,
-        None,
-    )
-    .unwrap();
+    let logical = generate_logical_asap_memo_candidates(pass1, &entries).unwrap();
     let physical = asap_physical_asap_optimization::generate_physical_asap_memo_candidates(
         &logical,
         &entries,
         &data,
         false,
         raw_data_retained,
-        None,
     )
     .unwrap();
     Fixture {

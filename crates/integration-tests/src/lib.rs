@@ -345,7 +345,6 @@ pub mod planning {
         use asap_logical_asap_optimization::test_support::{
             add_local_window_composition, try_populate_pass1,
         };
-        use asap_logical_asap_optimization::TumblingWindowWidthDomain;
         let initial = asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots);
         let inventory = generate_per_computation_candidates(
             &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
@@ -353,11 +352,8 @@ pub mod planning {
         .unwrap();
         let mut memo = try_populate_pass1(initial, &inventory).unwrap();
         add_local_window_composition(&mut memo, entries);
-        asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(
-            memo,
-            TumblingWindowWidthDomain::SeedGrids,
-        )
-        .unwrap()
+        asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(memo)
+            .unwrap()
     }
 
     /// One plan of `memo`'s first `queries` queries (`memo::enumeration::build_logical_asap_dags_from_chosen_candidates`):

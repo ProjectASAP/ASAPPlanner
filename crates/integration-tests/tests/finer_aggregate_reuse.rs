@@ -4,9 +4,8 @@ use asap_devtools::planner_fuzz::{read_seed_file, FuzzSettings, FuzzWorkload, Pl
 use asap_devtools::planning_stages::run_search_over;
 use asap_executor::values::Value;
 use asap_logical_asap_optimization::generate_dag_of_logical_memo_groups;
-use asap_logical_asap_optimization::{
-    test_support::{generate_per_computation_candidates, try_populate_pass1},
-    TumblingWindowWidthDomain,
+use asap_logical_asap_optimization::test_support::{
+    generate_per_computation_candidates, try_populate_pass1,
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
 use asap_types::stages::{CandidateForMemoGroup, Memo, OriginOfCandidateForMemoGroup};
@@ -55,11 +54,8 @@ fn expanded(queries: &[String]) -> Memo {
     )
     .unwrap();
     let memo = try_populate_pass1(initial, &inventory).unwrap();
-    asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(
-        memo,
-        TumblingWindowWidthDomain::SeedGrids,
-    )
-    .unwrap()
+    asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(memo)
+        .unwrap()
 }
 
 /// The aggregate group of query `query` alone and its rollup candidates.
@@ -314,10 +310,7 @@ fn cost(queries: &[String]) -> f64 {
         &entries,
         &w.data,
         models,
-        PlanSearchSettings {
-            time_limit_ms: Some(30_000),
-            inspect: false,
-        },
+        PlanSearchSettings::default(),
         None,
     )
     .unwrap();
@@ -330,7 +323,6 @@ fn cost(queries: &[String]) -> f64 {
 /// Example B end to end: adding the filtered sum to the finer sums costs
 /// only its read of the finer result, not a second scan and aggregation.
 #[test]
-#[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
 fn filtered_sum_costs_little_beyond_the_finer_sums() {
     let finer =
         format!("SELECT city, host, SUM(value) FROM metrics WHERE {WINDOW} GROUP BY city, host");
@@ -350,10 +342,7 @@ fn filtered_sum_costs_little_beyond_the_finer_sums() {
 /// Example C end to end: the joint plan costs no more than planning each
 /// query alone, and no more than on main before the state path (0.2285/s).
 /// The joint optimum is 0.1963/s: q1 keeps the NYC and SF states of a KLL
-/// by city built over q0's query-time rows. The search reaches the separate
-/// plans' cost because the first round evaluates them combined when the joint
-/// search ends above them; reaching 0.1963/s within the budget needs
-/// candidate-level cuts for rejected proposals.
+/// by city built over q0's query-time rows.
 #[test]
 #[ignore = "needs #1095's engine: since #1047 P7 Stage 3 has no per-query seed, and the joint search ends at 0.3321/s, above the separate plans' 0.2285/s"]
 fn filtered_kll_states_cost_no_more_than_separate_plans() {

@@ -1,9 +1,7 @@
 //! Scan-label widening for explicit memo state sharing. Reuses the existing
 //! Pass 2 widening rule; only its source-chain boundaries are interned here.
-use crate::pass2::memo::check_generation_deadline;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::time::Instant;
 
 use asap_accuracy::propagation::recompose_guarantees;
 use asap_types::ir::operator::Reduction;
@@ -15,17 +13,11 @@ use asap_types::stages::{MemoGroup, MemoGroupId};
 
 /// Preserve local implementations and append readers over union-label inputs.
 /// Parent/query reachability is rebuilt by the enclosing state-group expansion.
-pub(crate) fn add_scan_label_candidates(
-    memo: &mut Memo,
-    deadline: Option<Instant>,
-) -> Result<usize, Pass2RuleError> {
-    check_generation_deadline(deadline)?;
+pub(crate) fn add_scan_label_candidates(memo: &mut Memo) -> Result<usize, Pass2RuleError> {
     let mut owners = Vec::new();
     let mut roots = Vec::new();
     for (group, candidates) in memo.candidates.iter().enumerate() {
-        check_generation_deadline(deadline)?;
         for (index, candidate) in candidates.iter().enumerate() {
-            check_generation_deadline(deadline)?;
             // Source-group candidates expose scan reuse to every downstream
             // operator, including exact/non-summary computations. Their public
             // schemas stay narrow through the existing projection rewrite.
@@ -81,7 +73,6 @@ pub(crate) fn add_scan_label_candidates(
     let mut added = 0;
     let mut canonical = HashMap::new();
     for (((group, index), root), unwidened) in owners.into_iter().zip(widened).zip(unwidened) {
-        check_generation_deadline(deadline)?;
         let (QueryRoot::Operator(node), QueryRoot::Operator(unwidened)) = (root, unwidened) else {
             unreachable!("operator readers")
         };
@@ -138,7 +129,6 @@ pub(crate) fn add_scan_label_candidates(
         memo.candidates[group].push(reader);
         added += 1;
     }
-    check_generation_deadline(deadline)?;
     Ok(added)
 }
 

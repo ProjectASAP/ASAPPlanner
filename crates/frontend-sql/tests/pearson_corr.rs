@@ -147,7 +147,6 @@ async fn corr_filter_is_a_measure_filter() {
 // The plan the planner pipeline selects retains the complete typed query and
 // compiles to a physical ASAP DAG.
 #[tokio::test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn corr_survives_exact_plan_compilation() {
     let query = lower("SELECT corr(x, y) AS r FROM a").await;
     // `a` holds 60,000 rows: the query scans all of them.

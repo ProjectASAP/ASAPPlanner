@@ -14,17 +14,3 @@ pub(crate) mod shared_configurations;
 pub(crate) mod state_groups;
 /// Local tumbling-window candidates with selected-reader grid configurations.
 pub(crate) mod window_candidates;
-
-use std::time::Instant;
-
-use asap_types::stages::CandidateGenerationTimeout;
-
-pub(crate) fn check_generation_deadline(
-    deadline: Option<Instant>,
-) -> Result<(), CandidateGenerationTimeout> {
-    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-        Err(CandidateGenerationTimeout)
-    } else {
-        Ok(())
-    }
-}

@@ -35,17 +35,6 @@ pub enum ErrorGeneratingPhysicalASAPMemoCandidates {
     Pruning(String),
 }
 
-impl ErrorGeneratingPhysicalASAPMemoCandidates {
-    /// Whether generation stopped at `deadline`, leaving no usable output.
-    pub fn is_deadline_exceeded(&self) -> bool {
-        matches!(
-            self,
-            Self::Inventory(CandidateInventoryError::DeadlineExceeded(_))
-                | Self::Configuration(ConfigurationError::DeadlineExceeded(_))
-        )
-    }
-}
-
 /// Stage 2: implement every operator node of every candidate in `logical`'s
 /// memo, enumerate the timings and materializations the data and deployment
 /// allow (`query_time_results_retained`; no query-time raw scans unless
@@ -60,22 +49,20 @@ pub fn generate_physical_asap_memo_candidates(
     data: &DataWorkload,
     query_time_results_retained: bool,
     raw_data_retained: bool,
-    deadline: Option<std::time::Instant>,
 ) -> Result<PhysicalASAPMemoCandidates, ErrorGeneratingPhysicalASAPMemoCandidates> {
     let memo = &logical.memo;
     let output_groups: Vec<_> = asap_types::stages::output_references(&memo.query_roots)
         .into_iter()
         .map(|(_, group)| group)
         .collect();
-    let inventory = inventory::build_candidate_inventory_before(memo, &output_groups, deadline)?;
-    let configured = configurations::enumerate_candidate_configurations_before(
+    let inventory = inventory::build_candidate_inventory(memo, &output_groups)?;
+    let configured = configurations::enumerate_candidate_configurations(
         &inventory,
         &memo.query_roots,
         entries,
         data,
         query_time_results_retained,
         raw_data_retained,
-        deadline,
     )?;
     pruning::prune(configured).map_err(ErrorGeneratingPhysicalASAPMemoCandidates::Pruning)
 }
@@ -153,30 +140,19 @@ fn validate_candidates(physical: &PhysicalASAPMemoCandidates) -> Result<(), Stri
     Ok(())
 }
 
-/// Discard partially built catalogs on timeout; they cannot certify coverage.
-fn check_deadline(
-    deadline: Option<std::time::Instant>,
-) -> Result<(), asap_types::stages::CandidateGenerationTimeout> {
-    if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
-        Err(asap_types::stages::CandidateGenerationTimeout)
-    } else {
-        Ok(())
-    }
-}
-
 /// Catalog internals that plan selection's unit tests exercise together with
 /// its solver.
 #[cfg(feature = "test-support")]
 pub mod test_support {
     pub use super::configurations::{
-        compatible_timing, enumerate_candidate_configurations_before,
+        compatible_timing, enumerate_candidate_configurations,
         may_keep_across_evaluations_per_sole_reader_query,
     };
     pub use super::factoring::{
         factor_terminal_readers, MemoGroupOutputKey, MemoGroupOutputToCompatibleProducersCache,
     };
     pub use super::inventory::{
-        build_candidate_inventory_before, build_with_compatible_producers_cache, CandidateInventory,
+        build_candidate_inventory, build_with_compatible_producers_cache, CandidateInventory,
     };
     pub use super::pruning::{prune, usable_candidates};
     pub use super::realize::{

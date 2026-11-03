@@ -1,9 +1,7 @@
 //! Expand compatible readers at finite shared sizes and tumbling-window horizons before
 //! interning concrete states. Local candidates remain available.
-use crate::pass2::memo::check_generation_deadline;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::time::Instant;
 
 use asap_types::ir::flat::{flatten, FlatDag};
 use asap_types::ir::schema::{sketch::SketchKind, FieldDataType};
@@ -14,8 +12,8 @@ use super::shared_producer::{
 };
 use crate::pass2::asap_aware_cse::{with_resized_build, with_tumbling_window_chain};
 use crate::pass2::memo::shared_configurations::{
-    shared_size, state_size_configurations, tumbling_window_configurations_before,
-    TumblingWindowConfiguration, TumblingWindowRequirement, TumblingWindowWidthDomain,
+    shared_size, state_size_configurations, tumbling_window_configurations,
+    TumblingWindowConfiguration, TumblingWindowRequirement,
 };
 use crate::pass2::memo::state_groups::{same_range_input, simple_build, Pass2RuleError};
 use asap_types::stages::Memo;
@@ -95,7 +93,6 @@ enum StateCovering {
 /// later ([`super::super::state_groups`]).
 struct SummaryStates {
     deduplicate_requests: bool,
-    domain: TumblingWindowWidthDomain,
     /// Every candidate's graph signature by group, so no rewrite repeats one.
     known: HashMap<(usize, String), Vec<Rc<OperatorNode>>>,
     rewrite_count: usize,
@@ -103,28 +100,21 @@ struct SummaryStates {
     requests: HashSet<(usize, usize)>,
 }
 
-pub(crate) fn add_state_configuration_candidates_in_domain(
-    memo: &mut Memo,
-    domain: TumblingWindowWidthDomain,
-    deadline: Option<Instant>,
-) -> Result<(), Pass2RuleError> {
-    expand_configurations(memo, true, domain, deadline).map(|_| ())
+pub(crate) fn add_state_configuration_candidates(memo: &mut Memo) -> Result<(), Pass2RuleError> {
+    expand_configurations(memo, true).map(|_| ())
 }
 
 fn expand_configurations(
     memo: &mut Memo,
     deduplicate_requests: bool,
-    domain: TumblingWindowWidthDomain,
-    deadline: Option<Instant>,
 ) -> Result<usize, Pass2RuleError> {
     let mut states = SummaryStates {
         deduplicate_requests,
-        domain,
         known: HashMap::new(),
         rewrite_count: 0,
         requests: HashSet::new(),
     };
-    add_shared_producer_candidates(memo, &mut states, deadline)?;
+    add_shared_producer_candidates(memo, &mut states)?;
     Ok(states.rewrite_count)
 }
 
@@ -132,16 +122,10 @@ impl SharedProducer for SummaryStates {
     type Need = StateNeed;
     type Covering = StateCovering;
 
-    fn sets(
-        &mut self,
-        memo: &Memo,
-        deadline: Option<Instant>,
-    ) -> Result<Vec<Vec<Reader<StateNeed>>>, Pass2RuleError> {
+    fn sets(&mut self, memo: &Memo) -> Result<Vec<Vec<Reader<StateNeed>>>, Pass2RuleError> {
         let mut sets: Vec<Vec<Reader<StateNeed>>> = Vec::new();
         for (group, candidates) in memo.candidates.iter().enumerate() {
-            check_generation_deadline(deadline)?;
             for (candidate, entry) in candidates.iter().enumerate() {
-                check_generation_deadline(deadline)?;
                 let Some((build, _)) = simple_build(memo, entry) else {
                     continue;
                 };
@@ -198,9 +182,7 @@ impl SharedProducer for SummaryStates {
             }
         }
         for (group, candidates) in memo.candidates.iter().enumerate() {
-            check_generation_deadline(deadline)?;
             for candidate in candidates {
-                check_generation_deadline(deadline)?;
                 self.known
                     .entry((group, graph_signature(&candidate.root_node)?))
                     .or_default()
@@ -210,17 +192,13 @@ impl SharedProducer for SummaryStates {
         let mut layouts: Vec<(usize, usize, FlatDag)> = Vec::new();
         for set in &mut sets {
             if spans_groups(set) {
-                assign_normalized_layouts(memo, set, &mut layouts, deadline)?;
+                assign_normalized_layouts(memo, set, &mut layouts)?;
             }
         }
         Ok(sets)
     }
 
-    fn coverings(
-        &self,
-        set: &[Reader<StateNeed>],
-        deadline: Option<Instant>,
-    ) -> Result<Vec<StateCovering>, Pass2RuleError> {
+    fn coverings(&self, set: &[Reader<StateNeed>]) -> Result<Vec<StateCovering>, Pass2RuleError> {
         let tumbling_window_requirements: Option<Vec<_>> = set
             .iter()
             .map(|reader| tumbling_window_requirement(&reader.need))
@@ -234,7 +212,7 @@ impl SharedProducer for SummaryStates {
                 })
                 .collect();
             let first = &set[0].need.family;
-            return Ok(state_size_configurations(requirements, deadline)?
+            return Ok(state_size_configurations(requirements)
                 .into_iter()
                 .map(|configuration| {
                     let family = match (first, configuration) {
@@ -253,19 +231,17 @@ impl SharedProducer for SummaryStates {
                 })
                 .collect());
         };
-        Ok(
-            tumbling_window_configurations_before(&requirements, self.domain, deadline)?
-                .into_iter()
-                .enumerate()
-                .map(
-                    |(configuration_index, configuration)| StateCovering::TumblingWindows {
-                        configuration_index,
-                        accuracy_budget_parts: covered_parts(&configuration.family, set),
-                        configuration,
-                    },
-                )
-                .collect(),
-        )
+        Ok(tumbling_window_configurations(&requirements)
+            .into_iter()
+            .enumerate()
+            .map(
+                |(configuration_index, configuration)| StateCovering::TumblingWindows {
+                    configuration_index,
+                    accuracy_budget_parts: covered_parts(&configuration.family, set),
+                    configuration,
+                },
+            )
+            .collect())
     }
 
     fn derive(
@@ -375,7 +351,6 @@ fn assign_normalized_layouts(
     memo: &Memo,
     set: &mut [Reader<StateNeed>],
     layouts: &mut Vec<(usize, usize, FlatDag)>,
-    deadline: Option<Instant>,
 ) -> Result<(), Pass2RuleError> {
     let Some(requirements) = set
         .iter()
@@ -386,7 +361,6 @@ fn assign_normalized_layouts(
     };
     let mut layout_keys: HashMap<(usize, String), Vec<usize>> = HashMap::new();
     for (reader, requirement) in set.iter_mut().zip(&requirements) {
-        check_generation_deadline(deadline)?;
         let Ok(count) = u32::try_from(requirement.window_ms) else {
             // Normalization must not narrow the legal long-window domain.
             continue;
@@ -564,16 +538,8 @@ mod tests {
         ];
         crate::pass2::memo::window_candidates::add_local_window_composition(&mut memo, &entries);
         let mut unoptimized = memo.clone();
-        let optimized_rewrites =
-            expand_configurations(&mut memo, true, TumblingWindowWidthDomain::Complete, None)
-                .unwrap();
-        let exhaustive_rewrites = expand_configurations(
-            &mut unoptimized,
-            false,
-            TumblingWindowWidthDomain::Complete,
-            None,
-        )
-        .unwrap();
+        let optimized_rewrites = expand_configurations(&mut memo, true).unwrap();
+        let exhaustive_rewrites = expand_configurations(&mut unoptimized, false).unwrap();
         assert!(
             optimized_rewrites < exhaustive_rewrites,
             "{optimized_rewrites} versus {exhaustive_rewrites}"
@@ -659,7 +625,7 @@ mod tests {
             "{parts_of_size:?}"
         );
         let before = memo.candidates.iter().map(Vec::len).sum::<usize>();
-        expand_configurations(&mut memo, true, TumblingWindowWidthDomain::SeedGrids, None).unwrap();
+        expand_configurations(&mut memo, true).unwrap();
         assert!(memo.candidates.iter().map(Vec::len).sum::<usize>() > before);
         for candidate in memo.candidates.iter().flatten() {
             for k in kll_sizes(candidate) {

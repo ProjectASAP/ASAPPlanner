@@ -291,9 +291,6 @@ pub enum SearchStatus {
 /// Why Stage 3 selected no plan.
 #[derive(Debug, Error)]
 pub enum ErrorSelectingPlan {
-    /// Evaluation stopped without proving feasibility or infeasibility.
-    #[error("candidate evaluation deadline exceeded")]
-    EvaluationDeadlineExceeded,
     /// Bad input: the deployment's cost inputs
     /// ([`CostInputs::validate`](asap_cost::CostInputs::validate)).
     #[error("cost inputs: {0}")]

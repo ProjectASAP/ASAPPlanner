@@ -31,7 +31,6 @@ fn candidate(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
 }
 
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn four_evaluations_size_their_value_frequency_states_and_keep_honest_guarantees() {
     // Pass 1 sizes UnivMon per readout: the distinct count and L2 get their
     // own shapes, while the total and entropy keep the baseline shape and so
@@ -119,7 +118,6 @@ fn four_evaluations_size_their_value_frequency_states_and_keep_honest_guarantees
 }
 
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn uncalibrated_frequency_evaluations_do_not_bypass_accuracy_targets() {
     // An unmeasured heuristic remains inspectable but is never certified or
     // automatically selected for a caller-visible bounded-error result.

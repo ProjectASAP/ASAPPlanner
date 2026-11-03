@@ -19,7 +19,6 @@ use std::sync::Arc;
 /// SQL filtering and grouped aggregation survive logical/physical lowering;
 /// rebinding the compiled DAG runs against new data rather than cached results.
 #[tokio::test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn sql_filter_grouped_sum_executes_and_rebinds() {
     let catalog = SqlCatalog::new().with_table(
         "metrics",

@@ -262,11 +262,10 @@ are ignored, `stage_pipeline`'s default.
                              "retention_ms": 600000,
                              "stage2_node_id": 1, "installed_position": 0, "installed_count": 30 }]
   },
-  "planning_report": { "pass1_ms": 3.1, "selected_round": 1, "tumbling_window_widths_pending": false, "time_limit_ms": 30000,
-                       "rounds": [{ "tumbling_window_width_domain": "SeedGrids", "memo_groups": 12, "logical_candidates": 30,
-                                    "operator_nodes": 40, "physical_candidates": 96, "stage2_pruned_candidates": 4,
-                                    "pass2_ms": 1.2, "stage2_ms": 3.4, "stage3_ms": 150.0,
-                                    "search_report": { "...": "..." }, "error": null }] },
+  "planning_report": { "pass1_ms": 3.1, "memo_groups": 12, "logical_candidates": 30,
+                       "operator_nodes": 40, "physical_candidates": 96, "physical_producer_links": 120,
+                       "stage2_pruned_candidates": 4, "pass2_ms": 1.2, "stage2_ms": 3.4, "stage3_ms": 150.0,
+                       "search_report": { "...": "..." } },
   "reference_pricing": {
     "cost_per_candidate": { "E1-0": { "...": "as stage3_plan_selection.cost" } },
     "accepted_accuracy_per_candidate": { "E1-0": [{ "...": "as accepted_accuracy_per_query" }] },
@@ -291,7 +290,7 @@ are ignored, `stage_pipeline`'s default.
   `requirements.default_metric`, the metric the query's result is naturally
   stated in (null for a quantile), for display only.
 - `stage3_plan_selection` is Stage 3's `Selection`: the selected DAG
-  (`selected_dag`: `candidate_of_node`, the selected round's Stage 2
+  (`selected_dag`: `candidate_of_node`, the Stage 2
   candidate each node runs, one node per run; `edges`, node to node, per
   `input`; `node_of_output_reference`), the nodes whose count-min weights
   it proved non-negative, the selected plan's `cost`, the
@@ -303,10 +302,8 @@ are ignored, `stage_pipeline`'s default.
   run's cost model (`--cost-model`): null under cost model 3, which has no
   prices; a node's is null under cost models 2 and 3, which price or limit
   the whole plan's peaks.
-- `planning_report` is the facade's: Pass 1's time, then per tumbling-window-width
-  round its domain, Pass 2's and Stage 2's counts, each stage's time, and
-  Stage 3's search report or error; `selected_round` and whether some tumbling window
-  widths were not searched (`tumbling_window_widths_pending`).
+- `planning_report` is the facade's: each stage's time, Pass 2's and
+  Stage 2's counts, and Stage 3's search report.
 - `reference_pricing` (only with `--exhaustive`) is the reference pricer
   over the enumerated memo choices (`E<n>` logical, `E<n>-<k>` physical),
   with keys named as Stage 3's `Selection` names its fields: per shown
@@ -351,8 +348,8 @@ are ignored, `stage_pipeline`'s default.
   with the default `CostInputs`). The Stage 3 header shows it;
   an older document without it is still valid, any other value is not.
 - `search` is `candidate-connections`, or `exhaustive` when the document
-  also holds the reference enumeration (`reference_pricing`): the selected
-  round's memo choices, each implemented by Stage 2 with every
+  also holds the reference enumeration (`reference_pricing`): Pass 2's
+  memo choices, each implemented by Stage 2 with every
   materialization assignment and all priced by the reference pricer.
   `--max-combinations` bounds the choices enumerated.
 - `stage3_plan_selection.search_report` reports how the search ended
@@ -396,8 +393,8 @@ are ignored, `stage_pipeline`'s default.
   selects no plan, `stage3_plan_selection` has `selected_dag: null` and
   `error`; when the reference pricer selects none, its
   `selected_candidate` is null, with the `pruned_candidates` or `error`.
-- `memo` (left out with `--no-memo`) is the memo the search built, from
-  the planning round whose plan was selected: `nodes`, one node table for
+- `memo` (left out with `--no-memo`) is the memo the search built:
+  `nodes`, one node table for
   the whole section (each distinct logical node once, as in a flat logical
   DAG: children are indices into the table and come before their parents;
   `memoNodeDag` in `stages.js` rebuilds the flat DAG below any of them);

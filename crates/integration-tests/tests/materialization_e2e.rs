@@ -127,9 +127,7 @@ fn execute(
     evaluation_time_ms: i64,
 ) -> (Vec<f64>, Vec<u64>) {
     let mut dag = dag.clone();
-    let views = dag
-        .set_retention(&HashMap::new(), &HashMap::new(), None)
-        .unwrap();
+    let views = dag.set_retention(&HashMap::new(), &HashMap::new()).unwrap();
     let raw = |dag: &PhysicalASAPDAG| {
         physical_common::raw_data_store(dag, |source, schema| {
             let Source::TimeSeries { metric } = source else {
@@ -292,7 +290,6 @@ const INGESTION_WINDOW: Scope = Scope::Ingestion {
 /// selectors keeps only label sets present on both sides (none when
 /// disjoint), at either placement, and never becomes aligned maintenance.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn arithmetic_over_different_selectors_matches_prometheus() {
     // The selected root reads the outer `sum`'s exact state through its
     // finalize.

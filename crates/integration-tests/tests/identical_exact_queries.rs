@@ -21,10 +21,6 @@ fn workload() -> FuzzWorkload {
 }
 
 fn cost(w: &FuzzWorkload) -> f64 {
-    // Each regression has a wall-clock planning budget. Concurrent solver
-    // runs in this test binary must not consume one another's CPU budget.
-    static PLANNING: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _planning = PLANNING.lock().unwrap();
     let roots = Planner::new(FuzzSettings::default()).lower(w).unwrap();
     let planning = w.planning_workload();
     let entries: Vec<_> = planning.query_workload.entries().collect();
@@ -38,10 +34,7 @@ fn cost(w: &FuzzWorkload) -> f64 {
         &entries,
         &w.data,
         models,
-        PlanSearchSettings {
-            time_limit_ms: Some(30_000),
-            inspect: false,
-        },
+        PlanSearchSettings::default(),
         None,
     )
     .unwrap();
@@ -53,7 +46,6 @@ fn cost(w: &FuzzWorkload) -> f64 {
 
 /// #922: two identical exact percentile queries pay for their result once.
 #[test]
-#[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
 fn identical_exact_percentiles_share_work() {
     let related = workload();
     let mut base = related.clone();
@@ -68,7 +60,6 @@ fn identical_exact_percentiles_share_work() {
 
 /// Different ranks share the source window but still compute their own values.
 #[test]
-#[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
 fn different_exact_percentiles_share_the_input_window() {
     let mut related = workload();
     related.queries[1].entry.query.0 = related.queries[1].entry.query.0.replace("0.99", "0.5");

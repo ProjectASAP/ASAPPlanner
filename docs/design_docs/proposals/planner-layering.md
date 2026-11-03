@@ -425,9 +425,8 @@ with accuracy guarantees enforced and the `aws-fargate-us-east-1` cost model).
 `crates/integration-tests/tests/memo_enumeration.rs` lowers the query as
 production does (with the series-identity column) and reads the memo from the
 production run. It asserts the Stage 0 and Pass 1 numbers above. The last
-step is the memo of the planning round whose plan was selected, so it depends
-on the time budget; the test runs one round over the complete tumbling-window-width
-domain, which gives 438 groups and 2158 candidates.
+step is Pass 2's memo over the complete tumbling-window-width domain, which
+gives 438 groups and 2158 candidates.
 
 #### Algorithm: memo to candidate DAGs
 
@@ -509,12 +508,9 @@ candidate per memo group and execution context, with each shareable candidate
 charged once, and is solved once; it prices cost model 1 only (cost models 2
 and 3 are an `UnsupportedCostModel` error, #888). Stage 3 realizes the chosen
 plan through Stage 2's `AssignmentRealizer`, which the facade builds and passes in,
-so Stage 3 does not depend on the Stage 2 crate. The facade first finds an
-incumbent (the best validated plan so far) in a round over seed tumbling-window grids,
-then exposes finer tumbling-window widths in later rounds, each round running Pass 2,
-Stage 2 and Stage 3; only a completed round over the full tumbling-window-width domain
-bounds the declared search space, and otherwise the result is the best
-validated plan found. Stage 3 checks that `plan_cost` of the realized plan
+so Stage 3 does not depend on the Stage 2 crate. The facade runs Pass 2,
+Stage 2 and Stage 3 once, over the full tumbling-window-width domain, with no
+time limit. Stage 3 checks that `plan_cost` of the realized plan
 equals the MILP's objective, and that every query's accuracy and latency hold.
 
 #### Memo code interface
@@ -530,9 +526,9 @@ candidates is in `crates/plan-selection/src/` (`select.rs`, `groups/`, `milp/`).
 | Stage 0 | `generate_dag_of_logical_memo_groups` → `DagOfLogicalMemoGroups`, `MemoGroup`, `MemoGroupId` | `stage0.rs` (the types: `asap_types::stages`); hash-consing is `share_common_sub_dags` in `stage0/cse.rs` |
 | Pass 1 | `generate_per_computation_logical_memo_candidates` → `PerComputationLogicalMemoCandidates` (its `Memo` and its `PrunedCandidate<HowToComputeAggregateMeasure>`s; `ComputationTarget` is Pass 1's working type, in `asap_types::stages`), the one entry: inside it, the computation targets (walking the memo groups), the summaries the deployment does not support and those no query can use pruned, the candidates attached to the groups (`try_populate_pass1`), then the accuracy-scoped sizes | `pass1/logical_memo_candidates.rs`; `pass1/per_computation_candidates.rs`; `pass2/memo/groups.rs` |
 | Memo types | `DagOfLogicalMemoGroups`, `PerComputationLogicalMemoCandidates`, `HowToComputeAggregateMeasure`, Pass 1's working types (`ComputationTarget`, `FusedComputation`, `HavingEntry`, `HavingPlacement`), `Memo`, `CandidateForMemoGroup`, `OriginOfCandidateForMemoGroup`, `LogicalASAPMemoCandidates`, `CandidateGenerationTimeout`, `root_groups`, `queries_rooted_at` | `crates/types/src/stages/` (`asap_types::stages`) |
-| Pass 2 | `generate_logical_asap_memo_candidates` → `LogicalASAPMemoCandidates`, one tumbling-window-width round over a `Pass2RoundState` (kept between rounds: the memo after step 1 and before the rules, and the widths already generated). It calls in this order: 1. window composition for the round's new widths (`extend_local_window_composition`); 2–9. the rules in `pass2/memo/rules/`: scan widening, summary inputs, top-k reuse, finer aggregate, rollup, window rollup, summary results, state configurations; 10. `add_shared_summary_state_groups`, the shared builds | `pass2/logical_memo_candidates.rs` (`LogicalASAPMemoCandidates` itself: `asap_types::stages`); `pass2/memo/window_candidates.rs`, `pass2/memo/rules/`, `pass2/memo/state_groups.rs`, `pass2/memo/shared_configurations.rs` |
+| Pass 2 | `generate_logical_asap_memo_candidates` → `LogicalASAPMemoCandidates`, from Pass 1's output. It calls in this order: 1. window composition for every legal tumbling-window width (`add_local_window_composition`); 2–9. the rules in `pass2/memo/rules/`: scan widening, summary inputs, top-k reuse, finer aggregate, rollup, window rollup, summary results, state configurations; 10. `add_shared_summary_state_groups`, the shared builds | `pass2/logical_memo_candidates.rs` (`LogicalASAPMemoCandidates` itself: `asap_types::stages`); `pass2/memo/window_candidates.rs`, `pass2/memo/rules/`, `pass2/memo/state_groups.rs`, `pass2/memo/shared_configurations.rs` |
 | Memo to candidate DAGs | `enumerate`, `build_logical_asap_dags_from_chosen_candidates`, `ChosenCandidatePerMemoGroup`, `AllChosenCandidatesPerMemoGroup`, `ErrorBuildingLogicalASAPDagsFromChosenCandidates` | `pass2/memo/enumeration.rs` (re-exported at the crate root) |
-| Production memo build and search | The facade's `run_planning` builds the DAG of logical memo groups and runs Pass 1 (`generate_per_computation_logical_memo_candidates`) once; then, for each tumbling-window-width round, `generate_logical_asap_memo_candidates` (the `Pass2RoundState` is kept between rounds), `generate_physical_asap_memo_candidates` and Stage 3's `select_plan`. It keeps the best round's selection (`asap_cost::PlanRanking`) and builds that plan with Stage 2's `AssignmentRealizer::realize`. Behind `select_plan`: the group selection MILP (#1095), `groups/` and `milp/` | `crates/planner/src/run.rs`; `crates/plan-selection/src/select.rs` |
+| Production memo build and search | The facade's `run_planning` builds the DAG of logical memo groups and runs Pass 1 (`generate_per_computation_logical_memo_candidates`) once; then `generate_logical_asap_memo_candidates`, `generate_physical_asap_memo_candidates` and Stage 3's `select_plan`, once each, and builds the selected plan with Stage 2's `AssignmentRealizer::realize`. Behind `select_plan`: the group selection MILP (#1095), `groups/` and `milp/` | `crates/planner/src/run.rs`; `crates/plan-selection/src/select.rs` |
 
 ## ASAPPlanner Detailed Design: Planning Stages and their decisions/Strategies
 
@@ -605,7 +601,7 @@ the memo path's entry points.
 | 1, Pass 2 | One Pass 1 choice per computation → that choice rewritten by each sharing rule, every subset of sharing choices (no longer in the code) | `Memo`; the entries' recurrence and range steps → the same memo with each rule's candidates added to the groups they implement | the memo rules (`pass2/memo/rules/`), `pass2::memo::window_candidates` |
 | 1, concrete summary-state groups | (part of Pass 2) | `Memo` → the memo with concrete summary-state groups: one group per shared size or tumbling-window layout that readers can read | `add_shared_summary_state_groups`, Pass 2's last step; the Pass 2 output is `LogicalASAPMemoCandidates` (`generate_logical_asap_memo_candidates`) |
 | 2 | One whole-workload logical candidate; entries (recurrence, predictability), `DataWorkload`, query-time retention → its physical candidates, one per materialization assignment | `LogicalASAPMemoCandidates`; entries, `DataWorkload`, query-time and raw-data retention → `PhysicalASAPMemoCandidates`: every operator node of every candidate with each allowed timing and materialization (one physical candidate each, no copies), the producers of each input, reader constraints (each applied to every selected run of its candidate), and the pruned candidates (`PrunedCandidate<PhysicalCandidateKey>`) | `generate_physical_asap_memo_candidates` (`asap_physical_asap_optimization`) |
-| 3 | Every physical candidate; accuracy targets, accuracy model and evidence, cost model → one plan | `PhysicalASAPMemoCandidates`; entries, `DataWorkload`, `AccuracyCheckInputs`, `CostInputs`, Stage 2's realizer → `Selection`: the selected plan (`selected_dag`, a `DagOfSelectedCandidates`: one node per run of a candidate, so a candidate recomputed by two readers or shared as two instances over different inputs is two nodes, with an edge per input), its cost, the accepted accuracy per query and the search report | `select_plan` (`asap_plan_selection`); the facade (`run_planning`, output `PlanningRun`) runs it per tumbling-window-width round and builds the selected `PhysicalWorkloadPlan` with `AssignmentRealizer::realize`, one plan node per selected node |
+| 3 | Every physical candidate; accuracy targets, accuracy model and evidence, cost model → one plan | `PhysicalASAPMemoCandidates`; entries, `DataWorkload`, `AccuracyCheckInputs`, `CostInputs`, Stage 2's realizer → `Selection`: the selected plan (`selected_dag`, a `DagOfSelectedCandidates`: one node per run of a candidate, so a candidate recomputed by two readers or shared as two instances over different inputs is two nodes, with an edge per input), its cost, the accepted accuracy per query and the search report | `select_plan` (`asap_plan_selection`); the facade (`run_planning`, output `PlanningRun`) runs it once and builds the selected `PhysicalWorkloadPlan` with `AssignmentRealizer::realize`, one plan node per selected node |
 | 4. Execution | The selected `PhysicalASAPDAG` → query results | Same: an `InstallablePlan` (`{dag, query_texts}`) → query results | The deployment runtime installs the `InstallablePlan` |
 
 What changed with the memo:

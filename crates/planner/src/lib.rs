@@ -6,7 +6,7 @@
 //! ```
 //!
 //! The default pass, [`Stage1ToStage3Pass`], orchestrates the stages
-//! ([`run_planning`]): Stage 0 and Pass 1, then per tumbling-window-width round Pass 2,
+//! ([`run_planning`]): Stage 0, Pass 1, Pass 2 over every tumbling-window width,
 //! Stage 2 (`generate_physical_asap_memo_candidates`) and Stage 3
 //! (`asap_plan_selection::select_plan`), and builds the selected plan through
 //! Stage 2's realizer. The stages never call each other.
@@ -32,8 +32,8 @@ pub use pass::{
     PassNameConflict, PassRegistry, PlanOutput, PlanningModels, QueryPlan,
 };
 pub use run::{
-    run_planning, selected_chosen_candidates, PlanSearchSettings, PlanningReport,
-    PlanningRoundReport, PlanningRun, SelectionError, Stage1ToStage3Pass,
+    run_planning, selected_chosen_candidates, PlanSearchSettings, PlanningReport, PlanningRun,
+    SelectionError, Stage1ToStage3Pass,
 };
 
 mod installable;

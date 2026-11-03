@@ -9,15 +9,6 @@
 //! the production run's `PlanningRun::per_computation_candidates` (after
 //! Pass 1) and `PlanningRun::logical_asap_candidates` (after Pass 2).
 //!
-//! **Which round's memo.** The default search plans in rounds of growing
-//! tumbling-window-width domains and records the memo of the round whose plan it
-//! selected, so its last step depends on the time budget (the seed-grid
-//! round when a debug build runs out of it; round 5 of the release run that
-//! made the doc's document, 354 groups and 1738 candidates). The ratio test
-//! runs one round over the complete tumbling-window-width domain (a search with fewer
-//! than 4 evaluations has no progressive rounds), so its last step is the
-//! same on every machine. Stage 0 and Pass 1 are the same in every round.
-//!
 //! **The memo and the whole-workload plans.** After Pass 1 the memo's
 //! choices whose candidates are all sized for the whole accuracy budget
 //! (`accuracy_budget_parts` 1) and the plans `compose_logical_candidate` builds from
@@ -92,20 +83,13 @@ fn production_roots(workload: &PlanningWorkload) -> Vec<QueryRoot> {
 }
 
 /// The production run of Stages 1 to 3 over `workload`.
-fn production_run(workload: &PlanningWorkload, search: PlanSearchSettings) -> PlanningRun {
-    production_run_with(workload, search, PlanningModels::builtin())
+fn production_run(workload: &PlanningWorkload) -> PlanningRun {
+    production_run_with(workload, PlanningModels::builtin())
 }
 
 /// [`production_run`] with `models`, keeping every stage's memo.
-fn production_run_with(
-    workload: &PlanningWorkload,
-    search: PlanSearchSettings,
-    models: PlanningModels<'_>,
-) -> PlanningRun {
-    let search = PlanSearchSettings {
-        inspect: true,
-        ..search
-    };
+fn production_run_with(workload: &PlanningWorkload, models: PlanningModels<'_>) -> PlanningRun {
+    let search = PlanSearchSettings { inspect: true };
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap_or_default();
     let roots = production_roots(workload);
@@ -114,7 +98,7 @@ fn production_run_with(
 
 /// A deployment model that may accept an output whatever its guarantee, so
 /// Pass 1 prunes no summary for its target, and accepts none: Stage 3
-/// validates no plan, and the run records its last round's memo.
+/// validates no plan, and the run still records its memo.
 struct AcceptsNoOutput;
 
 impl asap_accuracy::AccuracyModel for AcceptsNoOutput {
@@ -127,22 +111,11 @@ impl asap_accuracy::AccuracyModel for AcceptsNoOutput {
     }
 }
 
-/// Rounds up to the complete tumbling-window-width domain, with a time limit a slow
-/// machine's Pass 2 does not reach. Stage 3 may use the whole budget: when
-/// it validates no plan, it searches until the deadline; the memo steps are
-/// recorded either way.
-fn complete_domain_round() -> PlanSearchSettings {
-    PlanSearchSettings {
-        time_limit_ms: Some(90_000),
-        ..PlanSearchSettings::default()
-    }
-}
-
-/// The memo after Pass 2: the selected (or last) round's.
+/// The memo after Pass 2.
 fn pass2_memo(run: &PlanningRun) -> &Memo {
     &run.logical_asap_candidates
         .as_ref()
-        .expect("a planning round recorded its memo within the time budget")
+        .expect("the run recorded its Pass 2 memo")
         .memo
 }
 
@@ -340,17 +313,16 @@ fn assert_pass1_memo_and_whole_workload_plans(
 /// The example's memo after each production step, and the `accuracy_budget_parts`
 /// of the state-configuration rule's rewrites (one test: one planning run).
 #[test]
-#[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
 fn ratio_of_quantiles_production_memo() {
     // With the built-in model, Pass 1 prunes every summary of the quantile
     // groups: no query has a guarantee through `/` and `+` over a KLL rank
     // error or a DDSketch relative one. The memo below is planned with a
     // model that prunes none and accepts no output, so its summaries stay
-    // and its last round, over the complete tumbling-window-width domain, is recorded.
-    let enforced = production_run(&ratio_of_quantiles(), PlanSearchSettings::default());
+    // and its Pass 2 memo is recorded.
+    let enforced = production_run(&ratio_of_quantiles());
     assert_eq!(candidate_count(pass1_memo(&enforced)), 7);
     let models = PlanningModels::builtin().with_accuracy(&AcceptsNoOutput);
-    let run = production_run_with(&ratio_of_quantiles(), complete_domain_round(), models);
+    let run = production_run_with(&ratio_of_quantiles(), models);
     // Stage 0 (Pass 1's groups): series identity makes the two
     // `quantile 0.5` one group.
     // Pass 1: the two quantile groups have 5 candidates each, 3 for the
@@ -430,10 +402,8 @@ fn ratio_of_quantiles_production_memo() {
 /// On the three-query workload, the same relation: the memo's 3 × 3
 /// whole-budget DAGs and the inventory's 3 × 3 assignments share the 2 × 2
 /// that take no KLL (the memo's is sized for the whole result, the
-/// inventory's per value). Pass 1 is the same in every round, so the
-/// default search will do.
+/// inventory's per value), with the default search.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn shared_quantiles_pass1_memo_and_whole_workload_plans() {
     let workload = with_queries(
         &[
@@ -443,7 +413,7 @@ fn shared_quantiles_pass1_memo_and_whole_workload_plans() {
         ],
         60_000,
     );
-    let run = production_run(&workload, PlanSearchSettings::default());
+    let run = production_run(&workload);
     assert_eq!(
         assert_pass1_memo_and_whole_workload_plans(
             &run,

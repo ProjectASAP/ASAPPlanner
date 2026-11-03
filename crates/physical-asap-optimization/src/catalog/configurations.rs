@@ -59,8 +59,6 @@ pub fn may_keep_across_evaluations_per_sole_reader_query(
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigurationError {
-    #[error(transparent)]
-    DeadlineExceeded(#[from] asap_types::stages::CandidateGenerationTimeout),
     #[error("invalid source candidate inventory: {0}")]
     InvalidInventory(String),
     #[error("candidate {candidate} already has timing or materialization assigned")]
@@ -70,16 +68,14 @@ pub enum ConfigurationError {
 /// Each operator node of `source` with every timing and materialization
 /// Stage 2 allows, one candidate each. `query_roots` are the memo's; their
 /// group references are `source`'s output references.
-pub fn enumerate_candidate_configurations_before(
+pub fn enumerate_candidate_configurations(
     source: &CandidateInventory,
     query_roots: &[QueryRoot<MemoGroupId>],
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     query_time_results_retained: bool,
     raw_data_retained: bool,
-    deadline: Option<std::time::Instant>,
 ) -> Result<PhysicalASAPMemoCandidates, ConfigurationError> {
-    super::check_deadline(deadline)?;
     let invalid = |message: &str| ConfigurationError::InvalidInventory(message.into());
     source.validate().map_err(|error| invalid(&error))?;
     let output_queries: Vec<usize> = output_references(query_roots)
@@ -104,14 +100,12 @@ pub fn enumerate_candidate_configurations_before(
     let mut potential = vec![vec![false; entries.len()]; source_count];
     let mut may_produce_query_output = vec![false; source_count];
     for (output, &query) in output_queries.iter().enumerate() {
-        super::check_deadline(deadline)?;
         query_outputs[query].push(output);
         let mut pending = source.query_output_nodes[output].clone();
         for root in &pending {
             may_produce_query_output[root.0] = true;
         }
         while let Some(candidate) = pending.pop() {
-            super::check_deadline(deadline)?;
             if !potential[candidate.0][query] {
                 potential[candidate.0][query] = true;
                 pending.extend(
@@ -127,7 +121,6 @@ pub fn enumerate_candidate_configurations_before(
     let mut pruned_candidates = Vec::new();
     let mut source_configurations = vec![Vec::new(); source_count];
     for source_id in 0..source_count {
-        super::check_deadline(deadline)?;
         let node = &source.operator_nodes_of_candidates_for_memo_groups[source_id].physical_node;
         if node.timing.is_some() || node.materialization != Materialization::NotMaterialized {
             return Err(ConfigurationError::AssignedExecution {
@@ -324,7 +317,6 @@ pub fn enumerate_candidate_configurations_before(
     // index; reader eligibility remains expressed by separate graph constraints.
     let mut timing_index = Vec::with_capacity(source_configurations.len());
     for configurations in &source_configurations {
-        super::check_deadline(deadline)?;
         let mut by_timing = [ProducerCandidates::default(), ProducerCandidates::default()];
         for (timing_index, timing) in [ExecutionTiming::QueryTime, ExecutionTiming::IngestionTime]
             .into_iter()
@@ -332,7 +324,6 @@ pub fn enumerate_candidate_configurations_before(
         {
             let mut compatible = Vec::new();
             for &producer in configurations {
-                super::check_deadline(deadline)?;
                 if compatible_timing(timing, &candidates[producer.0]) {
                     compatible.push(producer);
                 }
@@ -344,7 +335,6 @@ pub fn enumerate_candidate_configurations_before(
     let mut input_cache: HashMap<(ProducerCandidates, ExecutionTiming), ProducerCandidates> =
         HashMap::new();
     for candidate in &mut candidates {
-        super::check_deadline(deadline)?;
         let mut requirements = Vec::new();
         for input in &source.producer_nodes_per_input[candidate.operator_node.0] {
             let key = (input.clone(), candidate.timing);
@@ -357,7 +347,6 @@ pub fn enumerate_candidate_configurations_before(
                 };
                 let mut compatible = Vec::new();
                 for producer in input {
-                    super::check_deadline(deadline)?;
                     compatible.extend(timing_index[producer.0][timing].iter().copied());
                 }
                 let producer_candidates = producer_sets.intern(compatible);
@@ -376,7 +365,6 @@ pub fn enumerate_candidate_configurations_before(
     );
     result.pruned_candidates = pruned_candidates;
     super::validate_candidates(&result).map_err(|error| invalid(&error))?;
-    super::check_deadline(deadline)?;
     Ok(result)
 }
 

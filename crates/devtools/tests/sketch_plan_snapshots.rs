@@ -18,24 +18,16 @@
 //! Regenerate with
 //! `UPDATE_SNAPSHOTS=1 cargo test --release -p asap-devtools --test corpus_snapshots -- --ignored sketch_plans_match_snapshots`.
 //!
-//! The search's seed and tumbling-window-width rounds have wall-clock budgets (5 s
-//! each), so a search that stops at a budget, of time or of evaluations, can
-//! select a different plan on a slower machine. Only a search that proves its
-//! plan optimal is independent of speed, so every workload must end with
-//! status `optimal` and no tumbling-window width left unsearched; any other ending
-//! fails instead of being recorded. Each kept workload gave the same plan in three runs and on one core.
-//! Workloads whose search stops at a budget (the raw-retained memo examples,
-//! full random-mixed workloads, three or more quantile queries over 10,000
-//! series, the `or` and `COUNT(DISTINCT)` workloads, single quantiles under
-//! the default and raw-retained deployments) are left out.
+//! Planning has no time limit, so every workload must end with status
+//! `optimal`; any other ending fails instead of being recorded.
 
 use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
 use super::{
-    first_difference, first_differing_path, hit_time_limit, plan_snapshot, proven_optimal, rounded,
-    search_status, stage_pipeline,
+    first_difference, first_differing_path, plan_snapshot, proven_optimal, rounded, search_status,
+    stage_pipeline,
 };
 
 fn repository_root() -> PathBuf {
@@ -134,21 +126,10 @@ fn sketch_plans_match_snapshots() {
     for entry in entries {
         let id = entry["id"].as_str().unwrap();
         let document = stage_pipeline(&arguments(&manifest, entry), &scratch);
-        if hit_time_limit(&document) {
-            failures.push(format!(
-                "{id}: the {} s time limit ended the search, so its plan depends on \
-                 machine speed",
-                super::TIME_LIMIT_S
-            ));
-            continue;
-        }
         if !proven_optimal(&document) {
             failures.push(format!(
-                "{id}: the plan is not proven optimal (status {}, tumbling-window widths \
-                 pending {}), so a round's budget may have chosen it; drop the \
-                 workload or make it smaller",
-                search_status(&document),
-                document["planning_report"]["tumbling_window_widths_pending"]
+                "{id}: the plan is not proven optimal (status {})",
+                search_status(&document)
             ));
             continue;
         }
@@ -197,7 +178,6 @@ fn sketch_plans_match_snapshots() {
 /// Each manifest entry names a known deployment and an existing input, and
 /// builds its arguments.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn manifest_entries_build_their_arguments() {
     let manifest: Value = serde_json::from_str(
         &std::fs::read_to_string(snapshots_dir().join("manifest.json")).unwrap(),

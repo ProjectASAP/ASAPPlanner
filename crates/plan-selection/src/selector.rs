@@ -213,23 +213,6 @@ impl<'a> PlanSelector<'a> {
     /// it if it can still be selected.
     #[cfg(any(test, feature = "reference-pricer"))]
     pub fn offer(&mut self, candidate: &PhysicalWorkloadPlan) -> Result<(), ErrorSelectingPlan> {
-        self.offer_before(candidate, None)
-    }
-
-    /// A stopped compiler is not evidence that the candidate is invalid.
-    pub fn offer_before(
-        &mut self,
-        candidate: &PhysicalWorkloadPlan,
-        deadline: Option<std::time::Instant>,
-    ) -> Result<(), ErrorSelectingPlan> {
-        let check_deadline = || {
-            if deadline.is_some_and(|limit| std::time::Instant::now() >= limit) {
-                Err(ErrorSelectingPlan::EvaluationDeadlineExceeded)
-            } else {
-                Ok(())
-            }
-        };
-        check_deadline()?;
         if candidate.roots.len() != self.entries.len() {
             return Err(ErrorSelectingPlan::EntryCount {
                 candidate: candidate.id.clone(),
@@ -284,7 +267,6 @@ impl<'a> PlanSelector<'a> {
                 return Ok(());
             }
         }
-        check_deadline()?;
         if !self.keep_every_candidate {
             for kept in self.kept.drain(..) {
                 self.costs.remove(&kept.id);

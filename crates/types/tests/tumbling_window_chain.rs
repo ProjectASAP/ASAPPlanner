@@ -443,54 +443,18 @@ fn a_rollup_of_the_newest_tumbling_windows_covers_their_window() {
     );
 }
 
-/// A fine-width chain remains a legal candidate; interrupted expansion is a
-/// typed budget stop, never a malformed chain or a partially successful plan.
+/// Expansion keeps every tumbling window and the identity of a chain two
+/// readers share.
 #[test]
-#[ignore = "flaky: depends on a wall-clock deadline (#1067)"]
-fn fine_tumbling_window_expansion_stops_at_the_planning_deadline() {
-    use asap_types::ir::operator::tumbling_window_chain::TumblingWindowChainExpansionError;
+fn expansion_preserves_every_tumbling_window_and_shared_reader() {
+    use asap_types::ir::operator::tumbling_window_chain::expand_tumbling_window_chains_in_workload;
     use asap_types::ir::QueryRoot;
-    use asap_types::test_support::expand_tumbling_window_chains_in_workload_before;
-    use std::time::Instant;
-    let mut op = chain(scan()).operator.clone();
-    let Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
-        tumbling_window_width_ms,
-        tumbling_window_count,
-        ..
-    }) = &mut op
-    else {
-        unreachable!()
-    };
-    *tumbling_window_width_ms = 1;
-    *tumbling_window_count = 1_000_000;
-    let roots = [QueryRoot::Operator(merge(vec![OperatorNode::new_shared(
-        op,
-    )
-    .unwrap()]))];
-    let deadline = Instant::now() + Duration::from_millis(1);
-    assert!(matches!(
-        expand_tumbling_window_chains_in_workload_before(&roots, Some(deadline)),
-        Err(TumblingWindowChainExpansionError::DeadlineExceeded)
-    ));
-}
-
-/// Supplying ample budget preserves complete expansion and shared tumbling window identity.
-#[test]
-#[ignore = "flaky: depends on a wall-clock deadline (#1067)"]
-fn budgeted_expansion_preserves_every_tumbling_window_and_shared_reader() {
-    use asap_types::ir::QueryRoot;
-    use asap_types::test_support::expand_tumbling_window_chains_in_workload_before;
-    use std::time::Instant;
     let shared = chain(scan());
     let roots = [
         QueryRoot::Operator(merge(vec![shared.clone()])),
         QueryRoot::Operator(merge(vec![shared])),
     ];
-    let result = expand_tumbling_window_chains_in_workload_before(
-        &roots,
-        Some(Instant::now() + Duration::from_secs(10)),
-    )
-    .unwrap();
+    let result = expand_tumbling_window_chains_in_workload(&roots).unwrap();
     assert_eq!(result.chains.len(), 1);
     assert_eq!(result.chains[0].tumbling_windows.len(), 5);
     let QueryRoot::Operator(first) = &result.roots[0] else {
