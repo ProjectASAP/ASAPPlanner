@@ -489,7 +489,7 @@ class DefaultSearchTests(unittest.TestCase):
         report = self.doc["stage3_plan_selection"]["search_report"]
         self.assertIn(f"search {report['status'].replace('_', ' ')}", text)
         self.assertIn(f"MILP {report['milp_variables']} variables", text)
-        self.assertIn("tumbling-window-width round", text)
+        self.assertNotIn("round", text)
         outputs = self.doc["stage3_plan_selection"]["selected_dag"]["node_of_output_reference"]
         self.assertEqual(len(outputs), 2)
         # Archived documents (before Stage 3's `Selection`) still render

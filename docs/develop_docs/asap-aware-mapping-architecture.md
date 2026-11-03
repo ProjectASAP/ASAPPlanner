@@ -58,9 +58,9 @@ PhysicalASAPMemoCandidates (operator nodes per timing/materialization + pruned_c
 Selection (selected_dag, cost, accepted_accuracy_per_query, search_report)
 ```
 
-`asap_planner::run_planning` runs all of it over lowered roots: Pass 1 once,
-then Pass 2, Stage 2 and Stage 3 per tumbling-window-width round, keeping the best
-round's selection and building that plan with `AssignmentRealizer::realize`.
+`asap_planner::run_planning` runs all of it over lowered roots: Pass 1, then
+Pass 2 over every tumbling-window width, Stage 2 and Stage 3, and builds the
+selected plan with `AssignmentRealizer::realize`.
 It returns every stage's output (`PlanningRun`); `Stage1ToStage3Pass` is the
 same pipeline behind the `OptimizationPass` trait.
 

@@ -5,8 +5,7 @@
 const STAGE_PIPELINE_FORMAT = 'asap-stage-pipeline/v1';
 
 // Documents written before #1163 name the tumbling-window chain `PaneChain`,
-// its fields `pane_*`, the planning report's `pane_width_domain` and
-// `pane_widths_pending`, and the memo origin `panes` (`Panes` in older MILP
+// its fields `pane_*`, and the memo origin `panes` (`Panes` in older MILP
 // search reports); renames them in place to today's names, keeping each
 // object's key order, so the rest of the viewer reads one set of names.
 // Remove once no document the viewer must open predates #1163.
@@ -16,8 +15,6 @@ const TUMBLING_WINDOW_RENAMES = Object.freeze({
   pane_count: 'tumbling_window_count',
   newest_panes: 'newest_tumbling_windows',
   pane_retention_ms: 'tumbling_window_retention_ms',
-  pane_width_domain: 'tumbling_window_width_domain',
-  pane_widths_pending: 'tumbling_window_widths_pending',
 });
 const ORIGIN_RENAMES = Object.freeze({ panes: 'tumbling_windows', Panes: 'TumblingWindows' });
 const has = (object, key) => Object.prototype.hasOwnProperty.call(object, key);

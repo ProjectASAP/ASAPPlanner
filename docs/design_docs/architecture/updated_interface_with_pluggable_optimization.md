@@ -125,14 +125,13 @@ tracked in #580.
 | Step | Call |
 |---|---|
 | Prepare roots | Entries in `entries()` order, the accuracy target from each entry's `requirements`; PromQL operator roots carry the series identity (`with_promql_series_identity`) where it has a realization |
-| Stage 1: logical ASAP-aware optimization | `generate_per_computation_logical_memo_candidates` (Pass 1, once), then per tumbling-window-width round `generate_logical_asap_memo_candidates` (Pass 2) |
-| Stage 2: physical ASAP-aware optimization | `generate_physical_asap_memo_candidates` per round |
-| Stage 3: plan selection | `select_plan` per round: check accuracy and latency, price under the cost model, select one plan; the facade keeps the best round's and builds it with Stage 2's `AssignmentRealizer::realize` |
+| Stage 1: logical ASAP-aware optimization | `generate_per_computation_logical_memo_candidates` (Pass 1), then `generate_logical_asap_memo_candidates` (Pass 2) over every tumbling-window width |
+| Stage 2: physical ASAP-aware optimization | `generate_physical_asap_memo_candidates` |
+| Stage 3: plan selection | `select_plan`: check accuracy and latency, price under the cost model, select one plan; the facade builds it with Stage 2's `AssignmentRealizer::realize` |
 
 `run_planning` runs these steps over the query-language frontends' roots
-(Stage 0) and returns `PlanningRun`: Pass 1's candidates, the selected
-round's Pass 2 and Stage 2 outputs, the selection, the selected plan and a
-report per round; the `stage_pipeline` devtool shows them.
+(Stage 0) and returns `PlanningRun`: Pass 1's candidates, the Pass 2 and
+Stage 2 outputs, the selection, the selected plan and a report; the `stage_pipeline` devtool shows them.
 
 `ReplacementStrategy` remains a concept of the legacy candidate search, which
 no pass uses any more.

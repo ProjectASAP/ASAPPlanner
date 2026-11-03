@@ -281,7 +281,7 @@ async fn installable_at_query_time(query: &str) -> Result<InstallablePlan, PlanE
 /// which no ingestion run can build in time), is refused with its reason,
 /// not passed on with a wrong window or dropped; a plain range is listed.
 #[tokio::test]
-#[ignore = "fails on main too: the `@` query's selection MILP is infeasible (its scan has no rows_held to price); not a wall-clock issue"]
+#[ignore = "fails on main too: the `@` query's selection MILP is infeasible (its scan has no rows_held to price); not a wall-clock issue; #1015"]
 async fn raw_data_windows_of_unsupported_shapes_are_refused() {
     for (query, reason) in [
         (

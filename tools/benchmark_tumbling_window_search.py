@@ -3,6 +3,10 @@
 
 Linux /usr/bin/time measures whole-process peak RSS. Search counters describe
 reported domains and must not be confused with a complete-catalog optimum.
+
+Historical: since #1185 the planner has no planning budget and searches every
+tumbling-window width in one pass, so `--budget` only labels a run and the
+domain check passes trivially for binaries built after #1185.
 """
 import argparse
 import concurrent.futures
