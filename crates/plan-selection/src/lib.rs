@@ -5693,6 +5693,43 @@ mod tests {
         }
     }
 
+    /// The reference pricer rejects a candidate it cannot price, as the
+    /// search does, rather than failing the whole selection.
+    #[test]
+    fn the_reference_pricer_rejects_an_unpriceable_candidate() {
+        let candidates = tumbling_window_candidates(10_000.0);
+        let kll = candidates[0]
+            .dag
+            .nodes
+            .iter()
+            .find_map(|node| match &node.payload {
+                Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                    family: FieldDataType::Sketch(kind, _),
+                    ..
+                }) => Some(kind.params().clone()),
+                _ => None,
+            })
+            .unwrap();
+        let settings = measured(vec![OperatorCost {
+            memory_bytes_per_state: Some(u64::MAX as f64),
+            ..sketch_entry(OperatorKind::SummaryTumblingWindowChain, kll, 1.0)
+        }]);
+        let entries = [entry_with(p99_target(), repeating(MINUTE))];
+        let models = SelectionModels {
+            cost_inputs: &settings,
+            ..SelectionModels::builtin()
+        };
+        let Err(ErrorSelectingPlan::NoValidCandidate(rejected)) =
+            select_among_plans(&candidates, &entries, &arriving(10_000.0), models)
+        else {
+            panic!("every candidate overflows, so none is valid");
+        };
+        assert_eq!(rejected.len(), candidates.len());
+        assert!(rejected
+            .iter()
+            .all(|r| r.cause == RejectionCause::CostNotRepresentable));
+    }
+
     /// The table of earlier versions, a JSON array of sketch operations,
     /// still loads: each entry becomes its operator's entry at both phases,
     /// an update both a `SummaryAgg` and a `SummaryTumblingWindowChain` entry.

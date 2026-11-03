@@ -108,7 +108,8 @@
 //     `cause` (a failed check: `accuracy_target_missed`,
 //     `count_min_weights_not_proven_non_negative`, `no_accuracy_guarantee`,
 //     `latency_bound_exceeded`, `latency_over_repeat_interval`,
-//     `over_cluster_capacity`; or a loss under the cost model: `costlier`,
+//     `over_cluster_capacity`, `cost_not_representable`; or a loss under
+//     the cost model: `costlier`,
 //     `slower`, `more_memory`, `tied_lost_on_enumeration_order`),
 //     `pruned_candidates_not_enumerated` (rejections naming no enumerated
 //     candidate) and `pruned_candidate_count_by_cause`.
