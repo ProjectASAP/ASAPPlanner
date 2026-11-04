@@ -6,31 +6,27 @@ slowdown), #1201 (producer–consumer formulation).
 
 ## Context
 
-Stages 0–2 enumerate the set of logical DAGs that could answer a workload. Stage 3's MILP then picks
-the cheapest one. Enumeration only decides what is *possible*; cost decides what is *optimal*, and
-only in Stage 3.
+Stages 0–2 enumerate the set of logical DAGs that can answer a workload. Stage 3's MILP then picks
+the cheapest one. Enumeration only decides what is *possible*; cost decides what is *optimal*.
 
-The set is far too large to list, so we store a **compressed representation** of it. Any design has
-three aspects:
+The set of all possible DAGs too large to list, so we store a **compressed representation** of it. Any design to do this has three aspects:
 
-- **(a) Representation:** what is stored.
-- **(b) Rules:** how passes extend what is stored.
-- **(c) Enumeration:** how to decode the stored form back into the set of DAGs.
+- **(a) Representation:** what is stored
+- **(b) Rules:** how we update/extend the compressed representation of the set of possible DAGs (e.g. adding different window candidates.)
+- **(c) Enumeration:** how to enumerate the list of possible DAGs from the compressed representation
 
 There have been three designs:
 
-1. **Pre-memo:** an explicit list of whole DAGs. Nothing is compressed.
-2. **Today's memo:** groups share common sub-expressions. Every other kind of variation is written
-   out as copies.
-3. **Proposed:** also compresses (i) independent choices that multiply (sketch type × width) and
-   (ii) strength variants and sharing (k, ε, window, labels). It also records which rule introduced
+1. **Pre-memo:** an explicit list of whole DAGs. Nothing is compressed. This was the default until #934 (7bbade26, 2026-10-25); the memo first appeared as an opt-in search in #900 (89a5ada4).
+2. **Today:** Memo groups share common sub-expressions. Every other kind of variation is written out as copies.
+3. **Proposed:** Compress (i) independent choices that multiply (sketch type × width) and (ii) subsumption and sharing (k, ε, window, labels). It also records which rule introduced
    each variation.
 
 | Compresses | Pre-memo | Today | Proposed |
 |---|---|---|---|
 | Shared sub-expressions | – | ✓ groups | ✓ |
 | Product of independent choices | – | – | ✓ `open` |
-| Strength variants and sharing | – | – (copies) | ✓ requirements |
+| Subsumption and sharing | – | – (copies) | ✓ requirements |
 
 ## Running example
 
@@ -43,6 +39,7 @@ q99: quantile_over_time(0.99, data[5m])   ε .001
 
 Choices: exact or a sketch; sketch ∈ {Kll, DD}; shape ∈ {direct `SummaryAgg`, windowed
 `Merge ← TWChain` with width 60s}; private or shared.
+(TWChain == TumblingWindowChain)
 
 ## 1. Pre-memo: an explicit list of whole DAGs
 
@@ -83,7 +80,7 @@ G7 TW  Kll(.001)<-G0   G8 TW  DD(.001)<-G0                       shared configur
 every width. `SharedProducer` (`pass2/memo/rules/shared_producer.rs`), used by the summary and
 top-k rules, works in three steps:
 
-1. `sets()`: find readers whose producers differ only in strength, e.g. `topk(5, x)` and
+1. `sets()`: find readers where one producer could subsume the others, e.g. `topk(5, x)` and
    `topk(10, x)` by job.
 2. `coverings()`: decide which producers to offer the set, e.g. `Limit(10) ← Sort(x)`.
 3. `derive()`: for each reader × covering, add a new candidate that reads the producer (now a
@@ -149,7 +146,7 @@ struct Requirement { accuracy /* budget parts included */, window_ms, grid_ms }
 |---|---|
 | a structural candidate | `[exact]`, `[Estimate<-S]`; the direct and windowed shapes |
 | a free-choice domain in `open` | sketch ∈ {Kll, DD}; width ∈ {60s} |
-| a `Requirement` field with `combine` and `covers` | accuracy: combine = min ε; covers = p.ε ≤ r.ε |
+| a `Requirement` field with `combine` and `subsumes` | accuracy: combine = min ε; subsumes = p.ε ≤ r.ε |
 | a `derive` function: the reader's operators on top of a producer | `Estimate(q)` |
 
 This is `SharedProducer` split into its parts:
@@ -196,18 +193,18 @@ The memo stores 2 candidates per query, 2 shapes, 2 small `open` lists and 2 req
 29 DAGs. For three quantiles at one ε, today's 127 groups / 247 candidates per root become 6 groups /
 2 candidates per root.
 
-### Combine, covers, closure
+### Combine, subsumes, closure
 
 For a requirement type R:
-- `covers(p, r)`: can a producer built for requirement p serve a reader that needs r?
-- `combine(a, b)`: the weakest requirement that covers both, or none if they can't share.
+- `subsumes(p, r)`: can a producer built for requirement p serve a reader that needs r?
+- `combine(a, b)`: the weakest requirement that subsumes both, or none if they can't share.
 
-Rules: `covers(combine(a,b), a)` and `covers(combine(a,b), b)`, and no weaker requirement covers
-both. A requirement with several fields combines and covers field by field. Some checks need the
-configuration too (a width must divide the reader's grid), so `covers` takes (configuration,
+Rules: `subsumes(combine(a,b), a)` and `subsumes(combine(a,b), b)`, and no weaker requirement subsumes
+both. A requirement with several fields combines and subsumes field by field. Some checks need the
+configuration too (a width must divide the reader's grid), so `subsumes` takes (configuration,
 reader requirement).
 
-| Requirement | `covers(p, r)` | `combine(a, b)` |
+| Requirement | `subsumes(p, r)` | `combine(a, b)` |
 |---|---|---|
 | accuracy ε | p.ε ≤ r.ε | min |
 | window | p.window ≥ r.window | max |
@@ -223,7 +220,7 @@ costs more and helps no one, assuming cost only grows as requirements strengthen
 
 - Here: {q50} → ε.01, {q99} → ε.001, {q50,q99} → ε.001. Closure = {ε.01, ε.001}.
 - With several fields, a combine can be new: (ε.01, 5m) and (ε.001, 1m) combine to (ε.001, 5m).
-- It replaces the partition step: each reader picks one closure element that covers it. q50 may pick
+- It replaces the partition step: each reader picks one closure element that subsumes it. q50 may pick
   ε.01 or ε.001; q99 must pick ε.001. The number of partitions grows very fast with the number of
   readers; the closure stays small (n elements when the order is total).
 - Today's G5–G8 are closure elements (× shape × sketch), stored as groups. The proposal computes them.
@@ -245,7 +242,7 @@ roughly is; DD in 1/α).
 Stage 3 (facility location):
 ```
 x[g,c]  group g uses candidate c                         A
-y[r,p]  reader r reads closure element p (p covers r)    B, C
+y[r,p]  reader r reads closure element p (p subsumes r)  B, C
 z[p]    producer p is built  ⇐  any y[r,p]
 ```
 
@@ -253,8 +250,8 @@ z[p]    producer p is built  ⇐  any y[r,p]
 
 | Kind | Examples | Add |
 |---|---|---|
-| Free choice (unordered; sharers must agree) | sketch type, storage tier | a field in `ConfigurationSpace`, its cost, equality in `covers` |
-| Requirement (ordered; stronger serves weaker) | ε, window, grid, k, labels | a field in `Requirement`, its `combine`, its `covers` |
+| Free choice (unordered; sharers must agree) | sketch type, storage tier | a field in `ConfigurationSpace`, its cost, equality in `subsumes` |
+| Requirement (ordered; stronger subsumes weaker) | ε, window, grid, k, labels | a field in `Requirement`, its `combine`, its `subsumes` |
 
 Today, adding a dimension means writing a rule that copies candidates for each value.
 
@@ -282,7 +279,7 @@ Classified from file headers only; not yet verified against each rule's code.
 ## Open questions
 
 1. Do `topk`, `rollup`, `finer_aggregate` and `scan_labels` really fit `Requirement`, with the
-   combine and covers above?
+   combine and subsumes above?
 2. Where do factored candidates get expanded? (i) Just before Stage 2: small change, but the MILP
    stays large and #1197 isn't fixed. (ii) Keep them factored into the MILP (#1201): fixes #1197, but
    a larger change.
@@ -302,7 +299,7 @@ Classified from file headers only; not yet verified against each rule's code.
 | `open` | a candidate's free choices (sketch type, width) |
 | Reader | a group that reads a summary group |
 | Requirement | what one reader needs: ε (budget parts included), window, grid, … |
-| `combine` / `covers` | the weakest requirement satisfying both / whether a producer serves a reader |
+| `combine` / `subsumes` | the weakest requirement satisfying both / whether a producer serves a reader |
 | Combine closure | all combines of reader subsets: the producers worth building |
 | Producer | a built configuration: shape + `open` values + closure element |
 | `derive` | a reader's own operators on top of a producer (`Estimate(q)`, `Limit(k)`) |
