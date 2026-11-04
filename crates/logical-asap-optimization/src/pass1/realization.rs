@@ -10,15 +10,13 @@ use asap_types::ir::scalar::expr_ir::ColumnRef;
 use asap_types::ir::schema::topk::ranked_column;
 use asap_types::ir::schema::ColumnId;
 use asap_types::ir::schema::{
-    EntityIdentity, FamilyCapability, FieldDataType, NonNegativeWeightProof, Schema,
+    EntityIdentity, FamilyCapability, Field, FieldDataType, NonNegativeWeightProof, Schema,
     SketchAlgorithm, SummaryInputExpr, SummaryUpdate, WeightDomain,
 };
 use asap_types::ir::{NonASAPOp, OperatorNode};
 #[cfg(test)]
 use asap_types::ir::{Operator, ScalarExpr};
 use std::rc::Rc;
-
-use crate::ir_construction::column_ref;
 
 use asap_accuracy::sizing::sketch_statistic;
 
@@ -78,7 +76,7 @@ pub(crate) fn summarised_column(intent: &AggIntent, child_schema: &Schema) -> Co
         .first()
         .and_then(|id| child_schema.fields.get(*id))
     {
-        Some(c) => column_ref(c),
+        Some(c) => c.column_ref(),
         None => ColumnRef::SampleValue,
     }
 }
@@ -89,7 +87,7 @@ pub(crate) fn ranked_value(child: &OperatorNode) -> Result<(ColumnId, ColumnRef)
     let ranked = ranked_column(child)?;
     let column = match resolve_column_ref(&ColumnRef::SampleValue, &child.schema) {
         Ok(value) if value == ranked => ColumnRef::SampleValue,
-        _ => column_ref(&child.schema.fields[ranked]),
+        _ => child.schema.fields[ranked].column_ref(),
     };
     Ok((ranked, column))
 }
@@ -115,7 +113,7 @@ pub(crate) fn summarised_input(
     }
     let legs = cols
         .iter()
-        .map(|id| child_schema.fields.get(*id).map(column_ref))
+        .map(|id| child_schema.fields.get(*id).map(Field::column_ref))
         .collect::<Option<Vec<_>>>()?;
     Some(SummaryInputExpr::Tuple(
         legs.into_iter().map(SummaryInputExpr::Column).collect(),
@@ -209,7 +207,7 @@ pub(crate) fn realize_keyed_additive_summary_input(
         }
         [AggIntent::Sum { col }] => SummaryInputExpr::Column(match col {
             None => ColumnRef::SampleValue,
-            Some(index) => match schema_column_ref(raw_child, *index) {
+            Some(index) => match raw_child.schema.fields.get(*index).map(Field::column_ref) {
                 Some(column) => column,
                 None => {
                     // Unsupported: sum-ranked Top-K value column is outside the raw input schema.
@@ -239,7 +237,7 @@ pub(crate) fn realize_keyed_additive_summary_input(
         Reduction::PerEntity => vec![],
         Reduction::Reduce(keys) => keys
             .iter()
-            .filter_map(|index| schema_column_ref(child, *index))
+            .filter_map(|index| child.schema.fields.get(*index).map(Field::column_ref))
             .collect(),
     };
     let item = match reduction {
@@ -249,7 +247,7 @@ pub(crate) fn realize_keyed_additive_summary_input(
         Reduction::Reduce(keys) if !keys.is_without() && !keys.is_empty() => {
             let Some(columns) = keys
                 .iter()
-                .map(|index| schema_column_ref(raw_child, *index))
+                .map(|index| raw_child.schema.fields.get(*index).map(Field::column_ref))
                 .collect::<Option<Vec<_>>>()
             else {
                 // Unsupported: ranked item column is outside the raw input schema.
@@ -347,17 +345,6 @@ fn summed_per_series_samples(grouped: &OperatorNode) -> Option<(Rc<OperatorNode>
         return None;
     }
     Some((Rc::clone(rows), inner.clone()))
-}
-
-pub(crate) fn schema_column_ref(child: &OperatorNode, index: usize) -> Option<ColumnRef> {
-    let column = child.schema.fields.get(index)?;
-    Some(match &column.table {
-        Some(table) => ColumnRef::Qualified {
-            table: table.clone(),
-            name: column.name.clone(),
-        },
-        None => ColumnRef::Named(column.name.clone()),
-    })
 }
 
 #[cfg(test)]

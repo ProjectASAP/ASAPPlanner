@@ -136,7 +136,6 @@ use asap_types::workload::bounds::{declared_non_negative, series_read, values_pe
 use asap_types::workload::DataWorkload;
 
 use crate::deployment_capabilities::{summary_supported, SupportedSummary};
-use crate::ir_construction::{exact_family, partitions_over};
 use crate::pass1::realization::summary_candidates;
 use asap_types::stages::{
     ComputationTarget, DagOfLogicalMemoGroups, FusedComputation, HavingEntry, HavingPlacement,
@@ -1051,7 +1050,7 @@ fn add_nested_sum_targets(targets: &mut [ComputationTarget], logical_nodes: &[Rc
 }
 
 /// The input rows, the inner sum and the outer grouping (moved onto the
-/// input rows by column, [`partitions_over`]) of a nested-sum merge of
+/// input rows by column, [`Reduction::partitions_over`]) of a nested-sum merge of
 /// `target`, or `None` when it does not apply: `target` is a grouped `sum`
 /// (not by `without`) of the value column of a per-series or grouped `sum`
 /// directly beneath it, neither filtered nor with `HAVING`, and not grouped
@@ -1116,7 +1115,7 @@ fn nested_sum_input(target: &OperatorNode) -> Option<(Rc<OperatorNode>, AggInten
     {
         return None;
     }
-    let partitions = partitions_over(reduction, &inner.schema, &rows.schema)?;
+    let partitions = reduction.partitions_over(&inner.schema, &rows.schema)?;
     Some((Rc::clone(rows), inner_sum.clone(), partitions))
 }
 
@@ -1253,7 +1252,7 @@ fn reads_only_time_series(node: &OperatorNode) -> bool {
 /// `target`'s inner aggregate, by the keyed-additive rule, or `None` when it
 /// does not apply. Rows that carry the full series identity rank it as a
 /// column, as [`summary_update`] does. The partitions are `target`'s, moved
-/// onto the input the heap reads ([`partitions_over`]).
+/// onto the input the heap reads ([`Reduction::partitions_over`]).
 fn whole_expression_input(
     target: &OperatorNode,
 ) -> Option<(Rc<OperatorNode>, SummaryUpdate, Reduction)> {
@@ -1299,7 +1298,7 @@ fn whole_expression_input(
             ..
         })
     );
-    let partitions = partitions_over(reduction, &child.schema, &realized.child.schema)?;
+    let partitions = reduction.partitions_over(&child.schema, &realized.child.schema)?;
     if per_series && realized.child.schema.has_promql_series_identity() {
         input.item = Some(asap_types::ir::schema::topk::series_identity_item(
             &realized.child.schema,
@@ -1859,7 +1858,7 @@ pub(crate) fn exact_accumulator(
     input: &Rc<OperatorNode>,
     reduction: Reduction,
 ) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
-    let family = exact_family(kind);
+    let family = FieldDataType::exact(kind);
     let read = measure_input(intent, input, None)?;
     Ok(OperatorNode::new_shared(Operator::ASAP(
         ASAPOp::SummaryAgg {
@@ -1907,7 +1906,7 @@ fn substitute_measure(
         ))?)
     };
     let finalized = |kind: &ExactKind, intent: &AggIntent, read| {
-        let state = state(exact_family(*kind), intent, read)?;
+        let state = state(FieldDataType::exact(*kind), intent, read)?;
         Ok::<_, PerComputationCandidateError>(OperatorNode::new_shared(Operator::ASAP(
             ASAPOp::FinalizeExactAccumulator { child: state },
         ))?)
@@ -2287,7 +2286,7 @@ fn counted_column(
         schema
             .fields
             .get(id)
-            .map(crate::ir_construction::column_ref)
+            .map(asap_types::ir::schema::Field::column_ref)
     };
     filter
         .map_or_else(Vec::new, |filter| not_null(&filter.0))
@@ -2349,9 +2348,7 @@ fn summary_update(
                     .iter()
                     .enumerate()
                     .filter(|(index, _)| *index != value && !groups.contains(index))
-                    .map(|(_, field)| {
-                        SummaryInputExpr::Column(crate::ir_construction::column_ref(field))
-                    })
+                    .map(|(_, field)| SummaryInputExpr::Column(field.column_ref()))
                     .collect();
                 if items.is_empty() {
                     return Err(PerComputationCandidateError::Unsupported(
@@ -2363,7 +2360,7 @@ fn summary_update(
                 let excluding = groups
                     .iter()
                     .filter_map(|&index| child.fields.get(index))
-                    .map(crate::ir_construction::column_ref)
+                    .map(asap_types::ir::schema::Field::column_ref)
                     .collect();
                 SummaryInputExpr::EntityIdentity(EntityIdentity::PromqlLabelSet { excluding })
             };

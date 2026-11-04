@@ -62,8 +62,6 @@
 
 /// The deployment's capabilities: supported summaries and what it retains.
 mod deployment_capabilities;
-/// IR-building helpers both Stage 1 passes use.
-mod ir_construction;
 mod pass1;
 mod pass2;
 /// Stage 0: the memo groups of the workload's query roots.

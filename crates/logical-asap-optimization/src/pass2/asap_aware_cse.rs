@@ -122,7 +122,6 @@ use asap_types::ir::{
     TimeRangeKind,
 };
 
-use crate::ir_construction::{column_ref, exact_family, partitions_over};
 use asap_accuracy::estimators::size_for_all_readers;
 use asap_accuracy::propagation::recompose_guarantees;
 
@@ -1913,7 +1912,7 @@ fn rolled_up(
     {
         return None;
     }
-    let regrouped = partitions_over(reduction, &child.schema, &finer.schema)?;
+    let regrouped = reduction.partitions_over(&child.schema, &finer.schema)?;
     if regrouped
         .group_keys()
         .is_some_and(|keys| keys.iter().any(|&k| k >= value))
@@ -1923,7 +1922,7 @@ fn rolled_up(
     let kind = rollup_kind(family)?;
     // An exact accumulator over the finer value column: what Pass 1 builds
     // for a Sum, Min or Max of that column (no item, signed weights).
-    let weight = column_ref(&finer.schema.fields[value]);
+    let weight = finer.schema.fields[value].column_ref();
     resolve_column_ref(&weight, &finer.schema).ok()?;
     let state = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
         child: Rc::clone(finer),
@@ -1932,7 +1931,7 @@ fn rolled_up(
             weight: SummaryInputExpr::Column(weight),
             weight_domain: WeightDomain::UnknownOrSigned,
         },
-        family: exact_family(kind),
+        family: FieldDataType::exact(kind),
         reduction: regrouped,
         grouping: GroupingStrategy::default(),
         filter: None,

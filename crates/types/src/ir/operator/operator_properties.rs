@@ -447,6 +447,38 @@ pub enum Reduction<C = ColumnId> {
     PerEntity,
 }
 
+impl Reduction {
+    /// These keys, which index `inner`, as indices into `input`, matched by
+    /// column. `None` when a key is missing or ambiguous in `input`, or the
+    /// keys are given by `without`: `input` carries columns `inner` dropped.
+    pub fn partitions_over(
+        &self,
+        inner: &crate::ir::schema::Schema,
+        input: &crate::ir::schema::Schema,
+    ) -> Option<Reduction> {
+        let Reduction::Reduce(keys) = self else {
+            return Some(Reduction::PerEntity);
+        };
+        if keys.is_without() {
+            return None;
+        }
+        let keys = keys
+            .keys()
+            .iter()
+            .map(|&index| {
+                let key = inner.fields.get(index)?.column_ref();
+                let mut matches =
+                    (0..input.fields.len()).filter(|&i| input.fields[i].column_ref() == key);
+                match (matches.next(), matches.next()) {
+                    (Some(i), None) => Some(i),
+                    _ => None,
+                }
+            })
+            .collect::<Option<_>>()?;
+        Some(Reduction::by(keys))
+    }
+}
+
 impl<C> Reduction<C> {
     /// Shorthand for the common case — group by these (possibly empty)
     /// keys, kept rather than excluded.
@@ -473,5 +505,43 @@ impl<C> Reduction<C> {
             Self::Reduce(by) => by,
             Self::PerEntity => panic!("expected Reduction::Reduce, got PerEntity"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::schema::{DataType, Field, Schema};
+
+    /// A key moves to the input's column of the same name and qualifier; a
+    /// key that is missing or ambiguous there, or a `without` grouping, has no
+    /// partitions over the input.
+    #[test]
+    fn partitions_over_matches_keys_by_column() {
+        let field = |name: &str| Field::plain(name, DataType::Utf8, false);
+        let inner = Schema::new(vec![field("job"), field("value")]);
+        let input = Schema::new(vec![field("ts"), field("job"), field("value")]);
+        assert_eq!(
+            Reduction::by(vec![0]).partitions_over(&inner, &input),
+            Some(Reduction::by(vec![1]))
+        );
+        assert_eq!(
+            Reduction::PerEntity.partitions_over(&inner, &input),
+            Some(Reduction::PerEntity)
+        );
+        let ambiguous = Schema::new(vec![field("job"), field("job")]);
+        assert_eq!(
+            Reduction::by(vec![0]).partitions_over(&inner, &ambiguous),
+            None
+        );
+        let qualified = Schema::new(vec![field("job").with_table("t")]);
+        assert_eq!(
+            Reduction::by(vec![0]).partitions_over(&inner, &qualified),
+            None
+        );
+        assert_eq!(
+            Reduction::Reduce(GroupKeys::without(vec![0])).partitions_over(&inner, &input),
+            None
+        );
     }
 }

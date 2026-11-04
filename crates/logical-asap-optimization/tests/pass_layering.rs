@@ -1,6 +1,6 @@
 //! Stage 1's passes are independent modules (#1096, #1191): neither pass's
 //! production code imports the other. Test modules may use the other pass to
-//! build fixtures. What both passes need lives in `crate::ir_construction`.
+//! build fixtures. IR helpers both passes need live in `asap-types`.
 
 use std::path::{Path, PathBuf};
 
