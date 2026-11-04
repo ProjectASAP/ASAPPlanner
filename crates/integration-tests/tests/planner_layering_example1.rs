@@ -574,9 +574,9 @@ fn stage2_physical_asap_optimization_materializes_only_tumbling_windows_at_inges
     let mut shared_once = 0;
     for p in &run.physical {
         for n in &p.dag().nodes {
-            match materialization(p, n.id) {
-                MaterializationOption::NotMaterialized => {}
-                MaterializationOption::MatAtIngestion => {
+            match keeping(p, n.id) {
+                Keeping::NotKept => {}
+                Keeping::KeptAtIngestion => {
                     let Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { family, .. }) =
                         p.dag().payload(n.id)
                     else {
@@ -593,7 +593,7 @@ fn stage2_physical_asap_optimization_materializes_only_tumbling_windows_at_inges
                         counter_maintained += 1;
                     }
                 }
-                MaterializationOption::MatAtQuery => {
+                Keeping::KeptAtQueryTime => {
                     let (q1, q2) = roots(&p.query_roots);
                     assert!(
                         closure(p.dag(), q1).contains(&n.id)
@@ -742,7 +742,7 @@ fn stage3_plan_selection_shared_input_ties_up_to_rounding_unless_built_once() {
         p.dag()
             .nodes
             .iter()
-            .any(|n| materialization(p, n.id) == MaterializationOption::MatAtQuery)
+            .any(|n| keeping(p, n.id) == Keeping::KeptAtQueryTime)
     };
     let shared: Vec<_> = run
         .physical
@@ -770,7 +770,7 @@ fn stage3_plan_selection_shared_input_ties_up_to_rounding_unless_built_once() {
         .dag()
         .nodes
         .iter()
-        .find(|n| materialization(selected, n.id) == MaterializationOption::MatAtQuery)
+        .find(|n| keeping(selected, n.id) == Keeping::KeptAtQueryTime)
         .unwrap();
     assert_eq!(
         relational(&time_range.payload).as_deref(),

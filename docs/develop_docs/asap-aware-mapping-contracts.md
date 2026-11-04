@@ -99,7 +99,7 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
   candidate no buildable input, query output or reader count can use is
   removed (`InputHasNoBuildableProducer`, `ReachesNoQueryOutput`,
   `TooFewQueryReaders`). Stage 2 emits one candidate per operator node,
-  timing and materialization; it makes no execution-scope copies.
+  timing and lifetime; it makes no execution-scope copies.
 
 ## 5. Stage 3
 

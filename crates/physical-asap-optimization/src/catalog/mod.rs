@@ -1,5 +1,5 @@
 //! Stage 2's physical candidates: implement each memo candidate's
-//! operators, enumerate its timing and materialization, record which
+//! operators, enumerate its timing and lifetime, record which
 //! candidates can produce each input, and prune what cannot be used
 //! ([`generate_physical_asap_memo_candidates`]); and realize one selected
 //! assignment as a physical plan (#1047). The output type,

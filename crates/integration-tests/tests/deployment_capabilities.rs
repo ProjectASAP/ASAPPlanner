@@ -8,6 +8,7 @@ use asap_cost::CostInputs;
 use asap_devtools::planning_stages::lower_sql_roots;
 use asap_logical_asap_optimization::{DeploymentCapabilities, SupportedSummary};
 use asap_types::ir::flat::FlatDag;
+use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::{SketchAlgorithm, StatisticKind};
 use asap_types::ir::{ASAPOp, Operator};
 use asap_types::physical::Lifetime;
@@ -214,10 +215,12 @@ fn shared_chain_costs(run: &Run) -> (CandidateCosts, CandidateCosts) {
             };
             let entry = (p.id.clone(), cost.cost_per_second.expect("cost model 1"));
             let kept_detail = cost.per_node[&n.id].detail.contains("across evaluations");
-            match n.lifetime {
-                Lifetime::OneEvaluation(_) => within_one.push(entry),
-                Lifetime::AcrossEvaluations(_) if kept_detail => kept.push(entry),
-                Lifetime::AcrossEvaluations(_) => {
+            match (n.output_state.timing, n.lifetime) {
+                (_, Lifetime::OneEvaluation(_)) => within_one.push(entry),
+                (ExecutionTiming::QueryTime, Lifetime::AcrossEvaluations(_)) if kept_detail => {
+                    kept.push(entry)
+                }
+                (ExecutionTiming::QueryTime, Lifetime::AcrossEvaluations(_)) => {
                     panic!("{}: a kept chain priced as not kept", p.id)
                 }
                 _ => {}

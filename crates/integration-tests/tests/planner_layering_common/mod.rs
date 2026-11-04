@@ -681,10 +681,7 @@ pub fn assert_one_unmaterialized_physical_candidate_per_logical(run: &Run) {
         assert_eq!(unmaterialized, !p.candidate.materializes_any(), "{}", p.id);
         if unmaterialized {
             for n in &p.dag().nodes {
-                assert_eq!(
-                    materialization(p, n.id),
-                    MaterializationOption::NotMaterialized
-                );
+                assert_eq!(keeping(p, n.id), Keeping::NotKept);
             }
         }
     }
@@ -839,30 +836,30 @@ pub fn evaluation_interval_ms(workload: &PlanningWorkload, query: usize) -> Opti
     }
 }
 
-// ── Materialization ──────────────────────────────────────────────────────
+// ── Kept outputs ─────────────────────────────────────────────────────────
 
-/// A node's materialization option in #509's terms ("Materialization"),
-/// derived from its timing and lifetime, without its storage medium.
+/// Whether a node's output is kept and at which timing, without how long
+/// (`OneEvaluation` or `AcrossEvaluations`) or its storage medium.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum MaterializationOption {
-    /// Runs as data arrives; output stored before any query asks.
-    MatAtIngestion,
+pub enum Keeping {
+    /// Runs as data arrives; output kept until a query reads it.
+    KeptAtIngestion,
     /// Runs when a query first needs it; output reused by the other
     /// queries of the evaluation, or, as query-time `AcrossEvaluations`,
     /// kept for later evaluations.
-    MatAtQuery,
-    /// Runs at query time for each execution; output discarded.
-    NotMaterialized,
+    KeptAtQueryTime,
+    /// Output discarded after its reader (lifetime `None`).
+    NotKept,
 }
 
-/// The materialization option physical ASAP-aware optimization assigned to
-/// `node` (#667).
-pub fn materialization(p: &Physical, node: NodeId) -> MaterializationOption {
+/// Whether physical ASAP-aware optimization keeps `node`'s output, and at
+/// which timing (#667).
+pub fn keeping(p: &Physical, node: NodeId) -> Keeping {
     let n = p.dag().nodes.iter().find(|n| n.id == node).expect("node");
     match (n.output_state.timing, n.lifetime) {
-        (_, Lifetime::None) => MaterializationOption::NotMaterialized,
-        (ExecutionTiming::IngestionTime, _) => MaterializationOption::MatAtIngestion,
-        (ExecutionTiming::QueryTime, _) => MaterializationOption::MatAtQuery,
+        (_, Lifetime::None) => Keeping::NotKept,
+        (ExecutionTiming::IngestionTime, _) => Keeping::KeptAtIngestion,
+        (ExecutionTiming::QueryTime, _) => Keeping::KeptAtQueryTime,
     }
 }
 

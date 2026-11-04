@@ -20,7 +20,7 @@ use asap_types::stages::{
 };
 
 /// The memo's implementation candidates lowered to operator nodes, before
-/// timing and materialization. Node IDs index
+/// timing and lifetime. Node IDs index
 /// `operator_nodes_of_candidates_for_memo_groups`; they become
 /// [`asap_types::stages::OperatorNodeOfCandidateForMemoGroupId`]s of the
 /// configured candidates.

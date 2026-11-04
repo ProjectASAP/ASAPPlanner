@@ -50,7 +50,7 @@
 //! ## Dominance (exact under cost model 1)
 //!
 //! Candidate `k` is deleted when another candidate `k'` (the *dominating* candidate):
-//! - is in the same memo group, at the same timing and materialization,
+//! - is in the same memo group, at the same timing and lifetime,
 //!   with the same held state;
 //! - has the same producer candidates per input, the same readers (every
 //!   (reader candidate, input) that may read `k` may read `k'`, and nothing
@@ -356,7 +356,7 @@ pub(crate) fn run_kind(properties: PhysicalProperties) -> RunKind {
 /// roots give the group's result; an implementation's private nodes
 /// (`is_implementation_root == false`) give an intermediate result of
 /// their own, so each private operator node is its own slot (its
-/// candidates differ only in timing and materialization).
+/// candidates differ only in timing and lifetime).
 ///
 /// The memo group graph is not acyclic: a widened scan puts a `Project` in
 /// the memo group of the scan it reads, so a group's candidate may read

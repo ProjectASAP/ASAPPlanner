@@ -92,11 +92,8 @@ impl std::fmt::Debug for MaterializationAssignment {
         let assigned: Vec<_> = self
             .assigned
             .iter()
-            .map(|(ptr, (node, materialization))| {
-                (
-                    format!("{}@{ptr:p}", node.operator.kind_name()),
-                    materialization,
-                )
+            .map(|(ptr, (node, properties))| {
+                (format!("{}@{ptr:p}", node.operator.kind_name()), properties)
             })
             .collect();
         f.debug_struct("MaterializationAssignment")

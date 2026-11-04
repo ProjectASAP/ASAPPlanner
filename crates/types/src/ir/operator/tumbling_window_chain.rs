@@ -228,8 +228,8 @@ fn build_over(
 /// reads each tumbling window of each chain it read, newest first, as plain
 /// `SummaryAgg` nodes the executor runs; a merge of the newest `n` tumbling windows
 /// reads the first `n`, the same nodes a merge of the whole chain reads. Every other node keeps its
-/// guarantee, timing and materialization. Each tumbling window takes its chain's
-/// timing and materialization, and the range and shift it reads take the
+/// guarantee, timing and lifetime. Each tumbling window takes its chain's
+/// timing and lifetime, and the range and shift it reads take the
 /// chain's timing: a chain materialized at ingestion time expands into
 /// tumbling windows each built and stored at ingestion time. Expanding before timings
 /// are applied leaves the tumbling windows untimed. A chain read by anything but a

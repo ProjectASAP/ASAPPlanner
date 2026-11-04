@@ -4,7 +4,7 @@
 //! conjunction of individual-reader restrictions and pairwise interval/phase
 //! compatibility; selected-reader constraints encode those conditions. Complete
 //! Stage 2 validation still checks operator legality and upstream timing.
-//! Potential shared non-summary nodes also receive query materialization; Stage 2
+//! Potential shared non-summary nodes also receive query-time `OneEvaluation`; Stage 2
 //! checks highest-shared eligibility on the selected graph, not all possible consumers.
 use asap_types::stages::{ProducerCandidates, ProducerSetInterner};
 use std::collections::HashMap;
@@ -69,7 +69,7 @@ pub enum ConfigurationError {
     AssignedExecution { candidate: usize },
 }
 
-/// Each operator node of `source` with every timing and materialization
+/// Each operator node of `source` with every timing and lifetime
 /// Stage 2 allows, one candidate each. `query_roots` are the memo's; their
 /// group references are `source`'s output references.
 pub fn enumerate_candidate_configurations(
@@ -148,11 +148,11 @@ pub fn enumerate_candidate_configurations(
             .enumerate()
             .filter_map(|(query, reached)| reached.then_some(query))
             .collect::<Vec<_>>();
-        let mut modes = vec![properties(ExecutionTiming::QueryTime, Lifetime::None)];
+        let mut alternatives = vec![properties(ExecutionTiming::QueryTime, Lifetime::None)];
         if summary {
-            modes.push(kept_for_one_evaluation());
+            alternatives.push(kept_for_one_evaluation());
             if queries.iter().any(|&query| {
-                summary_mode_allowed(
+                summary_properties_allowed(
                     node,
                     &[query],
                     kept_across_evaluations_at_ingestion(),
@@ -161,11 +161,11 @@ pub fn enumerate_candidate_configurations(
                     query_time_results_retained,
                 )
             }) {
-                modes.push(kept_across_evaluations_at_ingestion());
+                alternatives.push(kept_across_evaluations_at_ingestion());
             }
             if matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }))
                 && queries.iter().any(|&query| {
-                    summary_mode_allowed(
+                    summary_properties_allowed(
                         node,
                         &[query],
                         kept_across_evaluations_at_query_time(),
@@ -175,21 +175,21 @@ pub fn enumerate_candidate_configurations(
                     )
                 })
             {
-                modes.push(kept_across_evaluations_at_query_time());
+                alternatives.push(kept_across_evaluations_at_query_time());
             }
         } else if !forced_query {
-            modes.push(properties(ExecutionTiming::IngestionTime, Lifetime::None));
+            alternatives.push(properties(ExecutionTiming::IngestionTime, Lifetime::None));
         }
         // Potential reach only generates the choice. Selected-reader cardinality
         // and Stage 2's highest-shared rule determine actual eligibility.
         if !summary && queries.len() >= 2 {
-            modes.push(kept_for_one_evaluation());
+            alternatives.push(kept_for_one_evaluation());
         }
         // Configurations the deployment cannot run are not generated; each is
         // recorded as pruned.
         let group = source.operator_nodes_of_candidates_for_memo_groups[source_id].group();
-        let mut prune_modes = |reason, applies: &dyn Fn(ExecutionTiming) -> bool| {
-            modes.retain(|&properties| {
+        let mut prune_alternatives = |reason, applies: &dyn Fn(ExecutionTiming) -> bool| {
+            alternatives.retain(|&properties| {
                 let pruned = applies(properties.timing());
                 if pruned {
                     pruned_candidates.push(PrunedCandidate {
@@ -205,16 +205,16 @@ pub fn enumerate_candidate_configurations(
             });
         };
         if !per_entity_aggregate_executable(node) {
-            prune_modes(PruneReason::PerEntityAggregateNotExecutable, &|_| true);
+            prune_alternatives(PruneReason::PerEntityAggregateNotExecutable, &|_| true);
         }
         // Without raw data retained, only ingestion-time work reads raw rows.
         if !raw_data_retained && matches!(node.operator, Operator::NonASAP(NonASAPOp::Scan { .. }))
         {
-            prune_modes(PruneReason::RawDataNotRetained, &|timing| {
+            prune_alternatives(PruneReason::RawDataNotRetained, &|timing| {
                 timing != ExecutionTiming::IngestionTime
             });
         }
-        for properties in modes {
+        for properties in alternatives {
             let timing = properties.timing();
             let id = PhysicalCandidateId(candidates.len());
             source_configurations[source_id].push(id);
@@ -251,7 +251,7 @@ pub fn enumerate_candidate_configurations(
                     .iter()
                     .copied()
                     .filter(|&query| {
-                        summary_mode_allowed(
+                        summary_properties_allowed(
                             node,
                             &[query],
                             properties,
@@ -274,7 +274,7 @@ pub fn enumerate_candidate_configurations(
                 // approximated by this encoding.
                 for (position, &left) in eligible.iter().enumerate() {
                     for &right in &eligible[position + 1..] {
-                        if !summary_mode_allowed(
+                        if !summary_properties_allowed(
                             node,
                             &[left, right],
                             properties,
@@ -300,7 +300,7 @@ pub fn enumerate_candidate_configurations(
         }
     }
     let mut producer_sets = ProducerSetInterner::default();
-    // Compatibility depends on consumer timing and producer mode/timing only.
+    // Compatibility depends on consumer timing and producer timing and lifetime only.
     // Evaluate each source configuration once per timing, then reuse this exact
     // index; reader eligibility remains expressed by separate graph constraints.
     let mut timing_index = Vec::with_capacity(source_configurations.len());
@@ -379,10 +379,10 @@ fn per_entity_aggregate_executable(node: &OperatorNode) -> bool {
     }
 }
 
-fn summary_mode_allowed(
+fn summary_properties_allowed(
     node: &OperatorNode,
     readers: &[usize],
-    mode: PhysicalProperties,
+    candidate_properties: PhysicalProperties,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     query_time_results_retained: bool,
@@ -397,7 +397,10 @@ fn summary_mode_allowed(
         return false;
     };
     eligibility.range_compatibility.is_ok()
-        && match (mode.timing(), mode.lifetime()) {
+        && match (
+            candidate_properties.timing(),
+            candidate_properties.lifetime(),
+        ) {
             (_, Lifetime::None | Lifetime::OneEvaluation(_)) => true,
             (ExecutionTiming::IngestionTime, Lifetime::AcrossEvaluations(_)) => {
                 eligibility.at_ingestion.is_ok()
