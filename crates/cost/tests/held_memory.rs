@@ -1,4 +1,4 @@
-//! Query-time working memory in [`plan_cost`]: how long a `NotMaterialized`
+//! Query-time working memory in [`plan_cost`]: how long a not-kept
 //! node's working memory is held depends on whether a materialized node
 //! reads it.
 
@@ -12,7 +12,7 @@ use asap_physical_asap_optimization::optimize_physical_asap;
 use asap_types::ir::physical_export::PhysicalASAPDAG;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::QueryRoot;
-use asap_types::physical::{Materialization, Medium};
+use asap_types::physical::{Lifetime, Medium};
 use asap_types::workload::{
     DataArrival, DataWorkload, QueryRecurrence, RepeatedDemand, RepetitionInterval, SourceFacts,
 };
@@ -83,12 +83,8 @@ fn held_memory_costs(dag: &PhysicalASAPDAG) -> Vec<(usize, f64, f64)> {
         .collect()
 }
 
-fn materialization_of(dag: &PhysicalASAPDAG, id: usize) -> Materialization {
-    dag.nodes
-        .iter()
-        .find(|n| n.id == id)
-        .unwrap()
-        .materialization
+fn lifetime_of(dag: &PhysicalASAPDAG, id: usize) -> Lifetime {
+    dag.nodes.iter().find(|n| n.id == id).unwrap().lifetime
 }
 
 fn close(a: f64, b: f64) -> bool {
@@ -98,9 +94,9 @@ fn close(a: f64, b: f64) -> bool {
 /// Query 0 is `sum(...)` over query 1's output, so it runs longer. Without
 /// a materialized node, each query computes the shared nodes and holds
 /// their working memory for its own latency: `bytes · Σ rate_q · latency_q`.
-/// When query 1's output is `MatAtQuery`, the nodes below it are computed
+/// When query 1's output is `OneEvaluation`, the nodes below it are computed
 /// once per execution of it, at its rate, and held until the
-/// longest reader, query 0, finishes, as the `MatAtQuery` state itself is:
+/// longest reader, query 0, finishes, as the `OneEvaluation` state itself is:
 /// `bytes · rate · latency_0`, not the rate-weighted mean of the two
 /// latencies.
 #[test]
@@ -115,15 +111,15 @@ fn working_memory_read_by_a_materialized_node_is_held_for_the_longest_reader() {
         false,
     )
     .unwrap();
-    let dag_with = |materialization: Materialization| {
+    let dag_with = |lifetime: Lifetime| {
         plans
             .iter()
             .map(|plan| &plan.dag)
-            .find(|dag| materialization_of(dag, dag.roots[1]) == materialization)
+            .find(|dag| lifetime_of(dag, dag.roots[1]) == lifetime)
             .unwrap()
     };
-    let recomputed = dag_with(Materialization::NotMaterialized);
-    let shared = dag_with(Materialization::MatAtQuery(Medium::Memory));
+    let recomputed = dag_with(Lifetime::None);
+    let shared = dag_with(Lifetime::OneEvaluation(Medium::Memory));
     let latency_ms = |dag| {
         let cost = cost(dag, 1.0);
         [0, 1].map(|q| cost.usage.latency_per_query[q].total_ms())
@@ -146,7 +142,7 @@ fn working_memory_read_by_a_materialized_node_is_held_for_the_longest_reader() {
         assert!(close(term, expected), "node {id}: {term} vs {expected}");
     }
 
-    // Below a MatAtQuery node: the longest reader's latency at the
+    // Below a `OneEvaluation` node: the longest reader's latency at the
     // materialized node's rate (its readers' schedules together).
     let materialized_rate = evaluation_rate(
         recurrence().iter().map(|r| (r, None)),
@@ -158,10 +154,7 @@ fn working_memory_read_by_a_materialized_node_is_held_for_the_longest_reader() {
     let checked = below(shared);
     assert!(!checked.is_empty(), "the nodes below it hold memory");
     for (id, bytes, term) in checked {
-        assert_eq!(
-            materialization_of(shared, id),
-            Materialization::NotMaterialized
-        );
+        assert_eq!(lifetime_of(shared, id), Lifetime::None);
         let expected = bytes * materialized_rate * outer_ms / 1_000.0;
         assert!(close(term, expected), "node {id}: {term} vs {expected}");
     }

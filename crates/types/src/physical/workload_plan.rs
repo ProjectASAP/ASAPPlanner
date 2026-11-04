@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use crate::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
 use crate::ir::QueryRoot;
 
-use super::Materialization;
+use super::Lifetime;
 
 /// One CandidatePhysicalASAPDAG (Stage 2 output), derived from exactly one
 /// CandidateLogicalASAPDAG (Stage 1 output). It holds planning data only;
@@ -19,12 +19,13 @@ pub struct PhysicalWorkloadPlan {
     /// exports.
     pub roots: Vec<QueryRoot>,
     pub dag: PhysicalASAPDAG,
-    /// Its materialization assignment: the option chosen for each summary
+    /// Its materialization assignment: the lifetime chosen for each summary
     /// build (`SummaryAgg` or `SummaryTumblingWindowChain`) of `dag`, by node id, including
-    /// the builds left `NotMaterialized`, and each other node materialized
+    /// the builds not kept (`Lifetime::None`), and each other node kept
     /// (a shared node built once per evaluation). A build one query reads
-    /// at ingestion time and another at query time appears once per copy.
-    pub materialization: BTreeMap<PhysicalASAPNodeId, Materialization>,
+    /// at ingestion time and another at query time appears once per copy;
+    /// each copy's timing is its `dag` node's.
+    pub lifetime: BTreeMap<PhysicalASAPNodeId, Lifetime>,
 }
 
 impl PhysicalWorkloadPlan {
@@ -32,8 +33,6 @@ impl PhysicalWorkloadPlan {
     /// non-summary node built once per evaluation.
     #[cfg(any(test, feature = "test-support"))]
     pub fn materializes_any(&self) -> bool {
-        self.materialization
-            .values()
-            .any(|m| *m != Materialization::NotMaterialized)
+        self.lifetime.values().any(|lifetime| lifetime.is_kept())
     }
 }

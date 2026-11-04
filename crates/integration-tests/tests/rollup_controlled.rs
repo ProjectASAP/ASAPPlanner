@@ -12,7 +12,7 @@ use asap_types::{
         schema::{DataType, Field, Schema, SketchAlgorithm},
         ASAPOp, OperatorNode, QueryRoot,
     },
-    physical::{Materialization, Medium},
+    physical::PhysicalProperties,
     workload::PlanningWorkload,
 };
 use std::{collections::HashSet, rc::Rc};
@@ -117,11 +117,22 @@ fn controlled_distinct_rollup_prices_the_original_workload() {
                     data,
                     models.deployment_capabilities.query_time_results_retained,
                     &mut |node, _, options| {
-                        let mat = Materialization::MatAtQuery(Medium::Memory);
-                        Some(if builds.contains(&node) && options.contains(&mat) {
-                            mat
-                        } else {
-                            Materialization::NotMaterialized
+                        // Kept for one evaluation where offered, as two
+                        // queries reading one build allow.
+                        let shared: Option<Option<PhysicalProperties>> = options
+                            .iter()
+                            .find(|kept| {
+                                kept.is_some_and(|p| {
+                                    matches!(
+                                        p.lifetime(),
+                                        asap_types::physical::Lifetime::OneEvaluation(_)
+                                    )
+                                })
+                            })
+                            .copied();
+                        Some(match shared {
+                            Some(kept) if builds.contains(&node) => kept,
+                            _ => None,
                         })
                     },
                 )

@@ -98,26 +98,32 @@ pub mod fixtures {
 /// Timing and physical ASAP DAG export helpers for planned candidates.
 pub mod physical_export {
     use asap_types::ir::physical_export::{compile_physical_asap_dag, PhysicalASAPDAG};
+    use asap_types::ir::properties::ExecutionTiming;
     use asap_types::ir::{
         apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
         OperatorNode,
     };
-    use asap_types::physical::{Materialization, Medium};
+    use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
     use std::rc::Rc;
 
-    /// Time `root` under the default assignment (every sub-DAG
-    /// `NotMaterialized`, so every summary computed at query time). Returns the timed copy; read `node.timing` on it.
+    /// Time `root` under the default assignment (no sub-DAG kept, so every
+    /// summary computed at query time). Returns the timed copy; read `node.timing` on it.
     pub fn timed(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
         timed_with(root, &MaterializationAssignment::default())
     }
 
-    /// Time `root` with every sub-DAG `MatAtIngestion` where the DAG allows it.
+    /// Time `root` with every sub-DAG kept at ingestion time where the DAG
+    /// allows it.
     pub fn at_ingestion(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
         timed_with(
             root,
-            &MaterializationAssignment::with_default(Materialization::MatAtIngestion(
-                Medium::Memory,
-            )),
+            &MaterializationAssignment::with_default(
+                PhysicalProperties::new(
+                    ExecutionTiming::IngestionTime,
+                    Lifetime::AcrossEvaluations(Medium::Memory),
+                )
+                .ok(),
+            ),
         )
     }
 
@@ -134,7 +140,7 @@ pub mod physical_export {
         compile_physical_asap_dag(&timed(root)).expect("physical ASAP DAG export failed")
     }
 
-    /// Time `root` with every sub-DAG `MatAtIngestion` where the DAG allows
+    /// Time `root` with every sub-DAG kept at ingestion time where the DAG allows
     /// it, then export the physical DAG.
     pub fn at_ingestion_physical_asap_dag(root: &Rc<OperatorNode>) -> PhysicalASAPDAG {
         compile_physical_asap_dag(&at_ingestion(root)).expect("physical ASAP DAG export failed")

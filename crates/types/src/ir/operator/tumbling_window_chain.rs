@@ -228,8 +228,8 @@ fn build_over(
 /// reads each tumbling window of each chain it read, newest first, as plain
 /// `SummaryAgg` nodes the executor runs; a merge of the newest `n` tumbling windows
 /// reads the first `n`, the same nodes a merge of the whole chain reads. Every other node keeps its
-/// guarantee, timing and materialization. Each tumbling window takes its chain's
-/// timing and materialization, and the range and shift it reads take the
+/// guarantee, timing and lifetime. Each tumbling window takes its chain's
+/// timing and lifetime, and the range and shift it reads take the
 /// chain's timing: a chain materialized at ingestion time expands into
 /// tumbling windows each built and stored at ingestion time. Expanding before timings
 /// are applied leaves the tumbling windows untimed. A chain read by anything but a
@@ -341,7 +341,7 @@ fn timed_like(node: &Rc<OperatorNode>, timing: ExecutionTiming) -> OperatorNode 
         node.schema.clone(),
     )
     .with_guarantee(node.guarantee.clone())
-    .with_materialization(node.materialization)
+    .with_lifetime(node.lifetime)
     .with_timing(Some(timing))
 }
 
@@ -393,7 +393,7 @@ fn expand(
                             let tumbling_window = match child.timing {
                                 Some(timing) => Rc::new(
                                     timed_like(&tumbling_window, timing)
-                                        .with_materialization(child.materialization),
+                                        .with_lifetime(child.lifetime),
                                 ),
                                 None => tumbling_window,
                             };
@@ -418,7 +418,7 @@ fn expand(
                 OperatorNode::with_schema(merge.operator, node.schema.clone())
                     .with_guarantee(node.guarantee.clone())
                     .with_timing(node.timing)
-                    .with_materialization(node.materialization),
+                    .with_lifetime(node.lifetime),
             )
         }
         _ => {
@@ -438,7 +438,7 @@ fn expand(
                     )
                     .with_guarantee(node.guarantee.clone())
                     .with_timing(node.timing)
-                    .with_materialization(node.materialization),
+                    .with_lifetime(node.lifetime),
                 )
             } else {
                 Rc::clone(node)

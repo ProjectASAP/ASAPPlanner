@@ -4,16 +4,20 @@
 //! conjunction of individual-reader restrictions and pairwise interval/phase
 //! compatibility; selected-reader constraints encode those conditions. Complete
 //! Stage 2 validation still checks operator legality and upstream timing.
-//! Potential shared non-summary nodes also receive query materialization; Stage 2
+//! Potential shared non-summary nodes also receive query-time `OneEvaluation`; Stage 2
 //! checks highest-shared eligibility on the selected graph, not all possible consumers.
 use asap_types::stages::{ProducerCandidates, ProducerSetInterner};
 use std::collections::HashMap;
 
-use crate::summary_materialization_eligibility;
+use crate::{
+    kept_across_evaluations_at_ingestion, kept_across_evaluations_at_query_time,
+    kept_for_one_evaluation, physical_properties as properties,
+    summary_materialization_eligibility,
+};
 use asap_types::ir::operator::{agg_has_exact_per_entity_kernel, Reduction};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
-use asap_types::physical::{Materialization, Medium};
+use asap_types::physical::{Lifetime, PhysicalProperties};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use super::inventory::CandidateInventory;
@@ -25,19 +29,19 @@ use asap_types::stages::{
 };
 
 /// [`PhysicalCandidate::may_keep_across_evaluations_per_sole_reader_query`] for `node` configured
-/// with `materialization`: for each query in `entries`, whether
+/// with `properties`: for each query in `entries`, whether
 /// `summary_materialization_eligibility` with that query as the only reader
 /// allows keeping it across evaluations. Empty unless `node` is a tumbling-window chain,
-/// `materialization` is `MatAtQueryKeptAcrossEvaluations(Memory)` and the
+/// `properties` is query time kept `AcrossEvaluations(Memory)` and the
 /// deployment keeps query-time results.
 pub fn may_keep_across_evaluations_per_sole_reader_query(
     node: &OperatorNode,
-    materialization: Materialization,
+    properties: PhysicalProperties,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     query_time_results_retained: bool,
 ) -> Vec<bool> {
-    if materialization != Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory)
+    if properties != kept_across_evaluations_at_query_time()
         || !matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }))
         || !query_time_results_retained
     {
@@ -61,11 +65,11 @@ pub fn may_keep_across_evaluations_per_sole_reader_query(
 pub enum ConfigurationError {
     #[error("invalid source candidate inventory: {0}")]
     InvalidInventory(String),
-    #[error("candidate {candidate} already has timing or materialization assigned")]
+    #[error("candidate {candidate} already has timing or lifetime assigned")]
     AssignedExecution { candidate: usize },
 }
 
-/// Each operator node of `source` with every timing and materialization
+/// Each operator node of `source` with every timing and lifetime
 /// Stage 2 allows, one candidate each. `query_roots` are the memo's; their
 /// group references are `source`'s output references.
 pub fn enumerate_candidate_configurations(
@@ -122,7 +126,7 @@ pub fn enumerate_candidate_configurations(
     let mut source_configurations = vec![Vec::new(); source_count];
     for source_id in 0..source_count {
         let node = &source.operator_nodes_of_candidates_for_memo_groups[source_id].physical_node;
-        if node.timing.is_some() || node.materialization != Materialization::NotMaterialized {
+        if node.timing.is_some() || node.lifetime.is_kept() {
             return Err(ConfigurationError::AssignedExecution {
                 candidate: source_id,
             });
@@ -144,71 +148,55 @@ pub fn enumerate_candidate_configurations(
             .enumerate()
             .filter_map(|(query, reached)| reached.then_some(query))
             .collect::<Vec<_>>();
-        let mut modes = vec![(Materialization::NotMaterialized, ExecutionTiming::QueryTime)];
+        let mut alternatives = vec![properties(ExecutionTiming::QueryTime, Lifetime::None)];
         if summary {
-            modes.push((
-                Materialization::MatAtQuery(Medium::Memory),
-                ExecutionTiming::QueryTime,
-            ));
+            alternatives.push(kept_for_one_evaluation());
             if queries.iter().any(|&query| {
-                summary_mode_allowed(
+                summary_properties_allowed(
                     node,
                     &[query],
-                    Materialization::MatAtIngestion(Medium::Memory),
+                    kept_across_evaluations_at_ingestion(),
                     entries,
                     data,
                     query_time_results_retained,
                 )
             }) {
-                modes.push((
-                    Materialization::MatAtIngestion(Medium::Memory),
-                    ExecutionTiming::IngestionTime,
-                ));
+                alternatives.push(kept_across_evaluations_at_ingestion());
             }
             if matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }))
                 && queries.iter().any(|&query| {
-                    summary_mode_allowed(
+                    summary_properties_allowed(
                         node,
                         &[query],
-                        Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory),
+                        kept_across_evaluations_at_query_time(),
                         entries,
                         data,
                         query_time_results_retained,
                     )
                 })
             {
-                modes.push((
-                    Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory),
-                    ExecutionTiming::QueryTime,
-                ));
+                alternatives.push(kept_across_evaluations_at_query_time());
             }
         } else if !forced_query {
-            modes.push((
-                Materialization::NotMaterialized,
-                ExecutionTiming::IngestionTime,
-            ));
+            alternatives.push(properties(ExecutionTiming::IngestionTime, Lifetime::None));
         }
         // Potential reach only generates the choice. Selected-reader cardinality
         // and Stage 2's highest-shared rule determine actual eligibility.
         if !summary && queries.len() >= 2 {
-            modes.push((
-                Materialization::MatAtQuery(Medium::Memory),
-                ExecutionTiming::QueryTime,
-            ));
+            alternatives.push(kept_for_one_evaluation());
         }
         // Configurations the deployment cannot run are not generated; each is
         // recorded as pruned.
         let group = source.operator_nodes_of_candidates_for_memo_groups[source_id].group();
-        let mut prune_modes = |reason, applies: &dyn Fn(ExecutionTiming) -> bool| {
-            modes.retain(|&(materialization, timing)| {
-                let pruned = applies(timing);
+        let mut prune_alternatives = |reason, applies: &dyn Fn(ExecutionTiming) -> bool| {
+            alternatives.retain(|&properties| {
+                let pruned = applies(properties.timing());
                 if pruned {
                     pruned_candidates.push(PrunedCandidate {
                         group,
                         candidate: PhysicalCandidateKey {
                             operator_node: OperatorNodeOfCandidateForMemoGroupId(source_id),
-                            timing,
-                            materialization,
+                            properties,
                         },
                         reason,
                     });
@@ -217,35 +205,35 @@ pub fn enumerate_candidate_configurations(
             });
         };
         if !per_entity_aggregate_executable(node) {
-            prune_modes(PruneReason::PerEntityAggregateNotExecutable, &|_| true);
+            prune_alternatives(PruneReason::PerEntityAggregateNotExecutable, &|_| true);
         }
         // Without raw data retained, only ingestion-time work reads raw rows.
         if !raw_data_retained && matches!(node.operator, Operator::NonASAP(NonASAPOp::Scan { .. }))
         {
-            prune_modes(PruneReason::RawDataNotRetained, &|timing| {
+            prune_alternatives(PruneReason::RawDataNotRetained, &|timing| {
                 timing != ExecutionTiming::IngestionTime
             });
         }
-        for (materialization, timing) in modes {
+        for properties in alternatives {
+            let timing = properties.timing();
             let id = PhysicalCandidateId(candidates.len());
             source_configurations[source_id].push(id);
             candidates.push(PhysicalCandidate {
                 operator_node: OperatorNodeOfCandidateForMemoGroupId(source_id),
-                timing,
-                materialization,
+                properties,
                 producer_candidates_per_input: Vec::new(),
                 may_produce_query_output: may_produce_query_output[source_id]
                     && timing == ExecutionTiming::QueryTime,
                 may_keep_across_evaluations_per_sole_reader_query:
                     may_keep_across_evaluations_per_sole_reader_query(
                         node,
-                        materialization,
+                        properties,
                         entries,
                         data,
                         query_time_results_retained,
                     ),
             });
-            if materialization == Materialization::MatAtQuery(Medium::Memory) {
+            if properties == kept_for_one_evaluation() {
                 if !summary {
                     reader_constraints.push(ReaderConstraint::HighestSharedQueryMaterialization {
                         candidate: id,
@@ -263,10 +251,10 @@ pub fn enumerate_candidate_configurations(
                     .iter()
                     .copied()
                     .filter(|&query| {
-                        summary_mode_allowed(
+                        summary_properties_allowed(
                             node,
                             &[query],
-                            materialization,
+                            properties,
                             entries,
                             data,
                             query_time_results_retained,
@@ -286,10 +274,10 @@ pub fn enumerate_candidate_configurations(
                 // approximated by this encoding.
                 for (position, &left) in eligible.iter().enumerate() {
                     for &right in &eligible[position + 1..] {
-                        if !summary_mode_allowed(
+                        if !summary_properties_allowed(
                             node,
                             &[left, right],
-                            materialization,
+                            properties,
                             entries,
                             data,
                             query_time_results_retained,
@@ -312,7 +300,7 @@ pub fn enumerate_candidate_configurations(
         }
     }
     let mut producer_sets = ProducerSetInterner::default();
-    // Compatibility depends on consumer timing and producer mode/timing only.
+    // Compatibility depends on consumer timing and producer timing and lifetime only.
     // Evaluate each source configuration once per timing, then reuse this exact
     // index; reader eligibility remains expressed by separate graph constraints.
     let mut timing_index = Vec::with_capacity(source_configurations.len());
@@ -324,7 +312,7 @@ pub fn enumerate_candidate_configurations(
         {
             let mut compatible = Vec::new();
             for &producer in configurations {
-                if compatible_timing(timing, &candidates[producer.0]) {
+                if candidates[producer.0].properties.readable_at(timing) {
                     compatible.push(producer);
                 }
             }
@@ -337,11 +325,11 @@ pub fn enumerate_candidate_configurations(
     for candidate in &mut candidates {
         let mut requirements = Vec::new();
         for input in &source.producer_nodes_per_input[candidate.operator_node.0] {
-            let key = (input.clone(), candidate.timing);
+            let key = (input.clone(), candidate.properties.timing());
             let compatible_producers = if let Some(producer_candidates) = input_cache.get(&key) {
                 producer_candidates.clone()
             } else {
-                let timing = match candidate.timing {
+                let timing = match candidate.properties.timing() {
                     ExecutionTiming::QueryTime => 0,
                     ExecutionTiming::IngestionTime => 1,
                 };
@@ -391,16 +379,10 @@ fn per_entity_aggregate_executable(node: &OperatorNode) -> bool {
     }
 }
 
-pub fn compatible_timing(consumer_timing: ExecutionTiming, producer: &PhysicalCandidate) -> bool {
-    consumer_timing == producer.timing
-        || (consumer_timing == ExecutionTiming::QueryTime
-            && matches!(producer.materialization, Materialization::MatAtIngestion(_)))
-}
-
-fn summary_mode_allowed(
+fn summary_properties_allowed(
     node: &OperatorNode,
     readers: &[usize],
-    mode: Materialization,
+    candidate_properties: PhysicalProperties,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     query_time_results_retained: bool,
@@ -415,10 +397,15 @@ fn summary_mode_allowed(
         return false;
     };
     eligibility.range_compatibility.is_ok()
-        && match mode {
-            Materialization::NotMaterialized | Materialization::MatAtQuery(_) => true,
-            Materialization::MatAtIngestion(_) => eligibility.at_ingestion.is_ok(),
-            Materialization::MatAtQueryKeptAcrossEvaluations(_) => {
+        && match (
+            candidate_properties.timing(),
+            candidate_properties.lifetime(),
+        ) {
+            (_, Lifetime::None | Lifetime::OneEvaluation(_)) => true,
+            (ExecutionTiming::IngestionTime, Lifetime::AcrossEvaluations(_)) => {
+                eligibility.at_ingestion.is_ok()
+            }
+            (ExecutionTiming::QueryTime, Lifetime::AcrossEvaluations(_)) => {
                 eligibility.may_keep_across_evaluations
             }
         }

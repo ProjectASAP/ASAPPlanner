@@ -240,7 +240,7 @@ async fn sql_window_and_filtered_aggregate_types() {
 /// A real query batch replaces each SUM by its exact accumulator state,
 /// retains two result roots, and executes both selected plans. Pass 2
 /// shares the identical state, and building the shared sub-DAG once per
-/// evaluation for both queries (`MatAtQuery`, on the state or on its
+/// evaluation for both queries (`OneEvaluation`, on the state or on its
 /// finalized sum above it) is the cheapest plan, so both roots read one
 /// state. No replacement dag is constructed by the test.
 #[tokio::test]
@@ -309,12 +309,10 @@ async fn batch_planning_replaces_summary_operators() {
         panic!("one SUM state for both queries: {states:?}")
     };
     assert!(output.operators().into_iter().any(|n| {
-        matches!(
-            n.materialization,
-            asap_types::physical::Materialization::MatAtQuery(_)
-        ) && OperatorNode::reachable(&n)
-            .iter()
-            .any(|m| Rc::ptr_eq(m, state))
+        matches!(n.lifetime, asap_types::physical::Lifetime::OneEvaluation(_))
+            && OperatorNode::reachable(&n)
+                .iter()
+                .any(|m| Rc::ptr_eq(m, state))
     }));
     for (plan, expected) in output.plans.iter().zip([31.0, 60.0]) {
         let root = &plan.root;
@@ -375,7 +373,7 @@ async fn batch_planning_replaces_summary_operators() {
         false
     };
     assert!(workload_dag.nodes.iter().any(|n| matches!(
-        n.materialization,
-        asap_types::physical::Materialization::MatAtQuery(_)
+        n.lifetime,
+        asap_types::physical::Lifetime::OneEvaluation(_)
     ) && reaches_state(n.id)));
 }

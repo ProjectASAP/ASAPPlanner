@@ -25,13 +25,14 @@ use asap_planner::{
     SelectionBox, Stage1ToStage3Pass, UserInput,
 };
 use asap_types::ir::operator::Source;
+use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams};
 use asap_types::ir::{
     apply_materialization_timings_to_roots, ASAPOp, MaterializationAssignment, OperatorNode,
     QueryRoot,
 };
-use asap_types::physical::{Materialization, Medium};
+use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
 use asap_types::stages::HowToComputeAggregateMeasure;
 use asap_types::stages::PruneReason;
 use futures::{executor::block_on, StreamExt};
@@ -1516,7 +1517,7 @@ async fn a_quantile_shared_with_a_ratio_is_sized_for_the_ratio() {
 /// the others as Stage 2 chose, and the plan timed again: how a test makes
 /// the plan store a shape Stage 3 does not select today.
 struct StoredAsForced {
-    store: fn(&OperatorNode) -> Option<Materialization>,
+    store: fn(&OperatorNode) -> Option<PhysicalProperties>,
 }
 
 impl OptimizationPass for StoredAsForced {
@@ -1550,11 +1551,11 @@ impl OptimizationPass for StoredAsForced {
     }
 }
 
-/// `node` untimed, with `store`'s materialization (or its own) recorded in
+/// `node` untimed, with `store`'s kept output (or its own) recorded in
 /// `assignment` for every node of its sub-DAG.
 fn untime(
     node: &Rc<OperatorNode>,
-    store: fn(&OperatorNode) -> Option<Materialization>,
+    store: fn(&OperatorNode) -> Option<PhysicalProperties>,
     untimed: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
     assignment: &mut MaterializationAssignment,
 ) -> Rc<OperatorNode> {
@@ -1566,7 +1567,7 @@ fn untime(
         .operator
         .map_children(|child| untime(child, store, untimed, assignment));
     copy.timing = None;
-    copy.materialization = Materialization::NotMaterialized;
+    copy.lifetime = Lifetime::None;
     let copy = Rc::new(copy);
     // A shared non-summary node Stage 2 built once per evaluation is not
     // kept: a build forced to ingestion time above it cannot read a
@@ -1576,28 +1577,39 @@ fn untime(
             ASAPOp::SummaryAgg { .. }
             | ASAPOp::SummaryTumblingWindowChain { .. }
             | ASAPOp::SummaryMerge { .. },
-        ) => node.materialization,
-        _ => Materialization::NotMaterialized,
+        ) if node.lifetime.is_kept() => Some(
+            PhysicalProperties::new(node.timing.expect("a timed plan"), node.lifetime).unwrap(),
+        ),
+        _ => None,
     };
-    let materialization = store(node).unwrap_or(own);
-    if materialization != Materialization::NotMaterialized {
-        assignment.set(&copy, materialization);
+    let kept = store(node).or(own);
+    if kept.is_some() {
+        assignment.set(&copy, kept);
     }
     untimed.insert(Rc::as_ptr(node), Rc::clone(&copy));
     copy
 }
 
 /// Every `SummaryAgg` built at ingestion time.
-fn summaries_at_ingestion(node: &OperatorNode) -> Option<Materialization> {
-    matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. }))
-        .then_some(Materialization::MatAtIngestion(Medium::Memory))
+fn summaries_at_ingestion(node: &OperatorNode) -> Option<PhysicalProperties> {
+    matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. })).then(|| {
+        PhysicalProperties::new(
+            ExecutionTiming::IngestionTime,
+            Lifetime::AcrossEvaluations(Medium::Memory),
+        )
+        .unwrap()
+    })
 }
 
 /// Every `SummaryMerge` built at query time and kept across evaluations.
-fn merges_kept(node: &OperatorNode) -> Option<Materialization> {
-    matches!(node.asap(), Some(ASAPOp::SummaryMerge { .. })).then_some(
-        Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory),
-    )
+fn merges_kept(node: &OperatorNode) -> Option<PhysicalProperties> {
+    matches!(node.asap(), Some(ASAPOp::SummaryMerge { .. })).then(|| {
+        PhysicalProperties::new(
+            ExecutionTiming::QueryTime,
+            Lifetime::AcrossEvaluations(Medium::Memory),
+        )
+        .unwrap()
+    })
 }
 
 /// Exact PromQL `queries`, every minute, over 6 ingesting series of `m`
@@ -1628,7 +1640,7 @@ fn exact_workload(queries: &[&str], tail: &str) -> PlanningWorkload {
 async fn forced_plan_json(
     workload: &PlanningWorkload,
     capabilities: &DeploymentCapabilities,
-    store: fn(&OperatorNode) -> Option<Materialization>,
+    store: fn(&OperatorNode) -> Option<PhysicalProperties>,
 ) -> String {
     let pass = StoredAsForced { store };
     let mut input = UserInput::new(

@@ -17,7 +17,7 @@ use planner_types::ir::scalar::{ColumnRef, CompareOpKind, ScalarValue};
 use planner_types::ir::schema::DataType;
 use planner_types::ir::schema::*;
 use planner_types::ir::{ASAPOp, ExprSemantics, Predicate, ScalarExpr};
-use planner_types::physical::Materialization;
+use planner_types::physical::Lifetime;
 use std::{collections::BTreeMap, sync::Arc};
 
 const WIDTH: u32 = 64;
@@ -75,7 +75,7 @@ fn node(id: usize, payload: Payload, output: Schema) -> PhysicalASAPDAGNode {
         id,
         payload,
         output_state: ExecutionDataState::QUERY_ROWS,
-        materialization: Materialization::NotMaterialized,
+        lifetime: Lifetime::None,
         output_schema: output,
         guarantee: None,
         retention_ms: None,

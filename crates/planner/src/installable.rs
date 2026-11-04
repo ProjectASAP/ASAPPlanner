@@ -50,7 +50,7 @@ use crate::{e2e_plan, PlanError, UserInput};
 
 /// The version of the plan-file format [`InstallablePlan`] serializes to:
 /// the DAG, its nodes' fields and the query texts.
-pub const INSTALLABLE_PLAN_WIRE_VERSION: u32 = 11;
+pub const INSTALLABLE_PLAN_WIRE_VERSION: u32 = 12;
 
 /// The selected plan, ready to install and execute: what
 /// [`plan_installable`] returns and a runtime writes as its plan file.
@@ -791,9 +791,10 @@ fn report_of(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asap_types::ir::properties::ExecutionTiming;
     use asap_types::ir::schema::{SketchAlgorithm, StatisticKind, SupportedSummary};
     use asap_types::ir::{NonASAPOp, Operator};
-    use asap_types::physical::Materialization;
+    use asap_types::physical::{Lifetime, PhysicalProperties};
 
     thread_local! {
         /// The plan nodes handed to the executor's compiler by the views'
@@ -999,7 +1000,14 @@ mod tests {
         }))
         .unwrap();
         let mut assignment = MaterializationAssignment::default();
-        assignment.set(&merged, Materialization::MatAtIngestion(Medium::Memory));
+        assignment.set(
+            &merged,
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .ok(),
+        );
         let timed =
             apply_materialization_timings(&merged, &assignment, &mut NodeToTimedNodeCache::new())
                 .unwrap();
@@ -1036,7 +1044,14 @@ mod tests {
         .unwrap();
         let mut assignment = MaterializationAssignment::default();
         for node in tumbling_windows.iter().chain([&merge]) {
-            assignment.set(node, Materialization::MatAtIngestion(Medium::Memory));
+            assignment.set(
+                node,
+                PhysicalProperties::new(
+                    ExecutionTiming::IngestionTime,
+                    Lifetime::AcrossEvaluations(Medium::Memory),
+                )
+                .ok(),
+            );
         }
         let timed =
             apply_materialization_timings(&merge, &assignment, &mut NodeToTimedNodeCache::new())

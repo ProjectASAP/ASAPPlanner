@@ -120,7 +120,7 @@ mod tests {
         };
         use crate::ir::properties::ExecutionTiming;
         use crate::ir::QueryRoot;
-        use crate::physical::Materialization;
+        use crate::physical::{Lifetime, PhysicalProperties};
         use crate::stages::MemoGroupId;
         let mut interner = ProducerSetInterner::default();
         let choices = interner.intern(vec![PhysicalCandidateId(0), PhysicalCandidateId(1)]);
@@ -147,8 +147,8 @@ mod tests {
             (0..3)
                 .map(|id| PhysicalCandidate {
                     operator_node: OperatorNodeOfCandidateForMemoGroupId(id),
-                    timing: ExecutionTiming::QueryTime,
-                    materialization: Materialization::NotMaterialized,
+                    properties: PhysicalProperties::new(ExecutionTiming::QueryTime, Lifetime::None)
+                        .unwrap(),
                     producer_candidates_per_input: if id == 2 {
                         vec![choices.clone(), choices.clone()]
                     } else {

@@ -21,9 +21,10 @@ use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_plan_selection::reference_pricer::WholePlanSelection as Selection;
 use asap_types::ir::flat::{flatten, FlatDag, NodeId};
 use asap_types::ir::physical_export::PhysicalASAPDAG;
+use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot};
-use asap_types::physical::Materialization;
+use asap_types::physical::Lifetime;
 use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::workload::{PlanningWorkload, QueryRecurrence, RepeatedDemand};
 
@@ -680,10 +681,7 @@ pub fn assert_one_unmaterialized_physical_candidate_per_logical(run: &Run) {
         assert_eq!(unmaterialized, !p.candidate.materializes_any(), "{}", p.id);
         if unmaterialized {
             for n in &p.dag().nodes {
-                assert_eq!(
-                    materialization(p, n.id),
-                    MaterializationOption::NotMaterialized
-                );
+                assert_eq!(keeping(p, n.id), Keeping::NotKept);
             }
         }
     }
@@ -771,16 +769,16 @@ pub fn assert_each_node_charged_per_consuming_query(run: &Run) {
 
 /// How many times each node is computed per evaluation of its consumers (#509; the
 /// rule of plan selection's private `computations`): 1 for a materialized
-/// node; for a `NotMaterialized` one, the number of consumers that reach
+/// node; for a not-kept one, the number of consumers that reach
 /// it. A consumer is a query (operator or scalar root) or a materialized
 /// node, whose walk starts at its inputs; a walk stops at materialized
-/// nodes and counts each node once. The `MatAtIngestion` consumers of one
+/// nodes and counts each node once. The consumers kept at ingestion time of one
 /// refresh window share one ingestion run and count once (#1151).
 pub fn computations(dag: &PhysicalASAPDAG) -> BTreeMap<NodeId, u64> {
     let materialized: BTreeSet<_> = dag
         .nodes
         .iter()
-        .filter(|n| n.materialization != Materialization::NotMaterialized)
+        .filter(|n| n.lifetime.is_kept())
         .map(|n| n.id)
         .collect();
     // Each walk's start and, for a consumer refreshed at ingestion, its
@@ -795,14 +793,14 @@ pub fn computations(dag: &PhysicalASAPDAG) -> BTreeMap<NodeId, u64> {
                 .map(|(_, expr)| (expr.operator_refs().into_iter().copied().collect(), None)),
         )
         .chain(materialized.iter().map(|&id| {
-            let at_ingestion = matches!(
-                dag.nodes
-                    .iter()
-                    .find(|n| n.id == id)
-                    .unwrap()
-                    .materialization,
-                Materialization::MatAtIngestion(_)
-            );
+            let at_ingestion = dag
+                .nodes
+                .iter()
+                .find(|n| n.id == id)
+                .unwrap()
+                .output_state
+                .timing
+                == ExecutionTiming::IngestionTime;
             let window = at_ingestion.then(|| dag.refresh_window(id)).flatten();
             (dag.producers(id), window)
         }));
@@ -838,32 +836,30 @@ pub fn evaluation_interval_ms(workload: &PlanningWorkload, query: usize) -> Opti
     }
 }
 
-// ── Materialization ──────────────────────────────────────────────────────
+// ── Kept outputs ─────────────────────────────────────────────────────────
 
-/// A node's materialization option (#509 "Materialization"), without its
-/// storage medium.
+/// Whether a node's output is kept and at which timing, without how long
+/// (`OneEvaluation` or `AcrossEvaluations`) or its storage medium.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum MaterializationOption {
-    /// Runs as data arrives; output stored before any query asks.
-    MatAtIngestion,
+pub enum Keeping {
+    /// Runs as data arrives; output kept until a query reads it.
+    KeptAtIngestion,
     /// Runs when a query first needs it; output reused by the other
-    /// queries of the evaluation, or, as `MatAtQueryKeptAcrossEvaluations`,
+    /// queries of the evaluation, or, as query-time `AcrossEvaluations`,
     /// kept for later evaluations.
-    MatAtQuery,
-    /// Runs at query time for each execution; output discarded.
-    NotMaterialized,
+    KeptAtQueryTime,
+    /// Output discarded after its reader (lifetime `None`).
+    NotKept,
 }
 
-/// The materialization option physical ASAP-aware optimization assigned to
-/// `node` (#667).
-pub fn materialization(p: &Physical, node: NodeId) -> MaterializationOption {
+/// Whether physical ASAP-aware optimization keeps `node`'s output, and at
+/// which timing (#667).
+pub fn keeping(p: &Physical, node: NodeId) -> Keeping {
     let n = p.dag().nodes.iter().find(|n| n.id == node).expect("node");
-    match n.materialization {
-        Materialization::MatAtIngestion(_) => MaterializationOption::MatAtIngestion,
-        Materialization::MatAtQuery(_) | Materialization::MatAtQueryKeptAcrossEvaluations(_) => {
-            MaterializationOption::MatAtQuery
-        }
-        Materialization::NotMaterialized => MaterializationOption::NotMaterialized,
+    match (n.output_state.timing, n.lifetime) {
+        (_, Lifetime::None) => Keeping::NotKept,
+        (ExecutionTiming::IngestionTime, _) => Keeping::KeptAtIngestion,
+        (ExecutionTiming::QueryTime, _) => Keeping::KeptAtQueryTime,
     }
 }
 

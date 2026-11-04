@@ -38,28 +38,28 @@
 //! computation is multiplied by how often it is computed per second
 //! ([`NodeCost::cost_per_second`](asap_cost::NodeCost::cost_per_second)):
 //!
-//! * A `NotMaterialized` node is recomputed for each consumer that reads it
+//! * A not-kept node is recomputed for each consumer that reads it
 //!   and is not stored: it is charged once per consumer
 //!   ([`NodeCost::multiplier`](asap_cost::NodeCost::multiplier)) at the sum of their rates. Its consumers are
 //!   the queries whose sub-DAG reaches it and the materialized nodes above
 //!   it, counted without looking through a materialized node: a node below
-//!   one is computed when that node is. The `MatAtIngestion` consumers of
+//!   one is computed when that node is. The consumers kept at ingestion time of
 //!   one refresh window (`PhysicalASAPDAG::refresh_window`: for a tumbling window
 //!   chain, its tumbling-window width) are refreshed in one ingestion run and count as
 //!   one consumer: a `Scan` under a KLL chain and a DDSketch chain of 10 s
 //!   tumbling windows is computed once per second of arriving data, under chains of
 //!   10 s and 60 s tumbling windows twice. Stage 2 keeps a shared node one
 //!   node (it copies it only for readers at two timings). A shared
-//!   `NotMaterialized` input costs what reading it separately does (#509
+//!   not-kept input costs what reading it separately does (#509
 //!   Example 4) only when every consumer reads the same window: a query-time `Scan` is priced over the longest window
 //!   read above it, so each consumer pays for that window, and a scan a 1 m
 //!   and a 5 m window share costs more than two separate scans. Stage 2
-//!   offers the highest shared node built once per evaluation (`MatAtQuery`)
+//!   offers the highest shared node built once per evaluation (`OneEvaluation`)
 //!   as another candidate.
-//! * A `MatAtQuery` node is computed once for all the queries that reach
+//! * A `OneEvaluation` node is computed once for all the queries that reach
 //!   it, at their combined rate: queries repeating at the same interval are
 //!   evaluated together, so each distinct interval counts once.
-//! * A `MatAtIngestion` node runs as data arrives: it is priced over one
+//! * A node kept at ingestion time runs as data arrives: it is priced over one
 //!   second of arriving rows, once per second, whatever its readers' rates.
 //!   A tumbling-window chain maintained this way updates only its newest
 //!   tumbling window: each arriving row is placed in it and updates it.
@@ -70,20 +70,20 @@
 //!
 //! Under cost model 1, memory is charged as bytes held per second
 //! ([`ResourceUsage::average_memory_bytes`](asap_cost::ResourceUsage::average_memory_bytes)), at
-//! `cost_per_memory_byte_second` per byte per second. A `MatAtIngestion`
+//! `cost_per_memory_byte_second` per byte per second. A node kept at ingestion time
 //! node keeps its state every second: twice for a whole window (the window
 //! being built and the completed one queries read) and `N + 1` tumbling windows for a
 //! chain of `N` (the `N` the query merges and the one being built). A
-//! `MatAtQuery` node's state is reused only within one evaluation, so it is
+//! `OneEvaluation` node's state is reused only within one evaluation, so it is
 //! held only while that evaluation runs: its bytes times the latency of the
 //! longest query reading it, once per evaluation. A query-time
-//! `NotMaterialized` node's working memory (a sketch being built, an exact
+//! not-kept node's working memory (a sketch being built, an exact
 //! aggregate's values) is charged once per consumer that recomputes it:
 //! for a query, its bytes times that query's latency, at its rate; for a
 //! materialized node reading it (directly or through other
-//! `NotMaterialized` nodes), its bytes times the latency of the longest
-//! query reading that node, at the node's rate, as a `MatAtQuery` state is.
-//! A `MatAtQueryKeptAcrossEvaluations` tumbling-window chain (#509 Example
+//! not-kept nodes), its bytes times the latency of the longest
+//! query reading that node, at the node's rate, as a `OneEvaluation` state is.
+//! A query-time `AcrossEvaluations` tumbling-window chain (#509 Example
 //! 4's B3, offered by Stage 2 when the deployment keeps query-time results,
 //! `DeploymentCapabilities::query_time_results_retained`) is kept across
 //! evaluations: each evaluation scans one tumbling window of raw data and builds the
@@ -99,8 +99,8 @@
 //! at 1 min steps):
 //!
 //! * every query-time computation that is not kept across evaluations
-//!   (`NotMaterialized`, `MatAtQuery`) runs once per step, `S` times per
-//!   request; a `MatAtIngestion` state is maintained as before, and the
+//!   (not kept, `OneEvaluation`) runs once per step, `S` times per
+//!   request; a kept at ingestion time state is maintained as before, and the
 //!   merge and estimate over it run once per step;
 //! * a chain kept across evaluations is built once per request: Stage 2
 //!   offers it only when the requests repeat at its tumbling-window width, so in the
@@ -116,7 +116,7 @@
 //! `S = 1` and the retention is the window, so every price is as above.
 //! Memory a computation holds only while it runs counts in
 //! [`ResourceUsage::peak_memory_bytes`](asap_cost::ResourceUsage::peak_memory_bytes), which cost models 2 and 3 read, and
-//! under cost model 1 for the time it is held, as above. (A `NotMaterialized`
+//! under cost model 1 for the time it is held, as above. (A not-kept
 //! node computed at ingestion time is a streaming operator holding one row,
 //! and is not charged.)
 //!
@@ -350,7 +350,7 @@ mod tests {
     };
     use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot};
     use asap_types::physical::PhysicalWorkloadPlan;
-    use asap_types::physical::{Materialization, Medium};
+    use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
     use asap_types::workload::bounds::with_confirmed_weights;
     use asap_types::workload::bounds::{declared_series, series_read, values_per_result};
     use asap_types::workload::{
@@ -1116,8 +1116,8 @@ mod tests {
     }
 
     /// Query 1 is `sum(...)` over query 2's output. Every node reached by
-    /// both queries is `NotMaterialized`, so recomputed for each: charged
-    /// twice. Materializing query 2's root (`MatAtQuery`) charges it once,
+    /// both queries is not kept, so recomputed for each: charged
+    /// twice. Materializing query 2's root (`OneEvaluation`) charges it once,
     /// and the nodes below it once, since they run only when it does.
     #[test]
     fn not_materialized_shared_nodes_are_charged_per_query() {
@@ -1158,7 +1158,7 @@ mod tests {
             .iter_mut()
             .find(|n| n.id == inner)
             .unwrap();
-        node.materialization = Materialization::MatAtQuery(asap_types::physical::Medium::Memory);
+        node.lifetime = Lifetime::OneEvaluation(Medium::Memory);
         let stored = price(&candidate.dag, &recurrences(2), &data(), &settings).unwrap();
         for (id, c) in &stored.per_node {
             assert_eq!(c.multiplier, 1, "node {id} is computed once");
@@ -1171,7 +1171,7 @@ mod tests {
         assert!(stored.cost_per_second.unwrap() < cost.cost_per_second.unwrap());
     }
 
-    /// A `NotMaterialized` node two queries read is computed for each, so
+    /// A not-kept node two queries read is computed for each, so
     /// its working memory is held once per query, each time for that
     /// query's latency: `bytes · Σ rate_q · latency_q`, not the longest
     /// latency at both rates. Query 1 is `sum(...)` over query 2's output,
@@ -2424,9 +2424,9 @@ mod tests {
     }
 
     /// `candidates` with every state node (a summary build or an exact
-    /// aggregate) kept at ingestion time, so selection charges its kept
-    /// bytes every second (a `MatAtQuery` state is held only for one
-    /// evaluation).
+    /// aggregate) kept across evaluations, so selection charges its kept
+    /// bytes every second (a state kept for one evaluation is held only for
+    /// that evaluation).
     fn keeping_state(mut candidates: Vec<PhysicalWorkloadPlan>) -> Vec<PhysicalWorkloadPlan> {
         for candidate in &mut candidates {
             for node in &mut candidate.dag.nodes {
@@ -2435,8 +2435,7 @@ mod tests {
                     Payload::ASAP(ASAPOp::SummaryAgg { .. })
                         | Payload::NonASAP(NonASAPOp::Aggregate { .. })
                 ) {
-                    node.materialization =
-                        Materialization::MatAtIngestion(asap_types::physical::Medium::Memory);
+                    node.lifetime = Lifetime::AcrossEvaluations(Medium::Memory);
                 }
             }
         }
@@ -3421,8 +3420,8 @@ mod tests {
     }
 
     /// `quantile_over_time(0.99, m[1m])` with its KLL candidate chosen, its
-    /// state materialized as `materialization`.
-    fn kll_dag(materialization: Materialization) -> PhysicalASAPDAG {
+    /// state kept with `kept` (`None`: not kept).
+    fn kll_dag(kept: Option<PhysicalProperties>) -> PhysicalASAPDAG {
         use asap_types::ir::{
             apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
         };
@@ -3462,9 +3461,8 @@ mod tests {
             .into_iter()
             .find(|n| matches!(n.asap(), Some(ASAPOp::SummaryAgg { .. })))
             .expect("a KLL state");
-        let mut assignment =
-            MaterializationAssignment::with_default(Materialization::NotMaterialized);
-        assignment.set(&state, materialization);
+        let mut assignment = MaterializationAssignment::default();
+        assignment.set(&state, kept);
         let timed =
             apply_materialization_timings(root, &assignment, &mut NodeToTimedNodeCache::new())
                 .unwrap();
@@ -3528,10 +3526,26 @@ mod tests {
         assert!(range.detail.contains("keep"), "{}", range.detail);
     }
 
-    const AT_INGESTION: Materialization =
-        Materialization::MatAtIngestion(asap_types::physical::Medium::Memory);
-    const AT_QUERY: Materialization =
-        Materialization::MatAtQuery(asap_types::physical::Medium::Memory);
+    /// Kept `lifetime` at `timing`.
+    fn kept(timing: ExecutionTiming, lifetime: Lifetime) -> Option<PhysicalProperties> {
+        Some(PhysicalProperties::new(timing, lifetime).unwrap())
+    }
+
+    /// Kept in memory at ingestion time until a query reads it.
+    fn at_ingestion() -> Option<PhysicalProperties> {
+        kept(
+            ExecutionTiming::IngestionTime,
+            Lifetime::AcrossEvaluations(Medium::Memory),
+        )
+    }
+
+    /// Kept in memory at query time for one evaluation.
+    fn at_query() -> Option<PhysicalProperties> {
+        kept(
+            ExecutionTiming::QueryTime,
+            Lifetime::OneEvaluation(Medium::Memory),
+        )
+    }
 
     fn node_of(dag: &PhysicalASAPDAG, pick: impl Fn(&Payload) -> bool) -> PhysicalASAPNodeId {
         dag.nodes.iter().find(|n| pick(&n.payload)).unwrap().id
@@ -3568,7 +3582,7 @@ mod tests {
     /// node scales with that rate.
     #[test]
     fn ingestion_time_node_is_priced_per_second_of_arriving_rows() {
-        let dag = kll_dag(AT_INGESTION);
+        let dag = kll_dag(at_ingestion());
         let (fast, slow) = (
             priced(&dag, &[repeating(1_000)]),
             priced(&dag, &[repeating(10_000)]),
@@ -3592,7 +3606,7 @@ mod tests {
     /// every second. At query time the state is reused only within one
     /// evaluation, so it is held only while that evaluation runs: its bytes
     /// times the evaluation's latency, once per evaluation. State computed
-    /// and dropped within a query (`NotMaterialized`) is held while that
+    /// and dropped within a query (not kept) is held while that
     /// query runs too, and charged the same way.
     #[test]
     fn kept_state_is_charged_per_byte_per_second() {
@@ -3600,7 +3614,7 @@ mod tests {
             let settings = unit_costs(|c| c.cost_per_memory_byte_second = w);
             price(dag, &recurrences(1), &data(), &settings).unwrap()
         };
-        for materialization in [AT_INGESTION, AT_QUERY, Materialization::NotMaterialized] {
+        for materialization in [at_ingestion(), at_query(), None] {
             let dag = kll_dag(materialization);
             let build = node_of(&dag, is_build);
             let (with, without) = (cost(&dag, 1.25e-7), cost(&dag, 0.0));
@@ -3613,15 +3627,16 @@ mod tests {
             // each sees its series' 12 samples: the 120 000 rows of its
             // source's 1-min window (data()'s 10 000 rows per second over its
             // five sources); at ingestion time its samples are unknown.
-            let samples = match materialization {
-                AT_INGESTION => StateInputRows::UNKNOWN,
-                _ => StateInputRows {
+            let samples = if materialization == at_ingestion() {
+                StateInputRows::UNKNOWN
+            } else {
+                StateInputRows {
                     rows_per_state: Some(12),
                     non_negative: false,
-                },
+                }
             };
             let state = 10_000.0 * summary_shape(family, samples).1 as f64;
-            let byte_seconds = if materialization == AT_INGESTION {
+            let byte_seconds = if materialization == at_ingestion() {
                 2.0 * state
             } else {
                 let evaluation_s = with.usage.latency_per_query[0].total_ms() / 1_000.0;
@@ -3680,7 +3695,7 @@ mod tests {
             (query.to_string(), dag)
         })
         .collect();
-        for materialization in [AT_INGESTION, AT_QUERY, Materialization::NotMaterialized] {
+        for materialization in [at_ingestion(), at_query(), None] {
             dags.push((format!("{materialization:?}"), kll_dag(materialization)));
         }
         for (name, dag) in &dags {
@@ -3697,7 +3712,7 @@ mod tests {
         }
         // Not materialized, nothing is kept, but the sketch being built is
         // held while the query runs: the memory price adds to the cost.
-        let (term, _) = memory_term(&kll_dag(Materialization::NotMaterialized));
+        let (term, _) = memory_term(&kll_dag(None));
         assert!(term > 0.0, "{term}");
     }
 
@@ -3718,7 +3733,7 @@ mod tests {
                 .iter_mut()
                 .find(|n| matches!(n.payload, Payload::NonASAP(NonASAPOp::Aggregate { .. })))
                 .unwrap();
-            aggregate.materialization = AT_QUERY;
+            aggregate.lifetime = Lifetime::OneEvaluation(Medium::Memory);
             let id = aggregate.id;
             let cost = |w| {
                 let settings = unit_costs(|c| c.cost_per_memory_byte_second = w);
@@ -3741,8 +3756,8 @@ mod tests {
         assert!(quantile > 10 * sum, "{quantile} vs {sum}");
     }
 
-    /// A `NotMaterialized` node read by two queries is computed for each, at
-    /// each one's rate; `MatAtQuery`, it is computed once at their combined
+    /// A not-kept node read by two queries is computed for each, at
+    /// each one's rate; `OneEvaluation`, it is computed once at their combined
     /// rate, where queries at the same interval run together.
     #[test]
     fn rates_follow_per_consumer_charging() {
@@ -3780,7 +3795,7 @@ mod tests {
         assert!(close(total(&two, &mixed), 1.5 * single));
         assert_eq!(two.roots[0], two.roots[1], "one root node for both queries");
         for node in &mut two.nodes {
-            node.materialization = AT_QUERY;
+            node.lifetime = Lifetime::OneEvaluation(Medium::Memory);
         }
         assert!(close(total(&two, &recurrences(2)), single));
         assert!(close(total(&two, &mixed), 1.5 * single));
@@ -4044,11 +4059,11 @@ mod tests {
     /// evaluations, and only that. Without it, Stage 2 offers the 1-min
     /// tumbling windows of a query repeating every minute rebuilt (B2) or maintained
     /// (B1); with it, also built at query time and kept (B3,
-    /// `MatAtQueryKeptAcrossEvaluations`). B3 is computed once per
+    /// query-time `AcrossEvaluations`). B3 is computed once per
     /// evaluation, reads one tumbling window (1 min) of raw data, keeps that much raw
     /// data on disk, and holds its 4 older tumbling windows in memory between
     /// evaluations (on disk, if it were placed there). The same chain
-    /// `MatAtQuery` is reused only within one evaluation: the scan reads the
+    /// `OneEvaluation` is reused only within one evaluation: the scan reads the
     /// 5-min window and nothing is kept between evaluations.
     #[test]
     fn query_time_results_retained_keeps_a_tumbling_window_chain_across_evaluations() {
@@ -4058,19 +4073,14 @@ mod tests {
         let b2 = &candidates[0].dag;
         let b3 = &candidates[2].dag;
         let chain = node_of(b3, is_chain);
-        let with_chain = |materialization: Materialization| {
+        let with_chain = |lifetime: Lifetime| {
             let mut dag = b3.clone();
             for node in dag.nodes.iter_mut().filter(|n| n.id == chain) {
-                node.materialization = materialization;
+                node.lifetime = lifetime;
             }
             dag
         };
-        assert_eq!(
-            *b3,
-            with_chain(Materialization::MatAtQueryKeptAcrossEvaluations(
-                Medium::Memory
-            ))
-        );
+        assert_eq!(*b3, with_chain(Lifetime::AcrossEvaluations(Medium::Memory)));
         let recurrence = [repeating(MINUTE)];
         let settings = CostInputs::default();
         let kept = price(b3, &recurrence, &arriving(10_000.0), &settings).unwrap();
@@ -4102,9 +4112,7 @@ mod tests {
             .detail
             .contains(&format!("keeps {between} bytes across evaluations")));
         // On disk, the same N − 1 older tumbling windows are kept.
-        let on_disk = with_chain(Materialization::MatAtQueryKeptAcrossEvaluations(
-            Medium::Disk,
-        ));
+        let on_disk = with_chain(Lifetime::AcrossEvaluations(Medium::Disk));
         let on_disk = price(&on_disk, &recurrence, &arriving(10_000.0), &settings).unwrap();
         assert_eq!(
             on_disk.usage.disk_bytes,
@@ -4112,7 +4120,7 @@ mod tests {
             "{on_disk:?}"
         );
         // Shared within one evaluation, nothing is kept between them.
-        let shared = with_chain(Materialization::MatAtQuery(Medium::Memory));
+        let shared = with_chain(Lifetime::OneEvaluation(Medium::Memory));
         let within_one = price(&shared, &recurrence, &arriving(10_000.0), &settings).unwrap();
         assert_eq!(scanned_samples(&within_one, scan), 10_000 * 300);
         assert!(!within_one.per_node[&chain]
@@ -4640,13 +4648,24 @@ mod tests {
     /// disk, nothing to average memory, and costs only its disk price.
     #[test]
     fn state_on_disk_is_counted_as_disk_not_memory() {
-        use asap_types::physical::Medium;
         let settings = unit_costs(|c| c.cost_per_disk_byte_second = 1e-9);
         let work_only = unit_costs(|c| c.cost_per_memory_byte_second = 0.0);
         let state = |dag: &PhysicalASAPDAG| node_of(dag, is_build);
         for (on_disk, in_memory) in [
-            (Materialization::MatAtIngestion(Medium::Disk), AT_INGESTION),
-            (Materialization::MatAtQuery(Medium::Disk), AT_QUERY),
+            (
+                kept(
+                    ExecutionTiming::IngestionTime,
+                    Lifetime::AcrossEvaluations(Medium::Disk),
+                ),
+                at_ingestion(),
+            ),
+            (
+                kept(
+                    ExecutionTiming::QueryTime,
+                    Lifetime::OneEvaluation(Medium::Disk),
+                ),
+                at_query(),
+            ),
         ] {
             let (disk_dag, memory_dag) = (kll_dag(on_disk), kll_dag(in_memory));
             let disk = price(&disk_dag, &recurrences(1), &data(), &settings).unwrap();
@@ -4812,9 +4831,9 @@ mod tests {
         .find(|c| {
             c.dag.nodes.iter().all(|n| match n.payload {
                 Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => {
-                    matches!(n.materialization, Materialization::MatAtIngestion(_))
+                    n.output_state.timing == ExecutionTiming::IngestionTime && n.lifetime.is_kept()
                 }
-                _ => n.materialization == Materialization::NotMaterialized,
+                _ => n.lifetime == Lifetime::None,
             })
         })
         .unwrap()

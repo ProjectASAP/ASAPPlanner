@@ -158,7 +158,7 @@ fn same_source_node(left: &OperatorNode, right: &OperatorNode) -> bool {
         && left.schema == right.schema
         && left.result_kind == right.result_kind
         && left.timing == right.timing
-        && left.materialization == right.materialization
+        && left.lifetime == right.lifetime
         && left
             .children()
             .iter()

@@ -124,7 +124,7 @@
     if (d.tumblingWindowOf !== undefined) items.push(['tumbling window', `${d.tumblingWindowIndex + 1} of ${body.tumbling_window_count} of SummaryTumblingWindowChain ${d.tumblingWindowOf}, window ${tumblingWindowTimeText(d.tumbling_window, body.tumbling_window_width_ms)}`]);
     if (d.expandable) items.push(['tumbling windows', `${body.tumbling_window_count} × ${durationText(body.tumbling_window_width_ms)} (click the chain to show them, a tumbling window to hide them)`]);
     if (d.timing !== undefined) items.push(['runs at', formatTiming(d.timing)]);
-    if (n.materialization) items.push(['materialization', compactWire(n.materialization)]);
+    if (n.lifetime) items.push(['lifetime', compactWire(n.lifetime)]);
     if (n.output_state && n.output_state.primitive) items.push(['output primitive', compactWire(n.output_state.primitive)]);
     if (d.cost) {
       const value = typeof d.cost.cost_per_second === 'number'

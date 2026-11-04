@@ -528,7 +528,7 @@ impl Checker<'_> {
 }
 
 /// `node` rebuilt over each combination of `per_input`'s outputs, with its
-/// timing and materialization and its guarantee composed again; outputs the
+/// timing and lifetime and its guarantee composed again; outputs the
 /// same for their readers kept once.
 fn rebuilt(node: &Rc<OperatorNode>, per_input: &[Vec<Rc<OperatorNode>>], keys: &mut Keys) -> Built {
     let combinations = combinations(per_input);
@@ -543,7 +543,7 @@ fn rebuilt(node: &Rc<OperatorNode>, per_input: &[Vec<Rc<OperatorNode>>], keys: &
             rebuilt
                 .with_guarantee(guarantee)
                 .with_timing(node.timing)
-                .with_materialization(node.materialization),
+                .with_lifetime(node.lifetime),
         ));
     }
     Ok(distinct_for_readers(outputs, keys))

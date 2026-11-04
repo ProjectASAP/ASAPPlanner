@@ -13,7 +13,7 @@ use asap_types::ir::operator::Source;
 use asap_types::ir::physical_export::{compile_physical_asap_workload, PhysicalASAPDAG};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
-use asap_types::physical::Materialization;
+use asap_types::physical::Lifetime;
 use asap_types::workload::PlanningWorkload;
 use serde_json::Value;
 
@@ -54,10 +54,11 @@ fn stage3_raw_lookback_ms(dag: &PhysicalASAPDAG) -> Vec<(Source, Option<u64>)> {
         .iter()
         .filter(|node| {
             matches!(
-                (&node.payload, node.materialization),
+                (&node.payload, node.output_state.timing, node.lifetime),
                 (
                     Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }),
-                    Materialization::MatAtQueryKeptAcrossEvaluations(_)
+                    ExecutionTiming::QueryTime,
+                    Lifetime::AcrossEvaluations(_)
                 )
             )
         })

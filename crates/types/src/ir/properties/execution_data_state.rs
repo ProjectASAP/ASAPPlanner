@@ -2,14 +2,15 @@
 //!
 //! [`ExecutionTiming`] says when a node's value is produced (ingestion vs.
 //! query time); [`ExecutionDataState`] pairs it with the [`DataPrimitive`]
-//! the edge carries (raw values vs. summary state). [`Materialization`] is
-//! the per-sub-DAG choice a node's timing is derived from. The rules that assign
+//! the edge carries (raw values vs. summary state). A kept output's
+//! [`PhysicalProperties`] are the per-sub-DAG choice a node's timing is
+//! derived from. The rules that assign
 //! and check them over a DAG live in [`crate::ir::properties::timing`], which reports
 //! violations as [`ExecutionDataStateError`].
 
 use thiserror::Error;
 
-use crate::physical::Materialization;
+use crate::physical::PhysicalProperties;
 
 /// When a post-ASAP value is produced.
 #[derive(
@@ -99,11 +100,11 @@ pub enum ExecutionDataStateError {
     },
     /// A summary build at query time over an input (rows or exact-accumulator
     /// state) produced at ingestion time and not stored there (the input node
-    /// is not `MatAtIngestion`): at query time that input no longer exists.
+    /// is not kept at ingestion time): at query time that input no longer exists.
     /// Bad input (a hand-built or candidate-fixed plan), not an internal bug.
     #[error(
         "a query-time {edge} reads {operator} output produced at ingestion time that is not \
-         stored (not MatAtIngestion)"
+         stored (not kept at ingestion time)"
     )]
     UnstoredIngestionInputUnderQueryTimeSummary {
         edge: &'static str,
@@ -134,10 +135,10 @@ pub enum ExecutionDataStateError {
     },
     /// A plan root that runs at ingestion time without being stored there
     /// (a timing fixed by a candidate builder): no query reads its rows. A
-    /// root assigned `MatAtIngestion` is valid; the query reads the stored
+    /// root assigned kept at ingestion time is valid; the query reads the stored
     /// output.
     #[error(
-        "{operator} root runs at ingestion time but is not MatAtIngestion: no query reads its \
+        "{operator} root runs at ingestion time but is not kept there: no query reads its \
          output"
     )]
     UnstoredIngestionRoot { operator: &'static str },
@@ -145,14 +146,14 @@ pub enum ExecutionDataStateError {
     /// fixed (e.g. a query-time `FinalizeExactAccumulator` read boundary)
     /// that needs the other timing.
     #[error(
-        "{operator} is fixed at {} by its candidate; materialization {materialization:?} needs \
+        "{operator} is fixed at {} by its candidate; its assigned kept output {assigned:?} needs \
          the other timing",
         fixed.as_str()
     )]
     MaterializationConflictsWithFixedTiming {
         operator: &'static str,
         fixed: ExecutionTiming,
-        materialization: Materialization,
+        assigned: PhysicalProperties,
     },
     /// A summary build with a filter placed at ingestion time. An
     /// ingestion-time build reads raw data samples, which carry none of the
@@ -177,7 +178,7 @@ pub enum ExecutionDataStateError {
     /// `SummaryJoin` and `Extension`.
     #[error("{operator} has no execution timing contract yet")]
     UnimplementedOperator { operator: &'static str },
-    /// A node assigned `MatAtIngestion` over a sub-DAG that can only run at
+    /// A node assigned kept at ingestion time over a sub-DAG that can only run at
     /// query time (#509 Algorithm 3, line 13).
     #[error("{operator}: upstream of ingestion-time node not at ingestion time")]
     UpstreamNotAtIngestion { operator: &'static str },

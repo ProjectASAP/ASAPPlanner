@@ -174,7 +174,7 @@ fn expansion_merges_the_tumbling_windows() {
     assert!(expand_tumbling_window_chains(&chain).is_err());
 }
 
-/// Expanding a timed chain carries its timing and materialization onto its
+/// Expanding a timed chain carries its timing and lifetime onto its
 /// tumbling windows: a chain materialized at ingestion time expands into tumbling windows each
 /// built and stored at ingestion time, over ranges and shifts that run at
 /// ingestion time too, while the merge reading them stays at query time.
@@ -185,11 +185,11 @@ fn expansion_carries_the_chains_timing_onto_its_tumbling_windows() {
     use asap_types::ir::{
         apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
     };
-    use asap_types::physical::{Materialization, Medium};
-    let at_ingestion = Materialization::MatAtIngestion(Medium::Memory);
-    for (materialization, timing) in [
-        (at_ingestion, ExecutionTiming::IngestionTime),
-        (Materialization::NotMaterialized, ExecutionTiming::QueryTime),
+    use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
+    let kept_across = Lifetime::AcrossEvaluations(Medium::Memory);
+    for (lifetime, timing) in [
+        (kept_across, ExecutionTiming::IngestionTime),
+        (Lifetime::None, ExecutionTiming::QueryTime),
     ] {
         let chain = chain(shifted(scan(), MINUTE as i64));
         let estimate = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryEstimate {
@@ -198,7 +198,12 @@ fn expansion_carries_the_chains_timing_onto_its_tumbling_windows() {
         }))
         .unwrap();
         let mut assignment = MaterializationAssignment::default();
-        assignment.set(&chain, materialization);
+        assignment.set(
+            &chain,
+            lifetime
+                .is_kept()
+                .then(|| PhysicalProperties::new(timing, lifetime).unwrap()),
+        );
         let timed =
             apply_materialization_timings(&estimate, &assignment, &mut NodeToTimedNodeCache::new())
                 .unwrap();
@@ -207,11 +212,11 @@ fn expansion_carries_the_chains_timing_onto_its_tumbling_windows() {
         assert_eq!(merged.timing, Some(ExecutionTiming::QueryTime));
         assert_eq!(merged.children().len(), 5);
         for tumbling_window in merged.children() {
-            assert_eq!(tumbling_window.timing, Some(timing), "{materialization:?}");
-            assert_eq!(tumbling_window.materialization, materialization);
+            assert_eq!(tumbling_window.timing, Some(timing), "{lifetime:?}");
+            assert_eq!(tumbling_window.lifetime, lifetime);
             for below in OperatorNode::reachable(tumbling_window).iter().skip(1) {
                 assert_eq!(below.timing, Some(timing), "{}", below.operator.kind_name());
-                assert_eq!(below.materialization, Materialization::NotMaterialized);
+                assert_eq!(below.lifetime, Lifetime::None);
             }
         }
     }

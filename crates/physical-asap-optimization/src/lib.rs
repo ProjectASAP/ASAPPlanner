@@ -21,16 +21,16 @@
 //! So is the highest node of each other sub-DAG that two or more queries
 //! read (e.g. a `Scan` that a 1 m and a 5 m window read): one a root or a
 //! node only one query reads consumes. Such a node has only
-//! `NotMaterialized` and `MatAtQuery(Memory)`, so a shared sub-DAG adds one
+//! not kept and `OneEvaluation(Memory)`, so a shared sub-DAG adds one
 //! option, not one per node. A summary build has up to four options:
 //!
-//! * `NotMaterialized`: rebuilt at query time by every query that reads it;
-//! * `MatAtIngestion(Memory)`: maintained as data arrives and kept for the
+//! * not kept: rebuilt at query time by every query that reads it;
+//! * ingestion-time `AcrossEvaluations(Memory)`: maintained as data arrives and kept for the
 //!   queries, when the build is eligible (`IngestionPruneReason`);
-//! * `MatAtQuery(Memory)`: built once at query time for every query of one
+//! * `OneEvaluation(Memory)`: built once at query time for every query of one
 //!   evaluation that reads it and reused only within that evaluation,
 //!   offered for a build two or more queries read;
-//! * `MatAtQueryKeptAcrossEvaluations(Memory)`: built at query time and
+//! * query-time `AcrossEvaluations(Memory)`: built at query time and
 //!   kept across evaluations (#509 Example 4's B3), offered when the
 //!   deployment keeps query-time results (the caller's
 //!   `query_time_results_retained`) for a
@@ -41,9 +41,9 @@
 //!
 //! A build at ingestion time needs every build below it at ingestion time too
 //! (#509 Algorithm 3, line 13), and every shared non-summary node below it
-//! `NotMaterialized`; other assignments are not generated. Every
+//! not kept; other assignments are not generated. Every
 //! other combination of options is one physical candidate, the
-//! all-`NotMaterialized` one first: nothing is capped. A node that one
+//! all-not-kept one first: nothing is capped. A node that one
 //! query reads at ingestion time and another at query time is copied, one
 //! copy per timing (`split_shared_by_timing`).
 //!
@@ -132,9 +132,9 @@ use asap_types::ir::{
     NodeToTimedNodeCache, NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr,
     SchemaDerivationError, SortKey,
 };
-use asap_types::physical::Materialization;
 use asap_types::physical::Medium;
 use asap_types::physical::PhysicalWorkloadPlan;
+use asap_types::physical::{Lifetime, PhysicalProperties};
 use asap_types::workload::{
     DataArrival, DataWorkload, Predictability, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
 };
@@ -324,10 +324,10 @@ fn summary_reader_eligibility(
 ///
 /// | materialization candidate        | readers | options                         |
 /// |----------------------------------|---------|---------------------------------|
-/// | Kll ×5 tumbling windows (q1)     | q1      | NotMaterialized, MatAtIngestion |
-/// | Max acc ×5 tumbling windows (q2) | q2      | NotMaterialized, MatAtIngestion |
+/// | Kll ×5 tumbling windows (q1)     | q1      | not kept, kept at ingestion time |
+/// | Max acc ×5 tumbling windows (q2) | q2      | not kept, kept at ingestion time |
 ///
-/// One read by two or more queries also gets `MatAtQuery` (built once per
+/// One read by two or more queries also gets `OneEvaluation` (built once per
 /// evaluation and reused), and so does the highest node of a shared
 /// non-summary sub-DAG, e.g. a `Scan` both queries read when Stage 1
 /// shares it. The physical candidates are the product of the
@@ -342,31 +342,29 @@ pub(crate) struct MaterializationCandidate {
     pub(crate) node: Rc<OperatorNode>,
     /// The queries (indices into the roots) that read it.
     pub(crate) readers: Vec<usize>,
-    /// `Ok` when `MatAtIngestion` is an option.
+    /// `Ok` when kept at ingestion time is an option.
     pub(crate) at_ingestion: Result<(), IngestionPruneReason>,
-    /// Whether `MatAtQueryKeptAcrossEvaluations` is an option: the
+    /// Whether query-time `AcrossEvaluations` is an option: the
     /// deployment keeps query-time results and it is a tumbling-window chain
     /// that builds one new tumbling window per evaluation.
     pub(crate) may_keep_across_evaluations: bool,
 }
 
 impl MaterializationCandidate {
-    /// Its options, `NotMaterialized` first: `MatAtIngestion` when eligible,
-    /// `MatAtQuery` when two or more queries read it, and
-    /// `MatAtQueryKeptAcrossEvaluations` when it may be kept across
+    /// Its options, not kept first: kept at ingestion time when eligible,
+    /// `OneEvaluation` when two or more queries read it, and
+    /// query-time `AcrossEvaluations` when it may be kept across
     /// evaluations.
-    pub(crate) fn options(&self) -> Vec<Materialization> {
-        let mut options = vec![Materialization::NotMaterialized];
+    pub(crate) fn options(&self) -> Vec<Option<PhysicalProperties>> {
+        let mut options = vec![None];
         if self.at_ingestion.is_ok() {
-            options.push(Materialization::MatAtIngestion(Medium::Memory));
+            options.push(Some(kept_across_evaluations_at_ingestion()));
         }
         if self.readers.len() > 1 {
-            options.push(Materialization::MatAtQuery(Medium::Memory));
+            options.push(Some(kept_for_one_evaluation()));
         }
         if self.may_keep_across_evaluations {
-            options.push(Materialization::MatAtQueryKeptAcrossEvaluations(
-                Medium::Memory,
-            ));
+            options.push(Some(kept_across_evaluations_at_query_time()));
         }
         options
     }
@@ -414,7 +412,7 @@ pub(crate) fn builds_one_tumbling_window_per_evaluation<'a>(
 
 /// Stage 2 for one CandidateLogicalASAPDAG: implement every operator
 /// (physical operator implementation), then one physical candidate per
-/// materialization assignment of its mat_candidates, the all-`NotMaterialized` one
+/// materialization assignment of its mat_candidates, the all-not-kept one
 /// first. `entries[i]` is the workload entry of query `i` (`roots[i]`):
 /// its recurrence and predictability decide whether state may be kept from
 /// ingestion time; a missing entry is unknown. `id` is left empty for the
@@ -458,7 +456,7 @@ pub fn optimize_physical_asap_assigned(
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     query_time_results_retained: bool,
-    choose: &mut dyn FnMut(&[usize]) -> Option<Materialization>,
+    choose: &mut dyn FnMut(&[usize]) -> Option<Option<PhysicalProperties>>,
 ) -> Result<Option<PhysicalWorkloadPlan>, PhysicalASAPOptimizationError> {
     optimize_physical_asap_chosen(
         from_logical,
@@ -473,8 +471,12 @@ pub fn optimize_physical_asap_assigned(
 /// [`optimize_physical_asap_chosen`]'s choice per materialization
 /// candidate: from the logical node it implements, its readers and its
 /// options. `None` rejects the assignment.
-pub(crate) type ChooseMaterialization<'a> =
-    dyn FnMut(*const OperatorNode, &[usize], &[Materialization]) -> Option<Materialization> + 'a;
+pub(crate) type ChooseMaterialization<'a> = dyn FnMut(
+        *const OperatorNode,
+        &[usize],
+        &[Option<PhysicalProperties>],
+    ) -> Option<Option<PhysicalProperties>>
+    + 'a;
 
 /// Stage 2 for one CandidateLogicalASAPDAG and one materialization
 /// assignment chosen node by node: `choose(logical, readers, options)`
@@ -526,17 +528,13 @@ fn assigned_candidate(
     from_logical: &str,
     implemented: &[QueryRoot],
     mat_candidates: &[MaterializationCandidate],
-    assignment: Vec<Materialization>,
+    assignment: Vec<Option<PhysicalProperties>>,
 ) -> Result<PhysicalWorkloadPlan, PhysicalASAPOptimizationError> {
-    let materialized: Vec<_> = mat_candidates
-        .iter()
-        .zip(&assignment)
-        .filter(|(_, m)| **m != Materialization::NotMaterialized)
-        .map(|(mat_candidate, m)| (mat_candidate, *m))
-        .collect();
-    let mut options = MaterializationAssignment::with_default(Materialization::NotMaterialized);
-    for (mat_candidate, materialization) in &materialized {
-        options.set(&mat_candidate.node, *materialization);
+    let mut options = MaterializationAssignment::default();
+    for (mat_candidate, kept) in mat_candidates.iter().zip(&assignment) {
+        if kept.is_some() {
+            options.set(&mat_candidate.node, *kept);
+        }
     }
     let operators: Vec<Rc<OperatorNode>> = implemented
         .iter()
@@ -556,7 +554,7 @@ fn assigned_candidate(
         Ok(apply_materialization_timings(node, &options, &mut timing)?)
     })?;
     let dag = compile_physical_asap_workload_with_node_ids(&timed)?.dag;
-    let materialization = dag
+    let lifetime = dag
         .nodes
         .iter()
         .filter(|n| {
@@ -565,16 +563,16 @@ fn assigned_candidate(
                 Operator::ASAP(
                     ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. }
                 )
-            ) || n.materialization != Materialization::NotMaterialized
+            ) || n.lifetime.is_kept()
         })
-        .map(|n| (n.id, n.materialization))
+        .map(|n| (n.id, n.lifetime))
         .collect();
     Ok(PhysicalWorkloadPlan {
         id: String::new(),
         from_logical: from_logical.to_string(),
         roots: timed,
         dag,
-        materialization,
+        lifetime,
     })
 }
 
@@ -661,7 +659,7 @@ fn is_summary_build(node: &OperatorNode) -> bool {
 /// discovery order, then every highest shared non-summary node, in
 /// discovery order. A shared node is one two or more queries read; the
 /// highest are those a root or an unshared node reads (e.g. a `Scan` that
-/// two windows read). Only a highest one is offered `MatAtQuery`, so a
+/// two windows read). Only a highest one is offered `OneEvaluation`, so a
 /// shared sub-DAG adds one candidate, not one per node.
 pub(crate) fn materialization_candidates(
     roots: &[QueryRoot],
@@ -711,10 +709,9 @@ pub(crate) fn materialization_candidates(
             summary_reader_eligibility(node, &readers, entries, data, query_time_results_retained);
         let at_ingestion = eligibility.at_ingestion.and_then(|()| {
             // Only this build and the builds below it at ingestion time.
-            let mut trial =
-                MaterializationAssignment::with_default(Materialization::NotMaterialized);
+            let mut trial = MaterializationAssignment::default();
             for &v in below[c].iter().chain([&c]) {
-                trial.set(&nodes[v], Materialization::MatAtIngestion(Medium::Memory));
+                trial.set(&nodes[v], Some(kept_across_evaluations_at_ingestion()));
             }
             apply_materialization_timings(node, &trial, &mut NodeToTimedNodeCache::new())
                 .map(|_| ())
@@ -943,43 +940,46 @@ fn candidates_below(nodes: &[Rc<OperatorNode>]) -> Vec<Vec<usize>> {
 
 /// Whether, below every ingestion-time build of `assignment`, every build
 /// is at ingestion time too and every shared non-summary node is
-/// `NotMaterialized`: ingestion work reads it as it arrives, and its
+/// not kept: ingestion work reads it as it arrives, and its
 /// query-time readers read a copy ([`split_shared_by_timing`]).
-/// Simplification: that copy is not offered `MatAtQuery` even when two
+/// Simplification: that copy is not offered `OneEvaluation` even when two
 /// query-time readers remain. `below` is [`candidates_below`] of
 /// `mat_candidates`.
 fn down_closed(
     mat_candidates: &[MaterializationCandidate],
     below: &[Vec<usize>],
-    assignment: &[Materialization],
+    assignment: &[Option<PhysicalProperties>],
 ) -> bool {
-    let at_ingestion = |m: &Materialization| m.timing() == ExecutionTiming::IngestionTime;
+    let at_ingestion = |kept: &Option<PhysicalProperties>| {
+        kept.is_some_and(|p| p.timing() == ExecutionTiming::IngestionTime)
+    };
     assignment.iter().enumerate().all(|(c, m)| {
         !at_ingestion(m)
             || below[c].iter().all(|&v| {
                 if is_summary_build(&mat_candidates[v].node) {
                     at_ingestion(&assignment[v])
                 } else {
-                    assignment[v] == Materialization::NotMaterialized
+                    assignment[v].is_none()
                 }
             })
     })
 }
 
 /// Every assignment of an option to each materialization candidate (mixed
-/// radix, the last varying fastest, all `NotMaterialized` first) that is
+/// radix, the last varying fastest, all not kept first) that is
 /// [`down_closed`].
 #[cfg(any(test, feature = "reference-pricer"))]
 fn materialization_assignments(
     mat_candidates: &[MaterializationCandidate],
-) -> impl Iterator<Item = Vec<Materialization>> + '_ {
-    let options: Vec<Vec<Materialization>> = mat_candidates.iter().map(|c| c.options()).collect();
+) -> impl Iterator<Item = Vec<Option<PhysicalProperties>>> + '_ {
+    let options: Vec<Vec<Option<PhysicalProperties>>> =
+        mat_candidates.iter().map(|c| c.options()).collect();
     let nodes: Vec<_> = mat_candidates.iter().map(|c| Rc::clone(&c.node)).collect();
     let below = candidates_below(&nodes);
     let mut digits = Some(vec![0usize; mat_candidates.len()]);
     std::iter::from_fn(move || loop {
         let current = digits.as_mut()?;
-        let assignment: Vec<Materialization> = current
+        let assignment: Vec<Option<PhysicalProperties>> = current
             .iter()
             .zip(&options)
             .map(|(&d, options)| options[d])
@@ -1195,6 +1195,39 @@ pub mod test_support {
     }
 }
 
+/// `timing` and `lifetime`, a pair Stage 2 only builds when valid.
+pub(crate) fn physical_properties(
+    timing: ExecutionTiming,
+    lifetime: Lifetime,
+) -> PhysicalProperties {
+    PhysicalProperties::new(timing, lifetime).expect("Stage 2 builds only valid pairs")
+}
+
+/// Query time, kept in memory until the evaluation's readers finish.
+pub(crate) fn kept_for_one_evaluation() -> PhysicalProperties {
+    physical_properties(
+        ExecutionTiming::QueryTime,
+        Lifetime::OneEvaluation(Medium::Memory),
+    )
+}
+
+/// Ingestion time, kept in memory until a query reads it.
+pub(crate) fn kept_across_evaluations_at_ingestion() -> PhysicalProperties {
+    physical_properties(
+        ExecutionTiming::IngestionTime,
+        Lifetime::AcrossEvaluations(Medium::Memory),
+    )
+}
+
+/// Query time, kept in memory across evaluations (a tumbling-window chain
+/// that builds its newest window at each evaluation).
+pub(crate) fn kept_across_evaluations_at_query_time() -> PhysicalProperties {
+    physical_properties(
+        ExecutionTiming::QueryTime,
+        Lifetime::AcrossEvaluations(Medium::Memory),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1257,7 +1290,7 @@ mod tests {
         );
     }
 
-    /// The all-`NotMaterialized` candidate, with no workload declared.
+    /// The all-not-kept candidate, with no workload declared.
     fn first_candidate(roots: &[QueryRoot]) -> PhysicalWorkloadPlan {
         optimize_physical_asap("L1", roots, &[], &DataWorkload::default(), false)
             .unwrap()
@@ -1573,15 +1606,15 @@ mod tests {
         pass2_candidates.pop().unwrap().roots.unwrap().remove(0)
     }
 
-    const AT_INGESTION: Materialization = Materialization::MatAtIngestion(Medium::Memory);
+    const KEPT_ACROSS: Lifetime = Lifetime::AcrossEvaluations(Medium::Memory);
 
-    /// The options `candidate` chose other than `NotMaterialized`, by node.
-    fn materialized(candidate: &PhysicalWorkloadPlan) -> Vec<Materialization> {
+    /// The lifetimes `candidate` chose other than `None`, by node.
+    fn materialized(candidate: &PhysicalWorkloadPlan) -> Vec<Lifetime> {
         candidate
-            .materialization
+            .lifetime
             .values()
             .copied()
-            .filter(|m| *m != Materialization::NotMaterialized)
+            .filter(|lifetime| lifetime.is_kept())
             .collect()
     }
 
@@ -1779,14 +1812,12 @@ mod tests {
             .nodes
             .iter()
             .all(|n| n.output_state.timing == ExecutionTiming::QueryTime));
-        assert_eq!(materialized(b1), [AT_INGESTION]);
+        assert_eq!(materialized(b1), [KEPT_ACROSS]);
         let [chain] = &node_of(b1, "SummaryTumblingWindowChain")[..] else {
             panic!("one chain")
         };
-        assert_eq!(
-            chain.materialization,
-            Materialization::MatAtIngestion(Medium::Memory)
-        );
+        assert_eq!(chain.lifetime, KEPT_ACROSS);
+        assert_eq!(chain.timing, Some(ExecutionTiming::IngestionTime));
         for below in OperatorNode::reachable(chain) {
             assert_eq!(below.timing, Some(ExecutionTiming::IngestionTime));
         }
@@ -2083,7 +2114,7 @@ mod tests {
             false,
         )
         .unwrap();
-        assert_eq!(materialized(&candidates[1]), [AT_INGESTION]);
+        assert_eq!(materialized(&candidates[1]), [KEPT_ACROSS]);
 
         // The same build with a filter.
         let QueryRoot::Operator(node) = &root else {
@@ -2215,7 +2246,7 @@ mod tests {
     }
 
     /// A build two queries read is also offered built once per evaluation
-    /// for both (`MatAtQuery`); a build one query reads is not.
+    /// for both (`OneEvaluation`); a build one query reads is not.
     #[test]
     fn a_build_two_queries_read_may_be_built_once_per_evaluation() {
         let QueryRoot::Operator(p99) = summary_root("quantile_over_time(0.99, m[1m])") else {
@@ -2238,21 +2269,18 @@ mod tests {
         assert_eq!(candidates.len(), 2);
         assert_eq!(
             materialized(&candidates[1]),
-            [Materialization::MatAtQuery(Medium::Memory)]
+            [Lifetime::OneEvaluation(Medium::Memory)]
         );
         let [build] = &node_of(&candidates[1], "SummaryAgg")[..] else {
             panic!("one shared build")
         };
-        assert_eq!(
-            build.materialization,
-            Materialization::MatAtQuery(Medium::Memory)
-        );
+        assert_eq!(build.lifetime, Lifetime::OneEvaluation(Medium::Memory));
     }
 
     /// Two queries share one scan: one reads it through tumbling windows maintained at
     /// ingestion time, the other at query time. The scan is split, one copy
     /// per timing; with nothing materialized it stays one node. The shared
-    /// scan may also be built once per evaluation (`MatAtQuery`), but not
+    /// scan may also be built once per evaluation (`OneEvaluation`), but not
     /// under ingestion-time tumbling windows, where only one query reads it at query
     /// time.
     #[test]
@@ -2298,12 +2326,12 @@ mod tests {
                 .nodes
                 .iter()
                 .filter(|n| matches!(n.payload, Payload::NonASAP(NonASAPOp::Scan { .. })))
-                .map(|n| (n.output_state.timing, n.materialization))
+                .map(|n| (n.output_state.timing, n.lifetime))
                 .collect();
             scans.sort_by_key(|(t, _)| *t == ExecutionTiming::QueryTime);
             scans
         };
-        let not_materialized = Materialization::NotMaterialized;
+        let not_materialized = Lifetime::None;
         assert_eq!(
             scans(&candidates[0]),
             [(ExecutionTiming::QueryTime, not_materialized)]
@@ -2312,7 +2340,7 @@ mod tests {
             scans(&candidates[1]),
             [(
                 ExecutionTiming::QueryTime,
-                Materialization::MatAtQuery(Medium::Memory)
+                Lifetime::OneEvaluation(Medium::Memory)
             )]
         );
         assert_eq!(
@@ -2325,7 +2353,7 @@ mod tests {
     }
 
     /// Only the highest shared non-summary nodes are materialization
-    /// candidates, each with `NotMaterialized` and `MatAtQuery` only: a
+    /// candidates, each with not kept and `OneEvaluation` only: a
     /// 5 m range two queries read (not the scan below it, which only that
     /// shared range reads for them), and the scan, which a third query
     /// also reads through its own 1 m range.
@@ -2367,10 +2395,7 @@ mod tests {
             .iter()
             .map(|c| (c.node.operator.kind_name(), c.readers.clone(), c.options()))
             .collect();
-        let options = vec![
-            Materialization::NotMaterialized,
-            Materialization::MatAtQuery(Medium::Memory),
-        ];
+        let options = vec![None, Some(kept_for_one_evaluation())];
         assert_eq!(
             found,
             [

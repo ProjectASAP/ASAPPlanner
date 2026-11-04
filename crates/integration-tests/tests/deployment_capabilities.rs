@@ -8,9 +8,10 @@ use asap_cost::CostInputs;
 use asap_devtools::planning_stages::lower_sql_roots;
 use asap_logical_asap_optimization::{DeploymentCapabilities, SupportedSummary};
 use asap_types::ir::flat::FlatDag;
+use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::{SketchAlgorithm, StatisticKind};
 use asap_types::ir::{ASAPOp, Operator};
-use asap_types::physical::Materialization;
+use asap_types::physical::Lifetime;
 use planner_layering_common::*;
 
 /// A deployment whose executor supports only `supported`: each family with
@@ -199,8 +200,8 @@ type CandidateCosts = Vec<(String, f64)>;
 
 /// The per-second cost of every physical candidate whose tumbling-window chain both
 /// panels read is materialized at query time: shared within one evaluation
-/// (`MatAtQuery`), and kept across evaluations
-/// (`MatAtQueryKeptAcrossEvaluations`, which Stage 3 prices as such).
+/// (`OneEvaluation`), and kept across evaluations
+/// (query-time `AcrossEvaluations`, which Stage 3 prices as such).
 fn shared_chain_costs(run: &Run) -> (CandidateCosts, CandidateCosts) {
     let (mut within_one, mut kept) = (Vec::new(), Vec::new());
     for p in &run.physical {
@@ -214,12 +215,12 @@ fn shared_chain_costs(run: &Run) -> (CandidateCosts, CandidateCosts) {
             };
             let entry = (p.id.clone(), cost.cost_per_second.expect("cost model 1"));
             let kept_detail = cost.per_node[&n.id].detail.contains("across evaluations");
-            match n.materialization {
-                Materialization::MatAtQuery(_) => within_one.push(entry),
-                Materialization::MatAtQueryKeptAcrossEvaluations(_) if kept_detail => {
+            match (n.output_state.timing, n.lifetime) {
+                (_, Lifetime::OneEvaluation(_)) => within_one.push(entry),
+                (ExecutionTiming::QueryTime, Lifetime::AcrossEvaluations(_)) if kept_detail => {
                     kept.push(entry)
                 }
-                Materialization::MatAtQueryKeptAcrossEvaluations(_) => {
+                (ExecutionTiming::QueryTime, Lifetime::AcrossEvaluations(_)) => {
                     panic!("{}: a kept chain priced as not kept", p.id)
                 }
                 _ => {}

@@ -15,7 +15,7 @@ use asap_planner::PlanningModels;
 use asap_types::ir::flat::NodeId;
 use asap_types::ir::schema::{FieldDataType, GroupingStrategy, HydraKind, SketchAlgorithm};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot, ScalarExpr, SortKey};
-use asap_types::physical::{Materialization, Medium};
+use asap_types::physical::{Lifetime, Medium};
 use planner_layering_common::*;
 
 // ── Example 1 workload ───────────────────────────────────────────────────
@@ -564,7 +564,7 @@ fn stage2_physical_asap_optimization_summary_topk_is_build_then_estimate() {
 /// chain is maintained or not independently: a logical candidate with `c`
 /// chains has `2^c` physical candidates. A shared input (the highest node
 /// both queries read: the scan, or the time range above it) is also built
-/// once per evaluation (`MatAtQuery`), which adds one candidate: the one
+/// once per evaluation (`OneEvaluation`), which adds one candidate: the one
 /// with every chain at query time, since a chain maintained at ingestion
 /// time leaves one query reading the input at query time.
 #[test]
@@ -574,9 +574,9 @@ fn stage2_physical_asap_optimization_materializes_only_tumbling_windows_at_inges
     let mut shared_once = 0;
     for p in &run.physical {
         for n in &p.dag().nodes {
-            match materialization(p, n.id) {
-                MaterializationOption::NotMaterialized => {}
-                MaterializationOption::MatAtIngestion => {
+            match keeping(p, n.id) {
+                Keeping::NotKept => {}
+                Keeping::KeptAtIngestion => {
                     let Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { family, .. }) =
                         p.dag().payload(n.id)
                     else {
@@ -593,7 +593,7 @@ fn stage2_physical_asap_optimization_materializes_only_tumbling_windows_at_inges
                         counter_maintained += 1;
                     }
                 }
-                MaterializationOption::MatAtQuery => {
+                Keeping::KeptAtQueryTime => {
                     let (q1, q2) = roots(&p.query_roots);
                     assert!(
                         closure(p.dag(), q1).contains(&n.id)
@@ -723,11 +723,11 @@ fn stage3_plan_selection_count_min_needs_the_counter_declaration() {
     );
 }
 
-/// A shared NotMaterialized input is charged once per consumer, and both
+/// A shared not-kept input is charged once per consumer, and both
 /// queries read the same 1 m window, so the shared-input candidates cost
 /// what the independent one does; their totals differ from it only by
 /// floating-point rounding (the same charges summed in another grouping).
-/// Built once per evaluation (`MatAtQuery`), the shared input is read once:
+/// Built once per evaluation (`OneEvaluation`), the shared input is read once:
 /// the shared time range (the doc's "Raw with a shared input") is selected,
 /// at 4.38 instead of 7.01 per second.
 #[test]
@@ -742,7 +742,7 @@ fn stage3_plan_selection_shared_input_ties_up_to_rounding_unless_built_once() {
         p.dag()
             .nodes
             .iter()
-            .any(|n| materialization(p, n.id) == MaterializationOption::MatAtQuery)
+            .any(|n| keeping(p, n.id) == Keeping::KeptAtQueryTime)
     };
     let shared: Vec<_> = run
         .physical
@@ -770,7 +770,7 @@ fn stage3_plan_selection_shared_input_ties_up_to_rounding_unless_built_once() {
         .dag()
         .nodes
         .iter()
-        .find(|n| materialization(selected, n.id) == MaterializationOption::MatAtQuery)
+        .find(|n| keeping(selected, n.id) == Keeping::KeptAtQueryTime)
         .unwrap();
     assert_eq!(
         relational(&time_range.payload).as_deref(),
@@ -817,7 +817,7 @@ fn stage3_plan_selection_selects_cheapest_valid() {
 }
 
 /// Every node of a valid candidate is charged once per consumer that reads
-/// it: a shared `NotMaterialized` node is recomputed for each query, and a
+/// it: a shared not-kept node is recomputed for each query, and a
 /// materialized one is computed once.
 #[test]
 fn stage3_plan_selection_charges_each_node_per_consuming_query() {
@@ -825,7 +825,7 @@ fn stage3_plan_selection_charges_each_node_per_consuming_query() {
 }
 
 /// A hand-built candidate with a materialized node: Q1's plan read by two
-/// queries, its `time_range` kept `MatAtQuery`. Plan selection charges the
+/// queries, its `time_range` kept `OneEvaluation`. Plan selection charges the
 /// two accumulators (rate, sum) and their finalizations twice, once per query; the walks from
 /// both roots stop at the materialized `time_range`, which is computed once
 /// and reads the scan once.
@@ -853,7 +853,7 @@ fn materialized_case() -> Run {
         .iter_mut()
         .find(|n| relational(&n.payload).as_deref() == Some("time_range"))
         .unwrap();
-    time_range.materialization = Materialization::MatAtQuery(Medium::Memory);
+    time_range.lifetime = Lifetime::OneEvaluation(Medium::Memory);
     let selection = select_plan(
         std::slice::from_ref(&p.candidate),
         &[exact_every_10s(), exact_every_10s()],

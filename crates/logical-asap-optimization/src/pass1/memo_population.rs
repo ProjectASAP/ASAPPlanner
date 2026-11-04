@@ -437,7 +437,7 @@ fn builds_a_sketch(node: &Rc<OperatorNode>) -> bool {
 }
 
 /// Interned structural identities: the operator over its children's identities,
-/// without the schema, guarantee, timing and materialization composition
+/// without the schema, guarantee, timing and lifetime composition
 /// derives. Memoized per node (the cache keeps each node alive, so its
 /// address is not reused).
 #[derive(Default)]

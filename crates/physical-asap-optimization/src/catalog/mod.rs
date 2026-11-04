@@ -1,5 +1,5 @@
 //! Stage 2's physical candidates: implement each memo candidate's
-//! operators, enumerate its timing and materialization, record which
+//! operators, enumerate its timing and lifetime, record which
 //! candidates can produce each input, and prune what cannot be used
 //! ([`generate_physical_asap_memo_candidates`]); and realize one selected
 //! assignment as a physical plan (#1047). The output type,
@@ -145,8 +145,7 @@ fn validate_candidates(physical: &PhysicalASAPMemoCandidates) -> Result<(), Stri
 #[cfg(feature = "test-support")]
 pub mod test_support {
     pub use super::configurations::{
-        compatible_timing, enumerate_candidate_configurations,
-        may_keep_across_evaluations_per_sole_reader_query,
+        enumerate_candidate_configurations, may_keep_across_evaluations_per_sole_reader_query,
     };
     pub use super::factoring::{
         factor_terminal_readers, MemoGroupOutputKey, MemoGroupOutputToCompatibleProducersCache,

@@ -1717,11 +1717,11 @@ mod compilation_tests {
 #[cfg(feature = "test-support")]
 pub mod test_support {
     use super::*;
-    use planner_types::physical::{Materialization, Medium};
+    use planner_types::physical::{Lifetime, Medium};
     use std::collections::HashMap;
 
     /// The materialized views at `nodes`, in that order: each node that is
-    /// not a view is marked `MatAtIngestion`, and it and every node below it
+    /// not a view is marked kept at ingestion time, and it and every node below it
     /// run at ingestion time (their outputs and outgoing edges); then every
     /// view's `retention_ms` is set ([`PhysicalASAPDAG::set_retention`])
     /// with no tumbling window or range-evaluation span. For tests that bind states at
@@ -1743,7 +1743,7 @@ pub mod test_support {
             .iter()
             .filter(|node| {
                 nodes.contains(&(node.id as NodeId))
-                    && !planner_types::test_support::is_materialized_view(node.materialization)
+                    && !matches!(node.lifetime, Lifetime::AcrossEvaluations(_))
             })
             .map(|node| node.id as NodeId)
             .collect();
@@ -1757,7 +1757,7 @@ pub mod test_support {
         for node in &mut dag.nodes {
             let id = node.id as NodeId;
             if marked.contains(&id) {
-                node.materialization = Materialization::MatAtIngestion(Medium::Memory);
+                node.lifetime = Lifetime::AcrossEvaluations(Medium::Memory);
             }
             if at_ingestion.contains(&id) {
                 node.output_state.timing = ExecutionTiming::IngestionTime;

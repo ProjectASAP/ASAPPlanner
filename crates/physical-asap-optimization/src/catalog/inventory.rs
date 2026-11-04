@@ -10,7 +10,6 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::ir::OperatorNode;
-use asap_types::physical::Materialization;
 use asap_types::stages::Memo;
 use asap_types::stages::MemoGroupId;
 
@@ -21,7 +20,7 @@ use asap_types::stages::{
 };
 
 /// The memo's implementation candidates lowered to operator nodes, before
-/// timing and materialization. Node IDs index
+/// timing and lifetime. Node IDs index
 /// `operator_nodes_of_candidates_for_memo_groups`; they become
 /// [`asap_types::stages::OperatorNodeOfCandidateForMemoGroupId`]s of the
 /// configured candidates.
@@ -278,11 +277,11 @@ impl ImmediateCandidateBuilder<'_> {
         if let Some(&existing) = self.private_nodes.get(&Rc::as_ptr(node)) {
             return Ok(existing);
         }
-        if node.timing.is_some() || node.materialization != Materialization::NotMaterialized {
+        if node.timing.is_some() || node.lifetime.is_kept() {
             return Err(CandidateInventoryError::Unsupported {
                 group: self.owner.group.0 as usize,
                 candidate: self.owner.index,
-                reason: "assigned execution timing or materialization",
+                reason: "assigned execution timing or lifetime",
             });
         }
         let mut requirements = Vec::new();

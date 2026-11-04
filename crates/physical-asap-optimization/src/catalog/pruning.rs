@@ -25,8 +25,7 @@ pub fn prune(configured: PhysicalASAPMemoCandidates) -> Result<PhysicalASAPMemoC
                     .group(),
                 candidate: PhysicalCandidateKey {
                     operator_node: candidate.operator_node,
-                    timing: candidate.timing,
-                    materialization: candidate.materialization,
+                    properties: candidate.properties,
                 },
                 reason,
             });

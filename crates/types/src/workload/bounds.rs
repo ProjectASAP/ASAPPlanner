@@ -478,7 +478,7 @@ pub fn with_confirmed_weights_at(
                 OperatorNode::with_schema(operator, node.schema.clone())
                     .with_guarantee(node.guarantee.clone())
                     .with_timing(node.timing)
-                    .with_materialization(node.materialization),
+                    .with_lifetime(node.lifetime),
             )
         } else {
             Rc::clone(node)

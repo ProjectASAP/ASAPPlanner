@@ -224,7 +224,7 @@ function stageDag(dag, physical) {
       const [kind, body] = stageOperatorParts(node.payload);
       return {
         id: node.id, kind, body, schema: node.output_schema, guarantee: node.guarantee,
-        materialization: node.materialization, timing: node.output_state ? node.output_state.timing : undefined, raw: node,
+        lifetime: node.lifetime, timing: node.output_state ? node.output_state.timing : undefined, raw: node,
       };
     });
     const edges = dag.edges.map((edge) => ({ producer: edge.producer, consumer: edge.consumer, raw: edge }));
@@ -242,7 +242,7 @@ function stageDag(dag, physical) {
     stageLogicalChildren(body).forEach((producer) => edges.push({ producer, consumer: id, raw: null }));
     return {
       id, kind, body, schema: node.schema, guarantee: node.guarantee,
-      materialization: node.materialization, timing: node.timing === null ? undefined : node.timing, raw: node,
+      lifetime: node.lifetime, timing: node.timing === null ? undefined : node.timing, raw: node,
     };
   });
   const queries = dag.roots.map((root) => ('Scalar' in root ? { scalar: root.Scalar } : { node: root.Operator }));

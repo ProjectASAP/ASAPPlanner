@@ -10,8 +10,9 @@ use crate::planner_layering_common;
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_plan_selection::RejectionCause;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
+use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::ASAPOp;
-use asap_types::physical::{Materialization, Medium};
+use asap_types::physical::{Lifetime, Medium};
 use asap_types::workload::{
     DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query, QueryLanguage,
     QueryRequirements, QueryWorkload, RangeEvaluation, RepeatedDemand, RepeatingEntry,
@@ -155,8 +156,9 @@ fn close(actual: f64, expected: f64) -> bool {
     (actual - expected).abs() <= 1e-6 * expected.abs().max(1.0)
 }
 
-/// Each physical candidate's tumbling-window chains: (tumbling-window width, materialization).
-fn tumbling_window_chains(run: &Run) -> Vec<(String, u64, Materialization)> {
+/// Each physical candidate's tumbling-window chains: (tumbling-window width,
+/// (timing, lifetime)).
+fn tumbling_window_chains(run: &Run) -> Vec<(String, u64, (ExecutionTiming, Lifetime))> {
     run.physical
         .iter()
         .flat_map(|p| {
@@ -164,15 +166,20 @@ fn tumbling_window_chains(run: &Run) -> Vec<(String, u64, Materialization)> {
                 PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryTumblingWindowChain {
                     tumbling_window_width_ms,
                     ..
-                }) => Some((p.id.clone(), *tumbling_window_width_ms, n.materialization)),
+                }) => Some((
+                    p.id.clone(),
+                    *tumbling_window_width_ms,
+                    (n.output_state.timing, n.lifetime),
+                )),
                 _ => None,
             })
         })
         .collect()
 }
 
-/// The candidate whose single tumbling-window chain is materialized as `wanted`.
-fn with_chain(run: &Run, wanted: Materialization) -> String {
+/// The candidate whose single tumbling-window chain runs at and is kept as
+/// `wanted`.
+fn with_chain(run: &Run, wanted: (ExecutionTiming, Lifetime)) -> String {
     tumbling_window_chains(run)
         .into_iter()
         .find(|(_, _, m)| *m == wanted)
@@ -272,7 +279,10 @@ fn stage3_plan_selection_reports_the_retention_of_kept_tumbling_windows() {
     );
     let kept = with_chain(
         &range,
-        Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory),
+        (
+            ExecutionTiming::QueryTime,
+            Lifetime::AcrossEvaluations(Medium::Memory),
+        ),
     );
     assert_eq!(range.selection.selected, kept);
     let retention: Vec<u64> = range
@@ -349,9 +359,18 @@ fn stage3_plan_selection_prefers_kept_tumbling_windows_once_the_range_is_declare
     );
     let kept = with_chain(
         &range,
-        Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory),
+        (
+            ExecutionTiming::QueryTime,
+            Lifetime::AcrossEvaluations(Medium::Memory),
+        ),
     );
-    let ingestion = with_chain(&range, Materialization::MatAtIngestion(Medium::Memory));
+    let ingestion = with_chain(
+        &range,
+        (
+            ExecutionTiming::IngestionTime,
+            Lifetime::AcrossEvaluations(Medium::Memory),
+        ),
+    );
     for (run, id, expected) in [
         (&none, "P1", 20.828_117),
         (&none, kept.as_str(), 32.262_967),

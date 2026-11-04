@@ -333,7 +333,7 @@ fn a_current_series_population_matches_only_its_selectors_lookback() {
 }
 
 /// Population timing is a materialization choice: the population follows its
-/// assignment (`NotMaterialized` by default), while its evaluation always
+/// assignment (not kept by default), while its evaluation always
 /// runs at query time.
 #[test]
 fn population_timing_follows_its_materialization() {
@@ -342,7 +342,7 @@ fn population_timing_follows_its_materialization() {
     use asap_types::ir::{
         apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
     };
-    use asap_types::physical::{Materialization, Medium};
+    use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
     let candidate = current_series_topk();
     let Some(ASAPOp::EvaluatePopulation {
         child: population, ..
@@ -350,14 +350,17 @@ fn population_timing_follows_its_materialization() {
     else {
         unreachable!()
     };
-    let on_disk = Materialization::MatAtIngestion(Medium::Disk);
+    let on_disk = Lifetime::AcrossEvaluations(Medium::Disk);
     let mut at_ingestion = MaterializationAssignment::default();
-    at_ingestion.set(population, on_disk);
-    for (assignment, timing, materialization) in [
+    at_ingestion.set(
+        population,
+        PhysicalProperties::new(IngestionTime, on_disk).ok(),
+    );
+    for (assignment, timing, lifetime) in [
         (
             MaterializationAssignment::default(),
             QueryTime,
-            Materialization::NotMaterialized,
+            Lifetime::None,
         ),
         (at_ingestion, IngestionTime, on_disk),
     ] {
@@ -372,7 +375,7 @@ fn population_timing_follows_its_materialization() {
             unreachable!()
         };
         assert_eq!(population.output_state.timing, timing);
-        assert_eq!(population.materialization, materialization);
+        assert_eq!(population.lifetime, lifetime);
         assert_eq!(evaluation.output_state.timing, QueryTime);
     }
     let mut evaluation_at_ingestion = (*candidate).clone();

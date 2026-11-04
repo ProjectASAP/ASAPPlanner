@@ -76,14 +76,18 @@ pub(super) fn catalog(
     )
 }
 
-/// One candidate of operator node `node` at query time, not materialized,
+/// At query time, not kept.
+pub(super) fn query_time_not_kept() -> PhysicalProperties {
+    PhysicalProperties::new(ExecutionTiming::QueryTime, Lifetime::None).unwrap()
+}
+
+/// One candidate of operator node `node` at query time, not kept,
 /// reading `producers` per input, that may produce a query's output when
 /// `output`.
 pub(super) fn candidate(node: usize, producers: &[&[usize]], output: bool) -> PhysicalCandidate {
     PhysicalCandidate {
         operator_node: OperatorNodeOfCandidateForMemoGroupId(node),
-        timing: ExecutionTiming::QueryTime,
-        materialization: Materialization::NotMaterialized,
+        properties: query_time_not_kept(),
         producer_candidates_per_input: producers
             .iter()
             .map(|input| {
@@ -174,8 +178,7 @@ fn dominance_needs_every_condition() {
         OperatorKindForReaders::Other(std::mem::discriminant(&rows_node(1).operator), "Values");
     let key = DominanceKey {
         group: MemoGroupId(3),
-        timing: ExecutionTiming::QueryTime,
-        materialization: Materialization::NotMaterialized,
+        properties: query_time_not_kept(),
         shareable: false,
         producer_candidates_per_input: &producers,
         readers: vec![(PhysicalCandidateId(9), 0)],
@@ -209,14 +212,19 @@ fn dominance_needs_every_condition() {
         (
             "timing",
             DominanceKey {
-                timing: ExecutionTiming::IngestionTime,
+                properties: PhysicalProperties::new(ExecutionTiming::IngestionTime, Lifetime::None)
+                    .unwrap(),
                 ..key.clone()
             },
         ),
         (
-            "materialization",
+            "lifetime",
             DominanceKey {
-                materialization: Materialization::MatAtQuery(Medium::Memory),
+                properties: PhysicalProperties::new(
+                    ExecutionTiming::QueryTime,
+                    Lifetime::OneEvaluation(Medium::Memory),
+                )
+                .unwrap(),
                 ..key.clone()
             },
         ),
@@ -371,8 +379,7 @@ fn pruning_keeps_the_smallest_equal_class_and_incomparable_ones() {
     let schema = rows_node(1).schema.clone();
     let key = DominanceKey {
         group: MemoGroupId(0),
-        timing: ExecutionTiming::QueryTime,
-        materialization: Materialization::NotMaterialized,
+        properties: query_time_not_kept(),
         shareable: false,
         producer_candidates_per_input: &producers,
         readers: Vec::new(),
@@ -486,7 +493,11 @@ fn shared_middle() -> PhysicalASAPMemoCandidates {
     let candidates = vec![
         candidate(0, &[], false),
         PhysicalCandidate {
-            materialization: Materialization::MatAtQuery(Medium::Memory),
+            properties: PhysicalProperties::new(
+                ExecutionTiming::QueryTime,
+                Lifetime::OneEvaluation(Medium::Memory),
+            )
+            .unwrap(),
             ..candidate(1, &[&[0]], false)
         },
         candidate(2, &[&[1]], true),
@@ -907,11 +918,11 @@ fn kept_builds_match_fresh_builds_of(roots: Vec<QueryRoot>) -> MilpInputs {
 ///   refresh window, (10 s, 0));
 /// - 5: a KLL over `TimeRange(60 s)`, window (60 s, 0);
 /// - 8: a KLL over `TimeRange(10 s)` over `TimeShift(5 s)`, window
-///   (10 s, 5 s), through two `NotMaterialized` ingestion-time nodes;
+///   (10 s, 5 s), through two not-kept ingestion-time nodes;
 /// - 9: a KLL over the whole scan, an unbounded window.
 ///
 /// Candidates 0, 1, 4, 6 and 7 (the scan, ranges and shift) are
-/// `NotMaterialized` at ingestion time; 10–14 are the query-time readers.
+/// not kept, at ingestion time; 10–14 are the query-time readers.
 fn ingestion_views_of_three_windows_and_an_unbounded_one() -> PhysicalASAPMemoCandidates {
     use asap_types::ir::operator::{Reduction, Source, TimeShift};
     use asap_types::ir::scalar::ColumnRef;
@@ -989,12 +1000,15 @@ fn ingestion_views_of_three_windows_and_an_unbounded_one() -> PhysicalASAPMemoCa
         (views[4].clone(), 9),
     ];
     let at_ingestion = |node: usize, producers: &[&[usize]], view: bool| PhysicalCandidate {
-        timing: ExecutionTiming::IngestionTime,
-        materialization: if view {
-            Materialization::MatAtIngestion(Medium::Memory)
-        } else {
-            Materialization::NotMaterialized
-        },
+        properties: PhysicalProperties::new(
+            ExecutionTiming::IngestionTime,
+            if view {
+                Lifetime::AcrossEvaluations(Medium::Memory)
+            } else {
+                Lifetime::None
+            },
+        )
+        .unwrap(),
         ..candidate(node, producers, false)
     };
     let mut candidates = vec![
@@ -1021,7 +1035,7 @@ fn ingestion_views_of_three_windows_and_an_unbounded_one() -> PhysicalASAPMemoCa
 
 // One `I_r` per refresh window: the two views over `TimeRange(10 s)` share
 // one; the 60 s view and the shifted 10 s view (window (10 s, 5 s), through
-// a `NotMaterialized` shift and range) have their own; the unbounded view
+// a not-kept shift and range) have their own; the unbounded view
 // gets an `Alone` one. Each `I_r` holds the scan and the stateless nodes
 // below its views, and each view's context reads across into its `I_r`.
 #[test]

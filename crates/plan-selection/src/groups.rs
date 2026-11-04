@@ -50,7 +50,7 @@
 //! ## Dominance (exact under cost model 1)
 //!
 //! Candidate `k` is deleted when another candidate `k'` (the *dominating* candidate):
-//! - is in the same memo group, at the same timing and materialization,
+//! - is in the same memo group, at the same timing and lifetime,
 //!   with the same held state;
 //! - has the same producer candidates per input, the same readers (every
 //!   (reader candidate, input) that may read `k` may read `k'`, and nothing
@@ -114,7 +114,7 @@ use asap_types::ir::properties::execution_data_state::{DataPrimitive, ExecutionD
 use asap_types::ir::properties::{AccuracyGuarantee, ExecutionTiming};
 use asap_types::ir::schema::{FieldDataType, Schema};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
-use asap_types::physical::Materialization;
+use asap_types::physical::{Lifetime, PhysicalProperties};
 use asap_types::stages::{
     output_references, MemoGroupId, OperatorNodeOfCandidateForMemoGroupId,
     PhysicalASAPMemoCandidates,
@@ -252,7 +252,7 @@ pub(crate) struct CandidateUsage {
     pub(crate) peak_memory_bytes: u64,
     pub(crate) disk_bytes: u64,
     /// Query-time memory held while an evaluation reading it runs (a
-    /// `MatAtQuery` state, or a not-materialized node's working memory).
+    /// `OneEvaluation` state, or a not-materialized node's working memory).
     pub(crate) held_bytes: u64,
     /// Raw data a query-time scan keeps on disk.
     pub(crate) raw_data_kept_bytes: u64,
@@ -324,30 +324,30 @@ pub(crate) enum UnusableReason {
 }
 
 /// Where a candidate runs (#1095 §2.0, "Memo groups and execution
-/// contexts"), by its materialization alone, as `asap_cost::plan_cost`
+/// contexts"), by its timing and lifetime, as `asap_cost::plan_cost`
 /// counts its executions:
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum RunKind {
-    /// `NotMaterialized` at query time: computed once in each execution
+    /// Not kept (lifetime `None`) at query time: computed once in each execution
     /// context (a query evaluation, or a shared query-time candidate's
     /// inputs) that selects it.
     PerContext,
-    /// `NotMaterialized` at ingestion time: runs in the ingestion pipeline
+    /// Not kept (lifetime `None`) at ingestion time: runs in the ingestion pipeline
     /// `I_r` of its readers' refresh window `r`, once per second of
     /// arriving data for all of them.
     Ingestion,
-    /// Materialized (`MatAtIngestion`, `MatAtQuery`,
-    /// `MatAtQueryKeptAcrossEvaluations`): selected once, its own execution
-    /// context for its inputs, charged once.
+    /// Kept (lifetime `OneEvaluation` or `AcrossEvaluations`, at either
+    /// timing): selected once, its own execution context for its inputs,
+    /// charged once.
     Shareable,
 }
 
-/// The [`RunKind`] of a candidate at `timing` and `materialization`.
-pub(crate) fn run_kind(timing: ExecutionTiming, materialization: Materialization) -> RunKind {
-    match (materialization, timing) {
-        (Materialization::NotMaterialized, ExecutionTiming::QueryTime) => RunKind::PerContext,
-        (Materialization::NotMaterialized, ExecutionTiming::IngestionTime) => RunKind::Ingestion,
-        _ => RunKind::Shareable,
+/// The [`RunKind`] of a candidate with `properties`.
+pub(crate) fn run_kind(properties: PhysicalProperties) -> RunKind {
+    match (properties.lifetime(), properties.timing()) {
+        (Lifetime::None, ExecutionTiming::QueryTime) => RunKind::PerContext,
+        (Lifetime::None, ExecutionTiming::IngestionTime) => RunKind::Ingestion,
+        (Lifetime::OneEvaluation(_) | Lifetime::AcrossEvaluations(_), _) => RunKind::Shareable,
     }
 }
 
@@ -356,7 +356,7 @@ pub(crate) fn run_kind(timing: ExecutionTiming, materialization: Materialization
 /// roots give the group's result; an implementation's private nodes
 /// (`is_implementation_root == false`) give an intermediate result of
 /// their own, so each private operator node is its own slot (its
-/// candidates differ only in timing and materialization).
+/// candidates differ only in timing and lifetime).
 ///
 /// The memo group graph is not acyclic: a widened scan puts a `Project` in
 /// the memo group of the scan it reads, so a group's candidate may read
@@ -432,7 +432,7 @@ impl CandidateLinks {
         let kind: Vec<RunKind> = physical
             .candidates
             .iter()
-            .map(|candidate| run_kind(candidate.timing, candidate.materialization))
+            .map(|candidate| run_kind(candidate.properties))
             .collect();
         // With one candidate per result slot per context, a candidate that
         // runs in a context cannot read its own slot there (only a self-loop
@@ -685,7 +685,7 @@ pub(crate) enum ContextKind {
 
 /// Which ingestion pipeline `I_r` (#1095 §2.5 O3(b)): the deployment
 /// refreshes the ingestion-time views of one refresh window in one run, so
-/// `asap_cost::execution_demand::computations` charges a `NotMaterialized`
+/// `asap_cost::execution_demand::computations` charges a not-kept
 /// ingestion-time node once per refresh window of the views reading it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum IngestionPipeline {
@@ -722,7 +722,8 @@ fn refresh_windows(
         .map(PhysicalCandidateId)
         .filter(|&class| {
             links.is_shareable(class)
-                && physical.candidates[class.0].timing == ExecutionTiming::IngestionTime
+                && physical.candidates[class.0].properties.timing()
+                    == ExecutionTiming::IngestionTime
         })
         .collect();
     let dag = dag_below(physical, links, &views);
@@ -957,7 +958,8 @@ pub(crate) fn execution_contexts(
         }
         pending.sort_unstable();
         for class in pending {
-            let at_query_time = physical.candidates[class.0].timing == ExecutionTiming::QueryTime;
+            let at_query_time =
+                physical.candidates[class.0].properties.timing() == ExecutionTiming::QueryTime;
             let mut context = ExecutionContext {
                 kind: ContextKind::Shared(class),
                 at_query_time,
@@ -1048,14 +1050,14 @@ fn catalog_node(
         id: class.0,
         payload,
         output_state: ExecutionDataState {
-            timing: candidate.timing,
+            timing: candidate.properties.timing(),
             primitive: if node.asap().and_then(ASAPOp::produced_state).is_some() {
                 DataPrimitive::SummaryState
             } else {
                 DataPrimitive::Raw
             },
         },
-        materialization: candidate.materialization,
+        lifetime: candidate.properties.lifetime(),
         output_schema: node.schema.clone(),
         guarantee: node.guarantee.clone(),
         retention_ms: None,
@@ -1090,10 +1092,8 @@ fn window_read_through(path: &[&PhysicalASAPDAGNode]) -> ScanWindow {
             Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                 tumbling_window_width_ms,
                 ..
-            }) if matches!(
-                node.materialization,
-                Materialization::MatAtQueryKeptAcrossEvaluations(_)
-            ) =>
+            }) if node.output_state.timing == ExecutionTiming::QueryTime
+                && matches!(node.lifetime, Lifetime::AcrossEvaluations(_)) =>
             {
                 u128::from(*tumbling_window_width_ms)
             }
@@ -1307,11 +1307,10 @@ fn retained_pane_options(
 ) -> Vec<u64> {
     let node = &nodes[chain.0];
     let kept = matches!(
-        (&node.payload, node.materialization),
+        (&node.payload, node.lifetime),
         (
             Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }),
-            Materialization::MatAtIngestion(_)
-                | Materialization::MatAtQueryKeptAcrossEvaluations(_)
+            Lifetime::AcrossEvaluations(_)
         )
     );
     if !kept {
@@ -1938,8 +1937,7 @@ pub(crate) struct DominanceProfile<'a> {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct DominanceKey<'a> {
     pub(crate) group: MemoGroupId,
-    pub(crate) timing: ExecutionTiming,
-    pub(crate) materialization: Materialization,
+    pub(crate) properties: PhysicalProperties,
     pub(crate) shareable: bool,
     pub(crate) producer_candidates_per_input: &'a [Vec<PhysicalCandidateId>],
     pub(crate) readers: Vec<(PhysicalCandidateId, usize)>,
@@ -1990,8 +1988,7 @@ fn dominance_profiles<'a>(
             DominanceProfile {
                 same: DominanceKey {
                     group: physical.memo_group_of(copy),
-                    timing: candidate.timing,
-                    materialization: candidate.materialization,
+                    properties: candidate.properties,
                     shareable: links.is_shareable(copy),
                     producer_candidates_per_input: producers_per_input,
                     readers: std::mem::take(&mut readers[class]),
@@ -2102,15 +2099,10 @@ pub(crate) fn prune_dominated_candidates(
 ) -> Vec<DominatedCandidate> {
     // Only candidates with equal keys can dominate each other.
     let mut buckets: Vec<Vec<usize>> = Vec::new();
-    let mut bucket_of_key: HashMap<(MemoGroupId, ExecutionTiming, Materialization), Vec<usize>> =
-        HashMap::new();
+    let mut bucket_of_key: HashMap<(MemoGroupId, PhysicalProperties), Vec<usize>> = HashMap::new();
     for (class, profile) in profiles.iter().enumerate() {
         let candidates = bucket_of_key
-            .entry((
-                profile.same.group,
-                profile.same.timing,
-                profile.same.materialization,
-            ))
+            .entry((profile.same.group, profile.same.properties))
             .or_default();
         match candidates
             .iter()

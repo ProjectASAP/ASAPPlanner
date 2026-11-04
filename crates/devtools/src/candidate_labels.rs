@@ -10,10 +10,11 @@ use std::rc::Rc;
 use serde_json::Value;
 
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
+use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
 use asap_types::ir::NonASAPOp;
 use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
-use asap_types::physical::Materialization;
+use asap_types::physical::Lifetime;
 use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::stages::HowToComputeAggregateMeasure;
 
@@ -144,19 +145,19 @@ fn duration_name(ms: u64) -> String {
 /// just `logical` when nothing is.
 pub fn physical_label(logical: &str, candidate: &PhysicalWorkloadPlan) -> String {
     let mut parts: Vec<(&str, Vec<String>)> = Vec::new();
-    for (id, materialization) in &candidate.materialization {
-        let phase = match materialization {
-            Materialization::NotMaterialized => continue,
-            Materialization::MatAtIngestion(_) => "ingestion time",
-            Materialization::MatAtQuery(_) => "query time, shared",
-            Materialization::MatAtQueryKeptAcrossEvaluations(_) => "query time, kept",
-        };
+    for (id, lifetime) in &candidate.lifetime {
         let node = candidate
             .dag
             .nodes
             .iter()
             .find(|n| n.id == *id)
             .expect("an assigned node is in the DAG");
+        let phase = match (node.output_state.timing, lifetime) {
+            (_, Lifetime::None) => continue,
+            (ExecutionTiming::IngestionTime, _) => "ingestion time",
+            (ExecutionTiming::QueryTime, Lifetime::OneEvaluation(_)) => "query time, shared",
+            (ExecutionTiming::QueryTime, Lifetime::AcrossEvaluations(_)) => "query time, kept",
+        };
         let label = match &node.payload {
             // Name the chain: chains of one family and tumbling-window count differ by
             // their readers and tumbling-window width.
@@ -495,10 +496,12 @@ mod tests {
         let one_chain_at_ingestion: Vec<String> = plans
             .iter()
             .filter(|plan| {
-                plan.materialization
+                plan.lifetime
                     .iter()
-                    .filter(|(id, m)| {
-                        matches!(m, Materialization::MatAtIngestion(_))
+                    .filter(|(id, lifetime)| {
+                        let node = plan.dag.nodes.iter().find(|n| n.id == **id).unwrap();
+                        lifetime.is_kept()
+                            && node.output_state.timing == ExecutionTiming::IngestionTime
                             && matches!(
                                 plan.dag
                                     .nodes

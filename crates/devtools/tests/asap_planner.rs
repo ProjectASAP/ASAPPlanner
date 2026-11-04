@@ -1112,8 +1112,9 @@ fn workload_file_with_a_range_evaluation_is_planned() {
             tumbling_window_candidates, window_composition_pass2_candidates,
         };
         use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
+        use asap_types::ir::properties::ExecutionTiming;
         use asap_types::ir::ASAPOp;
-        use asap_types::physical::{Materialization, Medium};
+        use asap_types::physical::{Lifetime, Medium};
         let parsed: PlanningWorkload = serde_json::from_value(workload.clone()).unwrap();
         let entries: Vec<_> = parsed.query_workload.entries().collect();
         let data = parsed.data_workload.clone().unwrap();
@@ -1149,8 +1150,8 @@ fn workload_file_with_a_range_evaluation_is_planned() {
                 matches!(
                     n.payload,
                     PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
-                ) && n.materialization
-                    == Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory)
+                ) && n.output_state.timing == ExecutionTiming::QueryTime
+                    && n.lifetime == Lifetime::AcrossEvaluations(Medium::Memory)
             })
         })
         .expect("a plan keeps its tumbling windows across evaluations");
@@ -1578,7 +1579,8 @@ fn scans_projecting_different_labels_are_shared() {
     let data = workload.data_workload.as_ref().unwrap();
     let roots = lower_promql_roots(&workload).unwrap();
     use asap_logical_asap_optimization::test_support::with_union_scan_labels;
-    use asap_types::physical::{Materialization, Medium};
+    use asap_types::ir::properties::ExecutionTiming;
+    use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
     // Plans `roots` with identical sub-DAGs made one node, as the memo's
     // groups are, and a node read by several roots kept for the evaluation.
     let plan = |name: &str, roots: &[QueryRoot]| {
@@ -1602,11 +1604,13 @@ fn scans_projecting_different_labels_are_shared() {
             data,
             false,
             &mut |readers| {
-                Some(if readers.len() > 1 {
-                    Materialization::MatAtQuery(Medium::Memory)
-                } else {
-                    Materialization::NotMaterialized
-                })
+                Some((readers.len() > 1).then(|| {
+                    PhysicalProperties::new(
+                        ExecutionTiming::QueryTime,
+                        Lifetime::OneEvaluation(Medium::Memory),
+                    )
+                    .unwrap()
+                }))
             },
         )
         .unwrap()

@@ -34,7 +34,7 @@ pub struct OperatorNode {
     pub schema: Schema,                       // output schema, derived at construction
     pub guarantee: Option<AccuracyGuarantee>, // None until accuracy assessment establishes one
     pub timing: Option<ExecutionTiming>,      // None until a materialization assignment is applied
-    pub materialization: Materialization,     // NotMaterialized until Stage 2 assigns one
+    pub lifetime: Lifetime,                   // None until Stage 2 keeps the node's output
 }
 ```
 
@@ -50,9 +50,9 @@ pub struct OperatorNode {
 - `timing` is `None` in every front-end DAG and every candidate. It is written by
   `ir::timing::apply_materialization_timings` (see the Post-ASAP IR document); export rejects an
   untimed node.
-- `materialization` is `NotMaterialized` in every front-end DAG. Stage 2 writes it, with
+- `lifetime` is `Lifetime::None` in every front-end DAG. Stage 2 writes it, with
   `timing`, through `ir::timing::apply_materialization_timings` from its materialization
-  assignment.
+  assignment; together they are the node's `PhysicalProperties`.
 
 `OperatorNode::children()` returns the operator's inputs in field order followed by the
 operator nodes its scalar expressions read (see "Scalar expressions"). Every DAG traversal —

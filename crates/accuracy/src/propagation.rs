@@ -122,7 +122,7 @@ pub fn root_guarantee(root: &QueryRoot) -> Option<AccuracyGuarantee> {
 
 /// Bind known statistics in existing contracts, then recover compositions
 /// that previously required constant child bounds. Physical state contracts,
-/// schemas, timing, materialization, and sharing are preserved. This does not
+/// schemas, timing, lifetime, and sharing are preserved. This does not
 /// infer facts: `bind` must leave unsupported statistics unknown.
 pub fn bind_guarantees(
     root: &QueryRoot,
@@ -139,7 +139,7 @@ pub fn bind_guarantees(
         let operator = node.operator.map_children(|child| walk(child, bind, cache));
         let mut rebuilt = OperatorNode::with_schema(operator, node.schema.clone())
             .with_timing(node.timing)
-            .with_materialization(node.materialization);
+            .with_lifetime(node.lifetime);
         rebuilt.guarantee = node
             .guarantee
             .as_ref()
@@ -215,7 +215,7 @@ pub fn with_resized_summaries(
             Rc::new(
                 rebuilt
                     .with_timing(node.timing)
-                    .with_materialization(node.materialization),
+                    .with_lifetime(node.lifetime),
             )
         } else {
             node.clone()

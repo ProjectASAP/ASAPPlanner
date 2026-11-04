@@ -85,7 +85,7 @@ pub fn split_shared_by_timing(
                 OperatorNode::with_schema(operator, node.schema.clone())
                     .with_guarantee(node.guarantee.clone())
                     .with_timing(node.timing)
-                    .with_materialization(node.materialization),
+                    .with_lifetime(node.lifetime),
             )
         } else {
             Rc::clone(node)
@@ -108,8 +108,8 @@ pub fn split_shared_by_timing(
         .collect();
     let mut remapped = assignment.clone();
     for (original, copy) in copies.values() {
-        if let Some(materialization) = assignment.get(original) {
-            remapped.set(copy, materialization);
+        if let Some(kept) = assignment.get(original) {
+            remapped.set(copy, kept);
         }
     }
     (split, remapped)
@@ -130,9 +130,14 @@ mod tests {
     use asap_types::ir::{
         apply_materialization_timings, ASAPOp, NodeToTimedNodeCache, NonASAPOp, Operator,
     };
-    use asap_types::physical::{Materialization, Medium};
+    use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
 
-    const AT_INGESTION: Materialization = Materialization::MatAtIngestion(Medium::Memory);
+    const KEPT_ACROSS: Lifetime = Lifetime::AcrossEvaluations(Medium::Memory);
+
+    /// Kept at ingestion time across evaluations.
+    fn at_ingestion() -> Option<PhysicalProperties> {
+        PhysicalProperties::new(ExecutionTiming::IngestionTime, KEPT_ACROSS).ok()
+    }
 
     fn scan() -> Rc<OperatorNode> {
         OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
@@ -242,7 +247,7 @@ mod tests {
         assert_eq!(
             apply_materialization_timings(
                 &root,
-                &MaterializationAssignment::with_default(AT_INGESTION),
+                &MaterializationAssignment::with_default(at_ingestion()),
                 &mut NodeToTimedNodeCache::new()
             )
             .err(),
@@ -253,7 +258,7 @@ mod tests {
         );
         let (split, assignment) = split_shared_by_timing(
             std::slice::from_ref(&root),
-            &MaterializationAssignment::with_default(AT_INGESTION),
+            &MaterializationAssignment::with_default(at_ingestion()),
         );
         assert!(apply_materialization_timings(
             &split[0],
@@ -274,7 +279,7 @@ mod tests {
         }))
         .unwrap();
         let mut assignment = MaterializationAssignment::default();
-        assignment.set(&summary, AT_INGESTION);
+        assignment.set(&summary, at_ingestion());
         let (split, assignment) = split_shared_by_timing(std::slice::from_ref(&root), &assignment);
         let timed =
             apply_materialization_timings(&split[0], &assignment, &mut NodeToTimedNodeCache::new())
@@ -284,7 +289,7 @@ mod tests {
             summary.operator,
             Operator::ASAP(ASAPOp::SummaryAgg { .. })
         ));
-        assert_eq!(summary.materialization, AT_INGESTION);
+        assert_eq!(summary.lifetime, KEPT_ACROSS);
         assert_eq!(summary.timing, Some(ExecutionTiming::IngestionTime));
     }
 
@@ -305,7 +310,7 @@ mod tests {
             concat(vec![raw, Rc::clone(&common)]),
         ];
         let mut assignment = MaterializationAssignment::default();
-        assignment.set(&summary, AT_INGESTION);
+        assignment.set(&summary, at_ingestion());
         let timed_unsplit = {
             let mut cache = NodeToTimedNodeCache::new();
             roots
@@ -325,7 +330,7 @@ mod tests {
             .map(|root| apply_materialization_timings(root, &assignment, &mut cache).unwrap())
             .collect();
         let summary = child(&child(&child(&timed[0])));
-        assert_eq!(summary.materialization, AT_INGESTION);
+        assert_eq!(summary.lifetime, KEPT_ACROSS);
         assert_eq!(child(&summary).timing, Some(ExecutionTiming::IngestionTime));
         assert_eq!(
             child(&child(&timed[1])).timing,
@@ -352,9 +357,9 @@ mod tests {
                 .with_timing(Some(ExecutionTiming::QueryTime)),
         );
         let mut assignment = MaterializationAssignment::default();
-        assignment.set(&summary, AT_INGESTION);
-        assignment.set(&state, AT_INGESTION);
-        assignment.set(&read, AT_INGESTION);
+        assignment.set(&summary, at_ingestion());
+        assignment.set(&state, at_ingestion());
+        assignment.set(&read, at_ingestion());
         let (split, assignment) = split_shared_by_timing(&[pair, read], &assignment);
         let mut cache = NodeToTimedNodeCache::new();
         let timed: Result<Vec<_>, _> = split
@@ -367,7 +372,7 @@ mod tests {
                 ExecutionDataStateError::MaterializationConflictsWithFixedTiming {
                     operator: "FinalizeExactAccumulator",
                     fixed: ExecutionTiming::QueryTime,
-                    materialization: AT_INGESTION,
+                    assigned: at_ingestion().unwrap(),
                 }
             )
         );

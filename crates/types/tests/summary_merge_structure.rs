@@ -13,7 +13,7 @@ use asap_types::ir::{
     apply_materialization_timings, ASAPOp, ExprSemantics, MaterializationAssignment,
     NodeToTimedNodeCache, NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr,
 };
-use asap_types::physical::{Materialization, Medium};
+use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
 use std::rc::Rc;
 /// KLL over `value` for one `region`, so states of different regions are
 /// disjoint.
@@ -720,7 +720,8 @@ fn summary_merge_timing() {
         timings(&MaterializationAssignment::default()),
         (QueryTime, vec![QueryTime, QueryTime])
     );
-    let at_ingestion = Materialization::MatAtIngestion(Medium::Memory);
+    let at_ingestion =
+        PhysicalProperties::new(IngestionTime, Lifetime::AcrossEvaluations(Medium::Memory)).ok();
     let mut stored_tumbling_windows = MaterializationAssignment::default();
     for tumbling_window in &tumbling_windows {
         stored_tumbling_windows.set(tumbling_window, at_ingestion);

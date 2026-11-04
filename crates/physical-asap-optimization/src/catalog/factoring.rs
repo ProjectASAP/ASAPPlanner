@@ -141,12 +141,12 @@ pub fn factor_terminal_readers(
             template.result_kind,
             &template.guarantee,
             template.timing,
-            template.materialization,
+            template.lifetime,
             &input.schema,
             input.result_kind,
             &input.guarantee,
             input.timing,
-            input.materialization,
+            input.lifetime,
         ))
         .map_err(|error| invalid(error.to_string()))?;
         if let Some(&previous) = classes.get(&key) {

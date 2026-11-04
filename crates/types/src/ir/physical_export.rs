@@ -1,11 +1,11 @@
 //! Physical ASAP DAG (planner-layering stage 2 output).
 //!
-//! The flattened operators of [`super::flat`], plus the materialization and
+//! The flattened operators of [`super::flat`], plus the lifetime and
 //! execution timing (data state) of every node and edge. The input must
 //! already be timed ([`crate::ir::properties::timing::apply_materialization_timings`]); export
-//! reads each node's timing and materialization and does not re-run
+//! reads each node's timing and lifetime and does not re-run
 //! data-state validation. The deployment executes the plan as given
-//! (#509 Assumption 8): it does not change materialization or timing.
+//! (#509 Assumption 8): it does not change lifetime or timing.
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -30,7 +30,7 @@ use crate::ir::properties::timing::{
 };
 use crate::ir::properties::timing::{data_state, is_materialization_point};
 use crate::ir::schema::{FieldDataType, Schema};
-use crate::physical::materialization::Materialization;
+use crate::physical::{Lifetime, PhysicalProperties};
 
 /// A node's operator, with each child replaced by its node id.
 pub type PhysicalASAPOperatorPayload = Operator<NodeId>;
@@ -71,22 +71,23 @@ pub struct PhysicalASAPDAGNode {
     pub payload: PhysicalASAPOperatorPayload,
     /// Phase is a placement choice for every operator, independent of payload kind.
     pub output_state: ExecutionDataState,
-    /// Whether and where the deployment stores this node's output: the
-    /// option the materialization assignment chose for the sub-DAG this node
-    /// produces. Any node may be stored (#509 §Materialization); a node with
-    /// no assignment is `NotMaterialized`.
-    pub materialization: Materialization,
+    /// How long and where the deployment keeps this node's output: the
+    /// lifetime the materialization assignment chose for the sub-DAG this
+    /// node produces. Any node may be kept (#509 §Materialization); a node
+    /// with no assignment has lifetime `None`. With `output_state.timing` it
+    /// is the node's [`PhysicalProperties`].
+    pub lifetime: Lifetime,
     pub output_schema: Schema,
     pub guarantee: Option<AccuracyGuarantee>,
-    /// For a materialized view (a node whose materialization keeps its
-    /// output across evaluations), how far back from the newest evaluation
+    /// For a materialized view (a node whose lifetime keeps its output
+    /// across evaluations), how far back from the newest evaluation
     /// time its output must stay available once refreshed; for a query-time
     /// `Scan`, how far back its source's rows must stay available (`None`
     /// when it reads them unbounded). `None` on every other node, and on
     /// every node of a DAG exported before installation sets it
     /// ([`PhysicalASAPDAG::set_retention`]). A
-    /// node field rather than part of [`Materialization`], because Stage 2
-    /// enumerates materializations before Stage 3 knows retention.
+    /// node field rather than part of [`Lifetime`], because Stage 2
+    /// enumerates lifetimes before Stage 3 knows retention.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention_ms: Option<u64>,
 }
@@ -172,12 +173,13 @@ pub struct PhysicalASAPDAG {
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PhysicalASAPDAGValidationError {
     #[error(
-        "node {node:?} runs at {timing:?}, which its materialization {materialization:?} does not"
+        "node {node:?} runs at {timing:?} with lifetime {lifetime:?}: a timing and lifetime that \
+         cannot go together, or a summary build that is not kept outside query time"
     )]
-    MaterializationTimingMismatch {
+    InvalidPhysicalProperties {
         node: PhysicalASAPNodeId,
         timing: ExecutionTiming,
-        materialization: Materialization,
+        lifetime: Lifetime,
     },
     #[error("ingestion node {consumer:?} depends on query node {producer:?}")]
     QueryDependencyInIngestion {
@@ -352,7 +354,7 @@ pub enum ReferencePlanError {
 impl PhysicalASAPDAG {
     /// This DAG's plan with nothing materialized: the same operators,
     /// summaries and summary parameters, with every sub-DAG
-    /// `NotMaterialized` and so every node at query time (the default
+    /// not kept and so every node at query time (the default
     /// [`MaterializationAssignment`]). Node ids are renumbered, and `roots`
     /// and `scalar_roots` keep their order.
     ///
@@ -369,7 +371,7 @@ impl PhysicalASAPDAG {
     }
 
     /// Every node of this DAG as IR, by node id, untimed and
-    /// `NotMaterialized` with its exported guarantee: what a caller derives
+    /// not kept with its exported guarantee: what a caller derives
     /// IR properties of a plan file's node from, such as its
     /// [`SummaryCoverage`](crate::ir::properties::summary_coverage::SummaryCoverage).
     /// Shared inputs stay shared. Validates the DAG first.
@@ -568,7 +570,7 @@ impl PhysicalASAPDAG {
     }
 
     /// The IR this DAG exports, one root per query in batch order, every
-    /// node untimed and `NotMaterialized`: the inverse of
+    /// node untimed and not kept: the inverse of
     /// [`compile_physical_asap_workload`] up to `Rc` identity and timing.
     #[cfg(any(test, feature = "test-support"))]
     fn untimed_query_roots(&self) -> Result<Vec<QueryRoot>, PhysicalASAPDAGValidationError> {
@@ -599,22 +601,23 @@ impl PhysicalASAPDAG {
             if nodes.insert(node.id, node).is_some() {
                 return Err(PhysicalASAPDAGValidationError::DuplicateNodeId(node.id));
             }
-            // A sub-DAG output runs when its materialization says; any other
-            // node is not stored and runs when its consumer runs.
-            if (is_materialization_point(&node.payload)
-                || node.materialization != Materialization::NotMaterialized)
-                && node.materialization.timing() != node.output_state.timing
+            // A kept output's timing and lifetime must go together; a summary
+            // build that is not kept runs at query time. Any other node that
+            // is not kept runs when its consumer runs.
+            let timing = node.output_state.timing;
+            if PhysicalProperties::new(timing, node.lifetime).is_err()
+                || (is_materialization_point(&node.payload)
+                    && node.lifetime == Lifetime::None
+                    && timing != ExecutionTiming::QueryTime)
             {
-                return Err(
-                    PhysicalASAPDAGValidationError::MaterializationTimingMismatch {
-                        node: node.id,
-                        timing: node.output_state.timing,
-                        materialization: node.materialization,
-                    },
-                );
+                return Err(PhysicalASAPDAGValidationError::InvalidPhysicalProperties {
+                    node: node.id,
+                    timing,
+                    lifetime: node.lifetime,
+                });
             }
             if node.retention_ms.is_some()
-                && !node.materialization.is_materialized_view()
+                && !matches!(node.lifetime, Lifetime::AcrossEvaluations(_))
                 && !super::materialized_view::is_query_time_scan(node)
             {
                 return Err(PhysicalASAPDAGValidationError::UnexpectedRetention(node.id));
@@ -902,7 +905,7 @@ pub fn compile_physical_asap_workload_with_node_ids(
             id,
             payload: flat_node.operator,
             output_state,
-            materialization: flat_node.materialization,
+            lifetime: flat_node.lifetime,
             output_schema: flat_node.schema,
             guarantee: flat_node.guarantee,
             retention_ms: None,

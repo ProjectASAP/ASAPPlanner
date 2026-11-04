@@ -12,7 +12,7 @@ use asap_types::ir::{
     apply_materialization_timings, ASAPOp, MaterializationAssignment, NodeToTimedNodeCache,
     NonASAPOp, Operator, OperatorNode, QueryRoot,
 };
-use asap_types::physical::{Materialization, Medium};
+use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
 use std::rc::Rc;
 
 /// Scan(t) → SummaryAgg(sum by key) → FinalizeExactAccumulator, untimed.
@@ -43,13 +43,16 @@ fn plan() -> Rc<OperatorNode> {
     .unwrap()
 }
 
-const ON_DISK: Materialization = Materialization::MatAtIngestion(Medium::Disk);
+const ON_DISK: Lifetime = Lifetime::AcrossEvaluations(Medium::Disk);
 
-/// `plan()` timed with its summary `MatAtIngestion` on disk.
+/// `plan()` timed with its summary kept at ingestion time on disk.
 fn timed_at_ingestion() -> Rc<OperatorNode> {
     let root = plan();
     let mut assignment = MaterializationAssignment::default();
-    assignment.set(root.children()[0], ON_DISK);
+    assignment.set(
+        root.children()[0],
+        PhysicalProperties::new(ExecutionTiming::IngestionTime, ON_DISK).ok(),
+    );
     apply_materialization_timings(&root, &assignment, &mut NodeToTimedNodeCache::new()).unwrap()
 }
 
@@ -70,15 +73,8 @@ fn timed_plan_exports_with_timing() {
             ExecutionTiming::QueryTime
         ]
     );
-    let materializations: Vec<_> = dag.nodes.iter().map(|n| n.materialization).collect();
-    assert_eq!(
-        materializations,
-        vec![
-            Materialization::NotMaterialized,
-            ON_DISK,
-            Materialization::NotMaterialized
-        ]
-    );
+    let lifetimes: Vec<_> = dag.nodes.iter().map(|n| n.lifetime).collect();
+    assert_eq!(lifetimes, vec![Lifetime::None, ON_DISK, Lifetime::None]);
     // Timing keeps what the summary covers.
     assert!(timed.children()[0].coverage().is_some());
 
@@ -99,24 +95,31 @@ fn query_time_input_to_ingestion_is_rejected() {
     ));
 }
 
-/// A summary's timing must be the one its materialization implies: the
-/// deployment cannot run a `MatAtIngestion` state at query time.
+/// A node's timing and lifetime must go together: an ingestion-time output
+/// cannot be kept for one evaluation, and a summary build that is not kept
+/// runs at query time.
 #[test]
-fn materialization_inconsistent_with_timing_is_rejected() {
+fn invalid_physical_properties_are_rejected() {
     let mut dag = compile_physical_asap_dag(&timed_at_ingestion()).unwrap();
-    dag.nodes[1].output_state.timing = ExecutionTiming::QueryTime;
-    *dag.edges[1].data_state_mut() = dag.nodes[1].output_state;
+    dag.nodes[1].lifetime = Lifetime::OneEvaluation(Medium::Disk);
     assert_eq!(
         dag.validate(),
-        Err(
-            PhysicalASAPDAGValidationError::MaterializationTimingMismatch {
-                node: 1,
-                timing: ExecutionTiming::QueryTime,
-                materialization: ON_DISK,
-            }
-        )
+        Err(PhysicalASAPDAGValidationError::InvalidPhysicalProperties {
+            node: 1,
+            timing: ExecutionTiming::IngestionTime,
+            lifetime: Lifetime::OneEvaluation(Medium::Disk),
+        })
     );
-    dag.nodes[1].materialization = Materialization::MatAtQuery(Medium::Disk);
+    dag.nodes[1].lifetime = Lifetime::None;
+    assert_eq!(
+        dag.validate(),
+        Err(PhysicalASAPDAGValidationError::InvalidPhysicalProperties {
+            node: 1,
+            timing: ExecutionTiming::IngestionTime,
+            lifetime: Lifetime::None,
+        })
+    );
+    dag.nodes[1].lifetime = ON_DISK;
     dag.validate().unwrap();
 }
 
@@ -187,7 +190,7 @@ fn scalar_roots_export_in_batch_order_and_reference_nodes() {
     scalar_only.roots.clear();
     scalar_only.validate().unwrap();
     let valid_scalar_only = scalar_only.clone();
-    // Materialization is checked on the nodes a scalar reads, too.
+    // Physical properties are checked on the nodes a scalar reads, too.
     let state = scalar_only
         .nodes
         .iter()
@@ -200,16 +203,15 @@ fn scalar_roots_export_in_batch_order_and_reference_nodes() {
             )
         })
         .unwrap();
-    scalar_only.nodes[state].materialization = ON_DISK;
+    scalar_only.nodes[state].output_state.timing = ExecutionTiming::IngestionTime;
+    scalar_only.nodes[state].lifetime = Lifetime::OneEvaluation(Medium::Disk);
     assert_eq!(
         scalar_only.validate(),
-        Err(
-            PhysicalASAPDAGValidationError::MaterializationTimingMismatch {
-                node: scalar_only.nodes[state].id,
-                timing: ExecutionTiming::QueryTime,
-                materialization: ON_DISK,
-            }
-        )
+        Err(PhysicalASAPDAGValidationError::InvalidPhysicalProperties {
+            node: scalar_only.nodes[state].id,
+            timing: ExecutionTiming::IngestionTime,
+            lifetime: Lifetime::OneEvaluation(Medium::Disk),
+        })
     );
 
     let mut missing = dag.clone();
@@ -390,8 +392,13 @@ fn exports_summary_over_summary_as_typed_precompute_edges() {
     }))
     .unwrap();
     let mut cache = NodeToTimedNodeCache::new();
-    let at_ingestion =
-        MaterializationAssignment::with_default(Materialization::MatAtIngestion(Medium::Memory));
+    let at_ingestion = MaterializationAssignment::with_default(
+        PhysicalProperties::new(
+            ExecutionTiming::IngestionTime,
+            Lifetime::AcrossEvaluations(Medium::Memory),
+        )
+        .ok(),
+    );
     let timed = apply_materialization_timings(&root, &at_ingestion, &mut cache).unwrap();
     let compiled = compile_physical_asap_dag_with_node_ids(&timed).unwrap();
     assert_eq!(compiled.node_ids.node_id(&timed), Some(3));
@@ -456,13 +463,13 @@ fn retention_is_only_on_materialized_views_and_query_time_scans() {
     let view = dag
         .nodes
         .iter()
-        .position(|node| asap_types::test_support::is_materialized_view(node.materialization))
+        .position(|node| matches!(node.lifetime, Lifetime::AcrossEvaluations(_)))
         .expect("a node built at ingestion");
     let other = dag
         .nodes
         .iter()
         .position(|node| {
-            !asap_types::test_support::is_materialized_view(node.materialization)
+            !matches!(node.lifetime, Lifetime::AcrossEvaluations(_))
                 && node.output_state.timing == ExecutionTiming::IngestionTime
         })
         .expect("an ingestion-time node that is not a view");
@@ -712,7 +719,7 @@ fn high_fan_in_edges_preserve_multiplicity_without_order_dependence() {
                 schema: schema.clone(),
             }),
             output_state: ExecutionDataState::QUERY_ROWS,
-            materialization: Materialization::NotMaterialized,
+            lifetime: Lifetime::None,
             output_schema: schema.clone(),
             guarantee: None,
             retention_ms: None,
@@ -725,7 +732,7 @@ fn high_fan_in_edges_preserve_multiplicity_without_order_dependence() {
             children: inputs.clone(),
         }),
         output_state: ExecutionDataState::QUERY_ROWS,
-        materialization: Materialization::NotMaterialized,
+        lifetime: Lifetime::None,
         output_schema: schema.clone(),
         guarantee: None,
         retention_ms: None,

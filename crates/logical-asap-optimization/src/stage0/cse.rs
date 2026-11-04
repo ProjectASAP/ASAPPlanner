@@ -117,7 +117,7 @@ pub(crate) fn structural_hash(node: &OperatorNode, cache: &mut NodeToStructuralH
         &node.schema,
         &node.guarantee,
         node.timing,
-        node.materialization,
+        node.lifetime,
     );
     serde_json::to_string(&own)
         .unwrap_or_default()
@@ -178,7 +178,7 @@ fn same_node(
         && left.result_kind == right.result_kind
         && left.schema == right.schema
         && left.timing == right.timing
-        && left.materialization == right.materialization
+        && left.lifetime == right.lifetime
         && same_value(&left.guarantee, &right.guarantee)
         && same_value(&own_fields(left), &own_fields(right))
 }
@@ -260,7 +260,7 @@ fn intern_bottom_up(
     let rebuilt = OperatorNode::with_schema(operator, node.schema.clone())
         .with_guarantee(node.guarantee.clone())
         .with_timing(node.timing)
-        .with_materialization(node.materialization);
+        .with_lifetime(node.lifetime);
     let interned = table.intern(rebuilt);
     visited.insert(Rc::as_ptr(node), (Rc::clone(node), Rc::clone(&interned)));
     interned

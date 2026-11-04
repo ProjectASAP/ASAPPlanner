@@ -299,7 +299,7 @@ impl PlanOutput {
     }
 
     /// The workload as one physical ASAP DAG, with shared sub-DAGs exported
-    /// once. A node keeps the timing and materialization its pass gave it:
+    /// once. A node keeps the timing and lifetime its pass gave it:
     /// for [`Stage1ToStage3Pass`] that is Stage 3's selected plan as
     /// selected (e.g. ingestion-time tumbling windows), the document a deployment
     /// runtime executes. Only a node the pass left untimed takes the default

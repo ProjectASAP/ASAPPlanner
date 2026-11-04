@@ -40,7 +40,7 @@ pub fn compile_physical_asap_dag(
     compile_with(root, &asap_types::ir::MaterializationAssignment::default())
 }
 
-/// As [`compile_physical_asap_dag`], with every sub-DAG `MatAtIngestion`
+/// As [`compile_physical_asap_dag`], with every sub-DAG kept at ingestion time
 /// where the DAG allows it.
 #[allow(dead_code)] // Not every test binary sharing this module stores states at ingestion.
 pub fn compile_at_ingestion_physical_asap_dag(
@@ -49,9 +49,13 @@ pub fn compile_at_ingestion_physical_asap_dag(
     compile_with(
         root,
         &asap_types::ir::MaterializationAssignment::with_default(
-            asap_types::physical::Materialization::MatAtIngestion(
-                asap_types::physical::Medium::Memory,
-            ),
+            asap_types::physical::PhysicalProperties::new(
+                asap_types::ir::properties::ExecutionTiming::IngestionTime,
+                asap_types::physical::Lifetime::AcrossEvaluations(
+                    asap_types::physical::Medium::Memory,
+                ),
+            )
+            .ok(),
         ),
     )
 }

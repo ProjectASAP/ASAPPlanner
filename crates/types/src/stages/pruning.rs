@@ -86,7 +86,7 @@ pub enum PruneReason {
     /// candidates, once each candidate's allowed readers are applied.
     ReachesNoQueryOutput,
     /// Stage 2: it is shared within one query evaluation
-    /// (`MatAtQuery`), which needs at least two reading queries, and fewer
+    /// (`OneEvaluation`), which needs at least two reading queries, and fewer
     /// queries can reach it.
     TooFewQueryReaders,
     /// Stage 3: the candidate it names, in the same memo group with the

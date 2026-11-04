@@ -16,7 +16,6 @@ use asap_types::ir::physical_export::{
 };
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::{ASAPOp, Operator};
-use asap_types::physical::Materialization;
 use asap_types::workload::PlanningWorkload;
 
 /// #509 Example 4b: one repeating `quantile_over_time` over a 60-minute
@@ -63,10 +62,7 @@ async fn plan(workload: &PlanningWorkload, capabilities: &DeploymentCapabilities
 }
 
 fn materialized_count(dag: &PhysicalASAPDAG) -> usize {
-    dag.nodes
-        .iter()
-        .filter(|n| n.materialization != Materialization::NotMaterialized)
-        .count()
+    dag.nodes.iter().filter(|n| n.lifetime.is_kept()).count()
 }
 
 /// Without raw data Stage 3 selects ingestion-time tumbling windows; the facade's

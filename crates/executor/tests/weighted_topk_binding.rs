@@ -126,7 +126,7 @@ fn assert_weighted_binding(algorithm: SketchAlgorithm) {
     })
     .collect();
     let batch = Batch::try_new(samples.clone(), rows).unwrap();
-    // The summaries `MatAtIngestion` run as data arrives; `NotMaterialized`
+    // The summaries kept at ingestion time run as data arrives; not kept
     // (the default) runs everything when the query does.
     for (placed, scope) in [
         (
@@ -267,17 +267,18 @@ fn rate_updates_cannot_enter_integer_heap_factory() {
     .is_err());
 }
 
-/// `candidate` with every `SummaryAgg` `MatAtIngestion`, the materialization
+/// `candidate` with every `SummaryAgg` kept at ingestion time, the materialization
 /// a continuously served query would get: each summary and every input it
 /// consumes run at ingestion time, the rest at query time. The candidate pins
 /// its finalize boundary to query time, which would put the summaries above
 /// it upstream of a query-time node, so the pin is lifted first.
 fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) -> PhysicalASAPDAG {
+    use planner_types::ir::properties::ExecutionTiming;
     use planner_types::ir::{
         apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
         Operator as IrOperator, OperatorNode,
     };
-    use planner_types::physical::{Materialization, Medium};
+    use planner_types::physical::{Lifetime, Medium, PhysicalProperties};
     fn unpinned(node: &Rc<OperatorNode>) -> Rc<OperatorNode> {
         let mut copy = (**node).clone();
         copy.operator = node.operator.map_children(unpinned);
@@ -293,7 +294,14 @@ fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) 
     let mut assignment = MaterializationAssignment::default();
     for node in OperatorNode::reachable(&candidate) {
         if matches!(node.operator, IrOperator::ASAP(ASAPOp::SummaryAgg { .. })) {
-            assignment.set(&node, Materialization::MatAtIngestion(Medium::Memory));
+            assignment.set(
+                &node,
+                PhysicalProperties::new(
+                    ExecutionTiming::IngestionTime,
+                    Lifetime::AcrossEvaluations(Medium::Memory),
+                )
+                .ok(),
+            );
         }
     }
     let timed =

@@ -93,7 +93,7 @@ pub fn with_promql_series_identity(
         let mut rebuilt = OperatorNode::new(operator).map_err(|e| e.to_string())?;
         rebuilt.guarantee = node.guarantee.clone();
         rebuilt.timing = node.timing;
-        rebuilt.materialization = node.materialization;
+        rebuilt.lifetime = node.lifetime;
         let rebuilt = Rc::new(rebuilt);
         cache.insert(Rc::as_ptr(node), Rc::clone(&rebuilt));
         Ok(rebuilt)

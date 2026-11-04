@@ -1,6 +1,6 @@
 //! Materialization decides placement, not answers: the same selected DAG
-//! timed with its states `NotMaterialized` (everything at query time) and
-//! `MatAtIngestion` (materialized views refreshed at ingestion time)
+//! timed with its states not kept (everything at query time) and
+//! kept at ingestion time (materialized views refreshed at ingestion time)
 //! executes to the same result.
 
 use std::collections::{BTreeMap, HashMap};
@@ -24,11 +24,18 @@ use asap_types::ir::{
     apply_materialization_timings, ASAPOp, MaterializationAssignment, NodeToTimedNodeCache,
     NonASAPOp, OperatorNode,
 };
-use asap_types::physical::{Materialization, Medium};
+use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
+
+/// Kept at ingestion time until a query reads it.
+fn at_ingestion() -> Option<PhysicalProperties> {
+    PhysicalProperties::new(
+        ExecutionTiming::IngestionTime,
+        Lifetime::AcrossEvaluations(Medium::Memory),
+    )
+    .ok()
+}
 
 use crate::physical_common;
-
-const AT_INGESTION: Materialization = Materialization::MatAtIngestion(Medium::Memory);
 
 /// The logical DAG the planner pipeline selects for `query`, optionally with
 /// a PromQL series identity (per-entity state needs one).
@@ -80,7 +87,7 @@ fn sketch_candidate(query: &str) -> Rc<OperatorNode> {
 fn placements() -> [MaterializationAssignment; 2] {
     [
         MaterializationAssignment::default(),
-        MaterializationAssignment::with_default(AT_INGESTION),
+        MaterializationAssignment::with_default(at_ingestion()),
     ]
 }
 
@@ -99,7 +106,10 @@ fn timed_dag(root: &Rc<OperatorNode>, assignment: &MaterializationAssignment) ->
 fn states(dag: &PhysicalASAPDAG) -> Vec<u64> {
     dag.nodes
         .iter()
-        .filter(|node| node.materialization == AT_INGESTION)
+        .filter(|node| {
+            node.output_state.timing == ExecutionTiming::IngestionTime
+                && node.lifetime == Lifetime::AcrossEvaluations(Medium::Memory)
+        })
         .map(|node| node.id as u64)
         .collect()
 }
@@ -198,8 +208,8 @@ fn values_1_to_100(schema: &SchemaRef, _metric: &str) -> Batch {
     Batch::try_new(schema.clone(), rows).unwrap()
 }
 
-/// `MatAtIngestion` puts the quantile's state in a materialized view;
-/// `NotMaterialized` has no view and reads the raw source at
+/// Keeping it at ingestion time puts the quantile's state in a materialized view;
+/// Not keeping it has no view and reads the raw source at
 /// query time; both answer alike.
 #[test]
 fn materialization_decides_precompute_contents() {
@@ -220,8 +230,8 @@ fn materialization_decides_precompute_contents() {
     assert_eq!(answers[0], answers[1]);
 }
 
-/// Mixed placement in one DAG: one summary `MatAtIngestion` (a materialized view)
-/// and the other `NotMaterialized` (built from the raw source at query
+/// Mixed placement in one DAG: one summary kept at ingestion time (a materialized view)
+/// and the other not kept (built from the raw source at query
 /// time) answer like the all-query-time placement.
 #[test]
 fn mixed_placement_answers_like_query_time() {
@@ -252,7 +262,7 @@ fn mixed_placement_answers_like_query_time() {
         "two explicitly selected KLL builds"
     );
     let mut mixed = MaterializationAssignment::default();
-    mixed.set(&sketches(&root)[0], AT_INGESTION);
+    mixed.set(&sketches(&root)[0], at_ingestion());
     let mut answers = Vec::new();
     for assignment in [MaterializationAssignment::default(), mixed] {
         let dag = timed_dag(&root, &assignment);

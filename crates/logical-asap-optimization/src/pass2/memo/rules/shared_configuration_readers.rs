@@ -54,7 +54,7 @@ fn with_child_nodes(
             OperatorNode::with_schema(operator, resized.schema.clone())
                 .with_guarantee(resized.guarantee.clone())
                 .with_timing(resized.timing)
-                .with_materialization(resized.materialization),
+                .with_lifetime(resized.lifetime),
         ),
     };
     done.insert(Rc::as_ptr(resized), Rc::clone(&out));
@@ -134,10 +134,7 @@ impl SharedProducer for SummaryStates {
                 };
                 // Configuration expansion precedes Stage 2. The rewrite helpers
                 // create unassigned state; preserve any already assigned build.
-                if build.timing.is_some()
-                    || build.materialization
-                        != asap_types::physical::Materialization::NotMaterialized
-                {
+                if build.timing.is_some() || build.lifetime.is_kept() {
                     continue;
                 }
                 let family = match build.asap() {
@@ -488,7 +485,7 @@ fn compatible(left: &StateNeed, right: &StateNeed) -> bool {
             schema,
             reader.build.result_kind,
             reader.build.timing,
-            reader.build.materialization,
+            reader.build.lifetime,
         ))
         .ok()
     };

@@ -15,7 +15,7 @@ use crate::ir::properties::guarantee::AccuracyGuarantee;
 use crate::ir::properties::summary_coverage::{NodeToSummaryCoverageCache, SummaryCoverage};
 use crate::ir::schema::Schema;
 use crate::ir::SchemaDerivationError;
-use crate::physical::materialization::Materialization;
+use crate::physical::Lifetime;
 
 /// The output category of an operator, derived from the operation and its
 /// inputs. Matching column schemas do not make categories interchangeable.
@@ -93,9 +93,9 @@ impl Operator {
 /// at construction and retained. `guarantee` is `None` until accuracy
 /// assessment establishes one (`None` never means exact). `timing` is `None`
 /// until a materialization assignment is applied; export rejects an executable
-/// node without one. `materialization` is the option that assignment chose
-/// for this node (`NotMaterialized` until then, and for every node whose
-/// output is not stored).
+/// node without one. `lifetime` is how long that assignment keeps this
+/// node's output (`None` until then, and for every node whose output is not
+/// kept); with `timing` it is the node's [`crate::physical::PhysicalProperties`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OperatorNode {
     pub operator: Operator,
@@ -103,7 +103,7 @@ pub struct OperatorNode {
     pub schema: Schema,
     pub guarantee: Option<AccuracyGuarantee>,
     pub timing: Option<ExecutionTiming>,
-    pub materialization: Materialization,
+    pub lifetime: Lifetime,
 }
 
 impl OperatorNode {
@@ -128,7 +128,7 @@ impl OperatorNode {
             schema,
             guarantee: None,
             timing: None,
-            materialization: Materialization::NotMaterialized,
+            lifetime: Lifetime::None,
         }
     }
 
@@ -149,8 +149,8 @@ impl OperatorNode {
         self
     }
 
-    pub fn with_materialization(mut self, materialization: Materialization) -> Self {
-        self.materialization = materialization;
+    pub fn with_lifetime(mut self, lifetime: Lifetime) -> Self {
+        self.lifetime = lifetime;
         self
     }
 
@@ -237,7 +237,7 @@ impl OperatorNode {
     /// the old derived schema are retained, for either operator category. A
     /// change in output arity with such overrides needs an explicit new
     /// naming assignment.
-    /// `guarantee`, `timing` and `materialization` depend on the inputs and
+    /// `guarantee`, `timing` and `lifetime` depend on the inputs and
     /// are cleared.
     pub fn with_new_children(
         &self,
