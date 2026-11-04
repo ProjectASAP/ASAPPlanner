@@ -508,7 +508,7 @@ fn write_selection(out: &mut String, stages: &PlanningStagesRun) {
     write_rows(out, "    ", rows);
     let _ = writeln!(out, "accepted accuracy:");
     for (query, accepted) in selection.accepted_accuracy_per_query.iter().enumerate() {
-        let _ = writeln!(out, "    q{query}: {accepted}");
+        let _ = writeln!(out, "    q{}: {accepted}", query + 1);
     }
 }
 
@@ -613,6 +613,6 @@ mod tests {
             text.contains("selected choice: G0:c0 G1:c0 G2:c0 G3:c0\n"),
             "{text}"
         );
-        assert!(text.contains("q0: "), "{text}");
+        assert!(text.contains("accepted accuracy:\n    q1: "), "{text}");
     }
 }

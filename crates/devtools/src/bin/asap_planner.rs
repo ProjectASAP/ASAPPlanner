@@ -137,9 +137,29 @@ const USAGE: &str = "usage: asap_planner (--workload <file>)... \
 [--ignore-accuracy-guarantees]";
 
 fn main() {
-    if let Err(message) = run(std::env::args().skip(1).collect()) {
-        eprintln!("asap_planner: {message}\n{USAGE}");
-        std::process::exit(2);
+    match run(std::env::args().skip(1).collect()) {
+        Ok(()) => {}
+        Err(Failure::Usage(message)) => {
+            eprintln!("asap_planner: {message}\n{USAGE}");
+            std::process::exit(2);
+        }
+        Err(Failure::Other(message)) => {
+            eprintln!("asap_planner: {message}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Why a run failed: bad arguments (status 2, with the usage line) or
+/// anything else (status 1).
+enum Failure {
+    Usage(String),
+    Other(String),
+}
+
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Self::Other(message)
     }
 }
 
@@ -149,7 +169,7 @@ fn read_json<T: serde::de::DeserializeOwned>(flag: &str, path: &str) -> Result<T
     serde_json::from_str(&text).map_err(|e| format!("{flag} {path}: {e}"))
 }
 
-fn run(args: Vec<String>) -> Result<(), String> {
+fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut workload_paths: Vec<String> = Vec::new();
     let mut tables = Vec::new();
     let mut run_until = None;
@@ -160,28 +180,33 @@ fn run(args: Vec<String>) -> Result<(), String> {
     let mut ignore_accuracy_guarantees = false;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
-        let mut value = || args.next().ok_or(format!("{flag} needs a value"));
+        let mut value = || {
+            args.next()
+                .ok_or_else(|| Failure::Usage(format!("{flag} needs a value")))
+        };
         match flag.as_str() {
             "--workload" => workload_paths.push(value()?),
             "--sql-catalog-table" => tables.push(value()?),
-            "--run-until" => run_until = Some(value()?.parse::<RunUntil>()?),
+            "--run-until" => {
+                run_until = Some(value()?.parse::<RunUntil>().map_err(Failure::Usage)?)
+            }
             "--format" => {
                 json_format = match value()?.as_str() {
                     "text" => false,
                     "json" => true,
-                    other => return Err(format!("unknown format {other}")),
+                    other => return Err(Failure::Usage(format!("unknown format {other}"))),
                 }
             }
             "--out" => out = Some(value()?),
             "--cost-inputs" => cost_inputs = read_json(&flag, &value()?)?,
             "--deployment-capabilities" => deployment_capabilities = read_json(&flag, &value()?)?,
             "--ignore-accuracy-guarantees" => ignore_accuracy_guarantees = true,
-            other => return Err(format!("unknown argument {other}")),
+            other => return Err(Failure::Usage(format!("unknown argument {other}"))),
         }
     }
-    let run_until = run_until.ok_or("--run-until is required")?;
+    let run_until = run_until.ok_or(Failure::Usage("--run-until is required".into()))?;
     if workload_paths.is_empty() {
-        return Err("--workload is required".into());
+        return Err(Failure::Usage("--workload is required".into()));
     }
     let mut workloads = Vec::new();
     for path in &workload_paths {
@@ -222,8 +247,11 @@ fn run(args: Vec<String>) -> Result<(), String> {
     );
     let text = if json_format {
         let mut document = document_of(described, &roots, &entries, result, run_until)?;
-        if !warnings.is_empty() && run_until == RunUntil::Stage3 {
-            document["stage3_plan_selection"]["warnings"] = json!(warnings);
+        // Stage 3 is null when Pass 1 rejected a query.
+        if let Some(stage3) = document["stage3_plan_selection"].as_object_mut() {
+            if !warnings.is_empty() {
+                stage3.insert("warnings".into(), json!(warnings));
+            }
         }
         document["workload"]["data_workload"] =
             serde_json::to_value(&data).map_err(|e| e.to_string())?;
@@ -241,7 +269,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         let mut text = match result {
             Ok(run) => planning_stages_text(&run),
             Err(PlanningStagesError::Pass1(error)) => format!("error: Pass 1: {error}\n"),
-            Err(error) => return Err(error.to_string()),
+            Err(error) => return Err(error.to_string().into()),
         };
         for warning in &warnings {
             text.push_str(&format!("warning: {warning}\n"));
@@ -249,7 +277,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         text
     };
     match out {
-        Some(path) => std::fs::write(&path, text).map_err(|e| format!("{path}: {e}")),
+        Some(path) => Ok(std::fs::write(&path, text).map_err(|e| format!("{path}: {e}"))?),
         None => {
             print!("{text}");
             Ok(())
@@ -320,7 +348,7 @@ fn document(queries: Vec<Value>, entries: &[QueryWorkloadEntry], run: &PlanningS
         });
         // Pass 1 or Pass 2 failed, or the deployment's capabilities
         // contradict the data workload.
-        if until <= RunUntil::Pass2 || run.run.physical_asap_candidates.is_none() {
+        if run.run.logical_asap_candidates.is_none() {
             if let Err(error) = &run.run.selection {
                 if !matches!(error, SelectionError::DeadlineReached) {
                     stage1["error"] = json!(error.to_string());
@@ -330,11 +358,18 @@ fn document(queries: Vec<Value>, entries: &[QueryWorkloadEntry], run: &PlanningS
         stage1
     });
     let stage2 = (until >= RunUntil::Stage2).then(|| {
-        json!({
+        let mut stage2 = json!({
             "candidates": physical,
             "pruned": [],
             "pruned_candidates": stage2_pruned_candidates_json(run.run.physical_asap_candidates.as_ref()),
-        })
+        });
+        // Stage 2 itself failed.
+        if run.run.logical_asap_candidates.is_some() && run.run.physical_asap_candidates.is_none() {
+            if let Err(error) = &run.run.selection {
+                stage2["error"] = json!(error.to_string());
+            }
+        }
+        stage2
     });
     let stage3 = (until == RunUntil::Stage3).then(|| stage3_json(run, entries));
     json!({
@@ -867,7 +902,7 @@ fn with_default_metrics(mut queries: Vec<Value>, roots: &[QueryRoot]) -> Vec<Val
     queries
 }
 
-/// The names of the tables `--table` declares.
+/// The names of the tables `--sql-catalog-table` declares.
 fn catalog_table_names(tables: &[String]) -> Result<Vec<String>, String> {
     tables
         .iter()

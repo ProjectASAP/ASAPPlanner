@@ -78,13 +78,16 @@ fn document(workload: &Value, args: &[&str]) -> Value {
     document_of(&all)
 }
 
-/// `asap_planner`'s standard error for `args`, which it must refuse as a
-/// usage error (status 2) without writing output.
+/// `asap_planner`'s standard error for `args`, whose input it must refuse
+/// (status 1, without the usage line, which is for bad arguments) without
+/// writing output.
 fn refused(args: &[&str]) -> String {
     let output = planner(args);
-    assert_eq!(output.status.code(), Some(2), "{args:?}");
+    assert_eq!(output.status.code(), Some(1), "{args:?}");
     assert!(output.stdout.is_empty(), "a refused run writes nothing");
-    String::from_utf8(output.stderr).unwrap()
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(!stderr.contains("usage:"), "{stderr}");
+    stderr
 }
 
 /// The committed workload file of #509's `example` (`example1`, `example2`,
@@ -622,6 +625,32 @@ fn pass1_failure_still_writes_stage0_and_the_error() {
     assert_eq!(logical["candidates"], json!([]));
     assert_eq!(document["stage2_physical_asap_optimization"], Value::Null);
     assert!(!selects_a_plan(&document["stage3_plan_selection"]));
+}
+
+/// A query Pass 1 rejects is reported before deployment capabilities that
+/// contradict the data workload (as `run_planning` orders them), and a
+/// metric-type warning does not turn the null Stage 3 section into one.
+#[test]
+fn pass1_failure_comes_before_capabilities_and_keeps_stage3_null() {
+    let mut workload = adhoc(&["topk(5, rate(m[5m]))"], within(1.5, 0.1), &["m"]);
+    workload["data_workload"]["arrival"] = json!("at_rest");
+    workload["data_workload"]["sources"]["m"]["metric_type"] = json!("gauge");
+    let no_raw = TempFile::new(NO_RAW);
+    let document = document(
+        &workload,
+        &[
+            "--run-until",
+            "stage3",
+            "--ignore-accuracy-guarantees",
+            "--deployment-capabilities",
+            no_raw.path(),
+        ],
+    );
+    let error = document["stage1_logical_asap_optimization"]["error"]
+        .as_str()
+        .unwrap();
+    assert!(error.starts_with("Pass 1: approximate accuracy"), "{error}");
+    assert_eq!(document["stage3_plan_selection"], Value::Null);
 }
 
 /// Standalone scalar queries first, in the middle and last keep their
@@ -2210,5 +2239,34 @@ fn milp_search_selects_a_checked_ddsketch_plan_for_a_ratio_and_its_operands() {
     for query in selection["accepted_accuracy_per_query"].as_array().unwrap() {
         assert_eq!(query["accepted_regardless_of_guarantee"], false, "{query}");
         assert_eq!(query["sketches"], json!(["DDSketch"]), "{query}");
+    }
+}
+
+/// The viewer's cost-input files carry the prices of the presets they are
+/// named after, so a change to `crates/cost`'s constants fails here instead
+/// of leaving the viewer and the snapshots on the old numbers.
+#[test]
+fn cost_input_files_match_their_presets() {
+    use asap_cost::{CostInputs, CostModel, ResourceUnitCost};
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/dag-viewer/cost-inputs");
+    let presets = [
+        ("usage-over-time.json", ResourceUnitCost::illustrative()),
+        (
+            "aws-fargate-us-east-1.json",
+            ResourceUnitCost::aws_fargate_us_east_1(CostInputs::default().resource_speed),
+        ),
+    ];
+    for (file, unit_cost) in presets {
+        let loaded: CostInputs =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(file)).unwrap()).unwrap();
+        let expected = CostInputs {
+            cost_model: CostModel::UsageOverTime(unit_cost),
+            ..CostInputs::default()
+        };
+        // Through JSON, as the file was read: serde_json's float parsing
+        // may differ from the computed value in the last bit.
+        let expected: CostInputs =
+            serde_json::from_str(&serde_json::to_string(&expected).unwrap()).unwrap();
+        assert_eq!(loaded, expected, "{file}");
     }
 }

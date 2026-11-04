@@ -74,10 +74,10 @@ def run(entry):
     if plan_path.exists():
         document = json.loads(plan_path.read_text())
         # Stage 3's `Selection`: the selected plan is P1, with its cost.
-        selection = document['stage3_plan_selection']
+        selection = document['stage3_plan_selection'] or {}  # null when Pass 1 rejected a query
         selected = 'P1' if selection.get('cost') else None
         result['selected'] = selected
-        result['error'] = selection.get('error')
+        result['error'] = selection.get('error') or (document.get('stage1_logical_asap_optimization') or {}).get('error')
         result['materialized_views_error'] = selection.get('materialized_views_error')
         report = selection.get('search_report') or {}
         result['search'] = report

@@ -19,7 +19,7 @@ use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::QueryRoot;
 use asap_types::physical::PhysicalWorkloadPlan;
-use asap_types::stages::{AssignmentRealizer, Memo};
+use asap_types::stages::{AssignmentRealizer, DagOfLogicalMemoGroups, Memo};
 use asap_types::workload::bounds::with_confirmed_weights_at;
 use asap_types::workload::{DataWorkload, PlanningWorkload, QueryWorkloadEntry};
 use serde_json::Value;
@@ -28,7 +28,7 @@ use std::rc::Rc;
 
 use crate::memo_pricing::{reference_enumeration, ReferenceEnumeration};
 
-/// The memo choices `--exhaustive` prices when no limit is given.
+/// The memo choices the reference enumeration prices when no limit is given.
 pub const DEFAULT_REFERENCE_CHOICES: usize = 10_000;
 
 /// The last stage a run runs (`asap_planner --run-until`); the run's
@@ -69,7 +69,7 @@ pub struct PlanningStagesRun {
     pub pass2_local_window_composition: Option<Memo>,
     /// The stages' outputs: Pass 1, Pass 2, Stage 2 and the selection.
     pub run: PlanningRun,
-    /// `--exhaustive`: the selected round's memo choices, each implemented
+    /// With a reference enumeration: the selected round's memo choices, each implemented
     /// by Stage 2 and all priced by the reference pricer.
     pub reference: Option<ReferenceEnumeration>,
 }
@@ -85,7 +85,7 @@ pub struct ShownLogicalCandidate {
 impl PlanningStagesRun {
     /// The logical candidates the document shows: the selected plan (`L1`;
     /// its roots as Stage 2 built them, with Stage 3's weight proofs), then
-    /// under `--exhaustive` the reference enumeration's choices (`E<n>`).
+    /// with a reference enumeration, its's choices (`E<n>`).
     pub fn logical_candidates(&self) -> Vec<ShownLogicalCandidate> {
         let selected = self
             .run
@@ -108,7 +108,7 @@ impl PlanningStagesRun {
     }
 
     /// The physical candidates the document shows: the selected plan as
-    /// Stage 2 built it (`P1`, from `L1`), then under `--exhaustive` every
+    /// Stage 2 built it (`P1`, from `L1`), then with a reference enumeration every
     /// plan the reference pricer priced (`E<n>-<k>`).
     pub fn physical_candidates(&self) -> Vec<PhysicalWorkloadPlan> {
         let selected =
@@ -282,7 +282,7 @@ pub fn run_search_over(
         .and_then(|max| reference_enumeration(&run, &roots, entries, data, models, max));
     Ok(PlanningStagesRun {
         run_until: RunUntil::Stage3,
-        stage0_memo_groups: stage0_memo_groups(&roots),
+        stage0_memo_groups: stage0_memo_groups(generate_dag_of_logical_memo_groups(&roots)),
         pass2_local_window_composition: None,
         stage0_query_language_frontends: roots,
         run,
@@ -290,9 +290,8 @@ pub fn run_search_over(
     })
 }
 
-/// Stage 0's memo groups over `roots`, without candidates.
-fn stage0_memo_groups(roots: &[QueryRoot]) -> Memo {
-    let dag = generate_dag_of_logical_memo_groups(roots);
+/// Stage 0's memo groups, `dag`, without candidates.
+fn stage0_memo_groups(dag: DagOfLogicalMemoGroups) -> Memo {
     Memo {
         candidates: vec![Vec::new(); dag.groups.len()],
         groups: dag.groups,
@@ -315,9 +314,10 @@ pub fn run_stages_until(
     until: RunUntil,
 ) -> Result<PlanningStagesRun, PlanningStagesError> {
     validate(&roots)?;
+    let stage0_dag = generate_dag_of_logical_memo_groups(&roots);
     let mut stages = PlanningStagesRun {
         run_until: until,
-        stage0_memo_groups: stage0_memo_groups(&roots),
+        stage0_memo_groups: stage0_memo_groups(stage0_dag.clone()),
         pass2_local_window_composition: None,
         stage0_query_language_frontends: roots.clone(),
         run: PlanningRun {
@@ -335,17 +335,13 @@ pub fn run_stages_until(
         return Ok(stages);
     }
     let run = &mut stages.run;
-    if let Err(error) = models.deployment_capabilities.validate(data) {
-        run.selection = Err(SelectionError::InvalidDeploymentCapabilities(error));
-        return Ok(stages);
-    }
     let accuracy_targets: Vec<_> = entries
         .iter()
         .map(|entry| entry.requirements.accuracy.clone())
         .collect();
     let accuracy = models.accuracy_check_inputs();
-    let pass1 = match generate_per_computation_logical_memo_candidates(
-        generate_dag_of_logical_memo_groups(&roots),
+    let pass1 = generate_per_computation_logical_memo_candidates(
+        stage0_dag,
         &accuracy_targets,
         accuracy.model,
         accuracy.evidence,
@@ -355,11 +351,18 @@ pub fn run_stages_until(
             .supported_summaries
             .as_deref(),
         None,
-    ) {
+    );
+    // As `run_planning`: a query Pass 1 cannot plan is reported before
+    // contradictory deployment capabilities.
+    if let Err(PerComputationLogicalMemoCandidatesError::PerComputation(error)) = &pass1 {
+        return Err(PlanningStagesError::Pass1(error.to_string()));
+    }
+    if let Err(error) = models.deployment_capabilities.validate(data) {
+        run.selection = Err(SelectionError::InvalidDeploymentCapabilities(error));
+        return Ok(stages);
+    }
+    let pass1 = match pass1 {
         Ok(pass1) => pass1,
-        Err(PerComputationLogicalMemoCandidatesError::PerComputation(error)) => {
-            return Err(PlanningStagesError::Pass1(error.to_string()))
-        }
         Err(error) => {
             run.selection = Err(SelectionError::LogicalASAPCandidates(error.to_string()));
             return Ok(stages);
