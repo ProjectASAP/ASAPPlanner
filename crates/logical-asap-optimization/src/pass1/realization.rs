@@ -10,13 +10,15 @@ use asap_types::ir::scalar::expr_ir::ColumnRef;
 use asap_types::ir::schema::topk::ranked_column;
 use asap_types::ir::schema::ColumnId;
 use asap_types::ir::schema::{
-    EntityIdentity, FamilyCapability, Field, FieldDataType, NonNegativeWeightProof, Schema,
+    EntityIdentity, FamilyCapability, FieldDataType, NonNegativeWeightProof, Schema,
     SketchAlgorithm, SummaryInputExpr, SummaryUpdate, WeightDomain,
 };
 use asap_types::ir::{NonASAPOp, OperatorNode};
 #[cfg(test)]
 use asap_types::ir::{Operator, ScalarExpr};
 use std::rc::Rc;
+
+use crate::ir_construction::column_ref;
 
 use asap_accuracy::sizing::sketch_statistic;
 
@@ -90,16 +92,6 @@ pub(crate) fn ranked_value(child: &OperatorNode) -> Result<(ColumnId, ColumnRef)
         _ => column_ref(&child.schema.fields[ranked]),
     };
     Ok((ranked, column))
-}
-
-pub(crate) fn column_ref(column: &Field) -> ColumnRef {
-    match &column.table {
-        Some(t) => ColumnRef::Qualified {
-            table: t.clone(),
-            name: column.name.clone(),
-        },
-        None => ColumnRef::Named(column.name.clone()),
-    }
 }
 
 /// What the summary consumes per input row. An intent that reads one column (or

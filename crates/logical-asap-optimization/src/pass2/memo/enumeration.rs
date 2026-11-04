@@ -19,10 +19,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
-use asap_types::ir::{OperatorNode, QueryRoot};
+use asap_types::ir::{OperatorNode, QueryRoot, SchemaDerivationError};
 
 use super::rules::reuse::replace;
-use crate::pass1::per_computation_candidates::PerComputationCandidateError;
 use asap_accuracy::propagation::recompose_guarantees;
 use asap_types::stages::Memo;
 use asap_types::stages::MemoGroupId;
@@ -61,7 +60,7 @@ pub enum ErrorBuildingLogicalASAPDagsFromChosenCandidates {
     Cycle { group: MemoGroupId },
     /// Re-deriving the composed nodes' schemas and guarantees failed.
     #[error("recomposing the composed DAG: {0}")]
-    Recompose(#[from] PerComputationCandidateError),
+    Recompose(#[from] SchemaDerivationError),
 }
 
 /// Every choice of one candidate per needed group, starting from the query
@@ -198,7 +197,7 @@ pub fn build_logical_asap_dags_from_chosen_candidates(
         .collect::<Result<Vec<_>, ErrorBuildingLogicalASAPDagsFromChosenCandidates>>()?
         .into_iter()
         .unzip();
-    let roots = recompose_guarantees(&roots).map_err(PerComputationCandidateError::from)?;
+    let roots = recompose_guarantees(&roots)?;
     Ok(groups
         .into_iter()
         .zip(roots)

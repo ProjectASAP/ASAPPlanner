@@ -110,9 +110,10 @@ use std::rc::Rc;
 
 use asap_types::ir::operator::operator_properties::{Reduction, Source};
 use asap_types::ir::operator::AggIntent;
+use asap_types::ir::scalar::resolve_column_ref;
 use asap_types::ir::schema::{
     ExactKind, FamilyCapability, FieldDataType, GroupingStrategy, MergeInputRule, MergedError,
-    Schema, SketchKind, PROMQL_SERIES_IDENTITY,
+    Schema, SketchKind, SummaryInputExpr, SummaryUpdate, WeightDomain, PROMQL_SERIES_IDENTITY,
 };
 use asap_types::ir::ScalarExpr;
 use asap_types::ir::SortKey;
@@ -121,9 +122,34 @@ use asap_types::ir::{
     TimeRangeKind,
 };
 
-use crate::pass1::per_computation_candidates::PerComputationCandidateError;
+use crate::ir_construction::{column_ref, exact_family, partitions_over};
 use asap_accuracy::estimators::size_for_all_readers;
 use asap_accuracy::propagation::recompose_guarantees;
+
+use asap_types::ir::SchemaDerivationError;
+
+/// Why a sharing rewrite builds no candidate. The rules report it as text
+/// ([`Pass2RuleError`](crate::pass2::memo::state_groups::Pass2RuleError)) or
+/// drop the candidate.
+#[derive(Debug, thiserror::Error)]
+pub enum CseError {
+    #[error(transparent)]
+    Structure(#[from] SchemaDerivationError),
+    #[error("unsupported substitution in logical ASAP-aware optimization: {0}")]
+    Unsupported(&'static str),
+    /// A rule found more than `max` candidates of one kind, whose 2^n subsets
+    /// it would enumerate: the workload is too large to plan this way, not
+    /// bad input.
+    #[error("found {found} {counted}, more than {max}")]
+    TooManyCandidates {
+        /// What was counted, e.g. "rollup choices".
+        counted: &'static str,
+        /// How many were found, more than `max`.
+        found: usize,
+        /// The most the rule enumerates.
+        max: usize,
+    },
+}
 
 /// `roots` with the time-series scans of one metric made identical when
 /// they project different labels, so that interning finds them identical: the PromQL frontend projects only the labels each query uses
@@ -139,9 +165,7 @@ use asap_accuracy::propagation::recompose_guarantees;
 /// and the other not, when a node would change arity, or when a consumer
 /// would have to narrow a summary state or a grouped or filtered tumbling-window chain
 /// would read a `Project`.
-pub fn with_union_scan_labels(
-    roots: &[QueryRoot],
-) -> Result<Option<Vec<QueryRoot>>, PerComputationCandidateError> {
+pub fn with_union_scan_labels(roots: &[QueryRoot]) -> Result<Option<Vec<QueryRoot>>, CseError> {
     let mut nodes = Vec::new();
     let mut seen = HashSet::new();
     for node in roots.iter().flat_map(QueryRoot::operator_refs) {
@@ -310,7 +334,7 @@ fn passes_labels_on(node: &OperatorNode) -> bool {
 fn narrowed(
     wide: &Rc<OperatorNode>,
     schema: &Schema,
-) -> Result<Option<Rc<OperatorNode>>, PerComputationCandidateError> {
+) -> Result<Option<Rc<OperatorNode>>, CseError> {
     use asap_types::ir::ProjectItem;
     if wide.schema.fields == schema.fields {
         return Ok(Some(Rc::clone(wide)));
@@ -370,9 +394,7 @@ fn same_build_family(a: &FieldDataType, b: &FieldDataType) -> bool {
 
 /// One build serving every member: the first member with the members'
 /// shared size ([`size_for_all_readers`]).
-fn sized_for_all(
-    members: &[&Rc<OperatorNode>],
-) -> Result<Option<Rc<OperatorNode>>, PerComputationCandidateError> {
+fn sized_for_all(members: &[&Rc<OperatorNode>]) -> Result<Option<Rc<OperatorNode>>, CseError> {
     // An exact accumulator has one size: the first member serves them all.
     if matches!(
         members[0].asap(),
@@ -468,7 +490,7 @@ pub struct WindowCompositionPass2Candidate {
     /// build has its own chain.
     pub shared_chains: Vec<SharedTumblingWindowChain>,
     /// The candidate's roots with those builds in tumbling windows.
-    pub roots: Result<Vec<QueryRoot>, PerComputationCandidateError>,
+    pub roots: Result<Vec<QueryRoot>, CseError>,
 }
 
 /// One tumbling-window chain several tumbling-window candidates read (window-composition rule):
@@ -596,9 +618,9 @@ fn splittable_window_ms(build: &OperatorNode) -> Option<u64> {
 pub fn window_composition_pass2_candidates(
     roots: &[QueryRoot],
     candidates: &[TumblingWindowCandidate],
-) -> Result<Vec<WindowCompositionPass2Candidate>, PerComputationCandidateError> {
+) -> Result<Vec<WindowCompositionPass2Candidate>, CseError> {
     if candidates.len() > MAX_TUMBLING_WINDOW_CANDIDATES {
-        return Err(PerComputationCandidateError::TooManyCandidates {
+        return Err(CseError::TooManyCandidates {
             counted: "summary builds that could be built in tumbling windows",
             found: candidates.len(),
             max: MAX_TUMBLING_WINDOW_CANDIDATES,
@@ -1027,7 +1049,7 @@ fn longest(candidates: &[TumblingWindowCandidate], group: &[usize]) -> usize {
 fn shared_chain_build(
     candidates: &[TumblingWindowCandidate],
     group: &[usize],
-) -> Result<Option<Rc<OperatorNode>>, PerComputationCandidateError> {
+) -> Result<Option<Rc<OperatorNode>>, CseError> {
     // Of the longest windows, the finest grouping: a rollup group's host.
     let host = *group
         .iter()
@@ -1053,7 +1075,7 @@ fn in_tumbling_windows(
     roots: &[QueryRoot],
     candidates: &[TumblingWindowCandidate],
     shared_chains: &[(SharedTumblingWindowChain, Rc<OperatorNode>)],
-) -> Result<Vec<QueryRoot>, PerComputationCandidateError> {
+) -> Result<Vec<QueryRoot>, CseError> {
     let mut replaced: HashMap<*const OperatorNode, Rc<OperatorNode>> = HashMap::new();
     for (shared, build) in shared_chains {
         let chain = tumbling_window_chain(&TumblingWindowCandidate {
@@ -1074,7 +1096,7 @@ fn in_tumbling_windows(
             let read = if group_key_count(member) == group_key_count(build) {
                 merge
             } else {
-                regrouped(member, &merge).ok_or(PerComputationCandidateError::Unsupported(
+                regrouped(member, &merge).ok_or(CseError::Unsupported(
                     "a coarser tumbling-window build whose keys the shared chain does not hold",
                 ))?
             };
@@ -1128,7 +1150,7 @@ pub(crate) fn with_tumbling_window_chain(
     family: FieldDataType,
     tumbling_window_width_ms: u64,
     tumbling_window_count: u32,
-) -> Result<Vec<QueryRoot>, PerComputationCandidateError> {
+) -> Result<Vec<QueryRoot>, CseError> {
     let Some(ASAPOp::SummaryMerge {
         children,
         newest_tumbling_windows: own_newest,
@@ -1203,7 +1225,7 @@ pub(crate) fn with_resized_build(
     roots: &[QueryRoot],
     build: &Rc<OperatorNode>,
     family: FieldDataType,
-) -> Result<Vec<QueryRoot>, PerComputationCandidateError> {
+) -> Result<Vec<QueryRoot>, CseError> {
     let Some(ASAPOp::SummaryAgg {
         child,
         input,
@@ -1253,7 +1275,7 @@ pub(crate) fn with_resized_build(
 /// output names.
 fn tumbling_window_chain(
     candidate: &TumblingWindowCandidate,
-) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
+) -> Result<Rc<OperatorNode>, CseError> {
     let Some(ASAPOp::SummaryAgg {
         child: range,
         family,
@@ -1293,7 +1315,7 @@ fn rebuild(
     node: &Rc<OperatorNode>,
     replaced: &HashMap<*const OperatorNode, Rc<OperatorNode>>,
     rebuilt: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
-) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
+) -> Result<Rc<OperatorNode>, CseError> {
     if let Some(done) = rebuilt.get(&Rc::as_ptr(node)) {
         return Ok(Rc::clone(done));
     }
@@ -1350,7 +1372,7 @@ pub struct RollupPass2Candidate {
     /// The candidate's roots with those builds rolled up and every guarantee
     /// composed again; `Err` when the rebuilt DAG does not derive or
     /// compose, which drops only this candidate.
-    pub roots: Result<Vec<QueryRoot>, PerComputationCandidateError>,
+    pub roots: Result<Vec<QueryRoot>, CseError>,
 }
 
 /// The most rollup or top-k reuse candidates one candidate may have: every
@@ -1836,7 +1858,6 @@ fn rolled_up(
     finer: &Rc<OperatorNode>,
     coarse_value: &OperatorNode,
 ) -> Option<Rc<OperatorNode>> {
-    use crate::pass1::per_computation_candidates::{exact_accumulator, partitions_over};
     let Some(ASAPOp::SummaryAgg {
         child,
         family,
@@ -1900,12 +1921,23 @@ fn rolled_up(
         return None;
     }
     let kind = rollup_kind(family)?;
-    let intent = match kind {
-        ExactKind::Min => AggIntent::Min { col: Some(value) },
-        ExactKind::Max => AggIntent::Max { col: Some(value) },
-        _ => AggIntent::Sum { col: Some(value) },
-    };
-    let state = exact_accumulator(kind, &intent, finer, regrouped).ok()?;
+    // An exact accumulator over the finer value column: what Pass 1 builds
+    // for a Sum, Min or Max of that column (no item, signed weights).
+    let weight = column_ref(&finer.schema.fields[value]);
+    resolve_column_ref(&weight, &finer.schema).ok()?;
+    let state = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
+        child: Rc::clone(finer),
+        input: SummaryUpdate {
+            item: None,
+            weight: SummaryInputExpr::Column(weight),
+            weight_domain: WeightDomain::UnknownOrSigned,
+        },
+        family: exact_family(kind),
+        reduction: regrouped,
+        grouping: GroupingStrategy::default(),
+        filter: None,
+    }))
+    .ok()?;
     let mut finalized =
         OperatorNode::new_shared(Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
             child: state,
@@ -1981,7 +2013,7 @@ fn is_sketch_build(node: &OperatorNode) -> bool {
 pub fn rollup_pass2_candidates(
     roots: &[QueryRoot],
     candidates: &[RollupCandidate],
-) -> Result<Vec<RollupPass2Candidate>, PerComputationCandidateError> {
+) -> Result<Vec<RollupPass2Candidate>, CseError> {
     Ok(subsets(&rollup_choices(candidates), "rollup")?
         .into_iter()
         .map(|choices| {
@@ -2021,11 +2053,9 @@ pub fn rollup_pass2_candidates(
 /// coarse builds have no shared size, or a node does not derive.
 fn sketch_rollups(
     choices: &[Vec<RollupCandidate>],
-) -> Result<Vec<(*const OperatorNode, Rc<OperatorNode>)>, PerComputationCandidateError> {
+) -> Result<Vec<(*const OperatorNode, Rc<OperatorNode>)>, CseError> {
     let unsupported = || {
-        PerComputationCandidateError::Unsupported(
-            "a sketch rollup whose finest and coarse builds have no shared size",
-        )
+        CseError::Unsupported("a sketch rollup whose finest and coarse builds have no shared size")
     };
     // A finest build can also be the coarse build of another choice, read
     // through a compensating filter. Each build is replaced once: as a
@@ -2075,13 +2105,10 @@ fn sketch_rollups(
 
 /// Every non-empty subset of `candidates`, in binary-counter order (the
 /// first candidate the lowest bit); an error past [`MAX_REUSE_CANDIDATES`].
-fn subsets<T: Clone>(
-    candidates: &[T],
-    rule: &'static str,
-) -> Result<Vec<Vec<T>>, PerComputationCandidateError> {
+fn subsets<T: Clone>(candidates: &[T], rule: &'static str) -> Result<Vec<Vec<T>>, CseError> {
     let n = candidates.len();
     if n > MAX_REUSE_CANDIDATES {
-        return Err(PerComputationCandidateError::TooManyCandidates {
+        return Err(CseError::TooManyCandidates {
             counted: match rule {
                 "rollup" => "rollup choices",
                 _ => "top-k reuse candidates",
@@ -2106,12 +2133,12 @@ fn subsets<T: Clone>(
 fn replace_all(
     roots: &[QueryRoot],
     replaced: &HashMap<*const OperatorNode, Rc<OperatorNode>>,
-) -> Result<Vec<QueryRoot>, PerComputationCandidateError> {
+) -> Result<Vec<QueryRoot>, CseError> {
     fn walk(
         node: &Rc<OperatorNode>,
         replaced: &HashMap<*const OperatorNode, Rc<OperatorNode>>,
         rebuilt: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
-    ) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
+    ) -> Result<Rc<OperatorNode>, CseError> {
         if let Some(done) = rebuilt.get(&Rc::as_ptr(node)) {
             return Ok(Rc::clone(done));
         }
