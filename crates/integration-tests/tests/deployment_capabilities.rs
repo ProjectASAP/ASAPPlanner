@@ -10,7 +10,7 @@ use asap_logical_asap_optimization::{DeploymentCapabilities, SupportedSummary};
 use asap_types::ir::flat::FlatDag;
 use asap_types::ir::schema::{SketchAlgorithm, StatisticKind};
 use asap_types::ir::{ASAPOp, Operator};
-use asap_types::physical::Materialization;
+use asap_types::physical::Lifetime;
 use planner_layering_common::*;
 
 /// A deployment whose executor supports only `supported`: each family with
@@ -214,12 +214,10 @@ fn shared_chain_costs(run: &Run) -> (CandidateCosts, CandidateCosts) {
             };
             let entry = (p.id.clone(), cost.cost_per_second.expect("cost model 1"));
             let kept_detail = cost.per_node[&n.id].detail.contains("across evaluations");
-            match n.materialization {
-                Materialization::MatAtQuery(_) => within_one.push(entry),
-                Materialization::MatAtQueryKeptAcrossEvaluations(_) if kept_detail => {
-                    kept.push(entry)
-                }
-                Materialization::MatAtQueryKeptAcrossEvaluations(_) => {
+            match n.lifetime {
+                Lifetime::OneEvaluation(_) => within_one.push(entry),
+                Lifetime::AcrossEvaluations(_) if kept_detail => kept.push(entry),
+                Lifetime::AcrossEvaluations(_) => {
                     panic!("{}: a kept chain priced as not kept", p.id)
                 }
                 _ => {}

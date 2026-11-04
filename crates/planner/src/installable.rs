@@ -793,7 +793,8 @@ mod tests {
     use super::*;
     use asap_types::ir::schema::{SketchAlgorithm, StatisticKind, SupportedSummary};
     use asap_types::ir::{NonASAPOp, Operator};
-    use asap_types::physical::Materialization;
+    use asap_types::ir::properties::ExecutionTiming;
+    use asap_types::physical::{Lifetime, PhysicalProperties};
 
     thread_local! {
         /// The plan nodes handed to the executor's compiler by the views'
@@ -999,7 +1000,14 @@ mod tests {
         }))
         .unwrap();
         let mut assignment = MaterializationAssignment::default();
-        assignment.set(&merged, Materialization::MatAtIngestion(Medium::Memory));
+        assignment.set(
+            &merged,
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .ok(),
+        );
         let timed =
             apply_materialization_timings(&merged, &assignment, &mut NodeToTimedNodeCache::new())
                 .unwrap();
@@ -1036,7 +1044,14 @@ mod tests {
         .unwrap();
         let mut assignment = MaterializationAssignment::default();
         for node in tumbling_windows.iter().chain([&merge]) {
-            assignment.set(node, Materialization::MatAtIngestion(Medium::Memory));
+            assignment.set(
+                node,
+                PhysicalProperties::new(
+                    ExecutionTiming::IngestionTime,
+                    Lifetime::AcrossEvaluations(Medium::Memory),
+                )
+                .ok(),
+            );
         }
         let timed =
             apply_materialization_timings(&merge, &assignment, &mut NodeToTimedNodeCache::new())

@@ -142,7 +142,7 @@ fn composed_summary_candidates(
                     &entries,
                     data,
                     models.deployment_capabilities.query_time_results_retained,
-                    &mut |_, _, _| Some(asap_types::physical::Materialization::NotMaterialized),
+                    &mut |_, _, _| Some(None),
                 )
                 .unwrap()
                 .expect("supported physical computation");
@@ -161,7 +161,6 @@ fn shared_kll_candidate(workload: &PlanningWorkload) -> asap_types::physical::Ph
     use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
-    use asap_types::physical::Materialization;
     let roots = lower_promql_query_workload(workload).unwrap();
     let inventory = generate_per_computation_candidates(
         &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
@@ -201,7 +200,7 @@ fn shared_kll_candidate(workload: &PlanningWorkload) -> asap_types::physical::Ph
             &workload.query_workload.entries().collect::<Vec<_>>(),
             workload.data_workload.as_ref().unwrap(),
             false,
-            &mut |_, _, _| Some(Materialization::NotMaterialized),
+            &mut |_, _, _| Some(None),
         )
         .unwrap()
         .unwrap();

@@ -6,7 +6,7 @@ use crate::milp::decode::{decode, ChosenCandidates};
 use asap_cost::{node_map, plan_cost, PlanCost, ResourceUnitCost};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::{OperatorNode, QueryRoot};
-use asap_types::physical::{Materialization, Medium};
+use asap_types::physical::{Lifetime, Medium};
 use asap_types::stages::{AssignmentRealizer, DagOfSelectedCandidates, PhysicalCandidate};
 use asap_types::workload::{DataWorkload, DurationMs, RangeEvaluation};
 
@@ -324,7 +324,7 @@ fn forbid(milp: &mut SelectionMilp<'_>, candidates: &[PhysicalCandidateId]) {
 /// The candidates that are pane chains or run at ingestion time.
 fn pane_chains_and_ingestion(milp: &SelectionMilp<'_>) -> Vec<PhysicalCandidateId> {
     candidates_where(milp, |candidate, node| {
-        candidate.timing == ExecutionTiming::IngestionTime
+        candidate.properties.timing() == ExecutionTiming::IngestionTime
             || matches!(
                 node.asap(),
                 Some(asap_types::ir::ASAPOp::SummaryTumblingWindowChain { .. })
@@ -380,7 +380,7 @@ fn held_memory_of_a_result_readers_of_different_latency_share() {
     let fixture = shared_sum();
     let checked = solve_and_check(&fixture, &cost_inputs(), |milp| {
         let shared: Vec<PhysicalCandidateId> = candidates_where(milp, |candidate, _| {
-            candidate.materialization == Materialization::MatAtQuery(Medium::Memory)
+            candidate.properties.lifetime() == Lifetime::OneEvaluation(Medium::Memory)
         })
         .into_iter()
         .filter(|&candidate| milp.queries_reaching(candidate).len() == 2)
@@ -477,10 +477,8 @@ fn a_kept_pane_chain_keeps_the_longest_readers_span() {
             matches!(
                 node.asap(),
                 Some(asap_types::ir::ASAPOp::SummaryTumblingWindowChain { .. })
-            ) && matches!(
-                candidate.materialization,
-                Materialization::MatAtIngestion(_)
-            )
+            ) && (candidate.properties.timing() == ExecutionTiming::IngestionTime
+                && candidate.properties.lifetime().is_kept())
         });
         require_one_of(milp, &chains);
     })
@@ -511,7 +509,7 @@ fn a_shared_results_not_materialized_input_runs_once() {
     let mut shared = Vec::new();
     let checked = solve_and_check(&fixture, &cost_inputs(), |milp| {
         shared = candidates_where(milp, |candidate, _| {
-            matches!(candidate.materialization, Materialization::MatAtQuery(_))
+            matches!(candidate.properties.lifetime(), Lifetime::OneEvaluation(_))
         })
         .into_iter()
         .filter(|&m| milp.queries_reaching(m).len() == 2)
@@ -565,8 +563,8 @@ fn one_ingestion_scan_shared_by_two_sketch_configurations_is_charged_once() {
     );
     let checked = solve_and_check(&fixture, &cost_inputs(), |milp| {
         let sketches = candidates_where(milp, |candidate, node| {
-            candidate.timing == ExecutionTiming::IngestionTime
-                && candidate.materialization != Materialization::NotMaterialized
+            candidate.properties.timing() == ExecutionTiming::IngestionTime
+                && candidate.properties.lifetime().is_kept()
                 && matches!(
                     node.asap(),
                     Some(asap_types::ir::ASAPOp::SummaryAgg { .. })
@@ -581,7 +579,7 @@ fn one_ingestion_scan_shared_by_two_sketch_configurations_is_charged_once() {
         milp.builder.row("test", constraint!(sum >= 2.0));
         // Every query-time scan is excluded: both read ingestion state.
         let scans = candidates_where(milp, |candidate, node| {
-            candidate.timing == ExecutionTiming::QueryTime && node.operator.kind_name() == "Scan"
+            candidate.properties.timing() == ExecutionTiming::QueryTime && node.operator.kind_name() == "Scan"
         });
         forbid(milp, &scans);
     })
@@ -589,7 +587,7 @@ fn one_ingestion_scan_shared_by_two_sketch_configurations_is_charged_once() {
     let ingestion_scans: Vec<usize> = (0..checked.dag.candidate_of_node.len())
         .filter(|&node| {
             let candidate = checked.dag.candidate_of_node[node];
-            fixture.physical.candidates[candidate.0].timing == ExecutionTiming::IngestionTime
+            fixture.physical.candidates[candidate.0].properties.timing() == ExecutionTiming::IngestionTime
                 && fixture
                     .physical
                     .physical_node(candidate)
@@ -615,8 +613,8 @@ fn ingestion_scans_under_refresh_windows(
     let fixture = through_stages_with(queries, true, true);
     let checked = solve_and_check(&fixture, &cost_inputs(), |milp| {
         let states = candidates_where(milp, |candidate, _| {
-            candidate.timing == ExecutionTiming::IngestionTime
-                && candidate.materialization != Materialization::NotMaterialized
+            candidate.properties.timing() == ExecutionTiming::IngestionTime
+                && candidate.properties.lifetime().is_kept()
         });
         let window_of = |state: PhysicalCandidateId| {
             milp.inputs
@@ -650,7 +648,7 @@ fn ingestion_scans_under_refresh_windows(
             .sum();
         milp.builder.row("test", constraint!(sum >= 2.0));
         let scans = candidates_where(milp, |candidate, node| {
-            candidate.timing == ExecutionTiming::QueryTime && node.operator.kind_name() == "Scan"
+            candidate.properties.timing() == ExecutionTiming::QueryTime && node.operator.kind_name() == "Scan"
         });
         forbid(milp, &scans);
     })
@@ -687,7 +685,7 @@ fn ingestion_scans_under_refresh_windows(
     let scans = (0..nodes)
         .filter(|&node| {
             let candidate = dag.candidate_of_node[node];
-            fixture.physical.candidates[candidate.0].timing == ExecutionTiming::IngestionTime
+            fixture.physical.candidates[candidate.0].properties.timing() == ExecutionTiming::IngestionTime
                 && fixture
                     .physical
                     .physical_node(candidate)
@@ -870,12 +868,12 @@ fn runs_decode_one_node_per_context_and_one_per_shareable_candidate() {
     );
     let unshared = solve_and_check(&fixture, &cost_inputs(), |milp| {
         let shared = candidates_where(milp, |candidate, _| {
-            candidate.timing == ExecutionTiming::QueryTime
-                && candidate.materialization != Materialization::NotMaterialized
+            candidate.properties.timing() == ExecutionTiming::QueryTime
+                && candidate.properties.lifetime().is_kept()
         });
         forbid(milp, &shared);
         let ingestion = candidates_where(milp, |candidate, _| {
-            candidate.timing == ExecutionTiming::IngestionTime
+            candidate.properties.timing() == ExecutionTiming::IngestionTime
         });
         forbid(milp, &ingestion);
     })
@@ -888,7 +886,7 @@ fn runs_decode_one_node_per_context_and_one_per_shareable_candidate() {
     let mut shared_result = Vec::new();
     let shared = solve_and_check(&fixture, &cost_inputs(), |milp| {
         shared_result = candidates_where(milp, |candidate, _| {
-            candidate.materialization == Materialization::MatAtQuery(Medium::Memory)
+            candidate.properties.lifetime() == Lifetime::OneEvaluation(Medium::Memory)
         })
         .into_iter()
         .filter(|&m| milp.queries_reaching(m).len() == 2)

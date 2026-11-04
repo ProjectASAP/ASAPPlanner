@@ -310,8 +310,8 @@ async fn batch_planning_replaces_summary_operators() {
     };
     assert!(output.operators().into_iter().any(|n| {
         matches!(
-            n.materialization,
-            asap_types::physical::Materialization::MatAtQuery(_)
+            n.lifetime,
+            asap_types::physical::Lifetime::OneEvaluation(_)
         ) && OperatorNode::reachable(&n)
             .iter()
             .any(|m| Rc::ptr_eq(m, state))
@@ -375,7 +375,7 @@ async fn batch_planning_replaces_summary_operators() {
         false
     };
     assert!(workload_dag.nodes.iter().any(|n| matches!(
-        n.materialization,
-        asap_types::physical::Materialization::MatAtQuery(_)
+        n.lifetime,
+        asap_types::physical::Lifetime::OneEvaluation(_)
     ) && reaches_state(n.id)));
 }

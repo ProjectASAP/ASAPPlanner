@@ -328,7 +328,7 @@ fn merge_over_a_stored_tumbling_window(
         payload,
         output_schema: output_schema.clone(),
         output_state,
-        materialization: Default::default(),
+        lifetime: Default::default(),
         guarantee: None,
         retention_ms: None,
     };

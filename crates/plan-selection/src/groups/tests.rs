@@ -76,14 +76,18 @@ pub(super) fn catalog(
     )
 }
 
-/// One candidate of operator node `node` at query time, not materialized,
+/// At query time, not kept.
+pub(super) fn query_time_not_kept() -> PhysicalProperties {
+    PhysicalProperties::new(ExecutionTiming::QueryTime, Lifetime::None).unwrap()
+}
+
+/// One candidate of operator node `node` at query time, not kept,
 /// reading `producers` per input, that may produce a query's output when
 /// `output`.
 pub(super) fn candidate(node: usize, producers: &[&[usize]], output: bool) -> PhysicalCandidate {
     PhysicalCandidate {
         operator_node: OperatorNodeOfCandidateForMemoGroupId(node),
-        timing: ExecutionTiming::QueryTime,
-        materialization: Materialization::NotMaterialized,
+        properties: query_time_not_kept(),
         producer_candidates_per_input: producers
             .iter()
             .map(|input| {
@@ -174,8 +178,7 @@ fn dominance_needs_every_condition() {
         OperatorKindForReaders::Other(std::mem::discriminant(&rows_node(1).operator), "Values");
     let key = DominanceKey {
         group: MemoGroupId(3),
-        timing: ExecutionTiming::QueryTime,
-        materialization: Materialization::NotMaterialized,
+        properties: query_time_not_kept(),
         shareable: false,
         producer_candidates_per_input: &producers,
         readers: vec![(PhysicalCandidateId(9), 0)],
@@ -209,14 +212,19 @@ fn dominance_needs_every_condition() {
         (
             "timing",
             DominanceKey {
-                timing: ExecutionTiming::IngestionTime,
+                properties: PhysicalProperties::new(ExecutionTiming::IngestionTime, Lifetime::None)
+                    .unwrap(),
                 ..key.clone()
             },
         ),
         (
-            "materialization",
+            "lifetime",
             DominanceKey {
-                materialization: Materialization::MatAtQuery(Medium::Memory),
+                properties: PhysicalProperties::new(
+                    ExecutionTiming::QueryTime,
+                    Lifetime::OneEvaluation(Medium::Memory),
+                )
+                .unwrap(),
                 ..key.clone()
             },
         ),
@@ -371,8 +379,7 @@ fn pruning_keeps_the_smallest_equal_class_and_incomparable_ones() {
     let schema = rows_node(1).schema.clone();
     let key = DominanceKey {
         group: MemoGroupId(0),
-        timing: ExecutionTiming::QueryTime,
-        materialization: Materialization::NotMaterialized,
+        properties: query_time_not_kept(),
         shareable: false,
         producer_candidates_per_input: &producers,
         readers: Vec::new(),
@@ -486,7 +493,11 @@ fn shared_middle() -> PhysicalASAPMemoCandidates {
     let candidates = vec![
         candidate(0, &[], false),
         PhysicalCandidate {
-            materialization: Materialization::MatAtQuery(Medium::Memory),
+            properties: PhysicalProperties::new(
+                ExecutionTiming::QueryTime,
+                Lifetime::OneEvaluation(Medium::Memory),
+            )
+            .unwrap(),
             ..candidate(1, &[&[0]], false)
         },
         candidate(2, &[&[1]], true),
@@ -989,12 +1000,15 @@ fn ingestion_views_of_three_windows_and_an_unbounded_one() -> PhysicalASAPMemoCa
         (views[4].clone(), 9),
     ];
     let at_ingestion = |node: usize, producers: &[&[usize]], view: bool| PhysicalCandidate {
-        timing: ExecutionTiming::IngestionTime,
-        materialization: if view {
-            Materialization::MatAtIngestion(Medium::Memory)
-        } else {
-            Materialization::NotMaterialized
-        },
+        properties: PhysicalProperties::new(
+            ExecutionTiming::IngestionTime,
+            if view {
+                Lifetime::AcrossEvaluations(Medium::Memory)
+            } else {
+                Lifetime::None
+            },
+        )
+        .unwrap(),
         ..candidate(node, producers, false)
     };
     let mut candidates = vec![

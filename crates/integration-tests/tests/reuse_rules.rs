@@ -23,7 +23,7 @@ use asap_types::ir::{
     apply_materialization_timings, ASAPOp, MaterializationAssignment, NodeToTimedNodeCache,
     NonASAPOp, OperatorNode, QueryRoot,
 };
-use asap_types::physical::Materialization;
+use asap_types::physical::Lifetime;
 use asap_types::stages::{root_groups, MemoGroupId};
 use asap_types::stages::{Memo, OriginOfCandidateForMemoGroup};
 use asap_types::workload::{
@@ -225,9 +225,9 @@ fn select(
         .expect("the selected plan");
     let name = selected.from_logical.clone();
     let built_once = selected
-        .materialization
+        .lifetime
         .values()
-        .any(|m| matches!(m, Materialization::MatAtQuery(_)));
+        .any(|lifetime| matches!(lifetime, Lifetime::OneEvaluation(_)));
     let roots = plans
         .iter()
         .find(|(n, _)| *n == name)

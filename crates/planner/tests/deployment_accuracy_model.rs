@@ -90,7 +90,6 @@ fn physical_candidates(
         compose_logical_candidate, generate_per_computation_candidates,
     };
     use asap_physical_asap_optimization::test_support::optimize_physical_asap_chosen;
-    use asap_types::physical::Materialization;
 
     let roots = lower_promql_query_workload(workload).expect("lowers");
     let inventory = generate_per_computation_candidates(
@@ -116,7 +115,7 @@ fn physical_candidates(
                 &workload.query_workload.entries().collect::<Vec<_>>(),
                 workload.data_workload.as_ref().unwrap(),
                 false,
-                &mut |_, _, _| Some(Materialization::NotMaterialized),
+                &mut |_, _, _| Some(None),
             )
             .unwrap()
             .expect("query-time fixture is executable");

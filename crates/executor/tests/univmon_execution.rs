@@ -191,7 +191,7 @@ fn planner_unit_frequency_update_binds_as_a_value_frequency_build() -> Result<()
             filter: None,
         }),
         output_state: ExecutionDataState::QUERY_ROWS,
-        materialization: Default::default(),
+        lifetime: Default::default(),
         output_schema: (*state).clone(),
         guarantee: None,
         retention_ms: None,

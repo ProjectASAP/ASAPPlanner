@@ -18,7 +18,8 @@ use asap_types::ir::{
     apply_materialization_timings_to_roots, ASAPOp, MaterializationAssignment, NonASAPOp, Operator,
     OperatorNode, QueryRoot, TimeRangeKind,
 };
-use asap_types::physical::{Materialization, Medium};
+use asap_types::ir::properties::ExecutionTiming;
+use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
 use asap_types::workload::{QueryRecurrence, RepeatedDemand, RepetitionInterval};
 
 /// `m` with columns `ts`, `value` and `job`.
@@ -73,15 +74,15 @@ fn chain(
 }
 
 /// One query per summary of `summaries`, merging it, with each summary
-/// materialized as `materialization`: the DAG Stage 3 costs, chains
+/// kept with `kept` (`None`: not kept): the DAG Stage 3 costs, chains
 /// unexpanded.
-fn dag_of(summaries: &[Rc<OperatorNode>], materialization: Materialization) -> PhysicalASAPDAG {
+fn dag_of(summaries: &[Rc<OperatorNode>], kept: Option<PhysicalProperties>) -> PhysicalASAPDAG {
     let mut assignment = MaterializationAssignment::default();
     let roots: Vec<QueryRoot> = summaries
         .iter()
         .map(|summary| {
-            if materialization != Materialization::NotMaterialized {
-                assignment.set(summary, materialization);
+            if kept.is_some() {
+                assignment.set(summary, kept);
             }
             QueryRoot::Operator(
                 OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
@@ -132,7 +133,14 @@ fn shifted(child: &Rc<OperatorNode>, offset_ms: i64) -> Rc<OperatorNode> {
     .unwrap()
 }
 
-const AT_INGESTION: Materialization = Materialization::MatAtIngestion(Medium::Memory);
+/// Kept at ingestion time until a query reads it.
+fn at_ingestion() -> Option<PhysicalProperties> {
+    PhysicalProperties::new(
+        ExecutionTiming::IngestionTime,
+        Lifetime::AcrossEvaluations(Medium::Memory),
+    )
+    .ok()
+}
 
 /// A KLL chain and a DDSketch chain of 10 s tumbling windows over one `Scan`, both
 /// kept at ingestion, are refreshed in one ingestion run per tumbling window: the
@@ -145,7 +153,7 @@ fn a_scan_under_two_chains_of_one_tumbling_window_width_is_computed_once() {
             chain(&scan, SketchAlgorithm::Kll, 10_000, 6),
             chain(&scan, SketchAlgorithm::DDSketch, 10_000, 30),
         ],
-        AT_INGESTION,
+        at_ingestion(),
     );
     assert_eq!(scan_computations(&dag), (1, 1.0));
 }
@@ -161,7 +169,7 @@ fn a_scan_under_chains_of_two_tumbling_window_widths_is_computed_for_each() {
             chain(&scan, SketchAlgorithm::Kll, 10_000, 6),
             chain(&scan, SketchAlgorithm::DDSketch, 60_000, 5),
         ],
-        AT_INGESTION,
+        at_ingestion(),
     );
     assert_eq!(scan_computations(&dag), (2, 2.0));
 }
@@ -195,7 +203,7 @@ fn query_consumers_still_count_once_each() {
             build(range(60_000), SketchAlgorithm::Kll),
             build(range(60_000), SketchAlgorithm::DDSketch),
         ],
-        Materialization::NotMaterialized,
+        None,
     );
     assert_eq!(scan_computations(&dag), (2, 0.2));
 }
@@ -211,7 +219,7 @@ fn a_scan_under_chains_of_10_10_and_60_s_is_computed_for_each_width() {
             chain(&scan, SketchAlgorithm::DDSketch, 10_000, 30),
             chain(&scan, SketchAlgorithm::Kll, 60_000, 5),
         ],
-        AT_INGESTION,
+        at_ingestion(),
     );
     assert_eq!(scan_computations(&dag), (2, 2.0));
 }
@@ -231,7 +239,7 @@ fn chains_of_one_width_and_two_phases_are_computed_apart() {
                 30,
             ),
         ],
-        AT_INGESTION,
+        at_ingestion(),
     );
     assert_eq!(scan_computations(&dag), (2, 2.0));
 }
@@ -246,7 +254,7 @@ fn nodes_below_a_shared_intermediate_node_are_computed_once_per_run() {
             chain(&shift, SketchAlgorithm::Kll, 10_000, 6),
             chain(&shift, SketchAlgorithm::DDSketch, 10_000, 30),
         ],
-        AT_INGESTION,
+        at_ingestion(),
     );
     assert_eq!(scan_computations(&dag), (1, 1.0));
     assert_eq!(
@@ -280,7 +288,7 @@ fn consumers_of_unbounded_windows_count_alone() {
             build(SketchAlgorithm::Kll),
             build(SketchAlgorithm::DDSketch),
         ],
-        AT_INGESTION,
+        at_ingestion(),
     );
     assert_eq!(
         computations_of(&dag, |op| matches!(op, NonASAPOp::Values { .. })),

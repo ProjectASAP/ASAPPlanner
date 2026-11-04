@@ -385,7 +385,7 @@ fn global_extrema_bind_with_planner_derived_schema() {
                 child: 0,
             }),
             output_state: ExecutionDataState::QUERY_ROWS,
-            materialization: Default::default(),
+            lifetime: Default::default(),
             output_schema: (*output).clone(),
             guarantee: None,
             retention_ms: None,
@@ -935,7 +935,7 @@ fn planner_node(
         id: 1,
         payload,
         output_state: planner_types::ir::properties::ExecutionDataState::QUERY_ROWS,
-        materialization: Default::default(),
+        lifetime: Default::default(),
         output_schema: planner_types::ir::schema::Schema::new(
             fields
                 .iter()
@@ -1192,7 +1192,7 @@ fn exact_aggregate_node(
             child: 0,
         }),
         output_state: ExecutionDataState::QUERY_ROWS,
-        materialization: Default::default(),
+        lifetime: Default::default(),
         output_schema: (*schema(&[(name, dtype, false)])).clone(),
         guarantee: None,
         retention_ms: None,

@@ -277,7 +277,8 @@ fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) 
         apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
         Operator as IrOperator, OperatorNode,
     };
-    use planner_types::physical::{Materialization, Medium};
+    use planner_types::ir::properties::ExecutionTiming;
+    use planner_types::physical::{Lifetime, Medium, PhysicalProperties};
     fn unpinned(node: &Rc<OperatorNode>) -> Rc<OperatorNode> {
         let mut copy = (**node).clone();
         copy.operator = node.operator.map_children(unpinned);
@@ -293,7 +294,14 @@ fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) 
     let mut assignment = MaterializationAssignment::default();
     for node in OperatorNode::reachable(&candidate) {
         if matches!(node.operator, IrOperator::ASAP(ASAPOp::SummaryAgg { .. })) {
-            assignment.set(&node, Materialization::MatAtIngestion(Medium::Memory));
+            assignment.set(
+                &node,
+                PhysicalProperties::new(
+                    ExecutionTiming::IngestionTime,
+                    Lifetime::AcrossEvaluations(Medium::Memory),
+                )
+                .ok(),
+            );
         }
     }
     let timed =

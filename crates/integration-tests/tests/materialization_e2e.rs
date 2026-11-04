@@ -24,11 +24,19 @@ use asap_types::ir::{
     apply_materialization_timings, ASAPOp, MaterializationAssignment, NodeToTimedNodeCache,
     NonASAPOp, OperatorNode,
 };
-use asap_types::physical::{Materialization, Medium};
+use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
+
+/// Kept at ingestion time until a query reads it.
+fn at_ingestion() -> Option<PhysicalProperties> {
+    PhysicalProperties::new(
+        ExecutionTiming::IngestionTime,
+        Lifetime::AcrossEvaluations(Medium::Memory),
+    )
+    .ok()
+}
 
 use crate::physical_common;
 
-const AT_INGESTION: Materialization = Materialization::MatAtIngestion(Medium::Memory);
 
 /// The logical DAG the planner pipeline selects for `query`, optionally with
 /// a PromQL series identity (per-entity state needs one).
@@ -80,7 +88,7 @@ fn sketch_candidate(query: &str) -> Rc<OperatorNode> {
 fn placements() -> [MaterializationAssignment; 2] {
     [
         MaterializationAssignment::default(),
-        MaterializationAssignment::with_default(AT_INGESTION),
+        MaterializationAssignment::with_default(at_ingestion()),
     ]
 }
 
@@ -99,7 +107,10 @@ fn timed_dag(root: &Rc<OperatorNode>, assignment: &MaterializationAssignment) ->
 fn states(dag: &PhysicalASAPDAG) -> Vec<u64> {
     dag.nodes
         .iter()
-        .filter(|node| node.materialization == AT_INGESTION)
+        .filter(|node| {
+            node.output_state.timing == ExecutionTiming::IngestionTime
+                && node.lifetime == Lifetime::AcrossEvaluations(Medium::Memory)
+        })
         .map(|node| node.id as u64)
         .collect()
 }
@@ -252,7 +263,7 @@ fn mixed_placement_answers_like_query_time() {
         "two explicitly selected KLL builds"
     );
     let mut mixed = MaterializationAssignment::default();
-    mixed.set(&sketches(&root)[0], AT_INGESTION);
+    mixed.set(&sketches(&root)[0], at_ingestion());
     let mut answers = Vec::new();
     for assignment in [MaterializationAssignment::default(), mixed] {
         let dag = timed_dag(&root, &assignment);

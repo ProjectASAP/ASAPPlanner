@@ -50,14 +50,14 @@ fn view_over_samples(
         id,
         payload,
         output_state,
-        materialization: Default::default(),
+        lifetime: Default::default(),
         output_schema,
         guarantee: None,
         retention_ms: None,
     };
     [
         PhysicalASAPDAGNode {
-            materialization: planner_types::physical::Materialization::MatAtIngestion(
+            lifetime: planner_types::physical::Lifetime::AcrossEvaluations(
                 planner_types::physical::Medium::Memory,
             ),
             ..node(
@@ -137,7 +137,7 @@ fn try_state_dag(
                 group_by: None,
             }),
             output_state: ExecutionDataState::INGESTION_SUMMARY,
-            materialization: planner_types::physical::Materialization::MatAtIngestion(
+            lifetime: planner_types::physical::Lifetime::AcrossEvaluations(
                 planner_types::physical::Medium::Memory,
             ),
             output_schema: logical_schema(family.clone()),
@@ -152,7 +152,7 @@ fn try_state_dag(
             child: read_id - 1,
         }),
         output_state: ExecutionDataState::INGESTION_ROWS,
-        materialization: Default::default(),
+        lifetime: Default::default(),
         output_schema: logical_schema(FieldDataType::Plain(DataType::Float64)),
         guarantee: None,
         retention_ms: None,
@@ -169,7 +169,7 @@ fn try_state_dag(
                 child: read_id,
             }),
             output_state: ExecutionDataState::INGESTION_SUMMARY,
-            materialization: planner_types::physical::Materialization::MatAtIngestion(
+            lifetime: planner_types::physical::Lifetime::AcrossEvaluations(
                 planner_types::physical::Medium::Memory,
             ),
             output_schema: logical_schema(target),

@@ -49,9 +49,13 @@ pub fn compile_at_ingestion_physical_asap_dag(
     compile_with(
         root,
         &asap_types::ir::MaterializationAssignment::with_default(
-            asap_types::physical::Materialization::MatAtIngestion(
-                asap_types::physical::Medium::Memory,
-            ),
+            asap_types::physical::PhysicalProperties::new(
+                asap_types::ir::properties::ExecutionTiming::IngestionTime,
+                asap_types::physical::Lifetime::AcrossEvaluations(
+                    asap_types::physical::Medium::Memory,
+                ),
+            )
+            .ok(),
         ),
     )
 }

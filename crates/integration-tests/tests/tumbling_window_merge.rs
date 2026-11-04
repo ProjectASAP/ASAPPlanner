@@ -28,7 +28,8 @@ use asap_types::ir::{
     apply_materialization_timings, ASAPOp, MaterializationAssignment, NodeToTimedNodeCache,
     NonASAPOp, Operator, OperatorNode, QueryRoot,
 };
-use asap_types::physical::{Materialization, Medium};
+use asap_types::ir::properties::ExecutionTiming;
+use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
 use asap_types::test_support::compile_physical_asap_dag_with_node_ids;
 
 const EVALUATION_MS: i64 = 300_000;
@@ -280,15 +281,19 @@ fn execute_retained(
     for tumbling_window in tumbling_windows {
         assignment.set(
             tumbling_window,
-            Materialization::MatAtIngestion(Medium::Memory),
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .ok(),
         );
     }
     execute_retained_as(root, &assignment, samples)
 }
 
 /// The planner's tumbling-window chain maintained at ingestion time, as Stage 2's B1
-/// option assigns it (`MatAtIngestion` on the chain), then expanded: each
-/// tumbling window carries the chain's timing and materialization, so the tumbling windows are
+/// option assigns it (kept at ingestion time on the chain), then expanded: each
+/// tumbling window carries the chain's timing and lifetime, so the tumbling windows are
 /// built in ingestion runs and merged in the query run.
 fn execute_maintained_chain(
     planned: &Rc<OperatorNode>,
@@ -299,7 +304,14 @@ fn execute_maintained_chain(
         .find(|n| matches!(n.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. })))
         .expect("a tumbling-window chain");
     let mut assignment = MaterializationAssignment::default();
-    assignment.set(&chain, Materialization::MatAtIngestion(Medium::Memory));
+    assignment.set(
+        &chain,
+        PhysicalProperties::new(
+            ExecutionTiming::IngestionTime,
+            Lifetime::AcrossEvaluations(Medium::Memory),
+        )
+        .ok(),
+    );
     let timed =
         apply_materialization_timings(planned, &assignment, &mut NodeToTimedNodeCache::new())
             .unwrap();
@@ -309,9 +321,10 @@ fn execute_maintained_chain(
         .filter(|n| matches!(n.asap(), Some(ASAPOp::SummaryAgg { .. })))
     {
         assert_eq!(
-            tumbling_window.materialization,
-            Materialization::MatAtIngestion(Medium::Memory)
+            tumbling_window.lifetime,
+            Lifetime::AcrossEvaluations(Medium::Memory)
         );
+        assert_eq!(tumbling_window.timing, Some(ExecutionTiming::IngestionTime));
     }
     execute_retained_as(&expanded, &MaterializationAssignment::default(), samples)
 }

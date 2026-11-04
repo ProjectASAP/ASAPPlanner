@@ -23,7 +23,8 @@ use asap_types::ir::flat::{flatten, FlatDag, NodeId};
 use asap_types::ir::physical_export::PhysicalASAPDAG;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot};
-use asap_types::physical::Materialization;
+use asap_types::ir::properties::ExecutionTiming;
+use asap_types::physical::Lifetime;
 use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::workload::{PlanningWorkload, QueryRecurrence, RepeatedDemand};
 
@@ -780,7 +781,7 @@ pub fn computations(dag: &PhysicalASAPDAG) -> BTreeMap<NodeId, u64> {
     let materialized: BTreeSet<_> = dag
         .nodes
         .iter()
-        .filter(|n| n.materialization != Materialization::NotMaterialized)
+        .filter(|n| n.lifetime.is_kept())
         .map(|n| n.id)
         .collect();
     // Each walk's start and, for a consumer refreshed at ingestion, its
@@ -795,14 +796,8 @@ pub fn computations(dag: &PhysicalASAPDAG) -> BTreeMap<NodeId, u64> {
                 .map(|(_, expr)| (expr.operator_refs().into_iter().copied().collect(), None)),
         )
         .chain(materialized.iter().map(|&id| {
-            let at_ingestion = matches!(
-                dag.nodes
-                    .iter()
-                    .find(|n| n.id == id)
-                    .unwrap()
-                    .materialization,
-                Materialization::MatAtIngestion(_)
-            );
+            let at_ingestion = dag.nodes.iter().find(|n| n.id == id).unwrap().output_state.timing
+                == ExecutionTiming::IngestionTime;
             let window = at_ingestion.then(|| dag.refresh_window(id)).flatten();
             (dag.producers(id), window)
         }));
@@ -840,8 +835,8 @@ pub fn evaluation_interval_ms(workload: &PlanningWorkload, query: usize) -> Opti
 
 // ── Materialization ──────────────────────────────────────────────────────
 
-/// A node's materialization option (#509 "Materialization"), without its
-/// storage medium.
+/// A node's materialization option in #509's terms ("Materialization"),
+/// derived from its timing and lifetime, without its storage medium.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MaterializationOption {
     /// Runs as data arrives; output stored before any query asks.
@@ -858,12 +853,10 @@ pub enum MaterializationOption {
 /// `node` (#667).
 pub fn materialization(p: &Physical, node: NodeId) -> MaterializationOption {
     let n = p.dag().nodes.iter().find(|n| n.id == node).expect("node");
-    match n.materialization {
-        Materialization::MatAtIngestion(_) => MaterializationOption::MatAtIngestion,
-        Materialization::MatAtQuery(_) | Materialization::MatAtQueryKeptAcrossEvaluations(_) => {
-            MaterializationOption::MatAtQuery
-        }
-        Materialization::NotMaterialized => MaterializationOption::NotMaterialized,
+    match (n.output_state.timing, n.lifetime) {
+        (_, Lifetime::None) => MaterializationOption::NotMaterialized,
+        (ExecutionTiming::IngestionTime, _) => MaterializationOption::MatAtIngestion,
+        (ExecutionTiming::QueryTime, _) => MaterializationOption::MatAtQuery,
     }
 }
 

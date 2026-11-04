@@ -15,7 +15,7 @@ use asap_planner::PlanningModels;
 use asap_types::ir::flat::NodeId;
 use asap_types::ir::schema::{FieldDataType, GroupingStrategy, HydraKind, SketchAlgorithm};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot, ScalarExpr, SortKey};
-use asap_types::physical::{Materialization, Medium};
+use asap_types::physical::{Lifetime, Medium};
 use planner_layering_common::*;
 
 // ── Example 1 workload ───────────────────────────────────────────────────
@@ -853,7 +853,7 @@ fn materialized_case() -> Run {
         .iter_mut()
         .find(|n| relational(&n.payload).as_deref() == Some("time_range"))
         .unwrap();
-    time_range.materialization = Materialization::MatAtQuery(Medium::Memory);
+    time_range.lifetime = Lifetime::OneEvaluation(Medium::Memory);
     let selection = select_plan(
         std::slice::from_ref(&p.candidate),
         &[exact_every_10s(), exact_every_10s()],

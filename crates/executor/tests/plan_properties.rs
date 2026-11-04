@@ -49,7 +49,7 @@ fn sorted_scan(schema: &Schema, identity: &Source) -> PhysicalASAPDAG {
         id,
         payload,
         output_state: ExecutionDataState::QUERY_ROWS,
-        materialization: Default::default(),
+        lifetime: Default::default(),
         output_schema: schema.clone(),
         guarantee: None,
         retention_ms: None,

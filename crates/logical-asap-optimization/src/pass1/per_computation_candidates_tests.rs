@@ -254,8 +254,8 @@ fn assigned_physical_annotation_asap_input_and_invalid_accuracy_are_rejected() {
         accuracy: approximate(),
     }))
     .clone();
-    stored.materialization =
-        asap_types::physical::Materialization::MatAtQuery(asap_types::physical::Medium::Memory);
+    stored.lifetime =
+        asap_types::physical::Lifetime::OneEvaluation(asap_types::physical::Medium::Memory);
     assert!(matches!(
         generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
             QueryRoot::Operator(Rc::new(stored.clone()))

@@ -1603,15 +1603,15 @@ mod tests {
         pass2_candidates.pop().unwrap().roots.unwrap().remove(0)
     }
 
-    const AT_INGESTION: Materialization = Materialization::MatAtIngestion(Medium::Memory);
+    const KEPT_ACROSS: Lifetime = Lifetime::AcrossEvaluations(Medium::Memory);
 
-    /// The options `candidate` chose other than `NotMaterialized`, by node.
-    fn materialized(candidate: &PhysicalWorkloadPlan) -> Vec<Materialization> {
+    /// The lifetimes `candidate` chose other than `None`, by node.
+    fn materialized(candidate: &PhysicalWorkloadPlan) -> Vec<Lifetime> {
         candidate
-            .materialization
+            .lifetime
             .values()
             .copied()
-            .filter(|m| *m != Materialization::NotMaterialized)
+            .filter(|lifetime| lifetime.is_kept())
             .collect()
     }
 
@@ -1809,14 +1809,12 @@ mod tests {
             .nodes
             .iter()
             .all(|n| n.output_state.timing == ExecutionTiming::QueryTime));
-        assert_eq!(materialized(b1), [AT_INGESTION]);
+        assert_eq!(materialized(b1), [KEPT_ACROSS]);
         let [chain] = &node_of(b1, "SummaryTumblingWindowChain")[..] else {
             panic!("one chain")
         };
-        assert_eq!(
-            chain.materialization,
-            Materialization::MatAtIngestion(Medium::Memory)
-        );
+        assert_eq!(chain.lifetime, KEPT_ACROSS);
+        assert_eq!(chain.timing, Some(ExecutionTiming::IngestionTime));
         for below in OperatorNode::reachable(chain) {
             assert_eq!(below.timing, Some(ExecutionTiming::IngestionTime));
         }
@@ -2113,7 +2111,7 @@ mod tests {
             false,
         )
         .unwrap();
-        assert_eq!(materialized(&candidates[1]), [AT_INGESTION]);
+        assert_eq!(materialized(&candidates[1]), [KEPT_ACROSS]);
 
         // The same build with a filter.
         let QueryRoot::Operator(node) = &root else {
@@ -2268,14 +2266,14 @@ mod tests {
         assert_eq!(candidates.len(), 2);
         assert_eq!(
             materialized(&candidates[1]),
-            [Materialization::MatAtQuery(Medium::Memory)]
+            [Lifetime::OneEvaluation(Medium::Memory)]
         );
         let [build] = &node_of(&candidates[1], "SummaryAgg")[..] else {
             panic!("one shared build")
         };
         assert_eq!(
-            build.materialization,
-            Materialization::MatAtQuery(Medium::Memory)
+            build.lifetime,
+            Lifetime::OneEvaluation(Medium::Memory)
         );
     }
 
@@ -2328,12 +2326,12 @@ mod tests {
                 .nodes
                 .iter()
                 .filter(|n| matches!(n.payload, Payload::NonASAP(NonASAPOp::Scan { .. })))
-                .map(|n| (n.output_state.timing, n.materialization))
+                .map(|n| (n.output_state.timing, n.lifetime))
                 .collect();
             scans.sort_by_key(|(t, _)| *t == ExecutionTiming::QueryTime);
             scans
         };
-        let not_materialized = Materialization::NotMaterialized;
+        let not_materialized = Lifetime::None;
         assert_eq!(
             scans(&candidates[0]),
             [(ExecutionTiming::QueryTime, not_materialized)]
@@ -2342,7 +2340,7 @@ mod tests {
             scans(&candidates[1]),
             [(
                 ExecutionTiming::QueryTime,
-                Materialization::MatAtQuery(Medium::Memory)
+                Lifetime::OneEvaluation(Medium::Memory)
             )]
         );
         assert_eq!(
@@ -2397,10 +2395,7 @@ mod tests {
             .iter()
             .map(|c| (c.node.operator.kind_name(), c.readers.clone(), c.options()))
             .collect();
-        let options = vec![
-            Materialization::NotMaterialized,
-            Materialization::MatAtQuery(Medium::Memory),
-        ];
+        let options = vec![None, Some(kept_for_one_evaluation())];
         assert_eq!(
             found,
             [

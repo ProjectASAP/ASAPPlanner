@@ -178,8 +178,8 @@ impl Diagnosis {
                 "c{} {} {:?} {:?}",
                 c.0,
                 milp.physical.physical_node(c).operator.kind_name(),
-                data.timing,
-                data.materialization
+                data.properties.timing(),
+                data.properties.lifetime()
             )
         };
         let mut labels = BTreeMap::new();
