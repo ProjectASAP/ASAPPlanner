@@ -249,9 +249,7 @@ mod tests {
             let producer = producer_candidates
                 .iter()
                 .copied()
-                .find(|s| {
-                    !physical.candidates[s.0].properties.lifetime().is_kept()
-                })
+                .find(|s| !physical.candidates[s.0].properties.lifetime().is_kept())
                 .unwrap_or(producer_candidates[0]);
             let producer = select_from(physical, producer, selected);
             selected.edges.push(SelectedEdge {

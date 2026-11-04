@@ -1,9 +1,9 @@
 //! #1095 Step 6 (§2.0, "Decode and check"): the group selection MILP's raw
 //! solution as a [`DagOfSelectedCandidates`], one node per candidate run.
 //!
-//! - A candidate computed in a context (`p[ctx, c] = 1`, a `NotMaterialized`
+//! - A candidate computed in a context (`p[ctx, c] = 1`, a not-kept
 //!   query-time candidate in a query's or a shareable candidate's context,
-//!   or a `NotMaterialized` ingestion-time candidate in an `I_r`) is one node per
+//!   or a not-kept ingestion-time candidate in an `I_r`) is one node per
 //!   context: selected in two contexts, it is two nodes; read by two
 //!   readers in one context, it is one.
 //! - A selected shareable candidate (`x[m] = 1`) is one node, whoever reads

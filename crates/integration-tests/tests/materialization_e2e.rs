@@ -1,6 +1,6 @@
 //! Materialization decides placement, not answers: the same selected DAG
-//! timed with its states `NotMaterialized` (everything at query time) and
-//! `MatAtIngestion` (materialized views refreshed at ingestion time)
+//! timed with its states not kept (everything at query time) and
+//! kept at ingestion time (materialized views refreshed at ingestion time)
 //! executes to the same result.
 
 use std::collections::{BTreeMap, HashMap};
@@ -36,7 +36,6 @@ fn at_ingestion() -> Option<PhysicalProperties> {
 }
 
 use crate::physical_common;
-
 
 /// The logical DAG the planner pipeline selects for `query`, optionally with
 /// a PromQL series identity (per-entity state needs one).
@@ -209,8 +208,8 @@ fn values_1_to_100(schema: &SchemaRef, _metric: &str) -> Batch {
     Batch::try_new(schema.clone(), rows).unwrap()
 }
 
-/// `MatAtIngestion` puts the quantile's state in a materialized view;
-/// `NotMaterialized` has no view and reads the raw source at
+/// Keeping it at ingestion time puts the quantile's state in a materialized view;
+/// Not keeping it has no view and reads the raw source at
 /// query time; both answer alike.
 #[test]
 fn materialization_decides_precompute_contents() {
@@ -231,8 +230,8 @@ fn materialization_decides_precompute_contents() {
     assert_eq!(answers[0], answers[1]);
 }
 
-/// Mixed placement in one DAG: one summary `MatAtIngestion` (a materialized view)
-/// and the other `NotMaterialized` (built from the raw source at query
+/// Mixed placement in one DAG: one summary kept at ingestion time (a materialized view)
+/// and the other not kept (built from the raw source at query
 /// time) answer like the all-query-time placement.
 #[test]
 fn mixed_placement_answers_like_query_time() {

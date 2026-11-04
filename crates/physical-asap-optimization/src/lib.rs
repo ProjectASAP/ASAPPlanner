@@ -21,16 +21,16 @@
 //! So is the highest node of each other sub-DAG that two or more queries
 //! read (e.g. a `Scan` that a 1 m and a 5 m window read): one a root or a
 //! node only one query reads consumes. Such a node has only
-//! `NotMaterialized` and `MatAtQuery(Memory)`, so a shared sub-DAG adds one
+//! not kept and `OneEvaluation(Memory)`, so a shared sub-DAG adds one
 //! option, not one per node. A summary build has up to four options:
 //!
-//! * `NotMaterialized`: rebuilt at query time by every query that reads it;
-//! * `MatAtIngestion(Memory)`: maintained as data arrives and kept for the
+//! * not kept: rebuilt at query time by every query that reads it;
+//! * ingestion-time `AcrossEvaluations(Memory)`: maintained as data arrives and kept for the
 //!   queries, when the build is eligible (`IngestionPruneReason`);
-//! * `MatAtQuery(Memory)`: built once at query time for every query of one
+//! * `OneEvaluation(Memory)`: built once at query time for every query of one
 //!   evaluation that reads it and reused only within that evaluation,
 //!   offered for a build two or more queries read;
-//! * `MatAtQueryKeptAcrossEvaluations(Memory)`: built at query time and
+//! * query-time `AcrossEvaluations(Memory)`: built at query time and
 //!   kept across evaluations (#509 Example 4's B3), offered when the
 //!   deployment keeps query-time results (the caller's
 //!   `query_time_results_retained`) for a
@@ -41,9 +41,9 @@
 //!
 //! A build at ingestion time needs every build below it at ingestion time too
 //! (#509 Algorithm 3, line 13), and every shared non-summary node below it
-//! `NotMaterialized`; other assignments are not generated. Every
+//! not kept; other assignments are not generated. Every
 //! other combination of options is one physical candidate, the
-//! all-`NotMaterialized` one first: nothing is capped. A node that one
+//! all-not-kept one first: nothing is capped. A node that one
 //! query reads at ingestion time and another at query time is copied, one
 //! copy per timing (`split_shared_by_timing`).
 //!
@@ -132,9 +132,9 @@ use asap_types::ir::{
     NodeToTimedNodeCache, NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr,
     SchemaDerivationError, SortKey,
 };
-use asap_types::physical::{Lifetime, PhysicalProperties};
 use asap_types::physical::Medium;
 use asap_types::physical::PhysicalWorkloadPlan;
+use asap_types::physical::{Lifetime, PhysicalProperties};
 use asap_types::workload::{
     DataArrival, DataWorkload, Predictability, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
 };
@@ -324,10 +324,10 @@ fn summary_reader_eligibility(
 ///
 /// | materialization candidate        | readers | options                         |
 /// |----------------------------------|---------|---------------------------------|
-/// | Kll ×5 tumbling windows (q1)     | q1      | NotMaterialized, MatAtIngestion |
-/// | Max acc ×5 tumbling windows (q2) | q2      | NotMaterialized, MatAtIngestion |
+/// | Kll ×5 tumbling windows (q1)     | q1      | not kept, kept at ingestion time |
+/// | Max acc ×5 tumbling windows (q2) | q2      | not kept, kept at ingestion time |
 ///
-/// One read by two or more queries also gets `MatAtQuery` (built once per
+/// One read by two or more queries also gets `OneEvaluation` (built once per
 /// evaluation and reused), and so does the highest node of a shared
 /// non-summary sub-DAG, e.g. a `Scan` both queries read when Stage 1
 /// shares it. The physical candidates are the product of the
@@ -342,18 +342,18 @@ pub(crate) struct MaterializationCandidate {
     pub(crate) node: Rc<OperatorNode>,
     /// The queries (indices into the roots) that read it.
     pub(crate) readers: Vec<usize>,
-    /// `Ok` when `MatAtIngestion` is an option.
+    /// `Ok` when kept at ingestion time is an option.
     pub(crate) at_ingestion: Result<(), IngestionPruneReason>,
-    /// Whether `MatAtQueryKeptAcrossEvaluations` is an option: the
+    /// Whether query-time `AcrossEvaluations` is an option: the
     /// deployment keeps query-time results and it is a tumbling-window chain
     /// that builds one new tumbling window per evaluation.
     pub(crate) may_keep_across_evaluations: bool,
 }
 
 impl MaterializationCandidate {
-    /// Its options, `NotMaterialized` first: `MatAtIngestion` when eligible,
-    /// `MatAtQuery` when two or more queries read it, and
-    /// `MatAtQueryKeptAcrossEvaluations` when it may be kept across
+    /// Its options, not kept first: kept at ingestion time when eligible,
+    /// `OneEvaluation` when two or more queries read it, and
+    /// query-time `AcrossEvaluations` when it may be kept across
     /// evaluations.
     pub(crate) fn options(&self) -> Vec<Option<PhysicalProperties>> {
         let mut options = vec![None];
@@ -412,7 +412,7 @@ pub(crate) fn builds_one_tumbling_window_per_evaluation<'a>(
 
 /// Stage 2 for one CandidateLogicalASAPDAG: implement every operator
 /// (physical operator implementation), then one physical candidate per
-/// materialization assignment of its mat_candidates, the all-`NotMaterialized` one
+/// materialization assignment of its mat_candidates, the all-not-kept one
 /// first. `entries[i]` is the workload entry of query `i` (`roots[i]`):
 /// its recurrence and predictability decide whether state may be kept from
 /// ingestion time; a missing entry is unknown. `id` is left empty for the
@@ -659,7 +659,7 @@ fn is_summary_build(node: &OperatorNode) -> bool {
 /// discovery order, then every highest shared non-summary node, in
 /// discovery order. A shared node is one two or more queries read; the
 /// highest are those a root or an unshared node reads (e.g. a `Scan` that
-/// two windows read). Only a highest one is offered `MatAtQuery`, so a
+/// two windows read). Only a highest one is offered `OneEvaluation`, so a
 /// shared sub-DAG adds one candidate, not one per node.
 pub(crate) fn materialization_candidates(
     roots: &[QueryRoot],
@@ -940,9 +940,9 @@ fn candidates_below(nodes: &[Rc<OperatorNode>]) -> Vec<Vec<usize>> {
 
 /// Whether, below every ingestion-time build of `assignment`, every build
 /// is at ingestion time too and every shared non-summary node is
-/// `NotMaterialized`: ingestion work reads it as it arrives, and its
+/// not kept: ingestion work reads it as it arrives, and its
 /// query-time readers read a copy ([`split_shared_by_timing`]).
-/// Simplification: that copy is not offered `MatAtQuery` even when two
+/// Simplification: that copy is not offered `OneEvaluation` even when two
 /// query-time readers remain. `below` is [`candidates_below`] of
 /// `mat_candidates`.
 fn down_closed(
@@ -966,7 +966,7 @@ fn down_closed(
 }
 
 /// Every assignment of an option to each materialization candidate (mixed
-/// radix, the last varying fastest, all `NotMaterialized` first) that is
+/// radix, the last varying fastest, all not kept first) that is
 /// [`down_closed`].
 #[cfg(any(test, feature = "reference-pricer"))]
 fn materialization_assignments(
@@ -1196,7 +1196,10 @@ pub mod test_support {
 }
 
 /// `timing` and `lifetime`, a pair Stage 2 only builds when valid.
-pub(crate) fn physical_properties(timing: ExecutionTiming, lifetime: Lifetime) -> PhysicalProperties {
+pub(crate) fn physical_properties(
+    timing: ExecutionTiming,
+    lifetime: Lifetime,
+) -> PhysicalProperties {
     PhysicalProperties::new(timing, lifetime).expect("Stage 2 builds only valid pairs")
 }
 
@@ -1287,7 +1290,7 @@ mod tests {
         );
     }
 
-    /// The all-`NotMaterialized` candidate, with no workload declared.
+    /// The all-not-kept candidate, with no workload declared.
     fn first_candidate(roots: &[QueryRoot]) -> PhysicalWorkloadPlan {
         optimize_physical_asap("L1", roots, &[], &DataWorkload::default(), false)
             .unwrap()
@@ -2243,7 +2246,7 @@ mod tests {
     }
 
     /// A build two queries read is also offered built once per evaluation
-    /// for both (`MatAtQuery`); a build one query reads is not.
+    /// for both (`OneEvaluation`); a build one query reads is not.
     #[test]
     fn a_build_two_queries_read_may_be_built_once_per_evaluation() {
         let QueryRoot::Operator(p99) = summary_root("quantile_over_time(0.99, m[1m])") else {
@@ -2271,16 +2274,13 @@ mod tests {
         let [build] = &node_of(&candidates[1], "SummaryAgg")[..] else {
             panic!("one shared build")
         };
-        assert_eq!(
-            build.lifetime,
-            Lifetime::OneEvaluation(Medium::Memory)
-        );
+        assert_eq!(build.lifetime, Lifetime::OneEvaluation(Medium::Memory));
     }
 
     /// Two queries share one scan: one reads it through tumbling windows maintained at
     /// ingestion time, the other at query time. The scan is split, one copy
     /// per timing; with nothing materialized it stays one node. The shared
-    /// scan may also be built once per evaluation (`MatAtQuery`), but not
+    /// scan may also be built once per evaluation (`OneEvaluation`), but not
     /// under ingestion-time tumbling windows, where only one query reads it at query
     /// time.
     #[test]
@@ -2353,7 +2353,7 @@ mod tests {
     }
 
     /// Only the highest shared non-summary nodes are materialization
-    /// candidates, each with `NotMaterialized` and `MatAtQuery` only: a
+    /// candidates, each with not kept and `OneEvaluation` only: a
     /// 5 m range two queries read (not the scan below it, which only that
     /// shared range reads for them), and the scan, which a third query
     /// also reads through its own 1 m range.

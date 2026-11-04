@@ -372,7 +372,7 @@ fn the_optimum_costs_what_plan_cost_says() {
     }
 }
 
-// Held memory and schedule groups: a `MatAtQuery(Memory)` result both
+// Held memory and schedule groups: a `OneEvaluation(Memory)` result both
 // queries read (every 60 s and every 30 s) is held until the slower reader
 // finishes, once per execution at the schedule groups' rates.
 #[test]
@@ -494,7 +494,7 @@ fn a_kept_pane_chain_keeps_the_longest_readers_span() {
     );
 }
 
-// A `NotMaterialized` input of a `MatAtQuery` candidate both queries read
+// A not-kept input of a `OneEvaluation` candidate both queries read
 // (`rate(m[5m])` under `sum` and `max`, one schedule group) runs once, in
 // the candidate's context, and is costed as `plan_cost` costs it.
 #[test]
@@ -579,7 +579,8 @@ fn one_ingestion_scan_shared_by_two_sketch_configurations_is_charged_once() {
         milp.builder.row("test", constraint!(sum >= 2.0));
         // Every query-time scan is excluded: both read ingestion state.
         let scans = candidates_where(milp, |candidate, node| {
-            candidate.properties.timing() == ExecutionTiming::QueryTime && node.operator.kind_name() == "Scan"
+            candidate.properties.timing() == ExecutionTiming::QueryTime
+                && node.operator.kind_name() == "Scan"
         });
         forbid(milp, &scans);
     })
@@ -587,7 +588,8 @@ fn one_ingestion_scan_shared_by_two_sketch_configurations_is_charged_once() {
     let ingestion_scans: Vec<usize> = (0..checked.dag.candidate_of_node.len())
         .filter(|&node| {
             let candidate = checked.dag.candidate_of_node[node];
-            fixture.physical.candidates[candidate.0].properties.timing() == ExecutionTiming::IngestionTime
+            fixture.physical.candidates[candidate.0].properties.timing()
+                == ExecutionTiming::IngestionTime
                 && fixture
                     .physical
                     .physical_node(candidate)
@@ -648,7 +650,8 @@ fn ingestion_scans_under_refresh_windows(
             .sum();
         milp.builder.row("test", constraint!(sum >= 2.0));
         let scans = candidates_where(milp, |candidate, node| {
-            candidate.properties.timing() == ExecutionTiming::QueryTime && node.operator.kind_name() == "Scan"
+            candidate.properties.timing() == ExecutionTiming::QueryTime
+                && node.operator.kind_name() == "Scan"
         });
         forbid(milp, &scans);
     })
@@ -685,7 +688,8 @@ fn ingestion_scans_under_refresh_windows(
     let scans = (0..nodes)
         .filter(|&node| {
             let candidate = dag.candidate_of_node[node];
-            fixture.physical.candidates[candidate.0].properties.timing() == ExecutionTiming::IngestionTime
+            fixture.physical.candidates[candidate.0].properties.timing()
+                == ExecutionTiming::IngestionTime
                 && fixture
                     .physical
                     .physical_node(candidate)
@@ -803,7 +807,7 @@ fn a_stateless_subtree_two_state_nodes_read_runs_once() {
 
 // "Used only if read": a query context may not select a shareable
 // candidate no used reader there reads, so a phantom read cannot satisfy
-// `MinimumQueryReaders`. With every reader of a two-reader `MatAtQuery`
+// `MinimumQueryReaders`. With every reader of a two-reader `OneEvaluation`
 // result in the second query's context forbidden, selecting it is
 // infeasible.
 #[test]
@@ -858,7 +862,7 @@ fn a_phantom_reader_does_not_satisfy_minimum_query_readers() {
     );
 }
 
-// A `NotMaterialized` query-time candidate selected in two contexts is two
+// A not-kept query-time candidate selected in two contexts is two
 // nodes; a shareable candidate two queries read is one node.
 #[test]
 fn runs_decode_one_node_per_context_and_one_per_shareable_candidate() {

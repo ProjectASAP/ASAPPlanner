@@ -835,8 +835,7 @@ pub fn generate_per_computation_candidates(
                 if !seen.insert(Rc::as_ptr(&node)) {
                     continue;
                 }
-                if node.timing.is_some() || node.lifetime != Lifetime::None
-                {
+                if node.timing.is_some() || node.lifetime != Lifetime::None {
                     return Err(PerComputationCandidateError::AssignedPhysicalAnnotation);
                 }
                 for child in node.children() {

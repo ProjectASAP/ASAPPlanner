@@ -111,9 +111,9 @@ use asap_types::ir::operator::operator_properties::{GroupKeys, Reduction, Source
 use asap_types::ir::properties::timing::{
     apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
 };
+use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::{ColumnId, DataType, Field, Schema};
 use asap_types::ir::{NonASAPOp, Predicate, ScalarExpr, TimeRangeKind};
-use asap_types::ir::properties::ExecutionTiming;
 use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
 
 /// A `TimeSeries("m")` scan over `[ts(0), value(1), labels...]`, time index 0,
@@ -221,7 +221,7 @@ pub fn time_range(range: Duration, child: Rc<OperatorNode>) -> Rc<OperatorNode> 
     .unwrap()
 }
 
-/// `root` timed under the default (every sub-DAG `NotMaterialized`)
+/// `root` timed under the default (every sub-DAG not kept)
 /// assignment — the shape export and the post-ASAP validators consume.
 pub fn timed(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
     apply_materialization_timings(
@@ -232,7 +232,7 @@ pub fn timed(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
     .expect("default materialization timings apply")
 }
 
-/// `root` timed with every sub-DAG `MatAtIngestion` where the DAG allows it.
+/// `root` timed with every sub-DAG kept at ingestion time where the DAG allows it.
 pub fn at_ingestion(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
     apply_materialization_timings(
         root,

@@ -20,10 +20,10 @@
 //!   contradiction, refused as bad input ([`DeploymentCapabilities::validate`]);
 //! * whether query-time results are retained across evaluations. If they
 //!   are, Stage 2 also offers a tumbling-window chain whose readers evaluate
-//!   together at its tumbling-window width as `MatAtQueryKeptAcrossEvaluations`: each
+//!   together at its tumbling-window width as query-time `AcrossEvaluations`: each
 //!   evaluation builds one new tumbling window and keeps the others for the next ones,
 //!   covering the readers' longest look-back. A chain two or more queries
-//!   read keeps its `MatAtQuery` option too (shared within one evaluation),
+//!   read keeps its `OneEvaluation` option too (shared within one evaluation),
 //!   and Stage 3 picks the cheaper. If they are not, a query-time result is
 //!   reused only within one evaluation.
 //!
@@ -53,7 +53,7 @@ pub struct DeploymentCapabilities {
     /// Whether raw data samples are kept for query-time scans; default `true`.
     pub raw_data_retained: bool,
     /// Whether a query-time result may be kept across evaluations
-    /// (`MatAtQueryKeptAcrossEvaluations`); default `false`.
+    /// (query-time `AcrossEvaluations`); default `false`.
     pub query_time_results_retained: bool,
 }
 

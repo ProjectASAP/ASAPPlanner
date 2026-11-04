@@ -252,7 +252,7 @@ pub(crate) struct CandidateUsage {
     pub(crate) peak_memory_bytes: u64,
     pub(crate) disk_bytes: u64,
     /// Query-time memory held while an evaluation reading it runs (a
-    /// `MatAtQuery` state, or a not-materialized node's working memory).
+    /// `OneEvaluation` state, or a not-materialized node's working memory).
     pub(crate) held_bytes: u64,
     /// Raw data a query-time scan keeps on disk.
     pub(crate) raw_data_kept_bytes: u64,
@@ -685,7 +685,7 @@ pub(crate) enum ContextKind {
 
 /// Which ingestion pipeline `I_r` (#1095 §2.5 O3(b)): the deployment
 /// refreshes the ingestion-time views of one refresh window in one run, so
-/// `asap_cost::execution_demand::computations` charges a `NotMaterialized`
+/// `asap_cost::execution_demand::computations` charges a not-kept
 /// ingestion-time node once per refresh window of the views reading it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum IngestionPipeline {
@@ -722,7 +722,8 @@ fn refresh_windows(
         .map(PhysicalCandidateId)
         .filter(|&class| {
             links.is_shareable(class)
-                && physical.candidates[class.0].properties.timing() == ExecutionTiming::IngestionTime
+                && physical.candidates[class.0].properties.timing()
+                    == ExecutionTiming::IngestionTime
         })
         .collect();
     let dag = dag_below(physical, links, &views);
@@ -957,7 +958,8 @@ pub(crate) fn execution_contexts(
         }
         pending.sort_unstable();
         for class in pending {
-            let at_query_time = physical.candidates[class.0].properties.timing() == ExecutionTiming::QueryTime;
+            let at_query_time =
+                physical.candidates[class.0].properties.timing() == ExecutionTiming::QueryTime;
             let mut context = ExecutionContext {
                 kind: ContextKind::Shared(class),
                 at_query_time,
@@ -2097,8 +2099,7 @@ pub(crate) fn prune_dominated_candidates(
 ) -> Vec<DominatedCandidate> {
     // Only candidates with equal keys can dominate each other.
     let mut buckets: Vec<Vec<usize>> = Vec::new();
-    let mut bucket_of_key: HashMap<(MemoGroupId, PhysicalProperties), Vec<usize>> =
-        HashMap::new();
+    let mut bucket_of_key: HashMap<(MemoGroupId, PhysicalProperties), Vec<usize>> = HashMap::new();
     for (class, profile) in profiles.iter().enumerate() {
         let candidates = bucket_of_key
             .entry((profile.same.group, profile.same.properties))

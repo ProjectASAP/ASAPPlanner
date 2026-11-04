@@ -145,8 +145,7 @@ fn validate_candidates(physical: &PhysicalASAPMemoCandidates) -> Result<(), Stri
 #[cfg(feature = "test-support")]
 pub mod test_support {
     pub use super::configurations::{
-        enumerate_candidate_configurations,
-        may_keep_across_evaluations_per_sole_reader_query,
+        enumerate_candidate_configurations, may_keep_across_evaluations_per_sole_reader_query,
     };
     pub use super::factoring::{
         factor_terminal_readers, MemoGroupOutputKey, MemoGroupOutputToCompatibleProducersCache,

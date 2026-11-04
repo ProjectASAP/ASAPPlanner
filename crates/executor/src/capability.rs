@@ -230,7 +230,7 @@ pub(crate) fn hydra_cms_shape(
 /// none of the query's columns for the filter predicate to read, so only a
 /// query-time build can apply it. The ingestion-time compiler and the
 /// binding of any ingestion-timed `SummaryAgg` apply this check. The planner
-/// applies the same rule: Stage 2 never offers `MatAtIngestion` for a
+/// applies the same rule: Stage 2 never offers keeping at ingestion time for a
 /// filtered build (`IngestionPruneReason::Filtered`), and materialization
 /// timing rejects an explicit one (`FilteredSummaryAtIngestion`). This check
 /// guards plans that did not come from the planner.

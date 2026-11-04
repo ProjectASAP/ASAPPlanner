@@ -354,7 +354,7 @@ pub enum ReferencePlanError {
 impl PhysicalASAPDAG {
     /// This DAG's plan with nothing materialized: the same operators,
     /// summaries and summary parameters, with every sub-DAG
-    /// `NotMaterialized` and so every node at query time (the default
+    /// not kept and so every node at query time (the default
     /// [`MaterializationAssignment`]). Node ids are renumbered, and `roots`
     /// and `scalar_roots` keep their order.
     ///
@@ -371,7 +371,7 @@ impl PhysicalASAPDAG {
     }
 
     /// Every node of this DAG as IR, by node id, untimed and
-    /// `NotMaterialized` with its exported guarantee: what a caller derives
+    /// not kept with its exported guarantee: what a caller derives
     /// IR properties of a plan file's node from, such as its
     /// [`SummaryCoverage`](crate::ir::properties::summary_coverage::SummaryCoverage).
     /// Shared inputs stay shared. Validates the DAG first.
@@ -570,7 +570,7 @@ impl PhysicalASAPDAG {
     }
 
     /// The IR this DAG exports, one root per query in batch order, every
-    /// node untimed and `NotMaterialized`: the inverse of
+    /// node untimed and not kept: the inverse of
     /// [`compile_physical_asap_workload`] up to `Rc` identity and timing.
     #[cfg(any(test, feature = "test-support"))]
     fn untimed_query_roots(&self) -> Result<Vec<QueryRoot>, PhysicalASAPDAGValidationError> {

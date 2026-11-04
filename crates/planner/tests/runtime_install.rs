@@ -25,13 +25,13 @@ use asap_planner::{
     SelectionBox, Stage1ToStage3Pass, UserInput,
 };
 use asap_types::ir::operator::Source;
+use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams};
 use asap_types::ir::{
     apply_materialization_timings_to_roots, ASAPOp, MaterializationAssignment, OperatorNode,
     QueryRoot,
 };
-use asap_types::ir::properties::ExecutionTiming;
 use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
 use asap_types::stages::HowToComputeAggregateMeasure;
 use asap_types::stages::PruneReason;

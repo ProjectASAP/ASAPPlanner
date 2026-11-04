@@ -918,11 +918,11 @@ fn kept_builds_match_fresh_builds_of(roots: Vec<QueryRoot>) -> MilpInputs {
 ///   refresh window, (10 s, 0));
 /// - 5: a KLL over `TimeRange(60 s)`, window (60 s, 0);
 /// - 8: a KLL over `TimeRange(10 s)` over `TimeShift(5 s)`, window
-///   (10 s, 5 s), through two `NotMaterialized` ingestion-time nodes;
+///   (10 s, 5 s), through two not-kept ingestion-time nodes;
 /// - 9: a KLL over the whole scan, an unbounded window.
 ///
 /// Candidates 0, 1, 4, 6 and 7 (the scan, ranges and shift) are
-/// `NotMaterialized` at ingestion time; 10–14 are the query-time readers.
+/// not kept, at ingestion time; 10–14 are the query-time readers.
 fn ingestion_views_of_three_windows_and_an_unbounded_one() -> PhysicalASAPMemoCandidates {
     use asap_types::ir::operator::{Reduction, Source, TimeShift};
     use asap_types::ir::scalar::ColumnRef;
@@ -1035,7 +1035,7 @@ fn ingestion_views_of_three_windows_and_an_unbounded_one() -> PhysicalASAPMemoCa
 
 // One `I_r` per refresh window: the two views over `TimeRange(10 s)` share
 // one; the 60 s view and the shifted 10 s view (window (10 s, 5 s), through
-// a `NotMaterialized` shift and range) have their own; the unbounded view
+// a not-kept shift and range) have their own; the unbounded view
 // gets an `Alone` one. Each `I_r` holds the scan and the stateless nodes
 // below its views, and each view's context reads across into its `I_r`.
 #[test]

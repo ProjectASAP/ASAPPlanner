@@ -392,14 +392,13 @@ fn exports_summary_over_summary_as_typed_precompute_edges() {
     }))
     .unwrap();
     let mut cache = NodeToTimedNodeCache::new();
-    let at_ingestion =
-        MaterializationAssignment::with_default(
-            PhysicalProperties::new(
-                ExecutionTiming::IngestionTime,
-                Lifetime::AcrossEvaluations(Medium::Memory),
-            )
-            .ok(),
-        );
+    let at_ingestion = MaterializationAssignment::with_default(
+        PhysicalProperties::new(
+            ExecutionTiming::IngestionTime,
+            Lifetime::AcrossEvaluations(Medium::Memory),
+        )
+        .ok(),
+    );
     let timed = apply_materialization_timings(&root, &at_ingestion, &mut cache).unwrap();
     let compiled = compile_physical_asap_dag_with_node_ids(&timed).unwrap();
     assert_eq!(compiled.node_ids.node_id(&timed), Some(3));

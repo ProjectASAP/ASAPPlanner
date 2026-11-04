@@ -46,15 +46,14 @@ decided by a `MaterializationAssignment`, as the layer contract below states.
 1. **Logical Post-ASAP** (`CandidateLogicalASAPDAGs`) decides what to compute: summary
    families, readouts and sharing. It does not decide placement; timing that a
    realization strategy writes while building a candidate is provisional.
-2. **Materialization** (Stage 2, #509) chooses `NotMaterialized`,
-   `MatAtIngestion(medium)`, `MatAtQuery(medium)` or
-   `MatAtQueryKeptAcrossEvaluations(medium)` for each sub-DAG whose
-   output may be stored (a `SummaryAgg` or a `MaintainPopulation`) and records
-   it in a `MaterializationAssignment`. `apply_materialization_timings` writes
-   every node's `ExecutionTiming` and `Materialization`: a `MatAtIngestion`
-   state and all of its inputs run at ingestion time; readouts, other
-   consumers, and the other states run at query time. The default assignment
-   is `NotMaterialized` everywhere; `PlanOutput::physical_asap_dag` applies it
+2. **Materialization** (Stage 2, #509) chooses, for each sub-DAG whose
+   output may be stored (a `SummaryAgg` or a `MaintainPopulation`), whether
+   it is kept and with which timing and `Lifetime` (`None`,
+   `OneEvaluation(medium)` or `AcrossEvaluations(medium)`), and records it in
+   a `MaterializationAssignment`. `apply_materialization_timings` writes every
+   node's `ExecutionTiming` and `Lifetime`: a state kept at ingestion time and
+   all of its inputs run at ingestion time; readouts, other consumers, and the
+   other states run at query time. The default assignment keeps nothing; `PlanOutput::physical_asap_dag` applies it
    only to nodes the optimization pass left untimed (a pass's own timing, such
    as Stage 3's ingestion-time tumbling windows, is kept).
 3. **Physical compile** (executor) reads the plan's materialized views: each
@@ -473,8 +472,8 @@ These derivations are methods on `PhysicalASAPDAG` in `asap-types`, so a
 runtime needs no dependency on the planner crate.
 
 A **materialized view** is a node whose output is kept across evaluations
-(`MatAtIngestion` or `MatAtQueryKeptAcrossEvaluations`). A `MatAtQuery` node is
-not a view: its output is discarded after one evaluation. Everything a runtime
+(lifetime `AcrossEvaluations`, at ingestion or at query time). A node kept for
+`OneEvaluation` is not a view: its output is discarded after one evaluation. Everything a runtime
 needs that the DAG determines is derived from the DAG, so the plan file has no
 second copy to keep consistent. Stage 3's selection report is returned beside
 the plan, not inside it.

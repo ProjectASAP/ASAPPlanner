@@ -58,8 +58,8 @@ fn cost(w: &FuzzWorkload) -> f64 {
 }
 
 /// #923: deriving the coarse sum costs only a sum over the 150 fine groups.
-/// Stage 2 offers that plan; Stage 3 keeps a `MatAtQuery` build whose
-/// `NotMaterialized` sibling would avoid a second scan (#1142).
+/// Stage 2 offers that plan; Stage 3 keeps a `OneEvaluation` build whose
+/// not-kept sibling would avoid a second scan (#1142).
 #[test]
 #[ignore = "Stage 3 misses the cheaper plan Stage 2 offers (#1142)"]
 fn exact_coarse_sum_reuses_fine_sum() {

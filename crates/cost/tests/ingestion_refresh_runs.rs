@@ -1,4 +1,4 @@
-//! How often a `NotMaterialized` node is computed for the views refreshed
+//! How often a not-kept node is computed for the views refreshed
 //! at ingestion above it ([`computations`]): once per refresh window, since
 //! a runtime refreshes the views of one refresh window in one ingestion run
 //! (issue #1151).
@@ -9,6 +9,7 @@ use std::time::Duration;
 use asap_cost::execution_demand::computations;
 use asap_types::ir::operator::operator_properties::{Reduction, Source, TimeShift};
 use asap_types::ir::physical_export::{compile_physical_asap_workload, PhysicalASAPDAG};
+use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{
     DataType, Field, FieldDataType, GroupingStrategy, Schema, SketchAlgorithm, SketchKind,
@@ -18,7 +19,6 @@ use asap_types::ir::{
     apply_materialization_timings_to_roots, ASAPOp, MaterializationAssignment, NonASAPOp, Operator,
     OperatorNode, QueryRoot, TimeRangeKind,
 };
-use asap_types::ir::properties::ExecutionTiming;
 use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
 use asap_types::workload::{QueryRecurrence, RepeatedDemand, RepetitionInterval};
 
@@ -175,7 +175,7 @@ fn a_scan_under_chains_of_two_tumbling_window_widths_is_computed_for_each() {
 }
 
 /// Query consumers are unchanged: with both chains built at query time
-/// (`NotMaterialized`), each query computes the `Scan` at its own rate.
+/// (not kept), each query computes the `Scan` at its own rate.
 #[test]
 fn query_consumers_still_count_once_each() {
     let scan = scan();

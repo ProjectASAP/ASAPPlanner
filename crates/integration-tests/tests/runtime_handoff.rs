@@ -62,10 +62,7 @@ async fn plan(workload: &PlanningWorkload, capabilities: &DeploymentCapabilities
 }
 
 fn materialized_count(dag: &PhysicalASAPDAG) -> usize {
-    dag.nodes
-        .iter()
-        .filter(|n| n.lifetime.is_kept())
-        .count()
+    dag.nodes.iter().filter(|n| n.lifetime.is_kept()).count()
 }
 
 /// Without raw data Stage 3 selects ingestion-time tumbling windows; the facade's

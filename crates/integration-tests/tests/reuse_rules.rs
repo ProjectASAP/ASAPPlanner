@@ -191,7 +191,7 @@ fn candidates_of<'a>(
 /// group on its first candidate (`group`), and `variant{i}` per entry of
 /// `variants`, a group's candidate index each. Returns the selected plan's
 /// name, its roots, whether it builds some computation once per evaluation
-/// for all its readers (`MatAtQuery`), and the selection's lowest prices of
+/// for all its readers (`OneEvaluation`), and the selection's lowest prices of
 /// `group` and of every variant.
 fn select(
     memo: &Memo,
@@ -304,7 +304,7 @@ fn shared_kinds(roots: &[Rc<OperatorNode>]) -> BTreeSet<String> {
 /// queries, among the queries' own roots and the plans reading `origin`
 /// candidates (the `i`-th of each group that has some, together). Stage 2
 /// offers each computation two queries read built once per evaluation
-/// (`MatAtQuery`); the reuse plan is selected and is cheaper than without it.
+/// (`OneEvaluation`); the reuse plan is selected and is cheaper than without it.
 fn selected_reuse(queries: &[&str], origin: OriginOfCandidateForMemoGroup) -> BTreeSet<String> {
     let memo = memo(&exact_queries(queries), repeating());
     let mut by_group: BTreeMap<usize, Vec<usize>> = BTreeMap::new();

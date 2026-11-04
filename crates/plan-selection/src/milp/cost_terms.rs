@@ -34,7 +34,7 @@
 //!
 //! **Held memory**: working memory of a run in query context `q` for `q`'s
 //! latency at `q`'s rate (`H_query ≥ L[q] − L̄[q] (1 − indicator)`); `m`'s
-//! `MatAtQuery(Memory)` result and the working memory of the runs in its
+//! `OneEvaluation(Memory)` result and the working memory of the runs in its
 //! context until `m`'s slowest reader finishes (`H[m] ≥ L[q] − L̄[q] (1 −
 //! a[q, m])`, then `W ≥ H[m] − H̄[m] (slack − Σ indicators)` per rate
 //! component).
@@ -693,7 +693,8 @@ fn pane_retention_terms(
         let mut indicators = Vec::new();
         if let Some(&reach) = milp.reach.get(&(query, chain)) {
             if at_query_time
-                || milp.physical.candidates[chain.0].properties.timing() == ExecutionTiming::QueryTime
+                || milp.physical.candidates[chain.0].properties.timing()
+                    == ExecutionTiming::QueryTime
             {
                 indicators.push(Expression::from(reach));
                 reached.push((query, indicators));
@@ -776,7 +777,9 @@ pub(crate) fn compaction_ms(milp: &mut SelectionMilp<'_>) -> HashMap<PhysicalCan
     let inputs = milp.inputs;
     let mut compaction = HashMap::new();
     for &shareable in inputs.context_of_shareable.keys() {
-        if milp.physical.candidates[shareable.0].properties.timing() != ExecutionTiming::IngestionTime {
+        if milp.physical.candidates[shareable.0].properties.timing()
+            != ExecutionTiming::IngestionTime
+        {
             continue;
         }
         let mut seen = BTreeSet::new();

@@ -22,13 +22,13 @@ use asap_logical_asap_optimization::test_support::{
 use asap_types::ir::operator::operator_properties::TimeShift;
 use asap_types::ir::operator::tumbling_window_chain::expand_tumbling_window_chains;
 use asap_types::ir::physical_export::PhysicalASAPDAG;
+use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
 use asap_types::ir::schema::Schema;
 use asap_types::ir::{
     apply_materialization_timings, ASAPOp, MaterializationAssignment, NodeToTimedNodeCache,
     NonASAPOp, Operator, OperatorNode, QueryRoot,
 };
-use asap_types::ir::properties::ExecutionTiming;
 use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
 use asap_types::test_support::compile_physical_asap_dag_with_node_ids;
 
@@ -270,7 +270,7 @@ fn execute(root: &Rc<OperatorNode>, samples: &[RawDataSample]) -> Vec<Vec<Value>
     run(&plan, raw_store(&exported.dag, samples), query_scope())
 }
 
-/// Build the tumbling windows in ingestion runs (stored `MatAtIngestion`, each with its
+/// Build the tumbling windows in ingestion runs (kept at ingestion time, each with its
 /// own build timestamp), then merge them in the query run (Pattern B1).
 fn execute_retained(
     root: &Rc<OperatorNode>,

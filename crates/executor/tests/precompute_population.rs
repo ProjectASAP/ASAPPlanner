@@ -30,7 +30,7 @@ fn logical_schema(family: FieldDataType) -> Schema {
         time_index: None,
     }
 }
-/// The stored state at node 0 (`MatAtIngestion`): a global `family`
+/// The stored state at node 0 (kept at ingestion time): a global `family`
 /// `SummaryAgg` over a minute of raw `m` samples (`Scan` node `scan`,
 /// `TimeRange` node `scan + 1`).
 fn view_over_samples(

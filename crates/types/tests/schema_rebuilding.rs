@@ -333,7 +333,7 @@ fn a_current_series_population_matches_only_its_selectors_lookback() {
 }
 
 /// Population timing is a materialization choice: the population follows its
-/// assignment (`NotMaterialized` by default), while its evaluation always
+/// assignment (not kept by default), while its evaluation always
 /// runs at query time.
 #[test]
 fn population_timing_follows_its_materialization() {
@@ -357,7 +357,11 @@ fn population_timing_follows_its_materialization() {
         PhysicalProperties::new(IngestionTime, on_disk).ok(),
     );
     for (assignment, timing, lifetime) in [
-        (MaterializationAssignment::default(), QueryTime, Lifetime::None),
+        (
+            MaterializationAssignment::default(),
+            QueryTime,
+            Lifetime::None,
+        ),
         (at_ingestion, IngestionTime, on_disk),
     ] {
         let timed = apply_materialization_timings(

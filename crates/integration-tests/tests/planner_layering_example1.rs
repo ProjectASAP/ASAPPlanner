@@ -564,7 +564,7 @@ fn stage2_physical_asap_optimization_summary_topk_is_build_then_estimate() {
 /// chain is maintained or not independently: a logical candidate with `c`
 /// chains has `2^c` physical candidates. A shared input (the highest node
 /// both queries read: the scan, or the time range above it) is also built
-/// once per evaluation (`MatAtQuery`), which adds one candidate: the one
+/// once per evaluation (`OneEvaluation`), which adds one candidate: the one
 /// with every chain at query time, since a chain maintained at ingestion
 /// time leaves one query reading the input at query time.
 #[test]
@@ -723,11 +723,11 @@ fn stage3_plan_selection_count_min_needs_the_counter_declaration() {
     );
 }
 
-/// A shared NotMaterialized input is charged once per consumer, and both
+/// A shared not-kept input is charged once per consumer, and both
 /// queries read the same 1 m window, so the shared-input candidates cost
 /// what the independent one does; their totals differ from it only by
 /// floating-point rounding (the same charges summed in another grouping).
-/// Built once per evaluation (`MatAtQuery`), the shared input is read once:
+/// Built once per evaluation (`OneEvaluation`), the shared input is read once:
 /// the shared time range (the doc's "Raw with a shared input") is selected,
 /// at 4.38 instead of 7.01 per second.
 #[test]
@@ -817,7 +817,7 @@ fn stage3_plan_selection_selects_cheapest_valid() {
 }
 
 /// Every node of a valid candidate is charged once per consumer that reads
-/// it: a shared `NotMaterialized` node is recomputed for each query, and a
+/// it: a shared not-kept node is recomputed for each query, and a
 /// materialized one is computed once.
 #[test]
 fn stage3_plan_selection_charges_each_node_per_consuming_query() {
@@ -825,7 +825,7 @@ fn stage3_plan_selection_charges_each_node_per_consuming_query() {
 }
 
 /// A hand-built candidate with a materialized node: Q1's plan read by two
-/// queries, its `time_range` kept `MatAtQuery`. Plan selection charges the
+/// queries, its `time_range` kept `OneEvaluation`. Plan selection charges the
 /// two accumulators (rate, sum) and their finalizations twice, once per query; the walks from
 /// both roots stop at the materialized `time_range`, which is computed once
 /// and reads the scan once.

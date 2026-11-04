@@ -21,9 +21,9 @@ use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_plan_selection::reference_pricer::WholePlanSelection as Selection;
 use asap_types::ir::flat::{flatten, FlatDag, NodeId};
 use asap_types::ir::physical_export::PhysicalASAPDAG;
+use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot};
-use asap_types::ir::properties::ExecutionTiming;
 use asap_types::physical::Lifetime;
 use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::workload::{PlanningWorkload, QueryRecurrence, RepeatedDemand};
@@ -772,10 +772,10 @@ pub fn assert_each_node_charged_per_consuming_query(run: &Run) {
 
 /// How many times each node is computed per evaluation of its consumers (#509; the
 /// rule of plan selection's private `computations`): 1 for a materialized
-/// node; for a `NotMaterialized` one, the number of consumers that reach
+/// node; for a not-kept one, the number of consumers that reach
 /// it. A consumer is a query (operator or scalar root) or a materialized
 /// node, whose walk starts at its inputs; a walk stops at materialized
-/// nodes and counts each node once. The `MatAtIngestion` consumers of one
+/// nodes and counts each node once. The consumers kept at ingestion time of one
 /// refresh window share one ingestion run and count once (#1151).
 pub fn computations(dag: &PhysicalASAPDAG) -> BTreeMap<NodeId, u64> {
     let materialized: BTreeSet<_> = dag
@@ -796,7 +796,13 @@ pub fn computations(dag: &PhysicalASAPDAG) -> BTreeMap<NodeId, u64> {
                 .map(|(_, expr)| (expr.operator_refs().into_iter().copied().collect(), None)),
         )
         .chain(materialized.iter().map(|&id| {
-            let at_ingestion = dag.nodes.iter().find(|n| n.id == id).unwrap().output_state.timing
+            let at_ingestion = dag
+                .nodes
+                .iter()
+                .find(|n| n.id == id)
+                .unwrap()
+                .output_state
+                .timing
                 == ExecutionTiming::IngestionTime;
             let window = at_ingestion.then(|| dag.refresh_window(id)).flatten();
             (dag.producers(id), window)
@@ -842,7 +848,7 @@ pub enum MaterializationOption {
     /// Runs as data arrives; output stored before any query asks.
     MatAtIngestion,
     /// Runs when a query first needs it; output reused by the other
-    /// queries of the evaluation, or, as `MatAtQueryKeptAcrossEvaluations`,
+    /// queries of the evaluation, or, as query-time `AcrossEvaluations`,
     /// kept for later evaluations.
     MatAtQuery,
     /// Runs at query time for each execution; output discarded.

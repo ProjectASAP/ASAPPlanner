@@ -15,6 +15,7 @@ use asap_types::ir::operator::TimeShift;
 use asap_types::ir::physical_export::{
     compile_physical_asap_dag, compile_physical_asap_workload, PhysicalASAPDAG,
 };
+use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{
     DataType, Field, FieldDataType, GroupingStrategy, Schema, SketchAlgorithm, SketchKind,
@@ -25,7 +26,6 @@ use asap_types::ir::{
     MaterializationAssignment, NodeToTimedNodeCache, NonASAPOp, Operator, OperatorNode, QueryRoot,
     TimeRangeKind,
 };
-use asap_types::ir::properties::ExecutionTiming;
 use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
 
 /// A KLL of `m`'s values over `(T - shift - 1 min, T - shift]`.
@@ -97,7 +97,11 @@ fn tumbling_windows_and_kept_merge() -> (PhysicalASAPDAG, usize) {
     for tumbling_window in &tumbling_windows {
         assignment.set(
             tumbling_window,
-            PhysicalProperties::new(ExecutionTiming::IngestionTime, Lifetime::AcrossEvaluations(Medium::Memory)).ok(),
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .ok(),
         );
     }
     assignment.set(
@@ -238,7 +242,14 @@ fn three_chains_over_one_scan() -> (PhysicalASAPDAG, PhysicalASAPDAG) {
     let roots: Vec<QueryRoot> = chains
         .iter()
         .map(|chain| {
-            assignment.set(chain, PhysicalProperties::new(ExecutionTiming::IngestionTime, Lifetime::AcrossEvaluations(Medium::Memory)).ok());
+            assignment.set(
+                chain,
+                PhysicalProperties::new(
+                    ExecutionTiming::IngestionTime,
+                    Lifetime::AcrossEvaluations(Medium::Memory),
+                )
+                .ok(),
+            );
             QueryRoot::Operator(
                 OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
                     children: vec![Rc::clone(chain)],
@@ -375,7 +386,11 @@ fn a_shifted_tumbling_window_has_its_own_phase() {
     for tumbling_window in &tumbling_windows {
         assignment.set(
             tumbling_window,
-            PhysicalProperties::new(ExecutionTiming::IngestionTime, Lifetime::AcrossEvaluations(Medium::Memory)).ok(),
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .ok(),
         );
     }
     let roots: Vec<QueryRoot> = tumbling_windows
@@ -420,7 +435,14 @@ fn views_of_unbounded_windows_are_groups_of_their_own() {
                 filter: None,
             }))
             .unwrap();
-            assignment.set(&build, PhysicalProperties::new(ExecutionTiming::IngestionTime, Lifetime::AcrossEvaluations(Medium::Memory)).ok());
+            assignment.set(
+                &build,
+                PhysicalProperties::new(
+                    ExecutionTiming::IngestionTime,
+                    Lifetime::AcrossEvaluations(Medium::Memory),
+                )
+                .ok(),
+            );
             QueryRoot::Operator(build)
         })
         .collect();
@@ -450,7 +472,14 @@ fn a_view_reading_a_view_of_its_group_follows_it() {
     .unwrap();
     let mut assignment = MaterializationAssignment::default();
     for view in [&tumbling_window, &rollup] {
-        assignment.set(view, PhysicalProperties::new(ExecutionTiming::IngestionTime, Lifetime::AcrossEvaluations(Medium::Memory)).ok());
+        assignment.set(
+            view,
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .ok(),
+        );
     }
     let timed = apply_materialization_timings_to_roots(
         &[QueryRoot::Operator(Rc::clone(&rollup))],
@@ -502,7 +531,14 @@ fn a_node_above_an_unexpanded_chain_has_the_window_of_its_tumbling_windows() {
 fn a_view_has_its_refresh_window_on_a_dag_without_edges() {
     let view = tumbling_window(&scan_m(), 15_000);
     let mut assignment = MaterializationAssignment::default();
-    assignment.set(&view, PhysicalProperties::new(ExecutionTiming::IngestionTime, Lifetime::AcrossEvaluations(Medium::Memory)).ok());
+    assignment.set(
+        &view,
+        PhysicalProperties::new(
+            ExecutionTiming::IngestionTime,
+            Lifetime::AcrossEvaluations(Medium::Memory),
+        )
+        .ok(),
+    );
     let timed = apply_materialization_timings(&view, &assignment, &mut NodeToTimedNodeCache::new())
         .unwrap();
     let mut dag = compile_physical_asap_dag(&timed).unwrap();

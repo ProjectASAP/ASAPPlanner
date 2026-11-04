@@ -94,8 +94,8 @@ pub fn plan_cost(
     // Each node's work in ms on one core: one computation at query time,
     // one second of arriving rows at ingestion time.
     let mut work_ms: HashMap<PhysicalASAPNodeId, f64> = HashMap::new();
-    // Query-time memory held only while one evaluation runs, a MatAtQuery
-    // state in memory or a NotMaterialized node's working memory: (bytes,
+    // Query-time memory held only while one evaluation runs, a OneEvaluation
+    // state in memory or a not-kept node's working memory: (bytes,
     // per second, whether each consumer computes its own copy),
     // counted once the evaluations' latencies are known, in node order so
     // the sum is the same in every run.
@@ -246,13 +246,13 @@ pub fn plan_cost(
     for (latency, evaluation_ms) in latency.iter_mut().zip(evaluation_ms_per_query) {
         latency.query_ms += evaluation_ms;
     }
-    // Query-time memory is held for one evaluation: a MatAtQuery state from
+    // Query-time memory is held for one evaluation: a `OneEvaluation` state from
     // its build until the longest query reading it finishes, about that
-    // query's latency, once per execution. A NotMaterialized node's working
+    // query's latency, once per execution. A not-kept node's working
     // memory is computed once per consumer ([`consumers`]), and each copy is
     // held while its consumer's evaluation runs: a query's for that query's
     // latency, at its rate; a materialized node's until the longest query
-    // reading that node finishes, at the node's rate, as its MatAtQuery
+    // reading that node finishes, at the node's rate, as its `OneEvaluation`
     // state is.
     let longest_reader_ms = |id: PhysicalASAPNodeId| {
         reach
@@ -1128,7 +1128,7 @@ pub fn node_usage<'a>(
     // consumer that recomputes it; at query time, that is held for the
     // evaluation too (counted in [`plan_cost`], per consumer: a query's
     // latency, or a materialized consumer's longest reader's, as a
-    // MatAtQuery state is).
+    // OneEvaluation state is).
     let state = out.bytes.max(estimate.peak_memory_bytes());
     let (kept, medium) = match (ingestion, node.lifetime, &node.payload) {
         (_, Lifetime::None, _) => {

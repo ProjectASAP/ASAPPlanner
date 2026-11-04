@@ -1198,21 +1198,26 @@ the `DataWorkload`. Typical outcomes:
 
 A shared summary is materialized once for all its consumers. See Example 4.
 
-The planner implements a subset of these options today. Stage 2 enumerates
+The planner implements a subset of these options today. In code each option
+is a timing and a lifetime (`PhysicalProperties`, #1200): materialized at
+ingestion time is ingestion time with lifetime `AcrossEvaluations`;
+materialized at query time is query time with lifetime `OneEvaluation`
+(reused within one evaluation) or `AcrossEvaluations` (kept for later
+evaluations); not materialized is lifetime `None`. Stage 2 enumerates
 materialization for summary builds (`SummaryAgg` and `SummaryTumblingWindowChain`); each
-gets `NotMaterialized`, `MatAtIngestion(Memory)` when it is eligible to run
-at ingestion time, and `MatAtQuery(Memory)` when two or more queries read
-it. Of every other sub-DAG that two or more queries read (for example a
-`Scan` that a 1 m and a 5 m window both read), only the highest node is a
-materialization candidate: one that a query's output, or a node only one
-query reads, consumes. It gets `NotMaterialized` and `MatAtQuery(Memory)`
-only, since raw rows are not maintained at ingestion time. Below an
-ingestion-time build it stays `NotMaterialized`: the ingestion side reads
-its own copy. A `MatAtQuery` state is reused within one evaluation only. When the
-deployment's capabilities declare `query_time_results_retained`, a
-tumbling-window chain that builds exactly one new tumbling window per evaluation also gets
-`MatAtQueryKeptAcrossEvaluations(Memory)`: the tumbling windows built at query time are
-kept for the next evaluations. Nothing is placed on disk yet.
+is offered not kept, kept at ingestion time `AcrossEvaluations(Memory)` when
+it is eligible to run at ingestion time, and kept at query time
+`OneEvaluation(Memory)` when two or more queries read it. Of every other
+sub-DAG that two or more queries read (for example a `Scan` that a 1 m and a
+5 m window both read), only the highest node is a materialization candidate:
+one that a query's output, or a node only one query reads, consumes. It is
+offered not kept and `OneEvaluation(Memory)` only, since raw rows are not
+maintained at ingestion time. Below an ingestion-time build it stays not
+kept: the ingestion side reads its own copy. When the deployment's
+capabilities declare `query_time_results_retained`, a tumbling-window chain
+that builds exactly one new tumbling window per evaluation is also offered
+query time `AcrossEvaluations(Memory)`: the tumbling windows built at query
+time are kept for the next evaluations. Nothing is placed on disk yet.
 
 A runtime builds every ingestion-time state on the grid of its width anchored
 at the epoch, so an ingestion-time build must end on that grid at every

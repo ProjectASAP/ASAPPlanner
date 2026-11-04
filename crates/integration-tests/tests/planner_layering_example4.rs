@@ -261,7 +261,7 @@ fn stage2_physical_asap_optimization_a_materialized_eh_is_built_once_for_all_con
 }
 
 /// A3 rebuilds the EH for each of the five queries (plan selection charges a
-/// `NotMaterialized` node once per consuming query), so it costs more than A1,
+/// not-kept node once per consuming query), so it costs more than A1,
 /// which builds it once.
 #[test]
 #[ignore = "needs Pass 2 window segments shared across queries (#628, #634); Stage 2 materialization (MatAtQuery within one batch) is in place"]

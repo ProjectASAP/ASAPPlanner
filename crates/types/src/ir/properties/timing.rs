@@ -45,13 +45,13 @@
 //!
 //! | Consumer | Accepts from an input |
 //! |---|---|
-//! | `SummaryAgg.child`, `SummaryTumblingWindowChain.child` | Rows, or exact-accumulator state, never a query-time value when the state is maintained; a query-time build reads an ingestion-time input (rows or exact-accumulator state) only as a `MatAtIngestion` input's stored output |
+//! | `SummaryAgg.child`, `SummaryTumblingWindowChain.child` | Rows, or exact-accumulator state, never a query-time value when the state is maintained; a query-time build reads an ingestion-time input (rows or exact-accumulator state) only as a kept at ingestion time input's stored output |
 //! | `SummaryEstimate.summary_input` | Summary state at either timing |
 //! | `SummaryMerge.children` | Summary state at either timing; at ingestion time only for a merge at ingestion time |
 //! | `FinalizeExactAccumulator.child` | Exact-accumulator state |
 //! | `EvaluatePopulation.child` | A timed `MaintainPopulation` |
-//! | `MaintainPopulation.child` | Rows at its own timing matching the population's input; unlike a `NonASAP` consumer, a query-time population does not read a `MatAtIngestion` input's stored output |
-//! | any `NonASAP` consumer | Rows (or exact-accumulator state for a projection-like operator) at the consumer's own timing, or a `MatAtIngestion` output read at query time; ingestion work never reads a query-time value |
+//! | `MaintainPopulation.child` | Rows at its own timing matching the population's input; unlike a `NonASAP` consumer, a query-time population does not read a kept at ingestion time input's stored output |
+//! | any `NonASAP` consumer | Rows (or exact-accumulator state for a projection-like operator) at the consumer's own timing, or an output kept at ingestion time read at query time; ingestion work never reads a query-time value |
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -65,9 +65,9 @@ use crate::ir::properties::execution_data_state::{
     DataPrimitive, ExecutionDataState, ExecutionDataStateError, ExecutionTiming,
 };
 use crate::ir::schema::{DataType, FieldDataType, Schema};
-use crate::physical::{Lifetime, PhysicalProperties};
 #[cfg(any(test, feature = "test-support"))]
 use crate::physical::Medium;
+use crate::physical::{Lifetime, PhysicalProperties};
 
 /// Whether each sub-DAG's output is kept, and with which timing and
 /// lifetime (#509 §Materialization: "Materialization decides, for each
@@ -349,7 +349,7 @@ pub fn apply_materialization_timings_to_roots(
         .collect()
 }
 
-/// Validate the sub-DAG below `root` with every sub-DAG `MatAtIngestion`
+/// Validate the sub-DAG below `root` with every sub-DAG kept at ingestion time
 /// where the DAG allows it ([`MaterializationAssignment::with_default`]) and
 /// `root` consumed at `root_timing`. For planning-time legality checks of a
 /// candidate before it is assembled into a workload DAG: a candidate must stay
@@ -367,7 +367,7 @@ pub fn validate_at_ingestion(
     validate(&timed, &mut HashMap::new())
 }
 
-/// The data state `node` produces with every sub-DAG `MatAtIngestion` where
+/// The data state `node` produces with every sub-DAG kept at ingestion time where
 /// the DAG allows it, when its consumer runs at `consumer` — the planning-time answer to
 /// "what does this candidate's output look like", consistent with
 /// [`validate_at_ingestion`].
@@ -757,8 +757,7 @@ fn validate_non_asap(
             && (is_exact_accumulator_state(&child.schema).is_ok() || selects_states(node));
         // A query-time consumer may read the stored output of a sub-DAG
         // materialized at ingestion time.
-        let reads_stored = timing == ExecutionTiming::QueryTime
-            && kept_at_ingestion(child);
+        let reads_stored = timing == ExecutionTiming::QueryTime && kept_at_ingestion(child);
         if (s.timing != timing && !reads_stored)
             || (s.primitive != DataPrimitive::Raw && !passes_state)
         {
@@ -995,7 +994,7 @@ mod tests {
         )
     }
 
-    /// Apply with every sub-DAG `MatAtIngestion` where the DAG allows it, the
+    /// Apply with every sub-DAG kept at ingestion time where the DAG allows it, the
     /// placement whose edge rules these tests exercise.
     fn apply(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, ExecutionDataStateError> {
         apply_materialization_timings(root, &all_at_ingestion(), &mut NodeToTimedNodeCache::new())
@@ -1016,7 +1015,7 @@ mod tests {
         Rc::clone(node.children()[0])
     }
 
-    /// Without a materialization decision, a summary is `NotMaterialized` and
+    /// Without a materialization decision, a summary is not kept and
     /// it and its input run at query time; an explicit choice overrides the
     /// default and is recorded on the timed node.
     #[test]
@@ -1042,7 +1041,10 @@ mod tests {
         );
         for (lifetime, timing) in [
             (KEPT_ACROSS, ExecutionTiming::IngestionTime),
-            (Lifetime::OneEvaluation(Medium::Disk), ExecutionTiming::QueryTime),
+            (
+                Lifetime::OneEvaluation(Medium::Disk),
+                ExecutionTiming::QueryTime,
+            ),
         ] {
             let mut assignment = MaterializationAssignment::default();
             assignment.set(&summary, kept(timing, lifetime));
@@ -1055,12 +1057,11 @@ mod tests {
             assert_eq!(root.timing, Some(timing));
             assert_eq!(root.lifetime, lifetime);
             assert_eq!(child(&root).timing, Some(timing));
-            assert_eq!(
-                child(&root).lifetime, Lifetime::None);
+            assert_eq!(child(&root).lifetime, Lifetime::None);
         }
     }
 
-    /// #509 Algorithm 3, line 13: an explicit `MatAtIngestion` over a state
+    /// #509 Algorithm 3, line 13: an explicit assignment kept at ingestion time over a state
     /// that only exists at query time is an error, not a silent move to
     /// query time.
     #[test]
@@ -1113,7 +1114,7 @@ mod tests {
     }
 
     /// A state not at ingestion time leaves the summary that reads it, when
-    /// that summary has no explicit assignment, `NotMaterialized` at query
+    /// that summary has no explicit assignment, not kept at query
     /// time, as an evaluation below it would.
     #[test]
     fn query_time_state_moves_its_consuming_summary_to_query_time() {
@@ -1214,7 +1215,7 @@ mod tests {
     }
 
     /// A finalize pinned to ingestion time (as fixed-window rate candidates
-    /// build it) over a state that is not `MatAtIngestion` names the missing
+    /// build it) over a state that is not kept at ingestion time names the missing
     /// upstream, not an illegal edge.
     #[test]
     fn ingestion_pinned_finalize_over_query_time_state_is_upstream_not_at_ingestion() {
@@ -1277,7 +1278,7 @@ mod tests {
 
     /// A summary build with a filter never runs at ingestion time: an
     /// ingestion-time build reads raw data samples, which carry none of the
-    /// query's columns the filter reads. An explicit `MatAtIngestion` is an
+    /// query's columns the filter reads. An explicit assignment kept at ingestion time is an
     /// error; the all-at-ingestion default leaves it at query time.
     #[test]
     fn a_filtered_summary_build_never_runs_at_ingestion_time() {
@@ -1324,8 +1325,7 @@ mod tests {
         );
         let timed = apply(&estimate(filtered)).unwrap();
         assert_eq!(child(&timed).timing, Some(ExecutionTiming::QueryTime));
-        assert_eq!(
-            child(&timed).lifetime, Lifetime::None);
+        assert_eq!(child(&timed).lifetime, Lifetime::None);
         assert!(validate_at_ingestion(&child(&timed), ExecutionTiming::QueryTime).is_ok());
     }
 
@@ -1395,13 +1395,16 @@ mod tests {
         assert!(!text.contains("fields"), "{text}");
     }
 
-    /// A node fixed at ingestion time by its candidate rejects a `MatAtQuery`
+    /// A node fixed at ingestion time by its candidate rejects a `OneEvaluation`
     /// assignment, which needs the other timing.
     #[test]
     fn ingestion_fixed_node_rejects_mat_at_query() {
         let fixed = placed_at_ingestion(max(scan()));
         let root = max(Rc::clone(&fixed));
-        let at_query = kept(ExecutionTiming::QueryTime, Lifetime::OneEvaluation(Medium::Memory));
+        let at_query = kept(
+            ExecutionTiming::QueryTime,
+            Lifetime::OneEvaluation(Medium::Memory),
+        );
         let mut assignment = MaterializationAssignment::default();
         assignment.set(&fixed, at_query);
         assert_eq!(
@@ -1417,9 +1420,9 @@ mod tests {
         );
     }
 
-    /// An explicit `NotMaterialized` on a node whose timing its candidate
+    /// An explicit not kept on a node whose timing its candidate
     /// fixed agrees with either timing: the node keeps its fixed timing and
-    /// records `NotMaterialized`.
+    /// records not kept.
     #[test]
     fn explicit_not_materialized_keeps_a_fixed_timing() {
         let read = Rc::new(

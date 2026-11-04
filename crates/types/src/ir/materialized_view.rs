@@ -235,13 +235,13 @@ impl RawDataWindow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MaterializedViewRefresh {
-    /// Refreshed at ingestion time (`MatAtIngestion`): the runtime runs the
+    /// Refreshed at ingestion time (kept at ingestion time): the runtime runs the
     /// node in an ingestion run once its inputs are complete (its windows'
     /// samples have arrived and the views it reads are refreshed), and
     /// keeps the result.
     AtIngestion,
     /// Refreshed at query time and kept across evaluations
-    /// (`MatAtQueryKeptAcrossEvaluations`): when an evaluation reads this
+    /// (query-time `AcrossEvaluations`): when an evaluation reads this
     /// view for a selection it has not been refreshed for yet, the runtime
     /// runs the node in a query run over its inputs, keeps the result, and
     /// binds it like a view refreshed at ingestion.

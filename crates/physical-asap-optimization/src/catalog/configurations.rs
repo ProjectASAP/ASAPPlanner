@@ -407,4 +407,3 @@ fn summary_mode_allowed(
             }
         }
 }
-

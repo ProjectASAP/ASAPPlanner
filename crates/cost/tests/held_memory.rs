@@ -1,4 +1,4 @@
-//! Query-time working memory in [`plan_cost`]: how long a `NotMaterialized`
+//! Query-time working memory in [`plan_cost`]: how long a not-kept
 //! node's working memory is held depends on whether a materialized node
 //! reads it.
 
@@ -94,9 +94,9 @@ fn close(a: f64, b: f64) -> bool {
 /// Query 0 is `sum(...)` over query 1's output, so it runs longer. Without
 /// a materialized node, each query computes the shared nodes and holds
 /// their working memory for its own latency: `bytes · Σ rate_q · latency_q`.
-/// When query 1's output is `MatAtQuery`, the nodes below it are computed
+/// When query 1's output is `OneEvaluation`, the nodes below it are computed
 /// once per execution of it, at its rate, and held until the
-/// longest reader, query 0, finishes, as the `MatAtQuery` state itself is:
+/// longest reader, query 0, finishes, as the `OneEvaluation` state itself is:
 /// `bytes · rate · latency_0`, not the rate-weighted mean of the two
 /// latencies.
 #[test]
@@ -142,7 +142,7 @@ fn working_memory_read_by_a_materialized_node_is_held_for_the_longest_reader() {
         assert!(close(term, expected), "node {id}: {term} vs {expected}");
     }
 
-    // Below a MatAtQuery node: the longest reader's latency at the
+    // Below a `OneEvaluation` node: the longest reader's latency at the
     // materialized node's rate (its readers' schedules together).
     let materialized_rate = evaluation_rate(
         recurrence().iter().map(|r| (r, None)),
@@ -154,10 +154,7 @@ fn working_memory_read_by_a_materialized_node_is_held_for_the_longest_reader() {
     let checked = below(shared);
     assert!(!checked.is_empty(), "the nodes below it hold memory");
     for (id, bytes, term) in checked {
-        assert_eq!(
-            lifetime_of(shared, id),
-            Lifetime::None
-        );
+        assert_eq!(lifetime_of(shared, id), Lifetime::None);
         let expected = bytes * materialized_rate * outer_ms / 1_000.0;
         assert!(close(term, expected), "node {id}: {term} vs {expected}");
     }

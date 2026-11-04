@@ -10,10 +10,10 @@ use std::rc::Rc;
 use serde_json::Value;
 
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
+use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
 use asap_types::ir::NonASAPOp;
 use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
-use asap_types::ir::properties::ExecutionTiming;
 use asap_types::physical::Lifetime;
 use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::stages::HowToComputeAggregateMeasure;

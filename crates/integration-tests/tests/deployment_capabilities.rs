@@ -199,8 +199,8 @@ type CandidateCosts = Vec<(String, f64)>;
 
 /// The per-second cost of every physical candidate whose tumbling-window chain both
 /// panels read is materialized at query time: shared within one evaluation
-/// (`MatAtQuery`), and kept across evaluations
-/// (`MatAtQueryKeptAcrossEvaluations`, which Stage 3 prices as such).
+/// (`OneEvaluation`), and kept across evaluations
+/// (query-time `AcrossEvaluations`, which Stage 3 prices as such).
 fn shared_chain_costs(run: &Run) -> (CandidateCosts, CandidateCosts) {
     let (mut within_one, mut kept) = (Vec::new(), Vec::new());
     for p in &run.physical {

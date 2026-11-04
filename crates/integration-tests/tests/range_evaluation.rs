@@ -10,8 +10,8 @@ use crate::planner_layering_common;
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_plan_selection::RejectionCause;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
-use asap_types::ir::ASAPOp;
 use asap_types::ir::properties::ExecutionTiming;
+use asap_types::ir::ASAPOp;
 use asap_types::physical::{Lifetime, Medium};
 use asap_types::workload::{
     DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query, QueryLanguage,

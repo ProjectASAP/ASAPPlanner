@@ -608,7 +608,7 @@ mod tests {
         // Stage 2 offers the tumbling-window chain at ingestion time, read from the
         // ingestion-time scan.
         assert!(
-            has_line(&["IngestionTime  MatAtIngestion(Memory)", "<- {C1}"]),
+            has_line(&["IngestionTime  AcrossEvaluations(Memory)", "<- {C1}"]),
             "{text}"
         );
         assert!(
