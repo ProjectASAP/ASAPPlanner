@@ -83,6 +83,18 @@ impl<T> Field<T> {
         self.table = Some(table.into());
         self
     }
+
+    /// A reference to this field: qualified by its table when it has one.
+    pub fn column_ref(&self) -> crate::ir::scalar::ColumnRef {
+        use crate::ir::scalar::ColumnRef;
+        match &self.table {
+            Some(table) => ColumnRef::Qualified {
+                table: table.clone(),
+                name: self.name.clone(),
+            },
+            None => ColumnRef::Named(self.name.clone()),
+        }
+    }
 }
 
 impl Field<FieldDataType> {
@@ -168,6 +180,21 @@ pub enum FieldDataType {
 }
 
 impl FieldDataType {
+    /// The state of exact accumulator `kind`, with its parameters (none has
+    /// any, so they mirror `kind`).
+    pub fn exact(kind: ExactKind) -> Self {
+        let params = match kind {
+            ExactKind::Sum => ExactParams::Sum,
+            ExactKind::Count => ExactParams::Count,
+            ExactKind::Min => ExactParams::Min,
+            ExactKind::Max => ExactParams::Max,
+            ExactKind::Rate => ExactParams::Rate,
+            ExactKind::IRate => ExactParams::IRate,
+            ExactKind::Increase => ExactParams::Increase,
+        };
+        FieldDataType::ExactAggregate(kind, params)
+    }
+
     pub(crate) fn is_plain(&self) -> bool {
         matches!(self, FieldDataType::Plain(_))
     }

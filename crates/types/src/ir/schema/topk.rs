@@ -130,15 +130,7 @@ pub fn series_identity_item(
                 && field.dtype == FieldDataType::Plain(DataType::Utf8)
                 && field.name != PROMQL_SERIES_IDENTITY
         })
-        .map(|(_, field)| {
-            SummaryInputExpr::Column(match &field.table {
-                Some(table) => ColumnRef::Qualified {
-                    table: table.clone(),
-                    name: field.name.clone(),
-                },
-                None => ColumnRef::Named(field.name.clone()),
-            })
-        })
+        .map(|(_, field)| SummaryInputExpr::Column(field.column_ref()))
         .collect();
     items.push(SummaryInputExpr::Column(ColumnRef::Named(
         PROMQL_SERIES_IDENTITY.into(),

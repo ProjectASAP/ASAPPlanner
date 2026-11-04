@@ -113,9 +113,8 @@ use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
 use asap_types::ir::scalar::{resolve_column_ref, ColumnRef, CompareOpKind, ScalarValue};
 use asap_types::ir::schema::{DataType, Schema};
 use asap_types::ir::schema::{
-    EntityIdentity, ExactKind, ExactParams, FieldDataType, GroupingStrategy,
-    NonNegativeWeightProof, SketchAlgorithm, SketchKind, StatisticKind, SummaryInputExpr,
-    SummaryUpdate, WeightDomain,
+    EntityIdentity, ExactKind, FieldDataType, GroupingStrategy, NonNegativeWeightProof,
+    SketchAlgorithm, SketchKind, StatisticKind, SummaryInputExpr, SummaryUpdate, WeightDomain,
 };
 use asap_types::ir::{
     ASAPOp, BinaryOperator, ExprSemantics, NonASAPOp, Operator, OperatorNode, OperatorResultKind,
@@ -142,21 +141,6 @@ use asap_types::stages::{
     ComputationTarget, DagOfLogicalMemoGroups, FusedComputation, HavingEntry, HavingPlacement,
     HowToComputeAggregateMeasure, MemoGroupId, PruneReason,
 };
-
-/// `FieldDataType::ExactAggregate` of accumulator `kind`, with its parameters
-/// (none has any, so they mirror `kind`).
-fn exact_family(kind: ExactKind) -> FieldDataType {
-    let params = match kind {
-        ExactKind::Sum => ExactParams::Sum,
-        ExactKind::Count => ExactParams::Count,
-        ExactKind::Min => ExactParams::Min,
-        ExactKind::Max => ExactParams::Max,
-        ExactKind::Rate => ExactParams::Rate,
-        ExactKind::IRate => ExactParams::IRate,
-        ExactKind::Increase => ExactParams::Increase,
-    };
-    FieldDataType::ExactAggregate(kind, params)
-}
 
 /// Unranked candidates of one measure and the candidates pruned for it.
 #[derive(Debug, Clone, PartialEq)]
@@ -702,18 +686,6 @@ pub enum PerComputationCandidateError {
     InvalidChoice,
     #[error("unsupported substitution in logical ASAP-aware optimization: {0}")]
     Unsupported(&'static str),
-    /// A Pass 2 rule found more than `max` candidates of one kind, whose
-    /// 2^n subsets it would enumerate: the workload is too large to plan
-    /// this way, not bad input.
-    #[error("found {found} {counted}, more than {max}")]
-    TooManyCandidates {
-        /// What was counted, e.g. "rollup candidates".
-        counted: &'static str,
-        /// How many were found, more than `max`.
-        found: usize,
-        /// The cap that was exceeded.
-        max: usize,
-    },
 }
 
 /// Enumerate exact, rewrite and summary choices of one measure in stable catalog
@@ -1078,7 +1050,7 @@ fn add_nested_sum_targets(targets: &mut [ComputationTarget], logical_nodes: &[Rc
 }
 
 /// The input rows, the inner sum and the outer grouping (moved onto the
-/// input rows by column, [`partitions_over`]) of a nested-sum merge of
+/// input rows by column, [`Reduction::partitions_over`]) of a nested-sum merge of
 /// `target`, or `None` when it does not apply: `target` is a grouped `sum`
 /// (not by `without`) of the value column of a per-series or grouped `sum`
 /// directly beneath it, neither filtered nor with `HAVING`, and not grouped
@@ -1143,7 +1115,7 @@ fn nested_sum_input(target: &OperatorNode) -> Option<(Rc<OperatorNode>, AggInten
     {
         return None;
     }
-    let partitions = partitions_over(reduction, &inner.schema, &rows.schema)?;
+    let partitions = reduction.partitions_over(&inner.schema, &rows.schema)?;
     Some((Rc::clone(rows), inner_sum.clone(), partitions))
 }
 
@@ -1280,7 +1252,7 @@ fn reads_only_time_series(node: &OperatorNode) -> bool {
 /// `target`'s inner aggregate, by the keyed-additive rule, or `None` when it
 /// does not apply. Rows that carry the full series identity rank it as a
 /// column, as [`summary_update`] does. The partitions are `target`'s, moved
-/// onto the input the heap reads ([`partitions_over`]).
+/// onto the input the heap reads ([`Reduction::partitions_over`]).
 fn whole_expression_input(
     target: &OperatorNode,
 ) -> Option<(Rc<OperatorNode>, SummaryUpdate, Reduction)> {
@@ -1326,7 +1298,7 @@ fn whole_expression_input(
             ..
         })
     );
-    let partitions = partitions_over(reduction, &child.schema, &realized.child.schema)?;
+    let partitions = reduction.partitions_over(&child.schema, &realized.child.schema)?;
     if per_series && realized.child.schema.has_promql_series_identity() {
         input.item = Some(asap_types::ir::schema::topk::series_identity_item(
             &realized.child.schema,
@@ -1342,40 +1314,6 @@ fn whole_expression_input(
         return None;
     }
     Some((realized.child, input, partitions))
-}
-
-/// `reduction`'s keys, which index `inner` (the absorbed aggregate's
-/// output), as indices into `input` (the rows the heap reads), matched by
-/// column. `None` when a key is missing or ambiguous in `input`, or the keys
-/// are given by `without`: `input` carries columns `inner` dropped.
-pub(crate) fn partitions_over(
-    reduction: &Reduction,
-    inner: &Schema,
-    input: &Schema,
-) -> Option<Reduction> {
-    let Reduction::Reduce(keys) = reduction else {
-        return Some(Reduction::PerEntity);
-    };
-    if keys.is_without() {
-        return None;
-    }
-    let column = |schema: &Schema, index: usize| {
-        crate::pass1::realization::column_ref(&schema.fields[index])
-    };
-    let keys = keys
-        .keys()
-        .iter()
-        .map(|&index| {
-            inner.fields.get(index)?;
-            let key = column(inner, index);
-            let mut matches = (0..input.fields.len()).filter(|&i| column(input, i) == key);
-            match (matches.next(), matches.next()) {
-                (Some(i), None) => Some(i),
-                _ => None,
-            }
-        })
-        .collect::<Option<_>>()?;
-    Some(Reduction::by(keys))
 }
 
 /// `update` with the open requirement that its weights are samples of
@@ -1920,7 +1858,7 @@ pub(crate) fn exact_accumulator(
     input: &Rc<OperatorNode>,
     reduction: Reduction,
 ) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
-    let family = exact_family(kind);
+    let family = FieldDataType::exact(kind);
     let read = measure_input(intent, input, None)?;
     Ok(OperatorNode::new_shared(Operator::ASAP(
         ASAPOp::SummaryAgg {
@@ -1968,7 +1906,7 @@ fn substitute_measure(
         ))?)
     };
     let finalized = |kind: &ExactKind, intent: &AggIntent, read| {
-        let state = state(exact_family(*kind), intent, read)?;
+        let state = state(FieldDataType::exact(*kind), intent, read)?;
         Ok::<_, PerComputationCandidateError>(OperatorNode::new_shared(Operator::ASAP(
             ASAPOp::FinalizeExactAccumulator { child: state },
         ))?)
@@ -2348,7 +2286,7 @@ fn counted_column(
         schema
             .fields
             .get(id)
-            .map(crate::pass1::realization::column_ref)
+            .map(asap_types::ir::schema::Field::column_ref)
     };
     filter
         .map_or_else(Vec::new, |filter| not_null(&filter.0))
@@ -2410,9 +2348,7 @@ fn summary_update(
                     .iter()
                     .enumerate()
                     .filter(|(index, _)| *index != value && !groups.contains(index))
-                    .map(|(_, field)| {
-                        SummaryInputExpr::Column(crate::pass1::realization::column_ref(field))
-                    })
+                    .map(|(_, field)| SummaryInputExpr::Column(field.column_ref()))
                     .collect();
                 if items.is_empty() {
                     return Err(PerComputationCandidateError::Unsupported(
@@ -2424,7 +2360,7 @@ fn summary_update(
                 let excluding = groups
                     .iter()
                     .filter_map(|&index| child.fields.get(index))
-                    .map(crate::pass1::realization::column_ref)
+                    .map(asap_types::ir::schema::Field::column_ref)
                     .collect();
                 SummaryInputExpr::EntityIdentity(EntityIdentity::PromqlLabelSet { excluding })
             };
@@ -3640,7 +3576,7 @@ mod tests {
         };
         assert_eq!(
             *family,
-            FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
+            FieldDataType::ExactAggregate(ExactKind::Sum, asap_types::ir::schema::ExactParams::Sum)
         );
         assert!(matches!(
             child.non_asap(),
@@ -4705,7 +4641,10 @@ mod tests {
         };
         assert_eq!(
             sum_family,
-            &FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
+            &FieldDataType::ExactAggregate(
+                ExactKind::Sum,
+                asap_types::ir::schema::ExactParams::Sum
+            )
         );
         assert!(!leaf.contains_asap());
         assert!(child
