@@ -1,14 +1,13 @@
 //! Stage 2's output: every operator node of every implementation candidate,
-//! each with the timings and materializations Stage 2 allows, and which
+//! each with the physical properties (timing, lifetime) Stage 2 allows, and which
 //! candidates may produce each input. Stage 3 selects among them; Stage 2
 //! prices nothing.
 use std::rc::Rc;
 
 use super::graph::{PhysicalCandidateId, ReaderConstraint};
 use super::producers::ProducerCandidates;
-use crate::ir::properties::ExecutionTiming;
 use crate::ir::{OperatorNode, QueryRoot};
-use crate::physical::Materialization;
+use crate::physical::PhysicalProperties;
 use crate::stages::{MemoGroupId, PrunedCandidate};
 
 /// One implementation candidate: index `index` in group `group`'s
@@ -25,7 +24,7 @@ pub struct CandidateForMemoGroupId {
 pub struct OperatorNodeOfCandidateForMemoGroupId(pub usize);
 
 /// One operator node of one or more candidates for a memo group, before
-/// Stage 2 chose its timing and materialization.
+/// Stage 2 chose its physical properties.
 #[derive(Debug, Clone)]
 pub struct OperatorNodeOfCandidateForMemoGroup {
     /// Every candidate of the group this node can implement, ascending:
@@ -59,18 +58,16 @@ impl OperatorNodeOfCandidateForMemoGroup {
     }
 }
 
-/// One operator node with one timing and materialization: what Stage 3
+/// One operator node with one timing and lifetime: what Stage 3
 /// selects. A selection may run it more than once, each run a node of the
 /// [`DagOfSelectedCandidates`](super::DagOfSelectedCandidates).
 #[derive(Debug, Clone)]
 pub struct PhysicalCandidate {
     /// The operator node it runs.
     pub operator_node: OperatorNodeOfCandidateForMemoGroupId,
-    /// When it runs. A node that is not materialized under an ingestion-time
-    /// build still runs at ingestion time, so both are kept.
-    pub timing: ExecutionTiming,
-    /// Whether and where its result is kept.
-    pub materialization: Materialization,
+    /// When it runs and how long its result lives. A node that is not kept
+    /// under an ingestion-time build still runs at ingestion time.
+    pub properties: PhysicalProperties,
     /// Per input of its operator node (in `map_children` order), the
     /// candidates that may produce it. Depends on its timing.
     pub producer_candidates_per_input: Vec<ProducerCandidates>,
@@ -80,7 +77,7 @@ pub struct PhysicalCandidate {
     pub may_produce_query_output: bool,
     /// One entry per workload query: whether this tumbling-window chain may be kept
     /// across evaluations when that query is its only reader. Filled only
-    /// for a `MatAtQueryKeptAcrossEvaluations(Memory)` tumbling-window chain in a
+    /// for a query-time tumbling-window chain kept `AcrossEvaluations(Memory)` in a
     /// deployment that keeps query-time results; empty otherwise.
     pub may_keep_across_evaluations_per_sole_reader_query: Vec<bool>,
 }
@@ -89,24 +86,23 @@ pub struct PhysicalCandidate {
 /// candidates are renumbered after pruning, so a pruned one has no
 /// [`PhysicalCandidateId`]. Unique among a [`PhysicalASAPMemoCandidates`]'
 /// `pruned_candidates`: an operator node has at most one candidate per
-/// timing and materialization.
+/// physical properties.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PhysicalCandidateKey {
     /// Its operator node: an index into the output's
     /// `operator_nodes_of_candidates_for_memo_groups`, which pruning keeps
     /// whole.
     pub operator_node: OperatorNodeOfCandidateForMemoGroupId,
-    pub timing: ExecutionTiming,
-    pub materialization: Materialization,
+    pub properties: PhysicalProperties,
 }
 
 /// Stage 2's output, which Stage 3 selects from.
 #[derive(Debug, Clone)]
 pub struct PhysicalASAPMemoCandidates {
     /// One per operator node of an implementation, before Stage 2 chose its
-    /// timing and materialization.
+    /// timing and lifetime.
     pub operator_nodes_of_candidates_for_memo_groups: Vec<OperatorNodeOfCandidateForMemoGroup>,
-    /// One per (operator node, timing, materialization): what Stage 3
+    /// One per (operator node, timing, lifetime): what Stage 3
     /// selects. Indexed by [`PhysicalCandidateId`].
     pub candidates: Vec<PhysicalCandidate>,
     /// Each query's root over groups, by index in the workload, passed

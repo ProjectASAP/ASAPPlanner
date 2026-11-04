@@ -54,7 +54,7 @@ fn with_child_nodes(
             OperatorNode::with_schema(operator, resized.schema.clone())
                 .with_guarantee(resized.guarantee.clone())
                 .with_timing(resized.timing)
-                .with_materialization(resized.materialization),
+                .with_lifetime(resized.lifetime),
         ),
     };
     done.insert(Rc::as_ptr(resized), Rc::clone(&out));

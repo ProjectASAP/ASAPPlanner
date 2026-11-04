@@ -341,7 +341,7 @@ fn timed_like(node: &Rc<OperatorNode>, timing: ExecutionTiming) -> OperatorNode 
         node.schema.clone(),
     )
     .with_guarantee(node.guarantee.clone())
-    .with_materialization(node.materialization)
+    .with_lifetime(node.lifetime)
     .with_timing(Some(timing))
 }
 
@@ -393,7 +393,7 @@ fn expand(
                             let tumbling_window = match child.timing {
                                 Some(timing) => Rc::new(
                                     timed_like(&tumbling_window, timing)
-                                        .with_materialization(child.materialization),
+                                        .with_lifetime(child.lifetime),
                                 ),
                                 None => tumbling_window,
                             };
@@ -418,7 +418,7 @@ fn expand(
                 OperatorNode::with_schema(merge.operator, node.schema.clone())
                     .with_guarantee(node.guarantee.clone())
                     .with_timing(node.timing)
-                    .with_materialization(node.materialization),
+                    .with_lifetime(node.lifetime),
             )
         }
         _ => {
@@ -438,7 +438,7 @@ fn expand(
                     )
                     .with_guarantee(node.guarantee.clone())
                     .with_timing(node.timing)
-                    .with_materialization(node.materialization),
+                    .with_lifetime(node.lifetime),
                 )
             } else {
                 Rc::clone(node)

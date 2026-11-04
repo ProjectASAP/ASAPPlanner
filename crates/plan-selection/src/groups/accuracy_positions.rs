@@ -543,7 +543,7 @@ fn rebuilt(node: &Rc<OperatorNode>, per_input: &[Vec<Rc<OperatorNode>>], keys: &
             rebuilt
                 .with_guarantee(guarantee)
                 .with_timing(node.timing)
-                .with_materialization(node.materialization),
+                .with_lifetime(node.lifetime),
         ));
     }
     Ok(distinct_for_readers(outputs, keys))

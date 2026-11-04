@@ -260,7 +260,7 @@ fn intern_bottom_up(
     let rebuilt = OperatorNode::with_schema(operator, node.schema.clone())
         .with_guarantee(node.guarantee.clone())
         .with_timing(node.timing)
-        .with_materialization(node.materialization);
+        .with_lifetime(node.lifetime);
     let interned = table.intern(rebuilt);
     visited.insert(Rc::as_ptr(node), (Rc::clone(node), Rc::clone(&interned)));
     interned

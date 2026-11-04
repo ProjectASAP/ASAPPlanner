@@ -85,7 +85,7 @@ pub fn split_shared_by_timing(
                 OperatorNode::with_schema(operator, node.schema.clone())
                     .with_guarantee(node.guarantee.clone())
                     .with_timing(node.timing)
-                    .with_materialization(node.materialization),
+                    .with_lifetime(node.lifetime),
             )
         } else {
             Rc::clone(node)

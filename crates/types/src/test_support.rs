@@ -14,7 +14,6 @@ use crate::ir::properties::ExecutionDataStateError;
 use crate::ir::schema::Schema;
 use crate::ir::{ASAPOp, NonASAPOp};
 use crate::ir::{OperatorNode, SchemaDerivationError};
-use crate::physical::Materialization;
 
 /// `SummaryCoverage::definition_id`.
 pub fn definition_id(coverage: &SummaryCoverage) -> String {
@@ -72,9 +71,4 @@ pub fn timed<'a>(
 /// `RawDataWindow::lookback_ms`.
 pub fn lookback_ms(window: &RawDataWindow) -> u64 {
     window.lookback_ms()
-}
-
-/// `Materialization::is_materialized_view`.
-pub fn is_materialized_view(materialization: Materialization) -> bool {
-    materialization.is_materialized_view()
 }

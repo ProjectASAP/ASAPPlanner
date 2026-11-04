@@ -18,7 +18,7 @@ use crate::ir::operator::query::QueryRoot;
 use crate::ir::properties::execution_data_state::ExecutionTiming;
 use crate::ir::properties::guarantee::AccuracyGuarantee;
 use crate::ir::schema::Schema;
-use crate::physical::materialization::Materialization;
+use crate::physical::Lifetime;
 
 /// Index of a node in [`FlatDag::nodes`].
 pub type NodeId = usize;
@@ -31,7 +31,7 @@ pub struct FlatNode {
     pub(crate) schema: Schema,
     pub(crate) guarantee: Option<AccuracyGuarantee>,
     pub(crate) timing: Option<ExecutionTiming>,
-    pub(crate) materialization: Materialization,
+    pub(crate) lifetime: Lifetime,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -79,7 +79,7 @@ fn visit(
         schema: node.schema.clone(),
         guarantee: node.guarantee.clone(),
         timing: node.timing,
-        materialization: node.materialization,
+        lifetime: node.lifetime,
     });
     originals.push(Rc::clone(node));
     ids.insert(Rc::as_ptr(node), id);

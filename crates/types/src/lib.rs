@@ -12,8 +12,8 @@
 //! - [`workload`] — the planner inputs (#509): the query and data
 //!   workloads and the parsed workload the query-language frontends produce
 //!   ([`workload::parsed_workload`]).
-//! - [`physical`] — Stage 2 decision data: the materialization of a
-//!   sub-DAG ([`physical::Materialization`]).
+//! - [`physical`] — Stage 2 decision data: the physical properties of a
+//!   candidate ([`physical::PhysicalProperties`]: timing and lifetime).
 //! - [`stages`] — the types one planning stage hands the next: the Stage 1
 //!   → Stage 2 memo of groups and implementation candidates
 //!   ([`stages::LogicalASAPMemoCandidates`]) and the Stage 2 → Stage 3

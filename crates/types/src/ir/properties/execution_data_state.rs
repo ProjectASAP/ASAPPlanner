@@ -2,14 +2,15 @@
 //!
 //! [`ExecutionTiming`] says when a node's value is produced (ingestion vs.
 //! query time); [`ExecutionDataState`] pairs it with the [`DataPrimitive`]
-//! the edge carries (raw values vs. summary state). [`Materialization`] is
-//! the per-sub-DAG choice a node's timing is derived from. The rules that assign
+//! the edge carries (raw values vs. summary state). A kept output's
+//! [`PhysicalProperties`] are the per-sub-DAG choice a node's timing is
+//! derived from. The rules that assign
 //! and check them over a DAG live in [`crate::ir::properties::timing`], which reports
 //! violations as [`ExecutionDataStateError`].
 
 use thiserror::Error;
 
-use crate::physical::Materialization;
+use crate::physical::PhysicalProperties;
 
 /// When a post-ASAP value is produced.
 #[derive(
@@ -145,14 +146,14 @@ pub enum ExecutionDataStateError {
     /// fixed (e.g. a query-time `FinalizeExactAccumulator` read boundary)
     /// that needs the other timing.
     #[error(
-        "{operator} is fixed at {} by its candidate; materialization {materialization:?} needs \
+        "{operator} is fixed at {} by its candidate; its assigned kept output {assigned:?} needs \
          the other timing",
         fixed.as_str()
     )]
     MaterializationConflictsWithFixedTiming {
         operator: &'static str,
         fixed: ExecutionTiming,
-        materialization: Materialization,
+        assigned: PhysicalProperties,
     },
     /// A summary build with a filter placed at ingestion time. An
     /// ingestion-time build reads raw data samples, which carry none of the
