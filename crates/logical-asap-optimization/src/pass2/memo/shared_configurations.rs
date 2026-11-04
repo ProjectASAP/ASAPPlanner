@@ -1,4 +1,5 @@
 //! Finite state configurations shared by memo rules and candidate selection.
+use crate::stage0::cse::same_value;
 use asap_accuracy::estimators::size_for_all_readers;
 use asap_types::ir::schema::{
     sketch::{SketchKind, SketchParams},
@@ -7,155 +8,15 @@ use asap_types::ir::schema::{
 use asap_types::workload::greatest_common_divisor;
 use std::collections::BTreeSet;
 
-/// Width domain used by the same candidate rules. Seed grids are only a
-/// feasible-plan heuristic; optimality must use the complete domain.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum TumblingWindowWidthDomain {
-    #[default]
-    Complete,
-    SeedGrids,
-    /// Seed grids plus widths obtained by dividing each grid into at most
-    /// `max_parts` equal pieces. Increasing the limit monotonically exposes
-    /// every legal divisor; only `Complete` certifies full-domain search.
-    Expanding {
-        max_parts: u64,
-    },
-}
-
-#[cfg(test)]
-pub(crate) fn tumbling_window_width_domain(
-    grids: impl IntoIterator<Item = u64>,
-    domain: TumblingWindowWidthDomain,
-) -> Vec<u64> {
-    tumbling_window_width_domain_before(grids, domain, None)
-        .expect("generation without a deadline cannot time out")
-}
-
-pub(crate) fn tumbling_window_width_domain_before(
-    grids: impl IntoIterator<Item = u64>,
-    domain: TumblingWindowWidthDomain,
-    deadline: Option<std::time::Instant>,
-) -> Result<Vec<u64>, asap_types::stages::CandidateGenerationTimeout> {
-    super::check_generation_deadline(deadline)?;
+/// Every tumbling-window width that divides one of `grids` (zero grids
+/// ignored), in ascending order.
+pub(crate) fn tumbling_window_width_domain(grids: impl IntoIterator<Item = u64>) -> Vec<u64> {
+    let grids: BTreeSet<u64> = grids.into_iter().filter(|&grid| grid > 0).collect();
     let mut widths = BTreeSet::new();
-    for width in grids {
-        super::check_generation_deadline(deadline)?;
-        if width > 0 {
-            widths.insert(width);
-        }
+    for grid in grids {
+        widths.extend(tumbling_window_width_divisors(grid));
     }
-    if domain == TumblingWindowWidthDomain::Complete {
-        let mut complete = BTreeSet::new();
-        for grid in widths {
-            complete.extend(tumbling_window_width_divisors_before(grid, deadline)?);
-        }
-        return Ok(complete.into_iter().collect());
-    }
-    let grids = widths.clone();
-    loop {
-        let mut additional = BTreeSet::new();
-        for &a in &widths {
-            for &b in &widths {
-                super::check_generation_deadline(deadline)?;
-                let width = greatest_common_divisor(a, b);
-                if !widths.contains(&width) {
-                    additional.insert(width);
-                }
-            }
-        }
-        if additional.is_empty() {
-            break;
-        }
-        widths.extend(additional);
-    }
-    if let TumblingWindowWidthDomain::Expanding { max_parts } = domain {
-        // Work is proportional to the requested frontier, not the complete
-        // divisor domain. Do not introduce the finest reciprocal width early.
-        for grid in grids {
-            for parts in 2..=max_parts.min(grid) {
-                if parts % 1024 == 2 {
-                    super::check_generation_deadline(deadline)?;
-                }
-                if grid.is_multiple_of(parts) {
-                    widths.insert(grid / parts);
-                }
-            }
-        }
-    }
-    super::check_generation_deadline(deadline)?;
-    Ok(widths.into_iter().collect())
-}
-
-/// Integer-domain frontier, independent of expensive candidate graph expansion.
-/// Complete divisor lists are computed once under the caller's deadline.
-pub struct TumblingWindowWidthFrontier {
-    grids: Vec<u64>,
-    complete: Vec<Vec<u64>>,
-    previous: Vec<Vec<u64>>,
-    max_parts: u64,
-    finished: bool,
-}
-
-impl TumblingWindowWidthFrontier {
-    pub fn new(
-        grids: impl IntoIterator<Item = u64>,
-        deadline: Option<std::time::Instant>,
-    ) -> Result<Self, asap_types::stages::CandidateGenerationTimeout> {
-        let grids: Vec<_> = grids
-            .into_iter()
-            .filter(|grid| *grid > 0)
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        let complete = grids
-            .iter()
-            .map(|&grid| tumbling_window_width_divisors_before(grid, deadline))
-            .collect::<Result<Vec<_>, _>>()?;
-        let previous = grids.iter().map(|&grid| vec![grid]).collect();
-        Ok(Self {
-            grids,
-            complete,
-            previous,
-            max_parts: 4,
-            finished: false,
-        })
-    }
-
-    /// Skip frontiers which expose no new width for any individual reader grid.
-    /// Comparing per-grid sets also protects group-specific producer choices.
-    pub fn next_domain(
-        &mut self,
-        deadline: Option<std::time::Instant>,
-    ) -> Result<Option<TumblingWindowWidthDomain>, asap_types::stages::CandidateGenerationTimeout>
-    {
-        while !self.finished {
-            super::check_generation_deadline(deadline)?;
-            let current: Vec<Vec<u64>> = self
-                .grids
-                .iter()
-                .zip(&self.complete)
-                .map(|(&grid, widths)| {
-                    widths
-                        .iter()
-                        .copied()
-                        .filter(|width| grid / width <= self.max_parts)
-                        .collect()
-                })
-                .collect();
-            self.max_parts = self.max_parts.saturating_mul(2);
-            if current == self.complete {
-                self.finished = true;
-                return Ok(Some(TumblingWindowWidthDomain::Complete));
-            }
-            if current != self.previous {
-                self.previous = current;
-                return Ok(Some(TumblingWindowWidthDomain::Expanding {
-                    max_parts: self.max_parts / 2,
-                }));
-            }
-        }
-        Ok(None)
-    }
+    widths.into_iter().collect()
 }
 
 #[derive(Debug, Clone)]
@@ -184,80 +45,42 @@ impl TumblingWindowConfiguration {
                 .is_multiple_of(self.tumbling_window_width_ms)
             && reader.window_ms <= self.longest_window_ms
             && shared_size(&self.family, &reader.family)
-                .is_some_and(|joined| same_family(&joined, &self.family))
+                .is_some_and(|joined| same_value(&joined, &self.family))
     }
 }
 /// Every positive integer-millisecond divisor of a grid, in ascending order.
 /// The time representation fixes the search resolution; no representative-width
 /// sampling or arbitrary candidate cap changes this domain.
-#[cfg(test)]
 pub(crate) fn tumbling_window_width_divisors(grid_ms: u64) -> Vec<u64> {
-    tumbling_window_width_divisors_before(grid_ms, None)
-        .expect("generation without a deadline cannot time out")
-}
-
-fn tumbling_window_width_divisors_before(
-    grid_ms: u64,
-    deadline: Option<std::time::Instant>,
-) -> Result<Vec<u64>, asap_types::stages::CandidateGenerationTimeout> {
-    super::check_generation_deadline(deadline)?;
     let mut widths = BTreeSet::new();
     let mut divisor = 1;
     while divisor <= grid_ms / divisor {
-        // A large user-provided grid must not monopolize the planning budget.
-        if divisor % 1024 == 1 {
-            super::check_generation_deadline(deadline)?;
-        }
         if grid_ms.is_multiple_of(divisor) {
             widths.insert(divisor);
             widths.insert(grid_ms / divisor);
         }
         divisor += 1;
     }
-    super::check_generation_deadline(deadline)?;
-    Ok(widths.into_iter().collect())
+    widths.into_iter().collect()
 }
 
 /// Complete divisor grids, distinct required horizons, and joined state sizes.
 /// This enumerates configurations of one compatible producer, not workload plans.
-#[cfg(test)]
-fn tumbling_window_configurations(
+pub(crate) fn tumbling_window_configurations(
     readers: &[TumblingWindowRequirement],
 ) -> Vec<TumblingWindowConfiguration> {
-    tumbling_window_configurations_in_domain(readers, TumblingWindowWidthDomain::Complete)
-}
-
-#[cfg(test)]
-fn tumbling_window_configurations_in_domain(
-    readers: &[TumblingWindowRequirement],
-    domain: TumblingWindowWidthDomain,
-) -> Vec<TumblingWindowConfiguration> {
-    tumbling_window_configurations_before(readers, domain, None)
-        .expect("generation without a deadline cannot time out")
-}
-
-pub(crate) fn tumbling_window_configurations_before(
-    readers: &[TumblingWindowRequirement],
-    domain: TumblingWindowWidthDomain,
-    deadline: Option<std::time::Instant>,
-) -> Result<Vec<TumblingWindowConfiguration>, asap_types::stages::CandidateGenerationTimeout> {
-    super::check_generation_deadline(deadline)?;
     if readers
         .iter()
         .any(|r| r.tumbling_window_width_ms == 0 || r.window_ms == 0)
     {
-        return Ok(Vec::new());
+        return Vec::new();
     }
-    let grids = tumbling_window_width_domain_before(
-        readers.iter().map(|reader| {
+    let grids =
+        tumbling_window_width_domain(readers.iter().map(|reader| {
             greatest_common_divisor(reader.tumbling_window_width_ms, reader.window_ms)
-        }),
-        domain,
-        deadline,
-    )?;
+        }));
     let mut configurations = Vec::new();
     for &tumbling_window_width_ms in &grids {
-        super::check_generation_deadline(deadline)?;
         let eligible: Vec<&TumblingWindowRequirement> = readers
             .iter()
             .filter(|r| {
@@ -270,18 +93,15 @@ pub(crate) fn tumbling_window_configurations_before(
         // The sizes: the readers' own, closed under the shared size.
         let mut sizes: Vec<FieldDataType> = Vec::new();
         for reader in &eligible {
-            super::check_generation_deadline(deadline)?;
-            if !sizes.iter().any(|known| same_family(known, &reader.family)) {
+            if !sizes.iter().any(|known| same_value(known, &reader.family)) {
                 sizes.push(reader.family.clone());
             }
         }
         let mut i = 0;
         while i < sizes.len() {
-            super::check_generation_deadline(deadline)?;
             for j in 0..i {
-                super::check_generation_deadline(deadline)?;
                 if let Some(joined) = shared_size(&sizes[i], &sizes[j]) {
-                    if !sizes.iter().any(|known| same_family(known, &joined)) {
+                    if !sizes.iter().any(|known| same_value(known, &joined)) {
                         sizes.push(joined);
                     }
                 }
@@ -289,9 +109,7 @@ pub(crate) fn tumbling_window_configurations_before(
             i += 1;
         }
         for &longest_window_ms in &windows {
-            super::check_generation_deadline(deadline)?;
             for family in &sizes {
-                super::check_generation_deadline(deadline)?;
                 let configuration = TumblingWindowConfiguration {
                     tumbling_window_width_ms,
                     longest_window_ms,
@@ -309,42 +127,34 @@ pub(crate) fn tumbling_window_configurations_before(
                     }))
                 });
                 if window == Some(longest_window_ms)
-                    && size
-                        .flatten()
-                        .is_some_and(|size| same_family(&size, family))
+                    && size.flatten().is_some_and(|size| same_value(&size, family))
                 {
                     configurations.push(configuration);
                 }
             }
         }
     }
-    super::check_generation_deadline(deadline)?;
-    Ok(configurations)
+    configurations
 }
 
 /// All distinct joined reader requirements, retaining recorded error contracts.
 /// This is configuration generation only; sharing is represented by state groups.
 pub(crate) fn state_size_configurations(
     requirements: Vec<Option<SketchParams>>,
-    deadline: Option<std::time::Instant>,
-) -> Result<Vec<Option<SketchParams>>, asap_types::stages::CandidateGenerationTimeout> {
-    super::check_generation_deadline(deadline)?;
+) -> Vec<Option<SketchParams>> {
     if requirements.iter().any(Option::is_none) {
-        return Ok(vec![None]);
+        return vec![None];
     }
     let requirements: Vec<SketchParams> = requirements.into_iter().flatten().collect();
     let mut joins: Vec<SketchParams> = Vec::new();
     for requirement in &requirements {
-        super::check_generation_deadline(deadline)?;
         let mut grown = vec![requirement.clone()];
         for join in &joins {
-            super::check_generation_deadline(deadline)?;
             if let Some(joined) = size_for_all_readers(&[join, requirement]) {
                 grown.push(joined);
             }
         }
         for join in grown {
-            super::check_generation_deadline(deadline)?;
             if !joins.iter().any(|known| same_size(known, &join)) {
                 joins.push(join);
             }
@@ -352,7 +162,6 @@ pub(crate) fn state_size_configurations(
     }
     let mut configurations = Vec::new();
     for configuration in joins {
-        super::check_generation_deadline(deadline)?;
         let admitted: Vec<_> = requirements
             .iter()
             .filter(|required| {
@@ -365,7 +174,7 @@ pub(crate) fn state_size_configurations(
             configurations.push(Some(configuration));
         }
     }
-    Ok(configurations)
+    configurations
 }
 
 fn same_size(a: &SketchParams, b: &SketchParams) -> bool {
@@ -386,12 +195,6 @@ pub(crate) fn shared_size(a: &FieldDataType, b: &FieldDataType) -> Option<FieldD
         (FieldDataType::Sketch(..), _) | (_, FieldDataType::Sketch(..)) => None,
         _ => (a == b).then(|| a.clone()),
     }
-}
-
-// SketchParams equality deliberately omits recorded error/probability metadata.
-// Producer contracts must retain those parameters when joining and deduplicating.
-fn same_family(left: &FieldDataType, right: &FieldDataType) -> bool {
-    left == right && serde_json::to_string(left).ok() == serde_json::to_string(right).ok()
 }
 
 #[cfg(test)]
@@ -424,22 +227,15 @@ mod tests {
             k: 200,
             failure_probability: None,
         };
-        let configurations = state_size_configurations(
-            vec![
-                Some(small.clone()),
-                Some(large.clone()),
-                Some(small.clone()),
-            ],
-            None,
-        )
-        .unwrap();
+        let configurations = state_size_configurations(vec![
+            Some(small.clone()),
+            Some(large.clone()),
+            Some(small.clone()),
+        ]);
         assert_eq!(configurations.len(), 2);
         assert!(configurations.contains(&Some(small)));
         assert!(configurations.contains(&Some(large)));
-        assert_eq!(
-            state_size_configurations(vec![None, None], None).unwrap(),
-            vec![None]
-        );
+        assert_eq!(state_size_configurations(vec![None, None]), vec![None]);
     }
 
     // Equal capacity does not erase the stricter recorded failure probability.
@@ -453,8 +249,7 @@ mod tests {
             k: 331,
             failure_probability: Some(0.001),
         };
-        let configurations =
-            state_size_configurations(vec![Some(weak), Some(strict.clone())], None).unwrap();
+        let configurations = state_size_configurations(vec![Some(weak), Some(strict.clone())]);
         assert!(configurations
             .iter()
             .flatten()
@@ -494,71 +289,6 @@ mod tests {
     // Every integer-millisecond width that divides the grid is offered, not
     // just the coarsest width or GCDs of the readers' original configurations.
     #[test]
-    fn width_frontier_skips_empty_rounds_and_detects_actual_completion() {
-        let mut frontier = TumblingWindowWidthFrontier::new([97], None).unwrap();
-        assert_eq!(
-            frontier.next_domain(None).unwrap(),
-            Some(TumblingWindowWidthDomain::Complete)
-        );
-        assert_eq!(frontier.next_domain(None).unwrap(), None);
-        let mut frontier = TumblingWindowWidthFrontier::new([12], None).unwrap();
-        assert_eq!(
-            frontier.next_domain(None).unwrap(),
-            Some(TumblingWindowWidthDomain::Expanding { max_parts: 4 })
-        );
-        assert_eq!(
-            frontier.next_domain(None).unwrap(),
-            Some(TumblingWindowWidthDomain::Expanding { max_parts: 8 })
-        );
-        assert_eq!(
-            frontier.next_domain(None).unwrap(),
-            Some(TumblingWindowWidthDomain::Complete)
-        );
-        assert!(
-            TumblingWindowWidthFrontier::new([u64::MAX], Some(std::time::Instant::now())).is_err()
-        );
-    }
-
-    #[test]
-    fn expanding_widths_are_nested_and_eventually_complete() {
-        let grids = [60, 90];
-        let mut previous =
-            tumbling_window_width_domain(grids, TumblingWindowWidthDomain::SeedGrids);
-        for max_parts in [2, 4, 8, 16, 32, 64, 128] {
-            let next = tumbling_window_width_domain(
-                grids,
-                TumblingWindowWidthDomain::Expanding { max_parts },
-            );
-            assert!(previous.iter().all(|width| next.contains(width)));
-            assert!(next
-                .iter()
-                .all(|width| grids.iter().any(|grid| grid % width == 0)));
-            previous = next;
-        }
-        assert_eq!(
-            previous,
-            tumbling_window_width_domain(grids, TumblingWindowWidthDomain::Complete)
-        );
-    }
-
-    #[test]
-    fn expanding_domain_defers_fine_tumbling_windows_and_obeys_deadline() {
-        let widths = tumbling_window_width_domain(
-            [60_000],
-            TumblingWindowWidthDomain::Expanding { max_parts: 4 },
-        );
-        assert_eq!(widths, vec![15_000, 20_000, 30_000, 60_000]);
-        assert!(tumbling_window_width_domain_before(
-            [u64::MAX],
-            TumblingWindowWidthDomain::Expanding {
-                max_parts: u64::MAX
-            },
-            Some(std::time::Instant::now()),
-        )
-        .is_err());
-    }
-
-    #[test]
     fn tumbling_window_width_domain_contains_every_legal_divisor() {
         let reader = TumblingWindowRequirement {
             tumbling_window_width_ms: 12,
@@ -581,20 +311,6 @@ mod tests {
                 .collect();
             assert_eq!(tumbling_window_width_divisors(grid), expected);
         }
-    }
-
-    // Cancellation is checked during divisor enumeration, not only between
-    // configurations: this grid cannot be fully factored within the budget.
-    #[test]
-    #[ignore = "flaky: depends on a wall-clock deadline (#1067)"]
-    fn large_grid_enumeration_honors_deadline() {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2);
-        assert!(tumbling_window_width_domain_before(
-            [u64::MAX],
-            TumblingWindowWidthDomain::Complete,
-            Some(deadline),
-        )
-        .is_err());
     }
 
     // Public finite enumeration rejects invalid grids instead of dividing by zero.

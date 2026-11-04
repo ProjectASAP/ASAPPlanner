@@ -3,7 +3,6 @@ use super::reuse::{
     append_producer, append_reader, combined_inputs, eligible, replace, restore_inputs,
 };
 use crate::pass2::asap_aware_cse::{rollup_candidate_for, rollup_pass2_candidates};
-use crate::pass2::memo::check_generation_deadline;
 use crate::pass2::memo::state_groups::{simple_build, Pass2RuleError};
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{
@@ -12,18 +11,11 @@ use asap_types::ir::{
 use asap_types::stages::{Memo, OriginOfCandidateForMemoGroup};
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::Instant;
 
-pub(crate) fn add_rollup_candidates(
-    memo: &mut Memo,
-    deadline: Option<Instant>,
-) -> Result<usize, Pass2RuleError> {
-    check_generation_deadline(deadline)?;
+pub(crate) fn add_rollup_candidates(memo: &mut Memo) -> Result<usize, Pass2RuleError> {
     let mut candidates = Vec::new();
     for (group, entries) in memo.candidates.iter().enumerate() {
-        check_generation_deadline(deadline)?;
         for candidate in entries {
-            check_generation_deadline(deadline)?;
             if eligible(candidate)
                 && matches!(
                     candidate.origin,
@@ -39,9 +31,7 @@ pub(crate) fn add_rollup_candidates(
     }
     let mut added = 0;
     for (coarse_group, coarse, coarse_build) in &candidates {
-        check_generation_deadline(deadline)?;
         for (fine_group, fine, _) in &candidates {
-            check_generation_deadline(deadline)?;
             if coarse_group == fine_group {
                 continue;
             }
@@ -219,23 +209,17 @@ pub(crate) fn add_rollup_candidates(
             }
         }
     }
-    check_generation_deadline(deadline)?;
     Ok(added)
 }
 
 /// Existing tumbling window rollup rules applied to producer pairs on already generated
 /// legal local grids. No whole-workload choice combinations are constructed.
-pub(crate) fn add_window_rollup_candidates(
-    memo: &mut Memo,
-    deadline: Option<Instant>,
-) -> Result<usize, Pass2RuleError> {
-    check_generation_deadline(deadline)?;
+pub(crate) fn add_window_rollup_candidates(memo: &mut Memo) -> Result<usize, Pass2RuleError> {
     use crate::pass2::asap_aware_cse::{
         tumbling_window_candidates, window_composition_shared_chain_candidates,
     };
     let mut grids = vec![std::collections::BTreeSet::new(); memo.groups.len()];
     for (group, candidates) in memo.candidates.iter().enumerate() {
-        check_generation_deadline(deadline)?;
         for candidate in candidates.iter().filter(|candidate| {
             candidate.origin == OriginOfCandidateForMemoGroup::TumblingWindows
                 && eligible(candidate)
@@ -266,14 +250,11 @@ pub(crate) fn add_window_rollup_candidates(
         .collect();
     let mut added = 0;
     for (coarse_group, coarse) in &candidates {
-        check_generation_deadline(deadline)?;
         for (fine_group, fine) in &candidates {
-            check_generation_deadline(deadline)?;
             if coarse_group == fine_group || grids[*fine_group].is_empty() {
                 continue;
             }
             for grid in &grids[*coarse_group] {
-                check_generation_deadline(deadline)?;
                 let roots = [
                     QueryRoot::Operator(Rc::clone(&coarse.root_node)),
                     QueryRoot::Operator(Rc::clone(&fine.root_node)),
@@ -286,7 +267,6 @@ pub(crate) fn add_window_rollup_candidates(
                 for rewritten in
                     window_composition_shared_chain_candidates(&roots, &tumbling_windows)
                 {
-                    check_generation_deadline(deadline)?;
                     if rewritten.shared_chains.is_empty() {
                         continue;
                     }
@@ -328,15 +308,13 @@ pub(crate) fn add_window_rollup_candidates(
             }
         }
     }
-    check_generation_deadline(deadline)?;
     Ok(added)
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::pass1::memo_population::try_populate_pass1;
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
-    use crate::pass2::memo::groups::try_populate_pass1;
-    use crate::pass2::memo::shared_configurations::TumblingWindowWidthDomain;
     use crate::stage0::generate_dag_of_logical_memo_groups;
     use crate::test_support::{lower_promql, sharing_rules_and_shared_state_groups};
     use asap_types::ir::properties::AccuracyTarget;
@@ -357,11 +335,9 @@ mod tests {
         let inventory =
             generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
                 .unwrap();
-        let memo = sharing_rules_and_shared_state_groups(
-            try_populate_pass1(initial, &inventory).unwrap(),
-            TumblingWindowWidthDomain::Complete,
-        )
-        .unwrap();
+        let memo =
+            sharing_rules_and_shared_state_groups(try_populate_pass1(initial, &inventory).unwrap())
+                .unwrap();
         let root_of = |query: usize| memo.query_roots[query].as_operator().unwrap().0 as usize;
         let (coarse, fine) = (root_of(0), root_of(1));
         assert!(

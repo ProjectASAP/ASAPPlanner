@@ -24,7 +24,6 @@ use time_series::{series_identity, series_labels, time_series_tables, RawDataSam
 const EVALUATION_MS: i64 = 3_600_000;
 
 #[tokio::test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn per_sample_updates_build_the_materialized_tumbling_window_the_plan_refreshes() {
     // What the user writes: the 5-minute rate of a counter, every minute,
     // exactly, over 1,000 series sampled every 15 s.
@@ -249,7 +248,6 @@ async fn answers(
 /// from them: the same answers as the plan's query-time reference over the
 /// raw data samples.
 #[tokio::test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn tumbling_windows_installed_from_per_sample_states_answer_the_query() {
     use asap_executor::arrow::array::{DictionaryArray, TimestampMillisecondArray, UInt32Array};
     use asap_executor::arrow::datatypes::UInt32Type;

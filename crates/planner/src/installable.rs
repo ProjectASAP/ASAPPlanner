@@ -367,11 +367,8 @@ impl InstallablePlan {
         tumbling_window_retention_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
         reader_span_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
     ) -> Result<Self, InstallablePlanError> {
-        let views = dag.set_retention(
-            tumbling_window_retention_ms_by_node,
-            reader_span_ms_by_node,
-            None,
-        )?;
+        let views =
+            dag.set_retention(tumbling_window_retention_ms_by_node, reader_span_ms_by_node)?;
         check_queries(&dag, &query_texts)?;
         executor_compiles(&dag, &views)?;
         let plan = InstallablePlan {
@@ -990,7 +987,6 @@ mod tests {
         // One sum over both windows' rows.
         let both = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Concat {
             children: vec![window(0), window(60_000)],
-            discriminator_unique_key: None,
         }))
         .unwrap();
         let merged = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {

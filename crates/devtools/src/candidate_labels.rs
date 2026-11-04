@@ -50,7 +50,7 @@ fn connected_candidate_label(roots: &[QueryRoot]) -> String {
     for (query, root) in roots.iter().enumerate() {
         let mut states = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        for operator in root_operators(root) {
+        for operator in root.operator_refs() {
             for node in OperatorNode::reachable(operator) {
                 let identity = Rc::as_ptr(&node) as usize;
                 if !seen.insert(identity) {
@@ -262,13 +262,6 @@ fn sketch_name(algorithm: &SketchAlgorithm) -> String {
         SketchAlgorithm::CmsWithHeap => "CMS+heap".to_string(),
         SketchAlgorithm::CountSketchWithHeap => "CountSketch+heap".to_string(),
         other => format!("{other:?}"),
-    }
-}
-
-fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
-    match root {
-        QueryRoot::Operator(node) => vec![node],
-        QueryRoot::Scalar(expr) => expr.operator_refs(),
     }
 }
 

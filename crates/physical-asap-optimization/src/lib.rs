@@ -113,7 +113,6 @@
 //! build → estimate. Every node keeps the guarantee Stage 1 composed for it.
 mod catalog;
 mod split_by_timing;
-mod summary_window;
 
 pub use catalog::{
     generate_physical_asap_memo_candidates, CandidateInventoryError, ConfigurationError,
@@ -140,16 +139,10 @@ use asap_types::workload::{
     DataArrival, DataWorkload, Predictability, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
 };
 use split_by_timing::split_shared_by_timing;
-use summary_window::{
-    plan_tumbling_window_phase, validate_tumbling_window_coverage, TumblingWindowLayout,
-    WindowEdgeCoverage,
-};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum PhysicalASAPOptimizationError {
-    #[error("invalid operator implementation boundary: {0}")]
-    ImplementationBoundary(&'static str),
     #[error(transparent)]
     Structure(#[from] SchemaDerivationError),
     #[error(transparent)]
@@ -440,11 +433,8 @@ pub fn optimize_physical_asap(
     data: &DataWorkload,
     query_time_results_retained: bool,
 ) -> Result<Vec<PhysicalWorkloadPlan>, PhysicalASAPOptimizationError> {
-    let mut cache = HashMap::new();
-    let implemented = map_roots(roots, &mut |node| implement(node, &mut cache))?;
-    let mat_candidates =
-        materialization_candidates(&implemented, entries, data, query_time_results_retained);
-    check_tumbling_windows_on_range_steps(&mat_candidates, entries)?;
+    let (implemented, _, mat_candidates) =
+        implement_and_find_candidates(roots, entries, data, query_time_results_retained)?;
     materialization_assignments(&mat_candidates)
         .map(|assignment| {
             assigned_candidate(from_logical, &implemented, &mat_candidates, assignment)
@@ -470,38 +460,29 @@ pub fn optimize_physical_asap_assigned(
     query_time_results_retained: bool,
     choose: &mut dyn FnMut(&[usize]) -> Option<Materialization>,
 ) -> Result<Option<PhysicalWorkloadPlan>, PhysicalASAPOptimizationError> {
-    let mut cache = HashMap::new();
-    let implemented = map_roots(roots, &mut |node| implement(node, &mut cache))?;
-    let mat_candidates =
-        materialization_candidates(&implemented, entries, data, query_time_results_retained);
-    check_tumbling_windows_on_range_steps(&mat_candidates, entries)?;
-    let mut assignment = Vec::with_capacity(mat_candidates.len());
-    for mat_candidate in &mat_candidates {
-        match choose(&mat_candidate.readers) {
-            Some(m) if mat_candidate.options().contains(&m) => assignment.push(m),
-            _ => return Ok(None),
-        }
-    }
-    let nodes: Vec<_> = mat_candidates.iter().map(|c| Rc::clone(&c.node)).collect();
-    if !down_closed(&mat_candidates, &candidates_below(&nodes), &assignment) {
-        return Ok(None);
-    }
-    assigned_candidate(from_logical, &implemented, &mat_candidates, assignment).map(Some)
+    optimize_physical_asap_chosen(
+        from_logical,
+        roots,
+        entries,
+        data,
+        query_time_results_retained,
+        &mut |_, readers, _| choose(readers),
+    )
 }
 
 /// [`optimize_physical_asap_chosen`]'s choice per materialization
 /// candidate: from the logical node it implements, its readers and its
-/// options.
+/// options. `None` rejects the assignment.
 pub(crate) type ChooseMaterialization<'a> =
-    dyn FnMut(*const OperatorNode, &[usize], &[Materialization]) -> Materialization + 'a;
+    dyn FnMut(*const OperatorNode, &[usize], &[Materialization]) -> Option<Materialization> + 'a;
 
 /// Stage 2 for one CandidateLogicalASAPDAG and one materialization
 /// assignment chosen node by node: `choose(logical, readers, options)`
 /// gives the option for each materialization candidate, `logical` being
 /// the address of the logical node of `roots` it implements (null when it
 /// implements none, e.g. a node the implementation adds) and `readers` the
-/// queries that read it. `None` when a chosen option is not one of the
-/// candidate's, or the assignment materializes a build at ingestion time
+/// queries that read it. `None` when `choose` rejects, a chosen option is
+/// not one of the candidate's, or the assignment materializes a build at ingestion time
 /// above one at query time. The search that decodes one plan from a model
 /// solution uses it to build that plan alone, not every assignment.
 pub(crate) fn optimize_physical_asap_chosen(
@@ -512,15 +493,12 @@ pub(crate) fn optimize_physical_asap_chosen(
     query_time_results_retained: bool,
     choose: &mut ChooseMaterialization<'_>,
 ) -> Result<Option<PhysicalWorkloadPlan>, PhysicalASAPOptimizationError> {
-    let mut cache = HashMap::new();
-    let implemented = map_roots(roots, &mut |node| implement(node, &mut cache))?;
+    let (implemented, cache, mat_candidates) =
+        implement_and_find_candidates(roots, entries, data, query_time_results_retained)?;
     let logical_of: HashMap<*const OperatorNode, *const OperatorNode> = cache
         .iter()
         .map(|(logical, implemented)| (Rc::as_ptr(implemented), *logical))
         .collect();
-    let mat_candidates =
-        materialization_candidates(&implemented, entries, data, query_time_results_retained);
-    check_tumbling_windows_on_range_steps(&mat_candidates, entries)?;
     let mut assignment = Vec::with_capacity(mat_candidates.len());
     for mat_candidate in &mat_candidates {
         let logical = logical_of
@@ -528,10 +506,11 @@ pub(crate) fn optimize_physical_asap_chosen(
             .copied()
             .unwrap_or(std::ptr::null());
         let options = mat_candidate.options();
-        let m = choose(logical, &mat_candidate.readers, &options);
-        if !options.contains(&m) {
+        let Some(m) =
+            choose(logical, &mat_candidate.readers, &options).filter(|m| options.contains(m))
+        else {
             return Ok(None);
-        }
+        };
         assignment.push(m);
     }
     let nodes: Vec<_> = mat_candidates.iter().map(|c| Rc::clone(&c.node)).collect();
@@ -561,7 +540,7 @@ fn assigned_candidate(
     }
     let operators: Vec<Rc<OperatorNode>> = implemented
         .iter()
-        .flat_map(|root| root_operators(root).into_iter().cloned())
+        .flat_map(|root| root.operator_refs().into_iter().cloned())
         .collect();
     let (split, options) = split_shared_by_timing(&operators, &options);
     let replaced: HashMap<_, _> = operators
@@ -599,22 +578,27 @@ fn assigned_candidate(
     })
 }
 
-/// The number of physical candidates [`optimize_physical_asap`] returns for
-/// `roots`, without building them; `Err` when a candidate cannot be
-/// implemented.
-#[cfg(test)]
-fn physical_candidate_count(
+/// `roots` implemented, the implementation of each logical node, and the
+/// materialization candidates of the implemented roots.
+fn implement_and_find_candidates(
     roots: &[QueryRoot],
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     query_time_results_retained: bool,
-) -> Result<usize, PhysicalASAPOptimizationError> {
+) -> Result<
+    (
+        Vec<QueryRoot>,
+        NodeToImplementedNodeCache,
+        Vec<MaterializationCandidate>,
+    ),
+    PhysicalASAPOptimizationError,
+> {
     let mut cache = HashMap::new();
     let implemented = map_roots(roots, &mut |node| implement(node, &mut cache))?;
     let mat_candidates =
         materialization_candidates(&implemented, entries, data, query_time_results_retained);
     check_tumbling_windows_on_range_steps(&mat_candidates, entries)?;
-    Ok(materialization_assignments(&mat_candidates).count())
+    Ok((implemented, cache, mat_candidates))
 }
 
 /// `Err` for the first tumbling-window chain whose tumbling-window width does not
@@ -663,14 +647,6 @@ fn check_summary_range_steps(
     Ok(())
 }
 
-/// The operator nodes `root` reads.
-fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
-    match root {
-        QueryRoot::Operator(node) => vec![node],
-        QueryRoot::Scalar(expr) => expr.operator_refs(),
-    }
-}
-
 /// Whether `node` is a summary build (`SummaryAgg` or `SummaryTumblingWindowChain`).
 fn is_summary_build(node: &OperatorNode) -> bool {
     matches!(
@@ -698,7 +674,7 @@ pub(crate) fn materialization_candidates(
     let mut consumers: HashMap<*const OperatorNode, Vec<*const OperatorNode>> = HashMap::new();
     let mut root_nodes: HashSet<*const OperatorNode> = HashSet::new();
     for (query, root) in roots.iter().enumerate() {
-        for operator in root_operators(root) {
+        for operator in root.operator_refs() {
             root_nodes.insert(Rc::as_ptr(operator));
             for node in OperatorNode::reachable(operator) {
                 let entry = readers.entry(Rc::as_ptr(&node)).or_default();
@@ -772,6 +748,30 @@ fn reads_only_time_series(node: &OperatorNode) -> bool {
     }
 }
 
+/// The phase, modulo `tumbling_window_width_ms` (which must be nonzero), of
+/// every evaluation of `demand`, if known. A plain fixed interval has cadence but no phase, so
+/// it is unknown. An explicit schedule has one only when every timestamp in
+/// it has the same phase.
+fn plan_tumbling_window_phase(
+    demand: &RepeatedDemand,
+    tumbling_window_width_ms: u64,
+) -> Option<u64> {
+    match demand {
+        RepeatedDemand::FixedIntervalAt {
+            evaluation_phase, ..
+        } => Some(evaluation_phase.0 % tumbling_window_width_ms),
+        RepeatedDemand::Scheduled(times) => {
+            let first = times.first().map(|t| t.0 % tumbling_window_width_ms);
+            first.filter(|phase| {
+                times
+                    .iter()
+                    .all(|t| t.0 % tumbling_window_width_ms == *phase)
+            })
+        }
+        RepeatedDemand::FixedInterval(_) | RepeatedDemand::EstimatedRate(_) => None,
+    }
+}
+
 /// The workload rules of S4 for `node` (module doc).
 fn ingestion_eligibility(
     node: &OperatorNode,
@@ -832,10 +832,6 @@ fn ingestion_eligibility(
         // phase also needs that phase on the grid. A reader of unknown phase
         // is taken to run at multiples of its interval (phase 0), as for a
         // whole-window build below.
-        let epoch_tumbling_windows = TumblingWindowLayout {
-            tumbling_window_width_ms,
-            tumbling_window_origin_ms: Some(0),
-        };
         for d in demands.iter().flatten() {
             let QueryRecurrence::Repeated(demand) = &d.recurrence else {
                 continue;
@@ -846,21 +842,20 @@ fn ingestion_eligibility(
             {
                 return Err(Why::TumblingWindowsOffInterval);
             }
-            let reader = plan_tumbling_window_phase(demand, tumbling_window_width_ms)
-                .map_err(|_| Why::TumblingWindowsOffPhase)?;
-            let Some(phase_ms) = reader.tumbling_window_origin_ms else {
+            if tumbling_window_width_ms == 0 {
+                return Err(Why::TumblingWindowsOffPhase);
+            }
+            let Some(phase_ms) = plan_tumbling_window_phase(demand, tumbling_window_width_ms)
+            else {
                 if matches!(demand, RepeatedDemand::Scheduled(_)) {
                     // A schedule whose times are not all on one tumbling-window phase.
                     return Err(Why::TumblingWindowsOffPhase);
                 }
                 continue;
             };
-            validate_tumbling_window_coverage(
-                &epoch_tumbling_windows,
-                Some(phase_ms),
-                &WindowEdgeCoverage::TumblingWindowAligned,
-            )
-            .map_err(|_| Why::TumblingWindowsOffPhase)?;
+            if phase_ms != 0 {
+                return Err(Why::TumblingWindowsOffPhase);
+            }
         }
         return Ok(());
     }
@@ -1040,23 +1035,9 @@ pub(crate) fn implement_candidate_operators(
     root: &Rc<OperatorNode>,
     inputs: &[Rc<OperatorNode>],
 ) -> Result<Rc<OperatorNode>, PhysicalASAPOptimizationError> {
-    if inputs.iter().any(|input| Rc::ptr_eq(input, root)) {
-        return Err(PhysicalASAPOptimizationError::ImplementationBoundary(
-            "candidate root cannot also be an input",
-        ));
-    }
-    let reachable = OperatorNode::reachable(root)
-        .into_iter()
-        .map(|node| Rc::as_ptr(&node))
-        .collect::<HashSet<_>>();
-    if inputs
-        .iter()
-        .any(|input| !reachable.contains(&Rc::as_ptr(input)))
-    {
-        return Err(PhysicalASAPOptimizationError::ImplementationBoundary(
-            "input is absent from candidate subtree",
-        ));
-    }
+    // The inventory rejects a root aliasing an input; an input outside the
+    // subtree is unused here and rejected by the inventory as `InvalidMemo`.
+    debug_assert!(!inputs.iter().any(|input| Rc::ptr_eq(input, root)));
     let mut implementations = inputs
         .iter()
         .map(|input| (Rc::as_ptr(input), Rc::clone(input)))
@@ -1183,23 +1164,16 @@ fn rebuilt(
 }
 
 /// Stage 2 internals that other crates' tests call: building one physical
-/// candidate for a chosen assignment, implementing one candidate's
-/// operators, and the tumbling-window-coverage check.
+/// candidate for a chosen assignment, the catalog steps, and the timing split.
 #[cfg(feature = "test-support")]
 pub mod test_support {
-    use std::rc::Rc;
-
-    use asap_types::ir::{OperatorNode, QueryRoot};
+    use asap_types::ir::QueryRoot;
     use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
     use crate::{PhysicalASAPOptimizationError, PhysicalWorkloadPlan};
 
     pub use crate::catalog::test_support as catalog;
     pub use crate::split_by_timing::split_shared_by_timing;
-    pub use crate::summary_window::{
-        validate_tumbling_window_coverage, TumblingWindowCoverageError, TumblingWindowLayout,
-        WindowEdgeCoverage,
-    };
 
     /// See `optimize_physical_asap_chosen` in this crate.
     pub fn optimize_physical_asap_chosen(
@@ -1218,14 +1192,6 @@ pub mod test_support {
             query_time_results_retained,
             choose,
         )
-    }
-
-    /// See `implement_candidate_operators` in this crate.
-    pub fn implement_candidate_operators(
-        root: &Rc<OperatorNode>,
-        inputs: &[Rc<OperatorNode>],
-    ) -> Result<Rc<OperatorNode>, PhysicalASAPOptimizationError> {
-        crate::implement_candidate_operators(root, inputs)
     }
 }
 
@@ -1256,10 +1222,6 @@ mod tests {
             .iter()
             .any(|node| node.operator.kind_name() == "Limit"));
         assert!(nodes.iter().any(|node| Rc::ptr_eq(node, &boundary)));
-        assert!(matches!(
-            implement_candidate_operators(&root, std::slice::from_ref(&root)),
-            Err(PhysicalASAPOptimizationError::ImplementationBoundary(_))
-        ));
     }
 
     // Logical and exact ranked rows retain the full series identity contract.
@@ -1627,7 +1589,8 @@ mod tests {
     #[test]
     fn selected_reader_eligibility_ignores_optional_unpredictable_consumers() {
         let root = in_tumbling_windows(summary_root("quantile_over_time(0.99, m[5m])"));
-        let node = root_operators(&root)
+        let node = root
+            .operator_refs()
             .into_iter()
             .flat_map(OperatorNode::reachable)
             .find(|node| matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. })))
@@ -1690,7 +1653,8 @@ mod tests {
     fn selected_reader_eligibility_checks_phase_and_range_compatibility() {
         use asap_types::workload::RangeEvaluation;
         let root = in_tumbling_windows(summary_root("quantile_over_time(0.99, m[5m])"));
-        let node = root_operators(&root)
+        let node = root
+            .operator_refs()
             .into_iter()
             .flat_map(OperatorNode::reachable)
             .find(|node| matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. })))
@@ -1784,7 +1748,7 @@ mod tests {
     /// The distinct nodes of `kind` the candidate's roots read.
     fn node_of(candidate: &PhysicalWorkloadPlan, kind: &str) -> Vec<Rc<OperatorNode>> {
         let mut nodes: Vec<Rc<OperatorNode>> = Vec::new();
-        for root in candidate.roots.iter().flat_map(root_operators) {
+        for root in candidate.roots.iter().flat_map(QueryRoot::operator_refs) {
             for node in OperatorNode::reachable(root) {
                 if node.operator.kind_name() == kind && !nodes.iter().any(|n| Rc::ptr_eq(n, &node))
                 {
@@ -2237,13 +2201,6 @@ mod tests {
             "tumbling-window width 60000 ms does not divide the 30000 ms step of a range \
              evaluation that reads it"
         );
-        assert!(physical_candidate_count(
-            std::slice::from_ref(&root),
-            &[stepping(30_000)],
-            &arriving(),
-            false,
-        )
-        .is_err());
         assert_eq!(implement_for(stepping(2 * MINUTE)).unwrap().len(), 2);
         // A one-step range (span 0) is one evaluation per request, at the
         // refresh: its step is not read.
@@ -2453,5 +2410,28 @@ mod tests {
             MINUTE,
             [&at(0), &unknown_phase, &at(30_000)]
         ));
+    }
+
+    // A known evaluation phase is reduced modulo the width; a bare interval has
+    // none; a schedule has one only when all its times share it.
+    #[test]
+    fn tumbling_window_phase_of_a_repeated_demand() {
+        use asap_types::workload::{RepetitionInterval, TimestampMs};
+        let at = |phase| RepeatedDemand::FixedIntervalAt {
+            interval: RepetitionInterval(60_000),
+            evaluation_phase: TimestampMs(phase),
+        };
+        let scheduled = |times: &[u64]| {
+            RepeatedDemand::Scheduled(times.iter().copied().map(TimestampMs).collect())
+        };
+        let phase = |demand| plan_tumbling_window_phase(&demand, 60_000);
+        assert_eq!(phase(at(56_000)), Some(56_000));
+        assert_eq!(phase(at(176_000)), Some(56_000));
+        assert_eq!(
+            phase(RepeatedDemand::FixedInterval(RepetitionInterval(60_000))),
+            None
+        );
+        assert_eq!(phase(scheduled(&[56_000, 176_000])), Some(56_000));
+        assert_eq!(phase(scheduled(&[56_000, 150_000])), None);
     }
 }

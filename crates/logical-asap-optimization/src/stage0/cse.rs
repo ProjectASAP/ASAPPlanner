@@ -131,8 +131,9 @@ pub(crate) fn structural_hash(node: &OperatorNode, cache: &mut NodeToStructuralH
 /// Numeric `PartialEq` alone conflates signed zeros. The serialized check is
 /// additional evidence, never a replacement for typed equality (JSON maps
 /// non-finite floats to `null`). Used for the guarantee, whose bounds are
-/// floats a shared node must preserve bit-for-bit.
-fn same_value<T: PartialEq + serde::Serialize>(left: &T, right: &T) -> bool {
+/// floats a shared node must preserve bit-for-bit, and for summary families,
+/// whose `SketchParams` equality omits the recorded error and probability.
+pub(crate) fn same_value<T: PartialEq + serde::Serialize>(left: &T, right: &T) -> bool {
     left == right
         && match (serde_json::to_string(left), serde_json::to_string(right)) {
             (Ok(left), Ok(right)) => left == right,

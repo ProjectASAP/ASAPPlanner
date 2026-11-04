@@ -5,10 +5,8 @@
 //! Concrete state identity includes capacity, guarantee, update/filter semantics,
 //! and materialization. Supported private projections/filters gain explicit input groups.
 
-use super::check_generation_deadline;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
-use std::time::Instant;
 
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
 
@@ -19,8 +17,6 @@ use asap_types::stages::{MemoGroup, MemoGroupId};
 /// (2–9), or the shared summary-state groups (10).
 #[derive(Debug, thiserror::Error)]
 pub enum Pass2RuleError {
-    #[error(transparent)]
-    DeadlineExceeded(#[from] asap_types::stages::CandidateGenerationTimeout),
     #[error("memo group and candidate vectors have different lengths")]
     MismatchedGroups,
     #[error("memo contains an out-of-range group reference")]
@@ -31,8 +27,6 @@ pub enum Pass2RuleError {
     CyclicDependencies,
     #[error("explicit summary-state groups have already been introduced")]
     AlreadyExpanded,
-    #[error("a previously discovered reader no longer exposes its summary boundary")]
-    InvalidReaderBoundary,
     #[error("scan-label candidate expansion: {0}")]
     ScanLabelWidening(String),
     #[error("state configuration expansion: {0}")]
@@ -72,28 +66,21 @@ pub(crate) fn check_unexpanded_memo(memo: &Memo) -> Result<(), Pass2RuleError> {
 /// (unsupported candidate shapes unchanged). Then rebuilds every group's
 /// parents and the queries it may serve. On error, discard `memo`: it may
 /// hold partial work.
-pub(crate) fn add_shared_summary_state_groups(
-    memo: &mut Memo,
-    deadline: Option<Instant>,
-) -> Result<(), Pass2RuleError> {
-    add_shared_summary_state_groups_with_index(memo, deadline, true)
+pub(crate) fn add_shared_summary_state_groups(memo: &mut Memo) -> Result<(), Pass2RuleError> {
+    add_shared_summary_state_groups_with_index(memo, true)
 }
 
 /// `indexed` looks builds up by fingerprint; otherwise by a linear scan
 /// (the reference the index is tested against).
 fn add_shared_summary_state_groups_with_index(
     memo: &mut Memo,
-    deadline: Option<Instant>,
     indexed: bool,
 ) -> Result<(), Pass2RuleError> {
     let mut builds: Vec<BuildReaders> = Vec::new();
     let mut build_index: HashMap<Option<BuildFingerprint>, Vec<usize>> = HashMap::new();
     for (group, candidates) in memo.candidates.iter().enumerate() {
-        check_generation_deadline(deadline)?;
         for (index, candidate) in candidates.iter().enumerate() {
-            check_generation_deadline(deadline)?;
             for (build, children) in direct_input_builds(memo, candidate) {
-                check_generation_deadline(deadline)?;
                 let fingerprint = build_fingerprint(&build);
                 let bucket = build_index.entry(fingerprint).or_default();
                 let matching = if indexed {
@@ -123,7 +110,6 @@ fn add_shared_summary_state_groups_with_index(
     let mut replacements: BTreeMap<(usize, usize), HashMap<*const OperatorNode, Rc<OperatorNode>>> =
         BTreeMap::new();
     for build in builds {
-        check_generation_deadline(deadline)?;
         // Repeated private builds within one result are reusable too. The
         // reader list records concrete build occurrences, not just owners.
         if build.readers.len() < 2 {
@@ -161,7 +147,6 @@ fn add_shared_summary_state_groups_with_index(
             accuracy_budget_parts,
         }]);
         for (group, index, own_build) in build.readers {
-            check_generation_deadline(deadline)?;
             replacements
                 .entry((group, index))
                 .or_default()
@@ -170,7 +155,6 @@ fn add_shared_summary_state_groups_with_index(
         state_groups.push(state_group);
     }
     for ((group, index), replacements) in replacements {
-        check_generation_deadline(deadline)?;
         // Factor every available producer boundary together. A producer used by
         // only one selected reader is still legal; no state-subset enumeration
         // is required. Retain the original entirely local implementation too.
@@ -191,11 +175,9 @@ fn add_shared_summary_state_groups_with_index(
     }
     // Parents describe every possible group/candidate dependency, not a selected plan.
     for group in &mut memo.groups {
-        check_generation_deadline(deadline)?;
         group.parents.clear();
     }
     for group in 0..memo.groups.len() {
-        check_generation_deadline(deadline)?;
         let dependencies: HashSet<_> = memo.groups[group]
             .child_groups
             .iter()
@@ -207,7 +189,6 @@ fn add_shared_summary_state_groups_with_index(
             .copied()
             .collect();
         for child in dependencies {
-            check_generation_deadline(deadline)?;
             memo.groups[child.0 as usize]
                 .parents
                 .push(MemoGroupId(group as u32));
@@ -236,13 +217,11 @@ fn add_shared_summary_state_groups_with_index(
             .copied()
             .collect();
         for child in children {
-            check_generation_deadline(deadline)?;
             memo.groups[child.0 as usize].queries.extend(&queries);
             memo.groups[child.0 as usize].queries.sort_unstable();
             memo.groups[child.0 as usize].queries.dedup();
         }
     }
-    check_generation_deadline(deadline)?;
     Ok(())
 }
 
@@ -359,6 +338,37 @@ pub(super) fn boundary_groups(
     found
 }
 
+/// The nodes of `candidate`'s input groups, where its own nodes end.
+pub(super) fn boundary_ptrs(
+    memo: &Memo,
+    candidate: &CandidateForMemoGroup,
+) -> HashSet<*const OperatorNode> {
+    candidate
+        .input_groups
+        .iter()
+        .map(|group| Rc::as_ptr(&memo.groups[group.0 as usize].logical_node))
+        .collect()
+}
+
+/// `root` and the nodes beneath it down to `boundaries` (excluded), each
+/// once, in depth-first order (last child first).
+pub(super) fn nodes_within(
+    root: &Rc<OperatorNode>,
+    boundaries: &HashSet<*const OperatorNode>,
+) -> Vec<Rc<OperatorNode>> {
+    let mut pending = vec![Rc::clone(root)];
+    let mut seen = HashSet::new();
+    let mut nodes = Vec::new();
+    while let Some(node) = pending.pop() {
+        if boundaries.contains(&Rc::as_ptr(&node)) || !seen.insert(Rc::as_ptr(&node)) {
+            continue;
+        }
+        pending.extend(node.children().into_iter().cloned());
+        nodes.push(node);
+    }
+    nodes
+}
+
 // Hashing narrows comparisons only; full strict equality below remains the
 // authority, including probability metadata and floating-point corner cases.
 #[derive(Hash, PartialEq, Eq)]
@@ -461,8 +471,8 @@ fn replace_node(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pass1::memo_population::try_populate_pass1;
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
-    use crate::pass2::memo::groups::try_populate_pass1;
     use crate::stage0::generate_dag_of_logical_memo_groups;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::QueryRoot;
@@ -479,10 +489,7 @@ mod tests {
     /// Pass 2 after local window composition, over the complete tumbling-window-width
     /// domain, as the Pass 2 entry runs it.
     fn expand(memo: Memo) -> Result<Expanded, Pass2RuleError> {
-        let memo = crate::test_support::sharing_rules_and_shared_state_groups(
-            memo,
-            super::super::shared_configurations::TumblingWindowWidthDomain::Complete,
-        )?;
+        let memo = crate::test_support::sharing_rules_and_shared_state_groups(memo)?;
         Ok(expanded(memo))
     }
 
@@ -515,14 +522,12 @@ mod tests {
             ]),
             &[6, 6, 6],
         );
-        let domain = super::super::shared_configurations::TumblingWindowWidthDomain::Complete;
         let mut memo = memo;
-        crate::pass2::logical_memo_candidates::apply_sharing_rules(&mut memo, domain, None)
-            .unwrap();
+        crate::pass2::logical_memo_candidates::apply_sharing_rules(&mut memo).unwrap();
         let mut linear = memo.clone();
         let mut indexed = memo;
-        add_shared_summary_state_groups_with_index(&mut indexed, None, true).unwrap();
-        add_shared_summary_state_groups_with_index(&mut linear, None, false).unwrap();
+        add_shared_summary_state_groups_with_index(&mut indexed, true).unwrap();
+        add_shared_summary_state_groups_with_index(&mut linear, false).unwrap();
         let (indexed, linear) = (expanded(indexed), expanded(linear));
         assert_eq!(indexed.state_groups, linear.state_groups);
         assert_eq!(indexed.memo.groups.len(), linear.memo.groups.len());
@@ -552,21 +557,6 @@ mod tests {
             assert_eq!(left.parents, right.parents);
             assert_eq!(left.queries, right.queries);
         }
-    }
-
-    // State expansion returns a typed timeout, not a partial success that a
-    // solver could incorrectly report as optimal over the complete catalog.
-    #[test]
-    fn expired_state_expansion_returns_timeout() {
-        let mut memo = workload(&[("quantile_over_time(0.95, latency[5m])", 0.01)]);
-        assert!(matches!(
-            crate::pass2::logical_memo_candidates::apply_sharing_rules(
-                &mut memo,
-                super::super::shared_configurations::TumblingWindowWidthDomain::Complete,
-                Some(Instant::now())
-            ),
-            Err(Pass2RuleError::DeadlineExceeded(_))
-        ));
     }
 
     fn workload(queries: &[(&str, f64)]) -> Memo {
@@ -929,12 +919,7 @@ mod tests {
             ],
         ] {
             let mut memo = workload_with_identity(&queries, true);
-            crate::pass2::logical_memo_candidates::apply_sharing_rules(
-                &mut memo,
-                super::super::shared_configurations::TumblingWindowWidthDomain::Complete,
-                None,
-            )
-            .unwrap();
+            crate::pass2::logical_memo_candidates::apply_sharing_rules(&mut memo).unwrap();
             assert!(
                 memo.candidates.iter().flatten().any(
                     |candidate| candidate.origin == OriginOfCandidateForMemoGroup::WidenedScans
@@ -1453,7 +1438,7 @@ mod tests {
             .filter(|node| is_univmon(node))
             .collect();
         assert!(!before.is_empty(), "real generation must offer UnivMon");
-        crate::pass2::memo::rules::summary_inputs::factor_summary_inputs(&mut memo, None).unwrap();
+        crate::pass2::memo::rules::summary_inputs::factor_summary_inputs(&mut memo).unwrap();
         assert!(memo
             .candidates
             .iter()
@@ -1597,7 +1582,6 @@ mod tests {
         let second = duplicate(&candidate.root_node, &boundaries);
         let combined =
             OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Concat {
-                discriminator_unique_key: None,
                 children: vec![Rc::clone(&candidate.root_node), second],
             }))
             .unwrap();

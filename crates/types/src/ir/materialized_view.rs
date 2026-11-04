@@ -65,7 +65,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -389,16 +388,6 @@ pub enum InstallableDagError {
     /// for less than its readers' window reaches back.
     #[error("query-time scan {node_id} is kept for less than its window reaches back")]
     ScanRetentionTooShort { node_id: PhysicalASAPNodeId },
-    /// The caller's deadline passed while deriving the views or retention.
-    #[error("deadline exceeded deriving materialized views")]
-    DeadlineExceeded,
-}
-
-fn check_deadline(deadline: Option<Instant>) -> Result<(), InstallableDagError> {
-    match deadline {
-        Some(limit) if Instant::now() >= limit => Err(InstallableDagError::DeadlineExceeded),
-        _ => Ok(()),
-    }
 }
 
 impl PhysicalASAPDAG {
@@ -418,7 +407,7 @@ impl PhysicalASAPDAG {
         }
         self.validate()?;
         let views: Vec<MaterializedView> = self
-            .views_with_node_retention(None)?
+            .views_with_node_retention()?
             .into_iter()
             .map(|(view, _)| view)
             .collect();
@@ -578,7 +567,7 @@ impl PhysicalASAPDAG {
 
     /// Sets `retention_ms` on every materialized view and every query-time
     /// `Scan` of an installed DAG (tumbling-window chains expanded), and returns the
-    /// views ([`Self::materialized_views`]); `Err` when `deadline` passes.
+    /// views ([`Self::materialized_views`]).
     ///
     /// A view takes `tumbling_window_retention_ms_by_node`'s value (Stage 3's retention
     /// of a tumbling window's chain: its offset plus its window plus the longest
@@ -606,12 +595,9 @@ impl PhysicalASAPDAG {
         &mut self,
         tumbling_window_retention_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
         reader_span_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
-        deadline: Option<Instant>,
     ) -> Result<Vec<MaterializedView>, InstallableDagError> {
-        let (mut views, scans_read): (Vec<MaterializedView>, Vec<Vec<PhysicalASAPNodeId>>) = self
-            .views_with_node_retention(deadline)?
-            .into_iter()
-            .unzip();
+        let (mut views, scans_read): (Vec<MaterializedView>, Vec<Vec<PhysicalASAPNodeId>>) =
+            self.views_with_node_retention()?.into_iter().unzip();
         let mut reach_ms_by_node = HashMap::new();
         let mut position_of = HashMap::new();
         for (position, view) in views.iter_mut().enumerate() {
@@ -633,7 +619,6 @@ impl PhysicalASAPDAG {
         // Views before their inputs: an input stays while every view built
         // from it may still be refreshed.
         for index in (0..views.len()).rev() {
-            check_deadline(deadline)?;
             let view = &views[index];
             let needed_ms = match view.refresh {
                 MaterializedViewRefresh::OnFirstRead => view.retention_ms,
@@ -661,7 +646,6 @@ impl PhysicalASAPDAG {
         }
         let scan_windows = self.query_time_scan_windows();
         for node in self.nodes.iter().filter(|node| is_query_time_scan(node)) {
-            check_deadline(deadline)?;
             let window_ms = scan_windows[&node.id].lookback_ms();
             let retention_ms = window_ms.map(|window_ms| {
                 let span_ms = reader_span_ms_by_node.get(&node.id).copied().unwrap_or(0);
@@ -740,9 +724,7 @@ impl PhysicalASAPDAG {
     /// `Scan`s its refresh reads through its raw-data windows.
     fn views_with_node_retention(
         &self,
-        deadline: Option<Instant>,
     ) -> Result<Vec<(MaterializedView, Vec<PhysicalASAPNodeId>)>, InstallableDagError> {
-        check_deadline(deadline)?;
         let index = ViewIndex::new(self);
         index.check_raw_data_windows()?;
         let views: HashSet<PhysicalASAPNodeId> = self
@@ -763,7 +745,6 @@ impl PhysicalASAPDAG {
         // its raw-data windows and those of the views it reads, unioned.
         let mut window_by_view: HashMap<PhysicalASAPNodeId, ScanWindow> = HashMap::new();
         for &id in index.children_first.iter().filter(|id| views.contains(id)) {
-            check_deadline(deadline)?;
             let node = index.nodes[&id];
             let (inputs, scans) = index.inputs_of_view(id, &views)?;
             let read_windows: Vec<ScanWindow> = inputs

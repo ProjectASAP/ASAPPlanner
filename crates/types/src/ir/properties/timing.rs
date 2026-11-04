@@ -1180,7 +1180,6 @@ mod tests {
                 max(estimate(agg(Rc::clone(&shared), kll()))),
                 max(Rc::clone(&shared)),
             ],
-            discriminator_unique_key: None,
         }))
         .unwrap();
         assert_eq!(

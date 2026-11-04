@@ -15,7 +15,6 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use asap_types::ir::operator::operator_properties::ConcatDiscriminatorKey;
 use asap_types::ir::operator::{
     AggIntent, GroupKeys, InfoMatcher, JoinKind, Reduction, RelationalSetOpKind, SampleKind,
     Source, TimeShift, WindowFrame, WindowFuncKind,
@@ -151,7 +150,6 @@ pub enum UnresolvedOp {
     },
     Concat {
         children: Vec<Rc<UnresolvedOp>>,
-        discriminator_unique_key: Option<ConcatDiscriminatorKey<ColumnRef>>,
     },
     Dedup {
         cols: Vec<ColumnRef>,
@@ -314,25 +312,10 @@ impl UnresolvedScalar {
 }
 
 impl UnresolvedOp {
-    /// An ordinary `Concat` (no unique-key claim).
+    /// A `Concat` of `children`.
     pub fn concat(children: Vec<UnresolvedOp>) -> Self {
         UnresolvedOp::Concat {
             children: children.into_iter().map(Rc::new).collect(),
-            discriminator_unique_key: None,
-        }
-    }
-
-    /// A `Concat` whose output carries the caller-proven compound unique key
-    /// `(discriminator, inner_key)`. Nothing verifies the claim.
-    #[cfg(test)]
-    pub(crate) fn concat_with_discriminator(
-        children: Vec<UnresolvedOp>,
-        discriminator: ColumnRef,
-        inner_key: Vec<ColumnRef>,
-    ) -> Self {
-        UnresolvedOp::Concat {
-            children: children.into_iter().map(Rc::new).collect(),
-            discriminator_unique_key: Some(ConcatDiscriminatorKey::new(discriminator, inner_key)),
         }
     }
 }

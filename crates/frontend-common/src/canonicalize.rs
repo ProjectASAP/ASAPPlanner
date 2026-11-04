@@ -108,21 +108,6 @@ fn canon(
         return Ok(Rc::clone(done));
     }
 
-    // A `Concat` asserting a caller-proven `discriminator_unique_key` (issue
-    // #228) had that key's `ColumnId`s resolved against exactly the first
-    // branch's output schema *as it stood before this pass ran*. The rewrites
-    // below can restructure that branch (anywhere within it) into a shape
-    // with a different output schema, which would leave those `ColumnId`s
-    // pointing at the wrong column, or out of bounds. Snapshot the schema the
-    // key was resolved against before recursing into the children.
-    let discriminator_branch_schema_before = match &node.operator {
-        Operator::NonASAP(NonASAPOp::Concat {
-            children,
-            discriminator_unique_key: Some(_),
-        }) => children.first().map(|c| c.schema.clone()),
-        _ => None,
-    };
-
     // Bottom-up: canonicalize every child (operator inputs and the nodes read
     // by scalar expressions) before matching at this node, so an inner
     // heavy-hitter is promoted before an enclosing rewrite inspects it.
@@ -133,7 +118,7 @@ fn canon(
         changed |= !Rc::ptr_eq(&new, child);
         rebuilt.push((Rc::as_ptr(child), new));
     }
-    let mut current = if changed {
+    let current = if changed {
         let rebuilt_child = |c: &Rc<OperatorNode>| {
             rebuilt
                 .iter()
@@ -144,26 +129,6 @@ fn canon(
     } else {
         Rc::clone(node)
     };
-
-    // If the first branch's output schema moved out from under the asserted
-    // key, the key can no longer be trusted — drop it (never re-derive it by
-    // guessing at name/position). A wrong `unique_keys` claim is a wrong
-    // query answer, not a missed optimization, so any difference at all
-    // drops the key.
-    if let Operator::NonASAP(NonASAPOp::Concat {
-        children,
-        discriminator_unique_key: Some(_),
-    }) = &current.operator
-    {
-        let after = children.first().map(|c| &c.schema);
-        if discriminator_branch_schema_before.as_ref() != after {
-            current =
-                OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Concat {
-                    children: children.clone(),
-                    discriminator_unique_key: None,
-                }))?;
-        }
-    }
 
     let columns_may_change = !read_by_position.contains(&Rc::as_ptr(node));
     let current = apply_local_rules(current, columns_may_change, cache, read_by_position)?;
@@ -592,8 +557,7 @@ mod tests {
     use super::*;
     use asap_types::ir::operator::operator_properties::WindowFuncKind;
     use asap_types::ir::operator::operator_properties::{
-        ConcatDiscriminatorKey, GroupKeys, Source, WindowFrame, WindowFrameBound,
-        WindowFrameOffset, WindowFrameUnits,
+        GroupKeys, Source, WindowFrame, WindowFrameBound, WindowFrameOffset, WindowFrameUnits,
     };
     use asap_types::ir::schema::{DataType, Field, Schema};
 
@@ -689,14 +653,8 @@ mod tests {
         })
     }
 
-    fn concat(
-        children: Vec<Rc<OperatorNode>>,
-        key: Option<ConcatDiscriminatorKey>,
-    ) -> Rc<OperatorNode> {
-        node(NonASAPOp::Concat {
-            children,
-            discriminator_unique_key: key,
-        })
+    fn concat(children: Vec<Rc<OperatorNode>>) -> Rc<OperatorNode> {
+        node(NonASAPOp::Concat { children })
     }
 
     fn measures(n: &OperatorNode) -> &[AggIntent] {
@@ -788,13 +746,10 @@ mod tests {
         // one shared aggregate. The root (and everything under it) must come
         // back as the same `Rc`.
         let agg = count_by_service();
-        let q = concat(
-            vec![
-                passthrough_project(Rc::clone(&agg)),
-                passthrough_project(Rc::clone(&agg)),
-            ],
-            None,
-        );
+        let q = concat(vec![
+            passthrough_project(Rc::clone(&agg)),
+            passthrough_project(Rc::clone(&agg)),
+        ]);
         let out = canonicalize(Rc::clone(&q)).unwrap();
         assert!(Rc::ptr_eq(&out, &q));
     }
@@ -822,80 +777,13 @@ mod tests {
     fn rewritten_shared_subtree_stays_shared() {
         // One promotable sub-DAG referenced twice is rewritten once.
         let branch = limit(5, 0, sort(desc(1), count_by_service()));
-        let q = concat(vec![Rc::clone(&branch), Rc::clone(&branch)], None);
+        let q = concat(vec![Rc::clone(&branch), Rc::clone(&branch)]);
         let out = canonicalize(q).unwrap();
         let Some(NonASAPOp::Concat { children, .. }) = out.non_asap() else {
             panic!("expected Concat");
         };
         assert!(is_topk_over_count(&children[0]));
         assert!(Rc::ptr_eq(&children[0], &children[1]));
-    }
-
-    // ── Concat's discriminator_unique_key vs. canonicalize (issue #228) ──
-    //
-    // `discriminator_unique_key`'s `ColumnId`s were resolved against the
-    // first branch's *pre-canonicalize* output schema. The key is dropped
-    // whenever that branch's schema actually changed, and survives untouched
-    // otherwise. Never guessed at.
-
-    fn discriminator_key(n: &OperatorNode) -> &Option<ConcatDiscriminatorKey> {
-        match n.non_asap() {
-            Some(NonASAPOp::Concat {
-                discriminator_unique_key,
-                ..
-            }) => discriminator_unique_key,
-            _ => panic!("expected Concat"),
-        }
-    }
-
-    #[test]
-    fn concat_discriminator_key_survives_canonicalize_when_first_branch_is_unaffected() {
-        // A plain `Aggregate` first branch matches neither rewrite trigger,
-        // so its schema is identical before and after canonicalize.
-        let q = concat(
-            vec![count_by_service(), count_by_service()],
-            Some(ConcatDiscriminatorKey::new(0, vec![1])),
-        );
-        let out = canonicalize(Rc::clone(&q)).unwrap();
-        assert!(
-            discriminator_key(&out).is_some(),
-            "an untouched first branch's discriminator key must survive canonicalize"
-        );
-        assert!(Rc::ptr_eq(&out, &q));
-    }
-
-    #[test]
-    fn concat_discriminator_key_is_dropped_when_first_branch_gets_rewritten() {
-        // The first branch is exactly the heavy-hitter promotion trigger, so
-        // canonicalize rewrites it to `Aggregate{TopK}`, whose own output is
-        // a single column, not the original two (`[service, count]`). A key
-        // resolved against the 2-column shape must not survive pointing at
-        // the new 1-column schema.
-        let promotable_branch = limit(5, 0, sort(desc(1), count_by_service()));
-        let q = concat(
-            vec![promotable_branch, count_by_service()],
-            Some(ConcatDiscriminatorKey::new(0, vec![1])),
-        );
-        let out = canonicalize(q).unwrap();
-        let Some(NonASAPOp::Concat {
-            children,
-            discriminator_unique_key,
-        }) = out.non_asap()
-        else {
-            panic!("expected Concat");
-        };
-        assert!(
-            is_topk_over_count(&children[0]),
-            "the first branch is still promoted normally"
-        );
-        assert!(
-            discriminator_unique_key.is_none(),
-            "a stale discriminator key must be dropped, never silently kept wrong"
-        );
-        assert!(
-            out.schema.unique_keys.is_empty(),
-            "the dropped key leaves the schema"
-        );
     }
 
     #[test]
@@ -1302,7 +1190,7 @@ mod tests {
     #[test]
     fn concat_branches_read_through_a_positional_reader_are_not_promoted() {
         let branch = limit(5, 0, sort(desc(1), count_by_service()));
-        let q = passthrough_project(concat(vec![Rc::clone(&branch), count_by_service()], None));
+        let q = passthrough_project(concat(vec![Rc::clone(&branch), count_by_service()]));
         let out = canonicalize(Rc::clone(&q)).unwrap();
         assert!(Rc::ptr_eq(&out, &q));
     }

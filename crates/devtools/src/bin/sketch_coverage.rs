@@ -67,7 +67,6 @@ fn analyze_corpus(
             &NoAccuracyEvidence,
             &DataWorkload::default(),
             None,
-            None,
         ) else {
             rejected += 1;
             continue;

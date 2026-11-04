@@ -46,36 +46,10 @@ pub struct FlatDag {
 /// becomes one node, so sharing is kept. Also returns the original node for
 /// each id.
 pub fn flatten(roots: &[QueryRoot]) -> (FlatDag, Vec<Rc<OperatorNode>>) {
-    flatten_before(roots, None).expect("flatten without a deadline cannot time out")
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("planning deadline exceeded flattening the physical DAG")]
-pub(crate) struct FlattenDeadlineExceeded;
-
-/// The same pointer-preserving export, cooperatively bounded while visiting
-/// nodes. A timeout returns no partially flattened DAG.
-pub(crate) fn flatten_before(
-    roots: &[QueryRoot],
-    deadline: Option<std::time::Instant>,
-) -> Result<(FlatDag, Vec<Rc<OperatorNode>>), FlattenDeadlineExceeded> {
     let mut ids = HashMap::new();
     let mut nodes = Vec::new();
     let mut originals = Vec::new();
-    check_deadline(deadline)?;
-    let mut error = None;
-    let mut id_of = |node: &Rc<OperatorNode>| {
-        if error.is_some() {
-            return 0;
-        }
-        match visit(node, &mut ids, &mut nodes, &mut originals, deadline) {
-            Ok(id) => id,
-            Err(failed) => {
-                error = Some(failed);
-                0
-            }
-        }
-    };
+    let mut id_of = |node: &Rc<OperatorNode>| visit(node, &mut ids, &mut nodes, &mut originals);
     let roots = roots
         .iter()
         .map(|root| match root {
@@ -83,19 +57,7 @@ pub(crate) fn flatten_before(
             QueryRoot::Scalar(expr) => QueryRoot::Scalar(expr.map_operator_refs(&mut id_of)),
         })
         .collect();
-    if let Some(error) = error {
-        return Err(error);
-    }
-    check_deadline(deadline)?;
-    Ok((FlatDag { nodes, roots }, originals))
-}
-
-fn check_deadline(deadline: Option<std::time::Instant>) -> Result<(), FlattenDeadlineExceeded> {
-    if deadline.is_some_and(|limit| std::time::Instant::now() >= limit) {
-        Err(FlattenDeadlineExceeded)
-    } else {
-        Ok(())
-    }
+    (FlatDag { nodes, roots }, originals)
 }
 
 fn visit(
@@ -103,29 +65,13 @@ fn visit(
     ids: &mut HashMap<*const OperatorNode, NodeId>,
     nodes: &mut Vec<FlatNode>,
     originals: &mut Vec<Rc<OperatorNode>>,
-    deadline: Option<std::time::Instant>,
-) -> Result<NodeId, FlattenDeadlineExceeded> {
-    check_deadline(deadline)?;
+) -> NodeId {
     if let Some(&id) = ids.get(&Rc::as_ptr(node)) {
-        return Ok(id);
+        return id;
     }
-    let mut error = None;
-    let operator = node.operator.map_children(|child| {
-        if error.is_some() {
-            return 0;
-        }
-        match visit(child, ids, nodes, originals, deadline) {
-            Ok(id) => id,
-            Err(failed) => {
-                error = Some(failed);
-                0
-            }
-        }
-    });
-    if let Some(error) = error {
-        return Err(error);
-    }
-    check_deadline(deadline)?;
+    let operator = node
+        .operator
+        .map_children(|child| visit(child, ids, nodes, originals));
     let id = nodes.len();
     nodes.push(FlatNode {
         operator,
@@ -137,7 +83,7 @@ fn visit(
     });
     originals.push(Rc::clone(node));
     ids.insert(Rc::as_ptr(node), id);
-    Ok(id)
+    id
 }
 
 #[cfg(test)]
@@ -161,30 +107,6 @@ mod tests {
             child,
         }))
         .unwrap()
-    }
-
-    #[test]
-    #[ignore = "flaky: depends on a wall-clock deadline (#1067)"]
-    fn bounded_flatten_preserves_identity_and_abandons_partial_export() {
-        use std::time::{Duration, Instant};
-        let shared = values();
-        let roots = vec![
-            QueryRoot::Operator(filter(Rc::clone(&shared))),
-            QueryRoot::Operator(filter(Rc::clone(&shared))),
-        ];
-        let (expected, originals) = flatten(&roots);
-        let (bounded, bounded_originals) =
-            flatten_before(&roots, Some(Instant::now() + Duration::from_secs(1))).unwrap();
-        assert_eq!(bounded, expected);
-        assert!(originals
-            .iter()
-            .zip(&bounded_originals)
-            .all(|(a, b)| Rc::ptr_eq(a, b)));
-        assert!(flatten_before(&roots, Some(Instant::now())).is_err());
-        let large: Vec<_> = (0..100_000)
-            .map(|_| QueryRoot::Operator(values()))
-            .collect();
-        assert!(flatten_before(&large, Some(Instant::now() + Duration::from_millis(1))).is_err());
     }
 
     #[test]

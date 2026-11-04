@@ -4,7 +4,8 @@
 Build asap_planner, copy it to a fixed path, then pass that path here. The
 binary SHA records exactly what ran even if another build updates the workspace.
 Each workload is planned through Stage 3 as its workload set says (deployment
-capabilities, cost model, accuracy guarantees) under an external 90s deadline.
+capabilities, cost model, accuracy guarantees); each planning process is
+stopped after 90 s.
 """
 import argparse
 import concurrent.futures

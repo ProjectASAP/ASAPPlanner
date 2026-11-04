@@ -11,13 +11,9 @@
 // document for the Stage Viewer (`--format json`), to `--out` or standard
 // output.
 //
-// Each stage runs once and without a deadline
-// (`asap_devtools::planning_stages::run_stages_until`): Pass 2 runs over
-// every legal tumbling-window width (`TumblingWindowWidthDomain::Complete`),
-// so the memo holds every candidate any of `run_planning`'s rounds would,
-// and Stages 2 and 3 run on that memo. With no rounds and no
-// deadline, the selected plan is the one `run_planning` selects when its
-// rounds reach the complete domain.
+// The stages run as `run_planning` runs them
+// (`asap_devtools::planning_stages::run_stages_until`), so the selected plan
+// is the one `run_planning` selects.
 //
 // Inputs, one flag per field of the planner's `UserInput`:
 //   - `--workload <file>` (repeatable): a `PlanningWorkload` JSON file. Each
@@ -229,11 +225,10 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         .with_ignore_accuracy_guarantees(ignore_accuracy_guarantees);
     let result = run_stages_until(roots.clone(), &entries, &data, models, run_until);
     // A stage that failed: the output is still written, then the run exits 1.
-    // (`DeadlineReached` only stands for the stages `--run-until` skipped.)
     let failure = match &result {
         Err(PlanningStagesError::Pass1(error)) => Some(format!("Pass 1: {error}")),
         Ok(run) => match &run.run.selection {
-            Err(SelectionError::DeadlineReached) | Ok(_) => None,
+            Err(SelectionError::NotRun) | Ok(_) => None,
             Err(error) => Some(error.to_string()),
         },
         Err(_) => None,
@@ -360,7 +355,7 @@ fn document(queries: Vec<Value>, entries: &[QueryWorkloadEntry], run: &PlanningS
         // contradict the data workload.
         if run.run.logical_asap_candidates.is_none() {
             if let Err(error) = &run.run.selection {
-                if !matches!(error, SelectionError::DeadlineReached) {
+                if !matches!(error, SelectionError::NotRun) {
                     stage1["error"] = json!(error.to_string());
                 }
             }

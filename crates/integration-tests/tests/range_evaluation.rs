@@ -263,7 +263,6 @@ fn explicit_tumbling_window_candidates_follow_the_evaluation_step_grid() {
 /// 3,900,000 ms, so the next refresh's earliest step finds its tumbling windows.
 /// Without the range it is the window, 300,000 ms.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn stage3_plan_selection_reports_the_retention_of_kept_tumbling_windows() {
     let deployment = keeping_query_time_results();
     let query = "max_over_time(m[5m])";
@@ -340,7 +339,6 @@ fn no_range_evaluation_leaves_every_price_unchanged() {
 /// of tumbling windows (460.0410), and B1 472.2760: the kept tumbling windows are selected, and without
 /// query-time retention, the ingestion-time tumbling windows.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn stage3_plan_selection_prefers_kept_tumbling_windows_once_the_range_is_declared() {
     let query = "max_over_time(m[5m])";
     let deployment = keeping_query_time_results();

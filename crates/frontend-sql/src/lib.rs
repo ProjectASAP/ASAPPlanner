@@ -19,7 +19,7 @@ use std::rc::Rc;
 use asap_frontend_common::resolve_root;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::OperatorNode;
-use asap_types::workload::{QueryLanguage, QueryWorkload, SqlDialect};
+use asap_types::workload::SqlDialect;
 
 pub use error::SqlError;
 pub use sql::SqlCatalog;
@@ -62,48 +62,4 @@ pub async fn lower_sql_dialect(
     let root = resolve_root(&unresolved)?;
     // #509 Example 2: the L2 and entropy idioms become frequency intents.
     Ok(frequency::recognize_frequency_idioms(&root).unwrap_or(root))
-}
-
-/// Lower every SQL batch entry in `workload` to an operator DAG.
-///
-/// One `Result` per entry — errors are per-query, not fatal for the batch.
-/// Returns `WrongLanguage` for every entry if the workload is not SQL, and
-/// `UnsupportedDialect` for `ElasticSQL` (no vendored parser).
-pub async fn lower_sql_batch(
-    workload: &QueryWorkload,
-    catalog: &SqlCatalog,
-) -> Vec<Result<Rc<OperatorNode>, SqlError>> {
-    let entries = match &workload.query_batch {
-        Some(e) if !e.is_empty() => e,
-        _ => return vec![],
-    };
-
-    // `DataFusion` is a legacy alias for `SQL(DataFusionSQL)`; accept both.
-    if !matches!(
-        workload.language,
-        QueryLanguage::SQL(_) | QueryLanguage::DataFusion
-    ) {
-        let lang = format!("{:?}", workload.language);
-        return entries
-            .iter()
-            .map(|_| Err(SqlError::WrongLanguage(lang.clone())))
-            .collect();
-    }
-    let dialect = match &workload.language {
-        QueryLanguage::SQL(d) => d.clone(),
-        _ => SqlDialect::DataFusionSQL,
-    };
-    if matches!(dialect, SqlDialect::ElasticSQL) {
-        return entries
-            .iter()
-            .map(|_| Err(SqlError::UnsupportedDialect("ElasticSQL".into())))
-            .collect();
-    }
-
-    let mut results = Vec::with_capacity(entries.len());
-    for entry in entries {
-        let accuracy = entry.requirements.accuracy.clone();
-        results.push(lower_sql_dialect(&entry.query.0, catalog, dialect.clone(), accuracy).await);
-    }
-    results
 }

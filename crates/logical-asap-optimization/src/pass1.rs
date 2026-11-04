@@ -7,6 +7,8 @@
 /// Stage 1, Pass 1's entry and output: the per-computation candidates on
 /// the memo groups ([`PerComputationLogicalMemoCandidates`](asap_types::stages::PerComputationLogicalMemoCandidates)).
 pub(crate) mod logical_memo_candidates;
+/// Pass 1's candidates on Stage 0's memo groups (`try_populate_pass1`).
+pub(crate) mod memo_population;
 /// Stage 1, Pass 1's computation targets, their candidates and their
 /// composition. No execution timing is assigned: that is a Stage 2
 /// materialization decision. Its target list

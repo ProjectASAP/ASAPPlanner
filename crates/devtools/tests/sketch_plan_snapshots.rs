@@ -19,16 +19,9 @@
 //! Regenerate with
 //! `UPDATE_SNAPSHOTS=1 cargo test --release -p asap-devtools --test corpus_snapshots -- --ignored sketch_plans_match_snapshots`.
 //!
-//! Each workload is planned by `asap_planner --run-until stage3`: one
-//! search over every legal tumbling-window width, with no time limit. Every workload
-//! must end with status `optimal`; any other ending fails instead of being
-//! recorded. A workload with a `deadline_reached_reason` in the manifest may
-//! instead end with status `deadline_reached`; its snapshot records that
-//! status, so the plan, cost and status must still match.
-//! Workloads whose search stops at a budget (the raw-retained memo examples,
-//! full random-mixed workloads, three or more quantile queries over 10,000
-//! series, the `or` and `COUNT(DISTINCT)` workloads, single quantiles under
-//! the default and raw-retained deployments) are left out.
+//! Each workload is planned by `asap_planner --run-until stage3`. Planning
+//! has no time limit, so every workload must end with status `optimal`; any
+//! other ending fails instead of being recorded.
 
 use std::path::PathBuf;
 
@@ -131,14 +124,10 @@ fn sketch_plans_match_snapshots() {
     for entry in entries {
         let id = entry["id"].as_str().unwrap();
         let document = asap_planner(&arguments(&manifest, entry), &scratch);
-        // A `deadline_reached_reason` accepts a search that did not prove
-        // its plan optimal; plan, cost and status are still compared.
-        let deadline_accepted = entry.get("deadline_reached_reason").is_some()
-            && search_status(&document) == "deadline_reached";
-        if !proven_optimal(&document) && !deadline_accepted {
+        if !proven_optimal(&document) {
             failures.push(format!(
                 "{id}: the plan is not proven optimal (status {})",
-                search_status(&document),
+                search_status(&document)
             ));
             continue;
         }
@@ -187,7 +176,6 @@ fn sketch_plans_match_snapshots() {
 /// Each manifest entry names a known deployment and an existing input, and
 /// builds its arguments.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn manifest_entries_build_their_arguments() {
     let manifest: Value = serde_json::from_str(
         &std::fs::read_to_string(snapshots_dir().join("manifest.json")).unwrap(),

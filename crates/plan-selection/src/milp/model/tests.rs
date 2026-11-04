@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Duration;
 
 use super::*;
 use crate::groups::{prepare_milp_inputs, AccuracyWeight, IngestionPipeline};
@@ -86,10 +85,9 @@ fn through_stages_over(
     ingesting: bool,
     values_non_negative: bool,
 ) -> Fixture {
+    use asap_logical_asap_optimization::generate_logical_asap_memo_candidates;
     use asap_logical_asap_optimization::generate_per_computation_logical_memo_candidates;
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
-    use asap_logical_asap_optimization::TumblingWindowWidthDomain;
-    use asap_logical_asap_optimization::{generate_logical_asap_memo_candidates, Pass2RoundState};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::workload::{
         Predictability, QueryRecurrence, RepeatedDemand, RepetitionInterval,
@@ -139,24 +137,15 @@ fn through_stages_over(
         &asap_accuracy::NoAccuracyEvidence,
         &data,
         None,
-        None,
     )
     .unwrap();
-    let mut round = Pass2RoundState::new(pass1);
-    let logical = generate_logical_asap_memo_candidates(
-        &mut round,
-        &entries,
-        TumblingWindowWidthDomain::Complete,
-        None,
-    )
-    .unwrap();
+    let logical = generate_logical_asap_memo_candidates(pass1, &entries).unwrap();
     let physical = asap_physical_asap_optimization::generate_physical_asap_memo_candidates(
         &logical,
         &entries,
         &data,
         false,
         raw_data_retained,
-        None,
     )
     .unwrap();
     Fixture {
@@ -177,23 +166,22 @@ pub(crate) struct Checked {
 
 /// `fixture`'s MILP under `cost_inputs`, with `restrict` adding rows first:
 /// solved, decoded, realized by Stage 2 and costed by
-/// `asap_cost::plan_cost`. At `Optimal` the objective plus the request fees
-/// must equal `plan_cost`'s cost; at the deadline be at least it.
+/// `asap_cost::plan_cost`. The objective plus the request fees must equal
+/// `plan_cost`'s cost.
 pub(crate) fn solve_and_check(
     fixture: &Fixture,
     cost_inputs: &CostInputs,
     restrict: impl FnOnce(&mut SelectionMilp<'_>),
 ) -> Result<Checked, SelectionMilpError> {
-    solve_and_check_by(fixture, cost_inputs, restrict, None, true)
+    solve_and_check_by(fixture, cost_inputs, restrict, true)
 }
 
-/// [`solve_and_check`] with HiGHS's time limit `limit`, and the
-/// independent parts solved apart when `split_into_parts`.
+/// [`solve_and_check`] with the independent parts solved apart when
+/// `split_into_parts`.
 fn solve_and_check_by(
     fixture: &Fixture,
     cost_inputs: &CostInputs,
     restrict: impl FnOnce(&mut SelectionMilp<'_>),
-    limit: Option<Duration>,
     split_into_parts: bool,
 ) -> Result<Checked, SelectionMilpError> {
     let inputs = prepare_milp_inputs(
@@ -208,13 +196,13 @@ fn solve_and_check_by(
         &fixture.entries,
         cost_inputs,
         SelectionMilpOptions {
-            enforce_accuracy: true,
             split_into_parts,
+            ..SelectionMilpOptions::default()
         },
     )?;
     assert!(milp.inexact.is_empty(), "inexact terms: {:?}", milp.inexact);
     restrict(&mut milp);
-    let solution = solve_selection_milp(milp, limit.map(|limit| Instant::now() + limit), 0)?;
+    let solution = solve_selection_milp(milp, 0)?;
     let dag = decode(
         &fixture.physical,
         &inputs,
@@ -260,21 +248,14 @@ fn solve_and_check_by(
     .expect("plan_cost costs the plan");
     let expected = plan.cost_per_second.expect("cost model 1") - solution.request_cost_per_second;
     let tolerance = 1e-6 * expected.abs().max(1e-12);
-    match solution.status {
-        SelectionMilpStatus::Optimal => assert!(
-            (solution.cost_per_second - expected).abs() <= tolerance,
-            "MILP objective {:e} != plan_cost {:e} (without {:e} of request fees); per node: {:#?}",
-            solution.cost_per_second,
-            expected,
-            solution.request_cost_per_second,
-            plan.per_node
-        ),
-        SelectionMilpStatus::TimeLimit => assert!(
-            expected <= solution.cost_per_second + tolerance,
-            "plan_cost {expected:e} above the incumbent's objective {:e}",
-            solution.cost_per_second
-        ),
-    }
+    assert!(
+        (solution.cost_per_second - expected).abs() <= tolerance,
+        "MILP objective {:e} != plan_cost {:e} (without {:e} of request fees); per node: {:#?}",
+        solution.cost_per_second,
+        expected,
+        solution.request_cost_per_second,
+        plan.per_node
+    );
     Ok(Checked {
         solution,
         plan,
@@ -387,8 +368,7 @@ pub(crate) fn two_windows() -> Fixture {
 #[test]
 fn the_optimum_costs_what_plan_cost_says() {
     for costs in [cost_inputs(), aws_fargate_cost_inputs()] {
-        let checked = solve_and_check(&shared_sum(), &costs, |_| {}).unwrap();
-        assert_eq!(checked.solution.status, SelectionMilpStatus::Optimal);
+        solve_and_check(&shared_sum(), &costs, |_| {}).unwrap();
     }
 }
 
@@ -833,10 +813,7 @@ fn a_phantom_reader_does_not_satisfy_minimum_query_readers() {
     let fixture = shared_sum();
     let costs = cost_inputs();
     let inputs = prepare_milp_inputs(&fixture.physical, &fixture.entries, &fixture.data, &costs);
-    let options = SelectionMilpOptions {
-        enforce_accuracy: true,
-        split_into_parts: true,
-    };
+    let options = SelectionMilpOptions::default();
     let mut milp = build_selection_milp(
         &fixture.physical,
         &inputs,
@@ -878,7 +855,7 @@ fn a_phantom_reader_does_not_satisfy_minimum_query_readers() {
         milp.builder.row("test", constraint!(choice <= 0.0));
     }
     assert_eq!(
-        solve_selection_milp(milp, None, 0).err(),
+        solve_selection_milp(milp, 0).err(),
         Some(SelectionMilpError::Infeasible)
     );
 }
@@ -967,10 +944,7 @@ fn cost_models_2_and_3_are_unsupported() {
         };
         let inputs =
             prepare_milp_inputs(&fixture.physical, &fixture.entries, &fixture.data, &costs);
-        let options = SelectionMilpOptions {
-            enforce_accuracy: true,
-            split_into_parts: true,
-        };
+        let options = SelectionMilpOptions::default();
         assert!(matches!(
             build_selection_milp(
                 &fixture.physical,
@@ -1018,14 +992,11 @@ fn accuracy_rows_follow_the_composition_on_a_ratio() {
             inputs,
             &fixture.entries,
             &costs,
-            SelectionMilpOptions {
-                enforce_accuracy: true,
-                split_into_parts: true,
-            },
+            SelectionMilpOptions::default(),
         )
         .unwrap();
         restrict(&mut milp);
-        solve_selection_milp(milp, None, 0).map(|_| ())
+        solve_selection_milp(milp, 0).map(|_| ())
     };
     // Each candidate's runs: `x[m]`, or `p` in a context computing it.
     let runs_of = |milp: &SelectionMilp<'_>, candidates: &[PhysicalCandidateId]| -> Expression {
@@ -1079,7 +1050,7 @@ fn the_warm_start_is_a_feasible_plan_costed_exactly() {
         let checked = solve_and_check(&fixture, &cost_inputs(), |milp| {
             let completion = crate::milp::completion::Completion::new(milp);
             let start =
-                crate::milp::warm_start::warm_start(milp, &completion, None).expect("a warm start");
+                crate::milp::warm_start::warm_start(milp, &completion).expect("a warm start");
             start_cost = Some(start.cost_per_second);
             let values: HashMap<Variable, f64> = start.values.into_iter().collect();
             let mut fixed = Vec::new();
@@ -1101,26 +1072,6 @@ fn the_warm_start_is_a_feasible_plan_costed_exactly() {
             checked.solution.cost_per_second
         );
     }
-}
-
-// A deadline yields a plan: HiGHS starts from the warm start, so even no
-// time ends with a validated incumbent, reported as the deadline.
-#[test]
-fn a_deadline_yields_the_warm_starts_plan() {
-    let checked = solve_and_check_by(
-        &two_windows(),
-        &cost_inputs(),
-        |_| {},
-        Some(Duration::ZERO),
-        true,
-    )
-    .unwrap();
-    assert_eq!(checked.solution.status, SelectionMilpStatus::TimeLimit);
-    let start = checked
-        .solution
-        .warm_start_cost_per_second
-        .expect("the warm start was costed");
-    assert!(checked.solution.cost_per_second <= start * (1.0 + 1e-9));
 }
 
 // RangeHeavy templates 7 and 4: the widened scan puts a `Project` in the
@@ -1154,8 +1105,7 @@ fn a_widened_scan_reading_its_own_memo_group_plans_exactly() {
         "the fixture has a root reading its own group"
     );
     for costs in [cost_inputs(), aws_fargate_cost_inputs()] {
-        let checked = solve_and_check(&fixture, &costs, |_| {}).unwrap();
-        assert_eq!(checked.solution.status, SelectionMilpStatus::Optimal);
+        solve_and_check(&fixture, &costs, |_| {}).unwrap();
     }
 }
 
@@ -1172,10 +1122,7 @@ fn independent_query_sets_solve_apart_to_the_same_plan() {
     let fixture = through_stages_over(&queries, &["m", "n"], true, false, false);
     let costs = cost_inputs();
     let inputs = prepare_milp_inputs(&fixture.physical, &fixture.entries, &fixture.data, &costs);
-    let options = SelectionMilpOptions {
-        enforce_accuracy: true,
-        split_into_parts: true,
-    };
+    let options = SelectionMilpOptions::default();
     let milp = build_selection_milp(
         &fixture.physical,
         &inputs,
@@ -1192,12 +1139,10 @@ fn independent_query_sets_solve_apart_to_the_same_plan() {
     assert_eq!(columns, milp.builder.variables.len());
     assert_eq!(rows, milp.builder.rows.len());
 
-    let apart = solve_and_check_by(&fixture, &costs, |_| {}, None, true).unwrap();
-    let whole = solve_and_check_by(&fixture, &costs, |_| {}, None, false).unwrap();
+    let apart = solve_and_check_by(&fixture, &costs, |_| {}, true).unwrap();
+    let whole = solve_and_check_by(&fixture, &costs, |_| {}, false).unwrap();
     assert_eq!(apart.solution.parts.len(), 2);
     assert_eq!(whole.solution.parts.len(), 1);
-    assert_eq!(apart.solution.status, SelectionMilpStatus::Optimal);
-    assert_eq!(whole.solution.status, SelectionMilpStatus::Optimal);
     let tolerance = 1e-9 * whole.solution.cost_per_second.abs();
     assert!(
         (apart.solution.cost_per_second - whole.solution.cost_per_second).abs() <= tolerance,
@@ -1225,10 +1170,7 @@ fn big_m_per_row(fixture: &Fixture, family: &str, loose: bool) -> Vec<f64> {
         &inputs,
         &fixture.entries,
         &costs,
-        SelectionMilpOptions {
-            enforce_accuracy: true,
-            split_into_parts: true,
-        },
+        SelectionMilpOptions::default(),
     )
     .unwrap();
     LOOSE_BIG_M.with(|cell| cell.set(false));
@@ -1276,8 +1218,6 @@ fn a_tighter_context_execution_bound_keeps_the_plan() {
     let looser = solve_and_check(&fixture, &aws_fargate_cost_inputs(), |_| {});
     LOOSE_BIG_M.with(|cell| cell.set(false));
     let looser = looser.unwrap();
-    assert_eq!(tightened.solution.status, SelectionMilpStatus::Optimal);
-    assert_eq!(looser.solution.status, SelectionMilpStatus::Optimal);
     let tolerance = 1e-9 * looser.solution.cost_per_second.abs();
     assert!(
         (tightened.solution.cost_per_second - looser.solution.cost_per_second).abs() <= tolerance

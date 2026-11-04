@@ -110,9 +110,7 @@ enum NonASAPOp {
     },
     Join { left: Rc<OperatorNode>, right: Rc<OperatorNode>, kind: JoinKind, pred: Predicate },
     SetOp { left: Rc<OperatorNode>, right: Rc<OperatorNode>, kind: RelationalSetOpKind, all: bool },
-    Concat {
-        children: Vec<Rc<OperatorNode>>, discriminator_unique_key: Option<ConcatDiscriminatorKey>,
-    },
+    Concat { children: Vec<Rc<OperatorNode>> },
     Dedup { child: Rc<OperatorNode>, cols: Vec<ColumnId> },
     Sort { child: Rc<OperatorNode>, keys: Vec<SortKey>, partition_by: GroupKeys },
     Limit { child: Rc<OperatorNode>, n: Option<usize>, offset: usize, partition_by: GroupKeys },
@@ -145,8 +143,7 @@ Ordinary payload fields have these roles:
   or limiting within groups, represented by `partition_by`.
 - Join/set kinds, vector matching, window frames and time selections preserve
   source-language semantics. Output names, qualifiers and proven uniqueness also
-  survive optimization. The optional concatenation key records a discriminator
-  that distinguishes branches together with their within-branch key.
+  survive optimization.
 
 `ASAPOp` describes state construction, state operations and evaluation separately.
 `FieldDataType` (§2.1) types every output field; state-producing operations use its

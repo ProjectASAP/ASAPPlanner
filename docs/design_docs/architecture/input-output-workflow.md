@@ -291,8 +291,9 @@ candidate whose output has no guarantee for an approximate target.
 * `selection.accepted_accuracy_per_query`: per query, the accuracy metric
   Stage 3 accepted;
 * `selection.pruned_candidates`: the candidates Stage 3 ruled out;
-* `selection.search_report`: how the search ended (`Optimal` or
-  `DeadlineReached`), its lower bound, the MILP's size and its times.
+* `selection.search_report`: how the search ended (`Optimal`: the MILP
+  runs to proven optimality, with no time limit), its lower bound, the
+  MILP's size and its times.
 
 Planner selects because it now has the inputs a backend used to own: the
 deployment declares its cost model, measurements and capabilities, and every

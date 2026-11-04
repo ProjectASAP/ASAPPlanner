@@ -28,7 +28,6 @@ fn select(
         },
         &cost_inputs(),
         realizer,
-        None,
     )
 }
 
@@ -166,7 +165,6 @@ fn cost_model_2_is_unsupported() {
         },
         &costs,
         &Rejecting,
-        None,
     );
     assert!(matches!(
         result,

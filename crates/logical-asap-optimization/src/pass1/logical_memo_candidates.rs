@@ -3,7 +3,6 @@
 //! ([`PerComputationLogicalMemoCandidates`]), which Pass 2 extends.
 
 use std::rc::Rc;
-use std::time::Instant;
 
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{QueryRoot, SchemaDerivationError};
@@ -14,16 +13,14 @@ use asap_accuracy::sizing::{
 };
 use asap_accuracy::{AccuracyEvidenceProvider, AccuracyModel};
 
+use super::memo_population::try_populate_pass1;
+use super::memo_population::CandidatePopulationError;
 use crate::deployment_capabilities::SupportedSummary;
 use crate::pass1::per_computation_candidates::{
     generate_per_computation_candidates, PerComputationCandidateError,
 };
-use crate::pass2::memo::candidates::CandidatePopulationError;
-use crate::pass2::memo::check_generation_deadline;
-use crate::pass2::memo::groups::try_populate_pass1;
 use asap_types::stages::{
-    CandidateGenerationTimeout, DagOfLogicalMemoGroups, Memo, PerComputationLogicalMemoCandidates,
-    PrunedCandidate,
+    DagOfLogicalMemoGroups, Memo, PerComputationLogicalMemoCandidates, PrunedCandidate,
 };
 
 /// Why [`generate_per_computation_logical_memo_candidates`] failed.
@@ -36,9 +33,6 @@ pub enum PerComputationLogicalMemoCandidatesError {
     /// The targets do not belong to the DAG of logical memo groups.
     #[error(transparent)]
     Population(#[from] CandidatePopulationError),
-    /// The deadline passed while sizing the candidates.
-    #[error(transparent)]
-    Timeout(#[from] CandidateGenerationTimeout),
     /// A candidate's summaries sized for its readers' failure probability
     /// did not rebuild.
     #[error(transparent)]
@@ -57,9 +51,7 @@ pub enum PerComputationLogicalMemoCandidatesError {
 /// candidates, each with its summaries sized for its readers' failure
 /// probabilities (`size_for_failure_probability`): one sized candidate
 /// per accuracy-budget split. Every pruned way to compute a measure is in
-/// the output's `pruned_candidates`. Stops with
-/// [`PerComputationLogicalMemoCandidatesError::Timeout`] once `deadline`
-/// passes while sizing.
+/// the output's `pruned_candidates`.
 pub fn generate_per_computation_logical_memo_candidates(
     dag_of_logical_memo_groups: DagOfLogicalMemoGroups,
     accuracy_targets: &[AccuracyTarget],
@@ -67,7 +59,6 @@ pub fn generate_per_computation_logical_memo_candidates(
     evidence: &dyn AccuracyEvidenceProvider,
     data: &DataWorkload,
     supported_summaries: Option<&[SupportedSummary]>,
-    deadline: Option<Instant>,
 ) -> Result<PerComputationLogicalMemoCandidates, PerComputationLogicalMemoCandidatesError> {
     let mut per_computation = generate_per_computation_candidates(&dag_of_logical_memo_groups)?
         .without_unsupported_summaries(supported_summaries);
@@ -76,13 +67,7 @@ pub fn generate_per_computation_logical_memo_candidates(
             per_computation.without_summaries_no_query_can_use(accuracy_targets, data, accuracy);
     }
     let mut memo = try_populate_pass1(dag_of_logical_memo_groups, &per_computation)?;
-    size_for_failure_probability(
-        &mut memo,
-        &per_computation.roots,
-        accuracy_targets,
-        data,
-        deadline,
-    )?;
+    size_for_failure_probability(&mut memo, &per_computation.roots, accuracy_targets, data)?;
     let pruned_candidates = per_computation
         .pruned_ways_to_compute
         .into_iter()
@@ -115,11 +100,9 @@ fn size_for_failure_probability(
     roots: &[QueryRoot],
     accuracy_targets: &[AccuracyTarget],
     data: &DataWorkload,
-    deadline: Option<Instant>,
 ) -> Result<(), PerComputationLogicalMemoCandidatesError> {
     for (group, candidates) in memo.groups.iter().zip(&mut memo.candidates) {
         for candidate in candidates.iter_mut() {
-            check_generation_deadline(deadline)?;
             let Some(failure_probability) = group
                 .reached_by_queries()
                 .iter()
@@ -152,7 +135,6 @@ fn size_for_failure_probability(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pass2::memo::shared_configurations::TumblingWindowWidthDomain;
     use crate::stage0::generate_dag_of_logical_memo_groups;
     use crate::test_support::{
         lower_promql, shared_summary_state_groups, sharing_rules_and_shared_state_groups,
@@ -200,7 +182,6 @@ mod tests {
             &IgnoreAccuracyGuarantees,
             &NoAccuracyEvidence,
             data,
-            None,
             None,
         )
         .unwrap()
@@ -313,9 +294,7 @@ mod tests {
             ],
             &data(Some(10_000)),
         );
-        let memo =
-            sharing_rules_and_shared_state_groups(memo, TumblingWindowWidthDomain::SeedGrids)
-                .unwrap();
+        let memo = sharing_rules_and_shared_state_groups(memo).unwrap();
         let found = kll_failure_probabilities(
             shared_summary_state_groups(&memo)
                 .iter()

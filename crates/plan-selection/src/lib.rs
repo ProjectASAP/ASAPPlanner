@@ -319,7 +319,7 @@ pub(crate) fn sized_as_pass1(
 mod tests {
     use super::*;
     use crate::accuracy_binding::bound_root_guarantee;
-    use crate::accuracy_binding::{bind_statistics, root_operators, workload_statistic};
+    use crate::accuracy_binding::{bind_statistics, workload_statistic};
     use crate::checks::guarantee_check;
     use crate::checks::{accuracy_check, CheckFailure};
     use crate::report::WholePlanSelection;
@@ -854,7 +854,7 @@ mod tests {
                 // The proof the executor reads.
                 let proofs: Vec<WeightDomain> = with_confirmed_weights(&candidate.roots, &gauge)
                     .iter()
-                    .flat_map(root_operators)
+                    .flat_map(QueryRoot::operator_refs)
                     .flat_map(OperatorNode::reachable)
                     .filter_map(|n| match n.asap() {
                         Some(ASAPOp::SummaryAgg {
@@ -1027,7 +1027,7 @@ mod tests {
         let domains = |roots: &[QueryRoot]| -> Vec<WeightDomain> {
             roots
                 .iter()
-                .flat_map(root_operators)
+                .flat_map(QueryRoot::operator_refs)
                 .flat_map(OperatorNode::reachable)
                 .filter_map(|n| match n.asap() {
                     Some(ASAPOp::SummaryAgg { input, .. }) => Some(input.weight_domain.clone()),
@@ -1332,7 +1332,7 @@ mod tests {
     fn kll_params(roots: &[QueryRoot]) -> Vec<SketchParams> {
         roots
             .iter()
-            .flat_map(root_operators)
+            .flat_map(QueryRoot::operator_refs)
             .flat_map(OperatorNode::reachable)
             .filter_map(|node| match node.asap() {
                 Some(ASAPOp::SummaryAgg {
@@ -5691,6 +5691,43 @@ mod tests {
                 Err((_, AnalyticalCostError::Overflow))
             ));
         }
+    }
+
+    /// The reference pricer rejects a candidate it cannot price, as the
+    /// search does, rather than failing the whole selection.
+    #[test]
+    fn the_reference_pricer_rejects_an_unpriceable_candidate() {
+        let candidates = tumbling_window_candidates(10_000.0);
+        let kll = candidates[0]
+            .dag
+            .nodes
+            .iter()
+            .find_map(|node| match &node.payload {
+                Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                    family: FieldDataType::Sketch(kind, _),
+                    ..
+                }) => Some(kind.params().clone()),
+                _ => None,
+            })
+            .unwrap();
+        let settings = measured(vec![OperatorCost {
+            memory_bytes_per_state: Some(u64::MAX as f64),
+            ..sketch_entry(OperatorKind::SummaryTumblingWindowChain, kll, 1.0)
+        }]);
+        let entries = [entry_with(p99_target(), repeating(MINUTE))];
+        let models = SelectionModels {
+            cost_inputs: &settings,
+            ..SelectionModels::builtin()
+        };
+        let Err(ErrorSelectingPlan::NoValidCandidate(rejected)) =
+            select_among_plans(&candidates, &entries, &arriving(10_000.0), models)
+        else {
+            panic!("every candidate overflows, so none is valid");
+        };
+        assert_eq!(rejected.len(), candidates.len());
+        assert!(rejected
+            .iter()
+            .all(|r| r.cause == RejectionCause::CostNotRepresentable));
     }
 
     /// The table of earlier versions, a JSON array of sketch operations,

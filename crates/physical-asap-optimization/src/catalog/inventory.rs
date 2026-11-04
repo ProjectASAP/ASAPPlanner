@@ -66,8 +66,6 @@ impl CandidateInventory {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CandidateInventoryError {
-    #[error(transparent)]
-    DeadlineExceeded(#[from] asap_types::stages::CandidateGenerationTimeout),
     #[error("invalid candidate memo: {0}")]
     InvalidMemo(String),
     #[error("unsupported candidate {candidate} in group {group}: {reason}")]
@@ -88,28 +86,24 @@ pub enum CandidateInventoryError {
 
 /// The inventory with identical terminal readers factored into one node
 /// (whose `candidates_for_memo_group` lists every candidate it can implement).
-pub fn build_candidate_inventory_before(
+pub fn build_candidate_inventory(
     memo: &Memo,
     output_groups: &[MemoGroupId],
-    deadline: Option<std::time::Instant>,
 ) -> Result<CandidateInventory, CandidateInventoryError> {
     let mut inventory = build_with_compatible_producers_cache(
         memo,
         output_groups,
-        deadline,
         &mut MemoGroupOutputToCompatibleProducersCache::default(),
     )?;
-    super::factoring::factor_terminal_readers(&mut inventory, deadline)?;
+    super::factoring::factor_terminal_readers(&mut inventory)?;
     Ok(inventory)
 }
 
 pub fn build_with_compatible_producers_cache(
     memo: &Memo,
     output_groups: &[MemoGroupId],
-    deadline: Option<std::time::Instant>,
     compatible_producers_cache: &mut MemoGroupOutputToCompatibleProducersCache,
 ) -> Result<CandidateInventory, CandidateInventoryError> {
-    super::check_deadline(deadline)?;
     let invalid = |message: &str| CandidateInventoryError::InvalidMemo(message.into());
     if memo.groups.len() != memo.candidates.len() {
         return Err(invalid("group and candidate vector lengths differ"));
@@ -127,9 +121,7 @@ pub fn build_with_compatible_producers_cache(
         implementation_roots_of_group: vec![Vec::new(); memo.groups.len()],
     };
     for (group, candidates) in memo.candidates.iter().enumerate() {
-        super::check_deadline(deadline)?;
         for (index, candidate) in candidates.iter().enumerate() {
-            super::check_deadline(deadline)?;
             let unsupported = |reason| CandidateInventoryError::Unsupported {
                 group,
                 candidate: index,
@@ -200,9 +192,7 @@ pub fn build_with_compatible_producers_cache(
         }
     }
     for (group, candidates) in memo.candidates.iter().enumerate() {
-        super::check_deadline(deadline)?;
         for (index, candidate) in candidates.iter().enumerate() {
-            super::check_deadline(deadline)?;
             let mut boundaries = HashMap::new();
             for &child in &candidate.input_groups {
                 let pointer = Rc::as_ptr(&memo.groups[child.0 as usize].logical_node);
@@ -231,7 +221,6 @@ pub fn build_with_compatible_producers_cache(
                     index,
                 },
                 owner_accuracy_budget_parts: candidate.accuracy_budget_parts,
-                deadline,
             };
             let root_id = builder.inventory.implementation_roots_of_group[group][index];
             let implemented = Rc::clone(
@@ -265,7 +254,6 @@ pub fn build_with_compatible_producers_cache(
         inventory.query_output_nodes.push(compatible_candidates);
     }
     inventory.validate().map_err(|error| invalid(&error))?;
-    super::check_deadline(deadline)?;
     Ok(inventory)
 }
 
@@ -279,7 +267,6 @@ struct ImmediateCandidateBuilder<'a> {
     owner: CandidateForMemoGroupId,
     /// The owner's `accuracy_budget_parts`, which its private nodes carry.
     owner_accuracy_budget_parts: usize,
-    deadline: Option<std::time::Instant>,
 }
 
 impl ImmediateCandidateBuilder<'_> {
@@ -288,7 +275,6 @@ impl ImmediateCandidateBuilder<'_> {
         node: &Rc<OperatorNode>,
         reserved: Option<PhysicalCandidateId>,
     ) -> Result<PhysicalCandidateId, CandidateInventoryError> {
-        super::check_deadline(self.deadline)?;
         if let Some(&existing) = self.private_nodes.get(&Rc::as_ptr(node)) {
             return Ok(existing);
         }
@@ -299,13 +285,8 @@ impl ImmediateCandidateBuilder<'_> {
                 reason: "assigned execution timing or materialization",
             });
         }
-        let mut inputs = Vec::new();
-        node.operator.map_children(|child| {
-            inputs.push(Rc::clone(child));
-            Rc::clone(child)
-        });
         let mut requirements = Vec::new();
-        for input in inputs {
+        for input in super::reconstruction::ordered_inputs(node) {
             let producers = if let Some(&group) = self.boundaries.get(&Rc::as_ptr(&input)) {
                 self.used_boundaries.insert(group);
                 let key = MemoGroupOutputKey::new(group, &input)
@@ -317,7 +298,6 @@ impl ImmediateCandidateBuilder<'_> {
                     for &candidate in
                         &self.inventory.implementation_roots_of_group[group.0 as usize]
                     {
-                        super::check_deadline(self.deadline)?;
                         let template = &self.inventory.operator_nodes_of_candidates_for_memo_groups
                             [candidate.0]
                             .physical_node;

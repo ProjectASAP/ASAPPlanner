@@ -657,7 +657,6 @@ fn a_view_window_is_the_union_of_the_windows_below_it() {
             window_over(&scan, 5 * minute_ms, None),
             window_over(&scan, 60 * minute_ms, Some(offset)),
         ],
-        discriminator_unique_key: None,
     }))
     .unwrap();
     let (dag, scan_id) = exported_with_scan(vec![both]);
@@ -724,7 +723,6 @@ fn high_fan_in_edges_preserve_multiplicity_without_order_dependence() {
         id: count,
         payload: Operator::NonASAP(NonASAPOp::Concat {
             children: inputs.clone(),
-            discriminator_unique_key: None,
         }),
         output_state: ExecutionDataState::QUERY_ROWS,
         materialization: Materialization::NotMaterialized,
@@ -767,27 +765,15 @@ fn high_fan_in_edges_preserve_multiplicity_without_order_dependence() {
     ));
 }
 
+/// A workload export of one timed root is that root's export, and an
+/// untimed root is invalid.
 #[test]
-#[ignore = "flaky: depends on a wall-clock deadline (#1067)"]
-fn physical_export_deadline_is_typed_and_preserves_unbounded_behavior() {
-    use asap_types::ir::physical_export::PhysicalASAPCompilationError;
-    use asap_types::test_support::compile_physical_asap_workload_with_node_ids_before;
-    use std::time::Instant;
+fn workload_export_matches_the_single_root_export() {
+    use asap_types::ir::physical_export::compile_physical_asap_workload_with_node_ids;
     let timed = timed_at_ingestion();
     let roots = [QueryRoot::Operator(Rc::clone(&timed))];
-    let bounded = compile_physical_asap_workload_with_node_ids_before(
-        &roots,
-        Some(Instant::now() + std::time::Duration::from_secs(1)),
-    )
-    .unwrap();
-    assert_eq!(bounded.dag, compile_physical_asap_dag(&timed).unwrap());
-    assert!(matches!(
-        compile_physical_asap_workload_with_node_ids_before(&roots, Some(Instant::now())),
-        Err(PhysicalASAPCompilationError::DeadlineExceeded)
-    ));
+    let exported = compile_physical_asap_workload_with_node_ids(&roots).unwrap();
+    assert_eq!(exported.dag, compile_physical_asap_dag(&timed).unwrap());
     let untimed = [QueryRoot::Operator(plan())];
-    assert!(matches!(
-        compile_physical_asap_workload_with_node_ids_before(&untimed, None),
-        Err(PhysicalASAPCompilationError::Invalid(_))
-    ));
+    assert!(compile_physical_asap_workload_with_node_ids(&untimed).is_err());
 }

@@ -84,7 +84,6 @@ fn queries(corpus: &str) -> impl Iterator<Item = &str> {
 }
 
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn benchmark_corpora_are_total_and_keep_their_coverage() {
     for (name, corpus, ratchet) in CORPORA {
         let mut total = 0;
@@ -151,7 +150,6 @@ fn benchmark_corpora_are_total_and_keep_their_coverage() {
 /// sum a string). The ranked-row TopK contract now exposes its numeric value
 /// and retained identity columns (#672).
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn kubernetes_mixin_aggregates_over_topk_compose() {
     for query in [
         r#"sum without (id, metrics_path, name, image, endpoint, job, node) ( topk by (cluster, namespace, pod, container, instance) (1, increase( container_cpu_cfs_throttled_periods_total{container!="", job="cadvisor", } [5m]) ) ) / on (cluster, namespace, pod, container, instance) group_left sum without (id, metrics_path, name, image, endpoint, job, node) ( topk by (cluster, namespace, pod, container, instance) (1, increase( container_cpu_cfs_periods_total{job="cadvisor", } [5m]) ) ) > ( 25 / 100 )"#,

@@ -32,7 +32,7 @@ pub mod rqe_atomic_costs;
 
 use asap_frontend_promql::lower_promql_query_workload;
 pub use asap_frontend_promql::PromqlError;
-pub use asap_frontend_sql::{lower_sql, lower_sql_batch, SqlCatalog, SqlError};
+pub use asap_frontend_sql::{lower_sql, SqlCatalog, SqlError};
 
 /// Lower one developer-supplied PromQL query whose metrics are each sampled
 /// every `interval_ms`, declared on each metric's source facts. Tools

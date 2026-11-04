@@ -75,6 +75,9 @@ pub enum RejectionCause {
     LatencyOverRepeatInterval,
     /// Under cost model 3, its usage is over one of the cluster's limits.
     OverClusterCapacity,
+    /// Its cost overflows the cost model's arithmetic, so it cannot be
+    /// priced.
+    CostNotRepresentable,
     /// Under cost models 1 and 2, its price is higher than the selected
     /// candidate's.
     Costlier,
@@ -95,8 +98,8 @@ pub enum RejectionCause {
 
 impl RejectionCause {
     /// Whether the candidate failed a check (accuracy, latency bound,
-    /// repeat interval or cluster capacity) rather than losing under the
-    /// cost model.
+    /// repeat interval, cluster capacity or a representable cost) rather
+    /// than losing under the cost model.
     pub fn failed_a_check(self) -> bool {
         matches!(
             self,
@@ -107,6 +110,7 @@ impl RejectionCause {
                 | Self::LatencyOverRepeatInterval
                 | Self::OverClusterCapacity
                 | Self::Infeasible
+                | Self::CostNotRepresentable
         )
     }
 }
@@ -279,19 +283,14 @@ impl SearchReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchStatus {
-    /// The search proved the plan optimal over the catalog it was given.
+    /// The search proved the plan optimal over the catalog it was given
+    /// (the only outcome: the solve has no time limit).
     Optimal,
-    /// The search stopped at the deadline (or another solver limit) with a
-    /// validated plan; the gap to the lower bound may be above zero.
-    DeadlineReached,
 }
 
 /// Why Stage 3 selected no plan.
 #[derive(Debug, Error)]
 pub enum ErrorSelectingPlan {
-    /// Evaluation stopped without proving feasibility or infeasibility.
-    #[error("candidate evaluation deadline exceeded")]
-    EvaluationDeadlineExceeded,
     /// Bad input: the deployment's cost inputs
     /// ([`CostInputs::validate`](asap_cost::CostInputs::validate)).
     #[error("cost inputs: {0}")]
@@ -312,9 +311,6 @@ pub enum ErrorSelectingPlan {
     },
     #[error("no valid candidate: {0:?}")]
     NoValidCandidate(Vec<Rejection>),
-    /// The search stopped at the deadline before it found a validated plan.
-    #[error("no plan by the deadline: {0}")]
-    NoPlanByDeadline(String),
     /// Stage 2 rejected a plan Stage 3 decoded from its catalog: a Stage 2
     /// catalog bug.
     #[error("the realizer rejected the selected plan: {0}")]

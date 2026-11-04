@@ -69,8 +69,6 @@ use crate::groups::{
 
 use super::model::{Reader, Scope, SelectionMilp, SelectionMilpError};
 
-use crate::groups::MAX_WINDOW_KINDS;
-
 /// The numbers of one run `asap-cost` computed, as the objective and the
 /// latency rows read them.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -158,7 +156,6 @@ pub(crate) fn run_terms(
     for usage_context in data.usage_depends_on.clone() {
         match usage_context {
             UsageContext::ProducerOnACycle => milp.note_inexact("usage: a producer on a cycle"),
-            UsageContext::TooManyContexts => milp.note_inexact("usage: too many contexts"),
             UsageContext::ProducerOutput
             | UsageContext::ScanWindowOfReader
             | UsageContext::PaneRetentionOfReachingQueries
@@ -575,7 +572,7 @@ fn window_terms(
                 Some(Vec::new())
             }
         },
-        count if count <= MAX_WINDOW_KINDS => {
+        count => {
             // `σ_W`: the exact OR, over the reading contexts, of "the
             // context reads the scan and a reader at kind `W` is used"
             // (`w`, exact from both sides at integral binaries).
@@ -626,6 +623,10 @@ fn window_terms(
                 sigma.push(or);
             }
             let mut terms = Vec::new();
+            assert!(
+                count < usize::BITS as usize,
+                "a scan run with {count} window kinds has too many unions to encode"
+            );
             for set in 1usize..(1 << count) {
                 let window = scan_window_read_at(
                     (0..count)
@@ -661,18 +662,6 @@ fn window_terms(
                 });
             }
             Some(terms)
-        }
-        _ => {
-            milp.note_inexact("a scan read at more window kinds than encoded (widest charged)");
-            let widest = scan_window_read_at(kinds.iter().copied());
-            usage_at(milp, widest).map(|(numbers, output)| {
-                vec![RunTerm {
-                    indicator: run.into(),
-                    numbers,
-                    plain: true,
-                    output,
-                }]
-            })
         }
     };
     milp.window_cache.insert((context, scan), terms.clone());

@@ -76,7 +76,6 @@
     {
       "id": "q05",
       "query": "max_over_time((sum(rate(http_requests_total{job=\"order-service\",status=~\"5..\"}[5m])) / sum(rate(http_requests_total{job=\"order-service\"}[5m])))[6h:1m])"
-
     },
     {
       "id": "q06",

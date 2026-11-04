@@ -10,9 +10,9 @@ use std::collections::HashMap;
 
 /// `configured` without the candidates `prune_reasons` rules out, its
 /// IDs renumbered densely in their order; each removed one is appended to
-/// its `pruned_candidates` with the reason.
+/// its `pruned_candidates` with the reason. `configured` is already
+/// validated: configuration enumeration ends by validating its output.
 pub fn prune(configured: PhysicalASAPMemoCandidates) -> Result<PhysicalASAPMemoCandidates, String> {
-    super::validate_candidates(&configured)?;
     let count = configured.candidates.len();
     let reasons = prune_reasons(&configured);
     let keep: Vec<bool> = reasons.iter().map(Option::is_none).collect();

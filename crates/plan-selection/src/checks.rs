@@ -11,7 +11,7 @@ use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
 use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
-use crate::accuracy_binding::{bound_root_guarantee, root_operators};
+use crate::accuracy_binding::bound_root_guarantee;
 use crate::report::{AcceptedAccuracy, RejectionCause};
 use crate::SelectionModels;
 use asap_types::workload::bounds::{confirmed_weights, series_read, values_per_result};
@@ -112,7 +112,8 @@ pub(crate) fn accuracy_check(
     for (query, (root, target)) in candidate.roots.iter().zip(targets).enumerate() {
         let query = query + 1;
         let mut sketches: Vec<String> = Vec::new();
-        for node in root_operators(root)
+        for node in root
+            .operator_refs()
             .iter()
             .flat_map(|node| OperatorNode::reachable(node))
         {

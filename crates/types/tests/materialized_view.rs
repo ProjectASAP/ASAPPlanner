@@ -130,7 +130,7 @@ fn a_view_without_retention_is_refused() {
 fn retention_propagates_from_a_view_refreshed_on_first_read_to_its_inputs() {
     let (mut dag, merge_id) = tumbling_windows_and_kept_merge();
     let spans = HashMap::from([(merge_id, 3_600_000)]);
-    dag.set_retention(&HashMap::new(), &spans, None).unwrap();
+    dag.set_retention(&HashMap::new(), &spans).unwrap();
     let views = dag.materialized_views().unwrap();
     let (merge, tumbling_windows) = views.split_last().unwrap();
     assert_eq!(merge.node_id, merge_id);
@@ -158,9 +158,7 @@ fn retention_propagates_from_a_view_refreshed_on_first_read_to_its_inputs() {
 #[test]
 fn a_view_kept_shorter_than_its_reach_is_refused() {
     let (mut dag, _) = tumbling_windows_and_kept_merge();
-    let views = dag
-        .set_retention(&HashMap::new(), &HashMap::new(), None)
-        .unwrap();
+    let views = dag.set_retention(&HashMap::new(), &HashMap::new()).unwrap();
     let older = views
         .iter()
         .find(|v| {
@@ -180,20 +178,6 @@ fn a_view_kept_shorter_than_its_reach_is_refused() {
     assert_eq!(
         dag.materialized_views(),
         Err(InstallableDagError::ViewRetentionTooShort { node_id: older })
-    );
-}
-
-/// An expired deadline stops the derivation.
-#[test]
-fn the_derivation_stops_at_its_deadline() {
-    let (mut dag, _) = tumbling_windows_and_kept_merge();
-    assert_eq!(
-        dag.set_retention(
-            &HashMap::new(),
-            &HashMap::new(),
-            Some(std::time::Instant::now())
-        ),
-        Err(InstallableDagError::DeadlineExceeded)
     );
 }
 
@@ -265,7 +249,7 @@ fn three_chains_over_one_scan() -> (PhysicalASAPDAG, PhysicalASAPDAG) {
     let expanded = expand_tumbling_window_chains_in_workload(&timed).unwrap();
     let mut installed = compile_physical_asap_workload(&expanded.roots).unwrap();
     installed
-        .set_retention(&HashMap::new(), &HashMap::new(), None)
+        .set_retention(&HashMap::new(), &HashMap::new())
         .unwrap();
     (unexpanded, installed)
 }
@@ -395,8 +379,7 @@ fn a_shifted_tumbling_window_has_its_own_phase() {
         .collect();
     let timed = apply_materialization_timings_to_roots(&roots, &assignment).unwrap();
     let mut dag = compile_physical_asap_workload(&timed).unwrap();
-    dag.set_retention(&HashMap::new(), &HashMap::new(), None)
-        .unwrap();
+    dag.set_retention(&HashMap::new(), &HashMap::new()).unwrap();
     let mut windows: Vec<(u64, u64)> = dag
         .ingestion_refresh_groups()
         .unwrap()
@@ -438,8 +421,7 @@ fn views_of_unbounded_windows_are_groups_of_their_own() {
         .collect();
     let timed = apply_materialization_timings_to_roots(&roots, &assignment).unwrap();
     let mut dag = compile_physical_asap_workload(&timed).unwrap();
-    dag.set_retention(&HashMap::new(), &HashMap::new(), None)
-        .unwrap();
+    dag.set_retention(&HashMap::new(), &HashMap::new()).unwrap();
     let groups = dag.ingestion_refresh_groups().unwrap();
     assert_eq!(groups.len(), 2);
     for group in &groups {
@@ -471,8 +453,7 @@ fn a_view_reading_a_view_of_its_group_follows_it() {
     )
     .unwrap();
     let mut dag = compile_physical_asap_workload(&timed).unwrap();
-    dag.set_retention(&HashMap::new(), &HashMap::new(), None)
-        .unwrap();
+    dag.set_retention(&HashMap::new(), &HashMap::new()).unwrap();
     let groups = dag.ingestion_refresh_groups().unwrap();
     assert_eq!(groups.len(), 1);
     let [tumbling_window_view, rollup_view] = groups[0].views.as_slice() else {

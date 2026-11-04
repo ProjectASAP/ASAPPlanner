@@ -1,5 +1,7 @@
 # Joint candidate search: ASAPQuery workload evaluation
 
+> Historical: the results below predate #1185, which removed the planning deadlines and the tumbling-window-width rounds.
+
 Developer evaluation, 2026-10-24. These are exploratory optimizer measurements and modeled execution costs, not measured query-runtime performance. Single debug-build runs on a shared host do not establish a speedup.
 
 ## Current production-path validation
@@ -138,7 +140,7 @@ CARGO_BUILD_JOBS=4 cargo build -p asap-devtools --bin stage_pipeline
 /usr/bin/time -v -o run.time.txt timeout 120s \
   /mydata/target-joint-candidate-connections/debug/stage_pipeline \
   --workload tools/dag-viewer/workloads/random-mixed-seed-862/workload-01.json \
-  --search candidate-connections --milp-time-limit-s 30 \
+  --search candidate-connections \
   --cost-model aws-fargate-us-east-1 --enforce-accuracy-guarantees \
   --deployment-capabilities '{"raw_data_retained":false,"query_time_results_retained":false}' \
   --out run.json

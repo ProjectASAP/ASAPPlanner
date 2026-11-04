@@ -65,10 +65,7 @@ fn non_asap_samples() -> Vec<NonASAPOp<()>> {
             left: (),
             right: (),
         },
-        NonASAPOp::Concat {
-            children: vec![],
-            discriminator_unique_key: None,
-        },
+        NonASAPOp::Concat { children: vec![] },
         NonASAPOp::Dedup {
             cols: vec![],
             child: (),
@@ -354,6 +351,7 @@ fn viewer_knows_every_view_refresh_and_rejection_cause() {
         C::LatencyOverRepeatInterval,
         C::OverClusterCapacity,
         C::Infeasible,
+        C::CostNotRepresentable,
         C::Costlier,
         C::Slower,
         C::MoreMemory,
@@ -368,6 +366,7 @@ fn viewer_knows_every_view_refresh_and_rejection_cause() {
             | C::LatencyOverRepeatInterval
             | C::OverClusterCapacity
             | C::Infeasible
+            | C::CostNotRepresentable
             | C::Costlier
             | C::Slower
             | C::MoreMemory

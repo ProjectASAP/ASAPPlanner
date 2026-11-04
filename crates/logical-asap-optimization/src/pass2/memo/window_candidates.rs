@@ -2,10 +2,7 @@
 //! connections, not the union of potential consumers, determine eligibility.
 #[cfg(test)]
 use super::shared_configurations::tumbling_window_width_divisors;
-use super::shared_configurations::{
-    tumbling_window_width_domain_before, TumblingWindowWidthDomain,
-};
-use super::{check_generation_deadline, CandidateGenerationTimeout};
+use super::shared_configurations::tumbling_window_width_domain;
 use crate::pass2::asap_aware_cse::{
     tumbling_window_candidates, window_composition_pass2_candidates,
 };
@@ -18,62 +15,22 @@ use asap_types::workload::QueryWorkloadEntry;
 use std::collections::BTreeSet;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::time::Instant;
 
-/// Offer each supported reader-grid configuration. Stage 2 checks the actual
-/// chosen consumers, including ingestion alignment and range evaluation steps.
-#[cfg(any(test, feature = "test-support"))]
+/// Offer each supported reader-grid configuration, for every legal
+/// tumbling-window width. Stage 2 checks the actual chosen consumers,
+/// including ingestion alignment and range evaluation steps.
 pub fn add_local_window_composition(memo: &mut Memo, entries: &[QueryWorkloadEntry]) {
-    add_local_window_composition_in_domain(memo, entries, TumblingWindowWidthDomain::Complete);
-}
-
-#[cfg(any(test, feature = "test-support"))]
-pub fn add_local_window_composition_in_domain(
-    memo: &mut Memo,
-    entries: &[QueryWorkloadEntry],
-    domain: TumblingWindowWidthDomain,
-) {
-    try_add_local_window_composition_in_domain(memo, entries, domain, None)
-        .expect("generation without a deadline cannot time out");
-}
-
-/// On timeout the caller must discard this memo, which may contain partial work.
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) fn try_add_local_window_composition_in_domain(
-    memo: &mut Memo,
-    entries: &[QueryWorkloadEntry],
-    domain: TumblingWindowWidthDomain,
-    deadline: Option<Instant>,
-) -> Result<(), CandidateGenerationTimeout> {
-    extend_local_window_composition(memo, entries, None, domain, deadline)
-}
-
-/// Extend a pre-state-expansion memo with only newly exposed tumbling-window widths.
-/// `previous` must describe widths already generated for this memo.
-pub(crate) fn extend_local_window_composition(
-    memo: &mut Memo,
-    entries: &[QueryWorkloadEntry],
-    previous: Option<TumblingWindowWidthDomain>,
-    domain: TumblingWindowWidthDomain,
-    deadline: Option<Instant>,
-) -> Result<(), CandidateGenerationTimeout> {
-    check_generation_deadline(deadline)?;
     // Flatten each existing/generated graph once. Repeatedly flattening the
     // growing candidate list makes a complete tumbling-window-width domain quadratic.
     let mut known: HashMap<(usize, String), Vec<usize>> = HashMap::new();
     for (group, candidates) in memo.candidates.iter().enumerate() {
-        check_generation_deadline(deadline)?;
         for (index, candidate) in candidates.iter().enumerate() {
-            check_generation_deadline(deadline)?;
             if let Ok(signature) = candidate_signature(candidate) {
                 known.entry((group, signature)).or_default().push(index);
             }
         }
     }
-    for (group, candidate) in
-        local_tumbling_window_candidates_delta(memo, entries, previous, domain, deadline)?
-    {
-        check_generation_deadline(deadline)?;
+    for (group, candidate) in local_tumbling_window_candidates(memo, entries) {
         let Ok(signature) = candidate_signature(&candidate) else {
             memo.candidates[group].push(candidate);
             continue;
@@ -91,75 +48,24 @@ pub(crate) fn extend_local_window_composition(
             memo.candidates[group].push(candidate);
         }
     }
-    check_generation_deadline(deadline)?;
-    Ok(())
 }
 
 /// Expand legal tumbling-window widths while preserving canonical memo inputs.
-#[cfg(test)]
 fn local_tumbling_window_candidates(
     memo: &Memo,
     entries: &[QueryWorkloadEntry],
 ) -> Vec<(usize, CandidateForMemoGroup)> {
-    local_tumbling_window_candidates_before(
-        memo,
-        entries,
-        TumblingWindowWidthDomain::Complete,
-        None,
-    )
-    .expect("generation without a deadline cannot time out")
-}
-
-#[cfg(test)]
-fn local_tumbling_window_candidates_before(
-    memo: &Memo,
-    entries: &[QueryWorkloadEntry],
-    domain: TumblingWindowWidthDomain,
-    deadline: Option<Instant>,
-) -> Result<Vec<(usize, CandidateForMemoGroup)>, CandidateGenerationTimeout> {
-    local_tumbling_window_candidates_delta(memo, entries, None, domain, deadline)
-}
-
-fn local_tumbling_window_candidates_delta(
-    memo: &Memo,
-    entries: &[QueryWorkloadEntry],
-    previous: Option<TumblingWindowWidthDomain>,
-    domain: TumblingWindowWidthDomain,
-    deadline: Option<Instant>,
-) -> Result<Vec<(usize, CandidateForMemoGroup)>, CandidateGenerationTimeout> {
-    check_generation_deadline(deadline)?;
     let group_of = group_of_node(&memo.groups);
     let mut own: Vec<(usize, CandidateForMemoGroup)> = Vec::new();
     for (g, group) in memo.groups.iter().enumerate() {
-        check_generation_deadline(deadline)?;
-        let grids = tumbling_window_width_domain_before(
+        let grids = tumbling_window_width_domain(
             group
                 .queries
                 .iter()
                 .filter_map(|&query| entries.get(query)?.evaluation_grid_ms()),
-            domain,
-            deadline,
-        )?;
-        let previous_widths = previous
-            .map(|previous| {
-                tumbling_window_width_domain_before(
-                    group
-                        .queries
-                        .iter()
-                        .filter_map(|&query| entries.get(query)?.evaluation_grid_ms()),
-                    previous,
-                    deadline,
-                )
-            })
-            .transpose()?
-            .unwrap_or_default();
+        );
         for grid in grids {
-            if previous_widths.binary_search(&grid).is_ok() {
-                continue;
-            }
-            check_generation_deadline(deadline)?;
             for candidate in &memo.candidates[g] {
-                check_generation_deadline(deadline)?;
                 if !matches!(
                     candidate.origin,
                     OriginOfCandidateForMemoGroup::Pass1
@@ -187,7 +93,6 @@ fn local_tumbling_window_candidates_delta(
                     continue;
                 };
                 for pass2_candidate in pass2_candidates {
-                    check_generation_deadline(deadline)?;
                     let Ok(rewritten) = pass2_candidate.roots else {
                         continue;
                     };
@@ -200,7 +105,6 @@ fn local_tumbling_window_candidates_delta(
                     // semantics. Otherwise the tumbling window's canonical input disappears.
                     let mut restored = HashMap::new();
                     for rewritten in OperatorNode::reachable(node) {
-                        check_generation_deadline(deadline)?;
                         let mut matches = canonical_scans.iter().filter(|original| {
                             original.operator == rewritten.operator
                                 && original.schema == rewritten.schema
@@ -229,8 +133,7 @@ fn local_tumbling_window_candidates_delta(
             }
         }
     }
-    check_generation_deadline(deadline)?;
-    Ok(own)
+    own
 }
 
 fn restore_scan_boundaries(
@@ -274,7 +177,6 @@ fn compatible_reader_grids(group: &MemoGroup, entries: &[QueryWorkloadEntry]) ->
             .queries
             .iter()
             .filter_map(|&query| entries.get(query)?.evaluation_grid_ms()),
-        TumblingWindowWidthDomain::Complete,
     )
 }
 
@@ -350,71 +252,12 @@ fn candidate_signature(candidate: &CandidateForMemoGroup) -> Result<String, serd
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pass1::memo_population::try_populate_pass1;
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
-    use crate::pass2::memo::groups::try_populate_pass1;
     use crate::stage0::generate_dag_of_logical_memo_groups;
     use crate::test_support::{entry_with, lower_promql};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::workload::{QueryRecurrence, RepeatedDemand, RepetitionInterval};
-
-    // An expired generation budget reports an incomplete catalog explicitly;
-    // callers must never interpret it as an empty, fully explored candidate set.
-    #[test]
-    fn expired_window_generation_returns_timeout() {
-        let (mut memo, entries) = fixture(&[repeated(60_000)]);
-        let original_sizes: Vec<_> = memo.candidates.iter().map(Vec::len).collect();
-        assert!(try_add_local_window_composition_in_domain(
-            &mut memo,
-            &entries,
-            TumblingWindowWidthDomain::Complete,
-            Some(Instant::now())
-        )
-        .is_err());
-        assert_eq!(
-            memo.candidates.iter().map(Vec::len).collect::<Vec<_>>(),
-            original_sizes
-        );
-    }
-
-    #[test]
-    fn incremental_local_widths_match_one_complete_pass() {
-        let (base, entries) = fixture(&[repeated(60)]);
-        let mut incremental = base.clone();
-        let mut previous = None;
-        for domain in [
-            TumblingWindowWidthDomain::SeedGrids,
-            TumblingWindowWidthDomain::Expanding { max_parts: 4 },
-            TumblingWindowWidthDomain::Expanding { max_parts: 8 },
-            TumblingWindowWidthDomain::Complete,
-        ] {
-            extend_local_window_composition(&mut incremental, &entries, previous, domain, None)
-                .unwrap();
-            assert!(local_tumbling_window_candidates_delta(
-                &incremental,
-                &entries,
-                Some(domain),
-                domain,
-                None
-            )
-            .unwrap()
-            .is_empty());
-            previous = Some(domain);
-        }
-        let mut complete = base;
-        add_local_window_composition(&mut complete, &entries);
-        let signatures = |memo: &Memo| {
-            memo.candidates
-                .iter()
-                .enumerate()
-                .flat_map(|(group, candidates)| {
-                    candidates
-                        .iter()
-                        .map(move |candidate| (group, candidate_signature(candidate).unwrap()))
-                })
-                .collect::<BTreeSet<_>>()
-        };
-        assert_eq!(signatures(&incremental), signatures(&complete));
-    }
 
     fn repeated(interval: u32) -> QueryRecurrence {
         QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(interval)))

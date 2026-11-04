@@ -2,19 +2,13 @@
 //! This preserves their full expressions and schema, including opaque series
 //! identity, rather than assuming that a projection is an identity operation.
 use super::reuse::{append_producer, append_reader, eligible, replace};
-use crate::pass2::memo::check_generation_deadline;
-use crate::pass2::memo::state_groups::Pass2RuleError;
+use crate::pass2::memo::state_groups::{boundary_ptrs, nodes_within, Pass2RuleError};
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
 use asap_types::stages::{Memo, OriginOfCandidateForMemoGroup};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::time::Instant;
 
-pub(crate) fn factor_summary_inputs(
-    memo: &mut Memo,
-    deadline: Option<Instant>,
-) -> Result<(), Pass2RuleError> {
-    check_generation_deadline(deadline)?;
+pub(crate) fn factor_summary_inputs(memo: &mut Memo) -> Result<(), Pass2RuleError> {
     let originals: Vec<_> = memo
         .candidates
         .iter()
@@ -27,37 +21,23 @@ pub(crate) fn factor_summary_inputs(
         })
         .collect();
     for (owner, original) in originals {
-        check_generation_deadline(deadline)?;
-        let boundaries: HashSet<_> = original
-            .input_groups
-            .iter()
-            .map(|group| Rc::as_ptr(&memo.groups[group.0 as usize].logical_node))
-            .collect();
-        let mut pending = vec![Rc::clone(&original.root_node)];
-        let mut seen = HashSet::new();
+        let boundaries = boundary_ptrs(memo, &original);
         let mut inputs = Vec::new();
-        while let Some(node) = pending.pop() {
-            check_generation_deadline(deadline)?;
-            if boundaries.contains(&Rc::as_ptr(&node)) || !seen.insert(Rc::as_ptr(&node)) {
-                continue;
-            }
+        for node in nodes_within(&original.root_node, &boundaries) {
             if matches!(
                 node.asap(),
                 Some(ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. })
             ) {
                 for child in node.children() {
-                    check_generation_deadline(deadline)?;
                     if !boundaries.contains(&Rc::as_ptr(child)) {
                         inputs.push(Rc::clone(child));
                     }
                 }
             }
-            pending.extend(node.children().into_iter().cloned());
         }
         let queries = memo.groups[owner].queries.clone();
         let mut replacements = HashMap::new();
         for input in inputs {
-            check_generation_deadline(deadline)?;
             canonical_preprocessing(memo, &input, &boundaries, &queries, &mut replacements)?;
         }
         if !replacements.is_empty() {
@@ -65,7 +45,6 @@ pub(crate) fn factor_summary_inputs(
             append_reader(memo, owner, &original, reader, original.origin.clone())?;
         }
     }
-    check_generation_deadline(deadline)?;
     Ok(())
 }
 

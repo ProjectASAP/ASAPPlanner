@@ -651,7 +651,7 @@ fn compile_in_runtime(p: &Physical) -> Result<(), String> {
     use asap_executor::physical_planner::compile;
     let mut dag = p.dag().clone();
     let views = dag
-        .set_retention(&Default::default(), &Default::default(), None)
+        .set_retention(&Default::default(), &Default::default())
         .map_err(|e| format!("{}: {e}", p.id))?;
     let roots: Vec<u64> = dag.roots.iter().map(|&id| id as u64).collect();
     compile(&dag, &views, &roots)

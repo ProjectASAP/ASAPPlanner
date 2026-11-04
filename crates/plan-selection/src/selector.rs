@@ -17,6 +17,7 @@ use crate::report::{
     AcceptedAccuracy, ErrorSelectingPlan, Rejection, RejectionCause, WholePlanSelection,
 };
 use crate::SelectionModels;
+use asap_cost::analytical::AnalyticalCostError;
 use asap_cost::{
     kept_tumbling_window_chains, node_map, plan_cost, query_reach, tumbling_window_retention_ms,
 };
@@ -56,12 +57,33 @@ pub(crate) fn select_among_plans(
     if selector.needs_calibration() {
         let mut fit = CalibrationFit::default();
         for candidate in cands {
-            fit.add(selector.calibration_fit(candidate)?);
+            match selector.calibration_fit(candidate) {
+                // Rejected below when offered.
+                Err(ErrorSelectingPlan::Cost {
+                    error: AnalyticalCostError::Overflow,
+                    ..
+                }) => {}
+                fit_or_error => fit.add(fit_or_error?),
+            }
         }
         selector.set_calibration(fit);
     }
+    // An unpriceable candidate is rejected, as the search rejects it
+    // (`cost_not_representable`), rather than failing the selection.
     for candidate in cands {
-        selector.offer(candidate)?;
+        match selector.offer(candidate) {
+            Err(
+                error @ ErrorSelectingPlan::Cost {
+                    error: AnalyticalCostError::Overflow,
+                    ..
+                },
+            ) => selector.reject(
+                &candidate.id,
+                RejectionCause::CostNotRepresentable,
+                error.to_string(),
+            ),
+            result => result?,
+        }
     }
     selector.finish().map(|(selection, _)| selection)
 }
@@ -191,23 +213,6 @@ impl<'a> PlanSelector<'a> {
     /// it if it can still be selected.
     #[cfg(any(test, feature = "reference-pricer"))]
     pub fn offer(&mut self, candidate: &PhysicalWorkloadPlan) -> Result<(), ErrorSelectingPlan> {
-        self.offer_before(candidate, None)
-    }
-
-    /// A stopped compiler is not evidence that the candidate is invalid.
-    pub fn offer_before(
-        &mut self,
-        candidate: &PhysicalWorkloadPlan,
-        deadline: Option<std::time::Instant>,
-    ) -> Result<(), ErrorSelectingPlan> {
-        let check_deadline = || {
-            if deadline.is_some_and(|limit| std::time::Instant::now() >= limit) {
-                Err(ErrorSelectingPlan::EvaluationDeadlineExceeded)
-            } else {
-                Ok(())
-            }
-        };
-        check_deadline()?;
         if candidate.roots.len() != self.entries.len() {
             return Err(ErrorSelectingPlan::EntryCount {
                 candidate: candidate.id.clone(),
@@ -262,7 +267,6 @@ impl<'a> PlanSelector<'a> {
                 return Ok(());
             }
         }
-        check_deadline()?;
         if !self.keep_every_candidate {
             for kept in self.kept.drain(..) {
                 self.costs.remove(&kept.id);

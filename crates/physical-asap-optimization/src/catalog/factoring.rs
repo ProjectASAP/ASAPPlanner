@@ -87,7 +87,6 @@ impl MemoGroupOutputToCompatibleProducersCache {
 /// `accuracy_budget_parts` the largest of theirs.
 pub fn factor_terminal_readers(
     inventory: &mut super::inventory::CandidateInventory,
-    deadline: Option<std::time::Instant>,
 ) -> Result<usize, super::inventory::CandidateInventoryError> {
     use super::inventory::CandidateInventoryError;
     use asap_types::ir::ASAPOp;
@@ -95,7 +94,6 @@ pub fn factor_terminal_readers(
     let count = inventory.operator_nodes_of_candidates_for_memo_groups.len();
     let mut internal = vec![false; count];
     for inputs in &inventory.producer_nodes_per_input {
-        super::check_deadline(deadline)?;
         for input in inputs {
             for producer in input {
                 internal[producer.0] = true;
@@ -112,7 +110,6 @@ pub fn factor_terminal_readers(
     let mut representative: Vec<_> = (0..count).collect();
     let mut eligible = vec![false; count];
     for id in 0..count {
-        super::check_deadline(deadline)?;
         let node = &inventory.operator_nodes_of_candidates_for_memo_groups[id];
         if internal[id]
             || outputs[id].is_empty()
@@ -171,7 +168,6 @@ pub fn factor_terminal_readers(
     let mut candidates_for_memo_group = HashMap::<usize, Vec<CandidateForMemoGroupId>>::new();
     let mut accuracy_budget_parts = HashMap::<usize, usize>::new();
     for (id, &rep) in representative.iter().enumerate() {
-        super::check_deadline(deadline)?;
         if eligible[id] {
             let producer_candidates = unions.entry(rep).or_default();
             let known = known.entry(rep).or_default();
@@ -210,7 +206,6 @@ pub fn factor_terminal_readers(
         .iter()
         .enumerate()
     {
-        super::check_deadline(deadline)?;
         if representative[id] != id {
             continue;
         }

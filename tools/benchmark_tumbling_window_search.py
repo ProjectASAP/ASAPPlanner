@@ -3,6 +3,10 @@
 
 Linux /usr/bin/time measures whole-process peak RSS. Search counters describe
 reported domains and must not be confused with a complete-catalog optimum.
+
+Historical: since #1185 the planner has no planning budget and searches every
+tumbling-window width in one pass, so `--budget` only labels a run and the
+domain check passes trivially for binaries built after #1185.
 """
 import argparse
 import concurrent.futures
@@ -135,7 +139,6 @@ def run_one(entry, args):
     command = ["/usr/bin/time", "-v", "-o", str(output / (name + ".time")),
                "timeout", f"{args.timeout}s", str(binary),
                "--workload", str(VIEWER / entry["workload"]),
-               "--milp-time-limit-s", str(args.budget),
                "--cost-model", entry["cost_model"], "--enforce-accuracy-guarantees",
                "--deployment-capabilities", json.dumps(entry["deployment_capabilities"]),
                "--out", str(artifact)]

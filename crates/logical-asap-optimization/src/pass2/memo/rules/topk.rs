@@ -3,28 +3,22 @@
 use super::reuse::{append_producer, append_reader, eligible, replace};
 use super::shared_producer::{add_shared_producer_candidates, Reader, SharedProducer};
 use crate::pass2::asap_aware_cse::topk_reuse_candidates;
-use crate::pass2::memo::check_generation_deadline;
-use crate::pass2::memo::state_groups::Pass2RuleError;
+use crate::pass2::memo::state_groups::{boundary_ptrs, nodes_within, Pass2RuleError};
 use asap_types::ir::operator::{AggIntent, Reduction};
 use asap_types::ir::properties::AccuracyGuarantee;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot};
 use asap_types::stages::MemoGroupId;
 use asap_types::stages::{Memo, OriginOfCandidateForMemoGroup};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::Instant;
 
-pub(crate) fn add_topk_candidates(
-    memo: &mut Memo,
-    deadline: Option<Instant>,
-) -> Result<usize, Pass2RuleError> {
+pub(crate) fn add_topk_candidates(memo: &mut Memo) -> Result<usize, Pass2RuleError> {
     add_shared_producer_candidates(
         memo,
         &mut TopKRankings {
             exact_groups: HashMap::new(),
         },
-        deadline,
     )
 }
 
@@ -50,15 +44,10 @@ impl SharedProducer for TopKRankings {
     type Need = Rc<OperatorNode>;
     type Covering = SharedRanking;
 
-    fn sets(
-        &mut self,
-        memo: &Memo,
-        deadline: Option<Instant>,
-    ) -> Result<Vec<Vec<Reader<Rc<OperatorNode>>>>, Pass2RuleError> {
+    fn sets(&mut self, memo: &Memo) -> Result<Vec<Vec<Reader<Rc<OperatorNode>>>>, Pass2RuleError> {
         let mut owners = HashMap::new();
         let mut roots = Vec::new();
         for (group, entry) in memo.groups.iter().enumerate() {
-            check_generation_deadline(deadline)?;
             let [input] = entry.logical_node.children()[..] else {
                 continue;
             };
@@ -96,7 +85,6 @@ impl SharedProducer for TopKRankings {
     fn coverings(
         &self,
         set: &[Reader<Rc<OperatorNode>>],
-        _deadline: Option<Instant>,
     ) -> Result<Vec<SharedRanking>, Pass2RuleError> {
         // The largest `k` holds every smaller top-k, so it serves the set.
         Ok(vec![SharedRanking {
@@ -218,25 +206,10 @@ fn exact_input_group(
         if !eligible(&candidate) {
             continue;
         }
-        let boundaries: HashSet<_> = candidate
-            .input_groups
-            .iter()
-            .map(|id| Rc::as_ptr(&memo.groups[id.0 as usize].logical_node))
-            .collect();
-        let mut pending = vec![Rc::clone(&candidate.root_node)];
-        let mut seen = HashSet::new();
-        let mut exact = true;
-        while let Some(node) = pending.pop() {
-            if boundaries.contains(&Rc::as_ptr(&node)) || !seen.insert(Rc::as_ptr(&node)) {
-                continue;
-            }
-            if matches!(node.asap(), Some(ASAPOp::SummaryAgg {family, ..} | ASAPOp::SummaryTumblingWindowChain {family, ..}) if !matches!(family, FieldDataType::ExactAggregate(..)))
-            {
-                exact = false;
-                break;
-            }
-            pending.extend(node.children().into_iter().cloned());
-        }
+        let boundaries = boundary_ptrs(memo, &candidate);
+        let mut exact = !nodes_within(&candidate.root_node, &boundaries).iter().any(|node| {
+            matches!(node.asap(), Some(ASAPOp::SummaryAgg {family, ..} | ASAPOp::SummaryTumblingWindowChain {family, ..}) if !matches!(family, FieldDataType::ExactAggregate(..)))
+        });
         if !exact {
             continue;
         }

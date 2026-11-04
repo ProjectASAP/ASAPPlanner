@@ -142,7 +142,7 @@ fn composed_summary_candidates(
                     &entries,
                     data,
                     models.deployment_capabilities.query_time_results_retained,
-                    &mut |_, _, _| asap_types::physical::Materialization::NotMaterialized,
+                    &mut |_, _, _| Some(asap_types::physical::Materialization::NotMaterialized),
                 )
                 .unwrap()
                 .expect("supported physical computation");
@@ -155,8 +155,8 @@ fn composed_summary_candidates(
     (candidates, selection)
 }
 
-/// Construct a legal shared-KLL candidate explicitly. Sharing capability must
-/// not depend on which prefix a time-limited optimization search visits.
+/// Construct a legal shared-KLL candidate explicitly, independent of the
+/// plan the search selects.
 fn shared_kll_candidate(workload: &PlanningWorkload) -> asap_types::physical::PhysicalWorkloadPlan {
     use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
@@ -173,7 +173,7 @@ fn shared_kll_candidate(workload: &PlanningWorkload) -> asap_types::physical::Ph
             let mut trial = vec![0; choices.len()];
             trial[index] = *choice;
             compose_logical_candidate(&inventory, &trial).unwrap().iter().any(|root| {
-                root_operators(root).into_iter().flat_map(OperatorNode::reachable).any(|node| {
+                root.operator_refs().into_iter().flat_map(OperatorNode::reachable).any(|node| {
                     matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }) if matches!(kind.params(), SketchParams::Kll { .. }))
                 })
             })
@@ -201,7 +201,7 @@ fn shared_kll_candidate(workload: &PlanningWorkload) -> asap_types::physical::Ph
             &workload.query_workload.entries().collect::<Vec<_>>(),
             workload.data_workload.as_ref().unwrap(),
             false,
-            &mut |_, _, _| Materialization::NotMaterialized,
+            &mut |_, _, _| Some(Materialization::NotMaterialized),
         )
         .unwrap()
         .unwrap();
@@ -244,14 +244,6 @@ fn reads_sketch(root: &Rc<OperatorNode>) -> bool {
             })
         )
     })
-}
-
-/// The operator sub-DAGs a query root reads.
-fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
-    match root {
-        QueryRoot::Operator(node) => vec![node],
-        QueryRoot::Scalar(expr) => expr.operator_refs(),
-    }
 }
 
 async fn plan_sql(queries: &[&str]) -> PlanOutput {
@@ -351,7 +343,7 @@ fn quantiles_with_equal_params_share_one_producer() {
         .roots
         .iter()
         .map(|root| {
-            root_operators(root)
+            root.operator_refs()
                 .into_iter()
                 .flat_map(OperatorNode::reachable)
                 .filter(|node| matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. })))
@@ -488,7 +480,6 @@ async fn cross_series_p50_and_p99_share_one_producer() {
 /// Two identical ungrouped queries: their identical producers (rate, then
 /// sum) are shared.
 #[tokio::test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn identical_ungrouped_queries_share_their_producers() {
     let query = ("sum(rate(x[5m]))", 0.01);
     let output = plan_promql(&[query, query]).await;
@@ -499,7 +490,6 @@ async fn identical_ungrouped_queries_share_their_producers() {
 /// The SQL frontend reaches the same sharing for two copies of one filtered
 /// percentile.
 #[tokio::test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn identical_sql_percentiles_share_one_producer() {
     let query =
         "SELECT approx_percentile_cont(l_extendedprice, 0.5) FROM lineitem WHERE l_orderkey > 10";
@@ -561,7 +551,6 @@ async fn sql_p50_and_p99_share_one_producer() {
 /// operator root (#511 §2.3): the scalar root is rebuilt over its selected
 /// sub-DAG, and entries keep their order around a literal scalar query.
 #[tokio::test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn scalar_queries_read_planned_sub_dags() {
     let output = plan_promql(&[
         ("1", 0.01),
@@ -607,7 +596,7 @@ fn combined_scalar_references_keep_summary_candidates() {
         0.01,
     )]);
     for both in candidates.iter().skip(1) {
-        let refs = root_operators(&both.roots[0]);
+        let refs = both.roots[0].operator_refs();
         assert_eq!(refs.len(), 2);
         assert!(
             refs.into_iter().all(reads_sketch),
@@ -642,7 +631,6 @@ fn combined_scalar_references_keep_summary_candidates() {
 /// output-level evidence (plan selection, #576), so it is not selected
 /// automatically: the exact plan is.
 #[tokio::test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn combined_vector_quantiles_keep_unselected_summary_candidates() {
     for query in [
         "quantile(0.99, rate(x[5m])) - quantile(0.5, rate(x[5m]))",
@@ -681,7 +669,6 @@ async fn combined_vector_quantiles_keep_unselected_summary_candidates() {
 /// The selected graph may reuse a producer or choose separate physical
 /// candidates. Every distinct selected reference must be exported exactly once.
 #[tokio::test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn identical_scalar_references_satisfy_the_plan_contract() {
     for (query, distinct) in [
         ("scalar(rate(x[5m])) - scalar(rate(x[5m]))", 1),
@@ -716,7 +703,6 @@ async fn identical_scalar_references_satisfy_the_plan_contract() {
 /// is read through `FinalizeExactAccumulator`, so its output is plain values,
 /// not accumulator state.
 #[tokio::test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn exact_state_roots_are_finalized() {
     for query in [
         "sum_over_time(m[1m])",

@@ -5,8 +5,7 @@
 const STAGE_PIPELINE_FORMAT = 'asap-stage-pipeline/v1';
 
 // Documents written before #1163 name the tumbling-window chain `PaneChain`,
-// its fields `pane_*`, the planning report's `pane_width_domain` and
-// `pane_widths_pending`, and the memo origin `panes` (`Panes` in older MILP
+// its fields `pane_*`, and the memo origin `panes` (`Panes` in older MILP
 // search reports); renames them in place to today's names, keeping each
 // object's key order, so the rest of the viewer reads one set of names.
 // Remove once no document the viewer must open predates #1163.
@@ -16,8 +15,6 @@ const TUMBLING_WINDOW_RENAMES = Object.freeze({
   pane_count: 'tumbling_window_count',
   newest_panes: 'newest_tumbling_windows',
   pane_retention_ms: 'tumbling_window_retention_ms',
-  pane_width_domain: 'tumbling_window_width_domain',
-  pane_widths_pending: 'tumbling_window_widths_pending',
 });
 const ORIGIN_RENAMES = Object.freeze({ panes: 'tumbling_windows', Panes: 'TumblingWindows' });
 const has = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
@@ -326,7 +323,7 @@ const FAILED_CHECK_CAUSES = [
   'accuracy_target_missed',
   'count_min_weights_not_proven_non_negative',
   'no_accuracy_guarantee', 'latency_bound_exceeded', 'latency_over_repeat_interval',
-  'over_cluster_capacity', 'infeasible',
+  'over_cluster_capacity', 'infeasible', 'cost_not_representable',
 ];
 // Every `reference_pricing.pruned_candidates[].cause` the reference pricer
 // writes: the failed checks, then the losses under the cost model (priced,
@@ -648,11 +645,6 @@ function searchText(doc) {
     parts.push(`search ${String(report.status).replace(/_/g, ' ')}`);
     if (typeof report.cost_lower_bound_per_second === 'number') parts.push(`cost lower bound ${Number(report.cost_lower_bound_per_second.toPrecision(4))}`);
     parts.push(`MILP ${report.milp_variables} variables, ${report.milp_constraints} constraints · model ${report.model_construction_ms} ms, solve ${report.solver_ms} ms, validation ${report.validation_ms} ms`);
-  }
-  const planning = doc.planning_report;
-  if (planning && Array.isArray(planning.rounds)) {
-    parts.push(`${planning.rounds.length} tumbling-window-width round${planning.rounds.length === 1 ? '' : 's'} (${planning.rounds.map((r) => r.tumbling_window_width_domain).join(', ')})`);
-    if (planning.tumbling_window_widths_pending) parts.push('some tumbling-window widths not searched');
   }
   const counts = selectionTable(doc).pruned_candidate_count_by_cause;
   if (doc.search === 'exhaustive' && counts && Object.keys(counts).length) {

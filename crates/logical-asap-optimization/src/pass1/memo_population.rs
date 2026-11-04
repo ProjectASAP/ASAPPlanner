@@ -11,7 +11,7 @@
 //!
 //! A Pass 1 target's aggregate group gets one candidate per combination of
 //! its measures' Pass 1 candidates: the aggregate alone composed by
-//! [`crate::pass1::per_computation_candidates::compose_logical_candidate`] with that choice, every target beneath it
+//! [`super::per_computation_candidates::compose_logical_candidate`] with that choice, every target beneath it
 //! exact. Its local nodes are the composed nodes above the first node
 //! equal to one of the group's descendant groups, which are its children.
 //! The local nodes read each child group through its node (the same
@@ -38,17 +38,27 @@ use asap_types::stages::HowToComputeAggregateMeasure;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use crate::pass1::per_computation_candidates::{
+use super::per_computation_candidates::{
     compose_logical_candidate_with_accuracy_budget_parts, PerComputationCandidates,
 };
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 
-use super::candidates::CandidatePopulationError;
 use asap_types::stages::{
     CandidateForMemoGroup, DagOfLogicalMemoGroups, Memo, MemoGroup, MemoGroupId,
     OriginOfCandidateForMemoGroup,
 };
+
+/// A Pass 1 inventory does not belong to the initial logical memo.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum CandidatePopulationError {
+    #[error("Pass 1 root dependencies differ from the initial logical memo")]
+    RootDependenciesChanged,
+    #[error("Pass 1 target {target} is not a valid measure of an initial aggregate group")]
+    InvalidTarget { target: usize },
+    #[error("Pass 1 target {target} references missing absorbed target {absorbed}")]
+    InvalidAbsorption { target: usize, absorbed: usize },
+}
 
 /// Populate implementation candidates without changing initial group identities.
 /// The inventory must have walked `initial`'s groups
@@ -308,8 +318,7 @@ fn compose_alone(
     targets: &[usize],
     choice: &[usize],
     accuracy_budget_parts: usize,
-) -> Result<Vec<QueryRoot>, crate::pass1::per_computation_candidates::PerComputationCandidateError>
-{
+) -> Result<Vec<QueryRoot>, super::per_computation_candidates::PerComputationCandidateError> {
     let mut kept: Vec<usize> = targets.to_vec();
     for &t in targets {
         if let Some((_, Some(absorbs))) = per_computation.targets[t].computation_for(choice[t]) {
@@ -770,7 +779,7 @@ mod tests {
     }
 
     /// The sketch summaries of the first query of `queries` composed with
-    /// every target at its `algorithm` summary, by [`crate::pass1::per_computation_candidates::compose_logical_candidate`]:
+    /// every target at its `algorithm` summary, by [`super::per_computation_candidates::compose_logical_candidate`]:
     /// as the exhaustive search sizes them.
     fn composed_sketches(
         queries: &[&str],

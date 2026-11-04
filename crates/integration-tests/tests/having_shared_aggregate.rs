@@ -4,9 +4,8 @@
 use asap_devtools::planner_fuzz::{read_seed_file, FuzzSettings, FuzzWorkload, Planner};
 use asap_executor::values::Value;
 use asap_logical_asap_optimization::generate_dag_of_logical_memo_groups;
-use asap_logical_asap_optimization::{
-    test_support::{generate_per_computation_candidates, try_populate_pass1},
-    TumblingWindowWidthDomain,
+use asap_logical_asap_optimization::test_support::{
+    generate_per_computation_candidates, try_populate_pass1,
 };
 use asap_types::ir::NonASAPOp;
 use asap_types::stages::Memo;
@@ -53,11 +52,8 @@ fn expanded(queries: &[String]) -> Memo {
     let dag = generate_dag_of_logical_memo_groups(&roots);
     let inventory = generate_per_computation_candidates(&dag).unwrap();
     let memo = try_populate_pass1(dag, &inventory).unwrap();
-    asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(
-        memo,
-        TumblingWindowWidthDomain::SeedGrids,
-    )
-    .unwrap()
+    asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(memo)
+        .unwrap()
 }
 
 fn row(city: &str, host: &str, value: f64) -> Vec<Value> {

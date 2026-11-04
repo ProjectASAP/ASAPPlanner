@@ -84,13 +84,12 @@ fn asap_planner(args: &[String], scratch: &Path) -> Value {
     serde_json::from_str(&std::fs::read_to_string(output).unwrap()).unwrap()
 }
 
-/// The selected plan's search status (`optimal` or `deadline_reached`), or
-/// null without a plan.
+/// The selected plan's search status (`optimal`), or null without a plan.
 fn search_status(document: &Value) -> &Value {
     &document["stage3_plan_selection"]["search_report"]["status"]
 }
 
-/// Whether the search proved the plan optimal.
+/// Whether the plan is proven optimal: its search says so.
 fn proven_optimal(document: &Value) -> bool {
     search_status(document) == "optimal"
 }
@@ -322,7 +321,7 @@ fn snapshot_keeps_only_the_plan() {
             "accepted_accuracy_per_query": [],
             "materialized_views": [],
             "tumbling_window_retention_ms": {"1": 60000},
-            "search_report": {"status": "deadline_reached", "solver_ms": 1},
+            "search_report": {"solver_ms": 1},
         },
     });
     assert_eq!(
@@ -365,13 +364,13 @@ fn snapshot_of_a_failed_query() {
     );
 }
 
-/// Only an optimal search proves the plan optimal.
+/// Only an `optimal` search status proves the plan optimal.
 #[test]
-fn proven_optimal_needs_an_optimal_search() {
+fn proven_optimal_needs_an_optimal_status() {
     let document =
-        |status: &str| json!({"stage3_plan_selection": {"search_report": {"status": status}}});
-    assert!(proven_optimal(&document("optimal")));
-    assert!(!proven_optimal(&document("deadline_reached")));
+        |status: Value| json!({"stage3_plan_selection": {"search_report": {"status": status}}});
+    assert!(proven_optimal(&document(json!("optimal"))));
+    assert!(!proven_optimal(&document(Value::Null)));
 }
 
 /// The failure message names the first differing JSON path.

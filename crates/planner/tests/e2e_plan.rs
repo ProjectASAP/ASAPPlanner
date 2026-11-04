@@ -86,7 +86,6 @@ fn sql_workload(
 /// `QueryWorkload::entries()` order, without the caller touching any stage's
 /// candidates.
 #[tokio::test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn plans_every_query_in_entry_order() {
     let workload = sql_workload(
         vec![
@@ -110,7 +109,6 @@ async fn plans_every_query_in_entry_order() {
 /// The facade selects what the planning stages select over the frontends'
 /// roots ([`run_planning`]), and reports that selection.
 #[tokio::test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn facade_plans_match_run_planning() {
     let workload = sql_workload(
         vec![
@@ -177,11 +175,8 @@ async fn facade_plans_match_run_planning() {
     assert_eq!(&output.roots(), run.selected_plan.as_ref().unwrap());
 }
 
-/// A repeating SQL query reaches the optimizer. `lower_sql_batch` walks
-/// `query_batch` alone, so driving the frontend through it would drop the
-/// repeating entries.
+/// A repeating SQL query reaches the optimizer, not only `query_batch` entries.
 #[tokio::test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn lowers_repeating_sql_entries_too() {
     let workload = sql_workload(
         vec![batch("SELECT COUNT(DISTINCT l_orderkey) FROM lineitem")],
@@ -300,7 +295,6 @@ async fn harness_rejects_a_pass_that_mislabels_entry_indices() {
 /// A frontend input that cannot lower the workload's language fails before any
 /// query is parsed.
 #[tokio::test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn rejects_a_frontend_that_does_not_match_the_workload_language() {
     let workload = sql_workload(
         vec![batch("SELECT COUNT(DISTINCT l_orderkey) FROM lineitem")],
@@ -317,7 +311,6 @@ async fn rejects_a_frontend_that_does_not_match_the_workload_language() {
 
 /// A repeating PromQL query yields one plan carrying its selected DAG root.
 #[tokio::test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn each_plan_carries_its_selected_root() {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
@@ -351,7 +344,6 @@ async fn each_plan_carries_its_selected_root() {
 
 /// Scalar-only and mixed workloads preserve entry bindings without wrapper nodes.
 #[tokio::test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn scalar_roots_survive_planning_in_workload_order() {
     for queries in [
         vec!["2", "time()"],

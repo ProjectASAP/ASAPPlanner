@@ -4,9 +4,9 @@
 
 use asap_frontend_sql::SqlCatalog;
 use asap_logical_asap_optimization::{
-    generate_dag_of_logical_memo_groups, generate_logical_asap_memo_candidates,
-    generate_per_computation_logical_memo_candidates, Pass2RoundState,
-    PerComputationLogicalMemoCandidatesError, TumblingWindowWidthDomain,
+    generate_dag_of_logical_memo_groups, generate_per_computation_logical_memo_candidates,
+    pass2_after_local_window_composition, pass2_local_window_composition,
+    PerComputationLogicalMemoCandidatesError,
 };
 use asap_physical_asap_optimization::{
     generate_physical_asap_memo_candidates, Stage2AssignmentRealizer,
@@ -70,7 +70,7 @@ pub struct PlanningStagesRun {
     pub pass2_local_window_composition: Option<Memo>,
     /// The stages' outputs: Pass 1, Pass 2, Stage 2 and the selection.
     pub run: PlanningRun,
-    /// With a reference enumeration: the selected round's memo choices, each implemented
+    /// With a reference enumeration: Pass 2's memo choices, each implemented
     /// by Stage 2 and all priced by the reference pricer.
     pub reference: Option<ReferenceEnumeration>,
 }
@@ -235,11 +235,8 @@ pub fn run_planning_stages_over(
         entries,
         data,
         models,
-        // The reference enumeration reads the selected round's memo.
-        PlanSearchSettings {
-            inspect: true,
-            ..PlanSearchSettings::default()
-        },
+        // The reference enumeration reads Pass 2's memo.
+        PlanSearchSettings { inspect: true },
         Some(max_combinations.unwrap_or(DEFAULT_REFERENCE_CHOICES)),
     )
 }
@@ -300,11 +297,8 @@ fn stage0_memo_groups(dag: DagOfLogicalMemoGroups) -> Memo {
     }
 }
 
-/// The stages over `roots` up to and including `until`, each once and
-/// without a deadline. Pass 2 runs once over every legal tumbling-window
-/// width (`TumblingWindowWidthDomain::Complete`), so its memo holds every
-/// candidate any of the facade's rounds would, and Stages 2 and 3 run on that
-/// memo. A stage's failure is reported in the run, as the facade does.
+/// The stages over `roots` up to and including `until`, as the facade runs
+/// them. A stage's failure is reported in the run, as the facade does.
 // ponytail: copies run_planning's stage order, which has no stop point;
 // #1169 moves the stop point into run_planning.
 pub fn run_stages_until(
@@ -325,7 +319,7 @@ pub fn run_stages_until(
             per_computation_candidates: None,
             logical_asap_candidates: None,
             physical_asap_candidates: None,
-            selection: Err(SelectionError::DeadlineReached),
+            selection: Err(SelectionError::NotRun),
             selected_physical_plan: None,
             selected_plan: None,
             report: PlanningReport::default(),
@@ -351,7 +345,6 @@ pub fn run_stages_until(
             .deployment_capabilities
             .supported_summaries
             .as_deref(),
-        None,
     );
     // As `run_planning`: a query Pass 1 cannot plan is reported before
     // contradictory deployment capabilities.
@@ -373,21 +366,15 @@ pub fn run_stages_until(
     if until == RunUntil::Pass1 {
         return Ok(stages);
     }
-    let mut round = Pass2RoundState::new(pass1);
-    let logical = generate_logical_asap_memo_candidates(
-        &mut round,
-        entries,
-        TumblingWindowWidthDomain::Complete,
-        None,
-    );
-    let logical = match logical {
+    let composed = pass2_local_window_composition(pass1, entries);
+    stages.pass2_local_window_composition = Some(composed.clone());
+    let logical = match pass2_after_local_window_composition(composed) {
         Ok(logical) => logical,
         Err(error) => {
             run.selection = Err(SelectionError::LogicalASAPCandidates(error.to_string()));
             return Ok(stages);
         }
     };
-    stages.pass2_local_window_composition = Some(round.unexpanded_memo().clone());
     let run = &mut stages.run;
     run.logical_asap_candidates = Some(logical);
     if until == RunUntil::Pass2 {
@@ -400,7 +387,6 @@ pub fn run_stages_until(
         data,
         models.deployment_capabilities.query_time_results_retained,
         models.deployment_capabilities.raw_data_retained,
-        None,
     ) {
         Ok(physical) => physical,
         Err(error) => {
@@ -425,7 +411,6 @@ pub fn run_stages_until(
         &accuracy,
         models.cost_inputs,
         &realizer,
-        None,
     ) {
         Ok(selection) => {
             match realizer.realize(&physical, &selection.selected_dag) {

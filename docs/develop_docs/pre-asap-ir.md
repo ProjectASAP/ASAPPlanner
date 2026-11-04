@@ -149,7 +149,7 @@ yet — and calls `asap_frontend_common::resolve_root`, which does three things 
    scalar subquery to a `Join { Cross }` plus column reference. The pass is idempotent and
    keeps the pointer identity of every untouched sub-DAG.
 
-The result is `Rc<OperatorNode>`. `lower_sql` / `lower_sql_dialect` / `lower_sql_batch` and
+The result is `Rc<OperatorNode>`. `lower_sql` / `lower_sql_dialect` and
 `lower_metricsql` return it; `lower_promql_query_workload` returns a `QueryRoot` per query.
 
 Workload search then runs structural CSE (`share_common_sub_dags` (crate-private in `asap_logical_asap_optimization`, `stage0/cse.rs`)) once
@@ -679,8 +679,6 @@ histogram_quantiles(rate(http_request_duration_seconds_bucket[5m]), "le", 0.5, 0
 
 **Fields:**
 - `children` — the union-compatible branches to concatenate; must be non-empty.
-- `discriminator_unique_key` — an optional caller-proven compound unique key
-  `(discriminator, inner_key)` over the output; nothing verifies the claim.
 
 ## Scalar-position nodes
 
