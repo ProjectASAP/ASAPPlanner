@@ -442,8 +442,8 @@ fn stage1_logical_asap_optimization_candidates_are_valid_and_uniquely_named() {
 #[test]
 fn stage2_physical_asap_optimization_keeps_every_logical_candidate() {
     let run = pipeline();
-    assert_one_unmaterialized_physical_candidate_per_logical(&run);
-    let unshared = unmaterialized(&run)
+    assert_one_not_kept_physical_candidate_per_logical(&run);
+    let unshared = not_kept(&run)
         .filter(|p| whole_windows(p.dag()) && !classify(p.dag(), &p.query_roots).1)
         .count();
     assert_eq!(unshared, 3);

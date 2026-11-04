@@ -26,8 +26,8 @@ use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
 use asap_types::ir::schema::Schema;
 use asap_types::ir::{
-    apply_materialization_timings, ASAPOp, MaterializationAssignment, NodeToTimedNodeCache,
-    NonASAPOp, Operator, OperatorNode, QueryRoot,
+    apply_physical_properties, ASAPOp, NodeToTimedNodeCache, NonASAPOp, Operator, OperatorNode,
+    PhysicalPropertiesAssignment, QueryRoot,
 };
 use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
 use asap_types::test_support::compile_physical_asap_dag_with_node_ids;
@@ -177,9 +177,9 @@ struct Exported {
     builds: Vec<(u64, i64)>,
 }
 
-fn export(root: &Rc<OperatorNode>, assignment: &MaterializationAssignment) -> Exported {
+fn export(root: &Rc<OperatorNode>, assignment: &PhysicalPropertiesAssignment) -> Exported {
     let timed =
-        apply_materialization_timings(root, assignment, &mut NodeToTimedNodeCache::new()).unwrap();
+        apply_physical_properties(root, assignment, &mut NodeToTimedNodeCache::new()).unwrap();
     let compiled = compile_physical_asap_dag_with_node_ids(&timed).unwrap();
     let tumbling_window = |node: &OperatorNode| -> i64 {
         match node.children()[0].non_asap() {
@@ -259,7 +259,7 @@ fn query_scope() -> Scope {
 fn compile_at_query_time(
     root: &Rc<OperatorNode>,
 ) -> Result<(Exported, CompiledPhysicalDAG), String> {
-    let exported = export(root, &MaterializationAssignment::default());
+    let exported = export(root, &PhysicalPropertiesAssignment::default());
     let plan =
         compile(&exported.dag, &[], &[exported.dag.roots[0] as u64]).map_err(|e| e.to_string())?;
     Ok((exported, plan))
@@ -277,7 +277,7 @@ fn execute_retained(
     tumbling_windows: &[Rc<OperatorNode>],
     samples: &[RawDataSample],
 ) -> Vec<Vec<Value>> {
-    let mut assignment = MaterializationAssignment::default();
+    let mut assignment = PhysicalPropertiesAssignment::default();
     for tumbling_window in tumbling_windows {
         assignment.set(
             tumbling_window,
@@ -303,7 +303,7 @@ fn execute_maintained_chain(
         .into_iter()
         .find(|n| matches!(n.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. })))
         .expect("a tumbling-window chain");
-    let mut assignment = MaterializationAssignment::default();
+    let mut assignment = PhysicalPropertiesAssignment::default();
     assignment.set(
         &chain,
         PhysicalProperties::new(
@@ -313,8 +313,7 @@ fn execute_maintained_chain(
         .ok(),
     );
     let timed =
-        apply_materialization_timings(planned, &assignment, &mut NodeToTimedNodeCache::new())
-            .unwrap();
+        apply_physical_properties(planned, &assignment, &mut NodeToTimedNodeCache::new()).unwrap();
     let expanded = expand_tumbling_window_chains(&timed).unwrap();
     for tumbling_window in OperatorNode::reachable(&expanded)
         .iter()
@@ -326,12 +325,12 @@ fn execute_maintained_chain(
         );
         assert_eq!(tumbling_window.timing, Some(ExecutionTiming::IngestionTime));
     }
-    execute_retained_as(&expanded, &MaterializationAssignment::default(), samples)
+    execute_retained_as(&expanded, &PhysicalPropertiesAssignment::default(), samples)
 }
 
 fn execute_retained_as(
     root: &Rc<OperatorNode>,
-    assignment: &MaterializationAssignment,
+    assignment: &PhysicalPropertiesAssignment,
     samples: &[RawDataSample],
 ) -> Vec<Vec<Value>> {
     let mut exported = export(root, assignment);

@@ -20,8 +20,8 @@ use asap_integration_tests::planning::{
 use asap_types::ir::physical_export::compile_physical_asap_dag;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{
-    apply_materialization_timings, ASAPOp, MaterializationAssignment, NodeToTimedNodeCache,
-    NonASAPOp, OperatorNode, QueryRoot,
+    apply_physical_properties, ASAPOp, NodeToTimedNodeCache, NonASAPOp, OperatorNode,
+    PhysicalPropertiesAssignment, QueryRoot,
 };
 use asap_types::physical::Lifetime;
 use asap_types::stages::{root_groups, MemoGroupId};
@@ -112,9 +112,9 @@ fn samples() -> Vec<(&'static str, &'static str, i64, f64)> {
 /// `Scan`; each `TimeRange` keeps its own window (a tumbling window's moved
 /// back by the `TimeShift` below it).
 fn execute(root: &Rc<OperatorNode>) -> Vec<String> {
-    let timed = apply_materialization_timings(
+    let timed = apply_physical_properties(
         root,
-        &MaterializationAssignment::default(),
+        &PhysicalPropertiesAssignment::default(),
         &mut NodeToTimedNodeCache::new(),
     )
     .unwrap();

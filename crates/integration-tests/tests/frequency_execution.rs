@@ -14,8 +14,8 @@ use asap_types::ir::physical_export::{compile_physical_asap_dag, PhysicalASAPOpe
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
 use asap_types::ir::{
-    apply_materialization_timings, ASAPOp, MaterializationAssignment, NodeToTimedNodeCache,
-    NonASAPOp, OperatorNode,
+    apply_physical_properties, ASAPOp, NodeToTimedNodeCache, NonASAPOp, OperatorNode,
+    PhysicalPropertiesAssignment,
 };
 
 use crate::physical_common;
@@ -36,9 +36,9 @@ fn built_family(candidate: &Rc<OperatorNode>) -> Option<FieldDataType> {
 
 /// Execute `candidate` at query time over `SAMPLES`, all inside the window.
 fn execute(candidate: &Rc<OperatorNode>) -> Vec<f64> {
-    let timed = apply_materialization_timings(
+    let timed = apply_physical_properties(
         candidate,
-        &MaterializationAssignment::default(),
+        &PhysicalPropertiesAssignment::default(),
         &mut NodeToTimedNodeCache::new(),
     )
     .unwrap();

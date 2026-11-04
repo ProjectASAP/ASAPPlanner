@@ -368,7 +368,7 @@ pub struct Planned {
 }
 
 /// A plan priced by Stage 2 and Stage 3 outside the search: the cheapest
-/// materialization assignment of given logical roots.
+/// physical properties assignment of given logical roots.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Priced {
     pub selected: String,

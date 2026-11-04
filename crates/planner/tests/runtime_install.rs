@@ -29,7 +29,7 @@ use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams};
 use asap_types::ir::{
-    apply_materialization_timings_to_roots, ASAPOp, MaterializationAssignment, OperatorNode,
+    apply_physical_properties_to_roots, ASAPOp, OperatorNode, PhysicalPropertiesAssignment,
     QueryRoot,
 };
 use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
@@ -1530,7 +1530,7 @@ impl OptimizationPass for StoredAsForced {
         // Each node untimed once, so shared inputs stay shared, and its
         // materialization in `assignment`.
         let mut untimed: HashMap<*const OperatorNode, Rc<OperatorNode>> = HashMap::new();
-        let mut assignment = MaterializationAssignment::default();
+        let mut assignment = PhysicalPropertiesAssignment::default();
         let roots: Vec<Rc<OperatorNode>> = output
             .plans
             .iter()
@@ -1540,7 +1540,7 @@ impl OptimizationPass for StoredAsForced {
         // copy per timing, as Stage 2 does.
         let (roots, assignment) = split_shared_by_timing(&roots, &assignment);
         let roots: Vec<QueryRoot> = roots.into_iter().map(QueryRoot::Operator).collect();
-        let timed = apply_materialization_timings_to_roots(&roots, &assignment).unwrap();
+        let timed = apply_physical_properties_to_roots(&roots, &assignment).unwrap();
         for (plan, root) in output.plans.iter_mut().zip(timed) {
             let QueryRoot::Operator(root) = root else {
                 unreachable!("operator roots in, operator roots out")
@@ -1557,7 +1557,7 @@ fn untime(
     node: &Rc<OperatorNode>,
     store: fn(&OperatorNode) -> Option<PhysicalProperties>,
     untimed: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
-    assignment: &mut MaterializationAssignment,
+    assignment: &mut PhysicalPropertiesAssignment,
 ) -> Rc<OperatorNode> {
     if let Some(done) = untimed.get(&Rc::as_ptr(node)) {
         return Rc::clone(done);

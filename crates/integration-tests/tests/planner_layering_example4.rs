@@ -216,7 +216,7 @@ fn stage2_physical_asap_optimization_monthly_materialized_output_covers_its_cons
 /// The shared EH candidate yields A1 (query time, kept), A2 (ingestion time) and A3 (not materialized).
 #[test]
 #[ignore = "needs Pass 2 window segments shared across queries (#628, #634); Stage 2 keeping outputs for one evaluation (OneEvaluation) is in place"]
-fn stage2_physical_asap_optimization_a_shared_eh_has_three_materialization_options() {
+fn stage2_physical_asap_optimization_a_shared_eh_has_three_physical_properties_options() {
     let found: BTreeSet<_> = eh_options(&run_promql(&once())).into_keys().collect();
     assert_eq!(
         found,
@@ -315,7 +315,7 @@ fn keeping_query_time_results() -> DeploymentCapabilities {
 
 /// The 1-min tumbling KLL candidate yields B1 (ingestion time), B2 (not materialized) and B3 (query time, kept).
 #[test]
-fn stage2_physical_asap_optimization_b_tumbling_kll_has_three_materialization_options() {
+fn stage2_physical_asap_optimization_b_tumbling_kll_has_three_physical_properties_options() {
     let run = run_pattern_b_fixture(
         &pattern_b(),
         &CostInputs::default(),
@@ -405,7 +405,7 @@ fn stage2_physical_asap_optimization_b_b3_keeps_query_time_windows() {
 /// The sliding-window KLL is kept from ingestion time or from query time; not materializing it is the no-window plan.
 #[test]
 #[ignore = "needs sliding windows (#522)"]
-fn stage2_physical_asap_optimization_b_sliding_kll_has_two_materialization_options() {
+fn stage2_physical_asap_optimization_b_sliding_kll_has_two_physical_properties_options() {
     let found: BTreeSet<_> = options_of(
         &run_pattern_b_fixture(
             &pattern_b(),

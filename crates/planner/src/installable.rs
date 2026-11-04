@@ -40,7 +40,7 @@ use asap_types::ir::physical_export::{
 use asap_types::ir::properties::{ExecutionDataStateError, ExecutionTiming};
 use asap_types::ir::SchemaDerivationError;
 use asap_types::ir::{
-    apply_materialization_timings_to_roots, ASAPOp, MaterializationAssignment, OperatorNode,
+    apply_physical_properties_to_roots, ASAPOp, OperatorNode, PhysicalPropertiesAssignment,
     QueryRoot,
 };
 use asap_types::workload::QueryWorkloadEntry;
@@ -282,7 +282,7 @@ pub fn installable_plan_of(
     let query_texts: Vec<String> = entries.iter().map(|entry| entry.query.0.clone()).collect();
     // Every node keeps the timing Stage 3 gave it.
     let timed =
-        apply_materialization_timings_to_roots(roots, &MaterializationAssignment::default())?;
+        apply_physical_properties_to_roots(roots, &PhysicalPropertiesAssignment::default())?;
     let expanded = tumbling_window_retention_of_expanded_tumbling_windows(
         &timed,
         tumbling_window_retention_ms,
@@ -871,7 +871,7 @@ mod tests {
         use asap_types::ir::physical_export::compile_physical_asap_dag;
         use asap_types::ir::schema::{DataType, Field, Schema};
         use asap_types::ir::{
-            apply_materialization_timings, NodeToTimedNodeCache, OperatorNode, TimeRangeKind,
+            apply_physical_properties, NodeToTimedNodeCache, OperatorNode, TimeRangeKind,
         };
         use std::time::Duration;
         let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
@@ -904,9 +904,9 @@ mod tests {
         }))
         .unwrap();
         let export = |root| {
-            let timed = apply_materialization_timings(
+            let timed = apply_physical_properties(
                 &root,
-                &MaterializationAssignment::default(),
+                &PhysicalPropertiesAssignment::default(),
                 &mut NodeToTimedNodeCache::new(),
             )
             .unwrap();
@@ -949,7 +949,7 @@ mod tests {
             DataType, ExactKind, ExactParams, Field, FieldDataType, Schema, SummaryUpdate,
         };
         use asap_types::ir::{
-            apply_materialization_timings, NodeToTimedNodeCache, OperatorNode, TimeRangeKind,
+            apply_physical_properties, NodeToTimedNodeCache, OperatorNode, TimeRangeKind,
         };
         use asap_types::physical::Medium;
         use std::time::Duration;
@@ -999,7 +999,7 @@ mod tests {
             filter: None,
         }))
         .unwrap();
-        let mut assignment = MaterializationAssignment::default();
+        let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &merged,
             PhysicalProperties::new(
@@ -1009,7 +1009,7 @@ mod tests {
             .ok(),
         );
         let timed =
-            apply_materialization_timings(&merged, &assignment, &mut NodeToTimedNodeCache::new())
+            apply_physical_properties(&merged, &assignment, &mut NodeToTimedNodeCache::new())
                 .unwrap();
         let dag = compile_physical_asap_dag(&timed).unwrap();
         match InstallablePlan::of_dag(dag, vec![String::new()], &HashMap::new(), &HashMap::new()) {
@@ -1042,7 +1042,7 @@ mod tests {
             group_by: None,
         }))
         .unwrap();
-        let mut assignment = MaterializationAssignment::default();
+        let mut assignment = PhysicalPropertiesAssignment::default();
         for node in tumbling_windows.iter().chain([&merge]) {
             assignment.set(
                 node,
@@ -1054,7 +1054,7 @@ mod tests {
             );
         }
         let timed =
-            apply_materialization_timings(&merge, &assignment, &mut NodeToTimedNodeCache::new())
+            apply_physical_properties(&merge, &assignment, &mut NodeToTimedNodeCache::new())
                 .unwrap();
         let dag = compile_physical_asap_dag(&timed).unwrap();
         match InstallablePlan::of_dag(dag, vec![String::new()], &HashMap::new(), &HashMap::new()) {

@@ -59,7 +59,7 @@
 //   - stage2_physical_asap_optimization (from `stage2`): `pruned_candidates`,
 //     the physical candidates Stage 2 pruned (each with its memo `group`,
 //     `operator_node`, `operator`, `implementation_root`, `timing`,
-//     `materialization` and `reason`); with `stage3`, `candidates` holds
+//     `lifetime` and `reason`); with `stage3`, `candidates` holds
 //     `P1`, the selected plan as Stage 2 built it;
 //   - stage3_plan_selection (from `stage3`): Stage 3's `Selection`:
 //     `selected_dag` (`candidate_of_node`, `edges`,
@@ -712,7 +712,7 @@ fn pass1_pruned_candidates_json(pass1: Option<&PerComputationLogicalMemoCandidat
 /// (`PhysicalASAPMemoCandidates::pruned_candidates`), in pruning order:
 /// each with its memo `group`, its `operator_node` (index into Stage 2's
 /// operator nodes), the node's `operator` label, whether it is an
-/// `implementation_root`, its `timing` and `materialization`, and the
+/// `implementation_root`, its `timing` and `lifetime`, and the
 /// `reason` (`PruneReason`, e.g.
 /// `RawDataNotRetained`). Empty without memo steps.
 fn stage2_pruned_candidates_json(stage2: Option<&PhysicalASAPMemoCandidates>) -> Vec<Value> {

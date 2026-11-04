@@ -39,7 +39,7 @@ The Logical Post-ASAP DAG is preceded by the Pre-ASAP DAG, the
 language-independent query semantics before summary selection. Both are
 logical `OperatorNode` DAGs. `compile_physical_asap_dag` exports the selected
 DAG as a `PhysicalASAPDAG`, which is the Physical Plan Compiler's input. Its per-node execution phase (ingestion or query time) is
-decided by a `MaterializationAssignment`, as the layer contract below states.
+decided by a `PhysicalPropertiesAssignment`, as the layer contract below states.
 
 ### Layer contract
 
@@ -50,7 +50,7 @@ decided by a `MaterializationAssignment`, as the layer contract below states.
    output may be stored (a `SummaryAgg` or a `MaintainPopulation`), whether
    it is kept and with which timing and `Lifetime` (`None`,
    `OneEvaluation(medium)` or `AcrossEvaluations(medium)`), and records it in
-   a `MaterializationAssignment`. `apply_materialization_timings` writes every
+   a `PhysicalPropertiesAssignment`. `apply_physical_properties` writes every
    node's `ExecutionTiming` and `Lifetime`: a state kept at ingestion time and
    all of its inputs run at ingestion time; readouts, other consumers, and the
    other states run at query time. The default assignment keeps nothing; `PlanOutput::physical_asap_dag` applies it
@@ -96,7 +96,7 @@ and a feasible candidate that loses on cost. Absence is not a cost comparison.
 
 For `sum by(job)(rate(m[1m]))`, Rate remains per series before grouped Sum.
 `CandidateLogicalASAPDAGs` offers one such candidate, with a per-series Rate state and a grouped
-Sum state. Its materialization assignment places it: an ingestion-time Sum state
+Sum state. Its physical properties assignment places it: an ingestion-time Sum state
 finalizes Rate and builds Sum within a bounded precompute run; a query-time Sum
 over an ingestion-time Rate state leaves the Rate readout and Sum in the query DAG. Storing a
 value requires its exact evaluation window, revision, readiness and serving
@@ -112,7 +112,7 @@ Planner's candidate space decides what to compute, not placement. For an
 instant-vector PromQL TopK, Planner resolves rows that carry the complete series
 identity and lists the current-series heap realizations per root with the other
 candidates, unranked. Precompute or query-time placement of Rate and grouped Sum
-is not a separate Planner candidate: the materialization assignment sets
+is not a separate Planner candidate: the physical properties assignment sets
 each node's timing, and the physical compiler reads it.
 
 This is the target ownership contract. A backend path that still reconstructs

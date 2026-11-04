@@ -10,8 +10,8 @@ use asap_types::ir::schema::{
     StatisticKind, SummaryUpdate, WaveletKind, WaveletParams,
 };
 use asap_types::ir::{
-    apply_materialization_timings, ASAPOp, ExprSemantics, MaterializationAssignment,
-    NodeToTimedNodeCache, NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr,
+    apply_physical_properties, ASAPOp, ExprSemantics, NodeToTimedNodeCache, NonASAPOp, Operator,
+    OperatorNode, PhysicalPropertiesAssignment, Predicate, ScalarExpr,
 };
 use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
 use std::rc::Rc;
@@ -702,10 +702,9 @@ fn idempotent_families_merge_overlapping_states() {
 fn summary_merge_timing() {
     let tumbling_windows = [state(200, "us"), state(200, "eu")];
     let root = merge(tumbling_windows.to_vec()).unwrap();
-    let timings = |assignment: &MaterializationAssignment| {
+    let timings = |assignment: &PhysicalPropertiesAssignment| {
         let timed =
-            apply_materialization_timings(&root, assignment, &mut NodeToTimedNodeCache::new())
-                .unwrap();
+            apply_physical_properties(&root, assignment, &mut NodeToTimedNodeCache::new()).unwrap();
         let children = timed.children();
         (
             timed.timing.unwrap(),
@@ -717,12 +716,12 @@ fn summary_merge_timing() {
     };
     use ExecutionTiming::{IngestionTime, QueryTime};
     assert_eq!(
-        timings(&MaterializationAssignment::default()),
+        timings(&PhysicalPropertiesAssignment::default()),
         (QueryTime, vec![QueryTime, QueryTime])
     );
     let at_ingestion =
         PhysicalProperties::new(IngestionTime, Lifetime::AcrossEvaluations(Medium::Memory)).ok();
-    let mut stored_tumbling_windows = MaterializationAssignment::default();
+    let mut stored_tumbling_windows = PhysicalPropertiesAssignment::default();
     for tumbling_window in &tumbling_windows {
         stored_tumbling_windows.set(tumbling_window, at_ingestion);
     }
@@ -732,13 +731,12 @@ fn summary_merge_timing() {
     );
     // A `SummaryAgg` without an assignment runs at query time, so a merge
     // stored at ingestion time needs its tumbling windows there too.
-    let mut only_merge = MaterializationAssignment::default();
+    let mut only_merge = PhysicalPropertiesAssignment::default();
     only_merge.set(&root, at_ingestion);
     assert!(
-        apply_materialization_timings(&root, &only_merge, &mut NodeToTimedNodeCache::new())
-            .is_err()
+        apply_physical_properties(&root, &only_merge, &mut NodeToTimedNodeCache::new()).is_err()
     );
-    let mut stored_merge = MaterializationAssignment::with_default(at_ingestion);
+    let mut stored_merge = PhysicalPropertiesAssignment::with_default(at_ingestion);
     stored_merge.set(&root, at_ingestion);
     assert_eq!(
         timings(&stored_merge),

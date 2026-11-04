@@ -18,7 +18,7 @@ use std::rc::Rc;
 
 use asap_types::ir::physical_export::compile_physical_asap_workload;
 use asap_types::ir::properties::timing::{
-    apply_materialization_timings_to_roots, MaterializationAssignment,
+    apply_physical_properties_to_roots, PhysicalPropertiesAssignment,
 };
 use asap_types::ir::properties::ExecutionDataStateError;
 use asap_types::ir::OperatorNode;
@@ -303,7 +303,7 @@ impl PlanOutput {
     /// for [`Stage1ToStage3Pass`] that is Stage 3's selected plan as
     /// selected (e.g. ingestion-time tumbling windows), the document a deployment
     /// runtime executes. Only a node the pass left untimed takes the default
-    /// [`MaterializationAssignment`] (not materialized, computed when its
+    /// [`PhysicalPropertiesAssignment`] (not materialized, computed when its
     /// consumer runs). Operator queries become its `roots` and standalone scalar
     /// queries its `scalar_roots`, keyed by position in the batch. That
     /// position is the entry index, because `check_contract` requires dense
@@ -317,9 +317,9 @@ impl PlanOutput {
         &self,
     ) -> Result<asap_types::ir::physical_export::PhysicalASAPDAG, ExecutionDataStateError> {
         // A node several roots share by `Rc` is timed and exported once.
-        let timed = apply_materialization_timings_to_roots(
+        let timed = apply_physical_properties_to_roots(
             &self.roots(),
-            &MaterializationAssignment::default(),
+            &PhysicalPropertiesAssignment::default(),
         )?;
         compile_physical_asap_workload(&timed)
     }

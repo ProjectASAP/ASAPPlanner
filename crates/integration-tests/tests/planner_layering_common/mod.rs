@@ -659,27 +659,24 @@ pub fn assert_valid_and_uniquely_named(run: &Run) {
 /// No candidate is discarded before plan selection: physical ASAP-aware
 /// optimization gives each logical candidate `L<n>` exactly one physical
 /// candidate with nothing materialized, `P<n>`, and one `P<n>-m<k>` for each
-/// other materialization assignment.
-pub fn assert_one_unmaterialized_physical_candidate_per_logical(run: &Run) {
+/// other physical properties assignment.
+pub fn assert_one_not_kept_physical_candidate_per_logical(run: &Run) {
     assert!(run.pruned.is_empty(), "pruned: {:?}", run.pruned);
-    let unmaterialized: Vec<_> = run
+    let not_kept: Vec<_> = run
         .physical
         .iter()
         .filter(|p| !p.id.contains("-m"))
         .collect();
-    let sources: BTreeSet<_> = unmaterialized
-        .iter()
-        .map(|p| p.from_logical.as_str())
-        .collect();
+    let sources: BTreeSet<_> = not_kept.iter().map(|p| p.from_logical.as_str()).collect();
     let logical: BTreeSet<_> = run.logical.iter().map(|c| c.id.as_str()).collect();
     assert_eq!(sources, logical);
-    assert_eq!(unmaterialized.len(), run.logical.len());
+    assert_eq!(not_kept.len(), run.logical.len());
     for p in &run.physical {
         let base = p.id.split("-m").next().unwrap();
         assert_eq!(&base[1..], &p.from_logical[1..], "{}", p.id);
-        let unmaterialized = !p.id.contains("-m");
-        assert_eq!(unmaterialized, !p.candidate.materializes_any(), "{}", p.id);
-        if unmaterialized {
+        let not_kept = !p.id.contains("-m");
+        assert_eq!(not_kept, !p.candidate.materializes_any(), "{}", p.id);
+        if not_kept {
             for n in &p.dag().nodes {
                 assert_eq!(keeping(p, n.id), Keeping::NotKept);
             }
@@ -691,7 +688,7 @@ pub fn assert_one_unmaterialized_physical_candidate_per_logical(run: &Run) {
 
 /// The physical candidates with nothing materialized, one per logical
 /// candidate.
-pub fn unmaterialized(run: &Run) -> impl Iterator<Item = &Physical> {
+pub fn not_kept(run: &Run) -> impl Iterator<Item = &Physical> {
     run.physical
         .iter()
         .filter(|p| !p.candidate.materializes_any())

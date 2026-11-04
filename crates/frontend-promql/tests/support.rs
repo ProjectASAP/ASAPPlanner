@@ -76,7 +76,7 @@ pub fn promql_scalar(node: &ScalarExpr) -> Option<f64> {
     }
 }
 
-/// Time `root` under the default materialization assignment (every summary
+/// Time `root` under the default physical properties assignment (every summary
 /// at query time) and export the physical DAG — export needs every node
 /// timed first.
 #[allow(dead_code)]
@@ -84,14 +84,14 @@ pub fn physical_asap_dag(
     root: &Rc<OperatorNode>,
 ) -> asap_types::ir::physical_export::PhysicalASAPDAG {
     use asap_types::ir::{
-        apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
+        apply_physical_properties, NodeToTimedNodeCache, PhysicalPropertiesAssignment,
     };
-    let timed = apply_materialization_timings(
+    let timed = apply_physical_properties(
         root,
-        &MaterializationAssignment::default(),
+        &PhysicalPropertiesAssignment::default(),
         &mut NodeToTimedNodeCache::new(),
     )
-    .expect("default materialization timings");
+    .expect("default physical properties");
     asap_types::ir::physical_export::compile_physical_asap_dag(&timed)
         .expect("post-ASAP DAG export")
 }

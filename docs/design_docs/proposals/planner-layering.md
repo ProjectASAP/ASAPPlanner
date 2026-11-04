@@ -600,7 +600,7 @@ the memo path's entry points.
 | 1, Pass 1 | Logical roots; the deployment's supported summaries → the Pass 1 inventory, every computation's candidates (`PerComputationCandidates`, now Pass 1's crate-private working form) | Logical roots → `DagOfLogicalMemoGroups` (hash-consed `MemoGroup`s); with the Pass 1 inventory, less the summaries the deployment does not support and those no query reading them can use → `PerComputationLogicalMemoCandidates`: the `Memo` (each group's `CandidateForMemoGroup`s, with the accuracy-scoped sizes) and the pruned candidates (`PrunedCandidate<HowToComputeAggregateMeasure>`) | `generate_dag_of_logical_memo_groups`, `generate_per_computation_logical_memo_candidates` |
 | 1, Pass 2 | One Pass 1 choice per computation → that choice rewritten by each sharing rule, every subset of sharing choices (no longer in the code) | `Memo`; the entries' recurrence and range steps → the same memo with each rule's candidates added to the groups they implement | the memo rules (`pass2/memo/rules/`), `pass2::memo::window_candidates` |
 | 1, concrete summary-state groups | (part of Pass 2) | `Memo` → the memo with concrete summary-state groups: one group per shared size or tumbling-window layout that readers can read | `add_shared_summary_state_groups`, Pass 2's last step; the Pass 2 output is `LogicalASAPMemoCandidates` (`generate_logical_asap_memo_candidates`) |
-| 2 | One whole-workload logical candidate; entries (recurrence, predictability), `DataWorkload`, query-time retention → its physical candidates, one per materialization assignment | `LogicalASAPMemoCandidates`; entries, `DataWorkload`, query-time and raw-data retention → `PhysicalASAPMemoCandidates`: every operator node of every candidate with each allowed timing and lifetime (one physical candidate each, no copies), the producers of each input, reader constraints (each applied to every selected run of its candidate), and the pruned candidates (`PrunedCandidate<PhysicalCandidateKey>`) | `generate_physical_asap_memo_candidates` (`asap_physical_asap_optimization`) |
+| 2 | One whole-workload logical candidate; entries (recurrence, predictability), `DataWorkload`, query-time retention → its physical candidates, one per physical properties assignment | `LogicalASAPMemoCandidates`; entries, `DataWorkload`, query-time and raw-data retention → `PhysicalASAPMemoCandidates`: every operator node of every candidate with each allowed timing and lifetime (one physical candidate each, no copies), the producers of each input, reader constraints (each applied to every selected run of its candidate), and the pruned candidates (`PrunedCandidate<PhysicalCandidateKey>`) | `generate_physical_asap_memo_candidates` (`asap_physical_asap_optimization`) |
 | 3 | Every physical candidate; accuracy targets, accuracy model and evidence, cost model → one plan | `PhysicalASAPMemoCandidates`; entries, `DataWorkload`, `AccuracyCheckInputs`, `CostInputs`, Stage 2's realizer → `Selection`: the selected plan (`selected_dag`, a `DagOfSelectedCandidates`: one node per run of a candidate, so a candidate recomputed by two readers or shared as two instances over different inputs is two nodes, with an edge per input), its cost, the accepted accuracy per query and the search report | `select_plan` (`asap_plan_selection`); the facade (`run_planning`, output `PlanningRun`) runs it once and builds the selected `PhysicalWorkloadPlan` with `AssignmentRealizer::realize`, one plan node per selected node |
 | 4. Execution | The selected `PhysicalASAPDAG` → query results | Same: an `InstallablePlan` (`{dag, query_texts}`) → query results | The deployment runtime installs the `InstallablePlan` |
 
@@ -1209,7 +1209,7 @@ is offered not kept, kept at ingestion time `AcrossEvaluations(Memory)` when
 it is eligible to run at ingestion time, and kept at query time
 `OneEvaluation(Memory)` when two or more queries read it. Of every other
 sub-DAG that two or more queries read (for example a `Scan` that a 1 m and a
-5 m window both read), only the highest node is a materialization candidate:
+5 m window both read), only the highest node is a kept-output candidate:
 one that a query's output, or a node only one query reads, consumes. It is
 offered not kept and `OneEvaluation(Memory)` only, since raw rows are not
 maintained at ingestion time. Below an ingestion-time build it stays not
@@ -1248,20 +1248,20 @@ Output: C3 — CandidatePhysicalASAPDAGs
 2:  for each LogicalASAPDAG d in C2 do
 3:      // Materialization: options per sub-DAG
 4:      for each sub-DAG s in d do
-5:          Opt(s) ← { NotMaterialized }
+5:          Opt(s) ← { (QueryTime, None) }
 6:          for each medium in {memory, disk} do
-7:              Opt(s) ← Opt(s) ∪ { MatAtIngestion(medium), MatAtQuery(medium) }
+7:              Opt(s) ← Opt(s) ∪ { (IngestionTime, AcrossEvaluations(medium)), (QueryTime, OneEvaluation(medium)) }
 8:          end for
 9:      end for
 10:
 11:     for each assignment m in Opt(s_1) × … × Opt(s_n) do
 12:         // constraint: everything upstream of an ingestion-time node also runs at ingestion time
-13:         if some s with m(s) = MatAtIngestion has an upstream node u with m(u) ≠ MatAtIngestion then
+13:         if some s with timing(m(s)) = IngestionTime has an upstream node u with timing(m(u)) ≠ IngestionTime then
 14:             PRUNE(m, "upstream of ingestion-time node not at ingestion time")
 15:             continue
 16:         end if
 17:         // constraint: keep a materialized output as long as any consumer needs it
-18:         for each s with m(s) ≠ NotMaterialized do
+18:         for each s with lifetime(m(s)) ≠ None do
 19:             retention(s) ← latest time any consumer of s reads it    // from recurrence, windows
 20:         end for
 21:         // a shared summary is one node, so it is materialized once for all consumers
@@ -1304,7 +1304,7 @@ into a node.
 
 *Example for Algorithm 3* ([Example 4, Pattern B](#example-4-materialization-of-window-summaries-in-physical-planning)).
 The logical candidate is the `Tumbling(1m)` KLL option from Algorithm 2. The
-diagram shows three of its materialization assignments, each drawn as a copy
+diagram shows three of its physical properties assignments, each drawn as a copy
 of the DAG with every node colored by its materialization. Line 13 enforces one
 rule: a node can run at ingestion time only if every node it reads from also
 runs at ingestion time, because otherwise its input does not exist yet when
@@ -1333,7 +1333,7 @@ flowchart TB
   end
   subgraph LEG["Legend: when a node runs and whether its output is stored"]
     direction LR
-    l1["MatAtIngestion"]:::ingest ~~~ l2["MatAtQuery"]:::qtime ~~~ l3["NotMaterialized"]:::notmat
+    l1["(IngestionTime, AcrossEvaluations)"]:::ingest ~~~ l2["(QueryTime, OneEvaluation)"]:::qtime ~~~ l3["(QueryTime, None)"]:::notmat
   end
   M1 --> P1
   LEG ~~~ M1

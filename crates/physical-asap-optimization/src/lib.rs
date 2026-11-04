@@ -16,7 +16,7 @@
 //! ## Materialization
 //!
 //! Each summary build (a `SummaryAgg` or a `SummaryTumblingWindowChain`) is one
-//! materialization candidate (`MaterializationCandidate`) whose
+//! kept-output candidate (`KeptOutputCandidate`) whose
 //! output materialization may store (#509 §Materialization, Algorithm 3).
 //! So is the highest node of each other sub-DAG that two or more queries
 //! read (e.g. a `Scan` that a 1 m and a 5 m window read): one a root or a
@@ -128,8 +128,8 @@ use asap_types::ir::physical_export::compile_physical_asap_workload_with_node_id
 use asap_types::ir::properties::{ExecutionDataStateError, ExecutionTiming};
 use asap_types::ir::schema::{ExactKind, FieldDataType};
 use asap_types::ir::{
-    apply_materialization_timings, is_filtered_build, ASAPOp, MaterializationAssignment,
-    NodeToTimedNodeCache, NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr,
+    apply_physical_properties, is_filtered_build, ASAPOp, NodeToTimedNodeCache, NonASAPOp,
+    Operator, OperatorNode, PhysicalPropertiesAssignment, QueryRoot, ScalarExpr,
     SchemaDerivationError, SortKey,
 };
 use asap_types::physical::Medium;
@@ -214,7 +214,7 @@ pub(crate) enum IngestionPruneReason {
 /// These are local options, not a complete physical assignment. Ingestion still
 /// requires selected upstream implementations to pass timing/down-closure checks.
 #[derive(Debug)]
-pub(crate) struct SummaryMaterializationEligibility {
+pub(crate) struct SummaryKeepEligibility {
     pub(crate) at_ingestion: Result<(), IngestionPruneReason>,
     pub(crate) may_keep_across_evaluations: bool,
     /// A tumbling window's selected readers must also meet their range-step grids.
@@ -225,9 +225,9 @@ pub(crate) struct SummaryMaterializationEligibility {
 pub(crate) enum SummaryEligibilityError {
     #[error("selected reader {query} has no workload entry")]
     UnknownReader { query: usize },
-    #[error("materialization eligibility requires a summary build or tumbling-window chain")]
+    #[error("keep eligibility requires a summary build or tumbling-window chain")]
     NotSummary,
-    #[error("materialization eligibility requires at least one selected reader")]
+    #[error("keep eligibility requires at least one selected reader")]
     NoSelectedReaders,
     #[error("tumbling-window width must be positive")]
     ZeroPaneWidth,
@@ -238,13 +238,13 @@ pub(crate) enum SummaryEligibilityError {
 /// missing workload entries are rejected as malformed reader references. The node must carry the actual bound source/filter/window subtree,
 /// and `data` describes that source's arrival. This function does not implement
 /// operators, assign upstream timing, or prove complete execution legality.
-pub(crate) fn summary_materialization_eligibility(
+pub(crate) fn summary_keep_eligibility(
     node: &OperatorNode,
     selected_readers: &[usize],
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     query_time_results_retained: bool,
-) -> Result<SummaryMaterializationEligibility, SummaryEligibilityError> {
+) -> Result<SummaryKeepEligibility, SummaryEligibilityError> {
     if !is_summary_build(node) {
         return Err(SummaryEligibilityError::NotSummary);
     }
@@ -284,7 +284,7 @@ fn summary_reader_eligibility(
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     query_time_results_retained: bool,
-) -> SummaryMaterializationEligibility {
+) -> SummaryKeepEligibility {
     let recurrences: Option<Vec<&QueryRecurrence>> = readers
         .iter()
         .map(|&query| entries.get(query).map(|entry| &entry.recurrence))
@@ -300,7 +300,7 @@ fn summary_reader_eligibility(
             ) => builds_one_tumbling_window_per_evaluation(*tumbling_window_width_ms, recurrences),
             _ => false,
         };
-    SummaryMaterializationEligibility {
+    SummaryKeepEligibility {
         at_ingestion: ingestion_eligibility(node, readers, entries, data),
         may_keep_across_evaluations,
         range_compatibility: check_summary_range_steps(node, readers, entries),
@@ -308,10 +308,10 @@ fn summary_reader_eligibility(
 }
 
 /// One summary build, or one highest shared non-summary node, Stage 2 may
-/// store, with its materialization options.
+/// store, with its physical properties options.
 /// It is not a whole-workload plan like [`PhysicalWorkloadPlan`]: it is Stage
 /// 2's enumeration bookkeeping, and the physical candidates are the
-/// combinations of the materialization candidates' options. For example,
+/// combinations of the kept-output candidates' options. For example,
 /// over one metric:
 ///
 /// ```text
@@ -320,9 +320,9 @@ fn summary_reader_eligibility(
 /// ```
 ///
 /// If Stage 1 chose KLL tumbling windows for q1 and exact max tumbling windows for q2, Stage 2
-/// finds two materialization candidates:
+/// finds two kept-output candidates:
 ///
-/// | materialization candidate        | readers | options                         |
+/// | kept-output candidate        | readers | options                         |
 /// |----------------------------------|---------|---------------------------------|
 /// | Kll ×5 tumbling windows (q1)     | q1      | not kept, kept at ingestion time |
 /// | Max acc ×5 tumbling windows (q2) | q2      | not kept, kept at ingestion time |
@@ -335,9 +335,9 @@ fn summary_reader_eligibility(
 /// ingestion time over one that is not; Stage 3 prices each.
 /// `at_ingestion` records why ingestion is ruled out when it is (e.g.
 /// `Filtered`, `NotRepeated`). Each physical candidate carries the
-/// resulting assignment ([`PhysicalWorkloadPlan::materialization`]).
+/// resulting assignment ([`PhysicalWorkloadPlan::lifetime`]).
 #[derive(Debug, Clone)]
-pub(crate) struct MaterializationCandidate {
+pub(crate) struct KeptOutputCandidate {
     /// The build in the implemented DAG.
     pub(crate) node: Rc<OperatorNode>,
     /// The queries (indices into the roots) that read it.
@@ -350,7 +350,7 @@ pub(crate) struct MaterializationCandidate {
     pub(crate) may_keep_across_evaluations: bool,
 }
 
-impl MaterializationCandidate {
+impl KeptOutputCandidate {
     /// Its options, not kept first: kept at ingestion time when eligible,
     /// `OneEvaluation` when two or more queries read it, and
     /// query-time `AcrossEvaluations` when it may be kept across
@@ -412,7 +412,7 @@ pub(crate) fn builds_one_tumbling_window_per_evaluation<'a>(
 
 /// Stage 2 for one CandidateLogicalASAPDAG: implement every operator
 /// (physical operator implementation), then one physical candidate per
-/// materialization assignment of its mat_candidates, the all-not-kept one
+/// physical properties assignment of its kept_output_candidates, the all-not-kept one
 /// first. `entries[i]` is the workload entry of query `i` (`roots[i]`):
 /// its recurrence and predictability decide whether state may be kept from
 /// ingestion time; a missing entry is unknown. `id` is left empty for the
@@ -431,18 +431,23 @@ pub fn optimize_physical_asap(
     data: &DataWorkload,
     query_time_results_retained: bool,
 ) -> Result<Vec<PhysicalWorkloadPlan>, PhysicalASAPOptimizationError> {
-    let (implemented, _, mat_candidates) =
+    let (implemented, _, kept_output_candidates) =
         implement_and_find_candidates(roots, entries, data, query_time_results_retained)?;
-    materialization_assignments(&mat_candidates)
+    physical_properties_assignments(&kept_output_candidates)
         .map(|assignment| {
-            assigned_candidate(from_logical, &implemented, &mat_candidates, assignment)
+            assigned_candidate(
+                from_logical,
+                &implemented,
+                &kept_output_candidates,
+                assignment,
+            )
         })
         .collect()
 }
 
-/// Stage 2 for one CandidateLogicalASAPDAG and one materialization
+/// Stage 2 for one CandidateLogicalASAPDAG and one physical properties
 /// assignment: the physical candidate [`optimize_physical_asap`] lists for
-/// it. `choose(readers)` gives the option for each materialization
+/// it. `choose(readers)` gives the option for each kept-output
 /// candidate (each summary build in discovery order, query by query, each
 /// query's builds as a walk from its root meets them, then each highest
 /// shared non-summary node in the same order), `readers` being the queries
@@ -468,19 +473,19 @@ pub fn optimize_physical_asap_assigned(
     )
 }
 
-/// [`optimize_physical_asap_chosen`]'s choice per materialization
+/// [`optimize_physical_asap_chosen`]'s choice per kept-output
 /// candidate: from the logical node it implements, its readers and its
 /// options. `None` rejects the assignment.
-pub(crate) type ChooseMaterialization<'a> = dyn FnMut(
+pub(crate) type ChoosePhysicalProperties<'a> = dyn FnMut(
         *const OperatorNode,
         &[usize],
         &[Option<PhysicalProperties>],
     ) -> Option<Option<PhysicalProperties>>
     + 'a;
 
-/// Stage 2 for one CandidateLogicalASAPDAG and one materialization
+/// Stage 2 for one CandidateLogicalASAPDAG and one physical properties
 /// assignment chosen node by node: `choose(logical, readers, options)`
-/// gives the option for each materialization candidate, `logical` being
+/// gives the option for each kept-output candidate, `logical` being
 /// the address of the logical node of `roots` it implements (null when it
 /// implements none, e.g. a node the implementation adds) and `readers` the
 /// queries that read it. `None` when `choose` rejects, a chosen option is
@@ -493,47 +498,60 @@ pub(crate) fn optimize_physical_asap_chosen(
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     query_time_results_retained: bool,
-    choose: &mut ChooseMaterialization<'_>,
+    choose: &mut ChoosePhysicalProperties<'_>,
 ) -> Result<Option<PhysicalWorkloadPlan>, PhysicalASAPOptimizationError> {
-    let (implemented, cache, mat_candidates) =
+    let (implemented, cache, kept_output_candidates) =
         implement_and_find_candidates(roots, entries, data, query_time_results_retained)?;
     let logical_of: HashMap<*const OperatorNode, *const OperatorNode> = cache
         .iter()
         .map(|(logical, implemented)| (Rc::as_ptr(implemented), *logical))
         .collect();
-    let mut assignment = Vec::with_capacity(mat_candidates.len());
-    for mat_candidate in &mat_candidates {
+    let mut assignment = Vec::with_capacity(kept_output_candidates.len());
+    for kept_output_candidate in &kept_output_candidates {
         let logical = logical_of
-            .get(&Rc::as_ptr(&mat_candidate.node))
+            .get(&Rc::as_ptr(&kept_output_candidate.node))
             .copied()
             .unwrap_or(std::ptr::null());
-        let options = mat_candidate.options();
-        let Some(m) =
-            choose(logical, &mat_candidate.readers, &options).filter(|m| options.contains(m))
+        let options = kept_output_candidate.options();
+        let Some(m) = choose(logical, &kept_output_candidate.readers, &options)
+            .filter(|m| options.contains(m))
         else {
             return Ok(None);
         };
         assignment.push(m);
     }
-    let nodes: Vec<_> = mat_candidates.iter().map(|c| Rc::clone(&c.node)).collect();
-    if !down_closed(&mat_candidates, &candidates_below(&nodes), &assignment) {
+    let nodes: Vec<_> = kept_output_candidates
+        .iter()
+        .map(|c| Rc::clone(&c.node))
+        .collect();
+    if !down_closed(
+        &kept_output_candidates,
+        &candidates_below(&nodes),
+        &assignment,
+    ) {
         return Ok(None);
     }
-    assigned_candidate(from_logical, &implemented, &mat_candidates, assignment).map(Some)
+    assigned_candidate(
+        from_logical,
+        &implemented,
+        &kept_output_candidates,
+        assignment,
+    )
+    .map(Some)
 }
 
 /// The physical candidate of the implemented roots `implemented` with
-/// `assignment[c]` chosen for `mat_candidates[c]`.
+/// `assignment[c]` chosen for `kept_output_candidates[c]`.
 fn assigned_candidate(
     from_logical: &str,
     implemented: &[QueryRoot],
-    mat_candidates: &[MaterializationCandidate],
+    kept_output_candidates: &[KeptOutputCandidate],
     assignment: Vec<Option<PhysicalProperties>>,
 ) -> Result<PhysicalWorkloadPlan, PhysicalASAPOptimizationError> {
-    let mut options = MaterializationAssignment::default();
-    for (mat_candidate, kept) in mat_candidates.iter().zip(&assignment) {
+    let mut options = PhysicalPropertiesAssignment::default();
+    for (kept_output_candidate, kept) in kept_output_candidates.iter().zip(&assignment) {
         if kept.is_some() {
-            options.set(&mat_candidate.node, *kept);
+            options.set(&kept_output_candidate.node, *kept);
         }
     }
     let operators: Vec<Rc<OperatorNode>> = implemented
@@ -551,7 +569,7 @@ fn assigned_candidate(
     })?;
     let mut timing = NodeToTimedNodeCache::new();
     let timed = map_roots(&split_roots, &mut |node| {
-        Ok(apply_materialization_timings(node, &options, &mut timing)?)
+        Ok(apply_physical_properties(node, &options, &mut timing)?)
     })?;
     let dag = compile_physical_asap_workload_with_node_ids(&timed)?.dag;
     let lifetime = dag
@@ -577,7 +595,7 @@ fn assigned_candidate(
 }
 
 /// `roots` implemented, the implementation of each logical node, and the
-/// materialization candidates of the implemented roots.
+/// kept-output candidates of the implemented roots.
 fn implement_and_find_candidates(
     roots: &[QueryRoot],
     entries: &[QueryWorkloadEntry],
@@ -587,16 +605,16 @@ fn implement_and_find_candidates(
     (
         Vec<QueryRoot>,
         NodeToImplementedNodeCache,
-        Vec<MaterializationCandidate>,
+        Vec<KeptOutputCandidate>,
     ),
     PhysicalASAPOptimizationError,
 > {
     let mut cache = HashMap::new();
     let implemented = map_roots(roots, &mut |node| implement(node, &mut cache))?;
-    let mat_candidates =
-        materialization_candidates(&implemented, entries, data, query_time_results_retained);
-    check_tumbling_windows_on_range_steps(&mat_candidates, entries)?;
-    Ok((implemented, cache, mat_candidates))
+    let kept_output_candidates =
+        find_kept_output_candidates(&implemented, entries, data, query_time_results_retained);
+    check_tumbling_windows_on_range_steps(&kept_output_candidates, entries)?;
+    Ok((implemented, cache, kept_output_candidates))
 }
 
 /// `Err` for the first tumbling-window chain whose tumbling-window width does not
@@ -604,10 +622,10 @@ fn implement_and_find_candidates(
 /// ([`PhysicalASAPOptimizationError::TumblingWindowWidthOffRangeStep`]): that step
 /// would end inside a tumbling window.
 fn check_tumbling_windows_on_range_steps(
-    mat_candidates: &[MaterializationCandidate],
+    kept_output_candidates: &[KeptOutputCandidate],
     entries: &[QueryWorkloadEntry],
 ) -> Result<(), PhysicalASAPOptimizationError> {
-    for candidate in mat_candidates {
+    for candidate in kept_output_candidates {
         check_summary_range_steps(&candidate.node, &candidate.readers, entries)?;
     }
     Ok(())
@@ -653,7 +671,7 @@ fn is_summary_build(node: &OperatorNode) -> bool {
     )
 }
 
-/// The materialization candidates of `roots` (implemented), with their
+/// The kept-output candidates of `roots` (implemented), with their
 /// readers, whether each may run at ingestion time and whether it may be
 /// kept from query time across evaluations: every summary build, in
 /// discovery order, then every highest shared non-summary node, in
@@ -661,12 +679,12 @@ fn is_summary_build(node: &OperatorNode) -> bool {
 /// highest are those a root or an unshared node reads (e.g. a `Scan` that
 /// two windows read). Only a highest one is offered `OneEvaluation`, so a
 /// shared sub-DAG adds one candidate, not one per node.
-pub(crate) fn materialization_candidates(
+pub(crate) fn find_kept_output_candidates(
     roots: &[QueryRoot],
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     query_time_results_retained: bool,
-) -> Vec<MaterializationCandidate> {
+) -> Vec<KeptOutputCandidate> {
     let mut reached: Vec<Rc<OperatorNode>> = Vec::new();
     let mut readers: HashMap<*const OperatorNode, Vec<usize>> = HashMap::new();
     let mut consumers: HashMap<*const OperatorNode, Vec<*const OperatorNode>> = HashMap::new();
@@ -709,15 +727,15 @@ pub(crate) fn materialization_candidates(
             summary_reader_eligibility(node, &readers, entries, data, query_time_results_retained);
         let at_ingestion = eligibility.at_ingestion.and_then(|()| {
             // Only this build and the builds below it at ingestion time.
-            let mut trial = MaterializationAssignment::default();
+            let mut trial = PhysicalPropertiesAssignment::default();
             for &v in below[c].iter().chain([&c]) {
                 trial.set(&nodes[v], Some(kept_across_evaluations_at_ingestion()));
             }
-            apply_materialization_timings(node, &trial, &mut NodeToTimedNodeCache::new())
+            apply_physical_properties(node, &trial, &mut NodeToTimedNodeCache::new())
                 .map(|_| ())
                 .map_err(|e| IngestionPruneReason::UpstreamAtQueryTime(e.to_string()))
         });
-        MaterializationCandidate {
+        KeptOutputCandidate {
             node: Rc::clone(node),
             readers,
             at_ingestion,
@@ -728,7 +746,7 @@ pub(crate) fn materialization_candidates(
     let shared_results = shared_results
         .into_iter()
         .filter(|n| highest_shared(n) && n.timing != Some(ExecutionTiming::IngestionTime))
-        .map(|node| MaterializationCandidate {
+        .map(|node| KeptOutputCandidate {
             readers: readers[&Rc::as_ptr(&node)].clone(),
             node,
             at_ingestion: Err(IngestionPruneReason::NotASummaryBuild),
@@ -807,7 +825,7 @@ fn ingestion_eligibility(
             tumbling_window_width_ms,
             ..
         }) => (family, Some(*tumbling_window_width_ms)),
-        _ => unreachable!("a materialization candidate is a summary build"),
+        _ => unreachable!("a kept-output candidate is a summary build"),
     };
     if matches!(
         family,
@@ -944,9 +962,9 @@ fn candidates_below(nodes: &[Rc<OperatorNode>]) -> Vec<Vec<usize>> {
 /// query-time readers read a copy ([`split_shared_by_timing`]).
 /// Simplification: that copy is not offered `OneEvaluation` even when two
 /// query-time readers remain. `below` is [`candidates_below`] of
-/// `mat_candidates`.
+/// `kept_output_candidates`.
 fn down_closed(
-    mat_candidates: &[MaterializationCandidate],
+    kept_output_candidates: &[KeptOutputCandidate],
     below: &[Vec<usize>],
     assignment: &[Option<PhysicalProperties>],
 ) -> bool {
@@ -956,7 +974,7 @@ fn down_closed(
     assignment.iter().enumerate().all(|(c, m)| {
         !at_ingestion(m)
             || below[c].iter().all(|&v| {
-                if is_summary_build(&mat_candidates[v].node) {
+                if is_summary_build(&kept_output_candidates[v].node) {
                     at_ingestion(&assignment[v])
                 } else {
                     assignment[v].is_none()
@@ -965,18 +983,21 @@ fn down_closed(
     })
 }
 
-/// Every assignment of an option to each materialization candidate (mixed
+/// Every assignment of an option to each kept-output candidate (mixed
 /// radix, the last varying fastest, all not kept first) that is
 /// [`down_closed`].
 #[cfg(any(test, feature = "reference-pricer"))]
-fn materialization_assignments(
-    mat_candidates: &[MaterializationCandidate],
+fn physical_properties_assignments(
+    kept_output_candidates: &[KeptOutputCandidate],
 ) -> impl Iterator<Item = Vec<Option<PhysicalProperties>>> + '_ {
     let options: Vec<Vec<Option<PhysicalProperties>>> =
-        mat_candidates.iter().map(|c| c.options()).collect();
-    let nodes: Vec<_> = mat_candidates.iter().map(|c| Rc::clone(&c.node)).collect();
+        kept_output_candidates.iter().map(|c| c.options()).collect();
+    let nodes: Vec<_> = kept_output_candidates
+        .iter()
+        .map(|c| Rc::clone(&c.node))
+        .collect();
     let below = candidates_below(&nodes);
-    let mut digits = Some(vec![0usize; mat_candidates.len()]);
+    let mut digits = Some(vec![0usize; kept_output_candidates.len()]);
     std::iter::from_fn(move || loop {
         let current = digits.as_mut()?;
         let assignment: Vec<Option<PhysicalProperties>> = current
@@ -997,7 +1018,7 @@ fn materialization_assignments(
         if carried {
             digits = None;
         }
-        if down_closed(mat_candidates, &below, &assignment) {
+        if down_closed(kept_output_candidates, &below, &assignment) {
             return Some(assignment);
         }
         digits.as_ref()?;
@@ -1182,7 +1203,7 @@ pub mod test_support {
         entries: &[QueryWorkloadEntry],
         data: &DataWorkload,
         query_time_results_retained: bool,
-        choose: &mut crate::ChooseMaterialization<'_>,
+        choose: &mut crate::ChoosePhysicalProperties<'_>,
     ) -> Result<Option<PhysicalWorkloadPlan>, PhysicalASAPOptimizationError> {
         crate::optimize_physical_asap_chosen(
             from_logical,
@@ -1637,34 +1658,24 @@ mod tests {
         ];
         let data = arriving();
         let query_time_results_retained = false;
-        let selected = summary_materialization_eligibility(
-            &node,
-            &[0, 0],
-            &entries,
-            &data,
-            query_time_results_retained,
-        )
-        .unwrap();
+        let selected =
+            summary_keep_eligibility(&node, &[0, 0], &entries, &data, query_time_results_retained)
+                .unwrap();
         assert_eq!(selected.at_ingestion, Ok(()));
         assert!(matches!(
-            summary_materialization_eligibility(&node, &[0, entries.len()], &entries, &data, query_time_results_retained),
+            summary_keep_eligibility(&node, &[0, entries.len()], &entries, &data, query_time_results_retained),
             Err(SummaryEligibilityError::UnknownReader { query }) if query == entries.len()
         ));
-        let combined = summary_materialization_eligibility(
-            &node,
-            &[0, 1],
-            &entries,
-            &data,
-            query_time_results_retained,
-        )
-        .unwrap();
+        let combined =
+            summary_keep_eligibility(&node, &[0, 1], &entries, &data, query_time_results_retained)
+                .unwrap();
         assert_eq!(
             combined.at_ingestion,
             Err(IngestionPruneReason::NotPredictable)
         );
         // The complete-DAG path uses the same selected-reader workload rules.
         let candidates =
-            materialization_candidates(&[root], &entries, &data, query_time_results_retained);
+            find_kept_output_candidates(&[root], &entries, &data, query_time_results_retained);
         let original = candidates
             .iter()
             .find(|candidate| {
@@ -1712,49 +1723,28 @@ mod tests {
         ];
         let query_time_results_retained = true;
         let data = arriving();
-        let one = summary_materialization_eligibility(
-            &node,
-            &[0],
-            &entries,
-            &data,
-            query_time_results_retained,
-        )
-        .unwrap();
+        let one =
+            summary_keep_eligibility(&node, &[0], &entries, &data, query_time_results_retained)
+                .unwrap();
         assert!(one.may_keep_across_evaluations);
         assert!(one.range_compatibility.is_ok());
-        let different_phase = summary_materialization_eligibility(
-            &node,
-            &[0, 1],
-            &entries,
-            &data,
-            query_time_results_retained,
-        )
-        .unwrap();
+        let different_phase =
+            summary_keep_eligibility(&node, &[0, 1], &entries, &data, query_time_results_retained)
+                .unwrap();
         assert!(!different_phase.may_keep_across_evaluations);
         assert_eq!(
             different_phase.at_ingestion,
             Err(IngestionPruneReason::TumblingWindowsOffPhase)
         );
-        let off_grid = summary_materialization_eligibility(
-            &node,
-            &[0, 2],
-            &entries,
-            &data,
-            query_time_results_retained,
-        )
-        .unwrap();
+        let off_grid =
+            summary_keep_eligibility(&node, &[0, 2], &entries, &data, query_time_results_retained)
+                .unwrap();
         assert!(matches!(
             off_grid.range_compatibility,
             Err(PhysicalASAPOptimizationError::TumblingWindowWidthOffRangeStep { .. })
         ));
         assert!(matches!(
-            summary_materialization_eligibility(
-                &node,
-                &[],
-                &entries,
-                &data,
-                query_time_results_retained
-            ),
+            summary_keep_eligibility(&node, &[], &entries, &data, query_time_results_retained),
             Err(SummaryEligibilityError::NoSelectedReaders)
         ));
     }
@@ -1851,7 +1841,7 @@ mod tests {
                 implement(n, &mut cache)
             })
             .unwrap();
-            materialization_candidates(&implemented, &demands, &arriving(), false)
+            find_kept_output_candidates(&implemented, &demands, &arriving(), false)
                 .into_iter()
                 .find(|c| {
                     matches!(
@@ -1859,7 +1849,7 @@ mod tests {
                         Some(ASAPOp::SummaryTumblingWindowChain { .. })
                     )
                 })
-                .expect("the chain is a materialization candidate")
+                .expect("the chain is a kept-output candidate")
                 .at_ingestion
         };
         assert_eq!(at_ingestion([at(0), at(2 * MINUTE)]), Ok(()));
@@ -1902,7 +1892,7 @@ mod tests {
                 implement(n, &mut cache)
             })
             .unwrap();
-            materialization_candidates(&implemented, &demands, &arriving(), false)
+            find_kept_output_candidates(&implemented, &demands, &arriving(), false)
                 .into_iter()
                 .find(|c| {
                     matches!(
@@ -1910,7 +1900,7 @@ mod tests {
                         Some(ASAPOp::SummaryTumblingWindowChain { .. })
                     )
                 })
-                .expect("the chain is a materialization candidate")
+                .expect("the chain is a kept-output candidate")
                 .at_ingestion
         };
         assert_eq!(at_ingestion([every_minute(), every(2 * MINUTE)]), Ok(()));
@@ -1926,7 +1916,7 @@ mod tests {
 
     /// S4: maintaining state at ingestion time needs arriving data and
     /// queries that repeat and are predictable; otherwise the chain only
-    /// runs at query time, and the materialization candidate says why.
+    /// runs at query time, and the kept-output candidate says why.
     #[test]
     fn ingestion_time_needs_arriving_data_and_repeated_predictable_queries() {
         use IngestionPruneReason as Why;
@@ -1959,9 +1949,10 @@ mod tests {
             assert_eq!(candidates.len(), 1, "{why:?}");
             let mut cache = HashMap::new();
             let implemented = map_roots(&roots, &mut |n| implement(n, &mut cache)).unwrap();
-            let mat_candidates = materialization_candidates(&implemented, &[demand], &data, false);
-            assert_eq!(mat_candidates.len(), 1);
-            assert_eq!(mat_candidates[0].at_ingestion, Err(why));
+            let kept_output_candidates =
+                find_kept_output_candidates(&implemented, &[demand], &data, false);
+            assert_eq!(kept_output_candidates.len(), 1);
+            assert_eq!(kept_output_candidates[0].at_ingestion, Err(why));
         }
     }
 
@@ -1975,9 +1966,9 @@ mod tests {
             let roots = [in_tumbling_windows(summary_root(query))];
             let mut cache = HashMap::new();
             let implemented = map_roots(&roots, &mut |n| implement(n, &mut cache)).unwrap();
-            let mat_candidates =
-                materialization_candidates(&implemented, &[every_minute()], &arriving(), false);
-            assert_eq!(mat_candidates[0].at_ingestion, Ok(()), "{query}");
+            let kept_output_candidates =
+                find_kept_output_candidates(&implemented, &[every_minute()], &arriving(), false);
+            assert_eq!(kept_output_candidates[0].at_ingestion, Ok(()), "{query}");
             let candidates =
                 optimize_physical_asap("L1", &roots, &[every_minute()], &arriving(), false)
                     .unwrap();
@@ -2006,10 +1997,10 @@ mod tests {
             let roots = [root];
             let mut cache = HashMap::new();
             let implemented = map_roots(&roots, &mut |n| implement(n, &mut cache)).unwrap();
-            let mat_candidates =
-                materialization_candidates(&implemented, &[every_minute()], &data, false);
+            let kept_output_candidates =
+                find_kept_output_candidates(&implemented, &[every_minute()], &data, false);
             assert_eq!(
-                mat_candidates[0].at_ingestion,
+                kept_output_candidates[0].at_ingestion,
                 Err(Why::CounterNeedsTimeOrder)
             );
         }
@@ -2050,60 +2041,60 @@ mod tests {
             ..every_minute()
         };
         let at = |interval_ms: u32| at_phase(interval_ms, 0);
-        let mat_candidates = |root: &QueryRoot, demand: QueryWorkloadEntry| {
+        let kept_output_candidates = |root: &QueryRoot, demand: QueryWorkloadEntry| {
             let mut cache = HashMap::new();
             let implemented = map_roots(std::slice::from_ref(root), &mut |n| {
                 implement(n, &mut cache)
             })
             .unwrap();
-            materialization_candidates(&implemented, &[demand], &arriving(), false)
+            find_kept_output_candidates(&implemented, &[demand], &arriving(), false)
                 .remove(0)
                 .at_ingestion
         };
-        assert_eq!(mat_candidates(&root, at(MINUTE as u32)), Ok(()));
-        assert_eq!(mat_candidates(&root, every_minute()), Ok(()));
-        assert_eq!(mat_candidates(&root, at(2 * MINUTE as u32)), Ok(()));
+        assert_eq!(kept_output_candidates(&root, at(MINUTE as u32)), Ok(()));
+        assert_eq!(kept_output_candidates(&root, every_minute()), Ok(()));
+        assert_eq!(kept_output_candidates(&root, at(2 * MINUTE as u32)), Ok(()));
         assert_eq!(
-            mat_candidates(&root, at_phase(MINUTE as u32, 3 * MINUTE)),
+            kept_output_candidates(&root, at_phase(MINUTE as u32, 3 * MINUTE)),
             Ok(())
         );
         assert_eq!(
-            mat_candidates(&root, at_phase(MINUTE as u32, 30_000)),
+            kept_output_candidates(&root, at_phase(MINUTE as u32, 30_000)),
             Err(Why::WindowOffEpochGrid)
         );
         assert_eq!(
-            mat_candidates(&root, at(30_000)),
+            kept_output_candidates(&root, at(30_000)),
             Err(Why::WindowOffEpochGrid)
         );
         assert_eq!(
-            mat_candidates(&root, at(90_000)),
+            kept_output_candidates(&root, at(90_000)),
             Err(Why::WindowOffEpochGrid)
         );
         // Several readers of one build: a declared phase on the grid and an
         // undeclared one agree; two declared phases, or two intervals, do not.
-        let mat_candidates_of = |demands: &[QueryWorkloadEntry]| {
+        let kept_output_candidates_of = |demands: &[QueryWorkloadEntry]| {
             let roots = vec![root.clone(); demands.len()];
             let mut cache = HashMap::new();
             let implemented = map_roots(&roots, &mut |n| implement(n, &mut cache)).unwrap();
-            materialization_candidates(&implemented, demands, &arriving(), false)
+            find_kept_output_candidates(&implemented, demands, &arriving(), false)
                 .into_iter()
                 .find(|c| matches!(c.node.asap(), Some(ASAPOp::SummaryAgg { .. })))
-                .expect("the whole-window build is a materialization candidate")
+                .expect("the whole-window build is a kept-output candidate")
                 .at_ingestion
         };
         assert_eq!(
-            mat_candidates_of(&[at_phase(MINUTE as u32, MINUTE), every_minute()]),
+            kept_output_candidates_of(&[at_phase(MINUTE as u32, MINUTE), every_minute()]),
             Ok(())
         );
         assert_eq!(
-            mat_candidates_of(&[
+            kept_output_candidates_of(&[
                 at(MINUTE as u32),
                 at_phase(MINUTE as u32, 2 * MINUTE + MINUTE / 2)
             ]),
             Err(Why::WindowNotFixed)
         );
         assert_eq!(
-            mat_candidates_of(&[at(MINUTE as u32), at(2 * MINUTE as u32)]),
+            kept_output_candidates_of(&[at(MINUTE as u32), at(2 * MINUTE as u32)]),
             Err(Why::WindowNotFixed)
         );
         let candidates = optimize_physical_asap(
@@ -2152,7 +2143,7 @@ mod tests {
             .with_guarantee(build.guarantee.clone()),
         );
         assert_eq!(
-            mat_candidates(&QueryRoot::Operator(filtered), at(MINUTE as u32)),
+            kept_output_candidates(&QueryRoot::Operator(filtered), at(MINUTE as u32)),
             Err(Why::Filtered)
         );
     }
@@ -2182,7 +2173,7 @@ mod tests {
                 implement(n, &mut cache)
             })
             .unwrap();
-            materialization_candidates(&implemented, &[entry], &arriving(), false)
+            find_kept_output_candidates(&implemented, &[entry], &arriving(), false)
                 .remove(0)
                 .at_ingestion
         };
@@ -2331,10 +2322,10 @@ mod tests {
             scans.sort_by_key(|(t, _)| *t == ExecutionTiming::QueryTime);
             scans
         };
-        let not_materialized = Lifetime::None;
+        let not_kept = Lifetime::None;
         assert_eq!(
             scans(&candidates[0]),
-            [(ExecutionTiming::QueryTime, not_materialized)]
+            [(ExecutionTiming::QueryTime, not_kept)]
         );
         assert_eq!(
             scans(&candidates[1]),
@@ -2346,13 +2337,13 @@ mod tests {
         assert_eq!(
             scans(&candidates[2]),
             [
-                (ExecutionTiming::IngestionTime, not_materialized),
-                (ExecutionTiming::QueryTime, not_materialized)
+                (ExecutionTiming::IngestionTime, not_kept),
+                (ExecutionTiming::QueryTime, not_kept)
             ]
         );
     }
 
-    /// Only the highest shared non-summary nodes are materialization
+    /// Only the highest shared non-summary nodes are kept-output
     /// candidates, each with not kept and `OneEvaluation` only: a
     /// 5 m range two queries read (not the scan below it, which only that
     /// shared range reads for them), and the scan, which a third query
@@ -2389,9 +2380,9 @@ mod tests {
             aggregate(AggIntent::Min { col: None }, five_minutes),
             aggregate(AggIntent::Max { col: None }, ranged(MINUTE)),
         ];
-        let mat_candidates =
-            materialization_candidates(&roots, &[], &DataWorkload::default(), false);
-        let found: Vec<_> = mat_candidates
+        let kept_output_candidates =
+            find_kept_output_candidates(&roots, &[], &DataWorkload::default(), false);
+        let found: Vec<_> = kept_output_candidates
             .iter()
             .map(|c| (c.node.operator.kind_name(), c.readers.clone(), c.options()))
             .collect();

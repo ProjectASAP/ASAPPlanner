@@ -1,4 +1,4 @@
-//! Apply an explicit selected materialization assignment through real Stage 2.
+//! Apply an explicit selected physical properties assignment through real Stage 2.
 //!
 //! No fallback modes are chosen. Physical rewrites or timing splits that change
 //! candidate identity are rejected until represented by physical enumeration.
@@ -21,12 +21,12 @@ use super::reconstruction::{
 };
 
 /// Realize `selected` with each selected node at its candidate's
-/// materialization. Output
+/// physical properties. Output
 /// references must follow `map_operator_refs` traversal of the original
 /// roots in workload order (one reference for an operator root). Repeated
 /// scalar references remain separate positions; literal-only scalar roots
 /// use none.
-pub fn materialize_selected_candidates(
+pub fn realize_selected_candidates(
     physical_candidates: &PhysicalASAPMemoCandidates,
     selected: &DagOfSelectedCandidates,
     original_roots: &[QueryRoot],
@@ -90,7 +90,7 @@ pub fn materialize_selected_candidates(
     }
     let physical = physical.ok_or_else(|| {
         PhysicalCandidateError::RejectedAssignment(
-            "selected materialization assignment violates Stage 2 timing or dependency rules"
+            "selected physical properties assignment violates Stage 2 timing or dependency rules"
                 .into(),
         )
     })?;
@@ -103,7 +103,7 @@ pub fn materialize_selected_candidates(
             // not offer this selected node (e.g. a lower shared non-summary),
             // so the assignment is infeasible rather than an adapter failure.
             return Err(PhysicalCandidateError::RejectedAssignment(format!(
-                "selected node {node} is not an eligible materialization node in the selected graph"
+                "selected node {node} is not an eligible kept-output node in the selected graph"
             )));
         }
     }
@@ -149,14 +149,14 @@ pub struct Stage2AssignmentRealizer<'a> {
 }
 
 impl AssignmentRealizer for Stage2AssignmentRealizer<'_> {
-    /// `materialize_selected_candidates`; each node also keeps its
+    /// `realize_selected_candidates`; each node also keeps its
     /// candidate's timing.
     fn realize(
         &self,
         physical: &PhysicalASAPMemoCandidates,
         selected: &DagOfSelectedCandidates,
     ) -> Result<RealizedPlan, PhysicalCandidateError> {
-        let realized = materialize_selected_candidates(
+        let realized = realize_selected_candidates(
             physical,
             selected,
             self.original_roots,
@@ -232,7 +232,7 @@ mod tests {
     use asap_types::workload::QueryRecurrence;
 
     /// Add a node running `candidate` and, for each input, a node of its
-    /// first unmaterialized producer (else its first producer),
+    /// first not_kept producer (else its first producer),
     /// recursively; returns the new node.
     fn select_from(
         physical: &PhysicalASAPMemoCandidates,
@@ -262,7 +262,7 @@ mod tests {
     }
 
     // The trait object returns what the catalog function returns with each
-    // candidate's own materialization.
+    // candidate's own physical properties.
     #[test]
     fn stage2_realizer_matches_direct_catalog_calls() {
         let root = QueryRoot::Operator(lower_promql(
@@ -310,7 +310,7 @@ mod tests {
         let realizer: &dyn AssignmentRealizer = &realizer;
 
         let direct =
-            materialize_selected_candidates(&physical, &selected, &roots, &entries, &data, false)
+            realize_selected_candidates(&physical, &selected, &roots, &entries, &data, false)
                 .unwrap();
         let through_trait = realizer.realize(&physical, &selected).unwrap();
         assert_eq!(

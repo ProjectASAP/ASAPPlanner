@@ -685,7 +685,7 @@ fn physical_node_owns_phase_independently_of_binary_payload() {
     use asap_types::ir::properties::ExecutionTiming;
     // The one-selector case (both operands over the same series, so the
     // BinaryOp may run at ingestion) is `arithmetic_over_one_selector_executes`
-    // in materialization_e2e.rs, ignored until #580.
+    // in physical_properties_e2e.rs, ignored until #580.
     let query = "sum_over_time(m[1m]) + sum_over_time(n[1m])";
     let expected = ExecutionTiming::QueryTime;
     let input = lower_promql(query, AccuracyTarget::max_error(0.05)).unwrap();

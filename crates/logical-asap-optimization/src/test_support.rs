@@ -109,7 +109,7 @@ use std::time::Duration;
 use asap_types::ir::operator::agg_intent::AggIntent;
 use asap_types::ir::operator::operator_properties::{GroupKeys, Reduction, Source};
 use asap_types::ir::properties::timing::{
-    apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
+    apply_physical_properties, NodeToTimedNodeCache, PhysicalPropertiesAssignment,
 };
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::{ColumnId, DataType, Field, Schema};
@@ -224,19 +224,19 @@ pub fn time_range(range: Duration, child: Rc<OperatorNode>) -> Rc<OperatorNode> 
 /// `root` timed under the default (every sub-DAG not kept)
 /// assignment — the shape export and the post-ASAP validators consume.
 pub fn timed(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
-    apply_materialization_timings(
+    apply_physical_properties(
         root,
-        &MaterializationAssignment::default(),
+        &PhysicalPropertiesAssignment::default(),
         &mut NodeToTimedNodeCache::new(),
     )
-    .expect("default materialization timings apply")
+    .expect("default physical properties apply")
 }
 
 /// `root` timed with every sub-DAG kept at ingestion time where the DAG allows it.
 pub fn at_ingestion(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
-    apply_materialization_timings(
+    apply_physical_properties(
         root,
-        &MaterializationAssignment::with_default(
+        &PhysicalPropertiesAssignment::with_default(
             PhysicalProperties::new(
                 ExecutionTiming::IngestionTime,
                 Lifetime::AcrossEvaluations(Medium::Memory),
@@ -245,7 +245,7 @@ pub fn at_ingestion(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
         ),
         &mut NodeToTimedNodeCache::new(),
     )
-    .expect("at-ingestion materialization timings apply")
+    .expect("at-ingestion physical properties apply")
 }
 
 /// The Count-Min summary of a Stage 1 candidate of `query`.

@@ -211,7 +211,7 @@ fn production_promql_compares_rollup_with_exact() {
     );
 }
 
-// Price the same workload with independently built, unmaterialized KLL states.
+// Price the same workload with independently built, not_kept KLL states.
 fn independent_kll_cost(
     roots: Vec<QueryRoot>,
     entries: &[QueryWorkloadEntry],

@@ -16,7 +16,7 @@
 //! `S` is usable for `q` only when every output passes: a candidate that
 //! fails through one reader is unusable through every reader (the largest
 //! weight counts, as before). The candidates of one operator node (other
-//! timings or materializations) build the same node, so they are checked
+//! timings or lifetimes) build the same node, so they are checked
 //! once, together. What a check builds is kept for the later checks
 //! ([`BuiltBefore`]).
 use std::cell::OnceCell;

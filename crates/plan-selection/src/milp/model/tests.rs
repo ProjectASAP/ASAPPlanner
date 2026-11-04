@@ -498,7 +498,7 @@ fn a_kept_pane_chain_keeps_the_longest_readers_span() {
 // (`rate(m[5m])` under `sum` and `max`, one schedule group) runs once, in
 // the candidate's context, and is costed as `plan_cost` costs it.
 #[test]
-fn a_shared_results_not_materialized_input_runs_once() {
+fn a_shared_results_not_kept_input_runs_once() {
     let fixture = through_stages(
         &[
             query("sum(rate(m[5m]))", 60_000),

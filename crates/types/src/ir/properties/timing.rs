@@ -5,10 +5,10 @@
 //! The logical DAG carries no timing. Materialization (#509
 //! §Materialization) decides, for each sub-DAG, whether its output is kept,
 //! and if so with which [`PhysicalProperties`]: its timing and its
-//! [`Lifetime`] (#1200). [`MaterializationAssignment`] records that per
+//! [`Lifetime`] (#1200). [`PhysicalPropertiesAssignment`] records that per
 //! sub-DAG, named by the node whose output would be kept (any node: a
 //! summary state, a population, or e.g. the tumbling windows of #509
-//! Example 4), and [`apply_materialization_timings`] expands it into a
+//! Example 4), and [`apply_physical_properties`] expands it into a
 //! timing and a lifetime on every node:
 //!
 //! - `SummaryEstimate` and `EvaluatePopulation` run at query time;
@@ -29,7 +29,7 @@
 //! `FinalizeExactAccumulator` of `finalize_query_candidate`) keeps that
 //! timing. An explicit assignment on it that agrees is kept; one that needs
 //! the other timing is an error
-//! ([`ExecutionDataStateError::MaterializationConflictsWithFixedTiming`]).
+//! ([`ExecutionDataStateError::PhysicalPropertiesConflictWithFixedTiming`]).
 //! A root may be kept at ingestion time across evaluations: the query reads
 //! its stored output. A root of rows that runs at ingestion time without
 //! being kept there is an error
@@ -80,14 +80,14 @@ use crate::physical::{Lifetime, PhysicalProperties};
 /// The assignment keeps every assigned node alive, so a later allocation
 /// cannot reuse its address and match a stale entry.
 #[derive(Clone, Default)]
-pub struct MaterializationAssignment {
+pub struct PhysicalPropertiesAssignment {
     assigned: HashMap<*const OperatorNode, (Rc<OperatorNode>, Option<PhysicalProperties>)>,
     unassigned: Option<PhysicalProperties>,
 }
 
 /// Each assigned node as its operator kind and address, not its whole
 /// sub-DAG.
-impl std::fmt::Debug for MaterializationAssignment {
+impl std::fmt::Debug for PhysicalPropertiesAssignment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let assigned: Vec<_> = self
             .assigned
@@ -96,14 +96,14 @@ impl std::fmt::Debug for MaterializationAssignment {
                 (format!("{}@{ptr:p}", node.operator.kind_name()), properties)
             })
             .collect();
-        f.debug_struct("MaterializationAssignment")
+        f.debug_struct("PhysicalPropertiesAssignment")
             .field("assigned", &assigned)
             .field("unassigned", &self.unassigned)
             .finish()
     }
 }
 
-impl MaterializationAssignment {
+impl PhysicalPropertiesAssignment {
     /// Every `SummaryAgg` or `MaintainPopulation` not [`set`](Self::set)
     /// explicitly takes `kept` where the DAG allows it: an ingestion-time
     /// default over a sub-DAG that can only run at query time leaves that
@@ -167,7 +167,7 @@ impl MaterializationAssignment {
 
 /// Whether `operator`'s output is a sub-DAG output that materialization may
 /// store: a `SummaryAgg`, a `SummaryTumblingWindowChain` or a `MaintainPopulation`.
-pub(crate) fn is_materialization_point<C>(operator: &Operator<C>) -> bool {
+pub(crate) fn is_keepable_state_output<C>(operator: &Operator<C>) -> bool {
     matches!(
         operator,
         Operator::ASAP(
@@ -196,7 +196,7 @@ pub fn is_filtered_build(node: &OperatorNode) -> bool {
     )
 }
 
-/// Cache of one [`apply_materialization_timings`] pass: `input node → timed node`,
+/// Cache of one [`apply_physical_properties`] pass: `input node → timed node`,
 /// shared by every root of a workload so a node shared by two roots stays
 /// one `Rc`. Re-reaching a node with a different timing is a conflict.
 #[derive(Default)]
@@ -244,7 +244,7 @@ pub fn data_state(node: &OperatorNode) -> Option<ExecutionDataState> {
 /// at query time.
 fn forces_query_time(
     node: &OperatorNode,
-    assignment: &MaterializationAssignment,
+    assignment: &PhysicalPropertiesAssignment,
     seen: &mut HashMap<*const OperatorNode, bool>,
 ) -> bool {
     let key = node as *const OperatorNode;
@@ -261,11 +261,11 @@ fn forces_query_time(
         Operator::ASAP(ASAPOp::SummaryEstimate { .. })
         | Operator::ASAP(ASAPOp::EvaluatePopulation { .. }) => true,
         _ if node.timing.is_none()
-            && (is_materialization_point(&node.operator) || assignment.get(node).is_some()) =>
+            && (is_keepable_state_output(&node.operator) || assignment.get(node).is_some()) =>
         {
             let upstream = upstream(seen);
             match assignment.resolve(node, upstream) {
-                Ok(None) if !is_materialization_point(&node.operator) => upstream,
+                Ok(None) if !is_keepable_state_output(&node.operator) => upstream,
                 Ok(None) => true,
                 Ok(Some(kept)) => kept.timing() == ExecutionTiming::QueryTime,
                 Err(_) => true,
@@ -290,9 +290,9 @@ fn forces_query_time(
 /// Write the timings of `assignment` into every node reachable from `root`,
 /// top-down, then validate every edge. Returns the timed copy of `root`;
 /// `cache` carries the sharing across the roots of one workload.
-pub fn apply_materialization_timings(
+pub fn apply_physical_properties(
     root: &Rc<OperatorNode>,
-    assignment: &MaterializationAssignment,
+    assignment: &PhysicalPropertiesAssignment,
     cache: &mut NodeToTimedNodeCache,
 ) -> Result<Rc<OperatorNode>, ExecutionDataStateError> {
     let mut forced = HashMap::new();
@@ -317,25 +317,25 @@ pub fn apply_materialization_timings(
     Ok(timed)
 }
 
-/// [`apply_materialization_timings`] over every root of one workload with
+/// [`apply_physical_properties`] over every root of one workload with
 /// one cache, so a node several roots share is timed once and stays one
 /// node. A standalone scalar root has each operator it reads timed, and is
 /// rebuilt over the timed nodes.
-pub fn apply_materialization_timings_to_roots(
+pub fn apply_physical_properties_to_roots(
     roots: &[QueryRoot],
-    assignment: &MaterializationAssignment,
+    assignment: &PhysicalPropertiesAssignment,
 ) -> Result<Vec<QueryRoot>, ExecutionDataStateError> {
     let mut cache = NodeToTimedNodeCache::new();
     roots
         .iter()
         .map(|root| {
             Ok(match root {
-                QueryRoot::Operator(node) => QueryRoot::Operator(apply_materialization_timings(
-                    node, assignment, &mut cache,
-                )?),
+                QueryRoot::Operator(node) => {
+                    QueryRoot::Operator(apply_physical_properties(node, assignment, &mut cache)?)
+                }
                 QueryRoot::Scalar(expr) => {
                     for node in expr.operator_refs() {
-                        apply_materialization_timings(node, assignment, &mut cache)?;
+                        apply_physical_properties(node, assignment, &mut cache)?;
                     }
                     QueryRoot::Scalar(expr.map_operator_refs(&mut |node| {
                         Rc::clone(cache.timed(node).expect("scalar reference was timed"))
@@ -347,7 +347,7 @@ pub fn apply_materialization_timings_to_roots(
 }
 
 /// Validate the sub-DAG below `root` with every sub-DAG kept at ingestion time
-/// where the DAG allows it ([`MaterializationAssignment::with_default`]) and
+/// where the DAG allows it ([`PhysicalPropertiesAssignment::with_default`]) and
 /// `root` consumed at `root_timing`. For planning-time legality checks of a
 /// candidate before it is assembled into a workload DAG: a candidate must stay
 /// executable if materialization later puts its states at ingestion time.
@@ -384,8 +384,8 @@ pub fn planned_data_state(
 
 /// The assignment of [`validate_at_ingestion`] and [`planned_data_state`].
 #[cfg(any(test, feature = "test-support"))]
-fn all_at_ingestion() -> MaterializationAssignment {
-    MaterializationAssignment::with_default(Some(
+fn all_at_ingestion() -> PhysicalPropertiesAssignment {
+    PhysicalPropertiesAssignment::with_default(Some(
         PhysicalProperties::new(
             ExecutionTiming::IngestionTime,
             Lifetime::AcrossEvaluations(Medium::Memory),
@@ -406,7 +406,7 @@ fn kept_at_ingestion(node: &OperatorNode) -> bool {
 fn placement(
     node: &Rc<OperatorNode>,
     consumer: ExecutionTiming,
-    assignment: &MaterializationAssignment,
+    assignment: &PhysicalPropertiesAssignment,
     forced: &mut HashMap<*const OperatorNode, bool>,
 ) -> Result<(ExecutionTiming, Lifetime), ExecutionDataStateError> {
     // A placement fixed when the candidate was built (an exact-state read
@@ -433,7 +433,7 @@ fn placement(
         // an error.
         return match assignment.get(node) {
             Some(Some(kept)) if kept.timing() != placed => Err(
-                ExecutionDataStateError::MaterializationConflictsWithFixedTiming {
+                ExecutionDataStateError::PhysicalPropertiesConflictWithFixedTiming {
                     operator: node.operator.kind_name(),
                     fixed: placed,
                     assigned: kept,
@@ -455,10 +455,10 @@ fn placement(
             Some(Some(kept)) => (ExecutionTiming::QueryTime, kept.lifetime()),
             Some(None) | None => (ExecutionTiming::QueryTime, Lifetime::None),
         },
-        _ if is_materialization_point(&node.operator) || assignment.get(node).is_some() => {
+        _ if is_keepable_state_output(&node.operator) || assignment.get(node).is_some() => {
             let upstream = upstream_at_query_time(forced);
             match assignment.resolve(node, upstream)? {
-                None if !is_materialization_point(&node.operator) => (consumer, Lifetime::None),
+                None if !is_keepable_state_output(&node.operator) => (consumer, Lifetime::None),
                 // A summary build that is not kept runs at query time.
                 None => (ExecutionTiming::QueryTime, Lifetime::None),
                 Some(kept) => (kept.timing(), kept.lifetime()),
@@ -469,16 +469,16 @@ fn placement(
 }
 
 /// The timing `node` takes when its consumer runs at `consumer`, by the
-/// placement rules [`apply_materialization_timings`] applies, for Stage 2's
+/// placement rules [`apply_physical_properties`] applies, for Stage 2's
 /// `split_shared_by_timing`: an assignment that cannot be honored is
-/// reported later by [`apply_materialization_timings`].
+/// reported later by [`apply_physical_properties`].
 /// `query_time_forced` caches, per node, whether something at or below it
 /// can only run at query time: pass an empty map and reuse it across the
 /// calls of one assignment.
 pub fn timing_under_consumer(
     node: &Rc<OperatorNode>,
     consumer: ExecutionTiming,
-    assignment: &MaterializationAssignment,
+    assignment: &PhysicalPropertiesAssignment,
     query_time_forced: &mut HashMap<*const OperatorNode, bool>,
 ) -> ExecutionTiming {
     placement(node, consumer, assignment, query_time_forced)
@@ -488,7 +488,7 @@ pub fn timing_under_consumer(
 fn write(
     node: &Rc<OperatorNode>,
     consumer: ExecutionTiming,
-    assignment: &MaterializationAssignment,
+    assignment: &PhysicalPropertiesAssignment,
     cache: &mut NodeToTimedNodeCache,
     forced: &mut HashMap<*const OperatorNode, bool>,
 ) -> Result<Rc<OperatorNode>, ExecutionDataStateError> {
@@ -994,7 +994,7 @@ mod tests {
     /// Apply with every sub-DAG kept at ingestion time where the DAG allows it, the
     /// placement whose edge rules these tests exercise.
     fn apply(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, ExecutionDataStateError> {
-        apply_materialization_timings(root, &all_at_ingestion(), &mut NodeToTimedNodeCache::new())
+        apply_physical_properties(root, &all_at_ingestion(), &mut NodeToTimedNodeCache::new())
     }
 
     const KEPT_ACROSS: Lifetime = Lifetime::AcrossEvaluations(Medium::Memory);
@@ -1018,9 +1018,9 @@ mod tests {
     #[test]
     fn default_assignment_materializes_nothing() {
         let summary = agg(scan(), kll());
-        let root = apply_materialization_timings(
+        let root = apply_physical_properties(
             &summary,
-            &MaterializationAssignment::default(),
+            &PhysicalPropertiesAssignment::default(),
             &mut NodeToTimedNodeCache::new(),
         )
         .unwrap();
@@ -1043,14 +1043,11 @@ mod tests {
                 ExecutionTiming::QueryTime,
             ),
         ] {
-            let mut assignment = MaterializationAssignment::default();
+            let mut assignment = PhysicalPropertiesAssignment::default();
             assignment.set(&summary, kept(timing, lifetime));
-            let root = apply_materialization_timings(
-                &summary,
-                &assignment,
-                &mut NodeToTimedNodeCache::new(),
-            )
-            .unwrap();
+            let root =
+                apply_physical_properties(&summary, &assignment, &mut NodeToTimedNodeCache::new())
+                    .unwrap();
             assert_eq!(root.timing, Some(timing));
             assert_eq!(root.lifetime, lifetime);
             assert_eq!(child(&root).timing, Some(timing));
@@ -1065,10 +1062,10 @@ mod tests {
     fn ingestion_time_node_over_query_time_upstream_is_rejected() {
         let inner = agg(scan(), exact_sum());
         let outer = agg(Rc::clone(&inner), kll());
-        let mut assignment = MaterializationAssignment::default();
+        let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(&outer, at_ingestion());
         assert_eq!(
-            apply_materialization_timings(
+            apply_physical_properties(
                 &estimate(outer),
                 &assignment,
                 &mut NodeToTimedNodeCache::new()
@@ -1081,7 +1078,7 @@ mod tests {
         assignment.set(&inner, at_ingestion());
         let outer = agg(Rc::clone(&inner), kll());
         assignment.set(&outer, at_ingestion());
-        let root = apply_materialization_timings(
+        let root = apply_physical_properties(
             &estimate(outer),
             &assignment,
             &mut NodeToTimedNodeCache::new(),
@@ -1119,7 +1116,7 @@ mod tests {
         let outer = agg(Rc::clone(&inner), kll());
         let mut assignment = all_at_ingestion();
         assignment.set(&inner, None);
-        let root = apply_materialization_timings(
+        let root = apply_physical_properties(
             &estimate(outer),
             &assignment,
             &mut NodeToTimedNodeCache::new(),
@@ -1225,9 +1222,9 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(
-            apply_materialization_timings(
+            apply_physical_properties(
                 &estimate(agg(finalize, kll())),
-                &MaterializationAssignment::default(),
+                &PhysicalPropertiesAssignment::default(),
                 &mut NodeToTimedNodeCache::new()
             )
             .err(),
@@ -1244,11 +1241,10 @@ mod tests {
     fn any_node_may_be_materialized() {
         let tumbling_windows = max(scan());
         let root = max(Rc::clone(&tumbling_windows));
-        let mut assignment = MaterializationAssignment::default();
+        let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(&tumbling_windows, at_ingestion());
-        let timed =
-            apply_materialization_timings(&root, &assignment, &mut NodeToTimedNodeCache::new())
-                .unwrap();
+        let timed = apply_physical_properties(&root, &assignment, &mut NodeToTimedNodeCache::new())
+            .unwrap();
         assert_eq!(timed.timing, Some(ExecutionTiming::QueryTime));
         assert_eq!(child(&timed).lifetime, KEPT_ACROSS);
         assert_eq!(child(&timed).timing, Some(ExecutionTiming::IngestionTime));
@@ -1258,10 +1254,10 @@ mod tests {
         );
 
         let over_evaluation = max(estimate(agg(scan(), kll())));
-        let mut assignment = MaterializationAssignment::default();
+        let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(&over_evaluation, at_ingestion());
         assert_eq!(
-            apply_materialization_timings(
+            apply_physical_properties(
                 &over_evaluation,
                 &assignment,
                 &mut NodeToTimedNodeCache::new()
@@ -1307,10 +1303,10 @@ mod tests {
             )
             .with_guarantee(None),
         );
-        let mut assignment = MaterializationAssignment::default();
+        let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(&filtered, at_ingestion());
         assert_eq!(
-            apply_materialization_timings(
+            apply_physical_properties(
                 &estimate(Rc::clone(&filtered)),
                 &assignment,
                 &mut NodeToTimedNodeCache::new()
@@ -1356,23 +1352,21 @@ mod tests {
                 .with_timing(Some(ExecutionTiming::QueryTime)),
         );
         let stored = Lifetime::OneEvaluation(Medium::Disk);
-        let mut assignment = MaterializationAssignment::default();
+        let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(&read, kept(ExecutionTiming::QueryTime, stored));
-        let timed =
-            apply_materialization_timings(&read, &assignment, &mut NodeToTimedNodeCache::new())
-                .unwrap();
+        let timed = apply_physical_properties(&read, &assignment, &mut NodeToTimedNodeCache::new())
+            .unwrap();
         assert_eq!(timed.timing, Some(ExecutionTiming::QueryTime));
         assert_eq!(timed.lifetime, stored);
         assert_eq!(exported(&timed, "FinalizeExactAccumulator"), stored);
 
-        let mut assignment = MaterializationAssignment::default();
+        let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(&state, at_ingestion());
         assignment.set(&read, at_ingestion());
         assert_eq!(
-            apply_materialization_timings(&read, &assignment, &mut NodeToTimedNodeCache::new())
-                .err(),
+            apply_physical_properties(&read, &assignment, &mut NodeToTimedNodeCache::new()).err(),
             Some(
-                ExecutionDataStateError::MaterializationConflictsWithFixedTiming {
+                ExecutionDataStateError::PhysicalPropertiesConflictWithFixedTiming {
                     operator: "FinalizeExactAccumulator",
                     fixed: ExecutionTiming::QueryTime,
                     assigned: at_ingestion().unwrap(),
@@ -1385,7 +1379,7 @@ mod tests {
     /// its whole sub-DAG.
     #[test]
     fn debug_names_each_assigned_node_by_its_kind() {
-        let mut assignment = MaterializationAssignment::default();
+        let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(&agg(scan(), kll()), at_ingestion());
         let text = format!("{assignment:?}");
         assert!(text.contains("SummaryAgg@"), "{text}");
@@ -1402,13 +1396,12 @@ mod tests {
             ExecutionTiming::QueryTime,
             Lifetime::OneEvaluation(Medium::Memory),
         );
-        let mut assignment = MaterializationAssignment::default();
+        let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(&fixed, at_query);
         assert_eq!(
-            apply_materialization_timings(&root, &assignment, &mut NodeToTimedNodeCache::new())
-                .err(),
+            apply_physical_properties(&root, &assignment, &mut NodeToTimedNodeCache::new()).err(),
             Some(
-                ExecutionDataStateError::MaterializationConflictsWithFixedTiming {
+                ExecutionDataStateError::PhysicalPropertiesConflictWithFixedTiming {
                     operator: "Aggregate",
                     fixed: ExecutionTiming::IngestionTime,
                     assigned: at_query.unwrap(),
@@ -1421,18 +1414,17 @@ mod tests {
     /// fixed agrees with either timing: the node keeps its fixed timing and
     /// records not kept.
     #[test]
-    fn explicit_not_materialized_keeps_a_fixed_timing() {
+    fn explicit_not_kept_keeps_a_fixed_timing() {
         let read = Rc::new(
             (*finalize(agg(scan(), exact_sum())))
                 .clone()
                 .with_timing(Some(ExecutionTiming::QueryTime)),
         );
         let root = max(Rc::clone(&read));
-        let mut assignment = MaterializationAssignment::default();
+        let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(&read, None);
-        let timed =
-            apply_materialization_timings(&root, &assignment, &mut NodeToTimedNodeCache::new())
-                .unwrap();
+        let timed = apply_physical_properties(&root, &assignment, &mut NodeToTimedNodeCache::new())
+            .unwrap();
         let read = child(&timed);
         assert_eq!(read.timing, Some(ExecutionTiming::QueryTime));
         assert_eq!(read.lifetime, Lifetime::None);
@@ -1446,9 +1438,9 @@ mod tests {
         let rows = placed_at_ingestion(max(scan()));
         let summary = agg(Rc::clone(&rows), kll());
         assert_eq!(
-            apply_materialization_timings(
+            apply_physical_properties(
                 &summary,
-                &MaterializationAssignment::default(),
+                &PhysicalPropertiesAssignment::default(),
                 &mut NodeToTimedNodeCache::new()
             )
             .err(),
@@ -1460,10 +1452,10 @@ mod tests {
             )
         );
 
-        let mut assignment = MaterializationAssignment::default();
+        let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(&rows, at_ingestion());
         let timed =
-            apply_materialization_timings(&summary, &assignment, &mut NodeToTimedNodeCache::new())
+            apply_physical_properties(&summary, &assignment, &mut NodeToTimedNodeCache::new())
                 .unwrap();
         assert_eq!(timed.timing, Some(ExecutionTiming::QueryTime));
         assert_eq!(child(&timed).lifetime, KEPT_ACROSS);
@@ -1476,9 +1468,9 @@ mod tests {
         let state = placed_at_ingestion(agg(scan(), exact_sum()));
         let summary = agg(Rc::clone(&state), kll());
         assert_eq!(
-            apply_materialization_timings(
+            apply_physical_properties(
                 &summary,
-                &MaterializationAssignment::default(),
+                &PhysicalPropertiesAssignment::default(),
                 &mut NodeToTimedNodeCache::new()
             )
             .err(),
@@ -1490,10 +1482,10 @@ mod tests {
             )
         );
 
-        let mut assignment = MaterializationAssignment::default();
+        let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(&state, at_ingestion());
         let timed =
-            apply_materialization_timings(&summary, &assignment, &mut NodeToTimedNodeCache::new())
+            apply_physical_properties(&summary, &assignment, &mut NodeToTimedNodeCache::new())
                 .unwrap();
         assert_eq!(timed.timing, Some(ExecutionTiming::QueryTime));
         assert_eq!(child(&timed).lifetime, KEPT_ACROSS);
@@ -1505,31 +1497,28 @@ mod tests {
     #[test]
     fn a_root_may_be_stored_at_ingestion_time() {
         let root = max(scan());
-        let mut assignment = MaterializationAssignment::default();
+        let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(&root, at_ingestion());
-        let timed =
-            apply_materialization_timings(&root, &assignment, &mut NodeToTimedNodeCache::new())
-                .unwrap();
+        let timed = apply_physical_properties(&root, &assignment, &mut NodeToTimedNodeCache::new())
+            .unwrap();
         assert_eq!(timed.timing, Some(ExecutionTiming::IngestionTime));
         assert_eq!(exported(&timed, "Aggregate"), KEPT_ACROSS);
 
         let state = agg(scan(), exact_sum());
         let root = finalize(Rc::clone(&state));
-        let mut assignment = MaterializationAssignment::default();
+        let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(&state, at_ingestion());
         assignment.set(&root, at_ingestion());
-        let timed =
-            apply_materialization_timings(&root, &assignment, &mut NodeToTimedNodeCache::new())
-                .unwrap();
+        let timed = apply_physical_properties(&root, &assignment, &mut NodeToTimedNodeCache::new())
+            .unwrap();
         assert_eq!(timed.timing, Some(ExecutionTiming::IngestionTime));
         assert_eq!(exported(&timed, "FinalizeExactAccumulator"), KEPT_ACROSS);
 
-        let mut assignment = MaterializationAssignment::default();
+        let mut assignment = PhysicalPropertiesAssignment::default();
         let root = placed_at_ingestion(max(scan()));
         assignment.set(&root, None);
         assert_eq!(
-            apply_materialization_timings(&root, &assignment, &mut NodeToTimedNodeCache::new())
-                .err(),
+            apply_physical_properties(&root, &assignment, &mut NodeToTimedNodeCache::new()).err(),
             Some(ExecutionDataStateError::UnstoredIngestionRoot {
                 operator: "Aggregate"
             })

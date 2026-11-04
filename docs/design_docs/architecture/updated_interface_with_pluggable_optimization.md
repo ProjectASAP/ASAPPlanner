@@ -101,7 +101,7 @@ pub struct QueryPlan {
 ```
 
 `Stage1ToStage3Pass` returns the selected plan's roots, as Stage 2's realizer
-built them with each node's timing and materialization, and with the weight
+built them with each node's timing and lifetime, and with the weight
 proofs Stage 3 made applied; `PlanOutput::physical_asap_dag()` exports them. Physical ASAP-aware optimization decides per
 sub-DAG whether to materialize, and whether at ingestion or query time, from
 #604 on.

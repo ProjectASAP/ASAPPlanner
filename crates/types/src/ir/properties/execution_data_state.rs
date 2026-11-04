@@ -150,7 +150,7 @@ pub enum ExecutionDataStateError {
          the other timing",
         fixed.as_str()
     )]
-    MaterializationConflictsWithFixedTiming {
+    PhysicalPropertiesConflictWithFixedTiming {
         operator: &'static str,
         fixed: ExecutionTiming,
         assigned: PhysicalProperties,
@@ -182,11 +182,9 @@ pub enum ExecutionDataStateError {
     /// query time (#509 Algorithm 3, line 13).
     #[error("{operator}: upstream of ingestion-time node not at ingestion time")]
     UpstreamNotAtIngestion { operator: &'static str },
-    /// A node reached by export without a timing: the materialization timing pass
+    /// A node reached by export without a timing: the physical properties pass
     /// was not applied to the DAG first.
-    #[error(
-        "{operator} node has no execution timing; apply materialization timings before export"
-    )]
+    #[error("{operator} node has no execution timing; apply physical properties before export")]
     UntimedNode { operator: &'static str },
     /// The exported physical DAG failed its own validation, e.g. an empty
     /// batch or a hand-timed plan the timing pass would have rejected.

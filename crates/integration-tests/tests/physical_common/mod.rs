@@ -37,7 +37,10 @@ pub fn execute(
 pub fn compile_physical_asap_dag(
     root: &std::rc::Rc<asap_types::ir::OperatorNode>,
 ) -> Result<asap_types::ir::physical_export::PhysicalASAPDAG, Box<dyn std::error::Error>> {
-    compile_with(root, &asap_types::ir::MaterializationAssignment::default())
+    compile_with(
+        root,
+        &asap_types::ir::PhysicalPropertiesAssignment::default(),
+    )
 }
 
 /// As [`compile_physical_asap_dag`], with every sub-DAG kept at ingestion time
@@ -48,7 +51,7 @@ pub fn compile_at_ingestion_physical_asap_dag(
 ) -> Result<asap_types::ir::physical_export::PhysicalASAPDAG, Box<dyn std::error::Error>> {
     compile_with(
         root,
-        &asap_types::ir::MaterializationAssignment::with_default(
+        &asap_types::ir::PhysicalPropertiesAssignment::with_default(
             asap_types::physical::PhysicalProperties::new(
                 asap_types::ir::properties::ExecutionTiming::IngestionTime,
                 asap_types::physical::Lifetime::AcrossEvaluations(
@@ -62,10 +65,10 @@ pub fn compile_at_ingestion_physical_asap_dag(
 
 fn compile_with(
     root: &std::rc::Rc<asap_types::ir::OperatorNode>,
-    assignment: &asap_types::ir::MaterializationAssignment,
+    assignment: &asap_types::ir::PhysicalPropertiesAssignment,
 ) -> Result<asap_types::ir::physical_export::PhysicalASAPDAG, Box<dyn std::error::Error>> {
     let root =
-        asap_types::ir::apply_materialization_timings(root, assignment, &mut Default::default())?;
+        asap_types::ir::apply_physical_properties(root, assignment, &mut Default::default())?;
     Ok(asap_types::ir::physical_export::compile_physical_asap_dag(
         &root,
     )?)

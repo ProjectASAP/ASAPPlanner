@@ -69,7 +69,7 @@ fn materialized_count(dag: &PhysicalASAPDAG) -> usize {
 /// export carries that selection rather than resetting every node to
 /// query time.
 #[tokio::test]
-async fn export_carries_the_selected_materialization() {
+async fn export_carries_the_selected_lifetime() {
     let capabilities = without_raw_data();
     let output = plan(&example4b(), &capabilities).await;
     let dag = output.physical_asap_dag().expect("exports");

@@ -178,12 +178,12 @@ fn expansion_merges_the_tumbling_windows() {
 /// tumbling windows: a chain materialized at ingestion time expands into tumbling windows each
 /// built and stored at ingestion time, over ranges and shifts that run at
 /// ingestion time too, while the merge reading them stays at query time.
-/// An unmaterialized chain expands into query-time tumbling windows.
+/// An not_kept chain expands into query-time tumbling windows.
 #[test]
 fn expansion_carries_the_chains_timing_onto_its_tumbling_windows() {
     use asap_types::ir::properties::ExecutionTiming;
     use asap_types::ir::{
-        apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
+        apply_physical_properties, NodeToTimedNodeCache, PhysicalPropertiesAssignment,
     };
     use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
     let kept_across = Lifetime::AcrossEvaluations(Medium::Memory);
@@ -197,7 +197,7 @@ fn expansion_carries_the_chains_timing_onto_its_tumbling_windows() {
             query: SketchStatistic::Quantile { q: 0.99 },
         }))
         .unwrap();
-        let mut assignment = MaterializationAssignment::default();
+        let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &chain,
             lifetime
@@ -205,7 +205,7 @@ fn expansion_carries_the_chains_timing_onto_its_tumbling_windows() {
                 .then(|| PhysicalProperties::new(timing, lifetime).unwrap()),
         );
         let timed =
-            apply_materialization_timings(&estimate, &assignment, &mut NodeToTimedNodeCache::new())
+            apply_physical_properties(&estimate, &assignment, &mut NodeToTimedNodeCache::new())
                 .unwrap();
         let expanded = expand_tumbling_window_chains(&timed).unwrap();
         let merged = expanded.children()[0];

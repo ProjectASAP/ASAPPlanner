@@ -22,9 +22,8 @@ use asap_types::ir::schema::{
     SketchParams, SummaryUpdate,
 };
 use asap_types::ir::{
-    apply_materialization_timings, apply_materialization_timings_to_roots, ASAPOp,
-    MaterializationAssignment, NodeToTimedNodeCache, NonASAPOp, Operator, OperatorNode, QueryRoot,
-    TimeRangeKind,
+    apply_physical_properties, apply_physical_properties_to_roots, ASAPOp, NodeToTimedNodeCache,
+    NonASAPOp, Operator, OperatorNode, PhysicalPropertiesAssignment, QueryRoot, TimeRangeKind,
 };
 use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
 
@@ -93,7 +92,7 @@ fn tumbling_windows_and_kept_merge() -> (PhysicalASAPDAG, usize) {
         group_by: None,
     }))
     .unwrap();
-    let mut assignment = MaterializationAssignment::default();
+    let mut assignment = PhysicalPropertiesAssignment::default();
     for tumbling_window in &tumbling_windows {
         assignment.set(
             tumbling_window,
@@ -113,8 +112,7 @@ fn tumbling_windows_and_kept_merge() -> (PhysicalASAPDAG, usize) {
         .ok(),
     );
     let timed =
-        apply_materialization_timings(&merge, &assignment, &mut NodeToTimedNodeCache::new())
-            .unwrap();
+        apply_physical_properties(&merge, &assignment, &mut NodeToTimedNodeCache::new()).unwrap();
     let dag = compile_physical_asap_dag(&timed).unwrap();
     let merge_id = dag.roots[0];
     (dag, merge_id)
@@ -238,7 +236,7 @@ fn three_chains_over_one_scan() -> (PhysicalASAPDAG, PhysicalASAPDAG) {
         ),
         chain(&scan, quantile_sketch(SketchAlgorithm::Kll), 60_000, 5),
     ];
-    let mut assignment = MaterializationAssignment::default();
+    let mut assignment = PhysicalPropertiesAssignment::default();
     let roots: Vec<QueryRoot> = chains
         .iter()
         .map(|chain| {
@@ -260,7 +258,7 @@ fn three_chains_over_one_scan() -> (PhysicalASAPDAG, PhysicalASAPDAG) {
             )
         })
         .collect();
-    let timed = apply_materialization_timings_to_roots(&roots, &assignment).unwrap();
+    let timed = apply_physical_properties_to_roots(&roots, &assignment).unwrap();
     let unexpanded = compile_physical_asap_workload(&timed).unwrap();
     let expanded = expand_tumbling_window_chains_in_workload(&timed).unwrap();
     let mut installed = compile_physical_asap_workload(&expanded.roots).unwrap();
@@ -382,7 +380,7 @@ fn tumbling_windows_of_one_width_form_one_refresh_group() {
 fn a_shifted_tumbling_window_has_its_own_phase() {
     let scan = scan_m();
     let tumbling_windows = [tumbling_window(&scan, 0), tumbling_window(&scan, 90_000)];
-    let mut assignment = MaterializationAssignment::default();
+    let mut assignment = PhysicalPropertiesAssignment::default();
     for tumbling_window in &tumbling_windows {
         assignment.set(
             tumbling_window,
@@ -397,7 +395,7 @@ fn a_shifted_tumbling_window_has_its_own_phase() {
         .iter()
         .map(|tumbling_window| QueryRoot::Operator(Rc::clone(tumbling_window)))
         .collect();
-    let timed = apply_materialization_timings_to_roots(&roots, &assignment).unwrap();
+    let timed = apply_physical_properties_to_roots(&roots, &assignment).unwrap();
     let mut dag = compile_physical_asap_workload(&timed).unwrap();
     dag.set_retention(&HashMap::new(), &HashMap::new()).unwrap();
     let mut windows: Vec<(u64, u64)> = dag
@@ -422,7 +420,7 @@ fn views_of_unbounded_windows_are_groups_of_their_own() {
         schema: scan_m().schema.clone(),
     }))
     .unwrap();
-    let mut assignment = MaterializationAssignment::default();
+    let mut assignment = PhysicalPropertiesAssignment::default();
     let roots: Vec<QueryRoot> = [SketchAlgorithm::Kll, SketchAlgorithm::DDSketch]
         .into_iter()
         .map(|algorithm| {
@@ -446,7 +444,7 @@ fn views_of_unbounded_windows_are_groups_of_their_own() {
             QueryRoot::Operator(build)
         })
         .collect();
-    let timed = apply_materialization_timings_to_roots(&roots, &assignment).unwrap();
+    let timed = apply_physical_properties_to_roots(&roots, &assignment).unwrap();
     let mut dag = compile_physical_asap_workload(&timed).unwrap();
     dag.set_retention(&HashMap::new(), &HashMap::new()).unwrap();
     let groups = dag.ingestion_refresh_groups().unwrap();
@@ -470,7 +468,7 @@ fn a_view_reading_a_view_of_its_group_follows_it() {
         group_by: Some(vec![]),
     }))
     .unwrap();
-    let mut assignment = MaterializationAssignment::default();
+    let mut assignment = PhysicalPropertiesAssignment::default();
     for view in [&tumbling_window, &rollup] {
         assignment.set(
             view,
@@ -481,11 +479,9 @@ fn a_view_reading_a_view_of_its_group_follows_it() {
             .ok(),
         );
     }
-    let timed = apply_materialization_timings_to_roots(
-        &[QueryRoot::Operator(Rc::clone(&rollup))],
-        &assignment,
-    )
-    .unwrap();
+    let timed =
+        apply_physical_properties_to_roots(&[QueryRoot::Operator(Rc::clone(&rollup))], &assignment)
+            .unwrap();
     let mut dag = compile_physical_asap_workload(&timed).unwrap();
     dag.set_retention(&HashMap::new(), &HashMap::new()).unwrap();
     let groups = dag.ingestion_refresh_groups().unwrap();
@@ -530,7 +526,7 @@ fn a_node_above_an_unexpanded_chain_has_the_window_of_its_tumbling_windows() {
 #[test]
 fn a_view_has_its_refresh_window_on_a_dag_without_edges() {
     let view = tumbling_window(&scan_m(), 15_000);
-    let mut assignment = MaterializationAssignment::default();
+    let mut assignment = PhysicalPropertiesAssignment::default();
     assignment.set(
         &view,
         PhysicalProperties::new(
@@ -539,8 +535,8 @@ fn a_view_has_its_refresh_window_on_a_dag_without_edges() {
         )
         .ok(),
     );
-    let timed = apply_materialization_timings(&view, &assignment, &mut NodeToTimedNodeCache::new())
-        .unwrap();
+    let timed =
+        apply_physical_properties(&view, &assignment, &mut NodeToTimedNodeCache::new()).unwrap();
     let mut dag = compile_physical_asap_dag(&timed).unwrap();
     let view_id = dag.roots[0];
     let window = Some(RefreshWindow {

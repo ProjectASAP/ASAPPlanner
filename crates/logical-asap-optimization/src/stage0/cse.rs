@@ -85,7 +85,7 @@ fn own_fields(node: &OperatorNode) -> Operator<()> {
 /// hash is SipHash over two parts:
 ///
 /// 1. the canonical JSON of [`own_fields`] plus `result_kind`, `schema`,
-///    `guarantee`, `timing` and `materialization` — every field `PartialEq` compares except the
+///    `guarantee`, `timing` and `lifetime` — every field `PartialEq` compares except the
 ///    children. A scalar expression is serialized as data with each operator
 ///    node it reads replaced by `()`, so a reference to an
 ///    interned sub-DAG contributes nothing of its own here;

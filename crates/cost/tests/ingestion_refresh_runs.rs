@@ -16,8 +16,8 @@ use asap_types::ir::schema::{
     SketchParams, SummaryUpdate,
 };
 use asap_types::ir::{
-    apply_materialization_timings_to_roots, ASAPOp, MaterializationAssignment, NonASAPOp, Operator,
-    OperatorNode, QueryRoot, TimeRangeKind,
+    apply_physical_properties_to_roots, ASAPOp, NonASAPOp, Operator, OperatorNode,
+    PhysicalPropertiesAssignment, QueryRoot, TimeRangeKind,
 };
 use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
 use asap_types::workload::{QueryRecurrence, RepeatedDemand, RepetitionInterval};
@@ -77,7 +77,7 @@ fn chain(
 /// kept with `kept` (`None`: not kept): the DAG Stage 3 costs, chains
 /// unexpanded.
 fn dag_of(summaries: &[Rc<OperatorNode>], kept: Option<PhysicalProperties>) -> PhysicalASAPDAG {
-    let mut assignment = MaterializationAssignment::default();
+    let mut assignment = PhysicalPropertiesAssignment::default();
     let roots: Vec<QueryRoot> = summaries
         .iter()
         .map(|summary| {
@@ -94,7 +94,7 @@ fn dag_of(summaries: &[Rc<OperatorNode>], kept: Option<PhysicalProperties>) -> P
             )
         })
         .collect();
-    let timed = apply_materialization_timings_to_roots(&roots, &assignment).unwrap();
+    let timed = apply_physical_properties_to_roots(&roots, &assignment).unwrap();
     compile_physical_asap_workload(&timed).unwrap()
 }
 

@@ -1,4 +1,4 @@
-//! One evaluated materialization assignment rebuilt as a physical DAG.
+//! One evaluated physical properties assignment rebuilt as a physical DAG.
 use std::collections::BTreeMap;
 
 use crate::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
@@ -19,7 +19,7 @@ pub struct PhysicalWorkloadPlan {
     /// exports.
     pub roots: Vec<QueryRoot>,
     pub dag: PhysicalASAPDAG,
-    /// Its materialization assignment: the lifetime chosen for each summary
+    /// Its physical properties assignment: the lifetime chosen for each summary
     /// build (`SummaryAgg` or `SummaryTumblingWindowChain`) of `dag`, by node id, including
     /// the builds not kept (`Lifetime::None`), and each other node kept
     /// (a shared node built once per evaluation). A build one query reads

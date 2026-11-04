@@ -459,7 +459,7 @@ impl Derivation<'_, '_> {
                     left,
                     right,
                 } => *c == candidate && references.contains(left) && references.contains(right),
-                ReaderConstraint::HighestSharedQueryMaterialization { .. } => false,
+                ReaderConstraint::HighestSharedOneEvaluation { .. } => false,
             })
     }
 

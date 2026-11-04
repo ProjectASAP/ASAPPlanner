@@ -1178,7 +1178,7 @@ fn shareables_needing_exact_reach(milp: &SelectionMilp<'_>) -> BTreeSet<Physical
             matches!(
                 constraint,
                 ReaderConstraint::MinimumQueryReaders { .. }
-                    | ReaderConstraint::HighestSharedQueryMaterialization { .. }
+                    | ReaderConstraint::HighestSharedOneEvaluation { .. }
             )
         });
         if !counted {
@@ -1291,7 +1291,7 @@ fn reader_constraint_rows(milp: &mut SelectionMilp<'_>) {
                             .row("9 reader constraints", constraint!(count >= minimum * used));
                     }
                 }
-                ReaderConstraint::HighestSharedQueryMaterialization { query_outputs, .. } => {
+                ReaderConstraint::HighestSharedOneEvaluation { query_outputs, .. } => {
                     let queries = bucket_queries(&query_of_reference, query_outputs);
                     if shareable {
                         let Some(&selected) = milp.selected.get(&candidate) else {
@@ -1343,7 +1343,7 @@ fn reader_constraint_rows(milp: &mut SelectionMilp<'_>) {
                             }
                             ContextKind::Ingestion(_) => {
                                 milp.note_inexact(
-                                    "highest shared materialization in an I_r (forbidden)",
+                                    "highest shared OneEvaluation result in an I_r (forbidden)",
                                 );
                                 milp.builder
                                     .row("9 reader constraints", constraint!(used <= 0.0));

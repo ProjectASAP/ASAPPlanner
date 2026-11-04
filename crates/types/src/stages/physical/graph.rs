@@ -25,10 +25,10 @@ pub enum ReaderConstraint {
         query_outputs: Vec<Vec<usize>>,
         minimum: usize,
     },
-    /// A non-summary query materialization: each node produces an
+    /// A non-summary node kept for one evaluation (`OneEvaluation`): each node produces an
     /// output reference, or has an immediate selected consumer reached by
     /// at most one query (`query_outputs` as in `MinimumQueryReaders`).
-    HighestSharedQueryMaterialization {
+    HighestSharedOneEvaluation {
         candidate: PhysicalCandidateId,
         query_outputs: Vec<Vec<usize>>,
     },
@@ -50,7 +50,7 @@ impl ReaderConstraint {
     pub fn candidate(&self) -> PhysicalCandidateId {
         match self {
             Self::MinimumQueryReaders { candidate, .. }
-            | Self::HighestSharedQueryMaterialization { candidate, .. }
+            | Self::HighestSharedOneEvaluation { candidate, .. }
             | Self::AllowedOutputs { candidate, .. }
             | Self::IncompatibleOutputs { candidate, .. } => *candidate,
         }
@@ -60,7 +60,7 @@ impl ReaderConstraint {
     pub fn candidate_mut(&mut self) -> &mut PhysicalCandidateId {
         match self {
             Self::MinimumQueryReaders { candidate, .. }
-            | Self::HighestSharedQueryMaterialization { candidate, .. }
+            | Self::HighestSharedOneEvaluation { candidate, .. }
             | Self::AllowedOutputs { candidate, .. }
             | Self::IncompatibleOutputs { candidate, .. } => candidate,
         }
@@ -257,7 +257,7 @@ impl DagOfSelectedCandidates {
                     minimum,
                     ..
                 } => queries_reaching(node, query_outputs) < *minimum,
-                ReaderConstraint::HighestSharedQueryMaterialization { query_outputs, .. } => {
+                ReaderConstraint::HighestSharedOneEvaluation { query_outputs, .. } => {
                     !output_nodes.contains(&node)
                         && !consumers[node]
                             .iter()

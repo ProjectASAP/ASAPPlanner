@@ -2,7 +2,7 @@
 //!
 //! The flattened operators of [`super::flat`], plus the lifetime and
 //! execution timing (data state) of every node and edge. The input must
-//! already be timed ([`crate::ir::properties::timing::apply_materialization_timings`]); export
+//! already be timed ([`crate::ir::properties::timing::apply_physical_properties`]); export
 //! reads each node's timing and lifetime and does not re-run
 //! data-state validation. The deployment executes the plan as given
 //! (#509 Assumption 8): it does not change lifetime or timing.
@@ -26,9 +26,9 @@ use crate::ir::properties::execution_data_state::{
 use crate::ir::properties::guarantee::AccuracyGuarantee;
 #[cfg(any(test, feature = "test-support"))]
 use crate::ir::properties::timing::{
-    apply_materialization_timings_to_roots, MaterializationAssignment,
+    apply_physical_properties_to_roots, PhysicalPropertiesAssignment,
 };
-use crate::ir::properties::timing::{data_state, is_materialization_point};
+use crate::ir::properties::timing::{data_state, is_keepable_state_output};
 use crate::ir::schema::{FieldDataType, Schema};
 use crate::physical::{Lifetime, PhysicalProperties};
 
@@ -72,7 +72,7 @@ pub struct PhysicalASAPDAGNode {
     /// Phase is a placement choice for every operator, independent of payload kind.
     pub output_state: ExecutionDataState,
     /// How long and where the deployment keeps this node's output: the
-    /// lifetime the materialization assignment chose for the sub-DAG this
+    /// lifetime the physical properties assignment chose for the sub-DAG this
     /// node produces. Any node may be kept (#509 §Materialization); a node
     /// with no assignment has lifetime `None`. With `output_state.timing` it
     /// is the node's [`PhysicalProperties`].
@@ -355,7 +355,7 @@ impl PhysicalASAPDAG {
     /// This DAG's plan with nothing materialized: the same operators,
     /// summaries and summary parameters, with every sub-DAG
     /// not kept and so every node at query time (the default
-    /// [`MaterializationAssignment`]). Node ids are renumbered, and `roots`
+    /// [`PhysicalPropertiesAssignment`]). Node ids are renumbered, and `roots`
     /// and `scalar_roots` keep their order.
     ///
     /// The correctness reference of a selected plan: a deployment runtime
@@ -366,7 +366,7 @@ impl PhysicalASAPDAG {
     pub fn with_every_node_at_query_time(&self) -> Result<PhysicalASAPDAG, ReferencePlanError> {
         let roots = self.untimed_query_roots()?;
         let timed =
-            apply_materialization_timings_to_roots(&roots, &MaterializationAssignment::default())?;
+            apply_physical_properties_to_roots(&roots, &PhysicalPropertiesAssignment::default())?;
         Ok(compile_physical_asap_workload(&timed)?)
     }
 
@@ -606,7 +606,7 @@ impl PhysicalASAPDAG {
             // is not kept runs when its consumer runs.
             let timing = node.output_state.timing;
             if PhysicalProperties::new(timing, node.lifetime).is_err()
-                || (is_materialization_point(&node.payload)
+                || (is_keepable_state_output(&node.payload)
                     && node.lifetime == Lifetime::None
                     && timing != ExecutionTiming::QueryTime)
             {
@@ -840,7 +840,7 @@ pub fn compile_physical_asap_dag(
 }
 
 /// Export the timed DAG below `root`. Every reachable node must carry a
-/// timing (see [`crate::ir::properties::timing::apply_materialization_timings`]); the data-state
+/// timing (see [`crate::ir::properties::timing::apply_physical_properties`]); the data-state
 /// rules were checked by that pass and are not re-run here.
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn compile_physical_asap_dag_with_node_ids(

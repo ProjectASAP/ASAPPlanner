@@ -1,6 +1,6 @@
 //! #1095 C3: what the owner-scoped candidate MILP (§2.0) is built from. Given
 //! Stage 2's physical candidates (one per operator node, timing and
-//! materialization; Stage 2 makes no copies), it computes:
+//! lifetime; Stage 2 makes no copies), it computes:
 //!
 //! 1. **Candidate dominance** ([`prune_dominated_candidates`]): a candidate no optimal
 //!    plan under cost model 1 uses is deleted, with its links.

@@ -22,8 +22,8 @@ use asap_types::ir::schema::{
     SketchParams, SketchStatistic, SummaryUpdate,
 };
 use asap_types::ir::{
-    apply_materialization_timings_to_roots, ASAPOp, MaterializationAssignment, NonASAPOp,
-    OperatorNode, QueryRoot, TimeRangeKind,
+    apply_physical_properties_to_roots, ASAPOp, NonASAPOp, OperatorNode,
+    PhysicalPropertiesAssignment, QueryRoot, TimeRangeKind,
 };
 use futures::{executor::block_on, StreamExt};
 use std::{
@@ -120,12 +120,12 @@ fn fixture() -> Fixture {
             query: SketchStatistic::Quantile { q },
         }))
     };
-    let roots = apply_materialization_timings_to_roots(
+    let roots = apply_physical_properties_to_roots(
         &[
             QueryRoot::Operator(estimate(0.5)),
             QueryRoot::Operator(estimate(0.99)),
         ],
-        &MaterializationAssignment::default(),
+        &PhysicalPropertiesAssignment::default(),
     )
     .unwrap();
     let compiled = compile_physical_asap_workload_with_node_ids(&roots).unwrap();

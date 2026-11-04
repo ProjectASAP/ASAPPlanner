@@ -1,11 +1,11 @@
 //! Splitting a shared sub-DAG by execution timing before Stage 2 applies a
-//! materialization assignment ([`split_shared_by_timing`]).
+//! physical properties assignment ([`split_shared_by_timing`]).
 
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use asap_types::ir::properties::ExecutionTiming;
-use asap_types::ir::{timing_under_consumer, MaterializationAssignment, OperatorNode};
+use asap_types::ir::{timing_under_consumer, OperatorNode, PhysicalPropertiesAssignment};
 
 /// Each (node, timing) pair's rebuilt node, with the original it copies.
 type Copies = HashMap<(*const OperatorNode, ExecutionTiming), (Rc<OperatorNode>, Rc<OperatorNode>)>;
@@ -21,15 +21,15 @@ type Copies = HashMap<(*const OperatorNode, ExecutionTiming), (Rc<OperatorNode>,
 /// keeps its original's explicit materialization.
 pub fn split_shared_by_timing(
     roots: &[Rc<OperatorNode>],
-    assignment: &MaterializationAssignment,
-) -> (Vec<Rc<OperatorNode>>, MaterializationAssignment) {
+    assignment: &PhysicalPropertiesAssignment,
+) -> (Vec<Rc<OperatorNode>>, PhysicalPropertiesAssignment) {
     // First pass: the set of timings each node is reached with.
     let mut reached: HashMap<*const OperatorNode, Vec<ExecutionTiming>> = HashMap::new();
     let mut forced = HashMap::new();
     fn collect(
         node: &Rc<OperatorNode>,
         consumer: ExecutionTiming,
-        assignment: &MaterializationAssignment,
+        assignment: &PhysicalPropertiesAssignment,
         reached: &mut HashMap<*const OperatorNode, Vec<ExecutionTiming>>,
         forced: &mut HashMap<*const OperatorNode, bool>,
     ) {
@@ -61,7 +61,7 @@ pub fn split_shared_by_timing(
     fn rebuild(
         node: &Rc<OperatorNode>,
         consumer: ExecutionTiming,
-        assignment: &MaterializationAssignment,
+        assignment: &PhysicalPropertiesAssignment,
         reached: &HashMap<*const OperatorNode, Vec<ExecutionTiming>>,
         copies: &mut Copies,
         forced: &mut HashMap<*const OperatorNode, bool>,
@@ -128,7 +128,7 @@ mod tests {
     };
     use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
     use asap_types::ir::{
-        apply_materialization_timings, ASAPOp, NodeToTimedNodeCache, NonASAPOp, Operator,
+        apply_physical_properties, ASAPOp, NodeToTimedNodeCache, NonASAPOp, Operator,
     };
     use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
 
@@ -245,9 +245,9 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(
-            apply_materialization_timings(
+            apply_physical_properties(
                 &root,
-                &MaterializationAssignment::with_default(at_ingestion()),
+                &PhysicalPropertiesAssignment::with_default(at_ingestion()),
                 &mut NodeToTimedNodeCache::new()
             )
             .err(),
@@ -258,9 +258,9 @@ mod tests {
         );
         let (split, assignment) = split_shared_by_timing(
             std::slice::from_ref(&root),
-            &MaterializationAssignment::with_default(at_ingestion()),
+            &PhysicalPropertiesAssignment::with_default(at_ingestion()),
         );
-        assert!(apply_materialization_timings(
+        assert!(apply_physical_properties(
             &split[0],
             &assignment,
             &mut NodeToTimedNodeCache::new()
@@ -278,11 +278,11 @@ mod tests {
             children: vec![max(estimate(Rc::clone(&summary))), max(Rc::clone(&shared))],
         }))
         .unwrap();
-        let mut assignment = MaterializationAssignment::default();
+        let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(&summary, at_ingestion());
         let (split, assignment) = split_shared_by_timing(std::slice::from_ref(&root), &assignment);
         let timed =
-            apply_materialization_timings(&split[0], &assignment, &mut NodeToTimedNodeCache::new())
+            apply_physical_properties(&split[0], &assignment, &mut NodeToTimedNodeCache::new())
                 .unwrap();
         let summary = child(&child(&child(&timed)));
         assert!(matches!(
@@ -309,13 +309,13 @@ mod tests {
             concat(vec![Rc::clone(&by_summary), Rc::clone(&common)]),
             concat(vec![raw, Rc::clone(&common)]),
         ];
-        let mut assignment = MaterializationAssignment::default();
+        let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(&summary, at_ingestion());
         let timed_unsplit = {
             let mut cache = NodeToTimedNodeCache::new();
             roots
                 .iter()
-                .map(|root| apply_materialization_timings(root, &assignment, &mut cache))
+                .map(|root| apply_physical_properties(root, &assignment, &mut cache))
                 .collect::<Result<Vec<_>, _>>()
         };
         assert!(matches!(
@@ -327,7 +327,7 @@ mod tests {
         let mut cache = NodeToTimedNodeCache::new();
         let timed: Vec<_> = split
             .iter()
-            .map(|root| apply_materialization_timings(root, &assignment, &mut cache).unwrap())
+            .map(|root| apply_physical_properties(root, &assignment, &mut cache).unwrap())
             .collect();
         let summary = child(&child(&child(&timed[0])));
         assert_eq!(summary.lifetime, KEPT_ACROSS);
@@ -356,7 +356,7 @@ mod tests {
                 .clone()
                 .with_timing(Some(ExecutionTiming::QueryTime)),
         );
-        let mut assignment = MaterializationAssignment::default();
+        let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(&summary, at_ingestion());
         assignment.set(&state, at_ingestion());
         assignment.set(&read, at_ingestion());
@@ -364,12 +364,12 @@ mod tests {
         let mut cache = NodeToTimedNodeCache::new();
         let timed: Result<Vec<_>, _> = split
             .iter()
-            .map(|root| apply_materialization_timings(root, &assignment, &mut cache))
+            .map(|root| apply_physical_properties(root, &assignment, &mut cache))
             .collect();
         assert_eq!(
             timed.err(),
             Some(
-                ExecutionDataStateError::MaterializationConflictsWithFixedTiming {
+                ExecutionDataStateError::PhysicalPropertiesConflictWithFixedTiming {
                     operator: "FinalizeExactAccumulator",
                     fixed: ExecutionTiming::QueryTime,
                     assigned: at_ingestion().unwrap(),

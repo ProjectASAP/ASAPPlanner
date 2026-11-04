@@ -81,7 +81,7 @@ Exact work is represented by the ordinary operators, unchanged:
 - `BinaryOp` combines independently planned operands. Summary planning may set
   its typed division guards (`checked_finite_division`,
   `checked_relative_division`); the operator's timing comes from the
-  materialization assignment, not from the operator.
+  physical properties assignment, not from the operator.
 - Aggregate, projection, filter, sort and limit over an evaluation are the ordinary
   `Aggregate`, `Project`, `Filter`, `Sort` and `Limit` operators reading an ASAP
   node. Exact-accumulator state may pass through the projection-like
@@ -118,13 +118,13 @@ reader), `OneEvaluation(medium)` (kept until every reader of one evaluation
 finishes) or `AcrossEvaluations(medium)` (kept for later evaluations), with
 `Medium::Memory` or `Medium::Disk`; an ingestion-time output cannot be kept
 for `OneEvaluation`. A
-[`MaterializationAssignment`](../../../crates/types/src/ir/properties/timing.rs) records,
+[`PhysicalPropertiesAssignment`](../../../crates/types/src/ir/properties/timing.rs) records,
 per sub-DAG, the properties of its kept output, named by the node whose output
 would be kept. Any node may be named: a summary state, a population, or, as in
 #509 Example 4, the tumbling windows a query reads. `set(node, Some(properties))`
 keeps one, `set(node, None)` keeps none, and every other sub-DAG is not kept.
 Stage 2 chooses the assignment.
-`apply_materialization_timings(root, &assignment, &mut NodeToTimedNodeCache)` then writes a
+`apply_physical_properties(root, &assignment, &mut NodeToTimedNodeCache)` then writes a
 timing and a lifetime into every node, top-down:
 
 - `SummaryEstimate` and `EvaluatePopulation` run at query time;
@@ -144,7 +144,7 @@ A node whose timing a candidate builder fixed (the query-time
 `FinalizeExactAccumulator` read boundary of `finalize_query_candidate`) keeps
 it: an explicit assignment that agrees with that timing is kept, and one that
 needs the other timing fails with
-`ExecutionDataStateError::MaterializationConflictsWithFixedTiming`; an
+`ExecutionDataStateError::PhysicalPropertiesConflictWithFixedTiming`; an
 explicit kept output is never silently moved or dropped. A root may be kept
 at ingestion time, and the query reads its stored output; a root of rows that
 runs at ingestion time without being stored there fails with
@@ -158,7 +158,7 @@ node reached from two consumers that need different timings;
 assignment is applied. How much a kept output retains (retention) is decided
 later and is not in the assignment.
 
-`MaterializationAssignment::with_default(kept)` gives every sub-DAG that is
+`PhysicalPropertiesAssignment::with_default(kept)` gives every sub-DAG that is
 not set explicitly `kept` where the DAG allows it; an ingestion-time default
 over a sub-DAG that can only run at query time leaves that sub-DAG not kept
 instead of failing (the default applies to
@@ -193,7 +193,7 @@ children as edges and no embedded sub-DAGs:
   producer's data state and grouping/window compatibility.
 - Each node records `output_state` (timing plus `Raw` or `SummaryState`),
   `output_schema` and `guarantee`. Export reads the timing written by
-  `apply_materialization_timings` and rejects an untimed node
+  `apply_physical_properties` and rejects an untimed node
   (`ExecutionDataStateError::UntimedNode`); it does not re-run data-state
   validation.
 
@@ -237,7 +237,7 @@ failure probabilities are combined, and the score guarantee remains in the
 membership guarantee's child provenance. An exact request does not accept this
 approximate output path merely because its selected identities are certified.
 
-The materialization assignment decides whether these summaries run at
+The physical properties assignment decides whether these summaries run at
 ingestion time or at query time, and the exported DAG carries that placement.
 Either placement must give each evaluation a complete
 rate window and an isolated summary state, or maintain an equivalent replacement

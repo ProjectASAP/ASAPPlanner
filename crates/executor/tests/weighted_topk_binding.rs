@@ -275,8 +275,8 @@ fn rate_updates_cannot_enter_integer_heap_factory() {
 fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) -> PhysicalASAPDAG {
     use planner_types::ir::properties::ExecutionTiming;
     use planner_types::ir::{
-        apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
-        Operator as IrOperator, OperatorNode,
+        apply_physical_properties, NodeToTimedNodeCache, Operator as IrOperator, OperatorNode,
+        PhysicalPropertiesAssignment,
     };
     use planner_types::physical::{Lifetime, Medium, PhysicalProperties};
     fn unpinned(node: &Rc<OperatorNode>) -> Rc<OperatorNode> {
@@ -291,7 +291,7 @@ fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) 
         Rc::new(copy)
     }
     let candidate = unpinned(candidate);
-    let mut assignment = MaterializationAssignment::default();
+    let mut assignment = PhysicalPropertiesAssignment::default();
     for node in OperatorNode::reachable(&candidate) {
         if matches!(node.operator, IrOperator::ASAP(ASAPOp::SummaryAgg { .. })) {
             assignment.set(
@@ -305,7 +305,7 @@ fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) 
         }
     }
     let timed =
-        apply_materialization_timings(&candidate, &assignment, &mut NodeToTimedNodeCache::new())
+        apply_physical_properties(&candidate, &assignment, &mut NodeToTimedNodeCache::new())
             .unwrap();
     planner_types::ir::physical_export::compile_physical_asap_dag(&timed).unwrap()
 }

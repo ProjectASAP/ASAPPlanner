@@ -2,7 +2,7 @@
 //! `asap_planner` viewer document and text
 //! only. Planning never reads them: they
 //! are pure functions of the candidates' planning data (the logical roots
-//! and the materialization assignment).
+//! and the physical properties assignment).
 
 use std::collections::BTreeMap;
 use std::rc::Rc;

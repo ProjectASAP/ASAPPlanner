@@ -21,8 +21,8 @@ use asap_types::ir::physical_export::{
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
 use asap_types::ir::{
-    apply_materialization_timings, ASAPOp, MaterializationAssignment, NodeToTimedNodeCache,
-    NonASAPOp, OperatorNode,
+    apply_physical_properties, ASAPOp, NodeToTimedNodeCache, NonASAPOp, OperatorNode,
+    PhysicalPropertiesAssignment,
 };
 use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
 
@@ -84,10 +84,10 @@ fn sketch_candidate(query: &str) -> Rc<OperatorNode> {
 
 /// The two placements under test: nothing stored, and every state stored at
 /// ingestion time where the DAG allows it.
-fn placements() -> [MaterializationAssignment; 2] {
+fn placements() -> [PhysicalPropertiesAssignment; 2] {
     [
-        MaterializationAssignment::default(),
-        MaterializationAssignment::with_default(at_ingestion()),
+        PhysicalPropertiesAssignment::default(),
+        PhysicalPropertiesAssignment::with_default(at_ingestion()),
     ]
 }
 
@@ -95,11 +95,13 @@ fn placements() -> [MaterializationAssignment; 2] {
 /// two timings (Pass 1 composes identical inputs as one memo group's node,
 /// e.g. the scan of two quantiles of one metric) is split first, one copy
 /// per timing.
-fn timed_dag(root: &Rc<OperatorNode>, assignment: &MaterializationAssignment) -> PhysicalASAPDAG {
+fn timed_dag(
+    root: &Rc<OperatorNode>,
+    assignment: &PhysicalPropertiesAssignment,
+) -> PhysicalASAPDAG {
     let (split, assignment) = split_shared_by_timing(std::slice::from_ref(root), assignment);
-    let timed =
-        apply_materialization_timings(&split[0], &assignment, &mut NodeToTimedNodeCache::new())
-            .unwrap();
+    let timed = apply_physical_properties(&split[0], &assignment, &mut NodeToTimedNodeCache::new())
+        .unwrap();
     compile_physical_asap_dag(&timed).unwrap()
 }
 
@@ -212,7 +214,7 @@ fn values_1_to_100(schema: &SchemaRef, _metric: &str) -> Batch {
 /// Not keeping it has no view and reads the raw source at
 /// query time; both answer alike.
 #[test]
-fn materialization_decides_precompute_contents() {
+fn physical_properties_decide_precompute_contents() {
     let root = sketch_candidate("quantile(0.99, latency)");
     let mut answers = Vec::new();
     for assignment in placements() {
@@ -261,10 +263,10 @@ fn mixed_placement_answers_like_query_time() {
         2,
         "two explicitly selected KLL builds"
     );
-    let mut mixed = MaterializationAssignment::default();
+    let mut mixed = PhysicalPropertiesAssignment::default();
     mixed.set(&sketches(&root)[0], at_ingestion());
     let mut answers = Vec::new();
-    for assignment in [MaterializationAssignment::default(), mixed] {
+    for assignment in [PhysicalPropertiesAssignment::default(), mixed] {
         let dag = timed_dag(&root, &assignment);
         let ingestion = Scope::Ingestion {
             window_start_ms: 0,
@@ -350,13 +352,13 @@ fn arithmetic_over_one_selector_executes() {
         ("m", "a", 290, 2.0),
         ("m", "b", 250, 5.0),
     ];
-    let [not_materialized, at_ingestion] = placements().map(|a| timed_dag(&root, &a));
-    assert!(!ingestion_binary(&not_materialized));
+    let [not_kept, at_ingestion] = placements().map(|a| timed_dag(&root, &a));
+    assert!(!ingestion_binary(&not_kept));
     assert!(
         ingestion_binary(&at_ingestion),
         "one selector shares its key set"
     );
-    for dag in [not_materialized, at_ingestion] {
+    for dag in [not_kept, at_ingestion] {
         let (values, _) = execute(&dag, &job_samples(&samples), INGESTION_WINDOW, 300_000);
         // job a: 3 + 3 = 6; job b: 5 + 5 = 10 (mispairing a with b gives 8 and 8).
         // KLL at epsilon 0.01 returns an input value within 0.01 of rank 0.9;

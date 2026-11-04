@@ -1,6 +1,6 @@
 //! Price a memo's enumerated choices as the selected plan is priced: each
 //! choice's composed DAG (`memo::enumeration::build_logical_asap_dags_from_chosen_candidates`) goes through Stage 2
-//! (`optimize_physical_asap`, every materialization assignment) and Stage 3
+//! (`optimize_physical_asap`, every physical properties assignment) and Stage 3
 //! (the reference pricer, `asap_plan_selection::reference_pricer`, under the
 //! run's models), and the plan it selects for
 //! it is installed as `plan_installable` installs one (`installable_plan_of`,
@@ -181,7 +181,7 @@ fn price_choice(
 }
 
 /// Every physical plan Stage 2 offers for choice `index`'s composed `roots`
-/// (each materialization assignment), named `E<index+1>-<k>`.
+/// (each physical properties assignment), named `E<index+1>-<k>`.
 pub fn physical_plans_of(
     roots: &[QueryRoot],
     index: usize,
@@ -255,7 +255,7 @@ pub struct EnumeratedChoice {
 
 /// The reference enumeration: the first `max_choices` choices of the
 /// Pass 2 memo (`run.logical_asap_candidates`), each composed,
-/// implemented by Stage 2 with every materialization assignment, and all
+/// implemented by Stage 2 with every physical properties assignment, and all
 /// their physical plans priced together by the reference pricer.
 #[derive(Debug)]
 pub struct ReferenceEnumeration {

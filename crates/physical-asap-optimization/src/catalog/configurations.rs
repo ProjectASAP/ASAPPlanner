@@ -11,8 +11,7 @@ use std::collections::HashMap;
 
 use crate::{
     kept_across_evaluations_at_ingestion, kept_across_evaluations_at_query_time,
-    kept_for_one_evaluation, physical_properties as properties,
-    summary_materialization_eligibility,
+    kept_for_one_evaluation, physical_properties as properties, summary_keep_eligibility,
 };
 use asap_types::ir::operator::{agg_has_exact_per_entity_kernel, Reduction};
 use asap_types::ir::properties::ExecutionTiming;
@@ -30,7 +29,7 @@ use asap_types::stages::{
 
 /// [`PhysicalCandidate::may_keep_across_evaluations_per_sole_reader_query`] for `node` configured
 /// with `properties`: for each query in `entries`, whether
-/// `summary_materialization_eligibility` with that query as the only reader
+/// `summary_keep_eligibility` with that query as the only reader
 /// allows keeping it across evaluations. Empty unless `node` is a tumbling-window chain,
 /// `properties` is query time kept `AcrossEvaluations(Memory)` and the
 /// deployment keeps query-time results.
@@ -49,14 +48,8 @@ pub fn may_keep_across_evaluations_per_sole_reader_query(
     }
     (0..entries.len())
         .map(|reader| {
-            summary_materialization_eligibility(
-                node,
-                &[reader],
-                entries,
-                data,
-                query_time_results_retained,
-            )
-            .is_ok_and(|eligibility| eligibility.may_keep_across_evaluations)
+            summary_keep_eligibility(node, &[reader], entries, data, query_time_results_retained)
+                .is_ok_and(|eligibility| eligibility.may_keep_across_evaluations)
         })
         .collect()
 }
@@ -235,7 +228,7 @@ pub fn enumerate_candidate_configurations(
             });
             if properties == kept_for_one_evaluation() {
                 if !summary {
-                    reader_constraints.push(ReaderConstraint::HighestSharedQueryMaterialization {
+                    reader_constraints.push(ReaderConstraint::HighestSharedOneEvaluation {
                         candidate: id,
                         query_outputs: query_outputs.clone(),
                     });
@@ -387,13 +380,9 @@ fn summary_properties_allowed(
     data: &DataWorkload,
     query_time_results_retained: bool,
 ) -> bool {
-    let Ok(eligibility) = summary_materialization_eligibility(
-        node,
-        readers,
-        entries,
-        data,
-        query_time_results_retained,
-    ) else {
+    let Ok(eligibility) =
+        summary_keep_eligibility(node, readers, entries, data, query_time_results_retained)
+    else {
         return false;
     };
     eligibility.range_compatibility.is_ok()

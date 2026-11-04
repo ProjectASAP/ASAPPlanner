@@ -6,8 +6,8 @@ use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{
-    apply_materialization_timings, physical_export::compile_physical_asap_dag,
-    MaterializationAssignment, NodeToTimedNodeCache, NonASAPOp, OperatorNode, ScalarExpr,
+    apply_physical_properties, physical_export::compile_physical_asap_dag, NodeToTimedNodeCache,
+    NonASAPOp, OperatorNode, PhysicalPropertiesAssignment, ScalarExpr,
 };
 
 fn catalog() -> SqlCatalog {
@@ -179,9 +179,9 @@ async fn corr_survives_exact_plan_compilation() {
     // operator DAG, no ASAP node added.
     assert!(!plan.contains_asap(), "expected the exact plan");
     assert_eq!(aggregate(plan).0, aggregate(&query).0);
-    let timed = apply_materialization_timings(
+    let timed = apply_physical_properties(
         plan,
-        &MaterializationAssignment::default(),
+        &PhysicalPropertiesAssignment::default(),
         &mut NodeToTimedNodeCache::new(),
     )
     .unwrap();

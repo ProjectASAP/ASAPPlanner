@@ -8,7 +8,7 @@
 //! - [`execution_data_state`] — when a node's value is produced
 //!   ([`ExecutionTiming`]) and what its edge carries ([`ExecutionDataState`]).
 //! - [`timing`] — execution timing written into every node from a
-//!   materialization assignment, and its validation.
+//!   physical properties assignment, and its validation.
 //! - [`summary_coverage`] — what a summary state covers.
 pub mod accuracy;
 pub mod execution_data_state;

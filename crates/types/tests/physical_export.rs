@@ -9,8 +9,8 @@ use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use asap_types::ir::schema::{ExactKind, ExactParams, SummaryUpdate};
 use asap_types::ir::{
-    apply_materialization_timings, ASAPOp, MaterializationAssignment, NodeToTimedNodeCache,
-    NonASAPOp, Operator, OperatorNode, QueryRoot,
+    apply_physical_properties, ASAPOp, NodeToTimedNodeCache, NonASAPOp, Operator, OperatorNode,
+    PhysicalPropertiesAssignment, QueryRoot,
 };
 use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
 use std::rc::Rc;
@@ -48,12 +48,12 @@ const ON_DISK: Lifetime = Lifetime::AcrossEvaluations(Medium::Disk);
 /// `plan()` timed with its summary kept at ingestion time on disk.
 fn timed_at_ingestion() -> Rc<OperatorNode> {
     let root = plan();
-    let mut assignment = MaterializationAssignment::default();
+    let mut assignment = PhysicalPropertiesAssignment::default();
     assignment.set(
         root.children()[0],
         PhysicalProperties::new(ExecutionTiming::IngestionTime, ON_DISK).ok(),
     );
-    apply_materialization_timings(&root, &assignment, &mut NodeToTimedNodeCache::new()).unwrap()
+    apply_physical_properties(&root, &assignment, &mut NodeToTimedNodeCache::new()).unwrap()
 }
 
 /// A summary materialized at ingestion time is read at query time, and the
@@ -139,11 +139,11 @@ fn batch_shares_the_summary_and_keeps_one_root_per_query() {
         child: state,
     }))
     .unwrap();
-    let assignment = MaterializationAssignment::default();
+    let assignment = PhysicalPropertiesAssignment::default();
     let mut cache = NodeToTimedNodeCache::new();
     let timed: Vec<_> = [first, second]
         .iter()
-        .map(|root| apply_materialization_timings(root, &assignment, &mut cache).unwrap())
+        .map(|root| apply_physical_properties(root, &assignment, &mut cache).unwrap())
         .collect();
     let roots: Vec<QueryRoot> = timed.into_iter().map(QueryRoot::Operator).collect();
     let dag = compile_physical_asap_workload(&roots).unwrap();
@@ -158,9 +158,9 @@ fn batch_shares_the_summary_and_keeps_one_root_per_query() {
 fn scalar_roots_export_in_batch_order_and_reference_nodes() {
     use asap_types::ir::scalar::ArithmeticOpKind;
     use asap_types::ir::{ExprSemantics, ScalarExpr};
-    let timed = apply_materialization_timings(
+    let timed = apply_physical_properties(
         &plan(),
-        &MaterializationAssignment::default(),
+        &PhysicalPropertiesAssignment::default(),
         &mut NodeToTimedNodeCache::new(),
     )
     .unwrap();
@@ -278,9 +278,9 @@ fn a_reference_read_twice_is_one_scalar_ref_edge() {
         child: series("a"),
     }))
     .unwrap();
-    let timed = apply_materialization_timings(
+    let timed = apply_physical_properties(
         &project,
-        &MaterializationAssignment::default(),
+        &PhysicalPropertiesAssignment::default(),
         &mut NodeToTimedNodeCache::new(),
     )
     .unwrap();
@@ -320,9 +320,9 @@ fn swapped_edge_roles_are_rejected() {
         right: scan("b"),
     }))
     .unwrap();
-    let timed = apply_materialization_timings(
+    let timed = apply_physical_properties(
         &join,
-        &MaterializationAssignment::default(),
+        &PhysicalPropertiesAssignment::default(),
         &mut NodeToTimedNodeCache::new(),
     )
     .unwrap();
@@ -392,14 +392,14 @@ fn exports_summary_over_summary_as_typed_precompute_edges() {
     }))
     .unwrap();
     let mut cache = NodeToTimedNodeCache::new();
-    let at_ingestion = MaterializationAssignment::with_default(
+    let at_ingestion = PhysicalPropertiesAssignment::with_default(
         PhysicalProperties::new(
             ExecutionTiming::IngestionTime,
             Lifetime::AcrossEvaluations(Medium::Memory),
         )
         .ok(),
     );
-    let timed = apply_materialization_timings(&root, &at_ingestion, &mut cache).unwrap();
+    let timed = apply_physical_properties(&root, &at_ingestion, &mut cache).unwrap();
     let compiled = compile_physical_asap_dag_with_node_ids(&timed).unwrap();
     assert_eq!(compiled.node_ids.node_id(&timed), Some(3));
     assert_eq!(
@@ -523,9 +523,9 @@ fn every_node_at_query_time_keeps_the_operators_and_stores_nothing() {
         .unwrap()
     };
     let materialized = workload(timed_at_ingestion());
-    let at_query_time = apply_materialization_timings(
+    let at_query_time = apply_physical_properties(
         &plan(),
-        &MaterializationAssignment::default(),
+        &PhysicalPropertiesAssignment::default(),
         &mut NodeToTimedNodeCache::new(),
     )
     .unwrap();
@@ -584,7 +584,7 @@ fn exported_with_scan(
     let timed: Vec<_> = roots
         .into_iter()
         .map(|root| {
-            apply_materialization_timings(&root, &MaterializationAssignment::default(), &mut cache)
+            apply_physical_properties(&root, &PhysicalPropertiesAssignment::default(), &mut cache)
                 .unwrap()
         })
         .map(QueryRoot::Operator)

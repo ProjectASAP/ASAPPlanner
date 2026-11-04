@@ -27,7 +27,7 @@ pub enum ErrorGeneratingPhysicalASAPMemoCandidates {
     /// Lowering the memo's candidates to operator nodes failed.
     #[error(transparent)]
     Inventory(#[from] CandidateInventoryError),
-    /// Enumerating timings and materializations failed.
+    /// Enumerating timings and lifetimes failed.
     #[error(transparent)]
     Configuration(#[from] ConfigurationError),
     /// Structural pruning found the candidates malformed.
@@ -36,7 +36,7 @@ pub enum ErrorGeneratingPhysicalASAPMemoCandidates {
 }
 
 /// Stage 2: implement every operator node of every candidate in `logical`'s
-/// memo, enumerate the timings and materializations the data and deployment
+/// memo, enumerate the timings and lifetimes the data and deployment
 /// allow (`query_time_results_retained`; no query-time raw scans unless
 /// `raw_data_retained`; no exact per-entity aggregate the executor cannot
 /// run), record which candidates may produce each input, and prune what
@@ -98,7 +98,7 @@ fn validate_candidates(physical: &PhysicalASAPMemoCandidates) -> Result<(), Stri
     for constraint in &physical.reader_constraints {
         let outputs = match constraint {
             ReaderConstraint::MinimumQueryReaders { query_outputs, .. }
-            | ReaderConstraint::HighestSharedQueryMaterialization { query_outputs, .. } => {
+            | ReaderConstraint::HighestSharedOneEvaluation { query_outputs, .. } => {
                 let outputs: Vec<_> = query_outputs.iter().flatten().copied().collect();
                 let unique: std::collections::HashSet<_> = outputs.iter().copied().collect();
                 if outputs.len() != outputs_count || unique.len() != outputs.len() {
@@ -154,7 +154,7 @@ pub mod test_support {
         build_candidate_inventory, build_with_compatible_producers_cache, CandidateInventory,
     };
     pub use super::pruning::usable_candidates;
-    pub use super::realize::{materialize_selected_candidates, restore_query_roots};
+    pub use super::realize::{realize_selected_candidates, restore_query_roots};
     pub use super::reconstruction::{
         ordered_inputs, output_contract_satisfied, paired_node_identities,
         reconstruct_selected_candidates, ReconstructedCandidates,

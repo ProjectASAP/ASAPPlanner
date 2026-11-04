@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use planner_types::ir::physical_export::PhysicalASAPDAG;
 use planner_types::ir::{
-    apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache, OperatorNode,
+    apply_physical_properties, NodeToTimedNodeCache, OperatorNode, PhysicalPropertiesAssignment,
     QueryRoot,
 };
 use std::rc::Rc;
@@ -9,9 +9,9 @@ use std::rc::Rc;
 pub fn compile_physical_asap_dag(
     root: &Rc<OperatorNode>,
 ) -> Result<PhysicalASAPDAG, Box<dyn std::error::Error>> {
-    let root = apply_materialization_timings(
+    let root = apply_physical_properties(
         root,
-        &MaterializationAssignment::default(),
+        &PhysicalPropertiesAssignment::default(),
         &mut NodeToTimedNodeCache::default(),
     )?;
     Ok(planner_types::ir::physical_export::compile_physical_asap_dag(&root)?)

@@ -1607,8 +1607,8 @@ mod compilation_tests {
         use planner_types::ir::physical_export::compile_physical_asap_workload;
         use planner_types::ir::schema::{Field, Schema};
         use planner_types::ir::{
-            apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
-            Operator, QueryRoot,
+            apply_physical_properties, NodeToTimedNodeCache, Operator,
+            PhysicalPropertiesAssignment, QueryRoot,
         };
         let minute_ms = 60_000;
         let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
@@ -1650,9 +1650,9 @@ mod compilation_tests {
         let roots: Vec<_> = windows
             .iter()
             .map(|window| {
-                let timed = apply_materialization_timings(
+                let timed = apply_physical_properties(
                     window,
-                    &MaterializationAssignment::default(),
+                    &PhysicalPropertiesAssignment::default(),
                     &mut cache,
                 )
                 .unwrap();

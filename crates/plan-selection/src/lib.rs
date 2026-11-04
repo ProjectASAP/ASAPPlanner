@@ -1120,7 +1120,7 @@ mod tests {
     /// twice. Materializing query 2's root (`OneEvaluation`) charges it once,
     /// and the nodes below it once, since they run only when it does.
     #[test]
-    fn not_materialized_shared_nodes_are_charged_per_query() {
+    fn not_kept_shared_nodes_are_charged_per_query() {
         let outer = lower_promql("sum(sum_over_time(m[1m]))", AccuracyTarget::exact());
         let inner = outer.children()[0].clone();
         let mut candidate = optimize_physical_asap(
@@ -1177,7 +1177,7 @@ mod tests {
     /// latency at both rates. Query 1 is `sum(...)` over query 2's output,
     /// so it runs longer; they repeat every 10 s and every 20 s.
     #[test]
-    fn shared_not_materialized_memory_is_held_for_each_reading_query() {
+    fn shared_not_kept_memory_is_held_for_each_reading_query() {
         let outer = lower_promql("sum(sum_over_time(m[1m]))", AccuracyTarget::exact());
         let inner = outer.children()[0].clone();
         let candidate = optimize_physical_asap(
@@ -2818,7 +2818,7 @@ mod tests {
     }
 
     /// Every whole plan of `roots`: each combination of Pass 1's choices
-    /// composed, then every materialization assignment Stage 2 offers for
+    /// composed, then every physical properties assignment Stage 2 offers for
     /// it, with unique ids.
     fn exhaustive_candidates(
         roots: &[QueryRoot],
@@ -3423,7 +3423,7 @@ mod tests {
     /// state kept with `kept` (`None`: not kept).
     fn kll_dag(kept: Option<PhysicalProperties>) -> PhysicalASAPDAG {
         use asap_types::ir::{
-            apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
+            apply_physical_properties, NodeToTimedNodeCache, PhysicalPropertiesAssignment,
         };
         let root = lower_promql(
             "quantile_over_time(0.99, m[1m])",
@@ -3461,11 +3461,10 @@ mod tests {
             .into_iter()
             .find(|n| matches!(n.asap(), Some(ASAPOp::SummaryAgg { .. })))
             .expect("a KLL state");
-        let mut assignment = MaterializationAssignment::default();
+        let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(&state, kept);
         let timed =
-            apply_materialization_timings(root, &assignment, &mut NodeToTimedNodeCache::new())
-                .unwrap();
+            apply_physical_properties(root, &assignment, &mut NodeToTimedNodeCache::new()).unwrap();
         asap_types::ir::physical_export::compile_physical_asap_workload_with_node_ids(&[
             QueryRoot::Operator(timed),
         ])
@@ -3614,8 +3613,8 @@ mod tests {
             let settings = unit_costs(|c| c.cost_per_memory_byte_second = w);
             price(dag, &recurrences(1), &data(), &settings).unwrap()
         };
-        for materialization in [at_ingestion(), at_query(), None] {
-            let dag = kll_dag(materialization);
+        for kept in [at_ingestion(), at_query(), None] {
+            let dag = kll_dag(kept);
             let build = node_of(&dag, is_build);
             let (with, without) = (cost(&dag, 1.25e-7), cost(&dag, 0.0));
             let Payload::ASAP(ASAPOp::SummaryAgg { family, .. }) =
@@ -3627,7 +3626,7 @@ mod tests {
             // each sees its series' 12 samples: the 120 000 rows of its
             // source's 1-min window (data()'s 10 000 rows per second over its
             // five sources); at ingestion time its samples are unknown.
-            let samples = if materialization == at_ingestion() {
+            let samples = if kept == at_ingestion() {
                 StateInputRows::UNKNOWN
             } else {
                 StateInputRows {
@@ -3636,7 +3635,7 @@ mod tests {
                 }
             };
             let state = 10_000.0 * summary_shape(family, samples).1 as f64;
-            let byte_seconds = if materialization == at_ingestion() {
+            let byte_seconds = if kept == at_ingestion() {
                 2.0 * state
             } else {
                 let evaluation_s = with.usage.latency_per_query[0].total_ms() / 1_000.0;
@@ -3649,7 +3648,7 @@ mod tests {
                 - without.per_node[&build].cost_per_second.unwrap();
             assert!(
                 close(term, 1.25e-7 * byte_seconds),
-                "{materialization:?}: {term} vs {}",
+                "{kept:?}: {term} vs {}",
                 1.25e-7 * byte_seconds
             );
             // The candidate's memory term covers every node's held memory,
@@ -3695,8 +3694,8 @@ mod tests {
             (query.to_string(), dag)
         })
         .collect();
-        for materialization in [at_ingestion(), at_query(), None] {
-            dags.push((format!("{materialization:?}"), kll_dag(materialization)));
+        for kept in [at_ingestion(), at_query(), None] {
+            dags.push((format!("{kept:?}"), kll_dag(kept)));
         }
         for (name, dag) in &dags {
             let (term, usage) = memory_term(dag);

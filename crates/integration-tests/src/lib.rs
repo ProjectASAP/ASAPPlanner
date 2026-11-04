@@ -100,8 +100,7 @@ pub mod physical_export {
     use asap_types::ir::physical_export::{compile_physical_asap_dag, PhysicalASAPDAG};
     use asap_types::ir::properties::ExecutionTiming;
     use asap_types::ir::{
-        apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
-        OperatorNode,
+        apply_physical_properties, NodeToTimedNodeCache, OperatorNode, PhysicalPropertiesAssignment,
     };
     use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
     use std::rc::Rc;
@@ -109,7 +108,7 @@ pub mod physical_export {
     /// Time `root` under the default assignment (no sub-DAG kept, so every
     /// summary computed at query time). Returns the timed copy; read `node.timing` on it.
     pub fn timed(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
-        timed_with(root, &MaterializationAssignment::default())
+        timed_with(root, &PhysicalPropertiesAssignment::default())
     }
 
     /// Time `root` with every sub-DAG kept at ingestion time where the DAG
@@ -117,7 +116,7 @@ pub mod physical_export {
     pub fn at_ingestion(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
         timed_with(
             root,
-            &MaterializationAssignment::with_default(
+            &PhysicalPropertiesAssignment::with_default(
                 PhysicalProperties::new(
                     ExecutionTiming::IngestionTime,
                     Lifetime::AcrossEvaluations(Medium::Memory),
@@ -129,10 +128,10 @@ pub mod physical_export {
 
     fn timed_with(
         root: &Rc<OperatorNode>,
-        assignment: &MaterializationAssignment,
+        assignment: &PhysicalPropertiesAssignment,
     ) -> Rc<OperatorNode> {
-        apply_materialization_timings(root, assignment, &mut NodeToTimedNodeCache::new())
-            .expect("materialization timing failed")
+        apply_physical_properties(root, assignment, &mut NodeToTimedNodeCache::new())
+            .expect("applying physical properties failed")
     }
 
     /// Time `root` (default assignment), then export the physical DAG.

@@ -255,16 +255,16 @@ fn current_series_topk() -> Rc<OperatorNode> {
     .unwrap()
 }
 
-/// Time `root` under the default materialization assignment, which runs the
+/// Time `root` under the default physical properties assignment, which runs the
 /// data-state and population-contract validation, and export it.
 fn compile_physical_asap_dag(root: &Rc<OperatorNode>) -> Result<(), String> {
     use asap_types::ir::{
-        apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
+        apply_physical_properties, NodeToTimedNodeCache, PhysicalPropertiesAssignment,
     };
     root.validate_structure().map_err(|e| e.to_string())?;
-    let timed = apply_materialization_timings(
+    let timed = apply_physical_properties(
         root,
-        &MaterializationAssignment::default(),
+        &PhysicalPropertiesAssignment::default(),
         &mut NodeToTimedNodeCache::new(),
     )
     .map_err(|e| format!("{e:?}"))?;
@@ -336,11 +336,11 @@ fn a_current_series_population_matches_only_its_selectors_lookback() {
 /// assignment (not kept by default), while its evaluation always
 /// runs at query time.
 #[test]
-fn population_timing_follows_its_materialization() {
+fn population_timing_follows_its_physical_properties() {
     use asap_types::ir::physical_export::compile_physical_asap_dag as export_timed;
     use asap_types::ir::properties::ExecutionTiming::{IngestionTime, QueryTime};
     use asap_types::ir::{
-        apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
+        apply_physical_properties, NodeToTimedNodeCache, PhysicalPropertiesAssignment,
     };
     use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
     let candidate = current_series_topk();
@@ -351,25 +351,22 @@ fn population_timing_follows_its_materialization() {
         unreachable!()
     };
     let on_disk = Lifetime::AcrossEvaluations(Medium::Disk);
-    let mut at_ingestion = MaterializationAssignment::default();
+    let mut at_ingestion = PhysicalPropertiesAssignment::default();
     at_ingestion.set(
         population,
         PhysicalProperties::new(IngestionTime, on_disk).ok(),
     );
     for (assignment, timing, lifetime) in [
         (
-            MaterializationAssignment::default(),
+            PhysicalPropertiesAssignment::default(),
             QueryTime,
             Lifetime::None,
         ),
         (at_ingestion, IngestionTime, on_disk),
     ] {
-        let timed = apply_materialization_timings(
-            &candidate,
-            &assignment,
-            &mut NodeToTimedNodeCache::new(),
-        )
-        .unwrap();
+        let timed =
+            apply_physical_properties(&candidate, &assignment, &mut NodeToTimedNodeCache::new())
+                .unwrap();
         let dag = export_timed(&timed).unwrap();
         let [population, evaluation] = &dag.nodes[dag.nodes.len() - 2..] else {
             unreachable!()

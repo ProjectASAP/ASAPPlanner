@@ -206,7 +206,7 @@ asap_plan_selection::select_plan(
 | `PlanOutput.selection` | `Some` with Stage 3's `Selection` under the default pass: `selected_dag`, `nodes_with_proven_non_negative_weights`, `cost` (the selected plan's `PlanCost` with its `ResourceUsage` and `cost_per_second`, `None` under cost model 3), `accepted_accuracy_per_query`, `pruned_candidates` and `search_report` |
 | `PlanOutput.tumbling_window_retention_ms` | For each tumbling-window chain the selected plan keeps beyond one evaluation, by node id, how long its tumbling windows are kept (`RealizedPlan::tumbling_window_retention_ms`) |
 | `PlanningRun` | `per_computation_candidates`, `logical_asap_candidates`, `physical_asap_candidates`, `selection`, `selected_physical_plan` (`RealizedPlan`), `selected_plan` (the roots to run) and `report` (Pass 2's and Stage 2's counts and each stage's time); `per_computation_candidates` is kept only with `PlanSearchSettings::inspect`; `asap_planner::selected_chosen_candidates` reads the selected plan as one candidate per group of `logical_asap_candidates.memo` |
-| `PlanOutput::physical_asap_dag()` | The planned queries as one `PhysicalASAPDAG`, timed with the default `MaterializationAssignment` (see [Export](#export)) |
+| `PlanOutput::physical_asap_dag()` | The planned queries as one `PhysicalASAPDAG`, timed with the default `PhysicalPropertiesAssignment` (see [Export](#export)) |
 
 Each candidate's `ResourceUsage` holds its usage without prices:
 `cpu_ops_per_second`, `scanned_bytes_per_second`, `average_memory_bytes`,
@@ -360,7 +360,7 @@ optional also does not guarantee every planning operation can succeed without it
 
 | Function/type | Purpose |
 | --- | --- |
-| `asap_types::ir::apply_materialization_timings(&root, &assignment, &mut NodeToTimedNodeCache::new())` | Write execution timing into every node from a `MaterializationAssignment` (default: all query time) and validate the data-state edges; `PlanOutput::physical_asap_dag()` applies the default to a planned workload |
+| `asap_types::ir::apply_physical_properties(&root, &assignment, &mut NodeToTimedNodeCache::new())` | Write execution timing into every node from a `PhysicalPropertiesAssignment` (default: all query time) and validate the data-state edges; `PlanOutput::physical_asap_dag()` applies the default to a planned workload |
 | `asap_types::ir::physical_export::compile_physical_asap_dag(&timed_root)` | Export a timed DAG as a `PhysicalASAPDAG`; rejects an untimed node; `compile_physical_asap_workload(&roots)` exports a batch with one root per query; `.validate()` checks it explicitly |
 | `PhysicalASAPDAG::materialized_views()` and `.raw_data_retention()` (`asap_types::ir::materialized_view`) | What a runtime keeps for an installed DAG, derived from the DAG and the `retention_ms` installation sets: each materialized view (refresh mode, coverage, inputs, the node's `retention_ms`) and how far back each raw-data source is kept for query-time scans (each query-time `Scan`'s `retention_ms`) |
 
