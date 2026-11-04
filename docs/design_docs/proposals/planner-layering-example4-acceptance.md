@@ -159,14 +159,15 @@ it.
 
 ## Devtool
 
-No `--example planner-layering-4`. Pattern A and B run as
-`planner-layering-3a` and `3b`, and Pattern B's materialization choices
-(B1, B2, and B3 with
-`--deployment-capabilities '{"query_time_results_retained": true}'`) appear in
-the `3b` document; `--cost-model` selects cost model 1, 2
-or 3 (with `--cluster-memory-bytes`, `--cluster-disk-bytes` and
-`--cluster-objective` for cost model 3). A useful id still needs:
+No Example 4 workload file. Pattern A and B run as the
+`tools/dag-viewer/workloads/planner-layering/example3a.json` and
+`example3b.json` workloads, and Pattern B's materialization choices
+(B1, B2, and B3 with a `--deployment-capabilities` file holding
+`{"query_time_results_retained": true}`) appear in the `3b` document; the
+`cost_model` of the `--cost-inputs` file selects cost model 1, 2
+or 3 (whose cluster memory, disk and objective are fields of that
+`cost_model`). A useful id still needs:
 
-* the variant (as given, monthly, at rest) selectable in `stage_pipeline`;
+* the variant (as given, monthly, at rest) selectable in `asap_planner`;
 * the viewer showing each materialized node's retention (it shows each
   node's materialization already).

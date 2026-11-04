@@ -2,7 +2,7 @@
   {
     "id": "example1",
     "name": "1 · dashboard panels",
-    "example": "planner-layering-1",
+    "workload": "workloads/planner-layering/example1.json",
     "accuracy_guarantees": "enforced",
     "file": "out/example1.json",
     "story": "Two PromQL panels over the last minute, every 10 s: Q1 the exact per-job request rate, Q2 the top-10 series per job within ε = 0.01, δ = 0.001 and 100 ms."
@@ -10,7 +10,7 @@
   {
     "id": "example3a",
     "name": "3a · historical p99 batch",
-    "example": "planner-layering-3a",
+    "workload": "workloads/planner-layering/example3a.json",
     "accuracy_guarantees": "enforced",
     "file": "out/example3a.json",
     "story": "An ad hoc batch of five p99 reports over historical intervals of 1 to 5 years, run once."
@@ -18,139 +18,9 @@
   {
     "id": "example3b",
     "name": "3b · live p99 panel",
-    "example": "planner-layering-3b",
+    "workload": "workloads/planner-layering/example3b.json",
     "accuracy_guarantees": "enforced",
     "file": "out/example3b.json",
     "story": "A p99 panel over the last 5 min, every minute, within 200 ms."
-  },
-  {
-    "id": "random-mixed-seed-862-workload-01",
-    "name": "seed-862 · workload-01",
-    "workload": "workloads/random-mixed-seed-862/workload-01.json",
-    "deployment_capabilities": {
-      "raw_data_retained": false,
-      "query_time_results_retained": false
-    },
-    "cost_model": "aws-fargate-us-east-1",
-    "accuracy_guarantees": "enforced",
-    "file": "examples/random-mixed-seed-862-workload-01.json",
-    "story": "Workload set Random mixed · seed-862, workload-01: nine repeating PromQL queries planned with the default search, as the MVP deployment (raw data not retained, AWS Fargate prices, accuracy guarantees enforced). Ten random workloads (seed 862) of nine PromQL queries each (sums, quantiles, top-k sums, top-k increases and top-k rates at several groupings) over a synthetic hierarchy of 4 regions × 5 services × 10 jobs × 50 label_0 values: 10,000 series per metric, sampled every 100 ms, lookbacks of 1 to 20 minutes."
-  },
-  {
-    "id": "random-mixed-seed-862-x5-workload-01",
-    "name": "seed-862-x5 · workload-01",
-    "workload": "workloads/random-mixed-seed-862-x5/workload-01.json",
-    "deployment_capabilities": {
-      "raw_data_retained": false,
-      "query_time_results_retained": false
-    },
-    "cost_model": "aws-fargate-us-east-1",
-    "accuracy_guarantees": "enforced",
-    "file": "examples/random-mixed-seed-862-x5-workload-01.json",
-    "story": "Workload set Random mixed · seed-862-x5, workload-01: nine repeating PromQL queries planned with the default search, as the MVP deployment (raw data not retained, AWS Fargate prices, accuracy guarantees enforced). The seed-862 workloads over five times as many series: 250 label_0 values per job, 50,000 series per metric."
-  },
-  {
-    "id": "random-mixed-seed-862-long-workload-01",
-    "name": "seed-862-long · workload-01",
-    "workload": "workloads/random-mixed-seed-862-long/workload-01.json",
-    "deployment_capabilities": {
-      "raw_data_retained": false,
-      "query_time_results_retained": false
-    },
-    "cost_model": "aws-fargate-us-east-1",
-    "accuracy_guarantees": "enforced",
-    "file": "examples/random-mixed-seed-862-long-workload-01.json",
-    "story": "Workload set Random mixed · seed-862-long, workload-01: nine repeating PromQL queries planned with the default search, as the MVP deployment (raw data not retained, AWS Fargate prices, accuracy guarantees enforced). The seed-862 workloads with three times longer lookbacks: 3 to 60 minutes."
-  },
-  {
-    "id": "memo-rangeheavy-t5-q05-q09-1h",
-    "name": "RangeHeavy T5 q0.5+q0.9 (shared sketch)",
-    "workload": "memo-examples/promql/rangeheavy-t5-q05-q09-1h.json",
-    "deployment_capabilities": {
-      "raw_data_retained": true,
-      "query_time_results_retained": false
-    },
-    "cost_model": "aws-fargate-us-east-1",
-    "accuracy_guarantees": "enforced",
-    "file": "examples/memo-rangeheavy-t5-q05-q09-1h.json",
-    "story": "Shared sketch: W-RangeHeavy template 5, quantile_over_time(q, data[1h]) for q = 0.5 and 0.9, both read one DDSketch pane chain (1 min panes over 1 h) sized for both."
-  },
-  {
-    "id": "memo-rangeheavy-t8-t5-1h",
-    "name": "RangeHeavy T8+T5 (ratio reuses its operands)",
-    "workload": "memo-examples/promql/rangeheavy-t8-t5-1h.json",
-    "deployment_capabilities": {
-      "raw_data_retained": true,
-      "query_time_results_retained": false
-    },
-    "cost_model": "aws-fargate-us-east-1",
-    "accuracy_guarantees": "enforced",
-    "file": "examples/memo-rangeheavy-t8-t5-1h.json",
-    "story": "Shared groups: W-RangeHeavy template 8, the ratio quantile_over_time(0.9, data[1h]) / quantile_over_time(0.5, data[1h]), reads the same two groups as template 5's q = 0.9 and q = 0.5 queries."
-  },
-  {
-    "id": "memo-rangeheavy-t5-q09-15m-1h",
-    "name": "RangeHeavy T5 q0.9 15m+1h (pane chain)",
-    "workload": "memo-examples/promql/rangeheavy-t5-q09-15m-1h.json",
-    "deployment_capabilities": {
-      "raw_data_retained": true,
-      "query_time_results_retained": false
-    },
-    "cost_model": "aws-fargate-us-east-1",
-    "accuracy_guarantees": "enforced",
-    "file": "examples/memo-rangeheavy-t5-q09-15m-1h.json",
-    "story": "Nested windows: W-RangeHeavy template 5, quantile_over_time(0.9, data[w]) for w = 15 min and 1 h, one DDSketch chain of 1 min panes over 1 h; the 15 min query merges its newest 15 panes."
-  },
-  {
-    "id": "memo-rangeheavy-t7-t4-1h",
-    "name": "RangeHeavy T7+T4 (widened scan)",
-    "workload": "memo-examples/promql/rangeheavy-t7-t4-1h.json",
-    "deployment_capabilities": {
-      "raw_data_retained": true,
-      "query_time_results_retained": false
-    },
-    "cost_model": "aws-fargate-us-east-1",
-    "accuracy_guarantees": "enforced",
-    "file": "examples/memo-rangeheavy-t7-t4-1h.json",
-    "story": "Widened scan: W-RangeHeavy templates 7 and 4 over 1 h; one scan of data with the job label feeds one pane chain of per-series sums, which T4 reads and T7 sums by job."
-  },
-  {
-    "id": "memo-rangeheavy-t5-q05-1h-60s-300s",
-    "name": "RangeHeavy T5 q0.5 every 60 s + 300 s (union rate)",
-    "workload": "memo-examples/promql/rangeheavy-t5-q05-1h-60s-300s.json",
-    "deployment_capabilities": {
-      "raw_data_retained": true,
-      "query_time_results_retained": false
-    },
-    "cost_model": "aws-fargate-us-east-1",
-    "accuracy_guarantees": "enforced",
-    "file": "examples/memo-rangeheavy-t5-q05-1h-60s-300s.json",
-    "story": "Union rate: W-RangeHeavy template 5, quantile_over_time(0.5, data[1h]) asked every 60 s and every 300 s (two of the 8-user dashboards): one group, run on the union of the two schedules."
-  },
-  {
-    "id": "memo-rollupheavy-t11-service-endpoint-5m",
-    "name": "RollupHeavy T11 by service + (service, endpoint) (sketch rollup)",
-    "workload": "memo-examples/sql/rollupheavy-t11-service-endpoint-5m.json",
-    "deployment_capabilities": {
-      "raw_data_retained": true,
-      "query_time_results_retained": false
-    },
-    "cost_model": "aws-fargate-us-east-1",
-    "accuracy_guarantees": "enforced",
-    "file": "examples/memo-rollupheavy-t11-service-endpoint-5m.json",
-    "story": "Sketch rollup: W-RollupHeavy template 11, distinct users over 5 min by (service, endpoint) and by (service); the coarser grouping merges the finer one's KMV states, sized for both."
-  },
-  {
-    "id": "memo-ratio-of-quantiles",
-    "name": "Ratio of quantiles (memo after each step)",
-    "workload": "memo-examples/promql/ratio-of-quantiles-5m.json",
-    "deployment_capabilities": {
-      "raw_data_retained": true,
-      "query_time_results_retained": false
-    },
-    "cost_model": "aws-fargate-us-east-1",
-    "accuracy_guarantees": "enforced",
-    "file": "examples/memo-ratio-of-quantiles.json",
-    "story": "The memo through the stages: avg by (job) (quantile_over_time(0.5, data[5m]) / quantile_over_time(0.5, data[5m]) + quantile_over_time(0.9, data[5m])) every minute, within ε = 0.01, δ = 0.001. The two equal quantiles share one group (each series' identity is a unique key); Pass 1 offers 7 candidates for each quantile group (49 candidate DAGs), Pass 2 adds pane candidates, and concrete state groups add one group per pane chain. The document's memo section lists each step's groups and candidates, the selected plan's choice and the enumerated candidate DAGs."
   }
 ]

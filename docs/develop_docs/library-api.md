@@ -297,8 +297,8 @@ let settings = CostInputs {
 let models = PlanningModels::builtin().with_cost_inputs(&settings);
 ```
 
-The `stage_pipeline` devtool runs the same stages and writes every stage's
-candidates as one JSON document; see the
+The `asap_planner` devtool runs the same stages and writes every stage's
+output as text or, with `--format json`, as one JSON document; see the
 [Stage Viewer guide](../user_guide_docs/stage-viewer.md).
 
 ## Workload inputs and defaults

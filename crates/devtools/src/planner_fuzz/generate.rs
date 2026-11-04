@@ -351,7 +351,7 @@ fn sql_interval(ms: u64) -> String {
     }
 }
 
-/// The SQL table declarations (`stage_pipeline --table` form) for `table`.
+/// The SQL table declarations (`asap_planner --sql-catalog-table` form) for `table`.
 pub fn sql_table_declaration(table: &str, columns: &[&str]) -> serde_json::Value {
     let mut fields = vec![json!({"name": "ts", "type": "timestamp", "nullable": false})];
     for column in columns {

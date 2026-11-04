@@ -102,11 +102,11 @@ tests in `planner_layering_example4.rs`.
   `DeploymentCapabilities`. Both reach the stages through `PlanningModels`;
   a stage function takes only the field it reads (Stage 2 takes
   `query_time_results_retained: bool`, not the whole struct).
-- Expose it in `stage_pipeline` and in the
+- Expose it in `asap_planner` and in the
   [Stage Viewer guide](../user_guide_docs/stage-viewer.md).
 
 Tests: a Stage 3 unit test that the check rejects exactly the candidates it
-should, and a `crates/devtools/tests/stage_pipeline.rs` test for the flag.
+should, and a `crates/devtools/tests/asap_planner.rs` test for the flag.
 
 ## 5. Add a query-language construct
 
@@ -127,6 +127,8 @@ tests (`analyze_corpora`, `variant_coverage`) show the coverage change.
 - [ ] Unit tests beside the code and one end-to-end test through the stages.
 - [ ] The design document's examples still plan the same, or the change is
       explained: run the `planner_layering_example*` tests and
-      `stage_pipeline --example planner-layering-1 --enforce-accuracy-guarantees`
-      (and `-2`, `-3a`, `-3b`).
+      `asap_planner --workload
+      tools/dag-viewer/workloads/planner-layering/example1.json --run-until stage3`
+      (and `example2.json`, with `--sql-catalog-table` for each table in
+      `tables.json`, `example3a.json` and `example3b.json`).
 - [ ] The design, developer and user docs that name what changed are updated.

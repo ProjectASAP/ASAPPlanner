@@ -4,7 +4,7 @@
 use asap_cost::CostInputs;
 use asap_devtools::memo_pricing::{price_choices, PricedChoice, SelectedBaseline};
 use asap_devtools::planner_layering_examples::example1;
-use asap_devtools::planning_stages::{lower_promql_roots, run_default_search_over};
+use asap_devtools::planning_stages::{lower_promql_roots, run_stages_until, RunUntil};
 use asap_logical_asap_optimization::enumerate;
 use asap_logical_asap_optimization::generate_dag_of_logical_memo_groups;
 use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
@@ -19,8 +19,6 @@ use asap_types::workload::{
     QueryRequirements, QueryWorkload, QueryWorkloadEntry, RepeatedDemand, RepeatingEntry,
     RepetitionInterval,
 };
-use serde_json::{json, Value};
-use std::process::Command;
 
 /// The issue's workload file: the query every minute, ε = 0.01, δ = 0.001.
 const RATIO_OF_QUANTILES_WORKLOAD: &str =
@@ -65,7 +63,7 @@ struct Planned {
     memo: Memo,
 }
 
-/// `stage_pipeline` lowers each series' identity as a column
+/// `asap_planner` lowers each series' identity as a column
 /// (`lower_promql_roots`); without it (`series_identity` false, as the
 /// memo-enumeration tests lower), the ratio's two `quantile 0.5` have no
 /// provable unique key, but they are still one group.
@@ -91,7 +89,7 @@ fn planned(workload: &PlanningWorkload, series_identity: bool) -> Planned {
     }
 }
 
-/// `stage_pipeline`'s models: the executor's summary families,
+/// `asap_planner`'s models: the executor's summary families,
 /// `settings` (accuracy guarantees ignored unless enforced).
 fn models<'a>(
     settings: &'a Settings,
@@ -110,7 +108,7 @@ fn deployment() -> DeploymentCapabilities {
     }
 }
 
-/// `stage_pipeline`'s cost inputs, and whether it ignores accuracy
+/// `asap_planner`'s cost inputs, and whether it ignores accuracy
 /// guarantees.
 struct Settings {
     cost_inputs: CostInputs,
@@ -124,14 +122,14 @@ fn settings(enforce_accuracy_guarantees: bool) -> Settings {
     }
 }
 
-/// The default search's selection of `planned`'s workload, as
-/// `stage_pipeline` runs it.
+/// `asap_planner`'s selection of `planned`'s workload.
 fn selected(planned: &Planned, models: PlanningModels<'_>) -> SelectedBaseline {
-    let run = run_default_search_over(
+    let run = run_stages_until(
         planned.roots.clone(),
         &planned.entries,
         &planned.data,
         models,
+        RunUntil::Stage3,
     )
     .unwrap();
     SelectedBaseline::of(run.run.selection.as_ref().expect("a selection"))
@@ -157,94 +155,82 @@ fn price_every_choice(
     )
 }
 
-/// `stage_pipeline --price-enumerated 200` on `args`' workload: the listed
-/// choices of the enumeration's step, each priced.
-fn priced_document(args: &[&str]) -> Value {
-    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let out = std::env::temp_dir().join(format!(
-        "stage_pipeline_{}_{call}_priced.json",
-        std::process::id()
-    ));
-    let status = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
-        .args(args)
-        .args(["--price-enumerated", "200", "--out"])
-        .arg(&out)
-        .status()
-        .unwrap();
-    assert!(status.success());
-    let document = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
-    std::fs::remove_file(out).unwrap();
-    document
-}
-
-/// Every listed choice is priced; the enumeration of its step is complete,
-/// and no valid choice is cheaper than the selected plan, whose cost is
-/// the one Stage 3 reports. Returns the choices.
-fn assert_no_listed_choice_is_cheaper(document: &Value) -> Vec<Value> {
-    let enumeration = &document["memo"]["enumeration"];
-    let step = enumeration["step"].as_str().unwrap();
-    assert_eq!(enumeration["per_step"][step]["complete"], true);
-    let choices = enumeration["choices"].as_array().unwrap().clone();
-    assert_eq!(
-        enumeration["per_step"][step]["count"].as_u64().unwrap(),
-        choices.len() as u64
+/// Every choice of `workload`'s Pass 1 memo, as `asap_planner` builds it
+/// (the enumeration is complete), priced against the plan `asap_planner`
+/// selects: none is cheaper, every valid one costs at least as much, and
+/// the others say why they were rejected. Returns the priced choices.
+fn assert_no_pass1_choice_is_cheaper(
+    workload: &PlanningWorkload,
+    enforce_accuracy_guarantees: bool,
+) -> Vec<PricedChoice> {
+    let planned = planned(workload, true);
+    let (settings, deployment) = (settings(enforce_accuracy_guarantees), deployment());
+    let models = models(&settings, &deployment);
+    let run = run_stages_until(
+        planned.roots.clone(),
+        &planned.entries,
+        &planned.data,
+        models,
+        RunUntil::Stage3,
+    )
+    .unwrap();
+    let selected = SelectedBaseline::of(run.run.selection.as_ref().expect("a selection"));
+    let memo = &run.run.per_computation_candidates.as_ref().unwrap().memo;
+    let enumeration = enumerate(memo, 100_000);
+    assert!(enumeration.complete);
+    let priced = price_choices(
+        memo,
+        &enumeration.all_chosen_candidates,
+        &planned.roots,
+        &planned.entries,
+        &planned.data,
+        models,
+        Some(selected),
     );
-    let stage3 = &document["stage3_plan_selection"];
-    let selected = &stage3["cost"]["cost_per_second"];
-    assert_eq!(
-        enumeration["priced"],
-        json!({"count": choices.len(), "cheaper_than_selected": 0, "selected_cost_per_second": selected})
-    );
-    for choice in &choices {
-        assert_eq!(choice["cheaper_than_selected"], false, "{}", choice["id"]);
-        if choice["valid"] == true {
-            assert!(choice["cost_per_second"].as_f64().unwrap() >= selected.as_f64().unwrap());
-            assert_eq!(choice["rejection"], Value::Null);
+    let selected = selected.cost_per_second.unwrap();
+    for choice in &priced {
+        assert!(!choice.cheaper_than_selected, "{choice:?}");
+        if choice.valid {
+            assert!(choice.cost_per_second.unwrap() >= selected, "{choice:?}");
+            assert_eq!(choice.rejection, None);
         } else {
-            assert!(choice["rejection"].is_string(), "{}", choice["id"]);
+            assert!(choice.rejection.is_some(), "{choice:?}");
         }
     }
-    assert!(choices.iter().any(|c| c["valid"] == true));
-    choices
+    assert!(priced.iter().any(|choice| choice.valid));
+    priced
 }
 
-/// #509 Example 1: its Pass 1 memo (the listed step) stands for 3 DAGs
+/// #509 Example 1: its Pass 1 memo stands for 3 DAGs
 /// (Q2's top-k group: exact, Count-Min with a heap and Count Sketch with a
 /// heap);
 /// Q2's summary reads miss its 100 ms latency bound, and no valid DAG is
 /// cheaper than the selection.
 #[test]
-fn example1_no_listed_choice_is_cheaper_than_the_selected_plan() {
-    let document = priced_document(&["--example", "planner-layering-1"]);
-    let choices = assert_no_listed_choice_is_cheaper(&document);
-    assert_eq!(document["memo"]["enumeration"]["step"], "pass1");
+fn example1_no_pass1_choice_is_cheaper_than_the_selected_plan() {
+    let choices = assert_no_pass1_choice_is_cheaper(&example1(), false);
     assert_eq!(choices.len(), 3);
     assert!(choices
         .iter()
-        .any(|c| c["rejection"] == "latency_bound_exceeded"));
+        .any(|c| c.rejection.as_deref() == Some("latency_bound_exceeded")));
 }
 
-/// The issue's ratio of quantiles as `stage_pipeline` lowers it (series
-/// identity: the two `quantile 0.5` share one group): no listed DAG is
-/// cheaper than the selection, with accuracy guarantees ignored (the
-/// default) or enforced. Enforced, Pass 1 prunes every summary: no query
+/// The issue's ratio of quantiles as `asap_planner` lowers it (series
+/// identity: the two `quantile 0.5` share one group): no Pass 1 DAG is
+/// cheaper than the selection, with accuracy guarantees ignored or
+/// enforced (the default). Enforced, Pass 1 prunes every summary: no query
 /// has a guarantee through `/` and `+` over a KLL rank error or a DDSketch
 /// relative one, so every listed DAG is exact and valid.
 #[test]
-fn ratio_of_quantiles_no_listed_choice_is_cheaper_than_the_selected_plan() {
-    let ignored = assert_no_listed_choice_is_cheaper(&priced_document(&[
-        "--workload",
-        RATIO_OF_QUANTILES_WORKLOAD,
-    ]));
+fn ratio_of_quantiles_no_pass1_choice_is_cheaper_than_the_selected_plan() {
+    let workload: PlanningWorkload =
+        serde_json::from_str(&std::fs::read_to_string(RATIO_OF_QUANTILES_WORKLOAD).unwrap())
+            .unwrap();
+    let ignored = assert_no_pass1_choice_is_cheaper(&workload, false);
     assert!(ignored.len() >= 25);
-    let enforced = assert_no_listed_choice_is_cheaper(&priced_document(&[
-        "--workload",
-        RATIO_OF_QUANTILES_WORKLOAD,
-        "--enforce-accuracy-guarantees",
-    ]));
+    let enforced = assert_no_pass1_choice_is_cheaper(&workload, true);
     assert!(!enforced.is_empty());
-    assert!(enforced.iter().all(|choice| choice["valid"] == true));
+    assert!(enforced.iter().all(|choice| choice.valid));
 }
 
 /// Lowered without series identity, the two `quantile 0.5` have no unique

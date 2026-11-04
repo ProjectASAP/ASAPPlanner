@@ -889,8 +889,8 @@ fn write_draft(
     text.push_str(&format!("```json\n{}\n```\n\n", workload_json(&related)));
     text.push_str(&format!(
         "```sh\n{}\n{}\n```\n\n",
-        base.stage_pipeline_command("base.json", settings),
-        related.stage_pipeline_command("related.json", settings),
+        base.asap_planner_command("base.json", settings),
+        related.asap_planner_command("related.json", settings),
     ));
     text.push_str("| Workload | Selected plan | Cost per second |\n|---|---|---|\n");
     text.push_str(&format!(

@@ -9,7 +9,7 @@
 
 ## 1. What is new
 
-1. An **end-to-end function API** to lib users, giving them a one-function-call abstraction from a prepared input to the selected Post-ASAP DAG. 
+1. An **end-to-end function API** to lib users, giving them a one-function-call abstraction from a prepared input to the selected Post-ASAP DAG.
 2. A **pluggable optimization pass**, which gives developers a replaceable optimization stage.
 
 What that buys:
@@ -33,11 +33,11 @@ PlanningWorkload ──lowering──▶ ParsedWorkload ──OptimizationPass�
 
 ## 2. The types
 
-This section introduces three key interfacing types of the unified workflow. 
+This section introduces three key interfacing types of the unified workflow.
 
 The following diagram illustrates the flow of data through the unified workflow:
 
-`e2e_plan` is the outer, light-blue box: a prepared workload goes in one end, the selected plan comes out the other. 
+`e2e_plan` is the outer, light-blue box: a prepared workload goes in one end, the selected plan comes out the other.
 Inside, the workflow is composed of 2 phases: A fixed lowering phase and a pluggable optimization phase.
 `OptimizationInput` is the intermediate type between the lowering and optimization phases.
 
@@ -131,7 +131,7 @@ tracked in #580.
 
 `run_planning` runs these steps over the query-language frontends' roots
 (Stage 0) and returns `PlanningRun`: Pass 1's candidates, the Pass 2 and
-Stage 2 outputs, the selection, the selected plan and a report; the `stage_pipeline` devtool shows them.
+Stage 2 outputs, the selection, the selected plan and a report; the `asap_planner` devtool shows them.
 
 `ReplacementStrategy` remains a concept of the legacy candidate search, which
 no pass uses any more.

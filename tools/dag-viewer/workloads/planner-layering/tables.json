@@ -1,0 +1,10 @@
+[
+  {
+    "name": "flows",
+    "time_index": 0,
+    "columns": [
+      { "name": "ts", "type": "timestamp", "nullable": false },
+      { "name": "src_ip", "type": "utf8", "nullable": false }
+    ]
+  }
+]

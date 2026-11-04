@@ -1,6 +1,6 @@
 //! The workloads of #509 Examples 1, 2, 3 and 4
 //! (`docs/design_docs/proposals/planner-layering.md`), shared by
-//! `stage_pipeline` and the planner-layering acceptance tests.
+//! `tools/dag-viewer/workloads/planner-layering/` and the planner-layering acceptance tests.
 
 use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
 use asap_types::workload::{

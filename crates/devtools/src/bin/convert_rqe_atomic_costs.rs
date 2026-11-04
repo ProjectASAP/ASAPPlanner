@@ -5,9 +5,8 @@
 // and writes plan selection's measured table: a JSON array of
 // `{"sketch": <SketchParams>, "operation": "update|merge|estimate",
 // "cpu_ns_per_operation": <ns>}`, three entries per converted row
-// (`asap_devtools::rqe_atomic_costs`). Pass it to `stage_pipeline
-// --measured-operation-costs`, or set it as
-// `CostInputs::measured_operation_costs`. Skipped rows (exact
+// (`asap_devtools::rqe_atomic_costs`). Set it as
+// `CostInputs::measured_operation_costs` (`asap_planner --cost-inputs`). Skipped rows (exact
 // accumulators, Hydra structures, unknown names) are listed on stderr.
 
 use asap_devtools::rqe_atomic_costs::convert_rqe_atomic_costs;

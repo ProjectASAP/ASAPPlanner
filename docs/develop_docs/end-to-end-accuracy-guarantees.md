@@ -43,7 +43,7 @@ The main implementation locations are:
 | Accuracy model and built-in propagation | `asap_accuracy` |
 | Candidate construction and legality filtering | `asap_aware_mapping::replacement` |
 | Parameter sizing hooks | `asap_aware_mapping::cost_model` |
-| Guarantee and rejection export | The `stage_pipeline` devtool's document (`crates/devtools/src/bin/stage_pipeline.rs`) |
+| Guarantee and rejection export | The `asap_planner` devtool's document (`crates/devtools/src/bin/asap_planner.rs`) |
 
 Read the sections below when changing one of those contracts.
 

@@ -10,13 +10,16 @@
 //! that query's snapshot. Regenerate with
 //! `UPDATE_SNAPSHOTS=1 cargo test --release -p asap-devtools --test corpus_snapshots -- --ignored`.
 //!
+//! Each query is planned by `asap_planner --run-until stage3`: one exact
+//! search over every legal tumbling-window width, with no time limit.
+//!
 //! A snapshot holds only the plan, never the search that found it: the
 //! selected plan's DAG (Stage 2 candidate `P1`) and display name, its cost
 //! and accepted accuracy per query, the materialized views, tumbling-window retention,
 //! and whether the search proved the plan optimal; for a query that does not
-//! plan, the error. Candidate ids, round and evaluation counters, timings, the
-//! Stage 1 and Stage 2 candidate lists and the memo are left out. Floats are
-//! rounded to 12 significant digits. A query with a `skip_reason` is skipped.
+//! plan, the error. Candidate ids, timings, the Stage 1 and Stage 2
+//! candidate lists and the memo are left out. Floats are rounded to 12
+//! significant digits. A query with a `skip_reason` is skipped.
 //!
 //! The same binary holds the sketch plan snapshots (`sketch_plan_snapshots.rs`),
 //! which reuse these helpers on multi-query workloads with accuracy targets.
@@ -51,23 +54,24 @@ fn workload(corpus: &Value, query: &str) -> Value {
     })
 }
 
-/// Runs `stage_pipeline` (without the memo section) on `workload`; panics
-/// (a planner crash) on failure.
+/// Runs `asap_planner` on `workload`; panics (a planner crash) on failure.
 fn plan(workload: &Value, args: &[String], scratch: &Path) -> Value {
     let input = scratch.join("workload.json");
     std::fs::write(&input, workload.to_string()).unwrap();
     let mut input_args = vec!["--workload".to_owned(), input.display().to_string()];
     input_args.extend_from_slice(args);
-    stage_pipeline(&input_args, scratch)
+    asap_planner(&input_args, scratch)
 }
 
-/// Runs `stage_pipeline` (without the memo section) with `args`, which name
-/// its input; panics (a planner crash) on failure.
-fn stage_pipeline(args: &[String], scratch: &Path) -> Value {
+/// Runs `asap_planner --run-until stage3 --format json` with `args`, which
+/// name its input (paths relative to the repository root); panics (a
+/// planner crash) on failure.
+fn asap_planner(args: &[String], scratch: &Path) -> Value {
     let output = scratch.join("document.json");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_asap_planner"));
     command
-        .arg("--no-memo")
+        .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .args(["--run-until", "stage3", "--format", "json"])
         .args(args)
         .arg("--out")
         .arg(&output);
@@ -105,7 +109,7 @@ fn rounded(value: &Value) -> Value {
     }
 }
 
-/// The stable part of a one-query `stage_pipeline` document: the query, the
+/// The stable part of a one-query `asap_planner` document: the query, the
 /// selected plan and its cost, or why there is none. See the module docs.
 fn snapshot_of(document: &Value) -> Value {
     let mut snapshot = plan_snapshot(document);
@@ -218,7 +222,7 @@ fn corpus_plans_match_snapshots() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let update = std::env::var_os("UPDATE_SNAPSHOTS").is_some();
     // Regenerated snapshots of failing queries, with their full
-    // `stage_pipeline` documents for the DAG viewer, for CI to upload.
+    // `asap_planner` documents for the DAG viewer, for CI to upload.
     // Each corpus clears only its own directory: the sketch plan test writes
     // beside them.
     let regenerated = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("corpus_snapshots");
@@ -238,7 +242,7 @@ fn corpus_plans_match_snapshots() {
             serde_json::from_str(&std::fs::read_to_string(dir.join("corpus.json")).unwrap())
                 .unwrap();
         let args: Vec<String> =
-            serde_json::from_value(corpus["stage_pipeline_args"].clone()).unwrap();
+            serde_json::from_value(corpus["asap_planner_args"].clone()).unwrap();
         // A query with a `skip_reason` is not planned.
         let queries: Vec<&Value> = corpus["queries"]
             .as_array()

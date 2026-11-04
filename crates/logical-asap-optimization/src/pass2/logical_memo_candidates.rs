@@ -22,9 +22,26 @@ pub fn generate_logical_asap_memo_candidates(
     pass1: PerComputationLogicalMemoCandidates,
     entries: &[QueryWorkloadEntry],
 ) -> Result<LogicalASAPMemoCandidates, Pass2RuleError> {
+    pass2_after_local_window_composition(pass2_local_window_composition(pass1, entries))
+}
+
+/// Pass 2's rule 1 alone: Pass 1's memo with the local tumbling-window
+/// candidates for every legal width (`asap_planner` prints this step).
+pub fn pass2_local_window_composition(
+    pass1: PerComputationLogicalMemoCandidates,
+    entries: &[QueryWorkloadEntry],
+) -> Memo {
     let mut memo = pass1.memo;
     // 1. Local window composition.
     add_local_window_composition(&mut memo, entries);
+    memo
+}
+
+/// The rest of Pass 2 on [`pass2_local_window_composition`]'s memo: rules
+/// 2–9 and `add_shared_summary_state_groups`.
+pub fn pass2_after_local_window_composition(
+    mut memo: Memo,
+) -> Result<LogicalASAPMemoCandidates, Pass2RuleError> {
     apply_sharing_rules(&mut memo)?;
     // 10. One group per shared summary build, read by its reader groups.
     add_shared_summary_state_groups(&mut memo)?;

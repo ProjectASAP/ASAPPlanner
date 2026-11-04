@@ -1,151 +1,93 @@
 # ASAPPlanner Stage Viewer
 
 A browser view of what the planner does with one workload, read from an
-`asap-stage-pipeline/v1` document written by the `stage_pipeline` devtool.
-`stage_pipeline` uses the candidate-connection MILP, the same search used by
-`plan_installable`. By default the document keeps the selected plan and its
-validation, cost, and search reports. `--exhaustive` uses the same engine to
-archive evaluated assignments within the configured time and evaluation
-budgets; only `catalog_exhausted` establishes complete traversal. The document
-shows:
+`asap-stage-pipeline/v1` document written by the `asap_planner` devtool
+(`asap_planner --workload <file> --run-until stage3 --format json`). The
+document shows:
 
 - **Stage 0**, the query-language frontends' DAG, with one root per query;
-- **Stage 1**, local computation choices and reconstructed logical plans for
-  evaluated candidate selections;
-- **Stage 2**, executable physical plans, their materialization assignments,
-  and any recorded physical-legality rejection;
-- **Stage 3**, validation, configured objective values, the selected plan,
-  and bounded-search status. A feasible selected plan need not be a proven optimum.
+- **Stage 1**, the logical candidates of the memo and the selected plan's
+  logical DAG (`L1`);
+- **Stage 2**, the selected plan as an executable physical DAG (`P1`), with
+  each node's timing and materialization, and the physical candidates Stage 2
+  pruned;
+- **Stage 3**, the selected plan's cost, the accuracy it accepted per query,
+  its materialized views and the search report.
 
 To run it, see [RUNNING.md](RUNNING.md).
 
 ## The page
 
 - **Examples**: one tab per entry of `examples.json`: #509 Examples 1, 3a
-  and 3b, workload-01 of each ASAPQuery random workload set (below), and
-  six sharing examples, each one kind of sharing on the smallest subset
-  of a paper workload template (below). `#example3b` in the URL opens that
-  example.
+  and 3b. The local server plans each one the first time it starts.
+  `#example3b` in the URL opens that example.
 - **Workload sets** (button): one table per set listed in
   `workloads/index.json`, one row per workload with its query count, query
   labels, the queries (text, how often, accuracy) and the sources they
-  read. Clicking a row plans it with the local server (`/api/plan-workload`:
-  `stage_pipeline --workload`, default search, the set's
-  `deployment_capabilities`, `cost_model` and `accuracy_guarantees`, and
-  for a SQL workload the tables in the `tables.json` next to its file).
-  Without the server, a row
-  with a precomputed `document` opens it and the others say they need the
-  server. `#workload-sets` in the URL opens the section.
+  read. Clicking a row plans it with the local server, as the set says
+  (deployment capabilities, cost model, accuracy guarantees). Without the
+  server, the rows say they need it. `#workload-sets` in the URL opens the
+  section.
 - **Query workload** with each query's accuracy, latency, recurrence,
   predictability and range evaluation, and a line that counts the
   candidates at each stage.
 - **Data workload** beside it: the arrival and one row per declared source
-  with exactly the facts `SourceFacts` has (series count, metric type,
+  with exactly the facts it declares (series count, metric type,
   non-negative values, sample interval, stream norms, distinct bound,
-  distinct values per label, distinct values per label set) and
-  the queries whose text names it, plus the deployment capabilities the
-  run planned with.
-- **Stage 3 · plans by cost**: every candidate the document shows. First the
-  selected plan, then the other valid ones cheapest first, then the
-  rejected ones with their reasons (or "not judged" when plan selection
-  failed with an error), then the Stage 2 pruned ones and the
-  Stage 1 candidates that did not compose, each with its reason. The header
-  says how many candidates Stage 1 enumerated, how many the document shows
-  when it caps them, and why Stage 1 or plan selection failed when it did.
-  Clicking a row shows it in the lanes. The header also names the search and
-  what it checked, why the workload was searched as one when it was
-  (`searched_as_one`, e.g. "searched as one: not in joint space") and the
-  classes of interchangeable queries that took one shared choice
-  (`interchangeable_queries`, e.g. "interchangeable queries: (p50, p90,
-  p99)"); under the default search the list has the selected plan
-  and the rejections Stage 3 recorded, which are not clickable.
+  distinct values per label, distinct values per label set) and the queries
+  whose text names it, plus the deployment capabilities the run planned
+  with.
+- **Stage 3 · plans by cost**: the selected plan, then the Stage 2 pruned
+  candidates and the Stage 1 candidates that did not compose, each with its
+  reason. The header counts the candidates, names the search and its report
+  (status, cost lower bound, MILP size, times), says whether accuracy
+  guarantees were enforced or ignored, shows the run's warnings, and says
+  why Stage 1 or plan selection failed when it did.
 - **Three lanes**, stacked top to bottom so each is as wide as the page:
-  Stage 0, the chosen Stage 1 candidate, and its Stage 2 candidate
-  with each node's timing (also its fill: green at ingestion time, orange
-  at query time; the border keeps its category) and Stage 3 cost (`× n` when a node that is not
-  materialized is computed once per reader). Each lane is the whole
-  workload's DAG, so a node shared by several queries appears once. Nodes
-  are data sources, relational operators or summary operators; summary
-  builds print their configuration (for example `CmsWithHeap · depth 7 ·
-  heap 100 · width 272`) and whether there is one per group, one per
-  series, or one shared instance. A standalone scalar query (`time()`,
-  `scalar(v)`, `1 + 2`) is a dashed `Scalar` node over the nodes it reads.
-  Query roots have a thick border. A node that several queries' roots reach
-  says `shared ×n`. A `SummaryTumblingWindowChain` is one node (`30 tumbling windows × 20 s`); clicking
-  it draws its tumbling windows, newest first, each a `TimeShift` by its offset (none
-  for the newest), a `TimeRange` of one tumbling window and the tumbling window's build with its
-  window (`window t−40 s … t−20 s`), and clicking a tumbling window folds them back.
-  This is display only: the document keeps the chain.
-- **Enumerated DAGs**, between the Stage 0 and Stage 1 lanes, shown only
-  when the document has `memo.enumeration`: the complete candidate DAGs the
-  memo stands for. The header counts them after each memo step (`Stage 0: 1 ·
-  Pass 1: 49 · Pass 2: ≥ 1000`; `≥` and the limit when counting stopped), says how
-  many of the enumerated step's DAGs the document lists, and, when they were
-  priced, how many are cheaper than the selected plan. Each row names the
-  groups whose candidate differs from the selected plan's choice
-  (`G7 → #2 CountSketch+heap (pass1)`: group, candidate index, its label and
-  origin when the step's memo lists the candidate; a group a choice does not
-  name takes candidate 0). The selected choice is over the last memo step;
-  when an earlier step was enumerated, the header says so and only each
-  row's own groups are compared. A row also shows `accuracy budget parts > 1`
-  when a chosen candidate is sized for a part of its budget, and, when priced, its cost and
-  validity (`✗ invalid` with the cause). A row cheaper than the selected
-  plan is red; the selected choice says `✓ selected`. Clicking a row draws
-  its DAG in the Stage 1 lane; the document holds every listed choice's
-  composed DAG, so the page composes nothing. Such a DAG has no Stage 2
-  plan, so the Stage 2 lane is cleared. Its roots are its root groups, in
-  increasing group id; the lane draws each as the root of the queries in its
-  group's `roots_of`, or labels it `root group #n` when that cannot be
-  matched (the enumerated step's memo is not in the document). When the enumerated step is earlier than the last
-  one, no row is marked selected.
+  Stage 0, the Stage 1 candidate, and its Stage 2 plan with each node's
+  timing (also its fill: green at ingestion time, orange at query time) and
+  Stage 3 cost (`× n` when a node that is not materialized is computed once
+  per reader). Each lane is the whole workload's DAG, so a node shared by
+  several queries appears once and says `shared ×n`. Summary builds print
+  their configuration (for example `CmsWithHeap · depth 7 · heap 100 ·
+  width 272`) and whether there is one per group, one per series, or one
+  shared instance. A standalone scalar query (`time()`, `scalar(v)`,
+  `1 + 2`) is a dashed `Scalar` node over the nodes it reads. Query roots
+  have a thick border. A `SummaryTumblingWindowChain` is one node (`6
+  tumbling windows × 10 s`); clicking it draws its tumbling windows, newest
+  first, each with its window (`window t−20 s … t−10 s`), and clicking a
+  tumbling window folds them back.
 - **Highlighting**: the **highlight query** menu dims, in every lane, what
   that query's root does not reach. Clicking a node dims everything but
-  what it reads and what reads it, directly or through other nodes; clicking
-  the background goes back to the query's highlight.
+  what it reads and what reads it; clicking the background goes back to the
+  query's highlight.
 - **Materialized views** under the Stage 2 lane: the selected plan's
-  materialized views as `plan_installable` gives them, one row per Stage 2 node: its
-  coverage definition, operator and summary parameters, tumbling windows (`30 × 20 s`
-  for a tumbling-window chain), how it is refreshed, its retention, the Stage 3 cost and the
-  queries that read it. A chain's row lists its installed tumbling windows (node id,
-  tumbling window, window, retention) under **installed**. Clicking a row selects its
-  node in the Stage 2 lane. Stage 3 predicts no
-  per-node state size, so the table has none. The lane's header also shows
-  the shown candidate's Stage 3 usage.
-- **Search summary**, under the materialized views: candidate-connection reports
-  show the incumbent cost, available lower bound and gap, refinement count,
-  and solver status. Historical documents may also contain a legacy memo-plan
-  view of shared units. Rendering that archived format does not enable a second
-  planner implementation; new documents use the candidate-connection report.
-- **Memo**, when the document has a `memo` section: the memo after each
-  step, one tab per step (`Stage 0`, `Stage 1, Pass 1`, `Stage 1, Pass 2`;
-  a step production did not run is not there), opening on
-  the last. Each memo group is a box `G<id> · <label>` with its candidate
-  count (`745 candidates (64 listed)` when the document lists only some) and
-  the queries it is the root of; its implementation candidates sit inside
-  it, bordered by origin (Pass1, SharedBuild, SummaryResult, SummaryInput,
-  TumblingWindows, Rollup, TopKReuse, WidenedScans), with a double border and
-  `✚ new` when the step added them. An edge goes from each candidate to
-  each child group it reads (at Stage 0, which has no candidates, from the
-  group). Readers sit above what they read. A group listing more than 12
-  candidates is drawn as one node per origin with its count (`360 TumblingWindows`);
-  clicking a count lists them, clicking the group folds them back. On the
-  last tab the selected plan's candidates (`selected_choice`) are filled
-  green with `✓ selected`, and so are the edges they read along. The header
-  counts the step's groups and candidates and what it added over the
-  previous step. Clicking a candidate shows its own nodes in the details,
-  down to the nodes of the child groups it reads; clicking a group shows
-  its node, its child and parent groups, queries and counts per origin.
-  The **highlight query** menu also dims the groups that query does not
-  reach. Documents without `memo` show no Memo panel.
-- **Details**: click a node for its operator, the queries reaching it, timing, materialization,
-  output schema, guarantee and Stage 3 cost; click an edge for its schema
-  and data state.
+  materialized views, one row per Stage 2 node: its coverage definition,
+  operator and summary parameters, tumbling windows (`6 × 10 s` for a
+  tumbling-window chain), how it is refreshed, its retention, the Stage 3
+  cost and the queries that read it. A chain's row lists its installed
+  tumbling windows under **installed**. Clicking a row selects its node in
+  the Stage 2 lane.
+- **Memo**: the memo after each planner step, one tab per step (`Stage 0`,
+  `Stage 1, Pass 1`, local window composition, `Stage 1, Pass 2`), opening
+  on the last. Each memo group is a box `G<id> · <label>` with its candidate count
+  and the queries it is the root of; its candidates sit inside it, bordered
+  by origin, marked `✚ new` when the step added them. A group with more
+  than 12 candidates is drawn as one node per origin with its count;
+  clicking a count lists them. On the last tab the selected plan's
+  candidates are filled green with `✓ selected`. Clicking a candidate or a
+  group shows its nodes, children, parents and queries in the details.
+- **Details**: click a node for its operator, the queries reaching it,
+  timing, materialization, output schema, guarantee and Stage 3 cost; click
+  an edge for its schema and data state.
 
-Other documents open with **Open stage document or workload…**, by
-dropping a file on the page, or with `?doc=<path>` for a file served next
-to `index.html`. A `PlanningWorkload` JSON file (one with a
-`query_workload`) is planned by the local server instead, with the default
-deployment capabilities and cost model.
+Other documents open with **Open stage document or workload…**, by dropping
+a file on the page, or with `?doc=<path>` for a file served next to
+`index.html`. A `PlanningWorkload` JSON file (one with a `query_workload`)
+is planned by the local server instead, with the default deployment
+capabilities and cost model. The viewer checks a document before showing
+it and lists the problems instead when a check fails. Documents written by
+earlier versions of the planner devtools remain readable.
 
 ## Workload sets
 
@@ -160,325 +102,33 @@ deployment capabilities and cost model.
              "cost_model": "aws-fargate-us-east-1",
              "accuracy_guarantees": "enforced",
              "workloads": [{ "id": "workload-01", "file": "random-mixed-seed-862/workload-01.json",
-                             "query_labels": ["q01-sum-fine", "..."],
-                             "document": "examples/random-mixed-seed-862-workload-01.json" }] }] }
+                             "query_labels": ["q01-sum-fine", "..."] }] }] }
 ```
 
-`deployment_capabilities`, `cost_model` (`usage-over-time`,
-`aws-fargate-us-east-1` or `provisioned-capacity`), `accuracy_guarantees`
-(`ignored`, the default, or `enforced`: the server then passes
-`--enforce-accuracy-guarantees`), `query_labels` (one per
-query, in entry order) and `document` (a precomputed stage document) are
+`deployment_capabilities`, `cost_model` (`usage-over-time` or
+`aws-fargate-us-east-1`: the cost inputs in `cost-inputs/<name>.json`), `accuracy_guarantees` (`ignored`, the default,
+or `enforced`) and `query_labels` (one per query, in entry order) are
 optional. A PlanningWorkload declares no SQL tables, so a set of SQL
-workloads puts them in `workloads/<set>/tables.json`, a JSON array of
-`stage_pipeline --table` declarations (`{"name": "flows", "time_index": 0,
-"columns": [{"name": "ts", "type": "timestamp", "nullable": false}, ...]}`);
-the page sends them with the workload (`/api/plan-workload`'s `tables`) and
-the server passes one `--table` each. An `examples.json` entry planned from
-a workload file reads the same file. A new set is a directory of files and
-an index entry; no code changes. `crates/devtools/tests/stage_pipeline.rs` checks that every file
-parses and passes `PlanningWorkload::validate`.
+workloads puts them in `workloads/<set>/tables.json`, a JSON array of table
+declarations (`{"name": "flows", "time_index": 0, "columns": [{"name":
+"ts", "type": "timestamp", "nullable": false}, ...]}`), which are planned
+with the workload. A new set is a directory of files and an index entry.
 
 The three ASAPQuery sets (seed-862, seed-862-x5, seed-862-long; 10
 workloads each, PromQL queries only) were converted from ASAPQuery's random
 workload manifests with ε = 1 − the accuracy SLA and δ = 0.3, and are
 planned as the MVP deployment: raw data not retained, Fargate prices,
-accuracy guarantees enforced.
+accuracy guarantees enforced. Stage 3 searches exactly, so planning one of
+them can take several minutes.
 
-## Query editor
-
-With the local server running, **Query editor** plans SQL and PromQL
-queries with one ε for every query. SQL queries read the tables declared in
-the editor (one column per line, `name TYPE [NOT NULL]`, and an optional
-time column). The editor also declares the source facts plan
-selection prices from (series, rows/s and rows held for every source; an
-empty field declares nothing). The server runs `stage_pipeline` with
-`--sql`, `--promql`, `--name`, `--table`, `--series-count`,
-`--rows-per-second` and `--rows-held`, and the page shows the result, or
-the error naming the source and the fact a plan needed but nobody
-declared. Accuracy guarantees
-are ignored, `stage_pipeline`'s default.
+`memo-examples/` holds smaller `PlanningWorkload` files, each the smallest
+subset of an ASAPQuery paper workload template that shows one kind of
+sharing; open one with **Open stage document or workload…**.
 
 ## Document format
 
-`stage_pipeline` writes:
-
-```json
-{
-  "format": "asap-stage-pipeline/v1",
-  "search": "default",
-  "accuracy_guarantees": "ignored",
-  "workload": { "queries": [{ "id": "q1", "language": "promql", "text": "...",
-                "requirements": { "accuracy": { "max_error": 0.0, "failure_probability": 0.0, "accuracy_scope": "whole_result" },
-                                  "repeat_interval_ms": 10000 },
-                "recurrence": { "repeated": { "fixed_interval": 10000 } },
-                "predictability": { "predictable": { "known_at": null } } }],
-                "data_workload": { "arrival": { "ingesting": { "rows_per_second": 200000.0 } },
-                                   "sources": { "data": { "series_count": 10000, "metric_type": "gauge", "values_non_negative": true,
-                                                          "sample_interval": 100, "stream_norms": null,
-                                                          "max_distinct_per_evaluation": null } } } },
-  "deployment_capabilities": { "supported_summaries": [{ "family": "Kll", "readouts": ["Quantile"] }, "..."], "raw_data_retained": true,
-                               "query_time_results_retained": false },
-  "stage0_query_language_frontends": { "dag": "<flat logical DAG>" },
-  "stage1_logical_asap_optimization": {
-    "combinations": 9, "capped": false,
-    "pruned_candidates": [{ "group": 3, "candidate": "DDSketch", "reason": "UnsupportedByDeployment" }],
-    "candidates": [{ "id": "L1", "display_name": "...", "dag": "<flat logical DAG>" },
-                   { "id": "L2", "display_name": "...", "error": "..." }]
-  },
-  "stage2_physical_asap_optimization": {
-    "candidates": [{ "id": "P1", "from_logical": "L1", "display_name": "...", "dag": "<PhysicalASAPDAG>" }],
-    "pruned": [{ "from_logical": "L3", "display_name": "...", "reason": "..." }],
-    "pruned_candidates": [{ "group": 1, "operator_node": 0, "operator": "Scan", "implementation_root": true,
-                            "timing": "query_time", "materialization": "NotMaterialized",
-                            "reason": "RawDataNotRetained" }]
-  },
-  "stage3_plan_selection": {
-    "selected_dag": { "candidate_of_node": [3, 7], "edges": [{ "producer": 0, "consumer": 1, "input": 0 }],
-                      "node_of_output_reference": [1] },
-    "nodes_with_proven_non_negative_weights": [],
-    "cost": { "cost_per_second": 7.9, "cpu_core_seconds_per_second": 0.0041,
-              "cost_unit": "cost_per_second", "source": "...",
-              "usage": { "cpu_ops_per_second": 4100210.0, "scanned_bytes_per_second": 38400000.0,
-                         "average_memory_bytes": 0.0, "peak_memory_bytes": 16481088,
-                         "disk_bytes": 192000000, "peak_cpu_cores": 2,
-                         "latency_per_query": [{ "compaction_ms": 0.0, "query_ms": 33.2 }] },
-              "per_node": { "<node id>": { "operator": "Scan", "timing": "query_time",
-                                            "cpu_core_seconds_per_second": 0.0012,
-                                            "cost_per_second": 2.3, "multiplier": 1, "detail": "...",
-                                            "price_source": "analytical" } } },
-    "accepted_accuracy_per_query": [{ "target_metric": null, "accepted_metric": "rank", "sketches": ["Kll"],
-                                      "summary": "metric not set; accepted rank (Kll)" }],
-    "pruned_candidates": [],
-    "search_report": { "status": "optimal", "cost_lower_bound_per_second": 7.9,
-                       "milp_variables": 812, "milp_constraints": 1490,
-                       "model_construction_ms": 12, "solver_ms": 40, "validation_ms": 95 },
-    "tumbling_window_retention_ms": { "<node id>": 600000 },
-    "materialized_views": [{ "node_id": 2, "refresh": "at_ingestion",
-                             "coverage": { "definition_id": "98f2b35a…", "selection": ["..."] },
-                             "inputs": { "raw_data_windows": [{ "source": { "TimeSeries": { "metric": "data" } },
-                                                                "end_offset_ms": 0, "width_ms": 20000 }],
-                                         "materialized_views": [] },
-                             "retention_ms": 600000,
-                             "stage2_node_id": 1, "installed_position": 0, "installed_count": 30 }]
-  },
-  "planning_report": { "pass1_ms": 3.1, "memo_groups": 12, "logical_candidates": 30,
-                       "operator_nodes": 40, "physical_candidates": 96, "physical_producer_links": 120,
-                       "stage2_pruned_candidates": 4, "pass2_ms": 1.2, "stage2_ms": 3.4, "stage3_ms": 150.0,
-                       "search_report": { "...": "..." } },
-  "reference_pricing": {
-    "cost_per_candidate": { "E1-0": { "...": "as stage3_plan_selection.cost" } },
-    "accepted_accuracy_per_candidate": { "E1-0": [{ "...": "as accepted_accuracy_per_query" }] },
-    "selected_candidate": "E1-0",
-    "pruned_candidates": [{ "candidate": "E2-0", "cause": "costlier", "reason": "..." }],
-    "pruned_candidates_not_enumerated": [],
-    "pruned_candidate_count_by_cause": { "accuracy_target_missed": 533, "costlier": 12 },
-    "tumbling_window_retention_ms": {}
-  }
-}
-```
-
-- A flat logical DAG lists its nodes in id order; an operator names its
-  inputs by node id. `roots` has one root per query: `{"Operator": id}`, or
-  `{"Scalar": expr}` for a standalone scalar query.
-- A `PhysicalASAPDAG` has node ids, an edge list, operator roots in `roots`,
-  and standalone scalar queries in `scalar_roots` as `[query position,
-  expr]`.
-- A query's `requirements.accuracy` is its accuracy target's own JSON
-  (`accuracy_metric` omitted when not set, `failure_probability` omitted without a
-  δ). An approximate target without a metric also has
-  `requirements.default_metric`, the metric the query's result is naturally
-  stated in (null for a quantile), for display only.
-- `stage3_plan_selection` is Stage 3's `Selection`: the selected DAG
-  (`selected_dag`: `candidate_of_node`, the Stage 2
-  candidate each node runs, one node per run; `edges`, node to node, per
-  `input`; `node_of_output_reference`), the nodes whose count-min weights
-  it proved non-negative, the selected plan's `cost`, the
-  accuracy it accepted per query (the metric the target set, null when not
-  set, and the metric Stage 3 accepted, null for an exact output), the
-  candidates it pruned and its `search_report`. The selected plan is shown
-  as the Stage 1 candidate `L1` and the Stage 2 candidate `P1`.
-- A `cost` has its resource `usage` and its `cost_per_second` under the
-  run's cost model (`--cost-model`): null under cost model 3, which has no
-  prices; a node's is null under cost models 2 and 3, which price or limit
-  the whole plan's peaks.
-- `planning_report` is the facade's: each stage's time, Pass 2's and
-  Stage 2's counts, and Stage 3's search report.
-- `reference_pricing` (only with `--exhaustive`) is the reference pricer
-  over the enumerated memo choices (`E<n>` logical, `E<n>-<k>` physical),
-  with keys named as Stage 3's `Selection` names its fields: per shown
-  candidate its cost (`cost_per_candidate`) and accepted accuracy
-  (`accepted_accuracy_per_candidate`), its pick `selected_candidate`, the
-  `pruned_candidates` and `pruned_candidate_count_by_cause`. The page lists
-  these candidates after `P1`, with the reference pricer's pick marked.
-- `deployment_capabilities` repeats the run's `--deployment-capabilities`
-  inputs with defaults filled in. Each stage's
-  `pruned_candidates` lists what that stage removed, one entry per removed
-  candidate with its memo `group` and `reason` (`PruneReason`): Pass 1's
-  ways to compute a measure (`candidate`), and Stage 2's physical
-  candidates, keyed by `operator_node` (index into Stage 2's operator
-  nodes), `timing` and `materialization`, with the node's
-  `operator` label and whether it is an `implementation_root`. The Memo
-  view's group panel lists both for the selected group;
-  `deployment_capabilities` is not shown.
-- A node's `per_node` entry holds its `operator` (as the measured cost
-  table names it), `timing` (`ingestion_time` or `query_time`), its
-  predicted CPU in core-seconds per second (`cpu_core_seconds_per_second`),
-  `cost_per_second`, `multiplier`, `detail` and `price_source` (`measured`
-  when `--measured-operation-costs` priced it, else `analytical`), the
-  names `plan_installable`'s predicted usage gives them. A candidate's
-  `cpu_core_seconds_per_second` is its nodes' sum. These CPU fields are
-  report-only: prices do not read them back.
-- Each `reference_pricing.pruned_candidates` entry names its `candidate`
-  and has a `reason` and a `cause`: a failed check
-  (`accuracy_target_missed`,
-  `count_min_weights_not_proven_non_negative`,
-  `no_accuracy_guarantee`, `latency_bound_exceeded`,
-  `latency_over_repeat_interval`, `over_cluster_capacity`,
-  `cost_not_representable`) or a loss under
-  the cost model (`costlier`, `slower`, `more_memory`,
-  `tied_lost_on_enumeration_order`).
-- `accuracy_guarantees` is `ignored` (`stage_pipeline`'s default: Stage 3
-  accepts every query output regardless of its guarantee and compares the
-  candidates on cost alone; every accepted output has
-  `accepted_regardless_of_guarantee: true`, and `guarantee_check_rejection`
-  names the cause the guarantee check would have rejected it with, or is
-  null when its guarantee met the target) or
-  `enforced` (`--enforce-accuracy-guarantees`, as `plan_installable` plans
-  with the default `CostInputs`). The Stage 3 header shows it;
-  an older document without it is still valid, any other value is not.
-- `search` is `candidate-connections`, or `exhaustive` when the document
-  also holds the reference enumeration (`reference_pricing`): Pass 2's
-  memo choices, each implemented by Stage 2 with every
-  materialization assignment and all priced by the reference pricer.
-  `--max-combinations` bounds the choices enumerated.
-- `stage3_plan_selection.search_report` reports how the search ended
-  (`optimal`; documents from before the MILP ran without a time limit may
-  say `deadline_reached`), its cost lower bound when it has one,
-  the MILP's size and the model, solver and validation times. Historical
-  committed documents with the earlier Stage 3 section (`costs`,
-  `selected`, `rejected`, `search`) remain readable.
-- `stage3_plan_selection.warnings` holds one-line warnings about the
-  workload and the selected plan: a PromQL query applying `rate`,
-  `increase` or `irate` to a metric the data workload declares a gauge
-  (prefixed with the query id; the query still plans as written), and the
-  plan's peak memory when over 10^12 bytes and the cost model declares no
-  memory capacity; absent when there are none. The candidate list's header
-  shows them.
-- `reference_pricing.pruned_candidates_not_enumerated` lists the reference
-  pricer's rejections that name no enumerated candidate. The page lists
-  them after the other rows, not clickable.
-- `workload.data_workload` is the `DataWorkload` the run planned with
-  (`arrival`, and per source exactly the `SourceFacts` fields). Labels,
-  label hierarchies and per-label cardinalities are not declarable there,
-  so the page shows none. Each query's `recurrence` and `predictability` are
-  its workload entry's own JSON.
-- `materialized_views` are the selected plan's materialized views from
-  `installable_plan_of` (what `plan_installable` returns): the node id in
-  the installable DAG (tumbling-window chains expanded into tumbling windows), `refresh`
-  (`at_ingestion` or `on_first_read`), `coverage`, `inputs` and
-  `retention_ms`. `stage2_node_id` is the node of the selected Stage 2
-  candidate it is installed from (null when Stage 3 recorded no cost to map
-  it by), `installed_position` its position among that node's installed
-  nodes (a tumbling-window chain's tumbling windows, newest first) and `installed_count` their
-  number. Empty without a selection; `materialized_views_error` says why when
-  the plan is not installable.
-- `pruned_candidate_count_by_cause` counts the pruned candidates by cause,
-  over every enumerated candidate; the header lists the counts.
-- Under `--exhaustive` the document shows at most `--max-displayed`
-  physical candidates: the selected one, the other valid ones cheapest
-  first, then the rejected ones taking each cause in turn, and the Stage 1
-  candidates they come from.
-- When Pass 1 fails, Stage 1 has `error` and no candidates. When Stage 3
-  selects no plan, `stage3_plan_selection` has `selected_dag: null` and
-  `error`; when the reference pricer selects none, its
-  `selected_candidate` is null, with the `pruned_candidates` or `error`.
-- `memo` (left out with `--no-memo`) is the memo the search built:
-  `nodes`, one node table for
-  the whole section (each distinct logical node once, as in a flat logical
-  DAG: children are indices into the table and come before their parents;
-  `memoNodeDag` in `stages.js` rebuilds the flat DAG below any of them);
-  `steps`, one per memo step
-  (`stage0`: the frontends' DAG hash-consed; `pass1`: Pass 1's output;
-  `pass2`: Pass 2's output, the memo Stage 2 implements), each with
-  its groups (`id`, `label`, `children`, `parents`, `queries`, `roots_of`,
-  `node`, the group's node in `nodes`) and their candidates (`candidate_count`,
-  `candidate_count_by_origin`, `candidates_capped`, and the first
-  `--max-memo-candidates`, default 64, under `candidates`: `index`,
-  `implements`, `children`, `origin`, `accuracy_budget_parts`, `added`, `label`,
-  `node`, and `group_of_node`: the `nodes` indices below it that are a
-  child group's node, to that group's id); `selected_choice`, the selected plan's
-  candidate index per group of the last step (null with
-  `selected_choice_unavailable` when it has none); and `enumeration`: each
-  step's number of candidate DAGs up to `--memo-enumeration-limit` (default
-  1000) under `per_step`, and the first `--max-enumerated` (default 200)
-  `choices` of `step` (the last step enumerated completely within that
-  many, else the last step), each composed into its `roots` (indices into
-  `nodes`, one per root group; null with `error` when it does not compose).
-  `examples/memo-ratio-of-quantiles.json` has one (2.9 MB, about 2.2 MB of
-  it the node table's 1,099 nodes).
-
-The viewer checks the document before showing it: one root per query, node,
-edge and root references, `scalar_roots` positions, `from_logical`, the Stage 3 ids, costs and
-`per_node` keys, the data workload's shape, and each materialized view's fields
-and `stage2_node_id`, and, when present, `memo.enumeration`: per-step
-counts, the listed choices' ids, group → candidate maps, `roots` (one per
-root group, each a `memo.nodes` index) and the optional pricing fields. Documents written before these
-sections are still shown. If a check fails, it shows the problems instead.
-
-## Files
-
-- `index.html`, `app.js`: the page.
-- `stages.js`: document checks, the candidate list, lane elements and node
-  labels, tumbling-window-chain expansion, the queries reaching each node and the
-  highlighted neighborhoods; no DOM. `stages.test.mjs`: its Node tests.
-- `enumeration.js`: the Enumerated DAGs panel and the checks of
-  `memo.enumeration`. `enumeration.test.mjs`: its Node tests, over
-  `test-fixtures/memo-enumeration-small.json` (a hand-written priced memo
-  for Example 1).
-- `memo.js`: the Memo view: checks of `memo.nodes`, `memo.steps` and
-  `memo.selected_choice`, the per-step diff, a step's elements with preset
-  positions, a candidate's own nodes (DOM-free), and the panel that draws
-  them. `memo.test.mjs`: its Node tests, over the hand-written
-  `test-fixtures/memo-small.json` (a three-step memo over Example 1's two
-  queries) and the committed planner memo example when present.
-- `node-style.js`: the operator-kind table (`KIND_CATEGORY_JSON`, checked
-  against the IR by `crates/devtools/tests/viewer_contract.rs`) and the
-  node groups.
-- `editor.js`: the query editor.
-- `workload-sets.js`: the workload-set browser.
-- `workloads/`: the workload sets (`index.json` and the `PlanningWorkload`
-  files).
-- `server.py`: serves the page, writes missing example documents into
-  `out/` (git-ignored), and plans editor queries.
-- `examples.json`: the example tabs. A built-in example (`example`) is
-  written into `out/`; a workload example (`workload`, with its
-  `deployment_capabilities` and `cost_model`) is committed under
-  `examples/`. The committed documents are
-  `examples/planner-layering-example1.json` and workload-01 of each
-  ASAPQuery set, the six sharing examples and the memo example. Historical snapshots retain
-  their original plans; `crates/devtools/tests/stage_pipeline.rs` checks input
-  consistency and newly generated plan validity and materialized-view linkage.
-  Timed searches are not required to reproduce snapshot IDs or prove optimality.
-  `server.py --regenerate` rewrites the snapshots.
-  An entry's `accuracy_guarantees` (`ignored` when absent) says whether it
-  is planned with `--enforce-accuracy-guarantees`; every current entry
-  enforces, since each story is about which plans meet their accuracy
-  target, and a workload example matches its set.
-- `memo-examples/`: the sharing examples' `PlanningWorkload` files
-  (`promql/`, and `sql/` with its `tables.json`). Each is the smallest
-  subset of an ASAPQuery paper workload template that shows one kind of
-  sharing, with the template's data facts (W-RangeHeavy: `data`, 10^4
-  series sampled every 5 ms, 2 × 10^6 rows/s; W-RollupHeavy: `http`, 10^4
-  series, every 5 ms, at most 10^6 distinct values per evaluation), raw
-  data retained, AWS Fargate prices and accuracy guarantees enforced. They
-  are planned with the default search; their documents are committed under
-  `examples/`.
-  `ratio-of-quantiles-5m.json` (one ratio of two equal per-series quantiles
-  plus a third, every minute, ε = 0.01, δ = 0.001) shows the `memo`
-  section: the memo after each step.
-- `cytoscape.min.js`, `dagre.min.js`, `cytoscape-dagre.js`: vendored, so the
-  page works offline.
+The `asap-stage-pipeline/v1` document is described in the header comment of
+`crates/devtools/src/bin/asap_planner.rs`.
 
 ## Tests
 
@@ -486,21 +136,10 @@ From `tools/dag-viewer`:
 
 ```bash
 python3 -m unittest test_viewer test_server
+node --test *.test.mjs
 ```
 
-`stages.js` and `memo.js` also have Node tests, which load the elements into the vendored
-cytoscape (headless), from the repository root:
-
-```bash
-node --test tools/dag-viewer/stages.test.mjs tools/dag-viewer/enumeration.test.mjs tools/dag-viewer/memo.test.mjs
-```
-
-The JavaScript runs in V8 through `py_mini_racer` (`pip install
-py-mini-racer==0.6.0`) against a stub DOM, so no browser is needed; without
-it those tests are skipped. The scalar-query and `/api/plan` tests need a
-built `stage_pipeline` (`cargo build -p asap-devtools --bin
-stage_pipeline`). The Rust side:
-
-```bash
-cargo test -p asap-devtools --test devtools -- viewer_contract:: stage_pipeline::
-```
+The Python tests run the page's JavaScript through `py_mini_racer` (`pip
+install py-mini-racer==0.6.0`); without it those tests are skipped. Tests
+over a planned document need a built `asap_planner` (`cargo build -p
+asap-devtools --bin asap_planner`) and are skipped without it.

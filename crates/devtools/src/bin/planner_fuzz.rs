@@ -16,9 +16,9 @@
 //
 // `--relations` takes relation names or the letters a–o (default: all);
 // `--search` is `candidate-connections` (the default search) or
-// `exhaustive`; `--ignore-accuracy-guarantees` plans as `stage_pipeline`
-// does by default (guarantees are enforced here by default, as
-// `plan_installable` does). A relation is violated when it misses by more
+// `exhaustive`; `--ignore-accuracy-guarantees` accepts every output
+// regardless of its accuracy guarantee (guarantees are enforced by
+// default, as `plan_installable` does). A relation is violated when it misses by more
 // than max(`--relative-tolerance` (default 0.01) × cost,
 // `--absolute-tolerance` (default 1e-6)). `--max-shrink-attempts` (default
 // 60) bounds the checks one shrink runs. Each case and each shrink runs in

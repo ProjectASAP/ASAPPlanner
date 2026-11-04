@@ -37,7 +37,7 @@ use crate::pass::{
 /// How the facade searches.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PlanSearchSettings {
-    /// Keep Pass 1's output for inspection (`stage_pipeline`, the DAG
+    /// Keep Pass 1's output for inspection (`asap_planner`, the DAG
     /// viewer): [`PlanningRun::per_computation_candidates`]. Default off:
     /// production planning copies no memo.
     pub inspect: bool,
@@ -63,6 +63,9 @@ pub enum SelectionError {
     /// Stage 2 could not build the plan Stage 3 selected.
     #[error("building the selected plan: {0}")]
     Realization(PhysicalCandidateError),
+    /// The run stopped before plan selection (`asap_planner --run-until`).
+    #[error("plan selection did not run")]
+    NotRun,
 }
 
 /// What the facade did: each stage's counts and time.

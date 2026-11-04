@@ -4,7 +4,7 @@
 //!
 //! [`run_stages`] runs the real stages through
 //! `asap_devtools::planning_stages::run_planning_stages`, the pipeline
-//! `stage_pipeline` also runs; the example workloads come from
+//! `asap_devtools` provides; the example workloads come from
 //! `asap_devtools::planner_layering_examples`. The functions under "Pending adapters" read properties the IR
 //! cannot express yet (sliding and EH window summaries) or derive what it
 //! does not record (retention). They return today's

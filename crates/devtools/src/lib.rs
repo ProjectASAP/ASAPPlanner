@@ -13,7 +13,7 @@
 //! other's parser.
 //!
 //! [`planning_stages`] and [`planner_layering_examples`] hold the one
-//! pipeline and the #509 example workloads that `stage_pipeline` and the
+//! pipeline and the #509 example workloads that `asap_planner` and the
 //! planner-layering acceptance tests share; [`candidate_labels`] names the
 //! candidates for the viewer document. [`corpora`] splits the checked-in
 //! query corpora and holds their SQL catalogs. [`rqe_atomic_costs`] converts
@@ -27,6 +27,7 @@ pub mod memo_pricing;
 pub mod planner_fuzz;
 pub mod planner_layering_examples;
 pub mod planning_stages;
+pub mod planning_stages_text;
 pub mod rqe_atomic_costs;
 
 use asap_frontend_promql::lower_promql_query_workload;

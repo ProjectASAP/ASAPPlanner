@@ -408,7 +408,7 @@ all; the memo has 259 candidates.
   `accuracy_budget_parts` 2 KLL),
   336 `TumblingWindows` and 345 `SharedBuild`. G6 has 3: `Pass1`, `SummaryResult` and
   `SharedBuild`.
-- Enumeration stops at `stage_pipeline`'s default limit of 1,000 candidate
+- Enumeration stops at the former `stage_pipeline`'s default limit of 1,000 candidate
   DAGs (`--memo-enumeration-limit`), as it does after step 3.
 
 | After | Groups | Candidates for memo groups | Candidate DAGs |
@@ -420,7 +420,7 @@ all; the memo has 259 candidates.
 
 These numbers are the production planner's, read from the stage-pipeline
 document `tools/dag-viewer/examples/memo-ratio-of-quantiles.json` (made by
-`stage_pipeline` from `tools/dag-viewer/memo-examples/promql/ratio-of-quantiles-5m.json`,
+the former `stage_pipeline` from `tools/dag-viewer/memo-examples/promql/ratio-of-quantiles-5m.json`,
 with accuracy guarantees enforced and the `aws-fargate-us-east-1` cost model).
 `crates/integration-tests/tests/memo_enumeration.rs` lowers the query as
 production does (with the series-identity column) and reads the memo from the
@@ -581,7 +581,7 @@ nodes are kept whole, so `operator_node` indexes the output's
 candidates are attached to the memo groups, and records a `PrunedCandidate`
 like every other Pass 1 prune.
 
-`stage_pipeline` writes both lists as `pruned_candidates` under
+`asap_planner` writes both lists as `pruned_candidates` under
 `stage1_logical_asap_optimization` and `stage2_physical_asap_optimization`,
 and the viewer's Memo view lists a group's entries in its group panel.
 

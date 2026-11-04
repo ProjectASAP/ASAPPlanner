@@ -77,7 +77,7 @@ fn with_queries(queries: &[&str], interval_ms: u32) -> PlanningWorkload {
 }
 
 /// The frontend's roots, each with the series-identity column, as
-/// `Stage1ToStage3Pass` and `stage_pipeline` lower a PromQL workload.
+/// `Stage1ToStage3Pass` and `asap_planner` lower a PromQL workload.
 fn production_roots(workload: &PlanningWorkload) -> Vec<QueryRoot> {
     lower_promql_roots(workload).unwrap()
 }

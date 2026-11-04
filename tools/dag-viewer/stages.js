@@ -1,5 +1,5 @@
 // DOM-free logic of the Stage Viewer: checking an `asap-stage-pipeline/v1`
-// document (written by the `stage_pipeline` devtool), the Stage 3 candidate
+// document (written by the `asap_planner` devtool), the Stage 3 candidate
 // list, and each stage's DAG as cytoscape elements with readable labels.
 // app.js draws them; test_viewer.py runs this file headless.
 const STAGE_PIPELINE_FORMAT = 'asap-stage-pipeline/v1';
@@ -51,6 +51,19 @@ function upgradeTumblingWindowNames(value, parentKey) {
 // the window-composition step is dropped (its candidates are in Pass 2's
 // output, marked by their origin), `concrete_states` becomes `pass2`.
 // Remove once no document the viewer must open predates the change.
+// A stage `run_until` stopped before, or one after a failed stage, is null;
+// the viewer shows it empty.
+function fillStagesNotRun(doc) {
+  if (!doc || typeof doc !== 'object') return doc;
+  const empty = {
+    stage1_logical_asap_optimization: { combinations: 0, capped: false, pruned_candidates: [], candidates: [] },
+    stage2_physical_asap_optimization: { candidates: [], pruned: [], pruned_candidates: [] },
+    stage3_plan_selection: { selected_dag: null, materialized_views: [] },
+  };
+  Object.entries(empty).forEach(([stage, section]) => { if (doc[stage] === null) doc[stage] = section; });
+  return doc;
+}
+
 function upgradeMemoSteps(doc) {
   const stage1 = doc && doc.stage1_logical_asap_optimization;
   if (stage1 && has(stage1, 'pass1_pruned') && !has(stage1, 'pruned_candidates')) {

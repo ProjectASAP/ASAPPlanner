@@ -2,15 +2,15 @@
   "deployments": {
     "raw_retained": [
       "--deployment-capabilities",
-      "{\"raw_data_retained\":true,\"query_time_results_retained\":false}",
-      "--cost-model",
-      "aws-fargate-us-east-1"
+      "crates/devtools/tests/sketch_plan_snapshots/deployments/raw-retained.capabilities.json",
+      "--cost-inputs",
+      "tools/dag-viewer/cost-inputs/aws-fargate-us-east-1.json"
     ],
     "mvp": [
       "--deployment-capabilities",
-      "{\"raw_data_retained\":false,\"query_time_results_retained\":false}",
-      "--cost-model",
-      "aws-fargate-us-east-1"
+      "crates/devtools/tests/sketch_plan_snapshots/deployments/mvp.capabilities.json",
+      "--cost-inputs",
+      "tools/dag-viewer/cost-inputs/aws-fargate-us-east-1.json"
     ]
   },
   "workloads": [

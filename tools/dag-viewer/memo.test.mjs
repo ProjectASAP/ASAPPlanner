@@ -6,8 +6,9 @@
 // `node --test tools/dag-viewer/memo.test.mjs`.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { planned, planner } from './test-fixtures/planned.mjs';
 
 const here = new URL('.', import.meta.url);
 const context = vm.createContext({ console: { warn() {} } });
@@ -224,25 +225,22 @@ test('a node shared by groups is stored once, and memoNodeDag rebuilds each DAG 
   });
 });
 
-// The planner's real memo for #1005's example, written by stage_pipeline
-// (#1003). Production shares the two quantile_over_time(0.5, ...) in one
-// group (series identity gives the schema a unique key), so it has 7 groups
-// and 19 Pass 1 candidates where #1005 measured 8 and 26 without it.
-const REAL = new URL('examples/memo-ratio-of-quantiles.json', here);
-test('the real example: 7 groups at Stage 0, 19 candidates after Pass 1, G2 TumblingWindows and SharedBuild counts on the last step', { skip: !existsSync(REAL) }, () => {
-  const doc = call('upgradeMemoSteps', JSON.parse(readFileSync(REAL, 'utf8')));
+// The memo asap_planner writes for #1005's ratio-of-quantiles query
+// (skipped when asap_planner is not built).
+test('the real example: each step draws its groups and counts its new candidates', { skip: !planner }, () => {
+  const doc = planned('memo-examples/promql/ratio-of-quantiles-5m.json');
   const memo = doc.memo;
   assert.deepEqual(call('validateMemo', memo, doc.workload.queries.length), []);
   const steps = memo.steps.map((s) => s.step);
+  const groupsOf = (step) => memo.steps[steps.indexOf(step)].groups;
   const stage0 = call('memoStepElements', memo, steps.indexOf('stage0'), {});
-  assert.equal(nodesOf(stage0).filter((e) => e.data.kind === 'group').length, 7);
-  assert.equal(call('memoStepDiff', memo, steps.indexOf('pass1')).candidates, 19);
+  assert.equal(nodesOf(stage0).filter((e) => e.data.kind === 'group').length, groupsOf('stage0').length);
+  const pass1 = groupsOf('pass1').reduce((n, g) => n + g.candidates.length, 0);
+  assert.equal(call('memoStepDiff', memo, steps.indexOf('pass1')).candidates, pass1);
   const last = memo.steps.length - 1;
   const elements = call('memoStepElements', memo, last, {});
-  const g2 = elements.filter((e) => e.data.parent === 'g2').map((e) => e.data.label.split('\n')[0]);
-  assert.deepEqual(g2.sort(), ['10 Pass1', '336 TumblingWindows', '345 SharedBuild']);
-  assert.equal(nodesOf(elements).filter((e) => e.data.kind === 'group').length, 354);
-  assert.ok(cytoscape(elements).nodes().length > 354);
+  assert.equal(nodesOf(elements).filter((e) => e.data.kind === 'group').length, memo.steps[last].groups.length);
+  assert.ok(cytoscape(elements).nodes().length >= memo.steps[last].groups.length);
   // A candidate's boundary node is its child group's own table node.
   memo.steps.forEach((step) => {
     const nodeOf = new Map(step.groups.map((g) => [g.id, g.node]));

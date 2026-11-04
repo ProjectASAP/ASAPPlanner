@@ -253,7 +253,7 @@ pub struct EnumeratedChoice {
     pub roots: Result<Vec<QueryRoot>, String>,
 }
 
-/// `stage_pipeline --exhaustive`: the first `max_choices` choices of the
+/// The reference enumeration: the first `max_choices` choices of the
 /// Pass 2 memo (`run.logical_asap_candidates`), each composed,
 /// implemented by Stage 2 with every materialization assignment, and all
 /// their physical plans priced together by the reference pricer.

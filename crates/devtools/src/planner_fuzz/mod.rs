@@ -59,7 +59,7 @@ use crate::planning_stages::{
 use generate::QuerySpec;
 
 /// The language of a fuzz workload: one per workload, as one
-/// `stage_pipeline --workload` file has.
+/// `asap_planner --workload` file has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Language {
@@ -121,7 +121,7 @@ impl FuzzQuery {
 }
 
 /// A workload the tester plans: queries in one language, the data facts,
-/// the SQL tables they read (`stage_pipeline --table` objects) and whether
+/// the SQL tables they read (`asap_planner --sql-catalog-table` objects) and whether
 /// the deployment keeps raw data.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FuzzWorkload {
@@ -142,7 +142,7 @@ pub struct FuzzWorkload {
 }
 
 impl FuzzWorkload {
-    /// The `PlanningWorkload` (`stage_pipeline --workload` file) of these
+    /// The `PlanningWorkload` (`asap_planner --workload` file) of these
     /// queries.
     pub fn planning_workload(&self) -> PlanningWorkload {
         PlanningWorkload {
@@ -217,28 +217,34 @@ impl FuzzWorkload {
         }
     }
 
-    /// The `stage_pipeline` invocation that plans this workload, saved as
-    /// `workload_file`, with `settings`.
-    /// Its output document is `<workload_file stem>.out.json`.
-    pub fn stage_pipeline_command(&self, workload_file: &str, settings: &FuzzSettings) -> String {
-        let mut command = format!(
-            "cargo run -p asap-devtools --bin stage_pipeline -- --workload {workload_file}"
-        );
-        for table in &self.tables {
-            command.push_str(&format!(" \\\n  --table '{table}'"));
+    /// The `asap_planner` invocation (a bash command) that plans this
+    /// workload, saved as `workload_file`, with `settings`' accuracy
+    /// guarantees. `asap_planner` has no exhaustive search, so under
+    /// `--search exhaustive` the command starts with a comment saying it
+    /// may not reproduce. Its output document is `<workload_file stem>.out.json`.
+    pub fn asap_planner_command(&self, workload_file: &str, settings: &FuzzSettings) -> String {
+        let mut command = String::new();
+        if matches!(settings.search, SearchKind::Exhaustive) {
+            command.push_str(
+                "# asap_planner runs the candidate-connection search, not the \
+                 exhaustive one; it may not reproduce this.\n",
+            );
         }
-        if settings.enforce_accuracy_guarantees {
-            command.push_str(" --enforce-accuracy-guarantees");
+        command.push_str(&format!(
+            "cargo run -p asap-devtools --bin asap_planner -- --workload {workload_file} \
+             --run-until stage3 --format json"
+        ));
+        for table in &self.tables {
+            command.push_str(&format!(" \\\n  --sql-catalog-table '{table}'"));
+        }
+        if !settings.enforce_accuracy_guarantees {
+            command.push_str(" --ignore-accuracy-guarantees");
         }
         if !self.raw_data_retained || self.query_time_results_retained {
             command.push_str(&format!(
-                " --deployment-capabilities '{{\"raw_data_retained\": {}, \"query_time_results_retained\": {}}}'",
+                " --deployment-capabilities <(echo '{{\"raw_data_retained\": {}, \"query_time_results_retained\": {}}}')",
                 self.raw_data_retained, self.query_time_results_retained
             ));
-        }
-        match settings.search {
-            SearchKind::CandidateConnections => {}
-            SearchKind::Exhaustive => command.push_str(" --exhaustive"),
         }
         let stem = workload_file.strip_suffix(".json").unwrap_or(workload_file);
         command.push_str(&format!(" --out {stem}.out.json"));
@@ -248,7 +254,7 @@ impl FuzzWorkload {
 
 /// Workloads read from a seed file: a `PlanningWorkload` JSON (its
 /// repeating queries), with the SQL tables of a `tables.json` (a JSON array
-/// of `--table` objects) in the same directory, or an object
+/// of `--sql-catalog-table` objects) in the same directory, or an object
 /// `{"workload": <PlanningWorkload>, "tables": [...]}`.
 pub fn read_seed_file(path: &std::path::Path) -> Result<FuzzWorkload, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -302,11 +308,11 @@ pub fn read_seed_file(path: &std::path::Path) -> Result<FuzzWorkload, String> {
     })
 }
 
-/// Which search plans each workload (`stage_pipeline`'s choices).
+/// Which search plans each workload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SearchKind {
-    /// Joint candidate-connection planning (`stage_pipeline`'s default).
+    /// Joint candidate-connection planning, the facade's search.
     CandidateConnections,
     /// Every generated candidate (`--exhaustive`), up to
     /// [`EXHAUSTIVE_MAX_COMBINATIONS`].
@@ -409,13 +415,12 @@ impl Planner {
             Language::Promql => lower_promql_roots(&planning),
             Language::Sql => {
                 let tables: Vec<String> = workload.tables.iter().map(Value::to_string).collect();
-                lower_sql_roots(&planning, &sql_catalog(&tables)?)
+                lower_sql_roots(&planning, &sql_catalog(&tables)?.0)
             }
         }
     }
 
-    /// `workload` planned by the configured search, as `stage_pipeline`
-    /// plans it.
+    /// `workload` planned by the configured search.
     pub fn plan(&mut self, workload: &FuzzWorkload) -> Result<Rc<Planned>, String> {
         let key = serde_json::to_string(workload).expect("a workload serializes");
         if let Some(planned) = self.cache.get(&key) {

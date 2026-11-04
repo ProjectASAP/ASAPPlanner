@@ -10,24 +10,26 @@
 //! diff.
 //!
 //! `tests/sketch_plan_snapshots/manifest.json` lists each workload by id:
-//! its `workload` file (or built-in `example`) relative to the repository
-//! root, SQL `tables`, `deployment`, and whether accuracy guarantees are
-//! `ignored` (enforced otherwise). `<id>.json` beside it is its snapshot,
+//! its `workload` file relative to the repository root, SQL `tables`,
+//! `deployment` (the `asap_planner` arguments of its deployment
+//! capabilities and cost inputs, files in `deployments/`), and whether
+//! accuracy guarantees are `ignored` (enforced otherwise). `<id>.json` beside it is its snapshot,
 //! the corpus snapshot of the selected plan plus every query's text and the
 //! search status. Workloads copied from elsewhere live in `workloads/`.
 //! Regenerate with
 //! `UPDATE_SNAPSHOTS=1 cargo test --release -p asap-devtools --test corpus_snapshots -- --ignored sketch_plans_match_snapshots`.
 //!
-//! Planning has no time limit, so every workload must end with status
-//! `optimal`; any other ending fails instead of being recorded.
+//! Each workload is planned by `asap_planner --run-until stage3`. Planning
+//! has no time limit, so every workload must end with status `optimal`; any
+//! other ending fails instead of being recorded.
 
 use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
 use super::{
-    first_difference, first_differing_path, plan_snapshot, proven_optimal, rounded, search_status,
-    stage_pipeline,
+    asap_planner, first_difference, first_differing_path, plan_snapshot, proven_optimal, rounded,
+    search_status,
 };
 
 fn repository_root() -> PathBuf {
@@ -38,23 +40,19 @@ fn snapshots_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/sketch_plan_snapshots")
 }
 
-/// The `stage_pipeline` arguments for `entry` under `manifest`'s deployments.
+/// The `asap_planner` arguments for `entry` under `manifest`'s deployments.
 fn arguments(manifest: &Value, entry: &Value) -> Vec<String> {
     let path = |key: &str| repository_root().join(entry[key].as_str().unwrap());
     let mut args = Vec::new();
-    match (entry["workload"].as_str(), entry["example"].as_str()) {
-        (Some(_), None) => args.extend([
-            "--workload".to_owned(),
-            path("workload").display().to_string(),
-        ]),
-        (None, Some(example)) => args.extend(["--example".to_owned(), example.to_owned()]),
-        _ => panic!("{entry}: give exactly one of `workload` and `example`"),
-    }
+    args.extend([
+        "--workload".to_owned(),
+        path("workload").display().to_string(),
+    ]);
     if entry.get("tables").is_some() {
         let tables: Vec<Value> =
             serde_json::from_str(&std::fs::read_to_string(path("tables")).unwrap()).unwrap();
         for table in tables {
-            args.extend(["--table".to_owned(), table.to_string()]);
+            args.extend(["--sql-catalog-table".to_owned(), table.to_string()]);
         }
     }
     let deployment = entry["deployment"].as_str().unwrap();
@@ -63,8 +61,8 @@ fn arguments(manifest: &Value, entry: &Value) -> Vec<String> {
             .unwrap_or_else(|_| panic!("{entry}: unknown deployment {deployment}"));
     args.extend(deployment);
     match entry["accuracy_guarantees"].as_str() {
-        None | Some("enforced") => args.push("--enforce-accuracy-guarantees".to_owned()),
-        Some("ignored") => {}
+        None | Some("enforced") => {}
+        Some("ignored") => args.push("--ignore-accuracy-guarantees".to_owned()),
         Some(other) => {
             panic!("{entry}: accuracy_guarantees must be enforced or ignored, not {other}")
         }
@@ -72,7 +70,7 @@ fn arguments(manifest: &Value, entry: &Value) -> Vec<String> {
     args
 }
 
-/// The stable part of a `stage_pipeline` document: every query's text, the
+/// The stable part of an `asap_planner` document: every query's text, the
 /// selected plan (see [`plan_snapshot`]) and how its search ended.
 fn snapshot_of(document: &Value) -> Value {
     let mut snapshot = plan_snapshot(document);
@@ -125,7 +123,7 @@ fn sketch_plans_match_snapshots() {
 
     for entry in entries {
         let id = entry["id"].as_str().unwrap();
-        let document = stage_pipeline(&arguments(&manifest, entry), &scratch);
+        let document = asap_planner(&arguments(&manifest, entry), &scratch);
         if !proven_optimal(&document) {
             failures.push(format!(
                 "{id}: the plan is not proven optimal (status {})",
@@ -190,9 +188,12 @@ fn manifest_entries_build_their_arguments() {
             }
         }
         let args = arguments(&manifest, entry);
+        for path in args.iter().skip(2).filter(|arg| arg.ends_with(".json")) {
+            assert!(repository_root().join(path).is_file(), "{entry}: no {path}");
+        }
         assert_eq!(
-            args.iter().any(|a| a == "--enforce-accuracy-guarantees"),
-            entry["accuracy_guarantees"] != json!("ignored")
+            args.iter().any(|a| a == "--ignore-accuracy-guarantees"),
+            entry["accuracy_guarantees"] == json!("ignored")
         );
     }
 }

@@ -123,18 +123,7 @@ footer { color: var(--muted); font-size: 12px; max-width: 100ch; }
 .btn:hover { background: var(--panel-2); }
 .btn[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
 .drop-active { outline: 2px dashed var(--accent); outline-offset: -8px; }
-.editor { padding: 12px; display: grid; gap: 10px; }
-.editor h3 { margin: 0; font-family: var(--font-display); font-size: 14px; font-weight: 600; }
-.editor .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
-.editor input, .editor select, .editor textarea { font: inherit; font-size: 13px; color: var(--fg); background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; min-width: 0; }
-.editor textarea { font-family: var(--font-mono); font-size: 12.5px; resize: vertical; }
-.editor label { font-size: 13px; color: var(--muted); display: flex; gap: 6px; align-items: center; }
-#plannerRows, #schemaRows { display: grid; gap: 6px; }
-.plannerRow { display: grid; grid-template-columns: auto 130px 90px 150px minmax(0, 1fr) auto; gap: 6px; align-items: center; }
-.plannerSchemas { display: flex; flex-wrap: wrap; gap: 2px 8px; font-size: 12px; color: var(--muted); }
-.schemaRow { display: grid; grid-template-columns: auto 150px minmax(0, 1fr) 110px auto; gap: 6px; align-items: center; }
 .hint-inline { color: var(--muted); font-size: 12px; }
-@media (max-width: 820px) { .plannerRow, .schemaRow { grid-template-columns: minmax(0, 1fr); } }
 .workload-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 560px); gap: 12px; align-items: start; }
 @media (max-width: 1100px) { .workload-row { grid-template-columns: minmax(0, 1fr); } }
 .table-wrap { overflow-x: auto; padding: 6px 12px 10px; }
@@ -156,34 +145,9 @@ tr.clickable:focus-visible td { outline: 2px solid var(--accent); outline-offset
     <div class="toolbar">
       <button class="btn" id="openFile" type="button" title="A stage document is shown; a PlanningWorkload JSON is planned by the local server">Open stage document or workload…</button>
       <input id="fileInput" type="file" accept="application/json" hidden />
-      <button class="btn" id="editorToggle" type="button" aria-pressed="false">Query editor</button>
       <button class="btn" id="setsToggle" type="button" aria-pressed="false" hidden>Workload sets</button>
       <span class="status" id="docName"></span>
     </div>
-    <section class="panel" id="editor" aria-labelledby="editor-title" hidden>
-      <div class="panel-head"><h2 id="editor-title">Plan SQL and PromQL queries</h2><span class="eyebrow">needs the local server (server.py)</span></div>
-      <div class="editor">
-        <div class="row"><h3>Input tables</h3><button class="btn" id="schemaAdd" type="button">Add table</button>
-          <span class="hint-inline">One column per line: name TYPE [NOT NULL]. PromQL schemas are inferred from metric usage.</span></div>
-        <div id="schemaRows"></div>
-        <div class="row"><h3>Queries</h3><button class="btn" id="plannerAdd" type="button">Add query</button></div>
-        <div id="plannerRows"></div>
-        <div class="row">
-          <label>ε <input id="plannerMaxError" type="number" min="0.000001" max="0.999999" step="0.001" value="0.01" /></label>
-          <label title="The error metric ε is stated in. Default: the query's own metric; a quantile query must name one.">metric <select id="plannerAccuracyMetric">
-            <option value="">default</option>
-            <option value="absolute">Absolute</option>
-            <option value="relative">Relative</option>
-            <option value="rank">Rank</option>
-          </select></label>
-          <label title="Declared series (PromQL) or groups of rows (SQL) of every source the queries read. Pricing uses only declared facts.">series <input id="plannerSeriesCount" type="number" min="1" step="1" value="" placeholder="e.g. 1000" /></label>
-          <label title="Declared rows arriving per second over all sources; empty: not declared (data at rest).">rows/s <input id="plannerRowsPerSecond" type="number" min="0" step="any" value="" /></label>
-          <label title="Declared rows each source holds at rest; bounds a scan with no window. Empty: not declared.">rows held <input id="plannerRowsHeld" type="number" min="1" step="1" value="" /></label>
-          <button class="btn" id="plannerRun" type="button">Plan</button>
-          <span class="status" id="plannerStatus">Plans the checked queries as one workload.</span>
-        </div>
-      </div>
-    </section>
     <section class="panel" id="workloadSets" aria-labelledby="sets-title" hidden>
       <div class="panel-head"><div class="set-head"><h2 id="sets-title">Workload sets</h2>
         <label><span class="eyebrow">set</span> <select id="setPick" aria-label="Workload set"></select></label></div>
@@ -195,7 +159,7 @@ tr.clickable:focus-visible td { outline: 2px solid var(--accent); outline-offset
     <div class="workload-row">
       <div style="display:grid; gap:6px; min-width:0">
         <div class="eyebrow">Query workload</div>
-        <div class="queries" id="queries"><span class="status">Pick an example or a workload set, open a stage document or a workload, or plan queries in the editor.</span></div>
+        <div class="queries" id="queries"><span class="status">Pick an example or a workload set, or open a stage document or a workload.</span></div>
       </div>
       <section class="panel" aria-labelledby="data-title">
         <div class="panel-head"><h2 id="data-title">Data workload</h2><span class="eyebrow" id="dataArrival"></span></div>
@@ -272,7 +236,7 @@ tr.clickable:focus-visible td { outline: 2px solid var(--accent); outline-offset
     </div>
   </div>
 
-  <footer>Documents are written by the <code>stage_pipeline</code> devtool (<code>asap-stage-pipeline/v1</code>). Statistics in the examples are illustrative, so only each example's ranking is meaningful.</footer>
+  <footer>Documents are written by the <code>asap_planner</code> devtool (<code>asap-stage-pipeline/v1</code>). Statistics in the examples are illustrative, so only each example's ranking is meaningful.</footer>
 </div>
 
 <script src="cytoscape.min.js"></script>
@@ -283,7 +247,6 @@ tr.clickable:focus-visible td { outline: 2px solid var(--accent); outline-offset
 <script src="enumeration.js"></script>
 <script src="memo.js"></script>
 <script src="app.js"></script>
-<script src="editor.js"></script>
 <script src="workload-sets.js"></script>
 </body>
 </html>
