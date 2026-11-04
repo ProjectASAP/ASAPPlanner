@@ -142,7 +142,7 @@ fn composed_summary_candidates(
                     &entries,
                     data,
                     models.deployment_capabilities.query_time_results_retained,
-                    &mut |_, _, _| asap_types::physical::Materialization::NotMaterialized,
+                    &mut |_, _, _| Some(asap_types::physical::Materialization::NotMaterialized),
                 )
                 .unwrap()
                 .expect("supported physical computation");
@@ -201,7 +201,7 @@ fn shared_kll_candidate(workload: &PlanningWorkload) -> asap_types::physical::Ph
             &workload.query_workload.entries().collect::<Vec<_>>(),
             workload.data_workload.as_ref().unwrap(),
             false,
-            &mut |_, _, _| Materialization::NotMaterialized,
+            &mut |_, _, _| Some(Materialization::NotMaterialized),
         )
         .unwrap()
         .unwrap();

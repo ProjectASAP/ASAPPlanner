@@ -116,7 +116,7 @@ fn physical_candidates(
                 &workload.query_workload.entries().collect::<Vec<_>>(),
                 workload.data_workload.as_ref().unwrap(),
                 false,
-                &mut |_, _, _| Materialization::NotMaterialized,
+                &mut |_, _, _| Some(Materialization::NotMaterialized),
             )
             .unwrap()
             .expect("query-time fixture is executable");

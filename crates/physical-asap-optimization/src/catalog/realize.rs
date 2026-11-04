@@ -74,6 +74,7 @@ pub fn materialize_selected_candidates(
                 } else {
                     PhysicalCandidateError::InvalidOrUnsupported(message)
                 });
+                return None;
             }
             Some(requested)
         },

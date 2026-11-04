@@ -748,8 +748,8 @@ fn reads_only_time_series(node: &OperatorNode) -> bool {
     }
 }
 
-/// The phase (modulo `tumbling_window_width_ms`, nonzero) of every evaluation
-/// of `demand`, if known. A plain fixed interval has cadence but no phase, so
+/// The phase, modulo `tumbling_window_width_ms` (which must be nonzero), of
+/// every evaluation of `demand`, if known. A plain fixed interval has cadence but no phase, so
 /// it is unknown. An explicit schedule has one only when every timestamp in
 /// it has the same phase.
 fn plan_tumbling_window_phase(
@@ -853,7 +853,7 @@ fn ingestion_eligibility(
                 }
                 continue;
             };
-            if phase_ms % tumbling_window_width_ms != 0 {
+            if phase_ms != 0 {
                 return Err(Why::TumblingWindowsOffPhase);
             }
         }
@@ -1164,22 +1164,16 @@ fn rebuilt(
 }
 
 /// Stage 2 internals that other crates' tests call: building one physical
-/// candidate for a chosen assignment, implementing one candidate's
-/// operators, and the tumbling-window-coverage check.
+/// candidate for a chosen assignment, the catalog steps, and the timing split.
 #[cfg(feature = "test-support")]
 pub mod test_support {
-    use asap_types::ir::{OperatorNode, QueryRoot};
-    use asap_types::physical::Materialization;
+    use asap_types::ir::QueryRoot;
     use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
     use crate::{PhysicalASAPOptimizationError, PhysicalWorkloadPlan};
 
     pub use crate::catalog::test_support as catalog;
     pub use crate::split_by_timing::split_shared_by_timing;
-
-    /// A choice per materialization candidate; see `optimize_physical_asap_chosen`.
-    pub type ChooseMaterialization<'a> =
-        dyn FnMut(*const OperatorNode, &[usize], &[Materialization]) -> Materialization + 'a;
 
     /// See `optimize_physical_asap_chosen` in this crate.
     pub fn optimize_physical_asap_chosen(
@@ -1188,7 +1182,7 @@ pub mod test_support {
         entries: &[QueryWorkloadEntry],
         data: &DataWorkload,
         query_time_results_retained: bool,
-        choose: &mut ChooseMaterialization<'_>,
+        choose: &mut crate::ChooseMaterialization<'_>,
     ) -> Result<Option<PhysicalWorkloadPlan>, PhysicalASAPOptimizationError> {
         crate::optimize_physical_asap_chosen(
             from_logical,
@@ -1196,7 +1190,7 @@ pub mod test_support {
             entries,
             data,
             query_time_results_retained,
-            &mut |logical, readers, options| Some(choose(logical, readers, options)),
+            choose,
         )
     }
 }
@@ -2418,28 +2412,26 @@ mod tests {
         ));
     }
 
-    // A known evaluation phase is reduced modulo the width; a bare interval has none.
+    // A known evaluation phase is reduced modulo the width; a bare interval has
+    // none; a schedule has one only when all its times share it.
     #[test]
-    fn repeated_dashboard_phase_selects_query_aligned_origin() {
+    fn tumbling_window_phase_of_a_repeated_demand() {
         use asap_types::workload::{RepetitionInterval, TimestampMs};
         let at = |phase| RepeatedDemand::FixedIntervalAt {
             interval: RepetitionInterval(60_000),
             evaluation_phase: TimestampMs(phase),
         };
+        let scheduled = |times: &[u64]| {
+            RepeatedDemand::Scheduled(times.iter().copied().map(TimestampMs).collect())
+        };
+        let phase = |demand| plan_tumbling_window_phase(&demand, 60_000);
+        assert_eq!(phase(at(56_000)), Some(56_000));
+        assert_eq!(phase(at(176_000)), Some(56_000));
         assert_eq!(
-            plan_tumbling_window_phase(&at(56_000), 60_000),
-            Some(56_000)
-        );
-        assert_eq!(
-            plan_tumbling_window_phase(&at(176_000), 60_000),
-            Some(56_000)
-        );
-        assert_eq!(
-            plan_tumbling_window_phase(
-                &RepeatedDemand::FixedInterval(RepetitionInterval(60_000)),
-                60_000,
-            ),
+            phase(RepeatedDemand::FixedInterval(RepetitionInterval(60_000))),
             None
         );
+        assert_eq!(phase(scheduled(&[56_000, 176_000])), Some(56_000));
+        assert_eq!(phase(scheduled(&[56_000, 150_000])), None);
     }
 }

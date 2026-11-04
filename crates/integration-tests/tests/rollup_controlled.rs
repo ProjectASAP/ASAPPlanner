@@ -118,11 +118,11 @@ fn controlled_distinct_rollup_prices_the_original_workload() {
                     models.deployment_capabilities.query_time_results_retained,
                     &mut |node, _, options| {
                         let mat = Materialization::MatAtQuery(Medium::Memory);
-                        if builds.contains(&node) && options.contains(&mat) {
+                        Some(if builds.contains(&node) && options.contains(&mat) {
                             mat
                         } else {
                             Materialization::NotMaterialized
-                        }
+                        })
                     },
                 )
                 .unwrap()
