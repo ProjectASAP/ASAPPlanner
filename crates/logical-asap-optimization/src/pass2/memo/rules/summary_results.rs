@@ -2,7 +2,9 @@
 //! choose a state configuration independently, without enumerating combinations
 //! of all private states in the enclosing query.
 use super::reuse::{append_producer, append_reader, eligible, replace};
-use crate::pass2::memo::state_groups::{direct_input_builds, Pass2RuleError};
+use crate::pass2::memo::state_groups::{
+    boundary_ptrs, direct_input_builds, nodes_within, Pass2RuleError,
+};
 use asap_types::ir::{ASAPOp, OperatorNode};
 use asap_types::stages::{Memo, OriginOfCandidateForMemoGroup};
 use std::collections::{HashMap, HashSet};
@@ -28,18 +30,9 @@ pub(crate) fn factor_summary_results(memo: &mut Memo) -> Result<usize, Pass2Rule
         }
         let build_pointers: HashSet<_> =
             builds.iter().map(|(build, _)| Rc::as_ptr(build)).collect();
-        let boundaries: HashSet<_> = original
-            .input_groups
-            .iter()
-            .map(|group| Rc::as_ptr(&memo.groups[group.0 as usize].logical_node))
-            .collect();
-        let mut pending = vec![Rc::clone(&original.root_node)];
-        let mut seen = HashSet::new();
+        let boundaries = boundary_ptrs(memo, &original);
         let mut readouts = Vec::new();
-        while let Some(node) = pending.pop() {
-            if boundaries.contains(&Rc::as_ptr(&node)) || !seen.insert(Rc::as_ptr(&node)) {
-                continue;
-            }
+        for node in nodes_within(&original.root_node, &boundaries) {
             if !Rc::ptr_eq(&node, &original.root_node)
                 && matches!(
                     node.asap(),
@@ -55,7 +48,6 @@ pub(crate) fn factor_summary_results(memo: &mut Memo) -> Result<usize, Pass2Rule
                     readouts.push(Rc::clone(&node));
                 }
             }
-            pending.extend(node.children().into_iter().cloned());
         }
         if readouts.is_empty() {
             continue;

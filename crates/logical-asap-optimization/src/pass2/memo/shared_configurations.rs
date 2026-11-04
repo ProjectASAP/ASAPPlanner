@@ -1,4 +1,5 @@
 //! Finite state configurations shared by memo rules and candidate selection.
+use crate::stage0::cse::same_value;
 use asap_accuracy::estimators::size_for_all_readers;
 use asap_types::ir::schema::{
     sketch::{SketchKind, SketchParams},
@@ -44,7 +45,7 @@ impl TumblingWindowConfiguration {
                 .is_multiple_of(self.tumbling_window_width_ms)
             && reader.window_ms <= self.longest_window_ms
             && shared_size(&self.family, &reader.family)
-                .is_some_and(|joined| same_family(&joined, &self.family))
+                .is_some_and(|joined| same_value(&joined, &self.family))
     }
 }
 /// Every positive integer-millisecond divisor of a grid, in ascending order.
@@ -92,7 +93,7 @@ pub(crate) fn tumbling_window_configurations(
         // The sizes: the readers' own, closed under the shared size.
         let mut sizes: Vec<FieldDataType> = Vec::new();
         for reader in &eligible {
-            if !sizes.iter().any(|known| same_family(known, &reader.family)) {
+            if !sizes.iter().any(|known| same_value(known, &reader.family)) {
                 sizes.push(reader.family.clone());
             }
         }
@@ -100,7 +101,7 @@ pub(crate) fn tumbling_window_configurations(
         while i < sizes.len() {
             for j in 0..i {
                 if let Some(joined) = shared_size(&sizes[i], &sizes[j]) {
-                    if !sizes.iter().any(|known| same_family(known, &joined)) {
+                    if !sizes.iter().any(|known| same_value(known, &joined)) {
                         sizes.push(joined);
                     }
                 }
@@ -126,9 +127,7 @@ pub(crate) fn tumbling_window_configurations(
                     }))
                 });
                 if window == Some(longest_window_ms)
-                    && size
-                        .flatten()
-                        .is_some_and(|size| same_family(&size, family))
+                    && size.flatten().is_some_and(|size| same_value(&size, family))
                 {
                     configurations.push(configuration);
                 }
@@ -196,12 +195,6 @@ pub(crate) fn shared_size(a: &FieldDataType, b: &FieldDataType) -> Option<FieldD
         (FieldDataType::Sketch(..), _) | (_, FieldDataType::Sketch(..)) => None,
         _ => (a == b).then(|| a.clone()),
     }
-}
-
-// SketchParams equality deliberately omits recorded error/probability metadata.
-// Producer contracts must retain those parameters when joining and deduplicating.
-fn same_family(left: &FieldDataType, right: &FieldDataType) -> bool {
-    left == right && serde_json::to_string(left).ok() == serde_json::to_string(right).ok()
 }
 
 #[cfg(test)]

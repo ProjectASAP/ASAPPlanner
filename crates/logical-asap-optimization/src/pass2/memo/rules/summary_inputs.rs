@@ -2,7 +2,7 @@
 //! This preserves their full expressions and schema, including opaque series
 //! identity, rather than assuming that a projection is an identity operation.
 use super::reuse::{append_producer, append_reader, eligible, replace};
-use crate::pass2::memo::state_groups::Pass2RuleError;
+use crate::pass2::memo::state_groups::{boundary_ptrs, nodes_within, Pass2RuleError};
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
 use asap_types::stages::{Memo, OriginOfCandidateForMemoGroup};
 use std::collections::{HashMap, HashSet};
@@ -21,18 +21,9 @@ pub(crate) fn factor_summary_inputs(memo: &mut Memo) -> Result<(), Pass2RuleErro
         })
         .collect();
     for (owner, original) in originals {
-        let boundaries: HashSet<_> = original
-            .input_groups
-            .iter()
-            .map(|group| Rc::as_ptr(&memo.groups[group.0 as usize].logical_node))
-            .collect();
-        let mut pending = vec![Rc::clone(&original.root_node)];
-        let mut seen = HashSet::new();
+        let boundaries = boundary_ptrs(memo, &original);
         let mut inputs = Vec::new();
-        while let Some(node) = pending.pop() {
-            if boundaries.contains(&Rc::as_ptr(&node)) || !seen.insert(Rc::as_ptr(&node)) {
-                continue;
-            }
+        for node in nodes_within(&original.root_node, &boundaries) {
             if matches!(
                 node.asap(),
                 Some(ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. })
@@ -43,7 +34,6 @@ pub(crate) fn factor_summary_inputs(memo: &mut Memo) -> Result<(), Pass2RuleErro
                     }
                 }
             }
-            pending.extend(node.children().into_iter().cloned());
         }
         let queries = memo.groups[owner].queries.clone();
         let mut replacements = HashMap::new();

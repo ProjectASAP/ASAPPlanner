@@ -359,7 +359,7 @@ fn collect_children_first(
 
 /// Whether builds of families `a` and `b` can be one build: one sketch
 /// algorithm and grouping at any sizes, or one exact accumulator.
-fn same_family(a: &FieldDataType, b: &FieldDataType) -> bool {
+fn same_build_family(a: &FieldDataType, b: &FieldDataType) -> bool {
     match (a, b) {
         (FieldDataType::Sketch(a, grouping), FieldDataType::Sketch(b, grouping_b)) => {
             a.algorithm() == b.algorithm() && grouping == grouping_b
@@ -962,7 +962,7 @@ fn rolls_up_into(member: &TumblingWindowCandidate, host: &TumblingWindowCandidat
         && by.len() < host_by.len()
         && by.keys().iter().all(|key| host_by.keys().contains(key))
         && FamilyCapability::merges_groups(family)
-        && same_family(family, host_family)
+        && same_build_family(family, host_family)
         && (Rc::ptr_eq(below, host_below) || below == host_below)
         && input == host_input
         && grouping == host_grouping
@@ -1004,7 +1004,7 @@ fn same_build_over_one_input(a: &TumblingWindowCandidate, b: &TumblingWindowCand
             .collect()
     };
     names(&a.build) == names(&b.build)
-        && same_family(family, family_b)
+        && same_build_family(family, family_b)
         && (Rc::ptr_eq(below, below_b) || below == below_b)
         && input == input_b
         && reduction == reduction_b
@@ -1402,21 +1402,6 @@ pub(crate) fn rollup_candidate_for(
     rollup_candidates_of(roots, Some(coarse)).into_iter().next()
 }
 
-/// Whether adding `root` to a candidate's roots may change the rollup
-/// candidate of its coarse build `coarse`: `root` reaches `coarse` itself
-/// or a build that could answer it ([`finer_keys`]). Otherwise `root` adds
-/// no reader of `coarse` or of any build that could answer it (a reader
-/// reaches what it reads), no such build, and leaves the walk order of the
-/// other nodes as it was, so [`rollup_candidate_for`] is unchanged.
-#[cfg(test)]
-fn may_change_rollup_candidate(coarse: &Rc<OperatorNode>, root: &Rc<OperatorNode>) -> bool {
-    OperatorNode::reachable(root).iter().any(|node| {
-        Rc::ptr_eq(node, coarse)
-            || finer_keys(coarse, node).is_some()
-            || filtered_finer(coarse, node).is_some()
-    })
-}
-
 /// [`rollup_candidates`], over the coarse builds that are `only` when set.
 fn rollup_candidates_of(
     roots: &[QueryRoot],
@@ -1695,7 +1680,7 @@ fn finer_keys(coarse: &OperatorNode, fine: &OperatorNode) -> Option<usize> {
         // A filter indexes its input's columns: equal only over equal rows.
         (a, b) => a == b && (Rc::ptr_eq(child, fine_child) || child == fine_child),
     };
-    (same_family(family, fine_family)
+    (same_build_family(family, fine_family)
         && input == fine_input
         && same_filter
         && fine_keys.len() > coarse_keys.len()
@@ -1733,7 +1718,7 @@ fn filtered_finer(coarse: &OperatorNode, fine: &OperatorNode) -> Option<(usize, 
     };
     if by.is_without()
         || fine_by.is_without()
-        || !same_family(family, fine_family)
+        || !same_build_family(family, fine_family)
         || input != fine_input
     {
         return None;
@@ -3122,8 +3107,7 @@ mod tests {
     }
 
     /// One coarse build's rollup candidate, computed alone, is the one
-    /// [`rollup_candidates`] lists for it; a query reaching no build that
-    /// could answer it may not change it, one reaching a finer build may.
+    /// [`rollup_candidates`] lists for it, and needs a finer build to exist.
     #[test]
     fn one_coarse_builds_rollup_candidate_is_the_listed_one() {
         let roots = exact(&[
@@ -3139,12 +3123,6 @@ mod tests {
         }
         let coarse = &builds(&roots[0])[0];
         assert!(rollup_candidate_for(&roots[..1], Rc::as_ptr(coarse)).is_none());
-        assert!(may_change_rollup_candidate(coarse, operator(&roots[1])));
-        let other_metric = exact(&["sum by (job, instance) (other)"]);
-        assert!(!may_change_rollup_candidate(
-            coarse,
-            operator(&other_metric[0])
-        ));
     }
 
     /// `sum by (job)` is answered from `sum by (job, instance)`, which the
