@@ -7,6 +7,7 @@ use std::rc::Rc;
 // Stage 1 internals other crates' tests call: Pass 1's working form and its
 // population step, single-candidate composition, Stage 0 hash-consing, and
 // the Pass 2 rule entry points those tests build memos with.
+pub use crate::pass1::memo_population::try_populate_pass1;
 pub use crate::pass1::per_computation_candidates::{
     compose_logical_candidate, generate_per_computation_candidates, PerComputationCandidates,
 };
@@ -15,7 +16,6 @@ pub use crate::pass2::asap_aware_cse::{
     window_composition_pass2_candidates, window_composition_shared_chain_candidates,
     with_union_scan_labels,
 };
-pub use crate::pass2::memo::groups::try_populate_pass1;
 pub use crate::pass2::memo::window_candidates::add_local_window_composition;
 pub use crate::stage0::cse::share_common_sub_dags;
 

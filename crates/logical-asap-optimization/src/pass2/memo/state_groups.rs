@@ -442,8 +442,8 @@ fn replace_node(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pass1::memo_population::try_populate_pass1;
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
-    use crate::pass2::memo::groups::try_populate_pass1;
     use crate::stage0::generate_dag_of_logical_memo_groups;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::QueryRoot;

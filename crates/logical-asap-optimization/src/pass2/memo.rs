@@ -1,12 +1,8 @@
 //! The logical memo's candidates, rules and enumeration, over the memo
 //! groups Stage 0 builds (`crate::stage0`).
 
-/// Logical implementation candidates populated after initial identity construction.
-pub(crate) mod candidates;
 /// The candidate DAGs a memo stands for: choices and their composition.
 pub(crate) mod enumeration;
-pub(crate) mod groups;
-pub(crate) use groups::NodeToStructuralIdCache;
 pub(crate) mod rules;
 /// Shared finite state configuration enumeration.
 pub(crate) mod shared_configurations;
