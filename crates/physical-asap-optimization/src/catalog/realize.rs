@@ -3,12 +3,12 @@
 //! No fallback modes are chosen. Physical rewrites or timing splits that change
 //! candidate identity are rejected until represented by physical enumeration.
 //! This validates execution legality, not cost estimates or accuracy targets.
+use asap_types::physical::Lifetime;
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::optimize_physical_asap_chosen;
 use asap_types::ir::{OperatorNode, QueryRoot};
-use asap_types::physical::Materialization;
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use asap_types::stages::{
@@ -39,10 +39,15 @@ pub fn materialize_selected_candidates(
     }
     let rebuilt = reconstruct_selected_candidates(physical_candidates, selected)?;
     // `reconstruct_selected_candidates` checked every selected candidate exists.
-    let materializations: Vec<_> = selected
+    // Each selected node's assignment: its properties when it is kept,
+    // `None` when it is not.
+    let assignments: Vec<_> = selected
         .candidate_of_node
         .iter()
-        .map(|id| physical_candidates.candidates[id.0].materialization)
+        .map(|id| {
+            let properties = physical_candidates.candidates[id.0].properties;
+            properties.lifetime().is_kept().then_some(properties)
+        })
         .collect();
     let mut node_by_pointer = HashMap::new();
     for (node, operator_node) in rebuilt.operator_node_of_selected_node.iter().enumerate() {
@@ -50,7 +55,7 @@ pub fn materialize_selected_candidates(
     }
     let roots = restore_query_roots(original_roots, &rebuilt.outputs)?;
     let mut assignment_error = None;
-    let mut seen = vec![false; materializations.len()];
+    let mut seen = vec![false; assignments.len()];
     let physical = optimize_physical_asap_chosen(
         "selected-candidate-connections",
         &roots,
@@ -61,13 +66,13 @@ pub fn materialize_selected_candidates(
             let node = node_by_pointer.get(&logical).copied();
             let requested = if let Some(node) = node {
                 seen[node] = true;
-                materializations[node]
+                assignments[node]
             } else {
-                Materialization::NotMaterialized
+                None
             };
             if !options.contains(&requested) {
                 let message = format!(
-                    "selected materialization {requested:?} is not offered for selected node {node:?}"
+                    "selected kept output {requested:?} is not offered for selected node {node:?}"
                 );
                 assignment_error = Some(if node.is_some() {
                     PhysicalCandidateError::RejectedAssignment(message)
@@ -92,8 +97,8 @@ pub fn materialize_selected_candidates(
     physical.dag.validate().map_err(|error| error.to_string())?;
     let physical_outputs = ordered_output_references(&physical.roots);
     let identities = paired_node_identities(&rebuilt.outputs, &physical_outputs)?;
-    for (node, mode) in materializations.iter().enumerate() {
-        if *mode != Materialization::NotMaterialized && !seen[node] {
+    for (node, kept) in assignments.iter().enumerate() {
+        if kept.is_some() && !seen[node] {
             // The decoder already established node identity. Stage 2 did
             // not offer this selected node (e.g. a lower shared non-summary),
             // so the assignment is infeasible rather than an adapter failure.
@@ -111,9 +116,10 @@ pub fn materialize_selected_candidates(
                 .get(&Rc::as_ptr(&operator_node))
                 .cloned()
                 .ok_or_else(|| format!("selected node {node} has no physical identity"))?;
-            if physical.materialization != materializations[node] {
+            let lifetime = assignments[node].map_or(Lifetime::None, |kept| kept.lifetime());
+            if physical.lifetime != lifetime {
                 return Err(format!(
-                    "selected node {node} materialization changed during physical reconstruction"
+                    "selected node {node} lifetime changed during physical reconstruction"
                 ));
             }
             Ok(physical)
@@ -163,7 +169,7 @@ impl AssignmentRealizer for Stage2AssignmentRealizer<'_> {
             .iter()
             .zip(&realized.operator_node_of_selected_node)
         {
-            let timing = physical.candidates[id.0].timing;
+            let timing = physical.candidates[id.0].properties.timing();
             if node.timing != Some(timing) {
                 return Err(PhysicalCandidateError::InvalidOrUnsupported(format!(
                     "candidate {} requested timing {timing:?}, Stage 2 produced {:?}",
@@ -244,7 +250,7 @@ mod tests {
                 .iter()
                 .copied()
                 .find(|s| {
-                    physical.candidates[s.0].materialization == Materialization::NotMaterialized
+                    !physical.candidates[s.0].properties.lifetime().is_kept()
                 })
                 .unwrap_or(producer_candidates[0]);
             let producer = select_from(physical, producer, selected);

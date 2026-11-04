@@ -120,7 +120,7 @@ use asap_types::ir::{
     ASAPOp, BinaryOperator, ExprSemantics, NonASAPOp, Operator, OperatorNode, OperatorResultKind,
     Predicate, ProjectItem, QueryRoot, ScalarExpr, SchemaDerivationError,
 };
-use asap_types::physical::Materialization;
+use asap_types::physical::Lifetime;
 use thiserror::Error;
 
 use asap_accuracy::composition::parse_raw_data_samples_sign_statistic;
@@ -667,7 +667,7 @@ fn absorbed_targets(targets: &[ComputationTarget]) -> impl Iterator<Item = usize
 pub enum PerComputationCandidateError {
     #[error(transparent)]
     Structure(#[from] SchemaDerivationError),
-    #[error("logical candidate input already has assigned execution timing or materialization")]
+    #[error("logical candidate input already has assigned execution timing or lifetime")]
     AssignedPhysicalAnnotation,
     #[error("logical candidate input already contains ASAP operators")]
     ContainsAsap,
@@ -835,7 +835,7 @@ pub fn generate_per_computation_candidates(
                 if !seen.insert(Rc::as_ptr(&node)) {
                     continue;
                 }
-                if node.timing.is_some() || node.materialization != Materialization::NotMaterialized
+                if node.timing.is_some() || node.lifetime != Lifetime::None
                 {
                     return Err(PerComputationCandidateError::AssignedPhysicalAnnotation);
                 }

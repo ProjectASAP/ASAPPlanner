@@ -65,7 +65,7 @@ pub(in crate::pass2::memo) fn same_node(
         && left.schema == right.schema
         && left.result_kind == right.result_kind
         && left.timing == right.timing
-        && left.materialization == right.materialization
+        && left.lifetime == right.lifetime
         && left.children().len() == right.children().len()
         && left
             .children()
@@ -77,7 +77,7 @@ pub(in crate::pass2::memo) fn same_node(
             &left.schema,
             left.result_kind,
             left.timing,
-            left.materialization,
+            left.lifetime,
         ))
         .ok()
             == serde_json::to_string(&(
@@ -85,7 +85,7 @@ pub(in crate::pass2::memo) fn same_node(
                 &right.schema,
                 right.result_kind,
                 right.timing,
-                right.materialization,
+                right.lifetime,
             ))
             .ok()
         && (!guarantees || left.guarantee == right.guarantee)

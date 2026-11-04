@@ -117,7 +117,7 @@ pub(crate) fn structural_hash(node: &OperatorNode, cache: &mut NodeToStructuralH
         &node.schema,
         &node.guarantee,
         node.timing,
-        node.materialization,
+        node.lifetime,
     );
     serde_json::to_string(&own)
         .unwrap_or_default()
@@ -178,7 +178,7 @@ fn same_node(
         && left.result_kind == right.result_kind
         && left.schema == right.schema
         && left.timing == right.timing
-        && left.materialization == right.materialization
+        && left.lifetime == right.lifetime
         && same_value(&left.guarantee, &right.guarantee)
         && same_value(&own_fields(left), &own_fields(right))
 }

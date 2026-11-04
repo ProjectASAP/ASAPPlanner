@@ -110,7 +110,7 @@ fn local_tumbling_window_candidates(
                                 && original.schema == rewritten.schema
                                 && original.result_kind == rewritten.result_kind
                                 && original.timing == rewritten.timing
-                                && original.materialization == rewritten.materialization
+                                && original.lifetime == rewritten.lifetime
                         });
                         if let Some(original) = matches.next() {
                             if matches.next().is_none() {

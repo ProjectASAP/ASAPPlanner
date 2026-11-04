@@ -108,8 +108,8 @@ pub fn split_shared_by_timing(
         .collect();
     let mut remapped = assignment.clone();
     for (original, copy) in copies.values() {
-        if let Some(materialization) = assignment.get(original) {
-            remapped.set(copy, materialization);
+        if let Some(kept) = assignment.get(original) {
+            remapped.set(copy, kept);
         }
     }
     (split, remapped)

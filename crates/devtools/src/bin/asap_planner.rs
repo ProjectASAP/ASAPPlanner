@@ -731,8 +731,8 @@ fn stage2_pruned_candidates_json(stage2: Option<&PhysicalASAPMemoCandidates>) ->
                 "operator_node": key.operator_node.0,
                 "operator": flat.nodes.last().map(node_label).unwrap_or_default(),
                 "implementation_root": node.is_implementation_root,
-                "timing": key.timing,
-                "materialization": key.materialization,
+                "timing": key.properties.timing(),
+                "lifetime": key.properties.lifetime(),
                 "reason": format!("{:?}", pruned.reason),
             })
         })

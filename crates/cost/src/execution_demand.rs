@@ -9,7 +9,8 @@
 
 use super::analytical::AnalyticalCostError;
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
-use asap_types::physical::Materialization;
+use asap_types::ir::properties::ExecutionTiming;
+use asap_types::physical::Lifetime;
 use asap_types::workload::{QueryRecurrence, RangeEvaluation, RepeatedDemand};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -299,7 +300,7 @@ pub fn consumers(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, Vec<Consu
     let materialized: Vec<PhysicalASAPNodeId> = dag
         .nodes
         .iter()
-        .filter(|n| n.materialization != Materialization::NotMaterialized)
+        .filter(|n| n.lifetime.is_kept())
         .map(|n| n.id)
         .collect();
     let is_materialized: HashSet<PhysicalASAPNodeId> = materialized.iter().copied().collect();
@@ -361,8 +362,8 @@ pub fn computations(
     let materialized: HashMap<_, _> = dag
         .nodes
         .iter()
-        .filter(|n| n.materialization != Materialization::NotMaterialized)
-        .map(|n| (n.id, n.materialization))
+        .filter(|n| n.lifetime.is_kept())
+        .map(|n| (n.id, (n.output_state.timing, n.lifetime)))
         .collect();
     let inputs = |id: PhysicalASAPNodeId| {
         dag.edges
@@ -385,14 +386,12 @@ pub fn computations(
         }
     }
     let mut rate_of_materialized = HashMap::new();
-    for (&id, materialization) in &materialized {
-        // A chain kept across evaluations is built once per request.
-        let per_request = matches!(
-            materialization,
-            Materialization::MatAtQueryKeptAcrossEvaluations(_)
-        );
-        let rate = match materialization {
-            Materialization::MatAtIngestion(_) => 1.0,
+    for (&id, &(timing, lifetime)) in &materialized {
+        let at_ingestion = timing == ExecutionTiming::IngestionTime;
+        // A query-time chain kept across evaluations is built once per request.
+        let per_request = !at_ingestion && matches!(lifetime, Lifetime::AcrossEvaluations(_));
+        let rate = match at_ingestion {
+            true => 1.0,
             _ => evaluation_rate(
                 reached.get(&id).into_iter().flatten().filter_map(|&q| {
                     let range = if per_request { None } else { range_of(q) };
@@ -418,7 +417,7 @@ pub fn computations(
     let refresh_windows = dag.refresh_windows(
         materialized
             .iter()
-            .filter(|(_, m)| matches!(m, Materialization::MatAtIngestion(_)))
+            .filter(|(_, (timing, _))| *timing == ExecutionTiming::IngestionTime)
             .map(|(&id, _)| id),
     );
     let mut count: HashMap<_, (u64, f64)> = HashMap::new();

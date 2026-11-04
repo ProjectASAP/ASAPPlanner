@@ -132,7 +132,7 @@ use asap_types::ir::{
     NodeToTimedNodeCache, NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr,
     SchemaDerivationError, SortKey,
 };
-use asap_types::physical::Materialization;
+use asap_types::physical::{Lifetime, PhysicalProperties};
 use asap_types::physical::Medium;
 use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::workload::{
@@ -355,18 +355,16 @@ impl MaterializationCandidate {
     /// `MatAtQuery` when two or more queries read it, and
     /// `MatAtQueryKeptAcrossEvaluations` when it may be kept across
     /// evaluations.
-    pub(crate) fn options(&self) -> Vec<Materialization> {
-        let mut options = vec![Materialization::NotMaterialized];
+    pub(crate) fn options(&self) -> Vec<Option<PhysicalProperties>> {
+        let mut options = vec![None];
         if self.at_ingestion.is_ok() {
-            options.push(Materialization::MatAtIngestion(Medium::Memory));
+            options.push(Some(kept_across_evaluations_at_ingestion()));
         }
         if self.readers.len() > 1 {
-            options.push(Materialization::MatAtQuery(Medium::Memory));
+            options.push(Some(kept_for_one_evaluation()));
         }
         if self.may_keep_across_evaluations {
-            options.push(Materialization::MatAtQueryKeptAcrossEvaluations(
-                Medium::Memory,
-            ));
+            options.push(Some(kept_across_evaluations_at_query_time()));
         }
         options
     }
@@ -458,7 +456,7 @@ pub fn optimize_physical_asap_assigned(
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     query_time_results_retained: bool,
-    choose: &mut dyn FnMut(&[usize]) -> Option<Materialization>,
+    choose: &mut dyn FnMut(&[usize]) -> Option<Option<PhysicalProperties>>,
 ) -> Result<Option<PhysicalWorkloadPlan>, PhysicalASAPOptimizationError> {
     optimize_physical_asap_chosen(
         from_logical,
@@ -473,8 +471,12 @@ pub fn optimize_physical_asap_assigned(
 /// [`optimize_physical_asap_chosen`]'s choice per materialization
 /// candidate: from the logical node it implements, its readers and its
 /// options. `None` rejects the assignment.
-pub(crate) type ChooseMaterialization<'a> =
-    dyn FnMut(*const OperatorNode, &[usize], &[Materialization]) -> Option<Materialization> + 'a;
+pub(crate) type ChooseMaterialization<'a> = dyn FnMut(
+        *const OperatorNode,
+        &[usize],
+        &[Option<PhysicalProperties>],
+    ) -> Option<Option<PhysicalProperties>>
+    + 'a;
 
 /// Stage 2 for one CandidateLogicalASAPDAG and one materialization
 /// assignment chosen node by node: `choose(logical, readers, options)`
@@ -526,17 +528,13 @@ fn assigned_candidate(
     from_logical: &str,
     implemented: &[QueryRoot],
     mat_candidates: &[MaterializationCandidate],
-    assignment: Vec<Materialization>,
+    assignment: Vec<Option<PhysicalProperties>>,
 ) -> Result<PhysicalWorkloadPlan, PhysicalASAPOptimizationError> {
-    let materialized: Vec<_> = mat_candidates
-        .iter()
-        .zip(&assignment)
-        .filter(|(_, m)| **m != Materialization::NotMaterialized)
-        .map(|(mat_candidate, m)| (mat_candidate, *m))
-        .collect();
-    let mut options = MaterializationAssignment::with_default(Materialization::NotMaterialized);
-    for (mat_candidate, materialization) in &materialized {
-        options.set(&mat_candidate.node, *materialization);
+    let mut options = MaterializationAssignment::default();
+    for (mat_candidate, kept) in mat_candidates.iter().zip(&assignment) {
+        if kept.is_some() {
+            options.set(&mat_candidate.node, *kept);
+        }
     }
     let operators: Vec<Rc<OperatorNode>> = implemented
         .iter()
@@ -556,7 +554,7 @@ fn assigned_candidate(
         Ok(apply_materialization_timings(node, &options, &mut timing)?)
     })?;
     let dag = compile_physical_asap_workload_with_node_ids(&timed)?.dag;
-    let materialization = dag
+    let lifetime = dag
         .nodes
         .iter()
         .filter(|n| {
@@ -565,16 +563,16 @@ fn assigned_candidate(
                 Operator::ASAP(
                     ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. }
                 )
-            ) || n.materialization != Materialization::NotMaterialized
+            ) || n.lifetime.is_kept()
         })
-        .map(|n| (n.id, n.materialization))
+        .map(|n| (n.id, n.lifetime))
         .collect();
     Ok(PhysicalWorkloadPlan {
         id: String::new(),
         from_logical: from_logical.to_string(),
         roots: timed,
         dag,
-        materialization,
+        lifetime,
     })
 }
 
@@ -711,10 +709,9 @@ pub(crate) fn materialization_candidates(
             summary_reader_eligibility(node, &readers, entries, data, query_time_results_retained);
         let at_ingestion = eligibility.at_ingestion.and_then(|()| {
             // Only this build and the builds below it at ingestion time.
-            let mut trial =
-                MaterializationAssignment::with_default(Materialization::NotMaterialized);
+            let mut trial = MaterializationAssignment::default();
             for &v in below[c].iter().chain([&c]) {
-                trial.set(&nodes[v], Materialization::MatAtIngestion(Medium::Memory));
+                trial.set(&nodes[v], Some(kept_across_evaluations_at_ingestion()));
             }
             apply_materialization_timings(node, &trial, &mut NodeToTimedNodeCache::new())
                 .map(|_| ())
@@ -951,16 +948,18 @@ fn candidates_below(nodes: &[Rc<OperatorNode>]) -> Vec<Vec<usize>> {
 fn down_closed(
     mat_candidates: &[MaterializationCandidate],
     below: &[Vec<usize>],
-    assignment: &[Materialization],
+    assignment: &[Option<PhysicalProperties>],
 ) -> bool {
-    let at_ingestion = |m: &Materialization| m.timing() == ExecutionTiming::IngestionTime;
+    let at_ingestion = |kept: &Option<PhysicalProperties>| {
+        kept.is_some_and(|p| p.timing() == ExecutionTiming::IngestionTime)
+    };
     assignment.iter().enumerate().all(|(c, m)| {
         !at_ingestion(m)
             || below[c].iter().all(|&v| {
                 if is_summary_build(&mat_candidates[v].node) {
                     at_ingestion(&assignment[v])
                 } else {
-                    assignment[v] == Materialization::NotMaterialized
+                    assignment[v].is_none()
                 }
             })
     })
@@ -972,14 +971,15 @@ fn down_closed(
 #[cfg(any(test, feature = "reference-pricer"))]
 fn materialization_assignments(
     mat_candidates: &[MaterializationCandidate],
-) -> impl Iterator<Item = Vec<Materialization>> + '_ {
-    let options: Vec<Vec<Materialization>> = mat_candidates.iter().map(|c| c.options()).collect();
+) -> impl Iterator<Item = Vec<Option<PhysicalProperties>>> + '_ {
+    let options: Vec<Vec<Option<PhysicalProperties>>> =
+        mat_candidates.iter().map(|c| c.options()).collect();
     let nodes: Vec<_> = mat_candidates.iter().map(|c| Rc::clone(&c.node)).collect();
     let below = candidates_below(&nodes);
     let mut digits = Some(vec![0usize; mat_candidates.len()]);
     std::iter::from_fn(move || loop {
         let current = digits.as_mut()?;
-        let assignment: Vec<Materialization> = current
+        let assignment: Vec<Option<PhysicalProperties>> = current
             .iter()
             .zip(&options)
             .map(|(&d, options)| options[d])
@@ -1193,6 +1193,36 @@ pub mod test_support {
             choose,
         )
     }
+}
+
+/// `timing` and `lifetime`, a pair Stage 2 only builds when valid.
+pub(crate) fn physical_properties(timing: ExecutionTiming, lifetime: Lifetime) -> PhysicalProperties {
+    PhysicalProperties::new(timing, lifetime).expect("Stage 2 builds only valid pairs")
+}
+
+/// Query time, kept in memory until the evaluation's readers finish.
+pub(crate) fn kept_for_one_evaluation() -> PhysicalProperties {
+    physical_properties(
+        ExecutionTiming::QueryTime,
+        Lifetime::OneEvaluation(Medium::Memory),
+    )
+}
+
+/// Ingestion time, kept in memory until a query reads it.
+pub(crate) fn kept_across_evaluations_at_ingestion() -> PhysicalProperties {
+    physical_properties(
+        ExecutionTiming::IngestionTime,
+        Lifetime::AcrossEvaluations(Medium::Memory),
+    )
+}
+
+/// Query time, kept in memory across evaluations (a tumbling-window chain
+/// that builds its newest window at each evaluation).
+pub(crate) fn kept_across_evaluations_at_query_time() -> PhysicalProperties {
+    physical_properties(
+        ExecutionTiming::QueryTime,
+        Lifetime::AcrossEvaluations(Medium::Memory),
+    )
 }
 
 #[cfg(test)]

@@ -370,8 +370,8 @@ fn write_physical(out: &mut String, physical: &PhysicalASAPMemoCandidates) {
             vec![
                 format!("C{id}:"),
                 format!("O{}", candidate.operator_node.0),
-                format!("{:?}", candidate.timing),
-                format!("{:?}", candidate.materialization),
+                format!("{:?}", candidate.properties.timing()),
+                format!("{:?}", candidate.properties.lifetime()),
                 // It may produce a query's output.
                 if candidate.may_produce_query_output {
                     "output".to_owned()
@@ -414,8 +414,8 @@ fn write_physical(out: &mut String, physical: &PhysicalASAPMemoCandidates) {
             vec![
                 format!("G{}", pruned.group.0),
                 format!("O{}", key.operator_node.0),
-                format!("{:?}", key.timing),
-                format!("{:?}", key.materialization),
+                format!("{:?}", key.properties.timing()),
+                format!("{:?}", key.properties.lifetime()),
                 format!("{:?}", pruned.reason),
             ]
         })

@@ -30,7 +30,7 @@ use asap_types::ir::schema::{
     FieldDataType, GroupingStrategy, Schema, SketchParams, SketchStatistic,
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, TimeRangeKind};
-use asap_types::physical::{Materialization, Medium};
+use asap_types::physical::{Lifetime, Medium};
 use asap_types::workload::{DataWorkload, QueryRecurrence, RangeEvaluation};
 
 use asap_types::workload::bounds::{
@@ -957,13 +957,13 @@ pub fn node_usage<'a>(
             // query time (all of them for a chain kept across
             // evaluations, whose scan Stage 2 bounds to its newest tumbling window,
             // the only one it builds).
-            let rows_per_tumbling_window = match (ingestion, node.materialization) {
+            let rows_per_tumbling_window = match (ingestion, node.lifetime) {
                 (true, _) => u64::try_from(
                     (u128::from(input.rows) * u128::from(*tumbling_window_width_ms))
                         .div_ceil(1_000),
                 )
                 .map_err(|_| AnalyticalCostError::Overflow)?,
-                (false, Materialization::MatAtQueryKeptAcrossEvaluations(_)) => input.rows,
+                (false, Lifetime::AcrossEvaluations(_)) => input.rows,
                 (false, _) => input
                     .rows
                     .div_ceil(u64::from(*tumbling_window_count).max(1)),
@@ -1130,8 +1130,8 @@ pub fn node_usage<'a>(
     // latency, or a materialized consumer's longest reader's, as a
     // MatAtQuery state is).
     let state = out.bytes.max(estimate.peak_memory_bytes());
-    let (kept, medium) = match (node.materialization, &node.payload) {
-        (Materialization::NotMaterialized, _) => {
+    let (kept, medium) = match (ingestion, node.lifetime, &node.payload) {
+        (_, Lifetime::None, _) => {
             let working_memory_bytes = estimate.peak_memory_bytes();
             peak_memory_bytes = working_memory_bytes.saturating_mul(multiplier);
             if !ingestion && working_memory_bytes > 0 {
@@ -1143,7 +1143,7 @@ pub fn node_usage<'a>(
         // retention covers ([`tumbling_window_retention_ms`]: N, plus one per tumbling window
         // width of the readers' range-evaluation span), all but the
         // newest between evaluations and all while one runs.
-        (Materialization::MatAtQueryKeptAcrossEvaluations(medium), _) => {
+        (false, Lifetime::AcrossEvaluations(medium), _) => {
             let tumbling_windows = tumbling_windows_of(node);
             let retained = retained_tumbling_window_count;
             let between = (state / tumbling_windows)
@@ -1168,7 +1168,7 @@ pub fn node_usage<'a>(
             detail += &format!("; keeps {between} bytes across evaluations");
             (0, medium)
         }
-        (Materialization::MatAtQuery(medium), _) => {
+        (_, Lifetime::OneEvaluation(medium), _) => {
             match medium {
                 Medium::Memory => {
                     held = Some((state, per_second, false));
@@ -1180,7 +1180,8 @@ pub fn node_usage<'a>(
         }
         // The retained tumbling windows and the one being built.
         (
-            Materialization::MatAtIngestion(medium),
+            true,
+            Lifetime::AcrossEvaluations(medium),
             Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }),
         ) => {
             let tumbling_windows = tumbling_windows_of(node);
@@ -1195,12 +1196,12 @@ pub fn node_usage<'a>(
                 medium,
             )
         }
-        (Materialization::MatAtIngestion(medium), _) => (
+        (true, Lifetime::AcrossEvaluations(medium), _) => (
             state.checked_mul(2).ok_or(AnalyticalCostError::Overflow)?,
             medium,
         ),
     };
-    if node.materialization == Materialization::MatAtIngestion(Medium::Memory) {
+    if ingestion && node.lifetime == Lifetime::AcrossEvaluations(Medium::Memory) {
         maintained = Some(state / tumbling_windows_of(node));
     }
     if kept > 0 {
@@ -1399,7 +1400,7 @@ pub fn tumbling_window_retention_ms(
     let nodes = node_map(dag);
     dag.nodes
         .iter()
-        .filter_map(|node| match (&node.payload, node.materialization) {
+        .filter_map(|node| match (&node.payload, node.lifetime) {
             (
                 Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
                     child,
@@ -1407,8 +1408,7 @@ pub fn tumbling_window_retention_ms(
                     tumbling_window_count,
                     ..
                 }),
-                Materialization::MatAtIngestion(_)
-                | Materialization::MatAtQueryKeptAcrossEvaluations(_),
+                Lifetime::AcrossEvaluations(_),
             ) => {
                 let span_ms = reach
                     .iter()
@@ -1594,8 +1594,8 @@ pub fn node_map(dag: &PhysicalASAPDAG) -> NodeMap<'_> {
 pub type NodeMap<'a> =
     HashMap<PhysicalASAPNodeId, &'a asap_types::ir::physical_export::PhysicalASAPDAGNode>;
 
-/// The tumbling-window chains of `dag` kept across evaluations
-/// (`MatAtQueryKeptAcrossEvaluations`, which Stage 2 offers only when the
+/// The query-time tumbling-window chains of `dag` kept across evaluations
+/// (lifetime `AcrossEvaluations` at query time, which Stage 2 offers only when the
 /// deployment keeps query-time results and every reader builds one new
 /// tumbling window per evaluation). Each evaluation builds the newest tumbling window, and the
 /// older ones, which complete the readers' look-back, are kept from
@@ -1605,10 +1605,11 @@ pub fn kept_tumbling_window_chains(dag: &PhysicalASAPDAG) -> HashSet<PhysicalASA
         .iter()
         .filter(|node| {
             matches!(
-                (&node.payload, node.materialization),
+                (&node.payload, node.output_state.timing, node.lifetime),
                 (
                     Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }),
-                    Materialization::MatAtQueryKeptAcrossEvaluations(_),
+                    ExecutionTiming::QueryTime,
+                    Lifetime::AcrossEvaluations(_),
                 )
             )
         })

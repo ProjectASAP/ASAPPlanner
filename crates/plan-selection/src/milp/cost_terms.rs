@@ -57,7 +57,7 @@ use asap_cost::CostModel;
 use asap_types::ir::physical_export::ScanWindow;
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::{NonASAPOp, Operator};
-use asap_types::physical::{Materialization, Medium};
+use asap_types::physical::{Lifetime, Medium};
 use asap_types::stages::PhysicalCandidateId;
 use asap_types::workload::bounds::source_name;
 use asap_types::workload::{QueryRecurrence, RepeatedDemand};
@@ -693,7 +693,7 @@ fn pane_retention_terms(
         let mut indicators = Vec::new();
         if let Some(&reach) = milp.reach.get(&(query, chain)) {
             if at_query_time
-                || milp.physical.candidates[chain.0].timing == ExecutionTiming::QueryTime
+                || milp.physical.candidates[chain.0].properties.timing() == ExecutionTiming::QueryTime
             {
                 indicators.push(Expression::from(reach));
                 reached.push((query, indicators));
@@ -776,7 +776,7 @@ pub(crate) fn compaction_ms(milp: &mut SelectionMilp<'_>) -> HashMap<PhysicalCan
     let inputs = milp.inputs;
     let mut compaction = HashMap::new();
     for &shareable in inputs.context_of_shareable.keys() {
-        if milp.physical.candidates[shareable.0].timing != ExecutionTiming::IngestionTime {
+        if milp.physical.candidates[shareable.0].properties.timing() != ExecutionTiming::IngestionTime {
             continue;
         }
         let mut seen = BTreeSet::new();
@@ -840,13 +840,14 @@ fn context_rates(
             ContextKind::Query(query) => ContextRate::Fixed(query_rate[query]),
             ContextKind::Ingestion(_) => ContextRate::Fixed(1.0),
             ContextKind::Shared(m) => {
-                let per_request = match milp.physical.candidates[m.0].materialization {
-                    Materialization::MatAtIngestion(_) | Materialization::NotMaterialized => {
+                let properties = milp.physical.candidates[m.0].properties;
+                let per_request = match (properties.timing(), properties.lifetime()) {
+                    (ExecutionTiming::IngestionTime, _) | (_, Lifetime::None) => {
                         rates.push(ContextRate::Fixed(1.0));
                         continue;
                     }
-                    Materialization::MatAtQuery(_) => false,
-                    Materialization::MatAtQueryKeptAcrossEvaluations(_) => true,
+                    (ExecutionTiming::QueryTime, Lifetime::OneEvaluation(_)) => false,
+                    (ExecutionTiming::QueryTime, Lifetime::AcrossEvaluations(_)) => true,
                 };
                 let readers = milp.queries_reaching(m);
                 let demand = |query: usize| {
@@ -988,7 +989,10 @@ pub(crate) fn encode_objective(milp: &mut SelectionMilp<'_>) -> Result<(), Selec
         let terms = milp.run_terms(context, candidate);
         milp.builder.scope = milp.scope_of(context);
         let candidate_data = &milp.physical.candidates[candidate.0];
-        let (timing, materialization) = (candidate_data.timing, candidate_data.materialization);
+        let (timing, lifetime) = (
+            candidate_data.properties.timing(),
+            candidate_data.properties.lifetime(),
+        );
         let own = milp.inputs.contexts[context].kind == ContextKind::Shared(candidate);
         // The most this run adds to its context's execution cost: all its
         // terms at 1.
@@ -1034,7 +1038,7 @@ pub(crate) fn encode_objective(milp: &mut SelectionMilp<'_>) -> Result<(), Selec
                     charge(&held.into(), per_byte_ms * query_rate[query]);
                 }
                 ContextKind::Shared(m) => {
-                    if own && materialization != Materialization::MatAtQuery(Medium::Memory) {
+                    if own && lifetime != Lifetime::OneEvaluation(Medium::Memory) {
                         milp.note_inexact("held bytes of a shareable candidate not in memory");
                     }
                     let (longest, most_held) = *held_time.entry(context).or_insert_with(|| {
@@ -1166,7 +1170,7 @@ fn raw_retention(
         else {
             continue;
         };
-        if milp.physical.candidates[candidate.0].timing != ExecutionTiming::QueryTime {
+        if milp.physical.candidates[candidate.0].properties.timing() != ExecutionTiming::QueryTime {
             continue;
         }
         let source = source_name(source).to_string();
