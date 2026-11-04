@@ -62,8 +62,9 @@ pub struct PlanningStagesRun {
     pub run_until: RunUntil,
     /// The query-language frontends' roots, one per workload entry.
     pub stage0_query_language_frontends: Vec<QueryRoot>,
-    /// Stage 0's memo groups (the roots hash-consed), without candidates.
-    pub stage0_memo_groups: Memo,
+    /// Stage 0's memo groups (the roots hash-consed), without candidates;
+    /// built by `run_stages_until` only (`asap_planner` prints them).
+    pub stage0_memo_groups: Option<Memo>,
     /// Stage 1 Pass 2's memo after local window composition (rule 1), before
     /// the other rules; `None` before Pass 2.
     pub pass2_local_window_composition: Option<Memo>,
@@ -282,7 +283,7 @@ pub fn run_search_over(
         .and_then(|max| reference_enumeration(&run, &roots, entries, data, models, max));
     Ok(PlanningStagesRun {
         run_until: RunUntil::Stage3,
-        stage0_memo_groups: stage0_memo_groups(generate_dag_of_logical_memo_groups(&roots)),
+        stage0_memo_groups: None,
         pass2_local_window_composition: None,
         stage0_query_language_frontends: roots,
         run,
@@ -317,7 +318,7 @@ pub fn run_stages_until(
     let stage0_dag = generate_dag_of_logical_memo_groups(&roots);
     let mut stages = PlanningStagesRun {
         run_until: until,
-        stage0_memo_groups: stage0_memo_groups(stage0_dag.clone()),
+        stage0_memo_groups: Some(stage0_memo_groups(stage0_dag.clone())),
         pass2_local_window_composition: None,
         stage0_query_language_frontends: roots.clone(),
         run: PlanningRun {
@@ -464,17 +465,17 @@ fn validate(roots: &[QueryRoot]) -> Result<(), PlanningStagesError> {
 /// The SQL catalog of the tables `tables` declare, each a `asap_planner
 /// --sql-catalog-table` JSON object: `{"name": ..., "columns": [{"name": ..., "type":
 /// "timestamp|utf8|string|float64|double|int64|bigint", "nullable": true}],
-/// "time_index": 0}`.
-pub fn sql_catalog(tables: &[String]) -> Result<SqlCatalog, String> {
+/// "time_index": 0}`, and the tables' names in declaration order.
+pub fn sql_catalog(tables: &[String]) -> Result<(SqlCatalog, Vec<String>), String> {
     let mut catalog = SqlCatalog::new();
-    let mut names = HashSet::new();
+    let mut names = Vec::new();
     for raw in tables {
         let table: Value =
             serde_json::from_str(raw).map_err(|e| format!("--sql-catalog-table: {e}"))?;
         let name = table["name"]
             .as_str()
             .ok_or("--sql-catalog-table: name must be a string")?;
-        if !names.insert(name.to_owned()) {
+        if names.iter().any(|declared| declared == name) {
             return Err(format!(
                 "--sql-catalog-table: table {name} is declared twice"
             ));
@@ -520,7 +521,8 @@ pub fn sql_catalog(tables: &[String]) -> Result<SqlCatalog, String> {
                 }
             },
         };
+        names.push(name.to_owned());
         catalog = catalog.with_table(name, schema);
     }
-    Ok(catalog)
+    Ok((catalog, names))
 }

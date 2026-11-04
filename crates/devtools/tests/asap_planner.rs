@@ -57,17 +57,24 @@ fn planner(args: &[&str]) -> Output {
         .unwrap()
 }
 
-/// The JSON document `asap_planner` writes for `args`, which must succeed.
+/// The JSON document `asap_planner` writes for `args`; the run exits 1
+/// exactly when a stage section records an error, else 0.
 fn document_of(args: &[&str]) -> Value {
     let mut args = args.to_vec();
     args.extend(["--format", "json"]);
     let output = planner(&args);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_str(&String::from_utf8(output.stdout).unwrap()).unwrap()
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let document: Value = serde_json::from_str(&String::from_utf8(output.stdout).unwrap())
+        .unwrap_or_else(|e| panic!("{e}: {stderr}"));
+    let failed = [
+        "stage1_logical_asap_optimization",
+        "stage2_physical_asap_optimization",
+        "stage3_plan_selection",
+    ]
+    .iter()
+    .any(|stage| !document[stage]["error"].is_null());
+    assert_eq!(output.status.code(), Some(i32::from(failed)), "{stderr}");
+    document
 }
 
 /// The document for the workload `workload` with `args`.
@@ -605,7 +612,7 @@ fn table_declared_twice_is_rejected() {
 
 /// When Pass 1 fails, the document still carries the Stage 0 DAG, with the
 /// error under Stage 1 and no Stage 2 or Stage 3 section, so the viewer can
-/// show both.
+/// show both, and the run exits 1.
 #[test]
 fn pass1_failure_still_writes_stage0_and_the_error() {
     let document = document(
@@ -625,6 +632,13 @@ fn pass1_failure_still_writes_stage0_and_the_error() {
     assert_eq!(logical["candidates"], json!([]));
     assert_eq!(document["stage2_physical_asap_optimization"], Value::Null);
     assert!(!selects_a_plan(&document["stage3_plan_selection"]));
+    // Text mode also prints the error and exits 1.
+    let file = TempFile::json(&adhoc(&["topk(5, rate(m[5m]))"], within(1.5, 0.1), &["m"]));
+    let output = planner(&["--workload", file.path(), "--run-until", "stage3"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8(output.stdout)
+        .unwrap()
+        .contains("error: Pass 1: "));
 }
 
 /// A query Pass 1 rejects is reported before deployment capabilities that

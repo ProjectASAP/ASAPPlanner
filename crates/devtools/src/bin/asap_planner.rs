@@ -216,9 +216,8 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             .map_err(|e| format!("--workload {path}: {e}"))?;
         workloads.push((path.as_str(), workload));
     }
-    let catalog = sql_catalog(&tables)?;
-    let (described, roots, entries, data) =
-        lowered_together(&workloads, &catalog, &catalog_table_names(&tables)?)?;
+    let (catalog, table_names) = sql_catalog(&tables)?;
+    let (described, roots, entries, data) = lowered_together(&workloads, &catalog, &table_names)?;
     // Plan with the executor's summary families when the deployment declares none.
     if deployment_capabilities.supported_summaries.is_none() {
         deployment_capabilities.supported_summaries =
@@ -229,6 +228,16 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         .with_deployment_capabilities(&deployment_capabilities)
         .with_ignore_accuracy_guarantees(ignore_accuracy_guarantees);
     let result = run_stages_until(roots.clone(), &entries, &data, models, run_until);
+    // A stage that failed: the output is still written, then the run exits 1.
+    // (`DeadlineReached` only stands for the stages `--run-until` skipped.)
+    let failure = match &result {
+        Err(PlanningStagesError::Pass1(error)) => Some(format!("Pass 1: {error}")),
+        Ok(run) => match &run.run.selection {
+            Err(SelectionError::DeadlineReached) | Ok(_) => None,
+            Err(error) => Some(error.to_string()),
+        },
+        Err(_) => None,
+    };
     // A rate, increase or irate over a declared gauge (the query still plans).
     let mut warnings = metric_type_warnings_of(&described, &data)?;
     // A selected plan's very large peak memory, when the deployment
@@ -277,11 +286,12 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         text
     };
     match out {
-        Some(path) => Ok(std::fs::write(&path, text).map_err(|e| format!("{path}: {e}"))?),
-        None => {
-            print!("{text}");
-            Ok(())
-        }
+        Some(path) => std::fs::write(&path, text).map_err(|e| format!("{path}: {e}"))?,
+        None => print!("{text}"),
+    }
+    match failure {
+        Some(error) => Err(Failure::Other(error)),
+        None => Ok(()),
     }
 }
 
@@ -418,7 +428,10 @@ fn stage3_json(run: &PlanningStagesRun, entries: &[QueryWorkloadEntry]) -> Value
 /// The document's `memo` section: the memo after each step `run` ran, and
 /// with Stage 3 the selected plan's choice over the last step's memo.
 fn memo_json(run: &PlanningStagesRun) -> Value {
-    let stage0 = &run.stage0_memo_groups;
+    let stage0 = run
+        .stage0_memo_groups
+        .as_ref()
+        .expect("run_stages_until builds Stage 0's memo");
     let mut named = vec![("stage0", "Stage 0, the frontends' DAG hash-consed", stage0)];
     if let Some(pass1) = &run.run.per_computation_candidates {
         named.push(("pass1", "Stage 1, Pass 1", &pass1.memo));
@@ -900,21 +913,6 @@ fn with_default_metrics(mut queries: Vec<Value>, roots: &[QueryRoot]) -> Vec<Val
         }
     }
     queries
-}
-
-/// The names of the tables `--sql-catalog-table` declares.
-fn catalog_table_names(tables: &[String]) -> Result<Vec<String>, String> {
-    tables
-        .iter()
-        .map(|raw| {
-            let table: Value =
-                serde_json::from_str(raw).map_err(|e| format!("--sql-catalog-table: {e}"))?;
-            table["name"]
-                .as_str()
-                .map(str::to_owned)
-                .ok_or_else(|| "--sql-catalog-table: name must be a string".to_string())
-        })
-        .collect()
 }
 
 /// Group id (as a string) to candidate index.

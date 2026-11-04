@@ -18,7 +18,7 @@ The report separates local candidate generation, memo expansion, inventory/model
 
 The separate nine-example viewer suite also passed, including SQL rollup and the composed DDS range query (174.52 s total, concurrency two). Zero-budget and refinement-budget reports passed their focused checks. These examples supplement the thirty random mixed workloads.
 
-To reproduce the thirty-workload collection, build `stage_pipeline`, freeze that executable, then run `python3 tools/validate_joint_workloads.py OUTPUT_DIRECTORY FROZEN_EXECUTABLE`. The runner uses the unchanged viewer manifests, enforced guarantees, Fargate prices, and a 90-second external deadline. Full regression and exact-head CI are separate release gates; successful workload coverage alone does not establish release readiness.
+To reproduce the thirty-workload collection, build `asap_planner` (which replaced `stage_pipeline`), freeze that executable, then run `python3 tools/validate_joint_workloads.py OUTPUT_DIRECTORY FROZEN_EXECUTABLE`. The runner uses the unchanged viewer manifests, enforced guarantees, Fargate prices, and a 90-second external deadline. Full regression and exact-head CI are separate release gates; successful workload coverage alone does not establish release readiness.
 
 ## Regression coverage
 

@@ -187,7 +187,8 @@ def plan_workload(payload: object) -> dict:
         out = str(Path(tmp) / "plan.json")
         args = workload_args(payload, tmp, out)
         result = subprocess.run(args, cwd=REPO, text=True, capture_output=True, timeout=PLAN_TIMEOUT_SECONDS)
-        if result.returncode != 0:
+        # A failed stage exits 1 but still writes the document, with the error.
+        if not Path(out).exists():
             raise RuntimeError(result.stderr.strip() or "asap_planner failed")
         document = json.loads(Path(out).read_text(encoding="utf-8"))
     # Stage 3's `Selection`: its plan is P1, with a cost; else `error`.

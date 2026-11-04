@@ -51,7 +51,10 @@ asap_planner (--workload <file>)... --run-until stage0|pass1|pass2|stage2|stage3
 | `--ignore-accuracy-guarantees` | Accept candidates without an accuracy guarantee. By default each query's accuracy requirement is enforced. |
 
 Any other option, or a missing required one, is a usage error (exit
-status 2). An input the planner cannot read or plan exits with status 1.
+status 2). An input the planner cannot read exits with status 1. So does a
+run in which a stage failed (for example, Pass 1 rejected a query, or no
+plan meets the requirements): the output is still written, with the error
+under the stage that failed.
 
 ## Stages
 

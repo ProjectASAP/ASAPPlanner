@@ -64,17 +64,20 @@ TUMBLING_WINDOWS_WORKLOAD = json.loads((HERE / "test-fixtures" / "tumbling-windo
 
 
 @functools.lru_cache(maxsize=None)
-def _planned(workload: str, capabilities: str | None, ignore_accuracy_guarantees: bool) -> str:
+def _planned(workload: str, capabilities: str | None, ignore_accuracy_guarantees: bool, run_until: str = "stage3") -> str:
     with tempfile.TemporaryDirectory() as tmp:
         workload_path, out = Path(tmp) / "workload.json", Path(tmp) / "doc.json"
         workload_path.write_text(workload)
-        args = [str(server.BINARY), "--workload", str(workload_path), "--run-until", "stage3", "--format", "json", "--out", str(out)]
+        args = [str(server.BINARY), "--workload", str(workload_path), "--run-until", run_until, "--format", "json", "--out", str(out)]
         if capabilities is not None:
             (Path(tmp) / "capabilities.json").write_text(capabilities)
             args += ["--deployment-capabilities", str(Path(tmp) / "capabilities.json")]
         if ignore_accuracy_guarantees:
             args.append("--ignore-accuracy-guarantees")
-        subprocess.run(args, check=True, capture_output=True)
+        # A failed stage exits 1 and still writes the document.
+        result = subprocess.run(args, capture_output=True)
+        if result.returncode not in (0, 1) or not out.exists():
+            raise RuntimeError(result.stderr.decode())
         return out.read_text()
 
 
@@ -134,6 +137,28 @@ class ValidationTests(unittest.TestCase):
     def test_example1_is_valid(self):
         """Example 1 as asap_planner plans it passes the checks."""
         self.assertEqual(self.validate(self.doc), [])
+
+    def test_a_run_stopped_before_stage3_is_shown_with_empty_later_stages(self):
+        """A document from each earlier `--run-until`, whose later stages
+        are null, passes the checks once those stages are shown empty."""
+        workload = EXAMPLE1.read_text()
+        for run_until in ["stage0", "pass1", "pass2", "stage2"]:
+            with self.subTest(run_until=run_until):
+                doc = json.loads(_planned(workload, None, False, run_until))
+                self.assertIsNone(doc["stage3_plan_selection"])
+                self.assertEqual(self.validate(self.js.call("fillStagesNotRun", doc)), [])
+
+    def test_a_pass1_failure_is_shown_with_its_error(self):
+        """When Pass 1 rejects a query, the document (Stage 2 and Stage 3
+        null) passes the checks and keeps the Stage 1 error to show."""
+        workload = promql_workload(["topk(5, rate(m[5m]))"], ["m"])
+        workload["query_workload"]["repeating_queries"][0]["requirements"]["accuracy"] = {
+            "max_error": 1.5, "failure_probability": 0.1}
+        doc = planned(workload, ignore_accuracy_guarantees=True)
+        self.assertIsNone(doc["stage2_physical_asap_optimization"])
+        doc = self.js.call("fillStagesNotRun", doc)
+        self.assertEqual(self.validate(doc), [])
+        self.assertTrue(doc["stage1_logical_asap_optimization"]["error"].startswith("Pass 1: "))
 
     def test_a_workload_example_with_materialized_views_is_valid(self):
         """A plan with materialized views passes the checks."""

@@ -219,13 +219,21 @@ impl FuzzWorkload {
 
     /// The `asap_planner` invocation (a bash command) that plans this
     /// workload, saved as `workload_file`, with `settings`' accuracy
-    /// guarantees; `asap_planner` has no exhaustive search. Its output
-    /// document is `<workload_file stem>.out.json`.
+    /// guarantees. `asap_planner` has no exhaustive search, so under
+    /// `--search exhaustive` the command starts with a comment saying it
+    /// may not reproduce. Its output document is `<workload_file stem>.out.json`.
     pub fn asap_planner_command(&self, workload_file: &str, settings: &FuzzSettings) -> String {
-        let mut command = format!(
+        let mut command = String::new();
+        if matches!(settings.search, SearchKind::Exhaustive) {
+            command.push_str(
+                "# asap_planner runs the candidate-connection search, not the \
+                 exhaustive one; it may not reproduce this.\n",
+            );
+        }
+        command.push_str(&format!(
             "cargo run -p asap-devtools --bin asap_planner -- --workload {workload_file} \
              --run-until stage3 --format json"
-        );
+        ));
         for table in &self.tables {
             command.push_str(&format!(" \\\n  --sql-catalog-table '{table}'"));
         }
@@ -246,7 +254,7 @@ impl FuzzWorkload {
 
 /// Workloads read from a seed file: a `PlanningWorkload` JSON (its
 /// repeating queries), with the SQL tables of a `tables.json` (a JSON array
-/// of `--table` objects) in the same directory, or an object
+/// of `--sql-catalog-table` objects) in the same directory, or an object
 /// `{"workload": <PlanningWorkload>, "tables": [...]}`.
 pub fn read_seed_file(path: &std::path::Path) -> Result<FuzzWorkload, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -407,7 +415,7 @@ impl Planner {
             Language::Promql => lower_promql_roots(&planning),
             Language::Sql => {
                 let tables: Vec<String> = workload.tables.iter().map(Value::to_string).collect();
-                lower_sql_roots(&planning, &sql_catalog(&tables)?)
+                lower_sql_roots(&planning, &sql_catalog(&tables)?.0)
             }
         }
     }

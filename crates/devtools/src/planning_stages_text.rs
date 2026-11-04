@@ -54,7 +54,9 @@ pub fn planning_stages_text(stages: &PlanningStagesRun) -> String {
         &mut out,
         "Stage 0 → Stage 1: DagOfLogicalMemoGroups (the roots hash-consed)",
     );
-    write_memo(&mut out, &stages.stage0_memo_groups, None, false);
+    if let Some(memo) = &stages.stage0_memo_groups {
+        write_memo(&mut out, memo, None, false);
+    }
     if until == RunUntil::Stage0 {
         return out;
     }
