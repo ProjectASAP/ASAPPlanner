@@ -2,7 +2,7 @@
 //! (#509 Example 2's Q3, in its Float64 form).
 use asap_frontend_common::resolve_root;
 use asap_frontend_sql::test_support::lower_unresolved;
-use asap_frontend_sql::{lower_sql, lower_sql_batch, SqlCatalog};
+use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, Schema};
@@ -118,32 +118,6 @@ async fn frequency_empty_input_guard_uses_an_exact_count() {
         measures.as_slice(),
         [AggIntent::Count { accuracy }] if accuracy.is_exact()
     ));
-}
-
-/// The batch path recognizes the idiom as the single-query path does.
-#[tokio::test]
-async fn batch_lowering_recognizes_frequency_l2() {
-    use asap_types::workload::{
-        BatchEntry, Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload,
-        SqlDialect,
-    };
-    let workload = QueryWorkload {
-        language: QueryLanguage::SQL(SqlDialect::DataFusionSQL),
-        query_batch: Some(vec![BatchEntry {
-            query: Query(CAST_COUNT.into()),
-            requirements: QueryRequirements {
-                accuracy: AccuracyTarget::exact(),
-                max_latency_ms: None,
-            },
-            predictability: Predictability::Unknown,
-            invocations: 1,
-            execute_at: None,
-            range_evaluation: None,
-        }]),
-        repeating_queries: None,
-    };
-    let roots = lower_sql_batch(&workload, &catalog(false)).await;
-    assert!(has_l2(roots[0].as_ref().unwrap()));
 }
 
 /// Stage 1 offers the exact option and summary candidates for the

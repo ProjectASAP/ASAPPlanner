@@ -20,7 +20,6 @@ use std::rc::Rc;
 
 use thiserror::Error;
 
-use asap_types::ir::operator::operator_properties::ConcatDiscriminatorKey;
 use asap_types::ir::operator::{AggIntent, GroupKeys, Reduction};
 use asap_types::ir::scalar::{resolve_column_ref, resolve_column_refs, ColumnRef, ResolveError};
 use asap_types::ir::schema::{ColumnId, Schema};
@@ -279,33 +278,12 @@ fn resolve(
             node(NonASAPOp::Dedup { cols, child })
         }
 
-        U::Concat {
-            children,
-            discriminator_unique_key,
-        } => {
+        U::Concat { children } => {
             let children = children
                 .iter()
                 .map(|c| resolve(c, usage_derived_schema))
                 .collect::<Result<Vec<_>, _>>()?;
-            // Resolved against the first branch's own output schema — the one
-            // `output_schema`'s `Concat` arm derives the merged schema from.
-            let discriminator_unique_key = discriminator_unique_key
-                .as_ref()
-                .map(|key| {
-                    let schema = &children
-                        .first()
-                        .ok_or(SchemaDerivationError::EmptyConcat)?
-                        .schema;
-                    Ok::<_, ResolveDAGError>(ConcatDiscriminatorKey::new(
-                        resolve_column_ref(key.discriminator(), schema)?,
-                        resolve_column_refs(key.inner_key(), schema)?,
-                    ))
-                })
-                .transpose()?;
-            node(NonASAPOp::Concat {
-                children,
-                discriminator_unique_key,
-            })
+            node(NonASAPOp::Concat { children })
         }
 
         U::Join {
@@ -1001,35 +979,6 @@ mod tests {
         );
         assert_eq!(resolved.schema, child.schema);
         assert!(resolved.schema.has_promql_series_identity());
-    }
-
-    // A `Concat` discriminator column referenced nowhere else, over a
-    // schemaless first branch, resolves to the branch's own positional ids.
-    #[test]
-    fn resolve_root_seeds_and_resolves_an_otherwise_unreferenced_discriminator_column() {
-        let unresolved = UnresolvedOp::concat_with_discriminator(
-            vec![scan("m"), scan("m")],
-            ColumnRef::Named("phi".into()),
-            vec![ColumnRef::Named("host".into())],
-        );
-
-        let resolved = resolve_root(&unresolved).expect("resolves");
-        let NonASAPOp::Concat {
-            children,
-            discriminator_unique_key,
-        } = resolved.expect_non_asap()
-        else {
-            panic!("expected a resolved Concat, got {resolved:?}");
-        };
-        let schema = &children[0].schema;
-        let key = discriminator_unique_key
-            .as_ref()
-            .expect("discriminator key survives resolution");
-        assert_eq!(*key.discriminator(), schema.column_id("phi").unwrap());
-        assert_eq!(
-            key.inner_key().to_vec(),
-            vec![schema.column_id("host").unwrap()]
-        );
     }
 
     // `sum by (job)(a or b)`: each `BinaryOp` side binds in its own scope but

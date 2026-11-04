@@ -239,9 +239,7 @@ pub async fn e2e_plan(input: UserInput<'_>) -> Result<PlanOutput, PlanError> {
 
 /// One expression per normalized entry, in `QueryWorkload::entries()` order.
 ///
-/// The SQL frontend is driven one entry at a time rather than
-/// through `lower_sql_batch`, which walks `query_batch` alone and would drop
-/// every repeating query, and the output must cover every entry.
+/// The SQL frontend lowers one entry at a time.
 async fn lower(input: &UserInput<'_>) -> Result<Vec<asap_types::ir::QueryRoot>, PlanError> {
     match &input.frontend_specific {
         FrontendInput::Sql { catalog } => {

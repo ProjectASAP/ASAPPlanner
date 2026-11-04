@@ -341,12 +341,6 @@ mod tests {
     }
 
     #[test]
-    fn discriminator_assertion_rejects_unknown_wire_fields() {
-        let json = r#"{"discriminator":1,"inner_key":[0],"unverified":true}"#;
-        assert!(serde_json::from_str::<ConcatDiscriminatorKey>(json).is_err());
-    }
-
-    #[test]
     fn aggregate_strips_time_and_keeps_unique_keys() {
         let input = Schema::with_time_index(
             vec![

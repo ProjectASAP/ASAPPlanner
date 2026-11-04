@@ -9,9 +9,8 @@ use serde::{Deserialize, Serialize};
 use super::node::{OperatorNode, OperatorResultKind};
 use crate::ir::operator::agg_intent::AggIntent;
 use crate::ir::operator::operator_properties::{
-    BinaryOpKind, ConcatDiscriminatorKey, GroupKeys, InfoMatcher, JoinKind, Reduction,
-    RelationalSetOpKind, SampleKind, Source, TimeShift, VectorMatch, WindowFrame, WindowFrameUnits,
-    WindowFuncKind,
+    BinaryOpKind, GroupKeys, InfoMatcher, JoinKind, Reduction, RelationalSetOpKind, SampleKind,
+    Source, TimeShift, VectorMatch, WindowFrame, WindowFrameUnits, WindowFuncKind,
 };
 use crate::ir::scalar::{Predicate, ProjectItem, ScalarExpr, SortKey};
 use crate::ir::schema::aggregate_schema::aggregate_output_schema;
@@ -110,11 +109,7 @@ pub enum NonASAPOp<C = Rc<OperatorNode>> {
     },
     /// ⊕ — exact n-ary `UNION ALL` of union-compatible branches. The output
     /// schema is the first child's.
-    Concat {
-        children: Vec<C>,
-        #[serde(default)]
-        discriminator_unique_key: Option<ConcatDiscriminatorKey>,
-    },
+    Concat { children: Vec<C> },
     /// δ — deduplication; empty `cols` = all columns.
     Dedup { cols: Vec<ColumnId>, child: C },
     /// Order-by, per `partition_by` group when non-empty.
@@ -368,12 +363,8 @@ impl<C> NonASAPOp<C> {
                 left: f(left),
                 right: f(right),
             },
-            Concat {
-                children,
-                discriminator_unique_key,
-            } => Concat {
+            Concat { children } => Concat {
                 children: children.iter().map(&mut f).collect(),
-                discriminator_unique_key: discriminator_unique_key.clone(),
             },
             Dedup { cols, child } => Dedup {
                 cols: cols.clone(),
@@ -763,10 +754,7 @@ impl NonASAPOp {
                 out
             }
 
-            Concat {
-                children,
-                discriminator_unique_key,
-            } => {
+            Concat { children } => {
                 let mut s = children
                     .first()
                     .ok_or(SchemaDerivationError::EmptyConcat)?
@@ -780,11 +768,6 @@ impl NonASAPOp {
                     }
                 }
                 s.unique_keys.clear();
-                if let Some(key) = discriminator_unique_key {
-                    let mut compound = vec![*key.discriminator()];
-                    compound.extend(key.inner_key().iter().copied());
-                    s.add_unique_key(compound);
-                }
                 s
             }
             SetOp { left, .. } => {
@@ -1426,14 +1409,8 @@ mod tests {
         })
     }
 
-    fn concat(
-        children: Vec<Rc<OperatorNode>>,
-        discriminator_unique_key: Option<ConcatDiscriminatorKey>,
-    ) -> NonASAPOp {
-        NonASAPOp::Concat {
-            children,
-            discriminator_unique_key,
-        }
+    fn concat(children: Vec<Rc<OperatorNode>>) -> NonASAPOp {
+        NonASAPOp::Concat { children }
     }
 
     fn rate_over(child: NonASAPOp) -> NonASAPOp {
@@ -1601,9 +1578,7 @@ mod tests {
             vec![vec![0]],
             "a Dedup branch does have a unique key on its own"
         );
-        let schema = concat(vec![branch(), branch()], None)
-            .output_schema()
-            .unwrap();
+        let schema = concat(vec![branch(), branch()]).output_schema().unwrap();
         assert!(
             schema.unique_keys.is_empty(),
             "the union of two deduplicated branches is not deduplicated"
@@ -1614,7 +1589,7 @@ mod tests {
     #[test]
     fn merge_and_setop_agree_on_unique_keys() {
         let branch = || dedup_branch(vec![col("k", DataType::Utf8, false)]);
-        let merged = concat(vec![branch(), branch()], None);
+        let merged = concat(vec![branch(), branch()]);
         let setop = NonASAPOp::SetOp {
             kind: RelationalSetOpKind::Union,
             all: true,
@@ -1630,37 +1605,16 @@ mod tests {
     #[test]
     fn an_empty_merge_has_no_schema() {
         assert!(matches!(
-            concat(vec![], None).output_schema(),
+            concat(vec![]).output_schema(),
             Err(SchemaDerivationError::EmptyConcat)
         ));
     }
 
-    /// Issue #228: an asserted discriminator yields the compound
-    /// `(discriminator, inner_key)` unique key, although each branch's own
-    /// `inner_key` repeats across branches.
+    /// A `Concat` never claims a unique key.
     #[test]
-    fn discriminator_override_produces_a_compound_unique_key() {
-        let branch = || {
-            dedup_branch(vec![
-                col("k", DataType::Utf8, false),
-                col("branch_id", DataType::Int64, false),
-            ])
-        };
-        let schema = concat(
-            vec![branch(), branch()],
-            Some(ConcatDiscriminatorKey::new(1, vec![0])),
-        )
-        .output_schema()
-        .unwrap();
-        assert_eq!(schema.unique_keys, vec![vec![1, 0]]);
-        assert_eq!(schema.fields.len(), 2, "column shape is the first branch's");
-    }
-
-    /// Without a named discriminator a `Concat` never claims a unique key.
-    #[test]
-    fn no_way_to_fabricate_a_unique_key_without_naming_a_discriminator() {
+    fn concat_never_claims_a_unique_key() {
         let branch = || dedup_branch(vec![col("k", DataType::Utf8, false)]);
-        assert!(concat(vec![branch(), branch()], None)
+        assert!(concat(vec![branch(), branch()])
             .output_schema()
             .unwrap()
             .unique_keys

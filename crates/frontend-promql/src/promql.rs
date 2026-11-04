@@ -1032,12 +1032,8 @@ fn walk_histogram_quantiles(call: &Call) -> Result<Unresolved> {
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    // No discriminator asserted here today (issue #228): the φ value each
-    // branch carries via `PromqlRelabel` *is* structurally a distinct
-    // per-branch discriminator, but nothing downstream currently needs the
-    // resulting compound unique key — see
-    // `docs/design_docs/concat-unique-keys-decision.md`. `Unresolved::concat`
-    // keeps `output_schema`'s default (drop `unique_keys` entirely).
+    // `Concat` claims no unique key, although each branch's φ would make
+    // `(φ, key)` one; see `docs/design_docs/decisions/concat-unique-keys.md`.
     Ok(Unresolved::concat(branches))
 }
 

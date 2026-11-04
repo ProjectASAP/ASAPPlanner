@@ -175,9 +175,7 @@ async fn facade_plans_match_run_planning() {
     assert_eq!(&output.roots(), run.selected_plan.as_ref().unwrap());
 }
 
-/// A repeating SQL query reaches the optimizer. `lower_sql_batch` walks
-/// `query_batch` alone, so driving the frontend through it would drop the
-/// repeating entries.
+/// A repeating SQL query reaches the optimizer, not only `query_batch` entries.
 #[tokio::test]
 async fn lowers_repeating_sql_entries_too() {
     let workload = sql_workload(
