@@ -142,7 +142,7 @@ class ValidationTests(unittest.TestCase):
         """A document from each earlier `--run-until`, whose later stages
         are null, passes the checks once those stages are shown empty."""
         workload = EXAMPLE1.read_text()
-        for run_until in ["stage0", "pass1", "pass2", "stage2"]:
+        for run_until in ["stage0", "stage1_pass1", "stage1_pass2", "stage2"]:
             with self.subTest(run_until=run_until):
                 doc = json.loads(_planned(workload, None, False, run_until))
                 self.assertIsNone(doc["stage3_plan_selection"])

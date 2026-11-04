@@ -42,17 +42,34 @@ pub enum RunUntil {
     Stage3,
 }
 
+impl RunUntil {
+    const ALL: [Self; 5] = [
+        Self::Stage0,
+        Self::Pass1,
+        Self::Pass2,
+        Self::Stage2,
+        Self::Stage3,
+    ];
+
+    /// The `--run-until` value, also written as the JSON `run_until`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Stage0 => "stage0",
+            Self::Pass1 => "stage1_pass1",
+            Self::Pass2 => "stage1_pass2",
+            Self::Stage2 => "stage2",
+            Self::Stage3 => "stage3",
+        }
+    }
+}
+
 impl std::str::FromStr for RunUntil {
     type Err = String;
     fn from_str(stage: &str) -> Result<Self, String> {
-        Ok(match stage {
-            "stage0" => Self::Stage0,
-            "pass1" => Self::Pass1,
-            "pass2" => Self::Pass2,
-            "stage2" => Self::Stage2,
-            "stage3" => Self::Stage3,
-            other => return Err(format!("unknown stage {other}")),
-        })
+        Self::ALL
+            .into_iter()
+            .find(|until| until.name() == stage)
+            .ok_or_else(|| format!("unknown stage {stage}"))
     }
 }
 

@@ -77,11 +77,11 @@ const SECTIONS: [(&str, &[&str]); 5] = [
         ],
     ),
     (
-        "pass1",
+        "stage1_pass1",
         &["Stage 1 Pass 1 output: PerComputationLogicalMemoCandidates"],
     ),
     (
-        "pass2",
+        "stage1_pass2",
         &[
             "Stage 1 Pass 2, after local window composition",
             "Stage 1 Pass 2 output = Stage 2 input: LogicalASAPMemoCandidates",
@@ -126,7 +126,7 @@ fn run_until_prints_exactly_the_stages_up_to_it() {
 #[test]
 fn pass2_holds_a_tumbling_window_candidate_for_every_width_dividing_the_grid() {
     let quantile = workload("quantile_over_time(0.5, data[5m])", 60_000, 0.01, "data");
-    let text = stdout(planner(&quantile, &["--run-until", "pass2"]));
+    let text = stdout(planner(&quantile, &["--run-until", "stage1_pass2"]));
     let widths: BTreeSet<u64> = text
         .split("tumbling_window_width_ms=")
         .skip(1)
@@ -160,7 +160,7 @@ fn stage3_selects_candidates_stage2_lists() {
 }
 
 /// `--format json` leaves the sections of stages it did not run null: after
-/// `pass2`, Stage 1 and the memo up to Pass 2 are there and Stages 2 and 3
+/// `stage1_pass2`, Stage 1 and the memo up to Pass 2 are there and Stages 2 and 3
 /// are null; after `stage3`, every section is there.
 #[test]
 fn json_sections_of_stages_not_run_are_null() {
@@ -171,8 +171,8 @@ fn json_sections_of_stages_not_run_are_null() {
         )))
         .unwrap()
     };
-    let pass2 = document("pass2");
-    assert_eq!(pass2["run_until"], "pass2");
+    let pass2 = document("stage1_pass2");
+    assert_eq!(pass2["run_until"], "stage1_pass2");
     assert!(pass2["stage0_query_language_frontends"].is_object());
     assert!(pass2["stage1_logical_asap_optimization"].is_object());
     assert_eq!(pass2["stage2_physical_asap_optimization"], Value::Null);
@@ -201,8 +201,9 @@ fn json_sections_of_stages_not_run_are_null() {
     );
 }
 
-/// A missing `--run-until`, and each flag `stage_pipeline` took that
-/// `asap_planner` does not, is a usage error (status 2, with the usage).
+/// A missing `--run-until`, the old `pass1`/`pass2` stage names, and each
+/// flag `stage_pipeline` took that `asap_planner` does not, is a usage error
+/// (status 2, with the usage).
 #[test]
 fn missing_run_until_and_removed_flags_are_usage_errors() {
     let refused = |args: &[&str], message: &str| {
@@ -213,6 +214,9 @@ fn missing_run_until_and_removed_flags_are_usage_errors() {
         assert!(stderr.contains("usage: asap_planner"), "{args:?}: {stderr}");
     };
     refused(&[], "--run-until is required");
+    for stage in ["pass1", "pass2"] {
+        refused(&["--run-until", stage], &format!("unknown stage {stage}"));
+    }
     for flag in [
         "--example",
         "--promql",

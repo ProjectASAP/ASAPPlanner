@@ -1199,7 +1199,7 @@ fn accuracy_guarantees_are_enforced_by_default_and_ignored_on_request() {
         json!({"max_error": 0.01, "failure_probability": 0.01, "accuracy_metric": "rank"}),
         &["x"],
     );
-    let enforced = document(&workload, &["--run-until", "pass1"]);
+    let enforced = document(&workload, &["--run-until", "stage1_pass1"]);
     assert_eq!(enforced["accuracy_guarantees"], "enforced");
     let no_bound: Vec<&str> = enforced["stage1_logical_asap_optimization"]["pruned_candidates"]
         .as_array()
@@ -1404,7 +1404,11 @@ fn check_workload_example(root: &Path, example: &Value) {
 fn undeclared_supported_summaries_default_to_the_executors_families() {
     let document = document(
         &adhoc(&["count by (job) (m)"], within(0.01, 0.01), &["m"]),
-        &["--run-until", "pass1", "--ignore-accuracy-guarantees"],
+        &[
+            "--run-until",
+            "stage1_pass1",
+            "--ignore-accuracy-guarantees",
+        ],
     );
     let labels = memo_labels(&document, "pass1");
     for family in ["FinalizeExactAccumulator", "Cms", "UnivMon"] {

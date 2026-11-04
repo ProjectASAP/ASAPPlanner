@@ -2,11 +2,11 @@
 //     --workload dashboard.json --run-until stage3
 // cargo run -p asap-devtools --bin asap_planner -- \
 //     --workload promql.json --workload sql.json --sql-catalog-table '<json>' \
-//     --run-until pass2 --format json --out run.json
+//     --run-until stage1_pass2 --format json --out run.json
 //
 // Runs the planner stages over a workload up to and including
-// `--run-until` (`stage0`, `pass1`, `pass2`, `stage2` or `stage3`) and
-// writes each stage's output, as text (`--format text`, the default;
+// `--run-until` (`stage0`, `stage1_pass1`, `stage1_pass2`, `stage2` or
+// `stage3`) and writes each stage's output, as text (`--format text`, the default;
 // `asap_devtools::planning_stages_text`) or as an `asap-stage-pipeline/v1`
 // document for the Stage Viewer (`--format json`), to `--out` or standard
 // output.
@@ -51,7 +51,7 @@
 //   - workload: the queries (`id`, `language`, `text`, `requirements`,
 //     `recurrence`, `predictability`) and the `data_workload` planned with;
 //   - stage0_query_language_frontends: the frontends' DAG, one root per query;
-//   - stage1_logical_asap_optimization (from `pass1`): `pruned_candidates`,
+//   - stage1_logical_asap_optimization (from `stage1_pass1`): `pruned_candidates`,
 //     the ways to compute a measure Pass 1 pruned (each on its aggregate's
 //     memo `group`, with `candidate` and `reason`); with `stage3`,
 //     `candidates` holds `L1`, the selected plan's roots (as Stage 2 built
@@ -128,7 +128,7 @@ use asap_types::workload::{
 use serde_json::{json, Value};
 
 const USAGE: &str = "usage: asap_planner (--workload <file>)... \
---run-until stage0|pass1|pass2|stage2|stage3 [--format text|json] [--out <file>] \
+--run-until stage0|stage1_pass1|stage1_pass2|stage2|stage3 [--format text|json] [--out <file>] \
 [--sql-catalog-table <json>]... [--cost-inputs <file>] [--deployment-capabilities <file>] \
 [--ignore-accuracy-guarantees]";
 
@@ -305,7 +305,7 @@ fn document_of(
         Ok(run) => Ok(document(queries, entries, &run)),
         Err(PlanningStagesError::Pass1(error)) => Ok(json!({
             "format": "asap-stage-pipeline/v1",
-            "run_until": format!("{run_until:?}").to_lowercase(),
+            "run_until": run_until.name(),
             "workload": { "queries": queries },
             "stage0_query_language_frontends": { "dag": export(roots) },
             "stage1_logical_asap_optimization": {
@@ -379,7 +379,7 @@ fn document(queries: Vec<Value>, entries: &[QueryWorkloadEntry], run: &PlanningS
     let stage3 = (until == RunUntil::Stage3).then(|| stage3_json(run, entries));
     json!({
         "format": "asap-stage-pipeline/v1",
-        "run_until": format!("{until:?}").to_lowercase(),
+        "run_until": until.name(),
         "workload": { "queries": queries },
         "stage0_query_language_frontends": { "dag": export(&run.stage0_query_language_frontends) },
         "stage1_logical_asap_optimization": stage1,

@@ -33,7 +33,7 @@ minutes in a debug build.
 ## Options
 
 ```text
-asap_planner (--workload <file>)... --run-until stage0|pass1|pass2|stage2|stage3
+asap_planner (--workload <file>)... --run-until stage0|stage1_pass1|stage1_pass2|stage2|stage3
   [--format text|json] [--out <file>] [--sql-catalog-table <json>]...
   [--cost-inputs <file>] [--deployment-capabilities <file>]
   [--ignore-accuracy-guarantees]
@@ -61,8 +61,8 @@ under the stage that failed.
 | `--run-until` | Prints, after the stages before it |
 | --- | --- |
 | `stage0` | The frontends' query DAGs and their memo groups. |
-| `pass1` | Stage 1 Pass 1: each computation's candidates, and the candidates pruned with their reason. |
-| `pass2` | Stage 1 Pass 2: the memo after local window composition (a candidate for every legal tumbling-window width), then the memo after the sharing rules, which Stage 2 implements. |
+| `stage1_pass1` | Stage 1 Pass 1: each computation's candidates, and the candidates pruned with their reason. |
+| `stage1_pass2` | Stage 1 Pass 2: the memo after local window composition (a candidate for every legal tumbling-window width), then the memo after the sharing rules, which Stage 2 implements. |
 | `stage2` | Stage 2: the physical candidates and the ones pruned. |
 | `stage3` | Stage 3: the selected plan, its cost per node, each query's accepted accuracy and the search status. |
 
