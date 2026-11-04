@@ -192,7 +192,6 @@ Following is an example of how the old workflow maps to the new interface.
 // Before — from a PlanningWorkload and a catalog.
 
 // 1. Lower every normalized entry, and record which entry each root came from.
-//    Not lower_sql_batch: it walks query_batch alone and drops repeating entries.
 let mut roots = Vec::new();
 for (index, entry) in workload.query_workload.entries().enumerate() {
     let accuracy = entry.requirements.accuracy.target();

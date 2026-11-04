@@ -1,11 +1,11 @@
 # `Concat` and `unique_keys`: the discriminator override (issue #228)
 
-> **Reverted (#1096)**: `discriminator_unique_key` and `ConcatDiscriminatorKey`
-> were removed. No production path ever set the key, so `Concat` always drops
-> `unique_keys` (Option 2 below). Re-add Option 1 when a call site needs it.
->
-> Status: accepted decision for the implementation described here. The
-> legacy `replacement.rs` and `explanation.rs` it mentions have been removed.
+> **Status: reverted (#1096).** Option 1 below was accepted and implemented,
+> then `discriminator_unique_key` and `ConcatDiscriminatorKey` were removed
+> because no production path ever set the key, so `Concat` always drops
+> `unique_keys` (Option 2). Re-add Option 1 when a call site needs it. The
+> legacy `replacement.rs` and `explanation.rs` mentioned below have been
+> removed.
 
 > Historical: `crates/types/src/pre_asap/query_expr.rs` was removed in #543;
 > `Concat` is now `NonASAPOp::Concat` (`crates/types/src/ir/operator/non_asap.rs`).

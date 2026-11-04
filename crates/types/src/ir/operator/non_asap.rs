@@ -1612,7 +1612,7 @@ mod tests {
 
     /// A `Concat` never claims a unique key.
     #[test]
-    fn no_way_to_fabricate_a_unique_key_without_naming_a_discriminator() {
+    fn concat_never_claims_a_unique_key() {
         let branch = || dedup_branch(vec![col("k", DataType::Utf8, false)]);
         assert!(concat(vec![branch(), branch()])
             .output_schema()

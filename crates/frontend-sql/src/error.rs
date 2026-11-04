@@ -8,8 +8,9 @@ use asap_frontend_common::ResolveDAGError;
 /// unified IR).
 ///
 /// Carries no PromQL type — the SQL front end never depends on the PromQL
-/// parser. The language-neutral variants (`UnsupportedFeature` / `Convert`) are
-/// mirrored by `asap_frontend_promql::PromqlError` rather than shared, so neither front end pulls the other's parser.
+/// parser. The language-neutral variants (`UnsupportedFeature` / `Convert`)
+/// are mirrored by `asap_frontend_promql::PromqlError` rather than shared, so
+/// neither front end pulls the other's parser.
 #[derive(Debug)]
 pub enum SqlError {
     /// DataFusion failed to parse / plan the SQL query.
