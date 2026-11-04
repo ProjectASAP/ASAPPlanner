@@ -2424,7 +2424,7 @@ mod tests {
     }
 
     /// `candidates` with every state node (a summary build or an exact
-    /// aggregate) kept at ingestion time, so selection charges its kept
+    /// aggregate) kept across evaluations, so selection charges its kept
     /// bytes every second (a state kept for one evaluation is held only for
     /// that evaluation).
     fn keeping_state(mut candidates: Vec<PhysicalWorkloadPlan>) -> Vec<PhysicalWorkloadPlan> {
@@ -2435,7 +2435,6 @@ mod tests {
                     Payload::ASAP(ASAPOp::SummaryAgg { .. })
                         | Payload::NonASAP(NonASAPOp::Aggregate { .. })
                 ) {
-                    node.output_state.timing = ExecutionTiming::IngestionTime;
                     node.lifetime = Lifetime::AcrossEvaluations(Medium::Memory);
                 }
             }

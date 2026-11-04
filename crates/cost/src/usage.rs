@@ -1143,7 +1143,11 @@ pub fn node_usage<'a>(
         // retention covers ([`tumbling_window_retention_ms`]: N, plus one per tumbling window
         // width of the readers' range-evaluation span), all but the
         // newest between evaluations and all while one runs.
-        (false, Lifetime::AcrossEvaluations(medium), _) => {
+        (
+            false,
+            Lifetime::AcrossEvaluations(medium),
+            Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }),
+        ) => {
             let tumbling_windows = tumbling_windows_of(node);
             let retained = retained_tumbling_window_count;
             let between = (state / tumbling_windows)
@@ -1196,7 +1200,8 @@ pub fn node_usage<'a>(
                 medium,
             )
         }
-        (true, Lifetime::AcrossEvaluations(medium), _) => (
+        // A whole state kept across evaluations: it and the one being built.
+        (_, Lifetime::AcrossEvaluations(medium), _) => (
             state.checked_mul(2).ok_or(AnalyticalCostError::Overflow)?,
             medium,
         ),
