@@ -16,7 +16,6 @@ asap-types = { path = "../types" }
 # The tumbling-window retention of a realized plan (`AssignmentRealizer::realize`).
 asap-cost = { path = "../cost" }
 rmp-serde = "1"
-serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 

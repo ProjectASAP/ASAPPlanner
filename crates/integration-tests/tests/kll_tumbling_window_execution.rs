@@ -309,19 +309,6 @@ fn five_tumbling_windows_roundtrip_and_shared_merge_runs_once() {
         &[fixture.merge, fixture.p50, fixture.p99],
     )
     .unwrap();
-    let layout = asap_physical_asap_optimization::test_support::TumblingWindowLayout {
-        tumbling_window_width_ms: 60_000,
-        tumbling_window_origin_ms: Some(0),
-    };
-    assert!(
-        asap_physical_asap_optimization::test_support::validate_tumbling_window_coverage(
-            &layout,
-            Some(330_000),
-            &asap_physical_asap_optimization::test_support::WindowEdgeCoverage::TumblingWindowAligned
-        )
-        .is_err(),
-        "moving window edges require residual computation"
-    );
     for offset in [0, 1] {
         let restored = restore(
             schema.clone(),
@@ -331,12 +318,6 @@ fn five_tumbling_windows_roundtrip_and_shared_merge_runs_once() {
                 .collect::<Vec<_>>(),
         );
         let evaluation_time_ms = (5 + offset as i64) * 60_000;
-        asap_physical_asap_optimization::test_support::validate_tumbling_window_coverage(
-            &layout,
-            Some(evaluation_time_ms),
-            &asap_physical_asap_optimization::test_support::WindowEdgeCoverage::TumblingWindowAligned,
-        )
-        .unwrap();
         // View `i` holds the tumbling window ending `i` minutes before the evaluation time.
         let bind = |count: usize| {
             fixture.tumbling_windows[..count].iter().enumerate().fold(

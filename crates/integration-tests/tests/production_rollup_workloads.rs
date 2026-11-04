@@ -262,7 +262,7 @@ fn independent_kll_cost(
         entries,
         data,
         models.deployment_capabilities.query_time_results_retained,
-        &mut |_, _, _| asap_types::physical::Materialization::NotMaterialized,
+        &mut |_, _, _| Some(asap_types::physical::Materialization::NotMaterialized),
     )
     .unwrap()
     .unwrap();
