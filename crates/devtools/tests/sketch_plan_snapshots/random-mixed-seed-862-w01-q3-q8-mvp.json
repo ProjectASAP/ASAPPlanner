@@ -6490,7 +6490,7 @@
             }
           },
           "id": 0,
-          "materialization": "NotMaterialized",
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -6599,8 +6599,8 @@
         {
           "guarantee": null,
           "id": 1,
-          "materialization": {
-            "MatAtIngestion": "Memory"
+          "lifetime": {
+            "AcrossEvaluations": "Memory"
           },
           "output_schema": {
             "closed": true,
@@ -6698,7 +6698,7 @@
         {
           "guarantee": null,
           "id": 2,
-          "materialization": "NotMaterialized",
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -6804,7 +6804,7 @@
             }
           },
           "id": 3,
-          "materialization": "NotMaterialized",
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -6903,7 +6903,7 @@
             }
           },
           "id": 4,
-          "materialization": "NotMaterialized",
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -6990,7 +6990,7 @@
         {
           "guarantee": null,
           "id": 5,
-          "materialization": "NotMaterialized",
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -7165,7 +7165,7 @@
             }
           },
           "id": 6,
-          "materialization": "NotMaterialized",
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -7208,7 +7208,7 @@
         {
           "guarantee": null,
           "id": 7,
-          "materialization": "NotMaterialized",
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -7293,7 +7293,7 @@
             }
           },
           "id": 8,
-          "materialization": "NotMaterialized",
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -7353,7 +7353,7 @@
             }
           },
           "id": 9,
-          "materialization": "NotMaterialized",
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -7524,7 +7524,7 @@
             }
           },
           "id": 10,
-          "materialization": "NotMaterialized",
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -7684,7 +7684,7 @@
             }
           },
           "id": 11,
-          "materialization": "NotMaterialized",
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -7759,7 +7759,7 @@
             }
           },
           "id": 12,
-          "materialization": "NotMaterialized",
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -7868,8 +7868,8 @@
         {
           "guarantee": null,
           "id": 13,
-          "materialization": {
-            "MatAtIngestion": "Memory"
+          "lifetime": {
+            "AcrossEvaluations": "Memory"
           },
           "output_schema": {
             "closed": true,
@@ -7953,7 +7953,7 @@
         {
           "guarantee": null,
           "id": 14,
-          "materialization": "NotMaterialized",
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -8035,7 +8035,7 @@
             }
           },
           "id": 15,
-          "materialization": "NotMaterialized",
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -8112,7 +8112,7 @@
             }
           },
           "id": 16,
-          "materialization": "NotMaterialized",
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -8201,7 +8201,7 @@
             }
           },
           "id": 17,
-          "materialization": "NotMaterialized",
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -8283,7 +8283,7 @@
             }
           },
           "id": 18,
-          "materialization": "NotMaterialized",
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
