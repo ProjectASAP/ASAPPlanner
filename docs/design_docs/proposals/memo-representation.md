@@ -104,18 +104,37 @@ only in how much they can serve (a k=10 ranking also answers k=5). So we store e
 and what each consumer needs once, and work out the combinations and the sharing only when we
 enumerate.
 
-### (a) Representation
+### Overview
+
+**(a) What is stored.** Today's groups and candidates, plus three additions:
+
+1. Each candidate lists its **free properties**: choices the planner can make freely, with their
+   legal values (sketch ∈ {Kll, DD}). One candidate instead of one per value.
+2. Each group lists its **consumers** (the groups that read it), each with its **requirement**
+   (G2 needs ε.01 from S). One entry per consumer instead of one candidate per possible producer.
+3. A new group S for "the quantile summary of data over 5m", with no sketch fixed. 
 
 ```
 G0 Scan
 G1 TimeRange 300s <- G0
-S  SummaryState(quantile, data, 300s)                     (summary group)
+S  quantile summary of data over 300s
      [SummaryAgg <-G1]       free: sketch ∈ {Kll, DD}
      [Merge←TWChain <-G0]    free: sketch ∈ {Kll, DD}, tumbling-window width ∈ {60s}
      consumers: G2 requires ε.01, G3 requires ε.001
 G2 q50: [exact<-G1] [Estimate(.5)<-S]
 G3 q99: [exact<-G1] [Estimate(.99)<-S]
 ```
+
+**(b) Rules** . For example, the tumbling-window rule adds one candidate to S, `[Merge←TWChain<-G0]` with
+width ∈ {60s}, instead of one candidate per width × sketch in every query's group.
+
+**(c) Enumeration** picks one candidate per group, as today. Then, for each group with consumers,
+it decides which consumers share a producer. Each producer gets a value for each free property, and
+the properties its consumers need (**derived properties**: ε.001 when q50 and q99 share, ε.01 for
+q50 alone).
+
+### (a) Representation: details
+
 ```rust
 struct Memo      { groups: Vec<MemoGroup>, query_roots: Vec<QueryRoot<MemoGroupId>> }
 struct MemoGroup { logical_node, candidates: Vec<Candidate>,
@@ -123,31 +142,32 @@ struct MemoGroup { logical_node, candidates: Vec<Candidate>,
 struct Candidate { root_node, input_groups, fused_groups,
                    free: Vec<FreeProperty> }                       // empty unless it builds a summary
 enum FreeProperty { Sketch(Vec<SketchKind>), TumblingWindowWidthMs(Vec<u64>) }  // legal values
-struct Requirement {                // what a consumer demands
+struct Requirement {                // what a consumer needs
     accuracy,                       // ε, with budget parts folded in
     lookback_ms,                    // how far back it reads: 300s for data[5m]
     evaluation_interval_ms,         // how often it is evaluated: 60s
 }
-struct DerivedProperties { accuracy, lookback_ms, evaluation_interval_ms }
-                                    // what a producer is built for; computed, not stored
+fn combine(requirements: &[Requirement]) -> Option<DerivedProperties>  // not stored; see below
 ```
 
-- **Summary group:** a group whose `logical_node` is a `SummaryState { kind, input, window }`: a
-  mergeable summary (a sketch or an exact accumulator) with no sketch or parameters fixed. This
-  logical operator is new; `SummaryAgg` fixes the sketch and is only the direct way to build it.
-  Its candidates are the ways to build it: here directly from G1, or from tumbling windows over G0.
-- **Consumer:** a group whose candidate reads a group it could share with other consumers at
-  different strengths (G2 and G3 read S; in (b), T5 and T10 read a ranking). Any group can have
-  consumers, not only summary groups.
-- **Requirement:** what a consumer demands of the group it reads. Each field comes from somewhere:
+`S` represents the new group from the example above (the quantile summary of `data` over 300s that G2 and G3 read). 
+`S` needs a new logical operator for its `logical_node`: `SummaryState { kind, input, window }`, a
+summary with no sketch or parameters fixed. Today's `SummaryAgg` can't serve, because it fixes the
+sketch and is only one way to build S (the direct one).
+
+- **Consumer:** a group that reads another group. G2 and G3 are consumers of S; in (b), T5 and T10 are consumers of a ranking.
+- **Requirement:** what a consumer needs from the group it reads. Each field comes from somewhere:
   ε from the query's `QueryRequirements.accuracy`, split by budget parts; lookback, k and labels
   from the query expression (or a consumer above); evaluation interval from the query's schedule.
   Lookback is `window_ms` in today's code (`TumblingWindowRequirement`,
   `pass2/memo/shared_configurations.rs`); evaluation interval is `evaluation_grid_ms()`
   (`crates/types/src/workload/mod.rs`): the fixed interval, combined by gcd with a range query's
   step and its evaluation phase.
-- **Producer:** one concrete build of a group with consumers: one of its candidates + a value for
-  each free property + its derived properties. Its properties come in two kinds:
+- **Producer:** one fully specified computation of a group, which one or more consumers read. A
+  candidate leaves things open (which sketch, which width, how large); a producer fixes all of them:
+  a candidate, a value for each free property, and its derived properties. For example, S's
+  candidate `[Merge←TWChain<-G0]` with sketch = Kll, width = 60s and ε.001 is the producer
+  `Merge ← TWChain[5×60s] Kll(k for .001)`. Its properties come in two kinds:
   - **Free properties:** picked from legal values, with no order between them: sketch type, and
     tumbling-window width (the length of each window, e.g. 60s gives `TWChain[5×60s]` over 5m; not
     the sketch size). Consumers that share a producer must agree on them.
@@ -155,7 +175,7 @@ struct DerivedProperties { accuracy, lookback_ms, evaluation_interval_ms }
     a stronger value serves a weaker requirement (a sketch built for ε.001 also serves a consumer
     requiring ε.01; a k=10 ranking also serves k=5).
 
-  For S built windowed with Kll, serving q50 and q99:
+  For `S` built windowed with Kll, serving q50 and q99:
 
   | Derived property | Set as | Value |
   |---|---|---|
@@ -168,12 +188,18 @@ struct DerivedProperties { accuracy, lookback_ms, evaluation_interval_ms }
   Derived properties also restrict the free values: the width must divide the evaluation interval
   (so window boundaries line up with evaluation times) and the lookback.
 - **`combine(requirements) -> Option<DerivedProperties>`:** the weakest derived properties that
-  serve every given requirement, or none if they can't share. Field by field: ε min, lookback max,
-  evaluation interval gcd.
+  serve every given requirement, or none if they can't share. Each field is computed on its own
+  from the consumers' values for that field: ε is the smallest (strictest), lookback the largest,
+  evaluation interval the gcd. For example, consumers requiring (ε.01, 300s, 60s) and
+  (ε.001, 600s, 90s) combine to (ε.001, 600s, 30s).
 - **`subsumes(d: DerivedProperties, r: Requirement) -> bool`:** a producer with properties d can
   serve a consumer requiring r. For ε: d.ε ≤ r.ε.
 
-### (b) Rules
+Derived properties are not stored in the memo: they depend on which consumers share a producer,
+which the memo does not decide. They are computed from the memo once the rules have finished, by
+the closure step in (c).
+
+### (b) Rules: details
 
 Each rule takes the compressed representation and extends it. Instead of copying candidates, a rule
 adds one or more of: a group, a candidate, a free property, a consumer with its requirement, or a
@@ -181,7 +207,7 @@ requirement field with its `combine` and `subsumes`. Rules are listed in the
 order they run; examples beyond the running one are noted. (Classified from file headers; not yet
 checked against each rule's code.)
 
-**Pass 1** (`pass1/`). Adds the summary group, its direct candidate and its consumers.
+**Pass 1** (`pass1/`). Adds S, its direct candidate and its consumers.
 ```
 in:   G0 Scan;  G1 TimeRange 300s <-G0
       G2 q50 Aggregate quantile(.5) <-G1     G3 q99 Aggregate quantile(.99) <-G1
@@ -237,7 +263,7 @@ out:  Sj: [Scan m keep {job}]  [Project {job} <-M]
 ```
 
 **Summary inputs, summary results** (`summary_inputs.rs`, `summary_results.rs`). Not needed: they
-exist to expose intermediate results as groups, and summary groups already are those.
+exist to expose intermediate results as groups, and groups like S already are those.
 
 **Relation to `SharedProducer`.** Today's three steps map as follows:
 - "find consumers that could share" (`sets()`) becomes the new group's consumer list, as in R, A
@@ -247,7 +273,7 @@ exist to expose intermediate results as groups, and summary groups already are t
 - "copy a candidate per consumer × producer" (`derive()`) disappears. Each consumer gets one
   candidate reading the group (`Limit(5) <-R`), whatever producer is chosen later.
 
-### (c) Enumeration
+### (c) Enumeration: details
 
 ```
 for each choice of candidate per reached group               # as today
@@ -334,7 +360,8 @@ roughly is; DD in 1/α).
    `combine` and `subsumes` in (b)?
 2. Where do factored candidates get expanded? (i) Just before Stage 2: small change, but the MILP
    stays large and #1197 isn't fixed. (ii) Keep them factored into the MILP (#1201): fixes #1197, but
-   a larger change.
+   a larger change. This also decides where the closure step (and so derived properties) is
+   computed: at the end of Stage 1 in (i), while building the MILP in (ii).
 3. Can a producer's cost depend on its consumers (query-time hold time, evaluation alignment)? If
    so, the model becomes facility cost + per-assignment cost.
 4. Should multi-operator private chains give way to one operator per candidate (classic Cascades)?
@@ -346,8 +373,7 @@ roughly is; DD in 1/α).
 |---|---|
 | Group | one distinct logical sub-expression; equal expressions across queries share one |
 | Candidate | one way to implement a group: its own operators + the groups it reads |
-| Summary group | a group whose `logical_node` is a `SummaryState` (new): a mergeable summary over an input and window, sketch not fixed; its candidates are the ways to build it |
-| Consumer | a group whose candidate reads a group it could share at different strengths; any group can have consumers |
+| Consumer | a group that reads another group, with its requirement |
 | Requirement | what a consumer demands (ε with budget parts, lookback, evaluation interval, k, labels); from the query's requirements, expression and schedule |
 | Producer | a candidate of a group with consumers + free-property values + derived properties |
 | Free property | a producer choice with legal values and no order (sketch type, tumbling-window width); sharers must agree |
