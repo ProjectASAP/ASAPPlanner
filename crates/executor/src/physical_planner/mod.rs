@@ -1607,8 +1607,7 @@ mod compilation_tests {
         use planner_types::ir::physical_export::compile_physical_asap_workload;
         use planner_types::ir::schema::{Field, Schema};
         use planner_types::ir::{
-            apply_physical_properties, NodeToTimedNodeCache, Operator,
-            PhysicalPropertiesAssignment, QueryRoot,
+            apply_physical_properties_to_roots, Operator, PhysicalPropertiesAssignment, QueryRoot,
         };
         let minute_ms = 60_000;
         let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
@@ -1644,22 +1643,11 @@ mod compilation_tests {
                 .unwrap()
             })
             .collect();
-        // One timing cache, so every window reads the one `Scan`. The cache is
-        // keyed by node address, so `windows` stays alive while it runs.
-        let mut cache = NodeToTimedNodeCache::new();
-        let roots: Vec<_> = windows
-            .iter()
-            .map(|window| {
-                let timed = apply_physical_properties(
-                    window,
-                    &PhysicalPropertiesAssignment::default(),
-                    &mut cache,
-                )
+        let roots: Vec<_> = windows.into_iter().map(QueryRoot::Operator).collect();
+        let timed =
+            apply_physical_properties_to_roots(&roots, &PhysicalPropertiesAssignment::default())
                 .unwrap();
-                QueryRoot::Operator(timed)
-            })
-            .collect();
-        let dag = compile_physical_asap_workload(&roots).unwrap();
+        let dag = compile_physical_asap_workload(&roots, &timed).unwrap();
         let roots = dag.roots.iter().map(|&id| id as NodeId).collect();
         (dag, roots)
     }

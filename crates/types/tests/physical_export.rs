@@ -1,4 +1,5 @@
-//! A timed plan exports as a PhysicalASAPDAG that keeps timing.
+//! A plan with its nodes' physical properties exports as a PhysicalASAPDAG
+//! that keeps them.
 use asap_types::ir::operator::{Reduction, Source};
 use asap_types::ir::physical_export::{
     compile_physical_asap_dag, compile_physical_asap_workload, PhysicalASAPDAG,
@@ -9,8 +10,8 @@ use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use asap_types::ir::schema::{ExactKind, ExactParams, SummaryUpdate};
 use asap_types::ir::{
-    apply_physical_properties, ASAPOp, NodeToTimedNodeCache, NonASAPOp, Operator, OperatorNode,
-    PhysicalPropertiesAssignment, QueryRoot,
+    apply_physical_properties, apply_physical_properties_to_roots, ASAPOp, NonASAPOp, Operator,
+    OperatorNode, PhysicalPropertiesAssignment, QueryRoot,
 };
 use asap_types::physical::{InvalidPhysicalProperties, Lifetime, Medium, PhysicalProperties};
 use std::rc::Rc;
@@ -45,23 +46,31 @@ fn plan() -> Rc<OperatorNode> {
 
 const ON_DISK: Lifetime = Lifetime::AcrossEvaluations(Medium::Disk);
 
-/// `plan()` timed with its summary materialized at ingestion time on disk.
-fn timed_at_ingestion() -> Rc<OperatorNode> {
+/// `plan()` with its nodes' physical properties, its summary materialized
+/// at ingestion time on disk.
+fn timed_at_ingestion() -> (Rc<OperatorNode>, PhysicalPropertiesAssignment) {
     let root = plan();
     let mut assignment = PhysicalPropertiesAssignment::default();
     assignment.set(
         root.children()[0],
         PhysicalProperties::new(ExecutionTiming::IngestionTime, ON_DISK).unwrap(),
     );
-    apply_physical_properties(&root, &assignment, &mut NodeToTimedNodeCache::new()).unwrap()
+    let timed = apply_physical_properties(&root, &assignment).unwrap();
+    (root, timed)
+}
+
+/// `timed_at_ingestion()` exported.
+fn exported_at_ingestion() -> PhysicalASAPDAG {
+    let (root, timed) = timed_at_ingestion();
+    compile_physical_asap_dag(&root, &timed).unwrap()
 }
 
 /// A summary materialized at ingestion time is read at query time, and the
 /// exported DAG says where to store it.
 #[test]
 fn timed_plan_exports_with_timing() {
-    let timed = timed_at_ingestion();
-    let dag = compile_physical_asap_dag(&timed).unwrap();
+    let (root, timed) = timed_at_ingestion();
+    let dag = compile_physical_asap_dag(&root, &timed).unwrap();
     dag.validate().unwrap();
 
     let timings: Vec<_> = dag.nodes.iter().map(|n| n.output_state.timing).collect();
@@ -76,7 +85,7 @@ fn timed_plan_exports_with_timing() {
     let lifetimes: Vec<_> = dag.nodes.iter().map(|n| n.lifetime).collect();
     assert_eq!(lifetimes, vec![Lifetime::None, ON_DISK, Lifetime::None]);
     // Timing keeps what the summary covers.
-    assert!(timed.children()[0].coverage().is_some());
+    assert!(root.children()[0].coverage().is_some());
 
     let decoded: PhysicalASAPDAG =
         serde_json::from_str(&serde_json::to_string(&dag).unwrap()).unwrap();
@@ -86,7 +95,7 @@ fn timed_plan_exports_with_timing() {
 /// A query-time producer cannot feed an ingestion-time consumer.
 #[test]
 fn query_time_input_to_ingestion_is_rejected() {
-    let mut dag = compile_physical_asap_dag(&timed_at_ingestion()).unwrap();
+    let mut dag = exported_at_ingestion();
     dag.nodes[0].output_state.timing = ExecutionTiming::QueryTime;
     *dag.edges[0].data_state_mut() = dag.nodes[0].output_state;
     assert!(matches!(
@@ -100,7 +109,7 @@ fn query_time_input_to_ingestion_is_rejected() {
 /// runs at query time.
 #[test]
 fn invalid_physical_properties_are_rejected() {
-    let mut dag = compile_physical_asap_dag(&timed_at_ingestion()).unwrap();
+    let mut dag = exported_at_ingestion();
     dag.nodes[1].lifetime = Lifetime::OneEvaluation(Medium::Disk);
     assert_eq!(
         dag.validate(),
@@ -118,10 +127,10 @@ fn invalid_physical_properties_are_rejected() {
     dag.validate().unwrap();
 }
 
-/// Untimed plans cannot be exported as physical plans.
+/// A plan whose nodes have no physical properties cannot be exported.
 #[test]
 fn untimed_plan_is_rejected() {
-    assert!(compile_physical_asap_dag(&plan()).is_err());
+    assert!(compile_physical_asap_dag(&plan(), &PhysicalPropertiesAssignment::default()).is_err());
 }
 
 /// Two queries reading one summary state export once, with one root per query.
@@ -134,14 +143,14 @@ fn batch_shares_the_summary_and_keeps_one_root_per_query() {
         child: state,
     }))
     .unwrap();
-    let assignment = PhysicalPropertiesAssignment::default();
-    let mut cache = NodeToTimedNodeCache::new();
-    let timed: Vec<_> = [first, second]
-        .iter()
-        .map(|root| apply_physical_properties(root, &assignment, &mut cache).unwrap())
+    let roots: Vec<QueryRoot> = [first, second]
+        .into_iter()
+        .map(QueryRoot::Operator)
         .collect();
-    let roots: Vec<QueryRoot> = timed.into_iter().map(QueryRoot::Operator).collect();
-    let dag = compile_physical_asap_workload(&roots).unwrap();
+    let timed =
+        apply_physical_properties_to_roots(&roots, &PhysicalPropertiesAssignment::default())
+            .unwrap();
+    let dag = compile_physical_asap_workload(&roots, &timed).unwrap();
     dag.validate().unwrap();
     assert_eq!(dag.roots.len(), 2);
     assert_eq!(dag.nodes.len(), 4, "scan and summary are exported once");
@@ -153,22 +162,21 @@ fn batch_shares_the_summary_and_keeps_one_root_per_query() {
 fn scalar_roots_export_in_batch_order_and_reference_nodes() {
     use asap_types::ir::scalar::ArithmeticOpKind;
     use asap_types::ir::{ExprSemantics, ScalarExpr};
-    let timed = apply_physical_properties(
-        &plan(),
-        &PhysicalPropertiesAssignment::default(),
-        &mut NodeToTimedNodeCache::new(),
-    )
-    .unwrap();
+    let read = plan();
+    let timed = apply_physical_properties(&read, &PhysicalPropertiesAssignment::default()).unwrap();
     let scalar = ScalarExpr::Arithmetic {
         op: ArithmeticOpKind::Add,
-        left: Box::new(ScalarExpr::PromqlScalarFromVector(Rc::clone(&timed))),
+        left: Box::new(ScalarExpr::PromqlScalarFromVector(Rc::clone(&read))),
         right: Box::new(ScalarExpr::literal_f64(1.0)),
         semantics: ExprSemantics::Promql,
     };
-    let dag = compile_physical_asap_workload(&[
-        QueryRoot::Scalar(scalar),
-        QueryRoot::Operator(Rc::clone(&timed)),
-    ])
+    let dag = compile_physical_asap_workload(
+        &[
+            QueryRoot::Scalar(scalar),
+            QueryRoot::Operator(Rc::clone(&read)),
+        ],
+        &timed,
+    )
     .unwrap();
     assert_eq!(dag.nodes.len(), 3, "the read plan is exported once");
     assert_eq!(dag.roots.len(), 1);
@@ -272,13 +280,9 @@ fn a_reference_read_twice_is_one_scalar_ref_edge() {
         child: series("a"),
     }))
     .unwrap();
-    let timed = apply_physical_properties(
-        &project,
-        &PhysicalPropertiesAssignment::default(),
-        &mut NodeToTimedNodeCache::new(),
-    )
-    .unwrap();
-    let dag = compile_physical_asap_dag(&timed).unwrap();
+    let timed =
+        apply_physical_properties(&project, &PhysicalPropertiesAssignment::default()).unwrap();
+    let dag = compile_physical_asap_dag(&project, &timed).unwrap();
     dag.validate().unwrap();
     let roles: Vec<_> = dag
         .edges
@@ -314,13 +318,8 @@ fn swapped_edge_roles_are_rejected() {
         right: scan("b"),
     }))
     .unwrap();
-    let timed = apply_physical_properties(
-        &join,
-        &PhysicalPropertiesAssignment::default(),
-        &mut NodeToTimedNodeCache::new(),
-    )
-    .unwrap();
-    let mut dag = compile_physical_asap_dag(&timed).unwrap();
+    let timed = apply_physical_properties(&join, &PhysicalPropertiesAssignment::default()).unwrap();
+    let mut dag = compile_physical_asap_dag(&join, &timed).unwrap();
     dag.validate().unwrap();
     for edge in &mut dag.edges {
         edge.role = match edge.role {
@@ -341,7 +340,7 @@ fn swapped_edge_roles_are_rejected() {
 #[test]
 fn an_empty_batch_is_an_error() {
     assert!(matches!(
-        compile_physical_asap_workload(&[]),
+        compile_physical_asap_workload(&[], &PhysicalPropertiesAssignment::default()),
         Err(ExecutionDataStateError::InvalidPhysicalDAG(
             PhysicalASAPDAGValidationError::NoRoots
         ))
@@ -385,19 +384,13 @@ fn exports_summary_over_summary_as_typed_precompute_edges() {
         child: outer,
     }))
     .unwrap();
-    let mut cache = NodeToTimedNodeCache::new();
     let at_ingestion = PhysicalPropertiesAssignment::materialized_at_ingestion_where_allowed(
         std::slice::from_ref(&root),
     );
-    let timed = apply_physical_properties(&root, &at_ingestion, &mut cache).unwrap();
-    let compiled = compile_physical_asap_dag_with_node_ids(&timed).unwrap();
-    assert_eq!(compiled.node_ids.node_id(&timed), Some(3));
-    assert_eq!(
-        compiled
-            .node_ids
-            .node_id(asap_types::test_support::timed(&cache, &inner).unwrap()),
-        Some(1)
-    );
+    let timed = apply_physical_properties(&root, &at_ingestion).unwrap();
+    let compiled = compile_physical_asap_dag_with_node_ids(&root, &timed).unwrap();
+    assert_eq!(compiled.node_ids.node_id(&root), Some(3));
+    assert_eq!(compiled.node_ids.node_id(&inner), Some(1));
     let dag = compiled.dag;
     assert_eq!(dag.roots, vec![3]);
     assert_eq!(
@@ -449,7 +442,7 @@ fn exports_summary_over_summary_as_typed_precompute_edges() {
 /// neither a view nor a query-time scan (here an ingestion-time node).
 #[test]
 fn retention_is_only_on_materialized_views_and_query_time_scans() {
-    let mut dag = compile_physical_asap_dag(&timed_at_ingestion()).unwrap();
+    let mut dag = exported_at_ingestion();
     let view = dag
         .nodes
         .iter()
@@ -498,30 +491,31 @@ fn physical_node_ids_serialize_in_deterministic_binding_order() {
 fn every_node_at_query_time_keeps_the_operators_and_stores_nothing() {
     use asap_types::ir::scalar::ArithmeticOpKind;
     use asap_types::ir::{ExprSemantics, ScalarExpr};
-    let workload = |root: Rc<OperatorNode>| {
+    let workload = |root: Rc<OperatorNode>, timed: &PhysicalPropertiesAssignment| {
         let scalar = ScalarExpr::Arithmetic {
             op: ArithmeticOpKind::Add,
             left: Box::new(ScalarExpr::PromqlScalarFromVector(Rc::clone(&root))),
             right: Box::new(ScalarExpr::literal_f64(1.0)),
             semantics: ExprSemantics::Promql,
         };
-        compile_physical_asap_workload(&[
-            QueryRoot::Operator(Rc::clone(&root)),
-            QueryRoot::Scalar(scalar),
-            QueryRoot::Operator(root),
-        ])
+        compile_physical_asap_workload(
+            &[
+                QueryRoot::Operator(Rc::clone(&root)),
+                QueryRoot::Scalar(scalar),
+                QueryRoot::Operator(root),
+            ],
+            timed,
+        )
         .unwrap()
     };
-    let materialized = workload(timed_at_ingestion());
-    let at_query_time = apply_physical_properties(
-        &plan(),
-        &PhysicalPropertiesAssignment::default(),
-        &mut NodeToTimedNodeCache::new(),
-    )
-    .unwrap();
+    let (root, timed) = timed_at_ingestion();
+    let materialized = workload(root, &timed);
+    let at_query_time = plan();
+    let timed = apply_physical_properties(&at_query_time, &PhysicalPropertiesAssignment::default())
+        .unwrap();
     assert_eq!(
         materialized.with_every_node_at_query_time().unwrap(),
-        workload(at_query_time)
+        workload(at_query_time, &timed)
     );
 }
 
@@ -569,17 +563,11 @@ fn exported_with_scan(
     asap_types::ir::physical_export::PhysicalASAPDAG,
     asap_types::ir::physical_export::PhysicalASAPNodeId,
 ) {
-    // One timing cache, so the roots keep sharing their `Scan`.
-    let mut cache = NodeToTimedNodeCache::new();
-    let timed: Vec<_> = roots
-        .into_iter()
-        .map(|root| {
-            apply_physical_properties(&root, &PhysicalPropertiesAssignment::default(), &mut cache)
-                .unwrap()
-        })
-        .map(QueryRoot::Operator)
-        .collect();
-    let dag = compile_physical_asap_workload(&timed).unwrap();
+    let roots: Vec<QueryRoot> = roots.into_iter().map(QueryRoot::Operator).collect();
+    let timed =
+        apply_physical_properties_to_roots(&roots, &PhysicalPropertiesAssignment::default())
+            .unwrap();
+    let dag = compile_physical_asap_workload(&roots, &timed).unwrap();
     let scans: Vec<_> = dag
         .nodes
         .iter()
@@ -767,10 +755,13 @@ fn high_fan_in_edges_preserve_multiplicity_without_order_dependence() {
 #[test]
 fn workload_export_matches_the_single_root_export() {
     use asap_types::ir::physical_export::compile_physical_asap_workload_with_node_ids;
-    let timed = timed_at_ingestion();
-    let roots = [QueryRoot::Operator(Rc::clone(&timed))];
-    let exported = compile_physical_asap_workload_with_node_ids(&roots).unwrap();
-    assert_eq!(exported.dag, compile_physical_asap_dag(&timed).unwrap());
+    let (root, timed) = timed_at_ingestion();
+    let roots = [QueryRoot::Operator(Rc::clone(&root))];
+    let exported = compile_physical_asap_workload_with_node_ids(&roots, &timed).unwrap();
+    assert_eq!(
+        exported.dag,
+        compile_physical_asap_dag(&root, &timed).unwrap()
+    );
     let untimed = [QueryRoot::Operator(plan())];
-    assert!(compile_physical_asap_workload_with_node_ids(&untimed).is_err());
+    assert!(compile_physical_asap_workload_with_node_ids(&untimed, &timed).is_err());
 }

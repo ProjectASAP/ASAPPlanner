@@ -383,8 +383,6 @@ fn local_fingerprint(node: &OperatorNode) -> Option<String> {
         &node.schema,
         node.result_kind,
         &node.guarantee,
-        node.timing,
-        node.lifetime,
     ))
     .ok()
 }
@@ -449,8 +447,6 @@ fn same_local_fields(left: &OperatorNode, right: &OperatorNode) -> bool {
             node.result_kind,
             node.schema.clone(),
             node.guarantee.clone(),
-            node.timing,
-            node.lifetime,
         )
     };
     let left = signature(left);

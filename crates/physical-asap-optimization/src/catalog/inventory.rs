@@ -277,13 +277,6 @@ impl ImmediateCandidateBuilder<'_> {
         if let Some(&existing) = self.private_nodes.get(&Rc::as_ptr(node)) {
             return Ok(existing);
         }
-        if node.timing.is_some() || node.lifetime.is_materialized() {
-            return Err(CandidateInventoryError::Unsupported {
-                group: self.owner.group.0 as usize,
-                candidate: self.owner.index,
-                reason: "assigned execution timing or lifetime",
-            });
-        }
         let mut requirements = Vec::new();
         for input in super::reconstruction::ordered_inputs(node) {
             let producers = if let Some(&group) = self.boundaries.get(&Rc::as_ptr(&input)) {

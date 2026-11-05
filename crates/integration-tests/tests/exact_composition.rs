@@ -197,8 +197,8 @@ fn every_exact_accumulator_is_finalized_before_an_outer_sketch() {
             })
             .unwrap_or_else(|| panic!("{kind:?}: a KLL over the exact accumulator"));
         // Timing is not stored on the plan: time it with the outer summary
-        // maintained (which also validates every edge) and inspect the copy.
-        let root = at_ingestion(&root);
+        // maintained (which also validates every edge) and inspect it.
+        let timed = at_ingestion(&root);
         let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &root.operator else {
             panic!("expected KLL evaluation, got {:?}", root.operator);
         };
@@ -210,7 +210,7 @@ fn every_exact_accumulator_is_finalized_before_an_outer_sketch() {
             panic!("{kind:?}: missing maintenance finalization");
         };
         assert_eq!(
-            child.timing,
+            timed.get(child).map(|properties| properties.timing()),
             Some(ExecutionTiming::IngestionTime),
             "{kind:?}: finalization runs at maintenance time"
         );
@@ -254,7 +254,9 @@ fn max_and_avg_over_quantile_compose_at_query_time() {
             "the composed plan's schema is the pre-ASAP target's own"
         );
         assert_eq!(
-            timed(&composed).timing,
+            timed(&composed)
+                .get(&composed)
+                .map(|properties| properties.timing()),
             Some(ExecutionTiming::QueryTime),
             "{intent:?}: the exact fold runs at query time"
         );
@@ -274,7 +276,9 @@ fn identity_and_genuine_multi_row_folds_both_compose() {
         let root = agg(vec![0], AggIntent::Max { col: None }, inner);
         let composed = composed(&root);
         assert_eq!(
-            timed(&composed).timing,
+            timed(&composed)
+                .get(&composed)
+                .map(|properties| properties.timing()),
             Some(ExecutionTiming::QueryTime),
             "{label}"
         );

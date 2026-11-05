@@ -109,8 +109,6 @@ fn local_tumbling_window_candidates(
                             original.operator == rewritten.operator
                                 && original.schema == rewritten.schema
                                 && original.result_kind == rewritten.result_kind
-                                && original.timing == rewritten.timing
-                                && original.lifetime == rewritten.lifetime
                         });
                         if let Some(original) = matches.next() {
                             if matches.next().is_none() {
@@ -156,9 +154,7 @@ fn restore_scan_boundaries(
     let rebuilt = if changed {
         Rc::new(
             OperatorNode::with_schema(operator, node.schema.clone())
-                .with_guarantee(node.guarantee.clone())
-                .with_timing(node.timing)
-                .with_lifetime(node.lifetime),
+                .with_guarantee(node.guarantee.clone()),
         )
     } else {
         Rc::clone(node)

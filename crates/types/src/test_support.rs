@@ -9,7 +9,7 @@ use crate::ir::operator::maintained_population::CurrentSeriesInput;
 use crate::ir::operator::node::Operator;
 use crate::ir::physical_export::PhysicalASAPDAGCompilation;
 use crate::ir::properties::summary_coverage::SummaryCoverage;
-use crate::ir::properties::timing::NodeToTimedNodeCache;
+use crate::ir::properties::timing::PhysicalPropertiesAssignment;
 use crate::ir::properties::ExecutionDataStateError;
 use crate::ir::schema::Schema;
 use crate::ir::{ASAPOp, NonASAPOp};
@@ -36,8 +36,9 @@ pub fn tumbling_window(
 /// `physical_export::compile_physical_asap_dag_with_node_ids`.
 pub fn compile_physical_asap_dag_with_node_ids(
     root: &Rc<OperatorNode>,
+    timed: &PhysicalPropertiesAssignment,
 ) -> Result<PhysicalASAPDAGCompilation, ExecutionDataStateError> {
-    crate::ir::physical_export::compile_physical_asap_dag_with_node_ids(root)
+    crate::ir::physical_export::compile_physical_asap_dag_with_node_ids(root, timed)
 }
 
 /// `Operator::output_schema`.
@@ -58,14 +59,6 @@ pub fn validate_asap_inputs(op: &ASAPOp) -> Result<(), SchemaDerivationError> {
 /// `CurrentSeriesInput::matches_node`.
 pub fn matches_node(input: &CurrentSeriesInput, node: &OperatorNode) -> bool {
     input.matches_node(node)
-}
-
-/// `NodeToTimedNodeCache::timed`.
-pub fn timed<'a>(
-    cache: &'a NodeToTimedNodeCache,
-    input: &Rc<OperatorNode>,
-) -> Option<&'a Rc<OperatorNode>> {
-    cache.timed(input)
 }
 
 /// `RawDataWindow::lookback_ms`.

@@ -3,14 +3,12 @@
 //! [`ExecutionTiming`] says when a node's value is produced (ingestion vs.
 //! query time); [`ExecutionDataState`] pairs it with the [`DataPrimitive`]
 //! the edge carries (raw values vs. summary state). A materialized output's
-//! [`PhysicalProperties`] are the per-sub-DAG choice a node's timing is
+//! [`crate::physical::PhysicalProperties`] are the per-sub-DAG choice a node's timing is
 //! derived from. The rules that assign
 //! and check them over a DAG live in [`crate::ir::properties::timing`], which reports
 //! violations as [`ExecutionDataStateError`].
 
 use thiserror::Error;
-
-use crate::physical::{InvalidPhysicalProperties, PhysicalProperties};
 
 /// When a post-ASAP value is produced.
 #[derive(
@@ -134,7 +132,8 @@ pub enum ExecutionDataStateError {
         second: ExecutionDataState,
     },
     /// A plan root that runs at ingestion time without being stored there
-    /// (a timing fixed by a candidate builder): no query reads its rows. A
+    /// (an assignment entry that fixes it at ingestion time, not
+    /// materialized): no query reads its rows. A
     /// root assigned materialized at ingestion time is valid; the query reads the stored
     /// output.
     #[error(
@@ -142,27 +141,6 @@ pub enum ExecutionDataStateError {
          output"
     )]
     UnstoredIngestionRoot { operator: &'static str },
-    /// An explicit materialization on a node whose timing a candidate builder
-    /// fixed (e.g. a query-time `FinalizeExactAccumulator` read boundary)
-    /// that needs the other timing.
-    #[error(
-        "{operator} is fixed at {} by its candidate; its assigned materialized output {assigned:?} needs \
-         the other timing",
-        fixed.as_str()
-    )]
-    PhysicalPropertiesConflictWithFixedTiming {
-        operator: &'static str,
-        fixed: ExecutionTiming,
-        assigned: PhysicalProperties,
-    },
-    /// A timed node whose timing and lifetime cannot go together: a bug in
-    /// whatever built the node.
-    #[error("{operator} node: {reason}")]
-    InvalidPhysicalProperties {
-        operator: &'static str,
-        #[source]
-        reason: InvalidPhysicalProperties,
-    },
     /// A summary build with a filter placed at ingestion time. An
     /// ingestion-time build reads raw data samples, which carry none of the
     /// query's columns the filter reads, so only a query-time build can
@@ -190,8 +168,8 @@ pub enum ExecutionDataStateError {
     /// query time (#509 Algorithm 3, line 13).
     #[error("{operator}: upstream of ingestion-time node not at ingestion time")]
     UpstreamNotAtIngestion { operator: &'static str },
-    /// A node reached by export without a timing: the physical properties pass
-    /// was not applied to the DAG first.
+    /// A node reached by export that the physical properties assignment
+    /// does not list: the timing pass was not applied to the DAG first.
     #[error("{operator} node has no execution timing; apply physical properties before export")]
     UntimedNode { operator: &'static str },
     /// The exported physical DAG failed its own validation, e.g. an empty

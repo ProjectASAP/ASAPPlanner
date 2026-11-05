@@ -18,8 +18,7 @@ use asap_types::ir::physical_export::{compile_physical_asap_dag, PhysicalASAPOpe
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{Schema, PROMQL_SERIES_IDENTITY};
 use asap_types::ir::{
-    apply_physical_properties, NodeToTimedNodeCache, NonASAPOp, OperatorNode,
-    PhysicalPropertiesAssignment,
+    apply_physical_properties, NonASAPOp, OperatorNode, PhysicalPropertiesAssignment,
 };
 use futures::{executor::block_on, StreamExt};
 
@@ -96,13 +95,9 @@ fn series_labels(schema: &Schema, row: &[Value]) -> BTreeMap<String, String> {
 /// Run `query`'s exact per-entity plan at query time over `samples`, bound
 /// at its `Scan` of `x`: each answered series' `instance` and value.
 fn execute(query: &str, samples: &[RawDataSample]) -> Vec<(String, f64)> {
-    let timed = apply_physical_properties(
-        &per_entity_plan(query),
-        &PhysicalPropertiesAssignment::default(),
-        &mut NodeToTimedNodeCache::new(),
-    )
-    .unwrap();
-    let dag = compile_physical_asap_dag(&timed).unwrap();
+    let plan = per_entity_plan(query);
+    let timed = apply_physical_properties(&plan, &PhysicalPropertiesAssignment::default()).unwrap();
+    let dag = compile_physical_asap_dag(&plan, &timed).unwrap();
     let node = |matches: fn(&PhysicalASAPOperatorPayload) -> bool| {
         let found: Vec<_> = dag
             .nodes

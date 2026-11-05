@@ -181,10 +181,9 @@ fn expansion_merges_the_tumbling_windows() {
 /// An not_materialized chain expands into query-time tumbling windows.
 #[test]
 fn expansion_carries_the_chains_timing_onto_its_tumbling_windows() {
+    use asap_types::ir::operator::tumbling_window_chain::expand_tumbling_window_chains_in_workload;
     use asap_types::ir::properties::ExecutionTiming;
-    use asap_types::ir::{
-        apply_physical_properties, NodeToTimedNodeCache, PhysicalPropertiesAssignment,
-    };
+    use asap_types::ir::{apply_physical_properties, PhysicalPropertiesAssignment, QueryRoot};
     use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
     let materialized_across = Lifetime::AcrossEvaluations(Medium::Memory);
     for (lifetime, timing) in [
@@ -201,19 +200,30 @@ fn expansion_carries_the_chains_timing_onto_its_tumbling_windows() {
         if lifetime.is_materialized() {
             assignment.set(&chain, PhysicalProperties::new(timing, lifetime).unwrap());
         }
-        let timed =
-            apply_physical_properties(&estimate, &assignment, &mut NodeToTimedNodeCache::new())
-                .unwrap();
-        let expanded = expand_tumbling_window_chains(&timed).unwrap();
+        let timed = apply_physical_properties(&estimate, &assignment).unwrap();
+        let expansion = expand_tumbling_window_chains_in_workload(
+            &[QueryRoot::Operator(Rc::clone(&estimate))],
+            &timed,
+        )
+        .unwrap();
+        let properties = |node: &OperatorNode| expansion.physical_properties.get(node).unwrap();
+        let QueryRoot::Operator(expanded) = &expansion.roots[0] else {
+            unreachable!()
+        };
         let merged = expanded.children()[0];
-        assert_eq!(merged.timing, Some(ExecutionTiming::QueryTime));
+        assert_eq!(properties(merged).timing(), ExecutionTiming::QueryTime);
         assert_eq!(merged.children().len(), 5);
         for tumbling_window in merged.children() {
-            assert_eq!(tumbling_window.timing, Some(timing), "{lifetime:?}");
-            assert_eq!(tumbling_window.lifetime, lifetime);
+            assert_eq!(properties(tumbling_window).timing(), timing, "{lifetime:?}");
+            assert_eq!(properties(tumbling_window).lifetime(), lifetime);
             for below in OperatorNode::reachable(tumbling_window).iter().skip(1) {
-                assert_eq!(below.timing, Some(timing), "{}", below.operator.kind_name());
-                assert_eq!(below.lifetime, Lifetime::None);
+                assert_eq!(
+                    properties(below).timing(),
+                    timing,
+                    "{}",
+                    below.operator.kind_name()
+                );
+                assert_eq!(properties(below).lifetime(), Lifetime::None);
             }
         }
     }
@@ -258,7 +268,7 @@ fn merges_over_one_chain_share_its_tumbling_windows() {
         QueryRoot::Operator(merge(vec![Rc::clone(&shared)])),
         QueryRoot::Operator(merge(vec![shared])),
     ];
-    let expansion = expand_tumbling_window_chains_in_workload(&roots).unwrap();
+    let expansion = expand_tumbling_window_chains_in_workload(&roots, &Default::default()).unwrap();
     assert_eq!(expansion.chains.len(), 1);
     assert_eq!(expansion.chains[0].tumbling_windows.len(), 5);
     let expanded = expansion.roots;
@@ -338,7 +348,7 @@ fn a_merge_of_the_newest_tumbling_windows_reads_the_first_tumbling_windows_of_th
         QueryRoot::Operator(newest(Rc::clone(&shared), 2)),
         QueryRoot::Operator(merge(vec![shared])),
     ];
-    let expansion = expand_tumbling_window_chains_in_workload(&roots).unwrap();
+    let expansion = expand_tumbling_window_chains_in_workload(&roots, &Default::default()).unwrap();
     assert_eq!(expansion.chains.len(), 1);
     assert_eq!(expansion.chains[0].tumbling_windows.len(), 5);
     let tumbling_windows = |root: &QueryRoot| match root {
@@ -456,7 +466,7 @@ fn expansion_preserves_every_tumbling_window_and_shared_reader() {
         QueryRoot::Operator(merge(vec![shared.clone()])),
         QueryRoot::Operator(merge(vec![shared])),
     ];
-    let result = expand_tumbling_window_chains_in_workload(&roots).unwrap();
+    let result = expand_tumbling_window_chains_in_workload(&roots, &Default::default()).unwrap();
     assert_eq!(result.chains.len(), 1);
     assert_eq!(result.chains[0].tumbling_windows.len(), 5);
     let QueryRoot::Operator(first) = &result.roots[0] else {

@@ -108,9 +108,7 @@ use std::time::Duration;
 
 use asap_types::ir::operator::agg_intent::AggIntent;
 use asap_types::ir::operator::operator_properties::{GroupKeys, Reduction, Source};
-use asap_types::ir::properties::timing::{
-    apply_physical_properties, NodeToTimedNodeCache, PhysicalPropertiesAssignment,
-};
+use asap_types::ir::properties::timing::{apply_physical_properties, PhysicalPropertiesAssignment};
 use asap_types::ir::schema::{ColumnId, DataType, Field, Schema};
 use asap_types::ir::{NonASAPOp, Predicate, ScalarExpr, TimeRangeKind};
 
@@ -219,25 +217,22 @@ pub fn time_range(range: Duration, child: Rc<OperatorNode>) -> Rc<OperatorNode> 
     .unwrap()
 }
 
-/// `root` timed under the default (every sub-DAG not materialized)
-/// assignment — the shape export and the post-ASAP validators consume.
-pub fn timed(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
-    apply_physical_properties(
-        root,
-        &PhysicalPropertiesAssignment::default(),
-        &mut NodeToTimedNodeCache::new(),
-    )
-    .expect("default physical properties apply")
+/// The physical properties of every node of `root` under the default
+/// (every sub-DAG not materialized) assignment — what export and the
+/// post-ASAP validators read.
+pub fn timed(root: &Rc<OperatorNode>) -> PhysicalPropertiesAssignment {
+    apply_physical_properties(root, &PhysicalPropertiesAssignment::default())
+        .expect("default physical properties apply")
 }
 
-/// `root` timed with every sub-DAG materialized at ingestion time where the DAG allows it.
-pub fn at_ingestion(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
+/// The physical properties of every node of `root` with every sub-DAG
+/// materialized at ingestion time where the DAG allows it.
+pub fn at_ingestion(root: &Rc<OperatorNode>) -> PhysicalPropertiesAssignment {
     apply_physical_properties(
         root,
         &PhysicalPropertiesAssignment::materialized_at_ingestion_where_allowed(
             std::slice::from_ref(root),
         ),
-        &mut NodeToTimedNodeCache::new(),
     )
     .expect("at-ingestion physical properties apply")
 }

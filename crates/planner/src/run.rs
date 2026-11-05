@@ -108,7 +108,8 @@ pub struct PlanningRun {
     /// The selected plan as Stage 2 built it, with its tumbling-window retention.
     pub selected_physical_plan: Option<RealizedPlan>,
     /// The plan to run: the selected plan's roots with the weight proofs
-    /// Stage 3 made applied.
+    /// Stage 3 made applied. Its nodes' physical properties are in
+    /// `selected_physical_plan`'s `plan.physical_properties`.
     pub selected_plan: Option<Vec<QueryRoot>>,
     pub report: PlanningReport,
 }
@@ -220,7 +221,7 @@ pub fn run_planning(
         let selection = selection.map_err(SelectionError::Selection)?;
         report.search_report = Some(selection.search_report.clone());
         // The selected plan, as Stage 2 builds it.
-        let realized = realizer
+        let mut realized = realizer
             .realize(physical, &selection.selected_dag)
             .map_err(SelectionError::Realization)?;
         let proven: HashSet<*const OperatorNode> = selection
@@ -233,6 +234,7 @@ pub fn run_planning(
             &realized.plan.roots,
             data,
             &|node| proven.contains(&Rc::as_ptr(node)),
+            &mut realized.plan.physical_properties,
         ));
         selected_physical_plan = Some(realized);
         Ok(selection)
@@ -402,10 +404,10 @@ impl OptimizationPass for Stage1ToStage3Pass {
                 }
             }
         }
-        output.tumbling_window_retention_ms = run
-            .selected_physical_plan
-            .map(|realized| realized.tumbling_window_retention_ms)
-            .unwrap_or_default();
+        if let Some(realized) = run.selected_physical_plan {
+            output.tumbling_window_retention_ms = realized.tumbling_window_retention_ms;
+            output.physical_properties = realized.plan.physical_properties;
+        }
         output.selection = Some(selection);
         Ok(output)
     }

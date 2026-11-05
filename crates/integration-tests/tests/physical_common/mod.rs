@@ -61,10 +61,9 @@ fn compile_with(
     root: &std::rc::Rc<asap_types::ir::OperatorNode>,
     assignment: &asap_types::ir::PhysicalPropertiesAssignment,
 ) -> Result<asap_types::ir::physical_export::PhysicalASAPDAG, Box<dyn std::error::Error>> {
-    let root =
-        asap_types::ir::apply_physical_properties(root, assignment, &mut Default::default())?;
+    let timed = asap_types::ir::apply_physical_properties(root, assignment)?;
     Ok(asap_types::ir::physical_export::compile_physical_asap_dag(
-        &root,
+        root, &timed,
     )?)
 }
 

@@ -666,8 +666,6 @@ fn absorbed_targets(targets: &[ComputationTarget]) -> impl Iterator<Item = usize
 pub enum PerComputationCandidateError {
     #[error(transparent)]
     Structure(#[from] SchemaDerivationError),
-    #[error("logical candidate input already has assigned execution timing or lifetime")]
-    AssignedPhysicalAnnotation,
     #[error("logical candidate input already contains ASAP operators")]
     ContainsAsap,
     /// `root` (the query's index in the workload) and `measure` locate the target;
@@ -833,9 +831,6 @@ pub fn generate_per_computation_candidates(
             for node in OperatorNode::reachable(root) {
                 if !seen.insert(Rc::as_ptr(&node)) {
                     continue;
-                }
-                if node.timing.is_some() || node.lifetime.is_materialized() {
-                    return Err(PerComputationCandidateError::AssignedPhysicalAnnotation);
                 }
                 for child in node.children() {
                     consumers

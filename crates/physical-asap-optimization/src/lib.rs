@@ -128,8 +128,8 @@ use asap_types::ir::physical_export::compile_physical_asap_workload_with_node_id
 use asap_types::ir::properties::{ExecutionDataStateError, ExecutionTiming};
 use asap_types::ir::schema::{ExactKind, FieldDataType};
 use asap_types::ir::{
-    apply_physical_properties, is_filtered_build, ASAPOp, NodeToTimedNodeCache, NonASAPOp,
-    Operator, OperatorNode, PhysicalPropertiesAssignment, QueryRoot, ScalarExpr,
+    apply_physical_properties, apply_physical_properties_to_roots, is_filtered_build, ASAPOp,
+    NonASAPOp, Operator, OperatorNode, PhysicalPropertiesAssignment, QueryRoot, ScalarExpr,
     SchemaDerivationError, SortKey,
 };
 use asap_types::physical::{PhysicalProperties, PhysicalWorkloadPlan};
@@ -542,15 +542,13 @@ fn assigned_candidate(
     let split_roots = map_roots(implemented, &mut |node| {
         Ok(replaced[&Rc::as_ptr(node)].clone())
     })?;
-    let mut timing = NodeToTimedNodeCache::new();
-    let timed = map_roots(&split_roots, &mut |node| {
-        Ok(apply_physical_properties(node, &options, &mut timing)?)
-    })?;
-    let dag = compile_physical_asap_workload_with_node_ids(&timed)?.dag;
+    let timed = apply_physical_properties_to_roots(&split_roots, &options)?;
+    let dag = compile_physical_asap_workload_with_node_ids(&split_roots, &timed)?.dag;
     Ok(PhysicalWorkloadPlan {
         id: String::new(),
         from_logical: from_logical.to_string(),
-        roots: timed,
+        roots: split_roots,
+        physical_properties: timed,
         dag,
     })
 }
@@ -699,7 +697,7 @@ pub(crate) fn find_materialized_output_candidates(
                     PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
                 );
             }
-            apply_physical_properties(node, &trial, &mut NodeToTimedNodeCache::new())
+            apply_physical_properties(node, &trial)
                 .map(|_| ())
                 .map_err(|e| IngestionPruneReason::UpstreamAtQueryTime(e.to_string()))
         });
@@ -710,10 +708,9 @@ pub(crate) fn find_materialized_output_candidates(
             may_keep_across_evaluations: eligibility.may_keep_across_evaluations,
         }
     });
-    // A node fixed at ingestion time cannot be built at query time.
     let shared_results = shared_results
         .into_iter()
-        .filter(|n| highest_shared(n) && n.timing != Some(ExecutionTiming::IngestionTime))
+        .filter(|n| highest_shared(n))
         .map(|node| MaterializedOutputCandidate {
             readers: readers[&Rc::as_ptr(&node)].clone(),
             node,
@@ -1781,14 +1778,21 @@ mod tests {
         let [chain] = &node_of(b1, "SummaryTumblingWindowChain")[..] else {
             panic!("one chain")
         };
-        assert_eq!(chain.lifetime, Lifetime::AcrossEvaluations(Medium::Memory));
-        assert_eq!(chain.timing, Some(ExecutionTiming::IngestionTime));
+        let properties = |node: &OperatorNode| b1.physical_properties.get(node).unwrap();
+        assert_eq!(
+            properties(chain),
+            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION
+        );
         for below in OperatorNode::reachable(chain) {
-            assert_eq!(below.timing, Some(ExecutionTiming::IngestionTime));
+            assert_eq!(properties(&below).timing(), ExecutionTiming::IngestionTime);
         }
         for kind in ["SummaryMerge", "SummaryEstimate"] {
             for node in node_of(b1, kind) {
-                assert_eq!(node.timing, Some(ExecutionTiming::QueryTime), "{kind}");
+                assert_eq!(
+                    properties(&node).timing(),
+                    ExecutionTiming::QueryTime,
+                    "{kind}"
+                );
             }
         }
     }
@@ -2260,7 +2264,14 @@ mod tests {
         let [build] = &node_of(&candidates[1], "SummaryAgg")[..] else {
             panic!("one shared build")
         };
-        assert_eq!(build.lifetime, Lifetime::OneEvaluation(Medium::Memory));
+        assert_eq!(
+            candidates[1]
+                .physical_properties
+                .get(build)
+                .unwrap()
+                .lifetime(),
+            Lifetime::OneEvaluation(Medium::Memory)
+        );
     }
 
     /// Two queries share one scan: one reads it through tumbling windows maintained at

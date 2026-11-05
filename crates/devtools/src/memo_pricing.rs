@@ -145,6 +145,7 @@ fn price_choice(
         Ok(selection) => {
             match installable_plan_of(
                 &selection.plan,
+                &selection.physical_properties,
                 None,
                 &selection.tumbling_window_retention_ms,
                 entries,

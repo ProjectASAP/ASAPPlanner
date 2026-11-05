@@ -122,7 +122,7 @@ pub fn root_guarantee(root: &QueryRoot) -> Option<AccuracyGuarantee> {
 
 /// Bind known statistics in existing contracts, then recover compositions
 /// that previously required constant child bounds. Physical state contracts,
-/// schemas, timing, lifetime, and sharing are preserved. This does not
+/// schemas and sharing are preserved. This does not
 /// infer facts: `bind` must leave unsupported statistics unknown.
 pub fn bind_guarantees(
     root: &QueryRoot,
@@ -137,9 +137,7 @@ pub fn bind_guarantees(
             return done.clone();
         }
         let operator = node.operator.map_children(|child| walk(child, bind, cache));
-        let mut rebuilt = OperatorNode::with_schema(operator, node.schema.clone())
-            .with_timing(node.timing)
-            .with_lifetime(node.lifetime);
+        let mut rebuilt = OperatorNode::with_schema(operator, node.schema.clone());
         rebuilt.guarantee = node
             .guarantee
             .as_ref()
@@ -162,8 +160,8 @@ pub fn bind_guarantees(
 /// `roots` with every sketch summary state rebuilt with the parameters
 /// `resize` gives it (same algorithm; `None` keeps them), and every node
 /// above one rebuilt over its new inputs with its guarantee composed again
-/// ([`composed_guarantee`]; a node that had none keeps none). Timing,
-/// materialization and sharing are kept. Pass 1 sizes summaries
+/// ([`composed_guarantee`]; a node that had none keeps none). Sharing is
+/// kept. Pass 1 sizes summaries
 /// for a failure probability this way.
 pub fn with_resized_summaries(
     roots: &[QueryRoot],
@@ -212,11 +210,7 @@ pub fn with_resized_summaries(
                 .guarantee
                 .as_ref()
                 .and_then(|_| composed_guarantee(&rebuilt));
-            Rc::new(
-                rebuilt
-                    .with_timing(node.timing)
-                    .with_lifetime(node.lifetime),
-            )
+            Rc::new(rebuilt)
         } else {
             node.clone()
         };

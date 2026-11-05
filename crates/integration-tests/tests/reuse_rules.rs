@@ -17,11 +17,10 @@ use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::planning::{
     cheapest_of, compose_memo_plan, expanded_memo, select_among,
 };
-use asap_types::ir::physical_export::compile_physical_asap_dag;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{
-    apply_physical_properties, ASAPOp, NodeToTimedNodeCache, NonASAPOp, OperatorNode,
-    PhysicalPropertiesAssignment, QueryRoot,
+    apply_physical_properties, ASAPOp, NonASAPOp, OperatorNode, PhysicalPropertiesAssignment,
+    QueryRoot,
 };
 use asap_types::physical::Lifetime;
 use asap_types::stages::{root_groups, MemoGroupId};
@@ -112,17 +111,19 @@ fn samples() -> Vec<(&'static str, &'static str, i64, f64)> {
 /// `Scan`; each `TimeRange` keeps its own window (a tumbling window's moved
 /// back by the `TimeShift` below it).
 fn execute(root: &Rc<OperatorNode>) -> Vec<String> {
-    let timed = apply_physical_properties(
-        root,
-        &PhysicalPropertiesAssignment::default(),
-        &mut NodeToTimedNodeCache::new(),
+    let timed = apply_physical_properties(root, &PhysicalPropertiesAssignment::default()).unwrap();
+    // Tumbling windows run as their tumbling windows, each over its own window.
+    let expansion =
+        asap_types::ir::operator::tumbling_window_chain::expand_tumbling_window_chains_in_workload(
+            &[QueryRoot::Operator(Rc::clone(root))],
+            &timed,
+        )
+        .unwrap();
+    let dag = asap_types::ir::physical_export::compile_physical_asap_workload(
+        &expansion.roots,
+        &expansion.physical_properties,
     )
     .unwrap();
-    // Tumbling windows run as their tumbling windows, each over its own window.
-    let timed =
-        asap_types::ir::operator::tumbling_window_chain::expand_tumbling_window_chains(&timed)
-            .unwrap();
-    let dag = compile_physical_asap_dag(&timed).unwrap();
     let store = physical_common::raw_data_store(&dag, |_, schema| {
         samples()
             .into_iter()

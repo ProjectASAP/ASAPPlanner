@@ -108,6 +108,7 @@ pub fn realize_selected_candidates(
             )));
         }
     }
+    let realized_properties = &physical.physical_properties;
     let operator_node_of_selected_node = rebuilt
         .operator_node_of_selected_node
         .into_iter()
@@ -117,7 +118,10 @@ pub fn realize_selected_candidates(
                 .get(&Rc::as_ptr(&operator_node))
                 .cloned()
                 .ok_or_else(|| format!("selected node {node} has no physical identity"))?;
-            if physical.lifetime != assignments[node].lifetime() {
+            let realized = realized_properties
+                .get(&physical)
+                .ok_or_else(|| format!("selected node {node} has no physical properties"))?;
+            if realized.lifetime() != assignments[node].lifetime() {
                 return Err(format!(
                     "selected node {node} lifetime changed during physical reconstruction"
                 ));
@@ -170,10 +174,15 @@ impl AssignmentRealizer for Stage2AssignmentRealizer<'_> {
             .zip(&realized.operator_node_of_selected_node)
         {
             let timing = physical.candidates[id.0].properties.timing();
-            if node.timing != Some(timing) {
+            let produced = realized
+                .plan
+                .physical_properties
+                .get(node)
+                .map(|properties| properties.timing());
+            if produced != Some(timing) {
                 return Err(PhysicalCandidateError::InvalidOrUnsupported(format!(
-                    "candidate {} requested timing {timing:?}, Stage 2 produced {:?}",
-                    id.0, node.timing
+                    "candidate {} requested timing {timing:?}, Stage 2 produced {produced:?}",
+                    id.0
                 )));
             }
         }
@@ -319,9 +328,10 @@ mod tests {
                 .unwrap();
         let through_trait = realizer.realize(&physical, &selected).unwrap();
         assert_eq!(
-            format!("{:?}", direct.plan),
-            format!("{:?}", through_trait.plan)
+            format!("{:?}", direct.plan.roots),
+            format!("{:?}", through_trait.plan.roots)
         );
+        assert_eq!(direct.plan.dag, through_trait.plan.dag);
         assert_eq!(
             direct.operator_node_of_selected_node,
             through_trait.operator_node_of_selected_node

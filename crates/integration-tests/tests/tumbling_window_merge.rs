@@ -20,16 +20,17 @@ use asap_logical_asap_optimization::test_support::{
     window_composition_shared_chain_candidates,
 };
 use asap_types::ir::operator::operator_properties::TimeShift;
-use asap_types::ir::operator::tumbling_window_chain::expand_tumbling_window_chains;
+use asap_types::ir::operator::tumbling_window_chain::{
+    expand_tumbling_window_chains, expand_tumbling_window_chains_in_workload,
+};
 use asap_types::ir::physical_export::PhysicalASAPDAG;
-use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
 use asap_types::ir::schema::Schema;
 use asap_types::ir::{
-    apply_physical_properties, ASAPOp, NodeToTimedNodeCache, NonASAPOp, Operator, OperatorNode,
+    apply_physical_properties, ASAPOp, NonASAPOp, Operator, OperatorNode,
     PhysicalPropertiesAssignment, QueryRoot,
 };
-use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
+use asap_types::physical::PhysicalProperties;
 use asap_types::test_support::compile_physical_asap_dag_with_node_ids;
 
 const EVALUATION_MS: i64 = 300_000;
@@ -178,9 +179,8 @@ struct Exported {
 }
 
 fn export(root: &Rc<OperatorNode>, assignment: &PhysicalPropertiesAssignment) -> Exported {
-    let timed =
-        apply_physical_properties(root, assignment, &mut NodeToTimedNodeCache::new()).unwrap();
-    let compiled = compile_physical_asap_dag_with_node_ids(&timed).unwrap();
+    let timed = apply_physical_properties(root, assignment).unwrap();
+    let compiled = compile_physical_asap_dag_with_node_ids(root, &timed).unwrap();
     let tumbling_window = |node: &OperatorNode| -> i64 {
         match node.children()[0].non_asap() {
             Some(NonASAPOp::TimeShift { shift, .. }) => shift.offset_ms / TUMBLING_WINDOW_WIDTH_MS,
@@ -304,20 +304,25 @@ fn execute_maintained_chain(
         &chain,
         PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
     );
-    let timed =
-        apply_physical_properties(planned, &assignment, &mut NodeToTimedNodeCache::new()).unwrap();
-    let expanded = expand_tumbling_window_chains(&timed).unwrap();
-    for tumbling_window in OperatorNode::reachable(&expanded)
+    let timed = apply_physical_properties(planned, &assignment).unwrap();
+    let expansion = expand_tumbling_window_chains_in_workload(
+        &[QueryRoot::Operator(Rc::clone(planned))],
+        &timed,
+    )
+    .unwrap();
+    let [QueryRoot::Operator(expanded)] = &expansion.roots[..] else {
+        unreachable!("one operator root")
+    };
+    for tumbling_window in OperatorNode::reachable(expanded)
         .iter()
         .filter(|n| matches!(n.asap(), Some(ASAPOp::SummaryAgg { .. })))
     {
         assert_eq!(
-            tumbling_window.lifetime,
-            Lifetime::AcrossEvaluations(Medium::Memory)
+            expansion.physical_properties.get(tumbling_window),
+            Some(PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION)
         );
-        assert_eq!(tumbling_window.timing, Some(ExecutionTiming::IngestionTime));
     }
-    execute_retained_as(&expanded, &PhysicalPropertiesAssignment::default(), samples)
+    execute_retained_as(expanded, &expansion.physical_properties, samples)
 }
 
 fn execute_retained_as(

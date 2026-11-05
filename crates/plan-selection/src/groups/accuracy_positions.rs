@@ -528,7 +528,7 @@ impl Checker<'_> {
 }
 
 /// `node` rebuilt over each combination of `per_input`'s outputs, with its
-/// timing and lifetime and its guarantee composed again; outputs the
+/// guarantee composed again; outputs the
 /// same for their readers kept once.
 fn rebuilt(node: &Rc<OperatorNode>, per_input: &[Vec<Rc<OperatorNode>>], keys: &mut Keys) -> Built {
     let combinations = combinations(per_input);
@@ -539,12 +539,7 @@ fn rebuilt(node: &Rc<OperatorNode>, per_input: &[Vec<Rc<OperatorNode>>], keys: &
             .with_new_children(|_| next.next().expect("one output per input"))
             .map_err(|_| UnusableReason::NotChecked)?;
         let guarantee = composed_guarantee(&rebuilt);
-        outputs.push(Rc::new(
-            rebuilt
-                .with_guarantee(guarantee)
-                .with_timing(node.timing)
-                .with_lifetime(node.lifetime),
-        ));
+        outputs.push(Rc::new(rebuilt.with_guarantee(guarantee)));
     }
     Ok(distinct_for_readers(outputs, keys))
 }

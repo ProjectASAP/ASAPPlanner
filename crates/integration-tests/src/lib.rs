@@ -98,20 +98,19 @@ pub mod fixtures {
 /// Timing and physical ASAP DAG export helpers for planned candidates.
 pub mod physical_export {
     use asap_types::ir::physical_export::{compile_physical_asap_dag, PhysicalASAPDAG};
-    use asap_types::ir::{
-        apply_physical_properties, NodeToTimedNodeCache, OperatorNode, PhysicalPropertiesAssignment,
-    };
+    use asap_types::ir::{apply_physical_properties, OperatorNode, PhysicalPropertiesAssignment};
     use std::rc::Rc;
 
-    /// Time `root` under the default assignment (no sub-DAG materialized, so every
-    /// summary computed at query time). Returns the timed copy; read `node.timing` on it.
-    pub fn timed(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
+    /// The physical properties of every node of `root` under the default
+    /// assignment (no sub-DAG materialized, so every summary computed at
+    /// query time).
+    pub fn timed(root: &Rc<OperatorNode>) -> PhysicalPropertiesAssignment {
         timed_with(root, &PhysicalPropertiesAssignment::default())
     }
 
-    /// Time `root` with every sub-DAG materialized at ingestion time where the DAG
-    /// allows it.
-    pub fn at_ingestion(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
+    /// The physical properties of every node of `root` with every sub-DAG
+    /// materialized at ingestion time where the DAG allows it.
+    pub fn at_ingestion(root: &Rc<OperatorNode>) -> PhysicalPropertiesAssignment {
         timed_with(
             root,
             &PhysicalPropertiesAssignment::materialized_at_ingestion_where_allowed(
@@ -123,20 +122,20 @@ pub mod physical_export {
     fn timed_with(
         root: &Rc<OperatorNode>,
         assignment: &PhysicalPropertiesAssignment,
-    ) -> Rc<OperatorNode> {
-        apply_physical_properties(root, assignment, &mut NodeToTimedNodeCache::new())
-            .expect("applying physical properties failed")
+    ) -> PhysicalPropertiesAssignment {
+        apply_physical_properties(root, assignment).expect("applying physical properties failed")
     }
 
     /// Time `root` (default assignment), then export the physical DAG.
     pub fn physical_asap_dag(root: &Rc<OperatorNode>) -> PhysicalASAPDAG {
-        compile_physical_asap_dag(&timed(root)).expect("physical ASAP DAG export failed")
+        compile_physical_asap_dag(root, &timed(root)).expect("physical ASAP DAG export failed")
     }
 
     /// Time `root` with every sub-DAG materialized at ingestion time where the DAG allows
     /// it, then export the physical DAG.
     pub fn at_ingestion_physical_asap_dag(root: &Rc<OperatorNode>) -> PhysicalASAPDAG {
-        compile_physical_asap_dag(&at_ingestion(root)).expect("physical ASAP DAG export failed")
+        compile_physical_asap_dag(root, &at_ingestion(root))
+            .expect("physical ASAP DAG export failed")
     }
 }
 

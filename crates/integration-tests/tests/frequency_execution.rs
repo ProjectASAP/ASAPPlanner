@@ -14,8 +14,7 @@ use asap_types::ir::physical_export::{compile_physical_asap_dag, PhysicalASAPOpe
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
 use asap_types::ir::{
-    apply_physical_properties, ASAPOp, NodeToTimedNodeCache, NonASAPOp, OperatorNode,
-    PhysicalPropertiesAssignment,
+    apply_physical_properties, ASAPOp, NonASAPOp, OperatorNode, PhysicalPropertiesAssignment,
 };
 
 use crate::physical_common;
@@ -36,13 +35,9 @@ fn built_family(candidate: &Rc<OperatorNode>) -> Option<FieldDataType> {
 
 /// Execute `candidate` at query time over `SAMPLES`, all inside the window.
 fn execute(candidate: &Rc<OperatorNode>) -> Vec<f64> {
-    let timed = apply_physical_properties(
-        candidate,
-        &PhysicalPropertiesAssignment::default(),
-        &mut NodeToTimedNodeCache::new(),
-    )
-    .unwrap();
-    let dag = compile_physical_asap_dag(&timed).unwrap();
+    let timed =
+        apply_physical_properties(candidate, &PhysicalPropertiesAssignment::default()).unwrap();
+    let dag = compile_physical_asap_dag(candidate, &timed).unwrap();
     let ranges = dag
         .nodes
         .iter()

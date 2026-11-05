@@ -88,7 +88,8 @@ async fn export_carries_the_selected_lifetime() {
     assert!(output.selection.is_some(), "Stage 3 selected");
     assert_eq!(
         dag,
-        compile_physical_asap_workload(&output.roots()).expect("the selected plan exports")
+        compile_physical_asap_workload(&output.roots(), &output.physical_properties)
+            .expect("the selected plan exports")
     );
 }
 

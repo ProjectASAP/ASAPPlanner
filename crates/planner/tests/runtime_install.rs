@@ -5,7 +5,7 @@
 //! `cargo check -p asap-planner --tests --locked` on its own for that).
 
 use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
 use crate::time_series;
@@ -31,11 +31,10 @@ use asap_types::ir::{
     apply_physical_properties_to_roots, ASAPOp, OperatorNode, PhysicalPropertiesAssignment,
     QueryRoot,
 };
-use asap_types::physical::{Lifetime, PhysicalProperties};
+use asap_types::physical::PhysicalProperties;
 use asap_types::stages::HowToComputeAggregateMeasure;
 use asap_types::stages::PruneReason;
 use futures::{executor::block_on, StreamExt};
-use std::collections::HashMap;
 use std::ops::Bound;
 use std::rc::Rc;
 use time_series::{series_labels, time_series_tables, RawDataSample};
@@ -1526,21 +1525,47 @@ impl OptimizationPass for StoredAsForced {
 
     fn optimize(&self, input: OptimizationInput<'_>) -> Result<PlanOutput, OptimizeError> {
         let mut output = Stage1ToStage3Pass.optimize(input)?;
-        // Each node untimed once, so shared inputs stay shared, and its
-        // materialization in `assignment`.
-        let mut untimed: HashMap<*const OperatorNode, Rc<OperatorNode>> = HashMap::new();
-        let mut assignment = PhysicalPropertiesAssignment::default();
+        // Each node's materialized output: `store`'s, or the one Stage 3
+        // selected.
         let roots: Vec<Rc<OperatorNode>> = output
             .plans
             .iter()
-            .map(|plan| untime(&plan.root, self.store, &mut untimed, &mut assignment))
+            .map(|plan| Rc::clone(&plan.root))
             .collect();
+        let mut assignment = PhysicalPropertiesAssignment::default();
+        let mut seen = HashSet::new();
+        for root in &roots {
+            for node in OperatorNode::reachable(root) {
+                if !seen.insert(Rc::as_ptr(&node)) {
+                    continue;
+                }
+                // A shared non-summary node Stage 2 built once per
+                // evaluation is not kept: a build forced to ingestion time
+                // above it cannot read a query-time result.
+                let selected = output
+                    .physical_properties
+                    .get(&node)
+                    .filter(|properties| properties.lifetime().is_materialized());
+                let own = match node.asap() {
+                    Some(
+                        ASAPOp::SummaryAgg { .. }
+                        | ASAPOp::SummaryTumblingWindowChain { .. }
+                        | ASAPOp::SummaryMerge { .. },
+                    ) => selected,
+                    _ => None,
+                };
+                if let Some(kept) = (self.store)(&node).or(own) {
+                    assignment.set(&node, kept);
+                }
+            }
+        }
         // A node read both at ingestion and at query time is copied, one
         // copy per timing, as Stage 2 does.
         let (roots, assignment) = split_shared_by_timing(&roots, &assignment);
         let roots: Vec<QueryRoot> = roots.into_iter().map(QueryRoot::Operator).collect();
-        let timed = apply_physical_properties_to_roots(&roots, &assignment).unwrap();
-        for (plan, root) in output.plans.iter_mut().zip(timed) {
+        output.physical_properties =
+            apply_physical_properties_to_roots(&roots, &assignment).unwrap();
+        for (plan, root) in output.plans.iter_mut().zip(roots) {
             let QueryRoot::Operator(root) = root else {
                 unreachable!("operator roots in, operator roots out")
             };
@@ -1548,42 +1573,6 @@ impl OptimizationPass for StoredAsForced {
         }
         Ok(output)
     }
-}
-
-/// `node` untimed, with `store`'s materialized output (or its own) recorded in
-/// `assignment` for every node of its sub-DAG.
-fn untime(
-    node: &Rc<OperatorNode>,
-    store: fn(&OperatorNode) -> Option<PhysicalProperties>,
-    untimed: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
-    assignment: &mut PhysicalPropertiesAssignment,
-) -> Rc<OperatorNode> {
-    if let Some(done) = untimed.get(&Rc::as_ptr(node)) {
-        return Rc::clone(done);
-    }
-    let mut copy = (**node).clone();
-    copy.operator = node
-        .operator
-        .map_children(|child| untime(child, store, untimed, assignment));
-    copy.timing = None;
-    copy.lifetime = Lifetime::None;
-    let copy = Rc::new(copy);
-    // A shared non-summary node Stage 2 built once per evaluation is not
-    // kept: a build forced to ingestion time above it cannot read a
-    // query-time result.
-    let own = match node.asap() {
-        Some(
-            ASAPOp::SummaryAgg { .. }
-            | ASAPOp::SummaryTumblingWindowChain { .. }
-            | ASAPOp::SummaryMerge { .. },
-        ) if node.lifetime.is_materialized() => node.physical_properties().map(Result::unwrap),
-        _ => None,
-    };
-    if let Some(materialized) = store(node).or(own) {
-        assignment.set(&copy, materialized);
-    }
-    untimed.insert(Rc::as_ptr(node), Rc::clone(&copy));
-    copy
 }
 
 /// Every `SummaryAgg` built at ingestion time.

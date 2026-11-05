@@ -222,6 +222,12 @@ pub struct PlanOutput {
     /// tumbling windows are kept ([`RealizedPlan::tumbling_window_retention_ms`](asap_types::stages::RealizedPlan::tumbling_window_retention_ms));
     /// empty for a pass that does not set it.
     pub tumbling_window_retention_ms: BTreeMap<PhysicalASAPNodeId, u64>,
+    /// The physical properties the pass selected for the plans' nodes, by
+    /// node: for [`Stage1ToStage3Pass`] every node, as Stage 3 selected it.
+    /// A node it does not list takes the timing pass's default (not
+    /// materialized, computed when its consumer runs); empty for a pass that
+    /// does not set it.
+    pub physical_properties: PhysicalPropertiesAssignment,
 }
 
 impl PlanOutput {
@@ -232,6 +238,7 @@ impl PlanOutput {
             scalar_plans: Vec::new(),
             selection: None,
             tumbling_window_retention_ms: BTreeMap::new(),
+            physical_properties: PhysicalPropertiesAssignment::default(),
         }
     }
 
@@ -299,12 +306,12 @@ impl PlanOutput {
     }
 
     /// The workload as one physical ASAP DAG, with shared sub-DAGs exported
-    /// once. A node keeps the timing and lifetime its pass gave it:
-    /// for [`Stage1ToStage3Pass`] that is Stage 3's selected plan as
-    /// selected (e.g. ingestion-time tumbling windows), the document a deployment
-    /// runtime executes. Only a node the pass left untimed takes the default
-    /// [`PhysicalPropertiesAssignment`] (not materialized, computed when its
-    /// consumer runs). Operator queries become its `roots` and standalone scalar
+    /// once. A node keeps the physical properties its pass gave it
+    /// (`physical_properties`): for [`Stage1ToStage3Pass`] that is Stage 3's
+    /// selected plan as selected (e.g. ingestion-time tumbling windows), the
+    /// document a deployment runtime executes. Only a node the pass did not
+    /// list takes the timing pass's default (not materialized, computed when
+    /// its consumer runs). Operator queries become its `roots` and standalone scalar
     /// queries its `scalar_roots`, keyed by position in the batch. That
     /// position is the entry index, because `check_contract` requires dense
     /// entry indices.
@@ -317,11 +324,9 @@ impl PlanOutput {
         &self,
     ) -> Result<asap_types::ir::physical_export::PhysicalASAPDAG, ExecutionDataStateError> {
         // A node several roots share by `Rc` is timed and exported once.
-        let timed = apply_physical_properties_to_roots(
-            &self.roots(),
-            &PhysicalPropertiesAssignment::default(),
-        )?;
-        compile_physical_asap_workload(&timed)
+        let roots = self.roots();
+        let timed = apply_physical_properties_to_roots(&roots, &self.physical_properties)?;
+        compile_physical_asap_workload(&roots, &timed)
     }
 
     pub fn len(&self) -> usize {

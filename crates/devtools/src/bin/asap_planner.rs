@@ -395,19 +395,29 @@ fn stage3_json(run: &PlanningStagesRun, entries: &[QueryWorkloadEntry]) -> Value
     let mut stage3 = selection_json(&run.run.selection);
     match (&run.run.selection, &run.run.selected_plan) {
         (Ok(selection), Some(roots)) => {
-            let tumbling_window_retention_ms = run
+            let (tumbling_window_retention_ms, physical_properties) = run
                 .run
                 .selected_physical_plan
                 .as_ref()
-                .map(|realized| realized.tumbling_window_retention_ms.clone())
+                .map(|realized| {
+                    (
+                        realized.tumbling_window_retention_ms.clone(),
+                        realized.plan.physical_properties.clone(),
+                    )
+                })
                 .unwrap_or_default();
             stage3["tumbling_window_retention_ms"] = tumbling_window_retention_ms
                 .iter()
                 .map(|(node, ms)| (node.to_string(), json!(ms)))
                 .collect::<serde_json::Map<_, _>>()
                 .into();
-            match materialized_views_json(roots, selection, &tumbling_window_retention_ms, entries)
-            {
+            match materialized_views_json(
+                roots,
+                &physical_properties,
+                selection,
+                &tumbling_window_retention_ms,
+                entries,
+            ) {
                 Ok(views) => stage3["materialized_views"] = Value::Array(views),
                 Err(error) => {
                     stage3["materialized_views"] = json!([]);
@@ -646,6 +656,7 @@ fn arrival_together(earlier: DataArrival, later: DataArrival) -> Option<DataArri
 /// tumbling-window chain's tumbling windows, newest first) and their number (`installed_count`).
 fn materialized_views_json(
     roots: &[QueryRoot],
+    physical_properties: &asap_types::ir::PhysicalPropertiesAssignment,
     selection: &Selection,
     tumbling_window_retention_ms: &std::collections::BTreeMap<
         asap_types::ir::physical_export::PhysicalASAPNodeId,
@@ -655,6 +666,7 @@ fn materialized_views_json(
 ) -> Result<Vec<Value>, String> {
     let (plan, report) = installable_plan_of(
         roots,
+        physical_properties,
         Some(selection),
         tumbling_window_retention_ms,
         entries,

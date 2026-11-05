@@ -431,7 +431,7 @@ pub fn run_stages_until(
     ) {
         Ok(selection) => {
             match realizer.realize(&physical, &selection.selected_dag) {
-                Ok(realized) => {
+                Ok(mut realized) => {
                     // As the facade does: the plan to run carries the weight
                     // proofs Stage 3 made.
                     let proven: HashSet<*const asap_types::ir::OperatorNode> = selection
@@ -440,9 +440,12 @@ pub fn run_stages_until(
                         .filter_map(|node| realized.operator_node_of_selected_node.get(node.0))
                         .map(Rc::as_ptr)
                         .collect();
-                    let plan = with_confirmed_weights_at(&realized.plan.roots, data, &|node| {
-                        proven.contains(&Rc::as_ptr(node))
-                    });
+                    let plan = with_confirmed_weights_at(
+                        &realized.plan.roots,
+                        data,
+                        &|node| proven.contains(&Rc::as_ptr(node)),
+                        &mut realized.plan.physical_properties,
+                    );
                     validate(&plan)?;
                     run.selected_plan = Some(plan);
                     run.selected_physical_plan = Some(realized);

@@ -20,8 +20,10 @@ use super::node::{Operator, OperatorNode};
 use super::non_asap::{NonASAPOp, TimeRangeKind};
 use super::operator_properties::TimeShift;
 use super::query::QueryRoot;
+use crate::ir::properties::timing::PhysicalPropertiesAssignment;
 use crate::ir::properties::ExecutionTiming;
 use crate::ir::SchemaDerivationError;
+use crate::physical::PhysicalProperties;
 
 fn invalid(message: &str) -> SchemaDerivationError {
     SchemaDerivationError::InvalidScalarSignature(message.into())
@@ -228,12 +230,9 @@ fn build_over(
 /// reads each tumbling window of each chain it read, newest first, as plain
 /// `SummaryAgg` nodes the executor runs; a merge of the newest `n` tumbling windows
 /// reads the first `n`, the same nodes a merge of the whole chain reads. Every other node keeps its
-/// guarantee, timing and lifetime. Each tumbling window takes its chain's
-/// timing and lifetime, and the range and shift it reads take the
-/// chain's timing: a chain materialized at ingestion time expands into
-/// tumbling windows each built and stored at ingestion time. Expanding before timings
-/// are applied leaves the tumbling windows untimed. A chain read by anything but a
-/// `SummaryMerge` is an error.
+/// guarantee. A chain read by anything but a `SummaryMerge` is an error.
+/// [`expand_tumbling_window_chains_in_workload`] also gives the expanded
+/// nodes their physical properties.
 #[cfg(any(test, feature = "test-support"))]
 pub fn expand_tumbling_window_chains(
     root: &Rc<OperatorNode>,
@@ -255,6 +254,13 @@ pub struct TumblingWindowChainExpansion {
     /// so a caller can carry what it knows about a node to the expanded
     /// workload.
     pub expanded_nodes: Vec<(Rc<OperatorNode>, Rc<OperatorNode>)>,
+    /// The physical properties of the expanded workload: each node the
+    /// input listed keeps its properties, a node replacing one takes its
+    /// properties, each tumbling window takes its chain's, and the range
+    /// and shift it reads take the chain's timing, not materialized. A chain
+    /// materialized at ingestion time expands into tumbling windows each
+    /// built and stored at ingestion time.
+    pub physical_properties: PhysicalPropertiesAssignment,
 }
 
 /// One expanded chain: the `SummaryTumblingWindowChain` node of the input workload and the
@@ -273,9 +279,11 @@ pub struct ExpandedTumblingWindowChain {
 /// read expands into one set of tumbling windows. A standalone scalar root has the
 /// operators it reads expanded. Also returns each chain's tumbling windows, so a
 /// caller can carry what it knows about a chain (e.g. its retention) to
-/// them.
+/// them, and the expanded workload's physical properties from `timed`, the
+/// input's (empty for an input not yet timed).
 pub fn expand_tumbling_window_chains_in_workload(
     roots: &[QueryRoot],
+    timed: &PhysicalPropertiesAssignment,
 ) -> Result<TumblingWindowChainExpansion, SchemaDerivationError> {
     let mut cache = NodeToExpandedNodeCache::default();
     let roots = roots
@@ -321,28 +329,48 @@ pub fn expand_tumbling_window_chains_in_workload(
                 tumbling_windows,
             }
         })
-        .collect();
+        .collect::<Vec<ExpandedTumblingWindowChain>>();
+    let mut physical_properties = timed.clone();
+    for (original, replacement) in &cache.expanded {
+        if let Some(properties) = timed.get(original) {
+            physical_properties.set(replacement, properties);
+        }
+    }
+    for expanded in &chains {
+        let Some(properties) = timed.get(&expanded.chain) else {
+            continue;
+        };
+        for tumbling_window in &expanded.tumbling_windows {
+            physical_properties.set(tumbling_window, properties);
+            not_materialized_below(
+                tumbling_window,
+                properties.timing(),
+                &mut physical_properties,
+            );
+        }
+    }
     Ok(TumblingWindowChainExpansion {
         roots,
         chains,
         expanded_nodes: cache.expanded,
+        physical_properties,
     })
 }
 
-/// The untimed `node` with `timing` written into it and into every untimed
-/// node below it: the nodes [`tumbling_window`] created, over the chain's input, which
-/// the timing pass already timed.
-fn timed_like(node: &Rc<OperatorNode>, timing: ExecutionTiming) -> OperatorNode {
-    OperatorNode::with_schema(
-        node.operator.map_children(|child| match child.timing {
-            Some(_) => Rc::clone(child),
-            None => Rc::new(timed_like(child, timing)),
-        }),
-        node.schema.clone(),
-    )
-    .with_guarantee(node.guarantee.clone())
-    .with_lifetime(node.lifetime)
-    .with_timing(Some(timing))
+/// List every node below `node` that `properties` does not list yet at
+/// `timing`, not materialized: the nodes [`tumbling_window`] created, over
+/// the chain's input, which the timing pass already timed.
+fn not_materialized_below(
+    node: &OperatorNode,
+    timing: ExecutionTiming,
+    properties: &mut PhysicalPropertiesAssignment,
+) {
+    for child in node.children() {
+        if properties.get(child).is_none() {
+            properties.set(child, PhysicalProperties::not_materialized_at(timing));
+            not_materialized_below(child, timing, properties);
+        }
+    }
 }
 
 /// What one expansion has built: each expanded node by its input's
@@ -390,13 +418,6 @@ fn expand(
                                 continue;
                             }
                             let tumbling_window = Rc::new(tumbling_window(child, index)?);
-                            let tumbling_window = match child.timing {
-                                Some(timing) => Rc::new(
-                                    timed_like(&tumbling_window, timing)
-                                        .with_lifetime(child.lifetime),
-                                ),
-                                None => tumbling_window,
-                            };
                             if index == 0 {
                                 cache.chains.push(Rc::clone(child));
                             }
@@ -416,9 +437,7 @@ fn expand(
             }))?;
             Rc::new(
                 OperatorNode::with_schema(merge.operator, node.schema.clone())
-                    .with_guarantee(node.guarantee.clone())
-                    .with_timing(node.timing)
-                    .with_lifetime(node.lifetime),
+                    .with_guarantee(node.guarantee.clone()),
             )
         }
         _ => {
@@ -436,9 +455,7 @@ fn expand(
                             .map_children(|child| Rc::clone(&children[&Rc::as_ptr(child)])),
                         node.schema.clone(),
                     )
-                    .with_guarantee(node.guarantee.clone())
-                    .with_timing(node.timing)
-                    .with_lifetime(node.lifetime),
+                    .with_guarantee(node.guarantee.clone()),
                 )
             } else {
                 Rc::clone(node)

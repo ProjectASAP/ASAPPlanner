@@ -640,10 +640,10 @@ fn nested_summary_explicitly_finalizes_exact_child_at_ingestion_time() {
                     if matches!(child.asap(), Some(ASAPOp::FinalizeExactAccumulator { .. }))))
         })
         .expect("a KLL over the finalized Sum accumulator");
-    // Stored timings are gone: time the plan with its outer summary
-    // maintained and read the timed copy.
-    let timed_plan = at_ingestion(&plan);
-    let Some(ASAPOp::SummaryEstimate { summary_input, .. }) = timed_plan.asap() else {
+    // Timings are not stored on the plan: time it with its outer summary
+    // maintained and read each node's timing.
+    let timed = at_ingestion(&plan);
+    let Some(ASAPOp::SummaryEstimate { summary_input, .. }) = plan.asap() else {
         panic!("expected selected quantile summary");
     };
     let Some(ASAPOp::SummaryAgg { child, .. }) = summary_input.asap() else {
@@ -656,7 +656,7 @@ fn nested_summary_explicitly_finalizes_exact_child_at_ingestion_time() {
         );
     };
     assert_eq!(
-        child.timing,
+        timed.get(child).map(|properties| properties.timing()),
         Some(asap_types::ir::properties::ExecutionTiming::IngestionTime)
     );
     assert!(matches!(

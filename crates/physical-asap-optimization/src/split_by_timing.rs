@@ -83,9 +83,7 @@ pub fn split_shared_by_timing(
         let out = if changed {
             Rc::new(
                 OperatorNode::with_schema(operator, node.schema.clone())
-                    .with_guarantee(node.guarantee.clone())
-                    .with_timing(node.timing)
-                    .with_lifetime(node.lifetime),
+                    .with_guarantee(node.guarantee.clone()),
             )
         } else {
             Rc::clone(node)
@@ -121,12 +119,12 @@ mod tests {
     use asap_types::ir::properties::{ExecutionDataState, ExecutionDataStateError};
     use asap_types::ir::scalar::expr_ir::ColumnRef;
     use asap_types::ir::schema::sketch::{
-        ExactKind, ExactParams, GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams,
-        SketchStatistic, SummaryUpdate,
+        GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SketchStatistic, SummaryUpdate,
     };
     use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
     use asap_types::ir::{
-        apply_physical_properties, ASAPOp, NodeToTimedNodeCache, NonASAPOp, Operator,
+        apply_physical_properties, apply_physical_properties_to_roots, ASAPOp, NonASAPOp, Operator,
+        QueryRoot,
     };
     use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
 
@@ -160,10 +158,6 @@ mod tests {
             ),
             GroupingStrategy::default(),
         )
-    }
-
-    fn exact_sum() -> FieldDataType {
-        FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
     }
 
     fn agg(child: Rc<OperatorNode>, family: FieldDataType) -> Rc<OperatorNode> {
@@ -215,11 +209,6 @@ mod tests {
         OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Concat { children })).unwrap()
     }
 
-    fn finalize(child: Rc<OperatorNode>) -> Rc<OperatorNode> {
-        OperatorNode::new_shared(Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child }))
-            .unwrap()
-    }
-
     fn child(node: &Rc<OperatorNode>) -> Rc<OperatorNode> {
         Rc::clone(node.children()[0])
     }
@@ -242,8 +231,7 @@ mod tests {
                 &root,
                 &PhysicalPropertiesAssignment::materialized_at_ingestion_where_allowed(
                     std::slice::from_ref(&root)
-                ),
-                &mut NodeToTimedNodeCache::new()
+                )
             )
             .err(),
             Some(ExecutionDataStateError::ConflictingTiming {
@@ -257,12 +245,7 @@ mod tests {
                 std::slice::from_ref(&root),
             ),
         );
-        assert!(apply_physical_properties(
-            &split[0],
-            &assignment,
-            &mut NodeToTimedNodeCache::new()
-        )
-        .is_ok());
+        assert!(apply_physical_properties(&split[0], &assignment).is_ok());
     }
 
     /// Splitting rebuilds the ancestors of a copied sub-DAG; an explicit
@@ -281,16 +264,16 @@ mod tests {
             PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         let (split, assignment) = split_shared_by_timing(std::slice::from_ref(&root), &assignment);
-        let timed =
-            apply_physical_properties(&split[0], &assignment, &mut NodeToTimedNodeCache::new())
-                .unwrap();
-        let summary = child(&child(&child(&timed)));
+        let timed = apply_physical_properties(&split[0], &assignment).unwrap();
+        let summary = child(&child(&child(&split[0])));
         assert!(matches!(
             summary.operator,
             Operator::ASAP(ASAPOp::SummaryAgg { .. })
         ));
-        assert_eq!(summary.lifetime, MATERIALIZED_ACROSS);
-        assert_eq!(summary.timing, Some(ExecutionTiming::IngestionTime));
+        assert_eq!(
+            timed.get(&summary),
+            Some(PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION)
+        );
     }
 
     /// Two queries share a scan: one reads it through a summary built at
@@ -314,80 +297,24 @@ mod tests {
             &summary,
             PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
-        let timed_unsplit = {
-            let mut cache = NodeToTimedNodeCache::new();
-            roots
-                .iter()
-                .map(|root| apply_physical_properties(root, &assignment, &mut cache))
-                .collect::<Result<Vec<_>, _>>()
+        let as_roots = |roots: &[Rc<OperatorNode>]| -> Vec<QueryRoot> {
+            roots.iter().cloned().map(QueryRoot::Operator).collect()
         };
         assert!(matches!(
-            timed_unsplit,
+            apply_physical_properties_to_roots(&as_roots(&roots), &assignment),
             Err(ExecutionDataStateError::ConflictingTiming { .. })
         ));
         let (split, assignment) = split_shared_by_timing(&roots, &assignment);
         assert_eq!(split.len(), 2);
-        let mut cache = NodeToTimedNodeCache::new();
-        let timed: Vec<_> = split
-            .iter()
-            .map(|root| apply_physical_properties(root, &assignment, &mut cache).unwrap())
-            .collect();
-        let summary = child(&child(&child(&timed[0])));
-        assert_eq!(summary.lifetime, MATERIALIZED_ACROSS);
-        assert_eq!(child(&summary).timing, Some(ExecutionTiming::IngestionTime));
+        let timed = apply_physical_properties_to_roots(&as_roots(&split), &assignment).unwrap();
+        let timing = |node: &OperatorNode| timed.get(node).unwrap().timing();
+        let summary = child(&child(&child(&split[0])));
+        assert_eq!(timed.get(&summary).unwrap().lifetime(), MATERIALIZED_ACROSS);
+        assert_eq!(timing(&child(&summary)), ExecutionTiming::IngestionTime);
         assert_eq!(
-            child(&child(&timed[1])).timing,
-            Some(ExecutionTiming::QueryTime)
+            timing(&child(&child(&split[1]))),
+            ExecutionTiming::QueryTime
         );
-        assert!(Rc::ptr_eq(timed[0].children()[1], timed[1].children()[1]));
-    }
-
-    /// Splitting a workload that also shares a scan at two timings keeps a
-    /// conflicting assignment on a fixed-timing node: the split roots still
-    /// fail with the conflict instead of dropping the assignment.
-    #[test]
-    fn a_fixed_timing_conflict_survives_the_split() {
-        let shared = scan();
-        let summary = agg(Rc::clone(&shared), kll());
-        let pair = concat(vec![
-            max(estimate(Rc::clone(&summary))),
-            max(Rc::clone(&shared)),
-        ]);
-        let state = agg(Rc::clone(&shared), exact_sum());
-        let read = Rc::new(
-            (*finalize(Rc::clone(&state)))
-                .clone()
-                .with_timing(Some(ExecutionTiming::QueryTime)),
-        );
-        let mut assignment = PhysicalPropertiesAssignment::default();
-        assignment.set(
-            &summary,
-            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
-        );
-        assignment.set(
-            &state,
-            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
-        );
-        assignment.set(
-            &read,
-            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
-        );
-        let (split, assignment) = split_shared_by_timing(&[pair, read], &assignment);
-        let mut cache = NodeToTimedNodeCache::new();
-        let timed: Result<Vec<_>, _> = split
-            .iter()
-            .map(|root| apply_physical_properties(root, &assignment, &mut cache))
-            .collect();
-        assert_eq!(
-            timed.err(),
-            Some(
-                ExecutionDataStateError::PhysicalPropertiesConflictWithFixedTiming {
-                    operator: "FinalizeExactAccumulator",
-                    fixed: ExecutionTiming::QueryTime,
-                    assigned:
-                        PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
-                }
-            )
-        );
+        assert!(Rc::ptr_eq(split[0].children()[1], split[1].children()[1]));
     }
 }

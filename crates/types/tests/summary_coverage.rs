@@ -10,7 +10,6 @@ use asap_types::ir::operator::TimeShift;
 use asap_types::ir::properties::summary_coverage::{
     ColumnIdentity, Constraint, CoverageError, SelectionBox,
 };
-use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::scalar::expr_ir::{ArithmeticOpKind, CompareOpKind, ScalarValue};
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
@@ -554,22 +553,6 @@ fn merges_nest() {
     );
 }
 
-/// When a state is computed is not what it computes.
-#[test]
-fn timing_does_not_block_merges() {
-    let ingested = Rc::new(
-        (*tumbling_window(60_000, vec![]))
-            .clone()
-            .with_timing(Some(ExecutionTiming::IngestionTime)),
-    );
-    let queried = Rc::new(
-        (*tumbling_window(0, vec![]))
-            .clone()
-            .with_timing(Some(ExecutionTiming::QueryTime)),
-    );
-    merge(vec![ingested, queried]).unwrap();
-}
-
 /// A merge built around `new` is still checked by `validate_structure`.
 #[test]
 fn forged_merges_fail_validation() {
@@ -805,11 +788,9 @@ fn equal_definitions_get_equal_ids() {
     let us = latency_where(eq(REGION, "us"));
     let eu = latency_where(eq(REGION, "eu"));
     assert_eq!(id(&us), id(&eu));
-    let ingested = (*tumbling_window(0, vec![]))
-        .clone()
-        .with_timing(Some(ExecutionTiming::IngestionTime));
-    assert_eq!(id(&ingested), id(&tumbling_window(60_000, vec![])));
-    assert_eq!(id(&ingested).len(), 32);
+    let newest = tumbling_window(0, vec![]);
+    assert_eq!(id(&newest), id(&tumbling_window(60_000, vec![])));
+    assert_eq!(id(&newest).len(), 32);
     let size = kll(filter(table(), eq(REGION, "eu")), "size");
     assert_ne!(id(&size), id(&eu));
     assert_ne!(

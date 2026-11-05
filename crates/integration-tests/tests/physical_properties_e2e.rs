@@ -21,8 +21,7 @@ use asap_types::ir::physical_export::{
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
 use asap_types::ir::{
-    apply_physical_properties, ASAPOp, NodeToTimedNodeCache, NonASAPOp, OperatorNode,
-    PhysicalPropertiesAssignment,
+    apply_physical_properties, ASAPOp, NonASAPOp, OperatorNode, PhysicalPropertiesAssignment,
 };
 use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
 
@@ -93,9 +92,8 @@ fn timed_dag(
     assignment: &PhysicalPropertiesAssignment,
 ) -> PhysicalASAPDAG {
     let (split, assignment) = split_shared_by_timing(std::slice::from_ref(root), assignment);
-    let timed = apply_physical_properties(&split[0], &assignment, &mut NodeToTimedNodeCache::new())
-        .unwrap();
-    compile_physical_asap_dag(&timed).unwrap()
+    let timed = apply_physical_properties(&split[0], &assignment).unwrap();
+    compile_physical_asap_dag(&split[0], &timed).unwrap()
 }
 
 fn states(dag: &PhysicalASAPDAG) -> Vec<u64> {

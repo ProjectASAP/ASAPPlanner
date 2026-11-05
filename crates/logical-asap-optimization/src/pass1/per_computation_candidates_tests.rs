@@ -171,7 +171,7 @@ fn scalar_root_producers_are_discovered_once() {
     }
     assert_eq!(candidates.targets.len(), 1);
     assert_eq!(**candidates.aggregate(&candidates.targets[0]), *producer);
-    assert!(producer.timing.is_none());
+
     assert!(producer.guarantee.is_none());
     producer.validate_structure().unwrap();
 }
@@ -229,49 +229,12 @@ fn example_1_exact_q1_keeps_exact_accumulators_only() {
             ])],
         ]
     );
-    assert!(candidates
-        .targets
-        .iter()
-        .all(|target| candidates.aggregate(target).timing.is_none()));
 }
 
-/// Physical annotations, ASAP operators and invalid probability requirements
-/// fail at the stage boundary.
+/// ASAP operators and invalid probability requirements fail at the stage
+/// boundary.
 #[test]
-fn assigned_physical_annotation_asap_input_and_invalid_accuracy_are_rejected() {
-    let mut producer = (*aggregate(AggIntent::Count {
-        accuracy: approximate(),
-    }))
-    .clone();
-    producer.timing = Some(asap_types::ir::properties::ExecutionTiming::QueryTime);
-    assert!(matches!(
-        generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
-            QueryRoot::Operator(Rc::new(producer.clone()))
-        ])),
-        Err(PerComputationCandidateError::AssignedPhysicalAnnotation)
-    ));
-    let mut stored = (*aggregate(AggIntent::Count {
-        accuracy: approximate(),
-    }))
-    .clone();
-    stored.lifetime =
-        asap_types::physical::Lifetime::OneEvaluation(asap_types::physical::Medium::Memory);
-    assert!(matches!(
-        generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
-            QueryRoot::Operator(Rc::new(stored.clone()))
-        ])),
-        Err(PerComputationCandidateError::AssignedPhysicalAnnotation)
-    ));
-    // An annotated node below an unannotated root is rejected too.
-    for annotated in [producer, stored] {
-        let root = having_filter(Rc::new(annotated), always());
-        assert!(matches!(
-            generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
-                QueryRoot::Operator(root)
-            ])),
-            Err(PerComputationCandidateError::AssignedPhysicalAnnotation)
-        ));
-    }
+fn asap_input_and_invalid_accuracy_are_rejected() {
     let summary = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
         child: scan(false),
         family: FieldDataType::Sketch(

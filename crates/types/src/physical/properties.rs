@@ -103,6 +103,14 @@ impl PhysicalProperties {
         }
     }
 
+    /// `(timing, None)`: not materialized, at `timing`.
+    pub fn not_materialized_at(timing: ExecutionTiming) -> Self {
+        Self {
+            timing,
+            lifetime: Lifetime::None,
+        }
+    }
+
     pub fn timing(self) -> ExecutionTiming {
         self.timing
     }

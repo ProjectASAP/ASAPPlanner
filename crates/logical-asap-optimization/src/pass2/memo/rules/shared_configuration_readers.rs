@@ -52,9 +52,7 @@ fn with_child_nodes(
         false => Rc::clone(resized),
         true => Rc::new(
             OperatorNode::with_schema(operator, resized.schema.clone())
-                .with_guarantee(resized.guarantee.clone())
-                .with_timing(resized.timing)
-                .with_lifetime(resized.lifetime),
+                .with_guarantee(resized.guarantee.clone()),
         ),
     };
     done.insert(Rc::as_ptr(resized), Rc::clone(&out));
@@ -132,11 +130,6 @@ impl SharedProducer for SummaryStates {
                 let Some((build, _)) = simple_build(memo, entry) else {
                     continue;
                 };
-                // Configuration expansion precedes Stage 2. The rewrite helpers
-                // create unassigned state; preserve any already assigned build.
-                if build.timing.is_some() || build.lifetime.is_materialized() {
-                    continue;
-                }
                 let family = match build.asap() {
                     Some(
                         ASAPOp::SummaryAgg { family, .. }
@@ -480,14 +473,7 @@ fn compatible(left: &StateNeed, right: &StateNeed) -> bool {
                 field.dtype = left.family.clone();
             }
         }
-        serde_json::to_string(&(
-            operator,
-            schema,
-            reader.build.result_kind,
-            reader.build.timing,
-            reader.build.lifetime,
-        ))
-        .ok()
+        serde_json::to_string(&(operator, schema, reader.build.result_kind)).ok()
     };
     signature(left).is_some_and(|signature_left| Some(signature_left) == signature(right))
 }

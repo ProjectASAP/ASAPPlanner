@@ -157,8 +157,6 @@ fn same_source_node(left: &OperatorNode, right: &OperatorNode) -> bool {
     left.operator.map_children(|_| ()) == right.operator.map_children(|_| ())
         && left.schema == right.schema
         && left.result_kind == right.result_kind
-        && left.timing == right.timing
-        && left.lifetime == right.lifetime
         && left
             .children()
             .iter()

@@ -360,8 +360,8 @@ optional also does not guarantee every planning operation can succeed without it
 
 | Function/type | Purpose |
 | --- | --- |
-| `asap_types::ir::apply_physical_properties(&root, &assignment, &mut NodeToTimedNodeCache::new())` | Write execution timing into every node from a `PhysicalPropertiesAssignment` (default: all query time) and validate the data-state edges; `PlanOutput::physical_asap_dag()` applies the default to a planned workload |
-| `asap_types::ir::physical_export::compile_physical_asap_dag(&timed_root)` | Export a timed DAG as a `PhysicalASAPDAG`; rejects an untimed node; `compile_physical_asap_workload(&roots)` exports a batch with one root per query; `.validate()` checks it explicitly |
+| `asap_types::ir::apply_physical_properties(&root, &assignment)` | Complete a `PhysicalPropertiesAssignment` (default: all query time) into the physical properties of every node and validate the data-state edges; `apply_physical_properties_to_roots` does it for a workload; `PlanOutput::physical_asap_dag()` applies the pass's `physical_properties` to a planned workload |
+| `asap_types::ir::physical_export::compile_physical_asap_dag(&root, &timed)` | Export a DAG as a `PhysicalASAPDAG`, each node with its properties from the completed assignment `timed`; rejects a node it does not list; `compile_physical_asap_workload(&roots, &timed)` exports a batch with one root per query; `.validate()` checks it explicitly |
 | `PhysicalASAPDAG::materialized_views()` and `.raw_data_retention()` (`asap_types::ir::materialized_view`) | What a runtime keeps for an installed DAG, derived from the DAG and the `retention_ms` installation sets: each materialized view (refresh mode, coverage, inputs, the node's `retention_ms`) and how far back each raw-data source is kept for query-time scans (each query-time `Scan`'s `retention_ms`) |
 
 Choose the export matching your intended handoff: an untimed semantic DAG is not

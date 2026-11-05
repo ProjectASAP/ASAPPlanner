@@ -97,7 +97,7 @@ fn dag_of(
         })
         .collect();
     let timed = apply_physical_properties_to_roots(&roots, &assignment).unwrap();
-    compile_physical_asap_workload(&timed).unwrap()
+    compile_physical_asap_workload(&roots, &timed).unwrap()
 }
 
 /// `(multiplier, per_second)` of `dag`'s `Scan`, each query every 10 s.

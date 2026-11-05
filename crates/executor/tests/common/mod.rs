@@ -1,20 +1,15 @@
 #![allow(dead_code)]
 use planner_types::ir::physical_export::PhysicalASAPDAG;
 use planner_types::ir::{
-    apply_physical_properties, NodeToTimedNodeCache, OperatorNode, PhysicalPropertiesAssignment,
-    QueryRoot,
+    apply_physical_properties, OperatorNode, PhysicalPropertiesAssignment, QueryRoot,
 };
 use std::rc::Rc;
 
 pub fn compile_physical_asap_dag(
     root: &Rc<OperatorNode>,
 ) -> Result<PhysicalASAPDAG, Box<dyn std::error::Error>> {
-    let root = apply_physical_properties(
-        root,
-        &PhysicalPropertiesAssignment::default(),
-        &mut NodeToTimedNodeCache::default(),
-    )?;
-    Ok(planner_types::ir::physical_export::compile_physical_asap_dag(&root)?)
+    let timed = apply_physical_properties(root, &PhysicalPropertiesAssignment::default())?;
+    Ok(planner_types::ir::physical_export::compile_physical_asap_dag(root, &timed)?)
 }
 
 /// The logical DAG the planner pipeline (`asap_planner::run_planning`) selects for the

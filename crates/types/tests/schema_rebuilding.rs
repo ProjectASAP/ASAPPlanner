@@ -1,5 +1,5 @@
 use asap_types::ir::operator::{AggIntent, Reduction, Source};
-use asap_types::ir::properties::{AccuracyGuarantee, ExecutionTiming};
+use asap_types::ir::properties::AccuracyGuarantee;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use asap_types::ir::schema::{ExactKind, ExactParams, GroupingStrategy, SummaryUpdate};
@@ -67,8 +67,7 @@ fn rebuilding_preserves_only_explicit_naming_overrides() {
         schema.fields[0].name = "alias".into();
         schema.fields[0].table = Some("result".into());
         let renamed = OperatorNode::with_schema(original.operator.clone(), schema)
-            .with_guarantee(Some(AccuracyGuarantee::exact("fixture")))
-            .with_timing(Some(ExecutionTiming::QueryTime));
+            .with_guarantee(Some(AccuracyGuarantee::exact("fixture")));
         let original = Rc::new(renamed);
         original.validate_structure().unwrap();
         let replacement = scan(DataType::Utf8, "new_key");
@@ -80,7 +79,6 @@ fn rebuilding_preserves_only_explicit_naming_overrides() {
             Some(&DataType::Utf8)
         );
         assert!(rebuilt.guarantee.is_none());
-        assert!(rebuilt.timing.is_none());
         rebuilt.validate_structure().unwrap();
     }
 }
@@ -258,17 +256,11 @@ fn current_series_topk() -> Rc<OperatorNode> {
 /// Time `root` under the default physical properties assignment, which runs the
 /// data-state and population-contract validation, and export it.
 fn compile_physical_asap_dag(root: &Rc<OperatorNode>) -> Result<(), String> {
-    use asap_types::ir::{
-        apply_physical_properties, NodeToTimedNodeCache, PhysicalPropertiesAssignment,
-    };
+    use asap_types::ir::{apply_physical_properties, PhysicalPropertiesAssignment};
     root.validate_structure().map_err(|e| e.to_string())?;
-    let timed = apply_physical_properties(
-        root,
-        &PhysicalPropertiesAssignment::default(),
-        &mut NodeToTimedNodeCache::new(),
-    )
-    .map_err(|e| format!("{e:?}"))?;
-    asap_types::ir::physical_export::compile_physical_asap_dag(&timed)
+    let timed = apply_physical_properties(root, &PhysicalPropertiesAssignment::default())
+        .map_err(|e| format!("{e:?}"))?;
+    asap_types::ir::physical_export::compile_physical_asap_dag(root, &timed)
         .map_err(|e| format!("{e:?}"))?;
     Ok(())
 }
@@ -339,9 +331,7 @@ fn a_current_series_population_matches_only_its_selectors_lookback() {
 fn population_timing_follows_its_physical_properties() {
     use asap_types::ir::physical_export::compile_physical_asap_dag as export_timed;
     use asap_types::ir::properties::ExecutionTiming::{IngestionTime, QueryTime};
-    use asap_types::ir::{
-        apply_physical_properties, NodeToTimedNodeCache, PhysicalPropertiesAssignment,
-    };
+    use asap_types::ir::{apply_physical_properties, PhysicalPropertiesAssignment};
     use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
     let candidate = current_series_topk();
     let Some(ASAPOp::EvaluatePopulation {
@@ -364,10 +354,8 @@ fn population_timing_follows_its_physical_properties() {
         ),
         (at_ingestion, IngestionTime, on_disk),
     ] {
-        let timed =
-            apply_physical_properties(&candidate, &assignment, &mut NodeToTimedNodeCache::new())
-                .unwrap();
-        let dag = export_timed(&timed).unwrap();
+        let timed = apply_physical_properties(&candidate, &assignment).unwrap();
+        let dag = export_timed(&candidate, &timed).unwrap();
         let [population, evaluation] = &dag.nodes[dag.nodes.len() - 2..] else {
             unreachable!()
         };
@@ -375,9 +363,12 @@ fn population_timing_follows_its_physical_properties() {
         assert_eq!(population.lifetime, lifetime);
         assert_eq!(evaluation.output_state.timing, QueryTime);
     }
-    let mut evaluation_at_ingestion = (*candidate).clone();
-    evaluation_at_ingestion.timing = Some(IngestionTime);
-    assert!(compile_physical_asap_dag(&Rc::new(evaluation_at_ingestion)).is_err());
+    let mut evaluation_at_ingestion = PhysicalPropertiesAssignment::default();
+    evaluation_at_ingestion.set(
+        &candidate,
+        PhysicalProperties::NOT_MATERIALIZED_AT_INGESTION,
+    );
+    assert!(apply_physical_properties(&candidate, &evaluation_at_ingestion).is_err());
 }
 
 /// An evaluation cannot exceed its population's contract (`max_k`), and a

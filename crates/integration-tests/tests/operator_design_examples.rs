@@ -309,10 +309,15 @@ async fn batch_planning_replaces_summary_operators() {
         panic!("one SUM state for both queries: {states:?}")
     };
     assert!(output.operators().into_iter().any(|n| {
-        matches!(n.lifetime, asap_types::physical::Lifetime::OneEvaluation(_))
-            && OperatorNode::reachable(&n)
-                .iter()
-                .any(|m| Rc::ptr_eq(m, state))
+        matches!(
+            output
+                .physical_properties
+                .get(&n)
+                .map(|properties| properties.lifetime()),
+            Some(asap_types::physical::Lifetime::OneEvaluation(_))
+        ) && OperatorNode::reachable(&n)
+            .iter()
+            .any(|m| Rc::ptr_eq(m, state))
     }));
     for (plan, expected) in output.plans.iter().zip([31.0, 60.0]) {
         let root = &plan.root;

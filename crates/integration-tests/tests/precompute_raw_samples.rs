@@ -70,7 +70,12 @@ fn candidates(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<OperatorNode>> {
     explicit_local_candidates(root)
         .into_iter()
         .map(|candidate| {
-            match &with_confirmed_weights(&[QueryRoot::Operator(candidate)], &data)[..] {
+            match &with_confirmed_weights(
+                &[QueryRoot::Operator(candidate)],
+                &data,
+                &mut Default::default(),
+            )[..]
+            {
                 [QueryRoot::Operator(confirmed)] => Rc::clone(confirmed),
                 _ => unreachable!("one operator root"),
             }

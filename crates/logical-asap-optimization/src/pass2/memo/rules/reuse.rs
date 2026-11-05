@@ -64,8 +64,6 @@ pub(in crate::pass2::memo) fn same_node(
     left.operator.map_children(|_| ()) == right.operator.map_children(|_| ())
         && left.schema == right.schema
         && left.result_kind == right.result_kind
-        && left.timing == right.timing
-        && left.lifetime == right.lifetime
         && left.children().len() == right.children().len()
         && left
             .children()
@@ -76,16 +74,12 @@ pub(in crate::pass2::memo) fn same_node(
             left.operator.map_children(|_| ()),
             &left.schema,
             left.result_kind,
-            left.timing,
-            left.lifetime,
         ))
         .ok()
             == serde_json::to_string(&(
                 right.operator.map_children(|_| ()),
                 &right.schema,
                 right.result_kind,
-                right.timing,
-                right.lifetime,
             ))
             .ok()
         && (!guarantees || left.guarantee == right.guarantee)

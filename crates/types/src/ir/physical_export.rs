@@ -25,10 +25,10 @@ use crate::ir::properties::execution_data_state::{
 };
 use crate::ir::properties::guarantee::AccuracyGuarantee;
 #[cfg(any(test, feature = "test-support"))]
+use crate::ir::properties::timing::apply_physical_properties_to_roots;
 use crate::ir::properties::timing::{
-    apply_physical_properties_to_roots, PhysicalPropertiesAssignment,
+    data_state, is_materializable_state_output, PhysicalPropertiesAssignment,
 };
-use crate::ir::properties::timing::{data_state, is_materializable_state_output};
 use crate::ir::schema::{FieldDataType, Schema};
 use crate::physical::{InvalidPhysicalProperties, Lifetime, PhysicalProperties};
 
@@ -376,14 +376,14 @@ impl PhysicalASAPDAG {
     /// installed plan may not keep.
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_every_node_at_query_time(&self) -> Result<PhysicalASAPDAG, ReferencePlanError> {
-        let roots = self.untimed_query_roots()?;
+        let roots = self.query_roots()?;
         let timed =
             apply_physical_properties_to_roots(&roots, &PhysicalPropertiesAssignment::default())?;
-        Ok(compile_physical_asap_workload(&timed)?)
+        Ok(compile_physical_asap_workload(&roots, &timed)?)
     }
 
-    /// Every node of this DAG as IR, by node id, untimed and
-    /// not materialized with its exported guarantee: what a caller derives
+    /// Every node of this DAG as IR, by node id, with its exported
+    /// guarantee (an operator node has no physical properties): what a caller derives
     /// IR properties of a plan file's node from, such as its
     /// [`SummaryCoverage`](crate::ir::properties::summary_coverage::SummaryCoverage).
     /// Shared inputs stay shared. Validates the DAG first.
@@ -581,11 +581,11 @@ impl PhysicalASAPDAG {
             .collect()
     }
 
-    /// The IR this DAG exports, one root per query in batch order, every
-    /// node untimed and not materialized: the inverse of
-    /// [`compile_physical_asap_workload`] up to `Rc` identity and timing.
+    /// The IR this DAG exports, one root per query in batch order: the
+    /// inverse of [`compile_physical_asap_workload`] up to `Rc` identity and
+    /// the nodes' physical properties.
     #[cfg(any(test, feature = "test-support"))]
-    fn untimed_query_roots(&self) -> Result<Vec<QueryRoot>, PhysicalASAPDAGValidationError> {
+    fn query_roots(&self) -> Result<Vec<QueryRoot>, PhysicalASAPDAGValidationError> {
         let rebuilt = self.operator_nodes()?;
         let mut operator_roots = self.roots.iter();
         let mut scalar_roots = self.scalar_roots.iter().peekable();
@@ -850,31 +850,37 @@ pub struct PhysicalASAPDAGCompilation {
 #[cfg(any(test, feature = "test-support"))]
 pub fn compile_physical_asap_dag(
     root: &Rc<OperatorNode>,
+    timed: &PhysicalPropertiesAssignment,
 ) -> Result<PhysicalASAPDAG, ExecutionDataStateError> {
-    Ok(compile_physical_asap_dag_with_node_ids(root)?.dag)
+    Ok(compile_physical_asap_dag_with_node_ids(root, timed)?.dag)
 }
 
-/// Export the timed DAG below `root`. Every reachable node must carry a
-/// timing (see [`crate::ir::properties::timing::apply_physical_properties`]); the data-state
+/// Export the DAG below `root` with each node's physical properties from
+/// `timed`, which must list every reachable node (the completed assignment
+/// [`crate::ir::properties::timing::apply_physical_properties`] returns); the data-state
 /// rules were checked by that pass and are not re-run here.
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn compile_physical_asap_dag_with_node_ids(
     root: &Rc<OperatorNode>,
+    timed: &PhysicalPropertiesAssignment,
 ) -> Result<PhysicalASAPDAGCompilation, ExecutionDataStateError> {
-    compile_physical_asap_workload_with_node_ids(&[QueryRoot::Operator(Rc::clone(root))])
+    compile_physical_asap_workload_with_node_ids(&[QueryRoot::Operator(Rc::clone(root))], timed)
 }
 
-/// Export a timed batch as one DAG: operator queries become `roots` and
+/// Export a batch as one DAG, each node with its physical properties from
+/// `timed` (the completed assignment): operator queries become `roots` and
 /// standalone scalar queries `scalar_roots`, keyed by their position in the
 /// batch.
 pub fn compile_physical_asap_workload(
     roots: &[QueryRoot],
+    timed: &PhysicalPropertiesAssignment,
 ) -> Result<PhysicalASAPDAG, ExecutionDataStateError> {
-    Ok(compile_physical_asap_workload_with_node_ids(roots)?.dag)
+    Ok(compile_physical_asap_workload_with_node_ids(roots, timed)?.dag)
 }
 
 pub fn compile_physical_asap_workload_with_node_ids(
     roots: &[QueryRoot],
+    timed: &PhysicalPropertiesAssignment,
 ) -> Result<PhysicalASAPDAGCompilation, ExecutionDataStateError> {
     let (flat, nodes_by_id) = flatten(roots);
     let mut scalar_roots = Vec::new();
@@ -894,9 +900,12 @@ pub fn compile_physical_asap_workload_with_node_ids(
     let mut edges = Vec::new();
     for (id, flat_node) in flat.nodes.into_iter().enumerate() {
         let node = &nodes_by_id[id];
-        let output_state = data_state(node).ok_or(ExecutionDataStateError::UntimedNode {
-            operator: node.operator.kind_name(),
-        })?;
+        let properties = timed
+            .get(node)
+            .ok_or(ExecutionDataStateError::UntimedNode {
+                operator: node.operator.kind_name(),
+            })?;
+        let output_state = data_state(node, timed).expect("listed node has a data state");
         // Children come before their parents, so every producer is already in `nodes`.
         for (producer, role) in edge_roles(&flat_node.operator) {
             let producer_state = nodes[producer].output_state;
@@ -920,7 +929,7 @@ pub fn compile_physical_asap_workload_with_node_ids(
             id,
             payload: flat_node.operator,
             output_state,
-            lifetime: flat_node.lifetime,
+            lifetime: properties.lifetime(),
             output_schema: flat_node.schema,
             guarantee: flat_node.guarantee,
             retention_ms: None,

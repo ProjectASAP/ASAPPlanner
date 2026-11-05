@@ -122,13 +122,15 @@ for `OneEvaluation`. A
 per sub-DAG, the properties of its materialized output, named by the node whose output
 would be materialized. Any node may be named: a summary state, a population, or, as in
 #509 Example 4, the tumbling windows a query reads. `set(node, properties)`
-materializes one; every other sub-DAG is not materialized.
-Stage 2 chooses the assignment.
-`apply_physical_properties(root, &assignment, &mut NodeToTimedNodeCache)` then writes a
-timing and a lifetime into every node, top-down:
+lists one; an entry whose lifetime is `None` fixes only the node's timing, and every
+sub-DAG the assignment does not list is not materialized. Stage 2 chooses the
+assignment. Operator nodes carry no timing or lifetime (#1200): the assignment is
+where physical stages keep them.
+`apply_physical_properties(root, &assignment)` then completes it into a timing and a
+lifetime for every node, top-down, and returns the completed assignment:
 
 - `SummaryEstimate` and `EvaluatePopulation` run at query time;
-- a node assigned a materialized output runs at that output's timing; a `SummaryAgg`
+- a node the assignment lists runs at its entry's timing; a `SummaryAgg`
   or `MaintainPopulation` that is not materialized runs at query time. Every node
   upstream of an ingestion-time node also runs at ingestion time, so a materialized
   ingestion-time output over something that can only exist at query time (an
@@ -140,18 +142,15 @@ timing and a lifetime into every node, top-down:
   an evaluation at query time. A query-time consumer reads the stored output
   of a node materialized at ingestion time (`AcrossEvaluations`).
 
-A node whose timing a candidate builder fixed (the query-time
-`FinalizeExactAccumulator` read boundary of `finalize_query_candidate`) keeps
-it: an explicit assignment that agrees with that timing is kept, and one that
-needs the other timing fails with
-`ExecutionDataStateError::PhysicalPropertiesConflictWithFixedTiming`; an
-explicit materialized output is never silently moved or dropped. A root may be materialized
+Applying a completed assignment again gives every node the same properties: the
+facade re-applies Stage 3's selection this way for export
+(`PlanOutput::physical_properties`). A root may be materialized
 at ingestion time, and the query reads its stored output; a root of rows that
 runs at ingestion time without being stored there fails with
 `ExecutionDataStateError::UnstoredIngestionRoot`.
 
 The pass then validates every edge (rows or exact-accumulator state into a
-`SummaryAgg`, state into an evaluation, a timed `MaintainPopulation` under
+`SummaryAgg`, state into an evaluation, a `MaintainPopulation` under
 an `EvaluatePopulation`, no ingestion work reading a query-time value) and rejects a
 node reached from two consumers that need different timings;
 `split_shared_by_timing` copies such a sub-DAG for one side before the
@@ -192,8 +191,9 @@ children as edges and no embedded sub-DAGs:
   expressions (`scalar(v)`). Every edge records the intermediate schema, the
   producer's data state and grouping/window compatibility.
 - Each node records `output_state` (timing plus `Raw` or `SummaryState`),
-  `output_schema` and `guarantee`. Export reads the timing written by
-  `apply_physical_properties` and rejects an untimed node
+  `output_schema` and `guarantee`. Export reads each node's timing and lifetime
+  from the assignment `apply_physical_properties` completed and rejects a node
+  it does not list
   (`ExecutionDataStateError::UntimedNode`); it does not re-run data-state
   validation.
 

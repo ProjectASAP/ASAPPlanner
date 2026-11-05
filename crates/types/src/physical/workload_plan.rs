@@ -1,6 +1,6 @@
 //! One evaluated physical properties assignment rebuilt as a physical DAG.
 use crate::ir::physical_export::PhysicalASAPDAG;
-use crate::ir::QueryRoot;
+use crate::ir::{PhysicalPropertiesAssignment, QueryRoot};
 
 /// One CandidatePhysicalASAPDAG (Stage 2 output), derived from exactly one
 /// CandidateLogicalASAPDAG (Stage 1 output). It holds planning data only;
@@ -11,9 +11,14 @@ pub struct PhysicalWorkloadPlan {
     pub id: String,
     /// The id of the logical candidate it implements.
     pub from_logical: String,
-    /// The timed query roots, one per query in workload order, that `dag`
+    /// The query roots, one per query in workload order, that `dag`
     /// exports.
     pub roots: Vec<QueryRoot>,
+    /// The physical properties of every node of `roots`: the completed
+    /// assignment `dag` exports them with. The facade adds the nodes it
+    /// rebuilds from them (`with_confirmed_weights_at`), so it also covers the
+    /// plan it runs.
+    pub physical_properties: PhysicalPropertiesAssignment,
     pub dag: PhysicalASAPDAG,
 }
 

@@ -1630,6 +1630,7 @@ fn scans_projecting_different_labels_are_shared() {
     let (_, reference) = plan("partial-sharing", &partial);
     let (installed, _) = asap_planner::installable_plan_of(
         &physical.roots,
+        &physical.physical_properties,
         None,
         &offered.tumbling_window_retention_ms,
         &entries,

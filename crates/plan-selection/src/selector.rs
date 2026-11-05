@@ -306,7 +306,8 @@ impl<'a> PlanSelector<'a> {
             }
         }
         let built = self.kept.swap_remove(best);
-        let plan = with_confirmed_weights(&built.roots, self.data);
+        let mut physical_properties = built.physical_properties.clone();
+        let plan = with_confirmed_weights(&built.roots, self.data, &mut physical_properties);
         let tumbling_window_retention_ms = tumbling_window_retention_ms(
             &built.dag,
             &query_reach(&built.dag, &node_map(&built.dag)),
@@ -315,6 +316,7 @@ impl<'a> PlanSelector<'a> {
         let selection = WholePlanSelection {
             selected,
             plan,
+            physical_properties,
             costs: self.costs,
             accepted: self.accepted,
             rejected: self.rejected,

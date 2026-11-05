@@ -9,6 +9,7 @@ use crate::ir::operator::operator_properties::{
 };
 use crate::ir::operator::{AggIntent, GroupKeys, Reduction, Source};
 use crate::ir::physical_export::PhysicalASAPOperatorPayload as Payload;
+use crate::ir::properties::timing::PhysicalPropertiesAssignment;
 use crate::ir::schema::{Schema, SketchStatistic, WeightDomain};
 use crate::ir::{
     ASAPOp, NonASAPOp, Operator, OperatorNode, OperatorResultKind, QueryRoot, ScalarExpr,
@@ -435,9 +436,14 @@ fn declared_counter(data: &DataWorkload, metric: &str) -> bool {
 /// `roots` with every open [`WeightDomain::RawDataSamplesOfMetric`] requirement
 /// replaced by its answer from `data` ([`confirmed_weights`]): the form of a
 /// selected plan the executor runs, which reads no data workload. The same
-/// `Rc` where nothing changes.
-pub fn with_confirmed_weights(roots: &[QueryRoot], data: &DataWorkload) -> Vec<QueryRoot> {
-    with_confirmed_weights_at(roots, data, &|_| true)
+/// `Rc` where nothing changes; a rebuilt node takes the physical properties
+/// `physical_properties` lists for the node it replaces.
+pub fn with_confirmed_weights(
+    roots: &[QueryRoot],
+    data: &DataWorkload,
+    physical_properties: &mut PhysicalPropertiesAssignment,
+) -> Vec<QueryRoot> {
+    with_confirmed_weights_at(roots, data, &|_| true, physical_properties)
 }
 
 /// [`with_confirmed_weights`] at the summaries `confirm_at` names only: the
@@ -447,19 +453,21 @@ pub fn with_confirmed_weights_at(
     roots: &[QueryRoot],
     data: &DataWorkload,
     confirm_at: &dyn Fn(&Rc<OperatorNode>) -> bool,
+    physical_properties: &mut PhysicalPropertiesAssignment,
 ) -> Vec<QueryRoot> {
     fn confirm(
         node: &Rc<OperatorNode>,
         data: &DataWorkload,
         confirm_at: &dyn Fn(&Rc<OperatorNode>) -> bool,
         cache: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
+        physical_properties: &mut PhysicalPropertiesAssignment,
     ) -> Rc<OperatorNode> {
         if let Some(done) = cache.get(&Rc::as_ptr(node)) {
             return Rc::clone(done);
         }
         let mut changed = false;
         let mut operator = node.operator.map_children(|child| {
-            let rebuilt = confirm(child, data, confirm_at, cache);
+            let rebuilt = confirm(child, data, confirm_at, cache, physical_properties);
             changed |= !Rc::ptr_eq(&rebuilt, child);
             rebuilt
         });
@@ -474,12 +482,14 @@ pub fn with_confirmed_weights_at(
             }
         }
         let rebuilt = if changed {
-            Rc::new(
+            let rebuilt = Rc::new(
                 OperatorNode::with_schema(operator, node.schema.clone())
-                    .with_guarantee(node.guarantee.clone())
-                    .with_timing(node.timing)
-                    .with_lifetime(node.lifetime),
-            )
+                    .with_guarantee(node.guarantee.clone()),
+            );
+            if let Some(properties) = physical_properties.get(node) {
+                physical_properties.set(&rebuilt, properties);
+            }
+            rebuilt
         } else {
             Rc::clone(node)
         };
@@ -490,10 +500,16 @@ pub fn with_confirmed_weights_at(
     roots
         .iter()
         .map(|root| match root {
-            QueryRoot::Operator(n) => QueryRoot::Operator(confirm(n, data, confirm_at, &mut cache)),
-            QueryRoot::Scalar(expr) => QueryRoot::Scalar(
-                expr.map_operator_refs(&mut |n| confirm(n, data, confirm_at, &mut cache)),
-            ),
+            QueryRoot::Operator(n) => QueryRoot::Operator(confirm(
+                n,
+                data,
+                confirm_at,
+                &mut cache,
+                physical_properties,
+            )),
+            QueryRoot::Scalar(expr) => QueryRoot::Scalar(expr.map_operator_refs(&mut |n| {
+                confirm(n, data, confirm_at, &mut cache, physical_properties)
+            })),
         })
         .collect()
 }

@@ -852,21 +852,22 @@ mod tests {
                     continue;
                 }
                 // The proof the executor reads.
-                let proofs: Vec<WeightDomain> = with_confirmed_weights(&candidate.roots, &gauge)
-                    .iter()
-                    .flat_map(QueryRoot::operator_refs)
-                    .flat_map(OperatorNode::reachable)
-                    .filter_map(|n| match n.asap() {
-                        Some(ASAPOp::SummaryAgg {
-                            input,
-                            family: FieldDataType::Sketch(kind, _),
-                            ..
-                        }) if *kind.algorithm() == SketchAlgorithm::CmsWithHeap => {
-                            Some(input.weight_domain.clone())
-                        }
-                        _ => None,
-                    })
-                    .collect();
+                let proofs: Vec<WeightDomain> =
+                    with_confirmed_weights(&candidate.roots, &gauge, &mut Default::default())
+                        .iter()
+                        .flat_map(QueryRoot::operator_refs)
+                        .flat_map(OperatorNode::reachable)
+                        .filter_map(|n| match n.asap() {
+                            Some(ASAPOp::SummaryAgg {
+                                input,
+                                family: FieldDataType::Sketch(kind, _),
+                                ..
+                            }) if *kind.algorithm() == SketchAlgorithm::CmsWithHeap => {
+                                Some(input.weight_domain.clone())
+                            }
+                            _ => None,
+                        })
+                        .collect();
                 assert!(!proofs.is_empty(), "{}", candidate.id);
                 assert!(
                     proofs.iter().all(|domain| *domain
@@ -1040,7 +1041,7 @@ mod tests {
             [WeightDomain::RawDataSamplesOfMetric { metric: "m".into() }]
         );
         let counter = with_metric_types(data(), &[("m", PrometheusMetricType::Counter)]);
-        let confirmed = with_confirmed_weights(&p2.roots, &counter);
+        let confirmed = with_confirmed_weights(&p2.roots, &counter, &mut Default::default());
         assert_eq!(
             domains(&confirmed),
             [WeightDomain::NonNegative {
@@ -1050,13 +1051,21 @@ mod tests {
         let mut gauge = with_metric_types(data(), &[("m", PrometheusMetricType::Gauge)]);
         gauge.sources.get_mut("m").unwrap().values_non_negative = true;
         assert_eq!(
-            domains(&with_confirmed_weights(&p2.roots, &gauge)),
+            domains(&with_confirmed_weights(
+                &p2.roots,
+                &gauge,
+                &mut Default::default()
+            )),
             [WeightDomain::NonNegative {
                 proof: NonNegativeWeightProof::DeclaredNonNegativeRawDataSamples
             }]
         );
         assert_eq!(
-            domains(&with_confirmed_weights(&p2.roots, &data())),
+            domains(&with_confirmed_weights(
+                &p2.roots,
+                &data(),
+                &mut Default::default()
+            )),
             [WeightDomain::UnknownOrSigned]
         );
         // Nothing open: the same roots.
@@ -1064,7 +1073,9 @@ mod tests {
         let QueryRoot::Operator(before) = &exact.roots[0] else {
             panic!()
         };
-        let QueryRoot::Operator(after) = &with_confirmed_weights(&exact.roots, &counter)[0] else {
+        let QueryRoot::Operator(after) =
+            &with_confirmed_weights(&exact.roots, &counter, &mut Default::default())[0]
+        else {
             panic!()
         };
         assert!(Rc::ptr_eq(before, after));
@@ -3429,9 +3440,7 @@ mod tests {
     /// `quantile_over_time(0.99, m[1m])` with its KLL candidate chosen, its
     /// state materialized with `materialized` (`None`: not materialized).
     fn kll_dag(materialized: Option<PhysicalProperties>) -> PhysicalASAPDAG {
-        use asap_types::ir::{
-            apply_physical_properties, NodeToTimedNodeCache, PhysicalPropertiesAssignment,
-        };
+        use asap_types::ir::{apply_physical_properties, PhysicalPropertiesAssignment};
         let root = lower_promql(
             "quantile_over_time(0.99, m[1m])",
             AccuracyTarget::max_error(0.01).failure_probability(0.01),
@@ -3472,11 +3481,11 @@ mod tests {
         if let Some(materialized) = materialized {
             assignment.set(&state, materialized);
         }
-        let timed =
-            apply_physical_properties(root, &assignment, &mut NodeToTimedNodeCache::new()).unwrap();
-        asap_types::ir::physical_export::compile_physical_asap_workload_with_node_ids(&[
-            QueryRoot::Operator(timed),
-        ])
+        let timed = apply_physical_properties(root, &assignment).unwrap();
+        asap_types::ir::physical_export::compile_physical_asap_workload_with_node_ids(
+            &[QueryRoot::Operator(Rc::clone(root))],
+            &timed,
+        )
         .unwrap()
         .dag
     }

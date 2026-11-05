@@ -83,16 +83,10 @@ pub fn promql_scalar(node: &ScalarExpr) -> Option<f64> {
 pub fn physical_asap_dag(
     root: &Rc<OperatorNode>,
 ) -> asap_types::ir::physical_export::PhysicalASAPDAG {
-    use asap_types::ir::{
-        apply_physical_properties, NodeToTimedNodeCache, PhysicalPropertiesAssignment,
-    };
-    let timed = apply_physical_properties(
-        root,
-        &PhysicalPropertiesAssignment::default(),
-        &mut NodeToTimedNodeCache::new(),
-    )
-    .expect("default physical properties");
-    asap_types::ir::physical_export::compile_physical_asap_dag(&timed)
+    use asap_types::ir::{apply_physical_properties, PhysicalPropertiesAssignment};
+    let timed = apply_physical_properties(root, &PhysicalPropertiesAssignment::default())
+        .expect("default physical properties");
+    asap_types::ir::physical_export::compile_physical_asap_dag(root, &timed)
         .expect("post-ASAP DAG export")
 }
 

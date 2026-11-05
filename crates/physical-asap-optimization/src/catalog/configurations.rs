@@ -61,8 +61,6 @@ pub fn may_keep_across_evaluations_per_sole_reader_query(
 pub enum ConfigurationError {
     #[error("invalid source candidate inventory: {0}")]
     InvalidInventory(String),
-    #[error("candidate {candidate} already has timing or lifetime assigned")]
-    AssignedExecution { candidate: usize },
 }
 
 /// Each operator node of `source` with every timing and lifetime
@@ -122,11 +120,6 @@ pub fn enumerate_candidate_configurations(
     let mut source_configurations = vec![Vec::new(); source_count];
     for source_id in 0..source_count {
         let node = &source.operator_nodes_of_candidates_for_memo_groups[source_id].physical_node;
-        if node.timing.is_some() || node.lifetime.is_materialized() {
-            return Err(ConfigurationError::AssignedExecution {
-                candidate: source_id,
-            });
-        }
         let summary = matches!(
             node.asap(),
             Some(ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. })

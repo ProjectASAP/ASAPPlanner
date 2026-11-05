@@ -8,7 +8,7 @@ use asap_cost::{CostModel, PlanCost};
 use asap_types::ir::physical_export::PhysicalASAPNodeId;
 use asap_types::ir::properties::AccuracyMetric;
 #[cfg(any(test, feature = "reference-pricer"))]
-use asap_types::ir::QueryRoot;
+use asap_types::ir::{PhysicalPropertiesAssignment, QueryRoot};
 use asap_types::stages::{
     DagOfSelectedCandidates, PhysicalCandidateId, PrunedCandidate, SelectedNodeId,
 };
@@ -198,6 +198,8 @@ pub struct WholePlanSelection {
     /// Stage 3 confirmed made a proof: the plan to run. The Stage 2
     /// candidate keeps the open requirement.
     pub plan: Vec<QueryRoot>,
+    /// The physical properties of `plan`'s nodes.
+    pub physical_properties: PhysicalPropertiesAssignment,
     pub costs: BTreeMap<String, PlanCost>,
     /// For each valid candidate, per query, the accuracy Stage 3 accepted.
     pub accepted: BTreeMap<String, Vec<AcceptedAccuracy>>,

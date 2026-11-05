@@ -69,6 +69,7 @@ fn confirmed_as_counter(
     match planner_types::workload::bounds::with_confirmed_weights(
         &[QueryRoot::Operator(plan)],
         &data,
+        &mut Default::default(),
     )
     .remove(0)
     {
@@ -274,24 +275,12 @@ fn rate_updates_cannot_enter_integer_heap_factory() {
 /// it upstream of a query-time node, so the pin is lifted first.
 fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) -> PhysicalASAPDAG {
     use planner_types::ir::{
-        apply_physical_properties, NodeToTimedNodeCache, Operator as IrOperator, OperatorNode,
+        apply_physical_properties, Operator as IrOperator, OperatorNode,
         PhysicalPropertiesAssignment,
     };
     use planner_types::physical::PhysicalProperties;
-    fn unpinned(node: &Rc<OperatorNode>) -> Rc<OperatorNode> {
-        let mut copy = (**node).clone();
-        copy.operator = node.operator.map_children(unpinned);
-        if matches!(
-            copy.operator,
-            IrOperator::ASAP(ASAPOp::FinalizeExactAccumulator { .. })
-        ) {
-            copy.timing = None;
-        }
-        Rc::new(copy)
-    }
-    let candidate = unpinned(candidate);
     let mut assignment = PhysicalPropertiesAssignment::default();
-    for node in OperatorNode::reachable(&candidate) {
+    for node in OperatorNode::reachable(candidate) {
         if matches!(node.operator, IrOperator::ASAP(ASAPOp::SummaryAgg { .. })) {
             assignment.set(
                 &node,
@@ -299,8 +288,6 @@ fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) 
             );
         }
     }
-    let timed =
-        apply_physical_properties(&candidate, &assignment, &mut NodeToTimedNodeCache::new())
-            .unwrap();
-    planner_types::ir::physical_export::compile_physical_asap_dag(&timed).unwrap()
+    let timed = apply_physical_properties(candidate, &assignment).unwrap();
+    planner_types::ir::physical_export::compile_physical_asap_dag(candidate, &timed).unwrap()
 }

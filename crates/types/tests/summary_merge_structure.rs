@@ -10,8 +10,8 @@ use asap_types::ir::schema::{
     StatisticKind, SummaryUpdate, WaveletKind, WaveletParams,
 };
 use asap_types::ir::{
-    apply_physical_properties, ASAPOp, ExprSemantics, NodeToTimedNodeCache, NonASAPOp, Operator,
-    OperatorNode, PhysicalPropertiesAssignment, Predicate, ScalarExpr,
+    apply_physical_properties, ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorNode,
+    PhysicalPropertiesAssignment, Predicate, ScalarExpr,
 };
 use asap_types::physical::PhysicalProperties;
 use std::rc::Rc;
@@ -703,14 +703,13 @@ fn summary_merge_timing() {
     let tumbling_windows = [state(200, "us"), state(200, "eu")];
     let root = merge(tumbling_windows.to_vec()).unwrap();
     let timings = |assignment: &PhysicalPropertiesAssignment| {
-        let timed =
-            apply_physical_properties(&root, assignment, &mut NodeToTimedNodeCache::new()).unwrap();
-        let children = timed.children();
+        let timed = apply_physical_properties(&root, assignment).unwrap();
+        let timing = |node: &OperatorNode| timed.get(node).unwrap().timing();
         (
-            timed.timing.unwrap(),
-            children
+            timing(&root),
+            root.children()
                 .iter()
-                .map(|c| c.timing.unwrap())
+                .map(|c| timing(c))
                 .collect::<Vec<_>>(),
         )
     };
@@ -732,9 +731,7 @@ fn summary_merge_timing() {
     // stored at ingestion time needs its tumbling windows there too.
     let mut only_merge = PhysicalPropertiesAssignment::default();
     only_merge.set(&root, at_ingestion);
-    assert!(
-        apply_physical_properties(&root, &only_merge, &mut NodeToTimedNodeCache::new()).is_err()
-    );
+    assert!(apply_physical_properties(&root, &only_merge).is_err());
     let mut stored_merge = PhysicalPropertiesAssignment::materialized_at_ingestion_where_allowed(
         std::slice::from_ref(&root),
     );

@@ -252,6 +252,7 @@ pub async fn plan_installable(
     let output = e2e_plan(input).await?;
     installable_plan_of(
         &output.roots(),
+        &output.physical_properties,
         output.selection.as_ref(),
         &output.tumbling_window_retention_ms,
         &entries,
@@ -260,7 +261,9 @@ pub async fn plan_installable(
 }
 
 /// The installable plan of `roots`, the selected roots of a workload whose
-/// entries are `entries` (in `QueryWorkload::entries()` order), with
+/// entries are `entries` (in `QueryWorkload::entries()` order), each node
+/// with the physical properties `physical_properties` lists for it (Stage
+/// 3's selection; a node it does not list takes the timing pass's default), with
 /// Stage 3's report of its `selection` of them when there is one, and the
 /// tumbling-window retention of the selected plan's kept chains
 /// (`RealizedPlan::tumbling_window_retention_ms`, by node id in the DAG `roots`
@@ -269,6 +272,7 @@ pub async fn plan_installable(
 /// what a runtime would install.
 pub fn installable_plan_of(
     roots: &[QueryRoot],
+    physical_properties: &PhysicalPropertiesAssignment,
     selection: Option<&Selection>,
     tumbling_window_retention_ms: &BTreeMap<PhysicalASAPNodeId, u64>,
     entries: &[QueryWorkloadEntry],
@@ -280,10 +284,10 @@ pub fn installable_plan_of(
         .map(|entry| entry.range_evaluation.map_or(0, |range| range.span_ms))
         .collect();
     let query_texts: Vec<String> = entries.iter().map(|entry| entry.query.0.clone()).collect();
-    // Every node keeps the timing Stage 3 gave it.
-    let timed =
-        apply_physical_properties_to_roots(roots, &PhysicalPropertiesAssignment::default())?;
+    // Every node keeps the physical properties Stage 3 gave it.
+    let timed = apply_physical_properties_to_roots(roots, physical_properties)?;
     let expanded = tumbling_window_retention_of_expanded_tumbling_windows(
+        roots,
         &timed,
         tumbling_window_retention_ms,
     )?;
@@ -640,22 +644,24 @@ fn executor_refreshes(
 struct ExpandedWithRetention {
     dag: PhysicalASAPDAG,
     retention_ms_by_node: HashMap<PhysicalASAPNodeId, u64>,
-    /// Each node id of the selected candidate's physical DAG (`timed`
+    /// Each node id of the selected candidate's physical DAG (its roots
     /// exported, Stage 3's ids) with the ids in `dag` that run it
     /// ([`PredictedNodeUsage::installed_node_ids`]).
     installed_node_ids: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
 }
 
-/// Expand the tumbling-window chains of `timed` and export it; each tumbling window takes the
+/// Expand the tumbling-window chains of `roots`, whose nodes' physical
+/// properties `timed` lists, and export it; each tumbling window takes the
 /// retention Stage 2 gives its chain (`RealizedPlan::tumbling_window_retention_ms`, by
-/// node id in the selected candidate's physical DAG, which is `timed`
+/// node id in the selected candidate's physical DAG, which is `roots`
 /// exported).
 fn tumbling_window_retention_of_expanded_tumbling_windows(
-    timed: &[QueryRoot],
+    roots: &[QueryRoot],
+    timed: &PhysicalPropertiesAssignment,
     tumbling_window_retention_ms: &BTreeMap<PhysicalASAPNodeId, u64>,
 ) -> Result<ExpandedWithRetention, InstallablePlanError> {
     use asap_types::ir::physical_export::compile_physical_asap_workload_with_node_ids;
-    let selected = compile_physical_asap_workload_with_node_ids(timed)?;
+    let selected = compile_physical_asap_workload_with_node_ids(roots, timed)?;
     // Reject unsupported raw-source shapes before expanding possibly thousands
     // of tumbling windows. The complete expanded-plan validation remains authoritative.
     selected.dag.check_raw_data_windows()?;
@@ -668,9 +674,12 @@ fn tumbling_window_retention_of_expanded_tumbling_windows(
             .ok_or(InstallablePlanError::TumblingWindowRetentionOfUnknownChain { node_id })?;
         retention_by_chain.push((Rc::clone(chain), retention_ms));
     }
-    let expansion = expand_tumbling_window_chains_in_workload(timed)
+    let expansion = expand_tumbling_window_chains_in_workload(roots, timed)
         .map_err(InstallablePlanError::TumblingWindowChainExpansion)?;
-    let compiled = compile_physical_asap_workload_with_node_ids(&expansion.roots)?;
+    let compiled = compile_physical_asap_workload_with_node_ids(
+        &expansion.roots,
+        &expansion.physical_properties,
+    )?;
     // Index physical identity once. Looking up every expanded tumbling window through
     // the identity map's linear search makes this phase quadratic in tumbling windows.
     let mut installed_ids_by_pointer = HashMap::with_capacity(compiled.dag.nodes.len());
@@ -869,9 +878,7 @@ mod tests {
         use asap_types::ir::operator::Source;
         use asap_types::ir::physical_export::compile_physical_asap_dag;
         use asap_types::ir::schema::{DataType, Field, Schema};
-        use asap_types::ir::{
-            apply_physical_properties, NodeToTimedNodeCache, OperatorNode, TimeRangeKind,
-        };
+        use asap_types::ir::{apply_physical_properties, OperatorNode, TimeRangeKind};
         use std::time::Duration;
         let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
             source: Source::TimeSeries {
@@ -903,13 +910,9 @@ mod tests {
         }))
         .unwrap();
         let export = |root| {
-            let timed = apply_physical_properties(
-                &root,
-                &PhysicalPropertiesAssignment::default(),
-                &mut NodeToTimedNodeCache::new(),
-            )
-            .unwrap();
-            compile_physical_asap_dag(&timed).unwrap()
+            let timed =
+                apply_physical_properties(&root, &PhysicalPropertiesAssignment::default()).unwrap();
+            compile_physical_asap_dag(&root, &timed).unwrap()
         };
         let install = |dag| {
             InstallablePlan::of_dag(dag, vec![String::new()], &HashMap::new(), &HashMap::new())
@@ -947,9 +950,7 @@ mod tests {
         use asap_types::ir::schema::{
             DataType, ExactKind, ExactParams, Field, FieldDataType, Schema, SummaryUpdate,
         };
-        use asap_types::ir::{
-            apply_physical_properties, NodeToTimedNodeCache, OperatorNode, TimeRangeKind,
-        };
+        use asap_types::ir::{apply_physical_properties, OperatorNode, TimeRangeKind};
         use std::time::Duration;
         let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
             source: Source::TimeSeries {
@@ -1002,10 +1003,8 @@ mod tests {
             &merged,
             PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
-        let timed =
-            apply_physical_properties(&merged, &assignment, &mut NodeToTimedNodeCache::new())
-                .unwrap();
-        let dag = compile_physical_asap_dag(&timed).unwrap();
+        let timed = apply_physical_properties(&merged, &assignment).unwrap();
+        let dag = compile_physical_asap_dag(&merged, &timed).unwrap();
         match InstallablePlan::of_dag(dag, vec![String::new()], &HashMap::new(), &HashMap::new()) {
             Err(InstallablePlanError::Uninstallable(
                 InstallableDagError::IngestionBuildReadsWindowsOfDifferentOffsets {
@@ -1043,10 +1042,8 @@ mod tests {
                 PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
             );
         }
-        let timed =
-            apply_physical_properties(&merge, &assignment, &mut NodeToTimedNodeCache::new())
-                .unwrap();
-        let dag = compile_physical_asap_dag(&timed).unwrap();
+        let timed = apply_physical_properties(&merge, &assignment).unwrap();
+        let dag = compile_physical_asap_dag(&merge, &timed).unwrap();
         match InstallablePlan::of_dag(dag, vec![String::new()], &HashMap::new(), &HashMap::new()) {
             Err(InstallablePlanError::Uninstallable(
                 InstallableDagError::IngestionBuildReadsWindowsOfDifferentOffsets {

@@ -85,7 +85,7 @@ fn own_fields(node: &OperatorNode) -> Operator<()> {
 /// hash is SipHash over two parts:
 ///
 /// 1. the canonical JSON of [`own_fields`] plus `result_kind`, `schema`,
-///    `guarantee`, `timing` and `lifetime` — every field `PartialEq` compares except the
+///    `guarantee` — every field `PartialEq` compares except the
 ///    children. A scalar expression is serialized as data with each operator
 ///    node it reads replaced by `()`, so a reference to an
 ///    interned sub-DAG contributes nothing of its own here;
@@ -116,8 +116,6 @@ pub(crate) fn structural_hash(node: &OperatorNode, cache: &mut NodeToStructuralH
         node.result_kind,
         &node.schema,
         &node.guarantee,
-        node.timing,
-        node.lifetime,
     );
     serde_json::to_string(&own)
         .unwrap_or_default()
@@ -177,8 +175,6 @@ fn same_node(
     children_equal
         && left.result_kind == right.result_kind
         && left.schema == right.schema
-        && left.timing == right.timing
-        && left.lifetime == right.lifetime
         && same_value(&left.guarantee, &right.guarantee)
         && same_value(&own_fields(left), &own_fields(right))
 }
@@ -242,8 +238,7 @@ impl InternTable {
 type NodeToInternedNodeCache = HashMap<*const OperatorNode, (Rc<OperatorNode>, Rc<OperatorNode>)>;
 
 /// Intern `node`'s children (recursively), then `node` itself. The rebuilt
-/// node keeps `node`'s retained schema, result kind, guarantee, timing and
-/// materialization:
+/// node keeps `node`'s retained schema, result kind and guarantee:
 /// every child is replaced by an equal node, so each derived property stays
 /// valid, and the result is `PartialEq`-equal to the input.
 fn intern_bottom_up(
@@ -258,9 +253,7 @@ fn intern_bottom_up(
         .operator
         .map_children(|child| intern_bottom_up(table, visited, child));
     let rebuilt = OperatorNode::with_schema(operator, node.schema.clone())
-        .with_guarantee(node.guarantee.clone())
-        .with_timing(node.timing)
-        .with_lifetime(node.lifetime);
+        .with_guarantee(node.guarantee.clone());
     let interned = table.intern(rebuilt);
     visited.insert(Rc::as_ptr(node), (Rc::clone(node), Rc::clone(&interned)));
     interned
