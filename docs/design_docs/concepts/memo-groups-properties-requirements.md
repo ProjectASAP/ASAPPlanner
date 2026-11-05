@@ -1,110 +1,138 @@
 # Memo groups, properties and requirements
 
-This page defines the memo's main data structures: groups, candidates, properties and requirements. It also lists every property and requirement, and gives the decision tree Stage 1 and Stage 2 walk to enumerate candidates. The symbols follow the planner formulation:
-- a candidate is $v = (e_v, p_v)$;
-- its logical properties are $p^{\log}$ and its physical properties are $p^{\mathrm{phys}}$;
-- a consumer input's requirements are $r^{\log}_{c,i}$ and $r^{\mathrm{phys}}_{c,i}$;
-- whether a producer satisfies them is $\alpha^{\log}$ and $\alpha^{\mathrm{phys}}$.
+This page defines the memo's data structures in the terms of the optimization problem formulation: workloads, memo groups, candidates, properties and property requirements. It also gives the decision tree Stage 1 and Stage 2 walk to enumerate candidates, and each stage's interfaces (section 3). Where tracking issue #1207 extends the formulation, the extension is marked **(#1207)**.
+
+## Notation
+
+| Notation | Definition |
+|---|---|
+| $\mathcal W = \{(q, \mathcal T_q, A_q) \mid q \in \mathcal Q\}$ | workload over an evaluation horizon $H$: each query expression $q$, its evaluation schedule $\mathcal T_q \subseteq [0, H)$, and its accuracy target $A_q$ |
+| $\mathcal Q$ | set of queries, each with one final output |
+| $G$ | memo group: a logical result or an intermediate state family over specified input data, independent of parameter configurations |
+| $G_q$ | memo group of query $q$'s final result |
+| $v = (e_v, p_v)$ | candidate of a memo group: an expression with its properties |
+| $e_v = \operatorname{op}_v(G_{v,1}, \dots, G_{v,n_v})$ | expression: operator $\operatorname{op}_v$ with its operator arguments (e.g. the summary family), over input memo groups $G_{v,i}$ |
+| $p_v = (p^{\log}_v, p^{\mathrm{phys}}_v)$ | properties: logical and physical |
+| $p^{\log}_v = \boldsymbol\theta_v$ | summary algorithm parameters, e.g. sketch size; **(#1207)** also the window layout $\omega_v$ |
+| $p^{\mathrm{phys}}_v = (\tau_v, \ell_v)$ | execution timing and lifetime; **(#1207)** also the schedule $\sigma_v$ when $\ell_v \ne$ None |
+| $(\varepsilon_v, \delta_v)$ | error bound and failure probability of $\boldsymbol\theta_v$ for the statistic $\operatorname{op}_v$ reads; derived, not a property |
+| $c \in G_c$, $u \in G_u$ | consumer candidate and its group; producer candidate and its group |
+| $\mathcal I(c)$ | input indices of consumer $c$ |
+| $G_{c,i}$ | memo group required by input $i$ of consumer $c$ |
+| $r_{c,i} = (r^{\log}_{c,i}, r^{\mathrm{phys}}_{c,i})$ | property requirement of input $i$ of consumer $c$ |
+| $p(u) \succeq r_{c,i}$ | producer $u$'s properties satisfy the requirement: $p^{\log}(u) \succeq r^{\log}_{c,i} \land p^{\mathrm{phys}}(u) \succeq r^{\mathrm{phys}}_{c,i}$ |
+| $\alpha^{\log}_{u,c,i}$, $\alpha^{\mathrm{phys}}_{u,c,i}$ | fixed indicators of $p^{\log}_u \succeq r^{\log}_{c,i}$ and $p^{\mathrm{phys}}_u \succeq r^{\mathrm{phys}}_{c,i}$ |
+| $\mathcal C$ | physical candidates, each with a fixed parameter configuration, timing and lifetime |
+| $P_{c,i}$ | physical candidates in the required input group, $G_{c,i} \cap \mathcal C$, before checking requirements |
+| $\mathcal E$ | potential dependencies $\{(u, c, i) \mid c \in \mathcal C,\ i \in \mathcal I(c),\ u \in P_{c,i}\}$ |
+| $x_v$, $y_{u,c,i}$, $z_{q,v}$, $t_v$ | MILP variables: candidate selected; producer $u$ supplies input $i$ of $c$; $v \in G_q$ supplies $q$'s result; topological rank |
+| (A)–(I) | MILP rows: input satisfaction, producer selection and sharing, query coverage, output selection, acyclicity, utilization, logical requirements ($y \le \alpha^{\log}$), physical requirements ($y \le \alpha^{\mathrm{phys}}$), domains |
+| $w_v$ | fixed cost: $C_{\text{read}}(v) + C_{\text{compute}}(v)$ plus $C^{\text{one}}_{\text{retain}}(v)$ or $C^{\text{across}}_{\text{retain}}(v)$ by $\ell_v$ |
+| $\Pi$, $V_\Pi$ | selected physical ASAP DAG and its node set; $\operatorname{Cost}(\Pi) = \sum_{v \in \mathcal C} w_v x_v$ |
+| **(#1207)** $\kappa$ | execution context of a candidate with $\ell_v$ = None: a query evaluation $\kappa_q$, an ingestion pipeline $I_r$, or a materialized candidate's computation $\kappa_m$ |
+| **(#1207)** (K), (R), (L), budgets | accuracy at each query root, $\sum_u \lambda_{q,u}\varepsilon_u a_{q,u} \le \varepsilon_q$ and $\sum_u \delta_u a_{q,u} \le \delta_q$; retention $h_v$; latency; resource budgets |
 
 ## Example
 
-Query A: `quantile_over_time(0.95, latency[1m])` with `max_error 0.01`. Query B: `quantile_over_time(0.99, latency[1m]) / quantile_over_time(0.50, latency[1m])` with the same target.
+Workload: query A, `quantile_over_time(0.95, latency[1m])`, and query B, `quantile_over_time(0.99, latency[1m]) / quantile_over_time(0.50, latency[1m])`. Both are evaluated every 10 s ($\mathcal T_A = \mathcal T_B = 10\,\text{s}\cdot\mathbb Z$) with accuracy target $A_q$: rank error 0.01.
 
 ```
 G1   Scan latency[1m]
-       producers: v1 = Scan                     (QueryTime, None)
-G2   KLL state over G1                          one group, whatever the size
-       producers: v2 = SummaryAgg[KLL](G1)  θ = {k = 200}   ε = 0.008   δ = 0.01
-                  v3 = SummaryAgg[KLL](G1)  θ = {k = 345}   ε = 0.005   δ = 0.01
-                  (each also expanded by Stage 2 into its (τ, ℓ, σ) alternatives)
-G3   p95 of G2      producers: SummaryEstimate[q=0.95](G2)
-G4   p99 of G2      producers: SummaryEstimate[q=0.99](G2)
-G5   p50 of G2      producers: SummaryEstimate[q=0.50](G2)
-G6   G4 / G5        producers: Divide(G4, G5)    input requirement: error_cap on each input
-Query roots: A → G3, B → G6
+       candidate: v1 = Scan                         p^phys = (QueryTime, None)
+G2   KLL state over G1                              one group, whatever θ
+       candidates: v2 = SummaryAgg[KLL](G1)  θ = {k = 200}   ε = 0.008   δ = 0.01
+                   v3 = SummaryAgg[KLL](G1)  θ = {k = 345}   ε = 0.005   δ = 0.01
+                   (Stage 2 expands each into its (τ, ℓ) alternatives)
+G3 = G_A   SummaryEstimate[q=0.95](G2)
+G4         SummaryEstimate[q=0.99](G2)
+G5         SummaryEstimate[q=0.50](G2)
+G6 = G_B   Divide(G4, G5)      r^log on each input: error cap (#1207)
 ```
 
 The ε values are illustrative.
 
-- G2 is one group: the KLL state over `latency[1m]`. Its sizes are candidates of G2, not separate groups.
-- G3, G4 and G5 are consumers of G2. They are not stored in G2; each is a group with its own producers whose expression reads G2.
-- A meets 0.01 with either size. B adds its two operands' errors (0.016 with `k = 200`, 0.010 with `k = 345`) and needs `k = 345` for both, so a plan where all three read v3 builds one KLL state.
+- G2 is one memo group: the KLL state over `latency[1m]`. Its parameter configurations are candidates of G2, not separate groups. The family KLL is an argument of $\operatorname{op}_v$.
+- G3, G4 and G5 are consumers of G2: their candidates' expressions read G2 as $G_{c,1}$. G2 does not store them.
+- A meets 0.01 with either θ. B adds its two operands' errors (0.016 with `k = 200`, 0.010 with `k = 345`) and needs `k = 345` for both, so a plan where G3's, G4's and G5's candidates all read v3 builds one KLL state.
 
-## 1. Properties and requirements over properties
+## 1. Properties and property requirements
 
 ### Properties
 
-A property is a value a candidate has. Every property is one dimension of a product: a struct with one field per dimension, never a flat enum that lists the combinations. Invalid combinations are rejected by the struct's checked constructor.
+A property is a value a candidate has. Properties are products of dimensions: one field per dimension, never a flat enum that lists the combinations. Invalid combinations are rejected by the checked constructor.
 
-| Dimension | Values | Logical or physical | Fixed by | Code |
-|---|---|---|---|---|
-| Which family to use (operator) | `Exact` (exact accumulator kinds: Sum, Count, Min, Max, Increase, Rate, IRate), or `Summary { family }` with family in KLL, DDSketch, CMS, CountSketch, CMS with heap, CountSketch with heap, UnivMon, HLL, KMV, the Hydra variants | logical | enumerated | `FieldDataType::{ExactAggregate, Sketch}` in the candidate's operator ([`schema/mod.rs`](../../../crates/types/src/ir/schema/mod.rs)); `SketchAlgorithm` |
-| Parameter configuration $\theta$ | per family, from a predefined list: KLL `k`; DDSketch `alpha`; CMS / CountSketch `width × depth`; CMS / CountSketch with heap `width × depth × heap_size`; UnivMon `heap_size × rows × cols × layers`; HLL `precision`; KMV `k` | logical | enumerated | `SketchParams` inside `SketchKind` ([`sketch.rs`](../../../crates/types/src/ir/schema/sketch.rs)), sized by `size_params` per `accuracy_budget_parts` |
-| Error bound $(\varepsilon_v, \delta_v)$ | computed on demand from $\theta$ and the statistic, in the family's accuracy metric (below); exact is $(0, 0)$ | logical | derived from $\theta$, not stored or chosen | `local_guarantee` → `AccuracyGuarantee` ([`estimators`](../../../crates/accuracy/src/estimators/mod.rs)) |
-| Window configuration $\omega$ | none; or tumbling windows of width $w$ and count $n$, with $w$ from the gcd closure of the readers' ranges and steps. Later: sliding windows by merge or by subtraction | logical | enumerated | `SummaryTumblingWindowChain` arguments, added by Pass 2 ([`window_candidates.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/window_candidates.rs)) |
-| Timing $\tau$ | `IngestionTime`, `QueryTime` | physical | enumerated | `ExecutionTiming` ([`execution_data_state.rs`](../../../crates/types/src/ir/properties/execution_data_state.rs)); `PhysicalCandidate::timing` |
-| Lifetime $\ell$ | `None`, `OneEvaluation(Medium)`, `AcrossEvaluations(Medium)`, with `Medium` in `Memory`, `Disk` | physical | enumerated | `Materialization` on main; `Lifetime`, `Medium` in #1214 ([`physical/`](../../../crates/types/src/physical)) |
-| Schedule $\sigma$ | only when $\ell \ne$ None. `Periodic { interval, phase }` for `OneEvaluation`; `TumblingWindowGrid { phase }` for `AcrossEvaluations` | physical | enumerated from the readers' schedules | not a property: schedule groups `z[m, G]` in the MILP ([`cost_terms.rs`](../../../crates/plan-selection/src/milp/cost_terms.rs)); a property in #1200 PR 2 |
+What is computed is the expression $e_v$, not a property: the operator, its arguments (including the summary family), and its input groups. A memo group's candidates differ in their properties, and, when rules add other ways to compute the same result, in their expressions.
 
-A candidate is materialized when $\ell \ne$ None. This is derived, not stored.
+| Dimension | Values | Part of | Code |
+|---|---|---|---|
+| Parameter configuration $\boldsymbol\theta_v$ | per family, from a predefined list: KLL `k`; DDSketch `alpha`; CMS / CountSketch `width × depth`; CMS / CountSketch with heap `width × depth × heap_size`; UnivMon `heap_size × rows × cols × layers`; HLL `precision`; KMV `k`. None for an exact operator | $p^{\log}_v$ | `SketchParams` inside `SketchKind` ([`sketch.rs`](../../../crates/types/src/ir/schema/sketch.rs)), sized by `size_params` per `accuracy_budget_parts` today |
+| **(#1207)** Window layout $\omega_v$ | none; or tumbling windows of width $w$ and count $n$, with $w$ from the gcd closure of the readers' ranges and steps. Later: sliding windows by merge or by subtraction | $p^{\log}_v$ | `SummaryTumblingWindowChain` arguments, added by Pass 2 ([`window_candidates.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/window_candidates.rs)) |
+| Execution timing $\tau_v$ | IngestionTime, QueryTime | $p^{\mathrm{phys}}_v$ | `ExecutionTiming` ([`execution_data_state.rs`](../../../crates/types/src/ir/properties/execution_data_state.rs)) |
+| Lifetime $\ell_v$ | None, OneEvaluation, AcrossEvaluations; **(#1207)** a materialized lifetime carries its medium, Memory or Disk | $p^{\mathrm{phys}}_v$ | `Materialization` on main; `Lifetime`, `Medium` in #1214 ([`physical/`](../../../crates/types/src/physical)) |
+| **(#1207)** Schedule $\sigma_v$ | only when $\ell_v \ne$ None: Periodic (interval, phase) for OneEvaluation; tumbling-window grid phase for AcrossEvaluations | $p^{\mathrm{phys}}_v$ | schedule groups `z[m, G]` in the MILP today ([`cost_terms.rs`](../../../crates/plan-selection/src/milp/cost_terms.rs)); a property in #1200 PR 2 |
 
-Invalid combinations, rejected by `PhysicalProperties::new` (the list in #1200; #1214 implements the first, the others come with the schedule in #1200 PR 2):
+Lifetime None means the output is discarded after its reader's execution completes. OneEvaluation retains the result until all readers within one evaluation finish. AcrossEvaluations retains it throughout the evaluation period, so later evaluations reuse it. A candidate is materialized when $\ell_v \ne$ None; this is derived, not stored.
+
+The error bound $(\varepsilon_v, \delta_v)$ is not a dimension: it is a function of $\boldsymbol\theta_v$ and the statistic $\operatorname{op}_v$ reads, derived when needed (`local_guarantee` in [`estimators`](../../../crates/accuracy/src/estimators/mod.rs)). An exact candidate has $(0, 0)$.
+
+Invalid combinations of $p^{\mathrm{phys}}$, rejected by `PhysicalProperties::new` (#1200; #1214 implements the first, the others come with $\sigma$ in #1200 PR 2):
 
 | Combination | Why |
 |---|---|
 | (IngestionTime, OneEvaluation) | there is no evaluation at ingestion time |
-| $\ell$ = None with a schedule | where an unmaterialized result runs is its reader's execution context, not a property |
+| $\ell$ = None with a schedule | where an unmaterialized result runs is its reader's execution context $\kappa$, not a property |
 | $\ell \ne$ None without a schedule | a materialized result must say on which times or grid it is delivered |
 | OneEvaluation with a grid, AcrossEvaluations with a periodic schedule | each lifetime has one kind of schedule |
 | a phase at or above the grid width or interval, or interval 0 | the phase is taken modulo the width or interval |
 | IngestionTime with a grid phase ≠ 0 | ingestion-time grids are anchored at the epoch today: the plan carries no origin |
 
-Valid physical states: (QueryTime, None), (IngestionTime, None), (QueryTime, OneEvaluation(m)), (QueryTime, AcrossEvaluations(m)), (IngestionTime, AcrossEvaluations(m)), for each medium $m$.
+Valid $(\tau, \ell)$: (QueryTime, None), (IngestionTime, None), (QueryTime, OneEvaluation), (QueryTime, AcrossEvaluations), (IngestionTime, AcrossEvaluations), each materialized one for each medium.
 
-### Requirements over properties
+### Property requirements
 
-A requirement is a constraint that a consumer, a query or the deployment puts on producers. One requirement can constrain several property dimensions, and one dimension can be constrained by several requirements.
+Each input $i$ of consumer $c$ names a producer group $G_{c,i}$ and a property requirement $r_{c,i} = (r^{\log}_{c,i}, r^{\mathrm{phys}}_{c,i})$. Logical satisfaction checks configuration requirements; physical satisfaction checks whether the producer's timing and lifetime jointly support the required access. For a monotone size parameter, $\succeq$ reduces to numerical dominance, e.g. $k_u \ge k_{\text{required}}$ for KLL.
 
-| Requirement | Who states it | Values | Constrains | Checked where |
+The workload's accuracy target $A_q$ is not an input requirement **(#1207)**: a per-input bound would fix each input's share of the query's budget. Row (K) bounds each query's composed error at its root instead. What stays in $r^{\log}$ is what depends only on the consumer.
+
+| Requirement | Stated by | Values | Constrains | Checked by |
 |---|---|---|---|---|
-| Accuracy | each query, at its root | metric: absolute (in the value's units, or times the stream's L1 or L2 norm), relative, rank; bound $\varepsilon_q$; failure probability $\delta_q$; scope: per value, whole result, or groups above a share of the records | operator family and $\theta$ of every approximate candidate the query reads, through their $(\varepsilon_v, \delta_v)$ | Stage 3, row (K): the composed error at the root. Not per edge, because a per-input bound would fix each input's share of the budget |
-| Validity cap `error_cap` | a non-linear consumer (ratio, product), per input | $\varepsilon$ cap | $\theta$ of the producer | per edge, $\alpha^{\log}$: row (K)'s linear bound holds only below the cap |
-| Summary family | a consumer that reads summary state, per input | a family, e.g. KLL for a quantile readout | operator family | per edge, $\alpha^{\log}$ |
-| Window | a consumer that reads windows, per input | the reader's range and step | window configuration: the width must divide both | per edge, $\alpha^{\log}$ |
-| Capability of ingestion-time compute | the deployment and the data workload | the source has an ingestion pipeline; the executor supports the family; query-time results may be kept across evaluations | timing; operator family; (QueryTime, AcrossEvaluations) | candidate generation: such candidates are not offered |
-| Reader timing and evaluation | a consumer, per input | when it reads (ingestion or query time) and from which evaluation (same or later) | timing and lifetime of the producer | per edge, $\alpha^{\mathrm{phys}}$ |
-| Reader schedule | a periodic consumer, per input | its interval and phase $(I_c, \varphi_c)$ | schedule of the producer | per edge, $\alpha^{\mathrm{phys}}$ |
-| Latency, resource budgets | the workload | per-query latency bound; memory and CPU budgets | the whole plan | Stage 3, rows (L) and (B) |
+| Accuracy target $A_q$ | the workload, per query | metric: absolute (in the value's units, or times the stream's L1 or L2 norm), relative, rank; bound $\varepsilon_q$; failure probability $\delta_q$; scope: per value, whole result, or groups above a share of the records | $\boldsymbol\theta_u$ of every approximate candidate $q$ depends on, through $(\varepsilon_u, \delta_u)$ | row (K) **(#1207)** |
+| Error cap, in $r^{\log}_{c,i}$ | a non-linear consumer (ratio, product), per input | a cap on $\varepsilon_u$; for a monotone size parameter, a minimum size $k_u \ge k_{\text{required}}$ | $\boldsymbol\theta_u$ | $\alpha^{\log}$, row (G): row (K)'s linear bound holds only below the cap |
+| Window, in $r^{\log}_{c,i}$ **(#1207)** | a consumer that reads windows, per input | the reader's range and step | $\omega_u$: the width must divide both | $\alpha^{\log}$, row (G) |
+| Summary family, in $r^{\log}_{c,i}$ | a consumer that reads summary state | a family | usually already fixed by $G_{c,i}$, whose $\operatorname{op}$ names the family | $\alpha^{\log}$, row (G) |
+| Reader timing and evaluation, in $r^{\mathrm{phys}}_{c,i}$ | the consumer, per input | when it reads (ingestion or query time) and from which evaluation (same or later) | $\tau_u$, $\ell_u$ | $\alpha^{\mathrm{phys}}$, row (H) |
+| Reader schedule, in $r^{\mathrm{phys}}_{c,i}$ **(#1207)** | a periodic consumer, from $\mathcal T_q$ | its interval and phase $(I_c, \varphi_c)$ | $\sigma_u$ | $\alpha^{\mathrm{phys}}$, row (H) |
+| Deployment capability | the deployment and data | the source has an ingestion pipeline; the executor supports the family; query-time results may be kept across evaluations | $\tau$, $\operatorname{op}$, (QueryTime, AcrossEvaluations) | candidate generation: such candidates are not in $\mathcal C$ |
+| Latency, resource budgets **(#1207)** | the workload | per-query latency bound; memory and CPU budgets | the whole plan | rows (L) and budgets |
 
 Accuracy metrics that may be added later, when a primitive needs them: top-k recall or precision, and a false-positive rate for membership summaries.
 
-How requirements map to property dimensions:
+How requirements map to properties:
 
 ```
-Accuracy (query)             ──► operator family, θ          (through ε_v, δ_v; row (K))
-error_cap (edge)             ──► θ
-Summary family (edge)        ──► operator family
-Window (edge)                ──► window configuration
-Ingestion capability (deploy)──► timing, operator family, lifetime
-Reader timing/evaluation     ──► timing, lifetime
-Reader schedule              ──► schedule
-Latency, budgets (workload)  ──► every dimension, through cost
+A_q (workload)               ──► θ_u of every approximate input   (through ε_u, δ_u; row (K))
+error cap      r^log         ──► θ_u
+window         r^log         ──► ω_u
+reader timing  r^phys        ──► τ_u, ℓ_u
+reader schedule r^phys       ──► σ_u
+deployment                   ──► τ, op, ℓ   (not generated)
+latency, budgets             ──► every dimension, through w_v
 ```
 
 ## 2. Decision tree of properties
 
-Each memo group's candidates are the leaves of a tree. Every level decides one property dimension, and each edge out of a node is one value of that dimension. A path from the root to a leaf is one candidate.
+Each memo group's candidates are the leaves of a tree. The first level chooses the expression $e_v$; every later level decides one property dimension. A path from the root to a leaf is one physical candidate in $\mathcal C$.
 
 ```mermaid
 flowchart TD
-    G["Group G<br/>(what is computed)"] --> R1["Exact"]
-    G --> R2["Summary: KLL"]
-    G --> R3["Summary: DDSketch"]
-    G --> R4["…other families<br/>(prune: executor support,<br/>consumer's family requirement)"]
+    G["Memo group G<br/>(logical result)"] --> R1["e_v: exact operator"]
+    G --> R2["e_v: SummaryAgg[KLL]"]
+    G --> R3["e_v: SummaryAgg[DDSketch]"]
+    G --> R4["e_v: …other operators<br/>(prune: executor support)"]
 
     R2 --> T1["θ: k = 200<br/>ε = 0.008"]
     R2 --> T2["θ: k = 345<br/>ε = 0.005"]
-    R2 --> T3["θ: k = …<br/>(prune: ε above every<br/>reading query's target)"]
+    R2 --> T3["θ: k = …<br/>(prune: ε above every<br/>reading query's ε_q)"]
 
     T2 --> W1["ω: no windows"]
     T2 --> W2["ω: tumbling, width w<br/>(prune: w must divide<br/>some reader's range and step)"]
@@ -113,49 +141,48 @@ flowchart TD
     W2 --> P2["τ = IngestionTime<br/>(prune: no ingestion pipeline)"]
 
     P1 --> L1["ℓ = None"]
-    P1 --> L2["ℓ = OneEvaluation(m)"]
-    P1 --> L3["ℓ = AcrossEvaluations(m)<br/>(prune: deployment keeps<br/>no query-time results)"]
+    P1 --> L2["ℓ = OneEvaluation"]
+    P1 --> L3["ℓ = AcrossEvaluations<br/>(prune: deployment keeps<br/>no query-time results)"]
     P2 --> L4["ℓ = None"]
-    P2 --> L5["ℓ = AcrossEvaluations(m)"]
+    P2 --> L5["ℓ = AcrossEvaluations"]
     P2 -. invalid .-> L6["ℓ = OneEvaluation"]
 
-    L2 --> S1["σ: Periodic (I, φ)<br/>from the gcd closure<br/>of the readers' schedules"]
+    L2 --> S1["σ: Periodic (I, φ)<br/>from the gcd closure<br/>of the readers' 𝒯_q"]
     L3 --> S2["σ: grid phase φ mod w"]
     L5 --> S3["σ: grid phase 0"]
 ```
 
 The levels, top to bottom:
 
-| Level | Dimension | Stage | Values offered | Pruned when | Code |
+| Level | Decides | Stage | Values offered | Pruned when | Code |
 |---|---|---|---|---|---|
-| 1 | family (operator) | Stage 1, Pass 1 and Pass 2 rules | each way to compute the group | the executor cannot build the family; no consumer's family requirement accepts it | Pass 1 ([`per_computation_candidates.rs`](../../../crates/logical-asap-optimization/src/pass1/per_computation_candidates.rs)); Pass 2 rules ([`rules/`](../../../crates/logical-asap-optimization/src/pass2/memo/rules)) |
-| 2 | $\theta$ | Stage 1, Pass 1 | the family's predefined list | $\varepsilon_v$ alone exceeds every reading query's target | Pass 1 sizing per `accuracy_budget_parts` ([`memo_population.rs`](../../../crates/logical-asap-optimization/src/pass1/memo_population.rs)); a predefined list in #1203 PR 2 |
-| 3 | window configuration $\omega$ | Stage 1, Pass 2 | tumbling widths from the gcd closure of readers' ranges and steps | no reader's range and step is a multiple of the width | Pass 2 ([`window_candidates.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/window_candidates.rs), [`state_groups.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/state_groups.rs)) |
-| 4 | timing $\tau$ | Stage 2 | QueryTime; IngestionTime | the source has no ingestion pipeline | Stage 2 `enumerate_candidate_configurations` ([`configurations.rs`](../../../crates/physical-asap-optimization/src/catalog/configurations.rs)) |
-| 5 | lifetime $\ell$ | Stage 2 | None, OneEvaluation(m), AcrossEvaluations(m) | invalid with $\tau$; the deployment keeps no query-time results across evaluations | same function, with `DeploymentCapabilities::query_time_results_retained` |
-| 6 | schedule $\sigma$ | Stage 2 | the gcd closure $\Sigma$ of the readers' schedules | only offered when $\ell \ne$ None | Stage 3 MILP today; Stage 2 in #1200 PR 2 |
+| 1 | expression $e_v$ ($\operatorname{op}_v$ with its family) | Stage 1, Pass 1 and Pass 2 rules | each way to compute the group | the executor cannot build the family | Pass 1 ([`per_computation_candidates.rs`](../../../crates/logical-asap-optimization/src/pass1/per_computation_candidates.rs)); Pass 2 rules ([`rules/`](../../../crates/logical-asap-optimization/src/pass2/memo/rules)) |
+| 2 | $\boldsymbol\theta_v$ | Stage 1, Pass 1 | the family's predefined list | $\varepsilon_v$ alone exceeds every reading query's $\varepsilon_q$ | Pass 1 sizing per `accuracy_budget_parts` ([`memo_population.rs`](../../../crates/logical-asap-optimization/src/pass1/memo_population.rs)); a predefined list in #1203 PR 2 |
+| 3 | $\omega_v$ **(#1207)** | Stage 1, Pass 2 | tumbling widths from the gcd closure of readers' ranges and steps | no reader's range and step is a multiple of the width | Pass 2 ([`window_candidates.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/window_candidates.rs), [`state_groups.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/state_groups.rs)) |
+| 4 | $\tau_v$ | Stage 2 | QueryTime; IngestionTime | the source has no ingestion pipeline | `enumerate_candidate_configurations` ([`configurations.rs`](../../../crates/physical-asap-optimization/src/catalog/configurations.rs)) |
+| 5 | $\ell_v$ | Stage 2 | None, OneEvaluation, AcrossEvaluations | invalid with $\tau_v$; the deployment keeps no query-time results across evaluations | same function, with `DeploymentCapabilities::query_time_results_retained` |
+| 6 | $\sigma_v$ **(#1207)** | Stage 2 | the gcd closure $\Sigma$ of the readers' schedules $\mathcal T_q$ | only offered when $\ell_v \ne$ None | Stage 3 MILP today; Stage 2 in #1200 PR 2 |
 
-What the tree does not decide:
-- **Which producer each consumer input reads.** That is the edge choice $y_{u,c,i}$ in Stage 3. Two consumers of one group may read different leaves, e.g. A reads `k = 200` and B reads `k = 345`.
-- **Where an unmaterialized candidate runs.** A candidate with $\ell$ = None runs inside each reader's execution context; Stage 3 chooses it.
-- **How much a materialized candidate retains.** The amount $h_v$ depends on the readers' longest range; Stage 3 chooses it.
+What the tree does not decide, because it is a choice of the MILP over $\mathcal C$ and $\mathcal E$:
+- **Which producer each consumer input reads:** $y_{u,c,i}$. Two consumers of one group may read different leaves, e.g. one reads `k = 200` and another `k = 345`.
+- **Where an unmaterialized candidate runs (#1207):** a candidate with $\ell_v$ = None runs inside each reading context $\kappa$.
+- **How much a materialized candidate retains (#1207):** $h_v$, from the selected readers' longest range, row (R).
 
 ### Order of decisions
 
-**The order does not affect correctness.** The set of leaves is the product of the dimensions' value sets, minus the invalid combinations and the pruned values. Every prune rule depends only on the value it removes and on values already decided above it, so any order that decides a pruned dimension after the dimensions its prune rule reads yields the same set of leaves.
+**The order does not affect correctness.** The leaves are the product of the dimensions' value sets, minus the invalid combinations and the pruned values. Every prune rule depends only on the value it removes and on values decided above it, so any order that decides a pruned dimension after the dimensions its prune rule reads yields the same $\mathcal C$.
 
 **The order affects the efficiency of enumeration.** The number of nodes visited is $\sum_{d} \prod_{d' \le d} |\text{values kept at } d'|$, so a dimension that prunes much should come early, and a dimension whose values multiply without pruning should come late. Four considerations set the order above:
 
-1. **Logical before physical.** Logical dimensions (operator family, $\theta$, $\omega$) change the result's values or error; physical dimensions ($\tau$, $\ell$, $\sigma$) change only when and how long it is computed. Deciding logical dimensions first lets Stage 1 hash-cons groups and check $\alpha^{\log}$ on edges once, before Stage 2 multiplies each logical candidate by its physical alternatives.
-2. **Strong prunes early.** The family is pruned by the executor and by consumers' family requirements, and $\theta$ by the accuracy target, before the window and physical levels multiply them.
-3. **Dependent dimensions adjacent.** $\ell$ is constrained by $\tau$ (no OneEvaluation at ingestion), and $\sigma$ exists only when $\ell \ne$ None and its kind follows $\ell$. Deciding them in the order $\tau \to \ell \to \sigma$ means each invalid combination is pruned at the first level where it can be detected.
-4. **Deployment-wide prunes as early as they can go.** If the deployment has no ingestion pipeline, the IngestionTime subtree is pruned once per candidate. Moving $\tau$ above $\omega$ would prune it once per group instead; this is an alternative order with the same leaves.
+1. **Logical before physical.** $e_v$, $\boldsymbol\theta_v$ and $\omega_v$ change the result's values or error; $\tau_v$, $\ell_v$ and $\sigma_v$ change only when and how long it is computed and kept. Deciding $p^{\log}$ first lets Stage 1 hash-cons groups and compute $\alpha^{\log}$ once, before Stage 2 multiplies each logical candidate by its $p^{\mathrm{phys}}$ alternatives.
+2. **Strong prunes early.** The operator is pruned by the executor, and $\boldsymbol\theta_v$ by the accuracy targets, before the window and physical levels multiply them.
+3. **Dependent dimensions adjacent.** $\ell_v$ is constrained by $\tau_v$, and $\sigma_v$ exists only when $\ell_v \ne$ None and its kind follows $\ell_v$. Deciding $\tau \to \ell \to \sigma$ prunes each invalid combination at the first level where it can be detected.
+4. **Deployment-wide prunes as early as they can go.** Without an ingestion pipeline, the IngestionTime subtree is pruned once per candidate. Moving $\tau$ above $\omega$ would prune it once per group instead; this is an alternative order with the same leaves.
 
 Alternative orders worth comparing:
-- **$\tau$ first.** In a deployment where most sources have no ingestion pipeline, deciding timing at the group level prunes half the tree before $\theta$ and $\omega$ multiply it.
-- **$\theta$ last among logical dimensions.** $\theta$ has the most values. Deciding $\omega$ before $\theta$ visits fewer nodes when many widths are pruned by readers' ranges.
-- **Requirement-driven (top-down) vs producer-driven (bottom-up).** Top-down enumeration starts from each consumer's requirement and offers only the values it accepts; bottom-up offers every value and lets $\alpha$ filter edges. Top-down visits fewer nodes but must union the requirements of all consumers of a group, so that sharing between consumers is not lost.
-
+- **$\tau$ first.** Where most sources have no ingestion pipeline, deciding timing at the group level prunes half the tree before $\boldsymbol\theta$ and $\omega$ multiply it.
+- **$\boldsymbol\theta$ last among logical dimensions.** $\boldsymbol\theta$ has the most values. Deciding $\omega$ before $\boldsymbol\theta$ visits fewer nodes when many widths are pruned by readers' ranges.
+- **Requirement-driven (top-down) vs producer-driven (bottom-up).** Top-down enumeration starts from each consumer's $r_{c,i}$ and offers only the values it accepts; bottom-up offers every value and lets $\alpha$ filter $\mathcal E$. Top-down visits fewer nodes but must union the requirements of all consumers of a group, so that sharing between consumers is not lost.
 
 ## 3. Data structures and interfaces per stage
 
@@ -167,7 +194,7 @@ This section gives the target interface of each stage after the formulation refa
 | Stage 1, Pass 1 | `DagOfLogicalMemoGroups` | `Memo` | $v = (e_v, p^{\log}_v)$, $r^{\log}_{c,i}$, $\theta$ list | #1203 |
 | Stage 1, Pass 2 | `Memo` | `LogicalASAPMemoCandidates` | rule-added candidates; logical edges with $\alpha^{\log}$ | #1203, #1201 |
 | Stage 2 | `LogicalASAPMemoCandidates` | `PhysicalASAPMemoCandidates` | $p^{\mathrm{phys}}_v = (\tau, \ell, \sigma)$, $r^{\mathrm{phys}}_{c,i}$, physical edges $\mathcal E$ with $\alpha^{\mathrm{phys}}$ | #1200, #1201 |
-| Stage 3 | `PhysicalASAPMemoCandidates` | `DagOfSelectedCandidates` | contexts $\kappa$; cost $w_v$ (`asap-cost`); $x$, $y$, $z$, $t$, $h$; rows (A)–(K), (R), (L), (B) | #1204 |
+| Stage 3 | `PhysicalASAPMemoCandidates` | `DagOfSelectedCandidates` | contexts $\kappa$; cost $w_v$ (`asap-cost`); $x$, $y$, $z$, $t$, $h$; rows (A)–(K), (R), (L), budgets | #1204 |
 | Realizer, export | `DagOfSelectedCandidates` | `PhysicalASAPDAG` | — | #1200 (export fields) |
 
 ### Stage 0: frontends and hash-consing
@@ -368,7 +395,7 @@ fn reader_constraint_rows(..);    // (J)
 fn accuracy_rows(..);             // (K) Σ λ_{q,u} ε_u a_{q,u} ≤ ε_q, Σ δ_u a_{q,u} ≤ δ_q
 fn retention_rows(..);            // (R) h_v ≥ need_{c,i} · y_{v,c,i}
 fn latency_rows(..);              // (L)
-fn resource_budget_rows(..);      // (B) budgets
+fn resource_budget_rows(..);      // budgets (#1207)
 // Objective: min Σ w_v x_v + Σ ρ_κ w_v x_{κ,v} + Σ π_v h_v
 
 // crates/types/src/stages/physical/graph.rs (unchanged)
@@ -385,3 +412,65 @@ pub struct DagOfSelectedCandidates {
 ### Realizer and export
 
 The realizer builds the plan from `DagOfSelectedCandidates`; each node's physical properties come from its `PhysicalCandidate`. The export writes timing and lifetime (and later the schedule) per node of `PhysicalASAPDAG`, changed together with the backend.
+
+## 4. Rules: how each pass and stage adds candidates
+
+A rule reads the memo and adds to it only through the interfaces of section 3:
+- `Memo::find_or_add_group(expression)` for a group, so an expression that already exists returns its group (hash-consing);
+- `Memo::add_candidate(group, CandidateForMemoGroup { expression, logical_properties, input_requirements, fused_groups })` for a candidate $v = (e_v, p^{\log}_v)$ with its $r^{\log}_{v,i}$.
+
+A rule never copies a reader and never edits an existing candidate: every consumer of a group sees a new candidate of that group through $\mathcal E$. Rules match over groups and their candidates' expressions, never over a reader's private operators. The order of the rules below is the order the code runs them; it affects which groups exist when a later rule matches, not which plans are valid.
+
+### Stage 0: hash-consing
+
+| Rule | Code | Matches | Adds |
+|---|---|---|---|
+| Hash-consing | `hash_consed` ([`stage0.rs`](../../../crates/logical-asap-optimization/src/stage0.rs)) | every operator node of every query root | one `MemoGroup` per distinct expression; `query_roots` point at $G_q$. No candidates. |
+
+### Stage 1, Pass 1: ways to compute each group
+
+Pass 1 adds, for each group a query computes, every way to compute it. Each intermediate result of a way to compute is its own group (`find_or_add_group`), so `Project ← SummaryEstimate ← SummaryAgg` is three groups, each with a one-operator candidate.
+
+| Way to compute | Code | Adds |
+|---|---|---|
+| Exact | [`per_computation_candidates.rs`](../../../crates/logical-asap-optimization/src/pass1/per_computation_candidates.rs), [`memo_population.rs`](../../../crates/logical-asap-optimization/src/pass1/memo_population.rs) | a candidate with the exact operator; $\boldsymbol\theta_v$ none, $(\varepsilon_v, \delta_v) = (0, 0)$ |
+| Exact accumulator | same | a state group `ExactAggregate(kind)` over the input group, one candidate; a `FinalizeExactAccumulator` candidate in the result's group reading it |
+| Summary, per family the executor supports | same | a state group `SummaryAgg[family]` over the input group, with **one candidate per $\boldsymbol\theta$ in the family's predefined list**, dropping a $\boldsymbol\theta$ whose $\varepsilon_v$ alone exceeds every reading query's $\varepsilon_q$; a `SummaryEstimate[statistic]` candidate in the result's group reading the state group, with $r^{\log}$ = error cap where the consumer is non-linear |
+| Fused build (#1203 2c) | same | a build that computes several targets at once: a candidate of the outer target's state group, with `fused_groups` naming the others |
+
+Example: for A and B, Pass 1 adds G2 = `SummaryAgg[KLL](G1)` with candidates `k = 200` and `k = 345`, and G3, G4, G5 = `SummaryEstimate[q](G2)`. A and B's three estimates read one state group because their expressions over G1 hash-cons to one group.
+
+Today, Pass 1 instead sizes one $\boldsymbol\theta$ per `accuracy_budget_parts` and keeps `SummaryEstimate ← SummaryAgg` as private nodes inside one candidate. #1203 2a makes the intermediate results groups; #1203 PR 2 replaces sizing by the predefined list.
+
+### Stage 1, Pass 2: rules over groups
+
+| # | Rule | Code | Matches | Adds | Status |
+|---|---|---|---|---|---|
+| 1 | Local window composition (tumbling windows) | `add_local_window_composition` ([`window_candidates.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/window_candidates.rs)) | a summary state group read by window readers whose ranges and steps share a gcd width $w$ | a candidate of the **same state group** with $\omega_v$ = tumbling $(w, n)$, its $r^{\log}$ window requirement on each reader input | today it copies readers per layout (`TumblingWindows` origin); #1160 makes it a candidate of the state group |
+| 2 | Scan widening | `add_scan_label_candidates` ([`scan_labels.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/rules/scan_labels.rs)) | several scan groups of one metric with different label sets | a group for the widened scan (`find_or_add_group`), and in each original scan group a candidate `Project(widened)` | #1203 2a-5 (#1222) |
+| 3 | Summary inputs | `factor_summary_inputs` ([`summary_inputs.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/rules/summary_inputs.rs)) | a value projection or filter below a summary build | that projection or filter as its own group; the build's candidate reads it | #1203 2a-2 (#1218); after 2a, Pass 1 already makes it a group |
+| 4 | Top-k reuse | `add_topk_candidates` ([`topk.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/rules/topk.rs)) | top-k groups over one ranking with different `k` | a candidate of each top-k group reading the largest-`k` group, with an exact-input requirement | #1203 2a-3 (#1220) |
+| 5 | Finer aggregate | `add_finer_aggregate_candidates` ([`finer_aggregate.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/rules/finer_aggregate.rs)) | a SQL aggregate whose grouping is coarser than another aggregate group's | a candidate of the coarse group: filter, then merge the finer group's rows with each measure's rollup | #1203 2a-3 (#1220) |
+| 6 | Rollup | `add_rollup_candidates` ([`rollup.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/rules/rollup.rs)) | a coarse aggregate or summary group and a finer group whose state rolls up | a candidate of the coarse group reading the finer group (exact or sketch merge) | #1203 2a-4 (#1221) |
+| 7 | Window rollup | `add_window_rollup_candidates` (same) | a longer-range group whose windows a shorter-range group's state covers | a candidate of the longer-range group merging the shorter one's windows | #1203 2a-4 (#1221) |
+| 8 | Summary results | `factor_summary_results` ([`summary_results.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/rules/summary_results.rs)) | a summary readout inside a composite candidate | the readout as its own group | #1203 2a-2 (#1218) makes the readout a group in Pass 1; the rule is then deleted |
+| 9 | Shared configurations | `add_state_configuration_candidates` ([`shared_configuration_readers.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/rules/shared_configuration_readers.rs)) | readers that could share a summary at a size or window horizon that covers them | reader copies at the shared size (`SharedBuild` origin) | deleted in #1203 2b: the state group already holds every $\boldsymbol\theta$, and $y$ chooses per reader |
+| 10 | Shared summary state groups | `add_shared_summary_state_groups` ([`state_groups.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/state_groups.rs)) | summary builds directly over input groups | per-size concrete state groups with reader copies | deleted in #1203 2b and #1160: one state group per state family |
+| — | Logical edges (#1201) | after the last rule | every candidate $c$ and input $i$ | one `LogicalEdge { producer, consumer, input, satisfies_logical_requirement }` per $u \in G_{c,i}$, with $\alpha^{\log}_{u,c,i}$ = `satisfies(p^log_u, r^log_{c,i})`; output `LogicalASAPMemoCandidates { memo, edges }` | #1201 |
+
+After #1203 2b, every Pass 2 rule has the same shape: match groups, then `find_or_add_group` for any new intermediate result and `add_candidate` for the new way to compute an existing group. A rule adds no candidate a group already has (same expression and $p^{\log}$).
+
+### Stage 2: physical expansion and edges
+
+Stage 2 adds no logical candidates. It expands each logical candidate into physical candidates, then builds $\mathcal E$.
+
+| Step | Code | Reads | Adds |
+|---|---|---|---|
+| Physical expansion | `enumerate_candidate_configurations` ([`configurations.rs`](../../../crates/physical-asap-optimization/src/catalog/configurations.rs)) | each `CandidateForMemoGroup`, deployment capabilities, readers' $\mathcal T_q$ | one `PhysicalCandidate { logical, properties, input_requirements }` per valid $p^{\mathrm{phys}} = (\tau, \ell, \sigma)$ that the deployment allows (section 2, levels 4–6), with one `PhysicalRequirement` per input: the reader's timing, the evaluation it reads from, and its schedule |
+| Physical edges (#1201) | after expansion | each `LogicalEdge` | one `PhysicalEdge { producer, consumer, input, satisfies_logical_requirement, satisfies_physical_requirement }` per pair of the two logical candidates' physical candidates, with $\alpha^{\mathrm{phys}}$ = `satisfies_physical(p^phys_u, r^phys_{c,i})`; the admissible ones ($\alpha^{\log} = \alpha^{\mathrm{phys}} = 1$) through `admissible_edges_into` / `admissible_edges_out_of` |
+
+Example: v3 (`k = 345`) becomes, among others, (QueryTime, None), (QueryTime, OneEvaluation, Periodic(10 s, 0)) and (IngestionTime, AcrossEvaluations, grid phase 0). G3's estimate at query time has an admissible edge to each of them: same timing, or a query-time reader of an ingestion-time result kept across evaluations.
+
+### Stage 3: no rules
+
+Stage 3 adds no candidates and no edges. It reads $\mathcal C$ and the admissible part of $\mathcal E$, creates the MILP variables of section 3 over them, and decodes $\{x = 1\}$ and $\{y = 1\}$ into `DagOfSelectedCandidates`.
