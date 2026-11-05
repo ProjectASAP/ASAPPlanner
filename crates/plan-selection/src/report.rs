@@ -303,6 +303,13 @@ pub enum ErrorSelectingPlan {
         roots: usize,
         entries: usize,
     },
+    /// A candidate that cannot be costed as a whole; the error names the node
+    /// (one whose timing and lifetime cannot go together: a Stage 2 bug).
+    #[error("candidate {candidate}: {error}")]
+    InvalidCandidate {
+        candidate: String,
+        error: AnalyticalCostError,
+    },
     #[error("candidate {candidate}, node {node:?}: {error}")]
     Cost {
         candidate: String,

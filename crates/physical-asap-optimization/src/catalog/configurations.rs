@@ -13,12 +13,11 @@ use crate::summary_keep_eligibility;
 use asap_types::ir::operator::{agg_has_exact_per_entity_kernel, Reduction};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
-use asap_types::physical::PhysicalProperties;
+use asap_types::physical::{KeptProperties, PhysicalProperties};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use super::inventory::CandidateInventory;
 use asap_types::ir::QueryRoot;
-use asap_types::physical::KeptProperties;
 use asap_types::stages::{
     output_references, MemoGroupId, OperatorNodeOfCandidateForMemoGroupId,
     PhysicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateId, PhysicalCandidateKey,
@@ -416,8 +415,13 @@ fn summary_properties_allowed(
     };
     eligibility.range_compatibility.is_ok()
         && match candidate_properties {
-            PhysicalProperties::NotKept(_)
+            PhysicalProperties::NotKept(ExecutionTiming::QueryTime)
             | PhysicalProperties::Kept(KeptProperties::ForOneEvaluationAtQueryTime(_)) => true,
+            // Runs inside the ingestion refresh of the state that reads it, so
+            // the reader must allow ingestion, as for a build kept there.
+            PhysicalProperties::NotKept(ExecutionTiming::IngestionTime) => {
+                eligibility.at_ingestion.is_ok()
+            }
             PhysicalProperties::Kept(KeptProperties::AcrossEvaluationsAtIngestion(_)) => {
                 eligibility.at_ingestion.is_ok()
             }

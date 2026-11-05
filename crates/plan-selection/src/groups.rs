@@ -114,7 +114,7 @@ use asap_types::ir::properties::execution_data_state::{DataPrimitive, ExecutionD
 use asap_types::ir::properties::{AccuracyGuarantee, ExecutionTiming};
 use asap_types::ir::schema::{FieldDataType, Schema};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
-use asap_types::physical::PhysicalProperties;
+use asap_types::physical::{KeptProperties, PhysicalProperties};
 use asap_types::stages::{
     output_references, MemoGroupId, OperatorNodeOfCandidateForMemoGroupId,
     PhysicalASAPMemoCandidates,
@@ -123,7 +123,6 @@ use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use crate::SelectionModels;
 
-use asap_types::physical::KeptProperties;
 use asap_types::stages::{PhysicalCandidateId, ReaderConstraint};
 
 /// What the MILP is built from (module documentation).

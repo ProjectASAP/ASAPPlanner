@@ -132,8 +132,7 @@ use asap_types::ir::{
     Operator, OperatorNode, PhysicalPropertiesAssignment, QueryRoot, ScalarExpr,
     SchemaDerivationError, SortKey,
 };
-use asap_types::physical::KeptProperties;
-use asap_types::physical::PhysicalWorkloadPlan;
+use asap_types::physical::{KeptProperties, PhysicalWorkloadPlan};
 use asap_types::workload::{
     DataArrival, DataWorkload, Predictability, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
 };

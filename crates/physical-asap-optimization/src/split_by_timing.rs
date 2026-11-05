@@ -128,8 +128,7 @@ mod tests {
     use asap_types::ir::{
         apply_physical_properties, ASAPOp, NodeToTimedNodeCache, NonASAPOp, Operator,
     };
-    use asap_types::physical::KeptProperties;
-    use asap_types::physical::{Lifetime, Medium};
+    use asap_types::physical::{KeptProperties, Lifetime, Medium};
 
     const KEPT_ACROSS: Lifetime = Lifetime::AcrossEvaluations(Medium::Memory);
 

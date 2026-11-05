@@ -22,11 +22,14 @@
 //! candidates' contexts apart), the timings, the warm start's cost, the
 //! objective, `plan_cost` and the dual bound (measurement only).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::time::Instant;
 
+use asap_cost::analytical::AnalyticalCostError;
 use asap_cost::{kept_tumbling_window_chains, node_map, plan_cost, CostInputs};
+use asap_types::ir::physical_export::PhysicalASAPNodeId;
 use asap_types::ir::{ASAPOp, Operator};
+use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::stages::{
     AssignmentRealizer, DagOfSelectedCandidates, PhysicalASAPMemoCandidates,
     PhysicalCandidateError, PhysicalCandidateId, PruneReason, PrunedCandidate, RealizedPlan,
@@ -46,6 +49,30 @@ use crate::report::{
     ErrorSelectingPlan, InexactObjective, Rejection, RejectionCause, SearchReport, SearchStatus,
     Selection,
 };
+
+/// [`ErrorSelectingPlan::Cost`] of `candidate`, from `plan_cost`'s error at
+/// a node.
+pub(crate) fn cost_error(
+    candidate: &str,
+) -> impl Fn((PhysicalASAPNodeId, AnalyticalCostError)) -> ErrorSelectingPlan + '_ {
+    move |(node, error)| ErrorSelectingPlan::Cost {
+        candidate: candidate.to_owned(),
+        node,
+        error,
+    }
+}
+
+/// `plan`'s [`kept_tumbling_window_chains`], or
+/// [`ErrorSelectingPlan::InvalidCandidate`] naming the node whose timing and
+/// lifetime cannot go together.
+pub(crate) fn kept_chains_of(
+    plan: &PhysicalWorkloadPlan,
+) -> Result<HashSet<PhysicalASAPNodeId>, ErrorSelectingPlan> {
+    kept_tumbling_window_chains(&plan.dag).map_err(|error| ErrorSelectingPlan::InvalidCandidate {
+        candidate: plan.id.clone(),
+        error,
+    })
+}
 
 /// The largest relative difference between the objective and `plan_cost`
 /// that counts as equal.
@@ -125,12 +152,7 @@ pub fn select_plan(
     let plan = &realized.plan;
     let recurrence: Vec<_> = entries.iter().map(|e| e.recurrence.clone()).collect();
     let ranges: Vec<_> = entries.iter().map(|e| e.range_evaluation).collect();
-    let cost_error = |(node, error)| ErrorSelectingPlan::Cost {
-        candidate: plan.id.clone(),
-        node,
-        error,
-    };
-    let kept_chains = kept_tumbling_window_chains(&plan.dag).map_err(cost_error)?;
+    let kept_chains = kept_chains_of(plan)?;
     let (cost, _) = plan_cost(
         &plan.dag,
         &node_map(&plan.dag),
@@ -141,7 +163,7 @@ pub fn select_plan(
         cost_inputs,
         formula_scale,
     )
-    .map_err(cost_error)?;
+    .map_err(cost_error(&plan.id))?;
     let plan_cost_per_second = cost.cost_per_second.ok_or_else(|| {
         ErrorSelectingPlan::UnsupportedCostModel("a cost model without a cost per second".into())
     })? - solution.request_cost_per_second;

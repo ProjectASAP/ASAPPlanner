@@ -13,8 +13,10 @@ use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
 use asap_types::ir::NonASAPOp;
 use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
-use asap_types::physical::PhysicalWorkloadPlan;
-use asap_types::physical::{InvalidPhysicalProperties, KeptProperties, PhysicalProperties};
+use asap_types::ir::properties::ExecutionTiming;
+use asap_types::physical::{
+    InvalidPhysicalProperties, KeptProperties, PhysicalProperties, PhysicalWorkloadPlan,
+};
 use asap_types::stages::HowToComputeAggregateMeasure;
 
 use crate::planning_stages::PlanningStagesRun;
@@ -188,7 +190,9 @@ fn phase_label(
     properties: Result<PhysicalProperties, InvalidPhysicalProperties>,
 ) -> Option<&'static str> {
     match properties {
-        Ok(PhysicalProperties::NotKept(_)) => None,
+        // Not kept: no phase holds it; it runs inside its reader at either timing.
+        Ok(PhysicalProperties::NotKept(ExecutionTiming::QueryTime)) => None,
+        Ok(PhysicalProperties::NotKept(ExecutionTiming::IngestionTime)) => None,
         Ok(PhysicalProperties::Kept(KeptProperties::AcrossEvaluationsAtIngestion(_))) => {
             Some("ingestion time")
         }
@@ -557,13 +561,13 @@ mod tests {
         );
     }
 
-    /// Raw logical operators have an exact label, rather than an empty choice label.
     /// The phase label over every valid state, and an invalid pair.
     #[test]
     fn phase_label_over_every_valid_state() {
         for properties in PhysicalProperties::every_valid() {
             let expected = match properties {
-                PhysicalProperties::NotKept(_) => None,
+                PhysicalProperties::NotKept(ExecutionTiming::QueryTime) => None,
+                PhysicalProperties::NotKept(ExecutionTiming::IngestionTime) => None,
                 PhysicalProperties::Kept(KeptProperties::AcrossEvaluationsAtIngestion(_)) => {
                     Some("ingestion time")
                 }
@@ -582,6 +586,7 @@ mod tests {
         );
     }
 
+    /// Raw logical operators have an exact label, rather than an empty choice label.
     #[test]
     fn connected_labels_name_exact_results() {
         let roots = lower_promql_roots(&example1()).unwrap();

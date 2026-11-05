@@ -16,11 +16,10 @@ use crate::checks::{accuracy_check, accuracy_targets, latency_violation};
 use crate::report::{
     AcceptedAccuracy, ErrorSelectingPlan, Rejection, RejectionCause, WholePlanSelection,
 };
+use crate::select::{cost_error, kept_chains_of};
 use crate::SelectionModels;
 use asap_cost::analytical::AnalyticalCostError;
-use asap_cost::{
-    kept_tumbling_window_chains, node_map, plan_cost, query_reach, tumbling_window_retention_ms,
-};
+use asap_cost::{node_map, plan_cost, query_reach, tumbling_window_retention_ms};
 
 type Ranking = PlanRanking;
 use asap_types::workload::bounds::with_confirmed_weights;
@@ -180,14 +179,7 @@ impl<'a> PlanSelector<'a> {
             return Ok(CalibrationFit::default());
         }
         let nodes = node_map(&candidate.dag);
-        let kept_chains =
-            kept_tumbling_window_chains(&candidate.dag).map_err(|(node, error)| {
-                ErrorSelectingPlan::Cost {
-                    candidate: candidate.id.clone(),
-                    node,
-                    error,
-                }
-            })?;
+        let kept_chains = kept_chains_of(candidate)?;
         let (_, fit) = plan_cost(
             &candidate.dag,
             &nodes,
@@ -198,11 +190,7 @@ impl<'a> PlanSelector<'a> {
             self.models.cost_inputs,
             1.0,
         )
-        .map_err(|(node, error)| ErrorSelectingPlan::Cost {
-            candidate: candidate.id.clone(),
-            node,
-            error,
-        })?;
+        .map_err(cost_error(&candidate.id))?;
         Ok(fit)
     }
 
@@ -237,14 +225,7 @@ impl<'a> PlanSelector<'a> {
                 }
             };
         let nodes = node_map(&candidate.dag);
-        let kept_chains =
-            kept_tumbling_window_chains(&candidate.dag).map_err(|(node, error)| {
-                ErrorSelectingPlan::Cost {
-                    candidate: candidate.id.clone(),
-                    node,
-                    error,
-                }
-            })?;
+        let kept_chains = kept_chains_of(candidate)?;
         let settings = self.models.cost_inputs;
         let (cost, _) = plan_cost(
             &candidate.dag,
@@ -256,11 +237,7 @@ impl<'a> PlanSelector<'a> {
             settings,
             self.formula_scale,
         )
-        .map_err(|(node, error)| ErrorSelectingPlan::Cost {
-            candidate: candidate.id.clone(),
-            node,
-            error,
-        })?;
+        .map_err(cost_error(&candidate.id))?;
         let violation =
             latency_violation(&cost, self.entries).or_else(|| match &settings.cost_model {
                 CostModel::ClusterCapacity(limits) => capacity_violation(&cost.usage, limits)

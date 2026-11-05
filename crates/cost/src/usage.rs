@@ -30,10 +30,9 @@ use asap_types::ir::schema::{
     FieldDataType, GroupingStrategy, Schema, SketchParams, SketchStatistic,
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, TimeRangeKind};
-use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
+use asap_types::physical::{KeptProperties, Lifetime, Medium, PhysicalProperties};
 use asap_types::workload::{DataWorkload, QueryRecurrence, RangeEvaluation};
 
-use asap_types::physical::KeptProperties;
 use asap_types::workload::bounds::{
     declared_non_negative, declared_series, group_count_bound, source_name, source_rows_per_ms,
     unchanged_source_columns,
@@ -1154,12 +1153,20 @@ pub fn node_usage<'a>(
         }
     })?;
     let (kept, medium) = match properties {
-        PhysicalProperties::NotKept(_) => {
+        // Working memory while it runs, once per consumer that recomputes it,
+        // and held through each such consumer's evaluation.
+        PhysicalProperties::NotKept(ExecutionTiming::QueryTime) => {
             let working_memory_bytes = estimate.peak_memory_bytes();
             peak_memory_bytes = working_memory_bytes.saturating_mul(multiplier);
-            if !ingestion && working_memory_bytes > 0 {
+            if working_memory_bytes > 0 {
                 held = Some((working_memory_bytes, per_second, true));
             }
+            (0, Medium::Memory)
+        }
+        // Working memory while it runs, once per ingestion run that computes
+        // it; no query evaluation holds it.
+        PhysicalProperties::NotKept(ExecutionTiming::IngestionTime) => {
+            peak_memory_bytes = estimate.peak_memory_bytes().saturating_mul(multiplier);
             (0, Medium::Memory)
         }
         // A tumbling-window chain kept across evaluations holds the tumbling windows its
@@ -1636,17 +1643,14 @@ pub type NodeMap<'a> =
 /// lifetime cannot go together.
 pub fn kept_tumbling_window_chains(
     dag: &PhysicalASAPDAG,
-) -> Result<HashSet<PhysicalASAPNodeId>, (PhysicalASAPNodeId, AnalyticalCostError)> {
+) -> Result<HashSet<PhysicalASAPNodeId>, AnalyticalCostError> {
     let mut chains = HashSet::new();
     for node in &dag.nodes {
         let properties = node.physical_properties().map_err(|reason| {
-            (
-                node.id,
-                AnalyticalCostError::InvalidPhysicalProperties {
-                    node: node.id,
-                    reason,
-                },
-            )
+            AnalyticalCostError::InvalidPhysicalProperties {
+                node: node.id,
+                reason,
+            }
         })?;
         let chain = matches!(
             node.payload,
@@ -1654,11 +1658,15 @@ pub fn kept_tumbling_window_chains(
         );
         let kept_at_query_time = match properties {
             PhysicalProperties::Kept(KeptProperties::AcrossEvaluationsAtQueryTime(_)) => true,
-            PhysicalProperties::NotKept(_)
-            | PhysicalProperties::Kept(
-                KeptProperties::AcrossEvaluationsAtIngestion(_)
-                | KeptProperties::ForOneEvaluationAtQueryTime(_),
-            ) => false,
+            // Rebuilt whole by each evaluation that reads it: its scan reads
+            // the whole window.
+            PhysicalProperties::NotKept(ExecutionTiming::QueryTime) => false,
+            // Built inside an ingestion run: no query-time scan reads below it.
+            PhysicalProperties::NotKept(ExecutionTiming::IngestionTime) => false,
+            // Built as data arrives: no query-time scan reads below it.
+            PhysicalProperties::Kept(KeptProperties::AcrossEvaluationsAtIngestion(_)) => false,
+            // Kept only within one evaluation, which builds it whole.
+            PhysicalProperties::Kept(KeptProperties::ForOneEvaluationAtQueryTime(_)) => false,
         };
         if chain && kept_at_query_time {
             chains.insert(node.id);

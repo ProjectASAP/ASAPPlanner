@@ -396,7 +396,7 @@ mod tests {
         self_calibrated_cost(
             dag,
             &node_map(dag),
-            &kept_tumbling_window_chains(dag)?,
+            &kept_tumbling_window_chains(dag).expect("valid physical properties"),
             recurrence,
             &[],
             data,
