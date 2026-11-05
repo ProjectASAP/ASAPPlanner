@@ -302,7 +302,7 @@ pub struct LogicalRequirement {
 pub fn satisfies(producer: &LogicalProperties, requirement: &LogicalRequirement) -> bool;
 
 /// g_c linearized: λ per input and the validity cap (None when g_c is linear).
-/// New abstraction, not yet in #1207: pending approval.
+/// Approved 2026-11-05.
 pub struct ErrorPropagation { pub slope_per_input: Vec<f64>, pub validity_cap: Option<f64> }
 pub fn error_propagation(consumer: &Operator<MemoGroupId>) -> ErrorPropagation;
 ```
