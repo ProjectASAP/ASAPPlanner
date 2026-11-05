@@ -19,7 +19,7 @@ use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::QueryRoot;
 use asap_types::physical::PhysicalWorkloadPlan;
-use asap_types::stages::{AssignmentRealizer, DagOfLogicalMemoGroups, Memo};
+use asap_types::stages::{AssignmentRealizer, Memo};
 use asap_types::workload::bounds::with_confirmed_weights_at;
 use asap_types::workload::{DataWorkload, PlanningWorkload, QueryWorkloadEntry};
 use serde_json::Value;
@@ -305,11 +305,6 @@ pub fn run_search_over(
     })
 }
 
-/// Stage 0's memo groups, `dag`, without candidates.
-fn stage0_memo_groups(dag: DagOfLogicalMemoGroups) -> Memo {
-    Memo::new(dag)
-}
-
 /// The stages over `roots` up to and including `until`, as the facade runs
 /// them. A stage's failure is reported in the run, as the facade does.
 // ponytail: copies run_planning's stage order, which has no stop point;
@@ -325,7 +320,7 @@ pub fn run_stages_until(
     let stage0_dag = generate_dag_of_logical_memo_groups(&roots);
     let mut stages = PlanningStagesRun {
         run_until: until,
-        stage0_memo_groups: Some(stage0_memo_groups(stage0_dag.clone())),
+        stage0_memo_groups: Some(Memo::new(stage0_dag.clone())),
         pass2_local_window_composition: None,
         stage0_query_language_frontends: roots.clone(),
         run: PlanningRun {

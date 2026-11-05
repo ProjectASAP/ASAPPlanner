@@ -23,6 +23,10 @@ pub struct Memo {
     /// Every group, by its logical node: [`Self::group_whose_node_is`] and
     /// [`Self::group_with_equal_node`] look groups up in it.
     group_lookup: MemoGroupLookup,
+    /// The number of groups Stage 0 produced from the queries' DAG
+    /// ([`Self::new`]): groups `0..stage0_group_count`. Groups added later
+    /// come after them ([`Self::is_stage0_group`]).
+    stage0_group_count: usize,
 }
 
 /// Every group of a memo, by the address of its logical node and by node
@@ -92,6 +96,7 @@ impl Memo {
             query_roots: dag.query_roots,
             candidates: vec![Vec::new(); dag.groups.len()],
             group_lookup: MemoGroupLookup::default(),
+            stage0_group_count: dag.groups.len(),
         };
         for group in dag.groups {
             memo.index_and_push(group);
@@ -102,6 +107,12 @@ impl Memo {
     /// The groups, by id.
     pub fn groups(&self) -> &[MemoGroup] {
         &self.groups
+    }
+
+    /// Whether `group` is one Stage 0 produced from the queries' DAG, not
+    /// one Pass 1 or Pass 2 added beneath them.
+    pub fn is_stage0_group(&self, group: MemoGroupId) -> bool {
+        (group.0 as usize) < self.stage0_group_count
     }
 
     /// The groups, by id, to change in a test (a malformed reference, a
@@ -148,98 +159,12 @@ impl Memo {
             .copied()
     }
 
-    /// The group [`Self::find_or_add_group`] finds for `node`: the group whose
-    /// logical node is `node`, else the lowest group whose logical node
-    /// equals `node` by Stage 0's equality when sharing `node` is legal
-    /// ([`HashConsingTable::find`]).
+    /// The group whose logical node is `node`, else the lowest group whose
+    /// logical node equals `node` by Stage 0's equality when sharing `node`
+    /// is legal ([`HashConsingTable::find`]).
     pub fn group_with_equal_node(&self, node: &Rc<OperatorNode>) -> Option<MemoGroupId> {
         self.group_whose_node_is(node)
             .or_else(|| self.group_lookup.group_with_equal_node.find(node))
-    }
-
-    /// Returns the existing group whose node equals `node`
-    /// ([`Self::group_with_equal_node`], Stage 0's equality), after adding
-    /// `queries` to it and to every group below it ([`Self::add_queries`]).
-    /// Otherwise adds a group for `node` over its children's groups
-    /// ([`Self::over_child_groups`]) and returns it. It never copies a group.
-    /// An added group's logical node is `node` over its children's groups'
-    /// nodes, `queries` reach it, and its one candidate is that node over
-    /// those groups, made by `origin` and sized for `accuracy_budget_parts`.
-    pub fn find_or_add_group(
-        &mut self,
-        node: &Rc<OperatorNode>,
-        queries: &[usize],
-        origin: &OriginOfCandidateForMemoGroup,
-        accuracy_budget_parts: usize,
-    ) -> MemoGroupId {
-        if let Some(group) = self.group_with_equal_node(node) {
-            self.add_queries(group, queries);
-            return group;
-        }
-        let (logical_node, child_groups) =
-            self.over_child_groups(node, queries, origin, accuracy_budget_parts);
-        let mut queries = queries.to_vec();
-        queries.sort_unstable();
-        queries.dedup();
-        let candidate = CandidateForMemoGroup {
-            fused_groups: Vec::new(),
-            root_node: Rc::clone(&logical_node),
-            input_groups: child_groups.clone(),
-            origin: origin.clone(),
-            accuracy_budget_parts,
-        };
-        self.push_group(
-            MemoGroup {
-                logical_node,
-                child_groups,
-                parents: Vec::new(),
-                queries,
-            },
-            vec![candidate],
-        )
-    }
-
-    /// `node`'s operator over the groups of its children, each found or
-    /// added with every node below it ([`Self::find_or_add_group`], same
-    /// arguments), and those groups by child position: group `i` is child
-    /// `i`'s, so an operator reading one group twice (`x / x`) lists it
-    /// twice. `node` itself when every child is its group's node.
-    pub fn over_child_groups(
-        &mut self,
-        node: &Rc<OperatorNode>,
-        queries: &[usize],
-        origin: &OriginOfCandidateForMemoGroup,
-        accuracy_budget_parts: usize,
-    ) -> (Rc<OperatorNode>, Vec<MemoGroupId>) {
-        let mut group_of_child: HashMap<*const OperatorNode, MemoGroupId> = HashMap::new();
-        let mut child_groups = Vec::new();
-        for child in node.children() {
-            let group = match group_of_child.get(&Rc::as_ptr(child)) {
-                Some(&group) => group,
-                None => {
-                    let group =
-                        self.find_or_add_group(child, queries, origin, accuracy_budget_parts);
-                    group_of_child.insert(Rc::as_ptr(child), group);
-                    group
-                }
-            };
-            child_groups.push(group);
-        }
-        let group_node = |child: &Rc<OperatorNode>| {
-            Rc::clone(&self.groups[group_of_child[&Rc::as_ptr(child)].0 as usize].logical_node)
-        };
-        if node
-            .children()
-            .into_iter()
-            .all(|child| Rc::ptr_eq(child, &group_node(child)))
-        {
-            return (Rc::clone(node), child_groups);
-        }
-        let rebuilt = Rc::new(OperatorNode {
-            operator: node.operator.map_children(group_node),
-            ..(**node).clone()
-        });
-        (rebuilt, child_groups)
     }
 
     /// The groups `group` reads: its logical child groups and its

@@ -18,9 +18,9 @@ use crate::pass2::memo::shared_configurations::{
     TumblingWindowConfiguration, TumblingWindowRequirement,
 };
 use crate::pass2::memo::state_groups::{
-    boundary_ptrs, input_group_build, same_range_input, simple_build, Pass2RuleError,
+    boundary_ptrs, build_read_by, same_range_input, BuildPlace, Pass2RuleError,
 };
-use asap_types::stages::{Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{Memo, OriginOfCandidateForMemoGroup};
 
 /// `resized` (a rewrite of `original` with the same shape) with each node
 /// that is a child group's node in `original` put back, and the nodes above
@@ -66,10 +66,8 @@ fn with_child_nodes(
 struct StateNeed {
     candidate: usize,
     build: Rc<OperatorNode>,
-    /// The build's group when the candidate reads it as an input group (a
-    /// build Pass 1 added); `None` when the build is one of the
-    /// candidate's private nodes.
-    build_group: Option<MemoGroupId>,
+    /// Where the candidate reads its build.
+    place: BuildPlace,
     merge: Option<Rc<OperatorNode>>,
     family: FieldDataType,
     /// The reader candidate's `accuracy_budget_parts`: the shares its build
@@ -134,12 +132,10 @@ impl SharedProducer for SummaryStates {
         let mut sets: Vec<Vec<Reader<StateNeed>>> = Vec::new();
         for (group, candidates) in memo.candidates.iter().enumerate() {
             for (candidate, entry) in candidates.iter().enumerate() {
-                let (build, build_group) = match simple_build(memo, entry) {
-                    Some((build, _)) => (build, None),
-                    None => match input_group_build(memo, entry) {
-                        Some((build, group)) => (build, Some(group)),
-                        None => continue,
-                    },
+                let Some((build, place @ (BuildPlace::Private | BuildPlace::InputGroup(_)))) =
+                    build_read_by(memo, entry)
+                else {
+                    continue;
                 };
                 // Configuration expansion precedes Stage 2. The rewrite helpers
                 // create unassigned state; preserve any already assigned build.
@@ -178,7 +174,7 @@ impl SharedProducer for SummaryStates {
                     need: StateNeed {
                         candidate,
                         build,
-                        build_group,
+                        place,
                         merge,
                         family,
                         accuracy_budget_parts: entry.accuracy_budget_parts,
@@ -309,7 +305,7 @@ impl SharedProducer for SummaryStates {
         let mut boundaries = boundary_ptrs(memo, &original);
         // A build read as an input group is the node resized: it is not put
         // back, and the resized build reads the build group's own inputs.
-        if let Some(build_group) = need.build_group {
+        if let BuildPlace::InputGroup(build_group) = need.place {
             boundaries.remove(&Rc::as_ptr(&need.build));
             boundaries.extend(
                 memo.groups()[build_group.0 as usize]
@@ -338,9 +334,11 @@ impl SharedProducer for SummaryStates {
         };
         // A build read as an input group stays one: the resized build's group
         // is found or added, and the reader reads it.
-        let (node, input_groups) = match need.build_group {
-            None => (node, original.input_groups.clone()),
-            Some(build_group) => {
+        let (node, input_groups) = match need.place {
+            BuildPlace::Private | BuildPlace::BeneathGroups => {
+                (node, original.input_groups.clone())
+            }
+            BuildPlace::InputGroup(build_group) => {
                 let resized_build = original
                     .root_node
                     .children()

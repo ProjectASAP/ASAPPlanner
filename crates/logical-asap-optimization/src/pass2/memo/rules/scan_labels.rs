@@ -7,8 +7,10 @@ use asap_accuracy::propagation::recompose_guarantees;
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot};
 
-use crate::added_groups::{groups_read_through_added_groups, workload_groups};
-use crate::pass2::memo::state_groups::{boundary_groups, builds_beneath, Pass2RuleError};
+use crate::added_groups::groups_read_through_added_groups;
+use crate::pass2::memo::state_groups::{
+    boundary_groups, build_down_to_stage0_groups, Pass2RuleError,
+};
 use asap_types::stages::{CandidateForMemoGroup, Memo, OriginOfCandidateForMemoGroup};
 use asap_types::stages::{MemoGroup, MemoGroupId};
 
@@ -18,11 +20,9 @@ pub(crate) fn add_scan_label_candidates(memo: &mut Memo) -> Result<usize, Pass2R
     let mut owners = Vec::new();
     let mut roots = Vec::new();
     // Pass 1's intermediate groups (a summary build, its readout) are
-    // widened inside their readers' candidates, down to the workload's
-    // groups.
-    let workload_groups = workload_groups(memo);
+    // widened inside their readers' candidates, down to Stage 0's groups.
     for (group, candidates) in memo.candidates.iter().enumerate() {
-        if !workload_groups.contains(&MemoGroupId(group as u32)) {
+        if !memo.is_stage0_group(MemoGroupId(group as u32)) {
             continue;
         }
         for (index, candidate) in candidates.iter().enumerate() {
@@ -37,9 +37,7 @@ pub(crate) fn add_scan_label_candidates(memo: &mut Memo) -> Result<usize, Pass2R
             if !super::reuse::eligible(candidate) {
                 continue;
             }
-            let Some((build, children)) =
-                build_down_to_workload_groups(memo, &workload_groups, candidate)
-            else {
+            let Some((build, children)) = build_down_to_stage0_groups(memo, candidate) else {
                 continue;
             };
             if !matches!(
@@ -55,14 +53,10 @@ pub(crate) fn add_scan_label_candidates(memo: &mut Memo) -> Result<usize, Pass2R
                         ..
                     }
                 )
-            ) || groups_read_through_added_groups(
-                memo,
-                &candidate.input_groups,
-                &workload_groups,
-            )
-            .workload_groups
-            .iter()
-            .any(|child| !children.contains(child))
+            ) || groups_read_through_added_groups(memo, &candidate.input_groups)
+                .stage0_groups
+                .iter()
+                .any(|child| !children.contains(child))
                 || children
                     .iter()
                     .any(|child| !is_source_chain(&memo.groups()[child.0 as usize].logical_node))
@@ -143,29 +137,6 @@ pub(crate) fn add_scan_label_candidates(memo: &mut Memo) -> Result<usize, Pass2R
         added += 1;
     }
     Ok(added)
-}
-
-/// The one summary build `candidate` computes down to `workload_groups`,
-/// through the groups added beneath them, with the workload groups it
-/// reads ([`builds_beneath`]); `None` unless there is exactly one.
-fn build_down_to_workload_groups(
-    memo: &Memo,
-    workload_groups: &HashSet<MemoGroupId>,
-    candidate: &CandidateForMemoGroup,
-) -> Option<(Rc<OperatorNode>, Vec<MemoGroupId>)> {
-    let boundaries: HashMap<*const OperatorNode, MemoGroupId> = workload_groups
-        .iter()
-        .map(|&group| {
-            (
-                Rc::as_ptr(&memo.groups()[group.0 as usize].logical_node),
-                group,
-            )
-        })
-        .collect();
-    let [(build, children)] = builds_beneath(&candidate.root_node, &boundaries)
-        .try_into()
-        .ok()?;
-    Some((build, children?))
 }
 
 fn same_output_contract(expected: &OperatorNode, actual: &OperatorNode) -> bool {

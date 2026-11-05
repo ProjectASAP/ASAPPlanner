@@ -1,6 +1,6 @@
 //! The one node equality that makes two nodes one memo group: Stage 0's
-//! hash-consing of the frontends' DAG and the memo's
-//! [`find_or_add_group`](super::Memo::find_or_add_group) both use
+//! hash-consing of the frontends' DAG and the memo's group lookup
+//! ([`group_with_equal_node`](super::Memo::group_with_equal_node)) both use
 //! [`HashConsingTable`]. Two nodes are one when they are equal by
 //! [`same_node`] (operator, schema, result kind, guarantee, timing,
 //! materialization and children) and sharing them is legal
@@ -49,6 +49,14 @@ fn own_fields(node: &OperatorNode) -> Operator<()> {
 /// `O(1)` beyond the children's already-known hashes. A non-finite `f64`
 /// serializes as `null`, merely widening one (still equality-checked) bucket.
 fn structural_hash(node: &OperatorNode, cache: &mut NodeToStructuralHashCache) -> u64 {
+    structural_hash_with(node, &mut |child| cached_structural_hash(child, cache))
+}
+
+/// [`structural_hash`] of `node` with each child's hash from `child_hash`.
+fn structural_hash_with(
+    node: &OperatorNode,
+    child_hash: &mut dyn FnMut(&Rc<OperatorNode>) -> u64,
+) -> u64 {
     let mut hasher = DefaultHasher::new();
     let own = (
         own_fields(node),
@@ -62,7 +70,7 @@ fn structural_hash(node: &OperatorNode, cache: &mut NodeToStructuralHashCache) -
         .unwrap_or_default()
         .hash(&mut hasher);
     for child in node.children() {
-        cached_structural_hash(child, cache).hash(&mut hasher);
+        child_hash(child).hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -85,34 +93,18 @@ fn looked_up_structural_hash(
     cache: &NodeToStructuralHashCache,
     looked_up: &mut HashMap<*const OperatorNode, u64>,
 ) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    let own = (
-        own_fields(node),
-        node.result_kind,
-        &node.schema,
-        &node.guarantee,
-        node.timing,
-        node.materialization,
-    );
-    serde_json::to_string(&own)
-        .unwrap_or_default()
-        .hash(&mut hasher);
-    for child in node.children() {
+    structural_hash_with(node, &mut |child| {
         let pointer = Rc::as_ptr(child);
-        let hash = match cache.get(&pointer) {
-            Some((_, hash)) => *hash,
-            None => match looked_up.get(&pointer) {
-                Some(hash) => *hash,
-                None => {
-                    let hash = looked_up_structural_hash(child, cache, looked_up);
-                    looked_up.insert(pointer, hash);
-                    hash
-                }
-            },
-        };
-        hash.hash(&mut hasher);
-    }
-    hasher.finish()
+        if let Some((_, hash)) = cache.get(&pointer) {
+            return *hash;
+        }
+        if let Some(hash) = looked_up.get(&pointer) {
+            return *hash;
+        }
+        let hash = looked_up_structural_hash(child, cache, looked_up);
+        looked_up.insert(pointer, hash);
+        hash
+    })
 }
 
 /// Numeric `PartialEq` alone conflates signed zeros. The serialized check is

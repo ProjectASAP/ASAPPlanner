@@ -191,26 +191,72 @@ fn validate_references(memo: &Memo) -> Result<(), Pass2RuleError> {
     Ok(())
 }
 
-pub(super) fn simple_build(
+/// Where a candidate reads its one summary build ([`build_read_by`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BuildPlace {
+    /// One of the candidate's private nodes.
+    Private,
+    /// An input group of the candidate (a build Pass 1 added), which its
+    /// root reads directly.
+    InputGroup(MemoGroupId),
+    /// Beneath the groups the candidate reads, down to Stage 0's groups.
+    BeneathGroups,
+}
+
+/// The one summary build `candidate` reads, and where, the first found of:
+/// - its one private build ([`direct_input_builds`]), when the sharing steps
+///   read its builds by origin;
+/// - with no private build, its one input group whose node is a
+///   `SummaryAgg`, which its root reads directly;
+/// - the one build beneath its root down to Stage 0's groups, through the
+///   groups added beneath them ([`build_down_to_stage0_groups`]).
+///
+/// `None` when there is none, or more than one where it looks.
+pub(super) fn build_read_by(
+    memo: &Memo,
+    candidate: &CandidateForMemoGroup,
+) -> Option<(Rc<OperatorNode>, BuildPlace)> {
+    if direct_input_builds_eligible(candidate) {
+        let mut builds = direct_input_builds(memo, candidate);
+        match builds.len() {
+            1 => return Some((builds.remove(0).0, BuildPlace::Private)),
+            0 => {
+                if let Some(found) = input_group_build(memo, candidate) {
+                    return Some(found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let (build, _) = build_down_to_stage0_groups(memo, candidate)?;
+    Some((build, BuildPlace::BeneathGroups))
+}
+
+/// The only summary build beneath `candidate`'s root down to Stage 0's
+/// groups, through its private nodes and the groups added beneath them
+/// ([`builds_beneath`]), with the Stage 0 groups it reads; `None` unless
+/// there is exactly one and it reads only Stage 0 groups. Unlike
+/// [`build_read_by`]'s first look, a build over another private node counts:
+/// scan widening rewrites the whole candidate, so it needs the only build.
+pub(super) fn build_down_to_stage0_groups(
     memo: &Memo,
     candidate: &CandidateForMemoGroup,
 ) -> Option<(Rc<OperatorNode>, Vec<MemoGroupId>)> {
-    let mut builds = direct_input_builds(memo, candidate);
-    (builds.len() == 1).then(|| builds.remove(0))
+    let [(build, children)]: [_; 1] = builds_beneath(&candidate.root_node, &|node| {
+        memo.group_whose_node_is(node)
+            .filter(|&group| memo.is_stage0_group(group))
+    })
+    .try_into()
+    .ok()?;
+    Some((build, children?))
 }
 
-/// The summary build `candidate` reads as an input group, with that group:
-/// a build Pass 1 added, read by a candidate with no private build. `None`
-/// unless exactly one input group is a `SummaryAgg` and the candidate is one
-/// [`simple_build`] would take by origin.
-pub(super) fn input_group_build(
+/// `candidate`'s one input group whose node is a `SummaryAgg`, which its
+/// root reads directly, with that node.
+fn input_group_build(
     memo: &Memo,
     candidate: &CandidateForMemoGroup,
-) -> Option<(Rc<OperatorNode>, MemoGroupId)> {
-    if !direct_input_builds_eligible(candidate) || !direct_input_builds(memo, candidate).is_empty()
-    {
-        return None;
-    }
+) -> Option<(Rc<OperatorNode>, BuildPlace)> {
     let mut builds = candidate.input_groups.iter().filter(|group| {
         matches!(
             memo.groups()[group.0 as usize].logical_node.asap(),
@@ -218,19 +264,17 @@ pub(super) fn input_group_build(
         )
     });
     let group = *builds.next()?;
+    let build = &memo.groups()[group.0 as usize].logical_node;
     if builds.next().is_some()
         || !candidate
             .root_node
             .children()
             .iter()
-            .any(|child| Rc::ptr_eq(child, &memo.groups()[group.0 as usize].logical_node))
+            .any(|child| Rc::ptr_eq(child, build))
     {
         return None;
     }
-    Some((
-        Rc::clone(&memo.groups()[group.0 as usize].logical_node),
-        group,
-    ))
+    Some((Rc::clone(build), BuildPlace::InputGroup(group)))
 }
 
 /// Whether the sharing steps read `candidate`'s builds: one made by Pass 1
@@ -267,25 +311,27 @@ pub(super) fn direct_input_builds(
             )
         })
         .collect();
-    builds_beneath(&candidate.root_node, &boundaries)
-        .into_iter()
-        .filter_map(|(build, children)| Some((build, children?)))
-        .collect()
+    builds_beneath(&candidate.root_node, &|node| {
+        boundaries.get(&Rc::as_ptr(node)).copied()
+    })
+    .into_iter()
+    .filter_map(|(build, children)| Some((build, children?)))
+    .collect()
 }
 
 /// The summary builds (`SummaryAgg`, `SummaryTumblingWindowChain`) beneath
-/// `root`, down to the nodes of `boundaries` (excluded), each once, with
-/// the boundary groups it reads (repeats next to each other removed), or
-/// `None` when it reads a node that is not a boundary.
+/// `root`, down to the nodes `boundary` gives a group (excluded), each
+/// once, with the boundary groups it reads (repeats next to each other
+/// removed), or `None` when it reads a node that is not a boundary.
 pub(super) fn builds_beneath(
     root: &Rc<OperatorNode>,
-    boundaries: &HashMap<*const OperatorNode, MemoGroupId>,
+    boundary: &dyn Fn(&Rc<OperatorNode>) -> Option<MemoGroupId>,
 ) -> Vec<(Rc<OperatorNode>, Option<Vec<MemoGroupId>>)> {
     let mut stack: Vec<Rc<OperatorNode>> = root.children().into_iter().cloned().collect();
     let mut seen = HashSet::new();
     let mut builds = Vec::new();
     while let Some(node) = stack.pop() {
-        if boundaries.contains_key(&Rc::as_ptr(&node)) || !seen.insert(Rc::as_ptr(&node)) {
+        if boundary(&node).is_some() || !seen.insert(Rc::as_ptr(&node)) {
             continue;
         }
         if matches!(
@@ -295,7 +341,7 @@ pub(super) fn builds_beneath(
             let children: Option<Vec<_>> = node
                 .children()
                 .iter()
-                .map(|child| boundaries.get(&Rc::as_ptr(child)).copied())
+                .map(|child| boundary(child))
                 .collect();
             builds.push((
                 Rc::clone(&node),
@@ -562,10 +608,9 @@ mod tests {
             .enumerate()
             .map(|(id, group)| (Rc::as_ptr(&group.logical_node), MemoGroupId(id as u32)))
             .collect();
-        // As local window composition does: the workload's groups only.
-        let workload_groups = crate::added_groups::workload_groups(&memo);
+        // As local window composition does: Stage 0's groups only.
         for group in 0..memo.groups().len() {
-            if !workload_groups.contains(&MemoGroupId(group as u32)) {
+            if !memo.is_stage0_group(MemoGroupId(group as u32)) {
                 continue;
             }
             let grid = grids[memo.groups()[group].queries[0]];
@@ -1320,7 +1365,7 @@ mod tests {
         };
         let mut memo = workload(&[("quantile_over_time(0.95, latency[5m])", 0.01)]);
         let (owner, mut base, build) = memo.candidates.iter().enumerate().find_map(|(owner, candidates)| candidates.iter().find_map(|candidate| {
-            let (build, _) = input_group_build(&memo, candidate)?;
+            let (build, BuildPlace::InputGroup(_)) = build_read_by(&memo, candidate)? else { return None };
             matches!(build.asap(), Some(ASAPOp::SummaryAgg {family: FieldDataType::Sketch(kind, _), ..}) if kind.algorithm() == &SketchAlgorithm::Kll).then(|| (owner, candidate.clone(), build))
         })).unwrap();
         let Some(ASAPOp::SummaryAgg {
@@ -1412,7 +1457,12 @@ mod tests {
             .find_map(|(group, candidates)| {
                 candidates
                     .iter()
-                    .find(|candidate| simple_build(&memo, candidate).is_some())
+                    .find(|candidate| {
+                        matches!(
+                            build_read_by(&memo, candidate),
+                            Some((_, BuildPlace::Private))
+                        )
+                    })
                     .map(|candidate| (group, candidate.clone()))
             })
             .unwrap();
@@ -1467,7 +1517,9 @@ mod tests {
                 let [own] = memo.candidates[group].as_slice() else {
                     return None;
                 };
-                let (_, build) = input_group_build(&memo, own)?;
+                let (_, BuildPlace::InputGroup(build)) = build_read_by(&memo, own)? else {
+                    return None;
+                };
                 matches!(
                     memo.groups()[build.0 as usize].logical_node.asap(),
                     Some(ASAPOp::SummaryAgg { .. })

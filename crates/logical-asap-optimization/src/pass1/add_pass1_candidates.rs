@@ -14,7 +14,7 @@
 //! [`super::per_computation_candidates::compose_logical_candidate`] with that choice, every target beneath it
 //! exact, its summaries sized for its readers' failure probability. The
 //! candidate is the composed root's operator alone: every node beneath it
-//! is found or added as a group ([`Memo::find_or_add_group`], by Stage 0's
+//! is found or added as a group ([`find_or_add_group`](crate::find_or_add_group::find_or_add_group), by Stage 0's
 //! node equality), so `Project ← SummaryEstimate ← SummaryAgg` is three
 //! groups, and equal builds of different queries are one group.
 //! The operator reads each child group through its node (the same `Rc`),
@@ -44,7 +44,8 @@ use std::rc::Rc;
 use super::per_computation_candidates::{
     compose_logical_candidate_with_accuracy_budget_parts, PerComputationCandidates,
 };
-use crate::added_groups::{groups_read_through_added_groups, workload_groups};
+use crate::added_groups::groups_read_through_added_groups;
+use crate::find_or_add_group::over_child_groups;
 use crate::own_candidate_sizing::size_own_candidate_for;
 use asap_accuracy::sizing::{
     per_input_failure_probability, with_summaries_sized_for_failure_probability,
@@ -128,7 +129,6 @@ fn add_candidates_to_initial_groups(
     memo: &mut Memo,
 ) -> Result<(), SchemaDerivationError> {
     let initial_groups = memo.groups().len();
-    let workload_groups = workload_groups(memo);
     // Each target aggregate group's targets, one per measure: Pass 1 walks
     // the groups, so an aggregate several queries read has one target per
     // measure.
@@ -188,7 +188,6 @@ fn add_candidates_to_initial_groups(
                     per_computation,
                     accuracy_targets,
                     data,
-                    &workload_groups,
                     memo,
                     &mut structural_ids,
                     &logical_nodes,
@@ -209,13 +208,12 @@ fn add_candidates_to_initial_groups(
 /// target varying fastest), each the aggregate composed alone with that
 /// choice, its summaries sized for its readers' failure probability (query
 /// `q`'s target `accuracy_targets[q]`, over `data`); the groups beneath it
-/// are found or added beneath `workload_groups`. `None` when none composes.
+/// are found or added beneath Stage 0's groups. `None` when none composes.
 #[allow(clippy::too_many_arguments)]
 fn target_candidates(
     per_computation: &PerComputationCandidates,
     accuracy_targets: &[AccuracyTarget],
     data: &DataWorkload,
-    workload_groups: &HashSet<MemoGroupId>,
     memo: &mut Memo,
     structural_ids: &mut NodeToStructuralIdCache,
     logical_nodes: &Rc<[Rc<OperatorNode>]>,
@@ -277,7 +275,8 @@ fn target_candidates(
                     data,
                 )?;
                 let root = without_exact_guarantees_below(&root);
-                let (node, children) = memo.over_child_groups(
+                let (node, children) = over_child_groups(
+                    memo,
                     &root,
                     &queries,
                     &OriginOfCandidateForMemoGroup::Pass1,
@@ -285,9 +284,7 @@ fn target_candidates(
                 );
                 // A reader sized for more parts may find a group added for
                 // fewer.
-                for group in
-                    groups_read_through_added_groups(memo, &children, workload_groups).added_groups
-                {
+                for group in groups_read_through_added_groups(memo, &children).added_groups {
                     size_own_candidate_for(memo, group, accuracy_budget_parts);
                 }
                 // A parent reads the candidate in the group's place, so it
@@ -451,7 +448,7 @@ fn compose_alone(
 /// 0's nodes carry no guarantee, and composition gives each exact node it
 /// rebuilds the exact one ("exact over exact inputs"); that difference alone
 /// must not split a composed node from the equal Stage 0 group
-/// ([`Memo::find_or_add_group`] compares guarantees). An approximate
+/// ([`find_or_add_group`](crate::find_or_add_group::find_or_add_group) compares guarantees). An approximate
 /// guarantee is kept, so builds that differ only in their failure
 /// probability or guarantee stay different groups. `root`'s own guarantee
 /// is the candidate's and is kept.
@@ -738,11 +735,10 @@ mod tests {
         g
     }
 
-    /// The workload groups `candidate` reads, directly or through the
+    /// The Stage 0 groups `candidate` reads, directly or through the
     /// groups Pass 1 added beneath them, in the order first reached.
-    fn workload_inputs(memo: &Memo, candidate: &CandidateForMemoGroup) -> Vec<MemoGroupId> {
-        groups_read_through_added_groups(memo, &candidate.input_groups, &workload_groups(memo))
-            .workload_groups
+    fn stage0_inputs(memo: &Memo, candidate: &CandidateForMemoGroup) -> Vec<MemoGroupId> {
+        groups_read_through_added_groups(memo, &candidate.input_groups).stage0_groups
     }
 
     /// The summary algorithms a candidate's private nodes build.
@@ -792,7 +788,8 @@ mod tests {
         assert!(!guarantee.is_exact());
         let groups_before = memo.groups().len();
         let mut add = |node: OperatorNode| {
-            memo.find_or_add_group(
+            crate::find_or_add_group::find_or_add_group(
+                &mut memo,
                 &Rc::new(node),
                 &[0],
                 &OriginOfCandidateForMemoGroup::Pass1,
@@ -905,7 +902,7 @@ mod tests {
         assert_eq!(candidates[0].input_groups, input);
         for candidate in candidates {
             assert!(candidate.fused_groups.is_empty());
-            assert_eq!(workload_inputs(&memo, candidate), input);
+            assert_eq!(stage0_inputs(&memo, candidate), input);
             assert_eq!(candidate.origin, OriginOfCandidateForMemoGroup::Pass1);
         }
         // Each sketch candidate is one operator over groups: `Project` over
@@ -952,7 +949,7 @@ mod tests {
         assert!(!fused.is_empty());
         for candidate in fused {
             assert_eq!(candidate.fused_groups, vec![sums]);
-            assert_eq!(workload_inputs(&memo, candidate), sums_input);
+            assert_eq!(stage0_inputs(&memo, candidate), sums_input);
             assert!(algorithms(candidate)[0].contains("Heap"));
         }
     }

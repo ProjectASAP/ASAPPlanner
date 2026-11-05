@@ -55,12 +55,11 @@ fn local_tumbling_window_candidates(
     memo: &Memo,
     entries: &[QueryWorkloadEntry],
 ) -> Vec<(usize, CandidateForMemoGroup)> {
-    let workload_groups = crate::added_groups::workload_groups(memo);
     let mut own: Vec<(usize, CandidateForMemoGroup)> = Vec::new();
     for (g, group) in memo.groups().iter().enumerate() {
         // Pass 1's intermediate groups (a summary build, its readout) are
         // rewritten inside their readers' candidates instead.
-        if !workload_groups.contains(&GroupId(g as u32)) {
+        if !memo.is_stage0_group(GroupId(g as u32)) {
             continue;
         }
         let grids = tumbling_window_width_domain(
