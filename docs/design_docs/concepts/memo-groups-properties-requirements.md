@@ -281,6 +281,9 @@ pub struct CandidateForMemoGroup {
     pub logical_properties: LogicalProperties,        // p_v^log
     pub input_requirements: Vec<LogicalRequirement>,  // r^log_{c,i}, one per input group
     pub fused_groups: Vec<MemoGroupId>,
+    /// Which rule added it. Not in the formulation: kept for `stage_pipeline --text`
+    /// and the viewer (approved 2026-11-05).
+    pub origin: OriginOfCandidateForMemoGroup,
 }
 /// e_v = op_v(G_{v,1}, …, G_{v,n}): one operator, its children are groups.
 pub struct CandidateExpression { pub operator: Operator<MemoGroupId> }
@@ -315,6 +318,8 @@ pub fn error_propagation(consumer: &Operator<MemoGroupId>) -> ErrorPropagation;
 The validity cap is known when the consumer is created. The pruning cap needs $\lambda_{q,c,i}$ and the queries that may reach $c$, so it is filled in when Pass 2 builds the logical edges.
 
 Deleted: `root_node` with private nodes, `input_groups` (the expression's children), `accuracy_budget_parts`, the `SharedBuild` and `SummaryResult` origins.
+
+Concepts not in the formulation: `origin: OriginOfCandidateForMemoGroup` (Pass1, SummaryInput, TumblingWindows, Rollup, TopKReuse, WidenedScans) records which rule added a candidate; nothing in planning reads it.
 
 ### Stage 1, Pass 2: rules and logical edges
 
