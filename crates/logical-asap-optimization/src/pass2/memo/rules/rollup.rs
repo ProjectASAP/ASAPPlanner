@@ -3,7 +3,7 @@ use super::reuse::{
     append_producer, append_reader, combined_inputs, eligible, replace, restore_inputs,
 };
 use crate::pass2::asap_aware_cse::{rollup_candidate_for, rollup_pass2_candidates};
-use crate::pass2::memo::state_groups::{build_read_by, BuildPlace, Pass2RuleError};
+use crate::pass2::memo::state_groups::{build_of, BuildPlace, Pass2RuleError};
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{
     ASAPOp, NonASAPOp, Operator, OperatorNode, ProjectItem, QueryRoot, ScalarExpr,
@@ -23,9 +23,9 @@ pub(crate) fn add_rollup_candidates(memo: &mut Memo) -> Result<usize, Pass2RuleE
                         | OriginOfCandidateForMemoGroup::WidenedScans
                 )
             {
-                // A Pass 1 build is its own group, which the reader reads.
+                // A Pass 1 build is its own group, which the consumer reads.
                 if let Some((build, BuildPlace::Private | BuildPlace::InputGroup(_))) =
-                    build_read_by(memo, candidate)
+                    build_of(memo, candidate)
                 {
                     candidates.push((group, candidate.clone(), build));
                 }
@@ -227,7 +227,7 @@ pub(crate) fn add_window_rollup_candidates(memo: &mut Memo) -> Result<usize, Pas
             candidate.origin == OriginOfCandidateForMemoGroup::TumblingWindows
                 && eligible(candidate)
         }) {
-            if let Some((build, BuildPlace::Private)) = build_read_by(memo, candidate) {
+            if let Some((build, BuildPlace::Private)) = build_of(memo, candidate) {
                 if let Some(ASAPOp::SummaryTumblingWindowChain {
                     tumbling_window_width_ms,
                     ..

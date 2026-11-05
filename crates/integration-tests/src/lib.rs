@@ -539,8 +539,8 @@ pub mod planning {
             if !is_build(&group.logical_node) || group.reached_by_queries().len() < queries {
                 continue;
             }
-            // Each query's reader of the state, and its own summary candidate
-            // above, which reads the reader's group (Pass 1 adds the reader
+            // Each query's consumer of the state, and its own summary candidate
+            // above, which reads the consumer's group (Pass 1 adds the consumer
             // as a group beneath the query's aggregate).
             let reading: Option<std::collections::BTreeMap<usize, usize>> = (0..queries)
                 .map(|q| {

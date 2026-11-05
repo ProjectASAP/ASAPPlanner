@@ -1,5 +1,5 @@
 //! The accuracy budget parts of a group's own candidate, which Pass 1 and
-//! Pass 2's sharing rules raise when a reader sized for more parts finds the
+//! Pass 2's sharing rules raise when a consumer sized for more parts finds the
 //! group ([`crate::find_or_add_group::find_or_add_group`]); the memo itself
 //! knows nothing of accuracy.
 
@@ -12,7 +12,7 @@ use crate::find_or_add_group::add_group;
 
 /// Sizes `group`'s own candidate (its logical node over its child groups,
 /// the one `find_or_add_group` adds) for at least `accuracy_budget_parts`:
-/// a reader sized for that many parts reads the group, and the node is the
+/// a consumer sized for that many parts reads the group, and the node is the
 /// same, so it meets both sizings.
 pub(crate) fn size_own_candidate_for(
     memo: &mut Memo,
@@ -30,7 +30,7 @@ pub(crate) fn size_own_candidate_for(
 
 /// [`crate::find_or_add_group::find_or_add_group`], with the group found
 /// sized for at least `accuracy_budget_parts` ([`size_own_candidate_for`]):
-/// a reader sized for more parts may find a group added for fewer.
+/// a consumer sized for more parts may find a group added for fewer.
 pub(crate) fn find_or_add_sized_group(
     memo: &mut Memo,
     node: &Rc<OperatorNode>,

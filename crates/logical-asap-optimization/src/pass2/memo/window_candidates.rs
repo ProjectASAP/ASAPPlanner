@@ -58,7 +58,7 @@ fn local_tumbling_window_candidates(
     let mut own: Vec<(usize, CandidateForMemoGroup)> = Vec::new();
     for (g, group) in memo.groups().iter().enumerate() {
         // Pass 1's intermediate groups (a summary build, its readout) are
-        // rewritten inside their readers' candidates instead.
+        // rewritten inside their consumers' candidates instead.
         if !memo.is_stage0_group(GroupId(g as u32)) {
             continue;
         }

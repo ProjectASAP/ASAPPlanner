@@ -216,12 +216,12 @@ impl Memo {
             group.parents.clear();
         }
         for group in 0..self.groups.len() {
-            let reader = MemoGroupId(group as u32);
-            let read: HashSet<MemoGroupId> = self.groups_read_by(reader).collect();
+            let consumer = MemoGroupId(group as u32);
+            let read: HashSet<MemoGroupId> = self.groups_read_by(consumer).collect();
             let mut read: Vec<MemoGroupId> = read.into_iter().collect();
             read.sort_unstable();
             for child in read {
-                self.groups[child.0 as usize].parents.push(reader);
+                self.groups[child.0 as usize].parents.push(consumer);
             }
         }
     }

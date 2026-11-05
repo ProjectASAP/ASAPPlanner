@@ -12,7 +12,7 @@
 //! A Pass 1 target's aggregate group gets one candidate per combination of
 //! its measures' Pass 1 candidates: the aggregate alone composed by
 //! [`super::per_computation_candidates::compose_logical_candidate`] with that choice, every target beneath it
-//! exact, its summaries sized for its readers' failure probability. The
+//! exact, its summaries sized for its queries' failure probability. The
 //! candidate is the composed root's operator alone: every node beneath it
 //! is found or added as a group ([`find_or_add_group`](crate::find_or_add_group::find_or_add_group), by Stage 0's
 //! node equality), so `Project ← SummaryEstimate ← SummaryAgg` is three
@@ -83,8 +83,8 @@ pub enum AddPass1CandidatesError {
 /// changing the initial groups' identities. The inventory must have walked
 /// `initial`'s groups (`PerComputationCandidates::walked`); its targets name
 /// them by id. Each composed candidate's summaries are sized for its
-/// readers' failure probability ([`size_for_failure_probability`]): query
-/// `q`'s target is `accuracy_targets[q]`, over `data`; a reader without a
+/// queries' failure probability ([`size_for_failure_probability`]): query
+/// `q`'s target is `accuracy_targets[q]`, over `data`; a query without a
 /// target gives no failure probability.
 pub fn try_add_pass1_candidates(
     initial: DagOfLogicalMemoGroups,
@@ -206,7 +206,7 @@ fn add_candidates_to_initial_groups(
 /// The candidates of target aggregate group `g`, whose measures' targets
 /// are `targets`: one per combination of their Pass 1 candidates (the last
 /// target varying fastest), each the aggregate composed alone with that
-/// choice, its summaries sized for its readers' failure probability (query
+/// choice, its summaries sized for its queries' failure probability (query
 /// `q`'s target `accuracy_targets[q]`, over `data`); the groups beneath it
 /// are found or added beneath Stage 0's groups. `None` when none composes.
 #[allow(clippy::too_many_arguments)]
@@ -282,7 +282,7 @@ fn target_candidates(
                     &OriginOfCandidateForMemoGroup::Pass1,
                     accuracy_budget_parts,
                 );
-                // A reader sized for more parts may find a group added for
+                // A consumer sized for more parts may find a group added for
                 // fewer.
                 for group in groups_read_through_added_groups(memo, &children).added_groups {
                     size_own_candidate_for(memo, group, accuracy_budget_parts);
@@ -340,17 +340,17 @@ fn target_candidates(
 }
 
 /// `root`, a candidate of a group `queries` reach, with each approximate
-/// input sized for `accuracy_budget_parts` parts of its readers' budget
+/// input sized for `accuracy_budget_parts` parts of its queries' budget
 /// (query `q`'s target `accuracy_targets[q]`, over `data`): the
 /// smallest [`per_input_failure_probability`] `δ_q / (n · V_q)` among
 /// `queries`, `V_q` the values `q`'s target covers (`G` of its root,
 /// `roots[q]`, for the whole result)
 /// ([`with_summaries_sized_for_failure_probability`]). These are the
 /// candidates' final sizes: Pass 2 inherits them or takes the strictest
-/// shared reader's
+/// shared consumer's
 /// ([`size_for_all_readers`](asap_accuracy::estimators::size_for_all_readers)),
 /// and Stage 3 only checks the composed accuracy. `root` is unchanged when
-/// no reader gives a failure probability (exact, per-value with no `δ`, or
+/// no query gives a failure probability (exact, per-value with no `δ`, or
 /// a whole-result target over an unbound `G`).
 fn size_for_failure_probability(
     root: &Rc<OperatorNode>,
@@ -824,7 +824,7 @@ mod tests {
         };
         let added = add(other_guarantee);
         assert!(added != estimate && added.0 as usize >= groups_before);
-        // A reader of the estimate keeps the estimate's approximate guarantee.
+        // A consumer of the estimate keeps the estimate's approximate guarantee.
         let reader = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(
             asap_types::ir::NonASAPOp::Project {
                 cols: vec![],

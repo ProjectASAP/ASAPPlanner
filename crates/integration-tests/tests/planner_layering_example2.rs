@@ -351,8 +351,8 @@ fn memo_computations(workload: &PlanningWorkload, roots: &[QueryRoot]) -> Vec<Ve
         if !is_univmon(&group.logical_node) || group.reached_by_queries().len() < 2 {
             continue;
         }
-        // Each query's reader of the state, and its own UnivMon candidate
-        // above, which reads the reader's group (Pass 1 adds the
+        // Each query's consumer of the state, and its own UnivMon candidate
+        // above, which reads the consumer's group (Pass 1 adds the
         // estimate beneath the query's aggregate).
         let reading: Option<Vec<[(usize, usize); 2]>> = group
             .reached_by_queries()

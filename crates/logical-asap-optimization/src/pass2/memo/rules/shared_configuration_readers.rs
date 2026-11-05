@@ -18,7 +18,7 @@ use crate::pass2::memo::shared_configurations::{
     TumblingWindowConfiguration, TumblingWindowRequirement,
 };
 use crate::pass2::memo::state_groups::{
-    boundary_ptrs, build_read_by, same_range_input, BuildPlace, Pass2RuleError,
+    boundary_ptrs, build_of, same_range_input, BuildPlace, Pass2RuleError,
 };
 use asap_types::stages::{Memo, OriginOfCandidateForMemoGroup};
 
@@ -133,7 +133,7 @@ impl SharedProducer for SummaryStates {
         for (group, candidates) in memo.candidates.iter().enumerate() {
             for (candidate, entry) in candidates.iter().enumerate() {
                 let Some((build, place @ (BuildPlace::Private | BuildPlace::InputGroup(_)))) =
-                    build_read_by(memo, entry)
+                    build_of(memo, entry)
                 else {
                     continue;
                 };
@@ -333,7 +333,7 @@ impl SharedProducer for SummaryStates {
             } => (*accuracy_budget_parts).max(original.accuracy_budget_parts),
         };
         // A build read as an input group stays one: the resized build's group
-        // is found or added, and the reader reads it.
+        // is found or added, and the consumer reads it.
         let (node, input_groups) = match need.place {
             BuildPlace::Private | BuildPlace::BeneathGroups => {
                 (node, original.input_groups.clone())
@@ -346,7 +346,7 @@ impl SharedProducer for SummaryStates {
                     .zip(node.children())
                     .find(|(before, _)| Rc::ptr_eq(before, &need.build))
                     .map(|(_, after)| Rc::clone(after))
-                    .expect("the reader reads its build group directly");
+                    .expect("the consumer reads its build group directly");
                 let queries = memo.groups()[reader.group].queries.clone();
                 // Rule 9 has no origin of its own; its added build groups
                 // are shared builds.

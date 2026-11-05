@@ -191,7 +191,7 @@ fn validate_references(memo: &Memo) -> Result<(), Pass2RuleError> {
     Ok(())
 }
 
-/// Where a candidate reads its one summary build ([`build_read_by`]).
+/// Where a candidate reads its one summary build ([`build_of`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum BuildPlace {
     /// One of the candidate's private nodes.
@@ -212,7 +212,7 @@ pub(super) enum BuildPlace {
 ///   groups added beneath them ([`build_down_to_stage0_groups`]).
 ///
 /// `None` when there is none, or more than one where it looks.
-pub(super) fn build_read_by(
+pub(super) fn build_of(
     memo: &Memo,
     candidate: &CandidateForMemoGroup,
 ) -> Option<(Rc<OperatorNode>, BuildPlace)> {
@@ -236,7 +236,7 @@ pub(super) fn build_read_by(
 /// groups, through its private nodes and the groups added beneath them
 /// ([`builds_beneath`]), with the Stage 0 groups it reads; `None` unless
 /// there is exactly one and it reads only Stage 0 groups. Unlike
-/// [`build_read_by`]'s first look, a build over another private node counts:
+/// [`build_of`]'s first look, a build over another private node counts:
 /// scan widening rewrites the whole candidate, so it needs the only build.
 pub(super) fn build_down_to_stage0_groups(
     memo: &Memo,
@@ -1365,7 +1365,7 @@ mod tests {
         };
         let mut memo = workload(&[("quantile_over_time(0.95, latency[5m])", 0.01)]);
         let (owner, mut base, build) = memo.candidates.iter().enumerate().find_map(|(owner, candidates)| candidates.iter().find_map(|candidate| {
-            let (build, BuildPlace::InputGroup(_)) = build_read_by(&memo, candidate)? else { return None };
+            let (build, BuildPlace::InputGroup(_)) = build_of(&memo, candidate)? else { return None };
             matches!(build.asap(), Some(ASAPOp::SummaryAgg {family: FieldDataType::Sketch(kind, _), ..}) if kind.algorithm() == &SketchAlgorithm::Kll).then(|| (owner, candidate.clone(), build))
         })).unwrap();
         let Some(ASAPOp::SummaryAgg {
@@ -1458,10 +1458,7 @@ mod tests {
                 candidates
                     .iter()
                     .find(|candidate| {
-                        matches!(
-                            build_read_by(&memo, candidate),
-                            Some((_, BuildPlace::Private))
-                        )
+                        matches!(build_of(&memo, candidate), Some((_, BuildPlace::Private)))
                     })
                     .map(|candidate| (group, candidate.clone()))
             })
@@ -1517,7 +1514,7 @@ mod tests {
                 let [own] = memo.candidates[group].as_slice() else {
                     return None;
                 };
-                let (_, BuildPlace::InputGroup(build)) = build_read_by(&memo, own)? else {
+                let (_, BuildPlace::InputGroup(build)) = build_of(&memo, own)? else {
                     return None;
                 };
                 matches!(

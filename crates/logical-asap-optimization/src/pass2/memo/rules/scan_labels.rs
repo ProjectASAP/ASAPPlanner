@@ -20,7 +20,7 @@ pub(crate) fn add_scan_label_candidates(memo: &mut Memo) -> Result<usize, Pass2R
     let mut owners = Vec::new();
     let mut roots = Vec::new();
     // Pass 1's intermediate groups (a summary build, its readout) are
-    // widened inside their readers' candidates, down to Stage 0's groups.
+    // widened inside their consumers' candidates, down to Stage 0's groups.
     for (group, candidates) in memo.candidates.iter().enumerate() {
         if !memo.is_stage0_group(MemoGroupId(group as u32)) {
             continue;
