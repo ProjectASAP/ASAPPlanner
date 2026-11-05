@@ -17,10 +17,7 @@ mod physical;
 mod pruning;
 mod realizer;
 
-pub use candidates::{
-    CandidateForMemoGroup, GroupFoundOrAdded, GroupsReadThroughAddedGroups, Memo,
-    OriginOfCandidateForMemoGroup,
-};
+pub use candidates::{CandidateForMemoGroup, Memo, OriginOfCandidateForMemoGroup};
 pub use logical_memo_candidates::LogicalASAPMemoCandidates;
 pub use memo::{queries_rooted_at, root_groups, DagOfLogicalMemoGroups, MemoGroup, MemoGroupId};
 pub use per_computation_logical_memo_candidates::{

@@ -5,7 +5,8 @@
 
 use std::rc::Rc;
 
-use asap_types::stages::{Memo, MemoGroupId};
+use asap_types::ir::OperatorNode;
+use asap_types::stages::{Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
 
 /// Sizes `group`'s own candidate (its logical node over its child groups,
 /// the one `find_or_add_group` adds) for at least `accuracy_budget_parts`:
@@ -23,4 +24,22 @@ pub(crate) fn size_own_candidate_for(
                 candidate.accuracy_budget_parts.max(accuracy_budget_parts);
         }
     }
+}
+
+/// [`Memo::find_or_add_group`], with the group found sized for at least
+/// `accuracy_budget_parts` ([`size_own_candidate_for`]): a reader sized for
+/// more parts may find a group added for fewer.
+pub(crate) fn find_or_add_sized_group(
+    memo: &mut Memo,
+    node: &Rc<OperatorNode>,
+    queries: &[usize],
+    origin: &OriginOfCandidateForMemoGroup,
+    accuracy_budget_parts: usize,
+) -> MemoGroupId {
+    let existed = memo.group_with_equal_node(node).is_some();
+    let group = memo.find_or_add_group(node, queries, origin, accuracy_budget_parts);
+    if existed {
+        size_own_candidate_for(memo, group, accuracy_budget_parts);
+    }
+    group
 }

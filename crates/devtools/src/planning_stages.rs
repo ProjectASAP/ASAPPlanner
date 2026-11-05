@@ -307,8 +307,7 @@ pub fn run_search_over(
 
 /// Stage 0's memo groups, `dag`, without candidates.
 fn stage0_memo_groups(dag: DagOfLogicalMemoGroups) -> Memo {
-    let candidates = vec![Vec::new(); dag.groups.len()];
-    Memo::new(dag.groups, dag.query_roots, candidates)
+    Memo::new(dag)
 }
 
 /// The stages over `roots` up to and including `until`, as the facade runs

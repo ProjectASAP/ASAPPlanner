@@ -11,7 +11,7 @@ use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
 use super::shared_producer::{
     add_shared_producer_candidates, spans_groups, Reader, SharedProducer,
 };
-use crate::own_candidate_sizing::size_own_candidate_for;
+use crate::own_candidate_sizing::find_or_add_sized_group;
 use crate::pass2::asap_aware_cse::{with_resized_build, with_tumbling_window_chain};
 use crate::pass2::memo::shared_configurations::{
     shared_size, state_size_configurations, tumbling_window_configurations,
@@ -20,7 +20,7 @@ use crate::pass2::memo::shared_configurations::{
 use crate::pass2::memo::state_groups::{
     boundary_ptrs, input_group_build, same_range_input, simple_build, Pass2RuleError,
 };
-use asap_types::stages::{GroupFoundOrAdded, Memo, MemoGroupId};
+use asap_types::stages::{Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
 
 /// `resized` (a rewrite of `original` with the same shape) with each node
 /// that is a child group's node in `original` put back, and the nodes above
@@ -350,20 +350,15 @@ impl SharedProducer for SummaryStates {
                     .map(|(_, after)| Rc::clone(after))
                     .expect("the reader reads its build group directly");
                 let queries = memo.groups()[reader.group].queries.clone();
-                let resized_group = match memo.find_or_add_group(
+                // Rule 9 has no origin of its own; its added build groups
+                // are shared builds.
+                let resized_group = find_or_add_sized_group(
+                    memo,
                     &resized_build,
                     &queries,
-                    &original.origin,
+                    &OriginOfCandidateForMemoGroup::SharedBuild,
                     accuracy_budget_parts,
-                ) {
-                    GroupFoundOrAdded::Found(group) => {
-                        // A reader sized for more parts may find a build
-                        // added for fewer.
-                        size_own_candidate_for(memo, group, accuracy_budget_parts);
-                        group
-                    }
-                    GroupFoundOrAdded::Added(group) => group,
-                };
+                );
                 let group_node = Rc::clone(&memo.groups()[resized_group.0 as usize].logical_node);
                 let node = super::reuse::replace(
                     &node,

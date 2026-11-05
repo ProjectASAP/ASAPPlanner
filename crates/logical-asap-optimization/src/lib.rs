@@ -60,6 +60,7 @@
 //! readers; plan selection (Stage 3) checks each selected candidate's
 //! guarantee against its query's `AccuracyTarget` and never resizes.
 
+mod added_groups;
 /// The deployment's capabilities: supported summaries and what it retains.
 mod deployment_capabilities;
 mod own_candidate_sizing;

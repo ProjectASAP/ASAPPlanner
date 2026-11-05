@@ -7,6 +7,7 @@ use std::rc::Rc;
 // Stage 1 internals other crates' tests call: Pass 1's working form and its
 // population step, single-candidate composition, Stage 0 hash-consing, and
 // the Pass 2 rule entry points those tests build memos with.
+pub use crate::added_groups::{groups_read_through_added_groups, workload_groups};
 pub use crate::pass1::add_pass1_candidates::try_add_pass1_candidates;
 pub use crate::pass1::per_computation_candidates::{
     compose_logical_candidate, generate_per_computation_candidates, PerComputationCandidates,

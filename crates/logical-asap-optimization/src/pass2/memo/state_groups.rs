@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
 
-use crate::own_candidate_sizing::size_own_candidate_for;
+use crate::own_candidate_sizing::find_or_add_sized_group;
 use asap_types::stages::hash_consing::HashConsingTable;
 use asap_types::stages::{CandidateForMemoGroup, Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
 
@@ -93,31 +93,27 @@ pub(crate) fn add_shared_summary_state_groups(memo: &mut Memo) -> Result<(), Pas
             .map(|(group, index, _)| memo.candidates[*group][*index].accuracy_budget_parts)
             .max()
             .unwrap_or(1);
-        let state_group = match memo.group_of(&build.build) {
-            Some(existing) => {
-                size_own_candidate_for(memo, existing, accuracy_budget_parts);
-                existing
-            }
-            // Repeated private builds within one result are reusable too. The
-            // reader list records concrete build occurrences, not just owners.
-            None if build.readers.len() < 2 => continue,
-            None => {
-                let mut queries: Vec<_> = build
-                    .readers
-                    .iter()
-                    .flat_map(|(group, _, _)| memo.groups()[*group].queries.iter().copied())
-                    .collect();
-                queries.sort_unstable();
-                queries.dedup();
-                memo.find_or_add_group(
-                    &build.build,
-                    &queries,
-                    &OriginOfCandidateForMemoGroup::SharedBuild,
-                    accuracy_budget_parts,
-                )
-                .group()
-            }
-        };
+        // A build no group's node equals is given a group when two or more
+        // candidates make it. Repeated private builds within one result are
+        // reusable too: the reader list records concrete build occurrences,
+        // not just owners.
+        if build.readers.len() < 2 && memo.group_with_equal_node(&build.build).is_none() {
+            continue;
+        }
+        let mut queries: Vec<_> = build
+            .readers
+            .iter()
+            .flat_map(|(group, _, _)| memo.groups()[*group].queries.iter().copied())
+            .collect();
+        queries.sort_unstable();
+        queries.dedup();
+        let state_group = find_or_add_sized_group(
+            memo,
+            &build.build,
+            &queries,
+            &OriginOfCandidateForMemoGroup::SharedBuild,
+            accuracy_budget_parts,
+        );
         let node = Rc::clone(&memo.groups()[state_group.0 as usize].logical_node);
         for (group, index, own_build) in build.readers {
             replacements
@@ -146,16 +142,7 @@ pub(crate) fn add_shared_summary_state_groups(memo: &mut Memo) -> Result<(), Pas
         reader.root_node = super::rules::reuse::replace(&reader.root_node, &replacements);
         reader.input_groups = boundary_groups(&reader.root_node, &boundaries);
         reader.origin = OriginOfCandidateForMemoGroup::SharedBuild;
-        // A reader this step added before (it ran on this memo already) is
-        // not added again.
-        if !memo.candidates[group].iter().any(|known| {
-            known.origin == reader.origin
-                && known.input_groups == reader.input_groups
-                && known.accuracy_budget_parts == reader.accuracy_budget_parts
-                && *known.root_node == *reader.root_node
-        }) {
-            memo.candidates[group].push(reader);
-        }
+        memo.candidates[group].push(reader);
     }
     // Parents describe every possible group/candidate dependency, not a selected plan.
     memo.rebuild_parents();
@@ -259,6 +246,10 @@ fn direct_input_builds_eligible(candidate: &CandidateForMemoGroup) -> bool {
     ) && candidate.accuracy_budget_parts != 0
 }
 
+/// The summary builds `candidate` makes beneath its root, each with the
+/// input groups it reads ([`builds_beneath`] down to its input groups): a
+/// build reading another of its private nodes is left out. Empty unless
+/// the candidate is one the sharing steps read by origin.
 pub(super) fn direct_input_builds(
     memo: &Memo,
     candidate: &CandidateForMemoGroup,
@@ -276,28 +267,43 @@ pub(super) fn direct_input_builds(
             )
         })
         .collect();
-    let mut stack = vec![Rc::clone(&candidate.root_node)];
+    builds_beneath(&candidate.root_node, &boundaries)
+        .into_iter()
+        .filter_map(|(build, children)| Some((build, children?)))
+        .collect()
+}
+
+/// The summary builds (`SummaryAgg`, `SummaryTumblingWindowChain`) beneath
+/// `root`, down to the nodes of `boundaries` (excluded), each once, with
+/// the boundary groups it reads (repeats next to each other removed), or
+/// `None` when it reads a node that is not a boundary.
+pub(super) fn builds_beneath(
+    root: &Rc<OperatorNode>,
+    boundaries: &HashMap<*const OperatorNode, MemoGroupId>,
+) -> Vec<(Rc<OperatorNode>, Option<Vec<MemoGroupId>>)> {
+    let mut stack: Vec<Rc<OperatorNode>> = root.children().into_iter().cloned().collect();
     let mut seen = HashSet::new();
     let mut builds = Vec::new();
     while let Some(node) = stack.pop() {
         if boundaries.contains_key(&Rc::as_ptr(&node)) || !seen.insert(Rc::as_ptr(&node)) {
             continue;
         }
-        if !Rc::ptr_eq(&node, &candidate.root_node)
-            && matches!(
-                node.asap(),
-                Some(ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. })
-            )
-        {
+        if matches!(
+            node.asap(),
+            Some(ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. })
+        ) {
             let children: Option<Vec<_>> = node
                 .children()
                 .iter()
                 .map(|child| boundaries.get(&Rc::as_ptr(child)).copied())
                 .collect();
-            if let Some(mut children) = children {
-                children.dedup();
-                builds.push((Rc::clone(&node), children));
-            }
+            builds.push((
+                Rc::clone(&node),
+                children.map(|mut children| {
+                    children.dedup();
+                    children
+                }),
+            ));
         }
         stack.extend(node.children().into_iter().cloned());
     }
@@ -557,7 +563,7 @@ mod tests {
             .map(|(id, group)| (Rc::as_ptr(&group.logical_node), MemoGroupId(id as u32)))
             .collect();
         // As local window composition does: the workload's groups only.
-        let workload_groups = memo.workload_groups();
+        let workload_groups = crate::added_groups::workload_groups(&memo);
         for group in 0..memo.groups().len() {
             if !workload_groups.contains(&MemoGroupId(group as u32)) {
                 continue;
@@ -1448,28 +1454,6 @@ mod tests {
                         && candidate.input_groups.contains(state)
                 })
         }));
-    }
-
-    /// The shared summary-state step changes nothing on a memo it already
-    /// ran on: no group and no candidate is added again.
-    #[test]
-    fn shared_summary_state_step_is_idempotent() {
-        let memo = with_local_tumbling_windows(
-            workload(&[
-                ("quantile_over_time(0.95, latency[5m])", 0.01),
-                ("quantile_over_time(0.99, latency[5m])", 0.02),
-            ]),
-            &[60_000, 60_000],
-        );
-        let mut once = expand(memo).unwrap().memo;
-        let groups = once.groups().len();
-        let candidates: Vec<usize> = once.candidates.iter().map(Vec::len).collect();
-        add_shared_summary_state_groups(&mut once).unwrap();
-        assert_eq!(once.groups().len(), groups);
-        assert_eq!(
-            once.candidates.iter().map(Vec::len).collect::<Vec<_>>(),
-            candidates
-        );
     }
 
     /// A private build equal to a build group is read from that group, and

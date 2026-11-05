@@ -55,7 +55,7 @@ fn local_tumbling_window_candidates(
     memo: &Memo,
     entries: &[QueryWorkloadEntry],
 ) -> Vec<(usize, CandidateForMemoGroup)> {
-    let workload_groups = memo.workload_groups();
+    let workload_groups = crate::added_groups::workload_groups(memo);
     let mut own: Vec<(usize, CandidateForMemoGroup)> = Vec::new();
     for (g, group) in memo.groups().iter().enumerate() {
         // Pass 1's intermediate groups (a summary build, its readout) are
@@ -84,7 +84,7 @@ fn local_tumbling_window_candidates(
                         matches!(
                             node.non_asap(),
                             Some(asap_types::ir::NonASAPOp::Scan { .. })
-                        ) && memo.group_with_node(node).is_some()
+                        ) && memo.group_whose_node_is(node).is_some()
                     })
                     .collect::<Vec<_>>();
                 let roots = [QueryRoot::Operator(Rc::clone(&candidate.root_node))];
@@ -226,7 +226,7 @@ fn child_groups(memo: &Memo, node: &Rc<OperatorNode>, implements: &[GroupId]) ->
             if !seen.insert(Rc::as_ptr(child)) {
                 continue;
             }
-            match memo.group_with_node(child) {
+            match memo.group_whose_node_is(child) {
                 Some(g) if !implements.contains(&g) => {
                     if !out.contains(&g) {
                         out.push(g);

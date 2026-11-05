@@ -23,7 +23,7 @@
 //! This is the one non-negotiable rule. A **false positive** here — two
 //! sub-DAGs wrongly judged shareable — is a wrong query answer, not a missed
 //! optimization: two different queries would read each other's data.
-//! [`structural_hash`](asap_types::stages::hash_consing::structural_hash) (SipHash over a canonical serialization, no
+//! The structural hash (`asap_types::stages::hash_consing`, SipHash over a canonical serialization, no
 //! collision-freedom guarantee) may only narrow the candidate set within one
 //! bucket; the typed equality check on that bucket (`same_node`) is what
 //! actually decides sharing, every time, no exceptions for "the hash probably
@@ -58,8 +58,6 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use asap_types::ir::operator::node::OperatorNode;
-#[cfg(test)]
-use asap_types::stages::hash_consing::structural_hash;
 use asap_types::stages::hash_consing::HashConsingTable;
 
 /// Input pointer → (input `Rc`, interned result). The input `Rc` is retained
@@ -411,32 +409,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn structural_hash_sees_through_a_scalar_reference() {
-        // Two equal bridges must hash equal whether or not their referenced
-        // vector is the same Rc — the reference contributes the vector's
-        // memoized hash, not its identity.
-        let a = scalar_of_vector();
-        let b = scalar_of_vector();
-        let mut cache = HashMap::new();
-        assert_eq!(
-            structural_hash(&a, &mut cache),
-            structural_hash(&b, &mut cache)
-        );
-        assert_eq!(
-            cache.len(),
-            4,
-            "aggregate + scan cached once per root: {cache:?}"
-        );
-        let other = node(NonASAPOp::PromqlVectorFromScalar(
-            ScalarExpr::PromqlScalarFromVector(quantile_agg(vec![1], Some(2), 0.5)),
-        ));
-        assert_ne!(
-            structural_hash(&a, &mut cache),
-            structural_hash(&other, &mut cache)
-        );
-    }
-
     // ── ASAP nodes ──────────────────────────────────────────────────────
 
     fn summary_agg(alpha: f64, guarantee: Option<AccuracyGuarantee>) -> Rc<OperatorNode> {
@@ -502,48 +474,6 @@ mod tests {
         let producer = |n: &Rc<OperatorNode>| Rc::clone(n.children()[0]);
         assert!(!Rc::ptr_eq(&p95, &p99));
         assert!(Rc::ptr_eq(&producer(&p95), &producer(&p99)));
-    }
-
-    // ── structural_hash (DAG-aware memoization) ─────────────────────────
-
-    #[test]
-    fn structural_hash_is_stable_across_cache_states() {
-        let agg = quantile_agg(vec![1], Some(2), 0.5);
-        let mut cold = HashMap::new();
-        let mut warm = HashMap::new();
-        structural_hash(&scan(), &mut warm);
-        assert_eq!(
-            structural_hash(&agg, &mut cold),
-            structural_hash(&agg, &mut warm),
-            "hash must be independent of unrelated cache state"
-        );
-    }
-
-    #[test]
-    fn structural_hash_of_an_internally_shared_dag_matches_the_unshared_equivalent() {
-        let agg = quantile_agg(vec![1], Some(2), 0.5);
-        let shared_root = compare(Rc::clone(&agg), Rc::clone(&agg));
-        let unshared_root = compare(
-            quantile_agg(vec![1], Some(2), 0.5),
-            quantile_agg(vec![1], Some(2), 0.5),
-        );
-        assert_eq!(
-            structural_hash(&shared_root, &mut HashMap::new()),
-            structural_hash(&unshared_root, &mut HashMap::new()),
-        );
-    }
-
-    #[test]
-    fn structural_hash_memoizes_a_shared_descendant_exactly_once() {
-        let agg = quantile_agg(vec![1], Some(2), 0.5);
-        let root = compare(Rc::clone(&agg), Rc::clone(&agg));
-        let mut cache = HashMap::new();
-        structural_hash(&root, &mut cache);
-        assert_eq!(
-            cache.len(),
-            2,
-            "one entry per unique node in the shared branch (Aggregate + Scan): {cache:?}"
-        );
     }
 
     /// `DISTINCT` (every column) returns the same rows each time; a `Dedup`

@@ -535,7 +535,7 @@ pub mod planning {
                 )
             })
             .collect();
-        let workload_groups = memo.workload_groups();
+        let workload_groups = asap_logical_asap_optimization::test_support::workload_groups(memo);
         for (state, group) in memo.groups().iter().enumerate() {
             if !is_build(&group.logical_node) || group.reached_by_queries().len() < queries {
                 continue;
@@ -551,7 +551,8 @@ pub mod planning {
                     .into_iter()
                     .next()?;
                     let top = own_builds[q].iter().copied().find(|&(group, index)| {
-                        memo.groups_read_through_added_groups(
+                        asap_logical_asap_optimization::test_support::groups_read_through_added_groups(
+                            memo,
                             &memo.candidates[group][index].input_groups,
                             &workload_groups,
                         )

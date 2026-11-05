@@ -44,6 +44,7 @@ use std::rc::Rc;
 use super::per_computation_candidates::{
     compose_logical_candidate_with_accuracy_budget_parts, PerComputationCandidates,
 };
+use crate::added_groups::{groups_read_through_added_groups, workload_groups};
 use crate::own_candidate_sizing::size_own_candidate_for;
 use asap_accuracy::sizing::{
     per_input_failure_probability, with_summaries_sized_for_failure_probability,
@@ -82,8 +83,8 @@ pub enum AddPass1CandidatesError {
 /// `initial`'s groups (`PerComputationCandidates::walked`); its targets name
 /// them by id. Each composed candidate's summaries are sized for its
 /// readers' failure probability ([`size_for_failure_probability`]): query
-/// `q`'s target is `accuracy_targets[q]`, over `data`; a query without a
-/// target leaves them at their composed sizes.
+/// `q`'s target is `accuracy_targets[q]`, over `data`; a reader without a
+/// target gives no failure probability.
 pub fn try_add_pass1_candidates(
     initial: DagOfLogicalMemoGroups,
     per_computation: &PerComputationCandidates,
@@ -113,7 +114,7 @@ pub fn try_add_pass1_candidates(
             }
         }
     }
-    let mut memo = Memo::new(initial.groups, initial.query_roots, Vec::new());
+    let mut memo = Memo::new(initial);
     add_candidates_to_initial_groups(per_computation, accuracy_targets, data, &mut memo)?;
     Ok(memo)
 }
@@ -127,8 +128,7 @@ fn add_candidates_to_initial_groups(
     memo: &mut Memo,
 ) -> Result<(), SchemaDerivationError> {
     let initial_groups = memo.groups().len();
-    let workload_groups = memo.workload_groups();
-    memo.candidates = vec![Vec::new(); initial_groups];
+    let workload_groups = workload_groups(memo);
     // Each target aggregate group's targets, one per measure: Pass 1 walks
     // the groups, so an aggregate several queries read has one target per
     // measure.
@@ -277,13 +277,16 @@ fn target_candidates(
                     data,
                 )?;
                 let root = without_exact_guarantees_below(&root);
-                let (node, children) =
-                    over_found_or_added_groups(&root, memo, &queries, accuracy_budget_parts);
+                let (node, children) = memo.over_child_groups(
+                    &root,
+                    &queries,
+                    &OriginOfCandidateForMemoGroup::Pass1,
+                    accuracy_budget_parts,
+                );
                 // A reader sized for more parts may find a group added for
                 // fewer.
-                for group in memo
-                    .groups_read_through_added_groups(&children, workload_groups)
-                    .added_groups
+                for group in
+                    groups_read_through_added_groups(memo, &children, workload_groups).added_groups
                 {
                     size_own_candidate_for(memo, group, accuracy_budget_parts);
                 }
@@ -498,52 +501,6 @@ fn without_exact_guarantees_below(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
         operator,
         ..(**root).clone()
     })
-}
-
-/// `node`'s operator over the groups of its children, each found or added
-/// with every node below it ([`Memo::find_or_add_group`]), and those groups
-/// in the order first read: one operator over groups, every intermediate
-/// result its own group.
-fn over_found_or_added_groups(
-    node: &Rc<OperatorNode>,
-    memo: &mut Memo,
-    queries: &[usize],
-    accuracy_budget_parts: usize,
-) -> (Rc<OperatorNode>, Vec<MemoGroupId>) {
-    let mut group_of_child: HashMap<*const OperatorNode, MemoGroupId> = HashMap::new();
-    let mut children = Vec::new();
-    for child in node.children() {
-        if group_of_child.contains_key(&Rc::as_ptr(child)) {
-            continue;
-        }
-        let group = memo
-            .find_or_add_group(
-                child,
-                queries,
-                &OriginOfCandidateForMemoGroup::Pass1,
-                accuracy_budget_parts,
-            )
-            .group();
-        group_of_child.insert(Rc::as_ptr(child), group);
-        if !children.contains(&group) {
-            children.push(group);
-        }
-    }
-    let group_node = |child: &Rc<OperatorNode>| {
-        Rc::clone(&memo.groups()[group_of_child[&Rc::as_ptr(child)].0 as usize].logical_node)
-    };
-    if node
-        .children()
-        .into_iter()
-        .all(|child| Rc::ptr_eq(child, &group_node(child)))
-    {
-        return (Rc::clone(node), children);
-    }
-    let rebuilt = Rc::new(OperatorNode {
-        operator: node.operator.map_children(group_node),
-        ..(**node).clone()
-    });
-    (rebuilt, children)
 }
 
 /// Whether `node`'s private nodes build a sketch, which its accuracy budget parts size.
@@ -784,7 +741,7 @@ mod tests {
     /// The workload groups `candidate` reads, directly or through the
     /// groups Pass 1 added beneath them, in the order first reached.
     fn workload_inputs(memo: &Memo, candidate: &CandidateForMemoGroup) -> Vec<MemoGroupId> {
-        memo.groups_read_through_added_groups(&candidate.input_groups, &memo.workload_groups())
+        groups_read_through_added_groups(memo, &candidate.input_groups, &workload_groups(memo))
             .workload_groups
     }
 
@@ -807,7 +764,6 @@ mod tests {
     fn equal_k_builds_with_another_failure_probability_or_guarantee_are_other_groups() {
         use asap_types::ir::schema::{SketchAlgorithm, SketchKind, SketchParams};
         use asap_types::ir::Operator;
-        use asap_types::stages::GroupFoundOrAdded;
         let mut memo = memo(
             &["quantile_over_time(0.9, m[5m])"],
             AccuracyTarget::max_error(0.01).failure_probability(0.01),
@@ -834,6 +790,7 @@ mod tests {
             .clone()
             .expect("the estimate's guarantee");
         assert!(!guarantee.is_exact());
+        let groups_before = memo.groups().len();
         let mut add = |node: OperatorNode| {
             memo.find_or_add_group(
                 &Rc::new(node),
@@ -842,7 +799,7 @@ mod tests {
                 1,
             )
         };
-        assert_eq!(add((*node).clone()), GroupFoundOrAdded::Found(build));
+        assert_eq!(add((*node).clone()), build);
         let mut other_failure_probability = (*node).clone();
         let Operator::ASAP(ASAPOp::SummaryAgg {
             family: FieldDataType::Sketch(kind, _),
@@ -861,22 +818,15 @@ mod tests {
                 failure_probability: Some(0.123),
             },
         );
-        assert!(matches!(
-            add(other_failure_probability),
-            GroupFoundOrAdded::Added(group) if group != build
-        ));
-        assert_eq!(
-            add((*estimate_node).clone()),
-            GroupFoundOrAdded::Found(estimate)
-        );
+        let added = add(other_failure_probability);
+        assert!(added != build && added.0 as usize >= groups_before);
+        assert_eq!(add((*estimate_node).clone()), estimate);
         let other_guarantee = OperatorNode {
             guarantee: None,
             ..(*estimate_node).clone()
         };
-        assert!(matches!(
-            add(other_guarantee),
-            GroupFoundOrAdded::Added(group) if group != estimate
-        ));
+        let added = add(other_guarantee);
+        assert!(added != estimate && added.0 as usize >= groups_before);
         // A reader of the estimate keeps the estimate's approximate guarantee.
         let reader = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(
             asap_types::ir::NonASAPOp::Project {

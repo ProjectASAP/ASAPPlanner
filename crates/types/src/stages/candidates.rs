@@ -1,11 +1,10 @@
 //! Implementation candidates attached to memo groups.
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use super::hash_consing::HashConsingTable;
-use super::{MemoGroup, MemoGroupId};
+use super::{DagOfLogicalMemoGroups, MemoGroup, MemoGroupId};
 use crate::ir::{OperatorNode, QueryRoot};
 
 /// The memo: the memo groups, each query's root over them, and each group's
@@ -21,8 +20,8 @@ pub struct Memo {
     pub query_roots: Vec<QueryRoot<MemoGroupId>>,
     /// Each group's implementation candidates, by group index.
     pub candidates: Vec<Vec<CandidateForMemoGroup>>,
-    /// Every group, by its logical node: [`Self::group_of`] looks groups up
-    /// in it.
+    /// Every group, by its logical node: [`Self::group_whose_node_is`] and
+    /// [`Self::group_with_equal_node`] look groups up in it.
     group_lookup: MemoGroupLookup,
 }
 
@@ -31,38 +30,9 @@ pub struct Memo {
 #[derive(Debug, Clone, Default)]
 struct MemoGroupLookup {
     /// Each group's logical node, by address (the memo keeps it alive).
-    group_with_node: HashMap<*const OperatorNode, MemoGroupId>,
-    /// Each group's logical node, by equality; a cell because looking a
-    /// node up memoizes its structural hash.
-    group_with_equal_node: RefCell<HashConsingTable<MemoGroupId>>,
-}
-
-/// What [`Memo::find_or_add_group`] did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GroupFoundOrAdded {
-    /// An existing group's node equals the node.
-    Found(MemoGroupId),
-    /// No group's node equals the node: this group was added for it.
-    Added(MemoGroupId),
-}
-
-impl GroupFoundOrAdded {
-    /// The group found or added.
-    pub fn group(self) -> MemoGroupId {
-        match self {
-            Self::Found(group) | Self::Added(group) => group,
-        }
-    }
-}
-
-/// The groups some inputs read through the groups added beneath the
-/// workload's groups ([`Memo::groups_read_through_added_groups`]).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct GroupsReadThroughAddedGroups {
-    /// The added groups passed through, in the order first reached.
-    pub added_groups: Vec<MemoGroupId>,
-    /// The workload groups reached, in the order first reached.
-    pub workload_groups: Vec<MemoGroupId>,
+    group_whose_node_is: HashMap<*const OperatorNode, MemoGroupId>,
+    /// Each group's logical node, by equality.
+    group_with_equal_node: HashConsingTable<MemoGroupId>,
 }
 
 /// One way to implement a group: its node as Stage 2 implements it, over
@@ -114,20 +84,16 @@ pub enum OriginOfCandidateForMemoGroup {
 }
 
 impl Memo {
-    /// A memo of `groups`, the queries' roots over them and each group's
-    /// candidates, by group index.
-    pub fn new(
-        groups: Vec<MemoGroup>,
-        query_roots: Vec<QueryRoot<MemoGroupId>>,
-        candidates: Vec<Vec<CandidateForMemoGroup>>,
-    ) -> Self {
+    /// The memo of Stage 0's groups and query roots, every group without
+    /// candidates yet.
+    pub fn new(dag: DagOfLogicalMemoGroups) -> Self {
         let mut memo = Self {
-            groups: Vec::with_capacity(groups.len()),
-            query_roots,
-            candidates,
+            groups: Vec::with_capacity(dag.groups.len()),
+            query_roots: dag.query_roots,
+            candidates: vec![Vec::new(); dag.groups.len()],
             group_lookup: MemoGroupLookup::default(),
         };
-        for group in groups {
+        for group in dag.groups {
             memo.index_and_push(group);
         }
         memo
@@ -163,22 +129,21 @@ impl Memo {
         );
         let node = Rc::clone(&group.logical_node);
         self.group_lookup
-            .group_with_node
+            .group_whose_node_is
             .entry(Rc::as_ptr(&node))
             .or_insert(id);
-        let mut equal_nodes = self.group_lookup.group_with_equal_node.borrow_mut();
+        let equal_nodes = &mut self.group_lookup.group_with_equal_node;
         if equal_nodes.find(&node).is_none() {
             equal_nodes.insert(node, id);
         }
-        drop(equal_nodes);
         self.groups.push(group);
         id
     }
 
     /// The group whose logical node is `node` itself (the same `Rc`).
-    pub fn group_with_node(&self, node: &Rc<OperatorNode>) -> Option<MemoGroupId> {
+    pub fn group_whose_node_is(&self, node: &Rc<OperatorNode>) -> Option<MemoGroupId> {
         self.group_lookup
-            .group_with_node
+            .group_whose_node_is
             .get(&Rc::as_ptr(node))
             .copied()
     }
@@ -187,64 +152,32 @@ impl Memo {
     /// logical node is `node`, else the lowest group whose logical node
     /// equals `node` by Stage 0's equality when sharing `node` is legal
     /// ([`HashConsingTable::find`]).
-    pub fn group_of(&self, node: &Rc<OperatorNode>) -> Option<MemoGroupId> {
-        self.group_with_node(node).or_else(|| {
-            self.group_lookup
-                .group_with_equal_node
-                .borrow_mut()
-                .find(node)
-        })
+    pub fn group_with_equal_node(&self, node: &Rc<OperatorNode>) -> Option<MemoGroupId> {
+        self.group_whose_node_is(node)
+            .or_else(|| self.group_lookup.group_with_equal_node.find(node))
     }
 
-    /// Returns the existing group whose node equals `node` ([`Self::group_of`],
-    /// Stage 0's equality), after adding `queries` to it and to every group
-    /// below it ([`Self::add_queries`]). Otherwise adds a group for `node`,
-    /// and for each of its children the same way, and returns that group.
-    /// It never copies a group. An added group's logical node is `node` over
-    /// its children's groups' nodes, `queries` reach it, and its one
-    /// candidate is that node over those groups, made by `origin` and sized
-    /// for `accuracy_budget_parts`.
+    /// Returns the existing group whose node equals `node`
+    /// ([`Self::group_with_equal_node`], Stage 0's equality), after adding
+    /// `queries` to it and to every group below it ([`Self::add_queries`]).
+    /// Otherwise adds a group for `node` over its children's groups
+    /// ([`Self::over_child_groups`]) and returns it. It never copies a group.
+    /// An added group's logical node is `node` over its children's groups'
+    /// nodes, `queries` reach it, and its one candidate is that node over
+    /// those groups, made by `origin` and sized for `accuracy_budget_parts`.
     pub fn find_or_add_group(
         &mut self,
         node: &Rc<OperatorNode>,
         queries: &[usize],
         origin: &OriginOfCandidateForMemoGroup,
         accuracy_budget_parts: usize,
-    ) -> GroupFoundOrAdded {
-        if let Some(group) = self.group_of(node) {
+    ) -> MemoGroupId {
+        if let Some(group) = self.group_with_equal_node(node) {
             self.add_queries(group, queries);
-            return GroupFoundOrAdded::Found(group);
+            return group;
         }
-        let mut group_of_child: HashMap<*const OperatorNode, MemoGroupId> = HashMap::new();
-        let mut child_groups = Vec::new();
-        for child in node.children() {
-            let group = match group_of_child.get(&Rc::as_ptr(child)) {
-                Some(&group) => group,
-                None => {
-                    let group = self
-                        .find_or_add_group(child, queries, origin, accuracy_budget_parts)
-                        .group();
-                    group_of_child.insert(Rc::as_ptr(child), group);
-                    group
-                }
-            };
-            child_groups.push(group);
-        }
-        let group_node = |child: &Rc<OperatorNode>| {
-            Rc::clone(&self.groups[group_of_child[&Rc::as_ptr(child)].0 as usize].logical_node)
-        };
-        let logical_node = if node
-            .children()
-            .into_iter()
-            .all(|child| Rc::ptr_eq(child, &group_node(child)))
-        {
-            Rc::clone(node)
-        } else {
-            Rc::new(OperatorNode {
-                operator: node.operator.map_children(group_node),
-                ..(**node).clone()
-            })
-        };
+        let (logical_node, child_groups) =
+            self.over_child_groups(node, queries, origin, accuracy_budget_parts);
         let mut queries = queries.to_vec();
         queries.sort_unstable();
         queries.dedup();
@@ -255,7 +188,7 @@ impl Memo {
             origin: origin.clone(),
             accuracy_budget_parts,
         };
-        GroupFoundOrAdded::Added(self.push_group(
+        self.push_group(
             MemoGroup {
                 logical_node,
                 child_groups,
@@ -263,7 +196,50 @@ impl Memo {
                 queries,
             },
             vec![candidate],
-        ))
+        )
+    }
+
+    /// `node`'s operator over the groups of its children, each found or
+    /// added with every node below it ([`Self::find_or_add_group`], same
+    /// arguments), and those groups by child position: group `i` is child
+    /// `i`'s, so an operator reading one group twice (`x / x`) lists it
+    /// twice. `node` itself when every child is its group's node.
+    pub fn over_child_groups(
+        &mut self,
+        node: &Rc<OperatorNode>,
+        queries: &[usize],
+        origin: &OriginOfCandidateForMemoGroup,
+        accuracy_budget_parts: usize,
+    ) -> (Rc<OperatorNode>, Vec<MemoGroupId>) {
+        let mut group_of_child: HashMap<*const OperatorNode, MemoGroupId> = HashMap::new();
+        let mut child_groups = Vec::new();
+        for child in node.children() {
+            let group = match group_of_child.get(&Rc::as_ptr(child)) {
+                Some(&group) => group,
+                None => {
+                    let group =
+                        self.find_or_add_group(child, queries, origin, accuracy_budget_parts);
+                    group_of_child.insert(Rc::as_ptr(child), group);
+                    group
+                }
+            };
+            child_groups.push(group);
+        }
+        let group_node = |child: &Rc<OperatorNode>| {
+            Rc::clone(&self.groups[group_of_child[&Rc::as_ptr(child)].0 as usize].logical_node)
+        };
+        if node
+            .children()
+            .into_iter()
+            .all(|child| Rc::ptr_eq(child, &group_node(child)))
+        {
+            return (Rc::clone(node), child_groups);
+        }
+        let rebuilt = Rc::new(OperatorNode {
+            operator: node.operator.map_children(group_node),
+            ..(**node).clone()
+        });
+        (rebuilt, child_groups)
     }
 
     /// The groups `group` reads: its logical child groups and its
@@ -323,51 +299,6 @@ impl Memo {
                 self.groups[child.0 as usize].parents.push(reader);
             }
         }
-    }
-
-    /// The groups of the workload's logical DAG: the query roots' groups and
-    /// every group below them through logical child groups. The groups
-    /// added beneath them, which only candidates read, are not among them.
-    pub fn workload_groups(&self) -> HashSet<MemoGroupId> {
-        let mut pending: Vec<MemoGroupId> =
-            super::root_groups(&self.query_roots).into_iter().collect();
-        let mut reached = HashSet::new();
-        while let Some(group) = pending.pop() {
-            if reached.insert(group) {
-                pending.extend(self.groups[group.0 as usize].child_groups.iter().copied());
-            }
-        }
-        reached
-    }
-
-    /// The groups `inputs` read, walking through every group not in
-    /// `workload_groups` (each read through all its candidates' input
-    /// groups) and stopping at workload groups.
-    pub fn groups_read_through_added_groups(
-        &self,
-        inputs: &[MemoGroupId],
-        workload_groups: &HashSet<MemoGroupId>,
-    ) -> GroupsReadThroughAddedGroups {
-        let mut read = GroupsReadThroughAddedGroups::default();
-        let mut pending: Vec<MemoGroupId> = inputs.iter().rev().copied().collect();
-        let mut seen = HashSet::new();
-        while let Some(group) = pending.pop() {
-            if !seen.insert(group) {
-                continue;
-            }
-            if workload_groups.contains(&group) {
-                read.workload_groups.push(group);
-                continue;
-            }
-            read.added_groups.push(group);
-            let below: Vec<MemoGroupId> = self.candidates[group.0 as usize]
-                .iter()
-                .flat_map(|candidate| &candidate.input_groups)
-                .copied()
-                .collect();
-            pending.extend(below.into_iter().rev());
-        }
-        read
     }
 
     /// The groups, each after every group it or one of its candidates
