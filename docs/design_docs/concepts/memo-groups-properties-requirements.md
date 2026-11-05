@@ -404,3 +404,232 @@ What goes into a property requirement affects only the efficiency of enumeration
 2. It adds candidates to an existing group, or adds a new group with its candidates. It never copies a reader: every existing consumer of the group sees the new candidate through edges.
 3. A candidate whose result has the same meaning as an existing group is added to that group, so hash-consing keeps sharing.
 4. Each new candidate states its input requirements.
+
+## 4. Data structures and interfaces per stage
+
+This section gives the target interface of each stage after the formulation refactor (#1207). Each stage's boundary type carries the notation that stage defines, and no stage reads a notation a later stage defines: logical stages carry no physical properties.
+
+| Stage | Input | Output (boundary type) | Notation it defines | Sub-issue |
+|---|---|---|---|---|
+| Stage 0: frontends, hash-consing | queries | `DagOfLogicalMemoGroups` | $G$, query roots | — |
+| Stage 1, Pass 1 | `DagOfLogicalMemoGroups` | `Memo` | $v = (e_v, p^{\log}_v)$, $r^{\log}_{c,i}$, $\theta$ list | #1203 |
+| Stage 1, Pass 2 | `Memo` | `LogicalASAPMemoCandidates` | rule-added candidates; logical edges with $\alpha^{\log}$ | #1203, #1201 |
+| Stage 2 | `LogicalASAPMemoCandidates` | `PhysicalASAPMemoCandidates` | $p^{\mathrm{phys}}_v = (\tau, \ell, \sigma)$, $r^{\mathrm{phys}}_{c,i}$, physical edges $\mathcal E$ with $\alpha^{\mathrm{phys}}$ | #1200, #1201 |
+| Stage 3 | `PhysicalASAPMemoCandidates` | `DagOfSelectedCandidates` | contexts $\kappa$; cost $w_v$ (`asap-cost`); $x$, $y$, $z$, $t$, $h$; rows (A)–(K), (R), (L), (B) | #1204 |
+| Realizer, export | `DagOfSelectedCandidates` | `PhysicalASAPDAG` | — | #1200 (export fields) |
+
+### Stage 0: frontends and hash-consing
+
+No change. One group per distinct logical sub-expression; the queries' roots point at groups.
+
+```rust
+// crates/types/src/stages/memo.rs
+pub struct MemoGroupId(pub u32);
+
+/// G: one logical result or one state family over specified input data.
+pub struct MemoGroup {
+    pub logical_node: Rc<OperatorNode>,   // expression; no physical fields (#1200)
+    pub child_groups: Vec<MemoGroupId>,   // producer groups G_i
+    pub parents: Vec<MemoGroupId>,        // derived: consumers' groups
+    pub queries: Vec<usize>,              // derived: queries that reach it
+}
+
+pub struct DagOfLogicalMemoGroups {
+    pub groups: Vec<MemoGroup>,
+    pub query_roots: Vec<QueryRoot<MemoGroupId>>,
+}
+```
+
+### Stage 1, Pass 1: candidates of each group
+
+Pass 1 adds every way to compute each group as candidates. Every intermediate result is its own group (no private nodes), and a summary family's sizes are candidates of one state group.
+
+```rust
+// crates/types/src/stages/candidates.rs
+pub struct CandidateForMemoGroupId { pub group: MemoGroupId, pub index: usize }
+
+pub struct Memo {
+    pub groups: Vec<MemoGroup>,
+    pub query_roots: Vec<QueryRoot<MemoGroupId>>,
+    pub candidates: Vec<Vec<CandidateForMemoGroup>>,   // by group
+}
+impl Memo {
+    /// Hash-consing: the group with this expression, added if new.
+    pub fn find_or_add_group(&mut self, expression: Operator<MemoGroupId>) -> MemoGroupId;
+    pub fn add_candidate(&mut self, group: MemoGroupId, candidate: CandidateForMemoGroup) -> CandidateForMemoGroupId;
+    pub fn candidate(&self, id: CandidateForMemoGroupId) -> &CandidateForMemoGroup;
+}
+
+/// v = (e_v, p_v^log)
+pub struct CandidateForMemoGroup {
+    pub expression: CandidateExpression,              // e_v
+    pub logical_properties: LogicalProperties,        // p_v^log
+    pub input_requirements: Vec<LogicalRequirement>,  // r^log_{c,i}, one per input group
+    pub fused_groups: Vec<MemoGroupId>,
+}
+/// e_v = op_v(G_{v,1}, …, G_{v,n}): one operator, its children are groups.
+pub struct CandidateExpression { pub operator: Operator<MemoGroupId> }
+
+pub struct LogicalProperties {
+    representation: Representation,       // family and θ, from the predefined list
+    window_layout: Option<WindowLayout>,  // ω_v
+}
+impl LogicalProperties {
+    pub fn new(representation: Representation, window_layout: Option<WindowLayout>) -> Result<Self, InvalidLogicalProperties>;
+    /// (ε_v, δ_v) for `statistic`, derived through `local_guarantee`.
+    pub fn error_bound(&self, statistic: &SketchStatistic) -> Option<AccuracyGuarantee>;
+}
+pub enum Representation { Exact(ExactKind), Summary(SketchKind) }
+pub enum WindowLayout { Tumbling { width_ms: u64, count: u32 } }
+
+pub struct LogicalRequirement {
+    pub family: Option<SketchAlgorithm>,
+    pub window: Option<WindowRequirement>,  // reader's range and step: a width must divide both
+    pub error_cap: Option<f64>,             // validity of row (K)'s linear bound
+}
+/// α^log_{u,c,i}
+pub fn satisfies(producer: &LogicalProperties, requirement: &LogicalRequirement) -> bool;
+```
+
+Deleted: `root_node` with private nodes, `input_groups` (the expression's children), `accuracy_budget_parts`, the `SharedBuild` and `SummaryResult` origins.
+
+### Stage 1, Pass 2: rules and logical edges
+
+Rules add candidates to existing groups, or add groups. A rule never copies a reader. After the last rule, Pass 2 builds the logical edges once.
+
+```rust
+// crates/logical-asap-optimization/src/pass2
+/// A rule: reads the memo, adds candidates or groups.
+fn apply(memo: &mut Memo) -> Result<(), Pass2RuleError>;
+
+// crates/types/src/stages/logical_memo_candidates.rs
+/// (u, c, i) over logical candidates: u is a candidate of G_{c,i}.
+pub struct LogicalEdge {
+    pub producer: CandidateForMemoGroupId,
+    pub consumer: CandidateForMemoGroupId,
+    pub input: usize,
+    pub satisfies_logical_requirement: bool,   // α^log
+}
+pub struct LogicalASAPMemoCandidates {
+    pub memo: Memo,
+    pub edges: Vec<LogicalEdge>,               // grouped by (consumer, input)
+}
+```
+
+### Stage 2: physical candidates and edges
+
+Stage 2 expands each logical candidate into one physical candidate per valid $(\tau, \ell, \sigma)$, gives each input its physical requirement, and turns each logical edge into the physical edges between the two candidates' physical alternatives.
+
+```rust
+// crates/types/src/physical/properties.rs
+pub enum ExecutionTiming { IngestionTime, QueryTime }
+pub enum Medium { Memory, Disk }
+pub enum Lifetime { None, OneEvaluation(Medium), AcrossEvaluations(Medium) }
+pub enum Schedule {
+    Periodic { interval_ms: u64, phase_ms: u64 },  // OneEvaluation
+    TumblingWindowGrid { phase_ms: u64 },          // AcrossEvaluations
+}
+/// p_v^phys = (τ, ℓ, σ); `new` rejects the invalid combinations (Section 1).
+pub struct PhysicalProperties { timing: ExecutionTiming, lifetime: Lifetime, schedule: Option<Schedule> }
+impl PhysicalProperties {
+    pub fn new(timing: ExecutionTiming, lifetime: Lifetime, schedule: Option<Schedule>) -> Result<Self, InvalidPhysicalProperties>;
+    pub fn timing(&self) -> ExecutionTiming;
+    pub fn lifetime(&self) -> Lifetime;
+    pub fn schedule(&self) -> Option<&Schedule>;
+    pub fn is_materialized(&self) -> bool;          // ℓ ≠ None
+}
+
+/// r^phys_{c,i}; `new` rejects (IngestionTime, Later).
+pub struct PhysicalRequirement {
+    reader_timing: ExecutionTiming,
+    reads_from: Evaluation,
+    reader_schedule: Option<ReaderSchedule>,        // (I_c, φ_c)
+}
+pub enum Evaluation { Same, Later }
+/// α^phys_{u,c,i}
+pub fn satisfies_physical(producer: &PhysicalProperties, requirement: &PhysicalRequirement) -> bool;
+
+// crates/types/src/stages/physical
+pub struct PhysicalCandidateId(pub usize);
+pub struct PhysicalEdgeId(pub usize);
+
+/// One physical alternative of a logical candidate.
+pub struct PhysicalCandidate {
+    pub logical: CandidateForMemoGroupId,             // e_v and p_v^log
+    pub properties: PhysicalProperties,               // p_v^phys
+    pub input_requirements: Vec<PhysicalRequirement>, // r^phys_{c,i}
+}
+/// (u, c, i) over physical candidates.
+pub struct PhysicalEdge {
+    pub producer: PhysicalCandidateId,
+    pub consumer: PhysicalCandidateId,
+    pub input: usize,
+    pub satisfies_logical_requirement: bool,    // α^log
+    pub satisfies_physical_requirement: bool,   // α^phys
+}
+pub struct PhysicalASAPMemoCandidates {
+    pub logical: LogicalASAPMemoCandidates,
+    pub candidates: Vec<PhysicalCandidate>,     // C
+    pub query_roots: Vec<QueryRoot<MemoGroupId>>,
+    pub pruned_candidates: Vec<PrunedCandidate<PhysicalCandidateKey>>,
+    // edges stored per (consumer, input); see `edges()`
+}
+impl PhysicalASAPMemoCandidates {
+    pub fn edges(&self) -> impl Iterator<Item = (PhysicalEdgeId, PhysicalEdge)>;             // E
+    pub fn admissible_edges_into(&self, consumer: PhysicalCandidateId, input: usize) -> &[PhysicalEdgeId]; // P_{c,i}
+    pub fn admissible_edges_out_of(&self, producer: PhysicalCandidateId) -> &[PhysicalEdgeId];
+}
+```
+
+Deleted: `Materialization`, `PhysicalCandidate::{timing, materialization, operator_node}`, `producer_candidates_per_input` as the interface, `compatible_timing`, `ReaderConstraint::{IncompatibleOutputs, AllowedOutputs}` (now $\alpha^{\mathrm{phys}}$ through $\sigma$), `may_keep_across_evaluations_per_sole_reader_query`.
+
+### Stage 3: the MILP
+
+Stage 3 reads the physical candidates and edges and selects the DAG. Variables and rows are named after the formulation.
+
+```rust
+// crates/plan-selection/src/milp/model.rs
+/// κ: where an ℓ = None candidate runs. Only those candidates are indexed by it.
+/// `ContextId` indexes the workload's contexts; the id types inside are illustrative.
+pub struct ContextId(pub usize);
+pub enum Context {
+    QueryEvaluation(QueryId),               // κ_q
+    IngestionPipeline(RefreshWindowId),     // I_r
+    Materialized(PhysicalCandidateId),      // κ_m: inside a materialized m's computation
+}
+
+struct SelectionVariables {
+    x_materialized: Vec<Variable>,                                     // x_v, ℓ ≠ None
+    x_in_context: HashMap<(ContextId, PhysicalCandidateId), Variable>, // x_{κ,v}, ℓ = None
+    y: HashMap<(Option<ContextId>, PhysicalEdgeId), Variable>,         // y_{u,c,i} on admissible edges
+    z: Vec<Variable>,                                                  // z_{q,v}
+    t: Vec<Variable>,                                                  // t_v, cyclic components only
+    h: Vec<Variable>,                                                  // h_v, ℓ ≠ None
+    latency: LatencyVariables,                                         // (L)
+}
+fn input_satisfaction_rows(..);   // (A) Σ_u y_{u,c,i} = x_c
+fn producer_selection_rows(..);   // (B) y_{u,c,i} ≤ x_u
+fn query_coverage_rows(..);       // (C), (D)
+fn acyclicity_rows(..);           // (E)
+fn utilization_rows(..);          // (F)
+fn reader_constraint_rows(..);    // (J)
+fn accuracy_rows(..);             // (K) Σ λ_{q,u} ε_u a_{q,u} ≤ ε_q, Σ δ_u a_{q,u} ≤ δ_q
+fn retention_rows(..);            // (R) h_v ≥ need_{c,i} · y_{v,c,i}
+fn latency_rows(..);              // (L)
+fn resource_budget_rows(..);      // (B) budgets
+// Objective: min Σ w_v x_v + Σ ρ_κ w_v x_{κ,v} + Σ π_v h_v
+
+// crates/types/src/stages/physical/graph.rs (unchanged)
+pub struct SelectedEdge { pub producer: SelectedNodeId, pub consumer: SelectedNodeId, pub input: usize }
+pub struct DagOfSelectedCandidates {
+    pub candidate_of_node: Vec<PhysicalCandidateId>,
+    pub edges: Vec<SelectedEdge>,                  // decoded from y = 1
+    pub node_of_output_reference: Vec<SelectedNodeId>,
+}
+```
+
+(G) $y \le \alpha^{\log}$ and (H) $y \le \alpha^{\mathrm{phys}}$ are not rows: $y$ exists only on admissible edges. Deleted: `ResultSlot`, `slot_of`, the `e` binaries, schedule groups `z[m, G]`, `N[q]`, `A[q, parts]`, and `p[ctx, c]` for materialized candidates.
+
+### Realizer and export
+
+The realizer builds the plan from `DagOfSelectedCandidates`; each node's physical properties come from its `PhysicalCandidate`. The export writes timing and lifetime (and later the schedule) per node of `PhysicalASAPDAG`, changed together with the backend.
