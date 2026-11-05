@@ -300,7 +300,17 @@ pub fn consumers(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, Vec<Consu
     let materialized_nodes: Vec<PhysicalASAPNodeId> = dag
         .nodes
         .iter()
-        .filter(|n| n.lifetime.is_materialized())
+        .filter(|n| {
+            use ExecutionTiming::{IngestionTime, QueryTime};
+            match (n.output_state.timing, n.lifetime) {
+                (QueryTime | IngestionTime, Lifetime::None) => false,
+                (QueryTime, Lifetime::OneEvaluation(_) | Lifetime::AcrossEvaluations(_))
+                | (IngestionTime, Lifetime::AcrossEvaluations(_)) => true,
+                (IngestionTime, Lifetime::OneEvaluation(_)) => {
+                    unreachable!("rejected by PhysicalProperties::new")
+                }
+            }
+        })
         .map(|n| n.id)
         .collect();
     let is_materialized: HashSet<PhysicalASAPNodeId> = materialized_nodes.iter().copied().collect();
@@ -342,8 +352,8 @@ pub enum MaterializedRunRate {
     /// At the combined evaluation rate of the queries reaching it, range
     /// steps included ([`evaluation_rate`]).
     PerEvaluation,
-    /// Once per request of the queries reaching it: a result kept across
-    /// evaluations builds only what is new (a chain's newest tumbling
+    /// Once per request of the queries reaching it: a result materialized
+    /// across evaluations builds only what is new (a chain's newest tumbling
     /// window), however many range steps a request evaluates.
     PerRequest,
 }
@@ -374,7 +384,7 @@ pub fn materialized_run_rate(properties: PhysicalProperties) -> Option<Materiali
 /// its readers: once per second at ingestion time (materialized at ingestion time), at
 /// the combined rate of the queries reaching it (`OneEvaluation`,
 /// [`evaluation_rate`]), or once per request of those queries for a chain
-/// kept across evaluations, whose request builds only its newest tumbling window
+/// materialized across evaluations, whose request builds only its newest tumbling window
 /// however many range steps it evaluates. `range_evaluations[q]` is query
 /// `q`'s range evaluation (none when missing). A not-materialized node is computed once per
 /// consumer that reaches it ([`consumers`]), at that consumer's rate. A consumer is a query
@@ -497,41 +507,6 @@ pub fn computations(
 mod tests {
     use super::*;
 
-    /// How often each valid state is computed when materialized, and `None` for
-    /// the two not-materialized states.
-    #[test]
-    fn kept_run_rate_over_every_valid_state() {
-        use asap_types::physical::Medium;
-        use ExecutionTiming::{IngestionTime, QueryTime};
-        let at = |timing, lifetime| PhysicalProperties::new(timing, lifetime).unwrap();
-        let mut expected = vec![
-            (at(QueryTime, Lifetime::None), None),
-            (at(IngestionTime, Lifetime::None), None),
-        ];
-        for medium in [Medium::Memory, Medium::Disk] {
-            expected.extend([
-                (
-                    at(IngestionTime, Lifetime::AcrossEvaluations(medium)),
-                    Some(MaterializedRunRate::PerSecondOfArrivingData),
-                ),
-                (
-                    at(QueryTime, Lifetime::OneEvaluation(medium)),
-                    Some(MaterializedRunRate::PerEvaluation),
-                ),
-                (
-                    at(QueryTime, Lifetime::AcrossEvaluations(medium)),
-                    Some(MaterializedRunRate::PerRequest),
-                ),
-            ]);
-        }
-        for properties in PhysicalProperties::every_valid() {
-            let (_, rate) = expected
-                .iter()
-                .find(|(state, _)| *state == properties)
-                .expect("every valid state has an expectation");
-            assert_eq!(materialized_run_rate(properties), *rate, "{properties:?}");
-        }
-    }
     use asap_types::workload::{DemandEstimate, Rate, RepetitionInterval, TimestampMs};
 
     fn fixed(interval: u32, phase: Option<u64>) -> QueryRecurrence {
@@ -715,5 +690,41 @@ mod tests {
             evaluation_rate([(&invalid, None)], 3600.0),
             Err(AnalyticalCostError::InvalidRecurrence)
         ));
+    }
+
+    /// How often each valid state is computed when materialized, and `None` for
+    /// the two not-materialized states.
+    #[test]
+    fn materialized_run_rate_over_every_valid_state() {
+        use asap_types::physical::Medium;
+        use ExecutionTiming::{IngestionTime, QueryTime};
+        let at = |timing, lifetime| PhysicalProperties::new(timing, lifetime).unwrap();
+        let mut expected = vec![
+            (at(QueryTime, Lifetime::None), None),
+            (at(IngestionTime, Lifetime::None), None),
+        ];
+        for medium in [Medium::Memory, Medium::Disk] {
+            expected.extend([
+                (
+                    at(IngestionTime, Lifetime::AcrossEvaluations(medium)),
+                    Some(MaterializedRunRate::PerSecondOfArrivingData),
+                ),
+                (
+                    at(QueryTime, Lifetime::OneEvaluation(medium)),
+                    Some(MaterializedRunRate::PerEvaluation),
+                ),
+                (
+                    at(QueryTime, Lifetime::AcrossEvaluations(medium)),
+                    Some(MaterializedRunRate::PerRequest),
+                ),
+            ]);
+        }
+        for properties in PhysicalProperties::every_valid() {
+            let (_, rate) = expected
+                .iter()
+                .find(|(state, _)| *state == properties)
+                .expect("every valid state has an expectation");
+            assert_eq!(materialized_run_rate(properties), *rate, "{properties:?}");
+        }
     }
 }

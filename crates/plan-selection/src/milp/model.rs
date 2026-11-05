@@ -5,11 +5,11 @@
 //!
 //! | Family | Meaning |
 //! |---|---|
-//! | `p[ctx, c]` | in context `ctx`, candidate `c` gives its result slot (binary): computed there, or read across the boundary (a shareable candidate, or a candidate of an ingestion pipeline `I_r`) |
-//! | `x[m]` | shareable candidate `m` is selected (binary) |
-//! | `a[q, m]` | query `q` depends on shareable `m` (continuous, exact at integral binaries) |
+//! | `p[ctx, c]` | in context `ctx`, candidate `c` gives its result slot (binary): computed there, or read across the boundary (a materialized candidate, or a candidate of an ingestion pipeline `I_r`) |
+//! | `x[m]` | materialized candidate `m` is selected (binary) |
+//! | `a[q, m]` | query `q` depends on materialized `m` (continuous, exact at integral binaries) |
 //! | `y[q, m, c]` | `AND(a[q, m], p[m, c])`, for reach from above and accuracy (continuous) |
-//! | `L[ctx]`, `T[q, m]`, `K[q]` | latency of a query or of a query-time shareable candidate's run and context; `m`'s latency in `q`'s; compaction (continuous) |
+//! | `L[ctx]`, `T[q, m]`, `K[q]` | latency of a query or of a query-time materialized candidate's run and context; `m`'s latency in `q`'s; compaction (continuous) |
 //! | `N[q]`, `A[q, parts]` | approximate values `q` depends on; whether it depends on one sized for `parts` shares (continuous) |
 //! | `g[m, c]` | highest shared materialization: `c` is read in context `m`, which at most one query reaches (binary) |
 //! | `rank` | order ranks on a context's cyclic links (continuous) |
@@ -96,13 +96,13 @@ impl Default for SelectionMilpOptions {
 }
 
 /// Which part of the model a variable or row belongs to, for the size
-/// report: the query contexts, the `I_r`, the shareable candidates' contexts
+/// report: the query contexts, the `I_r`, the materialized candidates' contexts
 /// (with their `x`, reach and schedule terms), or the rest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 pub(crate) enum Scope {
     Queries,
     Ingestion,
-    SharedContexts,
+    MaterializedContexts,
     Global,
 }
 
@@ -218,7 +218,7 @@ impl ModelBuilder {
 
 /// One way a candidate's input is read in a context: `(reader, input)`
 /// with the reader computed in that context, the query's output reference,
-/// or the shareable candidate's own input.
+/// or the materialized candidate's own input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum Reader {
     Candidate(PhysicalCandidateId, usize),
@@ -243,13 +243,13 @@ pub(crate) struct SelectionMilp<'a> {
     pub(crate) choice: Vec<BTreeMap<PhysicalCandidateId, Variable>>,
     /// Per context, per option, the reads of it in that context.
     pub(crate) readers: Vec<BTreeMap<PhysicalCandidateId, Vec<Reader>>>,
-    /// `x[m]` per shareable candidate with a context.
+    /// `x[m]` per materialized candidate with a context.
     pub(crate) selected: BTreeMap<PhysicalCandidateId, Variable>,
-    /// `a[q, m]`, for each query that may depend on shareable `m`.
+    /// `a[q, m]`, for each query that may depend on materialized `m`.
     pub(crate) reach: HashMap<(usize, PhysicalCandidateId), Variable>,
-    /// Per shareable candidate, the shareable candidates whose contexts may
+    /// Per materialized candidate, the materialized candidates whose contexts may
     /// read it.
-    pub(crate) shared_readers: BTreeMap<PhysicalCandidateId, Vec<PhysicalCandidateId>>,
+    pub(crate) materialized_readers: BTreeMap<PhysicalCandidateId, Vec<PhysicalCandidateId>>,
     /// `L[q]`.
     pub(crate) latency: Vec<Variable>,
     /// An upper bound of each `L[q]` (its bound, or the most it can be), in
@@ -267,7 +267,7 @@ pub(crate) struct SelectionMilp<'a> {
     pub(crate) request_cost_per_second: f64,
     /// Terms encoded inexactly, by reason.
     pub(crate) inexact: BTreeMap<&'static str, usize>,
-    /// The terms of each run `(context, candidate)`, cached; a shareable
+    /// The terms of each run `(context, candidate)`, cached; a materialized
     /// candidate's own run is keyed by its own context.
     pub(crate) run_terms_cache: HashMap<(usize, PhysicalCandidateId), Vec<RunTerm>>,
     /// Runs whose terms are being built (cycles of links).
@@ -313,7 +313,7 @@ pub(crate) struct SelectionMilpSolution {
     pub(crate) cost_lower_bound_per_second: f64,
     /// Per context, the options with `p[ctx, c] = 1`.
     pub(crate) chosen: Vec<BTreeSet<PhysicalCandidateId>>,
-    /// The shareable candidates with `x[m] = 1`.
+    /// The materialized candidates with `x[m] = 1`.
     pub(crate) selected: BTreeSet<PhysicalCandidateId>,
     /// Per multi-slot input `(context, reader, input)` of a used reader, the
     /// slot it reads.
@@ -341,9 +341,12 @@ impl<'a> SelectionMilp<'a> {
         self.inputs.ingestion_context_read_by(context)
     }
 
-    /// The context of shareable candidate `m`.
-    pub(crate) fn context_of(&self, shareable: PhysicalCandidateId) -> Option<usize> {
-        self.inputs.context_of_shareable.get(&shareable).copied()
+    /// The context of materialized candidate `m`.
+    pub(crate) fn context_of(&self, materialized: PhysicalCandidateId) -> Option<usize> {
+        self.inputs
+            .context_of_materialized
+            .get(&materialized)
+            .copied()
     }
 
     pub(crate) fn kind(&self, candidate: PhysicalCandidateId) -> RunKind {
@@ -360,7 +363,7 @@ impl<'a> SelectionMilp<'a> {
     }
 
     /// The indicator of run `(context, candidate)`: `p[ctx, c]` for a
-    /// candidate computed there, `x[m]` for a shareable candidate's own run
+    /// candidate computed there, `x[m]` for a materialized candidate's own run
     /// in its own context.
     pub(crate) fn run_indicator(
         &self,
@@ -377,7 +380,7 @@ impl<'a> SelectionMilp<'a> {
     }
 
     /// The context where run `(context, candidate)` reads its inputs: its
-    /// own (a shareable candidate's own run reads in its context too).
+    /// own (a materialized candidate's own run reads in its context too).
     pub(crate) fn runs_at_query_time(&self, context: usize) -> bool {
         self.inputs.contexts[context].at_query_time
     }
@@ -404,7 +407,7 @@ impl<'a> SelectionMilp<'a> {
         match self.inputs.contexts[context].kind {
             ContextKind::Query(_) => Scope::Queries,
             ContextKind::Ingestion(_) => Scope::Ingestion,
-            ContextKind::Materialized(_) => Scope::SharedContexts,
+            ContextKind::Materialized(_) => Scope::MaterializedContexts,
         }
     }
 
@@ -428,7 +431,7 @@ impl<'a> SelectionMilp<'a> {
     }
 
     /// Every run of the model: `(context, candidate)` for each candidate
-    /// computed in a context, and each shareable candidate's own run.
+    /// computed in a context, and each materialized candidate's own run.
     pub(crate) fn runs(&self) -> Vec<(usize, PhysicalCandidateId)> {
         let mut runs = Vec::new();
         for (context, options) in self.choice.iter().enumerate() {
@@ -446,10 +449,10 @@ impl<'a> SelectionMilp<'a> {
         runs
     }
 
-    /// The query contexts that may depend on shareable `m`, ascending.
-    pub(crate) fn queries_reaching(&self, shareable: PhysicalCandidateId) -> Vec<usize> {
+    /// The query contexts that may depend on materialized `m`, ascending.
+    pub(crate) fn queries_reaching(&self, materialized: PhysicalCandidateId) -> Vec<usize> {
         let mut queries: Vec<usize> = (0..self.query_count())
-            .filter(|&query| self.reach.contains_key(&(query, shareable)))
+            .filter(|&query| self.reach.contains_key(&(query, materialized)))
             .collect();
         queries.sort_unstable();
         queries
@@ -495,7 +498,7 @@ pub(crate) fn build_selection_milp<'a>(
         readers: Vec::new(),
         selected: BTreeMap::new(),
         reach: HashMap::new(),
-        shared_readers: BTreeMap::new(),
+        materialized_readers: BTreeMap::new(),
         latency: Vec::new(),
         latency_max: Vec::new(),
         ms_per_latency_unit: 1.0,
@@ -616,16 +619,19 @@ fn choice_variables(milp: &mut SelectionMilp<'_>) {
         milp.choice.push(choices);
         milp.readers.push(readers);
     }
-    milp.builder.scope = Scope::SharedContexts;
-    for &shareable in inputs.context_of_shareable.keys() {
-        let selected = milp.builder.binary("x (shareable candidates)");
-        milp.selected.insert(shareable, selected);
+    milp.builder.scope = Scope::MaterializedContexts;
+    for &materialized in inputs.context_of_materialized.keys() {
+        let selected = milp.builder.binary("x (materialized candidates)");
+        milp.selected.insert(materialized, selected);
     }
     for (context, data) in inputs.contexts.iter().enumerate() {
         if let ContextKind::Materialized(reader) = data.kind {
             for &option in &data.options {
                 if inputs.kind[option.0] == RunKind::Materialized {
-                    milp.shared_readers.entry(option).or_default().push(reader);
+                    milp.materialized_readers
+                        .entry(option)
+                        .or_default()
+                        .push(reader);
                 }
             }
             let _ = context;
@@ -638,14 +644,14 @@ fn choice_variables(milp: &mut SelectionMilp<'_>) {
 fn structural_rows(milp: &mut SelectionMilp<'_>) {
     let inputs = milp.inputs;
     let output_refs = output_references(&milp.physical.query_roots);
-    // Per `I_r`, the contexts of the ingestion-time shareable candidates of
+    // Per `I_r`, the contexts of the ingestion-time materialized candidates of
     // refresh window `r`.
     let mut readers_of_ingestion: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for (m, &at) in &inputs.ingestion_context_of_shareable {
+    for (m, &at) in &inputs.ingestion_context_of_materialized {
         readers_of_ingestion
             .entry(at)
             .or_default()
-            .push(inputs.context_of_shareable[m]);
+            .push(inputs.context_of_materialized[m]);
     }
     // 1. Coverage.
     milp.builder.scope = Scope::Queries;
@@ -777,7 +783,7 @@ fn structural_rows(milp: &mut SelectionMilp<'_>) {
                 }
             }
             // A candidate of `I_r` is also read by the contexts of the
-            // ingestion-time shareable candidates of refresh window `r`.
+            // ingestion-time materialized candidates of refresh window `r`.
             for &other in readers_of_ingestion.get(&context).into_iter().flatten() {
                 if let Some(&read) = milp.choice[other].get(&option) {
                     reads += read;
@@ -788,7 +794,7 @@ fn structural_rows(milp: &mut SelectionMilp<'_>) {
         }
     }
     // 5. Sharing.
-    milp.builder.scope = Scope::SharedContexts;
+    milp.builder.scope = Scope::MaterializedContexts;
     let mut reads_of: BTreeMap<PhysicalCandidateId, Expression> = BTreeMap::new();
     for choices in &milp.choice {
         for (&option, &variable) in choices {
@@ -798,8 +804,8 @@ fn structural_rows(milp: &mut SelectionMilp<'_>) {
         }
     }
     let selected = milp.selected.clone();
-    for (shareable, selected) in selected {
-        let reads = reads_of.remove(&shareable).unwrap_or_default();
+    for (materialized, selected) in selected {
+        let reads = reads_of.remove(&materialized).unwrap_or_default();
         milp.builder
             .row("5 sharing", constraint!(selected <= reads));
     }
@@ -858,18 +864,18 @@ fn acyclic_rows(milp: &mut SelectionMilp<'_>) {
     milp.builder.scope = Scope::Global;
 }
 
-/// Order ranks across contexts: on the graph whose nodes are the shareable
+/// Order ranks across contexts: on the graph whose nodes are the materialized
 /// candidates' own runs and the runs of each `I_r`, with an edge from a run
-/// to each shareable candidate or candidate of an `I_r` its context may
+/// to each materialized candidate or candidate of an `I_r` its context may
 /// read (for a run of `I_r`, its producers there). Rows 3–5 alone admit a
 /// cycle of reads across contexts that justifies itself with no output
-/// above it (two shareable candidates of one memo group, each listed among
+/// above it (two materialized candidates of one memo group, each listed among
 /// the other's producers); only edges inside a cyclic component get a row.
 fn acyclic_context_rows(milp: &mut SelectionMilp<'_>) {
     let inputs = milp.inputs;
     // Nodes: (context of the run, candidate).
     let mut nodes: Vec<(usize, PhysicalCandidateId)> = Vec::new();
-    for (&m, &context) in &inputs.context_of_shareable {
+    for (&m, &context) in &inputs.context_of_materialized {
         nodes.push((context, m));
     }
     for (context, data) in inputs.contexts.iter().enumerate() {
@@ -919,7 +925,7 @@ fn acyclic_context_rows(milp: &mut SelectionMilp<'_>) {
     }
     let plain: Vec<(usize, usize)> = edges.iter().map(|&(from, to, _)| (from, to)).collect();
     let components = strongly_connected_components(nodes.len(), &plain);
-    milp.builder.scope = Scope::SharedContexts;
+    milp.builder.scope = Scope::MaterializedContexts;
     let mut rank: HashMap<usize, Variable> = HashMap::new();
     for (from, to, active) in edges {
         let size = components.size_of(from);
@@ -1020,16 +1026,16 @@ pub(crate) fn strongly_connected_components(count: usize, edges: &[(usize, usize
     Components { of, sizes }
 }
 
-/// The shareable candidates in order: each before every shareable
+/// The materialized candidates in order: each before every materialized
 /// candidate its context may read (readers first), so `a[q, m]` exists
 /// before the reach rows of what `m` reads. A cycle among contexts is
 /// broken at the first candidate met.
-pub(crate) fn shareables_readers_first(milp: &SelectionMilp<'_>) -> Vec<PhysicalCandidateId> {
+pub(crate) fn materialized_readers_first(milp: &SelectionMilp<'_>) -> Vec<PhysicalCandidateId> {
     let inputs = milp.inputs;
     let mut order = Vec::new();
     let mut state: BTreeMap<PhysicalCandidateId, u8> = BTreeMap::new();
     // Post-order over "m reads c" (children = what m reads), reversed.
-    for &start in inputs.context_of_shareable.keys() {
+    for &start in inputs.context_of_materialized.keys() {
         if state.contains_key(&start) {
             continue;
         }
@@ -1045,7 +1051,7 @@ pub(crate) fn shareables_readers_first(milp: &SelectionMilp<'_>) -> Vec<Physical
             }
             state.insert(node, 1);
             stack.push((node, true));
-            let context = inputs.context_of_shareable[&node];
+            let context = inputs.context_of_materialized[&node];
             for &option in &inputs.contexts[context].options {
                 if inputs.kind[option.0] == RunKind::Materialized && !state.contains_key(&option) {
                     stack.push((option, false));
@@ -1061,9 +1067,9 @@ pub(crate) fn shareables_readers_first(milp: &SelectionMilp<'_>) -> Vec<Physical
 /// constraint counts queries.
 fn reach_rows(milp: &mut SelectionMilp<'_>) {
     let inputs = milp.inputs;
-    milp.builder.scope = Scope::SharedContexts;
-    let order = shareables_readers_first(milp);
-    // Which queries may depend on each shareable candidate: read in their
+    milp.builder.scope = Scope::MaterializedContexts;
+    let order = materialized_readers_first(milp);
+    // Which queries may depend on each materialized candidate: read in their
     // context, or in the context of one they may depend on.
     let mut may_reach: BTreeMap<PhysicalCandidateId, BTreeSet<usize>> = BTreeMap::new();
     for query in 0..milp.query_count() {
@@ -1073,9 +1079,9 @@ fn reach_rows(milp: &mut SelectionMilp<'_>) {
             }
         }
     }
-    for &shareable in &order {
-        let queries = may_reach.get(&shareable).cloned().unwrap_or_default();
-        let context = inputs.context_of_shareable[&shareable];
+    for &materialized in &order {
+        let queries = may_reach.get(&materialized).cloned().unwrap_or_default();
+        let context = inputs.context_of_materialized[&materialized];
         for &option in &inputs.contexts[context].options {
             if inputs.kind[option.0] == RunKind::Materialized {
                 may_reach
@@ -1085,25 +1091,30 @@ fn reach_rows(milp: &mut SelectionMilp<'_>) {
             }
         }
     }
-    for &shareable in &order {
-        for &query in may_reach.get(&shareable).into_iter().flatten() {
+    for &materialized in &order {
+        for &query in may_reach.get(&materialized).into_iter().flatten() {
             let reach = milp.builder.continuous("a (reach)", Some(1.0));
-            milp.reach.insert((query, shareable), reach);
+            milp.reach.insert((query, materialized), reach);
         }
     }
-    for &shareable in &order {
-        for &query in may_reach.get(&shareable).into_iter().flatten() {
-            let reach = milp.reach[&(query, shareable)];
-            if let Some(&direct) = milp.choice[query].get(&shareable) {
+    for &materialized in &order {
+        for &query in may_reach.get(&materialized).into_iter().flatten() {
+            let reach = milp.reach[&(query, materialized)];
+            if let Some(&direct) = milp.choice[query].get(&materialized) {
                 milp.builder
                     .row("6 reach from below", constraint!(reach >= direct));
             }
-            for &reader in milp.shared_readers.get(&shareable).into_iter().flatten() {
+            for &reader in milp
+                .materialized_readers
+                .get(&materialized)
+                .into_iter()
+                .flatten()
+            {
                 let Some(&above) = milp.reach.get(&(query, reader)) else {
                     continue;
                 };
-                let context = inputs.context_of_shareable[&reader];
-                let read = milp.choice[context][&shareable];
+                let context = inputs.context_of_materialized[&reader];
+                let read = milp.choice[context][&materialized];
                 milp.builder.row(
                     "6 reach from below",
                     constraint!(reach >= above + read - 1.0),
@@ -1112,20 +1123,20 @@ fn reach_rows(milp: &mut SelectionMilp<'_>) {
         }
     }
     // From above, where needed.
-    let exact = shareables_needing_exact_reach(milp);
-    for &shareable in &order {
-        if !exact.contains(&shareable) {
+    let exact = materialized_needing_exact_reach(milp);
+    for &materialized in &order {
+        if !exact.contains(&materialized) {
             continue;
         }
-        for &query in may_reach.get(&shareable).into_iter().flatten() {
-            let reach = milp.reach[&(query, shareable)];
+        for &query in may_reach.get(&materialized).into_iter().flatten() {
+            let reach = milp.reach[&(query, materialized)];
             let mut sources = Expression::from(0.0);
-            if let Some(&direct) = milp.choice[query].get(&shareable) {
+            if let Some(&direct) = milp.choice[query].get(&materialized) {
                 sources += direct;
             }
             for &reader in milp
-                .shared_readers
-                .get(&shareable)
+                .materialized_readers
+                .get(&materialized)
                 .cloned()
                 .unwrap_or_default()
                 .iter()
@@ -1133,8 +1144,8 @@ fn reach_rows(milp: &mut SelectionMilp<'_>) {
                 let Some(&above) = milp.reach.get(&(query, reader)) else {
                     continue;
                 };
-                let context = inputs.context_of_shareable[&reader];
-                let read = milp.choice[context][&shareable];
+                let context = inputs.context_of_materialized[&reader];
+                let read = milp.choice[context][&materialized];
                 let through = milp.builder.continuous("y (reach through)", Some(1.0));
                 milp.builder
                     .row("6 reach from above", constraint!(through <= above));
@@ -1165,11 +1176,11 @@ pub(crate) fn reader_constraints_of_candidates<'a>(
     of_candidate
 }
 
-/// The shareable candidates whose `a` must be exact from above: those a
+/// The materialized candidates whose `a` must be exact from above: those a
 /// counting reader constraint (minimum readers, highest shared
 /// materialization) names or whose context holds a constrained candidate,
-/// and transitively every shareable candidate whose context reads one.
-fn shareables_needing_exact_reach(milp: &SelectionMilp<'_>) -> BTreeSet<PhysicalCandidateId> {
+/// and transitively every materialized candidate whose context reads one.
+fn materialized_needing_exact_reach(milp: &SelectionMilp<'_>) -> BTreeSet<PhysicalCandidateId> {
     let inputs = milp.inputs;
     let constraints = reader_constraints_of_candidates(milp);
     let mut stack: Vec<PhysicalCandidateId> = Vec::new();
@@ -1188,7 +1199,12 @@ fn shareables_needing_exact_reach(milp: &SelectionMilp<'_>) -> BTreeSet<Physical
             stack.push(*candidate);
             // Highest shared materialization reads the reach of its
             // reading contexts.
-            stack.extend(milp.shared_readers.get(candidate).into_iter().flatten());
+            stack.extend(
+                milp.materialized_readers
+                    .get(candidate)
+                    .into_iter()
+                    .flatten(),
+            );
         }
         for (context, data) in inputs.contexts.iter().enumerate() {
             if let ContextKind::Materialized(own) = data.kind {
@@ -1199,9 +1215,14 @@ fn shareables_needing_exact_reach(milp: &SelectionMilp<'_>) -> BTreeSet<Physical
         }
     }
     let mut exact = BTreeSet::new();
-    while let Some(shareable) = stack.pop() {
-        if exact.insert(shareable) {
-            stack.extend(milp.shared_readers.get(&shareable).into_iter().flatten());
+    while let Some(materialized) = stack.pop() {
+        if exact.insert(materialized) {
+            stack.extend(
+                milp.materialized_readers
+                    .get(&materialized)
+                    .into_iter()
+                    .flatten(),
+            );
         }
     }
     exact
@@ -1222,7 +1243,7 @@ fn bucket_queries(query_of_reference: &[usize], query_outputs: &[Vec<usize>]) ->
 
 /// Row 9: reader constraints, on every node of the constrained candidate.
 /// A node in a query's context is reached by that query alone; a node in
-/// shareable `m`'s context, and `m` itself, by the queries that depend on
+/// materialized `m`'s context, and `m` itself, by the queries that depend on
 /// `m`. Reads into an `I_r` and per-output-reference reach inside one query
 /// are not modeled: the constraint is then applied to every reference of
 /// the query (conservative, counted as inexact).
@@ -1247,7 +1268,7 @@ fn reader_constraint_rows(milp: &mut SelectionMilp<'_>) {
         (count, most)
     };
     for (candidate, constraints) in constraints {
-        let shareable = inputs.kind[candidate.0] == RunKind::Materialized;
+        let materialized = inputs.kind[candidate.0] == RunKind::Materialized;
         // Its uses: (context, p) per context holding it as an option it
         // computes.
         let uses: Vec<(usize, Variable)> = (0..milp.choice.len())
@@ -1267,7 +1288,7 @@ fn reader_constraint_rows(milp: &mut SelectionMilp<'_>) {
                 } => {
                     let queries = bucket_queries(&query_of_reference, query_outputs);
                     let minimum = *minimum as f64;
-                    if shareable {
+                    if materialized {
                         if let Some(&selected) = milp.selected.get(&candidate) {
                             let (count, _) = reach_count(milp, &queries, candidate);
                             milp.builder.row(
@@ -1293,7 +1314,7 @@ fn reader_constraint_rows(milp: &mut SelectionMilp<'_>) {
                 }
                 ReaderConstraint::HighestSharedOneEvaluation { query_outputs, .. } => {
                     let queries = bucket_queries(&query_of_reference, query_outputs);
-                    if shareable {
+                    if materialized {
                         let Some(&selected) = milp.selected.get(&candidate) else {
                             continue;
                         };
@@ -1308,13 +1329,13 @@ fn reader_constraint_rows(milp: &mut SelectionMilp<'_>) {
                             }
                         }
                         for &reader in milp
-                            .shared_readers
+                            .materialized_readers
                             .get(&candidate)
                             .cloned()
                             .unwrap_or_default()
                             .iter()
                         {
-                            let context = inputs.context_of_shareable[&reader];
+                            let context = inputs.context_of_materialized[&reader];
                             let read = milp.choice[context][&candidate];
                             let (count, most) = reach_count(milp, &queries, reader);
                             let single = milp.builder.binary("g (single-query readers)");
@@ -1376,7 +1397,7 @@ fn reader_constraint_rows(milp: &mut SelectionMilp<'_>) {
                         forbid_reach(milp, left, candidate, &uses);
                         continue;
                     }
-                    if shareable {
+                    if materialized {
                         if let (Some(&l), Some(&r)) = (
                             milp.reach.get(&(left, candidate)),
                             milp.reach.get(&(right, candidate)),
@@ -1481,7 +1502,7 @@ fn context_work(milp: &mut SelectionMilp<'_>, context: usize) -> (Expression, f6
 
 /// Row 7: each query's latency, `asap_cost::plan_cost`'s definition: its
 /// request time, plus the work of every query-time run it reaches, each
-/// once (its own context's, and each query-time shareable candidate's run
+/// once (its own context's, and each query-time materialized candidate's run
 /// and context through `T[q, m]`), plus the longest compaction among the
 /// ingestion-time states it reaches.
 fn latency_rows(milp: &mut SelectionMilp<'_>) -> Result<(), SelectionMilpError> {
@@ -1502,20 +1523,20 @@ fn latency_rows(milp: &mut SelectionMilp<'_>) -> Result<(), SelectionMilpError> 
     }
     let unit = milp.ms_per_latency_unit;
     let request = request_ms / unit;
-    // `L[m]` per query-time shareable candidate.
-    milp.builder.scope = Scope::SharedContexts;
+    // `L[m]` per query-time materialized candidate.
+    milp.builder.scope = Scope::MaterializedContexts;
     let mut shared_latency: BTreeMap<PhysicalCandidateId, (Variable, f64)> = BTreeMap::new();
-    let shareables: Vec<(PhysicalCandidateId, usize)> = inputs
-        .context_of_shareable
+    let materialized_candidates: Vec<(PhysicalCandidateId, usize)> = inputs
+        .context_of_materialized
         .iter()
         .map(|(&m, &context)| (m, context))
         .collect();
-    for (m, context) in shareables {
+    for (m, context) in materialized_candidates {
         if !milp.runs_at_query_time(context) {
             continue;
         }
         let (work, most) = context_work(milp, context);
-        milp.builder.scope = Scope::SharedContexts;
+        milp.builder.scope = Scope::MaterializedContexts;
         if most <= 0.0 {
             continue;
         }
@@ -1599,7 +1620,7 @@ fn accuracy_rows(milp: &mut SelectionMilp<'_>) {
         // (candidate, dep, parts) per run `q` may depend on.
         let mut counted: Vec<(PhysicalCandidateId, Expression, usize)> = Vec::new();
         // Where each counted run gives its value: (context, slot), `None`
-        // for a shareable candidate's own run. One value per place.
+        // for a materialized candidate's own run. One value per place.
         let mut places: BTreeSet<(usize, Option<ResultSlot>)> = BTreeSet::new();
         for &(context, candidate) in &approximate_runs {
             let Some(weight) = inputs.accuracy_weights[query].get(&candidate).copied() else {
@@ -1719,7 +1740,7 @@ pub(crate) struct IndependentPart {
 
 /// The independent parts of `milp`, in order of their first query (the
 /// part without a query last). Queries fall into one part when they may
-/// share a shareable candidate, a run of an `I_r`, a source's raw retention or
+/// share a materialized candidate, a run of an `I_r`, a source's raw retention or
 /// anything else a row joins.
 pub(crate) fn independent_parts(milp: &SelectionMilp<'_>) -> Vec<IndependentPart> {
     let column_of: HashMap<Variable, usize> = milp

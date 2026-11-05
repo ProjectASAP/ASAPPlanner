@@ -8,7 +8,7 @@
 //! coefficients and the auxiliary rows that linearize them.
 //!
 //! A **run** is a candidate computed in an execution context (`p[ctx, c]`),
-//! or a shareable candidate's own run (`x[m]`, keyed by its own context).
+//! or a materialized candidate's own run (`x[m]`, keyed by its own context).
 //! A run's usage is one or more [`RunTerm`]s, each an indicator and the
 //! numbers that count when it is 1:
 //! - one term on the run's own indicator when its usage is plan
@@ -24,8 +24,8 @@
 //!   union is costed by `asap-cost` itself.
 //!
 //! **Executions per second** of a run: `rate(q)` in query context `q`; 1 in
-//! each `I_r` and for an ingestion-time shareable candidate; for a query-time
-//! shareable candidate `m` and the runs in its context, `Σ rate · z[m, G,
+//! each `I_r` and for an ingestion-time materialized candidate; for a query-time
+//! materialized candidate `m` and the runs in its context, `Σ rate · z[m, G,
 //! ℓ]` over its schedule groups and their levels, `z ≥ a[q, m]` for each
 //! reader at that level or faster (a group's rate is its fastest reader's).
 //! A context's runs other than `m`'s plain own term are summed once, `E[m]
@@ -670,7 +670,7 @@ fn window_terms(
     terms
 }
 
-/// For a shareable kept pane chain with usage depending on the panes it
+/// For a materialized kept pane chain with usage depending on the panes it
 /// retains: its base term at the fewest panes, plus one term per larger
 /// retention, `π[m, ℓ] ≥` the reach of each query needing at least `ℓ`.
 fn pane_retention_terms(
@@ -707,13 +707,13 @@ fn pane_retention_terms(
             indicators.push(direct.into());
         }
         for &reader in milp
-            .shared_readers
+            .materialized_readers
             .get(&chain)
             .cloned()
             .unwrap_or_default()
             .iter()
         {
-            let reader_context = milp.inputs.context_of_shareable[&reader];
+            let reader_context = milp.inputs.context_of_materialized[&reader];
             if !milp.runs_at_query_time(reader_context) {
                 continue;
             }
@@ -770,7 +770,7 @@ fn pane_retention_terms(
     }
 }
 
-/// Each ingestion-time shareable candidate's compaction term for its
+/// Each ingestion-time materialized candidate's compaction term for its
 /// readers' latency, ms, where `plan_cost` charges one: `(k − 1) · states ·
 /// merge time`, `k` the cores its ingestion work takes. With at most one
 /// second of ingestion work per second below it, `k = 1` and the term is 0;
@@ -778,14 +778,14 @@ fn pane_retention_terms(
 pub(crate) fn compaction_ms(milp: &mut SelectionMilp<'_>) -> HashMap<PhysicalCandidateId, f64> {
     let inputs = milp.inputs;
     let mut compaction = HashMap::new();
-    for &shareable in inputs.context_of_shareable.keys() {
-        if milp.physical.candidates[shareable.0].properties.timing()
+    for &materialized in inputs.context_of_materialized.keys() {
+        if milp.physical.candidates[materialized.0].properties.timing()
             != ExecutionTiming::IngestionTime
         {
             continue;
         }
         let mut seen = BTreeSet::new();
-        let mut stack = vec![shareable];
+        let mut stack = vec![materialized];
         let mut most_work_ms = 0.0;
         while let Some(class) = stack.pop() {
             if !seen.insert(class) {
@@ -804,7 +804,7 @@ pub(crate) fn compaction_ms(milp: &mut SelectionMilp<'_>) -> HashMap<PhysicalCan
         if most_work_ms > 1_000.0 {
             milp.note_inexact("compaction with more than one ingest worker (not encoded)");
         }
-        compaction.insert(shareable, 0.0);
+        compaction.insert(materialized, 0.0);
     }
     compaction
 }
@@ -816,9 +816,9 @@ type GroupLevels = (Vec<(usize, f64)>, Vec<f64>);
 #[derive(Debug, Clone)]
 enum ContextRate {
     /// A fixed rate (a query's, 1 at ingestion time, or a query-time
-    /// shareable candidate whose possible readers run it at one rate).
+    /// materialized candidate whose possible readers run it at one rate).
     Fixed(f64),
-    /// `Σ rate · z` over a query-time shareable candidate's schedule-group
+    /// `Σ rate · z` over a query-time materialized candidate's schedule-group
     /// levels.
     Components(Vec<(Variable, f64)>),
 }
@@ -839,7 +839,7 @@ fn context_rates(
         .collect::<Result<_, _>>()
         .map_err(cost)?;
     let mut rates = Vec::with_capacity(milp.inputs.contexts.len());
-    milp.builder.scope = Scope::SharedContexts;
+    milp.builder.scope = Scope::MaterializedContexts;
     for context in 0..milp.inputs.contexts.len() {
         let rate = match milp.inputs.contexts[context].kind {
             ContextKind::Query(query) => ContextRate::Fixed(query_rate[query]),
@@ -988,12 +988,12 @@ pub(crate) fn encode_objective(milp: &mut SelectionMilp<'_>) -> Result<(), Selec
             }
         }
     };
-    // Per query-time shareable context: the execution cost of its runs
+    // Per query-time materialized context: the execution cost of its runs
     // other than `m`'s plain own term, and per slot (`None`: `m`'s own run)
     // the most it can be.
     let mut context_execution: BTreeMap<usize, (Expression, BTreeMap<Option<ResultSlot>, f64>)> =
         BTreeMap::new();
-    // `H[m]` per query-time shareable context.
+    // `H[m]` per query-time materialized context.
     let mut held_time: HashMap<usize, (Variable, f64)> = HashMap::new();
     let runs = milp.runs();
     for (context, candidate) in runs {
@@ -1005,6 +1005,25 @@ pub(crate) fn encode_objective(milp: &mut SelectionMilp<'_>) -> Result<(), Selec
             candidate_data.properties.lifetime(),
         );
         let own = milp.inputs.contexts[context].kind == ContextKind::Materialized(candidate);
+        // Whether a query evaluation holds the run's bytes (only at query
+        // time), and whether they are held exactly as priced: in memory for
+        // one evaluation.
+        let (held_at_query_time, held_in_memory_for_one_evaluation) = {
+            use ExecutionTiming::{IngestionTime, QueryTime};
+            match (timing, lifetime) {
+                (QueryTime, Lifetime::OneEvaluation(Medium::Memory)) => (true, true),
+                (
+                    QueryTime,
+                    Lifetime::None
+                    | Lifetime::OneEvaluation(Medium::Disk)
+                    | Lifetime::AcrossEvaluations(_),
+                ) => (true, false),
+                (IngestionTime, Lifetime::None | Lifetime::AcrossEvaluations(_)) => (false, false),
+                (IngestionTime, Lifetime::OneEvaluation(_)) => {
+                    unreachable!("rejected by PhysicalProperties::new")
+                }
+            }
+        };
         // The most this run adds to its context's execution cost: all its
         // terms at 1.
         let mut run_execution = 0.0;
@@ -1029,7 +1048,7 @@ pub(crate) fn encode_objective(milp: &mut SelectionMilp<'_>) -> Result<(), Selec
                 }
             }
             // Held memory.
-            if numbers.held_bytes <= 0.0 || timing != ExecutionTiming::QueryTime {
+            if numbers.held_bytes <= 0.0 || !held_at_query_time {
                 continue;
             }
             // Per byte held per latency unit.
@@ -1049,8 +1068,8 @@ pub(crate) fn encode_objective(milp: &mut SelectionMilp<'_>) -> Result<(), Selec
                     charge(&held.into(), per_byte_ms * query_rate[query]);
                 }
                 ContextKind::Materialized(m) => {
-                    if own && lifetime != Lifetime::OneEvaluation(Medium::Memory) {
-                        milp.note_inexact("held bytes of a shareable candidate not in memory");
+                    if own && !held_in_memory_for_one_evaluation {
+                        milp.note_inexact("held bytes of a materialized candidate not in memory");
                     }
                     let (longest, most_held) = *held_time.entry(context).or_insert_with(|| {
                         let longest = milp
@@ -1113,7 +1132,7 @@ pub(crate) fn encode_objective(milp: &mut SelectionMilp<'_>) -> Result<(), Selec
     }
     // A context's execution at its varying rate: `V ≥ E − Ē (x[m] − z)` per
     // component `z`, `Ē` the most `E` can be: per slot, its costliest run.
-    milp.builder.scope = Scope::SharedContexts;
+    milp.builder.scope = Scope::MaterializedContexts;
     for (context, (sum, most_per_slot)) in context_execution {
         let most: f64 = if super::model::tests_loose_big_m() {
             // Before: every term's cost.
@@ -1181,8 +1200,21 @@ fn raw_retention(
         else {
             continue;
         };
-        if milp.physical.candidates[candidate.0].properties.timing() != ExecutionTiming::QueryTime {
-            continue;
+        let properties = milp.physical.candidates[candidate.0].properties;
+        {
+            use ExecutionTiming::{IngestionTime, QueryTime};
+            match (properties.timing(), properties.lifetime()) {
+                // A query-time scan retains its raw data, whatever its lifetime.
+                (
+                    QueryTime,
+                    Lifetime::None | Lifetime::OneEvaluation(_) | Lifetime::AcrossEvaluations(_),
+                ) => {}
+                // An ingestion-time scan reads arriving rows.
+                (IngestionTime, Lifetime::None | Lifetime::AcrossEvaluations(_)) => continue,
+                (IngestionTime, Lifetime::OneEvaluation(_)) => {
+                    unreachable!("rejected by PhysicalProperties::new")
+                }
+            }
         }
         let source = source_name(source).to_string();
         for term in milp.run_terms(context, candidate) {

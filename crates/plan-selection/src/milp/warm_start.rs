@@ -8,7 +8,7 @@
 //! plus its inputs' cheapest subtrees), unless the context already chose a
 //! candidate of that slot, which every reader must then accept (one
 //! candidate per slot per context); a dead end backtracks to the next
-//! candidate. A shareable candidate's context is derived once, when it is
+//! candidate. A materialized candidate's context is derived once, when it is
 //! first selected; a candidate of an `I_r` is chosen in the `I_r` of the
 //! reading context's refresh window.
 //!
@@ -19,13 +19,13 @@
 //! planned again by latency alone.
 //!
 //! **Greedy sharing.** A second plan prices what the queries planned
-//! before already selected (a shareable candidate, a candidate of an `I_r`) at
+//! before already selected (a materialized candidate, a candidate of an `I_r`) at
 //! zero, so later queries read it. Both plans, in workload order and
 //! reversed, are costed exactly by the MILP's own rows and objective
 //! ([`Completion`]); the cheapest feasible one is the start.
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use asap_cost::execution_demand::evaluation_rate;
+use asap_cost::execution_demand::{evaluation_rate, materialized_run_rate, MaterializedRunRate};
 use asap_types::stages::{output_references, PhysicalCandidateId, ReaderConstraint};
 use good_lp::Variable;
 
@@ -65,7 +65,7 @@ enum Approximate {
 }
 
 /// A plan under construction: per context, the candidate of each slot, and
-/// the selected shareable candidates.
+/// the selected materialized candidates.
 #[derive(Debug, Clone, Default)]
 struct Plan {
     chosen: Vec<BTreeMap<ResultSlot, PhysicalCandidateId>>,
@@ -106,7 +106,7 @@ pub(crate) fn warm_start(
         orders.push(order);
     }
     // (share, amortized): alone; reading what earlier queries selected; and
-    // that with each shareable candidate's own cost divided among the
+    // that with each materialized candidate's own cost divided among the
     // queries that may reach it.
     let strategies = [(false, false), (true, false), (true, true)];
     let mut tried = 0;
@@ -127,7 +127,7 @@ pub(crate) fn warm_start(
             if let Ok(completed) = completed {
                 debug(|| {
                     format!(
-                        "warm start: plan (share {share}, amortized {amortized}) costs {:e}, {} shareable selected",
+                        "warm start: plan (share {share}, amortized {amortized}) costs {:e}, {} materialized selected",
                         completed.cost_per_second,
                         plan.selected.len()
                     )
@@ -144,12 +144,12 @@ pub(crate) fn warm_start(
             }
         }
     }
-    // Greedy sharing: prefer one more shareable candidate that several
+    // Greedy sharing: prefer one more materialized candidate that several
     // queries may read (most readers first), kept when the exact cost
     // falls.
     let mut sharable: Vec<(usize, PhysicalCandidateId)> = milp
         .inputs
-        .context_of_shareable
+        .context_of_materialized
         .keys()
         .map(|&m| (estimates.readers[m.0], m))
         .filter(|&(readers, _)| readers >= 2)
@@ -201,8 +201,8 @@ fn binaries_of(milp: &SelectionMilp<'_>, plan: &Plan) -> Vec<(Variable, f64)> {
             }
         }
     }
-    for shareable in &plan.selected {
-        if let Some(&variable) = milp.selected.get(shareable) {
+    for materialized in &plan.selected {
+        if let Some(&variable) = milp.selected.get(materialized) {
             binaries.push((variable, 1.0));
         }
     }
@@ -324,8 +324,8 @@ fn undo_all(plan: &mut Plan, undo: Vec<Undo>) {
             Undo::Chose(context, slot) => {
                 plan.chosen[context].remove(&slot);
             }
-            Undo::Selected(shareable) => {
-                plan.selected.remove(&shareable);
+            Undo::Selected(materialized) => {
+                plan.selected.remove(&materialized);
             }
             Undo::SlotRead(context, reader, input) => {
                 plan.slot_reads.remove(&(context, reader, input));
@@ -342,7 +342,7 @@ struct Estimates {
     rate: Vec<f64>,
     /// Per candidate, its numbers (first costed context).
     numbers: Vec<Option<NodeNumbers>>,
-    /// Per candidate, the queries that may depend on it (shareable ones).
+    /// Per candidate, the queries that may depend on it (materialized ones).
     readers: Vec<usize>,
 }
 
@@ -357,6 +357,20 @@ impl Estimates {
                     .unwrap_or(1.0)
             })
             .collect();
+        // Each query's requests per second: range steps not counted.
+        let request_rate: Vec<f64> = milp
+            .entries
+            .iter()
+            .map(|entry| evaluation_rate([(&entry.recurrence, None)], horizon).unwrap_or(1.0))
+            .collect();
+        // The slowest of `rates` over the queries that may reach `m`.
+        let slowest = |m, rates: &[f64]| {
+            milp.queries_reaching(m)
+                .iter()
+                .map(|&query| rates[query])
+                .fold(f64::INFINITY, f64::min)
+                .min(1e9)
+        };
         let rate = milp
             .inputs
             .contexts
@@ -364,15 +378,17 @@ impl Estimates {
             .map(|context| match context.kind {
                 ContextKind::Query(query) => query_rate[query],
                 ContextKind::Ingestion(_) => 1.0,
-                ContextKind::Materialized(m) if context.at_query_time => {
-                    let readers = milp.queries_reaching(m);
-                    readers
-                        .iter()
-                        .map(|&query| query_rate[query])
-                        .fold(f64::INFINITY, f64::min)
-                        .min(1e9)
+                // As `context_rates` classifies `κ_m`.
+                ContextKind::Materialized(m) => {
+                    match materialized_run_rate(milp.physical.candidates[m.0].properties) {
+                        Some(MaterializedRunRate::PerSecondOfArrivingData) => 1.0,
+                        Some(MaterializedRunRate::PerEvaluation) => slowest(m, &query_rate),
+                        Some(MaterializedRunRate::PerRequest) => slowest(m, &request_rate),
+                        // `κ_m` exists only for a materialized `m`;
+                        // `context_rates` rejects any other.
+                        None => 1.0,
+                    }
                 }
-                ContextKind::Materialized(_) => 1.0,
             })
             .collect();
         let numbers = milp
@@ -382,7 +398,7 @@ impl Estimates {
             .map(|data| data.usage.as_ref().ok().map(NodeNumbers::of))
             .collect();
         let mut readers = vec![0; milp.inputs.candidate_data.len()];
-        for &m in milp.inputs.context_of_shareable.keys() {
+        for &m in milp.inputs.context_of_materialized.keys() {
             readers[m.0] = milp.queries_reaching(m).len();
         }
         Self {
@@ -401,10 +417,10 @@ struct Derivation<'m, 'a> {
     objective: Objective,
     approximate: Approximate,
     share: bool,
-    /// Divide a shareable candidate's own cost among the queries that may
+    /// Divide a materialized candidate's own cost among the queries that may
     /// reach it.
     amortized: bool,
-    /// Shareable candidates estimated free to read (greedy sharing).
+    /// Materialized candidates estimated free to read (greedy sharing).
     preferred: &'m BTreeSet<PhysicalCandidateId>,
     undo: Vec<Undo>,
     steps: usize,
@@ -662,7 +678,7 @@ impl Derivation<'_, '_> {
 
 /// The runs query `query` depends on in `plan`: `(context, candidate)` for
 /// candidates computed in its context and in the contexts of the
-/// shareable candidates it reaches, and each such shareable candidate
+/// materialized candidates it reaches, and each such materialized candidate
 /// `(its context, itself)`.
 fn runs_reached(
     milp: &SelectionMilp<'_>,

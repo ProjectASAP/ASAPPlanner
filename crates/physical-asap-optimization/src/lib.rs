@@ -354,7 +354,7 @@ impl MaterializedOutputCandidate {
     /// which places it where its consumer runs), then materialized at
     /// ingestion time when eligible, `OneEvaluation` when two or more
     /// queries read it, and query-time `AcrossEvaluations` when it may be
-    /// kept across evaluations. Every materialized option is in memory:
+    /// materialized across evaluations. Every materialized option is in memory:
     /// Stage 2 offers no `Disk` state, since the executor runs a `Disk`
     /// state in memory (#1217). The other valid states it does not offer
     /// are listed at `enumerate_candidate_configurations`.
@@ -938,8 +938,22 @@ fn down_closed(
     below: &[Vec<usize>],
     assignment: &[Option<PhysicalProperties>],
 ) -> bool {
-    let at_ingestion = |entry: &Option<PhysicalProperties>| {
-        entry.is_some_and(|p| p.timing() == ExecutionTiming::IngestionTime)
+    use asap_types::physical::Lifetime;
+    use ExecutionTiming::{IngestionTime, QueryTime};
+    // Whether an option puts its node at ingestion time; option `None`
+    // leaves its node to the timing pass.
+    let at_ingestion = |entry: &Option<PhysicalProperties>| match entry
+        .map(|properties| (properties.timing(), properties.lifetime()))
+    {
+        None => false,
+        Some((IngestionTime, Lifetime::None | Lifetime::AcrossEvaluations(_))) => true,
+        Some((
+            QueryTime,
+            Lifetime::None | Lifetime::OneEvaluation(_) | Lifetime::AcrossEvaluations(_),
+        )) => false,
+        Some((IngestionTime, Lifetime::OneEvaluation(_))) => {
+            unreachable!("rejected by PhysicalProperties::new")
+        }
     };
     assignment.iter().enumerate().all(|(c, m)| {
         !at_ingestion(m)
@@ -1574,7 +1588,7 @@ mod tests {
             .nodes
             .iter()
             .map(|node| node.lifetime)
-            .filter(|lifetime| lifetime.is_materialized())
+            .filter(|lifetime| *lifetime != Lifetime::None)
             .collect()
     }
 

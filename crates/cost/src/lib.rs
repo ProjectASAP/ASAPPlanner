@@ -41,7 +41,7 @@ pub use measured::{
 pub use operator_statistics::EdgeStatistics;
 pub use ranking::{cheaper, worst_latency_ms, PlanRanking};
 pub use usage::{
-    family_name, is_materialized_tumbling_window_chain, maintained_window_ms,
+    family_name, is_query_time_materialized_tumbling_window_chain, maintained_window_ms,
     materialized_tumbling_window_chains, node_map, node_usage, plan_cost, query_reach,
     retained_tumbling_windows, trailing_window, tumbling_window_retention_ms,
     tumbling_window_retention_ms_of_plan, tumbling_windows_of, NodeMap, NodeUsage, ProducerOutput,

@@ -18,18 +18,17 @@
 //!    (`satisfies`) and latency hold, or it is an error.
 //!
 //! With `ASAP_STAGE3_REPORT=<path>`, one JSON line per run is appended
-//! there: the model's size per family and per scope (the shareable
+//! there: the model's size per family and per scope (the materialized
 //! candidates' contexts apart), the timings, the warm start's cost, the
 //! objective, `plan_cost` and the dual bound (measurement only).
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 use asap_cost::analytical::AnalyticalCostError;
 use asap_cost::{materialized_tumbling_window_chains, node_map, plan_cost, CostInputs};
 use asap_types::ir::physical_export::PhysicalASAPNodeId;
 use asap_types::ir::{ASAPOp, Operator};
-use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::stages::{
     AssignmentRealizer, DagOfSelectedCandidates, PhysicalASAPMemoCandidates,
     PhysicalCandidateError, PhysicalCandidateId, PruneReason, PrunedCandidate, RealizedPlan,
@@ -60,20 +59,6 @@ pub(crate) fn cost_error(
         node,
         error,
     }
-}
-
-/// `plan`'s [`materialized_tumbling_window_chains`], or
-/// [`ErrorSelectingPlan::InvalidCandidate`] naming the node whose timing and
-/// lifetime cannot go together.
-pub(crate) fn materialized_chains_of(
-    plan: &PhysicalWorkloadPlan,
-) -> Result<HashSet<PhysicalASAPNodeId>, ErrorSelectingPlan> {
-    materialized_tumbling_window_chains(&plan.dag).map_err(|error| {
-        ErrorSelectingPlan::InvalidCandidate {
-            candidate: plan.id.clone(),
-            error,
-        }
-    })
 }
 
 /// The largest relative difference between the objective and `plan_cost`
@@ -157,7 +142,7 @@ pub fn select_plan(
     let (cost, _) = plan_cost(
         &plan.dag,
         &node_map(&plan.dag),
-        &materialized_chains_of(plan)?,
+        &materialized_tumbling_window_chains(&plan.dag).map_err(cost_error(&plan.id))?,
         &recurrence,
         &ranges,
         data,

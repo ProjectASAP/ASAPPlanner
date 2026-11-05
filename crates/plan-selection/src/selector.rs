@@ -16,10 +16,13 @@ use crate::checks::{accuracy_check, accuracy_targets, latency_violation};
 use crate::report::{
     AcceptedAccuracy, ErrorSelectingPlan, Rejection, RejectionCause, WholePlanSelection,
 };
-use crate::select::{cost_error, materialized_chains_of};
+use crate::select::cost_error;
 use crate::SelectionModels;
 use asap_cost::analytical::AnalyticalCostError;
-use asap_cost::{node_map, plan_cost, query_reach, tumbling_window_retention_ms};
+use asap_cost::{
+    materialized_tumbling_window_chains, node_map, plan_cost, query_reach,
+    tumbling_window_retention_ms,
+};
 
 type Ranking = PlanRanking;
 use asap_types::workload::bounds::with_confirmed_weights;
@@ -179,7 +182,8 @@ impl<'a> PlanSelector<'a> {
             return Ok(CalibrationFit::default());
         }
         let nodes = node_map(&candidate.dag);
-        let materialized_chains = materialized_chains_of(candidate)?;
+        let materialized_chains = materialized_tumbling_window_chains(&candidate.dag)
+            .map_err(cost_error(&candidate.id))?;
         let (_, fit) = plan_cost(
             &candidate.dag,
             &nodes,
@@ -225,7 +229,8 @@ impl<'a> PlanSelector<'a> {
                 }
             };
         let nodes = node_map(&candidate.dag);
-        let materialized_chains = materialized_chains_of(candidate)?;
+        let materialized_chains = materialized_tumbling_window_chains(&candidate.dag)
+            .map_err(cost_error(&candidate.id))?;
         let settings = self.models.cost_inputs;
         let (cost, _) = plan_cost(
             &candidate.dag,

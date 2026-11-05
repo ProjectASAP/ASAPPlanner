@@ -78,7 +78,7 @@ contains the candidate and that Stage 3 prices it.
 
 1. Add the `Lifetime` variant or the valid (timing, lifetime) pair
    (`crates/types/src/physical/properties.rs`, `PhysicalProperties::new` and
-   `readable_at`) and its placement in
+   `satisfies_physical`) and its placement in
    `crates/types/src/ir/properties/timing.rs`, with its data-state edge rules.
 2. Offer it in `crates/physical-asap-optimization/src/lib.rs` (the
    `MaterializedOutputCandidate` options), after the existing options so default

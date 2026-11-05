@@ -9,8 +9,8 @@
 //!    per execution, standing cost, held bytes and own latency, every number
 //!    from [`asap_cost::node_usage`].
 //! 3. **Owners** ([`OwnerRegion`]): one per query and one per possible
-//!    instance of each shareable candidate, each with its region of stateless
-//!    candidates, the links inside it and the shareable candidates it may read.
+//!    instance of each materialized candidate, each with its region of stateless
+//!    candidates, the links inside it and the materialized candidates it may read.
 //! 4. **Accuracy weights** ([`AccuracyWeight`]) per query and approximate
 //!    candidate, and pairs excluded together, from the composition of the
 //!    query's outputs.
@@ -29,7 +29,7 @@
 //! - for a query-time scan, the window each reader reads, through time
 //!   shifts ([`window_read_through`], which follows
 //!   [`PhysicalASAPDAG::scan_window`] for a plan with that one reader);
-//! - for a pane chain kept beyond one evaluation, the panes it keeps, which
+//! - for a pane chain materialized beyond one evaluation, the panes it retains, which
 //!   grow with the range-evaluation span of the queries reaching it
 //!   ([`asap_cost::tumbling_window_retention_ms`], [`asap_cost::retained_tumbling_windows`]).
 //!
@@ -144,14 +144,14 @@ pub(crate) struct MilpInputs {
     pub(crate) slot: Vec<ResultSlot>,
     /// The execution contexts: one per query (`0..Q`, in workload order),
     /// then the ingestion pipelines `I_r` some context reads, ascending by
-    /// [`IngestionPipeline`], then one per shareable candidate some context
+    /// [`IngestionPipeline`], then one per materialized candidate some context
     /// may read, ascending by candidate.
     pub(crate) contexts: Vec<ExecutionContext>,
-    /// Per shareable candidate with a context, its index in `contexts`.
-    pub(crate) context_of_shareable: BTreeMap<PhysicalCandidateId, usize>,
-    /// Per ingestion-time shareable candidate whose context reads a
+    /// Per materialized candidate with a context, its index in `contexts`.
+    pub(crate) context_of_materialized: BTreeMap<PhysicalCandidateId, usize>,
+    /// Per ingestion-time materialized candidate whose context reads a
     /// candidate of an `I_r`: the index of that `I_r` in `contexts`.
-    pub(crate) ingestion_context_of_shareable: BTreeMap<PhysicalCandidateId, usize>,
+    pub(crate) ingestion_context_of_materialized: BTreeMap<PhysicalCandidateId, usize>,
     /// Per query: `w(q, k)` for each approximate candidate `k` whose values
     /// reach its output.
     pub(crate) accuracy_weights: Vec<BTreeMap<PhysicalCandidateId, AccuracyWeight>>,
@@ -196,7 +196,7 @@ pub(crate) struct CandidateData {
     /// at (through time shifts, [`window_read_through`]). Empty for any
     /// other candidate.
     pub(crate) windows_per_reader: Vec<(PhysicalCandidateId, Vec<ScanWindow>)>,
-    /// For a kept pane chain whose usage depends on the panes it retains
+    /// For a materialized pane chain whose usage depends on the panes it retains
     /// ([`UsageContext::PaneRetentionOfReachingQueries`]): its usage per
     /// retained pane count. Empty otherwise.
     pub(crate) usage_per_retained_panes: Vec<(u64, CandidateUsage)>,
@@ -281,7 +281,7 @@ pub(crate) enum UsageContext {
     ProducerOutput,
     /// Which reader reads a query-time scan, so which window it scans.
     ScanWindowOfReader,
-    /// Which queries reach a kept pane chain, so how many panes it keeps.
+    /// Which queries reach a materialized pane chain, so how many panes it retains.
     PaneRetentionOfReachingQueries,
     /// A producer candidate on a cycle of candidate links was not costed yet, so
     /// its outputs were not among the options.
@@ -443,7 +443,7 @@ impl CandidateLinks {
         // With one candidate per result slot per context, a candidate that
         // runs in a context cannot read its own slot there (only a self-loop
         // could): such links are dropped (a widened scan's `Project` lists
-        // its own memo group). A shareable candidate reads in its own
+        // its own memo group). A materialized candidate reads in its own
         // context, so it keeps them, but never reads itself.
         let slot = result_slots(physical);
         let producers_per_input = producers_per_input
@@ -472,7 +472,7 @@ impl CandidateLinks {
     }
 
     /// Whether `candidate` is materialized: selected once, its own context.
-    fn is_shareable(&self, candidate: PhysicalCandidateId) -> bool {
+    fn is_materialized(&self, candidate: PhysicalCandidateId) -> bool {
         self.kind[candidate.0] == RunKind::Materialized
     }
 }
@@ -567,8 +567,8 @@ pub(crate) fn prepare_milp_inputs_with(
     let usable = |class: PhysicalCandidateId| candidate_data[class.0].usage.is_ok();
     let ExecutionContexts {
         contexts,
-        context_of_shareable,
-        ingestion_context_of_shareable,
+        context_of_materialized,
+        ingestion_context_of_materialized,
     } = execution_contexts(
         physical,
         &kind,
@@ -597,8 +597,8 @@ pub(crate) fn prepare_milp_inputs_with(
         kind,
         slot,
         contexts,
-        context_of_shareable,
-        ingestion_context_of_shareable,
+        context_of_materialized,
+        ingestion_context_of_materialized,
         accuracy_weights,
         accuracy_excluded_pairs,
     }
@@ -701,24 +701,24 @@ pub(crate) enum ContextKind {
 pub(crate) enum IngestionPipeline {
     /// The views of this refresh window.
     Window(RefreshWindow),
-    /// An ingestion-time shareable candidate whose window is unbounded or
+    /// An ingestion-time materialized candidate whose window is unbounded or
     /// empty: refreshed alone.
     Alone(PhysicalCandidateId),
 }
 
-/// The [`IngestionPipeline`] of ingestion-time shareable candidate
-/// `shareable`, from its refresh window ([`refresh_windows`]).
+/// The [`IngestionPipeline`] of ingestion-time materialized candidate
+/// `materialized`, from its refresh window ([`refresh_windows`]).
 pub(crate) fn ingestion_pipeline(
-    shareable: PhysicalCandidateId,
+    materialized: PhysicalCandidateId,
     refresh_windows: &HashMap<PhysicalCandidateId, Option<RefreshWindow>>,
 ) -> IngestionPipeline {
-    match refresh_windows.get(&shareable) {
+    match refresh_windows.get(&materialized) {
         Some(Some(window)) => IngestionPipeline::Window(*window),
-        _ => IngestionPipeline::Alone(shareable),
+        _ => IngestionPipeline::Alone(materialized),
     }
 }
 
-/// Each ingestion-time shareable candidate's refresh window, as
+/// Each ingestion-time materialized candidate's refresh window, as
 /// `asap_cost::execution_demand::computations` computes it on the realized
 /// plan ([`PhysicalASAPDAG::refresh_windows`]): on the DAG of the candidates
 /// below it, each input read from its first producer candidate. That is
@@ -731,7 +731,7 @@ fn refresh_windows(
     let views: Vec<PhysicalCandidateId> = (0..physical.candidates.len())
         .map(PhysicalCandidateId)
         .filter(|&class| {
-            links.is_shareable(class)
+            links.is_materialized(class)
                 && physical.candidates[class.0].properties.timing()
                     == ExecutionTiming::IngestionTime
         })
@@ -807,12 +807,12 @@ pub(crate) fn producer_window_disagreements_of_all(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExecutionContext {
     pub(crate) kind: ContextKind,
-    /// Whether it runs at query time (a query, or a query-time shareable
+    /// Whether it runs at query time (a query, or a query-time materialized
     /// candidate's inputs): its `PerContext` candidates are computed in it.
     pub(crate) at_query_time: bool,
     /// The candidates that may give a result slot in it, ascending: each
     /// computed in it ([`ExecutionContext::computes`]) or read across its
-    /// boundary (a shareable candidate, or a candidate of an `I_r`).
+    /// boundary (a materialized candidate, or a candidate of an `I_r`).
     pub(crate) options: Vec<PhysicalCandidateId>,
 }
 
@@ -830,12 +830,12 @@ impl ExecutionContext {
 
 impl MilpInputs {
     /// The context where context `context` reads a candidate of an `I_r`:
-    /// itself for an `I_r`, `I_{r(m)}` for ingestion-time shareable `m`'s
+    /// itself for an `I_r`, `I_{r(m)}` for ingestion-time materialized `m`'s
     /// context; `None` for any other context (it reads none).
     pub(crate) fn ingestion_context_read_by(&self, context: usize) -> Option<usize> {
         match self.contexts[context].kind {
             ContextKind::Ingestion(_) => Some(context),
-            ContextKind::Materialized(m) => self.ingestion_context_of_shareable.get(&m).copied(),
+            ContextKind::Materialized(m) => self.ingestion_context_of_materialized.get(&m).copied(),
             ContextKind::Query(_) => None,
         }
     }
@@ -844,14 +844,14 @@ impl MilpInputs {
 /// [`execution_contexts`]' result (see [`MilpInputs`] for each field).
 pub(crate) struct ExecutionContexts {
     pub(crate) contexts: Vec<ExecutionContext>,
-    pub(crate) context_of_shareable: BTreeMap<PhysicalCandidateId, usize>,
-    pub(crate) ingestion_context_of_shareable: BTreeMap<PhysicalCandidateId, usize>,
+    pub(crate) context_of_materialized: BTreeMap<PhysicalCandidateId, usize>,
+    pub(crate) ingestion_context_of_materialized: BTreeMap<PhysicalCandidateId, usize>,
 }
 
 /// The execution contexts and their options (module documentation): from
-/// each query's output candidates, each shareable candidate's producers
+/// each query's output candidates, each materialized candidate's producers
 /// and, per ingestion pipeline `I_r`, every candidate of `I_r` an
-/// ingestion-time shareable candidate of refresh window `r`
+/// ingestion-time materialized candidate of refresh window `r`
 /// (`refresh_windows`) reads across its boundary, expanded through the
 /// inputs of the candidates each context computes. Candidates `usable`
 /// rejects (no usage) are left out. A query-time `PerContext` candidate
@@ -908,10 +908,10 @@ pub(crate) fn execution_contexts(
         context.options = expand(&context, seeds);
         contexts.push(context);
     }
-    // Shareable contexts, discovered from the options, then each `I_r` from
+    // Materialized contexts, discovered from the options, then each `I_r` from
     // every candidate of `I_r` read across a boundary; repeated until
     // nothing new.
-    let mut context_of_shareable: BTreeMap<PhysicalCandidateId, usize> = BTreeMap::new();
+    let mut context_of_materialized: BTreeMap<PhysicalCandidateId, usize> = BTreeMap::new();
     let mut shared: Vec<ExecutionContext> = Vec::new();
     // Per `I_r`: its context and its seeds.
     let mut ingestion: BTreeMap<
@@ -924,7 +924,7 @@ pub(crate) fn execution_contexts(
         let mut seeds: Vec<(IngestionPipeline, PhysicalCandidateId)> = Vec::new();
         let unscanned = contexts.iter().chain(shared.iter()).skip(scanned);
         for context in unscanned.chain(ingestion.values().map(|(context, _)| context)) {
-            // Only an ingestion-time shareable candidate reads a candidate
+            // Only an ingestion-time materialized candidate reads a candidate
             // of an `I_r` (Stage 2's timing rule).
             let pipeline = match context.kind {
                 ContextKind::Materialized(m) if !context.at_query_time => {
@@ -935,7 +935,9 @@ pub(crate) fn execution_contexts(
             for &class in &context.options {
                 match kind[class.0] {
                     RunKind::Materialized => {
-                        if !context_of_shareable.contains_key(&class) && !pending.contains(&class) {
+                        if !context_of_materialized.contains_key(&class)
+                            && !pending.contains(&class)
+                        {
                             pending.push(class);
                         }
                     }
@@ -983,7 +985,7 @@ pub(crate) fn execution_contexts(
                     .copied()
                     .collect(),
             );
-            context_of_shareable.insert(class, usize::MAX);
+            context_of_materialized.insert(class, usize::MAX);
             shared.push(context);
         }
         for pipeline in grown {
@@ -997,14 +999,14 @@ pub(crate) fn execution_contexts(
         context_of_pipeline.insert(pipeline, contexts.len());
         contexts.push(context);
     }
-    let mut ingestion_context_of_shareable = BTreeMap::new();
+    let mut ingestion_context_of_materialized = BTreeMap::new();
     for context in shared {
         if let ContextKind::Materialized(class) = context.kind {
-            context_of_shareable.insert(class, contexts.len());
+            context_of_materialized.insert(class, contexts.len());
             if !context.at_query_time {
                 let pipeline = ingestion_pipeline(class, refresh_windows);
                 if let Some(&at) = context_of_pipeline.get(&pipeline) {
-                    ingestion_context_of_shareable.insert(class, at);
+                    ingestion_context_of_materialized.insert(class, at);
                 }
             }
         }
@@ -1012,8 +1014,8 @@ pub(crate) fn execution_contexts(
     }
     ExecutionContexts {
         contexts,
-        context_of_shareable,
-        ingestion_context_of_shareable,
+        context_of_materialized,
+        ingestion_context_of_materialized,
     }
 }
 
@@ -1088,7 +1090,7 @@ fn nodes_dag(nodes: &[&PhysicalASAPDAGNode]) -> PhysicalASAPDAG {
 /// The window a scan read through `path` (time shifts, then the reader that
 /// ends it) covers, as [`PhysicalASAPDAG::scan_window`] computes it for a
 /// plan where `path` is the scan's only reader: the shifts' offsets add up,
-/// and a `TimeRange` reads its range, a kept pane chain one pane, any other
+/// and a `TimeRange` reads its range, a pane chain materialized across evaluations at query time one pane, any other
 /// pane chain its whole window; any other reader reads `Unbounded`.
 fn window_read_through(
     path: &[&PhysicalASAPDAGNode],
@@ -1104,7 +1106,7 @@ fn window_read_through(
             Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                 tumbling_window_width_ms,
                 ..
-            }) if asap_cost::is_materialized_tumbling_window_chain(node)? => {
+            }) if asap_cost::is_query_time_materialized_tumbling_window_chain(node)? => {
                 u128::from(*tumbling_window_width_ms)
             }
             Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
@@ -1127,7 +1129,7 @@ fn window_read_through(
 /// the unions of the window kinds its readers there read (one scan run read
 /// by several readers reads the union, `PhysicalASAPDAG::scan_window`):
 /// every union of the kinds.
-/// A read as an output or as a shareable candidate's own input is
+/// A read as an output or as a materialized candidate's own input is
 /// `Unbounded`. Distinct; `Unbounded` alone when nothing reads it.
 fn scan_window_options(
     scan: PhysicalCandidateId,
@@ -1157,7 +1159,7 @@ fn scan_window_options(
                 window_union(read.iter().copied())
             })
     };
-    let shareable = kind[scan.0] == RunKind::Materialized;
+    let materialized = kind[scan.0] == RunKind::Materialized;
     let mut all_kinds: Vec<ScanWindow> = Vec::new();
     for context in contexts {
         if !context.options.contains(&scan) {
@@ -1176,7 +1178,7 @@ fn scan_window_options(
                 }
             }
         }
-        // A shareable candidate reading the scan as its own input reads it
+        // A materialized candidate reading the scan as its own input reads it
         // at its own window; a read as an output reads it whole.
         if let ContextKind::Materialized(own) = context.kind {
             if producers_per_input[own.0]
@@ -1196,7 +1198,7 @@ fn scan_window_options(
         if read_whole && !kinds.contains(&ScanWindow::Unbounded) {
             kinds.push(ScanWindow::Unbounded);
         }
-        if shareable {
+        if materialized {
             for window in kinds {
                 if !all_kinds.contains(&window) {
                     all_kinds.push(window);
@@ -1206,7 +1208,7 @@ fn scan_window_options(
         }
         add_unions(&kinds, &mut windows);
     }
-    if shareable {
+    if materialized {
         add_unions(&all_kinds, &mut windows);
     }
     if windows.is_empty() {
@@ -1306,9 +1308,10 @@ fn scan_windows_per_reader(
     Ok(per_reader)
 }
 
-/// The panes kept pane chain `chain` may keep, one per query that can reach
-/// it (its range-evaluation span), in `reaching` order; its pane count for
-/// any other node.
+/// The panes the pane chain `chain`, materialized across evaluations at
+/// either timing, may retain, one per query that can reach it (its
+/// range-evaluation span), in `reaching` order; its pane count for any
+/// other node.
 fn retained_pane_options(
     chain: PhysicalCandidateId,
     nodes: &[PhysicalASAPDAGNode],
@@ -1317,11 +1320,22 @@ fn retained_pane_options(
     entries: &[QueryWorkloadEntry],
 ) -> Vec<u64> {
     let node = &nodes[chain.0];
-    let kept = matches!(
+    let chain_node = matches!(
         node.payload,
         Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
-    ) && node.lifetime.is_across_evaluations();
-    if !kept {
+    );
+    let materialized_across_evaluations = {
+        use ExecutionTiming::{IngestionTime, QueryTime};
+        match (node.output_state.timing, node.lifetime) {
+            (QueryTime | IngestionTime, Lifetime::AcrossEvaluations(_)) => true,
+            (QueryTime | IngestionTime, Lifetime::None)
+            | (QueryTime, Lifetime::OneEvaluation(_)) => false,
+            (IngestionTime, Lifetime::OneEvaluation(_)) => {
+                unreachable!("rejected by PhysicalProperties::new")
+            }
+        }
+    };
+    if !(chain_node && materialized_across_evaluations) {
         return vec![asap_cost::tumbling_windows_of(node)];
     }
     // The chain over the time shifts below it, which set its input offset.
@@ -1953,7 +1967,7 @@ pub(crate) struct DominanceProfile<'a> {
 pub(crate) struct DominanceKey<'a> {
     pub(crate) group: MemoGroupId,
     pub(crate) properties: PhysicalProperties,
-    pub(crate) shareable: bool,
+    pub(crate) materialized: bool,
     pub(crate) producer_candidates_per_input: &'a [Vec<PhysicalCandidateId>],
     pub(crate) readers: Vec<(PhysicalCandidateId, usize)>,
     pub(crate) output_references: Vec<usize>,
@@ -2004,7 +2018,7 @@ fn dominance_profiles<'a>(
                 same: DominanceKey {
                     group: physical.memo_group_of(copy),
                     properties: candidate.properties,
-                    shareable: links.is_shareable(copy),
+                    materialized: links.is_materialized(copy),
                     producer_candidates_per_input: producers_per_input,
                     readers: std::mem::take(&mut readers[class]),
                     output_references: std::mem::take(&mut output_refs_of[class]),

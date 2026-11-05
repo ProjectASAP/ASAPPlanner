@@ -29,6 +29,6 @@ impl PhysicalWorkloadPlan {
         self.dag
             .nodes
             .iter()
-            .any(|node| node.lifetime.is_materialized())
+            .any(|node| node.lifetime != crate::physical::Lifetime::None)
     }
 }

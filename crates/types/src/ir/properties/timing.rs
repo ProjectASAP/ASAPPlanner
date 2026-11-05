@@ -63,7 +63,7 @@ use crate::ir::properties::execution_data_state::{
     DataPrimitive, ExecutionDataState, ExecutionDataStateError, ExecutionTiming,
 };
 use crate::ir::schema::{DataType, FieldDataType, Schema};
-use crate::physical::PhysicalProperties;
+use crate::physical::{satisfies_physical, Evaluation, PhysicalProperties, PhysicalRequirement};
 #[cfg(test)]
 use crate::physical::{Lifetime, Medium};
 
@@ -353,7 +353,10 @@ pub fn apply_physical_properties_to_roots(
                 .get(node)
                 .expect("written node is timed");
             if properties.timing() == ExecutionTiming::IngestionTime
-                && !properties.readable_at(ExecutionTiming::QueryTime)
+                && !satisfies_physical(
+                    &properties,
+                    &read_in_the_same_evaluation(ExecutionTiming::QueryTime),
+                )
                 && primitive(node) == DataPrimitive::Raw
             {
                 return Err(ExecutionDataStateError::UnstoredIngestionRoot {
@@ -581,7 +584,7 @@ fn validate_asap(
                 && avail.timing == ExecutionTiming::IngestionTime
                 && !physical_properties
                     .get(child)
-                    .is_some_and(|p| p.readable_at(timing))
+                    .is_some_and(|p| satisfies_physical(&p, &read_in_the_same_evaluation(timing)))
             {
                 return Err(
                     ExecutionDataStateError::UnstoredIngestionInputUnderQueryTimeSummary {
@@ -734,7 +737,7 @@ fn validate_non_asap(
         // materialized at ingestion time.
         let reads_stored = physical_properties
             .get(child)
-            .is_some_and(|p| p.readable_at(timing));
+            .is_some_and(|p| satisfies_physical(&p, &read_in_the_same_evaluation(timing)));
         if (s.timing != timing && !reads_stored)
             || (s.primitive != DataPrimitive::Raw && !passes_state)
         {
@@ -863,6 +866,13 @@ fn per_series_rows(node: &OperatorNode) -> Option<&OperatorNode> {
         }
         _ => None,
     }
+}
+
+/// r^phys of a reader at `timing` that reads its input's output in the same
+/// evaluation (or ingestion work), as every edge of the timing pass does.
+fn read_in_the_same_evaluation(timing: ExecutionTiming) -> PhysicalRequirement {
+    PhysicalRequirement::new(timing, Evaluation::Same)
+        .expect("a same-evaluation read is valid at either timing")
 }
 
 #[cfg(test)]

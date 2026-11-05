@@ -297,7 +297,7 @@ fn candidates_where(
         .collect()
 }
 
-/// Adds `Σ x[m] ≥ 1` over the shareable `candidates`: one is selected.
+/// Adds `Σ x[m] ≥ 1` over the materialized `candidates`: one is selected.
 fn require_one_of(milp: &mut SelectionMilp<'_>, candidates: &[PhysicalCandidateId]) {
     let sum: Expression = candidates
         .iter()
@@ -478,7 +478,7 @@ fn a_kept_pane_chain_keeps_the_longest_readers_span() {
                 node.asap(),
                 Some(asap_types::ir::ASAPOp::SummaryTumblingWindowChain { .. })
             ) && (candidate.properties.timing() == ExecutionTiming::IngestionTime
-                && candidate.properties.lifetime().is_materialized())
+                && candidate.properties.is_materialized())
         });
         require_one_of(milp, &chains);
     })
@@ -564,7 +564,7 @@ fn one_ingestion_scan_shared_by_two_sketch_configurations_is_charged_once() {
     let checked = solve_and_check(&fixture, &cost_inputs(), |milp| {
         let sketches = candidates_where(milp, |candidate, node| {
             candidate.properties.timing() == ExecutionTiming::IngestionTime
-                && candidate.properties.lifetime().is_materialized()
+                && candidate.properties.is_materialized()
                 && matches!(
                     node.asap(),
                     Some(asap_types::ir::ASAPOp::SummaryAgg { .. })
@@ -616,11 +616,11 @@ fn ingestion_scans_under_refresh_windows(
     let checked = solve_and_check(&fixture, &cost_inputs(), |milp| {
         let states = candidates_where(milp, |candidate, _| {
             candidate.properties.timing() == ExecutionTiming::IngestionTime
-                && candidate.properties.lifetime().is_materialized()
+                && candidate.properties.is_materialized()
         });
         let window_of = |state: PhysicalCandidateId| {
             milp.inputs
-                .ingestion_context_of_shareable
+                .ingestion_context_of_materialized
                 .get(&state)
                 .map(|&context| milp.inputs.contexts[context].kind)
         };
@@ -805,7 +805,7 @@ fn a_stateless_subtree_two_state_nodes_read_runs_once() {
 // Structure
 // ---------------------------------------------------------------------------
 
-// "Used only if read": a query context may not select a shareable
+// "Used only if read": a query context may not select a materialized
 // candidate no used reader there reads, so a phantom read cannot satisfy
 // `MinimumQueryReaders`. With every reader of a two-reader `OneEvaluation`
 // result in the second query's context forbidden, selecting it is
@@ -836,7 +836,9 @@ fn a_phantom_reader_does_not_satisfy_minimum_query_readers() {
         })
         .filter(|&m| milp.selected.contains_key(&m) && milp.choice[1].contains_key(&m))
         .collect();
-    let m = *constrained.first().expect("a two-reader shareable result");
+    let m = *constrained
+        .first()
+        .expect("a two-reader materialized result");
     let selected = milp.selected[&m];
     milp.builder.row("test", constraint!(selected >= 1.0));
     let readers: Vec<PhysicalCandidateId> = milp.readers[1][&m]
@@ -863,9 +865,9 @@ fn a_phantom_reader_does_not_satisfy_minimum_query_readers() {
 }
 
 // A not-materialized query-time candidate selected in two contexts is two
-// nodes; a shareable candidate two queries read is one node.
+// nodes; a materialized candidate two queries read is one node.
 #[test]
-fn runs_decode_one_node_per_context_and_one_per_shareable_candidate() {
+fn runs_decode_one_node_per_context_and_one_per_materialized_candidate() {
     let fixture = through_stages(
         &[query("sum(m)", 60_000), query("sum(m) * 2", 60_000)],
         true,
@@ -873,7 +875,7 @@ fn runs_decode_one_node_per_context_and_one_per_shareable_candidate() {
     let unshared = solve_and_check(&fixture, &cost_inputs(), |milp| {
         let shared = candidates_where(milp, |candidate, _| {
             candidate.properties.timing() == ExecutionTiming::QueryTime
-                && candidate.properties.lifetime().is_materialized()
+                && candidate.properties.is_materialized()
         });
         forbid(milp, &shared);
         let ingestion = candidates_where(milp, |candidate, _| {

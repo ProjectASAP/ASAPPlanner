@@ -141,7 +141,7 @@ fn duration_name(ms: u64) -> String {
 }
 
 /// `logical` followed by what the candidate materializes, e.g.
-/// "… · ingestion time: Kll for Q1, 5 × 1m tumbling windows · query time, shared:
+/// "… · ingestion time: Kll for Q1, 5 × 1m tumbling windows · query time, one evaluation:
 /// DDSketch";
 /// just `logical` when nothing is.
 pub fn physical_label(logical: &str, candidate: &PhysicalWorkloadPlan) -> String {
@@ -198,8 +198,10 @@ fn phase_label(
         (QueryTime, Lifetime::None) => None,
         (IngestionTime, Lifetime::None) => None,
         (IngestionTime, Lifetime::AcrossEvaluations(_)) => Some("ingestion time"),
-        (QueryTime, Lifetime::OneEvaluation(_)) => Some("query time, shared"),
-        (QueryTime, Lifetime::AcrossEvaluations(_)) => Some("query time, kept"),
+        (QueryTime, Lifetime::OneEvaluation(_)) => Some("query time, one evaluation"),
+        (QueryTime, Lifetime::AcrossEvaluations(_)) => {
+            Some("query time, materialized across evaluations")
+        }
         (IngestionTime, Lifetime::OneEvaluation(_)) => {
             unreachable!("rejected by PhysicalProperties::new")
         }
@@ -517,7 +519,7 @@ mod tests {
                     .iter()
                     .filter(|node| {
                         node.output_state.timing == ExecutionTiming::IngestionTime
-                            && node.lifetime.is_materialized()
+                            && node.lifetime != Lifetime::None
                             && matches!(
                                 node.payload,
                                 Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
@@ -576,11 +578,11 @@ mod tests {
                 ),
                 (
                     at(QueryTime, Lifetime::OneEvaluation(medium)),
-                    Some("query time, shared"),
+                    Some("query time, one evaluation"),
                 ),
                 (
                     at(QueryTime, Lifetime::AcrossEvaluations(medium)),
-                    Some("query time, kept"),
+                    Some("query time, materialized across evaluations"),
                 ),
             ]);
         }

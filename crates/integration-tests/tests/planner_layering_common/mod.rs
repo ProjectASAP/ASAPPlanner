@@ -783,7 +783,7 @@ pub fn computations(dag: &PhysicalASAPDAG) -> BTreeMap<NodeId, u64> {
     let materialized_nodes: BTreeSet<_> = dag
         .nodes
         .iter()
-        .filter(|n| n.lifetime.is_materialized())
+        .filter(|n| n.lifetime != Lifetime::None)
         .map(|n| n.id)
         .collect();
     // Each walk's start and, for a consumer refreshed at ingestion, its

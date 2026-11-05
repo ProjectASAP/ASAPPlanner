@@ -13,7 +13,9 @@ use crate::summary_materialization_eligibility;
 use asap_types::ir::operator::{agg_has_exact_per_entity_kernel, Reduction};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
-use asap_types::physical::{Lifetime, PhysicalProperties};
+use asap_types::physical::{
+    satisfies_physical, Evaluation, Lifetime, PhysicalProperties, PhysicalRequirement,
+};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use super::inventory::CandidateInventory;
@@ -141,7 +143,7 @@ pub fn enumerate_candidate_configurations(
         // still handles them when given one):
         // - any `Disk` medium (#1217): the executor has no disk store, so a
         //   `Disk` state given to it executes in memory (a view slot bound to
-        //   the deployment's in-memory store, a one-evaluation result kept
+        //   the deployment's in-memory store, a one-evaluation result materialized
         //   within the query run), while cost prices it as disk;
         // - (IngestionTime, None) for a summary build: an unmaterialized build
         //   runs at query time (`apply_physical_properties`);
@@ -319,9 +321,11 @@ pub fn enumerate_candidate_configurations(
             .into_iter()
             .enumerate()
         {
+            let requirement = PhysicalRequirement::new(timing, Evaluation::Same)
+                .expect("a same-evaluation read is valid at either timing");
             let mut compatible = Vec::new();
             for &producer in configurations {
-                if candidates[producer.0].properties.readable_at(timing) {
+                if satisfies_physical(&candidates[producer.0].properties, &requirement) {
                     compatible.push(producer);
                 }
             }

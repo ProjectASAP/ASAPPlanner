@@ -1545,7 +1545,7 @@ impl OptimizationPass for StoredAsForced {
                 let selected = output
                     .physical_properties
                     .get(&node)
-                    .filter(|properties| properties.lifetime().is_materialized());
+                    .filter(|properties| properties.is_materialized());
                 let own = match node.asap() {
                     Some(
                         ASAPOp::SummaryAgg { .. }

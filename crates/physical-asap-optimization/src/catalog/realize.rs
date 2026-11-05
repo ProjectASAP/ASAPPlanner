@@ -68,10 +68,11 @@ pub fn realize_selected_candidates(
                 });
             // The option with the requested properties; option `None` (no
             // entry: not materialized, placed by the timing pass) for a
-            // requested lifetime `None`, at either timing.
+            // requested lifetime `None`, at either timing. The timing pass's
+            // placement is checked against the requested timing below.
             let chosen = options.iter().position(|option| match option {
                 Some(entry) => *entry == requested,
-                None => !requested.lifetime().is_materialized(),
+                None => !requested.is_materialized(),
             });
             if chosen.is_none() {
                 let message = format!(
@@ -100,7 +101,7 @@ pub fn realize_selected_candidates(
     let physical_outputs = ordered_output_references(&physical.roots);
     let identities = paired_node_identities(&rebuilt.outputs, &physical_outputs)?;
     for (node, properties) in assignments.iter().enumerate() {
-        if properties.lifetime().is_materialized() && !seen[node] {
+        if properties.is_materialized() && !seen[node] {
             // The decoder already established node identity. Stage 2 did
             // not offer this selected node (e.g. a lower shared non-summary),
             // so the assignment is infeasible rather than an adapter failure.
@@ -122,9 +123,14 @@ pub fn realize_selected_candidates(
             let realized = realized_properties
                 .get(&physical)
                 .ok_or_else(|| format!("selected node {node} has no physical properties"))?;
-            if realized.lifetime() != assignments[node].lifetime() {
+            // The whole (timing, lifetime) Stage 3 selected and priced: an
+            // option `None` leaves the timing to the timing pass, which must
+            // place the node where Stage 3 assumed.
+            if realized != assignments[node] {
                 return Err(format!(
-                    "selected node {node} lifetime changed during physical reconstruction"
+                    "selected node {node} has physical properties {realized:?} after physical \
+                     reconstruction, not the selected {:?}",
+                    assignments[node]
                 ));
             }
             Ok(physical)
@@ -259,12 +265,7 @@ mod tests {
             let producer = producer_candidates
                 .iter()
                 .copied()
-                .find(|s| {
-                    !physical.candidates[s.0]
-                        .properties
-                        .lifetime()
-                        .is_materialized()
-                })
+                .find(|s| !physical.candidates[s.0].properties.is_materialized())
                 .unwrap_or(producer_candidates[0]);
             let producer = select_from(physical, producer, selected);
             selected.edges.push(SelectedEdge {

@@ -634,8 +634,20 @@ impl PhysicalASAPDAG {
                     },
                 );
             }
+            let materialized_across_evaluations = match (properties.timing(), properties.lifetime())
+            {
+                (
+                    ExecutionTiming::QueryTime | ExecutionTiming::IngestionTime,
+                    Lifetime::AcrossEvaluations(_),
+                ) => true,
+                (ExecutionTiming::QueryTime | ExecutionTiming::IngestionTime, Lifetime::None)
+                | (ExecutionTiming::QueryTime, Lifetime::OneEvaluation(_)) => false,
+                (ExecutionTiming::IngestionTime, Lifetime::OneEvaluation(_)) => {
+                    unreachable!("rejected by PhysicalProperties::new")
+                }
+            };
             if node.retention_ms.is_some()
-                && !node.lifetime.is_across_evaluations()
+                && !materialized_across_evaluations
                 && !super::materialized_view::is_query_time_scan(node)
             {
                 return Err(PhysicalASAPDAGValidationError::UnexpectedRetention(node.id));

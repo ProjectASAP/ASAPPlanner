@@ -916,8 +916,21 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
         let [left, right] = inputs else {
             return Err(invalid("binary requires two inputs"));
         };
-        if node.output_state.timing == planner_types::ir::properties::ExecutionTiming::IngestionTime
-        {
+        let at_ingestion = {
+            use planner_types::ir::properties::ExecutionTiming::{IngestionTime, QueryTime};
+            use planner_types::physical::Lifetime;
+            match (node.output_state.timing, node.lifetime) {
+                (IngestionTime, Lifetime::None | Lifetime::AcrossEvaluations(_)) => true,
+                (
+                    QueryTime,
+                    Lifetime::None | Lifetime::OneEvaluation(_) | Lifetime::AcrossEvaluations(_),
+                ) => false,
+                (IngestionTime, Lifetime::OneEvaluation(_)) => {
+                    unreachable!("rejected by PhysicalProperties::new")
+                }
+            }
+        };
+        if at_ingestion {
             let value = |schema: &SchemaRef| -> Result<usize, Error> {
                 let columns = schema
                     .fields
@@ -1730,7 +1743,18 @@ pub mod test_support {
             .nodes
             .iter()
             .filter(|node| {
-                nodes.contains(&(node.id as NodeId)) && !node.lifetime.is_across_evaluations()
+                use planner_types::ir::properties::ExecutionTiming::{IngestionTime, QueryTime};
+                use planner_types::physical::Lifetime;
+                let materialized_across_evaluations =
+                    match (node.output_state.timing, node.lifetime) {
+                        (QueryTime | IngestionTime, Lifetime::AcrossEvaluations(_)) => true,
+                        (QueryTime | IngestionTime, Lifetime::None)
+                        | (QueryTime, Lifetime::OneEvaluation(_)) => false,
+                        (IngestionTime, Lifetime::OneEvaluation(_)) => {
+                            unreachable!("rejected by PhysicalProperties::new")
+                        }
+                    };
+                nodes.contains(&(node.id as NodeId)) && !materialized_across_evaluations
             })
             .map(|node| node.id as NodeId)
             .collect();

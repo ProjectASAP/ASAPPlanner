@@ -4840,7 +4840,7 @@ mod tests {
             c.dag.nodes.iter().all(|n| match n.payload {
                 Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => {
                     n.output_state.timing == ExecutionTiming::IngestionTime
-                        && n.lifetime.is_materialized()
+                        && n.lifetime != Lifetime::None
                 }
                 _ => n.lifetime == Lifetime::None,
             })

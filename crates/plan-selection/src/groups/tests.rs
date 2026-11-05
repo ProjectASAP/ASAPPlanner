@@ -179,7 +179,7 @@ fn dominance_needs_every_condition() {
     let key = DominanceKey {
         group: MemoGroupId(3),
         properties: query_time_not_materialized(),
-        shareable: false,
+        materialized: false,
         producer_candidates_per_input: &producers,
         readers: vec![(PhysicalCandidateId(9), 0)],
         output_references: vec![0],
@@ -225,9 +225,9 @@ fn dominance_needs_every_condition() {
             },
         ),
         (
-            "shareable",
+            "materialized",
             DominanceKey {
-                shareable: true,
+                materialized: true,
                 ..key.clone()
             },
         ),
@@ -376,7 +376,7 @@ fn pruning_keeps_the_smallest_equal_class_and_incomparable_ones() {
     let key = DominanceKey {
         group: MemoGroupId(0),
         properties: query_time_not_materialized(),
-        shareable: false,
+        materialized: false,
         producer_candidates_per_input: &producers,
         readers: Vec::new(),
         output_references: vec![0],
@@ -477,7 +477,7 @@ fn a_dominated_class_is_deleted_with_its_links() {
 // Execution contexts
 // ---------------------------------------------------------------------------
 
-/// A leaf, a materialized (shareable) middle, and two queries each reading
+/// A leaf, a materialized (materialized) middle, and two queries each reading
 /// the middle through its own stateless top; a third query reads only its
 /// own leaf. Candidate `i` runs operator node `i`.
 fn shared_middle() -> PhysicalASAPMemoCandidates {
@@ -512,7 +512,7 @@ fn execution_contexts_on_a_hand_built_catalog() {
     let physical = shared_middle();
     let inputs = prepared(&physical);
     let (leaf, middle, top_0, top_1, lone) = (id(0), id(1), id(2), id(3), id(4));
-    assert!(CandidateLinks::new(&physical).is_shareable(middle));
+    assert!(CandidateLinks::new(&physical).is_materialized(middle));
     assert!(inputs.pruned_candidates.is_empty());
     let contexts: Vec<(ContextKind, Vec<PhysicalCandidateId>)> = inputs
         .contexts
@@ -528,7 +528,10 @@ fn execution_contexts_on_a_hand_built_catalog() {
             (ContextKind::Materialized(middle), vec![leaf]),
         ]
     );
-    assert_eq!(inputs.context_of_shareable, BTreeMap::from([(middle, 3)]));
+    assert_eq!(
+        inputs.context_of_materialized,
+        BTreeMap::from([(middle, 3)])
+    );
     assert!(inputs.contexts[3].computes(RunKind::PerContext));
     assert!(!inputs.contexts[3].computes(RunKind::Materialized));
     assert_eq!(
@@ -641,14 +644,14 @@ fn two_queries_share_a_pane_chain_through_the_real_pipeline() {
             matches!(
                 physical.physical_node(*candidate).asap(),
                 Some(ASAPOp::SummaryTumblingWindowChain { .. })
-            ) && links.is_shareable(*candidate)
+            ) && links.is_materialized(*candidate)
                 && inputs.contexts[0].options.contains(candidate)
                 && inputs.contexts[1].options.contains(candidate)
         })
         .collect();
     assert!(!shared_chains.is_empty());
     for &chain in &shared_chains {
-        let context = inputs.context_of_shareable[&chain];
+        let context = inputs.context_of_materialized[&chain];
         assert_eq!(
             inputs.contexts[context].kind,
             ContextKind::Materialized(chain)
@@ -1078,10 +1081,10 @@ fn execution_contexts_have_one_ingestion_pipeline_per_refresh_window() {
         ]
     );
     assert_eq!(
-        contexts.ingestion_context_of_shareable,
+        contexts.ingestion_context_of_materialized,
         BTreeMap::from([(id(2), 5), (id(3), 5), (id(5), 7), (id(8), 6), (id(9), 8)])
     );
-    let shared = contexts.context_of_shareable[&id(8)];
+    let shared = contexts.context_of_materialized[&id(8)];
     assert_eq!(contexts.contexts[shared].options, vec![id(7)]);
 }
 

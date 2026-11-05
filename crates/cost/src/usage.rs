@@ -576,7 +576,19 @@ pub fn node_usage<'a>(
     let mut raw_scan = None;
     // A query-time scan's raw rows kept ([`ScanWindow::lookback_ms`]).
     let mut raw_kept_rows = None;
-    let ingestion = node.output_state.timing == ExecutionTiming::IngestionTime;
+    let (timing, lifetime) = timing_and_lifetime(node)?;
+    // Whether the node computes at ingestion time, over arriving rows: the
+    // same for every lifetime.
+    let ingestion = match (timing, lifetime) {
+        (IngestionTime, Lifetime::None | Lifetime::AcrossEvaluations(_)) => true,
+        (
+            QueryTime,
+            Lifetime::None | Lifetime::OneEvaluation(_) | Lifetime::AcrossEvaluations(_),
+        ) => false,
+        (IngestionTime, Lifetime::OneEvaluation(_)) => {
+            unreachable!("rejected by PhysicalProperties::new")
+        }
+    };
     let inputs: Vec<EdgeStatistics> = producers.iter().map(|p| p.output).collect();
     let sources: BTreeSet<&str> = match &node.payload {
         Payload::NonASAP(NonASAPOp::Scan { source, .. }) => [source_name(source)].into(),
@@ -1140,10 +1152,9 @@ pub fn node_usage<'a>(
         node.payload,
         Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
     );
-    // A whole state kept across evaluations: it and the one being built.
-    let whole_state_kept = || state.checked_mul(2).ok_or(AnalyticalCostError::Overflow);
-    let (timing, lifetime) = timing_and_lifetime(node)?;
-    let (kept, medium) = match (timing, lifetime) {
+    // A whole state materialized across evaluations: it and the one being built.
+    let whole_state_materialized = || state.checked_mul(2).ok_or(AnalyticalCostError::Overflow);
+    let (materialized_bytes, medium) = match (timing, lifetime) {
         // Working memory while it runs, once per consumer that recomputes it,
         // and held through each such consumer's evaluation.
         (QueryTime, Lifetime::None) => {
@@ -1160,7 +1171,7 @@ pub fn node_usage<'a>(
             peak_memory_bytes = estimate.peak_memory_bytes().saturating_mul(multiplier);
             (0, Medium::Memory)
         }
-        // A tumbling-window chain kept across evaluations holds the tumbling windows its
+        // A tumbling-window chain materialized across evaluations holds the tumbling windows its
         // retention covers ([`tumbling_window_retention_ms`]: N, plus one per tumbling window
         // width of the readers' range-evaluation span), all but the
         // newest between evaluations and all while one runs.
@@ -1189,7 +1200,7 @@ pub fn node_usage<'a>(
             detail += &format!("; materializes {between} bytes across evaluations");
             (0, medium)
         }
-        (QueryTime, Lifetime::AcrossEvaluations(medium)) => (whole_state_kept()?, medium),
+        (QueryTime, Lifetime::AcrossEvaluations(medium)) => (whole_state_materialized()?, medium),
         (QueryTime, Lifetime::OneEvaluation(medium)) => {
             match medium {
                 Medium::Memory => {
@@ -1214,7 +1225,9 @@ pub fn node_usage<'a>(
                 medium,
             )
         }
-        (IngestionTime, Lifetime::AcrossEvaluations(medium)) => (whole_state_kept()?, medium),
+        (IngestionTime, Lifetime::AcrossEvaluations(medium)) => {
+            (whole_state_materialized()?, medium)
+        }
         (IngestionTime, Lifetime::OneEvaluation(_)) => {
             unreachable!("rejected by PhysicalProperties::new")
         }
@@ -1618,37 +1631,39 @@ pub type NodeMap<'a> =
 /// (lifetime `AcrossEvaluations` at query time, which Stage 2 offers only when the
 /// deployment keeps query-time results and every reader builds one new
 /// tumbling window per evaluation). Each evaluation builds the newest tumbling window, and the
-/// older ones, which complete the readers' look-back, are kept from
-/// earlier evaluations. Fails on a node whose timing and lifetime cannot
-/// go together.
+/// older ones, which complete the readers' look-back, are materialized from
+/// earlier evaluations. Fails, naming the node, on a node whose timing and
+/// lifetime cannot go together.
 pub fn materialized_tumbling_window_chains(
     dag: &PhysicalASAPDAG,
-) -> Result<HashSet<PhysicalASAPNodeId>, AnalyticalCostError> {
+) -> Result<HashSet<PhysicalASAPNodeId>, (PhysicalASAPNodeId, AnalyticalCostError)> {
     let mut chains = HashSet::new();
     for node in &dag.nodes {
-        if is_materialized_tumbling_window_chain(node)? {
+        if is_query_time_materialized_tumbling_window_chain(node)
+            .map_err(|error| (node.id, error))?
+        {
             chains.insert(node.id);
         }
     }
     Ok(chains)
 }
 
-/// Whether `node` is a tumbling-window chain kept across evaluations at
-/// query time ([`materialized_tumbling_window_chains`]). Query time only: these are
+/// Whether `node` is a tumbling-window chain materialized across evaluations
+/// at query time ([`materialized_tumbling_window_chains`]). Query time only: these are
 /// the chains whose query-time scan reads just the newest tumbling window.
-/// A chain kept across evaluations at ingestion time is built as data
+/// A chain materialized across evaluations at ingestion time is built as data
 /// arrives, so no query-time scan reads below it; plan selection's
 /// retained-window options (`retained_pane_options`) and
 /// [`tumbling_window_retention_ms`] cover both timings, since a chain materialized
 /// at either timing retains windows.
-pub fn is_materialized_tumbling_window_chain(
+pub fn is_query_time_materialized_tumbling_window_chain(
     node: &asap_types::ir::physical_export::PhysicalASAPDAGNode,
 ) -> Result<bool, AnalyticalCostError> {
     let chain = matches!(
         node.payload,
         Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
     );
-    let kept_at_query_time = match timing_and_lifetime(node)? {
+    let materialized_at_query_time = match timing_and_lifetime(node)? {
         (QueryTime, Lifetime::AcrossEvaluations(_)) => true,
         // Rebuilt whole by each evaluation that reads it: its scan reads
         // the whole window.
@@ -1663,7 +1678,7 @@ pub fn is_materialized_tumbling_window_chain(
             unreachable!("rejected by PhysicalProperties::new")
         }
     };
-    Ok(chain && kept_at_query_time)
+    Ok(chain && materialized_at_query_time)
 }
 
 /// `node`'s timing and lifetime, checked by [`PhysicalProperties::new`]:

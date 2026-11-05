@@ -301,7 +301,7 @@ fn an_invalid_node_is_reported_not_skipped() {
     let chain = dag
         .nodes
         .iter_mut()
-        .find(|node| node.lifetime.is_materialized())
+        .find(|node| node.lifetime != asap_types::physical::Lifetime::None)
         .unwrap();
     chain.lifetime =
         asap_types::physical::Lifetime::OneEvaluation(asap_types::physical::Medium::Memory);

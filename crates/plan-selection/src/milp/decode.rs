@@ -2,15 +2,15 @@
 //! solution as a [`DagOfSelectedCandidates`], one node per candidate run.
 //!
 //! - A candidate computed in a context (`p[ctx, c] = 1`, a not-materialized
-//!   query-time candidate in a query's or a shareable candidate's context,
+//!   query-time candidate in a query's or a materialized candidate's context,
 //!   or a not-materialized ingestion-time candidate in an `I_r`) is one node per
 //!   context: selected in two contexts, it is two nodes; read by two
 //!   readers in one context, it is one.
-//! - A selected shareable candidate (`x[m] = 1`) is one node, whoever reads
+//! - A selected materialized candidate (`x[m] = 1`) is one node, whoever reads
 //!   it.
 //! - In each context, input `n` of a computed node (or of `m`'s own node in
 //!   `m`'s context) reads the context's selected candidate among its
-//!   producers: the node computed there, the shareable candidate's node, or
+//!   producers: the node computed there, the materialized candidate's node, or
 //!   the candidate's node in `I_r(m)` (read in ingestion-time `m`'s context).
 //! - Output reference `r` is the selected output candidate in `r`'s query
 //!   context.
@@ -33,12 +33,12 @@ use crate::groups::{MilpInputs, ResultSlot, RunKind};
 enum Run {
     /// Candidate `.1` computed in context `.0`.
     Computed(usize, PhysicalCandidateId),
-    /// Shareable candidate `.0`.
-    Shared(PhysicalCandidateId),
+    /// Materialized candidate `.0`.
+    Materialized(PhysicalCandidateId),
 }
 
 /// The selected candidates of a solution: per context, `p[ctx, c] = 1`, and
-/// the shareable candidates with `x[m] = 1`.
+/// the materialized candidates with `x[m] = 1`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct ChosenCandidates {
     pub(crate) chosen: Vec<BTreeSet<PhysicalCandidateId>>,
@@ -69,7 +69,7 @@ pub(crate) fn decode(
             RunKind::Materialized => chosen
                 .selected
                 .contains(&producer)
-                .then_some(Run::Shared(producer)),
+                .then_some(Run::Materialized(producer)),
             RunKind::Ingestion => inputs
                 .ingestion_context_read_by(context)
                 .filter(|&ingestion| chosen.chosen[ingestion].contains(&producer))
@@ -81,11 +81,13 @@ pub(crate) fn decode(
     let inputs_of = |run: Run| -> Result<Vec<(usize, Run)>, String> {
         let (context, candidate) = match run {
             Run::Computed(context, candidate) => (context, candidate),
-            Run::Shared(candidate) => (
+            Run::Materialized(candidate) => (
                 *inputs
-                    .context_of_shareable
+                    .context_of_materialized
                     .get(&candidate)
-                    .ok_or_else(|| format!("shareable candidate {} has no context", candidate.0))?,
+                    .ok_or_else(|| {
+                        format!("materialized candidate {} has no context", candidate.0)
+                    })?,
                 candidate,
             ),
         };
@@ -96,12 +98,12 @@ pub(crate) fn decode(
         {
             let slot_read = match run {
                 Run::Computed(..) => chosen.slot_reads.get(&(context, candidate, input)),
-                Run::Shared(_) => None,
+                Run::Materialized(_) => None,
             };
             let producer = producers
                 .iter()
                 .filter(|producer| {
-                    matches!(run, Run::Shared(_))
+                    matches!(run, Run::Materialized(_))
                         || inputs.slot[producer.0] != inputs.slot[candidate.0]
                 })
                 .filter(|producer| slot_read.is_none_or(|&slot| inputs.slot[producer.0] == slot))
@@ -137,7 +139,7 @@ pub(crate) fn decode(
         }
         node_of.insert(run, SelectedNodeId(candidate_of_node.len()));
         candidate_of_node.push(match run {
-            Run::Computed(_, candidate) | Run::Shared(candidate) => candidate,
+            Run::Computed(_, candidate) | Run::Materialized(candidate) => candidate,
         });
         let reads = inputs_of(run)?;
         stack.extend(reads.iter().map(|&(_, producer)| producer));

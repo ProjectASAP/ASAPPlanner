@@ -911,7 +911,7 @@
       ],
       "scalar_roots": []
     },
-    "display_name": "Q1 exact · Q2 Kll · shared Scan (Q1, Q2) · query time, shared: TimeRange"
+    "display_name": "Q1 exact · Q2 Kll · shared Scan (Q1, Q2) · query time, one evaluation: TimeRange"
   },
   "tumbling_window_retention_ms": {}
 }

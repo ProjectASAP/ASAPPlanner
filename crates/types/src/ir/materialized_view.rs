@@ -79,6 +79,7 @@ use crate::ir::operator::non_asap::NonASAPOp;
 use crate::ir::operator::operator_properties::Source;
 use crate::ir::properties::execution_data_state::ExecutionTiming;
 use crate::ir::properties::summary_coverage::{CoverageError, SelectionBox, SummaryCoverage};
+use crate::physical::Lifetime;
 
 /// One materialized view of a DAG: what its stored state is, what it is
 /// refreshed from, when, and for how long it is kept.
@@ -400,7 +401,7 @@ impl PhysicalASAPDAG {
         if let Some(node) = self
             .nodes
             .iter()
-            .find(|node| node.lifetime.is_across_evaluations() && node.retention_ms.is_none())
+            .find(|node| is_view(node) && node.retention_ms.is_none())
         {
             return Err(InstallableDagError::ViewWithoutRetention { node_id: node.id });
         }
@@ -729,7 +730,7 @@ impl PhysicalASAPDAG {
         let views: HashSet<PhysicalASAPNodeId> = self
             .nodes
             .iter()
-            .filter(|node| node.lifetime.is_across_evaluations())
+            .filter(|node| is_view(node))
             .map(|node| node.id)
             .collect();
         // The IR of each node, which coverage is derived from.
@@ -763,7 +764,19 @@ impl PhysicalASAPDAG {
             {
                 window_by_view.insert(id, window);
             }
-            let refreshed_at_ingestion = node.output_state.timing == ExecutionTiming::IngestionTime;
+            let refreshed_at_ingestion = match (node.output_state.timing, node.lifetime) {
+                (
+                    ExecutionTiming::IngestionTime,
+                    Lifetime::None | Lifetime::AcrossEvaluations(_),
+                ) => true,
+                (
+                    ExecutionTiming::QueryTime,
+                    Lifetime::None | Lifetime::OneEvaluation(_) | Lifetime::AcrossEvaluations(_),
+                ) => false,
+                (ExecutionTiming::IngestionTime, Lifetime::OneEvaluation(_)) => {
+                    unreachable!("rejected by PhysicalProperties::new")
+                }
+            };
             if refreshed_at_ingestion {
                 // An ingestion run reads each view for the window ending at
                 // its end, so a view read must end where the raw windows do.
@@ -1159,4 +1172,20 @@ fn with_replaced(
         result
     }
     replace(node, old, new, &mut HashMap::new())
+}
+
+/// Whether `node` is a materialized view: its output is materialized across
+/// evaluations, at either timing.
+fn is_view(node: &PhysicalASAPDAGNode) -> bool {
+    match (node.output_state.timing, node.lifetime) {
+        (
+            ExecutionTiming::QueryTime | ExecutionTiming::IngestionTime,
+            Lifetime::AcrossEvaluations(_),
+        ) => true,
+        (ExecutionTiming::QueryTime | ExecutionTiming::IngestionTime, Lifetime::None)
+        | (ExecutionTiming::QueryTime, Lifetime::OneEvaluation(_)) => false,
+        (ExecutionTiming::IngestionTime, Lifetime::OneEvaluation(_)) => {
+            unreachable!("rejected by PhysicalProperties::new")
+        }
+    }
 }

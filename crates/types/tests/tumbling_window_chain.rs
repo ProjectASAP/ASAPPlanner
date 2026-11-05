@@ -197,7 +197,7 @@ fn expansion_carries_the_chains_timing_onto_its_tumbling_windows() {
         }))
         .unwrap();
         let mut assignment = PhysicalPropertiesAssignment::default();
-        if lifetime.is_materialized() {
+        if lifetime != Lifetime::None {
             assignment.set(&chain, PhysicalProperties::new(timing, lifetime).unwrap());
         }
         let physical_properties = apply_physical_properties(&estimate, &assignment).unwrap();

@@ -33,20 +33,6 @@ pub enum Lifetime {
     AcrossEvaluations(Medium),
 }
 
-impl Lifetime {
-    /// Whether the output outlives its reader: `OneEvaluation` or
-    /// `AcrossEvaluations`.
-    pub fn is_materialized(self) -> bool {
-        self != Self::None
-    }
-
-    /// Whether the output is materialized across evaluations: a materialized view
-    /// that later evaluations reuse.
-    pub fn is_across_evaluations(self) -> bool {
-        matches!(self, Self::AcrossEvaluations(_))
-    }
-}
-
 /// A timing and a lifetime that cannot go together.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum InvalidPhysicalProperties {
@@ -124,26 +110,15 @@ impl PhysicalProperties {
         self.lifetime
     }
 
-    /// Whether a reader running at `reader` may read this output: one at the
-    /// same timing, or a query-time reader of an ingestion-time output materialized
-    /// until a query reads it.
-    pub fn readable_at(self, reader: ExecutionTiming) -> bool {
+    /// Whether the output outlives its reader (lifetime `OneEvaluation` or
+    /// `AcrossEvaluations`): materialized(v) ⇔ ℓ_v ≠ None.
+    pub fn is_materialized(self) -> bool {
         use ExecutionTiming::{IngestionTime, QueryTime};
-        match (self.timing, self.lifetime, reader) {
-            // Runs inside the execution that reads it: only a reader at its
-            // own timing.
-            (QueryTime, Lifetime::None, QueryTime) => true,
-            (QueryTime, Lifetime::None, IngestionTime) => false,
-            (IngestionTime, Lifetime::None, IngestionTime) => true,
-            (IngestionTime, Lifetime::None, QueryTime) => false,
-            // Kept until a query reads it: ingestion work and queries both read it.
-            (IngestionTime, Lifetime::AcrossEvaluations(_), IngestionTime | QueryTime) => true,
-            // A query-time output: queries read it; ingestion work never does.
-            (QueryTime, Lifetime::OneEvaluation(_), QueryTime) => true,
-            (QueryTime, Lifetime::OneEvaluation(_), IngestionTime) => false,
-            (QueryTime, Lifetime::AcrossEvaluations(_), QueryTime) => true,
-            (QueryTime, Lifetime::AcrossEvaluations(_), IngestionTime) => false,
-            (IngestionTime, Lifetime::OneEvaluation(_), _) => {
+        match (self.timing, self.lifetime) {
+            (QueryTime | IngestionTime, Lifetime::None) => false,
+            (QueryTime, Lifetime::OneEvaluation(_) | Lifetime::AcrossEvaluations(_))
+            | (IngestionTime, Lifetime::AcrossEvaluations(_)) => true,
+            (IngestionTime, Lifetime::OneEvaluation(_)) => {
                 unreachable!("rejected by PhysicalProperties::new")
             }
         }
@@ -166,6 +141,103 @@ impl PhysicalProperties {
             (IngestionTime, Lifetime::AcrossEvaluations(Disk)),
         ]
         .map(|(timing, lifetime)| Self::new(timing, lifetime).expect("a valid pair"))
+    }
+}
+
+/// Which evaluation's output a reader reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Evaluation {
+    /// The output of the evaluation the reader runs in (or, at ingestion
+    /// time, of the ingestion work it runs in).
+    Same,
+    /// The output of an earlier evaluation, reused by a later one.
+    Later,
+}
+
+/// A reader timing and an evaluation that cannot go together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum InvalidPhysicalRequirement {
+    #[error("an ingestion-time reader cannot read a later evaluation's output: there is no evaluation at ingestion time")]
+    LaterEvaluationAtIngestion,
+}
+
+/// r^phys_{c,i}: when a consumer reads one input, and from which
+/// evaluation. The reader's schedule comes with the schedule σ (#1200 PR 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PhysicalRequirement {
+    reader_timing: ExecutionTiming,
+    reads_from: Evaluation,
+}
+
+impl PhysicalRequirement {
+    /// The requirement of a reader at `reader_timing` reading `reads_from`,
+    /// unless they cannot go together.
+    pub fn new(
+        reader_timing: ExecutionTiming,
+        reads_from: Evaluation,
+    ) -> Result<Self, InvalidPhysicalRequirement> {
+        use ExecutionTiming::{IngestionTime, QueryTime};
+        match (reader_timing, reads_from) {
+            (IngestionTime, Evaluation::Later) => {
+                Err(InvalidPhysicalRequirement::LaterEvaluationAtIngestion)
+            }
+            (QueryTime | IngestionTime, Evaluation::Same) | (QueryTime, Evaluation::Later) => {
+                Ok(Self {
+                    reader_timing,
+                    reads_from,
+                })
+            }
+        }
+    }
+
+    pub fn reader_timing(self) -> ExecutionTiming {
+        self.reader_timing
+    }
+
+    pub fn reads_from(self) -> Evaluation {
+        self.reads_from
+    }
+}
+
+/// α^phys_{u,c,i}: whether a producer with `producer`'s properties may serve
+/// an input with `requirement` (#1200, timing and lifetime table):
+/// - at ingestion time: the producer runs at ingestion time;
+/// - at query time, in the same evaluation: a query-time producer with any
+///   lifetime, or an ingestion-time producer materialized across evaluations;
+/// - at query time, in a later evaluation: a producer materialized across
+///   evaluations.
+pub fn satisfies_physical(
+    producer: &PhysicalProperties,
+    requirement: &PhysicalRequirement,
+) -> bool {
+    use ExecutionTiming::{IngestionTime, QueryTime};
+    match (
+        producer.timing,
+        producer.lifetime,
+        requirement.reader_timing,
+        requirement.reads_from,
+    ) {
+        (IngestionTime, Lifetime::OneEvaluation(_), ..) => {
+            unreachable!("rejected by PhysicalProperties::new")
+        }
+        (_, _, IngestionTime, Evaluation::Later) => {
+            unreachable!("rejected by PhysicalRequirement::new")
+        }
+        // An ingestion-time reader reads what runs at ingestion time.
+        (
+            IngestionTime,
+            Lifetime::None | Lifetime::AcrossEvaluations(_),
+            IngestionTime,
+            Evaluation::Same,
+        ) => true,
+        (QueryTime, _, IngestionTime, Evaluation::Same) => false,
+        // A query-time reader in the same evaluation.
+        (QueryTime, _, QueryTime, Evaluation::Same) => true,
+        (IngestionTime, Lifetime::AcrossEvaluations(_), QueryTime, Evaluation::Same) => true,
+        (IngestionTime, Lifetime::None, QueryTime, Evaluation::Same) => false,
+        // A later evaluation reads only what lives across evaluations.
+        (_, Lifetime::AcrossEvaluations(_), QueryTime, Evaluation::Later) => true,
+        (_, Lifetime::None | Lifetime::OneEvaluation(_), QueryTime, Evaluation::Later) => false,
     }
 }
 
@@ -221,47 +293,96 @@ mod tests {
         }
     }
 
-    /// `readable_at` for every valid state and both reader timings.
+    /// `satisfies_physical` for every valid state and every valid requirement.
     #[test]
-    fn readable_at_over_every_valid_state() {
+    fn satisfies_physical_over_every_valid_state() {
         use ExecutionTiming::{IngestionTime, QueryTime};
         let at = |timing, lifetime| PhysicalProperties::new(timing, lifetime).unwrap();
-        // (state, readable by a query-time reader, readable by an ingestion-time reader)
+        let same_at_query = PhysicalRequirement::new(QueryTime, Evaluation::Same).unwrap();
+        let same_at_ingestion = PhysicalRequirement::new(IngestionTime, Evaluation::Same).unwrap();
+        let later_at_query = PhysicalRequirement::new(QueryTime, Evaluation::Later).unwrap();
+        // (state, query time same evaluation, ingestion time, later evaluation)
         let mut expected = Vec::new();
         for medium in [Medium::Memory, Medium::Disk] {
             expected.extend([
-                (at(QueryTime, Lifetime::OneEvaluation(medium)), true, false),
+                (
+                    at(QueryTime, Lifetime::OneEvaluation(medium)),
+                    true,
+                    false,
+                    false,
+                ),
                 (
                     at(QueryTime, Lifetime::AcrossEvaluations(medium)),
                     true,
                     false,
+                    true,
                 ),
                 (
                     at(IngestionTime, Lifetime::AcrossEvaluations(medium)),
+                    true,
                     true,
                     true,
                 ),
             ]);
         }
         expected.extend([
-            (at(QueryTime, Lifetime::None), true, false),
-            (at(IngestionTime, Lifetime::None), false, true),
+            (at(QueryTime, Lifetime::None), true, false, false),
+            (at(IngestionTime, Lifetime::None), false, true, false),
         ]);
         assert_eq!(expected.len(), PhysicalProperties::every_valid().len());
         for properties in PhysicalProperties::every_valid() {
-            let (_, at_query, at_ingestion) = expected
+            let (_, query, ingestion, later) = expected
                 .iter()
                 .find(|(state, ..)| *state == properties)
                 .expect("every valid state has an expectation");
             assert_eq!(
-                properties.readable_at(QueryTime),
-                *at_query,
+                satisfies_physical(&properties, &same_at_query),
+                *query,
                 "{properties:?}"
             );
             assert_eq!(
-                properties.readable_at(IngestionTime),
-                *at_ingestion,
+                satisfies_physical(&properties, &same_at_ingestion),
+                *ingestion,
                 "{properties:?}"
+            );
+            assert_eq!(
+                satisfies_physical(&properties, &later_at_query),
+                *later,
+                "{properties:?}"
+            );
+        }
+    }
+
+    /// `is_materialized` is lifetime ≠ None for every valid state.
+    #[test]
+    fn is_materialized_over_every_valid_state() {
+        for properties in PhysicalProperties::every_valid() {
+            assert_eq!(
+                properties.is_materialized(),
+                properties.lifetime() != Lifetime::None,
+                "{properties:?}"
+            );
+        }
+    }
+
+    /// An ingestion-time reader cannot read a later evaluation; every other
+    /// requirement is valid.
+    #[test]
+    fn later_evaluation_at_ingestion_is_the_invalid_requirement() {
+        use ExecutionTiming::{IngestionTime, QueryTime};
+        assert_eq!(
+            PhysicalRequirement::new(IngestionTime, Evaluation::Later),
+            Err(InvalidPhysicalRequirement::LaterEvaluationAtIngestion)
+        );
+        for (timing, evaluation) in [
+            (QueryTime, Evaluation::Same),
+            (QueryTime, Evaluation::Later),
+            (IngestionTime, Evaluation::Same),
+        ] {
+            let requirement = PhysicalRequirement::new(timing, evaluation).unwrap();
+            assert_eq!(
+                (requirement.reader_timing(), requirement.reads_from()),
+                (timing, evaluation)
             );
         }
     }

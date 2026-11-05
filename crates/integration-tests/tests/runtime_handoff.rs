@@ -64,7 +64,7 @@ async fn plan(workload: &PlanningWorkload, capabilities: &DeploymentCapabilities
 fn materialized_count(dag: &PhysicalASAPDAG) -> usize {
     dag.nodes
         .iter()
-        .filter(|n| n.lifetime.is_materialized())
+        .filter(|n| n.lifetime != asap_types::physical::Lifetime::None)
         .count()
 }
 
