@@ -148,7 +148,9 @@ property and the requirement it is **built for**: the strictest of its consumers
 
 ### (a) Representation: details
 
-**Properties.** A *property* is one thing a producer fixes.
+**Properties.** A producer first picks one of the group's candidates: a structural choice (its
+operators and the groups it reads), not a property. A *property* is one thing the producer fixes
+under that candidate.
 
 - **Ordered property:** requirements only set a lower bound, and cost grows with the value, so
   its value is computed from `built_for`. E.g. ranking size = k.
@@ -157,31 +159,31 @@ property and the requirement it is **built for**: the strictest of its consumers
 
 | # | Property | Kind | Value |
 |---|---|---|---|
-| 1 | candidate (operators + groups read) | unordered | one of the group's candidates |
-| 2 | sketch kind | unordered | enumerated |
-| 3 | sketch parameters | ordered | `size(kind, ε)` |
-| 4 | tumbling-window width | unordered | enumerated; must divide lookback and evaluation interval |
-| 5 | window count | ordered | lookback / width |
-| 6 | ranking size | ordered | k |
-| 7 | kept labels | ordered | labels |
-| 8 | `ExecutionTiming` (`IngestionTime`, `QueryTime`) | unordered | enumerated |
-| 9 | `Lifetime` (`None`, `OneEvaluation(Medium)`, `AcrossEvaluations(Medium)`) | unordered | enumerated |
+| 1 | sketch kind | unordered | enumerated |
+| 2 | sketch parameters | ordered | `size(kind, ε)` |
+| 3 | tumbling-window width | unordered | enumerated; must divide lookback and evaluation interval |
+| 4 | window count | ordered | lookback / width |
+| 5 | ranking size | ordered | k |
+| 6 | kept labels | ordered | labels |
+| 7 | `ExecutionTiming` (`IngestionTime`, `QueryTime`) | unordered | enumerated |
+| 8 | `Lifetime` (`None`, `OneEvaluation(Medium)`, `AcrossEvaluations(Medium)`) | unordered | enumerated |
 
-8 and 9 are physical: together they decide materialization.
+7 and 8 are physical: together they decide materialization.
 
-*Order of setting* (property → property): a property is set after its parent.
+*Order of setting* (property → property): a property is set after its parent; the root is the
+candidate.
 ```
-1 candidate
-├── 2 sketch kind ── 3 sketch parameters
-├── 4 width ── 5 window count
-├── 6 ranking size
-├── 7 kept labels
-└── 8 ExecutionTiming ── 9 Lifetime
+candidate
+├── 1 sketch kind ── 2 sketch parameters
+├── 3 width ── 4 window count
+├── 5 ranking size
+├── 6 kept labels
+└── 7 ExecutionTiming ── 8 Lifetime
 ```
 
 *Which requirement fields constrain which properties* (requirement → property, many-to-many):
 
-| `Requirement` field | 2 kind | 3 params | 4 width | 5 count | 6 k | 7 labels | 8 timing | 9 lifetime |
+| `Requirement` field | 1 kind | 2 params | 3 width | 4 count | 5 k | 6 labels | 7 timing | 8 lifetime |
 |---|---|---|---|---|---|---|---|---|
 | query kind | ✓ | | | | | | | |
 | ε | | ✓ | | | | | | |
@@ -700,9 +702,8 @@ E.g. top-k adds R, `[Limit(5) <-R]` to T5, `[Limit(10) <-R]` to T10, and consume
 7. Is tumbling-window width ordered? The cheapest width that divides every reader's interval and
    lookback is their gcd (#1171), if a narrower width is never cheaper. Then each producer in Sec 4
    has 4 choices, not 122.
-8. Is the order of setting a tree or a DAG? Possible extra parents: `Lifetime` on candidate
-   (windowed state lives across evaluations, direct state doesn't) and on width (a window lives
-   until it leaves the lookback); `ExecutionTiming` on sketch kind (if some sketch can't be built at
+8. Is the order of setting a tree or a DAG? Possible extra parents: `Lifetime` on width (a
+   window lives until it leaves the lookback); `ExecutionTiming` on sketch kind (if some sketch can't be built at
    ingestion).
 
 ## Glossary
