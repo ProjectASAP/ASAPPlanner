@@ -3,7 +3,10 @@ use crate::ir::operator::{Reduction, Source};
 use crate::ir::scalar::column_resolution::{resolve_column_ref, ResolveError};
 use crate::ir::scalar::{ColumnRef, ProjectItem};
 use crate::ir::schema::{ColumnId, DataType, FieldDataType, PROMQL_SERIES_IDENTITY};
+use crate::ir::operator::AggIntent;
+use crate::ir::SortKey;
 use crate::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
+use std::rc::Rc;
 
 /// The column a top-k ranks `child` by. Over a one-measure grouped
 /// aggregate (the SQL heavy-hitter shape and PromQL `topk(k, sum by ..)`) it
@@ -150,4 +153,74 @@ fn reads_only_time_series(node: &OperatorNode) -> bool {
             .iter()
             .all(|child| reads_only_time_series(child)),
     }
+}
+
+/// Exact top-k `node` (an `Aggregate` with one `TopK` measure per listed
+/// keys, no filter and no `HAVING`) over `child` (its input as it runs), as
+/// it runs: `Limit(k)` over a descending `Sort` of `child` by its ranked
+/// column, partitioned by the keys, under a `Project` restoring the logical
+/// `[keys.., topk_k]` output (the ranked value under `topk_k`). `Err` says
+/// what is unsupported.
+pub fn exact_topk_as_sorted_limit(
+    node: &OperatorNode,
+    child: Rc<OperatorNode>,
+) -> Result<Rc<OperatorNode>, String> {
+    let Some(NonASAPOp::Aggregate {
+        reduction,
+        measures,
+        filters,
+        having,
+        ..
+    }) = node.non_asap()
+    else {
+        return Err("not an aggregate".into());
+    };
+    let Reduction::Reduce(keys) = reduction else {
+        return Err("per-entity reduction".into());
+    };
+    let [AggIntent::TopK { k, .. }] = measures.as_slice() else {
+        return Err("measures besides the top-k".into());
+    };
+    if filters.iter().any(Option::is_some) {
+        return Err("filtered measure".into());
+    }
+    if having.is_some() {
+        return Err("HAVING".into());
+    }
+    let value = ranked_column(&child).map_err(|e| format!("no ranked column: {e}"))?;
+    let sorted = Rc::new(
+        OperatorNode::new(Operator::NonASAP(NonASAPOp::Sort {
+            keys: vec![SortKey {
+                expr: ScalarExpr::Column(value),
+                ascending: false,
+                nulls_first: false,
+            }],
+            partition_by: keys.clone(),
+            child: Rc::clone(&child),
+        }))
+        .map_err(|e| e.to_string())?
+        .with_guarantee(child.guarantee.clone()),
+    );
+    let limited = Rc::new(
+        OperatorNode::new(Operator::NonASAP(NonASAPOp::Limit {
+            n: Some(*k),
+            offset: 0,
+            partition_by: keys.clone(),
+            child: sorted,
+        }))
+        .map_err(|e| e.to_string())?
+        .with_guarantee(node.guarantee.clone()),
+    );
+    let output_name = node.schema.fields[keys.len()].name.clone();
+    let cols = ranked_row_projection(&child, &Reduction::Reduce(keys.clone()), &output_name)
+        .map_err(|error| format!("ranked rows: {error}"))?;
+    Ok(Rc::new(
+        OperatorNode::new(Operator::NonASAP(NonASAPOp::Project {
+            cols,
+            qualifier: None,
+            child: limited,
+        }))
+        .map_err(|e| e.to_string())?
+        .with_guarantee(node.guarantee.clone()),
+    ))
 }

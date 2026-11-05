@@ -14,22 +14,19 @@
 //! [`super::per_computation_candidates::compose_logical_candidate`] with that choice, every target beneath it
 //! exact, its summaries sized for its queries' failure probability. The
 //! candidate is the composed root's operator alone: every node beneath it
-//! is found or added as a group ([`find_or_add_group`](crate::find_or_add_group::find_or_add_group), by Stage 0's
-//! node equality), so `Project ← SummaryEstimate ← SummaryAgg` is three
-//! groups, and equal builds of different queries are one group.
-//! The operator reads each child group through its node (the same `Rc`),
-//! and the candidate outputs the group's schema, so a parent reads it in
-//! the group's place (a query's top-k root, which no parent reads, may
-//! output the ranked value beside the key).
+//! is found or added as a group ([`Memo::find_or_add_group`]) with its
+//! operator as a candidate ([`add_operator_tree`]), so
+//! `Project ← SummaryEstimate ← SummaryAgg` is three groups, equal builds of
+//! different queries are one group, and builds that differ only in their
+//! sketch parameters are candidates of one state group.
 //!
 //! A fused computation is one more candidate of the outer group, whatever
 //! else reads the groups it absorbs: those keep their own candidates for
-//! their other readers. A candidate equal to one the group already has (the
-//! same structural id, input groups, fused groups and accuracy budget parts) is not
-//! added again.
+//! their other consumers. A candidate equal to one the group already has is
+//! not added again ([`Memo::add_candidate`]).
 //!
 //! A query whose value combines `n` approximate inputs splits its budget
-//! into `n` equal shares, so a summary's size depends on its readers: each
+//! into `n` equal shares, so a summary's size depends on its consumers: each
 //! sketch candidate is offered once per share `1..=n`, `n` the most
 //! approximate inputs a query reaching the group can have
 //! ([`CandidateForMemoGroup::accuracy_budget_parts`]). This records the sizing
@@ -37,7 +34,6 @@
 //! the resulting error contract. The connection planner may select a conservative
 //! larger configuration, and validates the recomposed query-root guarantee.
 
-use asap_types::stages::hash_consing::equal_nodes;
 use asap_types::stages::HowToComputeAggregateMeasure;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -45,18 +41,18 @@ use std::rc::Rc;
 use super::per_computation_candidates::{
     compose_logical_candidate_with_accuracy_budget_parts, PerComputationCandidates,
 };
-use crate::operator_over_groups::operator_over_groups;
+use crate::operator_tree::add_operator_tree;
 use asap_accuracy::sizing::{
     per_input_failure_probability, with_summaries_sized_for_failure_probability,
 };
 use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::schema::topk::exact_topk_as_sorted_limit;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot, SchemaDerivationError};
 use asap_types::workload::DataWorkload;
 
 use asap_types::stages::{
-    CandidateForMemoGroup, DagOfLogicalMemoGroups, Memo, MemoGroup, MemoGroupId,
-    OriginOfCandidateForMemoGroup,
+    DagOfLogicalMemoGroups, Memo, MemoGroupId, OriginOfCandidateForMemoGroup,
 };
 
 /// Why adding Pass 1's candidates to the memo failed.
@@ -114,7 +110,11 @@ pub fn try_add_pass1_candidates(
             }
         }
     }
-    let mut memo = Memo::new(initial);
+    let mut memo = Memo {
+        candidates: vec![Vec::new(); initial.groups.len()],
+        groups: initial.groups,
+        query_roots: initial.query_roots,
+    };
     add_candidates_to_initial_groups(per_computation, accuracy_targets, data, &mut memo)?;
     Ok(memo)
 }
@@ -127,7 +127,7 @@ fn add_candidates_to_initial_groups(
     data: &DataWorkload,
     memo: &mut Memo,
 ) -> Result<(), SchemaDerivationError> {
-    let initial_groups = memo.groups().len();
+    let initial_groups = memo.groups.len();
     // Each target aggregate group's targets, one per measure: Pass 1 walks
     // the groups, so an aggregate several queries read has one target per
     // measure.
@@ -140,17 +140,10 @@ fn add_candidates_to_initial_groups(
     }
     // The groups' own nodes, which the composed candidates read.
     let logical_nodes: Rc<[Rc<OperatorNode>]> = memo
-        .groups()
+        .groups
         .iter()
         .map(|group| Rc::clone(&group.logical_node))
         .collect();
-    let own = |group: &MemoGroup| CandidateForMemoGroup {
-        fused_groups: Vec::new(),
-        root_node: Rc::clone(&group.logical_node),
-        input_groups: group.child_groups.clone(),
-        origin: OriginOfCandidateForMemoGroup::Pass1,
-        accuracy_budget_parts: 1,
-    };
     // Each query's most approximate inputs: its targets that offer a
     // summary, each one sketch state at most.
     let offers_a_summary = |t: usize| {
@@ -167,13 +160,13 @@ fn add_candidates_to_initial_groups(
     let mut most_approximate_inputs = vec![0usize; per_computation.roots.len()];
     for (g, targets) in &targets_of {
         let summaries = targets.iter().filter(|&&t| offers_a_summary(t)).count();
-        for &q in &memo.groups()[g.0 as usize].queries {
+        for &q in &memo.groups[g.0 as usize].queries {
             most_approximate_inputs[q] += summaries;
         }
     }
     for g in 0..initial_groups {
         if let Some(targets) = targets_of.get(&MemoGroupId(g as u32)) {
-            let max_accuracy_budget_parts = memo.groups()[g]
+            let max_accuracy_budget_parts = memo.groups[g]
                 .queries
                 .iter()
                 .map(|&q| most_approximate_inputs[q])
@@ -192,10 +185,12 @@ fn add_candidates_to_initial_groups(
             )?;
         }
         if memo.candidates[g].is_empty() {
-            memo.candidates[g] = vec![own(&memo.groups()[g])];
+            let own = as_it_runs(&memo.groups[g].logical_node);
+            let candidate =
+                add_operator_tree(memo, &own, &OriginOfCandidateForMemoGroup::Pass1, 1);
+            memo.add_candidate(MemoGroupId(g as u32), candidate);
         }
     }
-    memo.rebuild_parents();
     Ok(())
 }
 
@@ -204,7 +199,7 @@ fn add_candidates_to_initial_groups(
 /// target varying fastest), each the aggregate composed alone with that
 /// choice, its summaries sized for its queries' failure probability (query
 /// `q`'s target `accuracy_targets[q]`, over `data`); the groups beneath it
-/// are found or added ([`operator_over_groups`]), each added to `g`
+/// are found or added ([`add_operator_tree`]), each added to `g`
 /// ([`Memo::add_candidate`]). None is added when none composes.
 #[allow(clippy::too_many_arguments)]
 fn target_candidates(
@@ -217,8 +212,8 @@ fn target_candidates(
     targets: &[usize],
     max_accuracy_budget_parts: usize,
 ) -> Result<(), SchemaDerivationError> {
-    let aggregate = Rc::clone(&memo.groups()[g.0 as usize].logical_node);
-    let queries = memo.groups()[g.0 as usize].queries.clone();
+    let aggregate = Rc::clone(&memo.groups[g.0 as usize].logical_node);
+    let queries = memo.groups[g.0 as usize].queries.clone();
     let mut choice = vec![0; per_computation.targets.len()];
     loop {
         let mut implements = vec![g];
@@ -258,54 +253,13 @@ fn target_candidates(
                 accuracy_targets,
                 data,
             )?;
-            let (node, children) = operator_over_groups(
+            let mut candidate = add_operator_tree(
                 memo,
-                &root,
-                &queries,
+                &as_it_runs(&root),
                 &OriginOfCandidateForMemoGroup::Pass1,
                 accuracy_budget_parts,
             );
-            // A parent reads the candidate in the group's place, so it
-            // outputs the group's schema when it has the same columns, with
-            // the group's metadata (composition may derive a closed label set
-            // where the frontend's node leaves it open). A query's top-k root
-            // may output other columns (the ranked value beside the key): it
-            // keeps its own.
-            let same_columns = node.schema.fields == aggregate.schema.fields
-                && node.schema.time_index == aggregate.schema.time_index;
-            let node = if !same_columns || node.schema == aggregate.schema {
-                node
-            } else {
-                Rc::new(OperatorNode {
-                    schema: aggregate.schema.clone(),
-                    ..(*node).clone()
-                })
-            };
-            // The exact composition of the group's own node is the group's
-            // node itself (Stage 0's equality, its exact guarantee aside).
-            let own = node.guarantee.as_ref().is_none_or(|g| g.is_exact())
-                && equal_nodes(
-                    &OperatorNode {
-                        guarantee: None,
-                        ..(*node).clone()
-                    },
-                    &aggregate,
-                );
-            let (node, children) = if own {
-                (
-                    Rc::clone(&aggregate),
-                    memo.groups()[g.0 as usize].child_groups.clone(),
-                )
-            } else {
-                (node, children)
-            };
-            let candidate = CandidateForMemoGroup {
-                fused_groups: implements[1..].to_vec(),
-                root_node: node,
-                input_groups: children,
-                origin: OriginOfCandidateForMemoGroup::Pass1,
-                accuracy_budget_parts,
-            };
+            candidate.fused_groups = implements[1..].to_vec();
             memo.add_candidate(g, candidate);
         }
         // Mixed-radix over this group's targets only.
@@ -430,7 +384,24 @@ fn compose_alone(
     )
 }
 
-/// Whether `node`'s private nodes build a sketch, which its accuracy budget parts size.
+/// `root` as it runs: an exact top-k as a `Project` over `Limit` over
+/// `Sort` ([`exact_topk_as_sorted_limit`]), each its own group; any other
+/// root, or a top-k that cannot run so, unchanged.
+fn as_it_runs(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
+    match root.non_asap() {
+        Some(asap_types::ir::NonASAPOp::Aggregate {
+            measures, child, ..
+        }) if measures
+            .iter()
+            .any(|measure| matches!(measure, asap_types::ir::operator::AggIntent::TopK { .. })) =>
+        {
+            exact_topk_as_sorted_limit(root, Rc::clone(child)).unwrap_or_else(|_| Rc::clone(root))
+        }
+        _ => Rc::clone(root),
+    }
+}
+
+/// Whether `node` builds a sketch, which its accuracy budget parts size.
 fn builds_a_sketch(node: &Rc<OperatorNode>) -> bool {
     OperatorNode::reachable(node).iter().any(|n| {
         matches!(

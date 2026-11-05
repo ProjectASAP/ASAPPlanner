@@ -4,9 +4,9 @@
 /// The candidate DAGs a memo stands for: choices and their composition.
 pub(crate) mod enumeration;
 pub(crate) mod rules;
-/// Shared finite state configuration enumeration.
-pub(crate) mod shared_configurations;
-/// Concrete summary-state groups exposed by sharing rules.
-pub(crate) mod state_groups;
-/// Local tumbling-window candidates with selected-reader grid configurations.
+/// Tumbling-window widths from the queries' evaluation grids.
+pub(crate) mod tumbling_window_widths;
+/// Pass 2's error and its check of the memo before its rules.
+pub(crate) mod well_formed;
+/// Local tumbling-window candidates (rule 1).
 pub(crate) mod window_candidates;

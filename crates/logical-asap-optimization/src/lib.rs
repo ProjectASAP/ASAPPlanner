@@ -60,12 +60,11 @@
 //! readers; plan selection (Stage 3) checks each selected candidate's
 //! guarantee against its query's `AccuracyTarget` and never resizes.
 
-mod added_groups;
 /// The deployment's capabilities: supported summaries and what it retains.
 mod deployment_capabilities;
-mod find_or_add_group;
-mod operator_over_groups;
-mod own_candidate_sizing;
+/// Adding Pass 1's and the rules' operator trees to the memo, one operator
+/// per candidate.
+mod operator_tree;
 mod pass1;
 mod pass2;
 /// Stage 0: the memo groups of the workload's query roots.
@@ -97,7 +96,7 @@ pub use pass2::logical_memo_candidates::{
     generate_logical_asap_memo_candidates, pass2_after_local_window_composition,
     pass2_local_window_composition,
 };
-pub use pass2::memo::state_groups::Pass2RuleError;
+pub use pass2::memo::well_formed::Pass2RuleError;
 // The CandidateLogicalASAPDAGs a memo stands for (developer tools'
 // reference pricing).
 pub use pass2::memo::enumeration::{

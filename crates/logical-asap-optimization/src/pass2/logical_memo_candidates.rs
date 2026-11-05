@@ -2,13 +2,8 @@
 //! candidates and groups that share work across computations
 //! ([`asap_types::stages::LogicalASAPMemoCandidates`]), which Stage 2 implements.
 
-use crate::pass2::memo::rules::{
-    finer_aggregate, rollup, scan_labels, shared_configuration_readers, summary_inputs,
-    summary_results, topk,
-};
-use crate::pass2::memo::state_groups::{
-    add_shared_summary_state_groups, check_group_references_valid_and_acyclic, Pass2RuleError,
-};
+use crate::pass2::memo::rules::{finer_aggregate, rollup, scan_labels, topk};
+use crate::pass2::memo::well_formed::{check_group_references_valid_and_acyclic, Pass2RuleError};
 use crate::pass2::memo::window_candidates::add_local_window_composition;
 use asap_types::stages::Memo;
 use asap_types::stages::{LogicalASAPMemoCandidates, PerComputationLogicalMemoCandidates};
@@ -16,7 +11,7 @@ use asap_types::workload::QueryWorkloadEntry;
 
 /// Stage 1, Pass 2: adds to Pass 1's memo the local tumbling-window
 /// candidates for every legal tumbling-window width (rule 1), then runs
-/// rules 2–9 and `add_shared_summary_state_groups`.
+/// rules 2 and 4–7.
 /// `entries[i]` is query `i`'s workload entry.
 pub fn generate_logical_asap_memo_candidates(
     pass1: PerComputationLogicalMemoCandidates,
@@ -38,23 +33,20 @@ pub fn pass2_local_window_composition(
 }
 
 /// The rest of Pass 2 on [`pass2_local_window_composition`]'s memo: rules
-/// 2–9 and `add_shared_summary_state_groups`.
+/// 2 and 4–7.
 pub fn pass2_after_local_window_composition(
     mut memo: Memo,
 ) -> Result<LogicalASAPMemoCandidates, Pass2RuleError> {
     apply_sharing_rules(&mut memo)?;
-    // 10. One group per shared summary build, read by its reader groups.
-    add_shared_summary_state_groups(&mut memo)?;
     Ok(LogicalASAPMemoCandidates { memo })
 }
 
-/// Pass 2's rules 2–9, in order, on a memo after local window composition.
+/// Pass 2's rules 2 and 4–7, in order, on a memo after local window
+/// composition.
 pub(crate) fn apply_sharing_rules(memo: &mut Memo) -> Result<(), Pass2RuleError> {
     check_group_references_valid_and_acyclic(memo)?;
     // 2. Scan widening.
     scan_labels::add_scan_label_candidates(memo)?;
-    // 3. Summary inputs.
-    summary_inputs::factor_summary_inputs(memo)?;
     // 4. Top-k reuse.
     topk::add_topk_candidates(memo)?;
     // 5. Finer aggregate.
@@ -63,9 +55,5 @@ pub(crate) fn apply_sharing_rules(memo: &mut Memo) -> Result<(), Pass2RuleError>
     rollup::add_rollup_candidates(memo)?;
     // 7. Window rollup.
     rollup::add_window_rollup_candidates(memo)?;
-    // 8. Summary results.
-    summary_results::factor_summary_results(memo)?;
-    // 9. Shared configurations.
-    shared_configuration_readers::add_state_configuration_candidates(memo)?;
     Ok(())
 }

@@ -1,40 +1,45 @@
-//! The candidate DAGs a memo stands for: each choice of one implementation
-//! candidate per needed group, and the complete DAG that choice composes.
+//! The candidate DAGs a memo stands for: each choice of the candidate
+//! computing each query's root group and of one producer per input of each
+//! chosen candidate, and the complete DAG that choice composes.
 //!
-//! A group is needed when a query's root is in it or a chosen candidate reads
-//! it. A group read by several chosen candidates takes one candidate, so its
-//! nodes are built once and shared; which groups are needed depends on the
-//! candidates chosen above them. The count is therefore not a product over
-//! groups.
+//! A candidate is needed when it computes a query's root group or a chosen
+//! candidate reads it. Two consumers of one group may read different
+//! candidates of it (`y_{u,c,i}`), and a candidate several consumers read is
+//! one node, built once and shared; which candidates are needed depends on
+//! the producers chosen above them. The count is therefore not a product
+//! over groups.
 //!
-//! A choice is counted, not the DAG it composes: two candidates of a group
-//! that differ only in what recomposing guarantees re-derives compose equal
-//! DAGs. Composing checks only that a choice composes; input contracts,
-//! accuracy at the roots, Stage 2 legality and Stage 3 cost stay with the
-//! validator and the later stages. The memo's groups are acyclic, as every
-//! memo step builds them, but candidates may read each other (a rollup of
-//! a finer grouping whose candidate reads the coarser one): a choice taking
-//! such candidates together composes no DAG and is not enumerated.
+//! A producer must satisfy its consumer input's logical requirement
+//! ([`satisfies`]). Composing checks only that a choice composes; accuracy
+//! at the roots, Stage 2 legality and Stage 3 cost stay with the validator
+//! and the later stages. Candidates may read each other through their
+//! groups (a rollup of a finer grouping whose candidate reads the coarser
+//! one): a choice closing such a cycle composes no DAG and is not
+//! enumerated.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
-use asap_types::ir::{OperatorNode, QueryRoot, SchemaDerivationError};
-
-use super::rules::reuse::replace;
 use asap_accuracy::propagation::recompose_guarantees;
-use asap_types::stages::Memo;
-use asap_types::stages::MemoGroupId;
+use asap_types::ir::{OperatorNode, QueryRoot, SchemaDerivationError};
+use asap_types::stages::{satisfies, CandidateForMemoGroupId, Memo, MemoGroupId};
 
-/// One candidate (an index into `Memo::candidates[group]`) for each
-/// group it names. [`build_logical_asap_dags_from_chosen_candidates`] gives a group it does not name its first
-/// candidate.
-pub type ChosenCandidatePerMemoGroup = BTreeMap<MemoGroupId, usize>;
+/// One memo choice: the candidate computing each query's root group
+/// (`z_{q,v}`), and the producer each input of each chosen candidate reads
+/// (`y_{u,c,i}`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChosenCandidatePerMemoGroup {
+    /// Each root group's candidate, by index in its group.
+    pub root_candidates: BTreeMap<MemoGroupId, usize>,
+    /// Each chosen candidate's input (in operator-child order) to the
+    /// candidate it reads.
+    pub producer_of_input: BTreeMap<(CandidateForMemoGroupId, usize), CandidateForMemoGroupId>,
+}
 
 /// The choices [`enumerate`] found, in depth-first order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AllChosenCandidatesPerMemoGroup {
-    /// Each choice names exactly the groups it needs.
+    /// Each choice names exactly the candidates and inputs it needs.
     pub all_chosen_candidates: Vec<ChosenCandidatePerMemoGroup>,
     /// False when the limit stopped the enumeration before every choice was found.
     pub complete: bool,
@@ -48,87 +53,138 @@ pub enum ErrorBuildingLogicalASAPDagsFromChosenCandidates {
         group: MemoGroupId,
         candidate: usize,
     },
-    #[error("group {group:?}'s candidate {candidate} reads group {child:?} but has no node of it to replace")]
-    ChildNotInCandidate {
-        group: MemoGroupId,
-        candidate: usize,
-        child: MemoGroupId,
+    #[error("input {input} of candidate {candidate:?} has no chosen producer")]
+    NoProducer {
+        candidate: CandidateForMemoGroupId,
+        input: usize,
     },
-    /// The chosen candidates read each other in a cycle (e.g. a coarse
-    /// group's rollup reads a finer group whose chosen candidate reads it).
-    #[error("group {group:?} reads itself through the chosen candidates")]
-    Cycle { group: MemoGroupId },
+    /// The chosen candidates read each other in a cycle.
+    #[error("candidate {candidate:?} reads itself through the chosen producers")]
+    Cycle { candidate: CandidateForMemoGroupId },
     /// Re-deriving the composed nodes' schemas and guarantees failed.
     #[error("recomposing the composed DAG: {0}")]
     Recompose(#[from] SchemaDerivationError),
 }
 
-/// Every choice of one candidate per needed group, starting from the query
-/// roots, stopping after `limit` choices. A choice whose candidates read
-/// each other in a cycle composes no DAG and is left out.
+/// The input groups of `candidate`, in operator-child order.
+fn inputs_of(memo: &Memo, candidate: CandidateForMemoGroupId) -> Vec<MemoGroupId> {
+    let mut inputs = Vec::new();
+    memo.candidate(candidate)
+        .expression
+        .operator
+        .map_children(|&group| inputs.push(group));
+    inputs
+}
+
+/// Every choice of a candidate per root group and a producer per needed
+/// input, starting from the query roots, stopping after `limit` choices. A
+/// producer must satisfy the input's requirement, and a choice whose
+/// candidates read each other in a cycle is left out.
 pub fn enumerate(memo: &Memo, limit: usize) -> AllChosenCandidatesPerMemoGroup {
-    fn walk(
-        memo: &Memo,
-        mut pending: Vec<MemoGroupId>,
-        chosen_candidates: &mut ChosenCandidatePerMemoGroup,
+    struct Walk<'a> {
+        memo: &'a Memo,
         limit: usize,
-        all_chosen_candidates: &mut Vec<ChosenCandidatePerMemoGroup>,
-    ) -> bool {
-        let group = loop {
-            match pending.pop() {
-                None => {
-                    if all_chosen_candidates.len() == limit {
+        found: Vec<ChosenCandidatePerMemoGroup>,
+    }
+    impl Walk<'_> {
+        /// Chooses the next undecided root or input; false when the limit
+        /// stopped the walk.
+        fn walk(
+            &mut self,
+            roots: &[MemoGroupId],
+            mut pending: Vec<(CandidateForMemoGroupId, usize)>,
+            expanded: &BTreeSet<CandidateForMemoGroupId>,
+            chosen: &mut ChosenCandidatePerMemoGroup,
+        ) -> bool {
+            if let Some((&root, rest)) = roots.split_first() {
+                for index in 0..self.memo.candidates[root.0 as usize].len() {
+                    let candidate = CandidateForMemoGroupId { group: root, index };
+                    chosen.root_candidates.insert(root, index);
+                    let (pending, expanded) = self.expand(candidate, &pending, expanded);
+                    let finished = self.walk(rest, pending, &expanded, chosen);
+                    chosen.root_candidates.remove(&root);
+                    if !finished {
                         return false;
                     }
-                    all_chosen_candidates.push(chosen_candidates.clone());
-                    return true;
                 }
-                Some(group) if !chosen_candidates.contains_key(&group) => break group,
-                Some(_) => {}
+                return true;
             }
-        };
-        for (index, candidate) in memo.candidates[group.0 as usize].iter().enumerate() {
-            // A candidate reading a group that already reads this one closes
-            // a cycle; every edge is checked as its group is chosen.
-            if candidate
-                .input_groups
-                .iter()
-                .any(|&child| reaches(memo, chosen_candidates, child, group))
-            {
-                continue;
+            let slot = loop {
+                match pending.pop() {
+                    None => {
+                        if self.found.len() == self.limit {
+                            return false;
+                        }
+                        self.found.push(chosen.clone());
+                        return true;
+                    }
+                    Some(slot) if !chosen.producer_of_input.contains_key(&slot) => break slot,
+                    Some(_) => {}
+                }
+            };
+            let (consumer, input) = slot;
+            let group = inputs_of(self.memo, consumer)[input];
+            let requirement = &self.memo.candidate(consumer).input_requirements[input];
+            for (index, producer) in self.memo.candidates[group.0 as usize].iter().enumerate() {
+                let producer_id = CandidateForMemoGroupId { group, index };
+                if !satisfies(&producer.logical_properties, requirement)
+                    || reaches(self.memo, chosen, producer_id, consumer)
+                {
+                    continue;
+                }
+                chosen.producer_of_input.insert(slot, producer_id);
+                let (next, next_expanded) = self.expand(producer_id, &pending, expanded);
+                let finished = self.walk(&[], next, &next_expanded, chosen);
+                chosen.producer_of_input.remove(&slot);
+                if !finished {
+                    return false;
+                }
             }
-            chosen_candidates.insert(group, index);
-            let mut next = pending.clone();
-            next.extend(candidate.input_groups.iter().rev());
-            let finished = walk(memo, next, chosen_candidates, limit, all_chosen_candidates);
-            chosen_candidates.remove(&group);
-            if !finished {
-                return false;
-            }
+            true
         }
-        true
+
+        /// `pending` with `candidate`'s inputs, when it is not expanded yet.
+        fn expand(
+            &self,
+            candidate: CandidateForMemoGroupId,
+            pending: &[(CandidateForMemoGroupId, usize)],
+            expanded: &BTreeSet<CandidateForMemoGroupId>,
+        ) -> (
+            Vec<(CandidateForMemoGroupId, usize)>,
+            BTreeSet<CandidateForMemoGroupId>,
+        ) {
+            let mut pending = pending.to_vec();
+            let mut expanded = expanded.clone();
+            if expanded.insert(candidate) {
+                let inputs = inputs_of(self.memo, candidate).len();
+                pending.extend((0..inputs).rev().map(|input| (candidate, input)));
+            }
+            (pending, expanded)
+        }
     }
-    let roots = root_groups(memo).rev().collect();
-    let mut all_chosen_candidates = Vec::new();
-    let complete = walk(
+    let roots: Vec<MemoGroupId> = root_groups(memo).collect();
+    let mut walk = Walk {
         memo,
-        roots,
-        &mut ChosenCandidatePerMemoGroup::new(),
         limit,
-        &mut all_chosen_candidates,
+        found: Vec::new(),
+    };
+    let complete = walk.walk(
+        &roots,
+        Vec::new(),
+        &BTreeSet::new(),
+        &mut ChosenCandidatePerMemoGroup::default(),
     );
     AllChosenCandidatesPerMemoGroup {
-        all_chosen_candidates,
+        all_chosen_candidates: walk.found,
         complete,
     }
 }
 
-/// Each root group (one with a query's root) and its DAG under `chosen_candidates`:
-/// each needed group implemented by its chosen candidate over its children's
-/// composed DAGs, a group read several times composed once and shared. Every
-/// node is then rebuilt with its derived schema and composed guarantee, as
-/// in plan reconstruction. A scalar query's expression is not rebuilt: its
-/// operator roots are root groups like any other query's.
+/// Each root group (one with a query's root) and its DAG under
+/// `chosen_candidates`: each needed candidate's operator over its chosen
+/// producers' composed DAGs, a candidate read several times composed once
+/// and shared. Every node is then rebuilt with its derived schema and
+/// composed guarantee, as in plan reconstruction.
 pub fn build_logical_asap_dags_from_chosen_candidates(
     memo: &Memo,
     chosen_candidates: &ChosenCandidatePerMemoGroup,
@@ -136,58 +192,59 @@ pub fn build_logical_asap_dags_from_chosen_candidates(
 {
     fn composed(
         memo: &Memo,
-        group: MemoGroupId,
+        candidate: CandidateForMemoGroupId,
         chosen_candidates: &ChosenCandidatePerMemoGroup,
-        done: &mut HashMap<MemoGroupId, Rc<OperatorNode>>,
-        composing: &mut HashSet<MemoGroupId>,
+        done: &mut HashMap<CandidateForMemoGroupId, Rc<OperatorNode>>,
+        composing: &mut HashSet<CandidateForMemoGroupId>,
     ) -> Result<Rc<OperatorNode>, ErrorBuildingLogicalASAPDagsFromChosenCandidates> {
-        if let Some(found) = done.get(&group) {
+        if let Some(found) = done.get(&candidate) {
             return Ok(Rc::clone(found));
         }
-        if !composing.insert(group) {
-            return Err(ErrorBuildingLogicalASAPDagsFromChosenCandidates::Cycle { group });
+        if !composing.insert(candidate) {
+            return Err(ErrorBuildingLogicalASAPDagsFromChosenCandidates::Cycle { candidate });
         }
-        let index = chosen_candidates.get(&group).copied().unwrap_or(0);
-        let candidate = memo.candidates[group.0 as usize].get(index).ok_or(
-            ErrorBuildingLogicalASAPDagsFromChosenCandidates::NoSuchCandidate {
-                group,
-                candidate: index,
-            },
-        )?;
-        let own_nodes: HashSet<_> = OperatorNode::reachable(&candidate.root_node)
-            .iter()
-            .map(Rc::as_ptr)
-            .collect();
-        let mut replacements = HashMap::new();
-        for &child in &candidate.input_groups {
-            let old = &memo.groups()[child.0 as usize].logical_node;
-            if !own_nodes.contains(&Rc::as_ptr(old)) {
-                return Err(
-                    ErrorBuildingLogicalASAPDagsFromChosenCandidates::ChildNotInCandidate {
-                        group,
-                        candidate: index,
-                        child,
-                    },
-                );
-            }
-            replacements.insert(
-                Rc::as_ptr(old),
-                composed(memo, child, chosen_candidates, done, composing)?,
-            );
+        let template = memo.operator_node_of(candidate)?;
+        let mut producers = Vec::new();
+        for input in 0..inputs_of(memo, candidate).len() {
+            let producer = *chosen_candidates
+                .producer_of_input
+                .get(&(candidate, input))
+                .ok_or(ErrorBuildingLogicalASAPDagsFromChosenCandidates::NoProducer {
+                    candidate,
+                    input,
+                })?;
+            producers.push(composed(memo, producer, chosen_candidates, done, composing)?);
         }
-        let node = replace(&candidate.root_node, &replacements);
-        done.insert(group, Rc::clone(&node));
+        let mut next = producers.into_iter();
+        let node = Rc::new(
+            template
+                .with_new_children(|_| next.next().expect("one producer per input"))?
+                .with_guarantee(template.guarantee.clone()),
+        );
+        done.insert(candidate, Rc::clone(&node));
         Ok(node)
     }
     let mut done = HashMap::new();
     let mut composing = HashSet::new();
     let (groups, roots): (Vec<_>, Vec<_>) = root_groups(memo)
         .map(|group| {
+            let index = chosen_candidates
+                .root_candidates
+                .get(&group)
+                .copied()
+                .unwrap_or(0);
+            if index >= memo.candidates[group.0 as usize].len() {
+                return Err(ErrorBuildingLogicalASAPDagsFromChosenCandidates::NoSuchCandidate {
+                    group,
+                    candidate: index,
+                });
+            }
+            let candidate = CandidateForMemoGroupId { group, index };
             Ok((
                 group,
                 QueryRoot::Operator(composed(
                     memo,
-                    group,
+                    candidate,
                     chosen_candidates,
                     &mut done,
                     &mut composing,
@@ -208,24 +265,26 @@ pub fn build_logical_asap_dags_from_chosen_candidates(
         .collect())
 }
 
-/// Whether `from` is `to` or reads it through the candidates `chosen_candidates` names.
+/// Whether `from` is `to` or reads it through the producers `chosen` names.
 fn reaches(
     memo: &Memo,
-    chosen_candidates: &ChosenCandidatePerMemoGroup,
-    from: MemoGroupId,
-    to: MemoGroupId,
+    chosen: &ChosenCandidatePerMemoGroup,
+    from: CandidateForMemoGroupId,
+    to: CandidateForMemoGroupId,
 ) -> bool {
     let mut pending = vec![from];
     let mut seen = HashSet::new();
-    while let Some(group) = pending.pop() {
-        if group == to {
+    while let Some(candidate) = pending.pop() {
+        if candidate == to {
             return true;
         }
-        if !seen.insert(group) {
+        if !seen.insert(candidate) {
             continue;
         }
-        if let Some(&index) = chosen_candidates.get(&group) {
-            pending.extend(&memo.candidates[group.0 as usize][index].input_groups);
+        for input in 0..inputs_of(memo, candidate).len() {
+            if let Some(&producer) = chosen.producer_of_input.get(&(candidate, input)) {
+                pending.push(producer);
+            }
         }
     }
     false

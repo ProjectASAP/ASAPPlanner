@@ -1,68 +1,57 @@
-//! Scan-label widening for explicit memo state sharing. Reuses the existing
-//! Pass 2 widening rule; only its source-chain boundaries are interned here.
-use std::rc::Rc;
+//! Rule 2, scan widening: the scans of one metric with different label sets
+//! are widened to their union (`asap_aware_cse::with_union_scan_labels`); the
+//! widened source chain is its own group, and each scan group (and each
+//! per-entity summary build over one) gets a candidate reading it.
 
 use asap_accuracy::propagation::recompose_guarantees;
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot};
 
-use super::reuse::{add_candidate_over_groups, same_output_contract};
-use crate::added_groups::groups_read_through_added_groups;
-use crate::operator_over_groups::without_exact_guarantees;
-use crate::pass2::memo::state_groups::{build_down_to_stage0_groups, Pass2RuleError};
-use asap_types::stages::{Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
+use super::reuse::same_output_contract;
+use crate::operator_tree::add_operator_tree;
+use crate::pass2::memo::well_formed::Pass2RuleError;
+use asap_types::stages::{CandidateForMemoGroupId, Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
 
-/// Preserve local implementations and append readers over union-label inputs.
-/// Parent/query reachability is rebuilt by the enclosing state-group expansion.
+/// Rule 2: adds to each source-chain group, and to each per-entity summary
+/// build over a source chain, a candidate reading the source chain widened
+/// to the union of its metric's label sets, through a `Project` that keeps
+/// the group's output. Returns the number of candidates added.
 pub(crate) fn add_scan_label_candidates(memo: &mut Memo) -> Result<usize, Pass2RuleError> {
     let mut owners = Vec::new();
     let mut roots = Vec::new();
-    // Pass 1's intermediate groups (a summary build, its readout) are
-    // widened inside their consumers' candidates, down to Stage 0's groups.
     for (group, candidates) in memo.candidates.iter().enumerate() {
-        if !memo.is_stage0_group(MemoGroupId(group as u32)) {
-            continue;
-        }
         for (index, candidate) in candidates.iter().enumerate() {
-            // Source-group candidates expose scan reuse to every downstream
-            // operator, including exact/non-summary computations. Their public
-            // schemas stay narrow through the existing projection rewrite.
-            if is_source_chain(&candidate.root_node) && super::reuse::eligible(candidate) {
-                owners.push((group, index));
-                roots.push(QueryRoot::Operator(Rc::clone(&candidate.root_node)));
+            if !candidate.fused_groups.is_empty() {
                 continue;
             }
-            if !super::reuse::eligible(candidate) {
-                continue;
-            }
-            let Some((build, children)) = build_down_to_stage0_groups(memo, candidate) else {
+            let id = CandidateForMemoGroupId {
+                group: MemoGroupId(group as u32),
+                index,
+            };
+            let Ok(node) = memo.operator_node_of(id) else {
                 continue;
             };
-            if !matches!(
-                build.asap(),
-                Some(
-                    ASAPOp::SummaryAgg {
-                        reduction: Reduction::PerEntity,
-                        filter: None,
-                        ..
-                    } | ASAPOp::SummaryTumblingWindowChain {
-                        reduction: Reduction::PerEntity,
-                        filter: None,
-                        ..
-                    }
-                )
-            ) || groups_read_through_added_groups(memo, &candidate.input_groups)
-                .stage0_groups
-                .iter()
-                .any(|child| !children.contains(child))
-                || children
-                    .iter()
-                    .any(|child| !is_source_chain(&memo.groups()[child.0 as usize].logical_node))
-            {
-                continue;
+            let widens = is_source_chain(&node)
+                || matches!(
+                    node.asap(),
+                    Some(
+                        ASAPOp::SummaryAgg {
+                            reduction: Reduction::PerEntity,
+                            filter: None,
+                            child,
+                            ..
+                        } | ASAPOp::SummaryTumblingWindowChain {
+                            reduction: Reduction::PerEntity,
+                            filter: None,
+                            child,
+                            ..
+                        }
+                    ) if is_source_chain(child)
+                );
+            if widens {
+                owners.push(id);
+                roots.push(QueryRoot::Operator(node));
             }
-            owners.push((group, index));
-            roots.push(QueryRoot::Operator(Rc::clone(&candidate.root_node)));
         }
     }
     let Some(widened) = crate::pass2::asap_aware_cse::with_union_scan_labels(&roots)
@@ -72,37 +61,36 @@ pub(crate) fn add_scan_label_candidates(memo: &mut Memo) -> Result<usize, Pass2R
     };
     // Widening recomposes every root's guarantees, also those it left
     // unchanged, so a root is unchanged when it equals its recomposed
-    // original. Compared with the stored original instead, an unchanged root
-    // (a scan that already has every label) that differs only in its
-    // guarantee annotation would pass for a widened reader, and interning
-    // would map it back to its own group: a candidate reading the group it
-    // implements.
+    // original.
     let unwidened = recompose_guarantees(&roots)
         .map_err(|error| Pass2RuleError::ScanLabelWidening(error.to_string()))?;
     let mut added = 0;
-    for (((group, index), root), unwidened) in owners.into_iter().zip(widened).zip(unwidened) {
-        let (QueryRoot::Operator(node), QueryRoot::Operator(unwidened)) = (root, unwidened) else {
-            unreachable!("operator readers")
+    for (((owner, root), unwidened), original) in owners.into_iter().zip(widened).zip(unwidened).zip(&roots) {
+        let (QueryRoot::Operator(node), QueryRoot::Operator(unwidened), QueryRoot::Operator(original)) =
+            (root, unwidened, original)
+        else {
+            unreachable!("operator consumers")
         };
-        let original = memo.candidates[group][index].clone();
         if *node == *unwidened {
             continue;
         }
-        // A widened source chain equal to a group's node is read through a
-        // projection instead of aliasing that group.
-        let node = if memo
-            .group_with_equal_node(&without_exact_guarantees(&node))
-            .is_some()
-        {
+        // A widened source chain is read through a projection, which keeps
+        // the group's columns.
+        let node = if is_source_chain(&node) {
             OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Project {
-                cols: node
+                cols: original
                     .schema
                     .fields
                     .iter()
-                    .enumerate()
-                    .map(|(column, field)| asap_types::ir::ProjectItem {
+                    .map(|field| asap_types::ir::ProjectItem {
                         alias: Some(field.name.clone()),
-                        expr: asap_types::ir::ScalarExpr::Column(column),
+                        expr: asap_types::ir::ScalarExpr::Column(
+                            node.schema
+                                .fields
+                                .iter()
+                                .position(|widened| widened.name == field.name)
+                                .unwrap_or_default(),
+                        ),
                     })
                     .collect(),
                 qualifier: None,
@@ -112,17 +100,23 @@ pub(crate) fn add_scan_label_candidates(memo: &mut Memo) -> Result<usize, Pass2R
         } else {
             node
         };
-        // A reader whose output the widening changed is not added.
-        if !same_output_contract(&original.root_node, &node) {
+        // A consumer whose output the widening changed is not added.
+        if !same_output_contract(original, &node) {
             continue;
         }
-        added += usize::from(add_candidate_over_groups(
+        let parts = memo.candidate(owner).accuracy_budget_parts;
+        let candidate = add_operator_tree(
             memo,
-            MemoGroupId(group as u32),
-            &original,
-            node,
-            OriginOfCandidateForMemoGroup::WidenedScans,
-        )?);
+            &node,
+            &OriginOfCandidateForMemoGroup::WidenedScans,
+            parts,
+        );
+        // A candidate never reads the group it computes.
+        if candidate.expression.operator.children().contains(&&owner.group) {
+            continue;
+        }
+        let known = memo.candidates[owner.group.0 as usize].len();
+        added += usize::from(memo.add_candidate(owner.group, candidate).index == known);
     }
     Ok(added)
 }

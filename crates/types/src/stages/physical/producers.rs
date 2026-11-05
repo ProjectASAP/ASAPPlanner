@@ -135,11 +135,10 @@ mod tests {
         let physical = PhysicalASAPMemoCandidates::new(
             (0..3)
                 .map(|group| OperatorNodeOfCandidateForMemoGroup {
-                    candidates_for_memo_group: vec![CandidateForMemoGroupId {
+                    candidate_for_memo_group: CandidateForMemoGroupId {
                         group: MemoGroupId(group),
                         index: 0,
-                    }],
-                    is_implementation_root: true,
+                    },
                     accuracy_budget_parts: 1,
                     physical_node: Rc::clone(&node),
                 })

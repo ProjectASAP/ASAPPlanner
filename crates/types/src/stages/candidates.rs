@@ -1,158 +1,267 @@
-//! Implementation candidates attached to memo groups.
+//! The memo (Stage 1): memo groups, each query's root over them, and each
+//! group's candidates `v = (e_v, p^log_v)` with a requirement `r^log_{v,i}`
+//! per input.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::rc::Rc;
 
-use super::hash_consing::HashConsingTable;
-use super::{DagOfLogicalMemoGroups, MemoGroup, MemoGroupId};
-use crate::ir::{OperatorNode, QueryRoot};
+use super::hash_consing::same_value;
+use super::{MemoGroup, MemoGroupId};
+use crate::ir::schema::sketch::{ExactKind, SketchAlgorithm, SketchKind};
+use crate::ir::{Operator, OperatorNode, QueryRoot, SchemaDerivationError};
 
 /// The memo: the memo groups, each query's root over them, and each group's
-/// candidate implementations.
+/// candidates.
 #[derive(Debug, Clone, Default)]
 pub struct Memo {
-    /// The groups, by id ([`Self::groups`]); private so every group added
-    /// ([`Self::push_group`]) is in [`Self::group_lookup`].
-    groups: Vec<MemoGroup>,
-    /// Each query's root over groups, by index in the workload (the
-    /// initial logical memo's query roots); groups added later are never a
-    /// query's root.
+    /// The groups, by id.
+    pub groups: Vec<MemoGroup>,
+    /// Each query's root over groups, by index in the workload.
     pub query_roots: Vec<QueryRoot<MemoGroupId>>,
-    /// Each group's implementation candidates, by group index.
+    /// Each group's candidates, by group index.
     pub candidates: Vec<Vec<CandidateForMemoGroup>>,
-    /// Every group, by its logical node: [`Self::group_whose_node_is`] and
-    /// [`Self::group_with_equal_node`] look groups up in it.
-    group_lookup: MemoGroupLookup,
-    /// The number of groups Stage 0 produced from the queries' DAG
-    /// ([`Self::new`]): groups `0..stage0_group_count`. Groups added later
-    /// come after them ([`Self::is_stage0_group`]).
-    stage0_group_count: usize,
 }
 
-/// Every group of a memo, by the address of its logical node and by node
-/// equality ([`HashConsingTable`], Stage 0's equality).
-#[derive(Debug, Clone, Default)]
-struct MemoGroupLookup {
-    /// Each group's logical node, by address (the memo keeps it alive).
-    group_whose_node_is: HashMap<*const OperatorNode, MemoGroupId>,
-    /// Each group's logical node, by equality.
-    group_with_equal_node: HashConsingTable<MemoGroupId>,
-}
-
-/// One implementation candidate: index `index` in group `group`'s
-/// candidates ([`Memo::candidates`]).
+/// One candidate: index `index` in group `group`'s candidates
+/// ([`Memo::candidates`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CandidateForMemoGroupId {
     pub group: MemoGroupId,
     pub index: usize,
 }
 
-/// One way to implement a group: its node as Stage 2 implements it, over
-/// child groups.
+/// `v = (e_v, p^log_v)`: one candidate of a memo group.
 #[derive(Debug, Clone)]
 pub struct CandidateForMemoGroup {
+    /// `e_v`.
+    pub expression: CandidateExpression,
+    /// `p^log_v`.
+    pub logical_properties: LogicalProperties,
+    /// `r^log_{v,i}`, one per child group of `expression.operator`, in
+    /// [`Operator::children`] order.
+    pub input_requirements: Vec<LogicalRequirement>,
     /// The groups a fused computation also implements, beyond the group
-    /// whose candidate it is (its owner, implicit from its position in
-    /// [`Memo::candidates`]); empty otherwise.
+    /// whose candidate it is; empty otherwise.
     pub fused_groups: Vec<MemoGroupId>,
-    /// The implementation's own node(s): its root node, whose descendants
-    /// down to [`Self::input_groups`] are its private nodes.
-    pub root_node: Rc<OperatorNode>,
-    /// The groups it reads, whose implementations are chosen separately.
-    pub input_groups: Vec<MemoGroupId>,
-    /// How it was made: by Pass 1, or by which Pass 2 transformation.
+    /// Which rule added it. Not in the formulation: kept for
+    /// `stage_pipeline --text` and the viewer.
     pub origin: OriginOfCandidateForMemoGroup,
-    /// The number of equal shares of its measures' accuracy budget its
-    /// summaries are sized for: 1 for the whole budget, `n` when it is one
-    /// of `n` approximate inputs of a query (a ratio's operand). This positive
-    /// generation parameter is already encoded in concrete sketch parameters;
-    /// it is not an equality constraint on the selected number of readers or
-    /// approximate inputs. Recompose and validate accuracy at query roots.
-    /// Larger allocations may be valid but costlier than necessary.
+    /// The number of equal shares of its queries' accuracy budget its
+    /// summary is sized for: 1 for the whole budget, `n` for one of `n`
+    /// approximate inputs of a query. Only a candidate whose representation
+    /// is a sketch has more than 1. Deleted by #1207 step 6 (the θ list and
+    /// row (K)).
     pub accuracy_budget_parts: usize,
 }
 
-/// Where an implementation candidate came from.
+/// `e_v = op_v(G_{v,1}, …, G_{v,n})`: one operator, with its arguments,
+/// whose children are groups.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CandidateExpression {
+    /// `op_v`; its children are `G_{v,i}`.
+    pub operator: Operator<MemoGroupId>,
+}
+
+/// `p^log_v`: one field per dimension.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LogicalProperties {
+    /// The family and `θ_v`.
+    representation: Representation,
+    /// `ω_v`.
+    window_layout: Option<WindowLayout>,
+}
+
+/// Why a [`LogicalProperties`] is invalid.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum InvalidLogicalProperties {
+    /// Only summary or exact-accumulator state is laid out in windows.
+    #[error("a plain value has no window layout")]
+    WindowLayoutOfPlainValue,
+}
+
+impl LogicalProperties {
+    /// The properties `(representation, window_layout)`; a plain value has
+    /// no window layout.
+    pub fn new(
+        representation: Representation,
+        window_layout: Option<WindowLayout>,
+    ) -> Result<Self, InvalidLogicalProperties> {
+        if matches!(representation, Representation::Plain) && window_layout.is_some() {
+            return Err(InvalidLogicalProperties::WindowLayoutOfPlainValue);
+        }
+        Ok(Self {
+            representation,
+            window_layout,
+        })
+    }
+
+    /// The family and `θ_v`.
+    pub fn representation(&self) -> &Representation {
+        &self.representation
+    }
+
+    /// `ω_v`.
+    pub fn window_layout(&self) -> Option<&WindowLayout> {
+        self.window_layout.as_ref()
+    }
+}
+
+/// What a candidate's output holds: exact-accumulator state of a kind,
+/// summary state of a family with its parameters `θ`, or plain values.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Representation {
+    Exact(ExactKind),
+    Summary(SketchKind),
+    /// Values: no state, so no `θ` (a readout, a projection, a scan).
+    Plain,
+}
+
+/// `ω_v`: how the state is laid out in time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowLayout {
+    /// `count` back-to-back tumbling windows of `width_ms`.
+    Tumbling { width_ms: u64, count: u32 },
+}
+
+/// `r^log_{c,i}`: one optional constraint per dimension; `None` is
+/// unconstrained.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LogicalRequirement {
+    /// The summary family the input must hold.
+    pub family: Option<SketchAlgorithm>,
+    /// The tumbling windows the input must be laid out in.
+    pub window: Option<WindowRequirement>,
+}
+
+/// The tumbling windows a consumer reads: their width, and how many there
+/// must be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowRequirement {
+    pub width_ms: u64,
+    pub min_count: u32,
+    pub max_count: u32,
+}
+
+/// `α^log_{u,c,i}`: whether a producer with properties `producer`
+/// satisfies `requirement`, one check per dimension.
+pub fn satisfies(producer: &LogicalProperties, requirement: &LogicalRequirement) -> bool {
+    let family = requirement.family.as_ref().is_none_or(|family| {
+        matches!(&producer.representation, Representation::Summary(kind) if kind.algorithm() == family)
+    });
+    let window = requirement.window.is_none_or(|required| {
+        matches!(
+            producer.window_layout,
+            Some(WindowLayout::Tumbling { width_ms, count })
+                if width_ms == required.width_ms
+                    && (required.min_count..=required.max_count).contains(&count)
+        )
+    });
+    family && window
+}
+
+/// Where a candidate came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OriginOfCandidateForMemoGroup {
-    /// Pass 1: exact, exact accumulator, or a summary family and size; or
-    /// the operator of an intermediate result Pass 1 added as a group.
+    /// Pass 1: exact, exact accumulator, or a summary family and size, and
+    /// the intermediate results of each.
     Pass1,
-    /// One build serving several reader groups (summary capability).
-    SharedBuild,
-    /// A summary readout factored from a composite implementation.
-    SummaryResult,
-    /// Canonical value preprocessing feeding a summary build.
-    SummaryInput,
-    /// Tumbling windows, or the newest tumbling windows of another group's chain.
+    /// Tumbling windows (rule 1).
     TumblingWindows,
-    /// A coarse group regrouping a finer group.
+    /// A coarse group regrouping a finer group (rules 5–7).
     Rollup,
-    /// A top-k read from another group's ranking.
+    /// A top-k read from another group's ranking (rule 4).
     TopKReuse,
     /// Its metric's scans widened to a shared label set, read through a
-    /// `Project` (scan widening).
+    /// `Project` (rule 2).
     WidenedScans,
 }
 
 impl Memo {
-    /// The memo of Stage 0's groups and query roots, every group without
-    /// candidates yet.
-    pub fn new(dag: DagOfLogicalMemoGroups) -> Self {
-        let mut memo = Self {
-            groups: Vec::with_capacity(dag.groups.len()),
-            query_roots: dag.query_roots,
-            candidates: vec![Vec::new(); dag.groups.len()],
-            group_lookup: MemoGroupLookup::default(),
-            stage0_group_count: dag.groups.len(),
+    /// Hash-consing: the group with this expression, added if new. Two
+    /// expressions are one group when they are equal without the
+    /// candidates' properties: sketch parameters (and the failure
+    /// probability they record) and tumbling-window width and count are
+    /// left out. An expression whose operator is not legal to share (a
+    /// non-ASAP operator that may return other rows for the same input
+    /// rows) is always a new group. A new group's logical node is the
+    /// operator over its child groups' logical nodes.
+    ///
+    /// Panics when the new group's schema does not derive: a rule adds only
+    /// expressions it built from nodes.
+    pub fn find_or_add_group(&mut self, expression: Operator<MemoGroupId>) -> MemoGroupId {
+        let children: Vec<MemoGroupId> = expression.children().into_iter().copied().collect();
+        let operator =
+            expression.map_children(|g| Rc::clone(&self.groups[g.0 as usize].logical_node));
+        let shareable = match &operator {
+            Operator::ASAP(_) => true,
+            Operator::NonASAP(op) => op.is_shareable_when_equal(),
         };
-        for group in dag.groups {
-            memo.index_and_push(group);
+        if shareable {
+            let key = group_key(&expression);
+            let found = (0..self.groups.len()).find(|&g| {
+                self.groups[g].child_groups == children
+                    && group_key(&self.group_expression(MemoGroupId(g as u32))) == key
+            });
+            if let Some(g) = found {
+                return MemoGroupId(g as u32);
+            }
         }
-        memo
+        let id = MemoGroupId(
+            u32::try_from(self.groups.len()).expect("a memo has at most u32::MAX groups"),
+        );
+        let logical_node = Rc::new(
+            OperatorNode::new(operator).expect("a rule adds only expressions whose schema derives"),
+        );
+        for &child in &children {
+            let parents = &mut self.groups[child.0 as usize].parents;
+            if !parents.contains(&id) {
+                parents.push(id);
+            }
+        }
+        self.groups.push(MemoGroup {
+            logical_node,
+            child_groups: children,
+            parents: Vec::new(),
+            queries: Vec::new(),
+        });
+        self.candidates.push(Vec::new());
+        id
     }
 
-    /// The groups, by id.
-    pub fn groups(&self) -> &[MemoGroup] {
-        &self.groups
-    }
-
-    /// Whether `group` is one Stage 0 produced from the queries' DAG, not
-    /// one Pass 1 or Pass 2 added beneath them.
-    pub fn is_stage0_group(&self, group: MemoGroupId) -> bool {
-        (group.0 as usize) < self.stage0_group_count
-    }
-
-    /// The groups, by id, to change in a test (a malformed reference, a
-    /// different logical node); a changed logical node is not looked up again.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn groups_mut(&mut self) -> &mut [MemoGroup] {
-        &mut self.groups
-    }
-
-    /// Adds `candidate` to `group`'s candidates and returns its id, or
-    /// returns the id of the candidate there already with the same input
-    /// groups, fused groups and accuracy budget parts and an equal node
-    /// ([`equal_nodes`](super::hash_consing::equal_nodes)): a candidate is
-    /// in a group once.
+    /// Adds `candidate` to `group` and returns its id, or the id of the
+    /// candidate there already with the same expression, properties,
+    /// requirements, fused groups and accuracy budget parts: a group has a
+    /// candidate once. The groups the candidate reads, and every group
+    /// below them, are reached by `group`'s queries, and `group` is their
+    /// parent.
     pub fn add_candidate(
         &mut self,
         group: MemoGroupId,
         candidate: CandidateForMemoGroup,
     ) -> CandidateForMemoGroupId {
-        let candidates = &mut self.candidates[group.0 as usize];
-        let index = candidates
-            .iter()
-            .position(|known| {
-                known.input_groups == candidate.input_groups
-                    && known.fused_groups == candidate.fused_groups
-                    && known.accuracy_budget_parts == candidate.accuracy_budget_parts
-                    && super::hash_consing::equal_nodes(&known.root_node, &candidate.root_node)
-            })
-            .unwrap_or_else(|| {
-                candidates.push(candidate);
-                candidates.len() - 1
-            });
+        let candidates = &self.candidates[group.0 as usize];
+        if let Some(index) = candidates.iter().position(|known| same_candidate(known, &candidate)) {
+            return CandidateForMemoGroupId { group, index };
+        }
+        let inputs: Vec<MemoGroupId> = candidate
+            .expression
+            .operator
+            .children()
+            .into_iter()
+            .copied()
+            .collect();
+        self.candidates[group.0 as usize].push(candidate);
+        let index = self.candidates[group.0 as usize].len() - 1;
+        for &input in &inputs {
+            let parents = &mut self.groups[input.0 as usize].parents;
+            if !parents.contains(&group) {
+                parents.push(group);
+            }
+        }
+        let queries = self.groups[group.0 as usize].queries.clone();
+        for input in inputs {
+            self.add_queries(input, &queries);
+        }
         CandidateForMemoGroupId { group, index }
     }
 
@@ -161,84 +270,59 @@ impl Memo {
         &self.candidates[id.group.0 as usize][id.index]
     }
 
-    /// Adds `group` with its `candidates` and returns its id.
-    pub fn push_group(
-        &mut self,
-        group: MemoGroup,
-        candidates: Vec<CandidateForMemoGroup>,
-    ) -> MemoGroupId {
-        let id = self.index_and_push(group);
-        self.candidates.push(candidates);
-        id
-    }
-
-    /// Indexes `group` by its logical node and adds it; its id.
-    fn index_and_push(&mut self, group: MemoGroup) -> MemoGroupId {
-        let id = MemoGroupId(
-            u32::try_from(self.groups.len()).expect("a memo has at most u32::MAX groups"),
-        );
-        let node = Rc::clone(&group.logical_node);
-        self.group_lookup
-            .group_whose_node_is
-            .entry(Rc::as_ptr(&node))
-            .or_insert(id);
-        let equal_nodes = &mut self.group_lookup.group_with_equal_node;
-        if equal_nodes.find(&node).is_none() {
-            equal_nodes.insert(node, id);
+    /// Candidate `id`'s operator node: its operator over its input groups'
+    /// logical nodes. The group's logical node itself when the candidate's
+    /// expression is the group's own (with its schema and guarantee);
+    /// otherwise the schema is derived, with the group's field names and
+    /// qualifiers when it has as many fields, and no guarantee.
+    pub fn operator_node_of(
+        &self,
+        id: CandidateForMemoGroupId,
+    ) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
+        let group = &self.groups[id.group.0 as usize];
+        let operator = &self.candidate(id).expression.operator;
+        let by_index = |operator: &Operator<MemoGroupId>| operator.map_children(|g| g.0);
+        if same_value(&by_index(operator), &by_index(&self.group_expression(id.group))) {
+            return Ok(Rc::clone(&group.logical_node));
         }
-        self.groups.push(group);
-        id
+        let mut node = OperatorNode::new(
+            operator.map_children(|g| Rc::clone(&self.groups[g.0 as usize].logical_node)),
+        )?;
+        let own = &group.logical_node.schema.fields;
+        if node.schema.fields.len() == own.len() {
+            for (field, own) in node.schema.fields.iter_mut().zip(own) {
+                field.name = own.name.clone();
+                field.table = own.table.clone();
+            }
+        }
+        Ok(Rc::new(node))
     }
 
-    /// The group whose logical node is `node` itself (the same `Rc`).
-    pub fn group_whose_node_is(&self, node: &Rc<OperatorNode>) -> Option<MemoGroupId> {
-        self.group_lookup
-            .group_whose_node_is
-            .get(&Rc::as_ptr(node))
-            .copied()
-    }
-
-    /// The group whose logical node is `node`, else the lowest group whose
-    /// logical node equals `node` by Stage 0's equality when sharing `node`
-    /// is legal ([`HashConsingTable::find`]).
-    pub fn group_with_equal_node(&self, node: &Rc<OperatorNode>) -> Option<MemoGroupId> {
-        self.group_whose_node_is(node)
-            .or_else(|| self.group_lookup.group_with_equal_node.find(node))
-    }
-
-    /// The groups `group` reads: its logical child groups and its
-    /// candidates' input groups.
-    fn groups_read_by(&self, group: MemoGroupId) -> impl Iterator<Item = MemoGroupId> + '_ {
-        self.groups[group.0 as usize]
-            .child_groups
-            .iter()
-            .chain(
-                self.candidates
-                    .get(group.0 as usize)
-                    .into_iter()
-                    .flatten()
-                    .flat_map(|candidate| &candidate.input_groups),
-            )
-            .copied()
+    /// Group `group`'s expression: its logical node's operator over its
+    /// child groups.
+    fn group_expression(&self, group: MemoGroupId) -> Operator<MemoGroupId> {
+        let memo_group = &self.groups[group.0 as usize];
+        let node = &memo_group.logical_node;
+        let group_of: HashMap<*const OperatorNode, MemoGroupId> = node
+            .children()
+            .into_iter()
+            .zip(&memo_group.child_groups)
+            .map(|(child, &g)| (Rc::as_ptr(child), g))
+            .collect();
+        node.operator.map_children(|child| group_of[&Rc::as_ptr(child)])
     }
 
     /// Adds `queries` to `group` and to every group below it, through
-    /// logical child groups and candidates' input groups. Below `group`, a
-    /// group that already has every query is not walked further: the groups
-    /// below it have them already, or get them when this is called for it.
-    pub fn add_queries(&mut self, group: MemoGroupId, queries: &[usize]) {
-        let mut pending: Vec<MemoGroupId> = self.groups_read_by(group).collect();
-        let own = &mut self.groups[group.0 as usize].queries;
-        own.extend_from_slice(queries);
-        own.sort_unstable();
-        own.dedup();
-        let mut seen = HashSet::from([group]);
+    /// logical child groups and candidates' input groups.
+    fn add_queries(&mut self, group: MemoGroupId, queries: &[usize]) {
+        let mut pending = vec![group];
+        let mut seen = HashSet::new();
         while let Some(next) = pending.pop() {
             if !seen.insert(next) {
                 continue;
             }
             let reached = &mut self.groups[next.0 as usize].queries;
-            if queries.iter().all(|query| reached.contains(query)) {
+            if next != group && queries.iter().all(|query| reached.contains(query)) {
                 continue;
             }
             reached.extend_from_slice(queries);
@@ -248,63 +332,108 @@ impl Memo {
         }
     }
 
-    /// Sets every group's parents to the groups that read it: through a
-    /// logical child group or a candidate's input group.
-    pub fn rebuild_parents(&mut self) {
-        for group in &mut self.groups {
-            group.parents.clear();
-        }
-        for group in 0..self.groups.len() {
-            let consumer = MemoGroupId(group as u32);
-            let read: HashSet<MemoGroupId> = self.groups_read_by(consumer).collect();
-            let mut read: Vec<MemoGroupId> = read.into_iter().collect();
-            read.sort_unstable();
-            for child in read {
-                self.groups[child.0 as usize].parents.push(consumer);
-            }
-        }
+    /// The groups `group` reads: its logical child groups and its
+    /// candidates' input groups.
+    fn groups_read_by(&self, group: MemoGroupId) -> Vec<MemoGroupId> {
+        self.groups[group.0 as usize]
+            .child_groups
+            .iter()
+            .copied()
+            .chain(
+                self.candidates
+                    .get(group.0 as usize)
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|candidate| candidate.expression.operator.children())
+                    .copied(),
+            )
+            .collect()
     }
 
     /// The groups, each after every group it or one of its candidates
-    /// reads, the lower index first among those ready: a dependency order for
-    /// candidate traversal, whatever order transformations appended
-    /// groups in. `None` when those reads form a cycle, a group reading
-    /// itself included.
+    /// reads, the lower index first among those ready: a dependency order
+    /// for candidate traversal. `None` when those reads form a cycle, a
+    /// group reading itself included.
     pub fn topological_order(&self) -> Option<Vec<MemoGroupId>> {
         let count = self.groups.len();
-        let mut reads: Vec<HashSet<usize>> = vec![HashSet::new(); count];
-        for (g, group) in self.groups.iter().enumerate() {
-            let candidates = self.candidates.get(g).map_or(&[][..], Vec::as_slice);
-            for child in group
-                .child_groups
-                .iter()
-                .chain(candidates.iter().flat_map(|c| &c.input_groups))
-            {
-                // A group reading itself never becomes ready: a cycle.
-                reads[g].insert(child.0 as usize);
-            }
-        }
-        let mut readers: Vec<Vec<usize>> = vec![Vec::new(); count];
+        let reads: Vec<HashSet<usize>> = (0..count)
+            .map(|g| {
+                self.groups_read_by(MemoGroupId(g as u32))
+                    .into_iter()
+                    .map(|child| child.0 as usize)
+                    .collect()
+            })
+            .collect();
+        let mut consumers: Vec<Vec<usize>> = vec![Vec::new(); count];
         let mut waiting: Vec<usize> = reads.iter().map(HashSet::len).collect();
         for (g, read) in reads.iter().enumerate() {
             for &child in read {
-                readers[child].push(g);
+                consumers[child].push(g);
             }
         }
-        let mut ready: std::collections::BinaryHeap<std::cmp::Reverse<usize>> = (0..count)
+        let mut ready: BinaryHeap<std::cmp::Reverse<usize>> = (0..count)
             .filter(|&g| waiting[g] == 0)
             .map(std::cmp::Reverse)
             .collect();
         let mut order = Vec::with_capacity(count);
         while let Some(std::cmp::Reverse(g)) = ready.pop() {
             order.push(MemoGroupId(g as u32));
-            for &reader in &readers[g] {
-                waiting[reader] -= 1;
-                if waiting[reader] == 0 {
-                    ready.push(std::cmp::Reverse(reader));
+            for &consumer in &consumers[g] {
+                waiting[consumer] -= 1;
+                if waiting[consumer] == 0 {
+                    ready.push(std::cmp::Reverse(consumer));
                 }
             }
         }
         (order.len() == count).then_some(order)
+    }
+}
+
+/// Whether two candidates are one: equal expressions (with their
+/// arguments, bit for bit), properties, requirements, fused groups and
+/// accuracy budget parts.
+fn same_candidate(left: &CandidateForMemoGroup, right: &CandidateForMemoGroup) -> bool {
+    let by_index = |operator: &Operator<MemoGroupId>| operator.map_children(|g| g.0);
+    left.fused_groups == right.fused_groups
+        && left.accuracy_budget_parts == right.accuracy_budget_parts
+        && left.input_requirements == right.input_requirements
+        && left.logical_properties.window_layout == right.logical_properties.window_layout
+        && match (
+            &left.logical_properties.representation,
+            &right.logical_properties.representation,
+        ) {
+            (Representation::Summary(a), Representation::Summary(b)) => same_value(a, b),
+            (a, b) => a == b,
+        }
+        && same_value(
+            &by_index(&left.expression.operator),
+            &by_index(&right.expression.operator),
+        )
+}
+
+/// The group key of `expression`: its canonical JSON without the
+/// candidates' properties (sketch parameters, tumbling-window width and
+/// count).
+fn group_key(expression: &Operator<MemoGroupId>) -> String {
+    let mut value = serde_json::to_value(expression.map_children(|g| g.0))
+        .expect("an operator over group ids serializes");
+    without_properties(&mut value);
+    value.to_string()
+}
+
+/// `value` with every sketch's parameters and every tumbling-window width
+/// and count removed.
+fn without_properties(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.contains_key("algorithm") && map.contains_key("params") && map.len() == 2 {
+                map.remove("params");
+            }
+            map.remove("tumbling_window_width_ms");
+            map.remove("tumbling_window_count");
+            map.values_mut().for_each(without_properties);
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(without_properties),
+        _ => {}
     }
 }

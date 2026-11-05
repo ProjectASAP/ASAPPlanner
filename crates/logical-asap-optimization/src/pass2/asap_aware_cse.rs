@@ -128,7 +128,7 @@ use asap_accuracy::propagation::recompose_guarantees;
 use asap_types::ir::SchemaDerivationError;
 
 /// Why a sharing rewrite builds no candidate. The rules report it as text
-/// ([`Pass2RuleError`](crate::pass2::memo::state_groups::Pass2RuleError)) or
+/// ([`Pass2RuleError`](crate::pass2::memo::well_formed::Pass2RuleError)) or
 /// drop the candidate.
 #[derive(Debug, thiserror::Error)]
 pub enum CseError {
@@ -136,18 +136,6 @@ pub enum CseError {
     Structure(#[from] SchemaDerivationError),
     #[error("unsupported substitution in logical ASAP-aware optimization: {0}")]
     Unsupported(&'static str),
-    /// A rule found more than `max` candidates of one kind, whose 2^n subsets
-    /// it would enumerate: the workload is too large to plan this way, not
-    /// bad input.
-    #[error("found {found} {counted}, more than {max}")]
-    TooManyCandidates {
-        /// What was counted, e.g. "rollup choices".
-        counted: &'static str,
-        /// How many were found, more than `max`.
-        found: usize,
-        /// The most the rule enumerates.
-        max: usize,
-    },
 }
 
 /// `roots` with the time-series scans of one metric made identical when
@@ -506,11 +494,6 @@ pub struct SharedTumblingWindowChain {
     pub tumbling_window_count: u32,
 }
 
-/// The most tumbling-window candidates one candidate may have: every non-empty subset
-/// is a Pass 2 candidate, and with shared grids up to three, about three
-/// million at 20.
-pub(crate) const MAX_TUMBLING_WINDOW_CANDIDATES: usize = 20;
-
 /// The tumbling-window candidates of the candidate with query roots `roots`, children
 /// first. `evaluation_grid_ms[q]` is the grid query `q`'s evaluations fall
 /// on: how often it repeats, or with a range evaluation the greatest common
@@ -596,54 +579,6 @@ fn splittable_window_ms(build: &OperatorNode) -> Option<u64> {
         below = child;
     }
     u64::try_from(range.as_millis()).ok().filter(|&ms| ms > 0)
-}
-
-/// Every Pass 2 candidate of the window-composition rule for the candidate
-/// with query roots `roots` and tumbling-window candidates `candidates`
-/// ([`tumbling_window_candidates`]): one per non-empty subset of them, in
-/// binary-counter order (the first candidate the lowest bit). Each build in
-/// the subset becomes a `SummaryMerge` over one [`ASAPOp::SummaryTumblingWindowChain`] of
-/// its tumbling windows; every other build is untouched. A subset whose builds can
-/// share chains is followed by one Pass 2 candidate per shared grid, in
-/// which each group reads one shared chain, each member merging its newest
-/// tumbling windows: the finest member's tumbling windows (`nested_window_groups`), then the
-/// gcd of the members' widths when that groups them differently
-/// (`gcd_window_groups`); and by one error candidate per group whose
-/// sizing fails. Each grid groups every build of a subset at once: a
-/// shared gcd grid over only some of the builds that could share it is not
-/// listed. An error only for more than
-/// `MAX_TUMBLING_WINDOW_CANDIDATES` tumbling-window candidates; a Pass 2 candidate whose
-/// composition fails carries its own error.
-pub fn window_composition_pass2_candidates(
-    roots: &[QueryRoot],
-    candidates: &[TumblingWindowCandidate],
-) -> Result<Vec<WindowCompositionPass2Candidate>, CseError> {
-    if candidates.len() > MAX_TUMBLING_WINDOW_CANDIDATES {
-        return Err(CseError::TooManyCandidates {
-            counted: "summary builds that could be built in tumbling windows",
-            found: candidates.len(),
-            max: MAX_TUMBLING_WINDOW_CANDIDATES,
-        });
-    }
-    let rollable = rollable_tumbling_window_candidates(roots, candidates);
-    let mut pass2_candidates = Vec::new();
-    for mask in 1u64..(1u64 << candidates.len()) {
-        let chosen: Vec<TumblingWindowCandidate> = (0..candidates.len())
-            .filter(|&i| mask >> i & 1 == 1)
-            .map(|i| candidates[i].clone())
-            .collect();
-        pass2_candidates.push(WindowCompositionPass2Candidate {
-            roots: in_tumbling_windows(roots, &chosen, &[]),
-            tumbling_window_candidates: chosen.clone(),
-            shared_chains: Vec::new(),
-        });
-        let chosen_rollable: Vec<bool> = (0..candidates.len())
-            .filter(|&i| mask >> i & 1 == 1)
-            .map(|i| rollable[i])
-            .collect();
-        push_every_shared_chain(roots, &chosen, &chosen_rollable, &mut pass2_candidates);
-    }
-    Ok(pass2_candidates)
 }
 
 /// The Pass 2 candidates of [`window_composition_pass2_candidates`] in
@@ -1136,143 +1071,9 @@ fn in_tumbling_windows(
     Ok(recompose_guarantees(&out)?)
 }
 
-/// `roots` with the `SummaryMerge` `merge` (over one [`ASAPOp::SummaryTumblingWindowChain`]
-/// of `roots`) reading the newest tumbling windows of another chain over the same
-/// input: `tumbling_window_count` tumbling windows of `tumbling_window_width_ms` of family `family` (a size
-/// that serves every reader of the chain). The merge reads the newest
-/// tumbling windows covering its own window (its newest tumbling windows, or its whole chain),
-/// which `tumbling_window_width_ms` divides and the new chain covers; every guarantee
-/// is composed again.
-pub(crate) fn with_tumbling_window_chain(
-    roots: &[QueryRoot],
-    merge: &Rc<OperatorNode>,
-    family: FieldDataType,
-    tumbling_window_width_ms: u64,
-    tumbling_window_count: u32,
-) -> Result<Vec<QueryRoot>, CseError> {
-    let Some(ASAPOp::SummaryMerge {
-        children,
-        newest_tumbling_windows: own_newest,
-        ..
-    }) = merge.asap()
-    else {
-        unreachable!("a merge over a tumbling-window chain");
-    };
-    let own = &children[0];
-    let Some(ASAPOp::SummaryTumblingWindowChain {
-        child,
-        input,
-        reduction,
-        grouping,
-        filter,
-        tumbling_window_width_ms: own_width,
-        tumbling_window_count: own_count,
-        ..
-    }) = own.asap()
-    else {
-        unreachable!("a merge over a tumbling-window chain");
-    };
-    // The merge's window: its newest tumbling windows, or the whole chain.
-    let window_ms = own_width * u64::from(own_newest.unwrap_or(*own_count));
-    let newest = u32::try_from(window_ms / tumbling_window_width_ms)
-        .expect("a reader's window is at most the chain's");
-    let mut chain = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
-        child: Rc::clone(child),
-        family,
-        input: input.clone(),
-        reduction: reduction.clone(),
-        grouping: grouping.clone(),
-        filter: filter.clone(),
-        tumbling_window_width_ms,
-        tumbling_window_count,
-    }))?;
-    for (field, kept) in chain.schema.fields.iter_mut().zip(&own.schema.fields) {
-        field.name = kept.name.clone();
-        field.table = kept.table.clone();
-    }
-    let read = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryMerge {
-        children: vec![Rc::new(chain)],
-        newest_tumbling_windows: (newest < tumbling_window_count).then_some(newest),
-        group_by: None,
-    }))?;
-    let replaced = HashMap::from([(Rc::as_ptr(merge), Rc::new(read))]);
-    let mut rebuilt = HashMap::new();
-    let mut out = Vec::new();
-    for root in roots {
-        out.push(match root {
-            QueryRoot::Operator(node) => {
-                QueryRoot::Operator(rebuild(node, &replaced, &mut rebuilt)?)
-            }
-            QueryRoot::Scalar(expr) => {
-                let mut nodes = HashMap::new();
-                for node in expr.operator_refs() {
-                    nodes.insert(Rc::as_ptr(node), rebuild(node, &replaced, &mut rebuilt)?);
-                }
-                QueryRoot::Scalar(
-                    expr.map_operator_refs(&mut |node| nodes[&Rc::as_ptr(node)].clone()),
-                )
-            }
-        });
-    }
-    Ok(recompose_guarantees(&out)?)
-}
-
-/// `roots` with the summary build `build` (a `SummaryAgg` of `roots`)
-/// built at family `family` instead (the same algorithm at another size),
-/// its output names kept; every guarantee is composed again.
-pub(crate) fn with_resized_build(
-    roots: &[QueryRoot],
-    build: &Rc<OperatorNode>,
-    family: FieldDataType,
-) -> Result<Vec<QueryRoot>, CseError> {
-    let Some(ASAPOp::SummaryAgg {
-        child,
-        input,
-        reduction,
-        grouping,
-        filter,
-        ..
-    }) = build.asap()
-    else {
-        unreachable!("a summary build");
-    };
-    let mut resized = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryAgg {
-        child: Rc::clone(child),
-        family,
-        input: input.clone(),
-        reduction: reduction.clone(),
-        grouping: grouping.clone(),
-        filter: filter.clone(),
-    }))?;
-    for (field, kept) in resized.schema.fields.iter_mut().zip(&build.schema.fields) {
-        field.name = kept.name.clone();
-        field.table = kept.table.clone();
-    }
-    let replaced = HashMap::from([(Rc::as_ptr(build), Rc::new(resized))]);
-    let mut rebuilt = HashMap::new();
-    let mut out = Vec::new();
-    for root in roots {
-        out.push(match root {
-            QueryRoot::Operator(node) => {
-                QueryRoot::Operator(rebuild(node, &replaced, &mut rebuilt)?)
-            }
-            QueryRoot::Scalar(expr) => {
-                let mut nodes = HashMap::new();
-                for node in expr.operator_refs() {
-                    nodes.insert(Rc::as_ptr(node), rebuild(node, &replaced, &mut rebuilt)?);
-                }
-                QueryRoot::Scalar(
-                    expr.map_operator_refs(&mut |node| nodes[&Rc::as_ptr(node)].clone()),
-                )
-            }
-        });
-    }
-    Ok(recompose_guarantees(&out)?)
-}
-
 /// The [`ASAPOp::SummaryTumblingWindowChain`] of `candidate`'s tumbling windows, with the build's
 /// output names.
-fn tumbling_window_chain(
+pub(crate) fn tumbling_window_chain(
     candidate: &TumblingWindowCandidate,
 ) -> Result<Rc<OperatorNode>, CseError> {
     let Some(ASAPOp::SummaryAgg {
@@ -1362,21 +1163,6 @@ pub struct RollupCandidate {
     /// candidate resizes `finer` for every reader).
     pub rollup: Rc<OperatorNode>,
 }
-
-/// A Pass 2 candidate of the rollup rule: the candidate's roots with the
-/// coarse build of each chosen rollup candidate answered from its finer
-/// build, and every guarantee composed again; the error when that fails.
-#[derive(Debug)]
-pub struct RollupPass2Candidate {
-    /// The candidate's roots with those builds rolled up and every guarantee
-    /// composed again; `Err` when the rebuilt DAG does not derive or
-    /// compose, which drops only this candidate.
-    pub roots: Result<Vec<QueryRoot>, CseError>,
-}
-
-/// The most rollup or top-k reuse candidates one candidate may have: every
-/// non-empty subset is a Pass 2 candidate, about a million at 20.
-pub(crate) const MAX_REUSE_CANDIDATES: usize = 20;
 
 /// The exact accumulator that merges finalized values of `family` across
 /// disjoint groups, by the family-capability table: a family whose states
@@ -1968,217 +1754,6 @@ fn rolled_up(
         .ok()?;
     }
     Some(finalized)
-}
-
-/// The independent choices among rollup candidates `candidates`
-/// ([`rollup_candidates`]), in order: each exact accumulator's alone, and
-/// every sketch candidate of one finest build together, since they share
-/// that build's size.
-pub(crate) fn rollup_choices(candidates: &[RollupCandidate]) -> Vec<Vec<RollupCandidate>> {
-    let mut choices: Vec<Vec<RollupCandidate>> = Vec::new();
-    for candidate in candidates {
-        let sketch = is_sketch_build(&candidate.finer);
-        match choices.iter_mut().find(|choice| {
-            sketch
-                && is_sketch_build(&choice[0].finer)
-                && Rc::ptr_eq(&choice[0].finer, &candidate.finer)
-        }) {
-            Some(choice) => choice.push(candidate.clone()),
-            None => choices.push(vec![candidate.clone()]),
-        }
-    }
-    choices
-}
-
-fn is_sketch_build(node: &OperatorNode) -> bool {
-    matches!(
-        node.asap(),
-        Some(ASAPOp::SummaryAgg {
-            family: FieldDataType::Sketch(..),
-            ..
-        })
-    )
-}
-
-/// Every Pass 2 candidate of the rollup rule for the candidate with query
-/// roots `roots` and rollup candidates `candidates` ([`rollup_candidates`]):
-/// one per non-empty subset of their choices (`rollup_choices`), in
-/// binary-counter order (the first the lowest bit). A chosen sketch choice
-/// resizes its finest build for every reader, its own and each coarse
-/// build's (`sized_for_all`: the strictest consumer's size), and each
-/// coarse build becomes the regrouping merge of the resized build's
-/// states. An error only for more than `MAX_REUSE_CANDIDATES` choices; a
-/// Pass 2 candidate whose composition fails carries its own error.
-pub fn rollup_pass2_candidates(
-    roots: &[QueryRoot],
-    candidates: &[RollupCandidate],
-) -> Result<Vec<RollupPass2Candidate>, CseError> {
-    Ok(subsets(&rollup_choices(candidates), "rollup")?
-        .into_iter()
-        .map(|choices| {
-            let values: HashMap<*const OperatorNode, &RollupCandidate> = choices
-                .iter()
-                .flatten()
-                .filter(|candidate| !is_sketch_build(&candidate.finer))
-                .map(|candidate| (Rc::as_ptr(&candidate.coarse), candidate))
-                .collect();
-            // Every finalized value of a chosen coarse exact build is
-            // replaced.
-            let mut replaced: HashMap<*const OperatorNode, Rc<OperatorNode>> = roots
-                .iter()
-                .flat_map(QueryRoot::operator_refs)
-                .flat_map(OperatorNode::reachable)
-                .filter_map(|node| match node.asap() {
-                    Some(ASAPOp::FinalizeExactAccumulator { child }) => {
-                        let candidate = values.get(&Rc::as_ptr(child))?;
-                        Some((Rc::as_ptr(&node), Rc::clone(&candidate.rollup)))
-                    }
-                    _ => None,
-                })
-                .collect();
-            let roots = sketch_rollups(&choices).and_then(|sketches| {
-                replaced.extend(sketches);
-                replace_all(roots, &replaced)
-            });
-            RollupPass2Candidate { roots }
-        })
-        .collect())
-}
-
-/// The replacements of the sketch rollup choices among `choices`
-/// ([`rollup_choices`]): each finest build by the build sized for it and
-/// every coarse build it serves, and each coarse build by the regrouping
-/// merge of that build's states. An error when a finest build and its
-/// coarse builds have no shared size, or a node does not derive.
-fn sketch_rollups(
-    choices: &[Vec<RollupCandidate>],
-) -> Result<Vec<(*const OperatorNode, Rc<OperatorNode>)>, CseError> {
-    let unsupported = || {
-        CseError::Unsupported("a sketch rollup whose finest and coarse builds have no shared size")
-    };
-    // A finest build can also be the coarse build of another choice, read
-    // through a compensating filter. Each build is replaced once: as a
-    // finest build, sized for its readers.
-    let finest: HashSet<*const OperatorNode> = choices
-        .iter()
-        .filter(|choice| is_sketch_build(&choice[0].finer))
-        .map(|choice| Rc::as_ptr(&choice[0].finer))
-        .collect();
-    let mut replaced = Vec::new();
-    for choice in choices {
-        let fine = &choice[0].finer;
-        if !is_sketch_build(fine) {
-            continue;
-        }
-        let mut members = vec![fine];
-        members.extend(choice.iter().map(|candidate| &candidate.coarse));
-        let sized = sized_for_all(&members)?.ok_or_else(unsupported)?;
-        replaced.push((Rc::as_ptr(fine), Rc::clone(&sized)));
-        for candidate in choice {
-            if finest.contains(&Rc::as_ptr(&candidate.coarse)) {
-                continue;
-            }
-            let Some(ASAPOp::SummaryMerge {
-                group_by: Some(keys),
-                ..
-            }) = candidate.rollup.asap()
-            else {
-                unreachable!("a sketch rollup candidate's rollup is a regrouping merge");
-            };
-            // A compensating filter is kept over the resized states.
-            let states = match candidate.rollup.children()[0].non_asap() {
-                Some(NonASAPOp::Filter { pred, .. }) => {
-                    OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Filter {
-                        pred: pred.clone(),
-                        child: Rc::clone(&sized),
-                    }))?
-                }
-                _ => Rc::clone(&sized),
-            };
-            let merge = regroup_merge(&states, keys.clone(), &candidate.coarse)?;
-            replaced.push((Rc::as_ptr(&candidate.coarse), merge));
-        }
-    }
-    Ok(replaced)
-}
-
-/// Every non-empty subset of `candidates`, in binary-counter order (the
-/// first candidate the lowest bit); an error past [`MAX_REUSE_CANDIDATES`].
-fn subsets<T: Clone>(candidates: &[T], rule: &'static str) -> Result<Vec<Vec<T>>, CseError> {
-    let n = candidates.len();
-    if n > MAX_REUSE_CANDIDATES {
-        return Err(CseError::TooManyCandidates {
-            counted: match rule {
-                "rollup" => "rollup choices",
-                _ => "top-k reuse candidates",
-            },
-            found: n,
-            max: MAX_REUSE_CANDIDATES,
-        });
-    }
-    Ok((1u64..(1u64 << n))
-        .map(|mask| {
-            (0..n)
-                .filter(|&i| mask >> i & 1 == 1)
-                .map(|i| candidates[i].clone())
-                .collect()
-        })
-        .collect())
-}
-
-/// `roots` with every node in `replaced` swapped for its replacement, and
-/// the nodes a replacement reads rebuilt too (a rollup may read a build
-/// another rollup replaces); every guarantee composed again.
-fn replace_all(
-    roots: &[QueryRoot],
-    replaced: &HashMap<*const OperatorNode, Rc<OperatorNode>>,
-) -> Result<Vec<QueryRoot>, CseError> {
-    fn walk(
-        node: &Rc<OperatorNode>,
-        replaced: &HashMap<*const OperatorNode, Rc<OperatorNode>>,
-        rebuilt: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
-    ) -> Result<Rc<OperatorNode>, CseError> {
-        if let Some(done) = rebuilt.get(&Rc::as_ptr(node)) {
-            return Ok(Rc::clone(done));
-        }
-        let source = replaced.get(&Rc::as_ptr(node)).unwrap_or(node);
-        let mut changed = !Rc::ptr_eq(source, node);
-        let mut children = HashMap::new();
-        for child in source.children() {
-            let new = walk(child, replaced, rebuilt)?;
-            changed |= !Rc::ptr_eq(&new, child);
-            children.insert(Rc::as_ptr(child), new);
-        }
-        let out = if !changed {
-            Rc::clone(node)
-        } else if children
-            .iter()
-            .all(|(old, new)| std::ptr::eq(*old, Rc::as_ptr(new)))
-        {
-            Rc::clone(source)
-        } else {
-            Rc::new(source.with_new_children(|child| children[&Rc::as_ptr(child)].clone())?)
-        };
-        rebuilt.insert(Rc::as_ptr(node), Rc::clone(&out));
-        Ok(out)
-    }
-    let mut rebuilt = HashMap::new();
-    let mut out = Vec::new();
-    for root in roots {
-        out.push(match root {
-            QueryRoot::Operator(node) => QueryRoot::Operator(walk(node, replaced, &mut rebuilt)?),
-            QueryRoot::Scalar(expr) => {
-                let mut nodes = HashMap::new();
-                for node in expr.operator_refs() {
-                    nodes.insert(Rc::as_ptr(node), walk(node, replaced, &mut rebuilt)?);
-                }
-                QueryRoot::Scalar(
-                    expr.map_operator_refs(&mut |node| nodes[&Rc::as_ptr(node)].clone()),
-                )
-            }
-        });
-    }
-    Ok(recompose_guarantees(&out)?)
 }
 
 /// Exact top-k computations of one input and partition with at least two

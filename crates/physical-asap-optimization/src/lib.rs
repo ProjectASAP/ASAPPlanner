@@ -1077,77 +1077,21 @@ fn implement(
     Ok(implemented)
 }
 
-/// Exact top-k as `Limit(Sort)` per group, which outputs the ranked rows of
-/// the child, under a `Project` restoring the logical `[keys.., topk_k]`
-/// output (the ranked value under `topk_k`): a root returns those columns,
-/// and a node reading the top-k resolved its columns against them.
+/// Exact top-k as `Limit(Sort)` per group under a `Project` restoring its
+/// logical output ([`exact_topk_as_sorted_limit`](asap_types::ir::schema::topk::exact_topk_as_sorted_limit)),
+/// over its implemented child.
 fn implement_topk(
     node: &Rc<OperatorNode>,
     cache: &NodeToImplementedNodeCache,
 ) -> Result<Rc<OperatorNode>, PhysicalASAPOptimizationError> {
-    let unsupported = |why: &str| PhysicalASAPOptimizationError::ExactTopK(why.to_string());
-    let Some(NonASAPOp::Aggregate {
-        reduction,
-        measures,
-        filters,
-        having,
-        child,
-        ..
-    }) = node.non_asap()
-    else {
+    let Some(NonASAPOp::Aggregate { child, .. }) = node.non_asap() else {
         unreachable!("implement_topk is called on an Aggregate")
     };
-    let Reduction::Reduce(keys) = reduction else {
-        return Err(unsupported("per-entity reduction"));
-    };
-    let [AggIntent::TopK { k, .. }] = measures.as_slice() else {
-        return Err(unsupported("measures besides the top-k"));
-    };
-    if filters.iter().any(Option::is_some) {
-        return Err(unsupported("filtered measure"));
-    }
-    if having.is_some() {
-        return Err(unsupported("HAVING"));
-    }
-    let child = cache[&Rc::as_ptr(child)].clone();
-    let value = asap_types::ir::schema::topk::ranked_column(&child)
-        .map_err(|e| unsupported(&format!("no ranked column: {e}")))?;
-    let sorted = Rc::new(
-        OperatorNode::new(Operator::NonASAP(NonASAPOp::Sort {
-            keys: vec![SortKey {
-                expr: ScalarExpr::Column(value),
-                ascending: false,
-                nulls_first: false,
-            }],
-            partition_by: keys.clone(),
-            child: child.clone(),
-        }))?
-        .with_guarantee(child.guarantee.clone()),
-    );
-    let limited = Rc::new(
-        OperatorNode::new(Operator::NonASAP(NonASAPOp::Limit {
-            n: Some(*k),
-            offset: 0,
-            partition_by: keys.clone(),
-            child: sorted,
-        }))?
-        .with_guarantee(node.guarantee.clone()),
-    );
-    let output_name = node.schema.fields[keys.len()].name.clone();
-    let cols = asap_types::ir::schema::topk::ranked_row_projection(
-        &child,
-        &Reduction::Reduce(keys.clone()),
-        &output_name,
+    asap_types::ir::schema::topk::exact_topk_as_sorted_limit(
+        node,
+        cache[&Rc::as_ptr(child)].clone(),
     )
-    .map_err(|error| unsupported(&format!("ranked rows: {error}")))?;
-    Ok(Rc::new(
-        OperatorNode::new(Operator::NonASAP(NonASAPOp::Project {
-            cols,
-            qualifier: None,
-            child: limited,
-        }))?
-        .with_guarantee(node.guarantee.clone()),
-    ))
+    .map_err(PhysicalASAPOptimizationError::ExactTopK)
 }
 
 /// `node` over its implemented children; the same `Rc` when none changed.

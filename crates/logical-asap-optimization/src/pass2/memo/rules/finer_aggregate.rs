@@ -1,9 +1,9 @@
 //! Read a SQL aggregate from a finer aggregate's result
 //! ([`match_finer`](crate::pass2::finer_aggregate::match_finer)): filter the finer
 //! rows, then merge them into the query's groups with each measure's rollup.
-use super::reuse::add_candidate_over_groups;
+use crate::operator_tree::add_operator_tree;
 use crate::pass2::finer_aggregate::match_finer;
-use crate::pass2::memo::state_groups::Pass2RuleError;
+use crate::pass2::memo::well_formed::Pass2RuleError;
 use asap_types::ir::operator::{AggIntent, Reduction};
 use asap_types::ir::{NonASAPOp, Operator, OperatorNode, OperatorResultKind};
 use asap_types::stages::{Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
@@ -72,7 +72,7 @@ pub(crate) fn add_finer_aggregate_candidates(memo: &mut Memo) -> Result<usize, P
     // Only aggregates of equal measures can match; bucket by them (the
     // first levels of the paper's filter tree) instead of trying all pairs.
     let mut buckets: HashMap<String, Vec<usize>> = HashMap::new();
-    for (group, entry) in memo.groups().iter().enumerate() {
+    for (group, entry) in memo.groups.iter().enumerate() {
         if let Some(aggregate) = Aggregate::of(&entry.logical_node) {
             buckets
                 .entry(format!("{:?}", aggregate.measures))
@@ -96,8 +96,8 @@ pub(crate) fn add_finer_aggregate_candidates(memo: &mut Memo) -> Result<usize, P
 /// Adds to group `owner` a read of group `finer`'s result when it computes
 /// `owner`'s aggregate; the number of candidates added (0 or 1).
 fn add_read(memo: &mut Memo, owner: usize, finer: usize) -> Result<usize, Pass2RuleError> {
-    let query_node = Rc::clone(&memo.groups()[owner].logical_node);
-    let finer_node = Rc::clone(&memo.groups()[finer].logical_node);
+    let query_node = Rc::clone(&memo.groups[owner].logical_node);
+    let finer_node = Rc::clone(&memo.groups[finer].logical_node);
     let (Some(query), Some(fine)) = (Aggregate::of(&query_node), Aggregate::of(&finer_node)) else {
         return Ok(0);
     };
@@ -145,33 +145,19 @@ fn add_read(memo: &mut Memo, owner: usize, finer: usize) -> Result<usize, Pass2R
         child: rows,
     }))
     .map_err(reuse_error)?;
-    let Some(original) = memo.candidates[owner]
-        .iter()
-        .find(|c| c.origin == OriginOfCandidateForMemoGroup::Pass1)
-        .cloned()
-    else {
-        return Ok(0);
-    };
     // The reader's columns take the query's qualifiers. A rollup whose type
     // or nullability differs from the query's (a sum of counts) is not
     // offered.
     let mut schema = reader.schema.clone();
-    for (field, expected) in schema
-        .fields
-        .iter_mut()
-        .zip(&original.root_node.schema.fields)
-    {
+    for (field, expected) in schema.fields.iter_mut().zip(&query_node.schema.fields) {
         field.table = expected.table.clone();
     }
-    if schema != original.root_node.schema || reader.result_kind != original.root_node.result_kind {
+    if schema != query_node.schema || reader.result_kind != query_node.result_kind {
         return Ok(0);
     }
     let reader = Rc::new(OperatorNode::with_schema(reader.operator.clone(), schema));
-    Ok(usize::from(add_candidate_over_groups(
-        memo,
-        MemoGroupId(owner as u32),
-        &original,
-        reader,
-        OriginOfCandidateForMemoGroup::Rollup,
-    )?))
+    let candidate = add_operator_tree(memo, &reader, &OriginOfCandidateForMemoGroup::Rollup, 1);
+    let owner = MemoGroupId(owner as u32);
+    let known = memo.candidates[owner.0 as usize].len();
+    Ok(usize::from(memo.add_candidate(owner, candidate).index == known))
 }

@@ -1,314 +1,180 @@
-//! Producer-level exact and sketch rollups, using the existing capability rules.
-use super::reuse::{add_candidate_over_groups, eligible, find_or_add_producer, replace};
-use crate::pass2::asap_aware_cse::{rollup_candidate_for, rollup_pass2_candidates};
-use crate::pass2::memo::state_groups::{build_of, BuildPlace, Pass2RuleError};
-use asap_types::ir::schema::FieldDataType;
-use asap_types::ir::{
-    ASAPOp, NonASAPOp, Operator, OperatorNode, ProjectItem, QueryRoot, ScalarExpr,
+//! Rules 6 and 7, rollups: a coarse group answered from a finer group whose
+//! state rolls up (`asap_aware_cse::rollup_candidate_for`), and a coarse
+//! state group merging the tumbling windows of a finer build's chain
+//! (`asap_aware_cse::window_composition_shared_chain_candidates`).
+use crate::operator_tree::add_operator_tree;
+use crate::pass2::asap_aware_cse::{
+    rollup_candidate_for, tumbling_window_candidates, window_composition_shared_chain_candidates,
 };
-use asap_types::stages::{Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
-use std::collections::HashMap;
+use crate::pass2::memo::well_formed::Pass2RuleError;
+use asap_types::ir::schema::FieldDataType;
+use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
+use asap_types::stages::{
+    CandidateForMemoGroupId, Memo, MemoGroupId, OriginOfCandidateForMemoGroup, WindowLayout,
+};
+use std::collections::BTreeSet;
 use std::rc::Rc;
 
-pub(crate) fn add_rollup_candidates(memo: &mut Memo) -> Result<usize, Pass2RuleError> {
-    let mut candidates = Vec::new();
-    for (group, entries) in memo.candidates.iter().enumerate() {
-        for candidate in entries {
-            if eligible(candidate)
-                && matches!(
-                    candidate.origin,
-                    OriginOfCandidateForMemoGroup::Pass1
-                        | OriginOfCandidateForMemoGroup::WidenedScans
-                )
+/// The candidates of `memo` whose expression `matches`, made by Pass 1 or
+/// scan widening and not fused, with their operator nodes.
+fn candidates_where(
+    memo: &Memo,
+    matches: impl Fn(&Operator<MemoGroupId>) -> bool,
+) -> Vec<(CandidateForMemoGroupId, Rc<OperatorNode>, usize)> {
+    let mut found = Vec::new();
+    for (group, candidates) in memo.candidates.iter().enumerate() {
+        for (index, candidate) in candidates.iter().enumerate() {
+            if !matches!(
+                candidate.origin,
+                OriginOfCandidateForMemoGroup::Pass1 | OriginOfCandidateForMemoGroup::WidenedScans
+            ) || !candidate.fused_groups.is_empty()
+                || !matches(&candidate.expression.operator)
             {
-                // A Pass 1 build is its own group, which the consumer reads.
-                if let Some((build, BuildPlace::Private | BuildPlace::InputGroup(_))) =
-                    build_of(memo, candidate)
-                {
-                    candidates.push((group, candidate.clone(), build));
-                }
+                continue;
+            }
+            let id = CandidateForMemoGroupId {
+                group: MemoGroupId(group as u32),
+                index,
+            };
+            if let Ok(node) = memo.operator_node_of(id) {
+                found.push((id, node, candidate.accuracy_budget_parts));
             }
         }
     }
-    let mut added = 0;
-    for (coarse_group, coarse, coarse_build) in &candidates {
-        for (fine_group, fine, _) in &candidates {
-            if coarse_group == fine_group {
+    found
+}
+
+/// Adds `candidate` (from `node`) to `owner` unless it reads `owner`; 1 when
+/// it was new.
+fn add_to(memo: &mut Memo, owner: MemoGroupId, node: &Rc<OperatorNode>, parts: usize) -> usize {
+    let candidate = add_operator_tree(memo, node, &OriginOfCandidateForMemoGroup::Rollup, parts);
+    if candidate.expression.operator.children().contains(&&owner) {
+        return 0;
+    }
+    let known = memo.candidates[owner.0 as usize].len();
+    usize::from(memo.add_candidate(owner, candidate).index == known)
+}
+
+/// Rule 6: for every pair of consumers of summary state (a
+/// `FinalizeExactAccumulator` or a `SummaryEstimate`) whose coarse state
+/// rolls up from the finer one, a candidate of the coarse group: for a
+/// sketch, of the coarse state group, merging the finer states by the
+/// coarse keys; for an exact accumulator, of the coarse value's group,
+/// accumulating the finer values. Returns the number of candidates added.
+pub(crate) fn add_rollup_candidates(memo: &mut Memo) -> Result<usize, Pass2RuleError> {
+    let consumers = candidates_where(memo, |operator| {
+        matches!(
+            operator,
+            Operator::ASAP(
+                ASAPOp::FinalizeExactAccumulator { .. } | ASAPOp::SummaryEstimate { .. }
+            )
+        )
+    });
+    let mut rollups = Vec::new();
+    for (coarse, coarse_node, parts) in &consumers {
+        let [build] = coarse_node.children()[..] else {
+            continue;
+        };
+        let Some(build_group) = memo.candidate(*coarse).expression.operator.children().first().map(|g| **g)
+        else {
+            continue;
+        };
+        for (fine, fine_node, _) in &consumers {
+            if fine.group == coarse.group {
                 continue;
             }
             let roots = [
-                QueryRoot::Operator(Rc::clone(&coarse.root_node)),
-                QueryRoot::Operator(Rc::clone(&fine.root_node)),
+                QueryRoot::Operator(Rc::clone(coarse_node)),
+                QueryRoot::Operator(Rc::clone(fine_node)),
             ];
-            let Some(rule) = rollup_candidate_for(&roots, Rc::as_ptr(coarse_build)) else {
+            let Some(rule) = rollup_candidate_for(&roots, Rc::as_ptr(build)) else {
                 continue;
             };
-            if !OperatorNode::reachable(&fine.root_node)
+            if !OperatorNode::reachable(fine_node)
                 .iter()
                 .any(|node| Rc::ptr_eq(node, &rule.finer))
             {
                 continue;
             }
-            let state_rollup = OperatorNode::reachable(&rule.rollup).iter().any(|node| {
-                matches!(
-                    node.asap(),
-                    Some(ASAPOp::SummaryMerge {
-                        group_by: Some(_),
-                        ..
-                    })
-                )
-            });
-            let is_sketch = matches!(
-                rule.finer.asap(),
+            let owner = match build.asap() {
                 Some(ASAPOp::SummaryAgg {
                     family: FieldDataType::Sketch(..),
                     ..
-                })
-            );
-            let rewritten = rollup_pass2_candidates(&roots, &[rule])
-                .map_err(|error| Pass2RuleError::ReuseRule(error.to_string()))?;
-            let Some(result) = rewritten.into_iter().next() else {
-                continue;
+                }) => build_group,
+                _ => coarse.group,
             };
-            // Existing rule API marks individually noncomposable rewrites as
-            // invalid candidates; retain the local implementation in that case.
-            let Ok(rewritten) = result.roots else {
-                continue;
-            };
-            let Ok([QueryRoot::Operator(coarse_node), QueryRoot::Operator(fine_node)]) =
-                <[QueryRoot; 2]>::try_from(rewritten)
-            else {
-                unreachable!("two operator roots")
-            };
-            if is_sketch || state_rollup {
-                // Concrete resized states become ordinary state groups after all
-                // producer-level configurations have been expanded.
-                added += usize::from(add_candidate_over_groups(
-                    memo,
-                    MemoGroupId(*coarse_group as u32),
-                    coarse,
-                    coarse_node,
-                    OriginOfCandidateForMemoGroup::Rollup,
-                )?);
-                added += usize::from(add_candidate_over_groups(
-                    memo,
-                    MemoGroupId(*fine_group as u32),
-                    fine,
-                    fine_node,
-                    OriginOfCandidateForMemoGroup::Rollup,
-                )?);
-            } else {
-                let Some(value) =
-                    OperatorNode::reachable(&coarse_node)
-                        .into_iter()
-                        .find_map(|node| match node.asap() {
-                            Some(ASAPOp::SummaryAgg { child, .. })
-                                if matches!(
-                                    child.asap(),
-                                    Some(ASAPOp::FinalizeExactAccumulator { .. })
-                                ) =>
-                            {
-                                Some(Rc::clone(child))
-                            }
-                            _ => None,
-                        })
-                else {
-                    continue;
-                };
-                // When the finer query's result is the value itself and every
-                // implementation of it is exact, read the finer query's group:
-                // one stored result then serves both queries, as the
-                // whole-workload rewrite does, without a separate producer the
-                // finer query would read through an identity projection.
-                // Exactness is checked when this rule runs; a later
-                // implementation of the group is still checked by plan
-                // reconstruction (input contract) and Stage 3 (guarantee).
-                let fine_result_is_value = *fine_node == *value
-                    && memo.groups()[*fine_group].logical_node.schema == value.schema
-                    && memo.candidates[*fine_group].iter().all(|candidate| {
-                        candidate
-                            .root_node
-                            .guarantee
-                            .as_ref()
-                            .is_some_and(|guarantee| guarantee.is_exact())
-                    });
-                if fine_result_is_value {
-                    let fine_result = Rc::clone(&memo.groups()[*fine_group].logical_node);
-                    let coarse_node = replace(
-                        &coarse_node,
-                        &HashMap::from([(Rc::as_ptr(&value), fine_result)]),
-                    );
-                    added += usize::from(add_candidate_over_groups(
-                        memo,
-                        MemoGroupId(*coarse_group as u32),
-                        coarse,
-                        coarse_node,
-                        OriginOfCandidateForMemoGroup::Rollup,
-                    )?);
-                    continue;
-                }
-                let mut queries = memo.groups()[*coarse_group].queries.clone();
-                queries.extend(&memo.groups()[*fine_group].queries);
-                queries.sort_unstable();
-                queries.dedup();
-                let producer = find_or_add_producer(
-                    memo,
-                    &value,
-                    &queries,
-                    &OriginOfCandidateForMemoGroup::Rollup,
-                );
-                let canonical = Rc::clone(&memo.groups()[producer.0 as usize].logical_node);
-                let coarse_node = replace(
-                    &coarse_node,
-                    &HashMap::from([(Rc::as_ptr(&value), Rc::clone(&canonical))]),
-                );
-                added += usize::from(add_candidate_over_groups(
-                    memo,
-                    MemoGroupId(*coarse_group as u32),
-                    coarse,
-                    coarse_node,
-                    OriginOfCandidateForMemoGroup::Rollup,
-                )?);
-                if let Some(own_value) = OperatorNode::reachable(&fine_node)
-                    .into_iter()
-                    .find(|node| **node == *value)
-                {
-                    let fine_reader = if Rc::ptr_eq(&own_value, &fine_node) {
-                        OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
-                            cols: canonical
-                                .schema
-                                .fields
-                                .iter()
-                                .enumerate()
-                                .map(|(column, field)| ProjectItem {
-                                    alias: Some(field.name.clone()),
-                                    expr: ScalarExpr::Column(column),
-                                })
-                                .collect(),
-                            qualifier: None,
-                            child: Rc::clone(&canonical),
-                        }))
-                        .map_err(|error| Pass2RuleError::ReuseRule(error.to_string()))?
-                    } else {
-                        replace(
-                            &fine_node,
-                            &HashMap::from([(Rc::as_ptr(&own_value), Rc::clone(&canonical))]),
-                        )
-                    };
-                    added += usize::from(add_candidate_over_groups(
-                        memo,
-                        MemoGroupId(*fine_group as u32),
-                        fine,
-                        fine_reader,
-                        OriginOfCandidateForMemoGroup::Rollup,
-                    )?);
-                }
-            }
+            rollups.push((owner, rule.rollup, *parts));
         }
     }
-    Ok(added)
+    Ok(rollups
+        .into_iter()
+        .map(|(owner, node, parts)| add_to(memo, owner, &node, parts))
+        .sum())
 }
 
-/// Existing tumbling window rollup rules applied to producer pairs on already generated
-/// legal local grids. No whole-workload choice combinations are constructed.
+/// Rule 7: for every pair of summary state groups whose builds both have
+/// tumbling windows of one width, a candidate of the coarse state group
+/// merging, by its keys, the newest windows of a chain the finer build's
+/// windows give. Returns the number of candidates added.
 pub(crate) fn add_window_rollup_candidates(memo: &mut Memo) -> Result<usize, Pass2RuleError> {
-    use crate::pass2::asap_aware_cse::{
-        tumbling_window_candidates, window_composition_shared_chain_candidates,
-    };
-    let mut grids = vec![std::collections::BTreeSet::new(); memo.groups().len()];
-    for (group, candidates) in memo.candidates.iter().enumerate() {
-        for candidate in candidates.iter().filter(|candidate| {
-            candidate.origin == OriginOfCandidateForMemoGroup::TumblingWindows
-                && eligible(candidate)
-        }) {
-            // The one tumbling-window chain the candidate reads, through its
-            // groups.
-            let widths: Vec<u64> = OperatorNode::reachable(&candidate.root_node)
-                .iter()
-                .filter_map(|node| match node.asap() {
-                    Some(ASAPOp::SummaryTumblingWindowChain {
-                        tumbling_window_width_ms,
-                        ..
-                    }) => Some(*tumbling_window_width_ms),
-                    _ => None,
-                })
-                .collect();
-            if let [width] = widths[..] {
-                grids[group].insert(width);
-            }
-        }
-    }
-    let candidates: Vec<_> = memo
+    let widths: Vec<BTreeSet<u64>> = memo
         .candidates
         .iter()
-        .enumerate()
-        .flat_map(|(group, candidates)| {
+        .map(|candidates| {
             candidates
                 .iter()
-                .filter(|candidate| {
-                    eligible(candidate) && candidate.origin == OriginOfCandidateForMemoGroup::Pass1
+                .filter(|c| c.origin == OriginOfCandidateForMemoGroup::TumblingWindows)
+                .filter_map(|c| match c.logical_properties.window_layout() {
+                    Some(WindowLayout::Tumbling { width_ms, .. }) => Some(*width_ms),
+                    None => None,
                 })
-                .map(move |candidate| (group, candidate.clone()))
+                .collect()
         })
         .collect();
-    let mut added = 0;
-    for (coarse_group, coarse) in &candidates {
-        for (fine_group, fine) in &candidates {
-            if coarse_group == fine_group || grids[*fine_group].is_empty() {
+    let builds = candidates_where(memo, |operator| {
+        matches!(operator, Operator::ASAP(ASAPOp::SummaryAgg { .. }))
+    });
+    let mut rollups = Vec::new();
+    for (coarse, coarse_node, parts) in &builds {
+        for (fine, fine_node, _) in &builds {
+            if coarse.group == fine.group {
                 continue;
             }
-            for grid in &grids[*coarse_group] {
+            for width in widths[coarse.group.0 as usize].intersection(&widths[fine.group.0 as usize]) {
                 let roots = [
-                    QueryRoot::Operator(Rc::clone(&coarse.root_node)),
-                    QueryRoot::Operator(Rc::clone(&fine.root_node)),
+                    QueryRoot::Operator(Rc::clone(coarse_node)),
+                    QueryRoot::Operator(Rc::clone(fine_node)),
                 ];
-                let tumbling_windows =
-                    tumbling_window_candidates(&roots, &[Some(*grid), Some(*grid)]);
-                if tumbling_windows.len() != 2 {
+                let windows = tumbling_window_candidates(&roots, &[Some(*width), Some(*width)]);
+                if windows.len() != 2 {
                     continue;
                 }
-                for rewritten in
-                    window_composition_shared_chain_candidates(&roots, &tumbling_windows)
-                {
+                for rewritten in window_composition_shared_chain_candidates(&roots, &windows) {
                     if rewritten.shared_chains.is_empty() {
                         continue;
                     }
                     let Ok(nodes) = rewritten.roots else { continue };
-                    let Ok([QueryRoot::Operator(coarse_node), QueryRoot::Operator(fine_node)]) =
-                        <[QueryRoot; 2]>::try_from(nodes)
-                    else {
+                    let Some(QueryRoot::Operator(coarse_read)) = nodes.into_iter().next() else {
                         continue;
                     };
-                    if !OperatorNode::reachable(&coarse_node).iter().any(|node| {
-                        matches!(
-                            node.asap(),
-                            Some(ASAPOp::SummaryMerge {
-                                group_by: Some(_),
-                                ..
-                            })
-                        )
-                    }) {
+                    if !matches!(
+                        coarse_read.asap(),
+                        Some(ASAPOp::SummaryMerge {
+                            group_by: Some(_),
+                            ..
+                        })
+                    ) {
                         continue;
                     }
-                    added += usize::from(add_candidate_over_groups(
-                        memo,
-                        MemoGroupId(*coarse_group as u32),
-                        coarse,
-                        coarse_node,
-                        OriginOfCandidateForMemoGroup::Rollup,
-                    )?);
-                    added += usize::from(add_candidate_over_groups(
-                        memo,
-                        MemoGroupId(*fine_group as u32),
-                        fine,
-                        fine_node,
-                        OriginOfCandidateForMemoGroup::Rollup,
-                    )?);
+                    rollups.push((coarse.group, coarse_read, *parts));
                 }
             }
         }
     }
-    Ok(added)
+    Ok(rollups
+        .into_iter()
+        .map(|(owner, node, parts)| add_to(memo, owner, &node, parts))
+        .sum())
 }
 
 #[cfg(test)]

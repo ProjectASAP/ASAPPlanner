@@ -18,7 +18,9 @@ mod pruning;
 mod realizer;
 
 pub use candidates::{
-    CandidateForMemoGroup, CandidateForMemoGroupId, Memo, OriginOfCandidateForMemoGroup,
+    satisfies, CandidateExpression, CandidateForMemoGroup, CandidateForMemoGroupId,
+    InvalidLogicalProperties, LogicalProperties, LogicalRequirement, Memo,
+    OriginOfCandidateForMemoGroup, Representation, WindowLayout, WindowRequirement,
 };
 pub use logical_memo_candidates::LogicalASAPMemoCandidates;
 pub use memo::{queries_rooted_at, root_groups, DagOfLogicalMemoGroups, MemoGroup, MemoGroupId};

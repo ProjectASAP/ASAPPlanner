@@ -1,4 +1,4 @@
-//! Stage 2's output: every operator node of every implementation candidate,
+//! Stage 2's output: the operator node of every memo candidate,
 //! each with the physical properties (timing, lifetime) Stage 2 allows, and which
 //! candidates may produce each input. Stage 3 selects among them; Stage 2
 //! prices nothing.
@@ -15,21 +15,14 @@ use crate::stages::{CandidateForMemoGroupId, MemoGroupId, PrunedCandidate};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct OperatorNodeOfCandidateForMemoGroupId(pub usize);
 
-/// One operator node of one or more candidates for a memo group, before
+/// The operator node of one memo candidate, before
 /// Stage 2 chose its physical properties.
 #[derive(Debug, Clone)]
 pub struct OperatorNodeOfCandidateForMemoGroup {
-    /// Every candidate of the group this node can implement, ascending:
-    /// identical terminal readers of different candidates are factored into
-    /// one node, and the selected producers decide which one it implements.
-    /// A private node belongs to the one candidate it was lowered from.
-    pub candidates_for_memo_group: Vec<CandidateForMemoGroupId>,
-    /// Whether it is its candidates' root; false for an implementation's
-    /// private nodes.
-    pub is_implementation_root: bool,
+    /// The memo candidate this node implements.
+    pub candidate_for_memo_group: CandidateForMemoGroupId,
     /// How many equal shares of a query's accuracy budget this node's sketch sizes meet
-    /// (`CandidateForMemoGroup::accuracy_budget_parts`). For a factored node, the largest among its
-    /// candidates: equal nodes have equal sizes. 1 for an exact node.
+    /// (`CandidateForMemoGroup::accuracy_budget_parts`); 1 for an exact node.
     pub accuracy_budget_parts: usize,
     /// The operator node, with Stage 2's physical implementation; its
     /// children are the expected inputs, which the selected producers replace.
@@ -37,16 +30,9 @@ pub struct OperatorNodeOfCandidateForMemoGroup {
 }
 
 impl OperatorNodeOfCandidateForMemoGroup {
-    /// The memo group whose candidates this node implements.
-    /// `candidates_for_memo_group` is never empty, and all its entries are
-    /// candidates of this one group.
+    /// The memo group whose candidate this node implements.
     pub fn group(&self) -> MemoGroupId {
-        let group = self.candidates_for_memo_group[0].group;
-        debug_assert!(self
-            .candidates_for_memo_group
-            .iter()
-            .all(|candidate| candidate.group == group));
-        group
+        self.candidate_for_memo_group.group
     }
 }
 
@@ -108,9 +94,9 @@ pub struct PhysicalASAPMemoCandidates {
     /// candidates no buildable input, query output or reader count can use.
     /// Empty when built by [`Self::new`].
     pub pruned_candidates: Vec<PrunedCandidate<PhysicalCandidateKey>>,
-    /// By group index: the candidates whose operator node is an
-    /// implementation root of that group, ascending.
-    implementation_roots_of_group: Vec<Vec<PhysicalCandidateId>>,
+    /// By group index: the physical candidates of that group's memo
+    /// candidates, ascending.
+    physical_candidates_of_group: Vec<Vec<PhysicalCandidateId>>,
     /// Each output reference's group: [`output_references`] of
     /// `query_roots`, built once.
     output_reference_groups: Vec<MemoGroupId>,
@@ -143,16 +129,14 @@ impl PhysicalASAPMemoCandidates {
         query_roots: Vec<QueryRoot<MemoGroupId>>,
         reader_constraints: Vec<ReaderConstraint>,
     ) -> Self {
-        let mut implementation_roots_of_group: Vec<Vec<PhysicalCandidateId>> = Vec::new();
+        let mut physical_candidates_of_group: Vec<Vec<PhysicalCandidateId>> = Vec::new();
         for (id, candidate) in candidates.iter().enumerate() {
             let node = &operator_nodes_of_candidates_for_memo_groups[candidate.operator_node.0];
-            if node.is_implementation_root {
-                let group = node.group().0 as usize;
-                if implementation_roots_of_group.len() <= group {
-                    implementation_roots_of_group.resize(group + 1, Vec::new());
-                }
-                implementation_roots_of_group[group].push(PhysicalCandidateId(id));
+            let group = node.group().0 as usize;
+            if physical_candidates_of_group.len() <= group {
+                physical_candidates_of_group.resize(group + 1, Vec::new());
             }
+            physical_candidates_of_group[group].push(PhysicalCandidateId(id));
         }
         let output_reference_groups = output_references(&query_roots)
             .into_iter()
@@ -164,21 +148,21 @@ impl PhysicalASAPMemoCandidates {
             query_roots,
             reader_constraints,
             pruned_candidates: Vec::new(),
-            implementation_roots_of_group,
+            physical_candidates_of_group,
             output_reference_groups,
         }
     }
 
-    /// The implementation roots of `group`, ascending.
-    pub fn implementation_roots(&self, group: MemoGroupId) -> &[PhysicalCandidateId] {
-        self.implementation_roots_of_group
+    /// The physical candidates of `group`'s memo candidates, ascending.
+    pub fn physical_candidates_of_group(&self, group: MemoGroupId) -> &[PhysicalCandidateId] {
+        self.physical_candidates_of_group
             .get(group.0 as usize)
             .map_or(&[], Vec::as_slice)
     }
 
     /// The candidates that may produce output reference `output_reference`
     /// (each group reference of `query_roots`, in order; a scalar query has
-    /// several): its group's roots with `may_produce_query_output`.
+    /// several): its group's candidates with `may_produce_query_output`.
     pub fn query_output_candidates(
         &self,
         output_reference: usize,
@@ -186,7 +170,7 @@ impl PhysicalASAPMemoCandidates {
         let roots = self
             .output_reference_groups
             .get(output_reference)
-            .map_or(&[][..], |&group| self.implementation_roots(group));
+            .map_or(&[][..], |&group| self.physical_candidates_of_group(group));
         roots
             .iter()
             .copied()
@@ -205,7 +189,7 @@ impl PhysicalASAPMemoCandidates {
             .physical_node
     }
 
-    /// The memo group whose candidates candidate `candidate` implements.
+    /// The memo group whose candidate candidate `candidate` implements.
     pub fn memo_group_of(&self, candidate: PhysicalCandidateId) -> MemoGroupId {
         self.operator_nodes_of_candidates_for_memo_groups
             [self.candidates[candidate.0].operator_node.0]
