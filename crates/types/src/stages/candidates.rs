@@ -38,7 +38,7 @@ pub struct CandidateForMemoGroup {
     /// `p^log_v`.
     pub logical_properties: LogicalProperties,
     /// `r^log_{v,i}`, one per child group of `expression.operator`, in
-    /// [`Operator::children`] order.
+    /// [`Operator::map_children`] order.
     pub input_requirements: Vec<LogicalRequirement>,
     /// The groups a fused computation also implements, beyond the group
     /// whose candidate it is; empty otherwise.

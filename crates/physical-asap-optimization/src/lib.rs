@@ -123,14 +123,14 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::ir::operator::operator_properties::Source;
-use asap_types::ir::operator::{AggIntent, Reduction};
+use asap_types::ir::operator::AggIntent;
 use asap_types::ir::physical_export::compile_physical_asap_workload_with_node_ids;
 use asap_types::ir::properties::{ExecutionDataStateError, ExecutionTiming};
 use asap_types::ir::schema::{ExactKind, FieldDataType};
 use asap_types::ir::{
     apply_physical_properties, apply_physical_properties_to_roots, is_filtered_build, ASAPOp,
-    NonASAPOp, Operator, OperatorNode, PhysicalPropertiesAssignment, QueryRoot, ScalarExpr,
-    SchemaDerivationError, SortKey,
+    NonASAPOp, OperatorNode, PhysicalPropertiesAssignment, QueryRoot,
+    SchemaDerivationError,
 };
 use asap_types::physical::{PhysicalProperties, PhysicalWorkloadPlan};
 use asap_types::workload::{
@@ -1031,25 +1031,6 @@ fn map_roots(
             }
         })
         .collect()
-}
-
-/// Lower the private operators of one candidate while preserving its already
-/// canonical input-group nodes. This reuses the complete-plan implementation
-/// rules (currently exact top-k -> Project/Limit/Sort), without assigning timing
-/// or materialization and without recursively implementing another group's input.
-/// Returned new operators must be enumerated and priced before plan selection.
-pub(crate) fn implement_candidate_operators(
-    root: &Rc<OperatorNode>,
-    inputs: &[Rc<OperatorNode>],
-) -> Result<Rc<OperatorNode>, PhysicalASAPOptimizationError> {
-    // The inventory rejects a root aliasing an input; an input outside the
-    // subtree is unused here and rejected by the inventory as `InvalidMemo`.
-    debug_assert!(!inputs.iter().any(|input| Rc::ptr_eq(input, root)));
-    let mut implementations = inputs
-        .iter()
-        .map(|input| (Rc::as_ptr(input), Rc::clone(input)))
-        .collect();
-    implement(root, &mut implementations)
 }
 
 /// Each node's implementation.

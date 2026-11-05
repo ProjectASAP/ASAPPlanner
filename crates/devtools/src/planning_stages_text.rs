@@ -20,7 +20,7 @@
 //!     [1]  TumblingWindows  new  FinalizeExactAccumulator ← SummaryMerge ← SummaryTumblingWindowChain tumbling_window_count=6 tumbling_window_width_ms=10000  inputs=[G0]
 //! ```
 
-use std::collections::HashSet;
+
 use std::fmt::Write;
 use std::rc::Rc;
 
@@ -128,7 +128,7 @@ pub fn planning_stages_text(stages: &PlanningStagesRun) -> String {
     section(&mut out, "Stage 3 output: Selection");
     let chosen = match &run.selection {
         Ok(selection) => {
-            selected_chosen_candidates(&logical.memo, physical, &selection.selected_dag)
+            selected_chosen_candidates(physical, &selection.selected_dag)
         }
         Err(_) => Err("no plan was selected".into()),
     };
@@ -224,11 +224,19 @@ fn group_list(groups: &[MemoGroupId]) -> String {
         .join(", ")
 }
 
-/// `G2:c0 G3:c0`: each chosen group's candidate.
+/// `G2:c0 G3[0].0<-G1[1]`: each root group's candidate, then each chosen
+/// candidate's input with the candidate it reads.
 fn choice_text(choice: &asap_logical_asap_optimization::ChosenCandidatePerMemoGroup) -> String {
     choice
+        .root_candidates
         .iter()
         .map(|(group, candidate)| format!("G{}:c{candidate}", group.0))
+        .chain(choice.producer_of_input.iter().map(|((consumer, input), producer)| {
+            format!(
+                "G{}[{}].{input}<-G{}[{}]",
+                consumer.group.0, consumer.index, producer.group.0, producer.index
+            )
+        }))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -242,7 +250,7 @@ fn write_memo(out: &mut String, memo: &Memo, previous: Option<&Memo>, with_candi
     // The group lines share one set of column widths, with each group's
     // candidates printed under its line.
     let group_rows: Vec<Vec<String>> = memo
-        .groups()
+        .groups
         .iter()
         .enumerate()
         .map(|(id, group)| {
@@ -274,10 +282,15 @@ fn write_memo(out: &mut String, memo: &Memo, previous: Option<&Memo>, with_candi
             .map(|(index, candidate)| {
                 let added = previous.is_some()
                     && !earlier.iter().any(|before| {
-                        Rc::ptr_eq(&before.root_node, &candidate.root_node)
-                            && before.input_groups == candidate.input_groups
+                        before.expression == candidate.expression
+                            && before.logical_properties == candidate.logical_properties
                     });
-                let mut inputs = format!("inputs=[{}]", group_list(&candidate.input_groups));
+                let mut inputs = Vec::new();
+                candidate
+                    .expression
+                    .operator
+                    .map_children(|&group| inputs.push(group));
+                let mut inputs = format!("inputs=[{}]", group_list(&inputs));
                 if !candidate.fused_groups.is_empty() {
                     let _ = write!(inputs, " fuses=[{}]", group_list(&candidate.fused_groups));
                 }
@@ -288,6 +301,14 @@ fn write_memo(out: &mut String, memo: &Memo, previous: Option<&Memo>, with_candi
                         candidate.accuracy_budget_parts
                     );
                 }
+                let id = asap_types::stages::CandidateForMemoGroupId {
+                    group: MemoGroupId(id as u32),
+                    index,
+                };
+                let label = memo
+                    .operator_node_of(id)
+                    .map(|node| root_label(&node))
+                    .unwrap_or_else(|error| format!("<{error}>"));
                 vec![
                     format!("[{index}]"),
                     format!("{:?}", candidate.origin),
@@ -296,7 +317,8 @@ fn write_memo(out: &mut String, memo: &Memo, previous: Option<&Memo>, with_candi
                     } else {
                         String::new()
                     },
-                    chain_label(memo, &candidate.root_node, &candidate.input_groups),
+                    label,
+                    properties_label(candidate),
                     inputs,
                 ]
             })
@@ -325,16 +347,9 @@ fn write_physical(out: &mut String, physical: &PhysicalASAPMemoCandidates) {
         .iter()
         .enumerate()
         .map(|(id, node)| {
-            let implements: Vec<String> = node
-                .candidates_for_memo_group
-                .iter()
-                .map(|candidate| format!("G{}[{}]", candidate.group.0, candidate.index))
-                .collect();
-            let mut role = if node.is_implementation_root {
-                "implementation root".to_owned()
-            } else {
-                "private".to_owned()
-            };
+            let candidate = node.candidate_for_memo_group;
+            let implements = [format!("G{}[{}]", candidate.group.0, candidate.index)];
+            let mut role = String::new();
             if node.accuracy_budget_parts != 1 {
                 let _ = write!(
                     role,
@@ -520,36 +535,20 @@ fn root_label(node: &Rc<OperatorNode>) -> String {
     flat.nodes.last().map(node_label).unwrap_or_default()
 }
 
-/// A candidate's own nodes, from `root` down to its `input_groups`' nodes
-/// (excluded), root first, joined by " ← ".
-fn chain_label(memo: &Memo, root: &Rc<OperatorNode>, input_groups: &[MemoGroupId]) -> String {
-    let (flat, originals) = flatten(&[QueryRoot::Operator(root.clone())]);
-    let is_input = |id: usize| {
-        input_groups.iter().any(|group| {
-            Rc::ptr_eq(
-                &memo.groups()[group.0 as usize].logical_node,
-                &originals[id],
-            )
-        })
+/// A candidate's logical properties: its summary family and parameters,
+/// or exact accumulator, and its tumbling windows.
+fn properties_label(candidate: &asap_types::stages::CandidateForMemoGroup) -> String {
+    use asap_types::stages::{Representation, WindowLayout};
+    let properties = &candidate.logical_properties;
+    let mut label = match properties.representation() {
+        Representation::Summary(kind) => format!("{:?} {:?}", kind.algorithm(), kind.params()),
+        Representation::Exact(kind) => format!("exact {kind:?}"),
+        Representation::Plain => "plain".to_owned(),
     };
-    let mut labels = Vec::new();
-    let mut pending = vec![flat.nodes.len() - 1];
-    let mut seen = HashSet::new();
-    while let Some(id) = pending.pop() {
-        if is_input(id) || !seen.insert(id) {
-            continue;
-        }
-        labels.push(node_label(&flat.nodes[id]));
-        pending.extend(
-            flat.nodes[id]
-                .operator
-                .children()
-                .into_iter()
-                .rev()
-                .copied(),
-        );
+    if let Some(WindowLayout::Tumbling { width_ms, count }) = properties.window_layout() {
+        let _ = write!(label, " tumbling {width_ms}ms x {count}");
     }
-    labels.join(" ← ")
+    label
 }
 
 #[cfg(test)]

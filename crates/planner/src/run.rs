@@ -24,7 +24,7 @@ use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::{OperatorNode, PhysicalPropertiesAssignment, QueryRoot};
 use asap_types::stages::{
     AssignmentRealizer, CandidateForMemoGroupId, DagOfSelectedCandidates,
-    LogicalASAPMemoCandidates, Memo, MemoGroupId, PhysicalASAPMemoCandidates,
+    LogicalASAPMemoCandidates, PhysicalASAPMemoCandidates,
     PhysicalCandidateError, RealizedPlan,
 };
 use asap_types::workload::bounds::with_confirmed_weights_at;
@@ -213,7 +213,7 @@ pub fn run_planning(
         let logical = logical_asap_candidates.insert(
             logical.map_err(|error| SelectionError::LogicalASAPCandidates(error.to_string()))?,
         );
-        report.memo_groups = logical.memo.groups().len();
+        report.memo_groups = logical.memo.groups.len();
         report.logical_candidates = logical.memo.candidates.iter().map(Vec::len).sum();
         // Stage 2.
         let started = Instant::now();
@@ -273,75 +273,47 @@ fn elapsed_ms(started: Instant) -> f64 {
     started.elapsed().as_secs_f64() * 1000.0
 }
 
-/// The selected plan's memo candidate for each group it uses: the memo
-/// candidate whose root each selected node's candidate is. Factoring may give several
-/// memo candidates of a group one root (identical terminal readers of
-/// different inputs); the one reading the selected producers' groups is taken.
-/// `memo` and `physical` are the run's
-/// ([`PlanningRun::logical_asap_candidates`]'s memo and
-/// [`PlanningRun::physical_asap_candidates`]); `selected` is the selection's
-/// `selected_dag`. An error says why the plan is not one candidate per group.
+/// The selected plan as a memo choice: the memo candidate of each query's
+/// root group, and the memo candidate each input of each selected
+/// candidate reads. `physical` is the run's
+/// [`PlanningRun::physical_asap_candidates`]; `selected` is the selection's
+/// `selected_dag`. An error says why the plan is not one memo choice: a
+/// root group or a candidate's input with two different candidates.
 pub fn selected_chosen_candidates(
-    memo: &Memo,
     physical: &PhysicalASAPMemoCandidates,
     selected: &DagOfSelectedCandidates,
 ) -> Result<ChosenCandidatePerMemoGroup, String> {
-    use std::collections::HashMap;
-    let mut producer_groups = HashMap::<_, Vec<MemoGroupId>>::new();
+    let memo_candidate = |node: asap_types::stages::SelectedNodeId| {
+        physical.operator_nodes_of_candidates_for_memo_groups
+            [physical.candidates[selected.candidate_of_node[node.0].0].operator_node.0]
+            .candidate_for_memo_group
+    };
+    let mut chosen_candidates = ChosenCandidatePerMemoGroup::default();
     for edge in &selected.edges {
-        producer_groups
-            .entry(edge.consumer)
-            .or_default()
-            .push(physical.memo_group_of(selected.candidate_of_node[edge.producer.0]));
-    }
-    let mut chosen_candidates = ChosenCandidatePerMemoGroup::new();
-    for (node_id, &id) in selected.candidate_of_node.iter().enumerate() {
-        let node_id = asap_types::stages::SelectedNodeId(node_id);
-        let node = &physical.operator_nodes_of_candidates_for_memo_groups
-            [physical.candidates[id.0].operator_node.0];
-        if !node.is_implementation_root {
-            continue; // a candidate's private node
-        }
-        let options = &node.candidates_for_memo_group;
-        let reads = |&&option: &&CandidateForMemoGroupId| {
-            producer_groups.get(&node_id).is_none_or(|read| {
-                read.iter().all(|&child| {
-                    child == option.group || memo.candidate(option).input_groups.contains(&child)
-                })
-            })
-        };
-        let &CandidateForMemoGroupId { group, index } =
-            options.iter().find(reads).ok_or_else(|| {
-                format!(
-                    "selected candidate {} reads groups none of its memo candidates read",
-                    id.0
-                )
-            })?;
-        if let Some(previous) = chosen_candidates.insert(group, index) {
-            if previous != index {
+        let consumer = memo_candidate(edge.consumer);
+        let producer = memo_candidate(edge.producer);
+        if let Some(previous) = chosen_candidates
+            .producer_of_input
+            .insert((consumer, edge.input), producer)
+        {
+            if previous != producer {
                 return Err(format!(
-                    "the selected plan implements group {} with two candidates, {previous} and {index}",
-                    group.0
+                    "the selected plan reads input {} of candidate {:?} from two candidates, {previous:?} and {producer:?}",
+                    edge.input, consumer
                 ));
             }
         }
     }
-    // Every group the chosen candidates need, from the query roots, is chosen.
-    let mut pending: Vec<_> = asap_types::stages::root_groups(&memo.query_roots)
-        .into_iter()
-        .collect();
-    let mut seen = HashSet::new();
-    while let Some(group) = pending.pop() {
-        if !seen.insert(group) {
-            continue;
+    for &node in &selected.node_of_output_reference {
+        let CandidateForMemoGroupId { group, index } = memo_candidate(node);
+        if let Some(previous) = chosen_candidates.root_candidates.insert(group, index) {
+            if previous != index {
+                return Err(format!(
+                    "the selected plan computes root group {} with two candidates, {previous} and {index}",
+                    group.0
+                ));
+            }
         }
-        let index = chosen_candidates.get(&group).ok_or_else(|| {
-            format!(
-                "the selected plan uses group {} but no candidate of it is selected",
-                group.0
-            )
-        })?;
-        pending.extend(&memo.candidates[group.0 as usize][*index].input_groups);
     }
     Ok(chosen_candidates)
 }

@@ -318,7 +318,11 @@ pub fn run_stages_until(
     let stage0_dag = generate_dag_of_logical_memo_groups(&roots);
     let mut stages = PlanningStagesRun {
         run_until: until,
-        stage0_memo_groups: Some(Memo::new(stage0_dag.clone())),
+        stage0_memo_groups: Some(Memo {
+            candidates: vec![Vec::new(); stage0_dag.groups.len()],
+            groups: stage0_dag.groups.clone(),
+            query_roots: stage0_dag.query_roots.clone(),
+        }),
         pass2_local_window_composition: None,
         stage0_query_language_frontends: roots.clone(),
         run: PlanningRun {

@@ -83,7 +83,7 @@ mod tests {
     use super::*;
     use crate::stage0::generate_dag_of_logical_memo_groups;
     use crate::test_support::{
-        lower_promql, shared_summary_state_groups, sharing_rules_and_shared_state_groups,
+        lower_promql, shared_summary_state_groups, sharing_rules,
     };
     use asap_accuracy::{IgnoreAccuracyGuarantees, NoAccuracyEvidence};
     use asap_types::ir::properties::{AccuracyMetric, AccuracyScope, AccuracyTarget};
@@ -242,7 +242,7 @@ mod tests {
             ],
             &data(Some(10_000)),
         );
-        let memo = sharing_rules_and_shared_state_groups(memo).unwrap();
+        let memo = sharing_rules(memo).unwrap();
         let found = kll_failure_probabilities(
             shared_summary_state_groups(&memo)
                 .iter()

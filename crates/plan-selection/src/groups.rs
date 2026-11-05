@@ -126,7 +126,7 @@ use asap_types::ir::schema::{FieldDataType, Schema};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 use asap_types::physical::{Lifetime, PhysicalProperties};
 use asap_types::stages::{
-    output_references, MemoGroupId, OperatorNodeOfCandidateForMemoGroupId,
+    output_references, MemoGroupId,
     PhysicalASAPMemoCandidates,
 };
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
@@ -396,55 +396,33 @@ pub(crate) fn run_kind(properties: PhysicalProperties) -> RunKind {
 }
 
 /// What "one candidate per memo group per context" (row 2) ranges over:
-/// the candidates that give one result. A memo group's implementation
-/// roots give the group's result; an implementation's private nodes
-/// (`is_implementation_root == false`) give an intermediate result of
-/// their own, so each private operator node is its own slot (its
-/// candidates differ only in timing and lifetime).
+/// the candidates that give one result, a memo group's.
 ///
-/// The memo group graph is not acyclic: a widened scan puts a `Project` in
-/// the memo group of the scan it reads, so a group's candidate may read
-/// its own group. Such a candidate and its producer cannot share one slot
-/// (one context would need both), so a group's roots are split by
-/// *self-read depth*: 0 for a root reading no root of its own group (the
-/// scan), 1 for one that may (the `Project`). A depth-1 root reading
-/// another depth-1 root of its group in one context (a `Project` over a
-/// `Project` of the widened scan) is then a read of its own slot, which
-/// [`CandidateLinks`] drops for candidates that run in a context.
+/// The memo group graph is not acyclic: a candidate may read its own group
+/// (a widened scan's `Project` over a `Project` of the widened scan). Such a
+/// candidate and its producer cannot share one slot (one context would need
+/// both), so a group's candidates are split by *self-read depth*: 0 for a
+/// candidate reading no candidate of its own group, 1 for one that may. A
+/// depth-1 candidate reading another depth-1 candidate of its group in one
+/// context is then a read of its own slot, which [`CandidateLinks`] drops
+/// for candidates that run in a context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum ResultSlot {
     Group(MemoGroupId, u32),
-    PrivateNode(OperatorNodeOfCandidateForMemoGroupId),
 }
 
 /// The [`ResultSlot`] of every candidate (see there).
 pub(crate) fn result_slots(physical: &PhysicalASAPMemoCandidates) -> Vec<ResultSlot> {
     let count = physical.candidates.len();
-    let root = |candidate: usize| {
-        let operator_node = physical.candidates[candidate].operator_node;
-        let node = &physical.operator_nodes_of_candidates_for_memo_groups[operator_node.0];
-        node.is_implementation_root
-            .then(|| node.group())
-            .ok_or(operator_node)
-    };
-    // Self-read depth: 1 for a root that may read a root of its own group.
-    let depth: Vec<u32> = (0..count)
+    let group = |candidate: usize| physical.memo_group_of(PhysicalCandidateId(candidate));
+    (0..count)
         .map(|candidate| {
-            let Ok(group) = root(candidate) else {
-                return 0;
-            };
             let reads_own_group = physical.candidates[candidate]
                 .producer_candidates_per_input
                 .iter()
                 .flat_map(|producers| producers.iter())
-                .any(|producer| producer.0 != candidate && root(producer.0) == Ok(group));
-            u32::from(reads_own_group)
-        })
-        .collect();
-    (0..count)
-        .map(|candidate| match root(candidate) {
-            Ok(group) => ResultSlot::Group(group, depth[candidate]),
-            Err(operator_node) => ResultSlot::PrivateNode(operator_node),
+                .any(|producer| producer.0 != candidate && group(producer.0) == group(candidate));
+            ResultSlot::Group(group(candidate), u32::from(reads_own_group))
         })
         .collect()
 }

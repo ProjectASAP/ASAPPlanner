@@ -1,43 +1,38 @@
-//! Lower the logical candidate memo into typed immediate operator nodes and
-//! the nodes that may produce each of their inputs.
+//! Lower the logical candidate memo into one operator node per candidate,
+//! and the candidates that may produce each of their inputs: the input
+//! group's candidates whose logical properties satisfy the input's
+//! requirement (`α^log`).
 //!
 //! Consumer-dependent demand, composed accuracy, and physical materialization
-//! are handled by later configuration and evaluation stages. Private exact
-//! operators are lowered before decomposition; the resulting nodes still need
-//! Stage 2 validation before execution. Nothing is priced.
+//! are handled by later configuration and evaluation stages. Nothing is
+//! priced.
 
-use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use asap_types::ir::OperatorNode;
-use asap_types::stages::Memo;
-use asap_types::stages::MemoGroupId;
-
-use super::factoring::{MemoGroupOutputKey, MemoGroupOutputToCompatibleProducersCache};
+use asap_accuracy::propagation::composed_guarantee;
+use asap_types::ir::operator::AggIntent;
+use asap_types::ir::{NonASAPOp, OperatorNode};
 use asap_types::stages::{
-    CandidateForMemoGroupId, OperatorNodeOfCandidateForMemoGroup, PhysicalCandidateId,
-    ProducerCandidates,
+    satisfies, CandidateForMemoGroupId, Memo, MemoGroupId, OperatorNodeOfCandidateForMemoGroup,
+    PhysicalCandidateId, ProducerCandidates, ProducerSetInterner,
 };
 
-/// The memo's implementation candidates lowered to operator nodes, before
-/// timing and lifetime. Node IDs index
-/// `operator_nodes_of_candidates_for_memo_groups`; they become
-/// [`asap_types::stages::OperatorNodeOfCandidateForMemoGroupId`]s of the
-/// configured candidates.
+/// The memo's candidates lowered to operator nodes, before timing and
+/// lifetime. Node IDs index `operator_nodes_of_candidates_for_memo_groups`;
+/// they become [`asap_types::stages::OperatorNodeOfCandidateForMemoGroupId`]s
+/// of the configured candidates.
 #[derive(Debug)]
 pub struct CandidateInventory {
-    /// One per operator node: each implementation root, then the private
-    /// nodes below it.
+    /// One per memo candidate.
     pub operator_nodes_of_candidates_for_memo_groups: Vec<OperatorNodeOfCandidateForMemoGroup>,
     /// Per node, per input (in `map_children` order): the nodes that may
-    /// produce it (a private child, or the input group's compatible roots).
+    /// produce it.
     pub producer_nodes_per_input: Vec<Vec<ProducerCandidates>>,
-    /// Per output reference: the roots of its group whose output matches the
+    /// Per output reference: the nodes of its group whose output matches the
     /// group's logical node.
     pub query_output_nodes: Vec<Vec<PhysicalCandidateId>>,
-    /// Per group: its implementation roots, excluding each implementation's
-    /// private nodes.
-    pub implementation_roots_of_group: Vec<Vec<PhysicalCandidateId>>,
+    /// Per group: the nodes of its candidates.
+    pub nodes_of_group: Vec<Vec<PhysicalCandidateId>>,
 }
 
 impl CandidateInventory {
@@ -83,33 +78,21 @@ pub enum CandidateInventoryError {
     },
 }
 
-/// The inventory with identical terminal readers factored into one node
-/// (whose `candidates_for_memo_group` lists every candidate it can implement).
+/// The inventory of `memo`'s candidates: one node per candidate, each
+/// input's producers the input group's candidates that satisfy its
+/// requirement.
 pub fn build_candidate_inventory(
     memo: &Memo,
     output_groups: &[MemoGroupId],
 ) -> Result<CandidateInventory, CandidateInventoryError> {
-    let mut inventory = build_with_compatible_producers_cache(
-        memo,
-        output_groups,
-        &mut MemoGroupOutputToCompatibleProducersCache::default(),
-    )?;
-    super::factoring::factor_terminal_readers(&mut inventory)?;
-    Ok(inventory)
-}
-
-pub fn build_with_compatible_producers_cache(
-    memo: &Memo,
-    output_groups: &[MemoGroupId],
-    compatible_producers_cache: &mut MemoGroupOutputToCompatibleProducersCache,
-) -> Result<CandidateInventory, CandidateInventoryError> {
     let invalid = |message: &str| CandidateInventoryError::InvalidMemo(message.into());
-    if memo.groups().len() != memo.candidates.len() {
+    let group_count = memo.groups.len();
+    if group_count != memo.candidates.len() {
         return Err(invalid("group and candidate vector lengths differ"));
     }
     if output_groups
         .iter()
-        .any(|group| group.0 as usize >= memo.groups().len())
+        .any(|group| group.0 as usize >= group_count)
     {
         return Err(invalid("query output references missing group"));
     }
@@ -117,8 +100,9 @@ pub fn build_with_compatible_producers_cache(
         operator_nodes_of_candidates_for_memo_groups: Vec::new(),
         producer_nodes_per_input: Vec::new(),
         query_output_nodes: Vec::new(),
-        implementation_roots_of_group: vec![Vec::new(); memo.groups().len()],
+        nodes_of_group: vec![Vec::new(); group_count],
     };
+    let mut input_groups = Vec::new();
     for (group, candidates) in memo.candidates.iter().enumerate() {
         for (index, candidate) in candidates.iter().enumerate() {
             let unsupported = |reason| CandidateInventoryError::Unsupported {
@@ -126,127 +110,109 @@ pub fn build_with_compatible_producers_cache(
                 candidate: index,
                 reason,
             };
-            let implemented: HashSet<_> = std::iter::once(MemoGroupId(group as u32))
-                .chain(candidate.fused_groups.iter().copied())
-                .collect();
+            let mut implemented = vec![MemoGroupId(group as u32)];
+            implemented.extend(&candidate.fused_groups);
+            implemented.sort_unstable();
+            implemented.dedup();
             if implemented.len() != 1 + candidate.fused_groups.len()
-                || implemented
-                    .iter()
-                    .any(|id| id.0 as usize >= memo.groups().len())
+                || implemented.iter().any(|id| id.0 as usize >= group_count)
             {
                 return Err(invalid(
                     "candidate names duplicate or missing absorbed groups",
                 ));
             }
-            // Only the owner group is this candidate's output contract. Its fused
-            // groups describe absorbed computations inside its private subtree,
-            // not additional results it can produce. Private-node decomposition
-            // charges that work; independent consumers of an absorbed group
-            // still select one of that group's own candidates. Reverse support
-            // leaves unused absorbed groups inactive without exclusion rules.
             if candidate.accuracy_budget_parts == 0 {
                 return Err(unsupported("zero accuracy budget parts"));
             }
-            if candidate
-                .input_groups
-                .iter()
-                .any(|child| child.0 as usize >= memo.groups().len())
-            {
+            let mut inputs = Vec::new();
+            candidate
+                .expression
+                .operator
+                .map_children(|&child| inputs.push(child));
+            if inputs.iter().any(|child| child.0 as usize >= group_count) {
                 return Err(invalid("candidate references missing input group"));
             }
-            let inputs = candidate
-                .input_groups
-                .iter()
-                .map(|child| Rc::clone(&memo.groups()[child.0 as usize].logical_node))
-                .collect::<Vec<_>>();
-            if inputs
-                .iter()
-                .any(|input| Rc::ptr_eq(input, &candidate.root_node))
-            {
-                return Err(unsupported(
-                    "root aliases an input group without an operator",
-                ));
+            if inputs.len() != candidate.input_requirements.len() {
+                return Err(invalid("candidate has not one requirement per input"));
             }
-            let implemented = crate::implement_candidate_operators(&candidate.root_node, &inputs)
-                .map_err(|error| CandidateInventoryError::PhysicalImplementation {
+            let id = CandidateForMemoGroupId {
+                group: MemoGroupId(group as u32),
+                index,
+            };
+            let implementation_error = |reason: String| CandidateInventoryError::PhysicalImplementation {
                 group,
                 candidate: index,
-                reason: error.to_string(),
-            })?;
-            let id =
-                PhysicalCandidateId(inventory.operator_nodes_of_candidates_for_memo_groups.len());
-            inventory.implementation_roots_of_group[group].push(id);
-            inventory.operator_nodes_of_candidates_for_memo_groups.push(
-                OperatorNodeOfCandidateForMemoGroup {
-                    candidates_for_memo_group: vec![CandidateForMemoGroupId {
-                        group: MemoGroupId(group as u32),
-                        index,
-                    }],
-                    is_implementation_root: true,
-                    accuracy_budget_parts: candidate.accuracy_budget_parts,
-                    physical_node: implemented,
-                },
-            );
-            inventory.producer_nodes_per_input.push(Vec::new());
-        }
-    }
-    for (group, candidates) in memo.candidates.iter().enumerate() {
-        for (index, candidate) in candidates.iter().enumerate() {
-            let mut boundaries = HashMap::new();
-            for &child in &candidate.input_groups {
-                let pointer = Rc::as_ptr(&memo.groups()[child.0 as usize].logical_node);
-                if boundaries
-                    .insert(pointer, child)
-                    .is_some_and(|previous| previous != child)
+                reason,
+            };
+            let node = memo
+                .operator_node_of(id)
+                .map_err(|error| implementation_error(error.to_string()))?;
+            if let Some(NonASAPOp::Aggregate { measures, child, .. }) = node.non_asap() {
+                if measures
+                    .iter()
+                    .any(|measure| matches!(measure, AggIntent::TopK { .. }))
                 {
-                    return Err(invalid("one boundary node names different input groups"));
+                    let reason = asap_types::ir::schema::topk::exact_topk_as_sorted_limit(
+                        &node,
+                        Rc::clone(child),
+                    )
+                    .err()
+                    .unwrap_or_else(|| "exact top-k not as Sort and Limit".into());
+                    return Err(implementation_error(reason));
                 }
             }
-            if boundaries.contains_key(&Rc::as_ptr(&candidate.root_node)) {
-                return Err(CandidateInventoryError::Unsupported {
-                    group,
-                    candidate: index,
-                    reason: "root aliases an input group without an operator",
-                });
-            }
-            let mut builder = ImmediateCandidateBuilder {
-                inventory: &mut inventory,
-                compatible_producers_cache: &mut *compatible_producers_cache,
-                boundaries,
-                private_nodes: HashMap::new(),
-                used_boundaries: HashSet::new(),
-                owner: CandidateForMemoGroupId {
-                    group: MemoGroupId(group as u32),
-                    index,
-                },
-                owner_accuracy_budget_parts: candidate.accuracy_budget_parts,
+            // A node other than its group's own carries the guarantee its
+            // inputs compose.
+            let node = if node.guarantee.is_none() && !Rc::ptr_eq(&node, &memo.groups[group].logical_node) {
+                let guarantee = composed_guarantee(&node);
+                Rc::new((*node).clone().with_guarantee(guarantee))
+            } else {
+                node
             };
-            let root_id = builder.inventory.implementation_roots_of_group[group][index];
-            let implemented = Rc::clone(
-                &builder
-                    .inventory
-                    .operator_nodes_of_candidates_for_memo_groups[root_id.0]
-                    .physical_node,
+            let node_id =
+                PhysicalCandidateId(inventory.operator_nodes_of_candidates_for_memo_groups.len());
+            inventory.nodes_of_group[group].push(node_id);
+            inventory.operator_nodes_of_candidates_for_memo_groups.push(
+                OperatorNodeOfCandidateForMemoGroup {
+                    candidate_for_memo_group: id,
+                    accuracy_budget_parts: candidate.accuracy_budget_parts,
+                    physical_node: node,
+                },
             );
-            builder.add(&implemented, Some(root_id))?;
-            if candidate
-                .input_groups
-                .iter()
-                .any(|group| !builder.used_boundaries.contains(group))
-            {
-                return Err(invalid(
-                    "declared input group has no canonical node boundary",
-                ));
-            }
+            input_groups.push(inputs);
         }
     }
+    let mut interner = ProducerSetInterner::default();
+    for (node, inputs) in input_groups.iter().enumerate() {
+        let consumer = memo.candidate(
+            inventory.operator_nodes_of_candidates_for_memo_groups[node].candidate_for_memo_group,
+        );
+        let producers = inputs
+            .iter()
+            .zip(&consumer.input_requirements)
+            .map(|(input, requirement)| {
+                let satisfying: Vec<PhysicalCandidateId> = inventory.nodes_of_group
+                    [input.0 as usize]
+                    .iter()
+                    .copied()
+                    .filter(|producer| {
+                        let id = inventory.operator_nodes_of_candidates_for_memo_groups
+                            [producer.0]
+                            .candidate_for_memo_group;
+                        satisfies(&memo.candidate(id).logical_properties, requirement)
+                    })
+                    .collect();
+                interner.intern(satisfying)
+            })
+            .collect();
+        inventory.producer_nodes_per_input.push(producers);
+    }
     for group in output_groups {
-        let expected = &memo.groups()[group.0 as usize].logical_node;
+        let expected = &memo.groups[group.0 as usize].logical_node;
         let mut compatible_candidates = Vec::new();
-        for &id in &inventory.implementation_roots_of_group[group.0 as usize] {
-            let template =
-                &inventory.operator_nodes_of_candidates_for_memo_groups[id.0].physical_node;
-            if compatible_output(expected, template)? {
+        for &id in &inventory.nodes_of_group[group.0 as usize] {
+            let node = &inventory.operator_nodes_of_candidates_for_memo_groups[id.0].physical_node;
+            if compatible_output(expected, node)? {
                 compatible_candidates.push(id);
             }
         }
@@ -254,79 +220,6 @@ pub fn build_with_compatible_producers_cache(
     }
     inventory.validate().map_err(|error| invalid(&error))?;
     Ok(inventory)
-}
-
-struct ImmediateCandidateBuilder<'a> {
-    inventory: &'a mut CandidateInventory,
-    compatible_producers_cache: &'a mut MemoGroupOutputToCompatibleProducersCache,
-    boundaries: HashMap<*const OperatorNode, MemoGroupId>,
-    private_nodes: HashMap<*const OperatorNode, PhysicalCandidateId>,
-    used_boundaries: HashSet<MemoGroupId>,
-    /// The memo candidate being lowered; owner of every node it adds.
-    owner: CandidateForMemoGroupId,
-    /// The owner's `accuracy_budget_parts`, which its private nodes carry.
-    owner_accuracy_budget_parts: usize,
-}
-
-impl ImmediateCandidateBuilder<'_> {
-    fn add(
-        &mut self,
-        node: &Rc<OperatorNode>,
-        reserved: Option<PhysicalCandidateId>,
-    ) -> Result<PhysicalCandidateId, CandidateInventoryError> {
-        if let Some(&existing) = self.private_nodes.get(&Rc::as_ptr(node)) {
-            return Ok(existing);
-        }
-        let mut requirements = Vec::new();
-        for input in super::reconstruction::ordered_inputs(node) {
-            let producers = if let Some(&group) = self.boundaries.get(&Rc::as_ptr(&input)) {
-                self.used_boundaries.insert(group);
-                let key = MemoGroupOutputKey::new(group, &input)
-                    .map_err(CandidateInventoryError::InvalidMemo)?;
-                if let Some(compatible) = self.compatible_producers_cache.get(&key) {
-                    compatible
-                } else {
-                    let mut compatible = Vec::new();
-                    for &candidate in
-                        &self.inventory.implementation_roots_of_group[group.0 as usize]
-                    {
-                        let template = &self.inventory.operator_nodes_of_candidates_for_memo_groups
-                            [candidate.0]
-                            .physical_node;
-                        if compatible_output(&input, template)? {
-                            compatible.push(candidate);
-                        }
-                    }
-                    self.compatible_producers_cache.remember(key, compatible)
-                }
-            } else {
-                vec![self.add(&input, None)?].into()
-            };
-            requirements.push(producers);
-        }
-        let id = if let Some(id) = reserved {
-            self.inventory.producer_nodes_per_input[id.0] = requirements;
-            id
-        } else {
-            let id = PhysicalCandidateId(
-                self.inventory
-                    .operator_nodes_of_candidates_for_memo_groups
-                    .len(),
-            );
-            self.inventory.producer_nodes_per_input.push(requirements);
-            self.inventory
-                .operator_nodes_of_candidates_for_memo_groups
-                .push(OperatorNodeOfCandidateForMemoGroup {
-                    candidates_for_memo_group: vec![self.owner],
-                    is_implementation_root: false,
-                    accuracy_budget_parts: self.owner_accuracy_budget_parts,
-                    physical_node: Rc::clone(node),
-                });
-            id
-        };
-        self.private_nodes.insert(Rc::as_ptr(node), id);
-        Ok(id)
-    }
 }
 
 fn compatible_output(

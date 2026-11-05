@@ -54,7 +54,7 @@ fn expanded(queries: &[String]) -> Memo {
     )
     .unwrap();
     let memo = try_add_pass1_candidates(initial, &inventory, &[], &Default::default()).unwrap();
-    asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(memo)
+    asap_logical_asap_optimization::test_support::sharing_rules(memo)
         .unwrap()
 }
 

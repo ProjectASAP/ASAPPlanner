@@ -27,53 +27,41 @@ use asap_types::workload::{
 };
 
 /// Pass 2 after local window composition, on a memo the test composed
-/// itself (or not at all): rules 2–9, then
-/// `add_shared_summary_state_groups`.
+/// itself (or not at all): rules 2 and 4–7.
 /// Production runs these through
 /// [`generate_logical_asap_memo_candidates`](crate::pass2::logical_memo_candidates::generate_logical_asap_memo_candidates).
-pub fn sharing_rules_and_shared_state_groups(
+pub fn sharing_rules(
     mut memo: asap_types::stages::Memo,
-) -> Result<asap_types::stages::Memo, crate::pass2::memo::state_groups::Pass2RuleError> {
+) -> Result<asap_types::stages::Memo, crate::pass2::memo::well_formed::Pass2RuleError> {
     crate::pass2::logical_memo_candidates::apply_sharing_rules(&mut memo)?;
-    crate::pass2::memo::state_groups::add_shared_summary_state_groups(&mut memo)?;
     Ok(memo)
 }
 
-/// The shared summary-state groups of an expanded memo, in order: each
-/// group `add_shared_summary_state_groups` added (one candidate, the shared
-/// build, origin `SharedBuild`), and each summary build Pass 1 added
-/// (logical node `SummaryAgg` or `SummaryTumblingWindowChain`) whose result
-/// candidates of two or more groups read.
+/// The summary state groups (logical node `SummaryAgg` or
+/// `SummaryTumblingWindowChain`) that candidates of two or more groups read,
+/// in order.
 pub fn shared_summary_state_groups(
     memo: &asap_types::stages::Memo,
 ) -> Vec<asap_types::stages::MemoGroupId> {
     use asap_types::ir::ASAPOp;
-    use asap_types::stages::{MemoGroupId, OriginOfCandidateForMemoGroup};
-    let added_by_the_shared_step = |group: usize| {
-        matches!(
-            memo.candidates[group].as_slice(),
-            [only] if only.origin == OriginOfCandidateForMemoGroup::SharedBuild
-        )
-    };
-    let added_and_shared = |group: usize| {
-        let id = MemoGroupId(group as u32);
-        matches!(
-            memo.groups()[group].logical_node.asap(),
-            Some(ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. })
-        ) && memo
-            .candidates
-            .iter()
-            .filter(|candidates| {
-                candidates
-                    .iter()
-                    .any(|candidate| candidate.input_groups.contains(&id))
-            })
-            .count()
-            >= 2
-    };
-    (0..memo.groups().len())
-        .filter(|&group| added_by_the_shared_step(group) || added_and_shared(group))
+    use asap_types::stages::MemoGroupId;
+    (0..memo.groups.len())
         .map(|group| MemoGroupId(group as u32))
+        .filter(|id| {
+            matches!(
+                memo.groups[id.0 as usize].logical_node.asap(),
+                Some(ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. })
+            ) && memo
+                .candidates
+                .iter()
+                .filter(|candidates| {
+                    candidates
+                        .iter()
+                        .any(|candidate| candidate.expression.operator.children().contains(&id))
+                })
+                .count()
+                >= 2
+        })
         .collect()
 }
 

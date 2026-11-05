@@ -182,7 +182,7 @@ mod tests {
     use crate::pass1::add_pass1_candidates::try_add_pass1_candidates;
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
     use crate::stage0::generate_dag_of_logical_memo_groups;
-    use crate::test_support::{lower_promql, sharing_rules_and_shared_state_groups};
+    use crate::test_support::{lower_promql, sharing_rules};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::OperatorNode;
     use asap_types::ir::QueryRoot;
@@ -203,7 +203,7 @@ mod tests {
         let inventory =
             generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
                 .unwrap();
-        let memo = sharing_rules_and_shared_state_groups(
+        let memo = sharing_rules(
             try_add_pass1_candidates(initial, &inventory, &[], &Default::default()).unwrap(),
         )
         .unwrap();

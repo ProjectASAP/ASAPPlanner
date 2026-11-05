@@ -211,7 +211,7 @@ fn exact_rollup_catalog_crosses_identical_per_series_average() {
     .unwrap();
     let memo = try_add_pass1_candidates(initial, &inventory, &[], &Default::default()).unwrap();
     let expanded =
-        asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(memo)
+        asap_logical_asap_optimization::test_support::sharing_rules(memo)
             .unwrap();
     let owner = expanded.query_roots[1].as_operator().unwrap().0 as usize;
     assert!(
@@ -246,7 +246,7 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
     .unwrap();
     let memo = try_add_pass1_candidates(initial, &inventory, &[], &Default::default()).unwrap();
     let expanded =
-        asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(memo)
+        asap_logical_asap_optimization::test_support::sharing_rules(memo)
             .unwrap();
     let (owner, candidate) = expanded.candidates.iter().enumerate().flat_map(|(owner, candidates)| candidates.iter().map(move |c| (owner,c)))
         .find(|(_, c)| c.origin == OriginOfCandidateForMemoGroup::Rollup && matches!(c.root_node.non_asap(), Some(NonASAPOp::Aggregate { measures, child, .. })
@@ -409,7 +409,7 @@ fn sql_count_rollup_executes_with_integer_results() {
         .unwrap();
         let memo = try_add_pass1_candidates(initial, &inventory, &[], &Default::default()).unwrap();
         let expanded =
-            asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(
+            asap_logical_asap_optimization::test_support::sharing_rules(
                 memo,
             )
             .unwrap();
@@ -531,7 +531,7 @@ fn sketch_rollup_crosses_inner_range_function() {
     .unwrap();
     let memo = try_add_pass1_candidates(initial, &inventory, &[], &Default::default()).unwrap();
     let expanded =
-        asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(memo)
+        asap_logical_asap_optimization::test_support::sharing_rules(memo)
             .unwrap();
     // The rule rewrites the reader of the coarse state, a group Pass 1
     // added beneath the query's root.

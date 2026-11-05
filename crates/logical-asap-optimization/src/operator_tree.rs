@@ -91,17 +91,16 @@ pub(crate) fn candidate_of(
         Representation::Exact(_) | Representation::Plain => 1,
     };
     let window_layout = window_layout_of(node);
-    let input_requirements = node
-        .children()
-        .into_iter()
-        .map(|child| LogicalRequirement {
+    let mut input_requirements = Vec::new();
+    node.operator.map_children(|child| {
+        input_requirements.push(LogicalRequirement {
             family: match representation_of(child) {
                 Representation::Summary(kind) => Some(kind.algorithm().clone()),
                 Representation::Exact(_) | Representation::Plain => None,
             },
             window: window_requirement(node, child),
         })
-        .collect();
+    });
     CandidateForMemoGroup {
         expression: CandidateExpression {
             operator: expression,

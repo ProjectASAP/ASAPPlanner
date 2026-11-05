@@ -359,24 +359,59 @@ pub mod planning {
         let mut memo =
             try_add_pass1_candidates(initial, &inventory, &[], &Default::default()).unwrap();
         add_local_window_composition(&mut memo, entries);
-        asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(memo)
+        asap_logical_asap_optimization::test_support::sharing_rules(memo)
             .unwrap()
     }
 
     /// One plan of `memo`'s first `queries` queries (`memo::enumeration::build_logical_asap_dags_from_chosen_candidates`):
-    /// each query's first root group's DAG, every group `choice` does not
-    /// name implemented by its first candidate.
+    /// each query's first root group's DAG, every input reading the
+    /// candidate `choice` names for its group, or else the group's first
+    /// candidate that satisfies the input's requirement.
     pub fn compose_memo_plan(
         memo: &asap_types::stages::Memo,
         queries: usize,
         choice: &std::collections::BTreeMap<usize, usize>,
     ) -> Vec<Rc<OperatorNode>> {
-        use asap_logical_asap_optimization::build_logical_asap_dags_from_chosen_candidates;
-        use asap_types::stages::MemoGroupId;
-        let choice = choice
-            .iter()
-            .map(|(&group, &index)| (MemoGroupId(group as u32), index))
-            .collect();
+        use asap_logical_asap_optimization::{
+            build_logical_asap_dags_from_chosen_candidates, ChosenCandidatePerMemoGroup,
+        };
+        use asap_types::stages::{satisfies, CandidateForMemoGroupId, MemoGroupId};
+        let mut chosen = ChosenCandidatePerMemoGroup::default();
+        let mut pending = Vec::new();
+        for group in asap_types::stages::root_groups(&memo.query_roots) {
+            let index = choice.get(&(group.0 as usize)).copied().unwrap_or(0);
+            chosen.root_candidates.insert(group, index);
+            pending.push(CandidateForMemoGroupId { group, index });
+        }
+        let mut seen = std::collections::HashSet::new();
+        while let Some(consumer) = pending.pop() {
+            if !seen.insert(consumer) {
+                continue;
+            }
+            let candidate = memo.candidate(consumer);
+            let mut inputs: Vec<MemoGroupId> = Vec::new();
+            candidate
+                .expression
+                .operator
+                .map_children(|&group| inputs.push(group));
+            for (input, group) in inputs.into_iter().enumerate() {
+                let index = choice.get(&(group.0 as usize)).copied().unwrap_or_else(|| {
+                    memo.candidates[group.0 as usize]
+                        .iter()
+                        .position(|producer| {
+                            satisfies(
+                                &producer.logical_properties,
+                                &candidate.input_requirements[input],
+                            )
+                        })
+                        .unwrap_or(0)
+                });
+                let producer = CandidateForMemoGroupId { group, index };
+                chosen.producer_of_input.insert((consumer, input), producer);
+                pending.push(producer);
+            }
+        }
+        let choice = chosen;
         let roots = build_logical_asap_dags_from_chosen_candidates(memo, &choice)
             .expect("the choice composes");
         (0..queries)
@@ -458,7 +493,7 @@ pub mod planning {
             .candidates
             .iter()
             .enumerate()
-            .filter(|(group, _)| memo.groups()[*group].reached_by_queries() == [q])
+            .filter(|(group, _)| memo.groups[*group].reached_by_queries() == [q])
             .flat_map(|(group, candidates)| {
                 candidates
                     .iter()
@@ -470,9 +505,9 @@ pub mod planning {
             .collect();
         // Group indices don't give the order: Pass 2 appends groups at the
         // end. Depth from the root does.
-        let mut depth = vec![usize::MAX; memo.groups().len()];
+        let mut depth = vec![usize::MAX; memo.groups.len()];
         let mut pending: std::collections::VecDeque<_> = memo
-            .groups()
+            .groups
             .iter()
             .enumerate()
             .filter(|(group, _)| {
@@ -488,7 +523,7 @@ pub mod planning {
             }
             depth[group] = d;
             pending.extend(
-                memo.groups()[group]
+                memo.groups[group]
                     .child_groups
                     .iter()
                     .map(|child| (child.0 as usize, d + 1)),
@@ -511,12 +546,20 @@ pub mod planning {
         entries: &[asap_types::workload::QueryWorkloadEntry],
         data: &DataWorkload,
     ) -> (Vec<Rc<OperatorNode>>, f64, f64) {
-        let builds = |node: &Rc<OperatorNode>| OperatorNode::reachable(node).iter().any(is_build);
+        let builds = |candidate: &asap_types::stages::CandidateForMemoGroup| {
+            matches!(
+                candidate.expression.operator,
+                asap_types::ir::Operator::ASAP(
+                    asap_types::ir::ASAPOp::SummaryAgg { .. }
+                        | asap_types::ir::ASAPOp::SummaryTumblingWindowChain { .. }
+                )
+            )
+        };
         let own_builds: Vec<Vec<(usize, usize)>> = (0..queries)
             .map(|q| {
                 let found = own_choices(memo, q, |c| {
                     c.origin == asap_types::stages::OriginOfCandidateForMemoGroup::Pass1
-                        && builds(&c.root_node)
+                        && builds(c)
                 });
                 let top = found
                     .first()
@@ -541,7 +584,7 @@ pub mod planning {
                 )
             })
             .collect();
-        for (state, group) in memo.groups().iter().enumerate() {
+        for (state, group) in memo.groups.iter().enumerate() {
             if !is_build(&group.logical_node) || group.reached_by_queries().len() < queries {
                 continue;
             }
@@ -626,7 +669,7 @@ pub mod planning {
                 .iter()
                 .enumerate()
                 .find_map(|(index, candidate)| {
-                    candidate.input_groups.iter().find_map(|input| {
+                    candidate.expression.operator.children().into_iter().find_map(|input| {
                         let mut path = below(memo, input.0 as usize, state, seen)?;
                         path.push((group, index));
                         Some(path)
@@ -635,8 +678,10 @@ pub mod planning {
         }
         let mut seen = std::collections::HashSet::from([group]);
         memo.candidates[group][index]
-            .input_groups
-            .iter()
+            .expression
+            .operator
+            .children()
+            .into_iter()
             .find_map(|input| below(memo, input.0 as usize, state, &mut seen))
     }
 

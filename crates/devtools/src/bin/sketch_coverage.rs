@@ -23,8 +23,8 @@ use asap_frontend_sql::lower_sql_dialect;
 use asap_logical_asap_optimization::generate_dag_of_logical_memo_groups;
 use asap_logical_asap_optimization::generate_per_computation_logical_memo_candidates;
 use asap_types::ir::properties::AccuracyTarget;
-use asap_types::ir::schema::FieldDataType;
-use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
+use asap_types::stages::Representation;
+use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
 use asap_types::workload::{DataWorkload, SqlDialect};
 use std::collections::BTreeSet;
 use std::rc::Rc;
@@ -77,8 +77,18 @@ fn analyze_corpus(
         // compose into a candidate is not counted.
         let mut offered = BTreeSet::new();
         for candidate in pass1.memo.candidates.iter().flatten() {
-            if candidate.fused_groups.is_empty() {
-                summary_families(&candidate.root_node, &mut offered);
+            let builds = matches!(
+                candidate.expression.operator,
+                Operator::ASAP(
+                    ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. }
+                )
+            );
+            if let (true, true, Representation::Summary(kind)) = (
+                candidate.fused_groups.is_empty(),
+                builds,
+                candidate.logical_properties.representation(),
+            ) {
+                offered.insert(format!("{:?}", kind.algorithm()));
             }
         }
         summaries.push((id, offered));
@@ -89,22 +99,6 @@ fn analyze_corpus(
         failed,
         rejected,
         summaries,
-    }
-}
-
-/// Adds the family of every summary `node` and its descendants build to
-/// `families`.
-fn summary_families(node: &OperatorNode, families: &mut BTreeSet<String>) {
-    if let Some(
-        ASAPOp::SummaryAgg { family, .. } | ASAPOp::SummaryTumblingWindowChain { family, .. },
-    ) = node.asap()
-    {
-        if let FieldDataType::Sketch(kind, _) = family {
-            families.insert(format!("{:?}", kind.algorithm()));
-        }
-    }
-    for child in node.children() {
-        summary_families(child, families);
     }
 }
 

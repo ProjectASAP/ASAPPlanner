@@ -6,7 +6,6 @@
 //! `PhysicalASAPMemoCandidates`, lives in `asap_types::stages`; Stage 3
 //! selects from it.
 mod configurations;
-mod factoring;
 mod inventory;
 mod pruning;
 mod realize;
@@ -147,12 +146,7 @@ pub mod test_support {
     pub use super::configurations::{
         enumerate_candidate_configurations, may_keep_across_evaluations_per_sole_reader_query,
     };
-    pub use super::factoring::{
-        factor_terminal_readers, MemoGroupOutputKey, MemoGroupOutputToCompatibleProducersCache,
-    };
-    pub use super::inventory::{
-        build_candidate_inventory, build_with_compatible_producers_cache, CandidateInventory,
-    };
+    pub use super::inventory::{build_candidate_inventory, CandidateInventory};
     pub use super::pruning::usable_candidates;
     pub use super::realize::{realize_selected_candidates, restore_query_roots};
     pub use super::reconstruction::{

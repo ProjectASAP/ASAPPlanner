@@ -89,7 +89,7 @@ pub fn enumerate_candidate_configurations(
         return Err(invalid("template or output/query mapping is incomplete"));
     }
     if source
-        .implementation_roots_of_group
+        .nodes_of_group
         .iter()
         .flatten()
         .any(|id| id.0 >= source_count)

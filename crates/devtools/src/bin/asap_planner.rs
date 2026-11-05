@@ -118,7 +118,7 @@ use asap_types::ir::flat::{flatten, FlatDag, FlatNode, NodeId};
 use asap_types::ir::operator::node::OperatorNode;
 use asap_types::ir::properties::{default_metric_for_root, AccuracyTarget};
 use asap_types::ir::QueryRoot;
-use asap_types::stages::{queries_rooted_at, MemoGroupId};
+use asap_types::stages::{queries_rooted_at, CandidateForMemoGroupId, MemoGroupId};
 use asap_types::stages::{Memo, OriginOfCandidateForMemoGroup};
 use asap_types::stages::{PerComputationLogicalMemoCandidates, PhysicalASAPMemoCandidates};
 use asap_types::workload::{
@@ -478,8 +478,8 @@ fn selected_choice(run: &PlanningRun) -> Result<ChosenCandidatePerMemoGroup, Str
         &run.logical_asap_candidates,
         &run.physical_asap_candidates,
     ) {
-        (Ok(selection), Some(logical), Some(physical)) => {
-            selected_chosen_candidates(&logical.memo, physical, &selection.selected_dag)
+        (Ok(selection), Some(_), Some(physical)) => {
+            selected_chosen_candidates(physical, &selection.selected_dag)
         }
         (Err(error), _, _) => Err(format!("no plan was selected: {error}")),
         _ => Err("no plan was selected".into()),
@@ -737,7 +737,6 @@ fn stage2_pruned_candidates_json(stage2: Option<&PhysicalASAPMemoCandidates>) ->
                 "group": pruned.group.0,
                 "operator_node": key.operator_node.0,
                 "operator": flat.nodes.last().map(node_label).unwrap_or_default(),
-                "implementation_root": node.is_implementation_root,
                 "timing": key.properties.timing(),
                 "lifetime": key.properties.lifetime(),
                 "reason": format!("{:?}", pruned.reason),
@@ -917,14 +916,26 @@ fn with_default_metrics(mut queries: Vec<Value>, roots: &[QueryRoot]) -> Vec<Val
     queries
 }
 
-/// Group id (as a string) to candidate index.
+/// `roots`: root group id (as a string) to candidate index; `producers`:
+/// each chosen candidate's input (`[group, index, input]`) with the
+/// candidate it reads (`[group, index]`).
 fn choice_json(choice: &ChosenCandidatePerMemoGroup) -> Value {
-    Value::Object(
-        choice
-            .iter()
-            .map(|(group, &candidate)| (group.0.to_string(), json!(candidate)))
-            .collect(),
-    )
+    let roots: serde_json::Map<_, _> = choice
+        .root_candidates
+        .iter()
+        .map(|(group, &candidate)| (group.0.to_string(), json!(candidate)))
+        .collect();
+    let producers: Vec<Value> = choice
+        .producer_of_input
+        .iter()
+        .map(|((consumer, input), producer)| {
+            json!({
+                "consumer": [consumer.group.0, consumer.index, input],
+                "producer": [producer.group.0, producer.index],
+            })
+        })
+        .collect();
+    json!({ "roots": roots, "producers": producers })
 }
 
 /// The `memo` section's node table (`memo.nodes`): each distinct node once,
@@ -974,7 +985,7 @@ impl MemoNodes {
 /// children.
 fn memo_groups_json(table: &mut MemoNodes, memo: &Memo, previous: Option<&Memo>) -> Vec<Value> {
     let ids = |groups: &[MemoGroupId]| groups.iter().map(|g| g.0).collect::<Vec<_>>();
-    memo.groups()
+    memo.groups
         .iter()
         .zip(&memo.candidates)
         .enumerate()
@@ -994,18 +1005,25 @@ fn memo_groups_json(table: &mut MemoNodes, memo: &Memo, previous: Option<&Memo>)
                 .iter()
                 .enumerate()
                 .map(|(index, candidate)| {
-                    let (roots, originals) = table.add(std::slice::from_ref(&candidate.root_node));
+                    let node = memo
+                        .operator_node_of(CandidateForMemoGroupId {
+                            group: MemoGroupId(id as u32),
+                            index,
+                        })
+                        .unwrap_or_else(|_| Rc::clone(&group.logical_node));
+                    let (roots, originals) = table.add(std::slice::from_ref(&node));
+                    let mut inputs = Vec::new();
+                    candidate
+                        .expression
+                        .operator
+                        .map_children(|&child| inputs.push(child));
                     let group_of_node: serde_json::Map<_, _> = originals
                         .iter()
                         .filter_map(|(original, node)| {
-                            candidate
-                                .input_groups
+                            inputs
                                 .iter()
                                 .find(|child| {
-                                    Rc::ptr_eq(
-                                        &memo.groups()[child.0 as usize].logical_node,
-                                        original,
-                                    )
+                                    Rc::ptr_eq(&memo.groups[child.0 as usize].logical_node, original)
                                 })
                                 .map(|child| (node.to_string(), json!(child.0)))
                         })
@@ -1015,12 +1033,12 @@ fn memo_groups_json(table: &mut MemoNodes, memo: &Memo, previous: Option<&Memo>)
                         "implements": std::iter::once(id as u32)
                             .chain(candidate.fused_groups.iter().map(|g| g.0))
                             .collect::<Vec<_>>(),
-                        "children": ids(&candidate.input_groups),
+                        "children": ids(&inputs),
                         "origin": origin_name(&candidate.origin),
                         "accuracy_budget_parts": candidate.accuracy_budget_parts,
                         "added": !earlier.iter().any(|before| {
-                            Rc::ptr_eq(&before.root_node, &candidate.root_node)
-                                && before.input_groups == candidate.input_groups
+                            before.expression == candidate.expression
+                                && before.logical_properties == candidate.logical_properties
                         }),
                         "label": candidate_node_label(&table.nodes, roots[0], &group_of_node),
                         "node": roots[0],
@@ -1049,9 +1067,6 @@ fn memo_groups_json(table: &mut MemoNodes, memo: &Memo, previous: Option<&Memo>)
 fn origin_name(origin: &OriginOfCandidateForMemoGroup) -> String {
     match origin {
         OriginOfCandidateForMemoGroup::Pass1 => "pass1",
-        OriginOfCandidateForMemoGroup::SharedBuild => "shared_build",
-        OriginOfCandidateForMemoGroup::SummaryResult => "summary_result",
-        OriginOfCandidateForMemoGroup::SummaryInput => "summary_input",
         OriginOfCandidateForMemoGroup::TumblingWindows => "tumbling_windows",
         OriginOfCandidateForMemoGroup::Rollup => "rollup",
         OriginOfCandidateForMemoGroup::TopKReuse => "top_k_reuse",
