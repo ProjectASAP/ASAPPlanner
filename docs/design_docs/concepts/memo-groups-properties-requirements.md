@@ -600,7 +600,8 @@ fn candidates_of(memo: &Memo, group: MemoGroupId) -> impl Iterator<Item = Candid
     (0..memo.candidates[group.0 as usize].len()).map(move |index| CandidateForMemoGroupId { group, index })
 }
 
-/// Whether `from` reaches `to` through the producers chosen so far.
+/// Whether `from` reaches `to` through the producers chosen so far
+/// (true when `from == to`, so a candidate never reads itself).
 fn reaches(dag: &LogicalDag, from: CandidateForMemoGroupId, to: CandidateForMemoGroupId) -> bool;
 
 /// Print one DAG as an indented tree; a node read a second time is printed as a
@@ -643,11 +644,11 @@ Listed from both roots at once there are $2 \times 4 = 8$ DAGs. In the one where
 
 ### Size
 
-Without sharing, the number of DAGs rooted at $G$ satisfies
+Counting each consumer input's choice independently gives an upper bound on the number of DAGs rooted at $G$:
 
-$$N(G) = \sum_{v \in G} \prod_{i} \sum_{u \in G_{v,i},\ \alpha^{\log}_{u,v,i} = 1} N(u), \qquad N(u) = \prod_i \sum_{w} N(w) \text{ for } u\text{'s own inputs},$$
+$$N(G) = \sum_{v \in G} N(v), \qquad N(v) = \prod_{i} \sum_{u \in P_{v,i},\ \alpha^{\log}_{u,v,i} = 1} N(u),$$
 
-which grows as a product over the DAG's depth. Sharing only identifies DAGs that choose the same candidate twice; it does not reduce the count much. This is why only small workloads are listed, and why Stage 3 chooses with the MILP instead.
+with $N(v) = 1$ for a candidate with no inputs. It is an upper bound because a shared producer is expanded once in a DAG, where the formula expands it once per consumer, and because cyclic choices are dropped. $N$ multiplies along the depth of the memo, which is why only small workloads are listed, and why Stage 3 chooses with the MILP instead.
 
 ### Physical DAGs
 
