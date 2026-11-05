@@ -535,19 +535,33 @@ pub mod planning {
                 )
             })
             .collect();
+        let workload_groups = memo.workload_groups();
         for (state, group) in memo.groups().iter().enumerate() {
             if !is_build(&group.logical_node) || group.reached_by_queries().len() < queries {
                 continue;
             }
+            // Each query's reader of the state, and its own summary candidate
+            // above, which reads the reader's group (Pass 1 adds the reader
+            // as a group beneath the query's aggregate).
             let reading: Option<std::collections::BTreeMap<usize, usize>> = (0..queries)
                 .map(|q| {
-                    own_choices(memo, q, |c| {
+                    let reader = own_choices(memo, q, |c| {
                         c.input_groups.iter().any(|child| child.0 as usize == state)
                     })
                     .into_iter()
-                    .next()
+                    .next()?;
+                    let top = own_builds[q].iter().copied().find(|&(group, index)| {
+                        memo.groups_read_through_added_groups(
+                            &memo.candidates[group][index].input_groups,
+                            &workload_groups,
+                        )
+                        .added_groups
+                        .contains(&asap_types::stages::MemoGroupId(reader.0 as u32))
+                    })?;
+                    Some([top, reader])
                 })
-                .collect();
+                .collect::<Option<Vec<_>>>()
+                .map(|pairs| pairs.into_iter().flatten().collect());
             if let Some(choice) = reading {
                 plans.push((
                     format!("shared{state}"),
