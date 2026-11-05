@@ -17,7 +17,9 @@ mod physical;
 mod pruning;
 mod realizer;
 
-pub use candidates::{CandidateForMemoGroup, Memo, OriginOfCandidateForMemoGroup};
+pub use candidates::{
+    CandidateForMemoGroup, CandidateForMemoGroupId, Memo, OriginOfCandidateForMemoGroup,
+};
 pub use logical_memo_candidates::LogicalASAPMemoCandidates;
 pub use memo::{queries_rooted_at, root_groups, DagOfLogicalMemoGroups, MemoGroup, MemoGroupId};
 pub use per_computation_logical_memo_candidates::{
@@ -25,10 +27,10 @@ pub use per_computation_logical_memo_candidates::{
     HowToComputeAggregateMeasure, PerComputationLogicalMemoCandidates,
 };
 pub use physical::{
-    output_references, CandidateForMemoGroupId, DagOfSelectedCandidates,
-    OperatorNodeOfCandidateForMemoGroup, OperatorNodeOfCandidateForMemoGroupId,
-    PhysicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateId, PhysicalCandidateKey,
-    ProducerCandidates, ProducerSetInterner, ReaderConstraint, SelectedEdge, SelectedNodeId,
+    output_references, DagOfSelectedCandidates, OperatorNodeOfCandidateForMemoGroup,
+    OperatorNodeOfCandidateForMemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidate,
+    PhysicalCandidateId, PhysicalCandidateKey, ProducerCandidates, ProducerSetInterner,
+    ReaderConstraint, SelectedEdge, SelectedNodeId,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use physical::{producer_storage_metrics, ProducerStorageMetrics};

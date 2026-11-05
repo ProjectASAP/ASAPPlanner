@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use asap_types::ir::OperatorNode;
-use asap_types::stages::{CandidateForMemoGroup, Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
 
 use crate::added_groups::groups_read_through_added_groups;
 use crate::find_or_add_group::over_child_groups;
@@ -35,28 +35,6 @@ pub(crate) fn operator_over_groups(
         size_own_candidate_for(memo, group, accuracy_budget_parts);
     }
     (node, children)
-}
-
-/// Adds `candidate` to `group`'s candidates unless one there has the same
-/// input groups, fused groups and accuracy budget parts and an equal node
-/// ([`equal_nodes`](asap_types::stages::hash_consing::equal_nodes));
-/// whether it was added.
-pub(crate) fn push_candidate_if_new(
-    memo: &mut Memo,
-    group: MemoGroupId,
-    candidate: CandidateForMemoGroup,
-) -> bool {
-    let candidates = &mut memo.candidates[group.0 as usize];
-    if candidates.iter().any(|known| {
-        known.input_groups == candidate.input_groups
-            && known.fused_groups == candidate.fused_groups
-            && known.accuracy_budget_parts == candidate.accuracy_budget_parts
-            && asap_types::stages::hash_consing::equal_nodes(&known.root_node, &candidate.root_node)
-    }) {
-        return false;
-    }
-    candidates.push(candidate);
-    true
 }
 
 /// `root` with the exact guarantee removed from every node below it. Stage

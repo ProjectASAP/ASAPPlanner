@@ -1,9 +1,7 @@
 //! Shared boundary handling for producer-level reuse rules. Rule outputs retain
 //! canonical input identities after guarantee recomposition rebuilds their DAGs.
 use crate::find_or_add_group::find_or_add_group;
-use crate::operator_over_groups::{
-    operator_over_groups, push_candidate_if_new, without_exact_guarantees_below,
-};
+use crate::operator_over_groups::{operator_over_groups, without_exact_guarantees_below};
 use crate::pass2::memo::state_groups::{boundary_groups, Pass2RuleError};
 use asap_types::ir::OperatorNode;
 use asap_types::stages::{CandidateForMemoGroup, Memo, OriginOfCandidateForMemoGroup};
@@ -169,7 +167,7 @@ fn check_output_contract(
 /// `node`, as one operator over groups ([`operator_over_groups`]: every node
 /// beneath `node` is found or added as a group made by `origin`, sized for
 /// `original`'s budget parts). `false` when `owner` has an equal candidate
-/// already ([`push_candidate_if_new`]), or when `node` reads `owner`
+/// already ([`Memo::add_candidate`]), or when `node` reads `owner`
 /// itself.
 pub(in crate::pass2::memo) fn add_candidate_over_groups(
     memo: &mut Memo,
@@ -194,7 +192,8 @@ pub(in crate::pass2::memo) fn add_candidate_over_groups(
     candidate.root_node = root_node;
     candidate.input_groups = input_groups;
     candidate.origin = origin;
-    Ok(push_candidate_if_new(memo, owner, candidate))
+    let known = memo.candidates[owner.0 as usize].len();
+    Ok(memo.add_candidate(owner, candidate).index == known)
 }
 
 /// The group of `node`, a producer a rule factors out of its readers, made

@@ -39,6 +39,14 @@ struct MemoGroupLookup {
     group_with_equal_node: HashConsingTable<MemoGroupId>,
 }
 
+/// One implementation candidate: index `index` in group `group`'s
+/// candidates ([`Memo::candidates`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CandidateForMemoGroupId {
+    pub group: MemoGroupId,
+    pub index: usize,
+}
+
 /// One way to implement a group: its node as Stage 2 implements it, over
 /// child groups.
 #[derive(Debug, Clone)]
@@ -120,6 +128,37 @@ impl Memo {
     #[cfg(any(test, feature = "test-support"))]
     pub fn groups_mut(&mut self) -> &mut [MemoGroup] {
         &mut self.groups
+    }
+
+    /// Adds `candidate` to `group`'s candidates and returns its id, or
+    /// returns the id of the candidate there already with the same input
+    /// groups, fused groups and accuracy budget parts and an equal node
+    /// ([`equal_nodes`](super::hash_consing::equal_nodes)): a candidate is
+    /// in a group once.
+    pub fn add_candidate(
+        &mut self,
+        group: MemoGroupId,
+        candidate: CandidateForMemoGroup,
+    ) -> CandidateForMemoGroupId {
+        let candidates = &mut self.candidates[group.0 as usize];
+        let index = candidates
+            .iter()
+            .position(|known| {
+                known.input_groups == candidate.input_groups
+                    && known.fused_groups == candidate.fused_groups
+                    && known.accuracy_budget_parts == candidate.accuracy_budget_parts
+                    && super::hash_consing::equal_nodes(&known.root_node, &candidate.root_node)
+            })
+            .unwrap_or_else(|| {
+                candidates.push(candidate);
+                candidates.len() - 1
+            });
+        CandidateForMemoGroupId { group, index }
+    }
+
+    /// The candidate `id` names.
+    pub fn candidate(&self, id: CandidateForMemoGroupId) -> &CandidateForMemoGroup {
+        &self.candidates[id.group.0 as usize][id.index]
     }
 
     /// Adds `group` with its `candidates` and returns its id.

@@ -9,9 +9,8 @@ pub use graph::{
     DagOfSelectedCandidates, PhysicalCandidateId, ReaderConstraint, SelectedEdge, SelectedNodeId,
 };
 pub use memo_candidates::{
-    output_references, CandidateForMemoGroupId, OperatorNodeOfCandidateForMemoGroup,
-    OperatorNodeOfCandidateForMemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidate,
-    PhysicalCandidateKey,
+    output_references, OperatorNodeOfCandidateForMemoGroup, OperatorNodeOfCandidateForMemoGroupId,
+    PhysicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateKey,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use producers::{producer_storage_metrics, ProducerStorageMetrics};

@@ -282,13 +282,10 @@ pub fn selected_chosen_candidates(
             continue; // a candidate's private node
         }
         let options = &node.candidates_for_memo_group;
-        let reads = |&&CandidateForMemoGroupId { group, index }: &&CandidateForMemoGroupId| {
+        let reads = |&&option: &&CandidateForMemoGroupId| {
             producer_groups.get(&node_id).is_none_or(|read| {
                 read.iter().all(|&child| {
-                    child == group
-                        || memo.candidates[group.0 as usize][index]
-                            .input_groups
-                            .contains(&child)
+                    child == option.group || memo.candidate(option).input_groups.contains(&child)
                 })
             })
         };

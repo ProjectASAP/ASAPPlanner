@@ -11,7 +11,6 @@ use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
 use super::shared_producer::{
     add_shared_producer_candidates, spans_groups, Reader, SharedProducer,
 };
-use crate::operator_over_groups::push_candidate_if_new;
 use crate::own_candidate_sizing::find_or_add_sized_group;
 use crate::pass2::asap_aware_cse::{with_resized_build, with_tumbling_window_chain};
 use crate::pass2::memo::shared_configurations::{
@@ -381,7 +380,10 @@ impl SharedProducer for SummaryStates {
         candidate.root_node = node;
         candidate.input_groups = input_groups;
         candidate.accuracy_budget_parts = accuracy_budget_parts;
-        Ok(usize::from(push_candidate_if_new(memo, owner, candidate)))
+        let known = memo.candidates[owner.0 as usize].len();
+        Ok(usize::from(
+            memo.add_candidate(owner, candidate).index == known,
+        ))
     }
 }
 
