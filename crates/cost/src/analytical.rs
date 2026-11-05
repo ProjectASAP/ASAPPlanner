@@ -1489,6 +1489,9 @@ pub enum AnalyticalCostError {
     UnsupportedWithoutDistribution(&'static str),
     #[error("analytical arithmetic overflowed")]
     Overflow,
+    /// A node whose timing and lifetime cannot go together: a planner bug.
+    #[error("{0}")]
+    InvalidPhysicalProperties(asap_types::physical::InvalidPhysicalProperties),
     #[error("candidate has no supported exact or sketch state")]
     UnsupportedCandidate,
     #[error("inconsistent operator statistics: {0}")]

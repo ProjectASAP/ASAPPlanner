@@ -10,7 +10,7 @@
 
 use thiserror::Error;
 
-use crate::physical::PhysicalProperties;
+use crate::physical::{InvalidPhysicalProperties, PhysicalProperties};
 
 /// When a post-ASAP value is produced.
 #[derive(
@@ -154,6 +154,14 @@ pub enum ExecutionDataStateError {
         operator: &'static str,
         fixed: ExecutionTiming,
         assigned: PhysicalProperties,
+    },
+    /// A timed node whose timing and lifetime cannot go together: a bug in
+    /// whatever built the node.
+    #[error("{operator} node: {reason}")]
+    InvalidPhysicalProperties {
+        operator: &'static str,
+        #[source]
+        reason: InvalidPhysicalProperties,
     },
     /// A summary build with a filter placed at ingestion time. An
     /// ingestion-time build reads raw data samples, which carry none of the

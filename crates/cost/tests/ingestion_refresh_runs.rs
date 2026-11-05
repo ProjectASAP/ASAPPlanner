@@ -285,3 +285,29 @@ fn consumers_of_unbounded_windows_count_alone() {
         (2, 2.0)
     );
 }
+
+/// A node whose timing and lifetime cannot go together (kept for one
+/// evaluation at ingestion time) is reported, not skipped.
+#[test]
+fn an_invalid_node_is_reported_not_skipped() {
+    let scan = scan();
+    let mut dag = dag_of(
+        &[chain(&scan, SketchAlgorithm::Kll, 10_000, 6)],
+        Some(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
+    );
+    let chain = dag
+        .nodes
+        .iter_mut()
+        .find(|node| node.lifetime.is_kept())
+        .unwrap();
+    chain.lifetime =
+        asap_types::physical::Lifetime::OneEvaluation(asap_types::physical::Medium::Memory);
+    assert!(matches!(
+        computations(&dag, &[], &[], 3600.0, None),
+        Err(
+            asap_cost::analytical::AnalyticalCostError::InvalidPhysicalProperties(
+                asap_types::physical::InvalidPhysicalProperties::OneEvaluationAtIngestion
+            )
+        )
+    ));
+}

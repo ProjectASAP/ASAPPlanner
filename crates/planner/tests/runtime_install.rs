@@ -1576,7 +1576,7 @@ fn untime(
             ASAPOp::SummaryAgg { .. }
             | ASAPOp::SummaryTumblingWindowChain { .. }
             | ASAPOp::SummaryMerge { .. },
-        ) if node.lifetime.is_kept() => node.physical_properties(),
+        ) if node.lifetime.is_kept() => node.physical_properties().map(Result::unwrap),
         _ => None,
     };
     if let Some(kept) = store(node).or(own) {

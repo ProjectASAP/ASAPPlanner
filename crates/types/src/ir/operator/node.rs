@@ -15,7 +15,7 @@ use crate::ir::properties::guarantee::AccuracyGuarantee;
 use crate::ir::properties::summary_coverage::{NodeToSummaryCoverageCache, SummaryCoverage};
 use crate::ir::schema::Schema;
 use crate::ir::SchemaDerivationError;
-use crate::physical::{Lifetime, PhysicalProperties};
+use crate::physical::{InvalidPhysicalProperties, Lifetime, PhysicalProperties};
 
 /// The output category of an operator, derived from the operation and its
 /// inputs. Matching column schemas do not make categories interchangeable.
@@ -108,9 +108,11 @@ pub struct OperatorNode {
 
 impl OperatorNode {
     /// Its timing and lifetime, once [`crate::ir::apply_physical_properties`]
-    /// has timed it; `None` before.
-    pub fn physical_properties(&self) -> Option<PhysicalProperties> {
-        PhysicalProperties::new(self.timing?, self.lifetime).ok()
+    /// has timed it (`None` before), or why they cannot go together.
+    pub fn physical_properties(
+        &self,
+    ) -> Option<Result<PhysicalProperties, InvalidPhysicalProperties>> {
+        Some(PhysicalProperties::new(self.timing?, self.lifetime))
     }
 
     /// Build a node, deriving its schema and output category. Fails when the

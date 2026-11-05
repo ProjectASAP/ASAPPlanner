@@ -189,6 +189,19 @@ impl PhysicalPropertiesAssignment {
     }
 }
 
+/// `node`'s physical properties once timed (`None` before), or its error
+/// when its timing and lifetime cannot go together.
+fn timed_properties(
+    node: &OperatorNode,
+) -> Result<Option<PhysicalProperties>, ExecutionDataStateError> {
+    node.physical_properties().transpose().map_err(|reason| {
+        ExecutionDataStateError::InvalidPhysicalProperties {
+            operator: node.operator.kind_name(),
+            reason,
+        }
+    })
+}
+
 /// Whether `operator`'s output is a sub-DAG output that materialization may
 /// store: a `SummaryAgg`, a `SummaryTumblingWindowChain` or a `MaintainPopulation`.
 pub(crate) fn is_keepable_state_output<C>(operator: &Operator<C>) -> bool {
@@ -330,9 +343,7 @@ pub fn apply_physical_properties(
     // A root stored at ingestion time is read by the query; one that runs at
     // ingestion time without being stored there produces rows nothing reads.
     if timed.timing == Some(ExecutionTiming::IngestionTime)
-        && !timed
-            .physical_properties()
-            .is_some_and(|p| p.readable_at(ExecutionTiming::QueryTime))
+        && !timed_properties(&timed)?.is_some_and(|p| p.readable_at(ExecutionTiming::QueryTime))
         && data_state(&timed).map(|s| s.primitive) == Some(DataPrimitive::Raw)
     {
         return Err(ExecutionDataStateError::UnstoredIngestionRoot {
@@ -613,9 +624,7 @@ fn validate_asap(
             // `NonASAP` consumer does.
             if timing == ExecutionTiming::QueryTime
                 && avail.timing == ExecutionTiming::IngestionTime
-                && !child
-                    .physical_properties()
-                    .is_some_and(|p| p.readable_at(timing))
+                && !timed_properties(child)?.is_some_and(|p| p.readable_at(timing))
             {
                 return Err(
                     ExecutionDataStateError::UnstoredIngestionInputUnderQueryTimeSummary {
@@ -766,9 +775,7 @@ fn validate_non_asap(
             && (is_exact_accumulator_state(&child.schema).is_ok() || selects_states(node));
         // A query-time consumer may read the stored output of a sub-DAG
         // materialized at ingestion time.
-        let reads_stored = child
-            .physical_properties()
-            .is_some_and(|p| p.readable_at(timing));
+        let reads_stored = timed_properties(child)?.is_some_and(|p| p.readable_at(timing));
         if (s.timing != timing && !reads_stored)
             || (s.primitive != DataPrimitive::Raw && !passes_state)
         {
@@ -1496,6 +1503,29 @@ mod tests {
                 .unwrap();
         assert_eq!(timed.timing, Some(ExecutionTiming::QueryTime));
         assert_eq!(child(&timed).lifetime, KEPT_ACROSS);
+    }
+
+    /// A node placed at ingestion time with a lifetime that cannot go with
+    /// it reports that, not "not stored".
+    #[test]
+    fn an_invalid_timed_node_reports_its_error() {
+        let root = Rc::new(
+            (*placed_at_ingestion(max(scan())))
+                .clone()
+                .with_lifetime(Lifetime::OneEvaluation(Medium::Memory)),
+        );
+        assert_eq!(
+            apply_physical_properties(
+                &root,
+                &PhysicalPropertiesAssignment::default(),
+                &mut NodeToTimedNodeCache::new()
+            )
+            .err(),
+            Some(ExecutionDataStateError::InvalidPhysicalProperties {
+                operator: "Aggregate",
+                reason: crate::physical::InvalidPhysicalProperties::OneEvaluationAtIngestion,
+            })
+        );
     }
 
     /// A root stored at ingestion time is valid: the query reads the stored
