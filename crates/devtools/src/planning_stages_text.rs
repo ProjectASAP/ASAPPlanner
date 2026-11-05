@@ -614,8 +614,9 @@ mod tests {
             has_line(&["IngestionTime  MatAtIngestion(Memory)", "<- {C1}"]),
             "{text}"
         );
+        // G4 and G5 are groups Pass 1 adds beneath the query's aggregates.
         assert!(
-            text.contains("selected choice: G0:c0 G1:c0 G2:c0 G3:c0\n"),
+            text.contains("selected choice: G0:c0 G1:c0 G2:c0 G3:c0 G4:c0 G5:c0\n"),
             "{text}"
         );
         assert!(text.contains("accepted accuracy:\n    q1: "), "{text}");
