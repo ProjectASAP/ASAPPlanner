@@ -539,28 +539,19 @@ pub mod planning {
             if !is_build(&group.logical_node) || group.reached_by_queries().len() < queries {
                 continue;
             }
-            // Each query's consumer of the state, and its own summary candidate
-            // above, which reads the consumer's group (Pass 1 adds the consumer
-            // as a group beneath the query's aggregate).
+            // Each query's own summary candidate, with the candidates on a
+            // path of groups from it down to the state (Pass 1 and the
+            // sharing rules add the consumers between them as groups).
             let reading: Option<std::collections::BTreeMap<usize, usize>> = (0..queries)
                 .map(|q| {
-                    let reader = own_choices(memo, q, |c| {
-                        c.input_groups.iter().any(|child| child.0 as usize == state)
+                    own_builds[q].iter().find_map(|&(group, index)| {
+                        let mut path = path_to_state(memo, group, index, state)?;
+                        path.push((group, index));
+                        Some(path)
                     })
-                    .into_iter()
-                    .next()?;
-                    let top = own_builds[q].iter().copied().find(|&(group, index)| {
-                        asap_logical_asap_optimization::test_support::groups_read_through_added_groups(
-                            memo,
-                            &memo.candidates[group][index].input_groups,
-                        )
-                        .added_groups
-                        .contains(&asap_types::stages::MemoGroupId(reader.0 as u32))
-                    })?;
-                    Some([top, reader])
                 })
                 .collect::<Option<Vec<_>>>()
-                .map(|pairs| pairs.into_iter().flatten().collect());
+                .map(|paths| paths.into_iter().flatten().collect());
             if let Some(choice) = reading {
                 plans.push((
                     format!("shared{state}"),
@@ -602,6 +593,45 @@ pub mod planning {
         // trivially.
         assert!(separate.is_finite(), "a valid plan with a build per query");
         (roots, separate, cheapest(&plans[separate_plans..]))
+    }
+
+    /// The candidates, one per group, on a path from candidate `index` of
+    /// `group` down to group `state` (excluded, and the start excluded):
+    /// each reads the next one's group. `None` when no path reaches `state`.
+    fn path_to_state(
+        memo: &asap_types::stages::Memo,
+        group: usize,
+        index: usize,
+        state: usize,
+    ) -> Option<Vec<(usize, usize)>> {
+        fn below(
+            memo: &asap_types::stages::Memo,
+            group: usize,
+            state: usize,
+            seen: &mut std::collections::HashSet<usize>,
+        ) -> Option<Vec<(usize, usize)>> {
+            if group == state {
+                return Some(Vec::new());
+            }
+            if !seen.insert(group) {
+                return None;
+            }
+            memo.candidates[group]
+                .iter()
+                .enumerate()
+                .find_map(|(index, candidate)| {
+                    candidate.input_groups.iter().find_map(|input| {
+                        let mut path = below(memo, input.0 as usize, state, seen)?;
+                        path.push((group, index));
+                        Some(path)
+                    })
+                })
+        }
+        let mut seen = std::collections::HashSet::from([group]);
+        memo.candidates[group][index]
+            .input_groups
+            .iter()
+            .find_map(|input| below(memo, input.0 as usize, state, &mut seen))
     }
 
     /// The summary builds and rollups (regrouping merges) `roots` read, each

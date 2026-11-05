@@ -10,17 +10,17 @@ use asap_types::stages::{Memo, MemoGroupId};
 /// The groups some inputs read through the groups added beneath Stage 0's
 /// groups ([`groups_read_through_added_groups`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct GroupsReadThroughAddedGroups {
+pub(crate) struct GroupsReadThroughAddedGroups {
     /// The added groups passed through, in the order first reached.
-    pub added_groups: Vec<MemoGroupId>,
+    pub(crate) added_groups: Vec<MemoGroupId>,
     /// The Stage 0 groups reached, in the order first reached.
-    pub stage0_groups: Vec<MemoGroupId>,
+    pub(crate) stage0_groups: Vec<MemoGroupId>,
 }
 
 /// The groups `inputs` read, walking through every added group (each read
 /// through all its candidates' input groups) and stopping at Stage 0's
 /// groups.
-pub fn groups_read_through_added_groups(
+pub(crate) fn groups_read_through_added_groups(
     memo: &Memo,
     inputs: &[MemoGroupId],
 ) -> GroupsReadThroughAddedGroups {
