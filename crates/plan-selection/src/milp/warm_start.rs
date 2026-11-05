@@ -25,7 +25,7 @@
 //! ([`Completion`]); the cheapest feasible one is the start.
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use asap_cost::execution_demand::evaluation_rate;
+use asap_cost::execution_demand::{evaluation_rate, kept_run_rate, KeptRunRate};
 use asap_types::stages::{output_references, PhysicalCandidateId, ReaderConstraint};
 use good_lp::Variable;
 
@@ -364,15 +364,15 @@ impl Estimates {
             .map(|context| match context.kind {
                 ContextKind::Query(query) => query_rate[query],
                 ContextKind::Ingestion(_) => 1.0,
-                ContextKind::Shared(m) if context.at_query_time => {
-                    let readers = milp.queries_reaching(m);
-                    readers
+                ContextKind::Shared(m, kept) => match kept_run_rate(kept) {
+                    KeptRunRate::PerSecondOfArrivingData => 1.0,
+                    KeptRunRate::PerEvaluation | KeptRunRate::PerRequest => milp
+                        .queries_reaching(m)
                         .iter()
                         .map(|&query| query_rate[query])
                         .fold(f64::INFINITY, f64::min)
-                        .min(1e9)
-                }
-                ContextKind::Shared(_) => 1.0,
+                        .min(1e9),
+                },
             })
             .collect();
         let numbers = milp
@@ -491,7 +491,7 @@ impl Derivation<'_, '_> {
                 (context, false)
             } else {
                 match kind {
-                    RunKind::Shareable => match milp.context_of(candidate) {
+                    RunKind::Shareable(_) => match milp.context_of(candidate) {
                         Some(own) => (own, plan.selected.contains(&candidate)),
                         None => return f64::INFINITY,
                     },
@@ -518,7 +518,10 @@ impl Derivation<'_, '_> {
                 }
                 Objective::Latency => numbers.latency_ms,
             };
-            if self.amortized && kind == RunKind::Shareable && self.objective == Objective::Cost {
+            if self.amortized
+                && matches!(kind, RunKind::Shareable(_))
+                && self.objective == Objective::Cost
+            {
                 own /= self.estimates.readers[candidate.0].max(1) as f64;
             }
             let mut total = own;
@@ -527,7 +530,7 @@ impl Derivation<'_, '_> {
                     .iter()
                     .filter(|producer| milp.choice[run_context].contains_key(producer))
                     .filter(|producer| {
-                        kind == RunKind::Shareable
+                        matches!(kind, RunKind::Shareable(_))
                             || inputs.slot[producer.0] != inputs.slot[candidate.0]
                     })
                     .map(|&producer| self.estimate(plan, memo, run_context, producer))
@@ -635,7 +638,7 @@ impl Derivation<'_, '_> {
             return Ok(());
         }
         match inputs.kind[candidate.0] {
-            RunKind::Shareable => {
+            RunKind::Shareable(_) => {
                 if plan.selected.contains(&candidate) {
                     return Ok(());
                 }
@@ -689,7 +692,7 @@ fn runs_reached(
             (context, false)
         } else {
             match inputs.kind[candidate.0] {
-                RunKind::Shareable => match milp.context_of(candidate) {
+                RunKind::Shareable(_) => match milp.context_of(candidate) {
                     Some(own) => (own, true),
                     None => continue,
                 },

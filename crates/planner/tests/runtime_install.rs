@@ -31,7 +31,7 @@ use asap_types::ir::{
     apply_physical_properties_to_roots, ASAPOp, OperatorNode, PhysicalPropertiesAssignment,
     QueryRoot,
 };
-use asap_types::physical::{Lifetime, PhysicalProperties};
+use asap_types::physical::{KeptProperties, Lifetime};
 use asap_types::stages::HowToComputeAggregateMeasure;
 use asap_types::stages::PruneReason;
 use futures::{executor::block_on, StreamExt};
@@ -1516,7 +1516,7 @@ async fn a_quantile_shared_with_a_ratio_is_sized_for_the_ratio() {
 /// the others as Stage 2 chose, and the plan timed again: how a test makes
 /// the plan store a shape Stage 3 does not select today.
 struct StoredAsForced {
-    store: fn(&OperatorNode) -> Option<PhysicalProperties>,
+    store: fn(&OperatorNode) -> Option<KeptProperties>,
 }
 
 impl OptimizationPass for StoredAsForced {
@@ -1554,7 +1554,7 @@ impl OptimizationPass for StoredAsForced {
 /// `assignment` for every node of its sub-DAG.
 fn untime(
     node: &Rc<OperatorNode>,
-    store: fn(&OperatorNode) -> Option<PhysicalProperties>,
+    store: fn(&OperatorNode) -> Option<KeptProperties>,
     untimed: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
     assignment: &mut PhysicalPropertiesAssignment,
 ) -> Rc<OperatorNode> {
@@ -1576,7 +1576,7 @@ fn untime(
             ASAPOp::SummaryAgg { .. }
             | ASAPOp::SummaryTumblingWindowChain { .. }
             | ASAPOp::SummaryMerge { .. },
-        ) if node.lifetime.is_kept() => node.physical_properties().map(Result::unwrap),
+        ) => node.physical_properties().and_then(|p| p.unwrap().kept()),
         _ => None,
     };
     if let Some(kept) = store(node).or(own) {
@@ -1587,15 +1587,15 @@ fn untime(
 }
 
 /// Every `SummaryAgg` built at ingestion time.
-fn summaries_at_ingestion(node: &OperatorNode) -> Option<PhysicalProperties> {
+fn summaries_at_ingestion(node: &OperatorNode) -> Option<KeptProperties> {
     matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. }))
-        .then(|| PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION)
+        .then(|| KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION)
 }
 
 /// Every `SummaryMerge` built at query time and kept across evaluations.
-fn merges_kept(node: &OperatorNode) -> Option<PhysicalProperties> {
+fn merges_kept(node: &OperatorNode) -> Option<KeptProperties> {
     matches!(node.asap(), Some(ASAPOp::SummaryMerge { .. }))
-        .then(|| PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME)
+        .then(|| KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME)
 }
 
 /// Exact PromQL `queries`, every minute, over 6 ingesting series of `m`
@@ -1626,7 +1626,7 @@ fn exact_workload(queries: &[&str], tail: &str) -> PlanningWorkload {
 async fn forced_plan_json(
     workload: &PlanningWorkload,
     capabilities: &DeploymentCapabilities,
-    store: fn(&OperatorNode) -> Option<PhysicalProperties>,
+    store: fn(&OperatorNode) -> Option<KeptProperties>,
 ) -> String {
     let pass = StoredAsForced { store };
     let mut input = UserInput::new(

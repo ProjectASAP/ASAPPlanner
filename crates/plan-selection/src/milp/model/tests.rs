@@ -238,7 +238,7 @@ fn solve_and_check_by(
     let (plan, _) = plan_cost(
         plan_dag,
         &node_map(plan_dag),
-        &asap_cost::kept_tumbling_window_chains(plan_dag),
+        &asap_cost::kept_tumbling_window_chains(plan_dag).unwrap(),
         &recurrence,
         &ranges,
         &fixture.data,

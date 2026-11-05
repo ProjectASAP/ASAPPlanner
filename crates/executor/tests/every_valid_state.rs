@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use planner_types::ir::operator::operator_properties::{Reduction, Source};
 use planner_types::ir::physical_export::compile_physical_asap_dag;
+use planner_types::ir::properties::ExecutionTiming;
 use planner_types::ir::scalar::ColumnRef;
 use planner_types::ir::schema::{
     DataType, ExactKind, ExactParams, Field, FieldDataType, Schema, SummaryUpdate,
@@ -14,7 +15,7 @@ use planner_types::ir::{
     apply_physical_properties, ASAPOp, NodeToTimedNodeCache, NonASAPOp, Operator, OperatorNode,
     PhysicalPropertiesAssignment, TimeRangeKind,
 };
-use planner_types::physical::PhysicalProperties;
+use planner_types::physical::{KeptProperties, PhysicalProperties};
 
 /// `FinalizeExactAccumulator(SummaryAgg(Sum)(TimeRange 5 min(Scan latency_ms)))`.
 fn plan() -> Rc<OperatorNode> {
@@ -65,8 +66,8 @@ fn physical_planner_over_every_valid_state() {
     for properties in PhysicalProperties::every_valid() {
         let root = plan();
         let mut assignment = PhysicalPropertiesAssignment::default();
-        if properties.lifetime().is_kept() {
-            assignment.set(root.children()[0], properties);
+        if let Some(kept) = properties.kept() {
+            assignment.set(root.children()[0], kept);
         }
         let timed = apply_physical_properties(&root, &assignment, &mut NodeToTimedNodeCache::new())
             .unwrap();
@@ -76,20 +77,20 @@ fn physical_planner_over_every_valid_state() {
             .unwrap_or_else(|error| panic!("{properties:?}: {error}"));
         let build = compiled.operator_name(2);
         match properties {
-            PhysicalProperties::KeptAcrossEvaluationsAtIngestion(_)
-            | PhysicalProperties::KeptAcrossEvaluationsAtQueryTime(_) => {
+            PhysicalProperties::Kept(KeptProperties::AcrossEvaluationsAtIngestion(_))
+            | PhysicalProperties::Kept(KeptProperties::AcrossEvaluationsAtQueryTime(_)) => {
                 assert_eq!(build, Some("MaterializedView"), "{properties:?}");
             }
-            PhysicalProperties::NotKeptAtQueryTime
-            | PhysicalProperties::KeptForOneEvaluationAtQueryTime(_) => {
+            PhysicalProperties::NotKept(ExecutionTiming::QueryTime)
+            | PhysicalProperties::Kept(KeptProperties::ForOneEvaluationAtQueryTime(_)) => {
                 assert_ne!(build, Some("MaterializedView"), "{properties:?}");
                 assert!(build.is_some(), "{properties:?}");
             }
-            PhysicalProperties::NotKeptAtIngestion => {
+            PhysicalProperties::NotKept(ExecutionTiming::IngestionTime) => {
                 // Not assignable to a summary build: it lands at query time.
                 assert_eq!(
                     dag.nodes[2].physical_properties(),
-                    Ok(PhysicalProperties::NotKeptAtQueryTime)
+                    Ok(PhysicalProperties::NotKept(ExecutionTiming::QueryTime))
                 );
             }
         }

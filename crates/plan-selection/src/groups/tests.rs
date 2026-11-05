@@ -81,7 +81,7 @@ pub(super) fn catalog(
 pub(super) fn candidate(node: usize, producers: &[&[usize]], output: bool) -> PhysicalCandidate {
     PhysicalCandidate {
         operator_node: OperatorNodeOfCandidateForMemoGroupId(node),
-        properties: PhysicalProperties::NotKeptAtQueryTime,
+        properties: PhysicalProperties::NotKept(ExecutionTiming::QueryTime),
         producer_candidates_per_input: producers
             .iter()
             .map(|input| {
@@ -172,7 +172,7 @@ fn dominance_needs_every_condition() {
         OperatorKindForReaders::Other(std::mem::discriminant(&rows_node(1).operator), "Values");
     let key = DominanceKey {
         group: MemoGroupId(3),
-        properties: PhysicalProperties::NotKeptAtQueryTime,
+        properties: PhysicalProperties::NotKept(ExecutionTiming::QueryTime),
         shareable: false,
         producer_candidates_per_input: &producers,
         readers: vec![(PhysicalCandidateId(9), 0)],
@@ -206,14 +206,14 @@ fn dominance_needs_every_condition() {
         (
             "timing",
             DominanceKey {
-                properties: PhysicalProperties::NotKeptAtIngestion,
+                properties: PhysicalProperties::NotKept(ExecutionTiming::IngestionTime),
                 ..key.clone()
             },
         ),
         (
             "lifetime",
             DominanceKey {
-                properties: PhysicalProperties::KEPT_IN_MEMORY_FOR_ONE_EVALUATION,
+                properties: PhysicalProperties::Kept(KeptProperties::IN_MEMORY_FOR_ONE_EVALUATION),
                 ..key.clone()
             },
         ),
@@ -368,7 +368,7 @@ fn pruning_keeps_the_smallest_equal_class_and_incomparable_ones() {
     let schema = rows_node(1).schema.clone();
     let key = DominanceKey {
         group: MemoGroupId(0),
-        properties: PhysicalProperties::NotKeptAtQueryTime,
+        properties: PhysicalProperties::NotKept(ExecutionTiming::QueryTime),
         shareable: false,
         producer_candidates_per_input: &producers,
         readers: Vec::new(),
@@ -482,7 +482,7 @@ fn shared_middle() -> PhysicalASAPMemoCandidates {
     let candidates = vec![
         candidate(0, &[], false),
         PhysicalCandidate {
-            properties: PhysicalProperties::KEPT_IN_MEMORY_FOR_ONE_EVALUATION,
+            properties: PhysicalProperties::Kept(KeptProperties::IN_MEMORY_FOR_ONE_EVALUATION),
             ..candidate(1, &[&[0]], false)
         },
         candidate(2, &[&[1]], true),
@@ -518,12 +518,17 @@ fn execution_contexts_on_a_hand_built_catalog() {
             (ContextKind::Query(0), vec![middle, top_0]),
             (ContextKind::Query(1), vec![middle, top_1]),
             (ContextKind::Query(2), vec![lone]),
-            (ContextKind::Shared(middle), vec![leaf]),
+            (
+                ContextKind::Shared(middle, KeptProperties::IN_MEMORY_FOR_ONE_EVALUATION),
+                vec![leaf]
+            ),
         ]
     );
     assert_eq!(inputs.context_of_shareable, BTreeMap::from([(middle, 3)]));
     assert!(inputs.contexts[3].computes(RunKind::PerContext));
-    assert!(!inputs.contexts[3].computes(RunKind::Shareable));
+    assert!(!inputs.contexts[3].computes(RunKind::Shareable(
+        KeptProperties::IN_MEMORY_FOR_ONE_EVALUATION
+    )));
     assert_eq!(
         inputs.output_candidates,
         vec![vec![top_0], vec![top_1], vec![lone]]
@@ -642,7 +647,10 @@ fn two_queries_share_a_pane_chain_through_the_real_pipeline() {
     assert!(!shared_chains.is_empty());
     for &chain in &shared_chains {
         let context = inputs.context_of_shareable[&chain];
-        assert_eq!(inputs.contexts[context].kind, ContextKind::Shared(chain));
+        assert!(matches!(
+            inputs.contexts[context].kind,
+            ContextKind::Shared(own, _) if own == chain
+        ));
     }
     // Every context computes only candidates of its own kind and reads the
     // others across its boundary.
@@ -651,7 +659,7 @@ fn two_queries_share_a_pane_chain_through_the_real_pipeline() {
             let kind = inputs.kind[option.0];
             assert!(
                 context.computes(kind)
-                    || kind == RunKind::Shareable
+                    || matches!(kind, RunKind::Shareable(_))
                     || (kind == RunKind::Ingestion
                         && !matches!(context.kind, ContextKind::Ingestion(_)))
             );
@@ -986,9 +994,9 @@ fn ingestion_views_of_three_windows_and_an_unbounded_one() -> PhysicalASAPMemoCa
     ];
     let at_ingestion = |node: usize, producers: &[&[usize]], view: bool| PhysicalCandidate {
         properties: if view {
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION
+            PhysicalProperties::Kept(KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION)
         } else {
-            PhysicalProperties::NotKeptAtIngestion
+            PhysicalProperties::NotKept(ExecutionTiming::IngestionTime)
         },
         ..candidate(node, producers, false)
     };
@@ -1086,11 +1094,9 @@ fn producers_of_an_input_read_one_view_window() {
 fn run_kind_over_every_valid_state() {
     for properties in PhysicalProperties::every_valid() {
         let expected = match properties {
-            PhysicalProperties::NotKeptAtQueryTime => RunKind::PerContext,
-            PhysicalProperties::NotKeptAtIngestion => RunKind::Ingestion,
-            PhysicalProperties::KeptAcrossEvaluationsAtIngestion(_)
-            | PhysicalProperties::KeptForOneEvaluationAtQueryTime(_)
-            | PhysicalProperties::KeptAcrossEvaluationsAtQueryTime(_) => RunKind::Shareable,
+            PhysicalProperties::NotKept(ExecutionTiming::QueryTime) => RunKind::PerContext,
+            PhysicalProperties::NotKept(ExecutionTiming::IngestionTime) => RunKind::Ingestion,
+            PhysicalProperties::Kept(kept) => RunKind::Shareable(kept),
         };
         assert_eq!(run_kind(properties), expected, "{properties:?}");
     }

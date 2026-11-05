@@ -12,7 +12,9 @@ use asap_types::ir::{
     apply_physical_properties, ASAPOp, NodeToTimedNodeCache, NonASAPOp, Operator, OperatorNode,
     PhysicalPropertiesAssignment, QueryRoot,
 };
-use asap_types::physical::{InvalidPhysicalProperties, Lifetime, Medium, PhysicalProperties};
+use asap_types::physical::{
+    InvalidPhysicalProperties, KeptProperties, Lifetime, Medium, PhysicalProperties,
+};
 use std::rc::Rc;
 
 /// Scan(t) → SummaryAgg(sum by key) → FinalizeExactAccumulator, untimed.
@@ -51,7 +53,10 @@ fn timed_at_ingestion() -> Rc<OperatorNode> {
     let mut assignment = PhysicalPropertiesAssignment::default();
     assignment.set(
         root.children()[0],
-        PhysicalProperties::new(ExecutionTiming::IngestionTime, ON_DISK).unwrap(),
+        PhysicalProperties::new(ExecutionTiming::IngestionTime, ON_DISK)
+            .unwrap()
+            .kept()
+            .unwrap(),
     );
     apply_physical_properties(&root, &assignment, &mut NodeToTimedNodeCache::new()).unwrap()
 }
@@ -786,19 +791,19 @@ fn export_validation_over_every_valid_state() {
         let root = plan();
         let build = root.children()[0];
         let mut assignment = PhysicalPropertiesAssignment::default();
-        if properties.lifetime().is_kept() {
-            assignment.set(build, properties);
+        if let Some(kept) = properties.kept() {
+            assignment.set(build, kept);
         }
         let timed = apply_physical_properties(&root, &assignment, &mut NodeToTimedNodeCache::new())
             .unwrap();
         let mut dag = compile_physical_asap_dag(&timed).unwrap();
         let [scan, build, _finalize] = [0, 1, 2].map(|i| dag.nodes[i].physical_properties());
         match properties {
-            PhysicalProperties::NotKeptAtQueryTime => {
+            PhysicalProperties::NotKept(ExecutionTiming::QueryTime) => {
                 assert_eq!(build, Ok(properties));
                 dag.validate().unwrap();
             }
-            PhysicalProperties::NotKeptAtIngestion => {
+            PhysicalProperties::NotKept(ExecutionTiming::IngestionTime) => {
                 dag.nodes[1].output_state.timing = ExecutionTiming::IngestionTime;
                 assert_eq!(
                     dag.validate(),
@@ -809,13 +814,16 @@ fn export_validation_over_every_valid_state() {
                     )
                 );
             }
-            PhysicalProperties::KeptAcrossEvaluationsAtIngestion(_) => {
+            PhysicalProperties::Kept(KeptProperties::AcrossEvaluationsAtIngestion(_)) => {
                 assert_eq!(build, Ok(properties));
-                assert_eq!(scan, Ok(PhysicalProperties::NotKeptAtIngestion));
+                assert_eq!(
+                    scan,
+                    Ok(PhysicalProperties::NotKept(ExecutionTiming::IngestionTime))
+                );
                 dag.validate().unwrap();
             }
-            PhysicalProperties::KeptForOneEvaluationAtQueryTime(_)
-            | PhysicalProperties::KeptAcrossEvaluationsAtQueryTime(_) => {
+            PhysicalProperties::Kept(KeptProperties::ForOneEvaluationAtQueryTime(_))
+            | PhysicalProperties::Kept(KeptProperties::AcrossEvaluationsAtQueryTime(_)) => {
                 assert_eq!(build, Ok(properties));
                 dag.validate().unwrap();
             }

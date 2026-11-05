@@ -277,7 +277,7 @@ fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) 
         apply_physical_properties, NodeToTimedNodeCache, Operator as IrOperator, OperatorNode,
         PhysicalPropertiesAssignment,
     };
-    use planner_types::physical::PhysicalProperties;
+    use planner_types::physical::KeptProperties;
     fn unpinned(node: &Rc<OperatorNode>) -> Rc<OperatorNode> {
         let mut copy = (**node).clone();
         copy.operator = node.operator.map_children(unpinned);
@@ -295,7 +295,7 @@ fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) 
         if matches!(node.operator, IrOperator::ASAP(ASAPOp::SummaryAgg { .. })) {
             assignment.set(
                 &node,
-                PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+                KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
             );
         }
     }

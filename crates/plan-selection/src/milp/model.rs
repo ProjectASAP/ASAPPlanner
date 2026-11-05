@@ -367,7 +367,10 @@ impl<'a> SelectionMilp<'a> {
         context: usize,
         candidate: PhysicalCandidateId,
     ) -> Option<Variable> {
-        if self.inputs.contexts[context].kind == ContextKind::Shared(candidate) {
+        if matches!(
+            self.inputs.contexts[context].kind,
+            ContextKind::Shared(own, _) if own == candidate
+        ) {
             return self.selected.get(&candidate).copied();
         }
         if !self.computes(context, candidate) {
@@ -404,7 +407,7 @@ impl<'a> SelectionMilp<'a> {
         match self.inputs.contexts[context].kind {
             ContextKind::Query(_) => Scope::Queries,
             ContextKind::Ingestion(_) => Scope::Ingestion,
-            ContextKind::Shared(_) => Scope::SharedContexts,
+            ContextKind::Shared(..) => Scope::SharedContexts,
         }
     }
 
@@ -437,7 +440,7 @@ impl<'a> SelectionMilp<'a> {
                     runs.push((context, candidate));
                 }
             }
-            if let ContextKind::Shared(own) = self.inputs.contexts[context].kind {
+            if let ContextKind::Shared(own, _) = self.inputs.contexts[context].kind {
                 if self.selected.contains_key(&own) {
                     runs.push((context, own));
                 }
@@ -573,7 +576,7 @@ fn choice_variables(milp: &mut SelectionMilp<'_>) {
                     }
                 }
             }
-            ContextKind::Shared(own) => {
+            ContextKind::Shared(own, _) => {
                 for (input, producers) in inputs.producer_candidates_per_input[own.0]
                     .iter()
                     .enumerate()
@@ -622,9 +625,9 @@ fn choice_variables(milp: &mut SelectionMilp<'_>) {
         milp.selected.insert(shareable, selected);
     }
     for (context, data) in inputs.contexts.iter().enumerate() {
-        if let ContextKind::Shared(reader) = data.kind {
+        if let ContextKind::Shared(reader, _) = data.kind {
             for &option in &data.options {
-                if inputs.kind[option.0] == RunKind::Shareable {
+                if matches!(inputs.kind[option.0], RunKind::Shareable(_)) {
                     milp.shared_readers.entry(option).or_default().push(reader);
                 }
             }
@@ -692,7 +695,7 @@ fn structural_rows(milp: &mut SelectionMilp<'_>) {
                 }
             } else {
                 match kind {
-                    RunKind::Shareable => {
+                    RunKind::Shareable(_) => {
                         let selected = milp.selected[&option];
                         milp.builder
                             .row("3 validity (boundary)", constraint!(variable <= selected));
@@ -716,7 +719,7 @@ fn structural_rows(milp: &mut SelectionMilp<'_>) {
                 }
             }
         }
-        if let ContextKind::Shared(own) = data.kind {
+        if let ContextKind::Shared(own, _) = data.kind {
             let selected = milp.selected[&own];
             for input in 0..inputs.producer_candidates_per_input[own.0].len() {
                 let sum: Expression = inputs.producer_candidates_per_input[own.0][input]
@@ -770,7 +773,7 @@ fn structural_rows(milp: &mut SelectionMilp<'_>) {
                     }
                     Reader::Output(_) => reads += 1.0,
                     Reader::OwnInput(_) => {
-                        if let ContextKind::Shared(own) = data.kind {
+                        if let ContextKind::Shared(own, _) = data.kind {
                             reads += milp.selected[&own];
                         }
                     }
@@ -792,7 +795,7 @@ fn structural_rows(milp: &mut SelectionMilp<'_>) {
     let mut reads_of: BTreeMap<PhysicalCandidateId, Expression> = BTreeMap::new();
     for choices in &milp.choice {
         for (&option, &variable) in choices {
-            if inputs.kind[option.0] == RunKind::Shareable {
+            if matches!(inputs.kind[option.0], RunKind::Shareable(_)) {
                 *reads_of.entry(option).or_default() += variable;
             }
         }
@@ -886,7 +889,7 @@ fn acyclic_context_rows(milp: &mut SelectionMilp<'_>) {
     // The node a read of `option` in `context` resolves to.
     let node_read = |context: usize, option: PhysicalCandidateId| -> Option<usize> {
         let run_context = match inputs.kind[option.0] {
-            RunKind::Shareable => milp.context_of(option)?,
+            RunKind::Shareable(_) => milp.context_of(option)?,
             RunKind::Ingestion => milp.ingestion_context_read_by(context)?,
             RunKind::PerContext => return None,
         };
@@ -1047,7 +1050,9 @@ pub(crate) fn shareables_readers_first(milp: &SelectionMilp<'_>) -> Vec<Physical
             stack.push((node, true));
             let context = inputs.context_of_shareable[&node];
             for &option in &inputs.contexts[context].options {
-                if inputs.kind[option.0] == RunKind::Shareable && !state.contains_key(&option) {
+                if matches!(inputs.kind[option.0], RunKind::Shareable(_))
+                    && !state.contains_key(&option)
+                {
                     stack.push((option, false));
                 }
             }
@@ -1068,7 +1073,7 @@ fn reach_rows(milp: &mut SelectionMilp<'_>) {
     let mut may_reach: BTreeMap<PhysicalCandidateId, BTreeSet<usize>> = BTreeMap::new();
     for query in 0..milp.query_count() {
         for &option in &inputs.contexts[query].options {
-            if inputs.kind[option.0] == RunKind::Shareable {
+            if matches!(inputs.kind[option.0], RunKind::Shareable(_)) {
                 may_reach.entry(option).or_default().insert(query);
             }
         }
@@ -1077,7 +1082,7 @@ fn reach_rows(milp: &mut SelectionMilp<'_>) {
         let queries = may_reach.get(&shareable).cloned().unwrap_or_default();
         let context = inputs.context_of_shareable[&shareable];
         for &option in &inputs.contexts[context].options {
-            if inputs.kind[option.0] == RunKind::Shareable {
+            if matches!(inputs.kind[option.0], RunKind::Shareable(_)) {
                 may_reach
                     .entry(option)
                     .or_default()
@@ -1184,14 +1189,14 @@ fn shareables_needing_exact_reach(milp: &SelectionMilp<'_>) -> BTreeSet<Physical
         if !counted {
             continue;
         }
-        if inputs.kind[candidate.0] == RunKind::Shareable {
+        if matches!(inputs.kind[candidate.0], RunKind::Shareable(_)) {
             stack.push(*candidate);
             // Highest shared materialization reads the reach of its
             // reading contexts.
             stack.extend(milp.shared_readers.get(candidate).into_iter().flatten());
         }
         for (context, data) in inputs.contexts.iter().enumerate() {
-            if let ContextKind::Shared(own) = data.kind {
+            if let ContextKind::Shared(own, _) = data.kind {
                 if milp.choice[context].contains_key(candidate) {
                     stack.push(own);
                 }
@@ -1247,7 +1252,7 @@ fn reader_constraint_rows(milp: &mut SelectionMilp<'_>) {
         (count, most)
     };
     for (candidate, constraints) in constraints {
-        let shareable = inputs.kind[candidate.0] == RunKind::Shareable;
+        let shareable = matches!(inputs.kind[candidate.0], RunKind::Shareable(_));
         // Its uses: (context, p) per context holding it as an option it
         // computes.
         let uses: Vec<(usize, Variable)> = (0..milp.choice.len())
@@ -1279,7 +1284,7 @@ fn reader_constraint_rows(milp: &mut SelectionMilp<'_>) {
                     for &(context, used) in &uses {
                         let count = match inputs.contexts[context].kind {
                             ContextKind::Query(_) => Expression::from(1.0),
-                            ContextKind::Shared(m) => reach_count(milp, &queries, m).0,
+                            ContextKind::Shared(m, _) => reach_count(milp, &queries, m).0,
                             ContextKind::Ingestion(_) => {
                                 milp.note_inexact(
                                     "minimum readers of a candidate of an I_r (forbidden)",
@@ -1333,7 +1338,7 @@ fn reader_constraint_rows(milp: &mut SelectionMilp<'_>) {
                     for &(context, used) in &uses {
                         match inputs.contexts[context].kind {
                             ContextKind::Query(_) => {}
-                            ContextKind::Shared(m) => {
+                            ContextKind::Shared(m, _) => {
                                 let (count, most) = reach_count(milp, &queries, m);
                                 let slack = (most - 1.0).max(0.0);
                                 milp.builder.row(
@@ -1386,7 +1391,7 @@ fn reader_constraint_rows(milp: &mut SelectionMilp<'_>) {
                         }
                     }
                     for &(context, used) in &uses {
-                        if let ContextKind::Shared(m) = inputs.contexts[context].kind {
+                        if let ContextKind::Shared(m, _) = inputs.contexts[context].kind {
                             if let (Some(&l), Some(&r)) =
                                 (milp.reach.get(&(left, m)), milp.reach.get(&(right, m)))
                             {
@@ -1422,7 +1427,7 @@ fn forbid_reach(
                     .row("9 reader constraints", constraint!(used <= 0.0));
             }
             ContextKind::Query(_) => {}
-            ContextKind::Shared(m) => {
+            ContextKind::Shared(m, _) => {
                 if let Some(&reach) = milp.reach.get(&(query, m)) {
                     milp.builder
                         .row("9 reader constraints", constraint!(reach + used <= 1.0));
@@ -1457,7 +1462,7 @@ fn context_work(milp: &mut SelectionMilp<'_>, context: usize) -> (Expression, f6
         .copied()
         .filter(|&c| milp.computes(context, c))
         .collect();
-    if let ContextKind::Shared(own) = milp.inputs.contexts[context].kind {
+    if let ContextKind::Shared(own, _) = milp.inputs.contexts[context].kind {
         runs.push(own);
     }
     // Per slot, only the slowest candidate can count (one per slot).
@@ -1610,10 +1615,10 @@ fn accuracy_rows(milp: &mut SelectionMilp<'_>) {
                     milp.choice[context].get(&candidate).map(|&p| p.into())
                 }
                 ContextKind::Query(_) => None,
-                ContextKind::Shared(own) if own == candidate => {
+                ContextKind::Shared(own, _) if own == candidate => {
                     milp.reach.get(&(query, candidate)).map(|&a| a.into())
                 }
-                ContextKind::Shared(own) => match milp.reach.get(&(query, own)) {
+                ContextKind::Shared(own, _) => match milp.reach.get(&(query, own)) {
                     Some(&above) => {
                         let p = milp.choice[context][&candidate];
                         Some(
@@ -1644,7 +1649,7 @@ fn accuracy_rows(milp: &mut SelectionMilp<'_>) {
             };
             if usable {
                 places.insert(match inputs.contexts[context].kind {
-                    ContextKind::Shared(own) if own == candidate => (context, None),
+                    ContextKind::Shared(own, _) if own == candidate => (context, None),
                     _ => (context, Some(inputs.slot[candidate.0])),
                 });
                 counted.push((

@@ -13,7 +13,9 @@
 use crate::ir::properties::ExecutionTiming;
 
 /// Where a kept output is stored.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum Medium {
     Memory,
     Disk,
@@ -54,35 +56,60 @@ pub enum InvalidPhysicalProperties {
     OneEvaluationAtIngestion,
 }
 
-/// When a candidate runs and how long its output lives: one of the valid
-/// rows of the table in this module's documentation, each a variant, so an
-/// invalid pair cannot be built or matched.
+/// When a candidate runs and how long its output lives: not kept at a
+/// timing, or one of the kept states. Each valid row of the table in this
+/// module's documentation is one value, so an invalid pair cannot be built
+/// or matched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PhysicalProperties {
-    /// Ingestion time, not kept: runs inside the ingestion work that reads it.
-    NotKeptAtIngestion,
+    /// Not kept: runs inside the execution that reads it (each reader's at
+    /// query time, the ingestion work that reads it at ingestion time).
+    NotKept(ExecutionTiming),
+    /// Kept beyond its reader.
+    Kept(KeptProperties),
+}
+
+/// A kept output: where and how long it is kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum KeptProperties {
     /// Ingestion time, kept until a query reads it.
-    KeptAcrossEvaluationsAtIngestion(Medium),
-    /// Query time, not kept: runs in each reader's execution.
-    NotKeptAtQueryTime,
+    AcrossEvaluationsAtIngestion(Medium),
     /// Query time, kept until the evaluation's readers finish.
-    KeptForOneEvaluationAtQueryTime(Medium),
+    ForOneEvaluationAtQueryTime(Medium),
     /// Query time, kept across evaluations (a tumbling-window chain that
     /// builds its newest window at each evaluation).
-    KeptAcrossEvaluationsAtQueryTime(Medium),
+    AcrossEvaluationsAtQueryTime(Medium),
+}
+
+impl KeptProperties {
+    /// The states Stage 2 offers: every kept state in memory (no disk store
+    /// in the executor yet, #1217).
+    pub const IN_MEMORY_FOR_ONE_EVALUATION: Self =
+        Self::ForOneEvaluationAtQueryTime(Medium::Memory);
+    pub const IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION: Self =
+        Self::AcrossEvaluationsAtIngestion(Medium::Memory);
+    pub const IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME: Self =
+        Self::AcrossEvaluationsAtQueryTime(Medium::Memory);
+
+    pub fn timing(self) -> ExecutionTiming {
+        match self {
+            Self::AcrossEvaluationsAtIngestion(_) => ExecutionTiming::IngestionTime,
+            Self::ForOneEvaluationAtQueryTime(_) | Self::AcrossEvaluationsAtQueryTime(_) => {
+                ExecutionTiming::QueryTime
+            }
+        }
+    }
+
+    pub fn lifetime(self) -> Lifetime {
+        match self {
+            Self::ForOneEvaluationAtQueryTime(medium) => Lifetime::OneEvaluation(medium),
+            Self::AcrossEvaluationsAtIngestion(medium)
+            | Self::AcrossEvaluationsAtQueryTime(medium) => Lifetime::AcrossEvaluations(medium),
+        }
+    }
 }
 
 impl PhysicalProperties {
-    /// Query time, kept in memory until the evaluation's readers finish.
-    pub const KEPT_IN_MEMORY_FOR_ONE_EVALUATION: Self =
-        Self::KeptForOneEvaluationAtQueryTime(Medium::Memory);
-    /// Ingestion time, kept in memory until a query reads it.
-    pub const KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION: Self =
-        Self::KeptAcrossEvaluationsAtIngestion(Medium::Memory);
-    /// Query time, kept in memory across evaluations.
-    pub const KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME: Self =
-        Self::KeptAcrossEvaluationsAtQueryTime(Medium::Memory);
-
     /// The properties `timing` and `lifetime`, unless they cannot go together.
     pub fn new(
         timing: ExecutionTiming,
@@ -90,40 +117,41 @@ impl PhysicalProperties {
     ) -> Result<Self, InvalidPhysicalProperties> {
         use ExecutionTiming::{IngestionTime, QueryTime};
         match (timing, lifetime) {
-            (IngestionTime, Lifetime::None) => Ok(Self::NotKeptAtIngestion),
+            (_, Lifetime::None) => Ok(Self::NotKept(timing)),
             (IngestionTime, Lifetime::OneEvaluation(_)) => {
                 Err(InvalidPhysicalProperties::OneEvaluationAtIngestion)
             }
-            (IngestionTime, Lifetime::AcrossEvaluations(medium)) => {
-                Ok(Self::KeptAcrossEvaluationsAtIngestion(medium))
-            }
-            (QueryTime, Lifetime::None) => Ok(Self::NotKeptAtQueryTime),
-            (QueryTime, Lifetime::OneEvaluation(medium)) => {
-                Ok(Self::KeptForOneEvaluationAtQueryTime(medium))
-            }
-            (QueryTime, Lifetime::AcrossEvaluations(medium)) => {
-                Ok(Self::KeptAcrossEvaluationsAtQueryTime(medium))
-            }
+            (IngestionTime, Lifetime::AcrossEvaluations(medium)) => Ok(Self::Kept(
+                KeptProperties::AcrossEvaluationsAtIngestion(medium),
+            )),
+            (QueryTime, Lifetime::OneEvaluation(medium)) => Ok(Self::Kept(
+                KeptProperties::ForOneEvaluationAtQueryTime(medium),
+            )),
+            (QueryTime, Lifetime::AcrossEvaluations(medium)) => Ok(Self::Kept(
+                KeptProperties::AcrossEvaluationsAtQueryTime(medium),
+            )),
         }
     }
 
     pub fn timing(self) -> ExecutionTiming {
         match self {
-            Self::NotKeptAtIngestion | Self::KeptAcrossEvaluationsAtIngestion(_) => {
-                ExecutionTiming::IngestionTime
-            }
-            Self::NotKeptAtQueryTime
-            | Self::KeptForOneEvaluationAtQueryTime(_)
-            | Self::KeptAcrossEvaluationsAtQueryTime(_) => ExecutionTiming::QueryTime,
+            Self::NotKept(timing) => timing,
+            Self::Kept(kept) => kept.timing(),
         }
     }
 
     pub fn lifetime(self) -> Lifetime {
         match self {
-            Self::NotKeptAtIngestion | Self::NotKeptAtQueryTime => Lifetime::None,
-            Self::KeptForOneEvaluationAtQueryTime(medium) => Lifetime::OneEvaluation(medium),
-            Self::KeptAcrossEvaluationsAtIngestion(medium)
-            | Self::KeptAcrossEvaluationsAtQueryTime(medium) => Lifetime::AcrossEvaluations(medium),
+            Self::NotKept(_) => Lifetime::None,
+            Self::Kept(kept) => kept.lifetime(),
+        }
+    }
+
+    /// How it is kept, if it is.
+    pub fn kept(self) -> Option<KeptProperties> {
+        match self {
+            Self::NotKept(_) => None,
+            Self::Kept(kept) => Some(kept),
         }
     }
 
@@ -133,42 +161,60 @@ impl PhysicalProperties {
     pub fn readable_at(self, reader: ExecutionTiming) -> bool {
         use ExecutionTiming::{IngestionTime, QueryTime};
         match (self, reader) {
-            (Self::NotKeptAtIngestion, IngestionTime) => true,
-            // A query reads an ingestion-time output only where it is kept.
-            (Self::NotKeptAtIngestion, QueryTime) => false,
-            (Self::KeptAcrossEvaluationsAtIngestion(_), IngestionTime | QueryTime) => true,
+            (Self::NotKept(timing), reader) => timing == reader,
+            (
+                Self::Kept(KeptProperties::AcrossEvaluationsAtIngestion(_)),
+                IngestionTime | QueryTime,
+            ) => true,
             // Ingestion work never reads a query-time output.
             (
-                Self::NotKeptAtQueryTime
-                | Self::KeptForOneEvaluationAtQueryTime(_)
-                | Self::KeptAcrossEvaluationsAtQueryTime(_),
+                Self::Kept(
+                    KeptProperties::ForOneEvaluationAtQueryTime(_)
+                    | KeptProperties::AcrossEvaluationsAtQueryTime(_),
+                ),
                 IngestionTime,
             ) => false,
             (
-                Self::NotKeptAtQueryTime
-                | Self::KeptForOneEvaluationAtQueryTime(_)
-                | Self::KeptAcrossEvaluationsAtQueryTime(_),
+                Self::Kept(
+                    KeptProperties::ForOneEvaluationAtQueryTime(_)
+                    | KeptProperties::AcrossEvaluationsAtQueryTime(_),
+                ),
                 QueryTime,
             ) => true,
         }
     }
 
-    /// Every valid pair: each timing with each lifetime and medium, less
-    /// `(IngestionTime, OneEvaluation)`. For table tests over every state.
+    /// The 8 valid states, for table tests over every state.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn every_valid() -> Vec<Self> {
-        let lifetimes = [
-            Lifetime::None,
-            Lifetime::OneEvaluation(Medium::Memory),
-            Lifetime::OneEvaluation(Medium::Disk),
-            Lifetime::AcrossEvaluations(Medium::Memory),
-            Lifetime::AcrossEvaluations(Medium::Disk),
+    pub fn every_valid() -> [Self; 8] {
+        use ExecutionTiming::{IngestionTime, QueryTime};
+        use KeptProperties::{
+            AcrossEvaluationsAtIngestion, AcrossEvaluationsAtQueryTime, ForOneEvaluationAtQueryTime,
+        };
+        use Medium::{Disk, Memory};
+        let every = [
+            Self::NotKept(IngestionTime),
+            Self::NotKept(QueryTime),
+            Self::Kept(AcrossEvaluationsAtIngestion(Memory)),
+            Self::Kept(AcrossEvaluationsAtIngestion(Disk)),
+            Self::Kept(ForOneEvaluationAtQueryTime(Memory)),
+            Self::Kept(ForOneEvaluationAtQueryTime(Disk)),
+            Self::Kept(AcrossEvaluationsAtQueryTime(Memory)),
+            Self::Kept(AcrossEvaluationsAtQueryTime(Disk)),
         ];
-        [ExecutionTiming::IngestionTime, ExecutionTiming::QueryTime]
-            .into_iter()
-            .flat_map(|timing| lifetimes.map(|lifetime| Self::new(timing, lifetime)))
-            .filter_map(Result::ok)
-            .collect()
+        // Exhaustive without wildcards: a new state fails to compile here
+        // until it is listed above.
+        for properties in every {
+            match properties {
+                Self::NotKept(IngestionTime | QueryTime)
+                | Self::Kept(
+                    AcrossEvaluationsAtIngestion(Memory | Disk)
+                    | ForOneEvaluationAtQueryTime(Memory | Disk)
+                    | AcrossEvaluationsAtQueryTime(Memory | Disk),
+                ) => {}
+            }
+        }
+        every
     }
 }
 
@@ -188,7 +234,12 @@ mod tests {
                 Err(InvalidPhysicalProperties::OneEvaluationAtIngestion)
             );
         }
-        assert_eq!(PhysicalProperties::every_valid().len(), 8);
+        for properties in PhysicalProperties::every_valid() {
+            assert_eq!(
+                PhysicalProperties::new(properties.timing(), properties.lifetime()),
+                Ok(properties)
+            );
+        }
     }
 
     /// `readable_at` for every valid state and both reader timings.
@@ -197,11 +248,8 @@ mod tests {
         use ExecutionTiming::{IngestionTime, QueryTime};
         for properties in PhysicalProperties::every_valid() {
             let expected_at_query = match properties {
-                PhysicalProperties::NotKeptAtIngestion => false,
-                PhysicalProperties::KeptAcrossEvaluationsAtIngestion(_)
-                | PhysicalProperties::NotKeptAtQueryTime
-                | PhysicalProperties::KeptForOneEvaluationAtQueryTime(_)
-                | PhysicalProperties::KeptAcrossEvaluationsAtQueryTime(_) => true,
+                PhysicalProperties::NotKept(IngestionTime) => false,
+                PhysicalProperties::NotKept(QueryTime) | PhysicalProperties::Kept(_) => true,
             };
             assert_eq!(
                 properties.readable_at(QueryTime),
@@ -212,21 +260,6 @@ mod tests {
                 properties.readable_at(IngestionTime),
                 properties.timing() == IngestionTime,
                 "{properties:?}"
-            );
-        }
-    }
-
-    /// The named properties are valid pairs.
-    #[test]
-    fn named_properties_are_valid() {
-        for named in [
-            PhysicalProperties::KEPT_IN_MEMORY_FOR_ONE_EVALUATION,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME,
-        ] {
-            assert_eq!(
-                PhysicalProperties::new(named.timing(), named.lifetime()),
-                Ok(named)
             );
         }
     }

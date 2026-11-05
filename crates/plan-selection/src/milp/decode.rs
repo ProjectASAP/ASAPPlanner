@@ -66,7 +66,7 @@ pub(crate) fn decode(
             return Some(Run::Computed(context, producer));
         }
         match kind {
-            RunKind::Shareable => chosen
+            RunKind::Shareable(_) => chosen
                 .selected
                 .contains(&producer)
                 .then_some(Run::Shared(producer)),

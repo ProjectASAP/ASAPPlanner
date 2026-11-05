@@ -128,7 +128,8 @@ mod tests {
     use asap_types::ir::{
         apply_physical_properties, ASAPOp, NodeToTimedNodeCache, NonASAPOp, Operator,
     };
-    use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
+    use asap_types::physical::KeptProperties;
+    use asap_types::physical::{Lifetime, Medium};
 
     const KEPT_ACROSS: Lifetime = Lifetime::AcrossEvaluations(Medium::Memory);
 
@@ -278,7 +279,7 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &summary,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         let (split, assignment) = split_shared_by_timing(std::slice::from_ref(&root), &assignment);
         let timed =
@@ -312,7 +313,7 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &summary,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         let timed_unsplit = {
             let mut cache = NodeToTimedNodeCache::new();
@@ -362,15 +363,15 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &summary,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         assignment.set(
             &state,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         assignment.set(
             &read,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         let (split, assignment) = split_shared_by_timing(&[pair, read], &assignment);
         let mut cache = NodeToTimedNodeCache::new();
@@ -384,7 +385,7 @@ mod tests {
                 ExecutionDataStateError::PhysicalPropertiesConflictWithFixedTiming {
                     operator: "FinalizeExactAccumulator",
                     fixed: ExecutionTiming::QueryTime,
-                    assigned: PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+                    assigned: KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
                 }
             )
         );

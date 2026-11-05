@@ -10,7 +10,7 @@
 
 use thiserror::Error;
 
-use crate::physical::{InvalidPhysicalProperties, PhysicalProperties};
+use crate::physical::{InvalidPhysicalProperties, KeptProperties};
 
 /// When a post-ASAP value is produced.
 #[derive(
@@ -153,7 +153,7 @@ pub enum ExecutionDataStateError {
     PhysicalPropertiesConflictWithFixedTiming {
         operator: &'static str,
         fixed: ExecutionTiming,
-        assigned: PhysicalProperties,
+        assigned: KeptProperties,
     },
     /// A timed node whose timing and lifetime cannot go together: a bug in
     /// whatever built the node.

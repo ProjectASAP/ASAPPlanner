@@ -18,7 +18,7 @@ use asap_types::ir::{
     apply_physical_properties_to_roots, ASAPOp, NonASAPOp, Operator, OperatorNode,
     PhysicalPropertiesAssignment, QueryRoot, TimeRangeKind,
 };
-use asap_types::physical::PhysicalProperties;
+use asap_types::physical::KeptProperties;
 use asap_types::workload::{QueryRecurrence, RepeatedDemand, RepetitionInterval};
 
 /// `m` with columns `ts`, `value` and `job`.
@@ -75,7 +75,7 @@ fn chain(
 /// One query per summary of `summaries`, merging it, with each summary
 /// kept with `kept` (`None`: not kept): the DAG Stage 3 costs, chains
 /// unexpanded.
-fn dag_of(summaries: &[Rc<OperatorNode>], kept: Option<PhysicalProperties>) -> PhysicalASAPDAG {
+fn dag_of(summaries: &[Rc<OperatorNode>], kept: Option<KeptProperties>) -> PhysicalASAPDAG {
     let mut assignment = PhysicalPropertiesAssignment::default();
     let roots: Vec<QueryRoot> = summaries
         .iter()
@@ -143,7 +143,7 @@ fn a_scan_under_two_chains_of_one_tumbling_window_width_is_computed_once() {
             chain(&scan, SketchAlgorithm::Kll, 10_000, 6),
             chain(&scan, SketchAlgorithm::DDSketch, 10_000, 30),
         ],
-        Some(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
+        Some(KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
     );
     assert_eq!(scan_computations(&dag), (1, 1.0));
 }
@@ -159,7 +159,7 @@ fn a_scan_under_chains_of_two_tumbling_window_widths_is_computed_for_each() {
             chain(&scan, SketchAlgorithm::Kll, 10_000, 6),
             chain(&scan, SketchAlgorithm::DDSketch, 60_000, 5),
         ],
-        Some(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
+        Some(KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
     );
     assert_eq!(scan_computations(&dag), (2, 2.0));
 }
@@ -209,7 +209,7 @@ fn a_scan_under_chains_of_10_10_and_60_s_is_computed_for_each_width() {
             chain(&scan, SketchAlgorithm::DDSketch, 10_000, 30),
             chain(&scan, SketchAlgorithm::Kll, 60_000, 5),
         ],
-        Some(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
+        Some(KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
     );
     assert_eq!(scan_computations(&dag), (2, 2.0));
 }
@@ -229,7 +229,7 @@ fn chains_of_one_width_and_two_phases_are_computed_apart() {
                 30,
             ),
         ],
-        Some(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
+        Some(KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
     );
     assert_eq!(scan_computations(&dag), (2, 2.0));
 }
@@ -244,7 +244,7 @@ fn nodes_below_a_shared_intermediate_node_are_computed_once_per_run() {
             chain(&shift, SketchAlgorithm::Kll, 10_000, 6),
             chain(&shift, SketchAlgorithm::DDSketch, 10_000, 30),
         ],
-        Some(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
+        Some(KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
     );
     assert_eq!(scan_computations(&dag), (1, 1.0));
     assert_eq!(
@@ -278,7 +278,7 @@ fn consumers_of_unbounded_windows_count_alone() {
             build(SketchAlgorithm::Kll),
             build(SketchAlgorithm::DDSketch),
         ],
-        Some(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
+        Some(KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
     );
     assert_eq!(
         computations_of(&dag, |op| matches!(op, NonASAPOp::Values { .. })),
@@ -293,7 +293,7 @@ fn an_invalid_node_is_reported_not_skipped() {
     let scan = scan();
     let mut dag = dag_of(
         &[chain(&scan, SketchAlgorithm::Kll, 10_000, 6)],
-        Some(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
+        Some(KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
     );
     let chain = dag
         .nodes

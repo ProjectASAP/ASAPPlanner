@@ -56,7 +56,7 @@ fn cost(dag: &PhysicalASAPDAG, cost_per_memory_byte_second: f64) -> PlanCost {
     plan_cost(
         dag,
         &nodes,
-        &kept_tumbling_window_chains(dag),
+        &kept_tumbling_window_chains(dag).unwrap(),
         &recurrence(),
         &[],
         &data(),

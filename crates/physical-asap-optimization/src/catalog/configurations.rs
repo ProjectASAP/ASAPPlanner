@@ -18,6 +18,7 @@ use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use super::inventory::CandidateInventory;
 use asap_types::ir::QueryRoot;
+use asap_types::physical::KeptProperties;
 use asap_types::stages::{
     output_references, MemoGroupId, OperatorNodeOfCandidateForMemoGroupId,
     PhysicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateId, PhysicalCandidateKey,
@@ -37,7 +38,8 @@ pub fn may_keep_across_evaluations_per_sole_reader_query(
     data: &DataWorkload,
     query_time_results_retained: bool,
 ) -> Vec<bool> {
-    if properties != PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME
+    if properties
+        != PhysicalProperties::Kept(KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME)
         || !matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }))
         || !query_time_results_retained
     {
@@ -140,8 +142,10 @@ pub fn enumerate_candidate_configurations(
             .collect::<Vec<_>>();
         // The valid states Stage 2 does not offer, by rule (every consumer
         // still handles them when given one):
-        // - any `Disk` medium: the executor keeps every kept output in
-        //   memory, so a disk state would be priced as disk but run in memory;
+        // - any `Disk` medium (#1217): the executor has no disk store, so a
+        //   `Disk` state given to it executes in memory (a view slot bound to
+        //   the deployment's in-memory store, a one-evaluation result kept in
+        //   the query run), while cost prices it as disk;
         // - `NotKeptAtIngestion` for a summary build: an ingestion-time state
         //   must be kept for a query to read it, so an unkept build runs at
         //   query time (`apply_physical_properties`);
@@ -153,44 +157,54 @@ pub fn enumerate_candidate_configurations(
         //   any other result is rebuilt whole each evaluation;
         // - any ingestion-time state for `SummaryEstimate`,
         //   `EvaluatePopulation` and `MaintainPopulation` (`forced_query`).
-        let mut alternatives = vec![PhysicalProperties::NotKeptAtQueryTime];
+        let mut alternatives = vec![PhysicalProperties::NotKept(ExecutionTiming::QueryTime)];
         if summary {
-            alternatives.push(PhysicalProperties::KEPT_IN_MEMORY_FOR_ONE_EVALUATION);
+            alternatives.push(PhysicalProperties::Kept(
+                KeptProperties::IN_MEMORY_FOR_ONE_EVALUATION,
+            ));
             if queries.iter().any(|&query| {
                 summary_properties_allowed(
                     node,
                     &[query],
-                    PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+                    PhysicalProperties::Kept(
+                        KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+                    ),
                     entries,
                     data,
                     query_time_results_retained,
                 )
             }) {
-                alternatives
-                    .push(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION);
+                alternatives.push(PhysicalProperties::Kept(
+                    KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+                ));
             }
             if matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }))
                 && queries.iter().any(|&query| {
                     summary_properties_allowed(
                         node,
                         &[query],
-                        PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME,
+                        PhysicalProperties::Kept(
+                            KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME,
+                        ),
                         entries,
                         data,
                         query_time_results_retained,
                     )
                 })
             {
-                alternatives
-                    .push(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME);
+                alternatives.push(PhysicalProperties::Kept(
+                    KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME,
+                ));
             }
         } else if !forced_query {
-            alternatives.push(PhysicalProperties::NotKeptAtIngestion);
+            alternatives.push(PhysicalProperties::NotKept(ExecutionTiming::IngestionTime));
         }
         // Potential reach only generates the choice. Selected-reader cardinality
         // and Stage 2's highest-shared rule determine actual eligibility.
         if !summary && queries.len() >= 2 {
-            alternatives.push(PhysicalProperties::KEPT_IN_MEMORY_FOR_ONE_EVALUATION);
+            alternatives.push(PhysicalProperties::Kept(
+                KeptProperties::IN_MEMORY_FOR_ONE_EVALUATION,
+            ));
         }
         // Configurations the deployment cannot run are not generated; each is
         // recorded as pruned.
@@ -240,7 +254,8 @@ pub fn enumerate_candidate_configurations(
                         query_time_results_retained,
                     ),
             });
-            if properties == PhysicalProperties::KEPT_IN_MEMORY_FOR_ONE_EVALUATION {
+            if properties == PhysicalProperties::Kept(KeptProperties::IN_MEMORY_FOR_ONE_EVALUATION)
+            {
                 if !summary {
                     reader_constraints.push(ReaderConstraint::HighestSharedOneEvaluation {
                         candidate: id,
@@ -401,13 +416,12 @@ fn summary_properties_allowed(
     };
     eligibility.range_compatibility.is_ok()
         && match candidate_properties {
-            PhysicalProperties::NotKeptAtIngestion
-            | PhysicalProperties::NotKeptAtQueryTime
-            | PhysicalProperties::KeptForOneEvaluationAtQueryTime(_) => true,
-            PhysicalProperties::KeptAcrossEvaluationsAtIngestion(_) => {
+            PhysicalProperties::NotKept(_)
+            | PhysicalProperties::Kept(KeptProperties::ForOneEvaluationAtQueryTime(_)) => true,
+            PhysicalProperties::Kept(KeptProperties::AcrossEvaluationsAtIngestion(_)) => {
                 eligibility.at_ingestion.is_ok()
             }
-            PhysicalProperties::KeptAcrossEvaluationsAtQueryTime(_) => {
+            PhysicalProperties::Kept(KeptProperties::AcrossEvaluationsAtQueryTime(_)) => {
                 eligibility.may_keep_across_evaluations
             }
         }

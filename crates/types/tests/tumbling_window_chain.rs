@@ -199,7 +199,13 @@ fn expansion_carries_the_chains_timing_onto_its_tumbling_windows() {
         .unwrap();
         let mut assignment = PhysicalPropertiesAssignment::default();
         if lifetime.is_kept() {
-            assignment.set(&chain, PhysicalProperties::new(timing, lifetime).unwrap());
+            assignment.set(
+                &chain,
+                PhysicalProperties::new(timing, lifetime)
+                    .unwrap()
+                    .kept()
+                    .unwrap(),
+            );
         }
         let timed =
             apply_physical_properties(&estimate, &assignment, &mut NodeToTimedNodeCache::new())

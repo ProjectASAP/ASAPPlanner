@@ -13,7 +13,6 @@ use asap_types::ir::{
     apply_physical_properties, ASAPOp, ExprSemantics, NodeToTimedNodeCache, NonASAPOp, Operator,
     OperatorNode, PhysicalPropertiesAssignment, Predicate, ScalarExpr,
 };
-use asap_types::physical::PhysicalProperties;
 use std::rc::Rc;
 /// KLL over `value` for one `region`, so states of different regions are
 /// disjoint.
@@ -714,12 +713,13 @@ fn summary_merge_timing() {
                 .collect::<Vec<_>>(),
         )
     };
+    use asap_types::physical::KeptProperties;
     use ExecutionTiming::{IngestionTime, QueryTime};
     assert_eq!(
         timings(&PhysicalPropertiesAssignment::default()),
         (QueryTime, vec![QueryTime, QueryTime])
     );
-    let at_ingestion = PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION;
+    let at_ingestion = KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION;
     let mut stored_tumbling_windows = PhysicalPropertiesAssignment::default();
     for tumbling_window in &tumbling_windows {
         stored_tumbling_windows.set(tumbling_window, at_ingestion);

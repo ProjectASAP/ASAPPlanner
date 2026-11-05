@@ -132,7 +132,8 @@ use asap_types::ir::{
     Operator, OperatorNode, PhysicalPropertiesAssignment, QueryRoot, ScalarExpr,
     SchemaDerivationError, SortKey,
 };
-use asap_types::physical::{PhysicalProperties, PhysicalWorkloadPlan};
+use asap_types::physical::KeptProperties;
+use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::workload::{
     DataArrival, DataWorkload, Predictability, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
 };
@@ -349,23 +350,26 @@ pub(crate) struct KeptOutputCandidate {
 }
 
 impl KeptOutputCandidate {
-    /// Its options, not kept first: kept at ingestion time when eligible,
-    /// `OneEvaluation` when two or more queries read it, and
+    /// Its options, not kept (`None`) first: kept at ingestion time when
+    /// eligible, `OneEvaluation` when two or more queries read it, and
     /// query-time `AcrossEvaluations` when it may be kept across
-    /// evaluations.
-    pub(crate) fn options(&self) -> Vec<Option<PhysicalProperties>> {
+    /// evaluations. Every kept option is in memory: Stage 2 offers no
+    /// `Disk` state, since the executor runs a `Disk` state in memory
+    /// (#1217). The other valid states it does not offer are listed at
+    /// `enumerate_candidate_configurations`.
+    pub(crate) fn options(&self) -> Vec<Option<KeptProperties>> {
         let mut options = vec![None];
         if self.at_ingestion.is_ok() {
             options.push(Some(
-                PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+                KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
             ));
         }
         if self.readers.len() > 1 {
-            options.push(Some(PhysicalProperties::KEPT_IN_MEMORY_FOR_ONE_EVALUATION));
+            options.push(Some(KeptProperties::IN_MEMORY_FOR_ONE_EVALUATION));
         }
         if self.may_keep_across_evaluations {
             options.push(Some(
-                PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME,
+                KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME,
             ));
         }
         options
@@ -452,7 +456,7 @@ pub fn optimize_physical_asap(
 /// options (`None` = not kept, always first): the index of the chosen
 /// option, or `None` to reject the assignment.
 pub(crate) type ChoosePhysicalProperties<'a> =
-    dyn FnMut(*const OperatorNode, &[usize], &[Option<PhysicalProperties>]) -> Option<usize> + 'a;
+    dyn FnMut(*const OperatorNode, &[usize], &[Option<KeptProperties>]) -> Option<usize> + 'a;
 
 /// Stage 2 for one CandidateLogicalASAPDAG and one physical properties
 /// assignment chosen node by node: `choose(logical, readers, options)`
@@ -517,7 +521,7 @@ fn assigned_candidate(
     from_logical: &str,
     implemented: &[QueryRoot],
     kept_output_candidates: &[KeptOutputCandidate],
-    assignment: Vec<Option<PhysicalProperties>>,
+    assignment: Vec<Option<KeptProperties>>,
 ) -> Result<PhysicalWorkloadPlan, PhysicalASAPOptimizationError> {
     let mut options = PhysicalPropertiesAssignment::default();
     for (kept_output_candidate, kept) in kept_output_candidates.iter().zip(&assignment) {
@@ -688,7 +692,7 @@ pub(crate) fn find_kept_output_candidates(
             for &v in below[c].iter().chain([&c]) {
                 trial.set(
                     &nodes[v],
-                    PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+                    KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
                 );
             }
             apply_physical_properties(node, &trial, &mut NodeToTimedNodeCache::new())
@@ -926,9 +930,9 @@ fn candidates_below(nodes: &[Rc<OperatorNode>]) -> Vec<Vec<usize>> {
 fn down_closed(
     kept_output_candidates: &[KeptOutputCandidate],
     below: &[Vec<usize>],
-    assignment: &[Option<PhysicalProperties>],
+    assignment: &[Option<KeptProperties>],
 ) -> bool {
-    let at_ingestion = |kept: &Option<PhysicalProperties>| {
+    let at_ingestion = |kept: &Option<KeptProperties>| {
         kept.is_some_and(|p| p.timing() == ExecutionTiming::IngestionTime)
     };
     assignment.iter().enumerate().all(|(c, m)| {
@@ -949,8 +953,8 @@ fn down_closed(
 #[cfg(any(test, feature = "reference-pricer"))]
 fn physical_properties_assignments(
     kept_output_candidates: &[KeptOutputCandidate],
-) -> impl Iterator<Item = Vec<Option<PhysicalProperties>>> + '_ {
-    let options: Vec<Vec<Option<PhysicalProperties>>> =
+) -> impl Iterator<Item = Vec<Option<KeptProperties>>> + '_ {
+    let options: Vec<Vec<Option<KeptProperties>>> =
         kept_output_candidates.iter().map(|c| c.options()).collect();
     let nodes: Vec<_> = kept_output_candidates
         .iter()
@@ -960,7 +964,7 @@ fn physical_properties_assignments(
     let mut digits = Some(vec![0usize; kept_output_candidates.len()]);
     std::iter::from_fn(move || loop {
         let current = digits.as_mut()?;
-        let assignment: Vec<Option<PhysicalProperties>> = current
+        let assignment: Vec<Option<KeptProperties>> = current
             .iter()
             .zip(&options)
             .map(|(&d, options)| options[d])
@@ -2316,10 +2320,7 @@ mod tests {
             .iter()
             .map(|c| (c.node.operator.kind_name(), c.readers.clone(), c.options()))
             .collect();
-        let options = vec![
-            None,
-            Some(PhysicalProperties::KEPT_IN_MEMORY_FOR_ONE_EVALUATION),
-        ];
+        let options = vec![None, Some(KeptProperties::IN_MEMORY_FOR_ONE_EVALUATION)];
         assert_eq!(
             found,
             [

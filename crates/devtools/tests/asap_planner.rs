@@ -1579,7 +1579,7 @@ fn scans_projecting_different_labels_are_shared() {
     let data = workload.data_workload.as_ref().unwrap();
     let roots = lower_promql_roots(&workload).unwrap();
     use asap_logical_asap_optimization::test_support::with_union_scan_labels;
-    use asap_types::physical::PhysicalProperties;
+    use asap_types::physical::KeptProperties;
     // Plans `roots` with identical sub-DAGs made one node, as the memo's
     // groups are, and a node read by several roots kept for the evaluation.
     let plan = |name: &str, roots: &[QueryRoot]| {
@@ -1604,8 +1604,8 @@ fn scans_projecting_different_labels_are_shared() {
                 data,
                 false,
                 &mut |_, readers, options| {
-                    let kept = (readers.len() > 1)
-                        .then_some(PhysicalProperties::KEPT_IN_MEMORY_FOR_ONE_EVALUATION);
+                    let kept =
+                        (readers.len() > 1).then_some(KeptProperties::IN_MEMORY_FOR_ONE_EVALUATION);
                     options.iter().position(|option| *option == kept)
                 },
             )

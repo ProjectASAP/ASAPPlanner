@@ -350,7 +350,7 @@ mod tests {
     };
     use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot};
     use asap_types::physical::PhysicalWorkloadPlan;
-    use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
+    use asap_types::physical::{KeptProperties, Lifetime, Medium, PhysicalProperties};
     use asap_types::workload::bounds::with_confirmed_weights;
     use asap_types::workload::bounds::{declared_series, series_read, values_per_result};
     use asap_types::workload::{
@@ -396,7 +396,7 @@ mod tests {
         self_calibrated_cost(
             dag,
             &node_map(dag),
-            &kept_tumbling_window_chains(dag),
+            &kept_tumbling_window_chains(dag)?,
             recurrence,
             &[],
             data,
@@ -3421,7 +3421,7 @@ mod tests {
 
     /// `quantile_over_time(0.99, m[1m])` with its KLL candidate chosen, its
     /// state kept with `kept` (`None`: not kept).
-    fn kll_dag(kept: Option<PhysicalProperties>) -> PhysicalASAPDAG {
+    fn kll_dag(kept: Option<KeptProperties>) -> PhysicalASAPDAG {
         use asap_types::ir::{
             apply_physical_properties, NodeToTimedNodeCache, PhysicalPropertiesAssignment,
         };
@@ -3528,12 +3528,11 @@ mod tests {
     }
 
     /// Kept in memory at ingestion time until a query reads it.
-    const AT_INGESTION: Option<PhysicalProperties> =
-        Some(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION);
+    const AT_INGESTION: Option<KeptProperties> =
+        Some(KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION);
 
     /// Kept in memory at query time for one evaluation.
-    const AT_QUERY: Option<PhysicalProperties> =
-        Some(PhysicalProperties::KEPT_IN_MEMORY_FOR_ONE_EVALUATION);
+    const AT_QUERY: Option<KeptProperties> = Some(KeptProperties::IN_MEMORY_FOR_ONE_EVALUATION);
 
     fn node_of(dag: &PhysicalASAPDAG, pick: impl Fn(&Payload) -> bool) -> PhysicalASAPNodeId {
         dag.nodes.iter().find(|n| pick(&n.payload)).unwrap().id
@@ -4645,7 +4644,8 @@ mod tests {
                     ExecutionTiming::IngestionTime,
                     Lifetime::AcrossEvaluations(Medium::Disk),
                 )
-                .ok(),
+                .ok()
+                .and_then(PhysicalProperties::kept),
                 AT_INGESTION,
             ),
             (
@@ -4653,7 +4653,8 @@ mod tests {
                     ExecutionTiming::QueryTime,
                     Lifetime::OneEvaluation(Medium::Disk),
                 )
-                .ok(),
+                .ok()
+                .and_then(PhysicalProperties::kept),
                 AT_QUERY,
             ),
         ] {
@@ -4706,13 +4707,11 @@ mod tests {
         let not_kept = price(&kll_dag(None), &recurrences(1), &data(), &settings).unwrap();
         for properties in PhysicalProperties::every_valid() {
             let dag = match properties {
-                PhysicalProperties::NotKeptAtQueryTime => kll_dag(None),
-                PhysicalProperties::NotKeptAtIngestion => kll_dag(AT_INGESTION),
-                PhysicalProperties::KeptAcrossEvaluationsAtIngestion(_)
-                | PhysicalProperties::KeptForOneEvaluationAtQueryTime(_)
-                | PhysicalProperties::KeptAcrossEvaluationsAtQueryTime(_) => {
-                    kll_dag(Some(properties))
+                PhysicalProperties::NotKept(ExecutionTiming::QueryTime) => kll_dag(None),
+                PhysicalProperties::NotKept(ExecutionTiming::IngestionTime) => {
+                    kll_dag(AT_INGESTION)
                 }
+                PhysicalProperties::Kept(kept) => kll_dag(Some(kept)),
             };
             assert!(
                 dag.nodes
@@ -5065,6 +5064,87 @@ mod tests {
         assert!(cost.usage.average_memory_bytes < (kept + bytes) as f64);
     }
 
+    /// Execution demand (`asap_cost::execution_demand::computations`) over
+    /// every valid state of the KLL build, read by one query every minute:
+    /// kept at ingestion time, once per second; kept at query time (one
+    /// evaluation, or across evaluations, built once per request), at the
+    /// query's rate; not kept at query time, once per consumer at its rate;
+    /// not kept at ingestion time is the scan below the ingestion-time build,
+    /// computed in its ingestion run.
+    #[test]
+    fn computations_over_every_valid_state() {
+        use asap_cost::execution_demand::computations;
+        let per_minute = 1.0 / 60.0;
+        for properties in PhysicalProperties::every_valid() {
+            let dag = match properties {
+                PhysicalProperties::NotKept(ExecutionTiming::QueryTime) => kll_dag(None),
+                PhysicalProperties::NotKept(ExecutionTiming::IngestionTime) => {
+                    kll_dag(AT_INGESTION)
+                }
+                PhysicalProperties::Kept(kept) => kll_dag(Some(kept)),
+            };
+            let times = computations(&dag, &[repeating(MINUTE)], &[], 3600.0, None)
+                .unwrap_or_else(|error| panic!("{properties:?}: {error}"));
+            let node = dag
+                .nodes
+                .iter()
+                .find(|node| node.physical_properties() == Ok(properties))
+                .unwrap_or_else(|| panic!("{properties:?}"));
+            let (_, rate) = times[&node.id];
+            let expected = match properties {
+                PhysicalProperties::NotKept(ExecutionTiming::IngestionTime)
+                | PhysicalProperties::Kept(KeptProperties::AcrossEvaluationsAtIngestion(_)) => 1.0,
+                PhysicalProperties::NotKept(ExecutionTiming::QueryTime)
+                | PhysicalProperties::Kept(
+                    KeptProperties::ForOneEvaluationAtQueryTime(_)
+                    | KeptProperties::AcrossEvaluationsAtQueryTime(_),
+                ) => per_minute,
+            };
+            assert!(
+                close(rate, expected),
+                "{properties:?}: {rate} vs {expected}"
+            );
+        }
+    }
+
+    /// The partial copies of the newest window over every valid state of
+    /// B1's chain: each ingest worker beyond the first holds one for a chain
+    /// kept at ingestion time, in memory or on disk (the newest window is
+    /// built in memory whatever the medium); no other state has them.
+    #[test]
+    fn partial_copies_over_every_valid_state() {
+        let rows_per_s = 1e9;
+        let b1 = tumbling_window_candidates(rows_per_s).remove(1);
+        let chain = node_of(&b1.dag, is_chain);
+        for properties in PhysicalProperties::every_valid() {
+            let mut dag = b1.dag.clone();
+            let node = dag.nodes.iter_mut().find(|n| n.id == chain).unwrap();
+            node.output_state.timing = properties.timing();
+            node.lifetime = properties.lifetime();
+            let cost = price(
+                &dag,
+                &[repeating(MINUTE)],
+                &arriving(rows_per_s),
+                &CostInputs::default(),
+            )
+            .unwrap_or_else(|error| panic!("{properties:?}: {error:?}"));
+            let copies = cost.per_node[&chain].detail.contains("partial copies");
+            let expected = match properties {
+                PhysicalProperties::Kept(KeptProperties::AcrossEvaluationsAtIngestion(_)) => true,
+                PhysicalProperties::NotKept(_)
+                | PhysicalProperties::Kept(
+                    KeptProperties::ForOneEvaluationAtQueryTime(_)
+                    | KeptProperties::AcrossEvaluationsAtQueryTime(_),
+                ) => false,
+            };
+            assert_eq!(
+                copies, expected,
+                "{properties:?}: {}",
+                cost.per_node[&chain].detail
+            );
+        }
+    }
+
     /// The KLL build of a `quantile_over_time` candidate, with its sketch
     /// parameters, and the candidate.
     fn kll_build() -> (PhysicalWorkloadPlan, PhysicalASAPNodeId, SketchParams) {
@@ -5380,7 +5460,7 @@ mod tests {
             plan_cost(
                 &candidate.dag,
                 &node_map(&candidate.dag),
-                &kept_tumbling_window_chains(&candidate.dag),
+                &kept_tumbling_window_chains(&candidate.dag).unwrap(),
                 &[repeating(MINUTE)],
                 &[],
                 &arriving(10_000.0),
@@ -5611,7 +5691,7 @@ mod tests {
             let cost = self_calibrated_cost(
                 &candidate.dag,
                 &node_map(&candidate.dag),
-                &kept_tumbling_window_chains(&candidate.dag),
+                &kept_tumbling_window_chains(&candidate.dag).unwrap(),
                 std::slice::from_ref(&recurrence),
                 &[range],
                 &data(),

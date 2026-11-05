@@ -13,8 +13,8 @@ use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
 use asap_types::ir::NonASAPOp;
 use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
-use asap_types::physical::PhysicalProperties;
 use asap_types::physical::PhysicalWorkloadPlan;
+use asap_types::physical::{InvalidPhysicalProperties, KeptProperties, PhysicalProperties};
 use asap_types::stages::HowToComputeAggregateMeasure;
 
 use crate::planning_stages::PlanningStagesRun;
@@ -146,12 +146,8 @@ pub fn physical_label(logical: &str, candidate: &PhysicalWorkloadPlan) -> String
     let mut parts: Vec<(&str, Vec<String>)> = Vec::new();
     for node in &candidate.dag.nodes {
         let id = &node.id;
-        let phase = match node.physical_properties() {
-            Ok(PhysicalProperties::NotKeptAtIngestion | PhysicalProperties::NotKeptAtQueryTime)
-            | Err(_) => continue,
-            Ok(PhysicalProperties::KeptAcrossEvaluationsAtIngestion(_)) => "ingestion time",
-            Ok(PhysicalProperties::KeptForOneEvaluationAtQueryTime(_)) => "query time, shared",
-            Ok(PhysicalProperties::KeptAcrossEvaluationsAtQueryTime(_)) => "query time, kept",
+        let Some(phase) = phase_label(node.physical_properties()) else {
+            continue;
         };
         let label = match &node.payload {
             // Name the chain: chains of one family and tumbling-window count differ by
@@ -183,6 +179,27 @@ pub fn physical_label(logical: &str, candidate: &PhysicalWorkloadPlan) -> String
         )
         .collect::<Vec<_>>()
         .join(" · ")
+}
+
+/// The label of the phase a node with `properties` is kept in; `None` when
+/// it is not kept. A node whose timing and lifetime cannot go together is
+/// shown as such rather than dropped.
+fn phase_label(
+    properties: Result<PhysicalProperties, InvalidPhysicalProperties>,
+) -> Option<&'static str> {
+    match properties {
+        Ok(PhysicalProperties::NotKept(_)) => None,
+        Ok(PhysicalProperties::Kept(KeptProperties::AcrossEvaluationsAtIngestion(_))) => {
+            Some("ingestion time")
+        }
+        Ok(PhysicalProperties::Kept(KeptProperties::ForOneEvaluationAtQueryTime(_))) => {
+            Some("query time, shared")
+        }
+        Ok(PhysicalProperties::Kept(KeptProperties::AcrossEvaluationsAtQueryTime(_))) => {
+            Some("query time, kept")
+        }
+        Err(_) => Some("invalid timing and lifetime"),
+    }
 }
 
 /// A summary build, e.g. "Kll ×5 tumbling windows" or "Sum acc".
@@ -497,7 +514,9 @@ mod tests {
                     .filter(|node| {
                         matches!(
                             node.physical_properties(),
-                            Ok(PhysicalProperties::KeptAcrossEvaluationsAtIngestion(_))
+                            Ok(PhysicalProperties::Kept(
+                                KeptProperties::AcrossEvaluationsAtIngestion(_)
+                            ))
                         ) && matches!(
                             node.payload,
                             Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
@@ -539,6 +558,30 @@ mod tests {
     }
 
     /// Raw logical operators have an exact label, rather than an empty choice label.
+    /// The phase label over every valid state, and an invalid pair.
+    #[test]
+    fn phase_label_over_every_valid_state() {
+        for properties in PhysicalProperties::every_valid() {
+            let expected = match properties {
+                PhysicalProperties::NotKept(_) => None,
+                PhysicalProperties::Kept(KeptProperties::AcrossEvaluationsAtIngestion(_)) => {
+                    Some("ingestion time")
+                }
+                PhysicalProperties::Kept(KeptProperties::ForOneEvaluationAtQueryTime(_)) => {
+                    Some("query time, shared")
+                }
+                PhysicalProperties::Kept(KeptProperties::AcrossEvaluationsAtQueryTime(_)) => {
+                    Some("query time, kept")
+                }
+            };
+            assert_eq!(phase_label(Ok(properties)), expected, "{properties:?}");
+        }
+        assert_eq!(
+            phase_label(Err(InvalidPhysicalProperties::OneEvaluationAtIngestion)),
+            Some("invalid timing and lifetime")
+        );
+    }
+
     #[test]
     fn connected_labels_name_exact_results() {
         let roots = lower_promql_roots(&example1()).unwrap();

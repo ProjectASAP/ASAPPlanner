@@ -7,5 +7,7 @@
 pub mod properties;
 pub mod workload_plan;
 
-pub use properties::{InvalidPhysicalProperties, Lifetime, Medium, PhysicalProperties};
+pub use properties::{
+    InvalidPhysicalProperties, KeptProperties, Lifetime, Medium, PhysicalProperties,
+};
 pub use workload_plan::PhysicalWorkloadPlan;

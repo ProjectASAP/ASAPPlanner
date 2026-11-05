@@ -24,7 +24,7 @@ use asap_types::ir::{
     apply_physical_properties, ASAPOp, NodeToTimedNodeCache, NonASAPOp, OperatorNode,
     PhysicalPropertiesAssignment,
 };
-use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
+use asap_types::physical::{KeptProperties, Lifetime, Medium};
 
 use crate::physical_common;
 
@@ -257,7 +257,7 @@ fn mixed_placement_answers_like_query_time() {
     let mut mixed = PhysicalPropertiesAssignment::default();
     mixed.set(
         &sketches(&root)[0],
-        PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+        KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
     );
     let mut answers = Vec::new();
     for assignment in [PhysicalPropertiesAssignment::default(), mixed] {

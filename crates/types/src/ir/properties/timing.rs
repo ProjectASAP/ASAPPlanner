@@ -67,7 +67,7 @@ use crate::ir::properties::execution_data_state::{
 use crate::ir::schema::{DataType, FieldDataType, Schema};
 #[cfg(test)]
 use crate::physical::Medium;
-use crate::physical::{Lifetime, PhysicalProperties};
+use crate::physical::{KeptProperties, Lifetime, PhysicalProperties};
 
 /// Which sub-DAG outputs are kept, and with which timing and lifetime
 /// (#509 §Materialization: "Materialization decides, for each sub-DAG,
@@ -81,7 +81,7 @@ use crate::physical::{Lifetime, PhysicalProperties};
 /// cannot reuse its address and match a stale entry.
 #[derive(Clone, Default)]
 pub struct PhysicalPropertiesAssignment {
-    kept: HashMap<*const OperatorNode, (Rc<OperatorNode>, PhysicalProperties)>,
+    kept: HashMap<*const OperatorNode, (Rc<OperatorNode>, KeptProperties)>,
 }
 
 /// Each kept node as its operator kind and address, not its whole sub-DAG.
@@ -102,9 +102,8 @@ impl std::fmt::Debug for PhysicalPropertiesAssignment {
 
 impl PhysicalPropertiesAssignment {
     /// Keep the output of the sub-DAG `node` produces with `kept`'s timing
-    /// and lifetime. `kept` must keep the output (lifetime not `None`).
-    pub fn set(&mut self, node: &Rc<OperatorNode>, kept: PhysicalProperties) {
-        debug_assert!(kept.lifetime().is_kept(), "{kept:?} does not keep");
+    /// and lifetime.
+    pub fn set(&mut self, node: &Rc<OperatorNode>, kept: KeptProperties) {
         self.kept.insert(Rc::as_ptr(node), (Rc::clone(node), kept));
     }
 
@@ -142,7 +141,7 @@ impl PhysicalPropertiesAssignment {
             {
                 assignment.set(
                     node,
-                    PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+                    KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
                 );
             }
         }
@@ -155,7 +154,7 @@ impl PhysicalPropertiesAssignment {
     }
 
     /// How `node` is kept, if it is.
-    fn get(&self, node: &OperatorNode) -> Option<PhysicalProperties> {
+    fn get(&self, node: &OperatorNode) -> Option<KeptProperties> {
         self.kept
             .get(&(node as *const OperatorNode))
             .map(|(_, kept)| *kept)
@@ -168,7 +167,7 @@ impl PhysicalPropertiesAssignment {
         &self,
         node: &OperatorNode,
         upstream_at_query_time: bool,
-    ) -> Result<Option<PhysicalProperties>, ExecutionDataStateError> {
+    ) -> Result<Option<KeptProperties>, ExecutionDataStateError> {
         match self.get(node) {
             Some(kept)
                 if kept.timing() == ExecutionTiming::IngestionTime && is_filtered_build(node) =>
@@ -1026,8 +1025,11 @@ mod tests {
 
     const KEPT_ACROSS: Lifetime = Lifetime::AcrossEvaluations(Medium::Memory);
 
-    fn kept(timing: ExecutionTiming, lifetime: Lifetime) -> PhysicalProperties {
-        PhysicalProperties::new(timing, lifetime).unwrap()
+    fn kept(timing: ExecutionTiming, lifetime: Lifetime) -> KeptProperties {
+        PhysicalProperties::new(timing, lifetime)
+            .unwrap()
+            .kept()
+            .unwrap()
     }
 
     fn child(node: &Rc<OperatorNode>) -> Rc<OperatorNode> {
@@ -1087,7 +1089,7 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &outer,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         assert_eq!(
             apply_physical_properties(
@@ -1102,12 +1104,12 @@ mod tests {
         );
         assignment.set(
             &inner,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         let outer = agg(Rc::clone(&inner), kll());
         assignment.set(
             &outer,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         let root = apply_physical_properties(
             &estimate(outer),
@@ -1254,7 +1256,7 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &tumbling_windows,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         let timed = apply_physical_properties(&root, &assignment, &mut NodeToTimedNodeCache::new())
             .unwrap();
@@ -1270,7 +1272,7 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &over_evaluation,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         assert_eq!(
             apply_physical_properties(
@@ -1322,7 +1324,7 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &filtered,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         assert_eq!(
             apply_physical_properties(
@@ -1382,11 +1384,11 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &state,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         assignment.set(
             &read,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         assert_eq!(
             apply_physical_properties(&read, &assignment, &mut NodeToTimedNodeCache::new()).err(),
@@ -1394,7 +1396,7 @@ mod tests {
                 ExecutionDataStateError::PhysicalPropertiesConflictWithFixedTiming {
                     operator: "FinalizeExactAccumulator",
                     fixed: ExecutionTiming::QueryTime,
-                    assigned: PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+                    assigned: KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
                 }
             )
         );
@@ -1407,7 +1409,7 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &agg(scan(), kll()),
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         let text = format!("{assignment:?}");
         assert!(text.contains("SummaryAgg@"), "{text}");
@@ -1463,7 +1465,7 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &rows,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         let timed =
             apply_physical_properties(&summary, &assignment, &mut NodeToTimedNodeCache::new())
@@ -1496,7 +1498,7 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &state,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         let timed =
             apply_physical_properties(&summary, &assignment, &mut NodeToTimedNodeCache::new())
@@ -1585,7 +1587,7 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &root,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         let timed = apply_physical_properties(&root, &assignment, &mut NodeToTimedNodeCache::new())
             .unwrap();
@@ -1597,11 +1599,11 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &state,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         assignment.set(
             &root,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         let timed = apply_physical_properties(&root, &assignment, &mut NodeToTimedNodeCache::new())
             .unwrap();

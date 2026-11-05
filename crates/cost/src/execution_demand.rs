@@ -10,7 +10,7 @@
 use super::analytical::AnalyticalCostError;
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
 use asap_types::ir::properties::ExecutionTiming;
-use asap_types::physical::PhysicalProperties;
+use asap_types::physical::KeptProperties;
 use asap_types::workload::{QueryRecurrence, RangeEvaluation, RepeatedDemand};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -334,6 +334,29 @@ pub fn consumers(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, Vec<Consu
     consumers
 }
 
+/// How often a kept output is computed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeptRunRate {
+    /// Once per second of arriving data, at ingestion time.
+    PerSecondOfArrivingData,
+    /// At the combined evaluation rate of the queries reaching it, range
+    /// steps included ([`evaluation_rate`]).
+    PerEvaluation,
+    /// Once per request of the queries reaching it: a result kept across
+    /// evaluations builds only what is new (a chain's newest tumbling
+    /// window), however many range steps a request evaluates.
+    PerRequest,
+}
+
+/// How often an output kept as `kept` is computed.
+pub fn kept_run_rate(kept: KeptProperties) -> KeptRunRate {
+    match kept {
+        KeptProperties::AcrossEvaluationsAtIngestion(_) => KeptRunRate::PerSecondOfArrivingData,
+        KeptProperties::ForOneEvaluationAtQueryTime(_) => KeptRunRate::PerEvaluation,
+        KeptProperties::AcrossEvaluationsAtQueryTime(_) => KeptRunRate::PerRequest,
+    }
+}
+
 /// How often each node of `dag` is computed: `(multiplier, per_second)`
 /// (module doc, "Cost model"). A materialized node is computed once for all
 /// its readers: once per second at ingestion time (kept at ingestion time), at
@@ -359,7 +382,7 @@ pub fn computations(
     root_rates: Option<&[f64]>,
 ) -> Result<HashMap<PhysicalASAPNodeId, (u64, f64)>, AnalyticalCostError> {
     let range_of = |query: usize| range_evaluations.get(query).copied().flatten();
-    let mut kept_nodes: HashMap<PhysicalASAPNodeId, PhysicalProperties> = HashMap::new();
+    let mut kept_nodes: HashMap<PhysicalASAPNodeId, KeptProperties> = HashMap::new();
     for node in &dag.nodes {
         let properties = node.physical_properties().map_err(|reason| {
             AnalyticalCostError::InvalidPhysicalProperties {
@@ -367,8 +390,8 @@ pub fn computations(
                 reason,
             }
         })?;
-        if properties.lifetime().is_kept() {
-            kept_nodes.insert(node.id, properties);
+        if let Some(kept) = properties.kept() {
+            kept_nodes.insert(node.id, kept);
         }
     }
     let inputs = |id: PhysicalASAPNodeId| {
@@ -392,16 +415,11 @@ pub fn computations(
         }
     }
     let mut rate_of_kept = HashMap::new();
-    for (&id, &properties) in &kept_nodes {
-        // Once per second at ingestion time; at query time, at its
-        // readers' evaluation rate, or once per request for a result kept
-        // across evaluations, which builds only what is new.
-        let per_request = match properties {
-            PhysicalProperties::NotKeptAtIngestion
-            | PhysicalProperties::KeptAcrossEvaluationsAtIngestion(_) => None,
-            PhysicalProperties::NotKeptAtQueryTime
-            | PhysicalProperties::KeptForOneEvaluationAtQueryTime(_) => Some(false),
-            PhysicalProperties::KeptAcrossEvaluationsAtQueryTime(_) => Some(true),
+    for (&id, &kept) in &kept_nodes {
+        let per_request = match kept_run_rate(kept) {
+            KeptRunRate::PerSecondOfArrivingData => None,
+            KeptRunRate::PerEvaluation => Some(false),
+            KeptRunRate::PerRequest => Some(true),
         };
         let rate = match per_request {
             None => 1.0,
@@ -430,7 +448,7 @@ pub fn computations(
     let refresh_windows = dag.refresh_windows(
         kept_nodes
             .iter()
-            .filter(|(_, properties)| properties.timing() == ExecutionTiming::IngestionTime)
+            .filter(|(_, kept)| kept.timing() == ExecutionTiming::IngestionTime)
             .map(|(&id, _)| id),
     );
     let mut count: HashMap<_, (u64, f64)> = HashMap::new();
@@ -469,6 +487,35 @@ pub fn computations(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asap_types::physical::PhysicalProperties;
+
+    /// How often each valid state is computed when kept; a state that is
+    /// not kept is computed per consumer that reaches it, by its
+    /// consumer's rate ([`consumers`]). The MILP's shared-context rates
+    /// (`asap-plan-selection`'s `context_rates` and warm start) use the
+    /// same `kept_run_rate`.
+    #[test]
+    fn kept_run_rate_over_every_valid_state() {
+        for properties in PhysicalProperties::every_valid() {
+            let expected = match properties {
+                PhysicalProperties::NotKept(_) => None,
+                PhysicalProperties::Kept(KeptProperties::AcrossEvaluationsAtIngestion(_)) => {
+                    Some(KeptRunRate::PerSecondOfArrivingData)
+                }
+                PhysicalProperties::Kept(KeptProperties::ForOneEvaluationAtQueryTime(_)) => {
+                    Some(KeptRunRate::PerEvaluation)
+                }
+                PhysicalProperties::Kept(KeptProperties::AcrossEvaluationsAtQueryTime(_)) => {
+                    Some(KeptRunRate::PerRequest)
+                }
+            };
+            assert_eq!(
+                properties.kept().map(kept_run_rate),
+                expected,
+                "{properties:?}"
+            );
+        }
+    }
     use asap_types::workload::{DemandEstimate, Rate, RepetitionInterval, TimestampMs};
 
     fn fixed(interval: u32, phase: Option<u64>) -> QueryRecurrence {

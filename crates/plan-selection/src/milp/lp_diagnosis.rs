@@ -192,7 +192,7 @@ impl Diagnosis {
                     }
                     crate::groups::IngestionPipeline::Alone(m) => format!("I[alone m{}]", m.0),
                 },
-                crate::groups::ContextKind::Shared(m) => format!("m{}", m.0),
+                crate::groups::ContextKind::Shared(m, _) => format!("m{}", m.0),
             };
             for (&c, variable) in choices {
                 labels.insert(column_of[variable], format!("p[{place}] {}", candidate(c)));

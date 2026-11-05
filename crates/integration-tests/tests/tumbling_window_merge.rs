@@ -29,7 +29,7 @@ use asap_types::ir::{
     apply_physical_properties, ASAPOp, NodeToTimedNodeCache, NonASAPOp, Operator, OperatorNode,
     PhysicalPropertiesAssignment, QueryRoot,
 };
-use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
+use asap_types::physical::{KeptProperties, Lifetime, Medium};
 use asap_types::test_support::compile_physical_asap_dag_with_node_ids;
 
 const EVALUATION_MS: i64 = 300_000;
@@ -281,7 +281,7 @@ fn execute_retained(
     for tumbling_window in tumbling_windows {
         assignment.set(
             tumbling_window,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
     }
     execute_retained_as(root, &assignment, samples)
@@ -302,7 +302,7 @@ fn execute_maintained_chain(
     let mut assignment = PhysicalPropertiesAssignment::default();
     assignment.set(
         &chain,
-        PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+        KeptProperties::IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
     );
     let timed =
         apply_physical_properties(planned, &assignment, &mut NodeToTimedNodeCache::new()).unwrap();

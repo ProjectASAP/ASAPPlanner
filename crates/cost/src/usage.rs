@@ -33,6 +33,7 @@ use asap_types::ir::{ASAPOp, NonASAPOp, TimeRangeKind};
 use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
 use asap_types::workload::{DataWorkload, QueryRecurrence, RangeEvaluation};
 
+use asap_types::physical::KeptProperties;
 use asap_types::workload::bounds::{
     declared_non_negative, declared_series, group_count_bound, source_name, source_rows_per_ms,
     unchanged_source_columns,
@@ -956,19 +957,25 @@ pub fn node_usage<'a>(
             // query time (all of them for a chain kept across
             // evaluations, whose scan Stage 2 bounds to its newest tumbling window,
             // the only one it builds).
-            let rows_per_tumbling_window = match node
-                .physical_properties()
-                .map_err(AnalyticalCostError::InvalidPhysicalProperties)?
-            {
-                PhysicalProperties::NotKeptAtIngestion
-                | PhysicalProperties::KeptAcrossEvaluationsAtIngestion(_) => u64::try_from(
-                    (u128::from(input.rows) * u128::from(*tumbling_window_width_ms))
-                        .div_ceil(1_000),
-                )
-                .map_err(|_| AnalyticalCostError::Overflow)?,
-                PhysicalProperties::KeptAcrossEvaluationsAtQueryTime(_) => input.rows,
-                PhysicalProperties::NotKeptAtQueryTime
-                | PhysicalProperties::KeptForOneEvaluationAtQueryTime(_) => input
+            let rows_per_tumbling_window = match node.physical_properties().map_err(|reason| {
+                AnalyticalCostError::InvalidPhysicalProperties {
+                    node: node.id,
+                    reason,
+                }
+            })? {
+                PhysicalProperties::NotKept(ExecutionTiming::IngestionTime)
+                | PhysicalProperties::Kept(KeptProperties::AcrossEvaluationsAtIngestion(_)) => {
+                    u64::try_from(
+                        (u128::from(input.rows) * u128::from(*tumbling_window_width_ms))
+                            .div_ceil(1_000),
+                    )
+                    .map_err(|_| AnalyticalCostError::Overflow)?
+                }
+                PhysicalProperties::Kept(KeptProperties::AcrossEvaluationsAtQueryTime(_)) => {
+                    input.rows
+                }
+                PhysicalProperties::NotKept(ExecutionTiming::QueryTime)
+                | PhysicalProperties::Kept(KeptProperties::ForOneEvaluationAtQueryTime(_)) => input
                     .rows
                     .div_ceil(u64::from(*tumbling_window_count).max(1)),
             };
@@ -1140,11 +1147,14 @@ pub fn node_usage<'a>(
     );
     // A whole state kept across evaluations: it and the one being built.
     let whole_state_kept = || state.checked_mul(2).ok_or(AnalyticalCostError::Overflow);
-    let properties = node
-        .physical_properties()
-        .map_err(AnalyticalCostError::InvalidPhysicalProperties)?;
+    let properties = node.physical_properties().map_err(|reason| {
+        AnalyticalCostError::InvalidPhysicalProperties {
+            node: node.id,
+            reason,
+        }
+    })?;
     let (kept, medium) = match properties {
-        PhysicalProperties::NotKeptAtIngestion | PhysicalProperties::NotKeptAtQueryTime => {
+        PhysicalProperties::NotKept(_) => {
             let working_memory_bytes = estimate.peak_memory_bytes();
             peak_memory_bytes = working_memory_bytes.saturating_mul(multiplier);
             if !ingestion && working_memory_bytes > 0 {
@@ -1156,7 +1166,9 @@ pub fn node_usage<'a>(
         // retention covers ([`tumbling_window_retention_ms`]: N, plus one per tumbling window
         // width of the readers' range-evaluation span), all but the
         // newest between evaluations and all while one runs.
-        PhysicalProperties::KeptAcrossEvaluationsAtQueryTime(medium) if is_chain => {
+        PhysicalProperties::Kept(KeptProperties::AcrossEvaluationsAtQueryTime(medium))
+            if is_chain =>
+        {
             let tumbling_windows = tumbling_windows_of(node);
             let retained = retained_tumbling_window_count;
             let between = (state / tumbling_windows)
@@ -1181,10 +1193,10 @@ pub fn node_usage<'a>(
             detail += &format!("; keeps {between} bytes across evaluations");
             (0, medium)
         }
-        PhysicalProperties::KeptAcrossEvaluationsAtQueryTime(medium) => {
+        PhysicalProperties::Kept(KeptProperties::AcrossEvaluationsAtQueryTime(medium)) => {
             (whole_state_kept()?, medium)
         }
-        PhysicalProperties::KeptForOneEvaluationAtQueryTime(medium) => {
+        PhysicalProperties::Kept(KeptProperties::ForOneEvaluationAtQueryTime(medium)) => {
             match medium {
                 Medium::Memory => {
                     held = Some((state, per_second, false));
@@ -1195,7 +1207,9 @@ pub fn node_usage<'a>(
             (0, medium)
         }
         // The retained tumbling windows and the one being built.
-        PhysicalProperties::KeptAcrossEvaluationsAtIngestion(medium) if is_chain => {
+        PhysicalProperties::Kept(KeptProperties::AcrossEvaluationsAtIngestion(medium))
+            if is_chain =>
+        {
             let tumbling_windows = tumbling_windows_of(node);
             (
                 (state / tumbling_windows)
@@ -1208,13 +1222,13 @@ pub fn node_usage<'a>(
                 medium,
             )
         }
-        PhysicalProperties::KeptAcrossEvaluationsAtIngestion(medium) => {
+        PhysicalProperties::Kept(KeptProperties::AcrossEvaluationsAtIngestion(medium)) => {
             (whole_state_kept()?, medium)
         }
     };
     // Each ingest worker builds its newest window in memory, whatever
     // medium the completed windows are kept on.
-    if let PhysicalProperties::KeptAcrossEvaluationsAtIngestion(_) = properties {
+    if let PhysicalProperties::Kept(KeptProperties::AcrossEvaluationsAtIngestion(_)) = properties {
         maintained = Some(state / tumbling_windows_of(node));
     }
     if kept > 0 {
@@ -1612,21 +1626,45 @@ pub type NodeMap<'a> =
 /// deployment keeps query-time results and every reader builds one new
 /// tumbling window per evaluation). Each evaluation builds the newest tumbling window, and the
 /// older ones, which complete the readers' look-back, are kept from
-/// earlier evaluations.
-pub fn kept_tumbling_window_chains(dag: &PhysicalASAPDAG) -> HashSet<PhysicalASAPNodeId> {
-    dag.nodes
-        .iter()
-        .filter(|node| {
-            matches!(
-                node.payload,
-                Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
-            ) && matches!(
-                node.physical_properties(),
-                Ok(PhysicalProperties::KeptAcrossEvaluationsAtQueryTime(_))
+/// earlier evaluations. Query time only: these are the chains whose
+/// query-time scan reads just the newest tumbling window. A chain kept
+/// across evaluations at ingestion time is built as data arrives, so no
+/// query-time scan reads below it; plan selection's retained-window
+/// options (`retained_pane_options`) and
+/// [`tumbling_window_retention_ms`] cover both timings, since a chain kept
+/// at either timing retains windows. Fails on a node whose timing and
+/// lifetime cannot go together.
+pub fn kept_tumbling_window_chains(
+    dag: &PhysicalASAPDAG,
+) -> Result<HashSet<PhysicalASAPNodeId>, (PhysicalASAPNodeId, AnalyticalCostError)> {
+    let mut chains = HashSet::new();
+    for node in &dag.nodes {
+        let properties = node.physical_properties().map_err(|reason| {
+            (
+                node.id,
+                AnalyticalCostError::InvalidPhysicalProperties {
+                    node: node.id,
+                    reason,
+                },
             )
-        })
-        .map(|node| node.id)
-        .collect()
+        })?;
+        let chain = matches!(
+            node.payload,
+            Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+        );
+        let kept_at_query_time = match properties {
+            PhysicalProperties::Kept(KeptProperties::AcrossEvaluationsAtQueryTime(_)) => true,
+            PhysicalProperties::NotKept(_)
+            | PhysicalProperties::Kept(
+                KeptProperties::AcrossEvaluationsAtIngestion(_)
+                | KeptProperties::ForOneEvaluationAtQueryTime(_),
+            ) => false,
+        };
+        if chain && kept_at_query_time {
+            chains.insert(node.id);
+        }
+    }
+    Ok(chains)
 }
 
 /// The widest window, in milliseconds, read above the scan `scan` at query

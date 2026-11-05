@@ -125,21 +125,23 @@ pub fn select_plan(
     let plan = &realized.plan;
     let recurrence: Vec<_> = entries.iter().map(|e| e.recurrence.clone()).collect();
     let ranges: Vec<_> = entries.iter().map(|e| e.range_evaluation).collect();
+    let cost_error = |(node, error)| ErrorSelectingPlan::Cost {
+        candidate: plan.id.clone(),
+        node,
+        error,
+    };
+    let kept_chains = kept_tumbling_window_chains(&plan.dag).map_err(cost_error)?;
     let (cost, _) = plan_cost(
         &plan.dag,
         &node_map(&plan.dag),
-        &kept_tumbling_window_chains(&plan.dag),
+        &kept_chains,
         &recurrence,
         &ranges,
         data,
         cost_inputs,
         formula_scale,
     )
-    .map_err(|(node, error)| ErrorSelectingPlan::Cost {
-        candidate: plan.id.clone(),
-        node,
-        error,
-    })?;
+    .map_err(cost_error)?;
     let plan_cost_per_second = cost.cost_per_second.ok_or_else(|| {
         ErrorSelectingPlan::UnsupportedCostModel("a cost model without a cost per second".into())
     })? - solution.request_cost_per_second;

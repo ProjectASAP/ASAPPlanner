@@ -123,6 +123,7 @@ use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use crate::SelectionModels;
 
+use asap_types::physical::KeptProperties;
 use asap_types::stages::{PhysicalCandidateId, ReaderConstraint};
 
 /// What the MILP is built from (module documentation).
@@ -256,7 +257,8 @@ pub(crate) struct CandidateUsage {
     pub(crate) held_bytes: u64,
     /// Raw data a query-time scan keeps on disk.
     pub(crate) raw_data_kept_bytes: u64,
-    /// An in-memory ingestion-time state's bytes per window.
+    /// A state kept at ingestion time: its bytes per window, the newest of
+    /// which each ingest worker builds in memory.
     pub(crate) maintained_window_bytes: u64,
     pub(crate) output_rows: u64,
     pub(crate) output_bytes: u64,
@@ -337,19 +339,17 @@ pub(crate) enum RunKind {
     /// arriving data for all of them.
     Ingestion,
     /// Kept (lifetime `OneEvaluation` or `AcrossEvaluations`, at either
-    /// timing): selected once, its own execution context for its inputs,
-    /// charged once.
-    Shareable,
+    /// timing), as it is kept: selected once, its own execution context
+    /// for its inputs, charged once.
+    Shareable(KeptProperties),
 }
 
 /// The [`RunKind`] of a candidate with `properties`.
 pub(crate) fn run_kind(properties: PhysicalProperties) -> RunKind {
     match properties {
-        PhysicalProperties::NotKeptAtQueryTime => RunKind::PerContext,
-        PhysicalProperties::NotKeptAtIngestion => RunKind::Ingestion,
-        PhysicalProperties::KeptAcrossEvaluationsAtIngestion(_)
-        | PhysicalProperties::KeptForOneEvaluationAtQueryTime(_)
-        | PhysicalProperties::KeptAcrossEvaluationsAtQueryTime(_) => RunKind::Shareable,
+        PhysicalProperties::NotKept(ExecutionTiming::QueryTime) => RunKind::PerContext,
+        PhysicalProperties::NotKept(ExecutionTiming::IngestionTime) => RunKind::Ingestion,
+        PhysicalProperties::Kept(kept) => RunKind::Shareable(kept),
     }
 }
 
@@ -453,7 +453,7 @@ impl CandidateLinks {
                             .into_iter()
                             .filter(|producer| {
                                 producer.0 != reader
-                                    && (kind[reader] == RunKind::Shareable
+                                    && (matches!(kind[reader], RunKind::Shareable(_))
                                         || slot[producer.0] != slot[reader])
                             })
                             .collect()
@@ -469,7 +469,7 @@ impl CandidateLinks {
 
     /// Whether `candidate` is materialized: selected once, its own context.
     fn is_shareable(&self, candidate: PhysicalCandidateId) -> bool {
-        self.kind[candidate.0] == RunKind::Shareable
+        matches!(self.kind[candidate.0], RunKind::Shareable(_))
     }
 }
 
@@ -682,7 +682,8 @@ fn queries_reaching(
 pub(crate) enum ContextKind {
     Query(usize),
     Ingestion(IngestionPipeline),
-    Shared(PhysicalCandidateId),
+    /// A shareable candidate's own inputs, with how it is kept.
+    Shared(PhysicalCandidateId, KeptProperties),
 }
 
 /// Which ingestion pipeline `I_r` (#1095 §2.5 O3(b)): the deployment
@@ -815,7 +816,7 @@ impl ExecutionContext {
         match kind {
             RunKind::PerContext => self.at_query_time,
             RunKind::Ingestion => matches!(self.kind, ContextKind::Ingestion(_)),
-            RunKind::Shareable => false,
+            RunKind::Shareable(_) => false,
         }
     }
 }
@@ -827,7 +828,7 @@ impl MilpInputs {
     pub(crate) fn ingestion_context_read_by(&self, context: usize) -> Option<usize> {
         match self.contexts[context].kind {
             ContextKind::Ingestion(_) => Some(context),
-            ContextKind::Shared(m) => self.ingestion_context_of_shareable.get(&m).copied(),
+            ContextKind::Shared(m, _) => self.ingestion_context_of_shareable.get(&m).copied(),
             ContextKind::Query(_) => None,
         }
     }
@@ -912,23 +913,25 @@ pub(crate) fn execution_contexts(
     > = BTreeMap::new();
     let mut scanned = 0;
     loop {
-        let mut pending: Vec<PhysicalCandidateId> = Vec::new();
+        let mut pending: Vec<(PhysicalCandidateId, KeptProperties)> = Vec::new();
         let mut seeds: Vec<(IngestionPipeline, PhysicalCandidateId)> = Vec::new();
         let unscanned = contexts.iter().chain(shared.iter()).skip(scanned);
         for context in unscanned.chain(ingestion.values().map(|(context, _)| context)) {
             // Only an ingestion-time shareable candidate reads a candidate
             // of an `I_r` (Stage 2's timing rule).
             let pipeline = match context.kind {
-                ContextKind::Shared(m) if !context.at_query_time => {
+                ContextKind::Shared(m, _) if !context.at_query_time => {
                     Some(ingestion_pipeline(m, refresh_windows))
                 }
                 _ => None,
             };
             for &class in &context.options {
                 match kind[class.0] {
-                    RunKind::Shareable => {
-                        if !context_of_shareable.contains_key(&class) && !pending.contains(&class) {
-                            pending.push(class);
+                    RunKind::Shareable(kept) => {
+                        if !context_of_shareable.contains_key(&class)
+                            && !pending.contains(&(class, kept))
+                        {
+                            pending.push((class, kept));
                         }
                     }
                     RunKind::Ingestion => {
@@ -959,11 +962,10 @@ pub(crate) fn execution_contexts(
             break;
         }
         pending.sort_unstable();
-        for class in pending {
-            let at_query_time =
-                physical.candidates[class.0].properties.timing() == ExecutionTiming::QueryTime;
+        for (class, kept) in pending {
+            let at_query_time = kept.timing() == ExecutionTiming::QueryTime;
             let mut context = ExecutionContext {
-                kind: ContextKind::Shared(class),
+                kind: ContextKind::Shared(class, kept),
                 at_query_time,
                 options: Vec::new(),
             };
@@ -991,7 +993,7 @@ pub(crate) fn execution_contexts(
     }
     let mut ingestion_context_of_shareable = BTreeMap::new();
     for context in shared {
-        if let ContextKind::Shared(class) = context.kind {
+        if let ContextKind::Shared(class, _) = context.kind {
             context_of_shareable.insert(class, contexts.len());
             if !context.at_query_time {
                 let pipeline = ingestion_pipeline(class, refresh_windows);
@@ -1149,7 +1151,7 @@ fn scan_window_options(
                 window_union(read.iter().copied())
             })
     };
-    let shareable = kind[scan.0] == RunKind::Shareable;
+    let shareable = matches!(kind[scan.0], RunKind::Shareable(_));
     let mut all_kinds: Vec<ScanWindow> = Vec::new();
     for context in contexts {
         if !context.options.contains(&scan) {
@@ -1170,7 +1172,7 @@ fn scan_window_options(
         }
         // A shareable candidate reading the scan as its own input reads it
         // at its own window; a read as an output reads it whole.
-        if let ContextKind::Shared(own) = context.kind {
+        if let ContextKind::Shared(own, _) = context.kind {
             if producers_per_input[own.0]
                 .iter()
                 .any(|producers| producers.contains(&scan))
@@ -1183,7 +1185,7 @@ fn scan_window_options(
         }
         let read_whole = match context.kind {
             ContextKind::Query(_) => output_candidates.iter().any(|out| out.contains(&scan)),
-            ContextKind::Shared(_) | ContextKind::Ingestion(_) => false,
+            ContextKind::Shared(..) | ContextKind::Ingestion(_) => false,
         };
         if read_whole && !kinds.contains(&ScanWindow::Unbounded) {
             kinds.push(ScanWindow::Unbounded);
@@ -1308,6 +1310,9 @@ fn retained_pane_options(
     entries: &[QueryWorkloadEntry],
 ) -> Vec<u64> {
     let node = &nodes[chain.0];
+    // Either timing: a chain kept across evaluations retains windows at
+    // ingestion time as at query time (`asap_cost::kept_tumbling_window_chains`
+    // is query time only, for the scans below a query-time chain).
     let kept = matches!(
         node.payload,
         Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })

@@ -180,7 +180,14 @@ impl<'a> PlanSelector<'a> {
             return Ok(CalibrationFit::default());
         }
         let nodes = node_map(&candidate.dag);
-        let kept_chains = kept_tumbling_window_chains(&candidate.dag);
+        let kept_chains =
+            kept_tumbling_window_chains(&candidate.dag).map_err(|(node, error)| {
+                ErrorSelectingPlan::Cost {
+                    candidate: candidate.id.clone(),
+                    node,
+                    error,
+                }
+            })?;
         let (_, fit) = plan_cost(
             &candidate.dag,
             &nodes,
@@ -230,7 +237,14 @@ impl<'a> PlanSelector<'a> {
                 }
             };
         let nodes = node_map(&candidate.dag);
-        let kept_chains = kept_tumbling_window_chains(&candidate.dag);
+        let kept_chains =
+            kept_tumbling_window_chains(&candidate.dag).map_err(|(node, error)| {
+                ErrorSelectingPlan::Cost {
+                    candidate: candidate.id.clone(),
+                    node,
+                    error,
+                }
+            })?;
         let settings = self.models.cost_inputs;
         let (cost, _) = plan_cost(
             &candidate.dag,

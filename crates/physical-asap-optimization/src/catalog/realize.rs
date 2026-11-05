@@ -60,17 +60,13 @@ pub fn realize_selected_candidates(
         query_time_results_retained,
         &mut |logical, _, options| {
             let node = node_by_pointer.get(&logical).copied();
-            // A node outside the selection is not kept.
-            let requested = node.map_or(PhysicalProperties::NotKeptAtQueryTime, |node| {
+            // How the selection keeps it (`None`: not kept, as is a node
+            // outside the selection).
+            let requested = node.and_then(|node| {
                 seen[node] = true;
-                assignments[node]
+                assignments[node].kept()
             });
-            // The option keeping it as requested; option `None` (not kept)
-            // for a requested lifetime `None`, at either timing.
-            let chosen = options.iter().position(|option| match option {
-                Some(kept) => *kept == requested,
-                None => !requested.lifetime().is_kept(),
-            });
+            let chosen = options.iter().position(|option| *option == requested);
             if chosen.is_none() {
                 let message = format!(
                     "selected properties {requested:?} are not offered for selected node {node:?}"
