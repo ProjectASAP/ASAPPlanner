@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use asap_accuracy::sizing::with_summaries_sized_for_failure_probability;
 use asap_executor::{
     physical_planner::compile,
     runtime::{Limits, RunContext, Scope},
@@ -25,7 +26,8 @@ use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
 use asap_types::ir::schema::{
     DataType, ExactKind, ExactParams, Field, FieldDataType, Schema, SketchAlgorithm,
 };
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot};
+use asap_types::workload::DataWorkload;
 use futures::StreamExt;
 
 const REGIONS: [&str; 3] = ["us", "eu", "ap"];
@@ -224,6 +226,10 @@ fn rolled_up(coarse: &OperatorNode) -> Rc<OperatorNode> {
 /// rollup from `(region, job)`: the family, the direct root and the
 /// rolled-up root. Explicit rule fixtures keep this execution test independent
 /// of the search archive and its tighter, potentially much larger capacities.
+/// Each candidate's summaries are sized for `accuracy`'s failure
+/// probability, as Pass 1 sizes a memo candidate
+/// ([`with_summaries_sized_for_failure_probability`]); composition alone
+/// sizes them for the calibrated one.
 async fn direct_and_rolled_up(
     sql: &str,
     accuracy: AccuracyTarget,
@@ -231,6 +237,21 @@ async fn direct_and_rolled_up(
     let root = lower_sql(sql, &catalog(), accuracy.clone()).await.unwrap();
     let mut out = Vec::new();
     for candidate in explicit_local_candidates(root) {
+        let candidate = match accuracy.failure_probability {
+            Some(failure_probability) => {
+                match &with_summaries_sized_for_failure_probability(
+                    &[QueryRoot::Operator(candidate)],
+                    failure_probability,
+                    &DataWorkload::default(),
+                )
+                .unwrap()[..]
+                {
+                    [QueryRoot::Operator(sized)] => Rc::clone(sized),
+                    _ => unreachable!("one operator root in, one out"),
+                }
+            }
+            None => candidate,
+        };
         let Some(build) = build(&candidate) else {
             continue;
         };
@@ -279,14 +300,18 @@ async fn distinct_counts_rolled_up_equal_the_direct_build() {
 
 /// p99 latency per job. DDSketch's bucket counts add, so the merged state
 /// is the direct build's and so is its answer. KLL's compactions are
-/// randomized, so its rolled-up answer differs, but stays within its rank
-/// bound of the exact p99, as the direct build's does.
+/// randomized (the executor's KLL seeds its coin per run), so its rolled-up
+/// answer differs, but stays within its rank bound of the exact p99, as the
+/// direct build's does. Each answer may miss the bound with the sizing's
+/// failure probability: at the calibrated 0.01 (`k = 52`) each of the eight
+/// KLL answers checked here may miss it with probability up to 0.01, so the
+/// KLL is sized for 1e-6 (`k = 100`).
 #[tokio::test]
 async fn quantiles_rolled_up_keep_the_sketch_bound() {
     const EPSILON: f64 = 0.05;
     for metric in [AccuracyMetric::Rank, AccuracyMetric::Relative] {
         let accuracy = AccuracyTarget::max_error(EPSILON)
-            .failure_probability(0.01)
+            .failure_probability(1e-6)
             .accuracy_metric(metric);
         let pairs = direct_and_rolled_up(
             "SELECT job, approx_percentile_cont(latency, 0.99) AS value FROM http GROUP BY job",
