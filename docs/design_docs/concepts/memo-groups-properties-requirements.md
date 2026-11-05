@@ -527,3 +527,128 @@ Example: v3 (`k = 345`) becomes, among others, (QueryTime, None), (QueryTime, On
 ### Stage 3: no rules
 
 Stage 3 adds no candidates and no edges. It reads $\mathcal C$ and the admissible part of $\mathcal E$, creates the MILP variables of section 3 over them, and decodes $\{x = 1\}$ and $\{y = 1\}$ into `DagOfSelectedCandidates`.
+
+## 5. Printing every logical DAG a memo group represents
+
+A memo group stores its candidates and, through their expressions, the groups they read. It represents a set of logical DAGs without listing them. This section shows how to list them, using only the section 3 interfaces. Planning never does this: Stage 3's MILP chooses one DAG without listing the others. The listing is for inspection and for checking the MILP on small workloads.
+
+### What one logical DAG is
+
+A logical DAG rooted at group $G$ is a set of logical candidates and edges $(u, c, i)$ such that:
+1. exactly one candidate of $G$ is in it (the root);
+2. every candidate $c$ in it has, for each input $i$, exactly one edge $(u, c, i)$, with $u$ a candidate of $G_{c,i}$ and $\alpha^{\log}_{u,c,i} = 1$ (rows (A) and (G));
+3. every candidate in it is the root or the producer of some edge (row (F));
+4. the edges form no cycle (row (E)).
+
+A candidate is one node however many edges read it: two consumers that choose the same producer share it, which is what $x_u \in \{0, 1\}$ says. Two consumers of one group may choose different candidates of it. The listing is therefore a choice of one producer per consumer input $(c, i)$, not one candidate per group.
+
+### Pseudocode
+
+```rust
+/// One logical DAG: its nodes and, for each node's inputs, the chosen producer.
+struct LogicalDag {
+    root: CandidateForMemoGroupId,
+    /// For each node c in the DAG, one producer per input i, in input order.
+    producers: BTreeMap<CandidateForMemoGroupId, Vec<CandidateForMemoGroupId>>,
+}
+
+/// Every logical DAG rooted at `root_group`, each exactly once.
+fn logical_dags(memo: &Memo, root_group: MemoGroupId) -> Vec<LogicalDag> {
+    let mut all = Vec::new();
+    for root in candidates_of(memo, root_group) {
+        let dag = LogicalDag { root, producers: BTreeMap::new() };
+        expand(memo, dag, VecDeque::from([root]), &mut all);
+    }
+    all
+}
+
+/// Choose producers for the inputs of every node in `pending`, in FIFO order.
+/// Each DAG is reached by exactly one sequence of choices, so none repeats.
+fn expand(memo: &Memo, dag: LogicalDag, mut pending: VecDeque<CandidateForMemoGroupId>, all: &mut Vec<LogicalDag>) {
+    let Some(consumer) = pending.pop_front() else {
+        all.push(dag);                                   // every input of every node has a producer
+        return;
+    };
+    let candidate = memo.candidate(consumer);
+    let inputs: Vec<MemoGroupId> = candidate.expression.operator.children().copied().collect();
+    // Every way to choose one producer per input of `consumer`: the product over i
+    // of the admissible producers in G_{c,i}.
+    for choice in cartesian_product(inputs.iter().enumerate().map(|(i, &group)| {
+        candidates_of(memo, group)
+            .filter(|&u| satisfies(&memo.candidate(u).logical_properties,      // α^log = 1
+                                   &candidate.input_requirements[i]))
+            .collect::<Vec<_>>()
+    })) {
+        // Row (E): a producer that already reaches `consumer` would close a cycle.
+        if choice.iter().any(|&u| reaches(&dag, u, consumer)) {
+            continue;
+        }
+        let mut next = dag.clone();
+        next.producers.insert(consumer, choice.clone());
+        let mut next_pending = pending.clone();
+        for &u in &choice {
+            // A producer already in the DAG is shared, not expanded again.
+            if !next.producers.contains_key(&u) && !next_pending.contains(&u) && u != next.root {
+                next_pending.push_back(u);
+            }
+        }
+        expand(memo, next, next_pending, all);
+    }
+}
+
+fn candidates_of(memo: &Memo, group: MemoGroupId) -> impl Iterator<Item = CandidateForMemoGroupId> + '_ {
+    (0..memo.candidates[group.0 as usize].len()).map(move |index| CandidateForMemoGroupId { group, index })
+}
+
+/// Whether `from` reaches `to` through the producers chosen so far.
+fn reaches(dag: &LogicalDag, from: CandidateForMemoGroupId, to: CandidateForMemoGroupId) -> bool;
+
+/// Print one DAG as an indented tree; a node read a second time is printed as a
+/// reference to its first occurrence, so sharing is visible.
+fn print(memo: &Memo, dag: &LogicalDag) {
+    fn node(memo: &Memo, dag: &LogicalDag, c: CandidateForMemoGroupId, depth: usize, seen: &mut HashSet<CandidateForMemoGroupId>) {
+        let candidate = memo.candidate(c);
+        if !seen.insert(c) {
+            println!("{}↑ G{}[{}] (shared)", "  ".repeat(depth), c.group.0, c.index);
+            return;
+        }
+        println!("{}G{}[{}] {} {:?}", "  ".repeat(depth), c.group.0, c.index,
+                 candidate.expression.operator.name(), candidate.logical_properties);
+        for &u in dag.producers.get(&c).into_iter().flatten() {
+            node(memo, dag, u, depth + 1, seen);
+        }
+    }
+    node(memo, dag, dag.root, 0, &mut HashSet::new());
+}
+```
+
+For a workload, list from every query root at once: start `pending` with one root candidate per $G_q$ (rows (C) and (D)), taking the product over queries of their root candidates. A candidate two queries reach is one node, as above.
+
+### Example
+
+For the example's query A (root G3) and query B (root G6), with no error caps applied:
+
+```
+A: 2 DAGs                              B: 4 DAGs (G4 and G5 choose independently)
+G3[0] SummaryEstimate q=0.95           G6[0] Divide
+  G2[0] SummaryAgg KLL θ={k=200}         G4[0] SummaryEstimate q=0.99
+    G1[0] Scan                             G2[0] SummaryAgg KLL θ={k=200}
+G3[0] SummaryEstimate q=0.95                 G1[0] Scan
+  G2[1] SummaryAgg KLL θ={k=345}         G5[0] SummaryEstimate q=0.50
+    G1[0] Scan                             ↑ G2[0] (shared)
+                                       … and (k=200, k=345), (k=345, k=200), (k=345, k=345)
+```
+
+Listed from both roots at once there are $2 \times 4 = 8$ DAGs. In the one where all three estimates choose `k = 345`, `G2[1]` is a single node read by three consumers, so its cost is counted once. Row (K) later accepts only the DAGs that meet each query's target: for B, only (k=345, k=345). Error caps (section 1) remove edges before the listing, so a capped producer never appears.
+
+### Size
+
+Without sharing, the number of DAGs rooted at $G$ satisfies
+
+$$N(G) = \sum_{v \in G} \prod_{i} \sum_{u \in G_{v,i},\ \alpha^{\log}_{u,v,i} = 1} N(u), \qquad N(u) = \prod_i \sum_{w} N(w) \text{ for } u\text{'s own inputs},$$
+
+which grows as a product over the DAG's depth. Sharing only identifies DAGs that choose the same candidate twice; it does not reduce the count much. This is why only small workloads are listed, and why Stage 3 chooses with the MILP instead.
+
+### Physical DAGs
+
+The same procedure lists physical DAGs from Stage 2's output. Use `PhysicalCandidate`s instead of logical candidates, and `admissible_edges_into(c, i)` (which already applies $\alpha^{\log}$ and $\alpha^{\mathrm{phys}}$) instead of `candidates_of` with `satisfies`. A physical candidate with $\ell = $ None that two consumers in different contexts $\kappa$ choose runs once per context; in the listing it is still one node, and the contexts are a Stage 3 choice (#1207).
