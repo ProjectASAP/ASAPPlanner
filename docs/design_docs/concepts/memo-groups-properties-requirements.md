@@ -482,8 +482,11 @@ pub enum Context {
     IngestionPipeline(RefreshWindowId),     // I_r
     Materialized(PhysicalCandidateId),      // κ_m: inside a materialized m's computation
 }
-/// T_κ: when the context runs; y_{κ,u,c,i} exists only if `p^phys_u.delivers_on(T_κ)`.
-fn context_times(context: &Context) -> Option<EvaluationSchedule>;
+/// T_κ: when the context runs; y_{κ,u,c,i} exists only if `p^phys_u.delivers_on(κ.evaluation_schedule())`.
+impl Context {
+    /// The context's evaluation schedule T_κ (None for a non-periodic query).
+    pub fn evaluation_schedule(&self) -> Option<EvaluationSchedule>;
+}
 
 struct SelectionVariables {
     x_materialized: Vec<Variable>,                                     // x_v, ℓ ≠ None
