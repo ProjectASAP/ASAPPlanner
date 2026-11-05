@@ -64,6 +64,7 @@ mod added_groups;
 /// The deployment's capabilities: supported summaries and what it retains.
 mod deployment_capabilities;
 mod find_or_add_group;
+mod operator_over_groups;
 mod own_candidate_sizing;
 mod pass1;
 mod pass2;

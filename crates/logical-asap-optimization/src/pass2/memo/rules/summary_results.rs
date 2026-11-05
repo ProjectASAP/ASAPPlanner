@@ -1,13 +1,15 @@
-//! Factor composite implementations at summary readouts. Each readout can then
-//! choose a state configuration independently, without enumerating combinations
-//! of all private states in the enclosing query.
-use super::reuse::{append_producer, append_reader, eligible, replace};
+//! Factor composite implementations at summary readouts: a candidate with two
+//! or more private builds and a readout of one of them gets a copy as one
+//! operator over groups, so each readout is its own group and can choose a
+//! state configuration independently, without enumerating combinations of
+//! all private states in the enclosing query.
+use super::reuse::{add_candidate_over_groups, eligible};
 use crate::pass2::memo::state_groups::{
     boundary_ptrs, direct_input_builds, nodes_within, Pass2RuleError,
 };
 use asap_types::ir::{ASAPOp, OperatorNode};
-use asap_types::stages::{Memo, OriginOfCandidateForMemoGroup};
-use std::collections::{HashMap, HashSet};
+use asap_types::stages::{Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
+use std::collections::HashSet;
 use std::rc::Rc;
 
 pub(crate) fn factor_summary_results(memo: &mut Memo) -> Result<usize, Pass2RuleError> {
@@ -19,7 +21,7 @@ pub(crate) fn factor_summary_results(memo: &mut Memo) -> Result<usize, Pass2Rule
             candidates
                 .iter()
                 .filter(|candidate| eligible(candidate))
-                .map(move |candidate| (group, candidate.clone()))
+                .map(move |candidate| (MemoGroupId(group as u32), candidate.clone()))
         })
         .collect();
     let mut added = 0;
@@ -31,50 +33,34 @@ pub(crate) fn factor_summary_results(memo: &mut Memo) -> Result<usize, Pass2Rule
         let build_pointers: HashSet<_> =
             builds.iter().map(|(build, _)| Rc::as_ptr(build)).collect();
         let boundaries = boundary_ptrs(memo, &original);
-        let mut readouts = Vec::new();
-        for node in nodes_within(&original.root_node, &boundaries) {
-            if !Rc::ptr_eq(&node, &original.root_node)
+        // A readout of exactly one of its private builds.
+        let reads_one_build = |node: &Rc<OperatorNode>| {
+            !Rc::ptr_eq(node, &original.root_node)
                 && matches!(
                     node.asap(),
                     Some(ASAPOp::SummaryEstimate { .. } | ASAPOp::FinalizeExactAccumulator { .. })
                 )
-            {
-                let private_builds: HashSet<_> = OperatorNode::reachable(&node)
+                && OperatorNode::reachable(node)
                     .iter()
                     .map(Rc::as_ptr)
                     .filter(|pointer| build_pointers.contains(pointer))
-                    .collect();
-                if private_builds.len() == 1 {
-                    readouts.push(Rc::clone(&node));
-                }
-            }
-        }
-        if readouts.is_empty() {
+                    .collect::<HashSet<_>>()
+                    .len()
+                    == 1
+        };
+        if !nodes_within(&original.root_node, &boundaries)
+            .iter()
+            .any(reads_one_build)
+        {
             continue;
         }
-        let queries = memo.groups()[owner].queries.clone();
-        let mut replacements = HashMap::new();
-        for readout in readouts {
-            let group = append_producer(
-                memo,
-                Rc::clone(&readout),
-                &queries,
-                OriginOfCandidateForMemoGroup::SummaryResult,
-                original.accuracy_budget_parts,
-            )?;
-            // The original reader's allocation was used to generate these
-            // parameters; lifting the boundary must not reset that provenance.
-            replacements.insert(
-                Rc::as_ptr(&readout),
-                Rc::clone(&memo.groups()[group.0 as usize].logical_node),
-            );
-        }
-        let reader = replace(&original.root_node, &replacements);
-        added += usize::from(append_reader(
+        // Every node beneath the root becomes a group, so each readout is
+        // its own group and chooses its state configuration on its own.
+        added += usize::from(add_candidate_over_groups(
             memo,
             owner,
             &original,
-            reader,
+            Rc::clone(&original.root_node),
             OriginOfCandidateForMemoGroup::SummaryResult,
         )?);
     }

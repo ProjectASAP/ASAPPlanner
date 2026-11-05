@@ -11,6 +11,7 @@ use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
 use super::shared_producer::{
     add_shared_producer_candidates, spans_groups, Reader, SharedProducer,
 };
+use crate::operator_over_groups::push_candidate_if_new;
 use crate::own_candidate_sizing::find_or_add_sized_group;
 use crate::pass2::asap_aware_cse::{with_resized_build, with_tumbling_window_chain};
 use crate::pass2::memo::shared_configurations::{
@@ -20,7 +21,7 @@ use crate::pass2::memo::shared_configurations::{
 use crate::pass2::memo::state_groups::{
     boundary_ptrs, build_of, same_range_input, BuildPlace, Pass2RuleError,
 };
-use asap_types::stages::{Memo, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
 
 /// `resized` (a rewrite of `original` with the same shape) with each node
 /// that is a child group's node in `original` put back, and the nodes above
@@ -99,8 +100,6 @@ enum StateCovering {
 /// later ([`super::super::state_groups`]).
 struct SummaryStates {
     deduplicate_requests: bool,
-    /// Every candidate's graph signature by group, so no rewrite repeats one.
-    known: HashMap<(usize, String), Vec<Rc<OperatorNode>>>,
     rewrite_count: usize,
     /// The (normalized layout, configuration index) rewrites already made.
     requests: HashSet<(usize, usize)>,
@@ -116,7 +115,6 @@ fn expand_configurations(
 ) -> Result<usize, Pass2RuleError> {
     let mut states = SummaryStates {
         deduplicate_requests,
-        known: HashMap::new(),
         rewrite_count: 0,
         requests: HashSet::new(),
     };
@@ -188,14 +186,6 @@ impl SharedProducer for SummaryStates {
                     Some(set) => set.push(reader),
                     None => sets.push(vec![reader]),
                 }
-            }
-        }
-        for (group, candidates) in memo.candidates.iter().enumerate() {
-            for candidate in candidates {
-                self.known
-                    .entry((group, graph_signature(&candidate.root_node)?))
-                    .or_default()
-                    .push(Rc::clone(&candidate.root_node));
             }
         }
         let mut layouts: Vec<(usize, usize, FlatDag)> = Vec::new();
@@ -377,29 +367,21 @@ impl SharedProducer for SummaryStates {
             }
         };
         // Resizing affects internal state types, never public output fields.
-        if original.root_node.schema.fields != node.schema.fields
-            || original.root_node.schema.time_index != node.schema.time_index
-            || original.root_node.schema.unique_keys != node.schema.unique_keys
-            || (original.root_node.schema.closed && !node.schema.closed)
-        {
+        if !super::reuse::same_output_contract(&original.root_node, &node) {
             return Err(Pass2RuleError::StateConfiguration(
                 "state rewrite changed the reader output contract".into(),
             ));
         }
-        let previous = self
-            .known
-            .entry((reader.group, graph_signature(&node)?))
-            .or_default();
-        if previous.iter().any(|known| **known == *node) {
+        // A rewrite never reads the group it implements.
+        let owner = MemoGroupId(reader.group as u32);
+        if input_groups.contains(&owner) {
             return Ok(0);
         }
-        previous.push(Rc::clone(&node));
         let mut candidate = original;
         candidate.root_node = node;
         candidate.input_groups = input_groups;
         candidate.accuracy_budget_parts = accuracy_budget_parts;
-        memo.candidates[reader.group].push(candidate);
-        Ok(1)
+        Ok(usize::from(push_candidate_if_new(memo, owner, candidate)))
     }
 }
 
@@ -461,6 +443,7 @@ fn assign_normalized_layouts(
     Ok(())
 }
 
+#[cfg(test)]
 fn graph_signature(node: &Rc<OperatorNode>) -> Result<String, Pass2RuleError> {
     serde_json::to_string(&flatten(&[QueryRoot::Operator(Rc::clone(node))]).0)
         .map_err(|error| Pass2RuleError::StateConfiguration(error.to_string()))

@@ -1,5 +1,9 @@
 //! Shared boundary handling for producer-level reuse rules. Rule outputs retain
 //! canonical input identities after guarantee recomposition rebuilds their DAGs.
+use crate::find_or_add_group::find_or_add_group;
+use crate::operator_over_groups::{
+    operator_over_groups, push_candidate_if_new, without_exact_guarantees_below,
+};
 use crate::pass2::memo::state_groups::{boundary_groups, Pass2RuleError};
 use asap_types::ir::OperatorNode;
 use asap_types::stages::{CandidateForMemoGroup, Memo, OriginOfCandidateForMemoGroup};
@@ -113,13 +117,7 @@ pub(in crate::pass2::memo) fn append_producer(
     // The new group's id must fit a `MemoGroupId`.
     u32::try_from(memo.groups().len()).map_err(|_| Pass2RuleError::TooManyGroups)?;
     let node = Rc::new((*node).clone());
-    let boundaries = memo
-        .groups()
-        .iter()
-        .enumerate()
-        .map(|(id, group)| (Rc::as_ptr(&group.logical_node), MemoGroupId(id as u32)))
-        .collect();
-    let children = boundary_groups(&node, &boundaries);
+    let children = boundary_groups(memo, &node, |_| true);
     Ok(memo.push_group(
         MemoGroup {
             logical_node: Rc::clone(&node),
@@ -137,6 +135,91 @@ pub(in crate::pass2::memo) fn append_producer(
     ))
 }
 
+/// Whether `actual` has `expected`'s output: the same result kind, fields,
+/// time index and unique keys, and a closed label set where `expected`'s is
+/// closed (a projection may enumerate every output of an open schema).
+pub(in crate::pass2::memo) fn same_output_contract(
+    expected: &OperatorNode,
+    actual: &OperatorNode,
+) -> bool {
+    expected.result_kind == actual.result_kind
+        && expected.schema.fields == actual.schema.fields
+        && expected.schema.time_index == actual.schema.time_index
+        && expected.schema.unique_keys == actual.schema.unique_keys
+        && (!expected.schema.closed || actual.schema.closed)
+}
+
+/// Rejects `node`, `original` rewritten by `origin`, when its output differs
+/// from `original`'s ([`same_output_contract`]).
+fn check_output_contract(
+    original: &CandidateForMemoGroup,
+    node: &OperatorNode,
+    origin: &OriginOfCandidateForMemoGroup,
+) -> Result<(), Pass2RuleError> {
+    if !same_output_contract(&original.root_node, node) {
+        return Err(Pass2RuleError::ReuseRule(format!(
+            "reuse changed the reader output contract ({origin:?}): expected {:?}, got {:?}",
+            original.root_node.schema, node.schema
+        )));
+    }
+    Ok(())
+}
+
+/// Adds to group `owner` the candidate `original` rewritten by `origin` to
+/// `node`, as one operator over groups ([`operator_over_groups`]: every node
+/// beneath `node` is found or added as a group made by `origin`, sized for
+/// `original`'s budget parts). `false` when `owner` has an equal candidate
+/// already ([`push_candidate_if_new`]), or when `node` reads `owner`
+/// itself.
+pub(in crate::pass2::memo) fn add_candidate_over_groups(
+    memo: &mut Memo,
+    owner: MemoGroupId,
+    original: &CandidateForMemoGroup,
+    node: Rc<OperatorNode>,
+    origin: OriginOfCandidateForMemoGroup,
+) -> Result<bool, Pass2RuleError> {
+    check_output_contract(original, &node, &origin)?;
+    let queries = memo.groups()[owner.0 as usize].queries.clone();
+    let (root_node, input_groups) = operator_over_groups(
+        memo,
+        &node,
+        &queries,
+        &origin,
+        original.accuracy_budget_parts,
+    );
+    if input_groups.contains(&owner) {
+        return Ok(false);
+    }
+    let mut candidate = original.clone();
+    candidate.root_node = root_node;
+    candidate.input_groups = input_groups;
+    candidate.origin = origin;
+    Ok(push_candidate_if_new(memo, owner, candidate))
+}
+
+/// The group of `node`, a producer a rule factors out of its readers, made
+/// by `origin` when no group's node equals it ([`find_or_add_group`]), its
+/// exact guarantees removed first so it equals the groups of the exact nodes
+/// it repeats. A producer holds no approximate state of its own, so its
+/// candidate is sized for the whole budget (1 part).
+pub(in crate::pass2::memo) fn find_or_add_producer(
+    memo: &mut Memo,
+    node: &Rc<OperatorNode>,
+    queries: &[usize],
+    origin: &OriginOfCandidateForMemoGroup,
+) -> MemoGroupId {
+    let below = without_exact_guarantees_below(node);
+    let node = if below.guarantee.as_ref().is_some_and(|g| g.is_exact()) {
+        Rc::new(OperatorNode {
+            guarantee: None,
+            ..(*below).clone()
+        })
+    } else {
+        below
+    };
+    find_or_add_group(memo, &node, queries, origin, 1)
+}
+
 pub(in crate::pass2::memo) fn append_reader(
     memo: &mut Memo,
     owner: usize,
@@ -144,25 +227,8 @@ pub(in crate::pass2::memo) fn append_reader(
     node: Rc<OperatorNode>,
     origin: OriginOfCandidateForMemoGroup,
 ) -> Result<bool, Pass2RuleError> {
-    if original.root_node.schema.fields != node.schema.fields
-        || original.root_node.schema.time_index != node.schema.time_index
-        || original.root_node.schema.unique_keys != node.schema.unique_keys
-        || (original.root_node.schema.closed && !node.schema.closed)
-        || original.root_node.result_kind != node.result_kind
-    {
-        return Err(Pass2RuleError::ReuseRule(format!(
-            "reuse changed the reader output contract ({origin:?}): expected {:?}, got {:?}",
-            original.root_node.schema, node.schema
-        )));
-    }
-    let boundaries = memo
-        .groups()
-        .iter()
-        .enumerate()
-        .filter(|(id, _)| *id != owner)
-        .map(|(id, group)| (Rc::as_ptr(&group.logical_node), MemoGroupId(id as u32)))
-        .collect();
-    let children = boundary_groups(&node, &boundaries);
+    check_output_contract(original, &node, &origin)?;
+    let children = boundary_groups(memo, &node, |group| group.0 as usize != owner);
     if memo.candidates[owner].iter().any(|known| {
         known.input_groups == children
             && known.accuracy_budget_parts == original.accuracy_budget_parts

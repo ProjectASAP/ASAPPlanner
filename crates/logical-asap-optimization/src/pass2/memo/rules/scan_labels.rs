@@ -7,6 +7,7 @@ use asap_accuracy::propagation::recompose_guarantees;
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot};
 
+use super::reuse::same_output_contract;
 use crate::added_groups::groups_read_through_added_groups;
 use crate::pass2::memo::state_groups::{
     boundary_groups, build_down_to_stage0_groups, Pass2RuleError,
@@ -116,15 +117,9 @@ pub(crate) fn add_scan_label_candidates(memo: &mut Memo) -> Result<usize, Pass2R
                 continue;
             }
         }
-        let boundaries = memo
-            .groups()
-            .iter()
-            .enumerate()
-            .map(|(id, group)| (Rc::as_ptr(&group.logical_node), MemoGroupId(id as u32)))
-            .collect();
         let mut reader = original;
         reader.root_node = node;
-        reader.input_groups = boundary_groups(&reader.root_node, &boundaries);
+        reader.input_groups = boundary_groups(memo, &reader.root_node, |_| true);
         reader.origin = OriginOfCandidateForMemoGroup::WidenedScans;
         if memo.candidates[group].iter().any(|known| {
             known.origin == OriginOfCandidateForMemoGroup::WidenedScans
@@ -137,15 +132,6 @@ pub(crate) fn add_scan_label_candidates(memo: &mut Memo) -> Result<usize, Pass2R
         added += 1;
     }
     Ok(added)
-}
-
-fn same_output_contract(expected: &OperatorNode, actual: &OperatorNode) -> bool {
-    expected.result_kind == actual.result_kind
-        && expected.schema.fields == actual.schema.fields
-        && expected.schema.time_index == actual.schema.time_index
-        && expected.schema.unique_keys == actual.schema.unique_keys
-        // A projection may enumerate every output of an originally open schema.
-        && (!expected.schema.closed || actual.schema.closed)
 }
 
 fn is_source_chain(node: &OperatorNode) -> bool {

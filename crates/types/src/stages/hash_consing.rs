@@ -162,6 +162,14 @@ fn same_node(
         && same_value(&own_fields(left), &own_fields(right))
 }
 
+/// Whether `left` and `right` are equal by Stage 0's equality ([`same_node`]),
+/// whether or not sharing them is legal: children compared by pointer
+/// first, so two operators over the same groups' nodes compare in `O(1)`
+/// beyond their own fields.
+pub fn equal_nodes(left: &OperatorNode, right: &OperatorNode) -> bool {
+    same_node(left, right, &mut NodePairToIsSameNodeCache::new())
+}
+
 /// Whether two equal copies of `node` return the same rows for the same
 /// input rows, so they may be one node: an ASAP node, or a non-ASAP node
 /// [`NonASAPOp::is_shareable_when_equal`].

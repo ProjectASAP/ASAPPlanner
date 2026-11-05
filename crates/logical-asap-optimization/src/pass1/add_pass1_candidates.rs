@@ -44,9 +44,7 @@ use std::rc::Rc;
 use super::per_computation_candidates::{
     compose_logical_candidate_with_accuracy_budget_parts, PerComputationCandidates,
 };
-use crate::added_groups::groups_read_through_added_groups;
-use crate::find_or_add_group::over_child_groups;
-use crate::own_candidate_sizing::size_own_candidate_for;
+use crate::operator_over_groups::operator_over_groups;
 use asap_accuracy::sizing::{
     per_input_failure_probability, with_summaries_sized_for_failure_probability,
 };
@@ -208,7 +206,7 @@ fn add_candidates_to_initial_groups(
 /// target varying fastest), each the aggregate composed alone with that
 /// choice, its summaries sized for its queries' failure probability (query
 /// `q`'s target `accuracy_targets[q]`, over `data`); the groups beneath it
-/// are found or added beneath Stage 0's groups. `None` when none composes.
+/// are found or added ([`operator_over_groups`]). `None` when none composes.
 #[allow(clippy::too_many_arguments)]
 fn target_candidates(
     per_computation: &PerComputationCandidates,
@@ -274,19 +272,13 @@ fn target_candidates(
                     accuracy_targets,
                     data,
                 )?;
-                let root = without_exact_guarantees_below(&root);
-                let (node, children) = over_child_groups(
+                let (node, children) = operator_over_groups(
                     memo,
                     &root,
                     &queries,
                     &OriginOfCandidateForMemoGroup::Pass1,
                     accuracy_budget_parts,
                 );
-                // A consumer sized for more parts may find a group added for
-                // fewer.
-                for group in groups_read_through_added_groups(memo, &children).added_groups {
-                    size_own_candidate_for(memo, group, accuracy_budget_parts);
-                }
                 // A parent reads the candidate in the group's place, so it
                 // outputs the group's schema when it has the same columns,
                 // with the group's metadata (composition may derive a closed
@@ -442,62 +434,6 @@ fn compose_alone(
         &alone_choice,
         accuracy_budget_parts,
     )
-}
-
-/// `root` with the exact guarantee removed from every node below it. Stage
-/// 0's nodes carry no guarantee, and composition gives each exact node it
-/// rebuilds the exact one ("exact over exact inputs"); that difference alone
-/// must not split a composed node from the equal Stage 0 group
-/// ([`find_or_add_group`](crate::find_or_add_group::find_or_add_group) compares guarantees). An approximate
-/// guarantee is kept, so builds that differ only in their failure
-/// probability or guarantee stay different groups. `root`'s own guarantee
-/// is the candidate's and is kept.
-fn without_exact_guarantees_below(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
-    fn without_exact(
-        node: &Rc<OperatorNode>,
-        done: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
-    ) -> Rc<OperatorNode> {
-        if let Some(found) = done.get(&Rc::as_ptr(node)) {
-            return Rc::clone(found);
-        }
-        let operator = node
-            .operator
-            .map_children(|child| without_exact(child, done));
-        let exact = node.guarantee.as_ref().is_some_and(|g| g.is_exact());
-        let changed = exact
-            || node
-                .children()
-                .iter()
-                .zip(operator.children())
-                .any(|(a, b)| !Rc::ptr_eq(a, b));
-        let rebuilt = if changed {
-            Rc::new(OperatorNode {
-                operator,
-                guarantee: if exact { None } else { node.guarantee.clone() },
-                ..(**node).clone()
-            })
-        } else {
-            Rc::clone(node)
-        };
-        done.insert(Rc::as_ptr(node), Rc::clone(&rebuilt));
-        rebuilt
-    }
-    let mut done = HashMap::new();
-    let operator = root
-        .operator
-        .map_children(|child| without_exact(child, &mut done));
-    if root
-        .children()
-        .iter()
-        .zip(operator.children())
-        .all(|(a, b)| Rc::ptr_eq(a, b))
-    {
-        return Rc::clone(root);
-    }
-    Rc::new(OperatorNode {
-        operator,
-        ..(**root).clone()
-    })
 }
 
 /// Whether `node`'s private nodes build a sketch, which its accuracy budget parts size.
@@ -738,7 +674,8 @@ mod tests {
     /// The Stage 0 groups `candidate` reads, directly or through the
     /// groups Pass 1 added beneath them, in the order first reached.
     fn stage0_inputs(memo: &Memo, candidate: &CandidateForMemoGroup) -> Vec<MemoGroupId> {
-        groups_read_through_added_groups(memo, &candidate.input_groups).stage0_groups
+        crate::added_groups::groups_read_through_added_groups(memo, &candidate.input_groups)
+            .stage0_groups
     }
 
     /// The summary algorithms a candidate's private nodes build.
@@ -833,7 +770,7 @@ mod tests {
             },
         ))
         .unwrap();
-        let stripped = without_exact_guarantees_below(&reader);
+        let stripped = crate::operator_over_groups::without_exact_guarantees_below(&reader);
         assert_eq!(stripped.children()[0].guarantee, Some(guarantee));
     }
 

@@ -133,14 +133,11 @@ pub(crate) fn add_shared_summary_state_groups(memo: &mut Memo) -> Result<(), Pas
         // Only declared inputs and newly lifted states are boundaries. A
         // factored result group's representative can equal its candidate root;
         // treating every memo node as an input would create a self-alias here.
-        let boundaries = reader
-            .input_groups
-            .iter()
-            .chain(&state_groups)
-            .map(|id| (Rc::as_ptr(&memo.groups()[id.0 as usize].logical_node), *id))
-            .collect();
+        let declared = reader.input_groups.clone();
         reader.root_node = super::rules::reuse::replace(&reader.root_node, &replacements);
-        reader.input_groups = boundary_groups(&reader.root_node, &boundaries);
+        reader.input_groups = boundary_groups(memo, &reader.root_node, |group| {
+            declared.contains(&group) || state_groups.contains(&group)
+        });
         reader.origin = OriginOfCandidateForMemoGroup::SharedBuild;
         memo.candidates[group].push(reader);
     }
@@ -356,9 +353,13 @@ pub(super) fn builds_beneath(
     builds
 }
 
+/// The groups `node` reads: walking down from `node`, each node that is a
+/// group's own node ([`Memo::group_whose_node_is`]) of a group
+/// `is_boundary` accepts, in the order first reached, each once.
 pub(super) fn boundary_groups(
+    memo: &Memo,
     node: &Rc<OperatorNode>,
-    boundaries: &HashMap<*const OperatorNode, MemoGroupId>,
+    is_boundary: impl Fn(MemoGroupId) -> bool,
 ) -> Vec<MemoGroupId> {
     let mut found = Vec::new();
     let mut stack = vec![Rc::clone(node)];
@@ -367,7 +368,10 @@ pub(super) fn boundary_groups(
         if !seen.insert(Rc::as_ptr(&node)) {
             continue;
         }
-        if let Some(&group) = boundaries.get(&Rc::as_ptr(&node)) {
+        if let Some(group) = memo
+            .group_whose_node_is(&node)
+            .filter(|&group| is_boundary(group))
+        {
             if !found.contains(&group) {
                 found.push(group);
             }
@@ -602,12 +606,6 @@ mod tests {
             tumbling_window_candidates, window_composition_pass2_candidates,
         };
 
-        let boundaries: HashMap<_, _> = memo
-            .groups()
-            .iter()
-            .enumerate()
-            .map(|(id, group)| (Rc::as_ptr(&group.logical_node), MemoGroupId(id as u32)))
-            .collect();
         // As local window composition does: Stage 0's groups only.
         for group in 0..memo.groups().len() {
             if !memo.is_stage0_group(MemoGroupId(group as u32)) {
@@ -640,7 +638,7 @@ mod tests {
                 let node = replace_node(node, chain.children()[0], &input);
                 let mut tumbling_window = candidate;
                 tumbling_window.root_node = Rc::clone(&node);
-                tumbling_window.input_groups = boundary_groups(&node, &boundaries);
+                tumbling_window.input_groups = boundary_groups(&memo, &node, |_| true);
                 tumbling_window.origin = OriginOfCandidateForMemoGroup::TumblingWindows;
                 memo.candidates[group].push(tumbling_window);
             }
@@ -1308,9 +1306,12 @@ mod tests {
         }
         assert!(injected >= 2);
         let expanded = expand(memo).unwrap();
-        assert!(expanded.state_groups.iter().any(|state| {
-            let group = &expanded.memo.groups()[state.0 as usize];
-            group.queries == vec![0, 1]
+        // One build group both queries reach, over a canonical input group.
+        assert!(expanded.memo.groups().iter().any(|group| {
+            matches!(
+                group.logical_node.asap(),
+                Some(ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. })
+            ) && group.queries == vec![0, 1]
                 && group.child_groups.iter().any(|input| {
                     expanded.memo.candidates[input.0 as usize]
                         .iter()
