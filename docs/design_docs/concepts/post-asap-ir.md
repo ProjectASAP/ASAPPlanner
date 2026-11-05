@@ -130,13 +130,18 @@ stages read them from the assignment.
 lifetime for every node, top-down, and returns the completed assignment:
 
 - `SummaryEstimate` and `EvaluatePopulation` run at query time;
-- a node the assignment lists runs at its entry's timing; a `SummaryAgg`
-  or `MaintainPopulation` that is not materialized runs at query time. Every node
+- a node the assignment lists runs at its entry's timing. Every node
   upstream of an ingestion-time node also runs at ingestion time, so a materialized
   ingestion-time output over something that can only exist at query time (an
-  evaluation, or a state not materialized at ingestion time) fails with
+  evaluation, or a filtered summary build) fails with
   `ExecutionDataStateError::UpstreamNotAtIngestion` ("upstream of
   ingestion-time node not at ingestion time");
+- a summary build or `MaintainPopulation` the assignment does not list is not
+  materialized and runs where its consumer runs, like any other node: in the
+  query run, or inside the ingestion run of the materialized state that reads
+  it ((IngestionTime, None)). A filtered build always runs at query time, since
+  raw samples carry none of the columns its filter reads, and so does a build
+  over something that only exists at query time (an evaluation);
 - every other node is not materialized and runs when its consumer runs: everything
   that feeds an ingestion-time node runs at ingestion time, everything above
   an evaluation at query time. A query-time consumer reads the stored output
@@ -200,10 +205,13 @@ children as edges and no embedded sub-DAGs:
 Each node also records its `lifetime`, including the medium, so the
 deployment knows which outputs to materialize, for how long and where; validation
 rejects a timing and lifetime that cannot go together (an ingestion-time
-output materialized for `OneEvaluation`) and a `SummaryAgg` or `MaintainPopulation`
-that is not materialized outside query time
-(`PhysicalASAPDAGValidationError::InvalidPhysicalProperties`). Ingestion
-work cannot depend on a future query result. The
+output materialized for `OneEvaluation`,
+`PhysicalASAPDAGValidationError::InvalidPhysicalProperties`). Every edge is
+checked with `satisfies_physical` (α^phys): ingestion work cannot depend
+on a future query result, and a query-time node cannot read an
+ingestion-time output that is not materialized, which exists only inside
+the ingestion run that reads it; either fails with
+`PhysicalRequirementNotSatisfied`. The
 deployment executes the plan as given and does not change its lifetime
 or timing ([#509 Assumption 8](../proposals/planner-layering.md#assumptions)); it must
 separately check that it has an implementation and a valid data source for

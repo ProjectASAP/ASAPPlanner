@@ -14,11 +14,13 @@
 //!
 //! - `SummaryEstimate` and `EvaluatePopulation` run at query time;
 //! - a node the assignment lists runs at its entry's timing with its entry's
-//!   lifetime. A `SummaryAgg` or `MaintainPopulation` the assignment does
-//!   not list is not materialized and runs at query time. Every node
-//!   upstream of an ingestion-time node also runs at ingestion time, so an
-//!   ingestion-time entry over something that can only exist at query time
-//!   is an error ([`ExecutionDataStateError::UpstreamNotAtIngestion`]);
+//!   lifetime. Every node upstream of an ingestion-time node also runs at
+//!   ingestion time, so an ingestion-time entry over something that can only
+//!   exist at query time (an evaluation, a filtered summary build) is an
+//!   error ([`ExecutionDataStateError::UpstreamNotAtIngestion`]);
+//! - a filtered summary build the assignment does not list runs at query
+//!   time (raw samples carry none of the columns its filter reads), and so
+//!   does one over something that only exists at query time;
 //! - a PromQL `BinaryOp` over per-series inputs that are not the same series
 //!   rows runs at query time, since maintenance cannot align them;
 //! - every other node is not materialized (lifetime `None`) and runs when its
@@ -72,9 +74,11 @@ use crate::physical::{
 /// output is stored"). Stage 2 lists each materialized sub-DAG output, named
 /// by the node whose output is materialized; an entry whose lifetime is
 /// `None` fixes only the node's timing. A node the assignment does not list
-/// is placed by [`apply_physical_properties`]' rules: not materialized, a
-/// summary build or `MaintainPopulation` at query time, every other node
-/// when its consumer runs. [`apply_physical_properties`] returns the
+/// is placed by [`apply_physical_properties`]' rules: not materialized, at
+/// query time if it is a filtered summary build or over something that only
+/// exists at query time, otherwise when its consumer runs (a summary build
+/// under a state materialized at ingestion time runs in that state's
+/// ingestion run). [`apply_physical_properties`] returns the
 /// completed assignment, which lists every node it reached; physical stages
 /// read a node's timing and lifetime from it. `Default` lists nothing.
 ///
@@ -262,8 +266,11 @@ fn is_unaligned_series_binary(node: &OperatorNode) -> bool {
 }
 
 /// Whether the sub-DAG below `node` contains a node that can only run at
-/// query time (an evaluation, or a sub-DAG `assignment` does not put at
-/// ingestion time), which forces every consumer above it to query time as well.
+/// query time (an evaluation, a filtered summary build, or a node
+/// `assignment` places at query time), which forces every consumer above
+/// it to query time as well. A node that `assignment` does not list takes
+/// its consumer's timing, so it forces query time only when something below
+/// it does.
 /// A PromQL `BinaryOp` whose inputs are not the same per-series rows also runs
 /// at query time.
 fn forces_query_time(
@@ -287,9 +294,12 @@ fn forces_query_time(
             Some(listed) if listed.timing() == ExecutionTiming::QueryTime => true,
             // An ingestion-time entry the DAG cannot honor runs at query time.
             Some(_) => is_filtered_build(node) || upstream(seen),
-            // A summary build that is not materialized runs at query time.
-            None if is_materializable_state_output(&node.operator) => true,
+            // A filtered build reads columns raw samples do not carry, so it
+            // runs at query time.
+            None if is_filtered_build(node) => true,
             None if is_unaligned_series_binary(node) => true,
+            // Not listed: it runs where its consumer runs, unless something
+            // below it cannot run at ingestion time.
             None => upstream(seen),
         }
     };
@@ -424,15 +434,23 @@ fn placement(
         }
         return Ok(listed);
     }
-    // A summary build that is not materialized runs at query time.
-    Ok(
-        if runs_at_query_time_only(node) || is_materializable_state_output(&node.operator) {
-            PhysicalProperties::new(ExecutionTiming::QueryTime, Lifetime::None)
-                .expect("a valid timing and lifetime")
-        } else {
-            PhysicalProperties::new(consumer, Lifetime::None).expect("a valid timing and lifetime")
-        },
-    )
+    // A filtered summary build reads columns raw samples do not carry, and a
+    // summary build over something that only exists at query time (an
+    // evaluation) runs there too. Otherwise a node with no entry runs where
+    // its consumer runs: in the query run, or in the ingestion run of the
+    // materialized state that reads it.
+    let query_time_build = is_materializable_state_output(&node.operator)
+        && (is_filtered_build(node)
+            || node
+                .children()
+                .iter()
+                .any(|child| forces_query_time(child, assignment, forced)));
+    Ok(if runs_at_query_time_only(node) || query_time_build {
+        PhysicalProperties::new(ExecutionTiming::QueryTime, Lifetime::None)
+            .expect("a valid timing and lifetime")
+    } else {
+        PhysicalProperties::new(consumer, Lifetime::None).expect("a valid timing and lifetime")
+    })
 }
 
 /// The timing `node` takes when its consumer runs at `consumer`, by the
@@ -904,6 +922,16 @@ mod tests {
     }
 
     fn agg(child: Rc<OperatorNode>, family: FieldDataType) -> Rc<OperatorNode> {
+        agg_with(child, family, None)
+    }
+
+    /// A `SummaryAgg` of `family` over `child`'s sample values, with
+    /// `filter` (a filtered build never runs at ingestion time).
+    fn agg_with(
+        child: Rc<OperatorNode>,
+        family: FieldDataType,
+        filter: Option<crate::ir::Predicate>,
+    ) -> Rc<OperatorNode> {
         std::rc::Rc::new(
             OperatorNode::with_schema(
                 crate::ir::Operator::ASAP(ASAPOp::SummaryAgg {
@@ -912,7 +940,7 @@ mod tests {
                     input: SummaryUpdate::column(ColumnRef::SampleValue),
                     reduction: Reduction::by(vec![]),
                     grouping: GroupingStrategy::default(),
-                    filter: None,
+                    filter,
                 }),
                 Schema::lifted(vec![Field::new("state", family, false)], None),
             )
@@ -1059,12 +1087,50 @@ mod tests {
         }
     }
 
-    /// #509 Algorithm 3, line 13: an explicit assignment materialized at ingestion time over a state
-    /// that only exists at query time is an error, not a silent move to
-    /// query time.
+    /// A state materialized at ingestion time over a summary build that is
+    /// not materialized: the build runs where its consumer runs, inside the
+    /// ingestion run that refreshes the materialized state.
     #[test]
-    fn ingestion_time_node_over_query_time_upstream_is_rejected() {
+    fn an_unmaterialized_build_under_an_ingestion_time_state_runs_at_ingestion() {
         let inner = agg(scan(), exact_sum());
+        let outer = agg(Rc::clone(&inner), kll());
+        let mut assignment = PhysicalPropertiesAssignment::default();
+        assignment.set(
+            &outer,
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
+        );
+        let timed = apply_physical_properties(&estimate(Rc::clone(&outer)), &assignment).unwrap();
+        assert_eq!(
+            timed.get(&outer),
+            Some(
+                PhysicalProperties::new(
+                    ExecutionTiming::IngestionTime,
+                    Lifetime::AcrossEvaluations(Medium::Memory)
+                )
+                .expect("a valid timing and lifetime")
+            )
+        );
+        assert_eq!(
+            timed.get(&inner),
+            Some(
+                PhysicalProperties::new(ExecutionTiming::IngestionTime, Lifetime::None)
+                    .expect("a valid timing and lifetime")
+            )
+        );
+    }
+
+    /// A filtered build cannot run at ingestion time, materialized or not: a
+    /// state materialized at ingestion time over it names the missing upstream.
+    #[test]
+    fn ingestion_time_state_over_a_filtered_build_is_rejected() {
+        let always = crate::ir::Predicate(crate::ir::ScalarExpr::Literal(
+            crate::ir::scalar::expr_ir::ScalarValue::Boolean(true),
+        ));
+        let inner = agg_with(scan(), exact_sum(), Some(always));
         let outer = agg(Rc::clone(&inner), kll());
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
@@ -1080,33 +1146,6 @@ mod tests {
             Some(ExecutionDataStateError::UpstreamNotAtIngestion {
                 operator: "SummaryAgg"
             })
-        );
-        assignment.set(
-            &inner,
-            PhysicalProperties::new(
-                ExecutionTiming::IngestionTime,
-                Lifetime::AcrossEvaluations(Medium::Memory),
-            )
-            .expect("a valid timing and lifetime"),
-        );
-        let outer = agg(Rc::clone(&inner), kll());
-        assignment.set(
-            &outer,
-            PhysicalProperties::new(
-                ExecutionTiming::IngestionTime,
-                Lifetime::AcrossEvaluations(Medium::Memory),
-            )
-            .expect("a valid timing and lifetime"),
-        );
-        let physical_properties =
-            apply_physical_properties(&estimate(Rc::clone(&outer)), &assignment).unwrap();
-        assert_eq!(
-            lifetime_of(&physical_properties, &outer),
-            MATERIALIZED_ACROSS
-        );
-        assert_eq!(
-            lifetime_of(&physical_properties, &inner),
-            MATERIALIZED_ACROSS
         );
     }
 
@@ -1221,11 +1260,13 @@ mod tests {
         );
     }
 
-    /// A finalize fixed at ingestion time over a state that is not
-    /// materialized at ingestion time names the missing upstream, not an
-    /// illegal edge.
+    /// A finalize fixed at ingestion time (as fixed-window rate candidates
+    /// build it) over a state that is not materialized: the state runs in the
+    /// ingestion run with it, and a query-time build cannot read the
+    /// finalize, which is not stored.
     #[test]
-    fn ingestion_fixed_finalize_over_query_time_state_is_upstream_not_at_ingestion() {
+    fn ingestion_pinned_finalize_over_an_unmaterialized_state_does_not_satisfy_a_query_time_consumer(
+    ) {
         let finalize = OperatorNode::new_shared(crate::ir::Operator::ASAP(
             ASAPOp::FinalizeExactAccumulator {
                 child: agg(scan(), exact_sum()),
@@ -1238,9 +1279,12 @@ mod tests {
                 &fixed_at_ingestion(&[&finalize]),
             )
             .err(),
-            Some(ExecutionDataStateError::UpstreamNotAtIngestion {
-                operator: "FinalizeExactAccumulator"
-            })
+            Some(
+                ExecutionDataStateError::UnstoredIngestionInputUnderQueryTimeSummary {
+                    edge: "SummaryAgg.child",
+                    operator: "FinalizeExactAccumulator"
+                }
+            )
         );
     }
 

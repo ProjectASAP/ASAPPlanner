@@ -911,3 +911,94 @@ fn queries_at_60_and_90_seconds_read_one_chain_of_30_second_tumbling_windows() {
         );
     }
 }
+
+/// End to end, a summary build not materialized at ingestion time: a merge
+/// materialized at ingestion time reads the 5-minute Sum build, which is not
+/// materialized and so runs inside the merge's ingestion run. The query
+/// reads the merge's view and answers as the whole build at query time.
+#[test]
+fn an_unmaterialized_build_runs_in_the_ingestion_run_of_the_state_reading_it() {
+    let samples = samples(1);
+    let single = single_build("sum_over_time(m[5m])", AccuracyTarget::exact());
+    let build = summary_agg(&single);
+    let merged = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
+        children: vec![Rc::clone(&build)],
+        newest_tumbling_windows: None,
+        group_by: None,
+    }))
+    .unwrap();
+    let root = replace(&single, &build, &merged);
+    let mut assignment = PhysicalPropertiesAssignment::default();
+    assignment.set(
+        &merged,
+        PhysicalProperties::new(
+            ExecutionTiming::IngestionTime,
+            Lifetime::AcrossEvaluations(Medium::Memory),
+        )
+        .expect("a valid timing and lifetime"),
+    );
+    let mut exported = export(&root, &assignment);
+    let id_of = |summary_merge: bool| {
+        exported
+            .dag
+            .nodes
+            .iter()
+            .find(|node| match &node.payload {
+                Operator::ASAP(ASAPOp::SummaryAgg { .. }) => !summary_merge,
+                Operator::ASAP(ASAPOp::SummaryMerge { .. }) => summary_merge,
+                _ => false,
+            })
+            .expect("the plan has a summary build and a merge")
+            .id
+    };
+    let (build_id, merge_id) = (id_of(false), id_of(true));
+    let (build_id, merge_id) = (build_id as u64, merge_id as u64);
+    let properties = |id: u64| {
+        let node = exported
+            .dag
+            .nodes
+            .iter()
+            .find(|node| node.id as u64 == id)
+            .unwrap();
+        PhysicalProperties::new(node.output_state.timing, node.lifetime)
+    };
+    assert_eq!(
+        properties(build_id),
+        Ok(
+            PhysicalProperties::new(ExecutionTiming::IngestionTime, Lifetime::None)
+                .expect("a valid timing and lifetime")
+        )
+    );
+    assert_eq!(
+        properties(merge_id),
+        Ok(PhysicalProperties::new(
+            ExecutionTiming::IngestionTime,
+            Lifetime::AcrossEvaluations(Medium::Memory)
+        )
+        .expect("a valid timing and lifetime"))
+    );
+    exported.dag.validate().unwrap();
+    let views = views_at(&mut exported.dag, &[merge_id]).unwrap();
+    // The merge's ingestion run builds the Sum from the raw samples and
+    // materializes only the merge.
+    let ingestion = compile(&exported.dag, &[], &[merge_id]).unwrap();
+    let rows = run(
+        &ingestion,
+        raw_store(&exported.dag, &samples),
+        Scope::Ingestion {
+            window_start_ms: 0,
+            window_end_ms: EVALUATION_MS,
+        },
+    );
+    let store = InMemoryDataStore::default()
+        .with_materialized_view(
+            merge_id as usize,
+            vec![Batch::try_new(schema_of(&exported.dag, merge_id), rows).unwrap()],
+        )
+        .unwrap();
+    let query = compile(&exported.dag, &views, &[exported.dag.roots[0] as u64]).unwrap();
+    assert_eq!(
+        render(&run(&query, store, query_scope())),
+        render(&execute(&single, &samples))
+    );
+}

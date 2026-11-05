@@ -5063,8 +5063,7 @@ mod tests {
 
     /// The KLL DAG whose node has `properties`: the build itself, except
     /// for (IngestionTime, None), which is the scan below the build
-    /// materialized at ingestion time (a summary build that is not
-    /// materialized runs at query time).
+    /// materialized at ingestion time.
     fn kll_dag_with(properties: PhysicalProperties) -> PhysicalASAPDAG {
         match (properties.timing(), properties.lifetime()) {
             (ExecutionTiming::IngestionTime, Lifetime::None) => kll_dag(at_ingestion()),

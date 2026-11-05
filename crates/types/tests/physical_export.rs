@@ -100,13 +100,13 @@ fn query_time_input_to_ingestion_is_rejected() {
     *dag.edges[0].data_state_mut() = dag.nodes[0].output_state;
     assert!(matches!(
         dag.validate(),
-        Err(PhysicalASAPDAGValidationError::QueryDependencyInIngestion { .. })
+        Err(PhysicalASAPDAGValidationError::PhysicalRequirementNotSatisfied { .. })
     ));
 }
 
 /// A node's timing and lifetime must go together: an ingestion-time output
-/// cannot be materialized for one evaluation, and a summary build that is not materialized
-/// runs at query time.
+/// cannot be materialized for one evaluation. A query reads an ingestion-time output
+/// only where it is materialized.
 #[test]
 fn invalid_physical_properties_are_rejected() {
     let mut dag = exported_at_ingestion();
@@ -121,7 +121,12 @@ fn invalid_physical_properties_are_rejected() {
     dag.nodes[1].lifetime = Lifetime::None;
     assert_eq!(
         dag.validate(),
-        Err(PhysicalASAPDAGValidationError::UnmaterializedSummaryBuildNotAtQueryTime { node: 1 })
+        Err(
+            PhysicalASAPDAGValidationError::PhysicalRequirementNotSatisfied {
+                producer: 1,
+                consumer: 2
+            }
+        )
     );
     dag.nodes[1].lifetime = ON_DISK;
     dag.validate().unwrap();
@@ -771,11 +776,9 @@ fn workload_export_matches_the_single_root_export() {
 }
 
 /// Export validation over every valid state of `plan()`'s summary build:
-/// each materialized state, any medium, is assigned, exported and valid; not
-/// materialized at query time is assigned and valid; not materialized at
-/// ingestion time is valid for the scan below an ingestion-time build and,
-/// for the build itself, rejected by rule (an ingestion-time state must be
-/// materialized for a query to read it).
+/// each state, any medium, is exported and valid. Not materialized at
+/// ingestion time is the build under its consumer materialized at ingestion
+/// time, computed in that consumer's ingestion run.
 #[test]
 fn export_validation_over_every_valid_state() {
     use ExecutionTiming::{IngestionTime, QueryTime};
@@ -797,13 +800,23 @@ fn export_validation_over_every_valid_state() {
         let root = plan();
         let build = root.children()[0];
         let mut assignment = PhysicalPropertiesAssignment::default();
-        let unmaterialized_at_ingestion =
-            (properties.timing(), properties.lifetime()) == (IngestionTime, Lifetime::None);
-        if !unmaterialized_at_ingestion {
-            assignment.set(build, properties);
+        match (properties.timing(), properties.lifetime()) {
+            // The build gets no entry: it runs in the ingestion run of the
+            // finalize above it, which is materialized at ingestion time.
+            (IngestionTime, Lifetime::None) => assignment.set(
+                &root,
+                PhysicalProperties::new(
+                    ExecutionTiming::IngestionTime,
+                    Lifetime::AcrossEvaluations(Medium::Memory),
+                )
+                .expect("a valid timing and lifetime"),
+            ),
+            // The build gets no entry and runs at query time with its consumer.
+            (QueryTime, Lifetime::None) => {}
+            _ => assignment.set(build, properties),
         }
         let timed = apply_physical_properties(&root, &assignment).unwrap();
-        let mut dag = compile_physical_asap_dag(&root, &timed).unwrap();
+        let dag = compile_physical_asap_dag(&root, &timed).unwrap();
         let [scan, build, _finalize] = [0, 1, 2].map(|i| {
             PhysicalProperties::new(dag.nodes[i].output_state.timing, dag.nodes[i].lifetime)
         });
@@ -813,15 +826,8 @@ fn export_validation_over_every_valid_state() {
                 dag.validate().unwrap();
             }
             (IngestionTime, Lifetime::None) => {
-                dag.nodes[1].output_state.timing = IngestionTime;
-                assert_eq!(
-                    dag.validate(),
-                    Err(
-                        PhysicalASAPDAGValidationError::UnmaterializedSummaryBuildNotAtQueryTime {
-                            node: 1
-                        }
-                    )
-                );
+                assert_eq!(build, Ok(properties));
+                dag.validate().unwrap();
             }
             (IngestionTime, Lifetime::AcrossEvaluations(_)) => {
                 assert_eq!(build, Ok(properties));

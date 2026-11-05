@@ -5,6 +5,8 @@ use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use asap_types::ir::schema::{ExactKind, ExactParams, GroupingStrategy, SummaryUpdate};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
+use asap_types::physical::Lifetime;
+use asap_types::physical::Medium;
 use std::rc::Rc;
 
 fn scan(key_type: DataType, name: &str) -> Rc<OperatorNode> {
@@ -401,4 +403,49 @@ fn malformed_population_dags_fail_closed() {
     };
     spec.metric = "b".into();
     assert!(compile_physical_asap_dag(&Rc::new(bad)).is_err());
+}
+
+/// A population that is not materialized, read by a node materialized at
+/// ingestion time, runs where its consumer runs: inside that consumer's
+/// ingestion run, as (IngestionTime, None).
+#[test]
+fn an_unmaterialized_population_under_an_ingestion_time_consumer_runs_at_ingestion() {
+    use asap_types::ir::{apply_physical_properties, PhysicalPropertiesAssignment};
+    use asap_types::physical::PhysicalProperties;
+    let candidate = current_series_topk();
+    let Some(ASAPOp::EvaluatePopulation {
+        child: population, ..
+    }) = candidate.asap()
+    else {
+        unreachable!()
+    };
+    // A key filter keeps whole population states.
+    let consumer = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Filter {
+        pred: asap_types::ir::Predicate(asap_types::ir::ScalarExpr::Literal(
+            asap_types::ir::scalar::expr_ir::ScalarValue::Boolean(true),
+        )),
+        child: Rc::clone(population),
+    }))
+    .unwrap();
+    assert_eq!(
+        consumer.result_kind,
+        asap_types::ir::OperatorResultKind::State
+    );
+    let mut assignment = PhysicalPropertiesAssignment::default();
+    assignment.set(
+        &consumer,
+        PhysicalProperties::new(
+            ExecutionTiming::IngestionTime,
+            Lifetime::AcrossEvaluations(Medium::Memory),
+        )
+        .expect("a valid timing and lifetime"),
+    );
+    let timed = apply_physical_properties(&consumer, &assignment).unwrap();
+    assert_eq!(
+        timed.get(population),
+        Some(
+            PhysicalProperties::new(ExecutionTiming::IngestionTime, Lifetime::None)
+                .expect("a valid timing and lifetime")
+        )
+    );
 }

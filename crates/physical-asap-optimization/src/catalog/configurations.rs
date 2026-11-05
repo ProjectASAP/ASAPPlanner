@@ -151,8 +151,12 @@ pub fn enumerate_candidate_configurations(
         //   `Disk` state given to it executes in memory (a view slot bound to
         //   the deployment's in-memory store, a one-evaluation result materialized
         //   within the query run), while cost prices it as disk;
-        // - (IngestionTime, None) for a summary build: an unmaterialized build
-        //   runs at query time (`apply_physical_properties`);
+        // - (IngestionTime, None) for a summary build: every consumer
+        //   handles it (the build runs inside the ingestion run of the
+        //   materialized state reading it), but offering it adds candidates
+        //   and can change selected plans, which is a separate decision;
+        //   `down_closed` requires every build below an ingestion-time build
+        //   to be materialized there;
         // - (IngestionTime, AcrossEvaluations) for a non-summary node: rows
         //   are not maintained at ingestion time, only summary states;
         // - (QueryTime, AcrossEvaluations) for anything but a tumbling-window

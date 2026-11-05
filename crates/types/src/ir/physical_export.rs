@@ -26,11 +26,12 @@ use crate::ir::properties::execution_data_state::{
 use crate::ir::properties::guarantee::AccuracyGuarantee;
 #[cfg(any(test, feature = "test-support"))]
 use crate::ir::properties::timing::apply_physical_properties_to_roots;
-use crate::ir::properties::timing::{
-    data_state, is_materializable_state_output, PhysicalPropertiesAssignment,
-};
+use crate::ir::properties::timing::{data_state, PhysicalPropertiesAssignment};
 use crate::ir::schema::{FieldDataType, Schema};
-use crate::physical::{InvalidPhysicalProperties, Lifetime, PhysicalProperties};
+use crate::physical::{
+    satisfies_physical, Evaluation, InvalidPhysicalProperties, Lifetime, PhysicalProperties,
+    PhysicalRequirement,
+};
 
 /// A node's operator, with each child replaced by its node id.
 pub type PhysicalASAPOperatorPayload = Operator<NodeId>;
@@ -179,14 +180,12 @@ pub enum PhysicalASAPDAGValidationError {
         #[source]
         reason: InvalidPhysicalProperties,
     },
-    /// A summary build (or maintained population) that is not materialized but does
-    /// not run at query time: a planner bug.
-    #[error(
-        "node {node:?} is a summary build that is not materialized but does not run at query time"
-    )]
-    UnmaterializedSummaryBuildNotAtQueryTime { node: PhysicalASAPNodeId },
-    #[error("ingestion node {consumer:?} depends on query node {producer:?}")]
-    QueryDependencyInIngestion {
+    /// An edge where α^phys fails (`satisfies_physical` is false): ingestion
+    /// work reads a query-time output, or a query-time node reads an
+    /// ingestion-time output that is not materialized (it runs only inside
+    /// the ingestion run that reads it). A planner bug.
+    #[error("node {consumer:?} cannot read node {producer:?} at its timing")]
+    PhysicalRequirementNotSatisfied {
         producer: PhysicalASAPNodeId,
         consumer: PhysicalASAPNodeId,
     },
@@ -604,13 +603,13 @@ impl PhysicalASAPDAG {
 
     pub fn validate(&self) -> Result<(), PhysicalASAPDAGValidationError> {
         let mut nodes = HashMap::new();
+        let mut properties_of = HashMap::new();
         for node in &self.nodes {
             if nodes.insert(node.id, node).is_some() {
                 return Err(PhysicalASAPDAGValidationError::DuplicateNodeId(node.id));
             }
-            // A node's timing and lifetime must go together; a summary
-            // build that is not materialized runs at query time. Any other node that
-            // is not materialized runs when its consumer runs.
+            // A node's timing and lifetime must go together. A node that is
+            // not materialized runs when its consumer runs (the edge checks below).
             let properties = PhysicalProperties::new(node.output_state.timing, node.lifetime)
                 .map_err(
                     |reason| PhysicalASAPDAGValidationError::InvalidPhysicalProperties {
@@ -618,17 +617,7 @@ impl PhysicalASAPDAG {
                         reason,
                     },
                 )?;
-            if is_materializable_state_output(&node.payload)
-                && properties
-                    == PhysicalProperties::new(ExecutionTiming::IngestionTime, Lifetime::None)
-                        .expect("a valid timing and lifetime")
-            {
-                return Err(
-                    PhysicalASAPDAGValidationError::UnmaterializedSummaryBuildNotAtQueryTime {
-                        node: node.id,
-                    },
-                );
-            }
+            properties_of.insert(node.id, properties);
             let materialized_across_evaluations = match (properties.timing(), properties.lifetime())
             {
                 (
@@ -750,13 +739,22 @@ impl PhysicalASAPDAG {
                     edge.consumer,
                 ));
             }
-            if producer.output_state.timing == ExecutionTiming::QueryTime
-                && nodes[&edge.consumer].output_state.timing == ExecutionTiming::IngestionTime
-            {
-                return Err(PhysicalASAPDAGValidationError::QueryDependencyInIngestion {
-                    producer: edge.producer,
-                    consumer: edge.consumer,
-                });
+            // α^phys: a node reads, in the same evaluation, only a producer
+            // that satisfies its timing (`satisfies_physical`).
+            let requirement = PhysicalRequirement::new(
+                nodes[&edge.consumer].output_state.timing,
+                Evaluation::Same,
+                None,
+            )
+            .expect("a same-evaluation read is valid at either timing");
+            let properties = properties_of[&edge.producer];
+            if !satisfies_physical(&properties, &requirement) {
+                return Err(
+                    PhysicalASAPDAGValidationError::PhysicalRequirementNotSatisfied {
+                        producer: edge.producer,
+                        consumer: edge.consumer,
+                    },
+                );
             }
             if edge.intermediate_schema != producer.output_schema {
                 return Err(PhysicalASAPDAGValidationError::EdgeSchemaMismatch {

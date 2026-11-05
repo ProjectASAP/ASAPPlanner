@@ -733,11 +733,15 @@ fn summary_merge_timing() {
         timings(&stored_tumbling_windows),
         (QueryTime, vec![IngestionTime, IngestionTime])
     );
-    // A `SummaryAgg` without an assignment runs at query time, so a merge
-    // stored at ingestion time needs its tumbling windows there too.
+    // A `SummaryAgg` without an assignment is not materialized and runs
+    // where its consumer runs: under a merge stored at ingestion time, its
+    // tumbling windows are built in the merge's ingestion run.
     let mut only_merge = PhysicalPropertiesAssignment::default();
     only_merge.set(&root, at_ingestion);
-    assert!(apply_physical_properties(&root, &only_merge).is_err());
+    assert_eq!(
+        timings(&only_merge),
+        (IngestionTime, vec![IngestionTime, IngestionTime])
+    );
     let mut stored_merge = PhysicalPropertiesAssignment::materialized_at_ingestion_where_allowed(
         std::slice::from_ref(&root),
     );

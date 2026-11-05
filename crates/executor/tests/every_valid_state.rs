@@ -18,7 +18,7 @@ use planner_types::ir::{
 };
 use planner_types::physical::{Lifetime, PhysicalProperties};
 
-/// `FinalizeExactAccumulator(SummaryAgg(Sum)(TimeRange 5 min(Scan latency_ms)))`.
+/// `FinalizeExactAccumulator(SummaryMerge(SummaryAgg(Sum)(TimeRange 5 min(Scan latency_ms))))`.
 fn plan() -> Rc<OperatorNode> {
     let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
         source: Source::TimeSeries {
@@ -50,19 +50,30 @@ fn plan() -> Rc<OperatorNode> {
         filter: None,
     }))
     .unwrap();
+    let merge = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
+        children: vec![state],
+        newest_tumbling_windows: None,
+        group_by: None,
+    }))
+    .unwrap();
     OperatorNode::new_shared(Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
-        child: state,
+        child: merge,
     }))
     .unwrap()
 }
 
+/// The build under the merge under `root`.
+fn build_of(root: &Rc<OperatorNode>) -> &Rc<OperatorNode> {
+    root.children()[0].children()[0]
+}
+
 /// What the physical planner makes of the build in each valid state: a
 /// state materialized across evaluations (either timing, either medium) is
-/// a materialized view slot the deployment binds; every other state is
-/// computed in the query run (a `OneEvaluation` result once for the run's
-/// readers). A summary build not materialized at ingestion time is not
-/// built by rule: the timing pass runs an unmaterialized build at query
-/// time.
+/// a materialized view slot the deployment binds; a query-time state that
+/// is not materialized across evaluations is computed in the query run (a
+/// `OneEvaluation` result once for the run's consumers). Not materialized at
+/// ingestion time, the build sits under the merge materialized at ingestion
+/// time and is computed in that view's ingestion run.
 #[test]
 fn physical_planner_over_every_valid_state() {
     use ExecutionTiming::{IngestionTime, QueryTime};
@@ -83,17 +94,38 @@ fn physical_planner_over_every_valid_state() {
     {
         let root = plan();
         let mut assignment = PhysicalPropertiesAssignment::default();
-        let unmaterialized_at_ingestion =
-            (properties.timing(), properties.lifetime()) == (IngestionTime, Lifetime::None);
-        if !unmaterialized_at_ingestion {
-            assignment.set(root.children()[0], properties);
+        match (properties.timing(), properties.lifetime()) {
+            // The build gets no entry: it runs in the ingestion run of the
+            // merge above it, which is materialized at ingestion time.
+            (IngestionTime, Lifetime::None) => assignment.set(
+                root.children()[0],
+                PhysicalProperties::new(
+                    ExecutionTiming::IngestionTime,
+                    Lifetime::AcrossEvaluations(Medium::Memory),
+                )
+                .expect("a valid timing and lifetime"),
+            ),
+            _ => assignment.set(build_of(&root), properties),
         }
         let timed = apply_physical_properties(&root, &assignment).unwrap();
         let mut dag = compile_physical_asap_dag(&root, &timed).unwrap();
         let views = dag.set_retention(&HashMap::new(), &HashMap::new()).unwrap();
-        let compiled = asap_executor::physical_planner::compile(&dag, &views, &[3])
-            .unwrap_or_else(|error| panic!("{properties:?}: {error}"));
-        let build = compiled.operator_name(2);
+        let id_of = |summary_merge: bool| {
+            dag.nodes
+                .iter()
+                .find(|node| match &node.payload {
+                    Operator::ASAP(ASAPOp::SummaryAgg { .. }) => !summary_merge,
+                    Operator::ASAP(ASAPOp::SummaryMerge { .. }) => summary_merge,
+                    _ => false,
+                })
+                .expect("the plan has a summary build and a merge")
+                .id
+        };
+        let (build_id, merge_id) = (id_of(false), id_of(true));
+        let compiled =
+            asap_executor::physical_planner::compile(&dag, &views, &[dag.roots[0] as u64])
+                .unwrap_or_else(|error| panic!("{properties:?}: {error}"));
+        let build = compiled.operator_name(build_id as u64);
         let computed_in_the_query_run = || {
             assert_ne!(build, Some("MaterializedView"), "{properties:?}");
             assert!(build.is_some(), "{properties:?}");
@@ -108,16 +140,24 @@ fn physical_planner_over_every_valid_state() {
             (QueryTime, Lifetime::None) => computed_in_the_query_run(),
             (QueryTime, Lifetime::OneEvaluation(_)) => computed_in_the_query_run(),
             (IngestionTime, Lifetime::None) => {
-                // Left unassigned: an unmaterialized build lands at query time.
+                let node = dag.nodes.iter().find(|node| node.id == build_id).unwrap();
                 assert_eq!(
-                    PhysicalProperties::new(
-                        dag.nodes[2].output_state.timing,
-                        dag.nodes[2].lifetime
-                    ),
-                    Ok(
-                        PhysicalProperties::new(ExecutionTiming::QueryTime, Lifetime::None)
-                            .expect("a valid timing and lifetime")
-                    )
+                    PhysicalProperties::new(node.output_state.timing, node.lifetime),
+                    Ok(properties)
+                );
+                // The query reads the merge's view; its ingestion run
+                // computes the build.
+                assert_eq!(
+                    compiled.operator_name(merge_id as u64),
+                    Some("MaterializedView")
+                );
+                let refresh =
+                    asap_executor::physical_planner::compile(&dag, &[], &[merge_id as u64])
+                        .unwrap();
+                let build = refresh.operator_name(build_id as u64);
+                assert!(
+                    build.is_some_and(|name| name != "MaterializedView"),
+                    "{build:?}"
                 );
             }
             (IngestionTime, Lifetime::OneEvaluation(_)) => {
