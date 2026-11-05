@@ -337,17 +337,23 @@ pub(crate) enum RunKind {
     /// arriving data for all of them.
     Ingestion,
     /// Materialized (lifetime `OneEvaluation` or `AcrossEvaluations`, at either
-    /// timing): selected once, its own execution context for its inputs,
+    /// timing): one `x_v`, its own execution context `κ_m` for its inputs,
     /// charged once.
-    Shareable,
+    Materialized,
 }
 
 /// The [`RunKind`] of a candidate with `properties`.
 pub(crate) fn run_kind(properties: PhysicalProperties) -> RunKind {
-    match (properties.lifetime(), properties.timing()) {
-        (Lifetime::None, ExecutionTiming::QueryTime) => RunKind::PerContext,
-        (Lifetime::None, ExecutionTiming::IngestionTime) => RunKind::Ingestion,
-        (Lifetime::OneEvaluation(_) | Lifetime::AcrossEvaluations(_), _) => RunKind::Shareable,
+    use ExecutionTiming::{IngestionTime, QueryTime};
+    match (properties.timing(), properties.lifetime()) {
+        (QueryTime, Lifetime::None) => RunKind::PerContext,
+        (IngestionTime, Lifetime::None) => RunKind::Ingestion,
+        (QueryTime, Lifetime::OneEvaluation(_)) => RunKind::Materialized,
+        (QueryTime, Lifetime::AcrossEvaluations(_)) => RunKind::Materialized,
+        (IngestionTime, Lifetime::AcrossEvaluations(_)) => RunKind::Materialized,
+        (IngestionTime, Lifetime::OneEvaluation(_)) => {
+            unreachable!("rejected by PhysicalProperties::new")
+        }
     }
 }
 
@@ -451,7 +457,7 @@ impl CandidateLinks {
                             .into_iter()
                             .filter(|producer| {
                                 producer.0 != reader
-                                    && (kind[reader] == RunKind::Shareable
+                                    && (kind[reader] == RunKind::Materialized
                                         || slot[producer.0] != slot[reader])
                             })
                             .collect()
@@ -467,7 +473,7 @@ impl CandidateLinks {
 
     /// Whether `candidate` is materialized: selected once, its own context.
     fn is_shareable(&self, candidate: PhysicalCandidateId) -> bool {
-        self.kind[candidate.0] == RunKind::Shareable
+        self.kind[candidate.0] == RunKind::Materialized
     }
 }
 
@@ -674,13 +680,17 @@ fn queries_reaching(
     reaching
 }
 
-/// Which execution context (#1095 §2.0): a query evaluation, an ingestion
-/// pipeline `I_r`, or a shareable candidate's own inputs.
+/// Which execution context κ (#1095 §2.0, #1204): a query evaluation
+/// `κ_q`, an ingestion pipeline `I_r`, or a materialized candidate's
+/// computation `κ_m`, which runs the not-materialized candidates it reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum ContextKind {
+    /// `κ_q`: query `q`'s evaluation.
     Query(usize),
+    /// `I_r`: the ingestion pipeline of refresh window `r`.
     Ingestion(IngestionPipeline),
-    Shared(PhysicalCandidateId),
+    /// `κ_m`: the computation of materialized candidate `m`.
+    Materialized(PhysicalCandidateId),
 }
 
 /// Which ingestion pipeline `I_r` (#1095 §2.5 O3(b)): the deployment
@@ -813,7 +823,7 @@ impl ExecutionContext {
         match kind {
             RunKind::PerContext => self.at_query_time,
             RunKind::Ingestion => matches!(self.kind, ContextKind::Ingestion(_)),
-            RunKind::Shareable => false,
+            RunKind::Materialized => false,
         }
     }
 }
@@ -825,7 +835,7 @@ impl MilpInputs {
     pub(crate) fn ingestion_context_read_by(&self, context: usize) -> Option<usize> {
         match self.contexts[context].kind {
             ContextKind::Ingestion(_) => Some(context),
-            ContextKind::Shared(m) => self.ingestion_context_of_shareable.get(&m).copied(),
+            ContextKind::Materialized(m) => self.ingestion_context_of_shareable.get(&m).copied(),
             ContextKind::Query(_) => None,
         }
     }
@@ -917,14 +927,14 @@ pub(crate) fn execution_contexts(
             // Only an ingestion-time shareable candidate reads a candidate
             // of an `I_r` (Stage 2's timing rule).
             let pipeline = match context.kind {
-                ContextKind::Shared(m) if !context.at_query_time => {
+                ContextKind::Materialized(m) if !context.at_query_time => {
                     Some(ingestion_pipeline(m, refresh_windows))
                 }
                 _ => None,
             };
             for &class in &context.options {
                 match kind[class.0] {
-                    RunKind::Shareable => {
+                    RunKind::Materialized => {
                         if !context_of_shareable.contains_key(&class) && !pending.contains(&class) {
                             pending.push(class);
                         }
@@ -961,7 +971,7 @@ pub(crate) fn execution_contexts(
             let at_query_time =
                 physical.candidates[class.0].properties.timing() == ExecutionTiming::QueryTime;
             let mut context = ExecutionContext {
-                kind: ContextKind::Shared(class),
+                kind: ContextKind::Materialized(class),
                 at_query_time,
                 options: Vec::new(),
             };
@@ -989,7 +999,7 @@ pub(crate) fn execution_contexts(
     }
     let mut ingestion_context_of_shareable = BTreeMap::new();
     for context in shared {
-        if let ContextKind::Shared(class) = context.kind {
+        if let ContextKind::Materialized(class) = context.kind {
             context_of_shareable.insert(class, contexts.len());
             if !context.at_query_time {
                 let pipeline = ingestion_pipeline(class, refresh_windows);
@@ -1080,7 +1090,9 @@ fn nodes_dag(nodes: &[&PhysicalASAPDAGNode]) -> PhysicalASAPDAG {
 /// plan where `path` is the scan's only reader: the shifts' offsets add up,
 /// and a `TimeRange` reads its range, a kept pane chain one pane, any other
 /// pane chain its whole window; any other reader reads `Unbounded`.
-fn window_read_through(path: &[&PhysicalASAPDAGNode]) -> ScanWindow {
+fn window_read_through(
+    path: &[&PhysicalASAPDAGNode],
+) -> Result<ScanWindow, asap_cost::analytical::AnalyticalCostError> {
     let mut end_offset_ms: i64 = 0;
     for node in path {
         let width_ms: u128 = match &node.payload {
@@ -1092,9 +1104,7 @@ fn window_read_through(path: &[&PhysicalASAPDAGNode]) -> ScanWindow {
             Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                 tumbling_window_width_ms,
                 ..
-            }) if node.output_state.timing == ExecutionTiming::QueryTime
-                && node.lifetime.is_across_evaluations() =>
-            {
+            }) if asap_cost::is_materialized_tumbling_window_chain(node)? => {
                 u128::from(*tumbling_window_width_ms)
             }
             Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
@@ -1102,14 +1112,14 @@ fn window_read_through(path: &[&PhysicalASAPDAGNode]) -> ScanWindow {
                 tumbling_window_count,
                 ..
             }) => u128::from(*tumbling_window_width_ms) * u128::from(*tumbling_window_count),
-            _ => return ScanWindow::Unbounded,
+            _ => return Ok(ScanWindow::Unbounded),
         };
-        return ScanWindow::Within {
+        return Ok(ScanWindow::Within {
             end_offset_ms,
             width_ms: i64::try_from(width_ms).unwrap_or(i64::MAX),
-        };
+        });
     }
-    ScanWindow::Unbounded
+    Ok(ScanWindow::Unbounded)
 }
 
 /// The windows query-time scan `scan` may be read at: each reader's
@@ -1147,7 +1157,7 @@ fn scan_window_options(
                 window_union(read.iter().copied())
             })
     };
-    let shareable = kind[scan.0] == RunKind::Shareable;
+    let shareable = kind[scan.0] == RunKind::Materialized;
     let mut all_kinds: Vec<ScanWindow> = Vec::new();
     for context in contexts {
         if !context.options.contains(&scan) {
@@ -1168,7 +1178,7 @@ fn scan_window_options(
         }
         // A shareable candidate reading the scan as its own input reads it
         // at its own window; a read as an output reads it whole.
-        if let ContextKind::Shared(own) = context.kind {
+        if let ContextKind::Materialized(own) = context.kind {
             if producers_per_input[own.0]
                 .iter()
                 .any(|producers| producers.contains(&scan))
@@ -1181,7 +1191,7 @@ fn scan_window_options(
         }
         let read_whole = match context.kind {
             ContextKind::Query(_) => output_candidates.iter().any(|out| out.contains(&scan)),
-            ContextKind::Shared(_) | ContextKind::Ingestion(_) => false,
+            ContextKind::Materialized(_) | ContextKind::Ingestion(_) => false,
         };
         if read_whole && !kinds.contains(&ScanWindow::Unbounded) {
             kinds.push(ScanWindow::Unbounded);
@@ -1256,7 +1266,8 @@ fn scan_windows_per_reader(
     scan: PhysicalCandidateId,
     nodes: &[PhysicalASAPDAGNode],
     readers: &[Vec<(PhysicalCandidateId, usize)>],
-) -> Vec<(PhysicalCandidateId, Vec<ScanWindow>)> {
+) -> Result<Vec<(PhysicalCandidateId, Vec<ScanWindow>)>, asap_cost::analytical::AnalyticalCostError>
+{
     /// Time shifts nested deeper than this are not followed.
     const MAX_SHIFTS: usize = 4;
     let mut per_reader: Vec<(PhysicalCandidateId, Vec<ScanWindow>)> = Vec::new();
@@ -1272,7 +1283,7 @@ fn scan_windows_per_reader(
         if !follow {
             // The path ends at a reader: what the scan reads under it.
             let through: Vec<_> = path[1..].iter().map(|class| &nodes[class.0]).collect();
-            let window = window_read_through(&through);
+            let window = window_read_through(&through)?;
             let Some(&reader) = path.get(1) else {
                 continue;
             };
@@ -1292,7 +1303,7 @@ fn scan_windows_per_reader(
         }
     }
     per_reader.sort_by_key(|(reader, _)| *reader);
-    per_reader
+    Ok(per_reader)
 }
 
 /// The panes kept pane chain `chain` may keep, one per query that can reach
@@ -1567,8 +1578,15 @@ fn candidate_data(
         }
         let windows = match (&node.payload, node.output_state.timing) {
             (Operator::NonASAP(NonASAPOp::Scan { .. }), ExecutionTiming::QueryTime) => {
-                result[class.0].windows_per_reader =
-                    scan_windows_per_reader(class, &nodes, &readers);
+                match scan_windows_per_reader(class, &nodes, &readers) {
+                    Ok(windows) => result[class.0].windows_per_reader = windows,
+                    Err(error) => {
+                        let reason = error.to_string();
+                        outputs[class.0] = Some(Err(reason.clone()));
+                        result[class.0].usage = Err(reason);
+                        continue;
+                    }
+                }
                 scan_window_options(
                     class,
                     &result[class.0].windows_per_reader,

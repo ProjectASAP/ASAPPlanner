@@ -364,7 +364,7 @@ impl Estimates {
             .map(|context| match context.kind {
                 ContextKind::Query(query) => query_rate[query],
                 ContextKind::Ingestion(_) => 1.0,
-                ContextKind::Shared(m) if context.at_query_time => {
+                ContextKind::Materialized(m) if context.at_query_time => {
                     let readers = milp.queries_reaching(m);
                     readers
                         .iter()
@@ -372,7 +372,7 @@ impl Estimates {
                         .fold(f64::INFINITY, f64::min)
                         .min(1e9)
                 }
-                ContextKind::Shared(_) => 1.0,
+                ContextKind::Materialized(_) => 1.0,
             })
             .collect();
         let numbers = milp
@@ -491,7 +491,7 @@ impl Derivation<'_, '_> {
                 (context, false)
             } else {
                 match kind {
-                    RunKind::Shareable => match milp.context_of(candidate) {
+                    RunKind::Materialized => match milp.context_of(candidate) {
                         Some(own) => (own, plan.selected.contains(&candidate)),
                         None => return f64::INFINITY,
                     },
@@ -518,7 +518,8 @@ impl Derivation<'_, '_> {
                 }
                 Objective::Latency => numbers.latency_ms,
             };
-            if self.amortized && kind == RunKind::Shareable && self.objective == Objective::Cost {
+            if self.amortized && kind == RunKind::Materialized && self.objective == Objective::Cost
+            {
                 own /= self.estimates.readers[candidate.0].max(1) as f64;
             }
             let mut total = own;
@@ -527,7 +528,7 @@ impl Derivation<'_, '_> {
                     .iter()
                     .filter(|producer| milp.choice[run_context].contains_key(producer))
                     .filter(|producer| {
-                        kind == RunKind::Shareable
+                        kind == RunKind::Materialized
                             || inputs.slot[producer.0] != inputs.slot[candidate.0]
                     })
                     .map(|&producer| self.estimate(plan, memo, run_context, producer))
@@ -635,7 +636,7 @@ impl Derivation<'_, '_> {
             return Ok(());
         }
         match inputs.kind[candidate.0] {
-            RunKind::Shareable => {
+            RunKind::Materialized => {
                 if plan.selected.contains(&candidate) {
                     return Ok(());
                 }
@@ -689,7 +690,7 @@ fn runs_reached(
             (context, false)
         } else {
             match inputs.kind[candidate.0] {
-                RunKind::Shareable => match milp.context_of(candidate) {
+                RunKind::Materialized => match milp.context_of(candidate) {
                     Some(own) => (own, true),
                     None => continue,
                 },

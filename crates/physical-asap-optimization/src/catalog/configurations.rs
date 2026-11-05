@@ -137,6 +137,22 @@ pub fn enumerate_candidate_configurations(
             .enumerate()
             .filter_map(|(query, reached)| reached.then_some(query))
             .collect::<Vec<_>>();
+        // The valid states Stage 2 does not offer, by rule (every consumer
+        // still handles them when given one):
+        // - any `Disk` medium (#1217): the executor has no disk store, so a
+        //   `Disk` state given to it executes in memory (a view slot bound to
+        //   the deployment's in-memory store, a one-evaluation result kept
+        //   within the query run), while cost prices it as disk;
+        // - (IngestionTime, None) for a summary build: an unmaterialized build
+        //   runs at query time (`apply_physical_properties`);
+        // - (IngestionTime, AcrossEvaluations) for a non-summary node: rows
+        //   are not maintained at ingestion time, only summary states;
+        // - (QueryTime, AcrossEvaluations) for anything but a tumbling-window
+        //   chain: only a chain reuses what earlier evaluations built (one
+        //   new tumbling window per evaluation); any other result is rebuilt
+        //   whole each evaluation;
+        // - any ingestion-time state for `SummaryEstimate`,
+        //   `EvaluatePopulation` and `MaintainPopulation` (`forced_query`).
         let mut alternatives = vec![PhysicalProperties::NOT_MATERIALIZED_AT_QUERY_TIME];
         if summary {
             alternatives.push(PhysicalProperties::MATERIALIZED_IN_MEMORY_FOR_ONE_EVALUATION);
@@ -394,12 +410,19 @@ fn summary_properties_allowed(
             candidate_properties.timing(),
             candidate_properties.lifetime(),
         ) {
-            (_, Lifetime::None | Lifetime::OneEvaluation(_)) => true,
+            (ExecutionTiming::QueryTime, Lifetime::None)
+            | (ExecutionTiming::QueryTime, Lifetime::OneEvaluation(_)) => true,
+            // Runs inside the ingestion refresh of the state that reads it, so
+            // the reader must allow ingestion, as for a build materialized there.
+            (ExecutionTiming::IngestionTime, Lifetime::None) => eligibility.at_ingestion.is_ok(),
             (ExecutionTiming::IngestionTime, Lifetime::AcrossEvaluations(_)) => {
                 eligibility.at_ingestion.is_ok()
             }
             (ExecutionTiming::QueryTime, Lifetime::AcrossEvaluations(_)) => {
                 eligibility.may_keep_across_evaluations
+            }
+            (ExecutionTiming::IngestionTime, Lifetime::OneEvaluation(_)) => {
+                unreachable!("rejected by PhysicalProperties::new")
             }
         }
 }

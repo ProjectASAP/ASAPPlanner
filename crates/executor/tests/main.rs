@@ -9,6 +9,7 @@ mod current_series_heap;
 mod current_timestamp;
 mod deployment;
 mod deployment_computation;
+mod every_valid_state;
 mod exact_state_columns;
 mod hydra_cms_execution;
 mod keyed_summary_row_weight;

@@ -525,12 +525,12 @@ fn execution_contexts_on_a_hand_built_catalog() {
             (ContextKind::Query(0), vec![middle, top_0]),
             (ContextKind::Query(1), vec![middle, top_1]),
             (ContextKind::Query(2), vec![lone]),
-            (ContextKind::Shared(middle), vec![leaf]),
+            (ContextKind::Materialized(middle), vec![leaf]),
         ]
     );
     assert_eq!(inputs.context_of_shareable, BTreeMap::from([(middle, 3)]));
     assert!(inputs.contexts[3].computes(RunKind::PerContext));
-    assert!(!inputs.contexts[3].computes(RunKind::Shareable));
+    assert!(!inputs.contexts[3].computes(RunKind::Materialized));
     assert_eq!(
         inputs.output_candidates,
         vec![vec![top_0], vec![top_1], vec![lone]]
@@ -649,7 +649,10 @@ fn two_queries_share_a_pane_chain_through_the_real_pipeline() {
     assert!(!shared_chains.is_empty());
     for &chain in &shared_chains {
         let context = inputs.context_of_shareable[&chain];
-        assert_eq!(inputs.contexts[context].kind, ContextKind::Shared(chain));
+        assert_eq!(
+            inputs.contexts[context].kind,
+            ContextKind::Materialized(chain)
+        );
     }
     // Every context computes only candidates of its own kind and reads the
     // others across its boundary.
@@ -658,7 +661,7 @@ fn two_queries_share_a_pane_chain_through_the_real_pipeline() {
             let kind = inputs.kind[option.0];
             assert!(
                 context.computes(kind)
-                    || kind == RunKind::Shareable
+                    || kind == RunKind::Materialized
                     || (kind == RunKind::Ingestion
                         && !matches!(context.kind, ContextKind::Ingestion(_)))
             );
@@ -1088,4 +1091,41 @@ fn execution_contexts_have_one_ingestion_pipeline_per_refresh_window() {
 fn producers_of_an_input_read_one_view_window() {
     let physical = ingestion_views_of_three_windows_and_an_unbounded_one();
     assert!(producer_window_disagreements_of_all(&physical).is_empty());
+}
+
+/// `run_kind` over every valid state: not materialized runs per context at
+/// query time and in the ingestion pipeline at ingestion time; every
+/// materialized state, any medium, is `Materialized`.
+#[test]
+fn run_kind_over_every_valid_state() {
+    use asap_types::physical::{Lifetime, Medium};
+    use ExecutionTiming::{IngestionTime, QueryTime};
+    let at = |timing, lifetime| PhysicalProperties::new(timing, lifetime).unwrap();
+    let mut expected = vec![
+        (at(QueryTime, Lifetime::None), RunKind::PerContext),
+        (at(IngestionTime, Lifetime::None), RunKind::Ingestion),
+    ];
+    for medium in [Medium::Memory, Medium::Disk] {
+        expected.extend([
+            (
+                at(QueryTime, Lifetime::OneEvaluation(medium)),
+                RunKind::Materialized,
+            ),
+            (
+                at(QueryTime, Lifetime::AcrossEvaluations(medium)),
+                RunKind::Materialized,
+            ),
+            (
+                at(IngestionTime, Lifetime::AcrossEvaluations(medium)),
+                RunKind::Materialized,
+            ),
+        ]);
+    }
+    for properties in PhysicalProperties::every_valid() {
+        let (_, kind) = expected
+            .iter()
+            .find(|(state, _)| *state == properties)
+            .expect("every valid state has an expectation");
+        assert_eq!(run_kind(properties), *kind, "{properties:?}");
+    }
 }

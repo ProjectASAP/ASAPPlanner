@@ -396,7 +396,7 @@ mod tests {
         self_calibrated_cost(
             dag,
             &node_map(dag),
-            &materialized_tumbling_window_chains(dag),
+            &materialized_tumbling_window_chains(dag).expect("valid physical properties"),
             recurrence,
             &[],
             data,
@@ -5047,6 +5047,127 @@ mod tests {
         assert!(cost.usage.average_memory_bytes < (materialized_bytes + bytes) as f64);
     }
 
+    /// The KLL DAG whose node has `properties`: the build itself, except
+    /// for (IngestionTime, None), which is the scan below the build
+    /// materialized at ingestion time (a summary build that is not
+    /// materialized runs at query time).
+    fn kll_dag_with(properties: PhysicalProperties) -> PhysicalASAPDAG {
+        match (properties.timing(), properties.lifetime()) {
+            (ExecutionTiming::IngestionTime, Lifetime::None) => kll_dag(AT_INGESTION),
+            _ => kll_dag(Some(properties)),
+        }
+    }
+
+    /// Cost over every valid state of the KLL build: each prices without
+    /// error; a state materialized on disk adds disk bytes and one in memory
+    /// adds none.
+    #[test]
+    fn cost_over_every_valid_state() {
+        let settings = unit_costs(|c| c.cost_per_disk_byte_second = 1e-9);
+        let not_materialized = price(&kll_dag(None), &recurrences(1), &data(), &settings).unwrap();
+        for properties in PhysicalProperties::every_valid() {
+            let dag = kll_dag_with(properties);
+            assert!(
+                dag.nodes
+                    .iter()
+                    .any(|node| node.physical_properties() == Ok(properties)),
+                "{properties:?}"
+            );
+            let cost = price(&dag, &recurrences(1), &data(), &settings)
+                .unwrap_or_else(|error| panic!("{properties:?}: {error:?}"));
+            assert!(cost.cost_per_second.unwrap().is_finite(), "{properties:?}");
+            let disk_added = cost.usage.disk_bytes > not_materialized.usage.disk_bytes;
+            let on_disk = match properties.lifetime() {
+                Lifetime::None => false,
+                Lifetime::OneEvaluation(medium) | Lifetime::AcrossEvaluations(medium) => {
+                    medium == Medium::Disk
+                }
+            };
+            assert_eq!(disk_added, on_disk, "{properties:?}");
+        }
+    }
+
+    /// Execution demand (`asap_cost::execution_demand::computations`) over
+    /// every valid state of the KLL build, read by one query every minute:
+    /// materialized at ingestion time, once per second; materialized at query
+    /// time (one evaluation, or across evaluations, built once per request),
+    /// at the query's rate; not materialized at query time, once per consumer
+    /// at its rate; not materialized at ingestion time (the scan below the
+    /// ingestion-time build), once per second in its ingestion run.
+    #[test]
+    fn computations_over_every_valid_state() {
+        use asap_cost::execution_demand::computations;
+        use ExecutionTiming::{IngestionTime, QueryTime};
+        let per_minute = 1.0 / 60.0;
+        for properties in PhysicalProperties::every_valid() {
+            let dag = kll_dag_with(properties);
+            let times = computations(&dag, &[repeating(MINUTE)], &[], 3600.0, None)
+                .unwrap_or_else(|error| panic!("{properties:?}: {error}"));
+            let node = dag
+                .nodes
+                .iter()
+                .find(|node| node.physical_properties() == Ok(properties))
+                .unwrap_or_else(|| panic!("{properties:?}"));
+            let (_, rate) = times[&node.id];
+            let expected = match (properties.timing(), properties.lifetime()) {
+                (IngestionTime, Lifetime::None) => 1.0,
+                (IngestionTime, Lifetime::AcrossEvaluations(_)) => 1.0,
+                (QueryTime, Lifetime::None) => per_minute,
+                (QueryTime, Lifetime::OneEvaluation(_)) => per_minute,
+                (QueryTime, Lifetime::AcrossEvaluations(_)) => per_minute,
+                (IngestionTime, Lifetime::OneEvaluation(_)) => {
+                    unreachable!("rejected by PhysicalProperties::new")
+                }
+            };
+            assert!(
+                close(rate, expected),
+                "{properties:?}: {rate} vs {expected}"
+            );
+        }
+    }
+
+    /// The partial copies of the newest window over every valid state of
+    /// B1's chain: each ingest worker beyond the first holds one for a chain
+    /// materialized at ingestion time, in memory or on disk (the newest
+    /// window is built in memory whatever the medium); no other state has
+    /// them.
+    #[test]
+    fn partial_copies_over_every_valid_state() {
+        use ExecutionTiming::{IngestionTime, QueryTime};
+        let rows_per_s = 1e9;
+        let b1 = tumbling_window_candidates(rows_per_s).remove(1);
+        let chain = node_of(&b1.dag, is_chain);
+        for properties in PhysicalProperties::every_valid() {
+            let mut dag = b1.dag.clone();
+            let node = dag.nodes.iter_mut().find(|n| n.id == chain).unwrap();
+            node.output_state.timing = properties.timing();
+            node.lifetime = properties.lifetime();
+            let cost = price(
+                &dag,
+                &[repeating(MINUTE)],
+                &arriving(rows_per_s),
+                &CostInputs::default(),
+            )
+            .unwrap_or_else(|error| panic!("{properties:?}: {error:?}"));
+            let copies = cost.per_node[&chain].detail.contains("partial copies");
+            let expected = match (properties.timing(), properties.lifetime()) {
+                (IngestionTime, Lifetime::AcrossEvaluations(_)) => true,
+                (IngestionTime, Lifetime::None) => false,
+                (QueryTime, Lifetime::None) => false,
+                (QueryTime, Lifetime::OneEvaluation(_)) => false,
+                (QueryTime, Lifetime::AcrossEvaluations(_)) => false,
+                (IngestionTime, Lifetime::OneEvaluation(_)) => {
+                    unreachable!("rejected by PhysicalProperties::new")
+                }
+            };
+            assert_eq!(
+                copies, expected,
+                "{properties:?}: {}",
+                cost.per_node[&chain].detail
+            );
+        }
+    }
+
     /// The KLL build of a `quantile_over_time` candidate, with its sketch
     /// parameters, and the candidate.
     fn kll_build() -> (PhysicalWorkloadPlan, PhysicalASAPNodeId, SketchParams) {
@@ -5362,7 +5483,7 @@ mod tests {
             plan_cost(
                 &candidate.dag,
                 &node_map(&candidate.dag),
-                &materialized_tumbling_window_chains(&candidate.dag),
+                &materialized_tumbling_window_chains(&candidate.dag).unwrap(),
                 &[repeating(MINUTE)],
                 &[],
                 &arriving(10_000.0),
@@ -5593,7 +5714,7 @@ mod tests {
             let cost = self_calibrated_cost(
                 &candidate.dag,
                 &node_map(&candidate.dag),
-                &materialized_tumbling_window_chains(&candidate.dag),
+                &materialized_tumbling_window_chains(&candidate.dag).unwrap(),
                 std::slice::from_ref(&recurrence),
                 &[range],
                 &data(),

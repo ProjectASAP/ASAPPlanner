@@ -95,11 +95,16 @@ impl PhysicalProperties {
         timing: ExecutionTiming,
         lifetime: Lifetime,
     ) -> Result<Self, InvalidPhysicalProperties> {
+        use ExecutionTiming::{IngestionTime, QueryTime};
         match (timing, lifetime) {
-            (ExecutionTiming::IngestionTime, Lifetime::OneEvaluation(_)) => {
+            (IngestionTime, Lifetime::OneEvaluation(_)) => {
                 Err(InvalidPhysicalProperties::OneEvaluationAtIngestion)
             }
-            _ => Ok(Self { timing, lifetime }),
+            (QueryTime | IngestionTime, Lifetime::None)
+            | (QueryTime, Lifetime::OneEvaluation(_))
+            | (QueryTime | IngestionTime, Lifetime::AcrossEvaluations(_)) => {
+                Ok(Self { timing, lifetime })
+            }
         }
     }
 
@@ -123,10 +128,44 @@ impl PhysicalProperties {
     /// same timing, or a query-time reader of an ingestion-time output materialized
     /// until a query reads it.
     pub fn readable_at(self, reader: ExecutionTiming) -> bool {
-        reader == self.timing
-            || (reader == ExecutionTiming::QueryTime
-                && self.timing == ExecutionTiming::IngestionTime
-                && self.lifetime.is_across_evaluations())
+        use ExecutionTiming::{IngestionTime, QueryTime};
+        match (self.timing, self.lifetime, reader) {
+            // Runs inside the execution that reads it: only a reader at its
+            // own timing.
+            (QueryTime, Lifetime::None, QueryTime) => true,
+            (QueryTime, Lifetime::None, IngestionTime) => false,
+            (IngestionTime, Lifetime::None, IngestionTime) => true,
+            (IngestionTime, Lifetime::None, QueryTime) => false,
+            // Kept until a query reads it: ingestion work and queries both read it.
+            (IngestionTime, Lifetime::AcrossEvaluations(_), IngestionTime | QueryTime) => true,
+            // A query-time output: queries read it; ingestion work never does.
+            (QueryTime, Lifetime::OneEvaluation(_), QueryTime) => true,
+            (QueryTime, Lifetime::OneEvaluation(_), IngestionTime) => false,
+            (QueryTime, Lifetime::AcrossEvaluations(_), QueryTime) => true,
+            (QueryTime, Lifetime::AcrossEvaluations(_), IngestionTime) => false,
+            (IngestionTime, Lifetime::OneEvaluation(_), _) => {
+                unreachable!("rejected by PhysicalProperties::new")
+            }
+        }
+    }
+
+    /// The 8 valid states, as literal `(timing, lifetime)` pairs through
+    /// [`Self::new`], for table tests over every state.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn every_valid() -> [Self; 8] {
+        use ExecutionTiming::{IngestionTime, QueryTime};
+        use Medium::{Disk, Memory};
+        [
+            (QueryTime, Lifetime::None),
+            (IngestionTime, Lifetime::None),
+            (QueryTime, Lifetime::OneEvaluation(Memory)),
+            (QueryTime, Lifetime::OneEvaluation(Disk)),
+            (QueryTime, Lifetime::AcrossEvaluations(Memory)),
+            (QueryTime, Lifetime::AcrossEvaluations(Disk)),
+            (IngestionTime, Lifetime::AcrossEvaluations(Memory)),
+            (IngestionTime, Lifetime::AcrossEvaluations(Disk)),
+        ]
+        .map(|(timing, lifetime)| Self::new(timing, lifetime).expect("a valid pair"))
     }
 }
 
@@ -134,30 +173,35 @@ impl PhysicalProperties {
 mod tests {
     use super::*;
 
+    /// Of every timing x lifetime pair, exactly the 8 of `every_valid` are
+    /// valid, and the 2 at ingestion time for one evaluation are not.
     #[test]
-    fn one_evaluation_at_ingestion_is_invalid() {
-        assert_eq!(
-            PhysicalProperties::new(
-                ExecutionTiming::IngestionTime,
-                Lifetime::OneEvaluation(Medium::Memory)
-            ),
-            Err(InvalidPhysicalProperties::OneEvaluationAtIngestion)
-        );
-    }
-
-    #[test]
-    fn every_other_pair_is_valid() {
-        for timing in [ExecutionTiming::QueryTime, ExecutionTiming::IngestionTime] {
+    fn exactly_the_ingestion_time_one_evaluation_pairs_are_invalid() {
+        use ExecutionTiming::{IngestionTime, QueryTime};
+        let mut valid = Vec::new();
+        for timing in [QueryTime, IngestionTime] {
             for lifetime in [
                 Lifetime::None,
                 Lifetime::OneEvaluation(Medium::Memory),
+                Lifetime::OneEvaluation(Medium::Disk),
+                Lifetime::AcrossEvaluations(Medium::Memory),
                 Lifetime::AcrossEvaluations(Medium::Disk),
             ] {
-                let valid = !(timing == ExecutionTiming::IngestionTime
-                    && matches!(lifetime, Lifetime::OneEvaluation(_)));
-                assert_eq!(PhysicalProperties::new(timing, lifetime).is_ok(), valid);
+                match PhysicalProperties::new(timing, lifetime) {
+                    Ok(properties) => valid.push(properties),
+                    Err(error) => {
+                        assert_eq!(error, InvalidPhysicalProperties::OneEvaluationAtIngestion);
+                        assert!(
+                            timing == IngestionTime
+                                && matches!(lifetime, Lifetime::OneEvaluation(_))
+                        );
+                    }
+                }
             }
         }
+        let every_valid = PhysicalProperties::every_valid();
+        assert_eq!(valid.len(), every_valid.len());
+        assert!(valid.iter().all(|state| every_valid.contains(state)));
     }
 
     /// The named properties are valid pairs.
@@ -177,15 +221,48 @@ mod tests {
         }
     }
 
+    /// `readable_at` for every valid state and both reader timings.
     #[test]
-    fn a_query_time_reader_reads_only_a_materialized_ingestion_output() {
+    fn readable_at_over_every_valid_state() {
+        use ExecutionTiming::{IngestionTime, QueryTime};
         let at = |timing, lifetime| PhysicalProperties::new(timing, lifetime).unwrap();
-        let query = ExecutionTiming::QueryTime;
-        let ingestion = ExecutionTiming::IngestionTime;
-        assert!(at(ingestion, Lifetime::AcrossEvaluations(Medium::Memory)).readable_at(query));
-        assert!(!at(ingestion, Lifetime::None).readable_at(query));
-        assert!(at(ingestion, Lifetime::None).readable_at(ingestion));
-        assert!(!at(query, Lifetime::OneEvaluation(Medium::Memory)).readable_at(ingestion));
-        assert!(at(query, Lifetime::AcrossEvaluations(Medium::Memory)).readable_at(query));
+        // (state, readable by a query-time reader, readable by an ingestion-time reader)
+        let mut expected = Vec::new();
+        for medium in [Medium::Memory, Medium::Disk] {
+            expected.extend([
+                (at(QueryTime, Lifetime::OneEvaluation(medium)), true, false),
+                (
+                    at(QueryTime, Lifetime::AcrossEvaluations(medium)),
+                    true,
+                    false,
+                ),
+                (
+                    at(IngestionTime, Lifetime::AcrossEvaluations(medium)),
+                    true,
+                    true,
+                ),
+            ]);
+        }
+        expected.extend([
+            (at(QueryTime, Lifetime::None), true, false),
+            (at(IngestionTime, Lifetime::None), false, true),
+        ]);
+        assert_eq!(expected.len(), PhysicalProperties::every_valid().len());
+        for properties in PhysicalProperties::every_valid() {
+            let (_, at_query, at_ingestion) = expected
+                .iter()
+                .find(|(state, ..)| *state == properties)
+                .expect("every valid state has an expectation");
+            assert_eq!(
+                properties.readable_at(QueryTime),
+                *at_query,
+                "{properties:?}"
+            );
+            assert_eq!(
+                properties.readable_at(IngestionTime),
+                *at_ingestion,
+                "{properties:?}"
+            );
+        }
     }
 }

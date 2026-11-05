@@ -349,10 +349,15 @@ pub(crate) struct MaterializedOutputCandidate {
 }
 
 impl MaterializedOutputCandidate {
-    /// Its options, not materialized first: materialized at ingestion time when eligible,
-    /// `OneEvaluation` when two or more queries read it, and
-    /// query-time `AcrossEvaluations` when it may be materialized across
-    /// evaluations.
+    /// Its options, each the assignment entry it would get: `None` first
+    /// (no entry: not materialized, its timing left to the timing pass,
+    /// which places it where its consumer runs), then materialized at
+    /// ingestion time when eligible, `OneEvaluation` when two or more
+    /// queries read it, and query-time `AcrossEvaluations` when it may be
+    /// kept across evaluations. Every materialized option is in memory:
+    /// Stage 2 offers no `Disk` state, since the executor runs a `Disk`
+    /// state in memory (#1217). The other valid states it does not offer
+    /// are listed at `enumerate_candidate_configurations`.
     pub(crate) fn options(&self) -> Vec<Option<PhysicalProperties>> {
         let mut options = vec![None];
         if self.at_ingestion.is_ok() {
@@ -522,11 +527,11 @@ fn assigned_candidate(
     assignment: Vec<Option<PhysicalProperties>>,
 ) -> Result<PhysicalWorkloadPlan, PhysicalASAPOptimizationError> {
     let mut options = PhysicalPropertiesAssignment::default();
-    for (materialized_output_candidate, materialized) in
+    for (materialized_output_candidate, entry) in
         materialized_output_candidates.iter().zip(&assignment)
     {
-        if let Some(materialized) = *materialized {
-            options.set(&materialized_output_candidate.node, materialized);
+        if let Some(properties) = *entry {
+            options.set(&materialized_output_candidate.node, properties);
         }
     }
     let operators: Vec<Rc<OperatorNode>> = implemented
@@ -933,8 +938,8 @@ fn down_closed(
     below: &[Vec<usize>],
     assignment: &[Option<PhysicalProperties>],
 ) -> bool {
-    let at_ingestion = |materialized: &Option<PhysicalProperties>| {
-        materialized.is_some_and(|p| p.timing() == ExecutionTiming::IngestionTime)
+    let at_ingestion = |entry: &Option<PhysicalProperties>| {
+        entry.is_some_and(|p| p.timing() == ExecutionTiming::IngestionTime)
     };
     assignment.iter().enumerate().all(|(c, m)| {
         !at_ingestion(m)

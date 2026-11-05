@@ -769,3 +769,60 @@ fn workload_export_matches_the_single_root_export() {
     let untimed = [QueryRoot::Operator(plan())];
     assert!(compile_physical_asap_workload_with_node_ids(&untimed, &physical_properties).is_err());
 }
+
+/// Export validation over every valid state of `plan()`'s summary build:
+/// each materialized state, any medium, is assigned, exported and valid; not
+/// materialized at query time is assigned and valid; not materialized at
+/// ingestion time is valid for the scan below an ingestion-time build and,
+/// for the build itself, rejected by rule (an ingestion-time state must be
+/// materialized for a query to read it).
+#[test]
+fn export_validation_over_every_valid_state() {
+    use ExecutionTiming::{IngestionTime, QueryTime};
+    for properties in PhysicalProperties::every_valid() {
+        let root = plan();
+        let build = root.children()[0];
+        let mut assignment = PhysicalPropertiesAssignment::default();
+        let unmaterialized_at_ingestion =
+            (properties.timing(), properties.lifetime()) == (IngestionTime, Lifetime::None);
+        if !unmaterialized_at_ingestion {
+            assignment.set(build, properties);
+        }
+        let timed = apply_physical_properties(&root, &assignment).unwrap();
+        let mut dag = compile_physical_asap_dag(&root, &timed).unwrap();
+        let [scan, build, _finalize] = [0, 1, 2].map(|i| dag.nodes[i].physical_properties());
+        match (properties.timing(), properties.lifetime()) {
+            (QueryTime, Lifetime::None) => {
+                assert_eq!(build, Ok(properties));
+                dag.validate().unwrap();
+            }
+            (IngestionTime, Lifetime::None) => {
+                dag.nodes[1].output_state.timing = IngestionTime;
+                assert_eq!(
+                    dag.validate(),
+                    Err(
+                        PhysicalASAPDAGValidationError::UnmaterializedSummaryBuildNotAtQueryTime {
+                            node: 1
+                        }
+                    )
+                );
+            }
+            (IngestionTime, Lifetime::AcrossEvaluations(_)) => {
+                assert_eq!(build, Ok(properties));
+                assert_eq!(scan, Ok(PhysicalProperties::NOT_MATERIALIZED_AT_INGESTION));
+                dag.validate().unwrap();
+            }
+            (QueryTime, Lifetime::OneEvaluation(_)) => {
+                assert_eq!(build, Ok(properties));
+                dag.validate().unwrap();
+            }
+            (QueryTime, Lifetime::AcrossEvaluations(_)) => {
+                assert_eq!(build, Ok(properties));
+                dag.validate().unwrap();
+            }
+            (IngestionTime, Lifetime::OneEvaluation(_)) => {
+                unreachable!("rejected by PhysicalProperties::new")
+            }
+        }
+    }
+}

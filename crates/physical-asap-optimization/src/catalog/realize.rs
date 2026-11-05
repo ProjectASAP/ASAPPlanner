@@ -66,10 +66,11 @@ pub fn realize_selected_candidates(
                     seen[node] = true;
                     assignments[node]
                 });
-            // The option materializing it as requested; option `None` (not materialized)
-            // for a requested lifetime `None`, at either timing.
+            // The option with the requested properties; option `None` (no
+            // entry: not materialized, placed by the timing pass) for a
+            // requested lifetime `None`, at either timing.
             let chosen = options.iter().position(|option| match option {
-                Some(materialized) => *materialized == requested,
+                Some(entry) => *entry == requested,
                 None => !requested.lifetime().is_materialized(),
             });
             if chosen.is_none() {

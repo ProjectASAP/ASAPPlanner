@@ -14,8 +14,9 @@ use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
 use asap_types::ir::NonASAPOp;
 use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
-use asap_types::physical::Lifetime;
-use asap_types::physical::PhysicalWorkloadPlan;
+use asap_types::physical::{
+    InvalidPhysicalProperties, Lifetime, PhysicalProperties, PhysicalWorkloadPlan,
+};
 use asap_types::stages::HowToComputeAggregateMeasure;
 
 use crate::planning_stages::PlanningStagesRun;
@@ -147,13 +148,8 @@ pub fn physical_label(logical: &str, candidate: &PhysicalWorkloadPlan) -> String
     let mut parts: Vec<(&str, Vec<String>)> = Vec::new();
     for node in &candidate.dag.nodes {
         let id = &node.id;
-        let phase = match (node.output_state.timing, node.lifetime) {
-            (_, Lifetime::None) => continue,
-            (ExecutionTiming::IngestionTime, _) => "ingestion time",
-            (ExecutionTiming::QueryTime, Lifetime::OneEvaluation(_)) => "query time, shared",
-            (ExecutionTiming::QueryTime, Lifetime::AcrossEvaluations(_)) => {
-                "query time, materialized across evaluations"
-            }
+        let Some(phase) = phase_label(node.physical_properties()) else {
+            continue;
         };
         let label = match &node.payload {
             // Name the chain: chains of one family and tumbling-window count differ by
@@ -185,6 +181,29 @@ pub fn physical_label(logical: &str, candidate: &PhysicalWorkloadPlan) -> String
         )
         .collect::<Vec<_>>()
         .join(" · ")
+}
+
+/// The label of the phase a node with `properties` is materialized in;
+/// `None` when it is not materialized. A node whose timing and lifetime
+/// cannot go together is shown as such rather than dropped.
+fn phase_label(
+    properties: Result<PhysicalProperties, InvalidPhysicalProperties>,
+) -> Option<&'static str> {
+    use ExecutionTiming::{IngestionTime, QueryTime};
+    let Ok(properties) = properties else {
+        return Some("invalid timing and lifetime");
+    };
+    match (properties.timing(), properties.lifetime()) {
+        // Not materialized: no phase holds it; it runs inside its reader.
+        (QueryTime, Lifetime::None) => None,
+        (IngestionTime, Lifetime::None) => None,
+        (IngestionTime, Lifetime::AcrossEvaluations(_)) => Some("ingestion time"),
+        (QueryTime, Lifetime::OneEvaluation(_)) => Some("query time, shared"),
+        (QueryTime, Lifetime::AcrossEvaluations(_)) => Some("query time, kept"),
+        (IngestionTime, Lifetime::OneEvaluation(_)) => {
+            unreachable!("rejected by PhysicalProperties::new")
+        }
+    }
 }
 
 /// A summary build, e.g. "Kll ×5 tumbling windows" or "Sum acc".
@@ -536,6 +555,45 @@ mod tests {
             distinct.len(),
             one_chain_at_ingestion.len(),
             "{one_chain_at_ingestion:#?}"
+        );
+    }
+
+    /// The phase label over every valid state, and an invalid pair.
+    #[test]
+    fn phase_label_over_every_valid_state() {
+        use asap_types::physical::Medium;
+        use ExecutionTiming::{IngestionTime, QueryTime};
+        let at = |timing, lifetime| PhysicalProperties::new(timing, lifetime).unwrap();
+        let mut expected = vec![
+            (at(QueryTime, Lifetime::None), None),
+            (at(IngestionTime, Lifetime::None), None),
+        ];
+        for medium in [Medium::Memory, Medium::Disk] {
+            expected.extend([
+                (
+                    at(IngestionTime, Lifetime::AcrossEvaluations(medium)),
+                    Some("ingestion time"),
+                ),
+                (
+                    at(QueryTime, Lifetime::OneEvaluation(medium)),
+                    Some("query time, shared"),
+                ),
+                (
+                    at(QueryTime, Lifetime::AcrossEvaluations(medium)),
+                    Some("query time, kept"),
+                ),
+            ]);
+        }
+        for properties in PhysicalProperties::every_valid() {
+            let (_, label) = expected
+                .iter()
+                .find(|(state, _)| *state == properties)
+                .expect("every valid state has an expectation");
+            assert_eq!(phase_label(Ok(properties)), *label, "{properties:?}");
+        }
+        assert_eq!(
+            phase_label(Err(InvalidPhysicalProperties::OneEvaluationAtIngestion)),
+            Some("invalid timing and lifetime")
         );
     }
 

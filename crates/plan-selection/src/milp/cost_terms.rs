@@ -52,7 +52,9 @@
 //! [`SelectionMilp::inexact`] by reason.
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use asap_cost::execution_demand::{evaluation_rate, schedule_groups};
+use asap_cost::execution_demand::{
+    evaluation_rate, materialized_run_rate, schedule_groups, MaterializedRunRate,
+};
 use asap_cost::CostModel;
 use asap_types::ir::physical_export::ScanWindow;
 use asap_types::ir::properties::ExecutionTiming;
@@ -212,7 +214,7 @@ fn producer_gives(
     // `I_r`.
     let producer_run = match milp.kind(producer) {
         _ if milp.computes(context, producer) => context,
-        RunKind::Shareable => milp.context_of(producer)?,
+        RunKind::Materialized => milp.context_of(producer)?,
         RunKind::Ingestion => milp.ingestion_context_read_by(context)?,
         RunKind::PerContext => return None,
     };
@@ -490,7 +492,7 @@ fn window_terms(
     }
     // Each read: (reading context, window kind, reader's indicator).
     let mut reads: Vec<(usize, ScanWindow, Expression)> = Vec::new();
-    let reading_contexts: Vec<usize> = if milp.kind(scan) == RunKind::Shareable {
+    let reading_contexts: Vec<usize> = if milp.kind(scan) == RunKind::Materialized {
         (0..milp.choice.len())
             .filter(|&other| milp.choice[other].contains_key(&scan))
             .collect()
@@ -516,7 +518,7 @@ fn window_terms(
                 }
                 Reader::Output(_) => (ScanWindow::Unbounded, Expression::from(1.0)),
                 Reader::OwnInput(_) => {
-                    let ContextKind::Shared(own) = milp.inputs.contexts[reading].kind else {
+                    let ContextKind::Materialized(own) = milp.inputs.contexts[reading].kind else {
                         continue;
                     };
                     // `m` itself reads the scan: at its own window.
@@ -842,15 +844,21 @@ fn context_rates(
         let rate = match milp.inputs.contexts[context].kind {
             ContextKind::Query(query) => ContextRate::Fixed(query_rate[query]),
             ContextKind::Ingestion(_) => ContextRate::Fixed(1.0),
-            ContextKind::Shared(m) => {
+            ContextKind::Materialized(m) => {
                 let properties = milp.physical.candidates[m.0].properties;
-                let per_request = match (properties.timing(), properties.lifetime()) {
-                    (ExecutionTiming::IngestionTime, _) | (_, Lifetime::None) => {
+                let per_request = match materialized_run_rate(properties) {
+                    Some(MaterializedRunRate::PerSecondOfArrivingData) => {
                         rates.push(ContextRate::Fixed(1.0));
                         continue;
                     }
-                    (ExecutionTiming::QueryTime, Lifetime::OneEvaluation(_)) => false,
-                    (ExecutionTiming::QueryTime, Lifetime::AcrossEvaluations(_)) => true,
+                    Some(MaterializedRunRate::PerEvaluation) => false,
+                    Some(MaterializedRunRate::PerRequest) => true,
+                    // `κ_m` exists only for a materialized `m` (`RunKind::Materialized`).
+                    None => {
+                        return Err(SelectionMilpError::Cost(format!(
+                            "context of candidate {m:?}, which is not materialized ({properties:?})"
+                        )))
+                    }
                 };
                 let readers = milp.queries_reaching(m);
                 let demand = |query: usize| {
@@ -996,7 +1004,7 @@ pub(crate) fn encode_objective(milp: &mut SelectionMilp<'_>) -> Result<(), Selec
             candidate_data.properties.timing(),
             candidate_data.properties.lifetime(),
         );
-        let own = milp.inputs.contexts[context].kind == ContextKind::Shared(candidate);
+        let own = milp.inputs.contexts[context].kind == ContextKind::Materialized(candidate);
         // The most this run adds to its context's execution cost: all its
         // terms at 1.
         let mut run_execution = 0.0;
@@ -1040,7 +1048,7 @@ pub(crate) fn encode_objective(milp: &mut SelectionMilp<'_>) -> Result<(), Selec
                     );
                     charge(&held.into(), per_byte_ms * query_rate[query]);
                 }
-                ContextKind::Shared(m) => {
+                ContextKind::Materialized(m) => {
                     if own && lifetime != Lifetime::OneEvaluation(Medium::Memory) {
                         milp.note_inexact("held bytes of a shareable candidate not in memory");
                     }
@@ -1119,7 +1127,7 @@ pub(crate) fn encode_objective(milp: &mut SelectionMilp<'_>) -> Result<(), Selec
         let ContextRate::Components(components) = &rates[context] else {
             continue;
         };
-        let ContextKind::Shared(m) = milp.inputs.contexts[context].kind else {
+        let ContextKind::Materialized(m) = milp.inputs.contexts[context].kind else {
             continue;
         };
         let region = milp
