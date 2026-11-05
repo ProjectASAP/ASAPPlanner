@@ -1,19 +1,15 @@
 //! Scan-label widening for explicit memo state sharing. Reuses the existing
 //! Pass 2 widening rule; only its source-chain boundaries are interned here.
-use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_accuracy::propagation::recompose_guarantees;
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot};
 
-use super::reuse::same_output_contract;
+use super::reuse::{add_candidate_over_groups, same_output_contract, without_exact_guarantees};
 use crate::added_groups::groups_read_through_added_groups;
-use crate::pass2::memo::state_groups::{
-    boundary_groups, build_down_to_stage0_groups, Pass2RuleError,
-};
-use asap_types::stages::{CandidateForMemoGroup, Memo, OriginOfCandidateForMemoGroup};
-use asap_types::stages::{MemoGroup, MemoGroupId};
+use crate::pass2::memo::state_groups::{build_down_to_stage0_groups, Pass2RuleError};
+use asap_types::stages::{Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
 
 /// Preserve local implementations and append readers over union-label inputs.
 /// Parent/query reachability is rebuilt by the enclosing state-group expansion.
@@ -83,53 +79,49 @@ pub(crate) fn add_scan_label_candidates(memo: &mut Memo) -> Result<usize, Pass2R
     let unwidened = recompose_guarantees(&roots)
         .map_err(|error| Pass2RuleError::ScanLabelWidening(error.to_string()))?;
     let mut added = 0;
-    let mut canonical = HashMap::new();
     for (((group, index), root), unwidened) in owners.into_iter().zip(widened).zip(unwidened) {
         let (QueryRoot::Operator(node), QueryRoot::Operator(unwidened)) = (root, unwidened) else {
             unreachable!("operator readers")
         };
         let original = memo.candidates[group][index].clone();
-        if *node == *unwidened || !same_output_contract(&original.root_node, &node) {
+        if *node == *unwidened {
             continue;
         }
-        let queries = memo.groups()[group].queries.clone();
-        let mut node = intern_inputs(&node, memo, &queries, &mut canonical)?;
-        if memo.group_whose_node_is(&node).is_some() {
-            // Interning an equivalent range/source can return another group's
-            // canonical value. Keep a concrete reader instead of a root alias.
-            node =
-                OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Project {
-                    cols: node
-                        .schema
-                        .fields
-                        .iter()
-                        .enumerate()
-                        .map(|(column, field)| asap_types::ir::ProjectItem {
-                            alias: Some(field.name.clone()),
-                            expr: asap_types::ir::ScalarExpr::Column(column),
-                        })
-                        .collect(),
-                    qualifier: None,
-                    child: node,
-                }))
-                .map_err(|error| Pass2RuleError::ScanLabelWidening(error.to_string()))?;
-            if !same_output_contract(&original.root_node, &node) {
-                continue;
-            }
-        }
-        let mut reader = original;
-        reader.root_node = node;
-        reader.input_groups = boundary_groups(memo, &reader.root_node, |_| true);
-        reader.origin = OriginOfCandidateForMemoGroup::WidenedScans;
-        if memo.candidates[group].iter().any(|known| {
-            known.origin == OriginOfCandidateForMemoGroup::WidenedScans
-                && known.input_groups == reader.input_groups
-                && *known.root_node == *reader.root_node
-        }) {
+        // A widened source chain equal to a group's node is read through a
+        // projection instead of aliasing that group.
+        let node = if memo
+            .group_with_equal_node(&without_exact_guarantees(&node))
+            .is_some()
+        {
+            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Project {
+                cols: node
+                    .schema
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .map(|(column, field)| asap_types::ir::ProjectItem {
+                        alias: Some(field.name.clone()),
+                        expr: asap_types::ir::ScalarExpr::Column(column),
+                    })
+                    .collect(),
+                qualifier: None,
+                child: node,
+            }))
+            .map_err(|error| Pass2RuleError::ScanLabelWidening(error.to_string()))?
+        } else {
+            node
+        };
+        // A reader whose output the widening changed is not added.
+        if !same_output_contract(&original.root_node, &node) {
             continue;
         }
-        memo.candidates[group].push(reader);
-        added += 1;
+        added += usize::from(add_candidate_over_groups(
+            memo,
+            MemoGroupId(group as u32),
+            &original,
+            node,
+            OriginOfCandidateForMemoGroup::WidenedScans,
+        )?);
     }
     Ok(added)
 }
@@ -142,86 +134,4 @@ fn is_source_chain(node: &OperatorNode) -> bool {
         }
         _ => false,
     }
-}
-
-fn same_source_node(left: &OperatorNode, right: &OperatorNode) -> bool {
-    // These operators preserve exact source rows; recomposition's exact
-    // guarantee annotation does not change their logical/execution contract.
-    left.operator.map_children(|_| ()) == right.operator.map_children(|_| ())
-        && left.schema == right.schema
-        && left.result_kind == right.result_kind
-        && left.timing == right.timing
-        && left.materialization == right.materialization
-        && left
-            .children()
-            .iter()
-            .zip(right.children())
-            .all(|(a, b)| Rc::ptr_eq(a, b))
-        && left.children().len() == right.children().len()
-}
-
-fn intern_inputs(
-    node: &Rc<OperatorNode>,
-    memo: &mut Memo,
-    queries: &[usize],
-    done: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
-) -> Result<Rc<OperatorNode>, Pass2RuleError> {
-    if let Some(known) = done.get(&Rc::as_ptr(node)) {
-        return Ok(Rc::clone(known));
-    }
-    let mut children = HashMap::new();
-    for child in node.children() {
-        children.insert(
-            Rc::as_ptr(child),
-            intern_inputs(child, memo, queries, done)?,
-        );
-    }
-    let rewritten = Rc::new(OperatorNode {
-        operator: node
-            .operator
-            .map_children(|child| Rc::clone(&children[&Rc::as_ptr(child)])),
-        ..(**node).clone()
-    });
-    let result = if is_source_chain(&rewritten) {
-        if let Some(existing) = memo
-            .groups()
-            .iter()
-            .find(|group| same_source_node(&group.logical_node, &rewritten))
-        {
-            Rc::clone(&existing.logical_node)
-        } else {
-            // The new group's id must fit a `MemoGroupId`.
-            u32::try_from(memo.groups().len()).map_err(|_| Pass2RuleError::TooManyGroups)?;
-            let mut seen = HashSet::new();
-            let inputs: Vec<_> = rewritten
-                .children()
-                .iter()
-                .map(|child| {
-                    memo.group_whose_node_is(child)
-                        .expect("source-chain children were interned")
-                })
-                .filter(|input| seen.insert(*input))
-                .collect();
-            memo.push_group(
-                MemoGroup {
-                    logical_node: Rc::clone(&rewritten),
-                    child_groups: inputs.clone(),
-                    parents: Vec::new(),
-                    queries: queries.to_vec(),
-                },
-                vec![CandidateForMemoGroup {
-                    fused_groups: Vec::new(),
-                    root_node: Rc::clone(&rewritten),
-                    input_groups: inputs,
-                    origin: OriginOfCandidateForMemoGroup::WidenedScans,
-                    accuracy_budget_parts: 1,
-                }],
-            );
-            rewritten
-        }
-    } else {
-        rewritten
-    };
-    done.insert(Rc::as_ptr(node), Rc::clone(&result));
-    Ok(result)
 }

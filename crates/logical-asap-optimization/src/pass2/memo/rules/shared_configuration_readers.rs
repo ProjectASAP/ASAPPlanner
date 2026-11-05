@@ -11,6 +11,7 @@ use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
 use super::shared_producer::{
     add_shared_producer_candidates, spans_groups, Reader, SharedProducer,
 };
+use crate::operator_over_groups::operator_over_groups;
 use crate::own_candidate_sizing::find_or_add_sized_group;
 use crate::pass2::asap_aware_cse::{with_resized_build, with_tumbling_window_chain};
 use crate::pass2::memo::shared_configurations::{
@@ -102,6 +103,9 @@ struct SummaryStates {
     rewrite_count: usize,
     /// The (normalized layout, configuration index) rewrites already made.
     requests: HashSet<(usize, usize)>,
+    /// The nodes of Stage 0's groups, which a rewrite of a candidate whose
+    /// build is beneath groups puts back ([`BuildPlace::BeneathGroups`]).
+    stage0_group_nodes: HashSet<*const OperatorNode>,
 }
 
 pub(crate) fn add_state_configuration_candidates(memo: &mut Memo) -> Result<(), Pass2RuleError> {
@@ -116,6 +120,7 @@ fn expand_configurations(
         deduplicate_requests,
         rewrite_count: 0,
         requests: HashSet::new(),
+        stage0_group_nodes: HashSet::new(),
     };
     add_shared_producer_candidates(memo, &mut states)?;
     Ok(states.rewrite_count)
@@ -127,13 +132,31 @@ impl SharedProducer for SummaryStates {
 
     fn sets(&mut self, memo: &Memo) -> Result<Vec<Vec<Reader<StateNeed>>>, Pass2RuleError> {
         let mut sets: Vec<Vec<Reader<StateNeed>>> = Vec::new();
+        self.stage0_group_nodes = memo
+            .groups()
+            .iter()
+            .enumerate()
+            .filter(|&(id, _)| memo.is_stage0_group(MemoGroupId(id as u32)))
+            .map(|(_, group)| Rc::as_ptr(&group.logical_node))
+            .collect();
         for (group, candidates) in memo.candidates.iter().enumerate() {
             for (candidate, entry) in candidates.iter().enumerate() {
-                let Some((build, place @ (BuildPlace::Private | BuildPlace::InputGroup(_)))) =
-                    build_of(memo, entry)
-                else {
+                let Some((build, place)) = build_of(memo, entry) else {
                     continue;
                 };
+                // A build beneath groups (a tumbling-window chain a rule
+                // added as groups) is rewritten whole, from a Stage 0
+                // group's candidate only: per-width merge groups below would
+                // defeat the per-group layout deduplication.
+                if place == BuildPlace::BeneathGroups
+                    && !(memo.is_stage0_group(MemoGroupId(group as u32))
+                        && matches!(
+                            build.asap(),
+                            Some(ASAPOp::SummaryTumblingWindowChain { .. })
+                        ))
+                {
+                    continue;
+                }
                 // Configuration expansion precedes Stage 2. The rewrite helpers
                 // create unassigned state; preserve any already assigned build.
                 if build.timing.is_some()
@@ -291,7 +314,12 @@ impl SharedProducer for SummaryStates {
                 with_resized_build(&roots, &need.build, family.clone())
             }
         };
-        let mut boundaries = boundary_ptrs(memo, &original);
+        let mut boundaries = match need.place {
+            // The rewrite reaches below the input groups: only Stage 0's
+            // groups' nodes are put back.
+            BuildPlace::BeneathGroups => self.stage0_group_nodes.clone(),
+            BuildPlace::Private | BuildPlace::InputGroup(_) => boundary_ptrs(memo, &original),
+        };
         // A build read as an input group is the node resized: it is not put
         // back, and the resized build reads the build group's own inputs.
         if let BuildPlace::InputGroup(build_group) = need.place {
@@ -324,9 +352,16 @@ impl SharedProducer for SummaryStates {
         // A build read as an input group stays one: the resized build's group
         // is found or added, and the consumer reads it.
         let (node, input_groups) = match need.place {
-            BuildPlace::Private | BuildPlace::BeneathGroups => {
-                (node, original.input_groups.clone())
-            }
+            BuildPlace::Private => (node, original.input_groups.clone()),
+            // Rule 9 has no origin of its own; the groups it adds are shared
+            // builds.
+            BuildPlace::BeneathGroups => operator_over_groups(
+                memo,
+                &node,
+                &memo.groups()[reader.group].queries.clone(),
+                &OriginOfCandidateForMemoGroup::SharedBuild,
+                accuracy_budget_parts,
+            ),
             BuildPlace::InputGroup(build_group) => {
                 let resized_build = original
                     .root_node
@@ -337,8 +372,6 @@ impl SharedProducer for SummaryStates {
                     .map(|(_, after)| Rc::clone(after))
                     .expect("the consumer reads its build group directly");
                 let queries = memo.groups()[reader.group].queries.clone();
-                // Rule 9 has no origin of its own; its added build groups
-                // are shared builds.
                 let resized_group = find_or_add_sized_group(
                     memo,
                     &resized_build,

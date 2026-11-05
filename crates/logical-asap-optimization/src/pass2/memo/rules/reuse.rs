@@ -88,16 +88,23 @@ pub(in crate::pass2::memo) fn find_or_add_producer(
     queries: &[usize],
     origin: &OriginOfCandidateForMemoGroup,
 ) -> MemoGroupId {
+    find_or_add_group(memo, &without_exact_guarantees(node), queries, origin, 1)
+}
+
+/// `node` with every exact guarantee removed, its own included: the node
+/// Stage 0's equality compares with the groups' nodes, which carry none.
+pub(in crate::pass2::memo) fn without_exact_guarantees(
+    node: &Rc<OperatorNode>,
+) -> Rc<OperatorNode> {
     let below = without_exact_guarantees_below(node);
-    let node = if below.guarantee.as_ref().is_some_and(|g| g.is_exact()) {
+    if below.guarantee.as_ref().is_some_and(|g| g.is_exact()) {
         Rc::new(OperatorNode {
             guarantee: None,
             ..(*below).clone()
         })
     } else {
         below
-    };
-    find_or_add_group(memo, &node, queries, origin, 1)
+    }
 }
 
 pub(in crate::pass2::memo) fn replace(

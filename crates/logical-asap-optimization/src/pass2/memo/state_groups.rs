@@ -648,6 +648,77 @@ mod tests {
 
     // Different label projections can consume one wider tumbling-window state through
     // typed reader projections; no original scan needs to contain the union.
+    /// Rollup gap check after scan widening became one operator over groups:
+    /// a widened tumbling-window reader's chain now sits beneath groups
+    /// (`BuildPlace::BeneathGroups`), which rule 6 does not take. Before,
+    /// the chain was the reader's private build, which rule 6 took. No
+    /// rollup is lost: rule 6's rewrite finds none for these readers, with
+    /// either query as the coarse one.
+    #[test]
+    fn rollups_lose_nothing_from_widened_readers_whose_chain_is_beneath_groups() {
+        use crate::pass2::asap_aware_cse::rollup_candidate_for;
+        let mut memo = with_local_tumbling_windows(
+            workload(&[
+                ("sum by (job) (sum_over_time(latency[5m]))", 0.01),
+                ("sum by (job, region) (sum_over_time(latency[5m]))", 0.01),
+            ]),
+            &[60_000, 60_000],
+        );
+        super::super::rules::scan_labels::add_scan_label_candidates(&mut memo).unwrap();
+        let memo = &memo;
+        let beneath: Vec<_> = (0..memo.groups().len())
+            .flat_map(|group| {
+                memo.candidates[group]
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.origin == OriginOfCandidateForMemoGroup::WidenedScans
+                    })
+                    .filter_map(move |candidate| match build_of(memo, candidate)? {
+                        (build, BuildPlace::BeneathGroups) => Some((group, candidate, build)),
+                        _ => None,
+                    })
+            })
+            .collect();
+        assert!(
+            beneath.iter().any(|(_, _, build)| matches!(
+                build.asap(),
+                Some(ASAPOp::SummaryTumblingWindowChain { .. })
+            )),
+            "a widened reader whose chain is beneath groups"
+        );
+        // Rule 6's other inputs: Pass 1 and widened candidates whose build
+        // it takes.
+        let inputs: Vec<_> = (0..memo.groups().len())
+            .flat_map(|group| {
+                memo.candidates[group].iter().filter_map(move |candidate| {
+                    match build_of(memo, candidate)? {
+                        (_, BuildPlace::Private | BuildPlace::InputGroup(_)) => {
+                            Some((group, candidate))
+                        }
+                        _ => None,
+                    }
+                })
+            })
+            .chain(
+                beneath
+                    .iter()
+                    .map(|&(group, candidate, _)| (group, candidate)),
+            )
+            .collect();
+        for (coarse_group, coarse, build) in &beneath {
+            for (fine_group, fine) in &inputs {
+                if coarse_group == fine_group {
+                    continue;
+                }
+                let roots = [
+                    QueryRoot::Operator(Rc::clone(&coarse.root_node)),
+                    QueryRoot::Operator(Rc::clone(&fine.root_node)),
+                ];
+                assert!(rollup_candidate_for(&roots, Rc::as_ptr(build)).is_none());
+            }
+        }
+    }
+
     #[test]
     fn disjoint_scan_labels_share_a_union_tumbling_window_state_with_typed_readers() {
         let original = with_local_tumbling_windows(
@@ -686,9 +757,9 @@ mod tests {
             })
             .collect();
         let expanded = expand(original).unwrap();
-        let shared = expanded
-            .state_groups
-            .iter()
+        // The union-label chain is a group both queries reach.
+        let shared = (0..expanded.memo.groups().len())
+            .map(|id| MemoGroupId(id as u32))
             .find(|id| {
                 let group = &expanded.memo.groups()[id.0 as usize];
                 matches!(
@@ -706,24 +777,33 @@ mod tests {
             })
             .expect("one state over union labels");
         let state = &expanded.memo.groups()[shared.0 as usize];
-        assert!(state.parents.len() >= 2);
-        for parent in &state.parents {
-            let reader = expanded.memo.candidates[parent.0 as usize]
-                .iter()
-                .find(|candidate| candidate.input_groups.contains(shared))
-                .unwrap();
-            assert_eq!(
-                reader.root_node.schema.fields,
-                expanded.memo.groups()[parent.0 as usize]
-                    .logical_node
-                    .schema
-                    .fields
-            );
-            assert!(OperatorNode::reachable(&reader.root_node)
-                .iter()
-                .any(|node| matches!(node.non_asap(), Some(NonASAPOp::Project { .. }))));
-            reader.root_node.validate_structure().unwrap();
+        // Each query reads it through a widened-scan candidate of a Stage 0
+        // group that projects back to the group's own labels.
+        let mut reading_queries = Vec::new();
+        for (group, candidates) in expanded.memo.candidates.iter().enumerate() {
+            if !expanded.memo.is_stage0_group(MemoGroupId(group as u32)) {
+                continue;
+            }
+            for reader in candidates.iter().filter(|candidate| {
+                candidate.origin == OriginOfCandidateForMemoGroup::WidenedScans
+                    && OperatorNode::reachable(&candidate.root_node)
+                        .iter()
+                        .any(|node| Rc::ptr_eq(node, &state.logical_node))
+            }) {
+                assert_eq!(
+                    reader.root_node.schema.fields,
+                    expanded.memo.groups()[group].logical_node.schema.fields
+                );
+                assert!(OperatorNode::reachable(&reader.root_node)
+                    .iter()
+                    .any(|node| matches!(node.non_asap(), Some(NonASAPOp::Project { .. }))));
+                reader.root_node.validate_structure().unwrap();
+                reading_queries.extend(expanded.memo.groups()[group].queries.iter().copied());
+            }
         }
+        reading_queries.sort_unstable();
+        reading_queries.dedup();
+        assert_eq!(reading_queries, vec![0, 1]);
         for (group, locals) in local_nodes.into_iter().enumerate() {
             assert!(locals
                 .iter()
@@ -755,10 +835,11 @@ mod tests {
             &[60_000, 60_000],
         );
         let expanded = expand(memo).unwrap();
+        // The union-label chain is a group both queries reach.
         let state = expanded
-            .state_groups
+            .memo
+            .groups()
             .iter()
-            .map(|id| &expanded.memo.groups()[id.0 as usize])
             .find(|group| {
                 matches!(
                     group.logical_node.asap(),
