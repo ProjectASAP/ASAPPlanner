@@ -342,7 +342,7 @@ impl LogicalProperties {
 /// The window count is the group's query range ÷ width; retention is h_v (Stage 3).
 pub enum WindowLayout { Tumbling { width_ms: u64 } }
 
-/// The family's predefined θ list (#1207 step 6), each with its error bound
+/// Approved 2026-11-05. The family's predefined θ list, each with its error bound
 /// derived through `estimators::local_guarantee` for a given statistic.
 pub fn parameter_list(family: SketchAlgorithm) -> &'static [SketchParams];
 
