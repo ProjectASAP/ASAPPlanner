@@ -21,7 +21,7 @@ use asap_physical_asap_optimization::{
 };
 use asap_plan_selection::{select_plan, ErrorSelectingPlan, SearchReport, Selection};
 use asap_types::ir::schema::schema_support::with_promql_series_identity;
-use asap_types::ir::{OperatorNode, QueryRoot};
+use asap_types::ir::{OperatorNode, PhysicalPropertiesAssignment, QueryRoot};
 use asap_types::stages::{
     AssignmentRealizer, CandidateForMemoGroupId, DagOfSelectedCandidates,
     LogicalASAPMemoCandidates, Memo, MemoGroupId, PhysicalASAPMemoCandidates,
@@ -107,11 +107,41 @@ pub struct PlanningRun {
     pub selection: Result<Selection, SelectionError>,
     /// The selected plan as Stage 2 built it, with its tumbling-window retention.
     pub selected_physical_plan: Option<RealizedPlan>,
-    /// The plan to run: the selected plan's roots with the weight proofs
-    /// Stage 3 made applied. Its nodes' physical properties are in
-    /// `selected_physical_plan`'s `plan.physical_properties`.
-    pub selected_plan: Option<Vec<QueryRoot>>,
+    /// The plan to run, with its nodes' physical properties.
+    pub selected_plan: Option<SelectedPlan>,
     pub report: PlanningReport,
+}
+
+/// The plan to run: the selected plan's roots with the weight proofs Stage 3
+/// made applied, and the physical properties of their nodes. The
+/// [`RealizedPlan`] it comes from stays as Stage 2 built it.
+#[derive(Debug, Clone)]
+pub struct SelectedPlan {
+    pub roots: Vec<QueryRoot>,
+    pub physical_properties: PhysicalPropertiesAssignment,
+}
+
+impl SelectedPlan {
+    /// `realized` with the weight proofs `selection` made applied.
+    pub fn of(realized: &RealizedPlan, selection: &Selection, data: &DataWorkload) -> Self {
+        let proven: HashSet<*const OperatorNode> = selection
+            .nodes_with_proven_non_negative_weights
+            .iter()
+            .filter_map(|node| realized.operator_node_of_selected_node.get(node.0))
+            .map(Rc::as_ptr)
+            .collect();
+        let mut physical_properties = realized.plan.physical_properties.clone();
+        let roots = with_confirmed_weights_at(
+            &realized.plan.roots,
+            data,
+            &|node| proven.contains(&Rc::as_ptr(node)),
+            &mut physical_properties,
+        );
+        Self {
+            roots,
+            physical_properties,
+        }
+    }
 }
 
 /// Run the planning stages over the frontends' `roots` (query `i` is
@@ -221,21 +251,10 @@ pub fn run_planning(
         let selection = selection.map_err(SelectionError::Selection)?;
         report.search_report = Some(selection.search_report.clone());
         // The selected plan, as Stage 2 builds it.
-        let mut realized = realizer
+        let realized = realizer
             .realize(physical, &selection.selected_dag)
             .map_err(SelectionError::Realization)?;
-        let proven: HashSet<*const OperatorNode> = selection
-            .nodes_with_proven_non_negative_weights
-            .iter()
-            .filter_map(|node| realized.operator_node_of_selected_node.get(node.0))
-            .map(Rc::as_ptr)
-            .collect();
-        selected_plan = Some(with_confirmed_weights_at(
-            &realized.plan.roots,
-            data,
-            &|node| proven.contains(&Rc::as_ptr(node)),
-            &mut realized.plan.physical_properties,
-        ));
+        selected_plan = Some(SelectedPlan::of(&realized, &selection, data));
         selected_physical_plan = Some(realized);
         Ok(selection)
     })();
@@ -378,7 +397,14 @@ impl OptimizationPass for Stage1ToStage3Pass {
             PlanSearchSettings::default(),
         )?;
         let selection = run.selection?;
-        let roots = run.selected_plan.expect("a selection has a plan");
+        let SelectedPlan {
+            roots,
+            physical_properties,
+        } = run.selected_plan.expect("a selection has a plan");
+        debug_assert!(
+            physical_properties.lists_every_node_of(&roots),
+            "the selected plan's physical properties list every node of its roots"
+        );
         let mut output = PlanOutput::new(Vec::new());
         for (entry_index, root) in roots.iter().enumerate() {
             match root {
@@ -406,8 +432,8 @@ impl OptimizationPass for Stage1ToStage3Pass {
         }
         if let Some(realized) = run.selected_physical_plan {
             output.tumbling_window_retention_ms = realized.tumbling_window_retention_ms;
-            output.physical_properties = realized.plan.physical_properties;
         }
+        output.physical_properties = physical_properties;
         output.selection = Some(selection);
         Ok(output)
     }

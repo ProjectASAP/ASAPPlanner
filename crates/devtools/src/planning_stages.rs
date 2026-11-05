@@ -13,18 +13,16 @@ use asap_physical_asap_optimization::{
 };
 use asap_plan_selection::select_plan;
 use asap_planner::{
-    run_planning, PlanSearchSettings, PlanningModels, PlanningReport, PlanningRun, SelectionError,
+    run_planning, PlanSearchSettings, PlanningModels, PlanningReport, PlanningRun, SelectedPlan,
+    SelectionError,
 };
 use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::QueryRoot;
 use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::stages::{AssignmentRealizer, DagOfLogicalMemoGroups, Memo};
-use asap_types::workload::bounds::with_confirmed_weights_at;
 use asap_types::workload::{DataWorkload, PlanningWorkload, QueryWorkloadEntry};
 use serde_json::Value;
-use std::collections::HashSet;
-use std::rc::Rc;
 
 use crate::memo_pricing::{reference_enumeration, ReferenceEnumeration};
 
@@ -109,9 +107,9 @@ impl PlanningStagesRun {
             .run
             .selected_plan
             .iter()
-            .map(|roots| ShownLogicalCandidate {
+            .map(|plan| ShownLogicalCandidate {
                 id: "L1".into(),
-                roots: Ok(roots.clone()),
+                roots: Ok(plan.roots.clone()),
             });
         let enumerated = self.reference.iter().flat_map(|reference| {
             reference
@@ -290,8 +288,8 @@ pub fn run_search_over(
     validate(&roots)?;
     let run = run_planning(roots.clone(), entries, data, models, settings)
         .map_err(|e| PlanningStagesError::Pass1(e.to_string()))?;
-    if let Some(roots) = &run.selected_plan {
-        validate(roots)?;
+    if let Some(plan) = &run.selected_plan {
+        validate(&plan.roots)?;
     }
     let reference = reference_choices
         .and_then(|max| reference_enumeration(&run, &roots, entries, data, models, max));
@@ -431,22 +429,11 @@ pub fn run_stages_until(
     ) {
         Ok(selection) => {
             match realizer.realize(&physical, &selection.selected_dag) {
-                Ok(mut realized) => {
+                Ok(realized) => {
                     // As the facade does: the plan to run carries the weight
                     // proofs Stage 3 made.
-                    let proven: HashSet<*const asap_types::ir::OperatorNode> = selection
-                        .nodes_with_proven_non_negative_weights
-                        .iter()
-                        .filter_map(|node| realized.operator_node_of_selected_node.get(node.0))
-                        .map(Rc::as_ptr)
-                        .collect();
-                    let plan = with_confirmed_weights_at(
-                        &realized.plan.roots,
-                        data,
-                        &|node| proven.contains(&Rc::as_ptr(node)),
-                        &mut realized.plan.physical_properties,
-                    );
-                    validate(&plan)?;
+                    let plan = SelectedPlan::of(&realized, &selection, data);
+                    validate(&plan.roots)?;
                     run.selected_plan = Some(plan);
                     run.selected_physical_plan = Some(realized);
                     run.selection = Ok(selection);

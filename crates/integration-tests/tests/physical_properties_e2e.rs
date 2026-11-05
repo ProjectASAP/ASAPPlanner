@@ -92,8 +92,8 @@ fn timed_dag(
     assignment: &PhysicalPropertiesAssignment,
 ) -> PhysicalASAPDAG {
     let (split, assignment) = split_shared_by_timing(std::slice::from_ref(root), assignment);
-    let timed = apply_physical_properties(&split[0], &assignment).unwrap();
-    compile_physical_asap_dag(&split[0], &timed).unwrap()
+    let physical_properties = apply_physical_properties(&split[0], &assignment).unwrap();
+    compile_physical_asap_dag(&split[0], &physical_properties).unwrap()
 }
 
 fn states(dag: &PhysicalASAPDAG) -> Vec<u64> {

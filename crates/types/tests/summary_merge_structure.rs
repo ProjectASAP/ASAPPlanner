@@ -703,8 +703,8 @@ fn summary_merge_timing() {
     let tumbling_windows = [state(200, "us"), state(200, "eu")];
     let root = merge(tumbling_windows.to_vec()).unwrap();
     let timings = |assignment: &PhysicalPropertiesAssignment| {
-        let timed = apply_physical_properties(&root, assignment).unwrap();
-        let timing = |node: &OperatorNode| timed.get(node).unwrap().timing();
+        let physical_properties = apply_physical_properties(&root, assignment).unwrap();
+        let timing = |node: &OperatorNode| physical_properties.get(node).unwrap().timing();
         (
             timing(&root),
             root.children()

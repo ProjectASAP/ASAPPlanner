@@ -111,12 +111,13 @@ fn samples() -> Vec<(&'static str, &'static str, i64, f64)> {
 /// `Scan`; each `TimeRange` keeps its own window (a tumbling window's moved
 /// back by the `TimeShift` below it).
 fn execute(root: &Rc<OperatorNode>) -> Vec<String> {
-    let timed = apply_physical_properties(root, &PhysicalPropertiesAssignment::default()).unwrap();
+    let physical_properties =
+        apply_physical_properties(root, &PhysicalPropertiesAssignment::default()).unwrap();
     // Tumbling windows run as their tumbling windows, each over its own window.
     let expansion =
         asap_types::ir::operator::tumbling_window_chain::expand_tumbling_window_chains_in_workload(
             &[QueryRoot::Operator(Rc::clone(root))],
-            &timed,
+            &physical_properties,
         )
         .unwrap();
     let dag = asap_types::ir::physical_export::compile_physical_asap_workload(

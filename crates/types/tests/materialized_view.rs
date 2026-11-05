@@ -102,8 +102,8 @@ fn tumbling_windows_and_kept_merge() -> (PhysicalASAPDAG, usize) {
         &merge,
         PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME,
     );
-    let timed = apply_physical_properties(&merge, &assignment).unwrap();
-    let dag = compile_physical_asap_dag(&merge, &timed).unwrap();
+    let physical_properties = apply_physical_properties(&merge, &assignment).unwrap();
+    let dag = compile_physical_asap_dag(&merge, &physical_properties).unwrap();
     let merge_id = dag.roots[0];
     (dag, merge_id)
 }
@@ -244,9 +244,9 @@ fn three_chains_over_one_scan() -> (PhysicalASAPDAG, PhysicalASAPDAG) {
             )
         })
         .collect();
-    let timed = apply_physical_properties_to_roots(&roots, &assignment).unwrap();
-    let unexpanded = compile_physical_asap_workload(&roots, &timed).unwrap();
-    let expanded = expand_tumbling_window_chains_in_workload(&roots, &timed).unwrap();
+    let physical_properties = apply_physical_properties_to_roots(&roots, &assignment).unwrap();
+    let unexpanded = compile_physical_asap_workload(&roots, &physical_properties).unwrap();
+    let expanded = expand_tumbling_window_chains_in_workload(&roots, &physical_properties).unwrap();
     let mut installed =
         compile_physical_asap_workload(&expanded.roots, &expanded.physical_properties).unwrap();
     installed
@@ -378,8 +378,8 @@ fn a_shifted_tumbling_window_has_its_own_phase() {
         .iter()
         .map(|tumbling_window| QueryRoot::Operator(Rc::clone(tumbling_window)))
         .collect();
-    let timed = apply_physical_properties_to_roots(&roots, &assignment).unwrap();
-    let mut dag = compile_physical_asap_workload(&roots, &timed).unwrap();
+    let physical_properties = apply_physical_properties_to_roots(&roots, &assignment).unwrap();
+    let mut dag = compile_physical_asap_workload(&roots, &physical_properties).unwrap();
     dag.set_retention(&HashMap::new(), &HashMap::new()).unwrap();
     let mut windows: Vec<(u64, u64)> = dag
         .ingestion_refresh_groups()
@@ -423,8 +423,8 @@ fn views_of_unbounded_windows_are_groups_of_their_own() {
             QueryRoot::Operator(build)
         })
         .collect();
-    let timed = apply_physical_properties_to_roots(&roots, &assignment).unwrap();
-    let mut dag = compile_physical_asap_workload(&roots, &timed).unwrap();
+    let physical_properties = apply_physical_properties_to_roots(&roots, &assignment).unwrap();
+    let mut dag = compile_physical_asap_workload(&roots, &physical_properties).unwrap();
     dag.set_retention(&HashMap::new(), &HashMap::new()).unwrap();
     let groups = dag.ingestion_refresh_groups().unwrap();
     assert_eq!(groups.len(), 2);
@@ -455,8 +455,8 @@ fn a_view_reading_a_view_of_its_group_follows_it() {
         );
     }
     let roots = [QueryRoot::Operator(Rc::clone(&rollup))];
-    let timed = apply_physical_properties_to_roots(&roots, &assignment).unwrap();
-    let mut dag = compile_physical_asap_workload(&roots, &timed).unwrap();
+    let physical_properties = apply_physical_properties_to_roots(&roots, &assignment).unwrap();
+    let mut dag = compile_physical_asap_workload(&roots, &physical_properties).unwrap();
     dag.set_retention(&HashMap::new(), &HashMap::new()).unwrap();
     let groups = dag.ingestion_refresh_groups().unwrap();
     assert_eq!(groups.len(), 1);
@@ -505,8 +505,8 @@ fn a_view_has_its_refresh_window_on_a_dag_without_edges() {
         &view,
         PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
     );
-    let timed = apply_physical_properties(&view, &assignment).unwrap();
-    let mut dag = compile_physical_asap_dag(&view, &timed).unwrap();
+    let physical_properties = apply_physical_properties(&view, &assignment).unwrap();
+    let mut dag = compile_physical_asap_dag(&view, &physical_properties).unwrap();
     let view_id = dag.roots[0];
     let window = Some(RefreshWindow {
         width_ms: 60_000,

@@ -296,7 +296,7 @@ In the worked example, `latency < 100` and `region = 'us'` move into `selection`
 
 **When two definitions are equal.** Merging (§5.6) requires equal definitions.
 
-- They must have the same structure. Planning details are ignored: `timing`, `guarantee` and `coverage_cache`. So a tumbling window built at ingestion time can merge with one built at query time.
+- They must have the same structure. Planning details are ignored: `guarantee` and `coverage_cache`. Operator nodes carry no timing (#1200), so a tumbling window built at ingestion time can merge with one built at query time.
 - `SummaryUpdate.weight_domain` is compared too. It is computed from the rest, so it differs only if something is wrong.
 - States over different tables never merge: a KLL over `m1` and one over `m2` have different definitions. To combine tables, put a `UNION ALL` with a column that marks the source table below one `SummaryAgg`; that column can then be used in `selection` or in the grouping.
 
@@ -921,9 +921,6 @@ pub struct OperatorNode {
     /// The accuracy statement of the output, once known. `None` does not
     /// mean exact.
     pub guarantee: Option<AccuracyGuarantee>,
-    /// When the node runs: `IngestionTime` or `QueryTime`. `None` until
-    /// planning assigns it.
-    pub timing: Option<ExecutionTiming>,
     /// Cache for `coverage()`. Filled on first use, never serialized,
     /// ignored by equality, emptied on clone. Not a source of truth:
     /// coverage can always be derived again.

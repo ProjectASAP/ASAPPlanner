@@ -36,9 +36,9 @@ pub fn tumbling_window(
 /// `physical_export::compile_physical_asap_dag_with_node_ids`.
 pub fn compile_physical_asap_dag_with_node_ids(
     root: &Rc<OperatorNode>,
-    timed: &PhysicalPropertiesAssignment,
+    physical_properties: &PhysicalPropertiesAssignment,
 ) -> Result<PhysicalASAPDAGCompilation, ExecutionDataStateError> {
-    crate::ir::physical_export::compile_physical_asap_dag_with_node_ids(root, timed)
+    crate::ir::physical_export::compile_physical_asap_dag_with_node_ids(root, physical_properties)
 }
 
 /// `Operator::output_schema`.

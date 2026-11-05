@@ -141,7 +141,8 @@ fn uncalibrated_frequency_evaluations_do_not_bypass_accuracy_targets() {
                 assert!(!unknown.is_empty(), "{query}");
                 let [asap_types::ir::QueryRoot::Operator(selected)] = run
                     .selected_plan
-                    .as_deref()
+                    .as_ref()
+                    .map(|plan| plan.roots.as_slice())
                     .expect("a certified plan is selected")
                 else {
                     panic!("one operator result");

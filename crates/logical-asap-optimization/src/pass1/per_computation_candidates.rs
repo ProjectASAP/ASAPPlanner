@@ -40,8 +40,8 @@
 //!   outputs then get guarantee `None`). So every candidate of a group
 //!   computes the group's own rows.
 //!
-//! The input must be a logical DAG: ASAP operators, execution timing or a
-//! materialization are rejected. No cost model is used. The accuracy model
+//! The input must be a logical DAG: ASAP operators are rejected. A logical
+//! DAG has no physical properties (#1200). No cost model is used. The accuracy model
 //! is used only to prune summaries no query reading them can use
 //! ([`PerComputationCandidates::without_summaries_no_query_can_use`]);
 //! ranking and discarding valid candidates belong to Stage 3.

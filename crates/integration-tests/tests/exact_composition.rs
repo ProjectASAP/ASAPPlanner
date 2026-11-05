@@ -9,7 +9,9 @@
 
 use std::rc::Rc;
 
-use asap_integration_tests::physical_export::{at_ingestion, physical_asap_dag, timed};
+use asap_integration_tests::physical_export::{
+    default_physical_properties, physical_asap_dag, physical_properties_at_ingestion,
+};
 use asap_integration_tests::planning::explicit_local_candidates;
 use asap_types::ir::operator::agg_intent::{default_quantile, AggIntent};
 use asap_types::ir::operator::operator_properties::{Reduction, Source};
@@ -198,7 +200,7 @@ fn every_exact_accumulator_is_finalized_before_an_outer_sketch() {
             .unwrap_or_else(|| panic!("{kind:?}: a KLL over the exact accumulator"));
         // Timing is not stored on the plan: time it with the outer summary
         // maintained (which also validates every edge) and inspect it.
-        let timed = at_ingestion(&root);
+        let physical_properties = physical_properties_at_ingestion(&root);
         let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &root.operator else {
             panic!("expected KLL evaluation, got {:?}", root.operator);
         };
@@ -210,7 +212,9 @@ fn every_exact_accumulator_is_finalized_before_an_outer_sketch() {
             panic!("{kind:?}: missing maintenance finalization");
         };
         assert_eq!(
-            timed.get(child).map(|properties| properties.timing()),
+            physical_properties
+                .get(child)
+                .map(|properties| properties.timing()),
             Some(ExecutionTiming::IngestionTime),
             "{kind:?}: finalization runs at maintenance time"
         );
@@ -254,7 +258,7 @@ fn max_and_avg_over_quantile_compose_at_query_time() {
             "the composed plan's schema is the pre-ASAP target's own"
         );
         assert_eq!(
-            timed(&composed)
+            default_physical_properties(&composed)
                 .get(&composed)
                 .map(|properties| properties.timing()),
             Some(ExecutionTiming::QueryTime),
@@ -276,7 +280,7 @@ fn identity_and_genuine_multi_row_folds_both_compose() {
         let root = agg(vec![0], AggIntent::Max { col: None }, inner);
         let composed = composed(&root);
         assert_eq!(
-            timed(&composed)
+            default_physical_properties(&composed)
                 .get(&composed)
                 .map(|properties| properties.timing()),
             Some(ExecutionTiming::QueryTime),

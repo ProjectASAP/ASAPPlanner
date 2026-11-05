@@ -171,7 +171,12 @@ async fn corr_survives_exact_plan_compilation() {
         asap_planner::PlanSearchSettings::default(),
     )
     .unwrap();
-    let [asap_types::ir::QueryRoot::Operator(plan)] = run.selected_plan.as_deref().unwrap() else {
+    let [asap_types::ir::QueryRoot::Operator(plan)] = run
+        .selected_plan
+        .as_ref()
+        .map(|plan| plan.roots.as_slice())
+        .unwrap()
+    else {
         panic!("one operator root");
     };
     assert!(plan.guarantee.as_ref().unwrap().is_exact());
@@ -179,6 +184,7 @@ async fn corr_survives_exact_plan_compilation() {
     // operator DAG, no ASAP node added.
     assert!(!plan.contains_asap(), "expected the exact plan");
     assert_eq!(aggregate(plan).0, aggregate(&query).0);
-    let timed = apply_physical_properties(plan, &PhysicalPropertiesAssignment::default()).unwrap();
-    compile_physical_asap_dag(plan, &timed).unwrap();
+    let physical_properties =
+        apply_physical_properties(plan, &PhysicalPropertiesAssignment::default()).unwrap();
+    compile_physical_asap_dag(plan, &physical_properties).unwrap();
 }

@@ -288,6 +288,7 @@ fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) 
             );
         }
     }
-    let timed = apply_physical_properties(candidate, &assignment).unwrap();
-    planner_types::ir::physical_export::compile_physical_asap_dag(candidate, &timed).unwrap()
+    let physical_properties = apply_physical_properties(candidate, &assignment).unwrap();
+    planner_types::ir::physical_export::compile_physical_asap_dag(candidate, &physical_properties)
+        .unwrap()
 }

@@ -172,7 +172,7 @@ async fn facade_plans_match_run_planning() {
         facade.accepted_accuracy_per_query,
         selection.accepted_accuracy_per_query
     );
-    assert_eq!(&output.roots(), run.selected_plan.as_ref().unwrap());
+    assert_eq!(&output.roots(), &run.selected_plan.as_ref().unwrap().roots);
 }
 
 /// A repeating SQL query reaches the optimizer, not only `query_batch` entries.

@@ -139,6 +139,30 @@ impl PhysicalPropertiesAssignment {
             .map(|(_, properties)| *properties)
     }
 
+    /// Whether the assignment lists every node reachable from `roots`, as a
+    /// completed assignment ([`apply_physical_properties_to_roots`]) does.
+    pub fn lists_every_node_of(&self, roots: &[QueryRoot]) -> bool {
+        fn visit(
+            node: &OperatorNode,
+            assignment: &PhysicalPropertiesAssignment,
+            visited: &mut std::collections::HashSet<*const OperatorNode>,
+        ) -> bool {
+            if !visited.insert(node as *const OperatorNode) {
+                return true;
+            }
+            assignment.get(node).is_some()
+                && node
+                    .children()
+                    .iter()
+                    .all(|child| visit(child, assignment, visited))
+        }
+        let mut visited = std::collections::HashSet::new();
+        roots
+            .iter()
+            .flat_map(QueryRoot::operator_refs)
+            .all(|node| visit(node, self, &mut visited))
+    }
+
     /// Every summary build and `MaintainPopulation` reachable from `roots`
     /// materialized in memory at ingestion time where the DAG allows it: not under a
     /// filter, and with nothing below it that can only run at query time.
@@ -234,10 +258,10 @@ fn primitive(node: &OperatorNode) -> DataPrimitive {
 /// The data state `node`'s output carries, if `timed` lists it.
 pub fn data_state(
     node: &OperatorNode,
-    timed: &PhysicalPropertiesAssignment,
+    physical_properties: &PhysicalPropertiesAssignment,
 ) -> Option<ExecutionDataState> {
     Some(ExecutionDataState {
-        timing: timed.get(node)?.timing(),
+        timing: physical_properties.get(node)?.timing(),
         primitive: primitive(node),
     })
 }
@@ -310,7 +334,7 @@ pub fn apply_physical_properties_to_roots(
     roots: &[QueryRoot],
     assignment: &PhysicalPropertiesAssignment,
 ) -> Result<PhysicalPropertiesAssignment, ExecutionDataStateError> {
-    let mut timed = PhysicalPropertiesAssignment::default();
+    let mut physical_properties = PhysicalPropertiesAssignment::default();
     let mut forced = HashMap::new();
     let mut validated = HashMap::new();
     for root in roots {
@@ -319,13 +343,15 @@ pub fn apply_physical_properties_to_roots(
                 node,
                 ExecutionTiming::QueryTime,
                 assignment,
-                &mut timed,
+                &mut physical_properties,
                 &mut forced,
             )?;
             // A root stored at ingestion time is read by the query; one that
             // runs at ingestion time without being stored there produces rows
             // nothing reads.
-            let properties = timed.get(node).expect("written node is timed");
+            let properties = physical_properties
+                .get(node)
+                .expect("written node is timed");
             if properties.timing() == ExecutionTiming::IngestionTime
                 && !properties.readable_at(ExecutionTiming::QueryTime)
                 && primitive(node) == DataPrimitive::Raw
@@ -334,10 +360,10 @@ pub fn apply_physical_properties_to_roots(
                     operator: node.operator.kind_name(),
                 });
             }
-            validate(node, &timed, &mut validated)?;
+            validate(node, &physical_properties, &mut validated)?;
         }
     }
-    Ok(timed)
+    Ok(physical_properties)
 }
 
 /// Validate the sub-DAG below `root` with every sub-DAG materialized at ingestion time
@@ -354,10 +380,16 @@ pub fn validate_at_ingestion(
     let assignment = PhysicalPropertiesAssignment::materialized_at_ingestion_where_allowed(
         std::slice::from_ref(root),
     );
-    let mut timed = PhysicalPropertiesAssignment::default();
+    let mut physical_properties = PhysicalPropertiesAssignment::default();
     let mut forced = HashMap::new();
-    write(root, root_timing, &assignment, &mut timed, &mut forced)?;
-    validate(root, &timed, &mut HashMap::new())
+    write(
+        root,
+        root_timing,
+        &assignment,
+        &mut physical_properties,
+        &mut forced,
+    )?;
+    validate(root, &physical_properties, &mut HashMap::new())
 }
 
 /// The data state `node` produces with every sub-DAG materialized at ingestion time where
@@ -442,11 +474,11 @@ fn write(
     node: &Rc<OperatorNode>,
     consumer: ExecutionTiming,
     assignment: &PhysicalPropertiesAssignment,
-    timed: &mut PhysicalPropertiesAssignment,
+    physical_properties: &mut PhysicalPropertiesAssignment,
     forced: &mut HashMap<*const OperatorNode, bool>,
 ) -> Result<(), ExecutionDataStateError> {
     let properties = placement(node, consumer, assignment, forced)?;
-    if let Some(previous) = timed.get(node) {
+    if let Some(previous) = physical_properties.get(node) {
         if previous.timing() != properties.timing() {
             return Err(ExecutionDataStateError::ConflictingTiming {
                 first: ExecutionDataState {
@@ -462,32 +494,41 @@ fn write(
         return Ok(());
     }
     for child in node.children() {
-        write(child, properties.timing(), assignment, timed, forced)?;
+        write(
+            child,
+            properties.timing(),
+            assignment,
+            physical_properties,
+            forced,
+        )?;
     }
-    timed.set(node, properties);
+    physical_properties.set(node, properties);
     Ok(())
 }
 
-fn state_of(node: &OperatorNode, timed: &PhysicalPropertiesAssignment) -> ExecutionDataState {
-    data_state(node, timed).expect("timed node")
+fn state_of(
+    node: &OperatorNode,
+    physical_properties: &PhysicalPropertiesAssignment,
+) -> ExecutionDataState {
+    data_state(node, physical_properties).expect("timed node")
 }
 
 /// Check every edge below `node` against the module-level rules.
 fn validate(
     node: &Rc<OperatorNode>,
-    timed: &PhysicalPropertiesAssignment,
+    physical_properties: &PhysicalPropertiesAssignment,
     seen: &mut HashMap<*const OperatorNode, ()>,
 ) -> Result<(), ExecutionDataStateError> {
     if seen.insert(Rc::as_ptr(node), ()).is_some() {
         return Ok(());
     }
-    let timing = timed.get(node).expect("timed node").timing();
+    let timing = physical_properties.get(node).expect("timed node").timing();
     match &node.operator {
-        Operator::ASAP(op) => validate_asap(node, op, timing, timed)?,
-        Operator::NonASAP(op) => validate_non_asap(node, op, timing, timed)?,
+        Operator::ASAP(op) => validate_asap(node, op, timing, physical_properties)?,
+        Operator::NonASAP(op) => validate_non_asap(node, op, timing, physical_properties)?,
     }
     for child in node.children() {
-        validate(child, timed, seen)?;
+        validate(child, physical_properties, seen)?;
     }
     Ok(())
 }
@@ -510,7 +551,7 @@ fn validate_asap(
     node: &OperatorNode,
     op: &ASAPOp,
     timing: ExecutionTiming,
-    timed: &PhysicalPropertiesAssignment,
+    physical_properties: &PhysicalPropertiesAssignment,
 ) -> Result<(), ExecutionDataStateError> {
     match op {
         ASAPOp::SummaryAgg { child, .. } | ASAPOp::SummaryTumblingWindowChain { child, .. } => {
@@ -518,7 +559,7 @@ fn validate_asap(
                 ASAPOp::SummaryTumblingWindowChain { .. } => "SummaryTumblingWindowChain.child",
                 _ => "SummaryAgg.child",
             };
-            let avail = state_of(child, timed);
+            let avail = state_of(child, physical_properties);
             match avail {
                 ExecutionDataState::INGESTION_ROWS | ExecutionDataState::QUERY_ROWS => {}
                 s if s.primitive == DataPrimitive::SummaryState => {
@@ -538,7 +579,9 @@ fn validate_asap(
             // `NonASAP` consumer does.
             if timing == ExecutionTiming::QueryTime
                 && avail.timing == ExecutionTiming::IngestionTime
-                && !timed.get(child).is_some_and(|p| p.readable_at(timing))
+                && !physical_properties
+                    .get(child)
+                    .is_some_and(|p| p.readable_at(timing))
             {
                 return Err(
                     ExecutionDataStateError::UnstoredIngestionInputUnderQueryTimeSummary {
@@ -560,7 +603,7 @@ fn validate_asap(
             Ok(())
         }
         ASAPOp::SummaryEstimate { summary_input, .. } => {
-            let s = state_of(summary_input, timed);
+            let s = state_of(summary_input, physical_properties);
             if s.primitive != DataPrimitive::SummaryState {
                 return Err(ExecutionDataStateError::IllegalChildDataState {
                     edge: "SummaryEstimate.summary_input",
@@ -570,13 +613,13 @@ fn validate_asap(
             if timing != ExecutionTiming::QueryTime {
                 return Err(ExecutionDataStateError::IllegalChildDataState {
                     edge: "SummaryEstimate",
-                    child: state_of(node, timed),
+                    child: state_of(node, physical_properties),
                 });
             }
             Ok(())
         }
         ASAPOp::FinalizeExactAccumulator { child } => {
-            let s = state_of(child, timed);
+            let s = state_of(child, physical_properties);
             if s.primitive != DataPrimitive::SummaryState
                 || is_exact_accumulator_state(&child.schema).is_err()
                 || (timing == ExecutionTiming::IngestionTime && s.timing != timing)
@@ -590,7 +633,7 @@ fn validate_asap(
         }
         ASAPOp::MaintainPopulation { child, population } => {
             let valid = population.matches_node(child)
-                && state_of(child, timed)
+                && state_of(child, physical_properties)
                     == ExecutionDataState {
                         timing,
                         primitive: DataPrimitive::Raw,
@@ -614,7 +657,7 @@ fn validate_asap(
         }
         ASAPOp::SummaryMerge { children, .. } => {
             for child in children {
-                let s = state_of(child, timed);
+                let s = state_of(child, physical_properties);
                 if s.primitive != DataPrimitive::SummaryState
                     || (timing == ExecutionTiming::IngestionTime && s.timing != timing)
                 {
@@ -672,13 +715,13 @@ fn validate_non_asap(
     node: &OperatorNode,
     op: &NonASAPOp,
     timing: ExecutionTiming,
-    timed: &PhysicalPropertiesAssignment,
+    physical_properties: &PhysicalPropertiesAssignment,
 ) -> Result<(), ExecutionDataStateError> {
     // Every input is rows at this node's own timing. Ingestion work never
     // reads a query-time value; exact-accumulator state may pass through
     // the projection-like operators unchanged.
     for child in op.children() {
-        let s = state_of(child, timed);
+        let s = state_of(child, physical_properties);
         let passes_state = matches!(
             op,
             NonASAPOp::Project { .. }
@@ -689,7 +732,9 @@ fn validate_non_asap(
             && (is_exact_accumulator_state(&child.schema).is_ok() || selects_states(node));
         // A query-time consumer may read the stored output of a sub-DAG
         // materialized at ingestion time.
-        let reads_stored = timed.get(child).is_some_and(|p| p.readable_at(timing));
+        let reads_stored = physical_properties
+            .get(child)
+            .is_some_and(|p| p.readable_at(timing));
         if (s.timing != timing && !reads_stored)
             || (s.primitive != DataPrimitive::Raw && !passes_state)
         {
@@ -948,12 +993,21 @@ mod tests {
         apply_fixing(root, &[])
     }
 
-    fn timing_of(timed: &PhysicalPropertiesAssignment, node: &OperatorNode) -> ExecutionTiming {
-        timed.get(node).expect("timed node").timing()
+    fn timing_of(
+        physical_properties: &PhysicalPropertiesAssignment,
+        node: &OperatorNode,
+    ) -> ExecutionTiming {
+        physical_properties.get(node).expect("timed node").timing()
     }
 
-    fn lifetime_of(timed: &PhysicalPropertiesAssignment, node: &OperatorNode) -> Lifetime {
-        timed.get(node).expect("timed node").lifetime()
+    fn lifetime_of(
+        physical_properties: &PhysicalPropertiesAssignment,
+        node: &OperatorNode,
+    ) -> Lifetime {
+        physical_properties
+            .get(node)
+            .expect("timed node")
+            .lifetime()
     }
 
     const MATERIALIZED_ACROSS: Lifetime = Lifetime::AcrossEvaluations(Medium::Memory);
@@ -972,18 +1026,18 @@ mod tests {
     #[test]
     fn default_assignment_materializes_nothing() {
         let summary = agg(scan(), kll());
-        let timed =
+        let physical_properties =
             apply_physical_properties(&summary, &PhysicalPropertiesAssignment::default()).unwrap();
         assert_eq!(
-            data_state(&summary, &timed),
+            data_state(&summary, &physical_properties),
             Some(ExecutionDataState {
                 timing: ExecutionTiming::QueryTime,
                 primitive: DataPrimitive::SummaryState,
             })
         );
-        assert_eq!(lifetime_of(&timed, &summary), Lifetime::None);
+        assert_eq!(lifetime_of(&physical_properties, &summary), Lifetime::None);
         assert_eq!(
-            data_state(&child(&summary), &timed),
+            data_state(&child(&summary), &physical_properties),
             Some(ExecutionDataState::QUERY_ROWS)
         );
         for (lifetime, timing) in [
@@ -995,11 +1049,14 @@ mod tests {
         ] {
             let mut assignment = PhysicalPropertiesAssignment::default();
             assignment.set(&summary, properties(timing, lifetime));
-            let timed = apply_physical_properties(&summary, &assignment).unwrap();
-            assert_eq!(timing_of(&timed, &summary), timing);
-            assert_eq!(lifetime_of(&timed, &summary), lifetime);
-            assert_eq!(timing_of(&timed, &child(&summary)), timing);
-            assert_eq!(lifetime_of(&timed, &child(&summary)), Lifetime::None);
+            let physical_properties = apply_physical_properties(&summary, &assignment).unwrap();
+            assert_eq!(timing_of(&physical_properties, &summary), timing);
+            assert_eq!(lifetime_of(&physical_properties, &summary), lifetime);
+            assert_eq!(timing_of(&physical_properties, &child(&summary)), timing);
+            assert_eq!(
+                lifetime_of(&physical_properties, &child(&summary)),
+                Lifetime::None
+            );
         }
     }
 
@@ -1030,21 +1087,28 @@ mod tests {
             &outer,
             PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
-        let timed = apply_physical_properties(&estimate(Rc::clone(&outer)), &assignment).unwrap();
-        assert_eq!(lifetime_of(&timed, &outer), MATERIALIZED_ACROSS);
-        assert_eq!(lifetime_of(&timed, &inner), MATERIALIZED_ACROSS);
+        let physical_properties =
+            apply_physical_properties(&estimate(Rc::clone(&outer)), &assignment).unwrap();
+        assert_eq!(
+            lifetime_of(&physical_properties, &outer),
+            MATERIALIZED_ACROSS
+        );
+        assert_eq!(
+            lifetime_of(&physical_properties, &inner),
+            MATERIALIZED_ACROSS
+        );
     }
 
     #[test]
     fn summary_agg_input_runs_at_ingestion_time() {
         let root = agg(scan(), kll());
-        let timed = apply(&root).unwrap();
+        let physical_properties = apply(&root).unwrap();
         assert_eq!(
-            data_state(&root, &timed),
+            data_state(&root, &physical_properties),
             Some(ExecutionDataState::INGESTION_SUMMARY)
         );
         assert_eq!(
-            data_state(&child(&root), &timed),
+            data_state(&child(&root), &physical_properties),
             Some(ExecutionDataState::INGESTION_ROWS)
         );
     }
@@ -1059,8 +1123,11 @@ mod tests {
     fn evaluation_can_feed_summary_construction_at_query_time() {
         let inner = estimate(agg(scan(), kll()));
         let root = estimate(agg(inner, kll()));
-        let timed = apply(&root).unwrap();
-        assert_eq!(timing_of(&timed, &child(&root)), ExecutionTiming::QueryTime);
+        let physical_properties = apply(&root).unwrap();
+        assert_eq!(
+            timing_of(&physical_properties, &child(&root)),
+            ExecutionTiming::QueryTime
+        );
     }
 
     /// Any non-ASAP operator over an evaluation runs at query time.
@@ -1074,9 +1141,9 @@ mod tests {
         }))
         .unwrap();
         for root in [max(evaluation()), sorted] {
-            let timed = apply(&root).unwrap();
+            let physical_properties = apply(&root).unwrap();
             assert_eq!(
-                data_state(&root, &timed),
+                data_state(&root, &physical_properties),
                 Some(ExecutionDataState::QUERY_ROWS)
             );
         }
@@ -1086,8 +1153,11 @@ mod tests {
     fn query_time_values_can_feed_query_time_summary_construction() {
         let post = max(estimate(agg(scan(), kll())));
         let root = estimate(agg(post, kll()));
-        let timed = apply(&root).unwrap();
-        assert_eq!(timing_of(&timed, &child(&root)), ExecutionTiming::QueryTime);
+        let physical_properties = apply(&root).unwrap();
+        assert_eq!(
+            timing_of(&physical_properties, &child(&root)),
+            ExecutionTiming::QueryTime
+        );
     }
 
     #[test]
@@ -1100,9 +1170,9 @@ mod tests {
             })
         );
         let root = estimate(agg(Rc::clone(&operation), kll()));
-        let timed = apply_fixing(&root, &[&operation]).unwrap();
+        let physical_properties = apply_fixing(&root, &[&operation]).unwrap();
         assert_eq!(
-            data_state(&operation, &timed),
+            data_state(&operation, &physical_properties),
             Some(ExecutionDataState::INGESTION_ROWS)
         );
     }
@@ -1192,15 +1262,21 @@ mod tests {
             &tumbling_windows,
             PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
-        let timed = apply_physical_properties(&root, &assignment).unwrap();
-        assert_eq!(timing_of(&timed, &root), ExecutionTiming::QueryTime);
-        assert_eq!(lifetime_of(&timed, &tumbling_windows), MATERIALIZED_ACROSS);
+        let physical_properties = apply_physical_properties(&root, &assignment).unwrap();
         assert_eq!(
-            timing_of(&timed, &tumbling_windows),
+            timing_of(&physical_properties, &root),
+            ExecutionTiming::QueryTime
+        );
+        assert_eq!(
+            lifetime_of(&physical_properties, &tumbling_windows),
+            MATERIALIZED_ACROSS
+        );
+        assert_eq!(
+            timing_of(&physical_properties, &tumbling_windows),
             ExecutionTiming::IngestionTime
         );
         assert_eq!(
-            timing_of(&timed, &child(&tumbling_windows)),
+            timing_of(&physical_properties, &child(&tumbling_windows)),
             ExecutionTiming::IngestionTime
         );
 
@@ -1263,9 +1339,12 @@ mod tests {
                 operator: "SummaryAgg"
             })
         );
-        let timed = apply(&estimate(Rc::clone(&filtered))).unwrap();
-        assert_eq!(timing_of(&timed, &filtered), ExecutionTiming::QueryTime);
-        assert_eq!(lifetime_of(&timed, &filtered), Lifetime::None);
+        let physical_properties = apply(&estimate(Rc::clone(&filtered))).unwrap();
+        assert_eq!(
+            timing_of(&physical_properties, &filtered),
+            ExecutionTiming::QueryTime
+        );
+        assert_eq!(lifetime_of(&physical_properties, &filtered), Lifetime::None);
         assert!(validate_at_ingestion(&filtered, ExecutionTiming::QueryTime).is_ok());
     }
 
@@ -1280,10 +1359,11 @@ mod tests {
     /// for `node`'s operator kind.
     fn exported(
         root: &Rc<OperatorNode>,
-        timed: &PhysicalPropertiesAssignment,
+        physical_properties: &PhysicalPropertiesAssignment,
         kind: &str,
     ) -> Lifetime {
-        let dag = crate::ir::physical_export::compile_physical_asap_dag(root, timed).unwrap();
+        let dag = crate::ir::physical_export::compile_physical_asap_dag(root, physical_properties)
+            .unwrap();
         dag.validate().unwrap();
         dag.nodes
             .iter()
@@ -1300,10 +1380,16 @@ mod tests {
         let stored = Lifetime::OneEvaluation(Medium::Disk);
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(&read, properties(ExecutionTiming::QueryTime, stored));
-        let timed = apply_physical_properties(&read, &assignment).unwrap();
-        assert_eq!(timing_of(&timed, &read), ExecutionTiming::QueryTime);
-        assert_eq!(lifetime_of(&timed, &read), stored);
-        assert_eq!(exported(&read, &timed, "FinalizeExactAccumulator"), stored);
+        let physical_properties = apply_physical_properties(&read, &assignment).unwrap();
+        assert_eq!(
+            timing_of(&physical_properties, &read),
+            ExecutionTiming::QueryTime
+        );
+        assert_eq!(lifetime_of(&physical_properties, &read), stored);
+        assert_eq!(
+            exported(&read, &physical_properties, "FinalizeExactAccumulator"),
+            stored
+        );
     }
 
     /// The Debug output names each assigned node by its operator kind, not
@@ -1342,9 +1428,15 @@ mod tests {
             &rows,
             PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
-        let timed = apply_physical_properties(&summary, &assignment).unwrap();
-        assert_eq!(timing_of(&timed, &summary), ExecutionTiming::QueryTime);
-        assert_eq!(lifetime_of(&timed, &child(&summary)), MATERIALIZED_ACROSS);
+        let physical_properties = apply_physical_properties(&summary, &assignment).unwrap();
+        assert_eq!(
+            timing_of(&physical_properties, &summary),
+            ExecutionTiming::QueryTime
+        );
+        assert_eq!(
+            lifetime_of(&physical_properties, &child(&summary)),
+            MATERIALIZED_ACROSS
+        );
     }
 
     /// The same holds for exact-accumulator state: a query-time build cannot
@@ -1368,9 +1460,15 @@ mod tests {
             &state,
             PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
-        let timed = apply_physical_properties(&summary, &assignment).unwrap();
-        assert_eq!(timing_of(&timed, &summary), ExecutionTiming::QueryTime);
-        assert_eq!(lifetime_of(&timed, &child(&summary)), MATERIALIZED_ACROSS);
+        let physical_properties = apply_physical_properties(&summary, &assignment).unwrap();
+        assert_eq!(
+            timing_of(&physical_properties, &summary),
+            ExecutionTiming::QueryTime
+        );
+        assert_eq!(
+            lifetime_of(&physical_properties, &child(&summary)),
+            MATERIALIZED_ACROSS
+        );
     }
 
     /// A root stored at ingestion time is valid: the query reads the stored
@@ -1384,9 +1482,15 @@ mod tests {
             &root,
             PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
-        let timed = apply_physical_properties(&root, &assignment).unwrap();
-        assert_eq!(timing_of(&timed, &root), ExecutionTiming::IngestionTime);
-        assert_eq!(exported(&root, &timed, "Aggregate"), MATERIALIZED_ACROSS);
+        let physical_properties = apply_physical_properties(&root, &assignment).unwrap();
+        assert_eq!(
+            timing_of(&physical_properties, &root),
+            ExecutionTiming::IngestionTime
+        );
+        assert_eq!(
+            exported(&root, &physical_properties, "Aggregate"),
+            MATERIALIZED_ACROSS
+        );
 
         let state = agg(scan(), exact_sum());
         let root = finalize(Rc::clone(&state));
@@ -1399,10 +1503,13 @@ mod tests {
             &root,
             PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
-        let timed = apply_physical_properties(&root, &assignment).unwrap();
-        assert_eq!(timing_of(&timed, &root), ExecutionTiming::IngestionTime);
+        let physical_properties = apply_physical_properties(&root, &assignment).unwrap();
         assert_eq!(
-            exported(&root, &timed, "FinalizeExactAccumulator"),
+            timing_of(&physical_properties, &root),
+            ExecutionTiming::IngestionTime
+        );
+        assert_eq!(
+            exported(&root, &physical_properties, "FinalizeExactAccumulator"),
             MATERIALIZED_ACROSS
         );
 

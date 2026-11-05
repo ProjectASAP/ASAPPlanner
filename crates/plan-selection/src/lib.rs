@@ -3481,10 +3481,10 @@ mod tests {
         if let Some(materialized) = materialized {
             assignment.set(&state, materialized);
         }
-        let timed = apply_physical_properties(root, &assignment).unwrap();
+        let physical_properties = apply_physical_properties(root, &assignment).unwrap();
         asap_types::ir::physical_export::compile_physical_asap_workload_with_node_ids(
             &[QueryRoot::Operator(Rc::clone(root))],
-            &timed,
+            &physical_properties,
         )
         .unwrap()
         .dag

@@ -264,14 +264,14 @@ mod tests {
             PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         let (split, assignment) = split_shared_by_timing(std::slice::from_ref(&root), &assignment);
-        let timed = apply_physical_properties(&split[0], &assignment).unwrap();
+        let physical_properties = apply_physical_properties(&split[0], &assignment).unwrap();
         let summary = child(&child(&child(&split[0])));
         assert!(matches!(
             summary.operator,
             Operator::ASAP(ASAPOp::SummaryAgg { .. })
         ));
         assert_eq!(
-            timed.get(&summary),
+            physical_properties.get(&summary),
             Some(PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION)
         );
     }
@@ -306,10 +306,14 @@ mod tests {
         ));
         let (split, assignment) = split_shared_by_timing(&roots, &assignment);
         assert_eq!(split.len(), 2);
-        let timed = apply_physical_properties_to_roots(&as_roots(&split), &assignment).unwrap();
-        let timing = |node: &OperatorNode| timed.get(node).unwrap().timing();
+        let physical_properties =
+            apply_physical_properties_to_roots(&as_roots(&split), &assignment).unwrap();
+        let timing = |node: &OperatorNode| physical_properties.get(node).unwrap().timing();
         let summary = child(&child(&child(&split[0])));
-        assert_eq!(timed.get(&summary).unwrap().lifetime(), MATERIALIZED_ACROSS);
+        assert_eq!(
+            physical_properties.get(&summary).unwrap().lifetime(),
+            MATERIALIZED_ACROSS
+        );
         assert_eq!(timing(&child(&summary)), ExecutionTiming::IngestionTime);
         assert_eq!(
             timing(&child(&child(&split[1]))),

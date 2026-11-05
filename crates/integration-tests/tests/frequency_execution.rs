@@ -35,9 +35,9 @@ fn built_family(candidate: &Rc<OperatorNode>) -> Option<FieldDataType> {
 
 /// Execute `candidate` at query time over `SAMPLES`, all inside the window.
 fn execute(candidate: &Rc<OperatorNode>) -> Vec<f64> {
-    let timed =
+    let physical_properties =
         apply_physical_properties(candidate, &PhysicalPropertiesAssignment::default()).unwrap();
-    let dag = compile_physical_asap_dag(candidate, &timed).unwrap();
+    let dag = compile_physical_asap_dag(candidate, &physical_properties).unwrap();
     let ranges = dag
         .nodes
         .iter()

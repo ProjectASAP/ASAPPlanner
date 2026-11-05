@@ -258,9 +258,10 @@ fn current_series_topk() -> Rc<OperatorNode> {
 fn compile_physical_asap_dag(root: &Rc<OperatorNode>) -> Result<(), String> {
     use asap_types::ir::{apply_physical_properties, PhysicalPropertiesAssignment};
     root.validate_structure().map_err(|e| e.to_string())?;
-    let timed = apply_physical_properties(root, &PhysicalPropertiesAssignment::default())
-        .map_err(|e| format!("{e:?}"))?;
-    asap_types::ir::physical_export::compile_physical_asap_dag(root, &timed)
+    let physical_properties =
+        apply_physical_properties(root, &PhysicalPropertiesAssignment::default())
+            .map_err(|e| format!("{e:?}"))?;
+    asap_types::ir::physical_export::compile_physical_asap_dag(root, &physical_properties)
         .map_err(|e| format!("{e:?}"))?;
     Ok(())
 }
@@ -354,8 +355,8 @@ fn population_timing_follows_its_physical_properties() {
         ),
         (at_ingestion, IngestionTime, on_disk),
     ] {
-        let timed = apply_physical_properties(&candidate, &assignment).unwrap();
-        let dag = export_timed(&candidate, &timed).unwrap();
+        let physical_properties = apply_physical_properties(&candidate, &assignment).unwrap();
+        let dag = export_timed(&candidate, &physical_properties).unwrap();
         let [population, evaluation] = &dag.nodes[dag.nodes.len() - 2..] else {
             unreachable!()
         };

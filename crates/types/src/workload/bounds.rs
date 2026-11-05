@@ -486,9 +486,7 @@ pub fn with_confirmed_weights_at(
                 OperatorNode::with_schema(operator, node.schema.clone())
                     .with_guarantee(node.guarantee.clone()),
             );
-            if let Some(properties) = physical_properties.get(node) {
-                physical_properties.set(&rebuilt, properties);
-            }
+            physical_properties.copy_assignment(node, &rebuilt);
             rebuilt
         } else {
             Rc::clone(node)

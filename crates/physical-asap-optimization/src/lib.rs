@@ -542,13 +542,13 @@ fn assigned_candidate(
     let split_roots = map_roots(implemented, &mut |node| {
         Ok(replaced[&Rc::as_ptr(node)].clone())
     })?;
-    let timed = apply_physical_properties_to_roots(&split_roots, &options)?;
-    let dag = compile_physical_asap_workload_with_node_ids(&split_roots, &timed)?.dag;
+    let physical_properties = apply_physical_properties_to_roots(&split_roots, &options)?;
+    let dag = compile_physical_asap_workload_with_node_ids(&split_roots, &physical_properties)?.dag;
     Ok(PhysicalWorkloadPlan {
         id: String::new(),
         from_logical: from_logical.to_string(),
         roots: split_roots,
-        physical_properties: timed,
+        physical_properties,
         dag,
     })
 }

@@ -223,7 +223,8 @@ pub struct PlanOutput {
     /// empty for a pass that does not set it.
     pub tumbling_window_retention_ms: BTreeMap<PhysicalASAPNodeId, u64>,
     /// The physical properties the pass selected for the plans' nodes, by
-    /// node: for [`Stage1ToStage3Pass`] every node, as Stage 3 selected it.
+    /// node: for [`Stage1ToStage3Pass`] every node, as Stage 3 selected it
+    /// (checked in debug builds).
     /// A node it does not list takes the timing pass's default (not
     /// materialized, computed when its consumer runs); empty for a pass that
     /// does not set it.
@@ -306,7 +307,7 @@ impl PlanOutput {
     }
 
     /// The workload as one physical ASAP DAG, with shared sub-DAGs exported
-    /// once. A node keeps the physical properties its pass gave it
+    /// once. A node takes the physical properties its pass gave it
     /// (`physical_properties`): for [`Stage1ToStage3Pass`] that is Stage 3's
     /// selected plan as selected (e.g. ingestion-time tumbling windows), the
     /// document a deployment runtime executes. Only a node the pass did not
@@ -325,8 +326,9 @@ impl PlanOutput {
     ) -> Result<asap_types::ir::physical_export::PhysicalASAPDAG, ExecutionDataStateError> {
         // A node several roots share by `Rc` is timed and exported once.
         let roots = self.roots();
-        let timed = apply_physical_properties_to_roots(&roots, &self.physical_properties)?;
-        compile_physical_asap_workload(&roots, &timed)
+        let physical_properties =
+            apply_physical_properties_to_roots(&roots, &self.physical_properties)?;
+        compile_physical_asap_workload(&roots, &physical_properties)
     }
 
     pub fn len(&self) -> usize {

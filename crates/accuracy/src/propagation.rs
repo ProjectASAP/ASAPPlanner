@@ -647,10 +647,10 @@ fn merged_tumbling_windows_guarantee(node: &OperatorNode) -> Option<Option<Accur
         return Some(None);
     };
     if let Operator::ASAP(ASAPOp::SummaryAgg { child: range, .. }) = &mut window_build.operator {
-        let mut timed = (**range).clone();
-        timed.guarantee = composed_guarantee(&timed);
-        debug_assert!(Rc::ptr_eq(timed.children()[0], input));
-        *range = Rc::new(timed);
+        let mut composed = (**range).clone();
+        composed.guarantee = composed_guarantee(&composed);
+        debug_assert!(Rc::ptr_eq(composed.children()[0], input));
+        *range = Rc::new(composed);
     }
     let window_build = Rc::new(window_build);
     let reader = OperatorNode::with_schema(

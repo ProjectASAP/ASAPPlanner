@@ -377,9 +377,12 @@ impl PhysicalASAPDAG {
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_every_node_at_query_time(&self) -> Result<PhysicalASAPDAG, ReferencePlanError> {
         let roots = self.query_roots()?;
-        let timed =
+        let physical_properties =
             apply_physical_properties_to_roots(&roots, &PhysicalPropertiesAssignment::default())?;
-        Ok(compile_physical_asap_workload(&roots, &timed)?)
+        Ok(compile_physical_asap_workload(
+            &roots,
+            &physical_properties,
+        )?)
     }
 
     /// Every node of this DAG as IR, by node id, with its exported
@@ -850,9 +853,9 @@ pub struct PhysicalASAPDAGCompilation {
 #[cfg(any(test, feature = "test-support"))]
 pub fn compile_physical_asap_dag(
     root: &Rc<OperatorNode>,
-    timed: &PhysicalPropertiesAssignment,
+    physical_properties: &PhysicalPropertiesAssignment,
 ) -> Result<PhysicalASAPDAG, ExecutionDataStateError> {
-    Ok(compile_physical_asap_dag_with_node_ids(root, timed)?.dag)
+    Ok(compile_physical_asap_dag_with_node_ids(root, physical_properties)?.dag)
 }
 
 /// Export the DAG below `root` with each node's physical properties from
@@ -862,9 +865,12 @@ pub fn compile_physical_asap_dag(
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn compile_physical_asap_dag_with_node_ids(
     root: &Rc<OperatorNode>,
-    timed: &PhysicalPropertiesAssignment,
+    physical_properties: &PhysicalPropertiesAssignment,
 ) -> Result<PhysicalASAPDAGCompilation, ExecutionDataStateError> {
-    compile_physical_asap_workload_with_node_ids(&[QueryRoot::Operator(Rc::clone(root))], timed)
+    compile_physical_asap_workload_with_node_ids(
+        &[QueryRoot::Operator(Rc::clone(root))],
+        physical_properties,
+    )
 }
 
 /// Export a batch as one DAG, each node with its physical properties from
@@ -873,14 +879,14 @@ pub(crate) fn compile_physical_asap_dag_with_node_ids(
 /// batch.
 pub fn compile_physical_asap_workload(
     roots: &[QueryRoot],
-    timed: &PhysicalPropertiesAssignment,
+    physical_properties: &PhysicalPropertiesAssignment,
 ) -> Result<PhysicalASAPDAG, ExecutionDataStateError> {
-    Ok(compile_physical_asap_workload_with_node_ids(roots, timed)?.dag)
+    Ok(compile_physical_asap_workload_with_node_ids(roots, physical_properties)?.dag)
 }
 
 pub fn compile_physical_asap_workload_with_node_ids(
     roots: &[QueryRoot],
-    timed: &PhysicalPropertiesAssignment,
+    physical_properties: &PhysicalPropertiesAssignment,
 ) -> Result<PhysicalASAPDAGCompilation, ExecutionDataStateError> {
     let (flat, nodes_by_id) = flatten(roots);
     let mut scalar_roots = Vec::new();
@@ -900,12 +906,14 @@ pub fn compile_physical_asap_workload_with_node_ids(
     let mut edges = Vec::new();
     for (id, flat_node) in flat.nodes.into_iter().enumerate() {
         let node = &nodes_by_id[id];
-        let properties = timed
-            .get(node)
-            .ok_or(ExecutionDataStateError::UntimedNode {
-                operator: node.operator.kind_name(),
-            })?;
-        let output_state = data_state(node, timed).expect("listed node has a data state");
+        let properties =
+            physical_properties
+                .get(node)
+                .ok_or(ExecutionDataStateError::UntimedNode {
+                    operator: node.operator.kind_name(),
+                })?;
+        let output_state =
+            data_state(node, physical_properties).expect("listed node has a data state");
         // Children come before their parents, so every producer is already in `nodes`.
         for (producer, role) in edge_roles(&flat_node.operator) {
             let producer_state = nodes[producer].output_state;

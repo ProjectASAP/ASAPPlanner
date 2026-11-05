@@ -1644,10 +1644,10 @@ mod compilation_tests {
             })
             .collect();
         let roots: Vec<_> = windows.into_iter().map(QueryRoot::Operator).collect();
-        let timed =
+        let physical_properties =
             apply_physical_properties_to_roots(&roots, &PhysicalPropertiesAssignment::default())
                 .unwrap();
-        let dag = compile_physical_asap_workload(&roots, &timed).unwrap();
+        let dag = compile_physical_asap_workload(&roots, &physical_properties).unwrap();
         let roots = dag.roots.iter().map(|&id| id as NodeId).collect();
         (dag, roots)
     }

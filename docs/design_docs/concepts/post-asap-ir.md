@@ -108,8 +108,8 @@ happens: **ingestion time** or **query time**. Operator identity must not imply
 one of these phases. Backend capability restrictions are implementation gaps,
 not definitions of the operator.
 
-The logical DAG carries no timing: `OperatorNode::timing` is `None` on every
-front-end node and every candidate, and `map_children` clears it.
+Operator nodes carry no physical properties: the logical DAG has no timing
+or lifetime.
 Materialization ([#509 §Materialization](../proposals/planner-layering.md#materialization))
 decides, for each sub-DAG, whether its output is materialized, and if so with which
 [`PhysicalProperties`](../../../crates/types/src/physical/properties.rs): a
@@ -124,8 +124,8 @@ would be materialized. Any node may be named: a summary state, a population, or,
 #509 Example 4, the tumbling windows a query reads. `set(node, properties)`
 lists one; an entry whose lifetime is `None` fixes only the node's timing, and every
 sub-DAG the assignment does not list is not materialized. Stage 2 chooses the
-assignment. Operator nodes carry no timing or lifetime (#1200): the assignment is
-where physical stages keep them.
+assignment. Operator nodes carry no timing or lifetime (#1200): physical
+stages read them from the assignment.
 `apply_physical_properties(root, &assignment)` then completes it into a timing and a
 lifetime for every node, top-down, and returns the completed assignment:
 

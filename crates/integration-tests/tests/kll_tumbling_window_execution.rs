@@ -124,10 +124,11 @@ fn fixture() -> Fixture {
         QueryRoot::Operator(estimate(0.5)),
         QueryRoot::Operator(estimate(0.99)),
     ];
-    let timed =
+    let physical_properties =
         apply_physical_properties_to_roots(&roots, &PhysicalPropertiesAssignment::default())
             .unwrap();
-    let compiled = compile_physical_asap_workload_with_node_ids(&roots, &timed).unwrap();
+    let compiled =
+        compile_physical_asap_workload_with_node_ids(&roots, &physical_properties).unwrap();
     let mut tumbling_window_ids = vec![0; 5];
     let (mut merge, mut p50, mut p99) = (0, 0, 0);
     for node in &compiled.dag.nodes {

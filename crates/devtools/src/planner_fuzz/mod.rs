@@ -503,7 +503,11 @@ impl Planner {
                     selected: "selected".into(),
                     cost_per_second,
                     stage0_roots: roots,
-                    logical_roots: run.run.selected_plan.clone(),
+                    logical_roots: run
+                        .run
+                        .selected_plan
+                        .as_ref()
+                        .map(|plan| plan.roots.clone()),
                 })
             }
         }

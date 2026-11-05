@@ -283,7 +283,7 @@ pub struct ExpandedTumblingWindowChain {
 /// input's (empty for an input not yet timed).
 pub fn expand_tumbling_window_chains_in_workload(
     roots: &[QueryRoot],
-    timed: &PhysicalPropertiesAssignment,
+    physical_properties: &PhysicalPropertiesAssignment,
 ) -> Result<TumblingWindowChainExpansion, SchemaDerivationError> {
     let mut cache = NodeToExpandedNodeCache::default();
     let roots = roots
@@ -330,14 +330,12 @@ pub fn expand_tumbling_window_chains_in_workload(
             }
         })
         .collect::<Vec<ExpandedTumblingWindowChain>>();
-    let mut physical_properties = timed.clone();
+    let mut physical_properties = physical_properties.clone();
     for (original, replacement) in &cache.expanded {
-        if let Some(properties) = timed.get(original) {
-            physical_properties.set(replacement, properties);
-        }
+        physical_properties.copy_assignment(original, replacement);
     }
     for expanded in &chains {
-        let Some(properties) = timed.get(&expanded.chain) else {
+        let Some(properties) = physical_properties.get(&expanded.chain) else {
             continue;
         };
         for tumbling_window in &expanded.tumbling_windows {

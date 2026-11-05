@@ -394,17 +394,12 @@ fn document(queries: Vec<Value>, entries: &[QueryWorkloadEntry], run: &PlanningS
 fn stage3_json(run: &PlanningStagesRun, entries: &[QueryWorkloadEntry]) -> Value {
     let mut stage3 = selection_json(&run.run.selection);
     match (&run.run.selection, &run.run.selected_plan) {
-        (Ok(selection), Some(roots)) => {
-            let (tumbling_window_retention_ms, physical_properties) = run
+        (Ok(selection), Some(plan)) => {
+            let tumbling_window_retention_ms = run
                 .run
                 .selected_physical_plan
                 .as_ref()
-                .map(|realized| {
-                    (
-                        realized.tumbling_window_retention_ms.clone(),
-                        realized.plan.physical_properties.clone(),
-                    )
-                })
+                .map(|realized| realized.tumbling_window_retention_ms.clone())
                 .unwrap_or_default();
             stage3["tumbling_window_retention_ms"] = tumbling_window_retention_ms
                 .iter()
@@ -412,8 +407,8 @@ fn stage3_json(run: &PlanningStagesRun, entries: &[QueryWorkloadEntry]) -> Value
                 .collect::<serde_json::Map<_, _>>()
                 .into();
             match materialized_views_json(
-                roots,
-                &physical_properties,
+                &plan.roots,
+                &plan.physical_properties,
                 selection,
                 &tumbling_window_retention_ms,
                 entries,

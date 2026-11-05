@@ -96,8 +96,9 @@ fn series_labels(schema: &Schema, row: &[Value]) -> BTreeMap<String, String> {
 /// at its `Scan` of `x`: each answered series' `instance` and value.
 fn execute(query: &str, samples: &[RawDataSample]) -> Vec<(String, f64)> {
     let plan = per_entity_plan(query);
-    let timed = apply_physical_properties(&plan, &PhysicalPropertiesAssignment::default()).unwrap();
-    let dag = compile_physical_asap_dag(&plan, &timed).unwrap();
+    let physical_properties =
+        apply_physical_properties(&plan, &PhysicalPropertiesAssignment::default()).unwrap();
+    let dag = compile_physical_asap_dag(&plan, &physical_properties).unwrap();
     let node = |matches: fn(&PhysicalASAPOperatorPayload) -> bool| {
         let found: Vec<_> = dag
             .nodes

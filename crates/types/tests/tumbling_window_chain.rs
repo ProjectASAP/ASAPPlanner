@@ -200,10 +200,10 @@ fn expansion_carries_the_chains_timing_onto_its_tumbling_windows() {
         if lifetime.is_materialized() {
             assignment.set(&chain, PhysicalProperties::new(timing, lifetime).unwrap());
         }
-        let timed = apply_physical_properties(&estimate, &assignment).unwrap();
+        let physical_properties = apply_physical_properties(&estimate, &assignment).unwrap();
         let expansion = expand_tumbling_window_chains_in_workload(
             &[QueryRoot::Operator(Rc::clone(&estimate))],
-            &timed,
+            &physical_properties,
         )
         .unwrap();
         let properties = |node: &OperatorNode| expansion.physical_properties.get(node).unwrap();

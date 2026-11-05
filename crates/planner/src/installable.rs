@@ -284,11 +284,11 @@ pub fn installable_plan_of(
         .map(|entry| entry.range_evaluation.map_or(0, |range| range.span_ms))
         .collect();
     let query_texts: Vec<String> = entries.iter().map(|entry| entry.query.0.clone()).collect();
-    // Every node keeps the physical properties Stage 3 gave it.
-    let timed = apply_physical_properties_to_roots(roots, physical_properties)?;
+    // Every node takes the physical properties Stage 3 gave it.
+    let physical_properties = apply_physical_properties_to_roots(roots, physical_properties)?;
     let expanded = tumbling_window_retention_of_expanded_tumbling_windows(
         roots,
-        &timed,
+        &physical_properties,
         tumbling_window_retention_ms,
     )?;
     let report = selection.map(|selection| report_of(selection, &expanded.installed_node_ids));
@@ -657,11 +657,11 @@ struct ExpandedWithRetention {
 /// exported).
 fn tumbling_window_retention_of_expanded_tumbling_windows(
     roots: &[QueryRoot],
-    timed: &PhysicalPropertiesAssignment,
+    physical_properties: &PhysicalPropertiesAssignment,
     tumbling_window_retention_ms: &BTreeMap<PhysicalASAPNodeId, u64>,
 ) -> Result<ExpandedWithRetention, InstallablePlanError> {
     use asap_types::ir::physical_export::compile_physical_asap_workload_with_node_ids;
-    let selected = compile_physical_asap_workload_with_node_ids(roots, timed)?;
+    let selected = compile_physical_asap_workload_with_node_ids(roots, physical_properties)?;
     // Reject unsupported raw-source shapes before expanding possibly thousands
     // of tumbling windows. The complete expanded-plan validation remains authoritative.
     selected.dag.check_raw_data_windows()?;
@@ -674,7 +674,7 @@ fn tumbling_window_retention_of_expanded_tumbling_windows(
             .ok_or(InstallablePlanError::TumblingWindowRetentionOfUnknownChain { node_id })?;
         retention_by_chain.push((Rc::clone(chain), retention_ms));
     }
-    let expansion = expand_tumbling_window_chains_in_workload(roots, timed)
+    let expansion = expand_tumbling_window_chains_in_workload(roots, physical_properties)
         .map_err(InstallablePlanError::TumblingWindowChainExpansion)?;
     let compiled = compile_physical_asap_workload_with_node_ids(
         &expansion.roots,
@@ -910,9 +910,9 @@ mod tests {
         }))
         .unwrap();
         let export = |root| {
-            let timed =
+            let physical_properties =
                 apply_physical_properties(&root, &PhysicalPropertiesAssignment::default()).unwrap();
-            compile_physical_asap_dag(&root, &timed).unwrap()
+            compile_physical_asap_dag(&root, &physical_properties).unwrap()
         };
         let install = |dag| {
             InstallablePlan::of_dag(dag, vec![String::new()], &HashMap::new(), &HashMap::new())
@@ -1003,8 +1003,8 @@ mod tests {
             &merged,
             PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
-        let timed = apply_physical_properties(&merged, &assignment).unwrap();
-        let dag = compile_physical_asap_dag(&merged, &timed).unwrap();
+        let physical_properties = apply_physical_properties(&merged, &assignment).unwrap();
+        let dag = compile_physical_asap_dag(&merged, &physical_properties).unwrap();
         match InstallablePlan::of_dag(dag, vec![String::new()], &HashMap::new(), &HashMap::new()) {
             Err(InstallablePlanError::Uninstallable(
                 InstallableDagError::IngestionBuildReadsWindowsOfDifferentOffsets {
@@ -1042,8 +1042,8 @@ mod tests {
                 PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
             );
         }
-        let timed = apply_physical_properties(&merge, &assignment).unwrap();
-        let dag = compile_physical_asap_dag(&merge, &timed).unwrap();
+        let physical_properties = apply_physical_properties(&merge, &assignment).unwrap();
+        let dag = compile_physical_asap_dag(&merge, &physical_properties).unwrap();
         match InstallablePlan::of_dag(dag, vec![String::new()], &HashMap::new(), &HashMap::new()) {
             Err(InstallablePlanError::Uninstallable(
                 InstallableDagError::IngestionBuildReadsWindowsOfDifferentOffsets {

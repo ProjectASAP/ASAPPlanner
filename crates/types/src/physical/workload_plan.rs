@@ -15,9 +15,8 @@ pub struct PhysicalWorkloadPlan {
     /// exports.
     pub roots: Vec<QueryRoot>,
     /// The physical properties of every node of `roots`: the completed
-    /// assignment `dag` exports them with. The facade adds the nodes it
-    /// rebuilds from them (`with_confirmed_weights_at`), so it also covers the
-    /// plan it runs.
+    /// assignment `dag` exports them with. The facade's plan to run, rebuilt
+    /// with Stage 3's weight proofs, carries its own copy (`SelectedPlan`).
     pub physical_properties: PhysicalPropertiesAssignment,
     pub dag: PhysicalASAPDAG,
 }

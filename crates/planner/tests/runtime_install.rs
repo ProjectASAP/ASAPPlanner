@@ -320,7 +320,7 @@ fn state_key(view: &MaterializedView, evaluation_ms: i64) -> String {
         Bound::Unbounded => Bound::Unbounded,
     };
     let boxes = view.coverage().selection();
-    let timed = boxes.iter().any(|b| b.relative_time().is_some());
+    let has_relative_time = boxes.iter().any(|b| b.relative_time().is_some());
     let selection: Vec<SelectionBox> = boxes
         .iter()
         .map(|selection_box| {
@@ -335,7 +335,7 @@ fn state_key(view: &MaterializedView, evaluation_ms: i64) -> String {
     serde_json::json!({
         "definition_id": view.coverage().definition_id(),
         "selection": selection,
-        "evaluation_ms": (!timed).then_some(evaluation_ms),
+        "evaluation_ms": (!has_relative_time).then_some(evaluation_ms),
     })
     .to_string()
 }
@@ -1540,7 +1540,7 @@ impl OptimizationPass for StoredAsForced {
                     continue;
                 }
                 // A shared non-summary node Stage 2 built once per
-                // evaluation is not kept: a build forced to ingestion time
+                // evaluation is not materialized: a build forced to ingestion time
                 // above it cannot read a query-time result.
                 let selected = output
                     .physical_properties
@@ -1554,8 +1554,8 @@ impl OptimizationPass for StoredAsForced {
                     ) => selected,
                     _ => None,
                 };
-                if let Some(kept) = (self.store)(&node).or(own) {
-                    assignment.set(&node, kept);
+                if let Some(materialized) = (self.store)(&node).or(own) {
+                    assignment.set(&node, materialized);
                 }
             }
         }

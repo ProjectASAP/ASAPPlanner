@@ -8,8 +8,9 @@ use std::rc::Rc;
 pub fn compile_physical_asap_dag(
     root: &Rc<OperatorNode>,
 ) -> Result<PhysicalASAPDAG, Box<dyn std::error::Error>> {
-    let timed = apply_physical_properties(root, &PhysicalPropertiesAssignment::default())?;
-    Ok(planner_types::ir::physical_export::compile_physical_asap_dag(root, &timed)?)
+    let physical_properties =
+        apply_physical_properties(root, &PhysicalPropertiesAssignment::default())?;
+    Ok(planner_types::ir::physical_export::compile_physical_asap_dag(root, &physical_properties)?)
 }
 
 /// The logical DAG the planner pipeline (`asap_planner::run_planning`) selects for the
@@ -22,7 +23,8 @@ pub fn selected_dag(
     let run = run_all_stages(root, accuracy);
     let [QueryRoot::Operator(selected)] = run
         .selected_plan
-        .as_deref()
+        .as_ref()
+        .map(|plan| plan.roots.as_slice())
         .unwrap_or_else(|| panic!("a plan is selected: {:?}", run.selection))
     else {
         panic!("one operator root");

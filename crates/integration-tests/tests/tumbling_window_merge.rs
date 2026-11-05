@@ -179,8 +179,8 @@ struct Exported {
 }
 
 fn export(root: &Rc<OperatorNode>, assignment: &PhysicalPropertiesAssignment) -> Exported {
-    let timed = apply_physical_properties(root, assignment).unwrap();
-    let compiled = compile_physical_asap_dag_with_node_ids(root, &timed).unwrap();
+    let physical_properties = apply_physical_properties(root, assignment).unwrap();
+    let compiled = compile_physical_asap_dag_with_node_ids(root, &physical_properties).unwrap();
     let tumbling_window = |node: &OperatorNode| -> i64 {
         match node.children()[0].non_asap() {
             Some(NonASAPOp::TimeShift { shift, .. }) => shift.offset_ms / TUMBLING_WINDOW_WIDTH_MS,
@@ -304,10 +304,10 @@ fn execute_maintained_chain(
         &chain,
         PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
     );
-    let timed = apply_physical_properties(planned, &assignment).unwrap();
+    let physical_properties = apply_physical_properties(planned, &assignment).unwrap();
     let expansion = expand_tumbling_window_chains_in_workload(
         &[QueryRoot::Operator(Rc::clone(planned))],
-        &timed,
+        &physical_properties,
     )
     .unwrap();
     let [QueryRoot::Operator(expanded)] = &expansion.roots[..] else {

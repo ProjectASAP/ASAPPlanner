@@ -84,9 +84,9 @@ fn window_over_rows(
         child,
     }))
     .unwrap();
-    let timed =
+    let physical_properties =
         apply_physical_properties(&range, &PhysicalPropertiesAssignment::default()).unwrap();
-    compile_physical_asap_dag(&range, &timed).unwrap()
+    compile_physical_asap_dag(&range, &physical_properties).unwrap()
 }
 
 /// `(instance, ts, value)` samples of `latency_ms` as a store's raw data.

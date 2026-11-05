@@ -84,9 +84,10 @@ pub fn physical_asap_dag(
     root: &Rc<OperatorNode>,
 ) -> asap_types::ir::physical_export::PhysicalASAPDAG {
     use asap_types::ir::{apply_physical_properties, PhysicalPropertiesAssignment};
-    let timed = apply_physical_properties(root, &PhysicalPropertiesAssignment::default())
-        .expect("default physical properties");
-    asap_types::ir::physical_export::compile_physical_asap_dag(root, &timed)
+    let physical_properties =
+        apply_physical_properties(root, &PhysicalPropertiesAssignment::default())
+            .expect("default physical properties");
+    asap_types::ir::physical_export::compile_physical_asap_dag(root, &physical_properties)
         .expect("post-ASAP DAG export")
 }
 
