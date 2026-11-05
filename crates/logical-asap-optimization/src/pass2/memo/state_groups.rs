@@ -1036,6 +1036,17 @@ mod tests {
         assert!(memo.topological_order().is_some());
     }
 
+    /// Whether `node` is a merge that regroups its input state.
+    fn regroups(node: &OperatorNode) -> bool {
+        matches!(
+            node.asap(),
+            Some(ASAPOp::SummaryMerge {
+                group_by: Some(_),
+                ..
+            })
+        )
+    }
+
     // Sketch rollup exposes the resized finer state through an ordinary group
     // dependency, while each output retains its own grouping and quantile.
     #[test]
@@ -1045,23 +1056,17 @@ mod tests {
             ("quantile by (job) (0.9, m)", 0.02),
         ]);
         let expanded = expand(original).unwrap();
-        assert!(expanded
-            .memo
-            .candidates
-            .iter()
-            .flatten()
-            .any(
-                |candidate| candidate.origin == OriginOfCandidateForMemoGroup::SharedBuild
-                    && OperatorNode::reachable(&candidate.root_node)
-                        .iter()
-                        .any(|node| matches!(
-                            node.asap(),
-                            Some(ASAPOp::SummaryMerge {
-                                group_by: Some(_),
-                                ..
-                            })
-                        ))
-            ));
+        // The regrouping merge is a group of the rollup, over the finer build's group.
+        assert!(expanded.memo.candidates.iter().flatten().any(|candidate| {
+            candidate.origin == OriginOfCandidateForMemoGroup::Rollup
+                && regroups(&candidate.root_node)
+                && candidate.input_groups.iter().any(|group| {
+                    matches!(
+                        expanded.memo.groups()[group.0 as usize].logical_node.asap(),
+                        Some(ASAPOp::SummaryAgg { .. })
+                    )
+                })
+        }));
         assert!(expanded.memo.topological_order().is_some());
     }
 
@@ -1208,30 +1213,23 @@ mod tests {
             &[10_000, 10_000],
         );
         let expanded = expand(memo).unwrap();
-        assert!(expanded
-            .memo
-            .candidates
-            .iter()
-            .flatten()
-            .any(
-                |candidate| candidate.origin == OriginOfCandidateForMemoGroup::SharedBuild
-                    && OperatorNode::reachable(&candidate.root_node)
-                        .iter()
-                        .any(|node| matches!(
+        // The regrouping merge is a group of the window rollup, reading the
+        // finer query's chain group (through the merge of its newest windows).
+        assert!(expanded.memo.candidates.iter().flatten().any(|candidate| {
+            candidate.origin == OriginOfCandidateForMemoGroup::Rollup
+                && regroups(&candidate.root_node)
+                && OperatorNode::reachable(&candidate.root_node)
+                    .iter()
+                    .any(|node| {
+                        matches!(
                             node.asap(),
-                            Some(ASAPOp::SummaryMerge {
-                                group_by: Some(_),
+                            Some(ASAPOp::SummaryTumblingWindowChain {
+                                tumbling_window_count: 120,
                                 ..
                             })
-                        ))
-                    && candidate.input_groups.iter().any(|group| matches!(
-                        expanded.memo.groups()[group.0 as usize].logical_node.asap(),
-                        Some(ASAPOp::SummaryTumblingWindowChain {
-                            tumbling_window_count: 120,
-                            ..
-                        })
-                    ))
-            ));
+                        ) && expanded.memo.group_whose_node_is(node).is_some()
+                    })
+        }));
     }
 
     // Private identity projections retain their full typed contract, but no
@@ -1365,7 +1363,7 @@ mod tests {
             FieldDataType,
         };
         let mut memo = workload(&[("quantile_over_time(0.95, latency[5m])", 0.01)]);
-        let (owner, mut base, build) = memo.candidates.iter().enumerate().find_map(|(owner, candidates)| candidates.iter().find_map(|candidate| {
+        let (owner, base, build) = memo.candidates.iter().enumerate().find_map(|(owner, candidates)| candidates.iter().find_map(|candidate| {
             let (build, BuildPlace::InputGroup(_)) = build_of(&memo, candidate)? else { return None };
             matches!(build.asap(), Some(ASAPOp::SummaryAgg {family: FieldDataType::Sketch(kind, _), ..}) if kind.algorithm() == &SketchAlgorithm::Kll).then(|| (owner, candidate.clone(), build))
         })).unwrap();
@@ -1419,9 +1417,7 @@ mod tests {
             let QueryRoot::Operator(root) = &roots[0] else {
                 unreachable!()
             };
-            let root =
-                crate::pass2::memo::rules::reuse::restore_inputs(root, &memo, &base.input_groups);
-            without_private_guarantees(&root, &boundaries)
+            without_private_guarantees(root, &boundaries)
         };
         let weak = rewritten(0.001);
         let strict = rewritten(0.0001);
@@ -1429,17 +1425,21 @@ mod tests {
             *weak, *strict,
             "ordinary equality omits the probability metadata"
         );
-        base.root_node = weak;
-        memo.candidates[owner] = vec![base.clone()];
-        assert!(crate::pass2::memo::rules::reuse::append_reader(
-            &mut memo,
-            owner,
-            &base,
-            strict,
-            OriginOfCandidateForMemoGroup::Rollup
-        )
-        .unwrap());
-        assert_eq!(memo.candidates[owner].len(), 2);
+        let before = memo.candidates[owner].len();
+        let mut add = |node: &Rc<OperatorNode>| {
+            crate::pass2::memo::rules::reuse::add_candidate_over_groups(
+                &mut memo,
+                MemoGroupId(owner as u32),
+                &base,
+                Rc::clone(node),
+                OriginOfCandidateForMemoGroup::Rollup,
+            )
+            .unwrap()
+        };
+        assert!(add(&weak));
+        assert!(add(&strict));
+        assert!(!add(&weak), "an equal candidate is not added again");
+        assert_eq!(memo.candidates[owner].len(), before + 2);
     }
 
     // Equal private producers can be shared within one composite result; they
