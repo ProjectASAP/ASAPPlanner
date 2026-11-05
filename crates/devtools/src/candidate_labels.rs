@@ -10,11 +10,10 @@ use std::rc::Rc;
 use serde_json::Value;
 
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
-use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
 use asap_types::ir::NonASAPOp;
 use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
-use asap_types::physical::Lifetime;
+use asap_types::physical::PhysicalProperties;
 use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::stages::HowToComputeAggregateMeasure;
 
@@ -147,11 +146,12 @@ pub fn physical_label(logical: &str, candidate: &PhysicalWorkloadPlan) -> String
     let mut parts: Vec<(&str, Vec<String>)> = Vec::new();
     for node in &candidate.dag.nodes {
         let id = &node.id;
-        let phase = match (node.output_state.timing, node.lifetime) {
-            (_, Lifetime::None) => continue,
-            (ExecutionTiming::IngestionTime, _) => "ingestion time",
-            (ExecutionTiming::QueryTime, Lifetime::OneEvaluation(_)) => "query time, shared",
-            (ExecutionTiming::QueryTime, Lifetime::AcrossEvaluations(_)) => "query time, kept",
+        let phase = match node.physical_properties() {
+            Ok(PhysicalProperties::NotKeptAtIngestion | PhysicalProperties::NotKeptAtQueryTime)
+            | Err(_) => continue,
+            Ok(PhysicalProperties::KeptAcrossEvaluationsAtIngestion(_)) => "ingestion time",
+            Ok(PhysicalProperties::KeptForOneEvaluationAtQueryTime(_)) => "query time, shared",
+            Ok(PhysicalProperties::KeptAcrossEvaluationsAtQueryTime(_)) => "query time, kept",
         };
         let label = match &node.payload {
             // Name the chain: chains of one family and tumbling-window count differ by
@@ -495,12 +495,13 @@ mod tests {
                     .nodes
                     .iter()
                     .filter(|node| {
-                        node.output_state.timing == ExecutionTiming::IngestionTime
-                            && node.lifetime.is_kept()
-                            && matches!(
-                                node.payload,
-                                Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
-                            )
+                        matches!(
+                            node.physical_properties(),
+                            Ok(PhysicalProperties::KeptAcrossEvaluationsAtIngestion(_))
+                        ) && matches!(
+                            node.payload,
+                            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+                        )
                     })
                     .count()
                     == 1

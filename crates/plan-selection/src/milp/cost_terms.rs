@@ -57,7 +57,7 @@ use asap_cost::CostModel;
 use asap_types::ir::physical_export::ScanWindow;
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::{NonASAPOp, Operator};
-use asap_types::physical::{Lifetime, Medium};
+use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
 use asap_types::stages::PhysicalCandidateId;
 use asap_types::workload::bounds::source_name;
 use asap_types::workload::{QueryRecurrence, RepeatedDemand};
@@ -844,13 +844,18 @@ fn context_rates(
             ContextKind::Ingestion(_) => ContextRate::Fixed(1.0),
             ContextKind::Shared(m) => {
                 let properties = milp.physical.candidates[m.0].properties;
-                let per_request = match (properties.timing(), properties.lifetime()) {
-                    (ExecutionTiming::IngestionTime, _) | (_, Lifetime::None) => {
+                let per_request = match properties {
+                    // Refreshed once per second of arriving data; a
+                    // query-time candidate that is not kept is never its
+                    // own context, so its rate is unused.
+                    PhysicalProperties::KeptAcrossEvaluationsAtIngestion(_)
+                    | PhysicalProperties::NotKeptAtIngestion
+                    | PhysicalProperties::NotKeptAtQueryTime => {
                         rates.push(ContextRate::Fixed(1.0));
                         continue;
                     }
-                    (ExecutionTiming::QueryTime, Lifetime::OneEvaluation(_)) => false,
-                    (ExecutionTiming::QueryTime, Lifetime::AcrossEvaluations(_)) => true,
+                    PhysicalProperties::KeptForOneEvaluationAtQueryTime(_) => false,
+                    PhysicalProperties::KeptAcrossEvaluationsAtQueryTime(_) => true,
                 };
                 let readers = milp.queries_reaching(m);
                 let demand = |query: usize| {

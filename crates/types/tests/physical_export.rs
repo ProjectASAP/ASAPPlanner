@@ -773,3 +773,52 @@ fn workload_export_matches_the_single_root_export() {
     let untimed = [QueryRoot::Operator(plan())];
     assert!(compile_physical_asap_workload_with_node_ids(&untimed).is_err());
 }
+
+/// Export validation over every valid state of `plan()`'s summary build:
+/// each kept state, any medium, is assigned, exported and valid; not kept
+/// at query time is the default and valid; not kept at ingestion time is
+/// valid for the scan below an ingestion-time build and, for the build
+/// itself, rejected by rule (an ingestion-time state must be kept for a
+/// query to read it).
+#[test]
+fn export_validation_over_every_valid_state() {
+    for properties in PhysicalProperties::every_valid() {
+        let root = plan();
+        let build = root.children()[0];
+        let mut assignment = PhysicalPropertiesAssignment::default();
+        if properties.lifetime().is_kept() {
+            assignment.set(build, properties);
+        }
+        let timed = apply_physical_properties(&root, &assignment, &mut NodeToTimedNodeCache::new())
+            .unwrap();
+        let mut dag = compile_physical_asap_dag(&timed).unwrap();
+        let [scan, build, _finalize] = [0, 1, 2].map(|i| dag.nodes[i].physical_properties());
+        match properties {
+            PhysicalProperties::NotKeptAtQueryTime => {
+                assert_eq!(build, Ok(properties));
+                dag.validate().unwrap();
+            }
+            PhysicalProperties::NotKeptAtIngestion => {
+                dag.nodes[1].output_state.timing = ExecutionTiming::IngestionTime;
+                assert_eq!(
+                    dag.validate(),
+                    Err(
+                        PhysicalASAPDAGValidationError::UnkeptSummaryBuildNotAtQueryTime {
+                            node: 1
+                        }
+                    )
+                );
+            }
+            PhysicalProperties::KeptAcrossEvaluationsAtIngestion(_) => {
+                assert_eq!(build, Ok(properties));
+                assert_eq!(scan, Ok(PhysicalProperties::NotKeptAtIngestion));
+                dag.validate().unwrap();
+            }
+            PhysicalProperties::KeptForOneEvaluationAtQueryTime(_)
+            | PhysicalProperties::KeptAcrossEvaluationsAtQueryTime(_) => {
+                assert_eq!(build, Ok(properties));
+                dag.validate().unwrap();
+            }
+        }
+    }
+}

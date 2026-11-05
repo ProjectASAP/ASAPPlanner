@@ -30,7 +30,7 @@ use asap_types::ir::schema::{
     FieldDataType, GroupingStrategy, Schema, SketchParams, SketchStatistic,
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, TimeRangeKind};
-use asap_types::physical::{Lifetime, Medium};
+use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
 use asap_types::workload::{DataWorkload, QueryRecurrence, RangeEvaluation};
 
 use asap_types::workload::bounds::{
@@ -530,7 +530,8 @@ pub struct NodeUsage<'a> {
     /// that consumer's evaluation runs ([`plan_cost`]), rather than one copy
     /// held until the longest query reading the node finishes).
     pub held: Option<(u64, f64, bool)>,
-    /// An in-memory ingestion-time state's bytes per window.
+    /// A state kept at ingestion time: its bytes per window, the newest of
+    /// which each ingest worker builds in memory.
     pub maintained: Option<u64>,
     /// A query-time scan's source and the raw bytes it reads.
     pub raw_scan: Option<(&'a Source, u64)>,
@@ -955,14 +956,19 @@ pub fn node_usage<'a>(
             // query time (all of them for a chain kept across
             // evaluations, whose scan Stage 2 bounds to its newest tumbling window,
             // the only one it builds).
-            let rows_per_tumbling_window = match (ingestion, node.lifetime) {
-                (true, _) => u64::try_from(
+            let rows_per_tumbling_window = match node
+                .physical_properties()
+                .map_err(AnalyticalCostError::InvalidPhysicalProperties)?
+            {
+                PhysicalProperties::NotKeptAtIngestion
+                | PhysicalProperties::KeptAcrossEvaluationsAtIngestion(_) => u64::try_from(
                     (u128::from(input.rows) * u128::from(*tumbling_window_width_ms))
                         .div_ceil(1_000),
                 )
                 .map_err(|_| AnalyticalCostError::Overflow)?,
-                (false, Lifetime::AcrossEvaluations(_)) => input.rows,
-                (false, _) => input
+                PhysicalProperties::KeptAcrossEvaluationsAtQueryTime(_) => input.rows,
+                PhysicalProperties::NotKeptAtQueryTime
+                | PhysicalProperties::KeptForOneEvaluationAtQueryTime(_) => input
                     .rows
                     .div_ceil(u64::from(*tumbling_window_count).max(1)),
             };
@@ -1128,8 +1134,17 @@ pub fn node_usage<'a>(
     // latency, or a materialized consumer's longest reader's, as a
     // OneEvaluation state is).
     let state = out.bytes.max(estimate.peak_memory_bytes());
-    let (kept, medium) = match (ingestion, node.lifetime, &node.payload) {
-        (_, Lifetime::None, _) => {
+    let is_chain = matches!(
+        node.payload,
+        Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+    );
+    // A whole state kept across evaluations: it and the one being built.
+    let whole_state_kept = || state.checked_mul(2).ok_or(AnalyticalCostError::Overflow);
+    let properties = node
+        .physical_properties()
+        .map_err(AnalyticalCostError::InvalidPhysicalProperties)?;
+    let (kept, medium) = match properties {
+        PhysicalProperties::NotKeptAtIngestion | PhysicalProperties::NotKeptAtQueryTime => {
             let working_memory_bytes = estimate.peak_memory_bytes();
             peak_memory_bytes = working_memory_bytes.saturating_mul(multiplier);
             if !ingestion && working_memory_bytes > 0 {
@@ -1141,11 +1156,7 @@ pub fn node_usage<'a>(
         // retention covers ([`tumbling_window_retention_ms`]: N, plus one per tumbling window
         // width of the readers' range-evaluation span), all but the
         // newest between evaluations and all while one runs.
-        (
-            false,
-            Lifetime::AcrossEvaluations(medium),
-            Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }),
-        ) => {
+        PhysicalProperties::KeptAcrossEvaluationsAtQueryTime(medium) if is_chain => {
             let tumbling_windows = tumbling_windows_of(node);
             let retained = retained_tumbling_window_count;
             let between = (state / tumbling_windows)
@@ -1170,7 +1181,10 @@ pub fn node_usage<'a>(
             detail += &format!("; keeps {between} bytes across evaluations");
             (0, medium)
         }
-        (_, Lifetime::OneEvaluation(medium), _) => {
+        PhysicalProperties::KeptAcrossEvaluationsAtQueryTime(medium) => {
+            (whole_state_kept()?, medium)
+        }
+        PhysicalProperties::KeptForOneEvaluationAtQueryTime(medium) => {
             match medium {
                 Medium::Memory => {
                     held = Some((state, per_second, false));
@@ -1181,11 +1195,7 @@ pub fn node_usage<'a>(
             (0, medium)
         }
         // The retained tumbling windows and the one being built.
-        (
-            true,
-            Lifetime::AcrossEvaluations(medium),
-            Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }),
-        ) => {
+        PhysicalProperties::KeptAcrossEvaluationsAtIngestion(medium) if is_chain => {
             let tumbling_windows = tumbling_windows_of(node);
             (
                 (state / tumbling_windows)
@@ -1198,13 +1208,13 @@ pub fn node_usage<'a>(
                 medium,
             )
         }
-        // A whole state kept across evaluations: it and the one being built.
-        (_, Lifetime::AcrossEvaluations(medium), _) => (
-            state.checked_mul(2).ok_or(AnalyticalCostError::Overflow)?,
-            medium,
-        ),
+        PhysicalProperties::KeptAcrossEvaluationsAtIngestion(medium) => {
+            (whole_state_kept()?, medium)
+        }
     };
-    if ingestion && node.lifetime == Lifetime::AcrossEvaluations(Medium::Memory) {
+    // Each ingest worker builds its newest window in memory, whatever
+    // medium the completed windows are kept on.
+    if let PhysicalProperties::KeptAcrossEvaluationsAtIngestion(_) = properties {
         maintained = Some(state / tumbling_windows_of(node));
     }
     if kept > 0 {
@@ -1608,12 +1618,11 @@ pub fn kept_tumbling_window_chains(dag: &PhysicalASAPDAG) -> HashSet<PhysicalASA
         .iter()
         .filter(|node| {
             matches!(
-                (&node.payload, node.output_state.timing, node.lifetime),
-                (
-                    Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }),
-                    ExecutionTiming::QueryTime,
-                    Lifetime::AcrossEvaluations(_),
-                )
+                node.payload,
+                Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+            ) && matches!(
+                node.physical_properties(),
+                Ok(PhysicalProperties::KeptAcrossEvaluationsAtQueryTime(_))
             )
         })
         .map(|node| node.id)

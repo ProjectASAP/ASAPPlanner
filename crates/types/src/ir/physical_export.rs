@@ -621,7 +621,7 @@ impl PhysicalASAPDAG {
                 }
             })?;
             if is_keepable_state_output(&node.payload)
-                && properties == PhysicalProperties::NOT_KEPT_AT_INGESTION
+                && properties == PhysicalProperties::NotKeptAtIngestion
             {
                 return Err(
                     PhysicalASAPDAGValidationError::UnkeptSummaryBuildNotAtQueryTime {

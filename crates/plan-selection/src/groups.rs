@@ -114,7 +114,7 @@ use asap_types::ir::properties::execution_data_state::{DataPrimitive, ExecutionD
 use asap_types::ir::properties::{AccuracyGuarantee, ExecutionTiming};
 use asap_types::ir::schema::{FieldDataType, Schema};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
-use asap_types::physical::{Lifetime, PhysicalProperties};
+use asap_types::physical::PhysicalProperties;
 use asap_types::stages::{
     output_references, MemoGroupId, OperatorNodeOfCandidateForMemoGroupId,
     PhysicalASAPMemoCandidates,
@@ -344,10 +344,12 @@ pub(crate) enum RunKind {
 
 /// The [`RunKind`] of a candidate with `properties`.
 pub(crate) fn run_kind(properties: PhysicalProperties) -> RunKind {
-    match (properties.lifetime(), properties.timing()) {
-        (Lifetime::None, ExecutionTiming::QueryTime) => RunKind::PerContext,
-        (Lifetime::None, ExecutionTiming::IngestionTime) => RunKind::Ingestion,
-        (Lifetime::OneEvaluation(_) | Lifetime::AcrossEvaluations(_), _) => RunKind::Shareable,
+    match properties {
+        PhysicalProperties::NotKeptAtQueryTime => RunKind::PerContext,
+        PhysicalProperties::NotKeptAtIngestion => RunKind::Ingestion,
+        PhysicalProperties::KeptAcrossEvaluationsAtIngestion(_)
+        | PhysicalProperties::KeptForOneEvaluationAtQueryTime(_)
+        | PhysicalProperties::KeptAcrossEvaluationsAtQueryTime(_) => RunKind::Shareable,
     }
 }
 

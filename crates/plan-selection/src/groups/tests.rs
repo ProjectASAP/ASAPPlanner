@@ -6,7 +6,6 @@ use asap_types::ir::scalar::expr_ir::ScalarValue;
 use asap_types::ir::schema::SketchAlgorithm;
 use asap_types::ir::schema::{DataType, Field};
 use asap_types::ir::{QueryRoot, ScalarExpr};
-use asap_types::physical::Medium;
 use asap_types::stages::{
     CandidateForMemoGroupId, OperatorNodeOfCandidateForMemoGroup,
     OperatorNodeOfCandidateForMemoGroupId, PhysicalCandidate, ProducerCandidates,
@@ -76,18 +75,13 @@ pub(super) fn catalog(
     )
 }
 
-/// At query time, not kept.
-pub(super) fn query_time_not_kept() -> PhysicalProperties {
-    PhysicalProperties::new(ExecutionTiming::QueryTime, Lifetime::None).unwrap()
-}
-
 /// One candidate of operator node `node` at query time, not kept,
 /// reading `producers` per input, that may produce a query's output when
 /// `output`.
 pub(super) fn candidate(node: usize, producers: &[&[usize]], output: bool) -> PhysicalCandidate {
     PhysicalCandidate {
         operator_node: OperatorNodeOfCandidateForMemoGroupId(node),
-        properties: query_time_not_kept(),
+        properties: PhysicalProperties::NotKeptAtQueryTime,
         producer_candidates_per_input: producers
             .iter()
             .map(|input| {
@@ -178,7 +172,7 @@ fn dominance_needs_every_condition() {
         OperatorKindForReaders::Other(std::mem::discriminant(&rows_node(1).operator), "Values");
     let key = DominanceKey {
         group: MemoGroupId(3),
-        properties: query_time_not_kept(),
+        properties: PhysicalProperties::NotKeptAtQueryTime,
         shareable: false,
         producer_candidates_per_input: &producers,
         readers: vec![(PhysicalCandidateId(9), 0)],
@@ -212,8 +206,7 @@ fn dominance_needs_every_condition() {
         (
             "timing",
             DominanceKey {
-                properties: PhysicalProperties::new(ExecutionTiming::IngestionTime, Lifetime::None)
-                    .unwrap(),
+                properties: PhysicalProperties::NotKeptAtIngestion,
                 ..key.clone()
             },
         ),
@@ -375,7 +368,7 @@ fn pruning_keeps_the_smallest_equal_class_and_incomparable_ones() {
     let schema = rows_node(1).schema.clone();
     let key = DominanceKey {
         group: MemoGroupId(0),
-        properties: query_time_not_kept(),
+        properties: PhysicalProperties::NotKeptAtQueryTime,
         shareable: false,
         producer_candidates_per_input: &producers,
         readers: Vec::new(),
@@ -992,15 +985,11 @@ fn ingestion_views_of_three_windows_and_an_unbounded_one() -> PhysicalASAPMemoCa
         (views[4].clone(), 9),
     ];
     let at_ingestion = |node: usize, producers: &[&[usize]], view: bool| PhysicalCandidate {
-        properties: PhysicalProperties::new(
-            ExecutionTiming::IngestionTime,
-            if view {
-                Lifetime::AcrossEvaluations(Medium::Memory)
-            } else {
-                Lifetime::None
-            },
-        )
-        .unwrap(),
+        properties: if view {
+            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION
+        } else {
+            PhysicalProperties::NotKeptAtIngestion
+        },
         ..candidate(node, producers, false)
     };
     let mut candidates = vec![
@@ -1088,4 +1077,21 @@ fn execution_contexts_have_one_ingestion_pipeline_per_refresh_window() {
 fn producers_of_an_input_read_one_view_window() {
     let physical = ingestion_views_of_three_windows_and_an_unbounded_one();
     assert!(producer_window_disagreements_of_all(&physical).is_empty());
+}
+
+/// `run_kind` over every valid state: not kept runs per context at query
+/// time and in the ingestion pipeline at ingestion time; every kept state,
+/// any medium, is shareable.
+#[test]
+fn run_kind_over_every_valid_state() {
+    for properties in PhysicalProperties::every_valid() {
+        let expected = match properties {
+            PhysicalProperties::NotKeptAtQueryTime => RunKind::PerContext,
+            PhysicalProperties::NotKeptAtIngestion => RunKind::Ingestion,
+            PhysicalProperties::KeptAcrossEvaluationsAtIngestion(_)
+            | PhysicalProperties::KeptForOneEvaluationAtQueryTime(_)
+            | PhysicalProperties::KeptAcrossEvaluationsAtQueryTime(_) => RunKind::Shareable,
+        };
+        assert_eq!(run_kind(properties), expected, "{properties:?}");
+    }
 }

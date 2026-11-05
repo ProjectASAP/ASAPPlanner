@@ -393,12 +393,19 @@ pub fn computations(
     }
     let mut rate_of_kept = HashMap::new();
     for (&id, &properties) in &kept_nodes {
-        let at_ingestion = properties.timing() == ExecutionTiming::IngestionTime;
-        // A query-time chain kept across evaluations is built once per request.
-        let per_request = !at_ingestion && properties.lifetime().is_across_evaluations();
-        let rate = match at_ingestion {
-            true => 1.0,
-            _ => evaluation_rate(
+        // Once per second at ingestion time; at query time, at its
+        // readers' evaluation rate, or once per request for a result kept
+        // across evaluations, which builds only what is new.
+        let per_request = match properties {
+            PhysicalProperties::NotKeptAtIngestion
+            | PhysicalProperties::KeptAcrossEvaluationsAtIngestion(_) => None,
+            PhysicalProperties::NotKeptAtQueryTime
+            | PhysicalProperties::KeptForOneEvaluationAtQueryTime(_) => Some(false),
+            PhysicalProperties::KeptAcrossEvaluationsAtQueryTime(_) => Some(true),
+        };
+        let rate = match per_request {
+            None => 1.0,
+            Some(per_request) => evaluation_rate(
                 reached.get(&id).into_iter().flatten().filter_map(|&q| {
                     let range = if per_request { None } else { range_of(q) };
                     recurrence.get(q).map(|r| (r, range))

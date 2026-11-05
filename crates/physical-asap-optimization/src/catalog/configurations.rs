@@ -13,7 +13,7 @@ use crate::summary_keep_eligibility;
 use asap_types::ir::operator::{agg_has_exact_per_entity_kernel, Reduction};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
-use asap_types::physical::{Lifetime, PhysicalProperties};
+use asap_types::physical::PhysicalProperties;
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use super::inventory::CandidateInventory;
@@ -138,7 +138,22 @@ pub fn enumerate_candidate_configurations(
             .enumerate()
             .filter_map(|(query, reached)| reached.then_some(query))
             .collect::<Vec<_>>();
-        let mut alternatives = vec![PhysicalProperties::NOT_KEPT_AT_QUERY_TIME];
+        // The valid states Stage 2 does not offer, by rule (every consumer
+        // still handles them when given one):
+        // - any `Disk` medium: the executor keeps every kept output in
+        //   memory, so a disk state would be priced as disk but run in memory;
+        // - `NotKeptAtIngestion` for a summary build: an ingestion-time state
+        //   must be kept for a query to read it, so an unkept build runs at
+        //   query time (`apply_physical_properties`);
+        // - `KeptAcrossEvaluationsAtIngestion` for a non-summary node: rows
+        //   are not maintained at ingestion time, only summary states;
+        // - `KeptAcrossEvaluationsAtQueryTime` for anything but a
+        //   tumbling-window chain: only a chain reuses what earlier
+        //   evaluations built (one new tumbling window per evaluation);
+        //   any other result is rebuilt whole each evaluation;
+        // - any ingestion-time state for `SummaryEstimate`,
+        //   `EvaluatePopulation` and `MaintainPopulation` (`forced_query`).
+        let mut alternatives = vec![PhysicalProperties::NotKeptAtQueryTime];
         if summary {
             alternatives.push(PhysicalProperties::KEPT_IN_MEMORY_FOR_ONE_EVALUATION);
             if queries.iter().any(|&query| {
@@ -170,7 +185,7 @@ pub fn enumerate_candidate_configurations(
                     .push(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME);
             }
         } else if !forced_query {
-            alternatives.push(PhysicalProperties::NOT_KEPT_AT_INGESTION);
+            alternatives.push(PhysicalProperties::NotKeptAtIngestion);
         }
         // Potential reach only generates the choice. Selected-reader cardinality
         // and Stage 2's highest-shared rule determine actual eligibility.
@@ -385,15 +400,14 @@ fn summary_properties_allowed(
         return false;
     };
     eligibility.range_compatibility.is_ok()
-        && match (
-            candidate_properties.timing(),
-            candidate_properties.lifetime(),
-        ) {
-            (_, Lifetime::None | Lifetime::OneEvaluation(_)) => true,
-            (ExecutionTiming::IngestionTime, Lifetime::AcrossEvaluations(_)) => {
+        && match candidate_properties {
+            PhysicalProperties::NotKeptAtIngestion
+            | PhysicalProperties::NotKeptAtQueryTime
+            | PhysicalProperties::KeptForOneEvaluationAtQueryTime(_) => true,
+            PhysicalProperties::KeptAcrossEvaluationsAtIngestion(_) => {
                 eligibility.at_ingestion.is_ok()
             }
-            (ExecutionTiming::QueryTime, Lifetime::AcrossEvaluations(_)) => {
+            PhysicalProperties::KeptAcrossEvaluationsAtQueryTime(_) => {
                 eligibility.may_keep_across_evaluations
             }
         }

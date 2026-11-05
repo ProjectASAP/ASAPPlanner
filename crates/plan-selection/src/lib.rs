@@ -4695,6 +4695,43 @@ mod tests {
         }
     }
 
+    /// Cost over every valid state of the KLL build: each prices without
+    /// error; a state kept on disk adds disk bytes and one kept in memory
+    /// adds none; not kept at ingestion time is the scan below the
+    /// ingestion-time build (a summary build that is not kept runs at
+    /// query time).
+    #[test]
+    fn cost_over_every_valid_state() {
+        let settings = unit_costs(|c| c.cost_per_disk_byte_second = 1e-9);
+        let not_kept = price(&kll_dag(None), &recurrences(1), &data(), &settings).unwrap();
+        for properties in PhysicalProperties::every_valid() {
+            let dag = match properties {
+                PhysicalProperties::NotKeptAtQueryTime => kll_dag(None),
+                PhysicalProperties::NotKeptAtIngestion => kll_dag(AT_INGESTION),
+                PhysicalProperties::KeptAcrossEvaluationsAtIngestion(_)
+                | PhysicalProperties::KeptForOneEvaluationAtQueryTime(_)
+                | PhysicalProperties::KeptAcrossEvaluationsAtQueryTime(_) => {
+                    kll_dag(Some(properties))
+                }
+            };
+            assert!(
+                dag.nodes
+                    .iter()
+                    .any(|node| node.physical_properties() == Ok(properties)),
+                "{properties:?}"
+            );
+            let cost = price(&dag, &recurrences(1), &data(), &settings)
+                .unwrap_or_else(|error| panic!("{properties:?}: {error:?}"));
+            assert!(cost.cost_per_second.unwrap().is_finite(), "{properties:?}");
+            let disk_added = cost.usage.disk_bytes > not_kept.usage.disk_bytes;
+            let on_disk = matches!(
+                properties.lifetime(),
+                Lifetime::OneEvaluation(Medium::Disk) | Lifetime::AcrossEvaluations(Medium::Disk)
+            );
+            assert_eq!(disk_added, on_disk, "{properties:?}");
+        }
+    }
+
     /// Under every cluster objective, two candidates with the same usage
     /// tie, and the earlier is selected; the later is reported as tied.
     /// Under the Pareto front neither dominates the other: both are on it.

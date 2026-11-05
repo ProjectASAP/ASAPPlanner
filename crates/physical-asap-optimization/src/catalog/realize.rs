@@ -61,7 +61,7 @@ pub fn realize_selected_candidates(
         &mut |logical, _, options| {
             let node = node_by_pointer.get(&logical).copied();
             // A node outside the selection is not kept.
-            let requested = node.map_or(PhysicalProperties::NOT_KEPT_AT_QUERY_TIME, |node| {
+            let requested = node.map_or(PhysicalProperties::NotKeptAtQueryTime, |node| {
                 seen[node] = true;
                 assignments[node]
             });
