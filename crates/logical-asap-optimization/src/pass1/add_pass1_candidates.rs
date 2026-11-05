@@ -689,7 +689,7 @@ mod tests {
             },
         ))
         .unwrap();
-        let stripped = crate::operator_over_groups::without_exact_guarantees_below(&reader);
+        let stripped = crate::operator_over_groups::without_exact_guarantees(&reader);
         assert_eq!(stripped.children()[0].guarantee, Some(guarantee));
     }
 

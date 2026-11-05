@@ -6,8 +6,9 @@ use asap_accuracy::propagation::recompose_guarantees;
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot};
 
-use super::reuse::{add_candidate_over_groups, same_output_contract, without_exact_guarantees};
+use super::reuse::{add_candidate_over_groups, same_output_contract};
 use crate::added_groups::groups_read_through_added_groups;
+use crate::operator_over_groups::without_exact_guarantees;
 use crate::pass2::memo::state_groups::{build_down_to_stage0_groups, Pass2RuleError};
 use asap_types::stages::{Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
 

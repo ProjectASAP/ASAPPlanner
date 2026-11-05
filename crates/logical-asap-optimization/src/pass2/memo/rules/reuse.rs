@@ -2,7 +2,7 @@
 //! ([`eligible`]), and how they add what they derive, as one operator over
 //! groups ([`add_candidate_over_groups`], [`find_or_add_producer`]).
 use crate::find_or_add_group::find_or_add_group;
-use crate::operator_over_groups::{operator_over_groups, without_exact_guarantees_below};
+use crate::operator_over_groups::{operator_over_groups, without_exact_guarantees};
 use crate::pass2::memo::state_groups::Pass2RuleError;
 use asap_types::ir::OperatorNode;
 use asap_types::stages::MemoGroupId;
@@ -89,22 +89,6 @@ pub(in crate::pass2::memo) fn find_or_add_producer(
     origin: &OriginOfCandidateForMemoGroup,
 ) -> MemoGroupId {
     find_or_add_group(memo, &without_exact_guarantees(node), queries, origin, 1)
-}
-
-/// `node` with every exact guarantee removed, its own included: the node
-/// Stage 0's equality compares with the groups' nodes, which carry none.
-pub(in crate::pass2::memo) fn without_exact_guarantees(
-    node: &Rc<OperatorNode>,
-) -> Rc<OperatorNode> {
-    let below = without_exact_guarantees_below(node);
-    if below.guarantee.as_ref().is_some_and(|g| g.is_exact()) {
-        Rc::new(OperatorNode {
-            guarantee: None,
-            ..(*below).clone()
-        })
-    } else {
-        below
-    }
 }
 
 pub(in crate::pass2::memo) fn replace(

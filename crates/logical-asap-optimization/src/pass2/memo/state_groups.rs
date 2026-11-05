@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
-use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
+use asap_types::ir::{ASAPOp, OperatorNode};
 
 use crate::own_candidate_sizing::find_or_add_sized_group;
 use asap_types::stages::hash_consing::HashConsingTable;
@@ -413,41 +413,6 @@ pub(super) fn nodes_within(
     nodes
 }
 
-// TimeRange lacks a unique row key and therefore is not generally memo-interned.
-// Equal ranges over the same canonical input nevertheless feed identical data
-// into a summary build, as the existing ASAP-aware summary reuse rule allows.
-pub(super) fn same_range_input(left: &OperatorNode, right: &OperatorNode) -> bool {
-    let (
-        Some(NonASAPOp::TimeRange {
-            child: left_child, ..
-        }),
-        Some(NonASAPOp::TimeRange {
-            child: right_child, ..
-        }),
-    ) = (left.non_asap(), right.non_asap())
-    else {
-        return false;
-    };
-    Rc::ptr_eq(left_child, right_child) && same_local_fields(left, right)
-}
-
-fn same_local_fields(left: &OperatorNode, right: &OperatorNode) -> bool {
-    let signature = |node: &OperatorNode| {
-        (
-            node.operator.map_children(|_| ()),
-            node.result_kind,
-            node.schema.clone(),
-            node.guarantee.clone(),
-            node.timing,
-            node.materialization,
-        )
-    };
-    let left = signature(left);
-    let right = signature(right);
-    left == right
-        && matches!((serde_json::to_string(&left), serde_json::to_string(&right)), (Ok(left), Ok(right)) if left == right)
-}
-
 #[cfg(test)]
 fn replace_node(
     node: &Rc<OperatorNode>,
@@ -464,6 +429,7 @@ mod tests {
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
     use crate::stage0::generate_dag_of_logical_memo_groups;
     use asap_types::ir::properties::AccuracyTarget;
+    use asap_types::ir::NonASAPOp;
     use asap_types::ir::QueryRoot;
 
     /// An expanded memo with its shared summary-state groups.

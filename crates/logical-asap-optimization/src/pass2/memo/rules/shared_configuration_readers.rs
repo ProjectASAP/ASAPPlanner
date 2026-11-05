@@ -18,9 +18,7 @@ use crate::pass2::memo::shared_configurations::{
     shared_size, state_size_configurations, tumbling_window_configurations,
     TumblingWindowConfiguration, TumblingWindowRequirement,
 };
-use crate::pass2::memo::state_groups::{
-    boundary_ptrs, build_of, same_range_input, BuildPlace, Pass2RuleError,
-};
+use crate::pass2::memo::state_groups::{boundary_ptrs, build_of, BuildPlace, Pass2RuleError};
 use asap_types::stages::{Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
 
 /// `resized` (a rewrite of `original` with the same shape) with each node
@@ -536,7 +534,7 @@ fn compatible(left: &StateNeed, right: &StateNeed) -> bool {
         || !left_inputs
             .iter()
             .zip(right_inputs)
-            .all(|(a, b)| Rc::ptr_eq(a, b) || same_range_input(a, b))
+            .all(|(a, b)| Rc::ptr_eq(a, b))
     {
         return false;
     }
