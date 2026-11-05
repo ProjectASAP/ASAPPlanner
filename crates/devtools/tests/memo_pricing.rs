@@ -85,7 +85,7 @@ fn planned(workload: &PlanningWorkload, series_identity: bool) -> Planned {
         roots,
         entries: workload.query_workload.entries().collect(),
         data: workload.data_workload.clone().unwrap(),
-        memo: try_populate_pass1(initial, &inventory).unwrap(),
+        memo: try_populate_pass1(initial, &inventory, None).unwrap(),
     }
 }
 

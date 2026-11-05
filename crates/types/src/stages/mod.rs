@@ -15,6 +15,7 @@ mod per_computation_logical_memo_candidates;
 mod physical;
 mod pruning;
 mod realizer;
+mod structural_id;
 
 pub use candidates::{CandidateForMemoGroup, Memo, OriginOfCandidateForMemoGroup};
 pub use logical_memo_candidates::LogicalASAPMemoCandidates;
@@ -33,3 +34,4 @@ pub use physical::{
 pub use physical::{producer_storage_metrics, ProducerStorageMetrics};
 pub use pruning::{PruneReason, PrunedCandidate};
 pub use realizer::{AssignmentRealizer, PhysicalCandidateError, RealizedPlan};
+pub use structural_id::NodeToStructuralIdCache;

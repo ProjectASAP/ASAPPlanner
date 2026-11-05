@@ -39,24 +39,41 @@ pub fn sharing_rules_and_shared_state_groups(
     Ok(memo)
 }
 
-/// The groups `add_shared_summary_state_groups`
-/// added to an expanded memo, in order: each has one candidate, the
-/// shared build (origin `SharedBuild`); no other group's candidates are
-/// only that.
+/// The shared summary-state groups of an expanded memo, in order: each
+/// group `add_shared_summary_state_groups` added (one candidate, the shared
+/// build, origin `SharedBuild`), and each summary build Pass 1 interned
+/// (logical node `SummaryAgg` or `SummaryTumblingWindowChain`) whose result
+/// candidates of two or more groups read.
 pub fn shared_summary_state_groups(
     memo: &asap_types::stages::Memo,
 ) -> Vec<asap_types::stages::MemoGroupId> {
-    memo.candidates
-        .iter()
-        .enumerate()
-        .filter(|(_, candidates)| {
-            matches!(
-                candidates.as_slice(),
-                [only] if only.origin
-                    == asap_types::stages::OriginOfCandidateForMemoGroup::SharedBuild
-            )
-        })
-        .map(|(group, _)| asap_types::stages::MemoGroupId(group as u32))
+    use asap_types::ir::ASAPOp;
+    use asap_types::stages::{MemoGroupId, OriginOfCandidateForMemoGroup};
+    let added_by_the_shared_step = |group: usize| {
+        matches!(
+            memo.candidates[group].as_slice(),
+            [only] if only.origin == OriginOfCandidateForMemoGroup::SharedBuild
+        )
+    };
+    let interned_and_shared = |group: usize| {
+        let id = MemoGroupId(group as u32);
+        matches!(
+            memo.groups[group].logical_node.asap(),
+            Some(ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. })
+        ) && memo
+            .candidates
+            .iter()
+            .filter(|candidates| {
+                candidates
+                    .iter()
+                    .any(|candidate| candidate.input_groups.contains(&id))
+            })
+            .count()
+            >= 2
+    };
+    (0..memo.groups.len())
+        .filter(|&group| added_by_the_shared_step(group) || interned_and_shared(group))
+        .map(|group| MemoGroupId(group as u32))
         .collect()
 }
 

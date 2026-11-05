@@ -2,25 +2,20 @@
 //! memo groups of the workload's hash-consed DAG
 //! ([`PerComputationLogicalMemoCandidates`]), which Pass 2 extends.
 
-use std::rc::Rc;
-
 use asap_types::ir::properties::AccuracyTarget;
-use asap_types::ir::{QueryRoot, SchemaDerivationError};
 use asap_types::workload::DataWorkload;
 
-use asap_accuracy::sizing::{
-    per_input_failure_probability, with_summaries_sized_for_failure_probability,
-};
 use asap_accuracy::{AccuracyEvidenceProvider, AccuracyModel};
 
-use super::memo_population::try_populate_pass1;
-use super::memo_population::CandidatePopulationError;
+use super::memo_population::{
+    try_populate_pass1, CandidatePopulationError, FailureProbabilitySizing,
+};
 use crate::deployment_capabilities::SupportedSummary;
 use crate::pass1::per_computation_candidates::{
     generate_per_computation_candidates, PerComputationCandidateError,
 };
 use asap_types::stages::{
-    DagOfLogicalMemoGroups, Memo, PerComputationLogicalMemoCandidates, PrunedCandidate,
+    DagOfLogicalMemoGroups, PerComputationLogicalMemoCandidates, PrunedCandidate,
 };
 
 /// Why [`generate_per_computation_logical_memo_candidates`] failed.
@@ -30,13 +25,10 @@ pub enum PerComputationLogicalMemoCandidatesError {
     /// annotations, or a measure's accuracy target is invalid.
     #[error(transparent)]
     PerComputation(#[from] PerComputationCandidateError),
-    /// The targets do not belong to the DAG of logical memo groups.
+    /// The targets do not belong to the DAG of logical memo groups, or a
+    /// candidate's summaries did not size.
     #[error(transparent)]
     Population(#[from] CandidatePopulationError),
-    /// A candidate's summaries sized for its readers' failure probability
-    /// did not rebuild.
-    #[error(transparent)]
-    Sizing(#[from] SchemaDerivationError),
 }
 
 /// Stage 1, Pass 1: the per-computation candidates on the memo groups of
@@ -49,7 +41,7 @@ pub enum PerComputationLogicalMemoCandidatesError {
 /// its guarantee, the summaries no query reading them can use (a query
 /// `q`'s target is `accuracy_targets[q]`). It then attaches each group's
 /// candidates, each with its summaries sized for its readers' failure
-/// probabilities (`size_for_failure_probability`): one sized candidate
+/// probabilities (`memo_population::size_for_failure_probability`): one sized candidate
 /// per accuracy-budget split. Every pruned way to compute a measure is in
 /// the output's `pruned_candidates`.
 pub fn generate_per_computation_logical_memo_candidates(
@@ -66,8 +58,14 @@ pub fn generate_per_computation_logical_memo_candidates(
         per_computation =
             per_computation.without_summaries_no_query_can_use(accuracy_targets, data, accuracy);
     }
-    let mut memo = try_populate_pass1(dag_of_logical_memo_groups, &per_computation)?;
-    size_for_failure_probability(&mut memo, &per_computation.roots, accuracy_targets, data)?;
+    let memo = try_populate_pass1(
+        dag_of_logical_memo_groups,
+        &per_computation,
+        Some(&FailureProbabilitySizing {
+            accuracy_targets,
+            data,
+        }),
+    )?;
     let pruned_candidates = per_computation
         .pruned_ways_to_compute
         .into_iter()
@@ -83,55 +81,6 @@ pub fn generate_per_computation_logical_memo_candidates(
     })
 }
 
-/// Sizes every candidate of `memo` for its readers' failure probabilities,
-/// in place: each approximate input of a candidate with `n`
-/// accuracy budget parts (`accuracy_budget_parts`) gets the smallest
-/// [`per_input_failure_probability`] `δ_q / (n · V_q)` among the queries `q`
-/// reaching its group, `V_q` the values `q`'s target covers (`G` of its
-/// root, `roots[q]`, for the whole result)
-/// ([`with_summaries_sized_for_failure_probability`]). These are the candidates' final
-/// sizes: Pass 2 inherits them or takes the strictest shared reader's
-/// ([`size_for_all_readers`](asap_accuracy::estimators::size_for_all_readers)),
-/// and Stage 3 only checks the composed accuracy. A candidate no reader
-/// gives a failure probability (exact, per-value with no `δ`, or a
-/// whole-result target over an unbound `G`) keeps its Pass 1 size.
-fn size_for_failure_probability(
-    memo: &mut Memo,
-    roots: &[QueryRoot],
-    accuracy_targets: &[AccuracyTarget],
-    data: &DataWorkload,
-) -> Result<(), PerComputationLogicalMemoCandidatesError> {
-    for (group, candidates) in memo.groups.iter().zip(&mut memo.candidates) {
-        for candidate in candidates.iter_mut() {
-            let Some(failure_probability) = group
-                .reached_by_queries()
-                .iter()
-                .filter_map(|&query| {
-                    per_input_failure_probability(
-                        accuracy_targets.get(query)?,
-                        candidate.accuracy_budget_parts,
-                        roots.get(query)?,
-                        data,
-                    )
-                })
-                .reduce(f64::min)
-            else {
-                continue;
-            };
-            let sized = with_summaries_sized_for_failure_probability(
-                &[QueryRoot::Operator(Rc::clone(&candidate.root_node))],
-                failure_probability,
-                data,
-            )?;
-            let [QueryRoot::Operator(node)] = &sized[..] else {
-                unreachable!("one operator root in, one out")
-            };
-            candidate.root_node = Rc::clone(node);
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,8 +91,10 @@ mod tests {
     use asap_accuracy::{IgnoreAccuracyGuarantees, NoAccuracyEvidence};
     use asap_types::ir::properties::{AccuracyMetric, AccuracyScope, AccuracyTarget};
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams};
+    use asap_types::ir::QueryRoot;
     use asap_types::ir::{ASAPOp, OperatorNode};
     use asap_types::stages::CandidateForMemoGroup;
+    use asap_types::stages::Memo;
     use asap_types::workload::DurationMs;
 
     /// Rank error 0.01 at δ = 0.01 over `scope`.

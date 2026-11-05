@@ -350,7 +350,7 @@ pub mod planning {
             &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
         )
         .unwrap();
-        let mut memo = try_populate_pass1(initial, &inventory).unwrap();
+        let mut memo = try_populate_pass1(initial, &inventory, None).unwrap();
         add_local_window_composition(&mut memo, entries);
         asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(memo)
             .unwrap()

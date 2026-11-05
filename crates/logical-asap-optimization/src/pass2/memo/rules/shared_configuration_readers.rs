@@ -17,9 +17,9 @@ use crate::pass2::memo::shared_configurations::{
     TumblingWindowConfiguration, TumblingWindowRequirement,
 };
 use crate::pass2::memo::state_groups::{
-    boundary_ptrs, same_range_input, simple_build, Pass2RuleError,
+    boundary_ptrs, input_group_build, same_range_input, simple_build, Pass2RuleError,
 };
-use asap_types::stages::Memo;
+use asap_types::stages::{Memo, MemoGroupId};
 
 /// `resized` (a rewrite of `original` with the same shape) with each node
 /// that is a child group's node in `original` put back, and the nodes above
@@ -65,6 +65,10 @@ fn with_child_nodes(
 struct StateNeed {
     candidate: usize,
     build: Rc<OperatorNode>,
+    /// The build's group when the candidate reads it as an input group (a
+    /// build Pass 1 interned); `None` when the build is one of the
+    /// candidate's private nodes.
+    build_group: Option<MemoGroupId>,
     merge: Option<Rc<OperatorNode>>,
     family: FieldDataType,
     /// The reader candidate's `accuracy_budget_parts`: the shares its build
@@ -129,8 +133,12 @@ impl SharedProducer for SummaryStates {
         let mut sets: Vec<Vec<Reader<StateNeed>>> = Vec::new();
         for (group, candidates) in memo.candidates.iter().enumerate() {
             for (candidate, entry) in candidates.iter().enumerate() {
-                let Some((build, _)) = simple_build(memo, entry) else {
-                    continue;
+                let (build, build_group) = match simple_build(memo, entry) {
+                    Some((build, _)) => (build, None),
+                    None => match input_group_build(memo, entry) {
+                        Some((build, group)) => (build, Some(group)),
+                        None => continue,
+                    },
                 };
                 // Configuration expansion precedes Stage 2. The rewrite helpers
                 // create unassigned state; preserve any already assigned build.
@@ -169,6 +177,7 @@ impl SharedProducer for SummaryStates {
                     need: StateNeed {
                         candidate,
                         build,
+                        build_group,
                         merge,
                         family,
                         accuracy_budget_parts: entry.accuracy_budget_parts,
@@ -296,13 +305,67 @@ impl SharedProducer for SummaryStates {
                 with_resized_build(&roots, &need.build, family.clone())
             }
         };
-        let boundaries = boundary_ptrs(memo, &original);
+        let mut boundaries = boundary_ptrs(memo, &original);
+        // A build read as an input group is the node resized: it is not put
+        // back.
+        boundaries.remove(&Rc::as_ptr(&need.build));
         let roots =
             result.map_err(|error| Pass2RuleError::StateConfiguration(error.to_string()))?;
         let [QueryRoot::Operator(node)] = roots.as_slice() else {
             unreachable!("operator rewrite")
         };
         let node = with_child_nodes(&original.root_node, node, &boundaries, &mut HashMap::new());
+        // The rewritten candidate's sized parts: the covering's, at least the
+        // reader's own.
+        let accuracy_budget_parts = match covering {
+            StateCovering::TumblingWindows {
+                accuracy_budget_parts,
+                ..
+            }
+            | StateCovering::Size {
+                accuracy_budget_parts,
+                ..
+            } => (*accuracy_budget_parts).max(original.accuracy_budget_parts),
+        };
+        // A build read as an input group stays one: the resized build is
+        // interned, and the reader reads its group.
+        let (node, input_groups) = match need.build_group {
+            None => (node, original.input_groups.clone()),
+            Some(build_group) => {
+                let resized_build = original
+                    .root_node
+                    .children()
+                    .into_iter()
+                    .zip(node.children())
+                    .find(|(before, _)| Rc::ptr_eq(before, &need.build))
+                    .map(|(_, after)| Rc::clone(after))
+                    .expect("the reader reads its build group directly");
+                let queries = memo.groups[reader.group].queries.clone();
+                let resized_group = memo.intern(
+                    &resized_build,
+                    &queries,
+                    &original.origin,
+                    accuracy_budget_parts,
+                );
+                let group_node = Rc::clone(&memo.groups[resized_group.0 as usize].logical_node);
+                let node = super::reuse::replace(
+                    &node,
+                    &HashMap::from([(Rc::as_ptr(&resized_build), group_node)]),
+                );
+                let mut input_groups = Vec::new();
+                for &input in &original.input_groups {
+                    let input = if input == build_group {
+                        resized_group
+                    } else {
+                        input
+                    };
+                    if !input_groups.contains(&input) {
+                        input_groups.push(input);
+                    }
+                }
+                (node, input_groups)
+            }
+        };
         // Resizing affects internal state types, never public output fields.
         if original.root_node.schema.fields != node.schema.fields
             || original.root_node.schema.time_index != node.schema.time_index
@@ -323,18 +386,8 @@ impl SharedProducer for SummaryStates {
         previous.push(Rc::clone(&node));
         let mut candidate = original;
         candidate.root_node = node;
-        // The rewritten build is sized for the covering's shares, at least
-        // the reader's own.
-        candidate.accuracy_budget_parts = match covering {
-            StateCovering::TumblingWindows {
-                accuracy_budget_parts,
-                ..
-            }
-            | StateCovering::Size {
-                accuracy_budget_parts,
-                ..
-            } => (*accuracy_budget_parts).max(candidate.accuracy_budget_parts),
-        };
+        candidate.input_groups = input_groups;
+        candidate.accuracy_budget_parts = accuracy_budget_parts;
         memo.candidates[reader.group].push(candidate);
         Ok(1)
     }
@@ -523,7 +576,7 @@ mod tests {
         let inventory =
             generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
                 .unwrap();
-        let mut memo = try_populate_pass1(initial, &inventory).unwrap();
+        let mut memo = try_populate_pass1(initial, &inventory, None).unwrap();
         let entries = vec![
             entry_with(
                 target,
@@ -606,7 +659,7 @@ mod tests {
         let inventory =
             generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
                 .unwrap();
-        let mut memo = try_populate_pass1(initial, &inventory).unwrap();
+        let mut memo = try_populate_pass1(initial, &inventory, None).unwrap();
         // Pass 1's parts per KLL size.
         let mut parts_of_size: HashMap<u32, usize> = HashMap::new();
         for candidate in memo.candidates.iter().flatten() {

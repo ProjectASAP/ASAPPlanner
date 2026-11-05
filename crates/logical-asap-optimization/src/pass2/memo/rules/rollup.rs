@@ -3,7 +3,7 @@ use super::reuse::{
     append_producer, append_reader, combined_inputs, eligible, replace, restore_inputs,
 };
 use crate::pass2::asap_aware_cse::{rollup_candidate_for, rollup_pass2_candidates};
-use crate::pass2::memo::state_groups::{simple_build, Pass2RuleError};
+use crate::pass2::memo::state_groups::{input_group_build, simple_build, Pass2RuleError};
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{
     ASAPOp, NonASAPOp, Operator, OperatorNode, ProjectItem, QueryRoot, ScalarExpr,
@@ -23,7 +23,11 @@ pub(crate) fn add_rollup_candidates(memo: &mut Memo) -> Result<usize, Pass2RuleE
                         | OriginOfCandidateForMemoGroup::WidenedScans
                 )
             {
-                if let Some((build, _)) = simple_build(memo, candidate) {
+                // A Pass 1 build is its own group, which the reader reads.
+                if let Some(build) = simple_build(memo, candidate)
+                    .map(|(build, _)| build)
+                    .or_else(|| input_group_build(memo, candidate).map(|(build, _)| build))
+                {
                     candidates.push((group, candidate.clone(), build));
                 }
             }
@@ -335,9 +339,10 @@ mod tests {
         let inventory =
             generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
                 .unwrap();
-        let memo =
-            sharing_rules_and_shared_state_groups(try_populate_pass1(initial, &inventory).unwrap())
-                .unwrap();
+        let memo = sharing_rules_and_shared_state_groups(
+            try_populate_pass1(initial, &inventory, None).unwrap(),
+        )
+        .unwrap();
         let root_of = |query: usize| memo.query_roots[query].as_operator().unwrap().0 as usize;
         let (coarse, fine) = (root_of(0), root_of(1));
         assert!(

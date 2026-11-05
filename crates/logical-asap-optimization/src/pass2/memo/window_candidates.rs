@@ -56,8 +56,14 @@ fn local_tumbling_window_candidates(
     entries: &[QueryWorkloadEntry],
 ) -> Vec<(usize, CandidateForMemoGroup)> {
     let group_of = group_of_node(&memo.groups);
+    let workload_groups = workload_groups(memo);
     let mut own: Vec<(usize, CandidateForMemoGroup)> = Vec::new();
     for (g, group) in memo.groups.iter().enumerate() {
+        // Pass 1's intermediate groups (a summary build, its readout) are
+        // rewritten inside their readers' candidates instead.
+        if !workload_groups.contains(&g) {
+            continue;
+        }
         let grids = tumbling_window_width_domain(
             group
                 .queries
@@ -134,6 +140,22 @@ fn local_tumbling_window_candidates(
         }
     }
     own
+}
+
+/// The groups of the workload's logical DAG: the query roots' groups and
+/// every group below them through logical child groups. Pass 1's
+/// intermediate groups, which only candidates read, are not among them.
+pub(super) fn workload_groups(memo: &Memo) -> HashSet<usize> {
+    let mut pending: Vec<GroupId> = asap_types::stages::root_groups(&memo.query_roots)
+        .into_iter()
+        .collect();
+    let mut reached = HashSet::new();
+    while let Some(group) = pending.pop() {
+        if reached.insert(group.0 as usize) {
+            pending.extend(memo.groups[group.0 as usize].child_groups.iter().copied());
+        }
+    }
+    reached
 }
 
 fn restore_scan_boundaries(
@@ -274,7 +296,7 @@ mod tests {
         let generated =
             generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
                 .unwrap();
-        let memo = try_populate_pass1(initial, &generated).unwrap();
+        let memo = try_populate_pass1(initial, &generated, None).unwrap();
         let entries = recurrences
             .iter()
             .map(|recurrence| entry_with(target.clone(), recurrence.clone()))

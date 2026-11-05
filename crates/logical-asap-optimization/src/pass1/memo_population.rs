@@ -12,12 +12,15 @@
 //! A Pass 1 target's aggregate group gets one candidate per combination of
 //! its measures' Pass 1 candidates: the aggregate alone composed by
 //! [`super::per_computation_candidates::compose_logical_candidate`] with that choice, every target beneath it
-//! exact. Its local nodes are the composed nodes above the first node
-//! equal to one of the group's descendant groups, which are its children.
-//! The local nodes read each child group through its node (the same
-//! `Rc`), and the candidate outputs the group's schema, so a parent reads
-//! it in the group's place (a query's top-k root, which no parent reads,
-//! may output the ranked value beside the key).
+//! exact, its summaries sized for its readers' failure probability. The
+//! candidate is the composed root's operator alone: every node beneath it
+//! is interned as a group ([`Memo::intern`], hash-consed on its structural
+//! id like the frontends' DAG), so `Project ← SummaryEstimate ← SummaryAgg`
+//! is three groups, and equal builds of different queries are one group.
+//! The operator reads each child group through its node (the same `Rc`),
+//! and the candidate outputs the group's schema, so a parent reads it in
+//! the group's place (a query's top-k root, which no parent reads, may
+//! output the ranked value beside the key).
 //!
 //! A fused computation is one more candidate of the outer group, whatever
 //! else reads the groups it absorbs: those keep their own candidates for
@@ -41,16 +44,22 @@ use std::rc::Rc;
 use super::per_computation_candidates::{
     compose_logical_candidate_with_accuracy_budget_parts, PerComputationCandidates,
 };
+use asap_accuracy::sizing::{
+    per_input_failure_probability, with_summaries_sized_for_failure_probability,
+};
+use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::FieldDataType;
-use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
+use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot, SchemaDerivationError};
+use asap_types::workload::DataWorkload;
 
 use asap_types::stages::{
     CandidateForMemoGroup, DagOfLogicalMemoGroups, Memo, MemoGroup, MemoGroupId,
-    OriginOfCandidateForMemoGroup,
+    NodeToStructuralIdCache, OriginOfCandidateForMemoGroup,
 };
 
-/// A Pass 1 inventory does not belong to the initial logical memo.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+/// A Pass 1 inventory does not belong to the initial logical memo, or a
+/// candidate's summaries did not size.
+#[derive(Debug, thiserror::Error)]
 pub enum CandidatePopulationError {
     #[error("Pass 1 root dependencies differ from the initial logical memo")]
     RootDependenciesChanged,
@@ -58,14 +67,29 @@ pub enum CandidatePopulationError {
     InvalidTarget { target: usize },
     #[error("Pass 1 target {target} references missing absorbed target {absorbed}")]
     InvalidAbsorption { target: usize, absorbed: usize },
+    /// A candidate's summaries sized for its readers' failure probability
+    /// did not rebuild.
+    #[error(transparent)]
+    Sizing(#[from] SchemaDerivationError),
+}
+
+/// What Pass 1 sizes each composed candidate's summaries for, before it
+/// interns their nodes as groups: query `q`'s target is
+/// `accuracy_targets[q]`, over `data`.
+pub struct FailureProbabilitySizing<'a> {
+    pub accuracy_targets: &'a [AccuracyTarget],
+    pub data: &'a DataWorkload,
 }
 
 /// Populate implementation candidates without changing initial group identities.
 /// The inventory must have walked `initial`'s groups
 /// (`PerComputationCandidates::walked`); its targets name them by id.
+/// Each composed candidate's summaries are sized by `sizing`
+/// ([`size_for_failure_probability`]); `None` keeps their composed sizes.
 pub fn try_populate_pass1(
     initial: DagOfLogicalMemoGroups,
     per_computation: &PerComputationCandidates,
+    sizing: Option<&FailureProbabilitySizing<'_>>,
 ) -> Result<Memo, CandidatePopulationError> {
     if !per_computation.walked(&initial) {
         return Err(CandidatePopulationError::RootDependenciesChanged);
@@ -90,28 +114,20 @@ pub fn try_populate_pass1(
             }
         }
     }
-    let candidates = pass1_candidates(per_computation, &initial.groups);
-    Ok(Memo {
-        groups: initial.groups,
-        query_roots: initial.query_roots,
-        candidates,
-    })
+    let mut memo = Memo::new(initial.groups, initial.query_roots, Vec::new());
+    add_pass1_candidates(per_computation, sizing, &mut memo)?;
+    Ok(memo)
 }
 
-/// `g` and every group below it.
-fn reach(groups: &[MemoGroup], g: MemoGroupId, reached: &mut HashSet<MemoGroupId>) {
-    if reached.insert(g) {
-        for &child in &groups[g.0 as usize].child_groups {
-            reach(groups, child, reached);
-        }
-    }
-}
-
-/// Every group's Pass 1 candidates, by group index.
-fn pass1_candidates(
+/// Give every group of the initial memo its Pass 1 candidates, interning the
+/// groups their operators read.
+fn add_pass1_candidates(
     per_computation: &PerComputationCandidates,
-    groups: &[MemoGroup],
-) -> Vec<Vec<CandidateForMemoGroup>> {
+    sizing: Option<&FailureProbabilitySizing<'_>>,
+    memo: &mut Memo,
+) -> Result<(), SchemaDerivationError> {
+    let initial_groups = memo.groups.len();
+    memo.candidates = vec![Vec::new(); initial_groups];
     // Each target aggregate group's targets, one per measure: Pass 1 walks
     // the groups, so an aggregate several queries read has one target per
     // measure.
@@ -123,14 +139,15 @@ fn pass1_candidates(
             .push(t);
     }
     // The groups' own nodes, which the composed candidates read.
-    let logical_nodes: Rc<[Rc<OperatorNode>]> = groups
+    let logical_nodes: Rc<[Rc<OperatorNode>]> = memo
+        .groups
         .iter()
         .map(|group| Rc::clone(&group.logical_node))
         .collect();
-    let own = |g: usize| CandidateForMemoGroup {
+    let own = |group: &MemoGroup| CandidateForMemoGroup {
         fused_groups: Vec::new(),
-        root_node: Rc::clone(&groups[g].logical_node),
-        input_groups: groups[g].child_groups.clone(),
+        root_node: Rc::clone(&group.logical_node),
+        input_groups: group.child_groups.clone(),
         origin: OriginOfCandidateForMemoGroup::Pass1,
         accuracy_budget_parts: 1,
     };
@@ -150,60 +167,57 @@ fn pass1_candidates(
     let mut most_approximate_inputs = vec![0usize; per_computation.roots.len()];
     for (g, targets) in &targets_of {
         let summaries = targets.iter().filter(|&&t| offers_a_summary(t)).count();
-        for &q in &groups[g.0 as usize].queries {
+        for &q in &memo.groups[g.0 as usize].queries {
             most_approximate_inputs[q] += summaries;
         }
     }
-    (0..groups.len())
-        .map(|g| match targets_of.get(&MemoGroupId(g as u32)) {
-            None => vec![own(g)],
-            Some(targets) => target_candidates(
-                per_computation,
-                groups,
-                &logical_nodes,
-                MemoGroupId(g as u32),
-                targets,
-                groups[g]
+    let mut structural_ids = NodeToStructuralIdCache::default();
+    for g in 0..initial_groups {
+        let candidates = match targets_of.get(&MemoGroupId(g as u32)) {
+            None => None,
+            Some(targets) => {
+                let max_accuracy_budget_parts = memo.groups[g]
                     .queries
                     .iter()
                     .map(|&q| most_approximate_inputs[q])
                     .max()
                     .unwrap_or(1)
-                    .max(1),
-            )
-            .unwrap_or_else(|| vec![own(g)]),
-        })
-        .collect()
+                    .max(1);
+                target_candidates(
+                    per_computation,
+                    sizing,
+                    memo,
+                    &mut structural_ids,
+                    &logical_nodes,
+                    MemoGroupId(g as u32),
+                    targets,
+                    max_accuracy_budget_parts,
+                )?
+            }
+        };
+        memo.candidates[g] = candidates.unwrap_or_else(|| vec![own(&memo.groups[g])]);
+    }
+    Ok(())
 }
 
 /// The candidates of target aggregate group `g`, whose measures' targets
 /// are `targets`: one per combination of their Pass 1 candidates (the last
 /// target varying fastest), each the aggregate composed alone with that
-/// choice. `None` when none composes.
+/// choice, its summaries sized by `sizing`. `None` when none composes.
+#[allow(clippy::too_many_arguments)]
 fn target_candidates(
     per_computation: &PerComputationCandidates,
-    groups: &[MemoGroup],
+    sizing: Option<&FailureProbabilitySizing<'_>>,
+    memo: &mut Memo,
+    structural_ids: &mut NodeToStructuralIdCache,
     logical_nodes: &Rc<[Rc<OperatorNode>]>,
     g: MemoGroupId,
     targets: &[usize],
     max_accuracy_budget_parts: usize,
-) -> Option<Vec<CandidateForMemoGroup>> {
-    let aggregate = Rc::clone(&groups[g.0 as usize].logical_node);
-    // The groups a candidate's private nodes may bottom out at, by key.
-    let mut below = HashSet::new();
-    for &child in &groups[g.0 as usize].child_groups {
-        reach(groups, child, &mut below);
-    }
-    let mut structural_ids = NodeToStructuralIdCache::default();
-    let mut descendant: HashMap<u64, MemoGroupId> = HashMap::new();
-    let mut ordered: Vec<MemoGroupId> = below.into_iter().collect();
-    ordered.sort_unstable();
-    for d in ordered {
-        descendant
-            .entry(structural_ids.structural_id(&groups[d.0 as usize].logical_node))
-            .or_insert(d);
-    }
-    let own_key = structural_ids.structural_id(&groups[g.0 as usize].logical_node);
+) -> Result<Option<Vec<CandidateForMemoGroup>>, SchemaDerivationError> {
+    let aggregate = Rc::clone(&memo.groups[g.0 as usize].logical_node);
+    let queries = memo.groups[g.0 as usize].queries.clone();
+    let own_key = structural_ids.structural_id(&aggregate);
     let mut candidates = Vec::new();
     // Each candidate's identity in the memo: its node's structural id, its
     // input groups, the groups it fuses and its accuracy budget parts. A candidate
@@ -242,26 +256,29 @@ fn target_candidates(
             }
             let (node, children) = if structural_ids.structural_id(&root) == own_key {
                 (
-                    Rc::clone(&groups[g.0 as usize].logical_node),
-                    groups[g.0 as usize].child_groups.clone(),
+                    Rc::clone(&aggregate),
+                    memo.groups[g.0 as usize].child_groups.clone(),
                 )
             } else {
-                let mut children = Vec::new();
-                let node = over_groups(
-                    &root,
-                    groups,
-                    &mut structural_ids,
-                    &descendant,
-                    &mut children,
-                    &mut HashMap::new(),
-                );
+                let root = match sizing {
+                    Some(sizing) => size_for_failure_probability(
+                        &root,
+                        &queries,
+                        accuracy_budget_parts,
+                        &per_computation.roots,
+                        sizing,
+                    )?,
+                    None => root,
+                };
+                let (node, children) =
+                    over_interned_groups(&root, memo, &queries, accuracy_budget_parts);
                 // A parent reads the candidate in the group's place, so it
                 // outputs the group's schema when it has the same columns,
                 // with the group's metadata (composition may derive a closed
                 // label set where the frontend's node leaves it open). A
                 // query's top-k root may output other columns (the ranked
                 // value beside the key): it keeps its own.
-                let group_node = &groups[g.0 as usize].logical_node;
+                let group_node = &aggregate;
                 let same_columns = node.schema.fields == group_node.schema.fields
                     && node.schema.time_index == group_node.schema.time_index;
                 let node = if !same_columns || node.schema == group_node.schema {
@@ -304,7 +321,51 @@ fn target_candidates(
             break;
         }
     }
-    (!candidates.is_empty()).then_some(candidates)
+    Ok((!candidates.is_empty()).then_some(candidates))
+}
+
+/// `root`, a candidate of a group `queries` reach, with each approximate
+/// input sized for `accuracy_budget_parts` parts of its readers' budget: the
+/// smallest [`per_input_failure_probability`] `δ_q / (n · V_q)` among
+/// `queries`, `V_q` the values `q`'s target covers (`G` of its root,
+/// `roots[q]`, for the whole result)
+/// ([`with_summaries_sized_for_failure_probability`]). These are the
+/// candidates' final sizes: Pass 2 inherits them or takes the strictest
+/// shared reader's
+/// ([`size_for_all_readers`](asap_accuracy::estimators::size_for_all_readers)),
+/// and Stage 3 only checks the composed accuracy. `root` is unchanged when
+/// no reader gives a failure probability (exact, per-value with no `δ`, or
+/// a whole-result target over an unbound `G`).
+fn size_for_failure_probability(
+    root: &Rc<OperatorNode>,
+    queries: &[usize],
+    accuracy_budget_parts: usize,
+    roots: &[QueryRoot],
+    sizing: &FailureProbabilitySizing<'_>,
+) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
+    let Some(failure_probability) = queries
+        .iter()
+        .filter_map(|&query| {
+            per_input_failure_probability(
+                sizing.accuracy_targets.get(query)?,
+                accuracy_budget_parts,
+                roots.get(query)?,
+                sizing.data,
+            )
+        })
+        .reduce(f64::min)
+    else {
+        return Ok(Rc::clone(root));
+    };
+    let sized = with_summaries_sized_for_failure_probability(
+        &[QueryRoot::Operator(Rc::clone(root))],
+        failure_probability,
+        sizing.data,
+    )?;
+    let [QueryRoot::Operator(node)] = &sized[..] else {
+        unreachable!("one operator root in, one out")
+    };
+    Ok(Rc::clone(node))
 }
 
 /// `aggregate` composed alone with `choice[t]` for each of its measures'
@@ -366,56 +427,48 @@ fn compose_alone(
     )
 }
 
-/// `node` with each first node on a path down from its children that
-/// equals a group in `descendant` replaced by that group's node (the same
-/// `Rc`), and those groups pushed to `children` in the order met: the
-/// candidate's private nodes over its child groups.
-fn over_groups(
+/// `node`'s operator over the groups of its children, each interned
+/// ([`Memo::intern`]) with every node below it, and those groups in the order
+/// first read: one operator over groups, every intermediate result its own
+/// group.
+fn over_interned_groups(
     node: &Rc<OperatorNode>,
-    groups: &[MemoGroup],
-    structural_ids: &mut NodeToStructuralIdCache,
-    descendant: &HashMap<u64, MemoGroupId>,
-    children: &mut Vec<MemoGroupId>,
-    rebuilt: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
-) -> Rc<OperatorNode> {
-    let mut replaced: HashMap<*const OperatorNode, Rc<OperatorNode>> = HashMap::new();
+    memo: &mut Memo,
+    queries: &[usize],
+    accuracy_budget_parts: usize,
+) -> (Rc<OperatorNode>, Vec<MemoGroupId>) {
+    let mut group_of_child: HashMap<*const OperatorNode, MemoGroupId> = HashMap::new();
+    let mut children = Vec::new();
     for child in node.children() {
-        let key = Rc::as_ptr(child);
-        if replaced.contains_key(&key) {
+        if group_of_child.contains_key(&Rc::as_ptr(child)) {
             continue;
         }
-        let new = match descendant.get(&structural_ids.structural_id(child)) {
-            Some(&group) => {
-                if !children.contains(&group) {
-                    children.push(group);
-                }
-                Rc::clone(&groups[group.0 as usize].logical_node)
-            }
-            None => match rebuilt.get(&key) {
-                Some(done) => Rc::clone(done),
-                None => {
-                    let done =
-                        over_groups(child, groups, structural_ids, descendant, children, rebuilt);
-                    rebuilt.insert(key, Rc::clone(&done));
-                    done
-                }
-            },
-        };
-        replaced.insert(key, new);
+        let group = memo.intern(
+            child,
+            queries,
+            &OriginOfCandidateForMemoGroup::Pass1,
+            accuracy_budget_parts,
+        );
+        group_of_child.insert(Rc::as_ptr(child), group);
+        if !children.contains(&group) {
+            children.push(group);
+        }
     }
+    let group_node = |child: &Rc<OperatorNode>| {
+        Rc::clone(&memo.groups[group_of_child[&Rc::as_ptr(child)].0 as usize].logical_node)
+    };
     if node
         .children()
         .into_iter()
-        .all(|child| Rc::ptr_eq(child, &replaced[&Rc::as_ptr(child)]))
+        .all(|child| Rc::ptr_eq(child, &group_node(child)))
     {
-        return Rc::clone(node);
+        return (Rc::clone(node), children);
     }
-    Rc::new(OperatorNode {
-        operator: node
-            .operator
-            .map_children(|child| Rc::clone(&replaced[&Rc::as_ptr(child)])),
+    let rebuilt = Rc::new(OperatorNode {
+        operator: node.operator.map_children(group_node),
         ..(**node).clone()
-    })
+    });
+    (rebuilt, children)
 }
 
 /// Whether `node`'s private nodes build a sketch, which its accuracy budget parts size.
@@ -434,40 +487,6 @@ fn builds_a_sketch(node: &Rc<OperatorNode>) -> bool {
             )
         )
     })
-}
-
-/// Interned structural identities: the operator over its children's identities,
-/// without the schema, guarantee, timing and materialization composition
-/// derives. Memoized per node (the cache keeps each node alive, so its
-/// address is not reused).
-#[derive(Default)]
-pub(crate) struct NodeToStructuralIdCache {
-    id_of_node: HashMap<*const OperatorNode, (Rc<OperatorNode>, u64)>,
-    id_of_encoded_operator: HashMap<Vec<u8>, u64>,
-}
-
-impl NodeToStructuralIdCache {
-    pub(crate) fn structural_id(&mut self, node: &Rc<OperatorNode>) -> u64 {
-        if let Some((_, key)) = self.id_of_node.get(&Rc::as_ptr(node)) {
-            return *key;
-        }
-        let children: HashMap<*const OperatorNode, u64> = node
-            .children()
-            .into_iter()
-            .map(|child| (Rc::as_ptr(child), self.structural_id(child)))
-            .collect();
-        let operator = node.operator.map_children(|c| children[&Rc::as_ptr(c)]);
-        // MessagePack preserves non-finite floats and signed zero. HashMap
-        // compares the complete byte key, so a hash collision cannot merge
-        // different computations. Cloned/recomposed NaN literals retain identity.
-        let encoded =
-            rmp_serde::to_vec(&operator).expect("an IR operator over child IDs must serialize");
-        let next = self.id_of_encoded_operator.len() as u64;
-        let key = *self.id_of_encoded_operator.entry(encoded).or_insert(next);
-        self.id_of_node
-            .insert(Rc::as_ptr(node), (Rc::clone(node), key));
-        key
-    }
 }
 
 #[cfg(test)]
@@ -520,7 +539,7 @@ mod tests {
         initial: DagOfLogicalMemoGroups,
         inventory: &PerComputationCandidates,
     ) -> Memo {
-        try_populate_pass1(initial, inventory).unwrap()
+        try_populate_pass1(initial, inventory, None).unwrap()
     }
 
     fn memo_of(inventory: &PerComputationCandidates) -> Memo {
@@ -553,7 +572,7 @@ mod tests {
             generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&other_roots))
                 .unwrap();
         assert!(matches!(
-            try_populate_pass1(initial, &inventory),
+            try_populate_pass1(initial, &inventory, None),
             Err(CandidatePopulationError::RootDependenciesChanged)
         ));
     }
@@ -572,7 +591,7 @@ mod tests {
         let mut invalid_measure = inventory.clone();
         invalid_measure.targets[0].measure_index = usize::MAX;
         assert!(matches!(
-            try_populate_pass1(initial.clone(), &invalid_measure),
+            try_populate_pass1(initial.clone(), &invalid_measure, None),
             Err(CandidatePopulationError::InvalidTarget { target: 0 })
         ));
         let mut invalid_absorption = inventory;
@@ -582,8 +601,10 @@ mod tests {
                 absorbed_targets: vec![missing],
                 ways_to_compute: Vec::new(),
             });
-        assert!(matches!(try_populate_pass1(initial, &invalid_absorption),
-            Err(CandidatePopulationError::InvalidAbsorption { target: 0, absorbed }) if absorbed == missing));
+        assert!(
+            matches!(try_populate_pass1(initial, &invalid_absorption, None),
+            Err(CandidatePopulationError::InvalidAbsorption { target: 0, absorbed }) if absorbed == missing)
+        );
     }
 
     /// Capability pruning must change implementations, not logical identities.
@@ -604,11 +625,16 @@ mod tests {
         let restricted_inventory = inventory.without_unsupported_summaries(Some(&[]));
         let restricted = populate_pass1(initial, &restricted_inventory);
         for memo in [&expanded, &restricted] {
-            assert_eq!(memo.groups.len(), original_groups.len());
+            // Pass 1 appends the groups it interns; the initial groups keep
+            // their ids and nodes, and gain only those groups as parents.
+            assert!(memo.groups.len() >= original_groups.len());
             for (before, after) in original_groups.iter().zip(&memo.groups) {
                 assert!(Rc::ptr_eq(&before.logical_node, &after.logical_node));
                 assert_eq!(before.child_groups, after.child_groups);
-                assert_eq!(before.parents, after.parents);
+                assert_eq!(before.parents, after.parents[..before.parents.len()]);
+                assert!(after.parents[before.parents.len()..]
+                    .iter()
+                    .all(|parent| parent.0 as usize >= original_groups.len()));
                 assert_eq!(before.queries, after.queries);
             }
             assert_eq!(memo.query_roots, original_roots);
@@ -644,6 +670,31 @@ mod tests {
             g = memo.groups[g].child_groups[0].0 as usize;
         }
         g
+    }
+
+    /// The groups of the initial memo (`initial_groups` of them) that
+    /// `candidate` reads, directly or through the groups Pass 1 interned,
+    /// in the order first reached.
+    fn initial_inputs(
+        memo: &Memo,
+        initial_groups: usize,
+        candidate: &CandidateForMemoGroup,
+    ) -> Vec<MemoGroupId> {
+        let mut found = Vec::new();
+        let mut pending: Vec<MemoGroupId> = candidate.input_groups.iter().rev().copied().collect();
+        while let Some(group) = pending.pop() {
+            if (group.0 as usize) < initial_groups {
+                if !found.contains(&group) {
+                    found.push(group);
+                }
+                continue;
+            }
+            let [interned] = memo.candidates[group.0 as usize].as_slice() else {
+                panic!("an interned group has one candidate");
+            };
+            pending.extend(interned.input_groups.iter().rev());
+        }
+        found
     }
 
     /// The summary algorithms a candidate's private nodes build.
@@ -708,10 +759,33 @@ mod tests {
         assert!(algorithms(&candidates[0]).is_empty());
         assert!(algorithms(&candidates[1])[0].contains("Kll"));
         assert!(algorithms(&candidates[2])[0].contains("DDSketch"));
+        assert_eq!(candidates[0].input_groups, input);
+        let initial_groups = quantile + 1;
         for candidate in candidates {
             assert!(candidate.fused_groups.is_empty());
-            assert_eq!(candidate.input_groups, input);
+            assert_eq!(initial_inputs(&memo, initial_groups, candidate), input);
             assert_eq!(candidate.origin, OriginOfCandidateForMemoGroup::Pass1);
+        }
+        // Each sketch candidate is one operator over groups: `Project` over
+        // the estimate's group, over the build's group, over the input.
+        for candidate in &candidates[1..] {
+            let [estimate] = candidate.input_groups[..] else {
+                panic!("one input group");
+            };
+            let estimate = &memo.groups[estimate.0 as usize];
+            assert!(matches!(
+                estimate.logical_node.asap(),
+                Some(ASAPOp::SummaryEstimate { .. })
+            ));
+            let [build] = estimate.child_groups[..] else {
+                panic!("one input group");
+            };
+            let build = &memo.groups[build.0 as usize];
+            assert!(matches!(
+                build.logical_node.asap(),
+                Some(ASAPOp::SummaryAgg { .. })
+            ));
+            assert_eq!(build.child_groups, input);
         }
     }
 
@@ -736,7 +810,7 @@ mod tests {
         assert!(!fused.is_empty());
         for candidate in fused {
             assert_eq!(candidate.fused_groups, vec![sums]);
-            assert_eq!(candidate.input_groups, sums_input);
+            assert_eq!(initial_inputs(&memo, topk + 1, candidate), sums_input);
             assert!(algorithms(candidate)[0].contains("Heap"));
         }
     }
@@ -889,12 +963,19 @@ mod tests {
             &["quantile_over_time(0.9, m[5m])"],
             AccuracyTarget::max_error(0.01),
         );
-        assert_eq!(
-            memo.topological_order().unwrap(),
-            (0..memo.groups.len() as u32)
-                .map(MemoGroupId)
-                .collect::<Vec<_>>()
-        );
+        // Pass 1's interned groups come after the group whose candidate
+        // reads them, so the order is not the index order.
+        let order = memo.topological_order().unwrap();
+        let position = |g: &MemoGroupId| order.iter().position(|x| x == g).unwrap();
+        for (g, group) in memo.groups.iter().enumerate() {
+            for read in group
+                .child_groups
+                .iter()
+                .chain(memo.candidates[g].iter().flat_map(|c| &c.input_groups))
+            {
+                assert!(position(read) < position(&MemoGroupId(g as u32)));
+            }
+        }
         let quantile = group_of_kind(&memo, 0, "Aggregate");
         let appended = MemoGroupId(memo.groups.len() as u32);
         memo.groups.push(memo.groups[1].clone());
@@ -1223,9 +1304,15 @@ mod tests {
             &generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
                 .unwrap(),
         );
-        assert_eq!(memo.groups.len(), 3);
+        // Three initial groups; Pass 1's interned groups come after them.
         assert_eq!(memo.groups[0].logical_node.operator.kind_name(), "Scan");
+        assert_eq!(memo.groups[1].child_groups, vec![MemoGroupId(0)]);
+        assert_eq!(memo.groups[2].child_groups, vec![MemoGroupId(0)]);
         assert_eq!(memo.groups[0].queries, vec![0, 1]);
-        assert_eq!(memo.groups[0].parents, vec![MemoGroupId(1), MemoGroupId(2)]);
+        assert_eq!(
+            memo.groups[0].parents[..2],
+            [MemoGroupId(1), MemoGroupId(2)]
+        );
+        assert!(memo.groups[0].parents[2..].iter().all(|p| p.0 >= 3));
     }
 }

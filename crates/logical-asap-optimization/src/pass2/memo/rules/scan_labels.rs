@@ -7,7 +7,7 @@ use asap_accuracy::propagation::recompose_guarantees;
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot};
 
-use crate::pass2::memo::state_groups::{boundary_groups, simple_build, Pass2RuleError};
+use crate::pass2::memo::state_groups::{boundary_groups, Pass2RuleError};
 use asap_types::stages::{CandidateForMemoGroup, Memo, OriginOfCandidateForMemoGroup};
 use asap_types::stages::{MemoGroup, MemoGroupId};
 
@@ -16,7 +16,23 @@ use asap_types::stages::{MemoGroup, MemoGroupId};
 pub(crate) fn add_scan_label_candidates(memo: &mut Memo) -> Result<usize, Pass2RuleError> {
     let mut owners = Vec::new();
     let mut roots = Vec::new();
+    // Pass 1's intermediate groups (a summary build, its readout) are
+    // widened inside their readers' candidates, down to the workload's
+    // groups.
+    let workload_groups = super::super::window_candidates::workload_groups(memo);
+    let workload_group_of: HashMap<*const OperatorNode, MemoGroupId> = workload_groups
+        .iter()
+        .map(|&group| {
+            (
+                Rc::as_ptr(&memo.groups[group].logical_node),
+                MemoGroupId(group as u32),
+            )
+        })
+        .collect();
     for (group, candidates) in memo.candidates.iter().enumerate() {
+        if !workload_groups.contains(&group) {
+            continue;
+        }
         for (index, candidate) in candidates.iter().enumerate() {
             // Source-group candidates expose scan reuse to every downstream
             // operator, including exact/non-summary computations. Their public
@@ -26,7 +42,12 @@ pub(crate) fn add_scan_label_candidates(memo: &mut Memo) -> Result<usize, Pass2R
                 roots.push(QueryRoot::Operator(Rc::clone(&candidate.root_node)));
                 continue;
             }
-            let Some((build, children)) = simple_build(memo, candidate) else {
+            if !super::reuse::eligible(candidate) {
+                continue;
+            }
+            let Some((build, children)) =
+                build_down_to_workload_groups(candidate, &workload_group_of)
+            else {
                 continue;
             };
             if !matches!(
@@ -42,8 +63,7 @@ pub(crate) fn add_scan_label_candidates(memo: &mut Memo) -> Result<usize, Pass2R
                         ..
                     }
                 )
-            ) || candidate
-                .input_groups
+            ) || workload_groups_read(candidate, &workload_group_of)
                 .iter()
                 .any(|child| !children.contains(child))
                 || children
@@ -130,6 +150,88 @@ pub(crate) fn add_scan_label_candidates(memo: &mut Memo) -> Result<usize, Pass2R
         added += 1;
     }
     Ok(added)
+}
+
+/// The one summary build `candidate` computes down to the workload's groups
+/// (`workload_group_of`), through the groups Pass 1 interned, with the
+/// workload groups it reads; `None` unless there is exactly one.
+fn build_down_to_workload_groups(
+    candidate: &CandidateForMemoGroup,
+    workload_group_of: &HashMap<*const OperatorNode, MemoGroupId>,
+) -> Option<(Rc<OperatorNode>, Vec<MemoGroupId>)> {
+    let mut builds = OperatorNode::reachable(&candidate.root_node)
+        .into_iter()
+        .filter(|node| {
+            !Rc::ptr_eq(node, &candidate.root_node)
+                && matches!(
+                    node.asap(),
+                    Some(ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. })
+                )
+                && !below_a_workload_group(&candidate.root_node, node, workload_group_of)
+        });
+    let build = builds.next()?;
+    if builds.next().is_some() {
+        return None;
+    }
+    let mut children: Vec<MemoGroupId> = build
+        .children()
+        .iter()
+        .map(|child| workload_group_of.get(&Rc::as_ptr(child)).copied())
+        .collect::<Option<_>>()?;
+    children.dedup();
+    Some((build, children))
+}
+
+/// Whether `node` is reached from `root` only through a workload group's
+/// node (`workload_group_of`), below `root` itself.
+fn below_a_workload_group(
+    root: &Rc<OperatorNode>,
+    node: &Rc<OperatorNode>,
+    workload_group_of: &HashMap<*const OperatorNode, MemoGroupId>,
+) -> bool {
+    let mut pending: Vec<Rc<OperatorNode>> = root.children().into_iter().cloned().collect();
+    let mut seen = HashSet::new();
+    while let Some(next) = pending.pop() {
+        if !seen.insert(Rc::as_ptr(&next)) || workload_group_of.contains_key(&Rc::as_ptr(&next)) {
+            continue;
+        }
+        if Rc::ptr_eq(&next, node) {
+            return false;
+        }
+        pending.extend(next.children().into_iter().cloned());
+    }
+    true
+}
+
+/// The workload groups (`workload_group_of`) `candidate` reads, directly or
+/// through the groups Pass 1 interned, in the order first reached.
+fn workload_groups_read(
+    candidate: &CandidateForMemoGroup,
+    workload_group_of: &HashMap<*const OperatorNode, MemoGroupId>,
+) -> Vec<MemoGroupId> {
+    let mut pending: Vec<Rc<OperatorNode>> = candidate
+        .root_node
+        .children()
+        .into_iter()
+        .rev()
+        .cloned()
+        .collect();
+    let mut seen = HashSet::new();
+    let mut read = Vec::new();
+    while let Some(next) = pending.pop() {
+        if !seen.insert(Rc::as_ptr(&next)) {
+            continue;
+        }
+        match workload_group_of.get(&Rc::as_ptr(&next)) {
+            Some(group) => {
+                if !read.contains(group) {
+                    read.push(*group);
+                }
+            }
+            None => pending.extend(next.children().into_iter().rev().cloned()),
+        }
+    }
+    read
 }
 
 fn same_output_contract(expected: &OperatorNode, actual: &OperatorNode) -> bool {

@@ -320,16 +320,22 @@ fn ratio_of_quantiles_production_memo() {
     // model that prunes none and accepts no output, so its summaries stay
     // and its Pass 2 memo is recorded.
     let enforced = production_run(&ratio_of_quantiles());
-    assert_eq!(candidate_count(pass1_memo(&enforced)), 7);
+    // 7 groups with one candidate each; the `avg`'s exact accumulator reads
+    // 6 more Pass 1 interns (its two states, their finalizes, a `Project`
+    // and the division), one candidate each.
+    assert_eq!(candidate_count(pass1_memo(&enforced)), 13);
     let models = PlanningModels::builtin().with_accuracy(&AcceptsNoOutput);
     let run = production_run_with(&ratio_of_quantiles(), models);
-    // Stage 0 (Pass 1's groups): series identity makes the two
+    // Stage 0 (Pass 1's first 7 groups): series identity makes the two
     // `quantile 0.5` one group.
     // Pass 1: the two quantile groups have 5 candidates each, 3 for the
     // whole budget (exact, DDSketch, KLL sized for the whole result) and 2
-    // for half of it; the other 5 groups one each.
-    assert_eq!(pass1_memo(&run).groups.len(), 7);
-    assert_eq!(candidate_count(pass1_memo(&run)), 15);
+    // for half of it; the other 5 groups one each. Each summary candidate
+    // reads its estimate's group, over its build's group: the 4 builds are
+    // shared by the two quantiles, the 8 estimates are not; with the `avg`'s
+    // 6, Pass 1 interns 18 groups, one candidate each.
+    assert_eq!(pass1_memo(&run).groups.len(), 25);
+    assert_eq!(candidate_count(pass1_memo(&run)), 33);
     // 5 × 5 choices, 3 × 3 of them for the whole budget. The inventory has
     // 3 × 3 assignments (one target per quantile group and measure, so the
     // two `quantile 0.5` share one, 3 choices each): the 2 × 2 that take no
@@ -343,8 +349,8 @@ fn ratio_of_quantiles_production_memo() {
     );
     // The last step, over the complete tumbling-window-width domain.
     let last = pass2_memo(&run);
-    assert_eq!(last.groups.len(), 255);
-    assert_eq!(candidate_count(last), 1243);
+    assert_eq!(last.groups.len(), 265);
+    assert_eq!(candidate_count(last), 1237);
     let enumeration = enumerate(last, 2_000);
     assert!(!enumeration.complete);
     assert_eq!(enumeration.all_chosen_candidates.len(), 2_000);
@@ -355,47 +361,46 @@ fn ratio_of_quantiles_production_memo() {
                 .unwrap_or_else(|e| panic!("G{group} candidate {index}: {e}"));
         }
     }
-    // The state-configuration rule rewrites a candidate's KLL to the size
-    // the readers of a state share; the rewrite is a copy of the candidate
-    // (`derive` in `pass2/memo/rules/shared_configuration_readers.rs`) with
-    // the `accuracy_budget_parts` its new size was made for. In each quantile
-    // group the `accuracy_budget_parts` 1 KLL `k` 567 (sized for the whole
-    // result) gets copies at `k` 567 (parts 1) and 1184 (parts 2, the size of
-    // the half-budget KLL); the `accuracy_budget_parts` 2 KLL `k` 1184 keeps
-    // 2. The `k` 1184 copy composes the same DAG as the original
-    // `accuracy_budget_parts` 2 candidate: one sketch, sized for half the
-    // budget.
+    // The state-configuration rule rewrites a reader of a KLL build group to
+    // read the build at the size the readers of a state share; the rewrite
+    // is a copy of the reader (`derive` in
+    // `pass2/memo/rules/shared_configuration_readers.rs`) with the
+    // `accuracy_budget_parts` its new size was made for. Each quantile
+    // group's `accuracy_budget_parts` 1 KLL candidate (`k` 567, sized for
+    // the whole result) reads an estimate group, which gets a copy reading
+    // the `k` 1184 build (parts 2, the size of the half-budget KLL): the
+    // build group the half-budget candidate's estimate reads, so one sketch,
+    // sized for half the budget.
     let pass1 = pass1_memo(&run);
     let quantile_groups: Vec<_> = (0..pass1.groups.len())
         .filter(|&group| pass1.candidates[group].len() == 5)
         .collect();
     assert_eq!(quantile_groups.len(), 2);
-    for group in quantile_groups {
-        let sizes = |candidates: &[CandidateForMemoGroup]| {
-            candidates
-                .iter()
-                .filter(|c| c.origin == OriginOfCandidateForMemoGroup::Pass1)
-                .filter_map(|c| kll(c).first().map(|&(k, _)| (k, c.accuracy_budget_parts)))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(sizes(&pass1.candidates[group]), [(567, 1), (1184, 2)]);
-        let candidates = &last.candidates[group];
-        assert_eq!(
-            sizes(candidates),
-            [(567, 1), (1184, 2), (567, 1), (1184, 2)]
-        );
-        let at_k: Vec<usize> = candidates
+    let sizes = |candidates: &[CandidateForMemoGroup]| {
+        candidates
             .iter()
-            .enumerate()
-            .filter(|(_, c)| {
-                c.origin == OriginOfCandidateForMemoGroup::Pass1
-                    && kll(c).first().is_some_and(|&(k, _)| k == 1184)
-            })
-            .map(|(index, _)| index)
-            .collect();
-        assert_eq!(at_k.len(), 2);
-        let alone = |index: usize| composed(last, &[(MemoGroupId(group as u32), index)].into());
-        assert_eq!(alone(at_k[0]), alone(at_k[1]));
+            .filter(|c| c.origin == OriginOfCandidateForMemoGroup::Pass1)
+            .filter_map(|c| kll(c).first().map(|&(k, _)| (k, c.accuracy_budget_parts)))
+            .collect::<Vec<_>>()
+    };
+    for group in quantile_groups {
+        assert_eq!(sizes(&pass1.candidates[group]), [(567, 1), (1184, 2)]);
+        let estimate_read_by = |k: u32| {
+            let candidate = pass1.candidates[group]
+                .iter()
+                .find(|c| kll(c).first().is_some_and(|&(size, _)| size == k))
+                .unwrap();
+            let [estimate] = candidate.input_groups[..] else {
+                panic!("one estimate group")
+            };
+            estimate.0 as usize
+        };
+        let (whole, half) = (estimate_read_by(567), estimate_read_by(1184));
+        assert_eq!(sizes(&last.candidates[whole]), [(567, 1), (1184, 2)]);
+        assert_eq!(
+            last.candidates[whole][1].input_groups,
+            last.candidates[half][0].input_groups
+        );
     }
 }
 

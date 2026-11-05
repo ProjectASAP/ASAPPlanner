@@ -51,7 +51,7 @@ fn expanded(queries: &[String]) -> Memo {
         .collect();
     let dag = generate_dag_of_logical_memo_groups(&roots);
     let inventory = generate_per_computation_candidates(&dag).unwrap();
-    let memo = try_populate_pass1(dag, &inventory).unwrap();
+    let memo = try_populate_pass1(dag, &inventory, None).unwrap();
     asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(memo)
         .unwrap()
 }

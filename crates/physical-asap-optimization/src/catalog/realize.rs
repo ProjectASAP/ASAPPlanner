@@ -272,7 +272,7 @@ mod tests {
                 roots[0].clone()
             ]))
             .unwrap();
-        let memo = try_populate_pass1(initial, &per_computation).unwrap();
+        let memo = try_populate_pass1(initial, &per_computation, None).unwrap();
         let logical = LogicalASAPMemoCandidates {
             memo: sharing_rules_and_shared_state_groups(memo).unwrap(),
         };

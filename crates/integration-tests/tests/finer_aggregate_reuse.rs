@@ -53,29 +53,36 @@ fn expanded(queries: &[String]) -> Memo {
         &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
     )
     .unwrap();
-    let memo = try_populate_pass1(initial, &inventory).unwrap();
+    let memo = try_populate_pass1(initial, &inventory, None).unwrap();
     asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(memo)
         .unwrap()
 }
 
 /// The aggregate group of query `query` alone and its rollup candidates.
 fn rollups(memo: &Memo, query: usize) -> (usize, Vec<&CandidateForMemoGroup>) {
-    let owner = memo
-        .groups
-        .iter()
-        .position(|group| {
-            group.reached_by_queries() == [query]
-                && matches!(
-                    group.logical_node.non_asap(),
-                    Some(NonASAPOp::Aggregate { .. })
-                )
+    let rollups_of = |group: usize| -> Vec<&CandidateForMemoGroup> {
+        memo.candidates[group]
+            .iter()
+            .filter(|c| c.origin == OriginOfCandidateForMemoGroup::Rollup)
+            .collect()
+    };
+    // The query's own aggregate group, or, for a rollup of summary states,
+    // the group of the readout Pass 1 interned beneath it, which the rule
+    // rewrites.
+    let own = |group: &asap_types::stages::MemoGroup| group.reached_by_queries() == [query];
+    let owner = (0..memo.groups.len())
+        .find(|&group| own(&memo.groups[group]) && !rollups_of(group).is_empty())
+        .or_else(|| {
+            memo.groups.iter().position(|group| {
+                own(group)
+                    && matches!(
+                        group.logical_node.non_asap(),
+                        Some(NonASAPOp::Aggregate { .. })
+                    )
+            })
         })
         .expect("the query's own aggregate group");
-    let candidates = memo.candidates[owner]
-        .iter()
-        .filter(|c| c.origin == OriginOfCandidateForMemoGroup::Rollup)
-        .collect();
-    (owner, candidates)
+    (owner, rollups_of(owner))
 }
 
 /// Whether `candidate` reads another group's result through a `Filter`

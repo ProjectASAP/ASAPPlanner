@@ -209,7 +209,7 @@ fn exact_rollup_catalog_crosses_identical_per_series_average() {
         &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
     )
     .unwrap();
-    let memo = try_populate_pass1(initial, &inventory).unwrap();
+    let memo = try_populate_pass1(initial, &inventory, None).unwrap();
     let expanded =
         asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(memo)
             .unwrap();
@@ -244,7 +244,7 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
         &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
     )
     .unwrap();
-    let memo = try_populate_pass1(initial, &inventory).unwrap();
+    let memo = try_populate_pass1(initial, &inventory, None).unwrap();
     let expanded =
         asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(memo)
             .unwrap();
@@ -407,7 +407,7 @@ fn sql_count_rollup_executes_with_integer_results() {
             &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
         )
         .unwrap();
-        let memo = try_populate_pass1(initial, &inventory).unwrap();
+        let memo = try_populate_pass1(initial, &inventory, None).unwrap();
         let expanded =
             asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(
                 memo,
@@ -529,13 +529,18 @@ fn sketch_rollup_crosses_inner_range_function() {
         &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
     )
     .unwrap();
-    let memo = try_populate_pass1(initial, &inventory).unwrap();
+    let memo = try_populate_pass1(initial, &inventory, None).unwrap();
     let expanded =
         asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(memo)
             .unwrap();
-    let owner = expanded.query_roots[1].as_operator().unwrap().0 as usize;
-    assert!(expanded.candidates[owner]
+    // The rule rewrites the reader of the coarse state, a group Pass 1
+    // interned beneath the query's root.
+    assert!(expanded
+        .groups
         .iter()
+        .zip(&expanded.candidates)
+        .filter(|(group, _)| group.reached_by_queries() == [1])
+        .flat_map(|(_, candidates)| candidates)
         .any(|c| c.origin == OriginOfCandidateForMemoGroup::Rollup));
 }
 
