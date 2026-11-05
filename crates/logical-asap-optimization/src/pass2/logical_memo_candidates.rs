@@ -7,7 +7,7 @@ use crate::pass2::memo::rules::{
     summary_results, topk,
 };
 use crate::pass2::memo::state_groups::{
-    add_shared_summary_state_groups, check_memo_well_formed, Pass2RuleError,
+    add_shared_summary_state_groups, check_group_references_valid_and_acyclic, Pass2RuleError,
 };
 use crate::pass2::memo::window_candidates::add_local_window_composition;
 use asap_types::stages::Memo;
@@ -50,7 +50,7 @@ pub fn pass2_after_local_window_composition(
 
 /// Pass 2's rules 2–9, in order, on a memo after local window composition.
 pub(crate) fn apply_sharing_rules(memo: &mut Memo) -> Result<(), Pass2RuleError> {
-    check_memo_well_formed(memo)?;
+    check_group_references_valid_and_acyclic(memo)?;
     // 2. Scan widening.
     scan_labels::add_scan_label_candidates(memo)?;
     // 3. Summary inputs.

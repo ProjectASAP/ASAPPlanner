@@ -46,7 +46,7 @@ struct BuildReaders {
 /// Rejects a memo the Pass 2 rules cannot extend: mismatched or
 /// out-of-range group references, or cyclic dependencies. Pass 2 checks
 /// this before its rules.
-pub(crate) fn check_memo_well_formed(memo: &Memo) -> Result<(), Pass2RuleError> {
+pub(crate) fn check_group_references_valid_and_acyclic(memo: &Memo) -> Result<(), Pass2RuleError> {
     validate_references(memo)?;
     if memo.topological_order().is_none() {
         return Err(Pass2RuleError::CyclicDependencies);
@@ -874,13 +874,13 @@ mod tests {
     #[test]
     fn a_group_reading_itself_is_a_cyclic_memo() {
         let mut memo = workload(&[("sum by (job) (m)", 0.01)]);
-        assert!(check_memo_well_formed(&memo).is_ok());
+        assert!(check_group_references_valid_and_acyclic(&memo).is_ok());
         let mut reader = memo.candidates[0][0].clone();
         reader.input_groups = vec![MemoGroupId(0)];
         memo.candidates[0].push(reader);
         assert_eq!(memo.topological_order(), None);
         assert!(matches!(
-            check_memo_well_formed(&memo),
+            check_group_references_valid_and_acyclic(&memo),
             Err(Pass2RuleError::CyclicDependencies)
         ));
     }
