@@ -12,9 +12,9 @@
 //! first selected; a candidate of an `I_r` is chosen in the `I_r` of the
 //! reading context's refresh window.
 //!
-//! **Repairs per query.** If the query's plan depends on more approximate
-//! values than one of them is sized for, on a pair excluded together, or
-//! on a candidate unusable for it, the query is planned again with exact
+//! **Repairs per query.** If the query's plan depends on more row (K)
+//! terms than one of their producers is sized for, on a pair of terms
+//! excluded together, or on a term unusable for it, the query is planned again with exact
 //! candidates only; if its estimated latency is over its bound, it is
 //! planned again by latency alone.
 //!
@@ -29,7 +29,7 @@ use asap_cost::execution_demand::evaluation_rate;
 use asap_types::stages::{output_references, PhysicalCandidateId, ReaderConstraint};
 use good_lp::Variable;
 
-use crate::groups::{AccuracyWeight, ContextKind, ResultSlot, RunKind};
+use crate::groups::{AccuracyTerm, AccuracyWeight, ContextKind, ResultSlot, RunKind};
 
 use super::completion::Completion;
 use super::cost_terms::NodeNumbers;
@@ -425,8 +425,15 @@ impl Derivation<'_, '_> {
             {
                 return false;
             }
-            if let Some(AccuracyWeight::Unusable(_)) =
-                inputs.accuracy_weights[self.query].get(&candidate)
+            // Unusable when every row (K) term of the query with this
+            // producer is (an unusable term needs every candidate on its
+            // path, so the accuracy check below decides the rest).
+            let mut terms = inputs.accuracy_terms[self.query]
+                .iter()
+                .filter(|term| term.producer() == candidate)
+                .peekable();
+            if terms.peek().is_some()
+                && terms.all(|term| matches!(term.weight, AccuracyWeight::Unusable(_)))
             {
                 return false;
             }
@@ -719,36 +726,67 @@ fn runs_reached(
     reached
 }
 
-/// Whether query `query`'s approximate runs in `plan` meet the A1 rows.
+/// Whether query `query`'s row (K) terms `plan` depends on meet the A1
+/// rows.
 fn meets_accuracy(milp: &SelectionMilp<'_>, plan: &Plan, query: usize) -> bool {
     let inputs = milp.inputs;
-    let runs: Vec<PhysicalCandidateId> = runs_reached(milp, plan, query)
-        .into_iter()
-        .map(|(_, candidate)| candidate)
-        .filter(|candidate| inputs.candidate_data[candidate.0].approximate)
-        .filter(|candidate| inputs.accuracy_weights[query].contains_key(candidate))
+    let depended: Vec<usize> = (0..inputs.accuracy_terms[query].len())
+        .filter(|&index| depends_on(milp, plan, query, &inputs.accuracy_terms[query][index]))
         .collect();
-    if runs.is_empty() {
+    if depended.is_empty() {
         return true;
     }
     if milp.entries[query].requirements.accuracy.is_exact() {
         return false;
     }
-    let count = runs.len();
-    for &candidate in &runs {
-        if matches!(
-            inputs.accuracy_weights[query].get(&candidate),
-            Some(AccuracyWeight::Unusable(_))
-        ) {
-            return false;
-        }
-        if inputs.candidate_data[candidate.0].accuracy_budget_parts < count {
+    let count = depended.len();
+    for &index in &depended {
+        let term = &inputs.accuracy_terms[query][index];
+        if term.weight != AccuracyWeight::One
+            || inputs.candidate_data[term.producer().0].accuracy_budget_parts < count
+        {
             return false;
         }
     }
     !inputs.accuracy_excluded_pairs[query]
         .iter()
-        .any(|(first, second)| runs.contains(first) && runs.contains(second))
+        .any(|(first, second)| depended.contains(first) && depended.contains(second))
+}
+
+/// Whether `plan` makes query `query` depend on `term`: every candidate on
+/// its path is chosen where the path reads it, as
+/// [`SelectionMilp::term_path`] reads the path.
+fn depends_on(milp: &SelectionMilp<'_>, plan: &Plan, query: usize, term: &AccuracyTerm) -> bool {
+    let inputs = milp.inputs;
+    let mut context = query;
+    for (depth, &candidate) in term.candidates.iter().enumerate() {
+        if plan.chosen[context].get(&inputs.slot[candidate.0]) != Some(&candidate) {
+            return false;
+        }
+        let run = if milp.computes(context, candidate) {
+            context
+        } else {
+            let run = match inputs.kind[candidate.0] {
+                RunKind::Shareable => milp.context_of(candidate),
+                RunKind::Ingestion => milp.ingestion_context_read_by(context),
+                RunKind::PerContext => None,
+            };
+            let Some(run) = run else {
+                return false;
+            };
+            run
+        };
+        if let Some(&input) = term.inputs.get(depth) {
+            if milp.slot_links.contains_key(&(run, candidate, input))
+                && plan.slot_reads.get(&(run, candidate, input))
+                    != Some(&inputs.slot[term.candidates[depth + 1].0])
+            {
+                return false;
+            }
+        }
+        context = run;
+    }
+    true
 }
 
 /// Whether query `query`'s estimated latency in `plan` is within its bound.

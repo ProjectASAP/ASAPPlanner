@@ -960,11 +960,11 @@ fn cost_models_2_and_3_are_unsupported() {
 }
 
 // Accuracy rows on `q0.5 / q0.9` over metric `m` declared non-negative,
-// weights from the composition: a candidate unusable for the query (a
-// DDSketch denominator sized for the whole target) is never depended on,
-// and two at `parts = 2` are depended on together unless their pair is
-// excluded. (Pass 1 already prunes KLL, whose rank error composes no
-// guarantee through the quotient.)
+// row (K) terms from the composition: an unusable term (a DDSketch
+// denominator sized for the whole target) is never depended on, and a
+// numerator and a denominator term at `parts = 2` are depended on together
+// unless their pair is excluded. (Pass 1 already prunes KLL, whose rank
+// error composes no guarantee through the quotient.)
 #[test]
 fn accuracy_rows_follow_the_composition_on_a_ratio() {
     let fixture = through_stages_non_negative(&[approximate(
@@ -974,19 +974,11 @@ fn accuracy_rows_follow_the_composition_on_a_ratio() {
     )]);
     let costs = cost_inputs();
     let inputs = prepare_milp_inputs(&fixture.physical, &fixture.entries, &fixture.data, &costs);
-    let of = |wanted: &dyn Fn(&AccuracyWeight, usize) -> bool| -> Vec<PhysicalCandidateId> {
-        inputs.accuracy_weights[0]
-            .iter()
-            .filter(|(class, weight)| {
-                wanted(weight, inputs.candidate_data[class.0].accuracy_budget_parts)
-            })
-            .map(|(class, _)| *class)
-            .collect()
-    };
-    let unusable = of(&|weight, _| matches!(weight, AccuracyWeight::Unusable(_)));
-    let usable_at_two = of(&|weight, parts| *weight == AccuracyWeight::One && parts == 2);
-    assert!(!unusable.is_empty() && usable_at_two.len() >= 2);
-    let solve = |inputs: &MilpInputs, restrict: &dyn Fn(&mut SelectionMilp<'_>)| {
+    let terms = &inputs.accuracy_terms[0];
+    let parts = |term: usize| inputs.candidate_data[terms[term].producer().0].accuracy_budget_parts;
+    // Solves with the query depending on every term of `all` (every
+    // indicator of its path is 1) and on at least one term of `any`.
+    let solve = |inputs: &MilpInputs, all: &[usize], any: &[usize]| {
         let mut milp = build_selection_milp(
             &fixture.physical,
             inputs,
@@ -995,47 +987,72 @@ fn accuracy_rows_follow_the_composition_on_a_ratio() {
             SelectionMilpOptions::default(),
         )
         .unwrap();
-        restrict(&mut milp);
+        for &term in all {
+            let path = milp
+                .term_path(0, &terms[term])
+                .expect("a path the MILP reads");
+            for indicator in path.indicators {
+                milp.builder.row("test", constraint!(indicator >= 1.0));
+            }
+        }
+        if !any.is_empty() {
+            let mut sum = Expression::from(0.0);
+            for &term in any {
+                let path = milp
+                    .term_path(0, &terms[term])
+                    .expect("a path the MILP reads");
+                // At most each indicator: 1 only when all are.
+                let and = milp.builder.continuous("test", Some(1.0));
+                for indicator in path.indicators {
+                    milp.builder.row("test", constraint!(and <= indicator));
+                }
+                sum += and;
+            }
+            milp.builder.row("test", constraint!(sum >= 1.0));
+        }
         solve_selection_milp(milp, 0).map(|_| ())
     };
-    // Each candidate's runs: `x[m]`, or `p` in a context computing it.
-    let runs_of = |milp: &SelectionMilp<'_>, candidates: &[PhysicalCandidateId]| -> Expression {
-        let mut sum = Expression::from(0.0);
-        for &candidate in candidates {
-            if let Some(&selected) = milp.selected.get(&candidate) {
-                sum += selected;
-            }
-            for context in 0..milp.choice.len() {
-                if milp.computes(context, candidate) {
-                    if let Some(&choice) = milp.choice[context].get(&candidate) {
-                        sum += choice;
-                    }
-                }
-            }
-        }
-        sum
+    let readable: Vec<bool> = {
+        let milp = build_selection_milp(
+            &fixture.physical,
+            &inputs,
+            &fixture.entries,
+            &costs,
+            SelectionMilpOptions::default(),
+        )
+        .unwrap();
+        terms
+            .iter()
+            .map(|term| milp.term_path(0, term).is_some())
+            .collect()
     };
+    let unusable: Vec<usize> = (0..terms.len())
+        .filter(|&t| matches!(terms[t].weight, AccuracyWeight::Unusable(_)) && readable[t])
+        .collect();
+    assert!(!unusable.is_empty());
     assert_eq!(
-        solve(&inputs, &|milp| {
-            let sum = runs_of(milp, &unusable);
-            milp.builder.row("test", constraint!(sum >= 1.0));
-        })
-        .err(),
+        solve(&inputs, &[], &unusable).err(),
         Some(SelectionMilpError::Infeasible)
     );
-    let two_of = |milp: &mut SelectionMilp<'_>| {
-        let sum = runs_of(milp, &usable_at_two);
-        milp.builder.row("test", constraint!(sum >= 2.0));
-    };
-    assert!(solve(&inputs, &two_of).is_ok());
+    // A numerator and a denominator term at two parts, under the two
+    // inputs of one quotient candidate.
+    let at_two = |t: usize| terms[t].weight == AccuracyWeight::One && parts(t) == 2 && readable[t];
+    let (numerator, denominator) = (0..terms.len())
+        .flat_map(|one| (0..terms.len()).map(move |other| (one, other)))
+        .filter(|&(one, other)| {
+            at_two(one)
+                && at_two(other)
+                && terms[one].candidates[0] == terms[other].candidates[0]
+                && terms[one].inputs[0] == 0
+                && terms[other].inputs[0] == 1
+        })
+        .find(|&(one, other)| solve(&inputs, &[one, other], &[]).is_ok())
+        .expect("a numerator and a denominator at two parts, read together");
     let mut excluded = inputs.clone();
-    for (index, &first) in usable_at_two.iter().enumerate() {
-        for &second in &usable_at_two[index + 1..] {
-            excluded.accuracy_excluded_pairs[0].push((first, second));
-        }
-    }
+    excluded.accuracy_excluded_pairs[0]
+        .push((numerator.min(denominator), numerator.max(denominator)));
     assert_eq!(
-        solve(&excluded, &two_of).err(),
+        solve(&excluded, &[numerator, denominator], &[]).err(),
         Some(SelectionMilpError::Infeasible)
     );
 }

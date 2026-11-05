@@ -334,7 +334,7 @@ pub enum ErrorSelectingPlan {
     },
     /// The selected plan fails a check the selection MILP encodes
     /// (accuracy through the budget shares, latency): a bug in the
-    /// accuracy weights, the sizing rule or a latency term, never a reason
+    /// row (K) terms, the sizing rule or a latency term, never a reason
     /// to re-solve.
     #[error("the selected plan fails a check the MILP encodes ({cause:?}): {reason}")]
     SelectedPlanFailedCheck {

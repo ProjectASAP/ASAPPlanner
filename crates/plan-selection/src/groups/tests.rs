@@ -661,32 +661,30 @@ fn two_queries_share_a_pane_chain_through_the_real_pipeline() {
             );
         }
     }
-    for weights in &inputs.accuracy_weights {
-        assert!(!weights.is_empty());
+    for terms in &inputs.accuracy_terms {
+        assert!(!terms.is_empty());
         assert!(
-            weights
-                .values()
-                .all(|&weight| weight == AccuracyWeight::One),
-            "{weights:?}"
+            terms.iter().all(|term| term.weight == AccuracyWeight::One),
+            "{terms:?}"
         );
     }
 }
 
 // ---------------------------------------------------------------------------
-// Accuracy weights
+// Row (K) terms
 // ---------------------------------------------------------------------------
 
-/// The sketch algorithm and `parts` of each approximate candidate of
-/// `physical`, with its weight for query 0 (`None`: no weight).
-fn sketch_weights(
+/// The sketch algorithm and `parts` of the producer of each row (K) term of
+/// query 0, with the term's weight.
+fn sketch_terms(
     physical: &PhysicalASAPMemoCandidates,
     inputs: &MilpInputs,
-) -> Vec<(SketchAlgorithm, usize, Option<AccuracyWeight>)> {
-    (0..physical.candidates.len())
-        .filter(|&class| inputs.candidate_data[class].approximate)
-        .map(|class| {
-            let id = PhysicalCandidateId(class);
-            let algorithm = match physical.physical_node(id).asap() {
+) -> Vec<(SketchAlgorithm, usize, AccuracyWeight)> {
+    inputs.accuracy_terms[0]
+        .iter()
+        .map(|term| {
+            let producer = term.producer();
+            let algorithm = match physical.physical_node(producer).asap() {
                 Some(
                     ASAPOp::SummaryAgg {
                         family: FieldDataType::Sketch(kind, _),
@@ -697,23 +695,23 @@ fn sketch_weights(
                         ..
                     },
                 ) => *kind.algorithm(),
-                _ => unreachable!("an approximate candidate is a sketch"),
+                _ => unreachable!("an approximate producer is a sketch"),
             };
             (
                 algorithm,
-                inputs.candidate_data[class].accuracy_budget_parts,
-                inputs.accuracy_weights[0].get(&id).copied(),
+                inputs.candidate_data[producer.0].accuracy_budget_parts,
+                term.weight,
             )
         })
         .collect()
 }
 
-// `q0.5 / q0.9` through the real stages, weights from the composition: a
-// KLL rank error has no rule through a quotient, so Pass 1 prunes every KLL
-// candidate (#1129); a DDSketch relative
-// error composes, but a lone denominator sized for the whole target
-// (`parts = 1`) misses it (`ε/(1 − ε) > ε`) while one sized for two parts
-// meets it.
+// `q0.5 / q0.9` through the real stages, weights from the composition: a KLL
+// rank error has no rule through a quotient, so Pass 1 prunes every KLL
+// candidate (#1129); a DDSketch relative error composes, but a lone
+// denominator sized for the whole target (`parts = 1`) misses it
+// (`ε/(1 − ε) > ε`) while a numerator sized so meets it, and one sized for
+// two parts meets it in either operand.
 #[test]
 fn ratio_weights_come_from_the_composition() {
     let stages = through_stages_1_and_2(&[
@@ -725,36 +723,34 @@ fn ratio_weights_come_from_the_composition() {
         &stages.data,
         &CostInputs::default(),
     );
-    let weights = sketch_weights(&stages.physical, &inputs);
-    let of = |algorithm: SketchAlgorithm, parts: usize| -> BTreeSet<Option<AccuracyWeight>> {
-        weights
+    let terms = sketch_terms(&stages.physical, &inputs);
+    let of = |algorithm: SketchAlgorithm, parts: usize| -> BTreeSet<AccuracyWeight> {
+        terms
             .iter()
             .filter(|(a, p, _)| *a == algorithm && *p == parts)
             .map(|(_, _, weight)| *weight)
             .collect()
     };
-    let missed = Some(AccuracyWeight::Unusable(
-        UnusableReason::AccuracyTargetMissed,
-    ));
+    let missed = AccuracyWeight::Unusable(UnusableReason::AccuracyTargetMissed);
     // Pass 1 prunes every KLL: its rank error composes no guarantee
     // through the quotient.
     for parts in [1, 2] {
         assert_eq!(
             of(SketchAlgorithm::Kll, parts),
             BTreeSet::new(),
-            "{weights:?}"
+            "{terms:?}"
         );
     }
     // At one part: numerators meet the target, denominators miss it.
     assert_eq!(
         of(SketchAlgorithm::DDSketch, 1),
-        BTreeSet::from([Some(AccuracyWeight::One), missed]),
-        "{weights:?}"
+        BTreeSet::from([AccuracyWeight::One, missed]),
+        "{terms:?}"
     );
     assert_eq!(
         of(SketchAlgorithm::DDSketch, 2),
-        BTreeSet::from([Some(AccuracyWeight::One)]),
-        "{weights:?}"
+        BTreeSet::from([AccuracyWeight::One]),
+        "{terms:?}"
     );
     // Two DDSketches at two parts compose: no pair is excluded.
     assert!(inputs.accuracy_excluded_pairs[0].is_empty());
@@ -764,7 +760,8 @@ fn ratio_weights_come_from_the_composition() {
 // alone. One DDSketch pane chain sized for two shares of the budget serves
 // both quotient operands and both lone quantiles, as the old Stage 3
 // engine planned it: the check accepts the quotient over it (`(α + α)/(1 − α) ≤ ε` at
-// `α = 1 − (1 + ε)^{−1/2}`), so it weighs 1 for every query. A chain sized
+// `α = 1 − (1 + ε)^{−1/2}`), so every term of every query over it has
+// weight `One`. A chain sized
 // for the whole budget (`α = ε`) never serves the quotient's denominator.
 #[test]
 fn one_pane_chain_serves_a_ratio_and_its_operands() {
@@ -793,15 +790,19 @@ fn one_pane_chain_serves_a_ratio_and_its_operands() {
         },
         _ => None,
     };
-    let weight = |query: usize, class: usize| {
-        inputs.accuracy_weights[query]
-            .get(&PhysicalCandidateId(class))
-            .copied()
+    // the weight of every term of `query` whose producer is `class`.
+    let lambdas = |query: usize, class: usize| -> BTreeSet<AccuracyWeight> {
+        inputs.accuracy_terms[query]
+            .iter()
+            .filter(|term| term.producer() == PhysicalCandidateId(class))
+            .map(|term| term.weight)
+            .collect()
     };
+    let one = BTreeSet::from([AccuracyWeight::One]);
     let two_shares = 1.0 - 1.01f64.powf(-0.5);
     let shared: Vec<usize> = (0..stages.physical.candidates.len())
         .filter(|&class| alpha(class).is_some())
-        .filter(|&class| (0..3).all(|query| weight(query, class) == Some(AccuracyWeight::One)))
+        .filter(|&class| (0..3).all(|query| lambdas(query, class) == one))
         .collect();
     assert!(!shared.is_empty());
     for &class in &shared {
@@ -811,22 +812,20 @@ fn one_pane_chain_serves_a_ratio_and_its_operands() {
             alpha(class)
         );
     }
-    // A chain sized for the whole budget weighs 1 for the ratio only where
+    // A chain sized for the whole budget has weight `One` for the ratio only where
     // its values are the numerator's alone, so it never also serves both
     // lone quantiles.
     for class in (0..stages.physical.candidates.len()).filter(|&class| alpha(class) == Some(0.01)) {
-        assert!(
-            !(0..3).all(|query| weight(query, class) == Some(AccuracyWeight::One)),
-            "{class}"
-        );
+        assert!(!(0..3).all(|query| lambdas(query, class) == one), "{class}");
     }
 }
 
 // The checks keep what they build for later checks and skip repeated
 // exact stand-ins: on RangeHeavy T8+T5's shape (a quotient and both
-// operands alone), on a quotient of three quantiles (where pairs are
-// excluded) and on a ratio with one approximate operand, the weights and
-// excluded pairs equal those with no kept builds and no skipped stand-in.
+// operands alone), on a quotient of three quantiles (where pairs of terms
+// are checked) and on a ratio with one approximate operand, the row (K) terms
+// and excluded pairs equal those with no kept builds and no skipped
+// stand-in.
 #[test]
 fn kept_builds_give_the_weights_of_fresh_builds() {
     kept_builds_match_fresh_builds(&[
@@ -837,12 +836,24 @@ fn kept_builds_give_the_weights_of_fresh_builds() {
     let three = kept_builds_match_fresh_builds(&[
         "quantile_over_time(0.9, m[5m]) / quantile_over_time(0.5, m[5m]) / quantile_over_time(0.1, m[5m])",
     ]);
-    assert!(!three.accuracy_excluded_pairs[0].is_empty());
+    // Pair checks run: a state Pass 2 shares among the three operands is
+    // the producer of terms with weight `One` under two inputs of one quotient.
+    // (Each pair of them meets the target; three of them together are
+    // excluded by the shares row, not by a pair.)
+    let terms = &three.accuracy_terms[0];
+    assert!(terms.iter().enumerate().any(|(index, one)| {
+        terms[index + 1..].iter().any(|other| {
+            one.producer() == other.producer()
+                && one.weight == AccuracyWeight::One
+                && other.weight == AccuracyWeight::One
+                && three.candidate_data[one.producer().0].accuracy_budget_parts >= 2
+                && accuracy_terms::read_together(one, other)
+        })
+    }));
     // A scalar ratio of two output references whose approximate values sit
     // under one operand only: the other reference's output candidates
-    // reach no member, and its first exact stand-in must still be built,
-    // or the ratio has no root to check and every approximate candidate
-    // would weigh nothing.
+    // reach no producer, and its first exact stand-in must still be built,
+    // or the ratio has no root to check and there would be no term.
     use asap_logical_asap_optimization::test_support::lower_promql;
     use asap_types::ir::scalar::{ArithmeticOpKind, ExprSemantics};
     let operand = |query: &str| {
@@ -858,11 +869,11 @@ fn kept_builds_give_the_weights_of_fresh_builds() {
         semantics: ExprSemantics::Promql,
     });
     let ratio = kept_builds_match_fresh_builds_of(vec![ratio]);
-    assert!(!ratio.accuracy_weights[0].is_empty());
+    assert!(!ratio.accuracy_terms[0].is_empty());
 }
 
-/// Asserts that `queries`' accuracy weights and excluded pairs are the
-/// same with kept builds and with none ([`accuracy_positions::FRESH_BUILDS`]);
+/// Asserts that `queries`' row (K) terms and excluded pairs are the same
+/// with kept builds and with none ([`accuracy_terms::FRESH_BUILDS`]);
 /// returns the former.
 fn kept_builds_match_fresh_builds(queries: &[&str]) -> MilpInputs {
     use asap_logical_asap_optimization::test_support::lower_promql;
@@ -878,22 +889,19 @@ fn kept_builds_match_fresh_builds(queries: &[&str]) -> MilpInputs {
 fn kept_builds_match_fresh_builds_of(roots: Vec<QueryRoot>) -> MilpInputs {
     let stages = through_stages_1_and_2_of(roots);
     let prepare = |fresh: bool| {
-        accuracy_positions::FRESH_BUILDS.with(|cell| cell.set(fresh));
+        accuracy_terms::FRESH_BUILDS.with(|cell| cell.set(fresh));
         let inputs = prepare_milp_inputs(
             &stages.physical,
             &stages.entries,
             &stages.data,
             &CostInputs::default(),
         );
-        accuracy_positions::FRESH_BUILDS.with(|cell| cell.set(false));
+        accuracy_terms::FRESH_BUILDS.with(|cell| cell.set(false));
         inputs
     };
     let (kept, fresh) = (prepare(false), prepare(true));
-    assert!(kept
-        .accuracy_weights
-        .iter()
-        .any(|weights| !weights.is_empty()));
-    assert_eq!(kept.accuracy_weights, fresh.accuracy_weights);
+    assert!(kept.accuracy_terms.iter().any(|terms| !terms.is_empty()));
+    assert_eq!(kept.accuracy_terms, fresh.accuracy_terms);
     assert_eq!(kept.accuracy_excluded_pairs, fresh.accuracy_excluded_pairs);
     kept
 }

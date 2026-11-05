@@ -11,9 +11,10 @@
 //! 3. **Owners** ([`OwnerRegion`]): one per query and one per possible
 //!    instance of each shareable candidate, each with its region of stateless
 //!    candidates, the links inside it and the shareable candidates it may read.
-//! 4. **Accuracy weights** ([`AccuracyWeight`]) per query and approximate
-//!    candidate, and pairs excluded together, from the composition of the
-//!    query's outputs.
+//! 4. **Row (K) terms** ([`AccuracyTerm`]) per query: one per path of
+//!    edges `(u, c, i)` from an approximate producer `u` to the query's
+//!    output, each with its accuracy weight, and pairs of terms
+//!    excluded together, from the composition of the query's outputs.
 //!
 //! Nothing calls it yet; the MILP (C4) will.
 //!
@@ -72,37 +73,46 @@
 //! dominate each other the one with the smallest id is kept. Every link to
 //! a deleted candidate is deleted; its readers still read the dominating candidate.
 //!
-//! ## Accuracy weights
+//! ## Row (K) terms
 //!
-//! `w(q, k)` says whether query `q` may read approximate candidate `k` (a
-//! sketch [`ASAPOp::SummaryAgg`] or [`ASAPOp::SummaryTumblingWindowChain`], what
-//! [`asap_accuracy::propagation::approximate_inputs`] counts), and pairs of
-//! approximate candidates `q` may not read together. Both come from the
-//! composition itself, never from an operator table
-//! ([`accuracy_positions`]): `q`'s outputs are built over the candidates
-//! with `k` approximate and every other candidate exact, their guarantees
+//! Row (K) (#1204) bounds each query's composed error by a sum of terms,
+//! one per approximate producer reaching the query. Until #1207 step 6
+//! gives each term a constant propagation factor, a term carries an
+//! accuracy weight: one share of the query's budget, or unusable. Here a query `q` depends on an approximate
+//! producer `u` (a sketch [`ASAPOp::SummaryAgg`] or
+//! [`ASAPOp::SummaryTumblingWindowChain`], what
+//! [`asap_accuracy::propagation::approximate_inputs`] counts) through a
+//! path of edges `(u, c, i)` up to its output, and one producer may reach
+//! `q` through several paths, e.g. a state read by both operands of a
+//! ratio. So each term ([`AccuracyTerm`]) is one such path, with its own
+//! accuracy weight ([`AccuracyWeight`]): `q` depends on the term when every
+//! candidate on its path is selected where the path reads it. The weight comes
+//! from the composition itself, never from an operator table
+//! ([`accuracy_terms`]): `q`'s outputs are built with `u`'s values
+//! approximate along the path and every other input exact, their guarantees
 //! composed by `asap-accuracy` ([`asap_accuracy::propagation::composed_guarantee`])
 //! and checked by the same check the selected plan passes
 //! ([`crate::checks::guarantee_check`], with the deployment's model):
-//! - every output exact: `k`'s values do not reach the output (only a row
-//!   count does), and `k` gets no weight;
-//! - every output meets the target: `w(q, k) = 1`, one share of `q`'s
-//!   budget ([`asap_accuracy::budget`]); `k`'s sizes are those of its
-//!   `parts`, so a lone denominator sized for the whole target
-//!   (`ε/(1 − ε) > ε`) fails here;
+//! - every output exact: `u`'s values do not reach the output along the
+//!   path (only a row count does), and there is no term;
+//! - every output meets the target: weight `One`, one share of `q`'s budget
+//!   ([`asap_accuracy::budget`]); `u`'s sizes are those of its `parts`, so
+//!   a lone denominator sized for the whole target (`ε/(1 − ε) > ε`) fails
+//!   here, while the same state read as the numerator meets it;
 //! - otherwise [`AccuracyWeight::Unusable`], with the check's cause
 //!   ([`UnusableReason`]): e.g. a rank error through any arithmetic, or an
 //!   HLL whose declared distinct bound is outside its contract.
 //!
-//! For each pair `k1, k2` of candidates usable alone, both sized for at
-//! least two shares, whose values meet in one plan of `q` (under two inputs
-//! of one candidate, under two references of a scalar root, or one below
-//! the other), the outputs are built and checked with both approximate; a
-//! pair that fails is excluded (`a[q, k1] + a[q, k2] ≤ 1`). A pair with a
-//! member sized for one share is excluded by the shares row already. The
-//! rows still bound the shares a plan reads by each candidate's `parts`,
-//! which the equal split proves for one product or quotient of two inputs;
-//! three or more approximate inputs are not built together.
+//! For each pair of terms with weight `One`, both producers sized for at least
+//! two shares, that one plan of `q` can depend on together (paths from two
+//! references of a scalar root, paths leaving each other at two inputs of
+//! one consumer, or one path continuing the other), the outputs are built
+//! and checked with both approximate; a pair that fails is excluded. A pair
+//! with a producer sized for one share is excluded by the shares row
+//! already. The rows still bound the shares a plan depends on by each
+//! producer's `parts`, which the equal split proves for one product or
+//! quotient of two inputs; three or more approximate values are not built
+//! together.
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use asap_cost::{CostInputs, NodeUsage, ProducerOutput};
@@ -152,12 +162,13 @@ pub(crate) struct MilpInputs {
     /// Per ingestion-time shareable candidate whose context reads a
     /// candidate of an `I_r`: the index of that `I_r` in `contexts`.
     pub(crate) ingestion_context_of_shareable: BTreeMap<PhysicalCandidateId, usize>,
-    /// Per query: `w(q, k)` for each approximate candidate `k` whose values
-    /// reach its output.
-    pub(crate) accuracy_weights: Vec<BTreeMap<PhysicalCandidateId, AccuracyWeight>>,
-    /// Per query: the pairs `(k1, k2)`, `k1 < k2`, of candidates usable alone
-    /// that it may not read together.
-    pub(crate) accuracy_excluded_pairs: Vec<Vec<(PhysicalCandidateId, PhysicalCandidateId)>>,
+    /// Per query: its row (K) terms, one per path of edges from an
+    /// approximate producer whose values reach its output.
+    pub(crate) accuracy_terms: Vec<Vec<AccuracyTerm>>,
+    /// Per query: the pairs `(t1, t2)`, `t1 < t2`, of indices into its
+    /// `accuracy_terms`, each with weight `One` alone, that it may not depend on
+    /// together.
+    pub(crate) accuracy_excluded_pairs: Vec<Vec<(usize, usize)>>,
 }
 
 /// One candidate's data for the MILP.
@@ -300,16 +311,43 @@ pub(crate) struct DominatedCandidate {
     pub(crate) reason: String,
 }
 
-/// `w(q, k)`: one share of `q`'s budget, or unusable.
+/// One term of row (K) for query `q`: approximate
+/// producer `u`'s values reaching `q`'s output along one path of edges
+/// `(u, c, i)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AccuracyTerm {
+    /// The output reference of `q` the path starts at.
+    pub(crate) output_reference: usize,
+    /// The path's candidates, from an output candidate of
+    /// `output_reference` down to `u`, the last.
+    pub(crate) candidates: Vec<PhysicalCandidateId>,
+    /// Per edge of the path, top down: the input `i` at which consumer
+    /// `candidates[d]` reads `candidates[d + 1]`.
+    pub(crate) inputs: Vec<usize>,
+    /// The term's accuracy weight along this path: one budget share or
+    /// unusable, not row (K)'s constant λ (interim, deleted by #1207 step 6).
+    pub(crate) weight: AccuracyWeight,
+}
+
+impl AccuracyTerm {
+    /// `u`, the approximate producer.
+    pub(crate) fn producer(&self) -> PhysicalCandidateId {
+        *self.candidates.last().expect("a path has a candidate")
+    }
+}
+
+/// The accuracy weight of one term: one share of `q`'s budget, or
+/// unusable. Interim: #1207 step 6 replaces it with row (K)'s constant
+/// λ_{q,c,i}.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum AccuracyWeight {
     One,
-    /// `∞`: `k` is unusable for `q`.
+    /// `∞`: `u`'s values are unusable for `q` along this path.
     Unusable(UnusableReason),
 }
 
-/// Why a position's weight is `∞`: the check of `q`'s outputs with `k`
-/// approximate failed.
+/// Why a term's weight is `Unusable`: the check of `q`'s outputs with `u`'s values
+/// approximate along the term's path failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum UnusableReason {
     /// Some output has no guarantee
@@ -571,10 +609,10 @@ pub(crate) fn prepare_milp_inputs_with(
         &refresh_windows,
         usable,
     );
-    let AccuracyPositions {
-        weights: accuracy_weights,
+    let AccuracyTerms {
+        terms: accuracy_terms,
         excluded_pairs: accuracy_excluded_pairs,
-    } = accuracy_positions::accuracy_positions(
+    } = accuracy_terms::accuracy_terms(
         physical,
         &candidate_data,
         &producer_candidates_per_input,
@@ -593,7 +631,7 @@ pub(crate) fn prepare_milp_inputs_with(
         contexts,
         context_of_shareable,
         ingestion_context_of_shareable,
-        accuracy_weights,
+        accuracy_terms,
         accuracy_excluded_pairs,
     }
 }
@@ -2155,9 +2193,9 @@ pub(crate) fn prune_dominated_candidates(
     pruned
 }
 
-mod accuracy_positions;
+mod accuracy_terms;
 
-use accuracy_positions::AccuracyPositions;
+use accuracy_terms::AccuracyTerms;
 
 #[cfg(test)]
 mod tests;
