@@ -112,12 +112,13 @@ enumerate.
    legal values (sketch ∈ {Kll, DD}). One candidate instead of one per value.
 2. Each group lists its **consumers** (the groups that read it), each with its **requirement**
    (G2 needs ε.01 from S). One entry per consumer instead of one candidate per possible producer.
-3. A new group S for "the quantile summary of data over 5m", with no sketch fixed. 
+3. A new group S, `SummaryState(quantile, data, 300s)`: the quantile summary of data over 5m, with
+   no sketch fixed.
 
 ```
 G0 Scan
 G1 TimeRange 300s <- G0
-S  quantile summary of data over 300s
+S  SummaryState(quantile, data, 300s)
      [SummaryAgg <-G1]       free: sketch ∈ {Kll, DD}
      [Merge←TWChain <-G0]    free: sketch ∈ {Kll, DD}, tumbling-window width ∈ {60s}
      consumers: G2 requires ε.01, G3 requires ε.001
@@ -146,13 +147,14 @@ struct Requirement {                // what a consumer needs
     accuracy,                       // ε, with budget parts folded in
     lookback_ms,                    // how far back it reads: 300s for data[5m]
     evaluation_interval_ms,         // how often it is evaluated: 60s
+    k: Option<u64>,                 // top-k only
+    labels: Option<LabelSet>,       // rollup and scan widening only
 }
 fn combine(requirements: &[Requirement]) -> Option<DerivedProperties>  // not stored; see below
 ```
 
-`S` represents the new group from the example above (the quantile summary of `data` over 300s that G2 and G3 read). 
-`S` needs a new logical operator for its `logical_node`: `SummaryState { kind, input, window }`, a
-summary with no sketch or parameters fixed. Today's `SummaryAgg` can't serve, because it fixes the
+S's `logical_node` is a new logical operator, `SummaryState { kind, input, window }`: a summary
+with no sketch or parameters fixed. Today's `SummaryAgg` can't serve, because it fixes the
 sketch and is only one way to build S (the direct one).
 
 - **Consumer:** a group that reads another group. G2 and G3 are consumers of S; in (b), T5 and T10 are consumers of a ranking.
@@ -175,21 +177,21 @@ sketch and is only one way to build S (the direct one).
 
   For `S` built windowed with Kll, serving q50 and q99:
 
-  | Derived property | Set as | Value |
-  |---|---|---|
-  | ε built for | min of the consumers' ε | ε.001 |
-  | sketch parameters | `size(sketch, ε)` | Kll k for .001 |
-  | lookback kept | max of the consumers' lookbacks | 300s |
-  | evaluation interval | gcd of the consumers' intervals | 60s |
-  | window count | lookback / width | 5 (at 60s) |
+  | Derived property | Value |
+  |---|---|
+  | ε built for | ε.001 |
+  | sketch parameters | Kll k for .001, `size(sketch, ε)` |
+  | lookback kept | 300s |
+  | evaluation interval | 60s |
+  | window count | 5, lookback / width at 60s |
 
   Derived properties also restrict the free values: the width must divide the evaluation interval
   (so window boundaries line up with evaluation times) and the lookback.
 - **`combine(requirements) -> Option<DerivedProperties>`:** the weakest derived properties that
-  serve every given requirement, or none if they can't share. E.g. (ε.01, 300s, 60s) and
-  (ε.001, 600s, 90s) combine to (ε.001, 600s, 30s): min ε, max lookback, gcd interval.
+  serve every given requirement, or none if they can't share. E.g. ε.01 and ε.001 combine to
+  ε.001. Each rule in (b) gives how its field combines.
 - **`subsumes(d: DerivedProperties, r: Requirement) -> bool`:** a producer with properties d can
-  serve a consumer requiring r. For ε: d.ε ≤ r.ε.
+  serve a consumer requiring r.
 
 Derived properties are not stored in the memo: they depend on which consumers share a producer,
 which the memo does not decide. They are computed from the memo once the rules have finished, when
@@ -202,13 +204,13 @@ Each rule takes the compressed representation and extends it. Notation, one grou
 
 **Pass 1** (`pass1/`). Adds S, its direct candidate and its consumers.
 ```
-in:   G2 q50: [quantile(.5) <-G1]
-      G3 q99: [quantile(.99) <-G1]
-out:  G2 q50: [quantile(.5) <-G1] [Estimate(.5) <-S]
-      G3 q99: [quantile(.99) <-G1] [Estimate(.99) <-S]
+in:   G2 q50: [exact <-G1]
+      G3 q99: [exact <-G1]
+out:  G2 q50: [exact <-G1] [Estimate(.5) <-S]
+      G3 q99: [exact <-G1] [Estimate(.99) <-S]
       S:      [SummaryAgg <-G1 | sketch ∈ {Kll, DD}]  consumers: G2 ε.01, G3 ε.001
 ```
-S is `SummaryState(quantile, data, 300s)`. ε: subsumes ≤, combine min.
+ε: subsumes ≤, combine min.
 
 **Tumbling windows** (`pass2/memo/window_candidates.rs`). Adds the windowed candidate and the
 lookback and evaluation-interval requirement fields.
@@ -216,15 +218,12 @@ lookback and evaluation-interval requirement fields.
 in:   S: [SummaryAgg <-G1 | sketch]  consumers: G2 ε.01, G3 ε.001
 out:  S: [SummaryAgg <-G1 | sketch] [Merge←TWChain <-G0 | sketch, width ∈ {60s}]  consumers: G2 (ε.01, 300s, 60s), G3 (ε.001, 300s, 60s)
 ```
-Requirements are (ε, lookback, evaluation interval). Lookback: subsumes ≥, combine max. Evaluation
-interval: combine gcd.
+Lookback: subsumes ≥, combine max. Evaluation interval: subsumes if it divides, combine gcd.
 
-**Shared sizes and layouts** (`shared_configuration_readers.rs`, `state_groups.rs`). Deleted. Today
-it is the `SharedProducer` for summaries: for each set of consumers that could share (`sets()`) and
-each size or window config that serves them all (`coverings()`), it copies each consumer's
-candidate at that config (`derive()`) and makes each concrete summary its own group: G5–G126 in the
-example. Proposed: S's consumer list replaces `sets()`, its producer options replace
-`coverings()`, and the size is a derived property, so no copies or extra groups.
+**Shared sizes and layouts** (`shared_configuration_readers.rs`, `state_groups.rs`). Deleted.
+Today it adds one group per concrete summary: G5–G126 for three quantiles (G5–G6 direct,
+G7–G126 windowed at 60 widths, each × Kll/DD). Free properties and producer options replace them;
+see "Relation to `SharedProducer`" below.
 
 **Top-k** (`topk.rs`), on `topk by (job) (5, x)` and `topk by (job) (10, x)`. Adds a ranking group
 R that both read. k: subsumes ≥, combine max.
@@ -283,7 +282,7 @@ for each choice of candidate per reached group     # reached: from a root via ch
 **Assign consumers to producers**, once per group S. Input from the 3a structs; output types
 belong to enumeration and are not stored in the memo:
 ```rust
-// input: memo.groups[S].consumers, kept if the consumer's chosen Candidate reads S
+// input C: memo.groups[S].consumers, kept if the consumer's chosen Candidate reads S
 //   e.g. [(G2 q50, ε.01), (G3 q99, ε.001)]
 
 struct Producer {                         // one build of S
@@ -301,13 +300,12 @@ struct Assignment {                       // output
 
 Two ways to compute it, giving the same output:
 - **Split then combine.** Split C into groups in every way; each group gets one producer at
-  `combine(group)`. Shared is the split {q50, q99}; separate is {q50}, {q99}.
+  `combine(group)`.
 - **Pick then group** (proposed). First list the **producer options**, `Vec<DerivedProperties>`: every distinct `combine` over
   subsets of C, i.e. the derived properties a producer of S may have. Compute them by combining
   pairs until nothing new appears. Here: {ε.01, ε.001}. Then each consumer picks an option that
-  subsumes its requirement; consumers that pick the same option share one producer. q50 picks
-  ε.01 or ε.001, q99 picks ε.001; both ε.001 is the shared case. Skip a pick when a weaker option
-  serves the same consumers (overbuilt).
+  subsumes its requirement; consumers that pick the same option share one producer. Skip a pick
+  when a weaker option serves the same consumers (overbuilt).
 
 Either way, then choose each `Producer`'s `candidate` and `free` values.
 
@@ -317,9 +315,6 @@ with the same derived properties, which costs more than one shared producer. n c
 then group yields only that one. More importantly, the options are a short list known before
 deciding who shares (at most one per distinct ε here), and each consumer's pick is independent of
 the others. That lets a later stage keep sharing compressed instead of expanding it into splits.
-
-Today's `coverings()` computes options per split; today's G5–G8 are options (× candidate ×
-sketch), stored as groups. The proposal computes them.
 
 **Worked through:**
 
