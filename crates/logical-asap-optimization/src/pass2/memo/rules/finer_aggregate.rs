@@ -6,7 +6,7 @@ use crate::pass2::finer_aggregate::match_finer;
 use crate::pass2::memo::state_groups::Pass2RuleError;
 use asap_types::ir::operator::{AggIntent, Reduction};
 use asap_types::ir::{NonASAPOp, Operator, OperatorNode, OperatorResultKind};
-use asap_types::stages::{Memo, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -169,7 +169,7 @@ fn add_read(memo: &mut Memo, owner: usize, finer: usize) -> Result<usize, Pass2R
     let reader = Rc::new(OperatorNode::with_schema(reader.operator.clone(), schema));
     Ok(usize::from(add_candidate_over_groups(
         memo,
-        owner,
+        MemoGroupId(owner as u32),
         &original,
         reader,
         OriginOfCandidateForMemoGroup::Rollup,

@@ -2,6 +2,7 @@
 //! flags are required: only exact implementations can supply these inputs.
 use super::reuse::{add_candidate_over_groups, eligible, find_or_add_producer, replace};
 use super::shared_producer::{add_shared_producer_candidates, Reader, SharedProducer};
+use crate::find_or_add_group::find_or_add_group;
 use crate::pass2::asap_aware_cse::topk_reuse_candidates;
 use crate::pass2::memo::state_groups::{boundary_ptrs, nodes_within, Pass2RuleError};
 use asap_types::ir::operator::{AggIntent, Reduction};
@@ -128,7 +129,6 @@ impl SharedProducer for TopKRankings {
             &Rc::new(sort),
             &queries,
             &OriginOfCandidateForMemoGroup::TopKReuse,
-            1,
         );
         let sort = Rc::clone(&memo.groups()[sort_group.0 as usize].logical_node);
         let ranking = covering
@@ -140,7 +140,6 @@ impl SharedProducer for TopKRankings {
             &Rc::new(ranking),
             &queries,
             &OriginOfCandidateForMemoGroup::TopKReuse,
-            1,
         );
         let ranking = Rc::clone(&memo.groups()[ranking_group.0 as usize].logical_node);
         let owner = reader.group;
@@ -178,7 +177,7 @@ impl SharedProducer for TopKRankings {
         .map_err(|error| Pass2RuleError::ReuseRule(error.to_string()))?;
         Ok(usize::from(add_candidate_over_groups(
             memo,
-            owner,
+            MemoGroupId(owner as u32),
             &original,
             reader,
             OriginOfCandidateForMemoGroup::TopKReuse,
@@ -253,7 +252,9 @@ fn exact_input_group(
     let queries = memo.groups()[group.0 as usize].queries.clone();
     // The exact guarantee is the group's identity: it keeps the group apart
     // from `group`, whose candidates may be approximate.
-    let id = memo.find_or_add_group(
+    let groups_before = memo.groups().len();
+    let id = find_or_add_group(
+        memo,
         &node,
         &queries,
         &OriginOfCandidateForMemoGroup::TopKReuse,
@@ -262,7 +263,16 @@ fn exact_input_group(
     for candidate in &mut candidates {
         candidate.fused_groups = Vec::new();
     }
-    memo.candidates[id.0 as usize] = candidates;
+    if id.0 as usize >= groups_before {
+        // Added: the exact candidates replace the group's own candidate.
+        memo.candidates[id.0 as usize] = candidates;
+    } else {
+        // Found (another group's exact input equals it): keep its
+        // candidates and add the new ones.
+        for candidate in candidates {
+            memo.add_candidate(id, candidate);
+        }
+    }
     known.insert(group, Some(id));
     Ok(Some(id))
 }
