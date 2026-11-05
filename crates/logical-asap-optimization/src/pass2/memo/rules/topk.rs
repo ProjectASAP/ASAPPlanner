@@ -1,6 +1,6 @@
 //! Exact ranking reuse with explicit exact-input groups. No global selection
 //! flags are required: only exact implementations can supply these inputs.
-use super::reuse::{append_producer, append_reader, eligible, replace};
+use super::reuse::{add_candidate_over_groups, eligible, find_or_add_producer, replace};
 use super::shared_producer::{add_shared_producer_candidates, Reader, SharedProducer};
 use crate::pass2::asap_aware_cse::topk_reuse_candidates;
 use crate::pass2::memo::state_groups::{boundary_ptrs, nodes_within, Pass2RuleError};
@@ -123,25 +123,25 @@ impl SharedProducer for TopKRankings {
         let sort = covering.ranking.children()[0]
             .with_new_children(|_| Rc::clone(&input))
             .map_err(|error| Pass2RuleError::ReuseRule(error.to_string()))?;
-        let sort_group = append_producer(
+        let sort_group = find_or_add_producer(
             memo,
-            Rc::new(sort),
+            &Rc::new(sort),
             &queries,
-            OriginOfCandidateForMemoGroup::TopKReuse,
+            &OriginOfCandidateForMemoGroup::TopKReuse,
             1,
-        )?;
+        );
         let sort = Rc::clone(&memo.groups()[sort_group.0 as usize].logical_node);
         let ranking = covering
             .ranking
             .with_new_children(|_| Rc::clone(&sort))
             .map_err(|error| Pass2RuleError::ReuseRule(error.to_string()))?;
-        let ranking_group = append_producer(
+        let ranking_group = find_or_add_producer(
             memo,
-            Rc::new(ranking),
+            &Rc::new(ranking),
             &queries,
-            OriginOfCandidateForMemoGroup::TopKReuse,
+            &OriginOfCandidateForMemoGroup::TopKReuse,
             1,
-        )?;
+        );
         let ranking = Rc::clone(&memo.groups()[ranking_group.0 as usize].logical_node);
         let owner = reader.group;
         let logical = Rc::clone(&memo.groups()[owner].logical_node);
@@ -176,7 +176,7 @@ impl SharedProducer for TopKRankings {
             child: limited,
         }))
         .map_err(|error| Pass2RuleError::ReuseRule(error.to_string()))?;
-        Ok(usize::from(append_reader(
+        Ok(usize::from(add_candidate_over_groups(
             memo,
             owner,
             &original,
@@ -251,13 +251,14 @@ fn exact_input_group(
         AccuracyGuarantee::exact("only exact implementations and exact inputs"),
     )));
     let queries = memo.groups()[group.0 as usize].queries.clone();
-    let id = append_producer(
-        memo,
-        node,
+    // The exact guarantee is the group's identity: it keeps the group apart
+    // from `group`, whose candidates may be approximate.
+    let id = memo.find_or_add_group(
+        &node,
         &queries,
-        OriginOfCandidateForMemoGroup::TopKReuse,
+        &OriginOfCandidateForMemoGroup::TopKReuse,
         1,
-    )?;
+    );
     for candidate in &mut candidates {
         candidate.fused_groups = Vec::new();
     }

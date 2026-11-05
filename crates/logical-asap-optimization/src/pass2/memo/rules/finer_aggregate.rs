@@ -1,7 +1,7 @@
 //! Read a SQL aggregate from a finer aggregate's result
 //! ([`match_finer`](crate::pass2::finer_aggregate::match_finer)): filter the finer
 //! rows, then merge them into the query's groups with each measure's rollup.
-use super::reuse::append_reader;
+use super::reuse::add_candidate_over_groups;
 use crate::pass2::finer_aggregate::match_finer;
 use crate::pass2::memo::state_groups::Pass2RuleError;
 use asap_types::ir::operator::{AggIntent, Reduction};
@@ -167,7 +167,7 @@ fn add_read(memo: &mut Memo, owner: usize, finer: usize) -> Result<usize, Pass2R
         return Ok(0);
     }
     let reader = Rc::new(OperatorNode::with_schema(reader.operator.clone(), schema));
-    Ok(usize::from(append_reader(
+    Ok(usize::from(add_candidate_over_groups(
         memo,
         owner,
         &original,
