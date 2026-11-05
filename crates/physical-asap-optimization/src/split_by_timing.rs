@@ -130,7 +130,7 @@ mod tests {
     };
     use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
 
-    const KEPT_ACROSS: Lifetime = Lifetime::AcrossEvaluations(Medium::Memory);
+    const MATERIALIZED_ACROSS: Lifetime = Lifetime::AcrossEvaluations(Medium::Memory);
 
     fn scan() -> Rc<OperatorNode> {
         OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
@@ -240,7 +240,7 @@ mod tests {
         assert_eq!(
             apply_physical_properties(
                 &root,
-                &PhysicalPropertiesAssignment::kept_at_ingestion_where_allowed(
+                &PhysicalPropertiesAssignment::materialized_at_ingestion_where_allowed(
                     std::slice::from_ref(&root)
                 ),
                 &mut NodeToTimedNodeCache::new()
@@ -253,9 +253,9 @@ mod tests {
         );
         let (split, assignment) = split_shared_by_timing(
             std::slice::from_ref(&root),
-            &PhysicalPropertiesAssignment::kept_at_ingestion_where_allowed(std::slice::from_ref(
-                &root,
-            )),
+            &PhysicalPropertiesAssignment::materialized_at_ingestion_where_allowed(
+                std::slice::from_ref(&root),
+            ),
         );
         assert!(apply_physical_properties(
             &split[0],
@@ -278,7 +278,7 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &summary,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         let (split, assignment) = split_shared_by_timing(std::slice::from_ref(&root), &assignment);
         let timed =
@@ -289,7 +289,7 @@ mod tests {
             summary.operator,
             Operator::ASAP(ASAPOp::SummaryAgg { .. })
         ));
-        assert_eq!(summary.lifetime, KEPT_ACROSS);
+        assert_eq!(summary.lifetime, MATERIALIZED_ACROSS);
         assert_eq!(summary.timing, Some(ExecutionTiming::IngestionTime));
     }
 
@@ -312,7 +312,7 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &summary,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         let timed_unsplit = {
             let mut cache = NodeToTimedNodeCache::new();
@@ -333,7 +333,7 @@ mod tests {
             .map(|root| apply_physical_properties(root, &assignment, &mut cache).unwrap())
             .collect();
         let summary = child(&child(&child(&timed[0])));
-        assert_eq!(summary.lifetime, KEPT_ACROSS);
+        assert_eq!(summary.lifetime, MATERIALIZED_ACROSS);
         assert_eq!(child(&summary).timing, Some(ExecutionTiming::IngestionTime));
         assert_eq!(
             child(&child(&timed[1])).timing,
@@ -362,15 +362,15 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &summary,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         assignment.set(
             &state,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         assignment.set(
             &read,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         let (split, assignment) = split_shared_by_timing(&[pair, read], &assignment);
         let mut cache = NodeToTimedNodeCache::new();
@@ -384,7 +384,8 @@ mod tests {
                 ExecutionDataStateError::PhysicalPropertiesConflictWithFixedTiming {
                     operator: "FinalizeExactAccumulator",
                     fixed: ExecutionTiming::QueryTime,
-                    assigned: PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+                    assigned:
+                        PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
                 }
             )
         );

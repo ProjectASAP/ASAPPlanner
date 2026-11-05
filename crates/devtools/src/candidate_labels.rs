@@ -496,7 +496,7 @@ mod tests {
                     .iter()
                     .filter(|node| {
                         node.output_state.timing == ExecutionTiming::IngestionTime
-                            && node.lifetime.is_kept()
+                            && node.lifetime.is_materialized()
                             && matches!(
                                 node.payload,
                                 Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })

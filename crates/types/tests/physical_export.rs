@@ -45,7 +45,7 @@ fn plan() -> Rc<OperatorNode> {
 
 const ON_DISK: Lifetime = Lifetime::AcrossEvaluations(Medium::Disk);
 
-/// `plan()` timed with its summary kept at ingestion time on disk.
+/// `plan()` timed with its summary materialized at ingestion time on disk.
 fn timed_at_ingestion() -> Rc<OperatorNode> {
     let root = plan();
     let mut assignment = PhysicalPropertiesAssignment::default();
@@ -96,7 +96,7 @@ fn query_time_input_to_ingestion_is_rejected() {
 }
 
 /// A node's timing and lifetime must go together: an ingestion-time output
-/// cannot be kept for one evaluation, and a summary build that is not kept
+/// cannot be kept for one evaluation, and a summary build that is not materialized
 /// runs at query time.
 #[test]
 fn invalid_physical_properties_are_rejected() {
@@ -112,7 +112,7 @@ fn invalid_physical_properties_are_rejected() {
     dag.nodes[1].lifetime = Lifetime::None;
     assert_eq!(
         dag.validate(),
-        Err(PhysicalASAPDAGValidationError::UnkeptSummaryBuildNotAtQueryTime { node: 1 })
+        Err(PhysicalASAPDAGValidationError::UnmaterializedSummaryBuildNotAtQueryTime { node: 1 })
     );
     dag.nodes[1].lifetime = ON_DISK;
     dag.validate().unwrap();
@@ -386,8 +386,9 @@ fn exports_summary_over_summary_as_typed_precompute_edges() {
     }))
     .unwrap();
     let mut cache = NodeToTimedNodeCache::new();
-    let at_ingestion =
-        PhysicalPropertiesAssignment::kept_at_ingestion_where_allowed(std::slice::from_ref(&root));
+    let at_ingestion = PhysicalPropertiesAssignment::materialized_at_ingestion_where_allowed(
+        std::slice::from_ref(&root),
+    );
     let timed = apply_physical_properties(&root, &at_ingestion, &mut cache).unwrap();
     let compiled = compile_physical_asap_dag_with_node_ids(&timed).unwrap();
     assert_eq!(compiled.node_ids.node_id(&timed), Some(3));

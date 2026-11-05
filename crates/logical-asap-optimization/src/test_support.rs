@@ -219,7 +219,7 @@ pub fn time_range(range: Duration, child: Rc<OperatorNode>) -> Rc<OperatorNode> 
     .unwrap()
 }
 
-/// `root` timed under the default (every sub-DAG not kept)
+/// `root` timed under the default (every sub-DAG not materialized)
 /// assignment — the shape export and the post-ASAP validators consume.
 pub fn timed(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
     apply_physical_properties(
@@ -230,11 +230,13 @@ pub fn timed(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
     .expect("default physical properties apply")
 }
 
-/// `root` timed with every sub-DAG kept at ingestion time where the DAG allows it.
+/// `root` timed with every sub-DAG materialized at ingestion time where the DAG allows it.
 pub fn at_ingestion(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
     apply_physical_properties(
         root,
-        &PhysicalPropertiesAssignment::kept_at_ingestion_where_allowed(std::slice::from_ref(root)),
+        &PhysicalPropertiesAssignment::materialized_at_ingestion_where_allowed(
+            std::slice::from_ref(root),
+        ),
         &mut NodeToTimedNodeCache::new(),
     )
     .expect("at-ingestion physical properties apply")

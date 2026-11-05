@@ -567,7 +567,7 @@ The sections below describe each stage.
 | 0. Frontends | nothing: a query that cannot be lowered fails planning with an error | — | — |
 | 1, Pass 1 | what the measure or the deployment cannot compute: `RequiresExact`, `NullableAvgInput`, `NoRelationalCountSketchRealization`, `UnsupportedByDeployment`, `QuantileOutsideUnitInterval`, `TopKHeapOverOneRowPerItem`; and, only when the deployment's accuracy model and evidence cannot accept an output without its guarantee, a summary no query reading it can use: `NoErrorBoundForQueryTarget` | `PerComputationLogicalMemoCandidates::pruned_candidates`, each on its aggregate's memo group | the way to compute the measure (`HowToComputeAggregateMeasure`) |
 | 1, Pass 2 | nothing: it only adds candidates | — | — |
-| 2 | what cannot be implemented, built or kept: `PerEntityAggregateNotExecutable` (an exact per-entity `Aggregate` the executor has no kernel for), `RawDataNotRetained` (a query-time scan of raw data the deployment does not keep), `InputHasNoBuildableProducer`, `ReachesNoQueryOutput`, `TooFewQueryReaders` (shared within one evaluation with fewer than two reading queries) | `PhysicalASAPMemoCandidates::pruned_candidates`, each on its operator node's memo group | `PhysicalCandidateKey { operator_node, properties }` |
+| 2 | what cannot be implemented, built or materialized: `PerEntityAggregateNotExecutable` (an exact per-entity `Aggregate` the executor has no kernel for), `RawDataNotRetained` (a query-time scan of raw data the deployment does not keep), `InputHasNoBuildableProducer`, `ReachesNoQueryOutput`, `TooFewQueryReaders` (shared within one evaluation with fewer than two reading queries) | `PhysicalASAPMemoCandidates::pruned_candidates`, each on its operator node's memo group | `PhysicalCandidateKey { operator_node, properties }` |
 | 3 | valid candidates that lose, and the checks only a whole plan can make (accuracy, latency, cluster capacity) | its own `RejectionCause` | — |
 
 Stage 2's key names what a pruned candidate would have been, since kept
@@ -1202,22 +1202,22 @@ The planner implements a subset of these options today. In code each option
 is a timing and a lifetime (`PhysicalProperties`, #1200): materialized at
 ingestion time is ingestion time with lifetime `AcrossEvaluations`;
 materialized at query time is query time with lifetime `OneEvaluation`
-(reused within one evaluation) or `AcrossEvaluations` (kept for later
+(reused within one evaluation) or `AcrossEvaluations` (materialized for later
 evaluations); not materialized is lifetime `None`. Stage 2 enumerates
 materialization for summary builds (`SummaryAgg` and `SummaryTumblingWindowChain`); each
-is offered not kept, kept at ingestion time `AcrossEvaluations(Memory)` when
-it is eligible to run at ingestion time, and kept at query time
+is offered not materialized, materialized at ingestion time `AcrossEvaluations(Memory)` when
+it is eligible to run at ingestion time, and materialized at query time
 `OneEvaluation(Memory)` when two or more queries read it. Of every other
 sub-DAG that two or more queries read (for example a `Scan` that a 1 m and a
-5 m window both read), only the highest node is a kept-output candidate:
+5 m window both read), only the highest node is a materialized-output candidate:
 one that a query's output, or a node only one query reads, consumes. It is
-offered not kept and `OneEvaluation(Memory)` only, since raw rows are not
+offered not materialized and `OneEvaluation(Memory)` only, since raw rows are not
 maintained at ingestion time. Below an ingestion-time build it stays not
-kept: the ingestion side reads its own copy. When the deployment's
+materialized: the ingestion side reads its own copy. When the deployment's
 capabilities declare `query_time_results_retained`, a tumbling-window chain
 that builds exactly one new tumbling window per evaluation is also offered
 query time `AcrossEvaluations(Memory)`: the tumbling windows built at query
-time are kept for the next evaluations. Nothing is placed on disk yet.
+time are materialized for the next evaluations. Nothing is placed on disk yet.
 
 A runtime builds every ingestion-time state on the grid of its width anchored
 at the epoch, so an ingestion-time build must end on that grid at every

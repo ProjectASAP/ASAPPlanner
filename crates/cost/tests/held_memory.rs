@@ -1,11 +1,11 @@
-//! Query-time working memory in [`plan_cost`]: how long a not-kept
+//! Query-time working memory in [`plan_cost`]: how long a not-materialized
 //! node's working memory is held depends on whether a materialized node
 //! reads it.
 
 use asap_cost::execution_demand::evaluation_rate;
 use asap_cost::ResourceUnitCost;
 use asap_cost::{
-    kept_tumbling_window_chains, node_map, plan_cost, CostInputs, CostModel, PlanCost,
+    materialized_tumbling_window_chains, node_map, plan_cost, CostInputs, CostModel, PlanCost,
 };
 use asap_logical_asap_optimization::test_support::lower_promql;
 use asap_physical_asap_optimization::optimize_physical_asap;
@@ -56,7 +56,7 @@ fn cost(dag: &PhysicalASAPDAG, cost_per_memory_byte_second: f64) -> PlanCost {
     plan_cost(
         dag,
         &nodes,
-        &kept_tumbling_window_chains(dag),
+        &materialized_tumbling_window_chains(dag),
         &recurrence(),
         &[],
         &data(),
@@ -100,7 +100,7 @@ fn close(a: f64, b: f64) -> bool {
 /// `bytes · rate · latency_0`, not the rate-weighted mean of the two
 /// latencies.
 #[test]
-fn working_memory_read_by_a_kept_node_is_held_for_the_longest_reader() {
+fn working_memory_read_by_a_materialized_node_is_held_for_the_longest_reader() {
     let outer = lower_promql("sum(sum_over_time(m[1m]))", AccuracyTarget::exact());
     let inner = outer.children()[0].clone();
     let plans = optimize_physical_asap(
@@ -129,10 +129,10 @@ fn working_memory_read_by_a_kept_node_is_held_for_the_longest_reader() {
     let [outer_ms, inner_ms] = latency_ms(recomputed);
     assert!(outer_ms > inner_ms, "{outer_ms} vs {inner_ms}");
     let below = |dag: &PhysicalASAPDAG| {
-        let kept_node = dag.roots[1];
+        let materialized_node = dag.roots[1];
         held_memory_costs(dag)
             .into_iter()
-            .filter(move |(id, _, _)| *id != kept_node && *id != dag.roots[0])
+            .filter(move |(id, _, _)| *id != materialized_node && *id != dag.roots[0])
             .collect::<Vec<_>>()
     };
     let checked = below(recomputed);
@@ -144,7 +144,7 @@ fn working_memory_read_by_a_kept_node_is_held_for_the_longest_reader() {
 
     // Below a `OneEvaluation` node: the longest reader's latency at the
     // materialized node's rate (its readers' schedules together).
-    let kept_rate = evaluation_rate(
+    let materialized_rate = evaluation_rate(
         recurrence().iter().map(|r| (r, None)),
         CostInputs::default().non_repeating_query_horizon_seconds,
     )
@@ -155,7 +155,7 @@ fn working_memory_read_by_a_kept_node_is_held_for_the_longest_reader() {
     assert!(!checked.is_empty(), "the nodes below it hold memory");
     for (id, bytes, term) in checked {
         assert_eq!(lifetime_of(shared, id), Lifetime::None);
-        let expected = bytes * kept_rate * outer_ms / 1_000.0;
+        let expected = bytes * materialized_rate * outer_ms / 1_000.0;
         assert!(close(term, expected), "node {id}: {term} vs {expected}");
     }
 }

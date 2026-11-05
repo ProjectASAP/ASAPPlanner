@@ -113,7 +113,7 @@ fn answer(
 /// Rate state. Moving Sum before Rate would answer differently across
 /// counter resets.
 #[test]
-fn grouped_rate_can_be_kept_before_or_after_grouped_sum() {
+fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
     let dag = grouped_rate();
     let state = dag
         .nodes

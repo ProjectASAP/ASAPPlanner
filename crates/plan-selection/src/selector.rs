@@ -19,7 +19,8 @@ use crate::report::{
 use crate::SelectionModels;
 use asap_cost::analytical::AnalyticalCostError;
 use asap_cost::{
-    kept_tumbling_window_chains, node_map, plan_cost, query_reach, tumbling_window_retention_ms,
+    materialized_tumbling_window_chains, node_map, plan_cost, query_reach,
+    tumbling_window_retention_ms,
 };
 
 type Ranking = PlanRanking;
@@ -180,11 +181,11 @@ impl<'a> PlanSelector<'a> {
             return Ok(CalibrationFit::default());
         }
         let nodes = node_map(&candidate.dag);
-        let kept_chains = kept_tumbling_window_chains(&candidate.dag);
+        let materialized_chains = materialized_tumbling_window_chains(&candidate.dag);
         let (_, fit) = plan_cost(
             &candidate.dag,
             &nodes,
-            &kept_chains,
+            &materialized_chains,
             &self.recurrence,
             &self.range_evaluations,
             self.data,
@@ -230,12 +231,12 @@ impl<'a> PlanSelector<'a> {
                 }
             };
         let nodes = node_map(&candidate.dag);
-        let kept_chains = kept_tumbling_window_chains(&candidate.dag);
+        let materialized_chains = materialized_tumbling_window_chains(&candidate.dag);
         let settings = self.models.cost_inputs;
         let (cost, _) = plan_cost(
             &candidate.dag,
             &nodes,
-            &kept_chains,
+            &materialized_chains,
             &self.recurrence,
             &self.range_evaluations,
             self.data,

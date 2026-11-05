@@ -28,7 +28,7 @@ use crate::ir::properties::guarantee::AccuracyGuarantee;
 use crate::ir::properties::timing::{
     apply_physical_properties_to_roots, PhysicalPropertiesAssignment,
 };
-use crate::ir::properties::timing::{data_state, is_keepable_state_output};
+use crate::ir::properties::timing::{data_state, is_materializable_state_output};
 use crate::ir::schema::{FieldDataType, Schema};
 use crate::physical::{InvalidPhysicalProperties, Lifetime, PhysicalProperties};
 
@@ -73,7 +73,7 @@ pub struct PhysicalASAPDAGNode {
     pub output_state: ExecutionDataState,
     /// How long and where the deployment keeps this node's output: the
     /// lifetime the physical properties assignment chose for the sub-DAG this
-    /// node produces. Any node may be kept (#509 §Materialization); a node
+    /// node produces. Any node may be materialized (#509 §Materialization); a node
     /// with no assignment has lifetime `None`. With `output_state.timing` it
     /// is the node's [`PhysicalProperties`].
     pub lifetime: Lifetime,
@@ -187,10 +187,10 @@ pub enum PhysicalASAPDAGValidationError {
         #[source]
         reason: InvalidPhysicalProperties,
     },
-    /// A summary build (or maintained population) that is not kept but does
+    /// A summary build (or maintained population) that is not materialized but does
     /// not run at query time: a planner bug.
     #[error("node {node:?} is a summary build that is not kept but does not run at query time")]
-    UnkeptSummaryBuildNotAtQueryTime { node: PhysicalASAPNodeId },
+    UnmaterializedSummaryBuildNotAtQueryTime { node: PhysicalASAPNodeId },
     #[error("ingestion node {consumer:?} depends on query node {producer:?}")]
     QueryDependencyInIngestion {
         producer: PhysicalASAPNodeId,
@@ -364,7 +364,7 @@ pub enum ReferencePlanError {
 impl PhysicalASAPDAG {
     /// This DAG's plan with nothing materialized: the same operators,
     /// summaries and summary parameters, with every sub-DAG
-    /// not kept and so every node at query time (the default
+    /// not materialized and so every node at query time (the default
     /// [`PhysicalPropertiesAssignment`]). Node ids are renumbered, and `roots`
     /// and `scalar_roots` keep their order.
     ///
@@ -381,7 +381,7 @@ impl PhysicalASAPDAG {
     }
 
     /// Every node of this DAG as IR, by node id, untimed and
-    /// not kept with its exported guarantee: what a caller derives
+    /// not materialized with its exported guarantee: what a caller derives
     /// IR properties of a plan file's node from, such as its
     /// [`SummaryCoverage`](crate::ir::properties::summary_coverage::SummaryCoverage).
     /// Shared inputs stay shared. Validates the DAG first.
@@ -423,7 +423,7 @@ impl PhysicalASAPDAG {
     /// - a `TimeRange(w)`, range or instant: `(T - s - w, T - s]`;
     /// - a `SummaryTumblingWindowChain` of `n` tumbling windows of width `w`: its whole window `(T - s -
     ///   n·w, T - s]`, or only its newest tumbling window `(T - s - w, T - s]` for a
-    ///   chain in `kept_chains` (kept across evaluations, so each
+    ///   chain in `materialized_chains` (kept across evaluations, so each
     ///   evaluation builds one tumbling window).
     ///
     /// `Unbounded` when a root, any other reader, or a shift with an `@`
@@ -431,9 +431,9 @@ impl PhysicalASAPDAG {
     pub fn scan_window(
         &self,
         scan: PhysicalASAPNodeId,
-        kept_chains: &HashSet<PhysicalASAPNodeId>,
+        materialized_chains: &HashSet<PhysicalASAPNodeId>,
     ) -> ScanWindow {
-        self.scan_windows([scan], kept_chains)[&scan]
+        self.scan_windows([scan], materialized_chains)[&scan]
     }
 
     /// [`Self::scan_window`] of each of `scans`, by id, with the DAG
@@ -441,7 +441,7 @@ impl PhysicalASAPDAG {
     pub fn scan_windows(
         &self,
         scans: impl IntoIterator<Item = PhysicalASAPNodeId>,
-        kept_chains: &HashSet<PhysicalASAPNodeId>,
+        materialized_chains: &HashSet<PhysicalASAPNodeId>,
     ) -> HashMap<PhysicalASAPNodeId, ScanWindow> {
         let payloads = self.payloads_by_id();
         let mut consumers: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
@@ -473,7 +473,7 @@ impl PhysicalASAPDAG {
                         Some(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                             tumbling_window_width_ms,
                             ..
-                        })) if kept_chains.contains(&consumer) => {
+                        })) if materialized_chains.contains(&consumer) => {
                             u128::from(*tumbling_window_width_ms)
                         }
                         Some(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
@@ -580,7 +580,7 @@ impl PhysicalASAPDAG {
     }
 
     /// The IR this DAG exports, one root per query in batch order, every
-    /// node untimed and not kept: the inverse of
+    /// node untimed and not materialized: the inverse of
     /// [`compile_physical_asap_workload`] up to `Rc` identity and timing.
     #[cfg(any(test, feature = "test-support"))]
     fn untimed_query_roots(&self) -> Result<Vec<QueryRoot>, PhysicalASAPDAGValidationError> {
@@ -612,19 +612,19 @@ impl PhysicalASAPDAG {
                 return Err(PhysicalASAPDAGValidationError::DuplicateNodeId(node.id));
             }
             // A node's timing and lifetime must go together; a summary
-            // build that is not kept runs at query time. Any other node that
-            // is not kept runs when its consumer runs.
+            // build that is not materialized runs at query time. Any other node that
+            // is not materialized runs when its consumer runs.
             let properties = node.physical_properties().map_err(|reason| {
                 PhysicalASAPDAGValidationError::InvalidPhysicalProperties {
                     node: node.id,
                     reason,
                 }
             })?;
-            if is_keepable_state_output(&node.payload)
-                && properties == PhysicalProperties::NOT_KEPT_AT_INGESTION
+            if is_materializable_state_output(&node.payload)
+                && properties == PhysicalProperties::NOT_MATERIALIZED_AT_INGESTION
             {
                 return Err(
-                    PhysicalASAPDAGValidationError::UnkeptSummaryBuildNotAtQueryTime {
+                    PhysicalASAPDAGValidationError::UnmaterializedSummaryBuildNotAtQueryTime {
                         node: node.id,
                     },
                 );

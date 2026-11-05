@@ -48,7 +48,7 @@ fn repeating_with(queries: &[&str], extra: &str) -> PlanningWorkload {
 /// evaluations reading its newest tumbling window, as `asap-plan-selection` prices
 /// it, the longest per source.
 fn stage3_raw_lookback_ms(dag: &PhysicalASAPDAG) -> Vec<(Source, Option<u64>)> {
-    let kept_chains = asap_cost::kept_tumbling_window_chains(dag);
+    let materialized_chains = asap_cost::materialized_tumbling_window_chains(dag);
     let mut lookback: Vec<(Source, Option<u64>)> = Vec::new();
     for node in &dag.nodes {
         let Operator::NonASAP(NonASAPOp::Scan { source, .. }) = &node.payload else {
@@ -57,7 +57,7 @@ fn stage3_raw_lookback_ms(dag: &PhysicalASAPDAG) -> Vec<(Source, Option<u64>)> {
         if node.output_state.timing != ExecutionTiming::QueryTime {
             continue;
         }
-        let scan = dag.scan_window(node.id, &kept_chains).lookback_ms();
+        let scan = dag.scan_window(node.id, &materialized_chains).lookback_ms();
         match lookback.iter_mut().find(|(kept, _)| kept == source) {
             Some((_, kept)) => *kept = kept.zip(scan).map(|(a, b)| a.max(b)),
             None => lookback.push((source.clone(), scan)),

@@ -66,7 +66,7 @@ fn options_of(
     run: &Run,
     form: Option<WindowForm>,
     readers_count: usize,
-) -> BTreeMap<Keeping, (String, NodeId)> {
+) -> BTreeMap<Materializing, (String, NodeId)> {
     let logical = run
         .logical
         .iter()
@@ -88,12 +88,12 @@ fn options_of(
                 })
                 .map(|(id, ..)| id)
                 .expect("the window summary survives physical ASAP-aware optimization");
-            (keeping(p, id), (p.id.clone(), id))
+            (materializing(p, id), (p.id.clone(), id))
         })
         .collect()
 }
 
-fn eh_options(run: &Run) -> BTreeMap<Keeping, (String, NodeId)> {
+fn eh_options(run: &Run) -> BTreeMap<Materializing, (String, NodeId)> {
     options_of(run, None, 5)
 }
 
@@ -114,7 +114,7 @@ fn cost(run: &Run, id: &str) -> f64 {
     run.cost(id).unwrap_or_else(|| panic!("{id} is not priced"))
 }
 
-use Keeping::{KeptAtIngestion, KeptAtQueryTime, NotKept};
+use Materializing::{MaterializedAtIngestion, MaterializedAtQueryTime, NotMaterialized};
 
 // ── Constraints over every candidate ─────────────────────────────────────
 
@@ -157,7 +157,7 @@ fn pattern_a_windows_and_offsets() -> (Vec<u64>, Vec<u64>) {
 
 /// Every materialized output of every candidate of `workload` is kept for at
 /// least its longest reader's `windows[q] + offsets[q]`.
-fn assert_kept_outputs_cover_their_consumers(
+fn assert_materialized_outputs_cover_their_consumers(
     workload: &PlanningWorkload,
     windows: &[u64],
     offsets: &[u64],
@@ -168,12 +168,12 @@ fn assert_kept_outputs_cover_their_consumers(
             // A shared scan or range built once per evaluation holds its
             // rows within that evaluation; plan selection reads it over the
             // longest window above it.
-            let shared_rows = keeping(p, n.id) == KeptAtQueryTime
+            let shared_rows = materializing(p, n.id) == MaterializedAtQueryTime
                 && matches!(
                     relational(&n.payload).as_deref(),
                     Some("scan" | "time_range" | "time_shift")
                 );
-            if keeping(p, n.id) == NotKept || shared_rows {
+            if materializing(p, n.id) == NotMaterialized || shared_rows {
                 continue;
             }
             let need = readers(p.dag(), &p.query_roots, n.id)
@@ -191,24 +191,24 @@ fn assert_kept_outputs_cover_their_consumers(
 
 /// A materialized output is kept for as long as its consumers read: it covers every reader's lookback and offset.
 /// The monthly variant runs in
-/// `stage2_physical_asap_optimization_monthly_kept_output_covers_its_consumers`.
+/// `stage2_physical_asap_optimization_monthly_materialized_output_covers_its_consumers`.
 #[test]
-fn stage2_physical_asap_optimization_kept_output_covers_its_consumers() {
+fn stage2_physical_asap_optimization_materialized_output_covers_its_consumers() {
     let (windows, offsets) = pattern_a_windows_and_offsets();
     for workload in [once(), at_rest()] {
-        assert_kept_outputs_cover_their_consumers(&workload, &windows, &offsets);
+        assert_materialized_outputs_cover_their_consumers(&workload, &windows, &offsets);
     }
-    assert_kept_outputs_cover_their_consumers(&pattern_b(), &[PATTERN_B_WINDOW_MS], &[0]);
+    assert_materialized_outputs_cover_their_consumers(&pattern_b(), &[PATTERN_B_WINDOW_MS], &[0]);
 }
 
 /// The monthly variant of
-/// `stage2_physical_asap_optimization_kept_output_covers_its_consumers`:
+/// `stage2_physical_asap_optimization_materialized_output_covers_its_consumers`:
 /// it plans 67,228 candidates, too slow for a debug build in CI.
 #[test]
 #[ignore = "slow: run in release by hand"]
-fn stage2_physical_asap_optimization_monthly_kept_output_covers_its_consumers() {
+fn stage2_physical_asap_optimization_monthly_materialized_output_covers_its_consumers() {
     let (windows, offsets) = pattern_a_windows_and_offsets();
-    assert_kept_outputs_cover_their_consumers(&monthly(), &windows, &offsets);
+    assert_materialized_outputs_cover_their_consumers(&monthly(), &windows, &offsets);
 }
 
 // ── Pattern A ────────────────────────────────────────────────────────────
@@ -220,7 +220,11 @@ fn stage2_physical_asap_optimization_a_shared_eh_has_three_physical_properties_o
     let found: BTreeSet<_> = eh_options(&run_promql(&once())).into_keys().collect();
     assert_eq!(
         found,
-        BTreeSet::from([KeptAtIngestion, KeptAtQueryTime, NotKept])
+        BTreeSet::from([
+            MaterializedAtIngestion,
+            MaterializedAtQueryTime,
+            NotMaterialized
+        ])
     );
 }
 
@@ -229,16 +233,19 @@ fn stage2_physical_asap_optimization_a_shared_eh_has_three_physical_properties_o
 #[ignore = "needs Pass 2 window segments shared across queries (#628, #634); Stage 2 keeping outputs for one evaluation (OneEvaluation) is in place"]
 fn stage2_physical_asap_optimization_a_at_rest_drops_the_ingestion_time_option() {
     let found: BTreeSet<_> = eh_options(&run_promql(&at_rest())).into_keys().collect();
-    assert_eq!(found, BTreeSet::from([KeptAtQueryTime, NotKept]));
+    assert_eq!(
+        found,
+        BTreeSet::from([MaterializedAtQueryTime, NotMaterialized])
+    );
 }
 
 /// A materialized shared EH is one build node read by all five queries, charged once.
 #[test]
 #[ignore = "needs Pass 2 window segments shared across queries (#628, #634); Stage 2 keeping outputs for one evaluation (OneEvaluation) is in place"]
-fn stage2_physical_asap_optimization_a_kept_eh_is_built_once_for_all_consumers() {
+fn stage2_physical_asap_optimization_a_materialized_eh_is_built_once_for_all_consumers() {
     let run = run_promql(&once());
     for (m, (id, build)) in eh_options(&run) {
-        if m == NotKept {
+        if m == NotMaterialized {
             continue;
         }
         let p = run.physical(&id);
@@ -261,14 +268,17 @@ fn stage2_physical_asap_optimization_a_kept_eh_is_built_once_for_all_consumers()
 }
 
 /// A3 rebuilds the EH for each of the five queries (plan selection charges a
-/// not-kept node once per consuming query), so it costs more than A1,
+/// not-materialized node once per consuming query), so it costs more than A1,
 /// which builds it once.
 #[test]
 #[ignore = "needs Pass 2 window segments shared across queries (#628, #634); Stage 2 keeping outputs for one evaluation (OneEvaluation) is in place"]
 fn stage3_plan_selection_a_rebuilding_per_query_costs_more_than_building_once() {
     let run = run_promql(&once());
     let options = eh_options(&run);
-    let (a1, a3) = (&options[&KeptAtQueryTime].0, &options[&NotKept].0);
+    let (a1, a3) = (
+        &options[&MaterializedAtQueryTime].0,
+        &options[&NotMaterialized].0,
+    );
     assert!(
         cost(&run, a3) > cost(&run, a1),
         "A3 {} vs A1 {}",
@@ -283,7 +293,7 @@ fn stage3_plan_selection_a_rebuilding_per_query_costs_more_than_building_once() 
 fn stage3_plan_selection_a_once_adhoc_prefers_the_query_time_eh() {
     let run = run_promql(&once());
     let options = eh_options(&run);
-    let a1 = cost(&run, &options[&KeptAtQueryTime].0);
+    let a1 = cost(&run, &options[&MaterializedAtQueryTime].0);
     for (m, (id, _)) in &options {
         assert!(a1 <= cost(&run, id), "A1 {a1} vs {m:?} {}", cost(&run, id));
     }
@@ -296,7 +306,8 @@ fn stage3_plan_selection_a_monthly_amortizes_ingestion_time_maintenance() {
     let ratio = |workload: PlanningWorkload| {
         let run = run_promql(&workload);
         let options = eh_options(&run);
-        cost(&run, &options[&KeptAtIngestion].0) / cost(&run, &options[&KeptAtQueryTime].0)
+        cost(&run, &options[&MaterializedAtIngestion].0)
+            / cost(&run, &options[&MaterializedAtQueryTime].0)
     };
     let (once, monthly) = (ratio(once()), ratio(monthly()));
     assert!(monthly < once, "A2/A1: monthly {monthly} vs once {once}");
@@ -324,7 +335,11 @@ fn stage2_physical_asap_optimization_b_tumbling_kll_has_three_physical_propertie
     let found: BTreeSet<_> = options_of(&run, tumbling(), 1).into_keys().collect();
     assert_eq!(
         found,
-        BTreeSet::from([KeptAtIngestion, KeptAtQueryTime, NotKept])
+        BTreeSet::from([
+            MaterializedAtIngestion,
+            MaterializedAtQueryTime,
+            NotMaterialized
+        ])
     );
 }
 
@@ -336,7 +351,7 @@ fn stage2_physical_asap_optimization_b_b1_builds_at_ingestion_and_merges_at_quer
         &CostInputs::default(),
         &DeploymentCapabilities::default(),
     );
-    let (id, build) = options_of(&run, tumbling(), 1)[&KeptAtIngestion].clone();
+    let (id, build) = options_of(&run, tumbling(), 1)[&MaterializedAtIngestion].clone();
     let p = run.physical(&id);
     assert!(runs_at_ingestion(p, build));
     let estimates = estimates_of(p.dag(), build);
@@ -370,7 +385,7 @@ fn stage2_physical_asap_optimization_b_tumbling_kll_has_b1_and_b2() {
     let options = options_of(&run, tumbling(), 1);
     assert_eq!(
         options.keys().copied().collect::<BTreeSet<_>>(),
-        BTreeSet::from([KeptAtIngestion, NotKept])
+        BTreeSet::from([MaterializedAtIngestion, NotMaterialized])
     );
     for (id, _) in options.values() {
         assert!(run.cost(id).is_some(), "{id} is priced");
@@ -391,7 +406,7 @@ fn stage2_physical_asap_optimization_b_b3_keeps_query_time_windows() {
         &keeping_query_time_results(),
     );
     let options = options_of(&run, tumbling(), 1);
-    let (id, build) = options[&KeptAtQueryTime].clone();
+    let (id, build) = options[&MaterializedAtQueryTime].clone();
     let p = run.physical(&id);
     assert!(
         p.dag().nodes.iter().all(|n| !runs_at_ingestion(p, n.id)),
@@ -399,7 +414,7 @@ fn stage2_physical_asap_optimization_b_b3_keeps_query_time_windows() {
     );
     assert_eq!(retention_ms(p, build), Some(PATTERN_B_WINDOW_MS));
     let disk = |id: &str| run.selection.costs[id].usage.disk_bytes;
-    assert_eq!(disk(&id) * 5, disk(&options[&NotKept].0));
+    assert_eq!(disk(&id) * 5, disk(&options[&NotMaterialized].0));
 }
 
 /// The sliding-window KLL is kept from ingestion time or from query time; not materializing it is the no-window plan.
@@ -417,7 +432,10 @@ fn stage2_physical_asap_optimization_b_sliding_kll_has_two_physical_properties_o
     )
     .into_keys()
     .collect();
-    assert_eq!(found, BTreeSet::from([KeptAtIngestion, KeptAtQueryTime]));
+    assert_eq!(
+        found,
+        BTreeSet::from([MaterializedAtIngestion, MaterializedAtQueryTime])
+    );
 }
 
 // ── Cost models (#683, #660) ─────────────────────────────────────────────
@@ -452,10 +470,10 @@ fn pattern_b_candidates(run: &Run) -> PatternBCandidates {
             .expect("an exact candidate")
             .id
             .clone(),
-        whole_window_kll: options_of(run, Some(WindowForm::None), 1)[&NotKept]
+        whole_window_kll: options_of(run, Some(WindowForm::None), 1)[&NotMaterialized]
             .0
             .clone(),
-        b1: tumbling_windows[&KeptAtIngestion].0.clone(),
+        b1: tumbling_windows[&MaterializedAtIngestion].0.clone(),
     }
 }
 

@@ -7,7 +7,7 @@ use crate::ir::QueryRoot;
 /// display labels are derived from it by the devtools.
 #[derive(Debug, Clone)]
 pub struct PhysicalWorkloadPlan {
-    /// `P<n>` (nothing kept) or `P<n>-m<k>`, set by the caller.
+    /// `P<n>` (nothing materialized) or `P<n>-m<k>`, set by the caller.
     pub id: String,
     /// The id of the logical candidate it implements.
     pub from_logical: String,
@@ -18,10 +18,13 @@ pub struct PhysicalWorkloadPlan {
 }
 
 impl PhysicalWorkloadPlan {
-    /// Whether any node of `dag` is kept: a summary build, or a shared
+    /// Whether any node of `dag` is materialized: a summary build, or a shared
     /// non-summary node built once per evaluation.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn keeps_any(&self) -> bool {
-        self.dag.nodes.iter().any(|node| node.lifetime.is_kept())
+    pub fn materializes_any(&self) -> bool {
+        self.dag
+            .nodes
+            .iter()
+            .any(|node| node.lifetime.is_materialized())
     }
 }

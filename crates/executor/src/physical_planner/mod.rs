@@ -1721,7 +1721,7 @@ pub mod test_support {
     use std::collections::HashMap;
 
     /// The materialized views at `nodes`, in that order: each node that is
-    /// not a view is marked kept at ingestion time, and it and every node below it
+    /// not a view is marked materialized at ingestion time, and it and every node below it
     /// run at ingestion time (their outputs and outgoing edges); then every
     /// view's `retention_ms` is set ([`PhysicalASAPDAG::set_retention`])
     /// with no tumbling window or range-evaluation span. For tests that bind states at

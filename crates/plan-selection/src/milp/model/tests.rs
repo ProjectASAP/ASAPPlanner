@@ -238,7 +238,7 @@ fn solve_and_check_by(
     let (plan, _) = plan_cost(
         plan_dag,
         &node_map(plan_dag),
-        &asap_cost::kept_tumbling_window_chains(plan_dag),
+        &asap_cost::materialized_tumbling_window_chains(plan_dag),
         &recurrence,
         &ranges,
         &fixture.data,
@@ -478,7 +478,7 @@ fn a_kept_pane_chain_keeps_the_longest_readers_span() {
                 node.asap(),
                 Some(asap_types::ir::ASAPOp::SummaryTumblingWindowChain { .. })
             ) && (candidate.properties.timing() == ExecutionTiming::IngestionTime
-                && candidate.properties.lifetime().is_kept())
+                && candidate.properties.lifetime().is_materialized())
         });
         require_one_of(milp, &chains);
     })
@@ -494,11 +494,11 @@ fn a_kept_pane_chain_keeps_the_longest_readers_span() {
     );
 }
 
-// A not-kept input of a `OneEvaluation` candidate both queries read
+// A not-materialized input of a `OneEvaluation` candidate both queries read
 // (`rate(m[5m])` under `sum` and `max`, one schedule group) runs once, in
 // the candidate's context, and is costed as `plan_cost` costs it.
 #[test]
-fn a_shared_results_not_kept_input_runs_once() {
+fn a_shared_results_not_materialized_input_runs_once() {
     let fixture = through_stages(
         &[
             query("sum(rate(m[5m]))", 60_000),
@@ -564,7 +564,7 @@ fn one_ingestion_scan_shared_by_two_sketch_configurations_is_charged_once() {
     let checked = solve_and_check(&fixture, &cost_inputs(), |milp| {
         let sketches = candidates_where(milp, |candidate, node| {
             candidate.properties.timing() == ExecutionTiming::IngestionTime
-                && candidate.properties.lifetime().is_kept()
+                && candidate.properties.lifetime().is_materialized()
                 && matches!(
                     node.asap(),
                     Some(asap_types::ir::ASAPOp::SummaryAgg { .. })
@@ -616,7 +616,7 @@ fn ingestion_scans_under_refresh_windows(
     let checked = solve_and_check(&fixture, &cost_inputs(), |milp| {
         let states = candidates_where(milp, |candidate, _| {
             candidate.properties.timing() == ExecutionTiming::IngestionTime
-                && candidate.properties.lifetime().is_kept()
+                && candidate.properties.lifetime().is_materialized()
         });
         let window_of = |state: PhysicalCandidateId| {
             milp.inputs
@@ -862,7 +862,7 @@ fn a_phantom_reader_does_not_satisfy_minimum_query_readers() {
     );
 }
 
-// A not-kept query-time candidate selected in two contexts is two
+// A not-materialized query-time candidate selected in two contexts is two
 // nodes; a shareable candidate two queries read is one node.
 #[test]
 fn runs_decode_one_node_per_context_and_one_per_shareable_candidate() {
@@ -873,7 +873,7 @@ fn runs_decode_one_node_per_context_and_one_per_shareable_candidate() {
     let unshared = solve_and_check(&fixture, &cost_inputs(), |milp| {
         let shared = candidates_where(milp, |candidate, _| {
             candidate.properties.timing() == ExecutionTiming::QueryTime
-                && candidate.properties.lifetime().is_kept()
+                && candidate.properties.lifetime().is_materialized()
         });
         forbid(milp, &shared);
         let ingestion = candidates_where(milp, |candidate, _| {

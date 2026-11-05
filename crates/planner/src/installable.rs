@@ -1000,7 +1000,7 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &merged,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         let timed =
             apply_physical_properties(&merged, &assignment, &mut NodeToTimedNodeCache::new())
@@ -1040,7 +1040,7 @@ mod tests {
         for node in tumbling_windows.iter().chain([&merge]) {
             assignment.set(
                 node,
-                PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+                PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
             );
         }
         let timed =

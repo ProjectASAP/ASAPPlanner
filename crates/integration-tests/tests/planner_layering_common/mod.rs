@@ -660,25 +660,33 @@ pub fn assert_valid_and_uniquely_named(run: &Run) {
 /// optimization gives each logical candidate `L<n>` exactly one physical
 /// candidate with nothing materialized, `P<n>`, and one `P<n>-m<k>` for each
 /// other physical properties assignment.
-pub fn assert_one_not_kept_physical_candidate_per_logical(run: &Run) {
+pub fn assert_one_not_materialized_physical_candidate_per_logical(run: &Run) {
     assert!(run.pruned.is_empty(), "pruned: {:?}", run.pruned);
-    let not_kept: Vec<_> = run
+    let not_materialized: Vec<_> = run
         .physical
         .iter()
         .filter(|p| !p.id.contains("-m"))
         .collect();
-    let sources: BTreeSet<_> = not_kept.iter().map(|p| p.from_logical.as_str()).collect();
+    let sources: BTreeSet<_> = not_materialized
+        .iter()
+        .map(|p| p.from_logical.as_str())
+        .collect();
     let logical: BTreeSet<_> = run.logical.iter().map(|c| c.id.as_str()).collect();
     assert_eq!(sources, logical);
-    assert_eq!(not_kept.len(), run.logical.len());
+    assert_eq!(not_materialized.len(), run.logical.len());
     for p in &run.physical {
         let base = p.id.split("-m").next().unwrap();
         assert_eq!(&base[1..], &p.from_logical[1..], "{}", p.id);
-        let not_kept = !p.id.contains("-m");
-        assert_eq!(not_kept, !p.candidate.keeps_any(), "{}", p.id);
-        if not_kept {
+        let not_materialized = !p.id.contains("-m");
+        assert_eq!(
+            not_materialized,
+            !p.candidate.materializes_any(),
+            "{}",
+            p.id
+        );
+        if not_materialized {
             for n in &p.dag().nodes {
-                assert_eq!(keeping(p, n.id), Keeping::NotKept);
+                assert_eq!(materializing(p, n.id), Materializing::NotMaterialized);
             }
         }
     }
@@ -688,8 +696,10 @@ pub fn assert_one_not_kept_physical_candidate_per_logical(run: &Run) {
 
 /// The physical candidates with nothing materialized, one per logical
 /// candidate.
-pub fn not_kept(run: &Run) -> impl Iterator<Item = &Physical> {
-    run.physical.iter().filter(|p| !p.candidate.keeps_any())
+pub fn not_materialized(run: &Run) -> impl Iterator<Item = &Physical> {
+    run.physical
+        .iter()
+        .filter(|p| !p.candidate.materializes_any())
 }
 
 /// One selected id; every other candidate rejected once, with a reason.
@@ -764,16 +774,16 @@ pub fn assert_each_node_charged_per_consuming_query(run: &Run) {
 
 /// How many times each node is computed per evaluation of its consumers (#509; the
 /// rule of plan selection's private `computations`): 1 for a materialized
-/// node; for a not-kept one, the number of consumers that reach
+/// node; for a not-materialized one, the number of consumers that reach
 /// it. A consumer is a query (operator or scalar root) or a materialized
 /// node, whose walk starts at its inputs; a walk stops at materialized
-/// nodes and counts each node once. The consumers kept at ingestion time of one
+/// nodes and counts each node once. The consumers materialized at ingestion time of one
 /// refresh window share one ingestion run and count once (#1151).
 pub fn computations(dag: &PhysicalASAPDAG) -> BTreeMap<NodeId, u64> {
-    let kept_nodes: BTreeSet<_> = dag
+    let materialized_nodes: BTreeSet<_> = dag
         .nodes
         .iter()
-        .filter(|n| n.lifetime.is_kept())
+        .filter(|n| n.lifetime.is_materialized())
         .map(|n| n.id)
         .collect();
     // Each walk's start and, for a consumer refreshed at ingestion, its
@@ -787,7 +797,7 @@ pub fn computations(dag: &PhysicalASAPDAG) -> BTreeMap<NodeId, u64> {
                 .iter()
                 .map(|(_, expr)| (expr.operator_refs().into_iter().copied().collect(), None)),
         )
-        .chain(kept_nodes.iter().map(|&id| {
+        .chain(materialized_nodes.iter().map(|&id| {
             let at_ingestion = dag
                 .nodes
                 .iter()
@@ -802,7 +812,7 @@ pub fn computations(dag: &PhysicalASAPDAG) -> BTreeMap<NodeId, u64> {
     let mut times: BTreeMap<_, _> = dag
         .nodes
         .iter()
-        .map(|n| (n.id, u64::from(kept_nodes.contains(&n.id))))
+        .map(|n| (n.id, u64::from(materialized_nodes.contains(&n.id))))
         .collect();
     // The (node, refresh window) pairs whose ingestion run is counted.
     let mut runs = HashSet::new();
@@ -810,7 +820,7 @@ pub fn computations(dag: &PhysicalASAPDAG) -> BTreeMap<NodeId, u64> {
         let mut seen = HashSet::new();
         let mut stack = start;
         while let Some(id) = stack.pop() {
-            if kept_nodes.contains(&id) || !seen.insert(id) {
+            if materialized_nodes.contains(&id) || !seen.insert(id) {
                 continue;
             }
             if window.is_none_or(|window| runs.insert((id, window))) {
@@ -831,30 +841,30 @@ pub fn evaluation_interval_ms(workload: &PlanningWorkload, query: usize) -> Opti
     }
 }
 
-// ── Kept outputs ─────────────────────────────────────────────────────────
+// ── Materialized outputs ─────────────────────────────────────────────────────────
 
-/// Whether a node's output is kept and at which timing, without how long
+/// Whether a node's output is materialized and at which timing, without how long
 /// (`OneEvaluation` or `AcrossEvaluations`) or its storage medium.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Keeping {
+pub enum Materializing {
     /// Runs as data arrives; output kept until a query reads it.
-    KeptAtIngestion,
+    MaterializedAtIngestion,
     /// Runs when a query first needs it; output reused by the other
     /// queries of the evaluation, or, as query-time `AcrossEvaluations`,
     /// kept for later evaluations.
-    KeptAtQueryTime,
+    MaterializedAtQueryTime,
     /// Output discarded after its reader (lifetime `None`).
-    NotKept,
+    NotMaterialized,
 }
 
 /// Whether physical ASAP-aware optimization keeps `node`'s output, and at
 /// which timing (#667).
-pub fn keeping(p: &Physical, node: NodeId) -> Keeping {
+pub fn materializing(p: &Physical, node: NodeId) -> Materializing {
     let n = p.dag().nodes.iter().find(|n| n.id == node).expect("node");
     match (n.output_state.timing, n.lifetime) {
-        (_, Lifetime::None) => Keeping::NotKept,
-        (ExecutionTiming::IngestionTime, _) => Keeping::KeptAtIngestion,
-        (ExecutionTiming::QueryTime, _) => Keeping::KeptAtQueryTime,
+        (_, Lifetime::None) => Materializing::NotMaterialized,
+        (ExecutionTiming::IngestionTime, _) => Materializing::MaterializedAtIngestion,
+        (ExecutionTiming::QueryTime, _) => Materializing::MaterializedAtQueryTime,
     }
 }
 

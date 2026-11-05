@@ -48,10 +48,10 @@ decided by a `PhysicalPropertiesAssignment`, as the layer contract below states.
    realization strategy writes while building a candidate is provisional.
 2. **Materialization** (Stage 2, #509) chooses, for each sub-DAG whose
    output may be stored (a `SummaryAgg` or a `MaintainPopulation`), whether
-   it is kept and with which timing and `Lifetime` (`None`,
+   it is materialized and with which timing and `Lifetime` (`None`,
    `OneEvaluation(medium)` or `AcrossEvaluations(medium)`), and records it in
    a `PhysicalPropertiesAssignment`. `apply_physical_properties` writes every
-   node's `ExecutionTiming` and `Lifetime`: a state kept at ingestion time and
+   node's `ExecutionTiming` and `Lifetime`: a state materialized at ingestion time and
    all of its inputs run at ingestion time; readouts, other consumers, and the
    other states run at query time. The default assignment keeps nothing; `PlanOutput::physical_asap_dag` applies it
    only to nodes the optimization pass left untimed (a pass's own timing, such
@@ -472,7 +472,7 @@ These derivations are methods on `PhysicalASAPDAG` in `asap-types`, so a
 runtime needs no dependency on the planner crate.
 
 A **materialized view** is a node whose output is kept across evaluations
-(lifetime `AcrossEvaluations`, at ingestion or at query time). A node kept for
+(lifetime `AcrossEvaluations`, at ingestion or at query time). A node materialized for
 `OneEvaluation` is not a view: its output is discarded after one evaluation. Everything a runtime
 needs that the DAG determines is derived from the DAG, so the plan file has no
 second copy to keep consistent. Stage 3's selection report is returned beside
@@ -744,7 +744,7 @@ operator/runtime fixtures:
 | `kll_tumbling_window_execution::a_store_keyed_by_definition_and_time_range_answers_the_tumbling_windows` | A store that finds states only by `(definition_id, time range)` answers the five-tumbling-window query: the tumbling windows share one definition and request the five ranges that tile the window |
 | `runtime_install::tumbling_windows_of_one_refresh_window_read_each_raw_window_once` | A KLL chain and a DDSketch chain of 10 s tumbling windows over one `Scan` are one refresh group: each tumbling window window is read from raw data once, in one ingestion run that builds both tumbling windows; each state equals that of a run of its view alone, and both queries answer as the query-time reference |
 | `kll_tumbling_window_execution::tumbling_windows_reject_parameters_schema_and_missing_binding` | Parameter relabelling, incompatible schemas and missing views fail explicitly |
-| `precompute_candidates::grouped_rate_can_be_kept_before_or_after_grouped_sum` | Stored Rate state and stored Sum state answer like query time; summing counters before Rate does not |
+| `precompute_candidates::grouped_rate_can_be_materialized_before_or_after_grouped_sum` | Stored Rate state and stored Sum state answer like query time; summing counters before Rate does not |
 | `sql_to_physical::sql_filter_grouped_sum_executes_and_rebinds` | SQL text → candidate search → physical compilation → shared Scan predicates and grouped summary execution; NULL samples are ignored and fresh bindings produce new results |
 
 Tumbling window construction, tumbling window timestamp checks, stored identity, revisions, readiness

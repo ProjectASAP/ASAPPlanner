@@ -65,7 +65,7 @@ impl OperatorNodeOfCandidateForMemoGroup {
 pub struct PhysicalCandidate {
     /// The operator node it runs.
     pub operator_node: OperatorNodeOfCandidateForMemoGroupId,
-    /// When it runs and how long its result lives. A node that is not kept
+    /// When it runs and how long its result lives. A node that is not materialized
     /// under an ingestion-time build still runs at ingestion time.
     pub properties: PhysicalProperties,
     /// Per input of its operator node (in `map_children` order), the
@@ -77,7 +77,7 @@ pub struct PhysicalCandidate {
     pub may_produce_query_output: bool,
     /// One entry per workload query: whether this tumbling-window chain may be kept
     /// across evaluations when that query is its only reader. Filled only
-    /// for a query-time tumbling-window chain kept `AcrossEvaluations(Memory)` in a
+    /// for a query-time tumbling-window chain materialized `AcrossEvaluations(Memory)` in a
     /// deployment that keeps query-time results; empty otherwise.
     pub may_keep_across_evaluations_per_sole_reader_query: Vec<bool>,
 }

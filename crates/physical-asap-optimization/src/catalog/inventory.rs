@@ -277,7 +277,7 @@ impl ImmediateCandidateBuilder<'_> {
         if let Some(&existing) = self.private_nodes.get(&Rc::as_ptr(node)) {
             return Ok(existing);
         }
-        if node.timing.is_some() || node.lifetime.is_kept() {
+        if node.timing.is_some() || node.lifetime.is_materialized() {
             return Err(CandidateInventoryError::Unsupported {
                 group: self.owner.group.0 as usize,
                 candidate: self.owner.index,

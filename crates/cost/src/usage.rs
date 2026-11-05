@@ -46,15 +46,15 @@ use asap_types::workload::bounds::{
 /// ([`computations`]); an ingestion-time node over one second of arriving
 /// rows. A materialized node's kept state is counted in byte-seconds per
 /// second; a tumbling-window chain kept beyond one evaluation keeps the tumbling windows its
-/// retention covers ([`tumbling_window_retention_ms`]). `nodes` and `kept_chains` are
-/// `dag`'s ([`node_map`], [`kept_tumbling_window_chains`]); `recurrence[q]` and
+/// retention covers ([`tumbling_window_retention_ms`]). `nodes` and `materialized_chains` are
+/// `dag`'s ([`node_map`], [`materialized_tumbling_window_chains`]); `recurrence[q]` and
 /// `range_evaluations[q]` say how often query `q` runs and how many steps
 /// each run evaluates (one when missing).
 #[allow(clippy::too_many_arguments)]
 pub fn plan_cost(
     dag: &PhysicalASAPDAG,
     nodes: &NodeMap<'_>,
-    kept_chains: &HashSet<PhysicalASAPNodeId>,
+    materialized_chains: &HashSet<PhysicalASAPNodeId>,
     recurrence: &[QueryRecurrence],
     range_evaluations: &[Option<RangeEvaluation>],
     data: &DataWorkload,
@@ -77,7 +77,7 @@ pub fn plan_cost(
     } = each_node_usage(
         dag,
         nodes,
-        kept_chains,
+        materialized_chains,
         recurrence,
         range_evaluations,
         data,
@@ -95,7 +95,7 @@ pub fn plan_cost(
     // one second of arriving rows at ingestion time.
     let mut work_ms: HashMap<PhysicalASAPNodeId, f64> = HashMap::new();
     // Query-time memory held only while one evaluation runs, a OneEvaluation
-    // state in memory or a not-kept node's working memory: (bytes,
+    // state in memory or a not-materialized node's working memory: (bytes,
     // per second, whether each consumer computes its own copy),
     // counted once the evaluations' latencies are known, in node order so
     // the sum is the same in every run.
@@ -248,7 +248,7 @@ pub fn plan_cost(
     }
     // Query-time memory is held for one evaluation: a `OneEvaluation` state from
     // its build until the longest query reading it finishes, about that
-    // query's latency, once per execution. A not-kept node's working
+    // query's latency, once per execution. A not-materialized node's working
     // memory is computed once per consumer ([`consumers`]), and each copy is
     // held while its consumer's evaluation runs: a query's for that query's
     // latency, at its rate; a materialized node's until the longest query
@@ -282,7 +282,9 @@ pub fn plan_cost(
                             .map_err(|error| (id, error))?;
                             rate * latency.get(query).map_or(0.0, QueryLatency::total_ms)
                         }
-                        Consumer::Kept(node) => multipliers[&node].1 * longest_reader_ms(node),
+                        Consumer::Materialized(node) => {
+                            multipliers[&node].1 * longest_reader_ms(node)
+                        }
                     };
                 }
                 sum
@@ -377,7 +379,7 @@ struct EachNodeUsage<'a> {
 fn each_node_usage<'a>(
     dag: &'a PhysicalASAPDAG,
     nodes: &NodeMap<'a>,
-    kept_chains: &HashSet<PhysicalASAPNodeId>,
+    materialized_chains: &HashSet<PhysicalASAPNodeId>,
     recurrence: &[QueryRecurrence],
     range_evaluations: &[Option<RangeEvaluation>],
     data: &DataWorkload,
@@ -421,11 +423,11 @@ fn each_node_usage<'a>(
             .collect();
         let scan_window = match (&node.payload, node.output_state.timing) {
             (Payload::NonASAP(NonASAPOp::Scan { .. }), ExecutionTiming::QueryTime) => {
-                match dag.scan_window(node.id, kept_chains) {
+                match dag.scan_window(node.id, materialized_chains) {
                     // Priced as before #955 decides `@` anchors and
                     // unwindowed readers: the widest window read.
                     ScanWindow::Unbounded => trailing_window(
-                        widest_window_read_ms(dag, nodes, node.id, kept_chains)
+                        widest_window_read_ms(dag, nodes, node.id, materialized_chains)
                             .or(root_scan_lookback_ms),
                     ),
                     window => window,
@@ -1603,7 +1605,7 @@ pub type NodeMap<'a> =
 /// tumbling window per evaluation). Each evaluation builds the newest tumbling window, and the
 /// older ones, which complete the readers' look-back, are kept from
 /// earlier evaluations.
-pub fn kept_tumbling_window_chains(dag: &PhysicalASAPDAG) -> HashSet<PhysicalASAPNodeId> {
+pub fn materialized_tumbling_window_chains(dag: &PhysicalASAPDAG) -> HashSet<PhysicalASAPNodeId> {
     dag.nodes
         .iter()
         .filter(|node| {
@@ -1623,14 +1625,14 @@ pub fn kept_tumbling_window_chains(dag: &PhysicalASAPDAG) -> HashSet<PhysicalASA
 /// The widest window, in milliseconds, read above the scan `scan` at query
 /// time, ignoring readers that read it outside a window and the anchors of
 /// shifts: each range `TimeRange` and `SummaryTumblingWindowChain` (its whole window, or
-/// one tumbling window for a chain in `kept_chains`) reached through time shifts.
+/// one tumbling window for a chain in `materialized_chains`) reached through time shifts.
 /// Prices a scan whose [`PhysicalASAPDAG::scan_window`] is unbounded as
 /// Stage 3 did before; #955 decides `@` anchors.
 fn widest_window_read_ms(
     dag: &PhysicalASAPDAG,
     nodes: &NodeMap<'_>,
     scan: PhysicalASAPNodeId,
-    kept_chains: &HashSet<PhysicalASAPNodeId>,
+    materialized_chains: &HashSet<PhysicalASAPNodeId>,
 ) -> Option<u64> {
     let mut widest = None;
     let mut stack = vec![scan];
@@ -1645,7 +1647,7 @@ fn widest_window_read_ms(
                 Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
                     tumbling_window_width_ms,
                     ..
-                }) if kept_chains.contains(&edge.consumer) => *tumbling_window_width_ms,
+                }) if materialized_chains.contains(&edge.consumer) => *tumbling_window_width_ms,
                 Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
                     tumbling_window_width_ms,
                     tumbling_window_count,

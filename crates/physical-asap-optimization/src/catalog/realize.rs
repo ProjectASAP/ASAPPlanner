@@ -60,16 +60,17 @@ pub fn realize_selected_candidates(
         query_time_results_retained,
         &mut |logical, _, options| {
             let node = node_by_pointer.get(&logical).copied();
-            // A node outside the selection is not kept.
-            let requested = node.map_or(PhysicalProperties::NOT_KEPT_AT_QUERY_TIME, |node| {
-                seen[node] = true;
-                assignments[node]
-            });
-            // The option keeping it as requested; option `None` (not kept)
+            // A node outside the selection is not materialized.
+            let requested =
+                node.map_or(PhysicalProperties::NOT_MATERIALIZED_AT_QUERY_TIME, |node| {
+                    seen[node] = true;
+                    assignments[node]
+                });
+            // The option keeping it as requested; option `None` (not materialized)
             // for a requested lifetime `None`, at either timing.
             let chosen = options.iter().position(|option| match option {
                 Some(kept) => *kept == requested,
-                None => !requested.lifetime().is_kept(),
+                None => !requested.lifetime().is_materialized(),
             });
             if chosen.is_none() {
                 let message = format!(
@@ -98,12 +99,12 @@ pub fn realize_selected_candidates(
     let physical_outputs = ordered_output_references(&physical.roots);
     let identities = paired_node_identities(&rebuilt.outputs, &physical_outputs)?;
     for (node, properties) in assignments.iter().enumerate() {
-        if properties.lifetime().is_kept() && !seen[node] {
+        if properties.lifetime().is_materialized() && !seen[node] {
             // The decoder already established node identity. Stage 2 did
             // not offer this selected node (e.g. a lower shared non-summary),
             // so the assignment is infeasible rather than an adapter failure.
             return Err(PhysicalCandidateError::RejectedAssignment(format!(
-                "selected node {node} is not an eligible kept-output node in the selected graph"
+                "selected node {node} is not an eligible materialized-output node in the selected graph"
             )));
         }
     }
@@ -231,7 +232,7 @@ mod tests {
     use asap_types::workload::QueryRecurrence;
 
     /// Add a node running `candidate` and, for each input, a node of its
-    /// first producer that is not kept (else its first producer),
+    /// first producer that is not materialized (else its first producer),
     /// recursively; returns the new node.
     fn select_from(
         physical: &PhysicalASAPMemoCandidates,
@@ -248,7 +249,12 @@ mod tests {
             let producer = producer_candidates
                 .iter()
                 .copied()
-                .find(|s| !physical.candidates[s.0].properties.lifetime().is_kept())
+                .find(|s| {
+                    !physical.candidates[s.0]
+                        .properties
+                        .lifetime()
+                        .is_materialized()
+                })
                 .unwrap_or(producer_candidates[0]);
             let producer = select_from(physical, producer, selected);
             selected.edges.push(SelectedEdge {

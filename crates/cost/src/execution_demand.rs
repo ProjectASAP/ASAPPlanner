@@ -281,29 +281,29 @@ pub fn query_starts(dag: &PhysicalASAPDAG) -> Vec<Vec<PhysicalASAPNodeId>> {
         .collect()
 }
 
-/// What computes a not-kept node once per its own execution
+/// What computes a not-materialized node once per its own execution
 /// ([`consumers`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Consumer {
     /// Query `.0` (an operator or scalar root), at its own rate.
     Query(usize),
-    /// A kept node, at that node's rate.
-    Kept(PhysicalASAPNodeId),
+    /// A materialized node, at that node's rate.
+    Materialized(PhysicalASAPNodeId),
 }
 
-/// The consumers of each not-kept node of `dag` that any consumer
+/// The consumers of each not-materialized node of `dag` that any consumer
 /// reaches ([`computations`]): the queries and the materialized nodes whose
 /// walk down their inputs reaches it before meeting a materialized node,
 /// each once; the queries first, in order, then the materialized nodes in
 /// `dag`'s node order.
 pub fn consumers(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, Vec<Consumer>> {
-    let kept_nodes: Vec<PhysicalASAPNodeId> = dag
+    let materialized_nodes: Vec<PhysicalASAPNodeId> = dag
         .nodes
         .iter()
-        .filter(|n| n.lifetime.is_kept())
+        .filter(|n| n.lifetime.is_materialized())
         .map(|n| n.id)
         .collect();
-    let is_kept: HashSet<PhysicalASAPNodeId> = kept_nodes.iter().copied().collect();
+    let is_materialized: HashSet<PhysicalASAPNodeId> = materialized_nodes.iter().copied().collect();
     let inputs = |id: PhysicalASAPNodeId| {
         dag.edges
             .iter()
@@ -315,16 +315,16 @@ pub fn consumers(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, Vec<Consu
         .enumerate()
         .map(|(query, start)| (Consumer::Query(query), start))
         .chain(
-            kept_nodes
+            materialized_nodes
                 .iter()
-                .map(|&id| (Consumer::Kept(id), inputs(id).collect())),
+                .map(|&id| (Consumer::Materialized(id), inputs(id).collect())),
         );
     let mut consumers: HashMap<_, Vec<Consumer>> = HashMap::new();
     for (consumer, start) in walks {
         let mut seen = HashSet::new();
         let mut stack: Vec<PhysicalASAPNodeId> = start;
         while let Some(id) = stack.pop() {
-            if is_kept.contains(&id) || !seen.insert(id) {
+            if is_materialized.contains(&id) || !seen.insert(id) {
                 continue;
             }
             consumers.entry(id).or_default().push(consumer);
@@ -336,17 +336,17 @@ pub fn consumers(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, Vec<Consu
 
 /// How often each node of `dag` is computed: `(multiplier, per_second)`
 /// (module doc, "Cost model"). A materialized node is computed once for all
-/// its readers: once per second at ingestion time (kept at ingestion time), at
+/// its readers: once per second at ingestion time (materialized at ingestion time), at
 /// the combined rate of the queries reaching it (`OneEvaluation`,
 /// [`evaluation_rate`]), or once per request of those queries for a chain
 /// kept across evaluations, whose request builds only its newest tumbling window
 /// however many range steps it evaluates. `range_evaluations[q]` is query
-/// `q`'s range evaluation (none when missing). A not-kept node is computed once per
+/// `q`'s range evaluation (none when missing). A not-materialized node is computed once per
 /// consumer that reaches it ([`consumers`]), at that consumer's rate. A consumer is a query
 /// (operator or scalar root), at its own rate, or a materialized node, at
 /// that node's rate; a walk stops at the first materialized node it meets,
 /// and a node read several times within one consumer's walk counts once for
-/// it. The consumers kept at ingestion time of one refresh window
+/// it. The consumers materialized at ingestion time of one refresh window
 /// ([`PhysicalASAPDAG::refresh_window`]) are refreshed in one ingestion run,
 /// which computes the node once for all of them: they count as one
 /// consumer (a consumer with an unbounded window counts alone). Its
@@ -359,7 +359,7 @@ pub fn computations(
     root_rates: Option<&[f64]>,
 ) -> Result<HashMap<PhysicalASAPNodeId, (u64, f64)>, AnalyticalCostError> {
     let range_of = |query: usize| range_evaluations.get(query).copied().flatten();
-    let mut kept_nodes: HashMap<PhysicalASAPNodeId, PhysicalProperties> = HashMap::new();
+    let mut materialized_nodes: HashMap<PhysicalASAPNodeId, PhysicalProperties> = HashMap::new();
     for node in &dag.nodes {
         let properties = node.physical_properties().map_err(|reason| {
             AnalyticalCostError::InvalidPhysicalProperties {
@@ -367,8 +367,8 @@ pub fn computations(
                 reason,
             }
         })?;
-        if properties.lifetime().is_kept() {
-            kept_nodes.insert(node.id, properties);
+        if properties.lifetime().is_materialized() {
+            materialized_nodes.insert(node.id, properties);
         }
     }
     let inputs = |id: PhysicalASAPNodeId| {
@@ -391,8 +391,8 @@ pub fn computations(
             stack.extend(inputs(id));
         }
     }
-    let mut rate_of_kept = HashMap::new();
-    for (&id, &properties) in &kept_nodes {
+    let mut rate_of_materialized = HashMap::new();
+    for (&id, &properties) in &materialized_nodes {
         let at_ingestion = properties.timing() == ExecutionTiming::IngestionTime;
         // A query-time chain kept across evaluations is built once per request.
         let per_request = !at_ingestion && properties.lifetime().is_across_evaluations();
@@ -406,7 +406,7 @@ pub fn computations(
                 non_repeating_query_horizon_seconds,
             )?,
         };
-        rate_of_kept.insert(id, rate);
+        rate_of_materialized.insert(id, rate);
     }
     // Each query consumer's rate.
     let mut query_rates = Vec::new();
@@ -421,7 +421,7 @@ pub fn computations(
     }
     // The refresh window of each node refreshed at ingestion.
     let refresh_windows = dag.refresh_windows(
-        kept_nodes
+        materialized_nodes
             .iter()
             .filter(|(_, properties)| properties.timing() == ExecutionTiming::IngestionTime)
             .map(|(&id, _)| id),
@@ -432,7 +432,7 @@ pub fn computations(
         // The refresh windows whose ingestion run already computes the node.
         let mut runs = HashSet::new();
         for consumer in of_node {
-            if let Consumer::Kept(node) = consumer {
+            if let Consumer::Materialized(node) = consumer {
                 if let Some(Some(window)) = refresh_windows.get(&node) {
                     if !runs.insert(*window) {
                         continue;
@@ -442,7 +442,7 @@ pub fn computations(
             entry.0 += 1;
             entry.1 += match consumer {
                 Consumer::Query(query) => query_rates[query],
-                Consumer::Kept(node) => rate_of_kept[&node],
+                Consumer::Materialized(node) => rate_of_materialized[&node],
             };
         }
     }
@@ -450,7 +450,7 @@ pub fn computations(
         .nodes
         .iter()
         .map(|n| {
-            let times = match rate_of_kept.get(&n.id) {
+            let times = match rate_of_materialized.get(&n.id) {
                 Some(&rate) => (1, rate),
                 None => count.get(&n.id).copied().unwrap_or((0, 0.0)),
             };

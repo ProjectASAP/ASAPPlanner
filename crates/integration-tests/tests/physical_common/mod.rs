@@ -43,7 +43,7 @@ pub fn compile_physical_asap_dag(
     )
 }
 
-/// As [`compile_physical_asap_dag`], with every sub-DAG kept at ingestion time
+/// As [`compile_physical_asap_dag`], with every sub-DAG materialized at ingestion time
 /// where the DAG allows it.
 #[allow(dead_code)] // Not every test binary sharing this module stores states at ingestion.
 pub fn compile_at_ingestion_physical_asap_dag(
@@ -51,7 +51,7 @@ pub fn compile_at_ingestion_physical_asap_dag(
 ) -> Result<asap_types::ir::physical_export::PhysicalASAPDAG, Box<dyn std::error::Error>> {
     compile_with(
         root,
-        &asap_types::ir::PhysicalPropertiesAssignment::kept_at_ingestion_where_allowed(
+        &asap_types::ir::PhysicalPropertiesAssignment::materialized_at_ingestion_where_allowed(
             std::slice::from_ref(root),
         ),
     )

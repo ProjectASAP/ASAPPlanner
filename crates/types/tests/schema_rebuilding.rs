@@ -333,7 +333,7 @@ fn a_current_series_population_matches_only_its_selectors_lookback() {
 }
 
 /// Population timing is a materialization choice: the population follows its
-/// assignment (not kept by default), while its evaluation always
+/// assignment (not materialized by default), while its evaluation always
 /// runs at query time.
 #[test]
 fn population_timing_follows_its_physical_properties() {

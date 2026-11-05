@@ -3,25 +3,25 @@
 //! edges.
 //!
 //! The logical DAG carries no timing. Materialization (#509
-//! §Materialization) decides, for each sub-DAG, whether its output is kept,
+//! §Materialization) decides, for each sub-DAG, whether its output is materialized,
 //! and if so with which [`PhysicalProperties`]: its timing and its
 //! [`Lifetime`] (#1200). [`PhysicalPropertiesAssignment`] records that per
-//! sub-DAG, named by the node whose output would be kept (any node: a
+//! sub-DAG, named by the node whose output would be materialized (any node: a
 //! summary state, a population, or e.g. the tumbling windows of #509
 //! Example 4), and [`apply_physical_properties`] expands it into a
 //! timing and a lifetime on every node:
 //!
 //! - `SummaryEstimate` and `EvaluatePopulation` run at query time;
-//! - a node assigned a kept output runs at that output's timing. A
-//!   `SummaryAgg` or `MaintainPopulation` without an assignment is not kept
+//! - a node assigned a materialized output runs at that output's timing. A
+//!   `SummaryAgg` or `MaintainPopulation` without an assignment is not materialized
 //!   and runs at query time. Every node upstream of an ingestion-time node
-//!   also runs at ingestion time, so a kept ingestion-time output (or an
+//!   also runs at ingestion time, so a materialized ingestion-time output (or an
 //!   ingestion timing fixed by a candidate builder) over something that can
 //!   only exist at query time is an error
 //!   ([`ExecutionDataStateError::UpstreamNotAtIngestion`]);
 //! - a PromQL `BinaryOp` over per-series inputs that are not the same series
 //!   rows runs at query time, since maintenance cannot align them;
-//! - every other node is not kept (lifetime `None`) and runs when its
+//! - every other node is not materialized (lifetime `None`) and runs when its
 //!   consumer runs: everything that feeds an ingestion-time node runs at
 //!   ingestion time, everything above an evaluation at query time.
 //!
@@ -30,9 +30,9 @@
 //! timing. An explicit assignment on it that agrees is kept; one that needs
 //! the other timing is an error
 //! ([`ExecutionDataStateError::PhysicalPropertiesConflictWithFixedTiming`]).
-//! A root may be kept at ingestion time across evaluations: the query reads
+//! A root may be materialized at ingestion time across evaluations: the query reads
 //! its stored output. A root of rows that runs at ingestion time without
-//! being kept there is an error
+//! being materialized there is an error
 //! ([`ExecutionDataStateError::UnstoredIngestionRoot`]).
 //!
 //! A node reached from two consumers that need different timings cannot be
@@ -45,13 +45,13 @@
 //!
 //! | Consumer | Accepts from an input |
 //! |---|---|
-//! | `SummaryAgg.child`, `SummaryTumblingWindowChain.child` | Rows, or exact-accumulator state, never a query-time value when the state is maintained; a query-time build reads an ingestion-time input (rows or exact-accumulator state) only as a kept at ingestion time input's stored output |
+//! | `SummaryAgg.child`, `SummaryTumblingWindowChain.child` | Rows, or exact-accumulator state, never a query-time value when the state is maintained; a query-time build reads an ingestion-time input (rows or exact-accumulator state) only as a materialized at ingestion time input's stored output |
 //! | `SummaryEstimate.summary_input` | Summary state at either timing |
 //! | `SummaryMerge.children` | Summary state at either timing; at ingestion time only for a merge at ingestion time |
 //! | `FinalizeExactAccumulator.child` | Exact-accumulator state |
 //! | `EvaluatePopulation.child` | A timed `MaintainPopulation` |
-//! | `MaintainPopulation.child` | Rows at its own timing matching the population's input; unlike a `NonASAP` consumer, a query-time population does not read a kept at ingestion time input's stored output |
-//! | any `NonASAP` consumer | Rows (or exact-accumulator state for a projection-like operator) at the consumer's own timing, or an output kept at ingestion time read at query time; ingestion work never reads a query-time value |
+//! | `MaintainPopulation.child` | Rows at its own timing matching the population's input; unlike a `NonASAP` consumer, a query-time population does not read a materialized at ingestion time input's stored output |
+//! | any `NonASAP` consumer | Rows (or exact-accumulator state for a projection-like operator) at the consumer's own timing, or an output materialized at ingestion time read at query time; ingestion work never reads a query-time value |
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -69,11 +69,11 @@ use crate::ir::schema::{DataType, FieldDataType, Schema};
 use crate::physical::Medium;
 use crate::physical::{Lifetime, PhysicalProperties};
 
-/// Which sub-DAG outputs are kept, and with which timing and lifetime
+/// Which sub-DAG outputs are materialized, and with which timing and lifetime
 /// (#509 §Materialization: "Materialization decides, for each sub-DAG,
 /// whether its output is stored"). A sub-DAG is named by the node whose
-/// output is kept (by identity); any node may be assigned. A node without
-/// an assignment is not kept: a summary build or `MaintainPopulation` then
+/// output is materialized (by identity); any node may be assigned. A node without
+/// an assignment is not materialized: a summary build or `MaintainPopulation` then
 /// runs at query time, every other node when its consumer runs. `Default`
 /// keeps nothing.
 ///
@@ -84,7 +84,7 @@ pub struct PhysicalPropertiesAssignment {
     kept: HashMap<*const OperatorNode, (Rc<OperatorNode>, PhysicalProperties)>,
 }
 
-/// Each kept node as its operator kind and address, not its whole sub-DAG.
+/// Each materialized node as its operator kind and address, not its whole sub-DAG.
 impl std::fmt::Debug for PhysicalPropertiesAssignment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let kept: Vec<_> = self
@@ -101,10 +101,10 @@ impl std::fmt::Debug for PhysicalPropertiesAssignment {
 }
 
 impl PhysicalPropertiesAssignment {
-    /// Keep the output of the sub-DAG `node` produces with `kept`'s timing
-    /// and lifetime. `kept` must keep the output (lifetime not `None`).
+    /// Keep the output of the sub-DAG `node` produces with `materialized`'s timing
+    /// and lifetime. `materialized` must keep the output (lifetime not `None`).
     pub fn set(&mut self, node: &Rc<OperatorNode>, kept: PhysicalProperties) {
-        debug_assert!(kept.lifetime().is_kept(), "{kept:?} does not keep");
+        debug_assert!(kept.lifetime().is_materialized(), "{kept:?} does not keep");
         self.kept.insert(Rc::as_ptr(node), (Rc::clone(node), kept));
     }
 
@@ -117,10 +117,10 @@ impl PhysicalPropertiesAssignment {
     }
 
     /// Every summary build and `MaintainPopulation` reachable from `roots`
-    /// kept in memory at ingestion time where the DAG allows it: not under a
+    /// materialized in memory at ingestion time where the DAG allows it: not under a
     /// filter, and with nothing below it that can only run at query time.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn kept_at_ingestion_where_allowed(roots: &[Rc<OperatorNode>]) -> Self {
+    pub fn materialized_at_ingestion_where_allowed(roots: &[Rc<OperatorNode>]) -> Self {
         fn visit(
             node: &Rc<OperatorNode>,
             assignment: &mut PhysicalPropertiesAssignment,
@@ -133,7 +133,7 @@ impl PhysicalPropertiesAssignment {
                 visit(child, assignment, visited);
             }
             if node.timing.is_none()
-                && is_keepable_state_output(&node.operator)
+                && is_materializable_state_output(&node.operator)
                 && !is_filtered_build(node)
                 && !node
                     .children()
@@ -142,7 +142,7 @@ impl PhysicalPropertiesAssignment {
             {
                 assignment.set(
                     node,
-                    PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+                    PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
                 );
             }
         }
@@ -154,14 +154,14 @@ impl PhysicalPropertiesAssignment {
         assignment
     }
 
-    /// How `node` is kept, if it is.
+    /// How `node` is materialized, if it is.
     fn get(&self, node: &OperatorNode) -> Option<PhysicalProperties> {
         self.kept
             .get(&(node as *const OperatorNode))
             .map(|(_, kept)| *kept)
     }
 
-    /// How `node` is kept, checked against what is below it:
+    /// How `node` is materialized, checked against what is below it:
     /// `upstream_at_query_time` says whether something below it can only
     /// run at query time.
     fn resolve(
@@ -204,7 +204,7 @@ fn timed_properties(
 
 /// Whether `operator`'s output is a sub-DAG output that materialization may
 /// store: a `SummaryAgg`, a `SummaryTumblingWindowChain` or a `MaintainPopulation`.
-pub(crate) fn is_keepable_state_output<C>(operator: &Operator<C>) -> bool {
+pub(crate) fn is_materializable_state_output<C>(operator: &Operator<C>) -> bool {
     matches!(
         operator,
         Operator::ASAP(
@@ -298,11 +298,12 @@ fn forces_query_time(
         Operator::ASAP(ASAPOp::SummaryEstimate { .. })
         | Operator::ASAP(ASAPOp::EvaluatePopulation { .. }) => true,
         _ if node.timing.is_none()
-            && (is_keepable_state_output(&node.operator) || assignment.get(node).is_some()) =>
+            && (is_materializable_state_output(&node.operator)
+                || assignment.get(node).is_some()) =>
         {
             let upstream = upstream(seen);
             match assignment.resolve(node, upstream) {
-                Ok(None) if !is_keepable_state_output(&node.operator) => upstream,
+                Ok(None) if !is_materializable_state_output(&node.operator) => upstream,
                 Ok(None) => true,
                 Ok(Some(kept)) => kept.timing() == ExecutionTiming::QueryTime,
                 Err(_) => true,
@@ -383,9 +384,9 @@ pub fn apply_physical_properties_to_roots(
         .collect()
 }
 
-/// Validate the sub-DAG below `root` with every sub-DAG kept at ingestion time
+/// Validate the sub-DAG below `root` with every sub-DAG materialized at ingestion time
 /// where the DAG allows it
-/// ([`PhysicalPropertiesAssignment::kept_at_ingestion_where_allowed`]) and
+/// ([`PhysicalPropertiesAssignment::materialized_at_ingestion_where_allowed`]) and
 /// `root` consumed at `root_timing`. For planning-time legality checks of a
 /// candidate before it is assembled into a workload DAG: a candidate must stay
 /// executable if materialization later puts its states at ingestion time.
@@ -395,15 +396,16 @@ pub fn validate_at_ingestion(
     root: &Rc<OperatorNode>,
     root_timing: ExecutionTiming,
 ) -> Result<(), ExecutionDataStateError> {
-    let assignment =
-        PhysicalPropertiesAssignment::kept_at_ingestion_where_allowed(std::slice::from_ref(root));
+    let assignment = PhysicalPropertiesAssignment::materialized_at_ingestion_where_allowed(
+        std::slice::from_ref(root),
+    );
     let mut cache = NodeToTimedNodeCache::new();
     let mut forced = HashMap::new();
     let timed = write(root, root_timing, &assignment, &mut cache, &mut forced)?;
     validate(&timed, &mut HashMap::new())
 }
 
-/// The data state `node` produces with every sub-DAG kept at ingestion time where
+/// The data state `node` produces with every sub-DAG materialized at ingestion time where
 /// the DAG allows it, when its consumer runs at `consumer` — the planning-time answer to
 /// "what does this candidate's output look like", consistent with
 /// [`validate_at_ingestion`].
@@ -413,8 +415,9 @@ pub fn planned_data_state(
     consumer: ExecutionTiming,
 ) -> ExecutionDataState {
     let mut forced = HashMap::new();
-    let assignment =
-        PhysicalPropertiesAssignment::kept_at_ingestion_where_allowed(std::slice::from_ref(node));
+    let assignment = PhysicalPropertiesAssignment::materialized_at_ingestion_where_allowed(
+        std::slice::from_ref(node),
+    );
     let (timing, _) = placement(node, consumer, &assignment, &mut forced)
         .expect("an assignment kept where allowed never fails");
     ExecutionDataState {
@@ -476,11 +479,13 @@ fn placement(
             Some(kept) => (ExecutionTiming::QueryTime, kept.lifetime()),
             None => (ExecutionTiming::QueryTime, Lifetime::None),
         },
-        _ if is_keepable_state_output(&node.operator) || assignment.get(node).is_some() => {
+        _ if is_materializable_state_output(&node.operator) || assignment.get(node).is_some() => {
             let upstream = upstream_at_query_time(forced);
             match assignment.resolve(node, upstream)? {
-                None if !is_keepable_state_output(&node.operator) => (consumer, Lifetime::None),
-                // A summary build that is not kept runs at query time.
+                None if !is_materializable_state_output(&node.operator) => {
+                    (consumer, Lifetime::None)
+                }
+                // A summary build that is not materialized runs at query time.
                 None => (ExecutionTiming::QueryTime, Lifetime::None),
                 Some(kept) => (kept.timing(), kept.lifetime()),
             }
@@ -1012,19 +1017,19 @@ mod tests {
         )
     }
 
-    /// Apply with every sub-DAG kept at ingestion time where the DAG allows it, the
+    /// Apply with every sub-DAG materialized at ingestion time where the DAG allows it, the
     /// placement whose edge rules these tests exercise.
     fn apply(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, ExecutionDataStateError> {
         apply_physical_properties(
             root,
-            &PhysicalPropertiesAssignment::kept_at_ingestion_where_allowed(std::slice::from_ref(
-                root,
-            )),
+            &PhysicalPropertiesAssignment::materialized_at_ingestion_where_allowed(
+                std::slice::from_ref(root),
+            ),
             &mut NodeToTimedNodeCache::new(),
         )
     }
 
-    const KEPT_ACROSS: Lifetime = Lifetime::AcrossEvaluations(Medium::Memory);
+    const MATERIALIZED_ACROSS: Lifetime = Lifetime::AcrossEvaluations(Medium::Memory);
 
     fn kept(timing: ExecutionTiming, lifetime: Lifetime) -> PhysicalProperties {
         PhysicalProperties::new(timing, lifetime).unwrap()
@@ -1034,11 +1039,11 @@ mod tests {
         Rc::clone(node.children()[0])
     }
 
-    /// Without a materialization decision, a summary is not kept and
+    /// Without a materialization decision, a summary is not materialized and
     /// it and its input run at query time; an explicit choice overrides the
     /// default and is recorded on the timed node.
     #[test]
-    fn default_assignment_keeps_nothing() {
+    fn default_assignment_materializes_nothing() {
         let summary = agg(scan(), kll());
         let root = apply_physical_properties(
             &summary,
@@ -1059,7 +1064,7 @@ mod tests {
             Some(ExecutionDataState::QUERY_ROWS)
         );
         for (lifetime, timing) in [
-            (KEPT_ACROSS, ExecutionTiming::IngestionTime),
+            (MATERIALIZED_ACROSS, ExecutionTiming::IngestionTime),
             (
                 Lifetime::OneEvaluation(Medium::Disk),
                 ExecutionTiming::QueryTime,
@@ -1077,7 +1082,7 @@ mod tests {
         }
     }
 
-    /// #509 Algorithm 3, line 13: an explicit assignment kept at ingestion time over a state
+    /// #509 Algorithm 3, line 13: an explicit assignment materialized at ingestion time over a state
     /// that only exists at query time is an error, not a silent move to
     /// query time.
     #[test]
@@ -1087,7 +1092,7 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &outer,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         assert_eq!(
             apply_physical_properties(
@@ -1102,12 +1107,12 @@ mod tests {
         );
         assignment.set(
             &inner,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         let outer = agg(Rc::clone(&inner), kll());
         assignment.set(
             &outer,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         let root = apply_physical_properties(
             &estimate(outer),
@@ -1115,8 +1120,8 @@ mod tests {
             &mut NodeToTimedNodeCache::new(),
         )
         .unwrap();
-        assert_eq!(child(&root).lifetime, KEPT_ACROSS);
-        assert_eq!(child(&child(&root)).lifetime, KEPT_ACROSS);
+        assert_eq!(child(&root).lifetime, MATERIALIZED_ACROSS);
+        assert_eq!(child(&child(&root)).lifetime, MATERIALIZED_ACROSS);
     }
 
     #[test]
@@ -1219,7 +1224,7 @@ mod tests {
     }
 
     /// A finalize pinned to ingestion time (as fixed-window rate candidates
-    /// build it) over a state that is not kept at ingestion time names the missing
+    /// build it) over a state that is not materialized at ingestion time names the missing
     /// upstream, not an illegal edge.
     #[test]
     fn ingestion_pinned_finalize_over_query_time_state_is_upstream_not_at_ingestion() {
@@ -1248,18 +1253,18 @@ mod tests {
     /// at ingestion time are read by a query-time consumer, and a node that
     /// can only run at query time cannot be stored at ingestion time.
     #[test]
-    fn any_node_may_be_kept() {
+    fn any_node_may_be_materialized() {
         let tumbling_windows = max(scan());
         let root = max(Rc::clone(&tumbling_windows));
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &tumbling_windows,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         let timed = apply_physical_properties(&root, &assignment, &mut NodeToTimedNodeCache::new())
             .unwrap();
         assert_eq!(timed.timing, Some(ExecutionTiming::QueryTime));
-        assert_eq!(child(&timed).lifetime, KEPT_ACROSS);
+        assert_eq!(child(&timed).lifetime, MATERIALIZED_ACROSS);
         assert_eq!(child(&timed).timing, Some(ExecutionTiming::IngestionTime));
         assert_eq!(
             child(&child(&timed)).timing,
@@ -1270,7 +1275,7 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &over_evaluation,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         assert_eq!(
             apply_physical_properties(
@@ -1287,7 +1292,7 @@ mod tests {
 
     /// A summary build with a filter never runs at ingestion time: an
     /// ingestion-time build reads raw data samples, which carry none of the
-    /// query's columns the filter reads. An explicit assignment kept at ingestion time is an
+    /// query's columns the filter reads. An explicit assignment materialized at ingestion time is an
     /// error; the all-at-ingestion default leaves it at query time.
     #[test]
     fn a_filtered_summary_build_never_runs_at_ingestion_time() {
@@ -1322,7 +1327,7 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &filtered,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         assert_eq!(
             apply_physical_properties(
@@ -1382,11 +1387,11 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &state,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         assignment.set(
             &read,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         assert_eq!(
             apply_physical_properties(&read, &assignment, &mut NodeToTimedNodeCache::new()).err(),
@@ -1394,7 +1399,8 @@ mod tests {
                 ExecutionDataStateError::PhysicalPropertiesConflictWithFixedTiming {
                     operator: "FinalizeExactAccumulator",
                     fixed: ExecutionTiming::QueryTime,
-                    assigned: PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+                    assigned:
+                        PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
                 }
             )
         );
@@ -1407,7 +1413,7 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &agg(scan(), kll()),
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         let text = format!("{assignment:?}");
         assert!(text.contains("SummaryAgg@"), "{text}");
@@ -1463,13 +1469,13 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &rows,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         let timed =
             apply_physical_properties(&summary, &assignment, &mut NodeToTimedNodeCache::new())
                 .unwrap();
         assert_eq!(timed.timing, Some(ExecutionTiming::QueryTime));
-        assert_eq!(child(&timed).lifetime, KEPT_ACROSS);
+        assert_eq!(child(&timed).lifetime, MATERIALIZED_ACROSS);
     }
 
     /// The same holds for exact-accumulator state: a query-time build cannot
@@ -1496,13 +1502,13 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &state,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         let timed =
             apply_physical_properties(&summary, &assignment, &mut NodeToTimedNodeCache::new())
                 .unwrap();
         assert_eq!(timed.timing, Some(ExecutionTiming::QueryTime));
-        assert_eq!(child(&timed).lifetime, KEPT_ACROSS);
+        assert_eq!(child(&timed).lifetime, MATERIALIZED_ACROSS);
     }
 
     /// A node placed at ingestion time with a lifetime that cannot go with
@@ -1585,28 +1591,31 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &root,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         let timed = apply_physical_properties(&root, &assignment, &mut NodeToTimedNodeCache::new())
             .unwrap();
         assert_eq!(timed.timing, Some(ExecutionTiming::IngestionTime));
-        assert_eq!(exported(&timed, "Aggregate"), KEPT_ACROSS);
+        assert_eq!(exported(&timed, "Aggregate"), MATERIALIZED_ACROSS);
 
         let state = agg(scan(), exact_sum());
         let root = finalize(Rc::clone(&state));
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &state,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         assignment.set(
             &root,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         let timed = apply_physical_properties(&root, &assignment, &mut NodeToTimedNodeCache::new())
             .unwrap();
         assert_eq!(timed.timing, Some(ExecutionTiming::IngestionTime));
-        assert_eq!(exported(&timed, "FinalizeExactAccumulator"), KEPT_ACROSS);
+        assert_eq!(
+            exported(&timed, "FinalizeExactAccumulator"),
+            MATERIALIZED_ACROSS
+        );
 
         let root = placed_at_ingestion(max(scan()));
         assert_eq!(

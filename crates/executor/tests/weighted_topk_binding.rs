@@ -126,7 +126,7 @@ fn assert_weighted_binding(algorithm: SketchAlgorithm) {
     })
     .collect();
     let batch = Batch::try_new(samples.clone(), rows).unwrap();
-    // The summaries kept at ingestion time run as data arrives; not kept
+    // The summaries materialized at ingestion time run as data arrives; not materialized
     // (the default) runs everything when the query does.
     for (placed, scope) in [
         (
@@ -267,7 +267,7 @@ fn rate_updates_cannot_enter_integer_heap_factory() {
     .is_err());
 }
 
-/// `candidate` with every `SummaryAgg` kept at ingestion time, the materialization
+/// `candidate` with every `SummaryAgg` materialized at ingestion time, the materialization
 /// a continuously served query would get: each summary and every input it
 /// consumes run at ingestion time, the rest at query time. The candidate pins
 /// its finalize boundary to query time, which would put the summaries above
@@ -295,7 +295,7 @@ fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) 
         if matches!(node.operator, IrOperator::ASAP(ASAPOp::SummaryAgg { .. })) {
             assignment.set(
                 &node,
-                PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+                PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
             );
         }
     }

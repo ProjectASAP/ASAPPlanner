@@ -7,7 +7,7 @@
 //!
 //! A **materialized view** is a node whose output is kept across
 //! evaluations: its lifetime is `AcrossEvaluations`, at ingestion time or
-//! at query time, and it carries its `retention_ms`. A node kept for
+//! at query time, and it carries its `retention_ms`. A node materialized for
 //! `OneEvaluation` is not a view: its output is discarded after one
 //! evaluation. A query-time `Scan` carries how long its source's rows are
 //! kept for it (`None` when it reads them unbounded).
@@ -234,7 +234,7 @@ impl RawDataWindow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MaterializedViewRefresh {
-    /// Refreshed at ingestion time (kept at ingestion time): the runtime runs the
+    /// Refreshed at ingestion time (materialized at ingestion time): the runtime runs the
     /// node in an ingestion run once its inputs are complete (its windows'
     /// samples have arrived and the views it reads are refreshed), and
     /// keeps the result.

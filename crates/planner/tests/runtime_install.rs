@@ -1550,7 +1550,7 @@ impl OptimizationPass for StoredAsForced {
     }
 }
 
-/// `node` untimed, with `store`'s kept output (or its own) recorded in
+/// `node` untimed, with `store`'s materialized output (or its own) recorded in
 /// `assignment` for every node of its sub-DAG.
 fn untime(
     node: &Rc<OperatorNode>,
@@ -1576,7 +1576,7 @@ fn untime(
             ASAPOp::SummaryAgg { .. }
             | ASAPOp::SummaryTumblingWindowChain { .. }
             | ASAPOp::SummaryMerge { .. },
-        ) if node.lifetime.is_kept() => node.physical_properties().map(Result::unwrap),
+        ) if node.lifetime.is_materialized() => node.physical_properties().map(Result::unwrap),
         _ => None,
     };
     if let Some(kept) = store(node).or(own) {
@@ -1589,13 +1589,13 @@ fn untime(
 /// Every `SummaryAgg` built at ingestion time.
 fn summaries_at_ingestion(node: &OperatorNode) -> Option<PhysicalProperties> {
     matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. }))
-        .then(|| PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION)
+        .then(|| PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION)
 }
 
 /// Every `SummaryMerge` built at query time and kept across evaluations.
 fn merges_kept(node: &OperatorNode) -> Option<PhysicalProperties> {
     matches!(node.asap(), Some(ASAPOp::SummaryMerge { .. }))
-        .then(|| PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME)
+        .then(|| PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME)
 }
 
 /// Exact PromQL `queries`, every minute, over 6 ingesting series of `m`

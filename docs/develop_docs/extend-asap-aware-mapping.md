@@ -81,7 +81,7 @@ contains the candidate and that Stage 3 prices it.
    `readable_at`) and its placement in
    `crates/types/src/ir/properties/timing.rs`, with its data-state edge rules.
 2. Offer it in `crates/physical-asap-optimization/src/lib.rs` (the
-   `KeptOutputCandidate` options), after the existing options so default
+   `MaterializedOutputCandidate` options), after the existing options so default
    candidate ids stay the same, and gate it on the deployment input that
    allows it.
 3. Price it in `crates/cost/src/usage.rs` (`asap_cost::node_usage`): what it keeps in memory or on

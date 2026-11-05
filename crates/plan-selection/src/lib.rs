@@ -38,19 +38,19 @@
 //! computation is multiplied by how often it is computed per second
 //! ([`NodeCost::cost_per_second`](asap_cost::NodeCost::cost_per_second)):
 //!
-//! * A not-kept node is recomputed for each consumer that reads it
+//! * A not-materialized node is recomputed for each consumer that reads it
 //!   and is not stored: it is charged once per consumer
 //!   ([`NodeCost::multiplier`](asap_cost::NodeCost::multiplier)) at the sum of their rates. Its consumers are
 //!   the queries whose sub-DAG reaches it and the materialized nodes above
 //!   it, counted without looking through a materialized node: a node below
-//!   one is computed when that node is. The consumers kept at ingestion time of
+//!   one is computed when that node is. The consumers materialized at ingestion time of
 //!   one refresh window (`PhysicalASAPDAG::refresh_window`: for a tumbling window
 //!   chain, its tumbling-window width) are refreshed in one ingestion run and count as
 //!   one consumer: a `Scan` under a KLL chain and a DDSketch chain of 10 s
 //!   tumbling windows is computed once per second of arriving data, under chains of
 //!   10 s and 60 s tumbling windows twice. Stage 2 keeps a shared node one
 //!   node (it copies it only for readers at two timings). A shared
-//!   not-kept input costs what reading it separately does (#509
+//!   not-materialized input costs what reading it separately does (#509
 //!   Example 4) only when every consumer reads the same window: a query-time `Scan` is priced over the longest window
 //!   read above it, so each consumer pays for that window, and a scan a 1 m
 //!   and a 5 m window share costs more than two separate scans. Stage 2
@@ -59,7 +59,7 @@
 //! * A `OneEvaluation` node is computed once for all the queries that reach
 //!   it, at their combined rate: queries repeating at the same interval are
 //!   evaluated together, so each distinct interval counts once.
-//! * A node kept at ingestion time runs as data arrives: it is priced over one
+//! * A node materialized at ingestion time runs as data arrives: it is priced over one
 //!   second of arriving rows, once per second, whatever its readers' rates.
 //!   A tumbling-window chain maintained this way updates only its newest
 //!   tumbling window: each arriving row is placed in it and updates it.
@@ -70,18 +70,18 @@
 //!
 //! Under cost model 1, memory is charged as bytes held per second
 //! ([`ResourceUsage::average_memory_bytes`](asap_cost::ResourceUsage::average_memory_bytes)), at
-//! `cost_per_memory_byte_second` per byte per second. A node kept at ingestion time
+//! `cost_per_memory_byte_second` per byte per second. A node materialized at ingestion time
 //! node keeps its state every second: twice for a whole window (the window
 //! being built and the completed one queries read) and `N + 1` tumbling windows for a
 //! chain of `N` (the `N` the query merges and the one being built). A
 //! `OneEvaluation` node's state is reused only within one evaluation, so it is
 //! held only while that evaluation runs: its bytes times the latency of the
 //! longest query reading it, once per evaluation. A query-time
-//! not-kept node's working memory (a sketch being built, an exact
+//! not-materialized node's working memory (a sketch being built, an exact
 //! aggregate's values) is charged once per consumer that recomputes it:
 //! for a query, its bytes times that query's latency, at its rate; for a
 //! materialized node reading it (directly or through other
-//! not-kept nodes), its bytes times the latency of the longest
+//! not-materialized nodes), its bytes times the latency of the longest
 //! query reading that node, at the node's rate, as a `OneEvaluation` state is.
 //! A query-time `AcrossEvaluations` tumbling-window chain (#509 Example
 //! 4's B3, offered by Stage 2 when the deployment keeps query-time results,
@@ -99,8 +99,8 @@
 //! at 1 min steps):
 //!
 //! * every query-time computation that is not kept across evaluations
-//!   (not kept, `OneEvaluation`) runs once per step, `S` times per
-//!   request; a kept at ingestion time state is maintained as before, and the
+//!   (not materialized, `OneEvaluation`) runs once per step, `S` times per
+//!   request; a materialized at ingestion time state is maintained as before, and the
 //!   merge and estimate over it run once per step;
 //! * a chain kept across evaluations is built once per request: Stage 2
 //!   offers it only when the requests repeat at its tumbling-window width, so in the
@@ -116,7 +116,7 @@
 //! `S = 1` and the retention is the window, so every price is as above.
 //! Memory a computation holds only while it runs counts in
 //! [`ResourceUsage::peak_memory_bytes`](asap_cost::ResourceUsage::peak_memory_bytes), which cost models 2 and 3 read, and
-//! under cost model 1 for the time it is held, as above. (A not-kept
+//! under cost model 1 for the time it is held, as above. (A not-materialized
 //! node computed at ingestion time is a streaming operator holding one row,
 //! and is not charged.)
 //!
@@ -330,8 +330,8 @@ mod tests {
     use asap_cost::analytical::AnalyticalCostError;
     use asap_cost::execution_demand::evaluation_rate;
     use asap_cost::state_bytes::{sketch_shape, summary_shape, StateInputRows};
-    use asap_cost::{kept_tumbling_window_chains, node_map, plan_cost, NodeMap};
     use asap_cost::{lookup, StateFamily};
+    use asap_cost::{materialized_tumbling_window_chains, node_map, plan_cost, NodeMap};
     use asap_cost::{
         CalibrationFit, ClusterLimits, ClusterObjective, CostInputs, CostModel, NodePriceSource,
         OperatorKind, PlanCost, ResourceUsage, COST_SOURCE, MEASURED_COST_SOURCE,
@@ -364,7 +364,7 @@ mod tests {
     fn self_calibrated_cost(
         dag: &PhysicalASAPDAG,
         nodes: &NodeMap<'_>,
-        kept_chains: &std::collections::HashSet<PhysicalASAPNodeId>,
+        materialized_chains: &std::collections::HashSet<PhysicalASAPNodeId>,
         recurrence: &[QueryRecurrence],
         range_evaluations: &[Option<RangeEvaluation>],
         data: &DataWorkload,
@@ -374,7 +374,7 @@ mod tests {
             plan_cost(
                 dag,
                 nodes,
-                kept_chains,
+                materialized_chains,
                 recurrence,
                 range_evaluations,
                 data,
@@ -396,7 +396,7 @@ mod tests {
         self_calibrated_cost(
             dag,
             &node_map(dag),
-            &kept_tumbling_window_chains(dag),
+            &materialized_tumbling_window_chains(dag),
             recurrence,
             &[],
             data,
@@ -1116,11 +1116,11 @@ mod tests {
     }
 
     /// Query 1 is `sum(...)` over query 2's output. Every node reached by
-    /// both queries is not kept, so recomputed for each: charged
+    /// both queries is not materialized, so recomputed for each: charged
     /// twice. Materializing query 2's root (`OneEvaluation`) charges it once,
     /// and the nodes below it once, since they run only when it does.
     #[test]
-    fn not_kept_shared_nodes_are_charged_per_query() {
+    fn not_materialized_shared_nodes_are_charged_per_query() {
         let outer = lower_promql("sum(sum_over_time(m[1m]))", AccuracyTarget::exact());
         let inner = outer.children()[0].clone();
         let mut candidate = optimize_physical_asap(
@@ -1171,13 +1171,13 @@ mod tests {
         assert!(stored.cost_per_second.unwrap() < cost.cost_per_second.unwrap());
     }
 
-    /// A not-kept node two queries read is computed for each, so
+    /// A not-materialized node two queries read is computed for each, so
     /// its working memory is held once per query, each time for that
     /// query's latency: `bytes · Σ rate_q · latency_q`, not the longest
     /// latency at both rates. Query 1 is `sum(...)` over query 2's output,
     /// so it runs longer; they repeat every 10 s and every 20 s.
     #[test]
-    fn shared_not_kept_memory_is_held_for_each_reading_query() {
+    fn shared_not_materialized_memory_is_held_for_each_reading_query() {
         let outer = lower_promql("sum(sum_over_time(m[1m]))", AccuracyTarget::exact());
         let inner = outer.children()[0].clone();
         let candidate = optimize_physical_asap(
@@ -2424,7 +2424,7 @@ mod tests {
     }
 
     /// `candidates` with every state node (a summary build or an exact
-    /// aggregate) kept across evaluations, so selection charges its kept
+    /// aggregate) kept across evaluations, so selection charges its materialized
     /// bytes every second (a state kept for one evaluation is held only for
     /// that evaluation).
     fn keeping_state(mut candidates: Vec<PhysicalWorkloadPlan>) -> Vec<PhysicalWorkloadPlan> {
@@ -3420,7 +3420,7 @@ mod tests {
     }
 
     /// `quantile_over_time(0.99, m[1m])` with its KLL candidate chosen, its
-    /// state kept with `kept` (`None`: not kept).
+    /// state materialized with `materialized` (`None`: not materialized).
     fn kll_dag(kept: Option<PhysicalProperties>) -> PhysicalASAPDAG {
         use asap_types::ir::{
             apply_physical_properties, NodeToTimedNodeCache, PhysicalPropertiesAssignment,
@@ -3527,13 +3527,13 @@ mod tests {
         assert!(range.detail.contains("keep"), "{}", range.detail);
     }
 
-    /// Kept in memory at ingestion time until a query reads it.
+    /// Materialized in memory at ingestion time until a query reads it.
     const AT_INGESTION: Option<PhysicalProperties> =
-        Some(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION);
+        Some(PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION);
 
-    /// Kept in memory at query time for one evaluation.
+    /// Materialized in memory at query time for one evaluation.
     const AT_QUERY: Option<PhysicalProperties> =
-        Some(PhysicalProperties::KEPT_IN_MEMORY_FOR_ONE_EVALUATION);
+        Some(PhysicalProperties::MATERIALIZED_IN_MEMORY_FOR_ONE_EVALUATION);
 
     fn node_of(dag: &PhysicalASAPDAG, pick: impl Fn(&Payload) -> bool) -> PhysicalASAPNodeId {
         dag.nodes.iter().find(|n| pick(&n.payload)).unwrap().id
@@ -3594,7 +3594,7 @@ mod tests {
     /// every second. At query time the state is reused only within one
     /// evaluation, so it is held only while that evaluation runs: its bytes
     /// times the evaluation's latency, once per evaluation. State computed
-    /// and dropped within a query (not kept) is held while that
+    /// and dropped within a query (not materialized) is held while that
     /// query runs too, and charged the same way.
     #[test]
     fn kept_state_is_charged_per_byte_per_second() {
@@ -3744,7 +3744,7 @@ mod tests {
         assert!(quantile > 10 * sum, "{quantile} vs {sum}");
     }
 
-    /// A not-kept node read by two queries is computed for each, at
+    /// A not-materialized node read by two queries is computed for each, at
     /// each one's rate; `OneEvaluation`, it is computed once at their combined
     /// rate, where queries at the same interval run together.
     #[test]
@@ -4821,7 +4821,8 @@ mod tests {
         .find(|c| {
             c.dag.nodes.iter().all(|n| match n.payload {
                 Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => {
-                    n.output_state.timing == ExecutionTiming::IngestionTime && n.lifetime.is_kept()
+                    n.output_state.timing == ExecutionTiming::IngestionTime
+                        && n.lifetime.is_materialized()
                 }
                 _ => n.lifetime == Lifetime::None,
             })
@@ -5343,7 +5344,7 @@ mod tests {
             plan_cost(
                 &candidate.dag,
                 &node_map(&candidate.dag),
-                &kept_tumbling_window_chains(&candidate.dag),
+                &materialized_tumbling_window_chains(&candidate.dag),
                 &[repeating(MINUTE)],
                 &[],
                 &arriving(10_000.0),
@@ -5574,7 +5575,7 @@ mod tests {
             let cost = self_calibrated_cost(
                 &candidate.dag,
                 &node_map(&candidate.dag),
-                &kept_tumbling_window_chains(&candidate.dag),
+                &materialized_tumbling_window_chains(&candidate.dag),
                 std::slice::from_ref(&recurrence),
                 &[range],
                 &data(),

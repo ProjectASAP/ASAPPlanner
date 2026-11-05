@@ -1605,7 +1605,7 @@ fn scans_projecting_different_labels_are_shared() {
                 false,
                 &mut |_, readers, options| {
                     let kept = (readers.len() > 1)
-                        .then_some(PhysicalProperties::KEPT_IN_MEMORY_FOR_ONE_EVALUATION);
+                        .then_some(PhysicalProperties::MATERIALIZED_IN_MEMORY_FOR_ONE_EVALUATION);
                     options.iter().position(|option| *option == kept)
                 },
             )

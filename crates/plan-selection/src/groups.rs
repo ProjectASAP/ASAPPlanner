@@ -328,15 +328,15 @@ pub(crate) enum UnusableReason {
 /// counts its executions:
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum RunKind {
-    /// Not kept (lifetime `None`) at query time: computed once in each execution
+    /// Not materialized (lifetime `None`) at query time: computed once in each execution
     /// context (a query evaluation, or a shared query-time candidate's
     /// inputs) that selects it.
     PerContext,
-    /// Not kept (lifetime `None`) at ingestion time: runs in the ingestion pipeline
+    /// Not materialized (lifetime `None`) at ingestion time: runs in the ingestion pipeline
     /// `I_r` of its readers' refresh window `r`, once per second of
     /// arriving data for all of them.
     Ingestion,
-    /// Kept (lifetime `OneEvaluation` or `AcrossEvaluations`, at either
+    /// Materialized (lifetime `OneEvaluation` or `AcrossEvaluations`, at either
     /// timing): selected once, its own execution context for its inputs,
     /// charged once.
     Shareable,
@@ -685,7 +685,7 @@ pub(crate) enum ContextKind {
 
 /// Which ingestion pipeline `I_r` (#1095 §2.5 O3(b)): the deployment
 /// refreshes the ingestion-time views of one refresh window in one run, so
-/// `asap_cost::execution_demand::computations` charges a not-kept
+/// `asap_cost::execution_demand::computations` charges a not-materialized
 /// ingestion-time node once per refresh window of the views reading it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum IngestionPipeline {

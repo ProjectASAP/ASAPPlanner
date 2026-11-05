@@ -1,4 +1,4 @@
-//! How often a not-kept node is computed for the views refreshed
+//! How often a not-materialized node is computed for the views refreshed
 //! at ingestion above it ([`computations`]): once per refresh window, since
 //! a runtime refreshes the views of one refresh window in one ingestion run
 //! (issue #1151).
@@ -73,7 +73,7 @@ fn chain(
 }
 
 /// One query per summary of `summaries`, merging it, with each summary
-/// kept with `kept` (`None`: not kept): the DAG Stage 3 costs, chains
+/// materialized with `materialized` (`None`: not materialized): the DAG Stage 3 costs, chains
 /// unexpanded.
 fn dag_of(summaries: &[Rc<OperatorNode>], kept: Option<PhysicalProperties>) -> PhysicalASAPDAG {
     let mut assignment = PhysicalPropertiesAssignment::default();
@@ -143,7 +143,7 @@ fn a_scan_under_two_chains_of_one_tumbling_window_width_is_computed_once() {
             chain(&scan, SketchAlgorithm::Kll, 10_000, 6),
             chain(&scan, SketchAlgorithm::DDSketch, 10_000, 30),
         ],
-        Some(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
+        Some(PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
     );
     assert_eq!(scan_computations(&dag), (1, 1.0));
 }
@@ -159,13 +159,13 @@ fn a_scan_under_chains_of_two_tumbling_window_widths_is_computed_for_each() {
             chain(&scan, SketchAlgorithm::Kll, 10_000, 6),
             chain(&scan, SketchAlgorithm::DDSketch, 60_000, 5),
         ],
-        Some(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
+        Some(PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
     );
     assert_eq!(scan_computations(&dag), (2, 2.0));
 }
 
 /// Query consumers are unchanged: with both chains built at query time
-/// (not kept), each query computes the `Scan` at its own rate.
+/// (not materialized), each query computes the `Scan` at its own rate.
 #[test]
 fn query_consumers_still_count_once_each() {
     let scan = scan();
@@ -209,7 +209,7 @@ fn a_scan_under_chains_of_10_10_and_60_s_is_computed_for_each_width() {
             chain(&scan, SketchAlgorithm::DDSketch, 10_000, 30),
             chain(&scan, SketchAlgorithm::Kll, 60_000, 5),
         ],
-        Some(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
+        Some(PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
     );
     assert_eq!(scan_computations(&dag), (2, 2.0));
 }
@@ -229,7 +229,7 @@ fn chains_of_one_width_and_two_phases_are_computed_apart() {
                 30,
             ),
         ],
-        Some(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
+        Some(PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
     );
     assert_eq!(scan_computations(&dag), (2, 2.0));
 }
@@ -244,7 +244,7 @@ fn nodes_below_a_shared_intermediate_node_are_computed_once_per_run() {
             chain(&shift, SketchAlgorithm::Kll, 10_000, 6),
             chain(&shift, SketchAlgorithm::DDSketch, 10_000, 30),
         ],
-        Some(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
+        Some(PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
     );
     assert_eq!(scan_computations(&dag), (1, 1.0));
     assert_eq!(
@@ -278,7 +278,7 @@ fn consumers_of_unbounded_windows_count_alone() {
             build(SketchAlgorithm::Kll),
             build(SketchAlgorithm::DDSketch),
         ],
-        Some(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
+        Some(PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
     );
     assert_eq!(
         computations_of(&dag, |op| matches!(op, NonASAPOp::Values { .. })),
@@ -293,12 +293,12 @@ fn an_invalid_node_is_reported_not_skipped() {
     let scan = scan();
     let mut dag = dag_of(
         &[chain(&scan, SketchAlgorithm::Kll, 10_000, 6)],
-        Some(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
+        Some(PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
     );
     let chain = dag
         .nodes
         .iter_mut()
-        .find(|node| node.lifetime.is_kept())
+        .find(|node| node.lifetime.is_materialized())
         .unwrap();
     chain.lifetime =
         asap_types::physical::Lifetime::OneEvaluation(asap_types::physical::Medium::Memory);

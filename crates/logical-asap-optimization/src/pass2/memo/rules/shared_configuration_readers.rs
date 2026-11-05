@@ -134,7 +134,7 @@ impl SharedProducer for SummaryStates {
                 };
                 // Configuration expansion precedes Stage 2. The rewrite helpers
                 // create unassigned state; preserve any already assigned build.
-                if build.timing.is_some() || build.lifetime.is_kept() {
+                if build.timing.is_some() || build.lifetime.is_materialized() {
                     continue;
                 }
                 let family = match build.asap() {

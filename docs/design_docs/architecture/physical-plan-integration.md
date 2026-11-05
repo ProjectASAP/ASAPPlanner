@@ -463,7 +463,7 @@ candidate completeness; that evidence belongs to the semi-join's pruning step.
 
 The logical DAG carries no execution layout: `apply_physical_properties`
 writes each node's timing and lifetime from a
-`PhysicalPropertiesAssignment` before export (no sub-DAG kept by default, so all
+`PhysicalPropertiesAssignment` before export (no sub-DAG materialized by default, so all
 query time). The exported DAG carries both, and the deployment
 executes it as given; this is not a claim that every deployment has
 implemented every placement.

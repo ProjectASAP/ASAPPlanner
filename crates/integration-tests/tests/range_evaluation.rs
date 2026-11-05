@@ -177,7 +177,7 @@ fn tumbling_window_chains(run: &Run) -> Vec<(String, u64, (ExecutionTiming, Life
         .collect()
 }
 
-/// The candidate whose single tumbling-window chain runs at and is kept as
+/// The candidate whose single tumbling-window chain runs at and is materialized as
 /// `wanted`.
 fn with_chain(run: &Run, wanted: (ExecutionTiming, Lifetime)) -> String {
     tumbling_window_chains(run)

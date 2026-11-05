@@ -9,7 +9,7 @@
 use asap_types::stages::{ProducerCandidates, ProducerSetInterner};
 use std::collections::HashMap;
 
-use crate::summary_keep_eligibility;
+use crate::summary_materialization_eligibility;
 use asap_types::ir::operator::{agg_has_exact_per_entity_kernel, Reduction};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
@@ -26,9 +26,9 @@ use asap_types::stages::{
 
 /// [`PhysicalCandidate::may_keep_across_evaluations_per_sole_reader_query`] for `node` configured
 /// with `properties`: for each query in `entries`, whether
-/// `summary_keep_eligibility` with that query as the only reader
+/// `summary_materialization_eligibility` with that query as the only reader
 /// allows keeping it across evaluations. Empty unless `node` is a tumbling-window chain,
-/// `properties` is query time kept `AcrossEvaluations(Memory)` and the
+/// `properties` is query time materialized `AcrossEvaluations(Memory)` and the
 /// deployment keeps query-time results.
 pub fn may_keep_across_evaluations_per_sole_reader_query(
     node: &OperatorNode,
@@ -37,7 +37,7 @@ pub fn may_keep_across_evaluations_per_sole_reader_query(
     data: &DataWorkload,
     query_time_results_retained: bool,
 ) -> Vec<bool> {
-    if properties != PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME
+    if properties != PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME
         || !matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }))
         || !query_time_results_retained
     {
@@ -45,8 +45,14 @@ pub fn may_keep_across_evaluations_per_sole_reader_query(
     }
     (0..entries.len())
         .map(|reader| {
-            summary_keep_eligibility(node, &[reader], entries, data, query_time_results_retained)
-                .is_ok_and(|eligibility| eligibility.may_keep_across_evaluations)
+            summary_materialization_eligibility(
+                node,
+                &[reader],
+                entries,
+                data,
+                query_time_results_retained,
+            )
+            .is_ok_and(|eligibility| eligibility.may_keep_across_evaluations)
         })
         .collect()
 }
@@ -116,7 +122,7 @@ pub fn enumerate_candidate_configurations(
     let mut source_configurations = vec![Vec::new(); source_count];
     for source_id in 0..source_count {
         let node = &source.operator_nodes_of_candidates_for_memo_groups[source_id].physical_node;
-        if node.timing.is_some() || node.lifetime.is_kept() {
+        if node.timing.is_some() || node.lifetime.is_materialized() {
             return Err(ConfigurationError::AssignedExecution {
                 candidate: source_id,
             });
@@ -138,44 +144,46 @@ pub fn enumerate_candidate_configurations(
             .enumerate()
             .filter_map(|(query, reached)| reached.then_some(query))
             .collect::<Vec<_>>();
-        let mut alternatives = vec![PhysicalProperties::NOT_KEPT_AT_QUERY_TIME];
+        let mut alternatives = vec![PhysicalProperties::NOT_MATERIALIZED_AT_QUERY_TIME];
         if summary {
-            alternatives.push(PhysicalProperties::KEPT_IN_MEMORY_FOR_ONE_EVALUATION);
+            alternatives.push(PhysicalProperties::MATERIALIZED_IN_MEMORY_FOR_ONE_EVALUATION);
             if queries.iter().any(|&query| {
                 summary_properties_allowed(
                     node,
                     &[query],
-                    PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+                    PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
                     entries,
                     data,
                     query_time_results_retained,
                 )
             }) {
-                alternatives
-                    .push(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION);
+                alternatives.push(
+                    PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+                );
             }
             if matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }))
                 && queries.iter().any(|&query| {
                     summary_properties_allowed(
                         node,
                         &[query],
-                        PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME,
+                        PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME,
                         entries,
                         data,
                         query_time_results_retained,
                     )
                 })
             {
-                alternatives
-                    .push(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME);
+                alternatives.push(
+                    PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME,
+                );
             }
         } else if !forced_query {
-            alternatives.push(PhysicalProperties::NOT_KEPT_AT_INGESTION);
+            alternatives.push(PhysicalProperties::NOT_MATERIALIZED_AT_INGESTION);
         }
         // Potential reach only generates the choice. Selected-reader cardinality
         // and Stage 2's highest-shared rule determine actual eligibility.
         if !summary && queries.len() >= 2 {
-            alternatives.push(PhysicalProperties::KEPT_IN_MEMORY_FOR_ONE_EVALUATION);
+            alternatives.push(PhysicalProperties::MATERIALIZED_IN_MEMORY_FOR_ONE_EVALUATION);
         }
         // Configurations the deployment cannot run are not generated; each is
         // recorded as pruned.
@@ -225,7 +233,7 @@ pub fn enumerate_candidate_configurations(
                         query_time_results_retained,
                     ),
             });
-            if properties == PhysicalProperties::KEPT_IN_MEMORY_FOR_ONE_EVALUATION {
+            if properties == PhysicalProperties::MATERIALIZED_IN_MEMORY_FOR_ONE_EVALUATION {
                 if !summary {
                     reader_constraints.push(ReaderConstraint::HighestSharedOneEvaluation {
                         candidate: id,
@@ -379,9 +387,13 @@ fn summary_properties_allowed(
     data: &DataWorkload,
     query_time_results_retained: bool,
 ) -> bool {
-    let Ok(eligibility) =
-        summary_keep_eligibility(node, readers, entries, data, query_time_results_retained)
-    else {
+    let Ok(eligibility) = summary_materialization_eligibility(
+        node,
+        readers,
+        entries,
+        data,
+        query_time_results_retained,
+    ) else {
         return false;
     };
     eligibility.range_compatibility.is_ok()

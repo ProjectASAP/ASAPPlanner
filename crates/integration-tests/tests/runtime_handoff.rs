@@ -61,8 +61,11 @@ async fn plan(workload: &PlanningWorkload, capabilities: &DeploymentCapabilities
         .expect("Example 4b plans")
 }
 
-fn kept_count(dag: &PhysicalASAPDAG) -> usize {
-    dag.nodes.iter().filter(|n| n.lifetime.is_kept()).count()
+fn materialized_count(dag: &PhysicalASAPDAG) -> usize {
+    dag.nodes
+        .iter()
+        .filter(|n| n.lifetime.is_materialized())
+        .count()
 }
 
 /// Without raw data Stage 3 selects ingestion-time tumbling windows; the facade's
@@ -74,7 +77,7 @@ async fn export_carries_the_selected_lifetime() {
     let output = plan(&example4b(), &capabilities).await;
     let dag = output.physical_asap_dag().expect("exports");
     assert!(
-        kept_count(&dag) > 0,
+        materialized_count(&dag) > 0,
         "the selected tumbling windows are stored"
     );
     assert!(dag
@@ -130,7 +133,7 @@ async fn installable_plan_has_its_tumbling_window_chains_expanded() {
     let dag = &installed.dag;
     let views = plan.materialized_views().unwrap();
     assert_eq!(tumbling_window_chain_count(dag), 0);
-    assert_eq!(kept_count(dag), views.len());
+    assert_eq!(materialized_count(dag), views.len());
     let roots: Vec<u64> = dag.roots.iter().map(|&r| r as u64).collect();
     let compiled = compile(dag, &views, &roots).expect("the executor compiles it");
     assert_eq!(plan.query_texts.len(), 1);
@@ -193,7 +196,7 @@ async fn reference_plan_runs_the_installable_plan_at_query_time() {
     let plan = installable(&example4b()).await;
     let reference = query_time_reference(&plan).expect("re-times");
     reference.validate().unwrap();
-    assert_eq!(kept_count(&reference.dag), 0);
+    assert_eq!(materialized_count(&reference.dag), 0);
     assert!(reference.materialized_views().unwrap().is_empty());
     // The reference reads the raw data the plan's views were refreshed from.
     let [retention] = reference.raw_data_retention().unwrap().try_into().unwrap();

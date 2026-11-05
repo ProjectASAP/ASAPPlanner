@@ -78,14 +78,14 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
 ## 4. Stage 2
 
 - Only summary builds (`SummaryAgg`, `SummaryTumblingWindowChain`) get materialization
-  options, each a timing and a lifetime (`PhysicalProperties`): not kept always;
-  kept at ingestion time, `AcrossEvaluations(Memory)`, when the build is
-  eligible to run as data arrives; kept at query time for `OneEvaluation(Memory)`
-  when two or more queries read it (reused within one evaluation); kept at
+  options, each a timing and a lifetime (`PhysicalProperties`): not materialized always;
+  materialized at ingestion time, `AcrossEvaluations(Memory)`, when the build is
+  eligible to run as data arrives; materialized at query time for `OneEvaluation(Memory)`
+  when two or more queries read it (reused within one evaluation); materialized at
   query time `AcrossEvaluations(Memory)` for a tumbling-window chain that
   builds one new tumbling window per evaluation, when the deployment declares
   `query_time_results_retained`.
-- One `PhysicalCandidate` per assignment, the all-not-kept one first
+- One `PhysicalCandidate` per assignment, the all-not-materialized one first
   (`P<n>`, then `P<n>-m<k>`). An assignment that puts a build at ingestion
   time over one that is not is not generated. A logical candidate Stage 2
   cannot implement becomes a `PrunedCandidate` with its reason.

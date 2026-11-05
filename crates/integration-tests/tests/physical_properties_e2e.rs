@@ -1,6 +1,6 @@
 //! Materialization decides placement, not answers: the same selected DAG
-//! timed with its states not kept (everything at query time) and
-//! kept at ingestion time (materialized views refreshed at ingestion time)
+//! timed with its states not materialized (everything at query time) and
+//! materialized at ingestion time (materialized views refreshed at ingestion time)
 //! executes to the same result.
 
 use std::collections::{BTreeMap, HashMap};
@@ -78,7 +78,9 @@ fn sketch_candidate(query: &str) -> Rc<OperatorNode> {
 fn placements(root: &Rc<OperatorNode>) -> [PhysicalPropertiesAssignment; 2] {
     [
         PhysicalPropertiesAssignment::default(),
-        PhysicalPropertiesAssignment::kept_at_ingestion_where_allowed(std::slice::from_ref(root)),
+        PhysicalPropertiesAssignment::materialized_at_ingestion_where_allowed(
+            std::slice::from_ref(root),
+        ),
     ]
 }
 
@@ -201,7 +203,7 @@ fn values_1_to_100(schema: &SchemaRef, _metric: &str) -> Batch {
     Batch::try_new(schema.clone(), rows).unwrap()
 }
 
-/// Keeping it at ingestion time puts the quantile's state in a materialized view;
+/// Materializing it at ingestion time puts the quantile's state in a materialized view;
 /// Not keeping it has no view and reads the raw source at
 /// query time; both answer alike.
 #[test]
@@ -223,8 +225,8 @@ fn physical_properties_decide_precompute_contents() {
     assert_eq!(answers[0], answers[1]);
 }
 
-/// Mixed placement in one DAG: one summary kept at ingestion time (a materialized view)
-/// and the other not kept (built from the raw source at query
+/// Mixed placement in one DAG: one summary materialized at ingestion time (a materialized view)
+/// and the other not materialized (built from the raw source at query
 /// time) answer like the all-query-time placement.
 #[test]
 fn mixed_placement_answers_like_query_time() {
@@ -257,7 +259,7 @@ fn mixed_placement_answers_like_query_time() {
     let mut mixed = PhysicalPropertiesAssignment::default();
     mixed.set(
         &sketches(&root)[0],
-        PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+        PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
     );
     let mut answers = Vec::new();
     for assignment in [PhysicalPropertiesAssignment::default(), mixed] {
@@ -346,13 +348,13 @@ fn arithmetic_over_one_selector_executes() {
         ("m", "a", 290, 2.0),
         ("m", "b", 250, 5.0),
     ];
-    let [not_kept, at_ingestion] = placements(&root).map(|a| timed_dag(&root, &a));
-    assert!(!ingestion_binary(&not_kept));
+    let [not_materialized, at_ingestion] = placements(&root).map(|a| timed_dag(&root, &a));
+    assert!(!ingestion_binary(&not_materialized));
     assert!(
         ingestion_binary(&at_ingestion),
         "one selector shares its key set"
     );
-    for dag in [not_kept, at_ingestion] {
+    for dag in [not_materialized, at_ingestion] {
         let (values, _) = execute(&dag, &job_samples(&samples), INGESTION_WINDOW, 300_000);
         // job a: 3 + 3 = 6; job b: 5 + 5 = 10 (mispairing a with b gives 8 and 8).
         // KLL at epsilon 0.01 returns an input value within 0.01 of rank 0.9;

@@ -442,8 +442,8 @@ fn stage1_logical_asap_optimization_candidates_are_valid_and_uniquely_named() {
 #[test]
 fn stage2_physical_asap_optimization_keeps_every_logical_candidate() {
     let run = pipeline();
-    assert_one_not_kept_physical_candidate_per_logical(&run);
-    let unshared = not_kept(&run)
+    assert_one_not_materialized_physical_candidate_per_logical(&run);
+    let unshared = not_materialized(&run)
         .filter(|p| whole_windows(p.dag()) && !classify(p.dag(), &p.query_roots).1)
         .count();
     assert_eq!(unshared, 3);
@@ -460,7 +460,7 @@ fn stage2_physical_asap_optimization_preserves_logical_choices() {
         let (option, shared) = classify(p.dag(), &p.query_roots);
         let (logical_option, logical_shared) = classify(&source.dag, &source.query_roots);
         assert_eq!(option, logical_option, "{} vs {}", p.id, source.id);
-        if !p.candidate.keeps_any() {
+        if !p.candidate.materializes_any() {
             assert_eq!(shared, logical_shared, "{} vs {}", p.id, source.id);
         }
     }
@@ -568,15 +568,15 @@ fn stage2_physical_asap_optimization_summary_topk_is_build_then_estimate() {
 /// with every chain at query time, since a chain maintained at ingestion
 /// time leaves one query reading the input at query time.
 #[test]
-fn stage2_physical_asap_optimization_keeps_only_tumbling_windows_at_ingestion() {
+fn stage2_physical_asap_optimization_materializes_only_tumbling_windows_at_ingestion() {
     let run = pipeline();
     let mut counter_maintained = 0;
     let mut shared_once = 0;
     for p in &run.physical {
         for n in &p.dag().nodes {
-            match keeping(p, n.id) {
-                Keeping::NotKept => {}
-                Keeping::KeptAtIngestion => {
+            match materializing(p, n.id) {
+                Materializing::NotMaterialized => {}
+                Materializing::MaterializedAtIngestion => {
                     let Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { family, .. }) =
                         p.dag().payload(n.id)
                     else {
@@ -593,7 +593,7 @@ fn stage2_physical_asap_optimization_keeps_only_tumbling_windows_at_ingestion() 
                         counter_maintained += 1;
                     }
                 }
-                Keeping::KeptAtQueryTime => {
+                Materializing::MaterializedAtQueryTime => {
                     let (q1, q2) = roots(&p.query_roots);
                     assert!(
                         closure(p.dag(), q1).contains(&n.id)
@@ -723,7 +723,7 @@ fn stage3_plan_selection_count_min_needs_the_counter_declaration() {
     );
 }
 
-/// A shared not-kept input is charged once per consumer, and both
+/// A shared not-materialized input is charged once per consumer, and both
 /// queries read the same 1 m window, so the shared-input candidates cost
 /// what the independent one does; their totals differ from it only by
 /// floating-point rounding (the same charges summed in another grouping).
@@ -742,7 +742,7 @@ fn stage3_plan_selection_shared_input_ties_up_to_rounding_unless_built_once() {
         p.dag()
             .nodes
             .iter()
-            .any(|n| keeping(p, n.id) == Keeping::KeptAtQueryTime)
+            .any(|n| materializing(p, n.id) == Materializing::MaterializedAtQueryTime)
     };
     let shared: Vec<_> = run
         .physical
@@ -770,7 +770,7 @@ fn stage3_plan_selection_shared_input_ties_up_to_rounding_unless_built_once() {
         .dag()
         .nodes
         .iter()
-        .find(|n| keeping(selected, n.id) == Keeping::KeptAtQueryTime)
+        .find(|n| materializing(selected, n.id) == Materializing::MaterializedAtQueryTime)
         .unwrap();
     assert_eq!(
         relational(&time_range.payload).as_deref(),
@@ -817,7 +817,7 @@ fn stage3_plan_selection_selects_cheapest_valid() {
 }
 
 /// Every node of a valid candidate is charged once per consumer that reads
-/// it: a shared not-kept node is recomputed for each query, and a
+/// it: a shared not-materialized node is recomputed for each query, and a
 /// materialized one is computed once.
 #[test]
 fn stage3_plan_selection_charges_each_node_per_consuming_query() {
@@ -825,11 +825,11 @@ fn stage3_plan_selection_charges_each_node_per_consuming_query() {
 }
 
 /// A hand-built candidate with a materialized node: Q1's plan read by two
-/// queries, its `time_range` kept `OneEvaluation`. Plan selection charges the
+/// queries, its `time_range` materialized `OneEvaluation`. Plan selection charges the
 /// two accumulators (rate, sum) and their finalizations twice, once per query; the walks from
 /// both roots stop at the materialized `time_range`, which is computed once
 /// and reads the scan once.
-fn kept_case() -> Run {
+fn materialized_case() -> Run {
     let mut workload = example1();
     let repeating = workload.query_workload.repeating_queries.as_mut().unwrap();
     repeating.truncate(1);
@@ -871,8 +871,8 @@ fn kept_case() -> Run {
 /// The charging helper agrees with plan selection when a node is
 /// materialized.
 #[test]
-fn stage3_plan_selection_charging_helper_follows_plan_selection_with_a_kept_node() {
-    let run = kept_case();
+fn stage3_plan_selection_charging_helper_follows_plan_selection_with_a_materialized_node() {
+    let run = materialized_case();
     let p = &run.physical[0];
     let mut by_kind: Vec<_> = run.selection.costs[&p.id]
         .per_node
@@ -898,8 +898,8 @@ fn stage3_plan_selection_charging_helper_follows_plan_selection_with_a_kept_node
 /// Charging the scan under a materialized node once per query is caught.
 #[test]
 #[should_panic(expected = "multiplier of")]
-fn stage3_plan_selection_charging_helper_rejects_recounting_below_a_kept_node() {
-    let mut run = kept_case();
+fn stage3_plan_selection_charging_helper_rejects_recounting_below_a_materialized_node() {
+    let mut run = materialized_case();
     let p = run.physical[0].clone();
     let scan = p
         .dag()

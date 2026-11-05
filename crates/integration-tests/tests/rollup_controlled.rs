@@ -126,7 +126,7 @@ fn controlled_distinct_rollup_prices_the_original_workload() {
                                 )
                             })
                         });
-                        // Option 0: not kept.
+                        // Option 0: not materialized.
                         Some(match shared {
                             Some(index) if builds.contains(&node) => index,
                             _ => 0,

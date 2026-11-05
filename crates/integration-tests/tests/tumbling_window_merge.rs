@@ -270,7 +270,7 @@ fn execute(root: &Rc<OperatorNode>, samples: &[RawDataSample]) -> Vec<Vec<Value>
     run(&plan, raw_store(&exported.dag, samples), query_scope())
 }
 
-/// Build the tumbling windows in ingestion runs (kept at ingestion time, each with its
+/// Build the tumbling windows in ingestion runs (materialized at ingestion time, each with its
 /// own build timestamp), then merge them in the query run (Pattern B1).
 fn execute_retained(
     root: &Rc<OperatorNode>,
@@ -281,14 +281,14 @@ fn execute_retained(
     for tumbling_window in tumbling_windows {
         assignment.set(
             tumbling_window,
-            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
     }
     execute_retained_as(root, &assignment, samples)
 }
 
 /// The planner's tumbling-window chain maintained at ingestion time, as Stage 2's B1
-/// option assigns it (kept at ingestion time on the chain), then expanded: each
+/// option assigns it (materialized at ingestion time on the chain), then expanded: each
 /// tumbling window carries the chain's timing and lifetime, so the tumbling windows are
 /// built in ingestion runs and merged in the query run.
 fn execute_maintained_chain(
@@ -302,7 +302,7 @@ fn execute_maintained_chain(
     let mut assignment = PhysicalPropertiesAssignment::default();
     assignment.set(
         &chain,
-        PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+        PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
     );
     let timed =
         apply_physical_properties(planned, &assignment, &mut NodeToTimedNodeCache::new()).unwrap();

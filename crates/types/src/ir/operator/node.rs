@@ -95,7 +95,7 @@ impl Operator {
 /// until a physical properties assignment is applied; export rejects an executable
 /// node without one. `lifetime` is how long that assignment keeps this
 /// node's output (`None` until then, and for every node whose output is not
-/// kept); with `timing` it is the node's [`crate::physical::PhysicalProperties`].
+/// materialized); with `timing` it is the node's [`crate::physical::PhysicalProperties`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OperatorNode {
     pub operator: Operator,
