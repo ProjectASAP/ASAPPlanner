@@ -18,7 +18,9 @@ use crate::pass2::memo::shared_configurations::{
     shared_size, state_size_configurations, tumbling_window_configurations,
     TumblingWindowConfiguration, TumblingWindowRequirement,
 };
-use crate::pass2::memo::state_groups::{boundary_ptrs, build_of, BuildPlace, Pass2RuleError};
+use crate::pass2::memo::state_groups::{
+    boundary_ptrs, build_down_to_stage0_groups, build_of, BuildPlace, Pass2RuleError,
+};
 use asap_types::stages::{Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
 
 /// `resized` (a rewrite of `original` with the same shape) with each node
@@ -67,6 +69,10 @@ struct StateNeed {
     build: Rc<OperatorNode>,
     /// Where the candidate reads its build.
     place: BuildPlace,
+    /// The groups the candidate's computation starts from: its input
+    /// groups, or for a build beneath its groups the Stage 0 groups the
+    /// build reads. Equal normalized layouts over equal inputs are one.
+    inputs: Vec<MemoGroupId>,
     merge: Option<Rc<OperatorNode>>,
     family: FieldDataType,
     /// The reader candidate's `accuracy_budget_parts`: the shares its build
@@ -155,6 +161,15 @@ impl SharedProducer for SummaryStates {
                 {
                     continue;
                 }
+                // The groups the build reads: Stage 0's groups for a build
+                // beneath groups, else the candidate's input groups.
+                let inputs = match place {
+                    BuildPlace::BeneathGroups => match build_down_to_stage0_groups(memo, entry) {
+                        Some((_, inputs)) => inputs,
+                        None => continue,
+                    },
+                    BuildPlace::Private | BuildPlace::InputGroup(_) => entry.input_groups.clone(),
+                };
                 // Configuration expansion precedes Stage 2. The rewrite helpers
                 // create unassigned state; preserve any already assigned build.
                 if build.timing.is_some()
@@ -193,6 +208,7 @@ impl SharedProducer for SummaryStates {
                         candidate,
                         build,
                         place,
+                        inputs,
                         merge,
                         family,
                         accuracy_budget_parts: entry.accuracy_budget_parts,
@@ -208,7 +224,7 @@ impl SharedProducer for SummaryStates {
                 }
             }
         }
-        let mut layouts: Vec<(usize, usize, FlatDag)> = Vec::new();
+        let mut layouts: Vec<(usize, usize, FlatDag, Vec<MemoGroupId>)> = Vec::new();
         for set in &mut sets {
             if spans_groups(set) {
                 assign_normalized_layouts(memo, set, &mut layouts)?;
@@ -427,7 +443,7 @@ impl SharedProducer for SummaryStates {
 fn assign_normalized_layouts(
     memo: &Memo,
     set: &mut [Reader<StateNeed>],
-    layouts: &mut Vec<(usize, usize, FlatDag)>,
+    layouts: &mut Vec<(usize, usize, FlatDag, Vec<MemoGroupId>)>,
 ) -> Result<(), Pass2RuleError> {
     let Some(requirements) = set
         .iter()
@@ -458,17 +474,17 @@ fn assign_normalized_layouts(
             .map_err(|error| Pass2RuleError::StateConfiguration(error.to_string()))?;
         let indices = layout_keys.entry((reader.group, signature)).or_default();
         let existing = indices.iter().copied().find(|&index| {
-            let (group, candidate, previous) = &layouts[index];
+            let (group, candidate, previous, previous_inputs) = &layouts[index];
             let previous_candidate = &memo.candidates[*group][*candidate];
             previous == &flat
                 && previous_candidate.origin == original.origin
-                && previous_candidate.input_groups == original.input_groups
+                && previous_inputs == &need.inputs
                 && previous_candidate.fused_groups == original.fused_groups
                 && previous_candidate.accuracy_budget_parts == original.accuracy_budget_parts
         });
         reader.need.normalized_layout = Some(existing.unwrap_or_else(|| {
             let index = layouts.len();
-            layouts.push((reader.group, need.candidate, flat));
+            layouts.push((reader.group, need.candidate, flat, need.inputs.clone()));
             indices.push(index);
             index
         }));

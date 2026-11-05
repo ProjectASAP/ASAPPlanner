@@ -347,10 +347,12 @@ fn ratio_of_quantiles_production_memo() {
         ),
         (25, 9, 9, 4)
     );
-    // The last step, over the complete tumbling-window-width domain.
+    // The last step, over the complete tumbling-window-width domain. Each
+    // tumbling-window chain, merge and readout is its own group (one operator
+    // per candidate), so the memo has more groups, most with one candidate.
     let last = pass2_memo(&run);
-    assert_eq!(last.groups().len(), 265);
-    assert_eq!(candidate_count(last), 1237);
+    assert_eq!(last.groups().len(), 985);
+    assert_eq!(candidate_count(last), 1477);
     let enumeration = enumerate(last, 2_000);
     assert!(!enumeration.complete);
     assert_eq!(enumeration.all_chosen_candidates.len(), 2_000);

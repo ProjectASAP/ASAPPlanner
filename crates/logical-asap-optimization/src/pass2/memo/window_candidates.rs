@@ -3,50 +3,47 @@
 #[cfg(test)]
 use super::shared_configurations::tumbling_window_width_divisors;
 use super::shared_configurations::tumbling_window_width_domain;
+use crate::operator_over_groups::operator_over_groups;
 use crate::pass2::asap_aware_cse::{
     tumbling_window_candidates, window_composition_pass2_candidates,
 };
-use asap_types::ir::flat::flatten;
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::stages::MemoGroupId as GroupId;
 use asap_types::stages::{CandidateForMemoGroup, Memo, OriginOfCandidateForMemoGroup};
 use asap_types::workload::QueryWorkloadEntry;
 #[cfg(test)]
 use std::collections::BTreeSet;
-use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 /// Offer each supported reader-grid configuration, for every legal
 /// tumbling-window width. Stage 2 checks the actual chosen consumers,
-/// including ingestion alignment and range evaluation steps.
+/// including ingestion alignment and range evaluation steps. Each candidate
+/// is one operator over groups ([`operator_over_groups`]): the tumbling-window
+/// chain, its merge and its readout are groups, which every reader of the
+/// same state at the same width shares.
 pub fn add_local_window_composition(memo: &mut Memo, entries: &[QueryWorkloadEntry]) {
-    // Flatten each existing/generated graph once. Repeatedly flattening the
-    // growing candidate list makes a complete tumbling-window-width domain quadratic.
-    let mut known: HashMap<(usize, String), Vec<usize>> = HashMap::new();
-    for (group, candidates) in memo.candidates.iter().enumerate() {
-        for (index, candidate) in candidates.iter().enumerate() {
-            if let Ok(signature) = candidate_signature(candidate) {
-                known.entry((group, signature)).or_default().push(index);
-            }
-        }
-    }
-    for (group, candidate) in local_tumbling_window_candidates(memo, entries) {
-        let Ok(signature) = candidate_signature(&candidate) else {
-            memo.candidates[group].push(candidate);
+    for (group, from, node) in local_tumbling_window_candidates(memo, entries) {
+        let queries = memo.groups()[group].queries.clone();
+        let origin = OriginOfCandidateForMemoGroup::TumblingWindows;
+        let (root_node, input_groups) =
+            operator_over_groups(memo, &node, &queries, &origin, from.accuracy_budget_parts);
+        // A candidate never reads a group it implements.
+        if std::iter::once(GroupId(group as u32))
+            .chain(from.fused_groups.iter().copied())
+            .any(|implemented| input_groups.contains(&implemented))
+        {
             continue;
-        };
-        let bucket = known.entry((group, signature)).or_default();
-        if !bucket.iter().any(|&index| {
-            let previous = &memo.candidates[group][index];
-            previous.origin == candidate.origin
-                && previous.input_groups == candidate.input_groups
-                && previous.fused_groups == candidate.fused_groups
-                && previous.accuracy_budget_parts == candidate.accuracy_budget_parts
-                && previous.root_node == candidate.root_node
-        }) {
-            bucket.push(memo.candidates[group].len());
-            memo.candidates[group].push(candidate);
         }
+        memo.add_candidate(
+            GroupId(group as u32),
+            CandidateForMemoGroup {
+                fused_groups: from.fused_groups,
+                root_node,
+                input_groups,
+                origin,
+                accuracy_budget_parts: from.accuracy_budget_parts,
+            },
+        );
     }
 }
 
@@ -54,8 +51,8 @@ pub fn add_local_window_composition(memo: &mut Memo, entries: &[QueryWorkloadEnt
 fn local_tumbling_window_candidates(
     memo: &Memo,
     entries: &[QueryWorkloadEntry],
-) -> Vec<(usize, CandidateForMemoGroup)> {
-    let mut own: Vec<(usize, CandidateForMemoGroup)> = Vec::new();
+) -> Vec<(usize, CandidateForMemoGroup, Rc<OperatorNode>)> {
+    let mut own: Vec<(usize, CandidateForMemoGroup, Rc<OperatorNode>)> = Vec::new();
     for (g, group) in memo.groups().iter().enumerate() {
         // Pass 1's intermediate groups (a summary build, its readout) are
         // rewritten inside their consumers' candidates instead.
@@ -77,15 +74,6 @@ fn local_tumbling_window_candidates(
                 ) {
                     continue;
                 }
-                let canonical_scans = OperatorNode::reachable(&candidate.root_node)
-                    .into_iter()
-                    .filter(|node| {
-                        matches!(
-                            node.non_asap(),
-                            Some(asap_types::ir::NonASAPOp::Scan { .. })
-                        ) && memo.group_whose_node_is(node).is_some()
-                    })
-                    .collect::<Vec<_>>();
                 let roots = [QueryRoot::Operator(Rc::clone(&candidate.root_node))];
                 let tumbling_windows = tumbling_window_candidates(&roots, &[Some(grid)]);
                 if tumbling_windows.is_empty() {
@@ -103,72 +91,12 @@ fn local_tumbling_window_candidates(
                     let [QueryRoot::Operator(node)] = &rewritten[..] else {
                         continue;
                     };
-                    // Guarantee recomposition can clone unchanged source scans.
-                    // Restore only an unambiguous original scan with the same full
-                    // source/schema/execution contract; scans have intrinsic exact
-                    // semantics. Otherwise the tumbling window's canonical input disappears.
-                    let mut restored = HashMap::new();
-                    for rewritten in OperatorNode::reachable(node) {
-                        let mut matches = canonical_scans.iter().filter(|original| {
-                            original.operator == rewritten.operator
-                                && original.schema == rewritten.schema
-                                && original.result_kind == rewritten.result_kind
-                                && original.timing == rewritten.timing
-                                && original.materialization == rewritten.materialization
-                        });
-                        if let Some(original) = matches.next() {
-                            if matches.next().is_none() {
-                                restored.insert(Rc::as_ptr(&rewritten), original);
-                            }
-                        }
-                    }
-                    let node = restore_scan_boundaries(node, &restored, &mut HashMap::new());
-                    own.push((
-                        g,
-                        rewritten_candidate(
-                            memo,
-                            GroupId(g as u32),
-                            candidate,
-                            node,
-                            OriginOfCandidateForMemoGroup::TumblingWindows,
-                        ),
-                    ));
+                    own.push((g, candidate.clone(), Rc::clone(node)));
                 }
             }
         }
     }
     own
-}
-
-fn restore_scan_boundaries(
-    node: &Rc<OperatorNode>,
-    restored: &HashMap<*const OperatorNode, &Rc<OperatorNode>>,
-    done: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
-) -> Rc<OperatorNode> {
-    if let Some(scan) = restored.get(&Rc::as_ptr(node)) {
-        return Rc::clone(scan);
-    }
-    if let Some(previous) = done.get(&Rc::as_ptr(node)) {
-        return Rc::clone(previous);
-    }
-    let mut changed = false;
-    let operator = node.operator.map_children(|child| {
-        let rebuilt = restore_scan_boundaries(child, restored, done);
-        changed |= !Rc::ptr_eq(child, &rebuilt);
-        rebuilt
-    });
-    let rebuilt = if changed {
-        Rc::new(
-            OperatorNode::with_schema(operator, node.schema.clone())
-                .with_guarantee(node.guarantee.clone())
-                .with_timing(node.timing)
-                .with_materialization(node.materialization),
-        )
-    } else {
-        Rc::clone(node)
-    };
-    done.insert(Rc::as_ptr(node), Rc::clone(&rebuilt));
-    rebuilt
 }
 
 // Union of complete divisor domains covers individual readers and every
@@ -185,63 +113,6 @@ fn compatible_reader_grids(
             .iter()
             .filter_map(|&query| entries.get(query)?.evaluation_grid_ms()),
     )
-}
-
-/// `from`, a candidate of group `owner`, with root `node` and `origin`.
-fn rewritten_candidate(
-    memo: &Memo,
-    owner: GroupId,
-    from: &CandidateForMemoGroup,
-    node: Rc<OperatorNode>,
-    origin: OriginOfCandidateForMemoGroup,
-) -> CandidateForMemoGroup {
-    let implements: Vec<GroupId> = std::iter::once(owner)
-        .chain(from.fused_groups.iter().copied())
-        .collect();
-    let reached = |node: &Rc<OperatorNode>| child_groups(memo, node, &implements);
-    let children = if reached(&from.root_node) == from.input_groups {
-        reached(&node)
-    } else {
-        from.input_groups.clone()
-    };
-    CandidateForMemoGroup {
-        fused_groups: from.fused_groups.clone(),
-        root_node: node,
-        input_groups: children,
-        origin,
-        accuracy_budget_parts: from.accuracy_budget_parts,
-    }
-}
-
-fn child_groups(memo: &Memo, node: &Rc<OperatorNode>, implements: &[GroupId]) -> Vec<GroupId> {
-    fn walk(
-        node: &Rc<OperatorNode>,
-        memo: &Memo,
-        implements: &[GroupId],
-        seen: &mut HashSet<*const OperatorNode>,
-        out: &mut Vec<GroupId>,
-    ) {
-        for child in node.children() {
-            if !seen.insert(Rc::as_ptr(child)) {
-                continue;
-            }
-            match memo.group_whose_node_is(child) {
-                Some(g) if !implements.contains(&g) => {
-                    if !out.contains(&g) {
-                        out.push(g);
-                    }
-                }
-                _ => walk(child, memo, implements, seen, out),
-            }
-        }
-    }
-    let mut out = Vec::new();
-    walk(node, memo, implements, &mut HashSet::new(), &mut out);
-    out
-}
-
-fn candidate_signature(candidate: &CandidateForMemoGroup) -> Result<String, serde_json::Error> {
-    serde_json::to_string(&flatten(&[QueryRoot::Operator(Rc::clone(&candidate.root_node))]).0)
 }
 
 #[cfg(test)]
@@ -283,9 +154,10 @@ mod tests {
         let (memo, entries) = fixture(&[repeated(60_000), QueryRecurrence::Unknown]);
         let candidates = local_tumbling_window_candidates(&memo, &entries);
         assert!(!candidates.is_empty());
-        assert!(candidates.iter().all(
-            |(_, candidate)| candidate.origin == OriginOfCandidateForMemoGroup::TumblingWindows
-        ));
+        assert!(candidates.iter().all(|(_, from, _)| matches!(
+            from.origin,
+            OriginOfCandidateForMemoGroup::Pass1 | OriginOfCandidateForMemoGroup::SharedBuild
+        )));
     }
 
     // Individual grids and subset GCDs allow separate or shared physical choices.

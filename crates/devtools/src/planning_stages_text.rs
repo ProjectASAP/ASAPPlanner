@@ -600,12 +600,18 @@ mod tests {
             text.lines()
                 .any(|line| parts.iter().all(|part| line.contains(part)))
         };
-        // Pass 2 adds a tumbling-window candidate reading the scan, its layout in its chain.
+        // Pass 2 adds tumbling-window candidates as one operator over groups:
+        // the chain reading the scan is its own group, its layout in it, and
+        // the merge over it is another.
         assert!(
             has_line(&[
-                "TumblingWindows  new  FinalizeExactAccumulator ← SummaryMerge ← SummaryTumblingWindowChain tumbling_window_count=6 tumbling_window_width_ms=10000",
+                "TumblingWindows  new  SummaryTumblingWindowChain tumbling_window_count=6 tumbling_window_width_ms=10000",
                 "inputs=[G0]",
             ]),
+            "{text}"
+        );
+        assert!(
+            has_line(&["TumblingWindows  new  SummaryMerge", "inputs=[G54]"]),
             "{text}"
         );
         // Stage 2 offers the tumbling-window chain at ingestion time, read from the

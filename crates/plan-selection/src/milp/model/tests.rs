@@ -1091,12 +1091,14 @@ fn the_warm_start_is_a_feasible_plan_costed_exactly() {
     }
 }
 
-// RangeHeavy templates 7 and 4: the widened scan puts a `Project` in the
-// memo group of the scan it reads. The group's roots are split by
-// self-read depth, so the plan is acyclic, valid, accepted by the realizer
-// and costed exactly.
+// RangeHeavy templates 7 and 4: the two queries' scans of `m` are widened
+// to one label set and each reader projects back (a `Project` over the
+// widened `Scan`). The plan is acyclic, valid, accepted by the realizer and
+// costed exactly. Before tumbling windows were groups (#1203 2a-6), the
+// widened `Project` landed in the memo group of the scan it reads; it no
+// longer does, so the self-read case of `result_slots` is not exercised here.
 #[test]
-fn a_widened_scan_reading_its_own_memo_group_plans_exactly() {
+fn a_widened_scan_plans_exactly() {
     let fixture = through_stages(
         &[
             approximate("sum by (job) (sum_over_time(m[1h]))", 60_000, 0.05),
@@ -1104,23 +1106,20 @@ fn a_widened_scan_reading_its_own_memo_group_plans_exactly() {
         ],
         true,
     );
-    let reads_own_group = (0..fixture.physical.candidates.len()).any(|candidate| {
-        let group = fixture
-            .physical
-            .memo_group_of(PhysicalCandidateId(candidate));
-        fixture.physical.candidates[candidate]
-            .producer_candidates_per_input
-            .iter()
-            .any(|producers| {
-                producers
-                    .iter()
-                    .any(|p| p.0 != candidate && fixture.physical.memo_group_of(*p) == group)
-            })
-    });
-    assert!(
-        reads_own_group,
-        "the fixture has a root reading its own group"
-    );
+    let widens_a_scan = fixture
+        .physical
+        .operator_nodes_of_candidates_for_memo_groups
+        .iter()
+        .any(|node| match node.physical_node.non_asap() {
+            Some(asap_types::ir::NonASAPOp::Project { child, .. }) => {
+                matches!(
+                    child.non_asap(),
+                    Some(asap_types::ir::NonASAPOp::Scan { .. })
+                ) && child.schema.fields.len() > node.physical_node.schema.fields.len()
+            }
+            _ => false,
+        });
+    assert!(widens_a_scan, "the fixture widens a scan");
     for costs in [cost_inputs(), aws_fargate_cost_inputs()] {
         solve_and_check(&fixture, &costs, |_| {}).unwrap();
     }

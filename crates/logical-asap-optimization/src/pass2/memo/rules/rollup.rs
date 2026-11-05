@@ -221,14 +221,20 @@ pub(crate) fn add_window_rollup_candidates(memo: &mut Memo) -> Result<usize, Pas
             candidate.origin == OriginOfCandidateForMemoGroup::TumblingWindows
                 && eligible(candidate)
         }) {
-            if let Some((build, BuildPlace::Private)) = build_of(memo, candidate) {
-                if let Some(ASAPOp::SummaryTumblingWindowChain {
-                    tumbling_window_width_ms,
-                    ..
-                }) = build.asap()
-                {
-                    grids[group].insert(*tumbling_window_width_ms);
-                }
+            // The one tumbling-window chain the candidate reads, through its
+            // groups.
+            let widths: Vec<u64> = OperatorNode::reachable(&candidate.root_node)
+                .iter()
+                .filter_map(|node| match node.asap() {
+                    Some(ASAPOp::SummaryTumblingWindowChain {
+                        tumbling_window_width_ms,
+                        ..
+                    }) => Some(*tumbling_window_width_ms),
+                    _ => None,
+                })
+                .collect();
+            if let [width] = widths[..] {
+                grids[group].insert(width);
             }
         }
     }

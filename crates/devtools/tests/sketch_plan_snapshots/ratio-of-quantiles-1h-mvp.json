@@ -2301,9 +2301,9 @@
       }
     ],
     "cost": {
-      "cost_per_second": 6.4822354111e-6,
+      "cost_per_second": 6.48211976516e-6,
       "cost_unit": "cost_per_second",
-      "cpu_core_seconds_per_second": 0.0124208333333,
+      "cpu_core_seconds_per_second": 0.0124108333333,
       "per_node": {
         "0": {
           "cost_per_second": 9.44496e-8,
@@ -2324,9 +2324,9 @@
           "timing": "ingestion_time"
         },
         "2": {
-          "cost_per_second": 1.14606178698e-10,
+          "cost_per_second": 1.13566412923e-10,
           "cpu_core_seconds_per_second": 0.00001,
-          "detail": "merge 600000 states into 10000; x 0.0167/s; holds 90400000 bytes for 1.2 ms",
+          "detail": "merge 600000 states into 10000; x 0.0167/s; holds 90400000 bytes for 0.7 ms",
           "multiplier": 1,
           "operator": "SummaryMerge",
           "price_source": "analytical",
@@ -2342,24 +2342,15 @@
           "timing": "query_time"
         },
         "4": {
-          "cost_per_second": 1.87400076679e-12,
+          "cost_per_second": 1.87400039873e-12,
           "cpu_core_seconds_per_second": 1.66666666667e-7,
-          "detail": "operator: pass 10000 rows; x 0.0167/s; holds 32 bytes for 1.2 ms",
+          "detail": "operator: pass 10000 rows; x 0.0167/s; holds 32 bytes for 0.7 ms",
           "multiplier": 1,
           "operator": "Project",
           "price_source": "analytical",
           "timing": "query_time"
         },
         "5": {
-          "cost_per_second": 1.14606178698e-10,
-          "cpu_core_seconds_per_second": 0.00001,
-          "detail": "merge 600000 states into 10000; x 0.0167/s; holds 90400000 bytes for 1.2 ms",
-          "multiplier": 1,
-          "operator": "SummaryMerge",
-          "price_source": "analytical",
-          "timing": "query_time"
-        },
-        "6": {
           "cost_per_second": 1.874e-12,
           "cpu_core_seconds_per_second": 1.66666666667e-7,
           "detail": "estimate 10000 groups x 1; x 0.0167/s",
@@ -2368,19 +2359,19 @@
           "price_source": "analytical",
           "timing": "query_time"
         },
-        "7": {
-          "cost_per_second": 1.87400076679e-12,
+        "6": {
+          "cost_per_second": 1.87400039873e-12,
           "cpu_core_seconds_per_second": 1.66666666667e-7,
-          "detail": "operator: pass 10000 rows; x 0.0167/s; holds 32 bytes for 1.2 ms",
+          "detail": "operator: pass 10000 rows; x 0.0167/s; holds 32 bytes for 0.7 ms",
           "multiplier": 1,
           "operator": "Project",
           "price_source": "analytical",
           "timing": "query_time"
         },
-        "8": {
-          "cost_per_second": 1.87400076679e-12,
+        "7": {
+          "cost_per_second": 1.87400039873e-12,
           "cpu_core_seconds_per_second": 1.66666666667e-7,
-          "detail": "operator: pass 10000 rows; x 0.0167/s; holds 32 bytes for 1.2 ms",
+          "detail": "operator: pass 10000 rows; x 0.0167/s; holds 32 bytes for 0.7 ms",
           "multiplier": 1,
           "operator": "BinaryOp",
           "price_source": "analytical",
@@ -2389,17 +2380,17 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 5514403766.67,
-        "cpu_ops_per_second": 6020833.33333,
+        "average_memory_bytes": 5514400979.33,
+        "cpu_ops_per_second": 6010833.33333,
         "disk_bytes": 0,
         "latency_per_query": [
           {
             "compaction_ms": 0.0,
-            "query_ms": 1.25
+            "query_ms": 0.65
           }
         ],
         "peak_cpu_cores": 2,
-        "peak_memory_bytes": 5695200128,
+        "peak_memory_bytes": 5604800128,
         "scanned_bytes_per_second": 64000000.0
       }
     },
@@ -2617,7 +2608,7 @@
           "consumer": 5,
           "data_state": {
             "primitive": "SummaryState",
-            "timing": "ingestion_time"
+            "timing": "query_time"
           },
           "grouping": "NotApplicable",
           "intermediate_schema": {
@@ -2666,14 +2657,14 @@
               ]
             ]
           },
-          "producer": 1,
+          "producer": 2,
           "role": "Input",
           "window": "NotApplicable"
         },
         {
           "consumer": 6,
           "data_state": {
-            "primitive": "SummaryState",
+            "primitive": "Raw",
             "timing": "query_time"
           },
           "grouping": "NotApplicable",
@@ -2690,19 +2681,9 @@
               },
               {
                 "dtype": {
-                  "Sketch": [
-                    {
-                      "algorithm": "DDSketch",
-                      "params": {
-                        "DDSketch": {
-                          "alpha": 0.0240999270515
-                        }
-                      }
-                    },
-                    "PerSubpopulationInstance"
-                  ]
+                  "Plain": "float64"
                 },
-                "name": "state",
+                "name": "quantile",
                 "nullable": false,
                 "table": null
               },
@@ -2749,53 +2730,6 @@
                 "dtype": {
                   "Plain": "float64"
                 },
-                "name": "quantile",
-                "nullable": false,
-                "table": null
-              },
-              {
-                "dtype": {
-                  "Plain": "utf8"
-                },
-                "name": "$promql_series_identity",
-                "nullable": false,
-                "table": null
-              }
-            ],
-            "time_index": 0,
-            "unique_keys": [
-              [
-                2,
-                0
-              ]
-            ]
-          },
-          "producer": 6,
-          "role": "Input",
-          "window": "NotApplicable"
-        },
-        {
-          "consumer": 8,
-          "data_state": {
-            "primitive": "Raw",
-            "timing": "query_time"
-          },
-          "grouping": "NotApplicable",
-          "intermediate_schema": {
-            "closed": true,
-            "fields": [
-              {
-                "dtype": {
-                  "Plain": "timestamp"
-                },
-                "name": "ts",
-                "nullable": false,
-                "table": null
-              },
-              {
-                "dtype": {
-                  "Plain": "float64"
-                },
                 "name": "value",
                 "nullable": false,
                 "table": null
@@ -2822,7 +2756,7 @@
           "window": "NotApplicable"
         },
         {
-          "consumer": 8,
+          "consumer": 7,
           "data_state": {
             "primitive": "Raw",
             "timing": "query_time"
@@ -2864,7 +2798,7 @@
               ]
             ]
           },
-          "producer": 7,
+          "producer": 6,
           "role": "Right",
           "window": "NotApplicable"
         }
@@ -3334,7 +3268,41 @@
           }
         },
         {
-          "guarantee": null,
+          "guarantee": {
+            "provenance": [
+              {
+                "algorithm": "DDSketch",
+                "contract": "ddsketch_relative_error_alpha_v1",
+                "kind": "sketch_evaluation",
+                "params": {
+                  "DDSketch": {
+                    "alpha": 0.0240999270515
+                  }
+                },
+                "query": "Quantile { q: 0.5 }"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "relative",
+              "accuracy_scope": "per_value",
+              "error": {
+                "factors": [
+                  {
+                    "op": "constant",
+                    "value": 0.0240999270515
+                  },
+                  {
+                    "op": "unknown",
+                    "statistic": "values_non_negative[data]"
+                  }
+                ],
+                "op": "product"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
           "id": 5,
           "materialization": "NotMaterialized",
           "output_schema": {
@@ -3350,19 +3318,9 @@
               },
               {
                 "dtype": {
-                  "Sketch": [
-                    {
-                      "algorithm": "DDSketch",
-                      "params": {
-                        "DDSketch": {
-                          "alpha": 0.0240999270515
-                        }
-                      }
-                    },
-                    "PerSubpopulationInstance"
-                  ]
+                  "Plain": "float64"
                 },
-                "name": "state",
+                "name": "quantile",
                 "nullable": false,
                 "table": null
               },
@@ -3384,15 +3342,18 @@
             ]
           },
           "output_state": {
-            "primitive": "SummaryState",
+            "primitive": "Raw",
             "timing": "query_time"
           },
           "payload": {
             "ASAP": {
-              "SummaryMerge": {
-                "children": [
-                  1
-                ]
+              "SummaryEstimate": {
+                "query": {
+                  "Quantile": {
+                    "q": 0.5
+                  }
+                },
+                "summary_input": 2
               }
             }
           }
@@ -3450,97 +3411,6 @@
                 "dtype": {
                   "Plain": "float64"
                 },
-                "name": "quantile",
-                "nullable": false,
-                "table": null
-              },
-              {
-                "dtype": {
-                  "Plain": "utf8"
-                },
-                "name": "$promql_series_identity",
-                "nullable": false,
-                "table": null
-              }
-            ],
-            "time_index": 0,
-            "unique_keys": [
-              [
-                2,
-                0
-              ]
-            ]
-          },
-          "output_state": {
-            "primitive": "Raw",
-            "timing": "query_time"
-          },
-          "payload": {
-            "ASAP": {
-              "SummaryEstimate": {
-                "query": {
-                  "Quantile": {
-                    "q": 0.5
-                  }
-                },
-                "summary_input": 5
-              }
-            }
-          }
-        },
-        {
-          "guarantee": {
-            "provenance": [
-              {
-                "algorithm": "DDSketch",
-                "contract": "ddsketch_relative_error_alpha_v1",
-                "kind": "sketch_evaluation",
-                "params": {
-                  "DDSketch": {
-                    "alpha": 0.0240999270515
-                  }
-                },
-                "query": "Quantile { q: 0.5 }"
-              }
-            ],
-            "spec": {
-              "accuracy_metric": "relative",
-              "accuracy_scope": "per_value",
-              "error": {
-                "factors": [
-                  {
-                    "op": "constant",
-                    "value": 0.0240999270515
-                  },
-                  {
-                    "op": "unknown",
-                    "statistic": "values_non_negative[data]"
-                  }
-                ],
-                "op": "product"
-              },
-              "failure_probability": {
-                "op": "zero"
-              }
-            }
-          },
-          "id": 7,
-          "materialization": "NotMaterialized",
-          "output_schema": {
-            "closed": true,
-            "fields": [
-              {
-                "dtype": {
-                  "Plain": "timestamp"
-                },
-                "name": "ts",
-                "nullable": false,
-                "table": null
-              },
-              {
-                "dtype": {
-                  "Plain": "float64"
-                },
                 "name": "value",
                 "nullable": false,
                 "table": null
@@ -3569,7 +3439,7 @@
           "payload": {
             "NonASAP": {
               "Project": {
-                "child": 6,
+                "child": 5,
                 "cols": [
                   {
                     "alias": "ts",
@@ -3597,7 +3467,7 @@
         },
         {
           "guarantee": null,
-          "id": 8,
+          "id": 7,
           "materialization": "NotMaterialized",
           "output_schema": {
             "closed": true,
@@ -3652,14 +3522,14 @@
                   "vector_match": null
                 },
                 "return_bool": false,
-                "rhs": 7
+                "rhs": 6
               }
             }
           }
         }
       ],
       "roots": [
-        8
+        7
       ],
       "scalar_roots": []
     },

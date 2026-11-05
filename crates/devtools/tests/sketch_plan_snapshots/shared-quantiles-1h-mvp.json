@@ -2312,9 +2312,9 @@
       }
     ],
     "cost": {
-      "cost_per_second": 3.99010517691e-6,
+      "cost_per_second": 3.98999208465e-6,
       "cost_unit": "cost_per_second",
-      "cpu_core_seconds_per_second": 0.0124206666667,
+      "cpu_core_seconds_per_second": 0.0124106666667,
       "per_node": {
         "0": {
           "cost_per_second": 9.44496e-8,
@@ -2362,15 +2362,6 @@
           "timing": "query_time"
         },
         "5": {
-          "cost_per_second": 1.13092261327e-10,
-          "cpu_core_seconds_per_second": 0.00001,
-          "detail": "merge 600000 states into 10000; x 0.0167/s; holds 54880000 bytes for 0.6 ms",
-          "multiplier": 1,
-          "operator": "SummaryMerge",
-          "price_source": "analytical",
-          "timing": "query_time"
-        },
-        "6": {
           "cost_per_second": 1.874e-12,
           "cpu_core_seconds_per_second": 1.66666666667e-7,
           "detail": "estimate 10000 groups x 1; x 0.0167/s",
@@ -2379,7 +2370,7 @@
           "price_source": "analytical",
           "timing": "query_time"
         },
-        "7": {
+        "6": {
           "cost_per_second": 1.87400038033e-12,
           "cpu_core_seconds_per_second": 1.66666666667e-7,
           "detail": "operator: pass 10000 rows; x 0.0167/s; holds 32 bytes for 0.6 ms",
@@ -2391,8 +2382,8 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 3347681134.19,
-        "cpu_ops_per_second": 6020666.66667,
+        "average_memory_bytes": 3347680567.09,
+        "cpu_ops_per_second": 6010666.66667,
         "disk_bytes": 0,
         "latency_per_query": [
           {
@@ -2405,7 +2396,7 @@
           }
         ],
         "peak_cpu_cores": 3,
-        "peak_memory_bytes": 3457440096,
+        "peak_memory_bytes": 3402560096,
         "scanned_bytes_per_second": 64000000.0
       }
     },
@@ -2623,63 +2614,6 @@
           "consumer": 5,
           "data_state": {
             "primitive": "SummaryState",
-            "timing": "ingestion_time"
-          },
-          "grouping": "NotApplicable",
-          "intermediate_schema": {
-            "closed": true,
-            "fields": [
-              {
-                "dtype": {
-                  "Plain": "timestamp"
-                },
-                "name": "ts",
-                "nullable": false,
-                "table": null
-              },
-              {
-                "dtype": {
-                  "Sketch": [
-                    {
-                      "algorithm": "DDSketch",
-                      "params": {
-                        "DDSketch": {
-                          "alpha": 0.05
-                        }
-                      }
-                    },
-                    "PerSubpopulationInstance"
-                  ]
-                },
-                "name": "state",
-                "nullable": false,
-                "table": null
-              },
-              {
-                "dtype": {
-                  "Plain": "utf8"
-                },
-                "name": "$promql_series_identity",
-                "nullable": false,
-                "table": null
-              }
-            ],
-            "time_index": 0,
-            "unique_keys": [
-              [
-                2,
-                0
-              ]
-            ]
-          },
-          "producer": 1,
-          "role": "Input",
-          "window": "NotApplicable"
-        },
-        {
-          "consumer": 6,
-          "data_state": {
-            "primitive": "SummaryState",
             "timing": "query_time"
           },
           "grouping": "NotApplicable",
@@ -2729,12 +2663,12 @@
               ]
             ]
           },
-          "producer": 5,
+          "producer": 2,
           "role": "Input",
           "window": "NotApplicable"
         },
         {
-          "consumer": 7,
+          "consumer": 6,
           "data_state": {
             "primitive": "Raw",
             "timing": "query_time"
@@ -2776,7 +2710,7 @@
               ]
             ]
           },
-          "producer": 6,
+          "producer": 5,
           "role": "Input",
           "window": "NotApplicable"
         }
@@ -2986,7 +2920,9 @@
         {
           "guarantee": null,
           "id": 2,
-          "materialization": "NotMaterialized",
+          "materialization": {
+            "MatAtQuery": "Memory"
+          },
           "output_schema": {
             "closed": true,
             "fields": [
@@ -3246,7 +3182,41 @@
           }
         },
         {
-          "guarantee": null,
+          "guarantee": {
+            "provenance": [
+              {
+                "algorithm": "DDSketch",
+                "contract": "ddsketch_relative_error_alpha_v1",
+                "kind": "sketch_evaluation",
+                "params": {
+                  "DDSketch": {
+                    "alpha": 0.05
+                  }
+                },
+                "query": "Quantile { q: 0.9 }"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "relative",
+              "accuracy_scope": "per_value",
+              "error": {
+                "factors": [
+                  {
+                    "op": "constant",
+                    "value": 0.05
+                  },
+                  {
+                    "op": "unknown",
+                    "statistic": "values_non_negative[data]"
+                  }
+                ],
+                "op": "product"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
           "id": 5,
           "materialization": "NotMaterialized",
           "output_schema": {
@@ -3262,19 +3232,9 @@
               },
               {
                 "dtype": {
-                  "Sketch": [
-                    {
-                      "algorithm": "DDSketch",
-                      "params": {
-                        "DDSketch": {
-                          "alpha": 0.05
-                        }
-                      }
-                    },
-                    "PerSubpopulationInstance"
-                  ]
+                  "Plain": "float64"
                 },
-                "name": "state",
+                "name": "quantile",
                 "nullable": false,
                 "table": null
               },
@@ -3296,15 +3256,18 @@
             ]
           },
           "output_state": {
-            "primitive": "SummaryState",
+            "primitive": "Raw",
             "timing": "query_time"
           },
           "payload": {
             "ASAP": {
-              "SummaryMerge": {
-                "children": [
-                  1
-                ]
+              "SummaryEstimate": {
+                "query": {
+                  "Quantile": {
+                    "q": 0.9
+                  }
+                },
+                "summary_input": 2
               }
             }
           }
@@ -3362,97 +3325,6 @@
                 "dtype": {
                   "Plain": "float64"
                 },
-                "name": "quantile",
-                "nullable": false,
-                "table": null
-              },
-              {
-                "dtype": {
-                  "Plain": "utf8"
-                },
-                "name": "$promql_series_identity",
-                "nullable": false,
-                "table": null
-              }
-            ],
-            "time_index": 0,
-            "unique_keys": [
-              [
-                2,
-                0
-              ]
-            ]
-          },
-          "output_state": {
-            "primitive": "Raw",
-            "timing": "query_time"
-          },
-          "payload": {
-            "ASAP": {
-              "SummaryEstimate": {
-                "query": {
-                  "Quantile": {
-                    "q": 0.9
-                  }
-                },
-                "summary_input": 5
-              }
-            }
-          }
-        },
-        {
-          "guarantee": {
-            "provenance": [
-              {
-                "algorithm": "DDSketch",
-                "contract": "ddsketch_relative_error_alpha_v1",
-                "kind": "sketch_evaluation",
-                "params": {
-                  "DDSketch": {
-                    "alpha": 0.05
-                  }
-                },
-                "query": "Quantile { q: 0.9 }"
-              }
-            ],
-            "spec": {
-              "accuracy_metric": "relative",
-              "accuracy_scope": "per_value",
-              "error": {
-                "factors": [
-                  {
-                    "op": "constant",
-                    "value": 0.05
-                  },
-                  {
-                    "op": "unknown",
-                    "statistic": "values_non_negative[data]"
-                  }
-                ],
-                "op": "product"
-              },
-              "failure_probability": {
-                "op": "zero"
-              }
-            }
-          },
-          "id": 7,
-          "materialization": "NotMaterialized",
-          "output_schema": {
-            "closed": true,
-            "fields": [
-              {
-                "dtype": {
-                  "Plain": "timestamp"
-                },
-                "name": "ts",
-                "nullable": false,
-                "table": null
-              },
-              {
-                "dtype": {
-                  "Plain": "float64"
-                },
                 "name": "value",
                 "nullable": false,
                 "table": null
@@ -3481,7 +3353,7 @@
           "payload": {
             "NonASAP": {
               "Project": {
-                "child": 6,
+                "child": 5,
                 "cols": [
                   {
                     "alias": "ts",
@@ -3510,11 +3382,11 @@
       ],
       "roots": [
         4,
-        7
+        6
       ],
       "scalar_roots": []
     },
-    "display_name": "Q1 DDSketch ×60 tumbling windows · Q2 DDSketch ×60 tumbling windows · shared DDSketch ×60 tumbling windows (Q1, Q2) · shared Scan (Q1, Q2) · ingestion time: DDSketch for Q1, Q2, 60 × 1m tumbling windows"
+    "display_name": "Q1 DDSketch ×60 tumbling windows · Q2 DDSketch ×60 tumbling windows · shared DDSketch ×60 tumbling windows (Q1, Q2) · shared Scan (Q1, Q2) · ingestion time: DDSketch for Q1, Q2, 60 × 1m tumbling windows · query time, shared: SummaryMerge"
   },
   "tumbling_window_retention_ms": {
     "1": 3600000
