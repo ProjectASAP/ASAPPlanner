@@ -288,34 +288,57 @@ pub struct CandidateForMemoGroup {
 /// e_v = op_v(G_{v,1}, …, G_{v,n}): one operator, its children are groups.
 pub struct CandidateExpression { pub operator: Operator<MemoGroupId> }
 
+/// p_v^log = (θ_v, ω_v); `new` rejects invalid combinations (parameters of
+/// another family, a window layout on an exact operator that cannot be windowed).
 pub struct LogicalProperties {
     representation: Representation,       // family and θ, from the predefined list
     window_layout: Option<WindowLayout>,  // ω_v
 }
 impl LogicalProperties {
     pub fn new(representation: Representation, window_layout: Option<WindowLayout>) -> Result<Self, InvalidLogicalProperties>;
-    /// (ε_v, δ_v) for `statistic`, derived through `local_guarantee`.
-    pub fn error_bound(&self, statistic: &SketchStatistic) -> Option<AccuracyGuarantee>;
+    pub fn representation(&self) -> &Representation;
+    pub fn window_layout(&self) -> Option<&WindowLayout>;
 }
 pub enum Representation { Exact(ExactKind), Summary(SketchKind) }
 pub enum WindowLayout { Tumbling { width_ms: u64, count: u32 } }
 
+/// r^log_{c,i}: one optional constraint per dimension; None accepts any value.
+/// `new` rejects invalid combinations (a cap that is not positive and finite,
+/// a cap without the statistic it applies to, a window with zero range or step).
 pub struct LogicalRequirement {
-    pub family: Option<SketchAlgorithm>,
-    pub window: Option<WindowRequirement>,  // range and step of the queries reaching the consumer: a width must divide both
-    pub error_cap: Option<f64>,             // cap_{c,i}: min(validity cap of g_c, pruning cap)
+    family: Option<SketchAlgorithm>,
+    /// Range and step of the queries reaching the consumer: a width must divide both.
+    window: Option<WindowRequirement>,
+    /// The statistic the consumer reads from this input; the producer's ε is
+    /// derived for it.
+    statistic: Option<SketchStatistic>,
+    /// cap_{c,i} = min(validity cap of g_c, pruning cap max_q ε_q / λ_{q,c,i}).
+    error_cap: Option<f64>,
 }
-/// α^log_{u,c,i}
-pub fn satisfies(producer: &LogicalProperties, requirement: &LogicalRequirement) -> bool;
-
-/// g_c as propagation factors λ_{c,i}, read from the consumer's operator and
-/// arguments, and the validity cap (None when g_c is linear).
+impl LogicalRequirement {
+    pub fn new(family: Option<SketchAlgorithm>, window: Option<WindowRequirement>,
+               statistic: Option<SketchStatistic>, error_cap: Option<f64>) -> Result<Self, InvalidLogicalProperties>;
+    pub fn family(&self) -> Option<SketchAlgorithm>;
+    pub fn window(&self) -> Option<&WindowRequirement>;
+    pub fn statistic(&self) -> Option<&SketchStatistic>;
+    pub fn error_cap(&self) -> Option<f64>;
+    /// g_c of a consumer: the propagation factor λ_{c,i} per input, read from the
+    /// operator and its arguments, and the validity cap (None when g_c is linear).
+    /// Sets each input's first `error_cap`; Stage 3 composes the factors into λ_{q,c,i}.
+    pub fn error_propagation(consumer: &Operator<MemoGroupId>) -> ErrorPropagation;
+}
 /// Approved 2026-11-05.
 pub struct ErrorPropagation { pub factor_per_input: Vec<f64>, pub validity_cap: Option<f64> }
-pub fn error_propagation(consumer: &Operator<MemoGroupId>) -> ErrorPropagation;
+
+/// α^log_{u,c,i}: one check per dimension, joined by "and". The error check
+/// derives the producer's (ε_u, δ_u) for `requirement.statistic()` through
+/// `estimators::local_guarantee` and compares ε_u with `error_cap`.
+pub fn satisfies_logical(producer: &LogicalProperties, requirement: &LogicalRequirement) -> bool;
 ```
 
-The validity cap is known when the consumer is created. The pruning cap needs $\lambda_{q,c,i}$ and the queries that may reach $c$, so it is filled in when Pass 2 builds the logical edges.
+The logical and physical sides have the same shape: a properties struct and a requirement struct, each with private fields, a checked `new`, one accessor per dimension, and one `satisfies_*` function. Invalid values of both logical structs are reported through one error type, `InvalidLogicalProperties`, as `InvalidPhysicalProperties` does for the physical side.
+
+The error bound is not a method of `LogicalProperties`: it depends on the statistic the consumer reads, so `satisfies_logical` derives it from the requirement's statistic. The validity cap is known when the consumer is created (`LogicalRequirement::error_propagation`). The pruning cap needs $\lambda_{q,c,i}$ and the queries that may reach $c$, so Pass 2 builds each input's final requirement with `LogicalRequirement::new` when it builds the logical edges.
 
 Deleted: `root_node` with private nodes, `input_groups` (the expression's children), `accuracy_budget_parts`, the `SharedBuild` and `SummaryResult` origins.
 
@@ -367,13 +390,21 @@ impl PhysicalProperties {
     pub fn is_materialized(&self) -> bool;          // ℓ ≠ None
 }
 
-/// r^phys_{c,i}; `new` rejects (IngestionTime, Later).
+/// r^phys_{c,i}; `new` rejects (IngestionTime, Later), reported through
+/// `InvalidPhysicalProperties` (one error type per side).
 pub struct PhysicalRequirement {
     consumer_timing: ExecutionTiming,
     reads_from: Evaluation,
     /// (I_κ, φ_κ) of the consumer's execution context, from its query's T_q;
     /// None for a non-periodic query.
     consumer_schedule: Option<EvaluationSchedule>,
+}
+impl PhysicalRequirement {
+    pub fn new(consumer_timing: ExecutionTiming, reads_from: Evaluation,
+               consumer_schedule: Option<EvaluationSchedule>) -> Result<Self, InvalidPhysicalProperties>;
+    pub fn consumer_timing(&self) -> ExecutionTiming;
+    pub fn reads_from(&self) -> Evaluation;
+    pub fn consumer_schedule(&self) -> Option<&EvaluationSchedule>;
 }
 /// A periodic evaluation schedule φ + I·ℤ.
 pub struct EvaluationSchedule { interval_ms: u64, phase_ms: u64 }
@@ -509,7 +540,7 @@ Today, Pass 1 instead sizes one $\boldsymbol\theta$ per `accuracy_budget_parts` 
 | 8 | Summary results | `factor_summary_results` ([`summary_results.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/rules/summary_results.rs)) | a summary readout inside a composite candidate | the readout as its own group | #1203 2a-2 (#1218) makes the readout a group in Pass 1; the rule is then deleted |
 | 9 | Shared configurations | `add_state_configuration_candidates` ([`shared_configuration_readers.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/rules/shared_configuration_readers.rs)) | consumers that could share a summary at a size or window horizon that covers them | consumer copies at the shared size (`SharedBuild` origin) | deleted in #1203 2b: the state group already holds every $\boldsymbol\theta$, and $y$ chooses per consumer input |
 | 10 | Shared summary state groups | `add_shared_summary_state_groups` ([`state_groups.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/state_groups.rs)) | summary builds directly over input groups | per-size concrete state groups with consumer copies | deleted in #1203 2b and #1160: one state group per state family |
-| — | Logical edges (#1201) | after the last rule | every candidate $c$ and input $i$ | one `LogicalEdge { producer, consumer, input, satisfies_logical_requirement }` per $u \in G_{c,i}$, after tightening each `error_cap` with the pruning cap $\max_q \varepsilon_q / \lambda_{q,c,i}$; $\alpha^{\log}_{u,c,i}$ = `satisfies(p^log_u, r^log_{c,i})`; output `LogicalASAPMemoCandidates { memo, edges }` | #1201 |
+| — | Logical edges (#1201) | after the last rule | every candidate $c$ and input $i$ | one `LogicalEdge { producer, consumer, input, satisfies_logical_requirement }` per $u \in G_{c,i}$, after tightening each `error_cap` with the pruning cap $\max_q \varepsilon_q / \lambda_{q,c,i}$; $\alpha^{\log}_{u,c,i}$ = `satisfies_logical(p^log_u, r^log_{c,i})`; output `LogicalASAPMemoCandidates { memo, edges }` | #1201 |
 
 After #1203 2b, every Pass 2 rule has the same shape: match groups, then `find_or_add_group` for any new intermediate result and `add_candidate` for the new way to compute an existing group. A rule adds no candidate a group already has (same expression and $p^{\log}$).
 
@@ -575,7 +606,7 @@ fn expand(memo: &Memo, dag: LogicalDag, mut pending: VecDeque<CandidateForMemoGr
     // of the admissible producers in G_{c,i}.
     for choice in cartesian_product(inputs.iter().enumerate().map(|(i, &group)| {
         candidates_of(memo, group)
-            .filter(|&u| satisfies(&memo.candidate(u).logical_properties,      // α^log = 1
+            .filter(|&u| satisfies_logical(&memo.candidate(u).logical_properties,      // α^log = 1
                                    &candidate.input_requirements[i]))
             .collect::<Vec<_>>()
     })) {
@@ -652,4 +683,4 @@ with $N(v) = 1$ for a candidate with no inputs. It is an upper bound because a s
 
 ### Physical DAGs
 
-The same procedure lists physical DAGs from Stage 2's output. Use `PhysicalCandidate`s instead of logical candidates, and `admissible_edges_into(c, i)` (which already applies $\alpha^{\log}$ and $\alpha^{\mathrm{phys}}$) instead of `candidates_of` with `satisfies`. A physical candidate with $\ell = $ None that two consumers in different contexts $\kappa$ choose runs once per context; in the listing it is still one node, and the contexts are a Stage 3 choice (#1207).
+The same procedure lists physical DAGs from Stage 2's output. Use `PhysicalCandidate`s instead of logical candidates, and `admissible_edges_into(c, i)` (which already applies $\alpha^{\log}$ and $\alpha^{\mathrm{phys}}$) instead of `candidates_of` with `satisfies_logical`. A physical candidate with $\ell = $ None that two consumers in different contexts $\kappa$ choose runs once per context; in the listing it is still one node, and the contexts are a Stage 3 choice (#1207).
