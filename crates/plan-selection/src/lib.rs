@@ -248,7 +248,7 @@ mod accuracy_binding;
 mod checks;
 mod models;
 // #1095 §2.0: the group selection MILP's inputs (dominance, execution
-// contexts, accuracy weights).
+// contexts, row (K) terms).
 mod groups;
 // #1095 §2.0: the group selection MILP and the decode of its solution.
 mod milp;

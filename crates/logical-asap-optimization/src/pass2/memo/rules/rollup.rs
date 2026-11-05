@@ -1,14 +1,12 @@
 //! Producer-level exact and sketch rollups, using the existing capability rules.
-use super::reuse::{
-    append_producer, append_reader, combined_inputs, eligible, replace, restore_inputs,
-};
+use super::reuse::{add_candidate_over_groups, eligible, find_or_add_producer, replace};
 use crate::pass2::asap_aware_cse::{rollup_candidate_for, rollup_pass2_candidates};
-use crate::pass2::memo::state_groups::{simple_build, Pass2RuleError};
+use crate::pass2::memo::state_groups::{build_of, BuildPlace, Pass2RuleError};
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{
     ASAPOp, NonASAPOp, Operator, OperatorNode, ProjectItem, QueryRoot, ScalarExpr,
 };
-use asap_types::stages::{Memo, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -23,7 +21,10 @@ pub(crate) fn add_rollup_candidates(memo: &mut Memo) -> Result<usize, Pass2RuleE
                         | OriginOfCandidateForMemoGroup::WidenedScans
                 )
             {
-                if let Some((build, _)) = simple_build(memo, candidate) {
+                // A Pass 1 build is its own group, which the consumer reads.
+                if let Some((build, BuildPlace::Private | BuildPlace::InputGroup(_))) =
+                    build_of(memo, candidate)
+                {
                     candidates.push((group, candidate.clone(), build));
                 }
             }
@@ -74,27 +75,24 @@ pub(crate) fn add_rollup_candidates(memo: &mut Memo) -> Result<usize, Pass2RuleE
             let Ok(rewritten) = result.roots else {
                 continue;
             };
-            let [QueryRoot::Operator(coarse_node), QueryRoot::Operator(fine_node)] =
-                rewritten.as_slice()
+            let Ok([QueryRoot::Operator(coarse_node), QueryRoot::Operator(fine_node)]) =
+                <[QueryRoot; 2]>::try_from(rewritten)
             else {
                 unreachable!("two operator roots")
             };
-            let inputs = combined_inputs(coarse, fine);
-            let coarse_node = restore_inputs(coarse_node, memo, &inputs);
-            let fine_node = restore_inputs(fine_node, memo, &inputs);
             if is_sketch || state_rollup {
                 // Concrete resized states become ordinary state groups after all
                 // producer-level configurations have been expanded.
-                added += usize::from(append_reader(
+                added += usize::from(add_candidate_over_groups(
                     memo,
-                    *coarse_group,
+                    MemoGroupId(*coarse_group as u32),
                     coarse,
                     coarse_node,
                     OriginOfCandidateForMemoGroup::Rollup,
                 )?);
-                added += usize::from(append_reader(
+                added += usize::from(add_candidate_over_groups(
                     memo,
-                    *fine_group,
+                    MemoGroupId(*fine_group as u32),
                     fine,
                     fine_node,
                     OriginOfCandidateForMemoGroup::Rollup,
@@ -126,7 +124,7 @@ pub(crate) fn add_rollup_candidates(memo: &mut Memo) -> Result<usize, Pass2RuleE
                 // implementation of the group is still checked by plan
                 // reconstruction (input contract) and Stage 3 (guarantee).
                 let fine_result_is_value = *fine_node == *value
-                    && memo.groups[*fine_group].logical_node.schema == value.schema
+                    && memo.groups()[*fine_group].logical_node.schema == value.schema
                     && memo.candidates[*fine_group].iter().all(|candidate| {
                         candidate
                             .root_node
@@ -135,39 +133,38 @@ pub(crate) fn add_rollup_candidates(memo: &mut Memo) -> Result<usize, Pass2RuleE
                             .is_some_and(|guarantee| guarantee.is_exact())
                     });
                 if fine_result_is_value {
-                    let fine_result = Rc::clone(&memo.groups[*fine_group].logical_node);
+                    let fine_result = Rc::clone(&memo.groups()[*fine_group].logical_node);
                     let coarse_node = replace(
                         &coarse_node,
                         &HashMap::from([(Rc::as_ptr(&value), fine_result)]),
                     );
-                    added += usize::from(append_reader(
+                    added += usize::from(add_candidate_over_groups(
                         memo,
-                        *coarse_group,
+                        MemoGroupId(*coarse_group as u32),
                         coarse,
                         coarse_node,
                         OriginOfCandidateForMemoGroup::Rollup,
                     )?);
                     continue;
                 }
-                let mut queries = memo.groups[*coarse_group].queries.clone();
-                queries.extend(&memo.groups[*fine_group].queries);
+                let mut queries = memo.groups()[*coarse_group].queries.clone();
+                queries.extend(&memo.groups()[*fine_group].queries);
                 queries.sort_unstable();
                 queries.dedup();
-                let producer = append_producer(
+                let producer = find_or_add_producer(
                     memo,
-                    Rc::clone(&value),
+                    &value,
                     &queries,
-                    OriginOfCandidateForMemoGroup::Rollup,
-                    1,
-                )?;
-                let canonical = Rc::clone(&memo.groups[producer.0 as usize].logical_node);
+                    &OriginOfCandidateForMemoGroup::Rollup,
+                );
+                let canonical = Rc::clone(&memo.groups()[producer.0 as usize].logical_node);
                 let coarse_node = replace(
                     &coarse_node,
                     &HashMap::from([(Rc::as_ptr(&value), Rc::clone(&canonical))]),
                 );
-                added += usize::from(append_reader(
+                added += usize::from(add_candidate_over_groups(
                     memo,
-                    *coarse_group,
+                    MemoGroupId(*coarse_group as u32),
                     coarse,
                     coarse_node,
                     OriginOfCandidateForMemoGroup::Rollup,
@@ -198,9 +195,9 @@ pub(crate) fn add_rollup_candidates(memo: &mut Memo) -> Result<usize, Pass2RuleE
                             &HashMap::from([(Rc::as_ptr(&own_value), Rc::clone(&canonical))]),
                         )
                     };
-                    added += usize::from(append_reader(
+                    added += usize::from(add_candidate_over_groups(
                         memo,
-                        *fine_group,
+                        MemoGroupId(*fine_group as u32),
                         fine,
                         fine_reader,
                         OriginOfCandidateForMemoGroup::Rollup,
@@ -218,20 +215,26 @@ pub(crate) fn add_window_rollup_candidates(memo: &mut Memo) -> Result<usize, Pas
     use crate::pass2::asap_aware_cse::{
         tumbling_window_candidates, window_composition_shared_chain_candidates,
     };
-    let mut grids = vec![std::collections::BTreeSet::new(); memo.groups.len()];
+    let mut grids = vec![std::collections::BTreeSet::new(); memo.groups().len()];
     for (group, candidates) in memo.candidates.iter().enumerate() {
         for candidate in candidates.iter().filter(|candidate| {
             candidate.origin == OriginOfCandidateForMemoGroup::TumblingWindows
                 && eligible(candidate)
         }) {
-            if let Some((build, _)) = simple_build(memo, candidate) {
-                if let Some(ASAPOp::SummaryTumblingWindowChain {
-                    tumbling_window_width_ms,
-                    ..
-                }) = build.asap()
-                {
-                    grids[group].insert(*tumbling_window_width_ms);
-                }
+            // The one tumbling-window chain the candidate reads, through its
+            // groups.
+            let widths: Vec<u64> = OperatorNode::reachable(&candidate.root_node)
+                .iter()
+                .filter_map(|node| match node.asap() {
+                    Some(ASAPOp::SummaryTumblingWindowChain {
+                        tumbling_window_width_ms,
+                        ..
+                    }) => Some(*tumbling_window_width_ms),
+                    _ => None,
+                })
+                .collect();
+            if let [width] = widths[..] {
+                grids[group].insert(width);
             }
         }
     }
@@ -271,12 +274,12 @@ pub(crate) fn add_window_rollup_candidates(memo: &mut Memo) -> Result<usize, Pas
                         continue;
                     }
                     let Ok(nodes) = rewritten.roots else { continue };
-                    let [QueryRoot::Operator(coarse_node), QueryRoot::Operator(fine_node)] =
-                        nodes.as_slice()
+                    let Ok([QueryRoot::Operator(coarse_node), QueryRoot::Operator(fine_node)]) =
+                        <[QueryRoot; 2]>::try_from(nodes)
                     else {
                         continue;
                     };
-                    if !OperatorNode::reachable(coarse_node).iter().any(|node| {
+                    if !OperatorNode::reachable(&coarse_node).iter().any(|node| {
                         matches!(
                             node.asap(),
                             Some(ASAPOp::SummaryMerge {
@@ -287,19 +290,16 @@ pub(crate) fn add_window_rollup_candidates(memo: &mut Memo) -> Result<usize, Pas
                     }) {
                         continue;
                     }
-                    let inputs = combined_inputs(coarse, fine);
-                    let coarse_node = restore_inputs(coarse_node, memo, &inputs);
-                    let fine_node = restore_inputs(fine_node, memo, &inputs);
-                    added += usize::from(append_reader(
+                    added += usize::from(add_candidate_over_groups(
                         memo,
-                        *coarse_group,
+                        MemoGroupId(*coarse_group as u32),
                         coarse,
                         coarse_node,
                         OriginOfCandidateForMemoGroup::Rollup,
                     )?);
-                    added += usize::from(append_reader(
+                    added += usize::from(add_candidate_over_groups(
                         memo,
-                        *fine_group,
+                        MemoGroupId(*fine_group as u32),
                         fine,
                         fine_node,
                         OriginOfCandidateForMemoGroup::Rollup,
@@ -313,13 +313,15 @@ pub(crate) fn add_window_rollup_candidates(memo: &mut Memo) -> Result<usize, Pas
 
 #[cfg(test)]
 mod tests {
-    use crate::pass1::memo_population::try_populate_pass1;
+    use crate::pass1::add_pass1_candidates::try_add_pass1_candidates;
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
     use crate::stage0::generate_dag_of_logical_memo_groups;
     use crate::test_support::{lower_promql, sharing_rules_and_shared_state_groups};
     use asap_types::ir::properties::AccuracyTarget;
+    use asap_types::ir::OperatorNode;
     use asap_types::ir::QueryRoot;
     use asap_types::stages::OriginOfCandidateForMemoGroup;
+    use std::rc::Rc;
 
     // When the finer query's own result is the finalized value the coarse
     // query rolls up, the rollup reads the finer query's group, so one
@@ -335,20 +337,20 @@ mod tests {
         let inventory =
             generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
                 .unwrap();
-        let memo =
-            sharing_rules_and_shared_state_groups(try_populate_pass1(initial, &inventory).unwrap())
-                .unwrap();
+        let memo = sharing_rules_and_shared_state_groups(
+            try_add_pass1_candidates(initial, &inventory, &[], &Default::default()).unwrap(),
+        )
+        .unwrap();
         let root_of = |query: usize| memo.query_roots[query].as_operator().unwrap().0 as usize;
         let (coarse, fine) = (root_of(0), root_of(1));
         assert!(
             memo.candidates[coarse].iter().any(|candidate| {
                 candidate.origin == OriginOfCandidateForMemoGroup::Rollup
-                    && candidate
-                        .input_groups
+                    && OperatorNode::reachable(&candidate.root_node)
                         .iter()
-                        .any(|child| child.0 as usize == fine)
+                        .any(|node| Rc::ptr_eq(node, &memo.groups()[fine].logical_node))
             }),
-            "the coarse rollup reads the finer query's group"
+            "the coarse rollup reads the finer query's group, through its own groups"
         );
         assert!(
             !memo.candidates[fine]

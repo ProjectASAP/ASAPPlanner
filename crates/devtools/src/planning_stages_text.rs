@@ -242,7 +242,7 @@ fn write_memo(out: &mut String, memo: &Memo, previous: Option<&Memo>, with_candi
     // The group lines share one set of column widths, with each group's
     // candidates printed under its line.
     let group_rows: Vec<Vec<String>> = memo
-        .groups
+        .groups()
         .iter()
         .enumerate()
         .map(|(id, group)| {
@@ -525,9 +525,12 @@ fn root_label(node: &Rc<OperatorNode>) -> String {
 fn chain_label(memo: &Memo, root: &Rc<OperatorNode>, input_groups: &[MemoGroupId]) -> String {
     let (flat, originals) = flatten(&[QueryRoot::Operator(root.clone())]);
     let is_input = |id: usize| {
-        input_groups
-            .iter()
-            .any(|group| Rc::ptr_eq(&memo.groups[group.0 as usize].logical_node, &originals[id]))
+        input_groups.iter().any(|group| {
+            Rc::ptr_eq(
+                &memo.groups()[group.0 as usize].logical_node,
+                &originals[id],
+            )
+        })
     };
     let mut labels = Vec::new();
     let mut pending = vec![flat.nodes.len() - 1];
@@ -597,12 +600,18 @@ mod tests {
             text.lines()
                 .any(|line| parts.iter().all(|part| line.contains(part)))
         };
-        // Pass 2 adds a tumbling-window candidate reading the scan, its layout in its chain.
+        // Pass 2 adds tumbling-window candidates as one operator over groups:
+        // the chain reading the scan is its own group, its layout in it, and
+        // the merge over it is another.
         assert!(
             has_line(&[
-                "TumblingWindows  new  FinalizeExactAccumulator ← SummaryMerge ← SummaryTumblingWindowChain tumbling_window_count=6 tumbling_window_width_ms=10000",
+                "TumblingWindows  new  SummaryTumblingWindowChain tumbling_window_count=6 tumbling_window_width_ms=10000",
                 "inputs=[G0]",
             ]),
+            "{text}"
+        );
+        assert!(
+            has_line(&["TumblingWindows  new  SummaryMerge", "inputs=[G54]"]),
             "{text}"
         );
         // Stage 2 offers the tumbling-window chain at ingestion time, read from the
@@ -611,8 +620,9 @@ mod tests {
             has_line(&["IngestionTime  AcrossEvaluations(Memory)", "<- {C1}"]),
             "{text}"
         );
+        // G4 and G5 are groups Pass 1 adds beneath the query's aggregates.
         assert!(
-            text.contains("selected choice: G0:c0 G1:c0 G2:c0 G3:c0\n"),
+            text.contains("selected choice: G0:c0 G1:c0 G2:c0 G3:c0 G4:c0 G5:c0\n"),
             "{text}"
         );
         assert!(text.contains("accepted accuracy:\n    q1: "), "{text}");

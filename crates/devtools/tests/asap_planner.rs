@@ -1525,7 +1525,7 @@ fn widened_scans_keep_memo_groups_and_stage2_candidates_acyclic() {
             .flat_map(|candidate| candidate.input_groups.iter().map(|g| g.0 as usize))
             .collect()
     };
-    for group in 0..memo.groups.len() {
+    for group in 0..memo.groups().len() {
         assert!(
             !reaches(&group_reads, group, group),
             "memo group {group} reads itself"
@@ -2068,11 +2068,14 @@ fn memo_section_lists_each_step_and_the_selected_choice() {
     // group: 7 groups (scan, range, two quantile groups, ratio, sum, avg),
     // 5 + 5 + 5 Pass 1 candidates (each quantile group: exact, DDSketch and
     // a KLL sized for the whole result for the whole budget, DDSketch and a
-    // KLL for half of it).
+    // KLL for half of it). Each summary candidate is one operator over the
+    // groups Pass 1 adds beneath it: the 4 builds both quantiles share,
+    // each quantile's 4 estimates, and the `avg`'s 6 (two states, their
+    // finalizes, a `Project` and the division), one candidate each.
     assert_eq!(steps[0]["groups"].as_array().unwrap().len(), 7);
     assert_eq!(candidates(&steps[0]), 0);
-    assert_eq!(steps[1]["groups"].as_array().unwrap().len(), 7);
-    assert_eq!(candidates(&steps[1]), 15);
+    assert_eq!(steps[1]["groups"].as_array().unwrap().len(), 25);
+    assert_eq!(candidates(&steps[1]), 33);
     // The node table is a valid FlatDag (children before parents) holding
     // each node once; every group's and candidate's `node` names a node of
     // it, and each boundary names a node and one of the candidate's child

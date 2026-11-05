@@ -1,7 +1,8 @@
 //! Exact ranking reuse with explicit exact-input groups. No global selection
 //! flags are required: only exact implementations can supply these inputs.
-use super::reuse::{append_producer, append_reader, eligible, replace};
+use super::reuse::{add_candidate_over_groups, eligible, find_or_add_producer, replace};
 use super::shared_producer::{add_shared_producer_candidates, Reader, SharedProducer};
+use crate::find_or_add_group::find_or_add_group;
 use crate::pass2::asap_aware_cse::topk_reuse_candidates;
 use crate::pass2::memo::state_groups::{boundary_ptrs, nodes_within, Pass2RuleError};
 use asap_types::ir::operator::{AggIntent, Reduction};
@@ -47,7 +48,7 @@ impl SharedProducer for TopKRankings {
     fn sets(&mut self, memo: &Memo) -> Result<Vec<Vec<Reader<Rc<OperatorNode>>>>, Pass2RuleError> {
         let mut owners = HashMap::new();
         let mut roots = Vec::new();
-        for (group, entry) in memo.groups.iter().enumerate() {
+        for (group, entry) in memo.groups().iter().enumerate() {
             let [input] = entry.logical_node.children()[..] else {
                 continue;
             };
@@ -101,7 +102,7 @@ impl SharedProducer for TopKRankings {
     ) -> Result<usize, Pass2RuleError> {
         // Interning the ranking is idempotent, so every reader of the set
         // reads the producer the first one interned.
-        let Some(input_group) = memo.groups[covering.reader_groups[0]]
+        let Some(input_group) = memo.groups()[covering.reader_groups[0]]
             .child_groups
             .first()
             .copied()
@@ -112,39 +113,37 @@ impl SharedProducer for TopKRankings {
         else {
             return Ok(0);
         };
-        let input = Rc::clone(&memo.groups[exact_input.0 as usize].logical_node);
+        let input = Rc::clone(&memo.groups()[exact_input.0 as usize].logical_node);
         let queries: Vec<_> = covering
             .reader_groups
             .iter()
-            .flat_map(|&group| memo.groups[group].queries.iter().copied())
+            .flat_map(|&group| memo.groups()[group].queries.iter().copied())
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect();
         let sort = covering.ranking.children()[0]
             .with_new_children(|_| Rc::clone(&input))
             .map_err(|error| Pass2RuleError::ReuseRule(error.to_string()))?;
-        let sort_group = append_producer(
+        let sort_group = find_or_add_producer(
             memo,
-            Rc::new(sort),
+            &Rc::new(sort),
             &queries,
-            OriginOfCandidateForMemoGroup::TopKReuse,
-            1,
-        )?;
-        let sort = Rc::clone(&memo.groups[sort_group.0 as usize].logical_node);
+            &OriginOfCandidateForMemoGroup::TopKReuse,
+        );
+        let sort = Rc::clone(&memo.groups()[sort_group.0 as usize].logical_node);
         let ranking = covering
             .ranking
             .with_new_children(|_| Rc::clone(&sort))
             .map_err(|error| Pass2RuleError::ReuseRule(error.to_string()))?;
-        let ranking_group = append_producer(
+        let ranking_group = find_or_add_producer(
             memo,
-            Rc::new(ranking),
+            &Rc::new(ranking),
             &queries,
-            OriginOfCandidateForMemoGroup::TopKReuse,
-            1,
-        )?;
-        let ranking = Rc::clone(&memo.groups[ranking_group.0 as usize].logical_node);
+            &OriginOfCandidateForMemoGroup::TopKReuse,
+        );
+        let ranking = Rc::clone(&memo.groups()[ranking_group.0 as usize].logical_node);
         let owner = reader.group;
-        let logical = Rc::clone(&memo.groups[owner].logical_node);
+        let logical = Rc::clone(&memo.groups()[owner].logical_node);
         let Some(NonASAPOp::Aggregate {
             reduction: Reduction::Reduce(keys),
             measures,
@@ -176,9 +175,9 @@ impl SharedProducer for TopKRankings {
             child: limited,
         }))
         .map_err(|error| Pass2RuleError::ReuseRule(error.to_string()))?;
-        Ok(usize::from(append_reader(
+        Ok(usize::from(add_candidate_over_groups(
             memo,
-            owner,
+            MemoGroupId(owner as u32),
             &original,
             reader,
             OriginOfCandidateForMemoGroup::TopKReuse,
@@ -221,8 +220,8 @@ fn exact_input_group(
                 break;
             };
             replacements.insert(
-                Rc::as_ptr(&memo.groups[child.0 as usize].logical_node),
-                Rc::clone(&memo.groups[exact_child.0 as usize].logical_node),
+                Rc::as_ptr(&memo.groups()[child.0 as usize].logical_node),
+                Rc::clone(&memo.groups()[exact_child.0 as usize].logical_node),
             );
             children.push(exact_child);
         }
@@ -250,18 +249,30 @@ fn exact_input_group(
     let node = Rc::new((*candidates[0].root_node).clone().with_guarantee(Some(
         AccuracyGuarantee::exact("only exact implementations and exact inputs"),
     )));
-    let queries = memo.groups[group.0 as usize].queries.clone();
-    let id = append_producer(
+    let queries = memo.groups()[group.0 as usize].queries.clone();
+    // The exact guarantee is the group's identity: it keeps the group apart
+    // from `group`, whose candidates may be approximate.
+    let groups_before = memo.groups().len();
+    let id = find_or_add_group(
         memo,
-        node,
+        &node,
         &queries,
-        OriginOfCandidateForMemoGroup::TopKReuse,
+        &OriginOfCandidateForMemoGroup::TopKReuse,
         1,
-    )?;
+    );
     for candidate in &mut candidates {
         candidate.fused_groups = Vec::new();
     }
-    memo.candidates[id.0 as usize] = candidates;
+    if id.0 as usize >= groups_before {
+        // Added: the exact candidates replace the group's own candidate.
+        memo.candidates[id.0 as usize] = candidates;
+    } else {
+        // Found (another group's exact input equals it): keep its
+        // candidates and add the new ones.
+        for candidate in candidates {
+            memo.add_candidate(id, candidate);
+        }
+    }
     known.insert(group, Some(id));
     Ok(Some(id))
 }

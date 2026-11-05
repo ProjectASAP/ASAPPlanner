@@ -104,12 +104,12 @@ pub fn build_with_compatible_producers_cache(
     compatible_producers_cache: &mut MemoGroupOutputToCompatibleProducersCache,
 ) -> Result<CandidateInventory, CandidateInventoryError> {
     let invalid = |message: &str| CandidateInventoryError::InvalidMemo(message.into());
-    if memo.groups.len() != memo.candidates.len() {
+    if memo.groups().len() != memo.candidates.len() {
         return Err(invalid("group and candidate vector lengths differ"));
     }
     if output_groups
         .iter()
-        .any(|group| group.0 as usize >= memo.groups.len())
+        .any(|group| group.0 as usize >= memo.groups().len())
     {
         return Err(invalid("query output references missing group"));
     }
@@ -117,7 +117,7 @@ pub fn build_with_compatible_producers_cache(
         operator_nodes_of_candidates_for_memo_groups: Vec::new(),
         producer_nodes_per_input: Vec::new(),
         query_output_nodes: Vec::new(),
-        implementation_roots_of_group: vec![Vec::new(); memo.groups.len()],
+        implementation_roots_of_group: vec![Vec::new(); memo.groups().len()],
     };
     for (group, candidates) in memo.candidates.iter().enumerate() {
         for (index, candidate) in candidates.iter().enumerate() {
@@ -132,7 +132,7 @@ pub fn build_with_compatible_producers_cache(
             if implemented.len() != 1 + candidate.fused_groups.len()
                 || implemented
                     .iter()
-                    .any(|id| id.0 as usize >= memo.groups.len())
+                    .any(|id| id.0 as usize >= memo.groups().len())
             {
                 return Err(invalid(
                     "candidate names duplicate or missing absorbed groups",
@@ -150,14 +150,14 @@ pub fn build_with_compatible_producers_cache(
             if candidate
                 .input_groups
                 .iter()
-                .any(|child| child.0 as usize >= memo.groups.len())
+                .any(|child| child.0 as usize >= memo.groups().len())
             {
                 return Err(invalid("candidate references missing input group"));
             }
             let inputs = candidate
                 .input_groups
                 .iter()
-                .map(|child| Rc::clone(&memo.groups[child.0 as usize].logical_node))
+                .map(|child| Rc::clone(&memo.groups()[child.0 as usize].logical_node))
                 .collect::<Vec<_>>();
             if inputs
                 .iter()
@@ -194,7 +194,7 @@ pub fn build_with_compatible_producers_cache(
         for (index, candidate) in candidates.iter().enumerate() {
             let mut boundaries = HashMap::new();
             for &child in &candidate.input_groups {
-                let pointer = Rc::as_ptr(&memo.groups[child.0 as usize].logical_node);
+                let pointer = Rc::as_ptr(&memo.groups()[child.0 as usize].logical_node);
                 if boundaries
                     .insert(pointer, child)
                     .is_some_and(|previous| previous != child)
@@ -241,7 +241,7 @@ pub fn build_with_compatible_producers_cache(
         }
     }
     for group in output_groups {
-        let expected = &memo.groups[group.0 as usize].logical_node;
+        let expected = &memo.groups()[group.0 as usize].logical_node;
         let mut compatible_candidates = Vec::new();
         for &id in &inventory.implementation_roots_of_group[group.0 as usize] {
             let template =

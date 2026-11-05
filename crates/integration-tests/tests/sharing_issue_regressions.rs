@@ -196,7 +196,7 @@ fn sql_count_topk_has_a_fused_raw_row_heap() {
 #[test]
 fn exact_rollup_catalog_crosses_identical_per_series_average() {
     use asap_logical_asap_optimization::test_support::{
-        generate_per_computation_candidates, try_populate_pass1,
+        generate_per_computation_candidates, try_add_pass1_candidates,
     };
     use asap_types::stages::OriginOfCandidateForMemoGroup;
     let roots: Vec<_> = Planner::new(FuzzSettings::default())
@@ -209,7 +209,7 @@ fn exact_rollup_catalog_crosses_identical_per_series_average() {
         &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
     )
     .unwrap();
-    let memo = try_populate_pass1(initial, &inventory).unwrap();
+    let memo = try_add_pass1_candidates(initial, &inventory, &[], &Default::default()).unwrap();
     let expanded =
         asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(memo)
             .unwrap();
@@ -230,7 +230,7 @@ use crate::physical_common;
 fn filtered_group_preserves_sql_empty_and_null_semantics() {
     use asap_executor::values::Value;
     use asap_logical_asap_optimization::test_support::{
-        generate_per_computation_candidates, try_populate_pass1,
+        generate_per_computation_candidates, try_add_pass1_candidates,
     };
     use asap_types::ir::{operator::AggIntent, NonASAPOp};
     use asap_types::stages::OriginOfCandidateForMemoGroup;
@@ -244,7 +244,7 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
         &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
     )
     .unwrap();
-    let memo = try_populate_pass1(initial, &inventory).unwrap();
+    let memo = try_add_pass1_candidates(initial, &inventory, &[], &Default::default()).unwrap();
     let expanded =
         asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(memo)
             .unwrap();
@@ -369,7 +369,7 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
         ],
     ] {
         let before = physical_common::execute_raw_rows_at(
-            &expanded.groups[owner].logical_node,
+            &expanded.groups()[owner].logical_node,
             rows.clone(),
             1000,
         );
@@ -384,7 +384,7 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
 fn sql_count_rollup_executes_with_integer_results() {
     use asap_executor::values::Value;
     use asap_logical_asap_optimization::test_support::{
-        generate_per_computation_candidates, try_populate_pass1,
+        generate_per_computation_candidates, try_add_pass1_candidates,
     };
     use asap_types::ir::ASAPOp;
     use asap_types::stages::OriginOfCandidateForMemoGroup;
@@ -407,7 +407,7 @@ fn sql_count_rollup_executes_with_integer_results() {
             &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
         )
         .unwrap();
-        let memo = try_populate_pass1(initial, &inventory).unwrap();
+        let memo = try_add_pass1_candidates(initial, &inventory, &[], &Default::default()).unwrap();
         let expanded =
             asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(
                 memo,
@@ -449,7 +449,7 @@ fn sql_count_rollup_executes_with_integer_results() {
             ],
         ];
         let before =
-            physical_common::execute_raw_rows(&expanded.groups[owner].logical_node, rows.clone());
+            physical_common::execute_raw_rows(&expanded.groups()[owner].logical_node, rows.clone());
         let after = physical_common::execute_raw_rows(&candidate.root_node, rows);
         let sorted = |rows: Vec<Vec<Value>>| {
             let mut rows: Vec<_> = rows.iter().map(|row| format!("{row:?}")).collect();
@@ -461,7 +461,7 @@ fn sql_count_rollup_executes_with_integer_results() {
             .all(|row| matches!(row.last(), Some(Value::Int64(_)))));
         assert_eq!(sorted(before), sorted(after));
         let before_empty =
-            physical_common::execute_raw_rows(&expanded.groups[owner].logical_node, vec![]);
+            physical_common::execute_raw_rows(&expanded.groups()[owner].logical_node, vec![]);
         let after_empty = physical_common::execute_raw_rows(&candidate.root_node, vec![]);
         assert_eq!(sorted(before_empty), sorted(after_empty));
     }
@@ -510,7 +510,7 @@ fn sql_sum_shares_nested_windows_and_slower_readers() {
 #[test]
 fn sketch_rollup_crosses_inner_range_function() {
     use asap_logical_asap_optimization::test_support::{
-        generate_per_computation_candidates, try_populate_pass1,
+        generate_per_computation_candidates, try_add_pass1_candidates,
     };
     use asap_types::stages::OriginOfCandidateForMemoGroup;
     let mut w = workload(923);
@@ -529,13 +529,18 @@ fn sketch_rollup_crosses_inner_range_function() {
         &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
     )
     .unwrap();
-    let memo = try_populate_pass1(initial, &inventory).unwrap();
+    let memo = try_add_pass1_candidates(initial, &inventory, &[], &Default::default()).unwrap();
     let expanded =
         asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(memo)
             .unwrap();
-    let owner = expanded.query_roots[1].as_operator().unwrap().0 as usize;
-    assert!(expanded.candidates[owner]
+    // The rule rewrites the reader of the coarse state, a group Pass 1
+    // added beneath the query's root.
+    assert!(expanded
+        .groups()
         .iter()
+        .zip(&expanded.candidates)
+        .filter(|(group, _)| group.reached_by_queries() == [1])
+        .flat_map(|(_, candidates)| candidates)
         .any(|c| c.origin == OriginOfCandidateForMemoGroup::Rollup));
 }
 

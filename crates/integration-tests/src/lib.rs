@@ -349,14 +349,15 @@ pub mod planning {
     ) -> asap_types::stages::Memo {
         use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
         use asap_logical_asap_optimization::test_support::{
-            add_local_window_composition, try_populate_pass1,
+            add_local_window_composition, try_add_pass1_candidates,
         };
         let initial = asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots);
         let inventory = generate_per_computation_candidates(
             &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
         )
         .unwrap();
-        let mut memo = try_populate_pass1(initial, &inventory).unwrap();
+        let mut memo =
+            try_add_pass1_candidates(initial, &inventory, &[], &Default::default()).unwrap();
         add_local_window_composition(&mut memo, entries);
         asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(memo)
             .unwrap()
@@ -457,7 +458,7 @@ pub mod planning {
             .candidates
             .iter()
             .enumerate()
-            .filter(|(group, _)| memo.groups[*group].reached_by_queries() == [q])
+            .filter(|(group, _)| memo.groups()[*group].reached_by_queries() == [q])
             .flat_map(|(group, candidates)| {
                 candidates
                     .iter()
@@ -469,9 +470,9 @@ pub mod planning {
             .collect();
         // Group indices don't give the order: Pass 2 appends groups at the
         // end. Depth from the root does.
-        let mut depth = vec![usize::MAX; memo.groups.len()];
+        let mut depth = vec![usize::MAX; memo.groups().len()];
         let mut pending: std::collections::VecDeque<_> = memo
-            .groups
+            .groups()
             .iter()
             .enumerate()
             .filter(|(group, _)| {
@@ -487,7 +488,7 @@ pub mod planning {
             }
             depth[group] = d;
             pending.extend(
-                memo.groups[group]
+                memo.groups()[group]
                     .child_groups
                     .iter()
                     .map(|child| (child.0 as usize, d + 1)),
@@ -540,19 +541,23 @@ pub mod planning {
                 )
             })
             .collect();
-        for (state, group) in memo.groups.iter().enumerate() {
+        for (state, group) in memo.groups().iter().enumerate() {
             if !is_build(&group.logical_node) || group.reached_by_queries().len() < queries {
                 continue;
             }
+            // Each query's own summary candidate, with the candidates on a
+            // path of groups from it down to the state (Pass 1 and the
+            // sharing rules add the consumers between them as groups).
             let reading: Option<std::collections::BTreeMap<usize, usize>> = (0..queries)
                 .map(|q| {
-                    own_choices(memo, q, |c| {
-                        c.input_groups.iter().any(|child| child.0 as usize == state)
+                    own_builds[q].iter().find_map(|&(group, index)| {
+                        let mut path = path_to_state(memo, group, index, state)?;
+                        path.push((group, index));
+                        Some(path)
                     })
-                    .into_iter()
-                    .next()
                 })
-                .collect();
+                .collect::<Option<Vec<_>>>()
+                .map(|paths| paths.into_iter().flatten().collect());
             if let Some(choice) = reading {
                 plans.push((
                     format!("shared{state}"),
@@ -594,6 +599,45 @@ pub mod planning {
         // trivially.
         assert!(separate.is_finite(), "a valid plan with a build per query");
         (roots, separate, cheapest(&plans[separate_plans..]))
+    }
+
+    /// The candidates, one per group, on a path from candidate `index` of
+    /// `group` down to group `state` (excluded, and the start excluded):
+    /// each reads the next one's group. `None` when no path reaches `state`.
+    fn path_to_state(
+        memo: &asap_types::stages::Memo,
+        group: usize,
+        index: usize,
+        state: usize,
+    ) -> Option<Vec<(usize, usize)>> {
+        fn below(
+            memo: &asap_types::stages::Memo,
+            group: usize,
+            state: usize,
+            seen: &mut std::collections::HashSet<usize>,
+        ) -> Option<Vec<(usize, usize)>> {
+            if group == state {
+                return Some(Vec::new());
+            }
+            if !seen.insert(group) {
+                return None;
+            }
+            memo.candidates[group]
+                .iter()
+                .enumerate()
+                .find_map(|(index, candidate)| {
+                    candidate.input_groups.iter().find_map(|input| {
+                        let mut path = below(memo, input.0 as usize, state, seen)?;
+                        path.push((group, index));
+                        Some(path)
+                    })
+                })
+        }
+        let mut seen = std::collections::HashSet::from([group]);
+        memo.candidates[group][index]
+            .input_groups
+            .iter()
+            .find_map(|input| below(memo, input.0 as usize, state, &mut seen))
     }
 
     /// The summary builds and rollups (regrouping merges) `roots` read, each

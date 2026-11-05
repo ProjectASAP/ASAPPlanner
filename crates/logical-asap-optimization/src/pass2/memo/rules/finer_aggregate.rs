@@ -1,12 +1,12 @@
 //! Read a SQL aggregate from a finer aggregate's result
 //! ([`match_finer`](crate::pass2::finer_aggregate::match_finer)): filter the finer
 //! rows, then merge them into the query's groups with each measure's rollup.
-use super::reuse::append_reader;
+use super::reuse::add_candidate_over_groups;
 use crate::pass2::finer_aggregate::match_finer;
 use crate::pass2::memo::state_groups::Pass2RuleError;
 use asap_types::ir::operator::{AggIntent, Reduction};
 use asap_types::ir::{NonASAPOp, Operator, OperatorNode, OperatorResultKind};
-use asap_types::stages::{Memo, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -72,7 +72,7 @@ pub(crate) fn add_finer_aggregate_candidates(memo: &mut Memo) -> Result<usize, P
     // Only aggregates of equal measures can match; bucket by them (the
     // first levels of the paper's filter tree) instead of trying all pairs.
     let mut buckets: HashMap<String, Vec<usize>> = HashMap::new();
-    for (group, entry) in memo.groups.iter().enumerate() {
+    for (group, entry) in memo.groups().iter().enumerate() {
         if let Some(aggregate) = Aggregate::of(&entry.logical_node) {
             buckets
                 .entry(format!("{:?}", aggregate.measures))
@@ -96,8 +96,8 @@ pub(crate) fn add_finer_aggregate_candidates(memo: &mut Memo) -> Result<usize, P
 /// Adds to group `owner` a read of group `finer`'s result when it computes
 /// `owner`'s aggregate; the number of candidates added (0 or 1).
 fn add_read(memo: &mut Memo, owner: usize, finer: usize) -> Result<usize, Pass2RuleError> {
-    let query_node = Rc::clone(&memo.groups[owner].logical_node);
-    let finer_node = Rc::clone(&memo.groups[finer].logical_node);
+    let query_node = Rc::clone(&memo.groups()[owner].logical_node);
+    let finer_node = Rc::clone(&memo.groups()[finer].logical_node);
     let (Some(query), Some(fine)) = (Aggregate::of(&query_node), Aggregate::of(&finer_node)) else {
         return Ok(0);
     };
@@ -167,9 +167,9 @@ fn add_read(memo: &mut Memo, owner: usize, finer: usize) -> Result<usize, Pass2R
         return Ok(0);
     }
     let reader = Rc::new(OperatorNode::with_schema(reader.operator.clone(), schema));
-    Ok(usize::from(append_reader(
+    Ok(usize::from(add_candidate_over_groups(
         memo,
-        owner,
+        MemoGroupId(owner as u32),
         &original,
         reader,
         OriginOfCandidateForMemoGroup::Rollup,

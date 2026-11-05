@@ -213,7 +213,7 @@ pub fn run_planning(
         let logical = logical_asap_candidates.insert(
             logical.map_err(|error| SelectionError::LogicalASAPCandidates(error.to_string()))?,
         );
-        report.memo_groups = logical.memo.groups.len();
+        report.memo_groups = logical.memo.groups().len();
         report.logical_candidates = logical.memo.candidates.iter().map(Vec::len).sum();
         // Stage 2.
         let started = Instant::now();
@@ -303,13 +303,10 @@ pub fn selected_chosen_candidates(
             continue; // a candidate's private node
         }
         let options = &node.candidates_for_memo_group;
-        let reads = |&&CandidateForMemoGroupId { group, index }: &&CandidateForMemoGroupId| {
+        let reads = |&&option: &&CandidateForMemoGroupId| {
             producer_groups.get(&node_id).is_none_or(|read| {
                 read.iter().all(|&child| {
-                    child == group
-                        || memo.candidates[group.0 as usize][index]
-                            .input_groups
-                            .contains(&child)
+                    child == option.group || memo.candidate(option).input_groups.contains(&child)
                 })
             })
         };

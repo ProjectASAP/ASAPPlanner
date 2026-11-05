@@ -8,7 +8,8 @@
 //! | `p[ctx, c]` | in context `ctx`, candidate `c` gives its result slot (binary): computed there, or read across the boundary (a materialized candidate, or a candidate of an ingestion pipeline `I_r`) |
 //! | `x[m]` | materialized candidate `m` is selected (binary) |
 //! | `a[q, m]` | query `q` depends on materialized `m` (continuous, exact at integral binaries) |
-//! | `y[q, m, c]` | `AND(a[q, m], p[m, c])`, for reach from above and accuracy (continuous) |
+//! | `y[q, m, c]` | `AND(a[q, m], p[m, c])`, for reach from above (continuous) |
+//! | `d[q, t]` | `q` depends on row (K) term `t`: `AND` of its path's indicators (continuous) |
 //! | `L[ctx]`, `T[q, m]`, `K[q]` | latency of a query or of a query-time materialized candidate's run and context; `m`'s latency in `q`'s; compaction (continuous) |
 //! | `N[q]`, `A[q, parts]` | approximate values `q` depends on; whether it depends on one sized for `parts` shares (continuous) |
 //! | `g[m, c]` | highest shared materialization: `c` is read in context `m`, which at most one query reaches (binary) |
@@ -30,7 +31,7 @@
 //! 6. Reach: `a[q, m] ≥ p[q, m]`, `a[q, c] ≥ a[q, m] + p[m, c] − 1`; from
 //!    above, where a reader constraint counts queries.
 //! 7. Latency (`plan_cost`'s: each query-time run it reaches counts once).
-//! 8. Accuracy (A1), per run a query depends on.
+//! 8. Accuracy (A1), per row (K) term a query depends on.
 //! 9. Reader constraints.
 //!
 //! A link from a candidate to one of its own result slot is dropped: with
@@ -51,7 +52,7 @@ use good_lp::{
     SolverModel, Variable,
 };
 
-use crate::groups::{AccuracyWeight, ContextKind, MilpInputs, ResultSlot, RunKind};
+use crate::groups::{AccuracyTerm, AccuracyWeight, ContextKind, MilpInputs, ResultSlot, RunKind};
 
 use super::cost_terms::{self, RunTerm};
 use super::warm_start;
@@ -1603,106 +1604,151 @@ fn latency_rows(milp: &mut SelectionMilp<'_>) -> Result<(), SelectionMilpError> 
     Ok(())
 }
 
-/// Row 8: accuracy (A1, revised 2026-10-31), per run `q` depends on: a run
-/// unusable for `q` is never depended on, two whose pair is excluded are
-/// not depended on together, and the shares depended on are at most each
-/// such run's `parts`.
+/// Where a term's path is read in the MILP ([`SelectionMilp::term_path`]).
+pub(crate) struct TermPath {
+    /// The binaries that are all 1 exactly when `q` depends on the term:
+    /// `p[ctx, c]` for each candidate on the path in the context reading it,
+    /// and the slot link `e` of each multi-slot input on it.
+    pub(crate) indicators: Vec<Variable>,
+    /// `(context, slot, input)` per candidate on the path (`input` is the
+    /// edge's input below it, `usize::MAX` for `u`). Two terms through the
+    /// same places are never both depended on (one candidate per slot per
+    /// context).
+    pub(crate) places: Vec<(usize, ResultSlot, usize)>,
+    /// The context `u` is computed in.
+    pub(crate) producer_context: usize,
+}
+
+impl SelectionMilp<'_> {
+    /// The indicators and places of `term`'s path for query `query`: from
+    /// `query`'s context down, crossing into a materialized candidate's
+    /// context or the `I_r` its reader reads at each candidate not computed
+    /// where it is read. `None` when no plan reads the path.
+    pub(crate) fn term_path(&self, query: usize, term: &AccuracyTerm) -> Option<TermPath> {
+        let inputs = self.inputs;
+        let mut context = query;
+        let mut path = TermPath {
+            indicators: Vec::new(),
+            places: Vec::new(),
+            producer_context: query,
+        };
+        for (depth, &candidate) in term.candidates.iter().enumerate() {
+            path.indicators.push(*self.choice[context].get(&candidate)?);
+            let run = if self.computes(context, candidate) {
+                context
+            } else {
+                match inputs.kind[candidate.0] {
+                    RunKind::Materialized => self.context_of(candidate)?,
+                    RunKind::Ingestion => self.ingestion_context_read_by(context)?,
+                    RunKind::PerContext => return None,
+                }
+            };
+            let input = term.inputs.get(depth).copied();
+            path.places.push((
+                context,
+                inputs.slot[candidate.0],
+                input.unwrap_or(usize::MAX),
+            ));
+            match input {
+                Some(input) => {
+                    if let Some(links) = self.slot_links.get(&(run, candidate, input)) {
+                        let below = inputs.slot[term.candidates[depth + 1].0];
+                        let (_, link) = links.iter().find(|(slot, _)| *slot == below)?;
+                        path.indicators.push(*link);
+                    }
+                }
+                None => path.producer_context = run,
+            }
+            context = run;
+        }
+        Some(path)
+    }
+}
+
+/// Row (K), as A1 (revised 2026-10-31) over row (K)'s terms: per query `q`,
+/// a term whose weight is unusable is never depended on, two terms whose pair
+/// is excluded are not depended on together, and the shares depended on
+/// are at most each such term's producer's `parts`. `q` depends on a term
+/// when every indicator of its path ([`SelectionMilp::term_path`]) is 1.
 fn accuracy_rows(milp: &mut SelectionMilp<'_>) {
     let inputs = milp.inputs;
     milp.builder.scope = Scope::Global;
-    let approximate_runs: Vec<(usize, PhysicalCandidateId)> = milp
-        .runs()
-        .into_iter()
-        .filter(|&(_, candidate)| inputs.candidate_data[candidate.0].approximate)
-        .collect();
     for query in 0..milp.query_count() {
         let exact_target = milp.entries[query].requirements.accuracy.is_exact();
-        // (candidate, dep, parts) per run `q` may depend on.
-        let mut counted: Vec<(PhysicalCandidateId, Expression, usize)> = Vec::new();
-        // Where each counted run gives its value: (context, slot), `None`
-        // for a materialized candidate's own run. One value per place.
-        let mut places: BTreeSet<(usize, Option<ResultSlot>)> = BTreeSet::new();
-        for &(context, candidate) in &approximate_runs {
-            let Some(weight) = inputs.accuracy_weights[query].get(&candidate).copied() else {
+        let terms = &inputs.accuracy_terms[query];
+        // An approximate producer of `q` is never computed in an `I_r`.
+        let producers: BTreeSet<PhysicalCandidateId> =
+            terms.iter().map(AccuracyTerm::producer).collect();
+        for (context, candidate) in milp.runs() {
+            if producers.contains(&candidate)
+                && matches!(inputs.contexts[context].kind, ContextKind::Ingestion(_))
+            {
+                milp.note_inexact("an approximate candidate of an I_r (forbidden)");
+                let p = milp.choice[context][&candidate];
+                milp.builder.row("8 accuracy", constraint!(p <= 0.0));
+            }
+        }
+        // (term, path, parts) per term `q` may depend on.
+        let mut counted: Vec<(usize, TermPath, usize)> = Vec::new();
+        for (index, term) in terms.iter().enumerate() {
+            let Some(path) = milp.term_path(query, term) else {
                 continue;
             };
-            let dep: Option<Expression> = match inputs.contexts[context].kind {
-                ContextKind::Query(q) if q == query => {
-                    milp.choice[context].get(&candidate).map(|&p| p.into())
-                }
-                ContextKind::Query(_) => None,
-                ContextKind::Materialized(own) if own == candidate => {
-                    milp.reach.get(&(query, candidate)).map(|&a| a.into())
-                }
-                ContextKind::Materialized(own) => match milp.reach.get(&(query, own)) {
-                    Some(&above) => {
-                        let p = milp.choice[context][&candidate];
-                        Some(
-                            milp.builder
-                                .and_at_least(
-                                    "y (depends on a run in m)",
-                                    &[above.into(), p.into()],
-                                )
-                                .into(),
-                        )
-                    }
-                    None => None,
-                },
-                ContextKind::Ingestion(_) => {
-                    milp.note_inexact("an approximate candidate of an I_r (forbidden)");
-                    let p = milp.choice[context][&candidate];
-                    milp.builder.row("8 accuracy", constraint!(p <= 0.0));
-                    None
-                }
-            };
-            let Some(dep) = dep else {
+            if matches!(
+                inputs.contexts[path.producer_context].kind,
+                ContextKind::Ingestion(_)
+            ) {
                 continue;
-            };
-            let usable = match weight {
-                _ if exact_target => false,
-                AccuracyWeight::One => true,
-                AccuracyWeight::Unusable(_) => false,
-            };
+            }
+            let usable = !exact_target && term.weight == AccuracyWeight::One;
             if usable {
-                places.insert(match inputs.contexts[context].kind {
-                    ContextKind::Materialized(own) if own == candidate => (context, None),
-                    _ => (context, Some(inputs.slot[candidate.0])),
-                });
-                counted.push((
-                    candidate,
-                    dep,
-                    inputs.candidate_data[candidate.0].accuracy_budget_parts,
-                ));
+                let parts = inputs.candidate_data[term.producer().0].accuracy_budget_parts;
+                counted.push((index, path, parts));
             } else {
-                milp.builder.row("8 accuracy", constraint!(dep <= 0.0));
+                not_all(milp, &[&path.indicators]);
             }
         }
-        let mut pairs: Vec<(Expression, Expression)> = Vec::new();
         for &(first, second) in &inputs.accuracy_excluded_pairs[query] {
-            for (_, one, _) in counted.iter().filter(|(c, _, _)| *c == first) {
-                for (_, other, _) in counted.iter().filter(|(c, _, _)| *c == second) {
-                    pairs.push((one.clone(), other.clone()));
-                }
+            let one = counted.iter().find(|(index, _, _)| *index == first);
+            let other = counted.iter().find(|(index, _, _)| *index == second);
+            if let (Some((_, one, _)), Some((_, other, _))) = (one, other) {
+                not_all(milp, &[&one.indicators, &other.indicators]);
             }
         }
-        for (one, other) in pairs {
-            milp.builder
-                .row("8 accuracy (pair)", constraint!(one + other <= 1.0));
-        }
-        // The most values `q` can depend on together.
+        // The most terms `q` can depend on together.
         let most = if tests_loose_big_m() {
             counted.len() as f64
         } else {
-            places.len() as f64
+            counted
+                .iter()
+                .map(|(_, path, _)| &path.places)
+                .collect::<BTreeSet<_>>()
+                .len() as f64
         };
         if counted.iter().all(|&(_, _, parts)| parts as f64 >= most) {
             continue;
         }
+        let deps: Vec<(Expression, usize)> = counted
+            .iter()
+            .map(|(_, path, parts)| {
+                let dep: Expression = match path.indicators.as_slice() {
+                    [one] => (*one).into(),
+                    many => {
+                        let terms: Vec<Expression> =
+                            many.iter().map(|&v| Expression::from(v)).collect();
+                        milp.builder
+                            .and_at_least("d (q depends on a term)", &terms)
+                            .into()
+                    }
+                };
+                (dep, *parts)
+            })
+            .collect();
         let shares = milp.builder.continuous("N (approximate values)", None);
-        let sum: Expression = counted.iter().map(|(_, dep, _)| dep.clone()).sum();
+        let sum: Expression = deps.iter().map(|(dep, _)| dep.clone()).sum();
         milp.builder.row("8 accuracy", constraint!(shares == sum));
         let mut by_parts: BTreeMap<usize, Vec<Expression>> = BTreeMap::new();
-        for (_, dep, parts) in &counted {
+        for (dep, parts) in &deps {
             if (*parts as f64) < most {
                 by_parts.entry(*parts).or_default().push(dep.clone());
             }
@@ -1721,6 +1767,20 @@ fn accuracy_rows(milp: &mut SelectionMilp<'_>) {
             );
         }
     }
+}
+
+/// The row that the indicators of `paths` (together) are not all 1.
+fn not_all(milp: &mut SelectionMilp<'_>, paths: &[&Vec<Variable>]) {
+    let mut indicators: Vec<Variable> = Vec::new();
+    for &indicator in paths.iter().flat_map(|path| path.iter()) {
+        if !indicators.contains(&indicator) {
+            indicators.push(indicator);
+        }
+    }
+    let count = indicators.len() as f64;
+    let sum: Expression = indicators.into_iter().map(Expression::from).sum();
+    milp.builder
+        .row("8 accuracy", constraint!(sum <= count - 1.0));
 }
 
 /// One independent part of the model (#1095 §5, 3a): a connected component

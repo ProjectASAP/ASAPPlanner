@@ -115,13 +115,13 @@ mod tests {
     fn shared_producer_storage_keeps_input_choices_independent() {
         use super::super::graph::{DagOfSelectedCandidates, SelectedEdge, SelectedNodeId};
         use super::super::memo_candidates::{
-            CandidateForMemoGroupId, OperatorNodeOfCandidateForMemoGroup,
-            OperatorNodeOfCandidateForMemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidate,
+            OperatorNodeOfCandidateForMemoGroup, OperatorNodeOfCandidateForMemoGroupId,
+            PhysicalASAPMemoCandidates, PhysicalCandidate,
         };
         use crate::ir::properties::ExecutionTiming;
         use crate::ir::QueryRoot;
         use crate::physical::{Lifetime, PhysicalProperties};
-        use crate::stages::MemoGroupId;
+        use crate::stages::{CandidateForMemoGroupId, MemoGroupId};
         let mut interner = ProducerSetInterner::default();
         let choices = interner.intern(vec![PhysicalCandidateId(0), PhysicalCandidateId(1)]);
         use crate::ir::scalar::expr_ir::ScalarValue;

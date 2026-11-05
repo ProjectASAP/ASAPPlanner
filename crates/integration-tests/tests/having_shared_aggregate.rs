@@ -5,7 +5,7 @@ use asap_devtools::planner_fuzz::{read_seed_file, FuzzSettings, FuzzWorkload, Pl
 use asap_executor::values::Value;
 use asap_logical_asap_optimization::generate_dag_of_logical_memo_groups;
 use asap_logical_asap_optimization::test_support::{
-    generate_per_computation_candidates, try_populate_pass1,
+    generate_per_computation_candidates, try_add_pass1_candidates,
 };
 use asap_types::ir::NonASAPOp;
 use asap_types::stages::Memo;
@@ -51,7 +51,7 @@ fn expanded(queries: &[String]) -> Memo {
         .collect();
     let dag = generate_dag_of_logical_memo_groups(&roots);
     let inventory = generate_per_computation_candidates(&dag).unwrap();
-    let memo = try_populate_pass1(dag, &inventory).unwrap();
+    let memo = try_add_pass1_candidates(dag, &inventory, &[], &Default::default()).unwrap();
     asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(memo)
         .unwrap()
 }
@@ -90,7 +90,7 @@ fn key_only_having_of_one_reader_stays_above_a_shared_aggregate() {
     let grouped = format!("SELECT city, {P90} FROM metrics WHERE {WINDOW} GROUP BY city");
     let memo = expanded(&[format!("{grouped} HAVING city = 'NYC'"), grouped]);
     let shared = memo
-        .groups
+        .groups()
         .iter()
         .position(|group| {
             group.reached_by_queries() == [0, 1]
@@ -100,7 +100,7 @@ fn key_only_having_of_one_reader_stays_above_a_shared_aggregate() {
                 )
         })
         .expect("the aggregate both queries read");
-    let expected = cities(&memo.groups[shared].logical_node);
+    let expected = cities(&memo.groups()[shared].logical_node);
     assert_eq!(expected.len(), 3, "{expected:?}");
     assert!(memo.candidates[shared].len() > 1, "summary candidates too");
     for candidate in &memo.candidates[shared] {

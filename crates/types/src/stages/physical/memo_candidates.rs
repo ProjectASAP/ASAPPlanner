@@ -8,15 +8,7 @@ use super::graph::{PhysicalCandidateId, ReaderConstraint};
 use super::producers::ProducerCandidates;
 use crate::ir::{OperatorNode, QueryRoot};
 use crate::physical::PhysicalProperties;
-use crate::stages::{MemoGroupId, PrunedCandidate};
-
-/// One implementation candidate: index `index` in group `group`'s
-/// candidates ([`Memo::candidates`](crate::stages::Memo::candidates)).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct CandidateForMemoGroupId {
-    pub group: MemoGroupId,
-    pub index: usize,
-}
+use crate::stages::{CandidateForMemoGroupId, MemoGroupId, PrunedCandidate};
 
 /// Index into
 /// [`PhysicalASAPMemoCandidates::operator_nodes_of_candidates_for_memo_groups`].

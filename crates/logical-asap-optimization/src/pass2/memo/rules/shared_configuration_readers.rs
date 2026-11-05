@@ -1,6 +1,6 @@
 //! Expand compatible readers at finite shared sizes and tumbling-window horizons before
 //! interning concrete states. Local candidates remain available.
-use crate::stage0::cse::same_value;
+use asap_types::stages::hash_consing::same_value;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -11,15 +11,17 @@ use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
 use super::shared_producer::{
     add_shared_producer_candidates, spans_groups, Reader, SharedProducer,
 };
+use crate::operator_over_groups::operator_over_groups;
+use crate::own_candidate_sizing::find_or_add_sized_group;
 use crate::pass2::asap_aware_cse::{with_resized_build, with_tumbling_window_chain};
 use crate::pass2::memo::shared_configurations::{
     shared_size, state_size_configurations, tumbling_window_configurations,
     TumblingWindowConfiguration, TumblingWindowRequirement,
 };
 use crate::pass2::memo::state_groups::{
-    boundary_ptrs, same_range_input, simple_build, Pass2RuleError,
+    boundary_ptrs, build_down_to_stage0_groups, build_of, BuildPlace, Pass2RuleError,
 };
-use asap_types::stages::Memo;
+use asap_types::stages::{Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
 
 /// `resized` (a rewrite of `original` with the same shape) with each node
 /// that is a child group's node in `original` put back, and the nodes above
@@ -63,6 +65,12 @@ fn with_child_nodes(
 struct StateNeed {
     candidate: usize,
     build: Rc<OperatorNode>,
+    /// Where the candidate reads its build.
+    place: BuildPlace,
+    /// The groups the candidate's computation starts from: its input
+    /// groups, or for a build beneath its groups the Stage 0 groups the
+    /// build reads. Equal normalized layouts over equal inputs are one.
+    inputs: Vec<MemoGroupId>,
     merge: Option<Rc<OperatorNode>>,
     family: FieldDataType,
     /// The reader candidate's `accuracy_budget_parts`: the shares its build
@@ -94,11 +102,12 @@ enum StateCovering {
 /// later ([`super::super::state_groups`]).
 struct SummaryStates {
     deduplicate_requests: bool,
-    /// Every candidate's graph signature by group, so no rewrite repeats one.
-    known: HashMap<(usize, String), Vec<Rc<OperatorNode>>>,
     rewrite_count: usize,
     /// The (normalized layout, configuration index) rewrites already made.
     requests: HashSet<(usize, usize)>,
+    /// The nodes of Stage 0's groups, which a rewrite of a candidate whose
+    /// build is beneath groups puts back ([`BuildPlace::BeneathGroups`]).
+    stage0_group_nodes: HashSet<*const OperatorNode>,
 }
 
 pub(crate) fn add_state_configuration_candidates(memo: &mut Memo) -> Result<(), Pass2RuleError> {
@@ -111,9 +120,9 @@ fn expand_configurations(
 ) -> Result<usize, Pass2RuleError> {
     let mut states = SummaryStates {
         deduplicate_requests,
-        known: HashMap::new(),
         rewrite_count: 0,
         requests: HashSet::new(),
+        stage0_group_nodes: HashSet::new(),
     };
     add_shared_producer_candidates(memo, &mut states)?;
     Ok(states.rewrite_count)
@@ -125,10 +134,39 @@ impl SharedProducer for SummaryStates {
 
     fn sets(&mut self, memo: &Memo) -> Result<Vec<Vec<Reader<StateNeed>>>, Pass2RuleError> {
         let mut sets: Vec<Vec<Reader<StateNeed>>> = Vec::new();
+        self.stage0_group_nodes = memo
+            .groups()
+            .iter()
+            .enumerate()
+            .filter(|&(id, _)| memo.is_stage0_group(MemoGroupId(id as u32)))
+            .map(|(_, group)| Rc::as_ptr(&group.logical_node))
+            .collect();
         for (group, candidates) in memo.candidates.iter().enumerate() {
             for (candidate, entry) in candidates.iter().enumerate() {
-                let Some((build, _)) = simple_build(memo, entry) else {
+                let Some((build, place)) = build_of(memo, entry) else {
                     continue;
+                };
+                // A build beneath groups (a tumbling-window chain a rule
+                // added as groups) is rewritten whole, from a Stage 0
+                // group's candidate only: per-width merge groups below would
+                // defeat the per-group layout deduplication.
+                if place == BuildPlace::BeneathGroups
+                    && !(memo.is_stage0_group(MemoGroupId(group as u32))
+                        && matches!(
+                            build.asap(),
+                            Some(ASAPOp::SummaryTumblingWindowChain { .. })
+                        ))
+                {
+                    continue;
+                }
+                // The groups the build reads: Stage 0's groups for a build
+                // beneath groups, else the candidate's input groups.
+                let inputs = match place {
+                    BuildPlace::BeneathGroups => match build_down_to_stage0_groups(memo, entry) {
+                        Some((_, inputs)) => inputs,
+                        None => continue,
+                    },
+                    BuildPlace::Private | BuildPlace::InputGroup(_) => entry.input_groups.clone(),
                 };
                 let family = match build.asap() {
                     Some(
@@ -159,6 +197,8 @@ impl SharedProducer for SummaryStates {
                     need: StateNeed {
                         candidate,
                         build,
+                        place,
+                        inputs,
                         merge,
                         family,
                         accuracy_budget_parts: entry.accuracy_budget_parts,
@@ -174,15 +214,7 @@ impl SharedProducer for SummaryStates {
                 }
             }
         }
-        for (group, candidates) in memo.candidates.iter().enumerate() {
-            for candidate in candidates {
-                self.known
-                    .entry((group, graph_signature(&candidate.root_node)?))
-                    .or_default()
-                    .push(Rc::clone(&candidate.root_node));
-            }
-        }
-        let mut layouts: Vec<(usize, usize, FlatDag)> = Vec::new();
+        let mut layouts: Vec<(usize, usize, FlatDag, Vec<MemoGroupId>)> = Vec::new();
         for set in &mut sets {
             if spans_groups(set) {
                 assign_normalized_layouts(memo, set, &mut layouts)?;
@@ -286,36 +318,32 @@ impl SharedProducer for SummaryStates {
                 with_resized_build(&roots, &need.build, family.clone())
             }
         };
-        let boundaries = boundary_ptrs(memo, &original);
+        let mut boundaries = match need.place {
+            // The rewrite reaches below the input groups: only Stage 0's
+            // groups' nodes are put back.
+            BuildPlace::BeneathGroups => self.stage0_group_nodes.clone(),
+            BuildPlace::Private | BuildPlace::InputGroup(_) => boundary_ptrs(memo, &original),
+        };
+        // A build read as an input group is the node resized: it is not put
+        // back, and the resized build reads the build group's own inputs.
+        if let BuildPlace::InputGroup(build_group) = need.place {
+            boundaries.remove(&Rc::as_ptr(&need.build));
+            boundaries.extend(
+                memo.groups()[build_group.0 as usize]
+                    .child_groups
+                    .iter()
+                    .map(|child| Rc::as_ptr(&memo.groups()[child.0 as usize].logical_node)),
+            );
+        }
         let roots =
             result.map_err(|error| Pass2RuleError::StateConfiguration(error.to_string()))?;
         let [QueryRoot::Operator(node)] = roots.as_slice() else {
             unreachable!("operator rewrite")
         };
         let node = with_child_nodes(&original.root_node, node, &boundaries, &mut HashMap::new());
-        // Resizing affects internal state types, never public output fields.
-        if original.root_node.schema.fields != node.schema.fields
-            || original.root_node.schema.time_index != node.schema.time_index
-            || original.root_node.schema.unique_keys != node.schema.unique_keys
-            || (original.root_node.schema.closed && !node.schema.closed)
-        {
-            return Err(Pass2RuleError::StateConfiguration(
-                "state rewrite changed the reader output contract".into(),
-            ));
-        }
-        let previous = self
-            .known
-            .entry((reader.group, graph_signature(&node)?))
-            .or_default();
-        if previous.iter().any(|known| **known == *node) {
-            return Ok(0);
-        }
-        previous.push(Rc::clone(&node));
-        let mut candidate = original;
-        candidate.root_node = node;
-        // The rewritten build is sized for the covering's shares, at least
-        // the reader's own.
-        candidate.accuracy_budget_parts = match covering {
+        // The rewritten candidate's sized parts: the covering's, at least the
+        // reader's own.
+        let accuracy_budget_parts = match covering {
             StateCovering::TumblingWindows {
                 accuracy_budget_parts,
                 ..
@@ -323,10 +351,76 @@ impl SharedProducer for SummaryStates {
             | StateCovering::Size {
                 accuracy_budget_parts,
                 ..
-            } => (*accuracy_budget_parts).max(candidate.accuracy_budget_parts),
+            } => (*accuracy_budget_parts).max(original.accuracy_budget_parts),
         };
-        memo.candidates[reader.group].push(candidate);
-        Ok(1)
+        // A build read as an input group stays one: the resized build's group
+        // is found or added, and the consumer reads it.
+        let (node, input_groups) = match need.place {
+            BuildPlace::Private => (node, original.input_groups.clone()),
+            // Rule 9 has no origin of its own; the groups it adds are shared
+            // builds.
+            BuildPlace::BeneathGroups => operator_over_groups(
+                memo,
+                &node,
+                &memo.groups()[reader.group].queries.clone(),
+                &OriginOfCandidateForMemoGroup::SharedBuild,
+                accuracy_budget_parts,
+            ),
+            BuildPlace::InputGroup(build_group) => {
+                let resized_build = original
+                    .root_node
+                    .children()
+                    .into_iter()
+                    .zip(node.children())
+                    .find(|(before, _)| Rc::ptr_eq(before, &need.build))
+                    .map(|(_, after)| Rc::clone(after))
+                    .expect("the consumer reads its build group directly");
+                let queries = memo.groups()[reader.group].queries.clone();
+                let resized_group = find_or_add_sized_group(
+                    memo,
+                    &resized_build,
+                    &queries,
+                    &OriginOfCandidateForMemoGroup::SharedBuild,
+                    accuracy_budget_parts,
+                );
+                let group_node = Rc::clone(&memo.groups()[resized_group.0 as usize].logical_node);
+                let node = super::reuse::replace(
+                    &node,
+                    &HashMap::from([(Rc::as_ptr(&resized_build), group_node)]),
+                );
+                let mut input_groups = Vec::new();
+                for &input in &original.input_groups {
+                    let input = if input == build_group {
+                        resized_group
+                    } else {
+                        input
+                    };
+                    if !input_groups.contains(&input) {
+                        input_groups.push(input);
+                    }
+                }
+                (node, input_groups)
+            }
+        };
+        // Resizing affects internal state types, never public output fields.
+        if !super::reuse::same_output_contract(&original.root_node, &node) {
+            return Err(Pass2RuleError::StateConfiguration(
+                "state rewrite changed the reader output contract".into(),
+            ));
+        }
+        // A rewrite never reads the group it implements.
+        let owner = MemoGroupId(reader.group as u32);
+        if input_groups.contains(&owner) {
+            return Ok(0);
+        }
+        let mut candidate = original;
+        candidate.root_node = node;
+        candidate.input_groups = input_groups;
+        candidate.accuracy_budget_parts = accuracy_budget_parts;
+        let known = memo.candidates[owner.0 as usize].len();
+        Ok(usize::from(
+            memo.add_candidate(owner, candidate).index == known,
+        ))
     }
 }
 
@@ -339,7 +433,7 @@ impl SharedProducer for SummaryStates {
 fn assign_normalized_layouts(
     memo: &Memo,
     set: &mut [Reader<StateNeed>],
-    layouts: &mut Vec<(usize, usize, FlatDag)>,
+    layouts: &mut Vec<(usize, usize, FlatDag, Vec<MemoGroupId>)>,
 ) -> Result<(), Pass2RuleError> {
     let Some(requirements) = set
         .iter()
@@ -370,17 +464,17 @@ fn assign_normalized_layouts(
             .map_err(|error| Pass2RuleError::StateConfiguration(error.to_string()))?;
         let indices = layout_keys.entry((reader.group, signature)).or_default();
         let existing = indices.iter().copied().find(|&index| {
-            let (group, candidate, previous) = &layouts[index];
+            let (group, candidate, previous, previous_inputs) = &layouts[index];
             let previous_candidate = &memo.candidates[*group][*candidate];
             previous == &flat
                 && previous_candidate.origin == original.origin
-                && previous_candidate.input_groups == original.input_groups
+                && previous_inputs == &need.inputs
                 && previous_candidate.fused_groups == original.fused_groups
                 && previous_candidate.accuracy_budget_parts == original.accuracy_budget_parts
         });
         reader.need.normalized_layout = Some(existing.unwrap_or_else(|| {
             let index = layouts.len();
-            layouts.push((reader.group, need.candidate, flat));
+            layouts.push((reader.group, need.candidate, flat, need.inputs.clone()));
             indices.push(index);
             index
         }));
@@ -388,6 +482,7 @@ fn assign_normalized_layouts(
     Ok(())
 }
 
+#[cfg(test)]
 fn graph_signature(node: &Rc<OperatorNode>) -> Result<String, Pass2RuleError> {
     serde_json::to_string(&flatten(&[QueryRoot::Operator(Rc::clone(node))]).0)
         .map_err(|error| Pass2RuleError::StateConfiguration(error.to_string()))
@@ -445,7 +540,7 @@ fn compatible(left: &StateNeed, right: &StateNeed) -> bool {
         || !left_inputs
             .iter()
             .zip(right_inputs)
-            .all(|(a, b)| Rc::ptr_eq(a, b) || same_range_input(a, b))
+            .all(|(a, b)| Rc::ptr_eq(a, b))
     {
         return false;
     }
@@ -481,7 +576,7 @@ fn compatible(left: &StateNeed, right: &StateNeed) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pass1::memo_population::try_populate_pass1;
+    use crate::pass1::add_pass1_candidates::try_add_pass1_candidates;
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
     use crate::stage0::generate_dag_of_logical_memo_groups;
     use crate::test_support::{entry_with, lower_promql};
@@ -506,7 +601,8 @@ mod tests {
         let inventory =
             generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
                 .unwrap();
-        let mut memo = try_populate_pass1(initial, &inventory).unwrap();
+        let mut memo =
+            try_add_pass1_candidates(initial, &inventory, &[], &Default::default()).unwrap();
         let entries = vec![
             entry_with(
                 target,
@@ -589,7 +685,8 @@ mod tests {
         let inventory =
             generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
                 .unwrap();
-        let mut memo = try_populate_pass1(initial, &inventory).unwrap();
+        let mut memo =
+            try_add_pass1_candidates(initial, &inventory, &[], &Default::default()).unwrap();
         // Pass 1's parts per KLL size.
         let mut parts_of_size: HashMap<u32, usize> = HashMap::new();
         for candidate in memo.candidates.iter().flatten() {

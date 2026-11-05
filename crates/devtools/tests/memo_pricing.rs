@@ -8,7 +8,7 @@ use asap_devtools::planning_stages::{lower_promql_roots, run_stages_until, RunUn
 use asap_logical_asap_optimization::enumerate;
 use asap_logical_asap_optimization::generate_dag_of_logical_memo_groups;
 use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
-use asap_logical_asap_optimization::test_support::try_populate_pass1;
+use asap_logical_asap_optimization::test_support::try_add_pass1_candidates;
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_planner::PlanningModels;
 use asap_types::ir::properties::AccuracyTarget;
@@ -85,7 +85,7 @@ fn planned(workload: &PlanningWorkload, series_identity: bool) -> Planned {
         roots,
         entries: workload.query_workload.entries().collect(),
         data: workload.data_workload.clone().unwrap(),
-        memo: try_populate_pass1(initial, &inventory).unwrap(),
+        memo: try_add_pass1_candidates(initial, &inventory, &[], &Default::default()).unwrap(),
     }
 }
 

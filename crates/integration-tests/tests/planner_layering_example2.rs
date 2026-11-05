@@ -347,20 +347,28 @@ fn memo_computations(workload: &PlanningWorkload, roots: &[QueryRoot]) -> Vec<Ve
             choices.push(BTreeMap::from([choice]));
         }
     }
-    for (state, group) in memo.groups.iter().enumerate() {
+    for (state, group) in memo.groups().iter().enumerate() {
         if !is_univmon(&group.logical_node) || group.reached_by_queries().len() < 2 {
             continue;
         }
-        let reading: Option<BTreeMap<_, _>> = group
+        // Each query's consumer of the state, and its own UnivMon candidate
+        // above, which reads the consumer's group (Pass 1 adds the
+        // estimate beneath the query's aggregate).
+        let reading: Option<Vec<[(usize, usize); 2]>> = group
             .reached_by_queries()
             .iter()
             .map(|&q| {
-                own(q, &|c| {
+                let reader = own(q, &|c| {
                     c.input_groups.iter().any(|child| child.0 as usize == state)
-                })
+                })?;
+                let top = own(q, &|c| {
+                    c.origin == OriginOfCandidateForMemoGroup::Pass1
+                        && OperatorNode::reachable(&c.root_node).iter().any(is_univmon)
+                })?;
+                Some([top, reader])
             })
             .collect();
-        choices.extend(reading);
+        choices.extend(reading.map(|pairs| pairs.into_iter().flatten().collect()));
     }
     choices
         .iter()

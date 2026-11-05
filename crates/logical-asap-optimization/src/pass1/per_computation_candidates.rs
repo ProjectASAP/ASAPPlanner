@@ -218,12 +218,11 @@ pub struct PerComputationCandidates {
 
 impl PerComputationCandidates {
     /// Whether this inventory walked `dag`, or a DAG built the same way from
-    /// the same roots: the same groups (by structural id, in the same order)
+    /// the same roots: the same groups (equal by Stage 0's equality, in the
+    /// same order)
     /// and each query's root over the same groups. Its targets' group ids
     /// then name `dag`'s groups.
     pub(crate) fn walked(&self, dag: &DagOfLogicalMemoGroups) -> bool {
-        use super::memo_population::NodeToStructuralIdCache;
-        let mut structural_ids = NodeToStructuralIdCache::default();
         let group_of: HashMap<*const OperatorNode, MemoGroupId> = self
             .logical_nodes
             .iter()
@@ -238,8 +237,7 @@ impl PerComputationCandidates {
                 .zip(self.logical_nodes.iter())
                 .all(|(group, node)| {
                     Rc::ptr_eq(&group.logical_node, node)
-                        || structural_ids.structural_id(&group.logical_node)
-                            == structural_ids.structural_id(node)
+                        || asap_types::stages::hash_consing::equal_nodes(&group.logical_node, node)
                 })
             && dag
                 .query_roots

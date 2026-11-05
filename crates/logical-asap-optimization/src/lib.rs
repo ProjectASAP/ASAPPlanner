@@ -60,8 +60,12 @@
 //! readers; plan selection (Stage 3) checks each selected candidate's
 //! guarantee against its query's `AccuracyTarget` and never resizes.
 
+mod added_groups;
 /// The deployment's capabilities: supported summaries and what it retains.
 mod deployment_capabilities;
+mod find_or_add_group;
+mod operator_over_groups;
+mod own_candidate_sizing;
 mod pass1;
 mod pass2;
 /// Stage 0: the memo groups of the workload's query roots.
@@ -88,7 +92,7 @@ pub use pass1::{
     PerComputationLogicalMemoCandidatesError,
 };
 // Pass 2: its entry and its error.
-pub use pass1::memo_population::CandidatePopulationError;
+pub use pass1::add_pass1_candidates::AddPass1CandidatesError;
 pub use pass2::logical_memo_candidates::{
     generate_logical_asap_memo_candidates, pass2_after_local_window_composition,
     pass2_local_window_composition,

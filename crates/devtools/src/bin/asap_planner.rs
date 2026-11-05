@@ -974,7 +974,7 @@ impl MemoNodes {
 /// children.
 fn memo_groups_json(table: &mut MemoNodes, memo: &Memo, previous: Option<&Memo>) -> Vec<Value> {
     let ids = |groups: &[MemoGroupId]| groups.iter().map(|g| g.0).collect::<Vec<_>>();
-    memo.groups
+    memo.groups()
         .iter()
         .zip(&memo.candidates)
         .enumerate()
@@ -1003,7 +1003,7 @@ fn memo_groups_json(table: &mut MemoNodes, memo: &Memo, previous: Option<&Memo>)
                                 .iter()
                                 .find(|child| {
                                     Rc::ptr_eq(
-                                        &memo.groups[child.0 as usize].logical_node,
+                                        &memo.groups()[child.0 as usize].logical_node,
                                         original,
                                     )
                                 })
