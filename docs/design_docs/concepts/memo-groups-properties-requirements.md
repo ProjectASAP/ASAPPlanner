@@ -19,7 +19,7 @@ This page defines the memo's data structures in the terms of the optimization pr
 | $c \in G_c$, $u \in G_u$ | consumer candidate and its group; producer candidate and its group. This page says *consumer* for $c$ and *query* $q$ (or its execution context $\kappa$) for who needs a result on a schedule; it does not use "reader" |
 | $\mathcal I(c)$ | input indices of consumer $c$ |
 | $G_{c,i}$ | memo group required by input $i$ of consumer $c$ |
-| $r_{c,i} = (r^{\log}_{c,i}, r^{\mathrm{phys}}_{c,i})$ | property requirement of input $i$ of consumer $c$ |
+| $r_{c,i} = (r^{\log}_{c,i}, r^{\mathrm{phys}}_{c,i})$ | property requirement of input $i$ of consumer $c$; $r^{\mathrm{phys}}_{c,i}$ is a function of $p^{\mathrm{phys}}_c$ |
 | $p(u) \succeq r_{c,i}$ | producer $u$'s properties satisfy the requirement: $p^{\log}(u) \succeq r^{\log}_{c,i} \land p^{\mathrm{phys}}(u) \succeq r^{\mathrm{phys}}_{c,i}$ |
 | $\alpha^{\log}_{u,c,i}$, $\alpha^{\mathrm{phys}}_{u,c,i}$ | fixed indicators of $p^{\log}_u \succeq r^{\log}_{c,i}$ and $p^{\mathrm{phys}}_u \succeq r^{\mathrm{phys}}_{c,i}$ |
 | $\mathcal C$ | physical candidates, each with a fixed parameter configuration, timing and lifetime |
@@ -32,7 +32,7 @@ This page defines the memo's data structures in the terms of the optimization pr
 | **(#1207)** $\kappa$ | execution context of a candidate with $\ell_v$ = None: a query evaluation $\kappa_q$, an ingestion pipeline $I_r$, or a materialized candidate's computation $\kappa_m$ |
 | $g_c$ | error propagation function of consumer $c$: $\varepsilon_c \le g_c(\varepsilon_{c,1}, \dots, \varepsilon_{c,n})$ |
 | $\lambda_{q,c,i}$ | propagation factor of input $i$ of $c$ to query $q$'s result, read off $q$'s expression |
-| $\text{cap}_{c,i}$ | error cap of input $i$ of $c$: the smaller of $g_c$'s validity cap and the pruning cap |
+| $\text{cap}_{c,i}$, $\boldsymbol\theta^{\min}_{c,i}$ | error cap of input $i$ of $c$ (the smaller of $g_c$'s validity cap and the pruning cap), and the parameter floor $r^{\log}_{c,i}$ stores: the smallest listed $\boldsymbol\theta$ whose $\varepsilon$ is at most the cap |
 | **(#1207)** (K), (R), (L), budgets | accuracy at each query root, $\sum_u \lambda_{q,u}\varepsilon_u a_{q,u} \le \varepsilon_q$ and $\sum_u \delta_u a_{q,u} \le \delta_q$; retention $h_v$; latency; resource budgets |
 
 ## Example
@@ -69,7 +69,7 @@ What is computed is the expression $e_v$, not a property: the operator, its argu
 | Dimension | Values | Part of | Code |
 |---|---|---|---|
 | Parameter configuration $\boldsymbol\theta_v$ | per family, from a predefined list: KLL `k`; DDSketch `alpha`; CMS / CountSketch `width × depth`; CMS / CountSketch with heap `width × depth × heap_size`; UnivMon `heap_size × rows × cols × layers`; HLL `precision`; KMV `k`. None for an exact operator | $p^{\log}_v$ | `SketchParams` inside `SketchKind` ([`sketch.rs`](../../../crates/types/src/ir/schema/sketch.rs)), sized by `size_params` per `accuracy_budget_parts` today |
-| **(#1207)** Window layout $\omega_v$ | none; or tumbling windows of width $w$ and count $n$, with $w$ from the gcd closure of the ranges and steps of the queries that reach the group. Later: sliding windows by merge or by subtraction | $p^{\log}_v$ | `SummaryTumblingWindowChain` arguments, added by Pass 2 ([`window_candidates.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/window_candidates.rs)) |
+| **(#1207)** Window layout $\omega_v$ | none; or tumbling windows of width $w$, from the gcd closure of the ranges and steps of the queries that reach the group. The window count is not a property: it is the group's query range divided by $w$, and how many windows to retain is $h_v$ (Stage 3). Later: sliding windows by merge or by subtraction | $p^{\log}_v$ | `SummaryTumblingWindowChain` arguments, added by Pass 2 ([`window_candidates.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/window_candidates.rs)) |
 | Execution timing $\tau_v$ | IngestionTime, QueryTime | $p^{\mathrm{phys}}_v$ | `ExecutionTiming` ([`execution_data_state.rs`](../../../crates/types/src/ir/properties/execution_data_state.rs)) |
 | Lifetime $\ell_v$ | None, OneEvaluation, AcrossEvaluations; **(#1207)** a materialized lifetime carries its medium, Memory or Disk | $p^{\mathrm{phys}}_v$ | `Materialization` on main; `Lifetime`, `Medium` in #1214 ([`physical/`](../../../crates/types/src/physical)) |
 | **(#1207)** Schedule $\sigma_v$ | only when $\ell_v \ne$ None: Periodic (interval, phase) for OneEvaluation; tumbling-window grid phase for AcrossEvaluations | $p^{\mathrm{phys}}_v$ | schedule groups `z[m, G]` in the MILP today ([`cost_terms.rs`](../../../crates/plan-selection/src/milp/cost_terms.rs)); a property in #1200 PR 2 |
@@ -93,7 +93,7 @@ Valid $(\tau, \ell)$: (QueryTime, None), (IngestionTime, None), (QueryTime, OneE
 
 ### Property requirements
 
-Each input $i$ of consumer $c$ names a producer group $G_{c,i}$ and a property requirement $r_{c,i} = (r^{\log}_{c,i}, r^{\mathrm{phys}}_{c,i})$. Logical satisfaction checks configuration requirements; physical satisfaction checks whether the producer's timing and lifetime jointly support the required access. For a monotone size parameter, $\succeq$ reduces to numerical dominance, e.g. $k_u \ge k_{\text{required}}$ for KLL.
+Each input $i$ of consumer $c$ names a producer group $G_{c,i}$ and a property requirement $r_{c,i} = (r^{\log}_{c,i}, r^{\mathrm{phys}}_{c,i})$. A requirement holds only what neither $G_{c,i}$'s identity nor the consumer's own properties already fix (decided 2026-11-05): the family and the query window are in $G_{c,i}$'s identity, and $r^{\mathrm{phys}}_{c,i}$ is a function of the consumer's own $p^{\mathrm{phys}}_c$, not a stored value. Logical satisfaction checks configuration requirements; physical satisfaction checks whether the producer's timing and lifetime jointly support the required access. For a monotone size parameter, $\succeq$ reduces to numerical dominance, e.g. $k_u \ge k_{\text{required}}$ for KLL.
 
 The workload's accuracy target $A_q$ is not an input requirement **(#1207)**: a per-input bound would fix each input's share of the query's budget. Row (K) bounds each query's composed error at its root instead. What stays in $r^{\log}$ is what depends only on the consumer.
 
@@ -133,11 +133,9 @@ For a monotone size parameter, $\varepsilon_u \le \text{cap}_{c,i}$ is a minimum
 | Requirement | Stated by | Values | Constrains | Checked by |
 |---|---|---|---|---|
 | Accuracy target $A_q$ | the workload, per query | metric: absolute (in the value's units, or times the stream's L1 or L2 norm), relative, rank; bound $\varepsilon_q$; failure probability $\delta_q$; scope: per value, whole result, or groups above a share of the records | $\boldsymbol\theta_u$ of every approximate candidate $q$ depends on, through $(\varepsilon_u, \delta_u)$ | row (K) **(#1207)** |
-| Error cap $\text{cap}_{c,i}$, in $r^{\log}_{c,i}$ | every consumer, per input, from $g_c$ and the targets of the queries that may reach it | the smaller of the validity cap (non-linear $g_c$ only) and the pruning cap; for a monotone size parameter, a minimum size $k_u \ge k_{\text{required}}$ | $\boldsymbol\theta_u$ | $\alpha^{\log}$, row (G): validity cap for correctness of (K), pruning cap for efficiency |
-| Window, in $r^{\log}_{c,i}$ **(#1207)** | a consumer that reads windows, per input | the range and step of the queries that reach the consumer | $\omega_u$: the width must divide both | $\alpha^{\log}$, row (G) |
-| Summary family, in $r^{\log}_{c,i}$ | a consumer that reads summary state | a family | usually already fixed by $G_{c,i}$, whose $\operatorname{op}$ names the family | $\alpha^{\log}$, row (G) |
-| Consumer timing and evaluation, in $r^{\mathrm{phys}}_{c,i}$ | the consumer, per input | when it reads (ingestion or query time) and from which evaluation (same or later) | $\tau_u$, $\ell_u$ | $\alpha^{\mathrm{phys}}$, row (H) |
-| Consumer schedule, in $r^{\mathrm{phys}}_{c,i}$ **(#1207)** | the consumer's execution context $\kappa$, from the $\mathcal T_q$ of its query | the context's interval and phase $(I_\kappa, \varphi_\kappa)$; the producer must deliver on them, $T_\kappa \subseteq T_{\sigma_u}$ | $\sigma_u$ | $\alpha^{\mathrm{phys}}$, row (H) |
+| Parameter floor $\boldsymbol\theta^{\min}_{c,i}$, the only field of $r^{\log}_{c,i}$ | every consumer, per input, from $g_c$ and the targets of the queries that may reach it | the smallest $\boldsymbol\theta$ in the family's predefined list whose $\varepsilon$, for the statistic $c$ reads, is at most $\text{cap}_{c,i}$ = min(validity cap, pruning cap); e.g. $k_u \ge k_{\text{required}}$ | $\boldsymbol\theta_u$ | $\alpha^{\log}$, row (G): $\boldsymbol\theta_u \succeq \boldsymbol\theta^{\min}_{c,i}$ |
+| Consumer timing, $r^{\mathrm{phys}}_{c,i}$ from $\tau_c$ | the consumer's own $p^{\mathrm{phys}}_c$ | when $c$ runs: ingestion or query time | $\tau_u$, $\ell_u$ | $\alpha^{\mathrm{phys}}$, row (H) |
+| Consumer schedule, $r^{\mathrm{phys}}_{c,i}$ from $\sigma_c$ or $\kappa$ **(#1207)** | a materialized consumer's own $\sigma_c$; for $\ell_c$ = None, the times $T_\kappa$ of each context $\kappa$ it runs in (from its query's $\mathcal T_q$) | interval and phase | $\sigma_u$: the producer delivers on those times | $\alpha^{\mathrm{phys}}$, row (H): in Stage 2 for a materialized consumer; per context in Stage 3 for $\ell_c$ = None |
 | Deployment capability | the deployment and data | the source has an ingestion pipeline; the executor supports the family; query-time results may be kept across evaluations | $\tau$, $\operatorname{op}$, (QueryTime, AcrossEvaluations) | candidate generation: such candidates are not in $\mathcal C$ |
 | Latency, resource budgets **(#1207)** | the workload | per-query latency bound; memory and CPU budgets | the whole plan | rows (L) and budgets |
 
@@ -146,14 +144,54 @@ Accuracy metrics that may be added later, when a primitive needs them: top-k rec
 How requirements map to properties:
 
 ```
-A_q (workload)               ──► θ_u of every approximate input   (through ε_u, δ_u; row (K))
-error cap      r^log         ──► θ_u            (validity cap from g_c; pruning cap from ε_q / λ_{q,c,i})
-window         r^log         ──► ω_u
-consumer timing r^phys       ──► τ_u, ℓ_u
-consumer schedule r^phys     ──► σ_u
-deployment                   ──► τ, op, ℓ   (not generated)
-latency, budgets             ──► every dimension, through w_v
+A_q (workload)                  ──► θ_u of every approximate input   (through ε_u, δ_u; row (K))
+parameter floor θ^min   r^log   ──► θ_u   (from cap = min(validity cap of g_c, pruning cap ε_q / λ_{q,c,i}))
+τ_c               r^phys = f(p^phys_c) ──► τ_u, ℓ_u
+σ_c or T_κ        r^phys = f(p^phys_c) ──► σ_u
+G_{c,i}'s identity (family, query window) ──► op_u, ω_u   (by construction: no requirement)
+deployment                      ──► τ, op, ℓ   (not generated)
+latency, budgets                ──► every dimension, through w_v
 ```
+
+### Properties and requirements at a glance (decided 2026-11-05)
+
+A field is kept only when it is a real choice: anything the expression, $G_{c,i}$'s identity or the consumer's own properties already fix is not repeated.
+
+| Struct | Field | Values | Symbol | `new` rejects |
+|---|---|---|---|---|
+| `LogicalProperties` ($p^{\log}_v$) | `parameters` | `Option<SketchParams>`: θ from the family's predefined list; None for an exact operator | $\boldsymbol\theta_v$ | parameters of a family other than the operator's; parameters on an exact operator |
+| | `window_layout` | `None`, or `Tumbling { width_ms }` (later: sliding by merge or subtraction) | $\omega_v$ | a window on an operator that cannot be windowed; width 0 |
+| `LogicalRequirement` ($r^{\log}_{c,i}$) | `parameter_floor` | `Option<SketchParams>`: the smallest θ in the list whose $\varepsilon$ ≤ $\text{cap}_{c,i}$ | $\boldsymbol\theta^{\min}_{c,i}$ | a floor not in the family's predefined list |
+| `PhysicalProperties` ($p^{\mathrm{phys}}_v$) | `timing` | IngestionTime, QueryTime | $\tau_v$ | (IngestionTime, OneEvaluation) |
+| | `lifetime` | None, OneEvaluation(Medium), AcrossEvaluations(Medium); Medium ∈ {Memory, Disk} | $\ell_v$ | |
+| | `schedule` | None; Periodic { interval, phase }; TumblingWindowGrid { phase } | $\sigma_v$ | the schedule combinations listed above |
+| ($r^{\mathrm{phys}}_{c,i}$) | none | a function of the consumer's $p^{\mathrm{phys}}_c$: its $\tau_c$, and its $\sigma_c$ or each context's $T_\kappa$ | | |
+
+Not fields, because something else already fixes them: the summary family ($\operatorname{op}_v$'s argument, part of the group identity); the window count (query range ÷ width; retention is $h_v$); a family or window requirement on an input ($G_{c,i}$'s identity, and the schedule check); the statistic a consumer reads (its own operator, used once to compute $\boldsymbol\theta^{\min}$); which evaluation produced the output (reuse across evaluations is the producer's $\ell$, a cost choice).
+
+**α^log** = `satisfies_logical(p^log_u, r^log_{c,i})`: $\boldsymbol\theta_u \succeq \boldsymbol\theta^{\min}_{c,i}$, compared per family on the parameters that set $\varepsilon$ (KLL `k` ≥; CMS / CountSketch `width` ≥; DDSketch `alpha` ≤; HLL `precision` ≥; KMV `k` ≥; UnivMon and the heap variants on each sizing parameter). No floor, or an exact producer, always satisfies.
+
+**α^phys** = `satisfies_physical(p^phys_u, p^phys_c)`, timing and lifetime:
+
+| Consumer $\tau_c$ ↓ / producer $(\tau_u, \ell_u)$ → | (QT, None) | (QT, OneEval) | (QT, AcrossEval) | (IT, None) | (IT, AcrossEval) |
+|---|---|---|---|---|---|
+| QueryTime | ✅ | ✅ | ✅ | ❌ an unmaterialized ingestion-time output is gone by query time | ✅ |
+| IngestionTime | ❌ | ❌ | ❌ | ✅ | ✅ |
+
+and schedule, for a producer with $\ell_u \ne$ None, against the consumer's times (its own $\sigma_c$ in Stage 2 when $\ell_c \ne$ None; each context's $T_\kappa$ in Stage 3 when $\ell_c$ = None):
+
+| Producer $\sigma_u$ | Delivers on consumer times $(I, \varphi)$ when |
+|---|---|
+| none ($\ell_u$ = None) | always: it runs inside the consumer's context, chosen by Stage 3 ($x_{\kappa,v}$) |
+| Periodic $(I_\sigma, \varphi_\sigma)$ | $I_\sigma \mid I$ and $\varphi \equiv \varphi_\sigma \pmod{I_\sigma}$; a non-periodic consumer is never served |
+| TumblingWindowGrid $\varphi_g$, width $w$ | $w \mid I$ and $\varphi \equiv \varphi_g \pmod w$; a non-periodic consumer is never served |
+
+| Struct | Set by | When |
+|---|---|---|
+| `LogicalProperties` | Pass 1 (one candidate per θ in the list); Pass 2 rules (window layouts) | when the candidate is created |
+| `LogicalRequirement` | the consumer: floor from the validity cap of `LogicalRequirement::error_propagation(consumer)` | when the consumer is created; Pass 2 tightens it with the pruning cap when it builds the logical edges |
+| `PhysicalProperties` | Stage 2 physical expansion (every valid $(\tau, \ell, \sigma)$) | Stage 2 |
+| $r^{\mathrm{phys}}_{c,i}$ | derived from $p^{\mathrm{phys}}_c$ | checked in Stage 2 (timing, lifetime; schedule of a materialized consumer) and Stage 3 (schedule per context) |
 
 ## 2. Decision tree of properties
 
@@ -288,57 +326,51 @@ pub struct CandidateForMemoGroup {
 /// e_v = op_v(G_{v,1}, …, G_{v,n}): one operator, its children are groups.
 pub struct CandidateExpression { pub operator: Operator<MemoGroupId> }
 
-/// p_v^log = (θ_v, ω_v); `new` rejects invalid combinations (parameters of
-/// another family, a window layout on an exact operator that cannot be windowed).
+/// p_v^log = (θ_v, ω_v). The family is the operator's argument, not a property.
+/// `new` rejects parameters of another family (or on an exact operator) and a
+/// window on an operator that cannot be windowed.
 pub struct LogicalProperties {
-    representation: Representation,       // family and θ, from the predefined list
-    window_layout: Option<WindowLayout>,  // ω_v
+    parameters: Option<SketchParams>,      // θ_v, from the family's predefined list; None for exact
+    window_layout: Option<WindowLayout>,   // ω_v
 }
 impl LogicalProperties {
-    pub fn new(representation: Representation, window_layout: Option<WindowLayout>) -> Result<Self, InvalidLogicalProperties>;
-    pub fn representation(&self) -> &Representation;
+    pub fn new(expression: &CandidateExpression, parameters: Option<SketchParams>,
+               window_layout: Option<WindowLayout>) -> Result<Self, InvalidLogicalProperties>;
+    pub fn parameters(&self) -> Option<&SketchParams>;
     pub fn window_layout(&self) -> Option<&WindowLayout>;
 }
-pub enum Representation { Exact(ExactKind), Summary(SketchKind) }
-pub enum WindowLayout { Tumbling { width_ms: u64, count: u32 } }
+/// The window count is the group's query range ÷ width; retention is h_v (Stage 3).
+pub enum WindowLayout { Tumbling { width_ms: u64 } }
 
-/// r^log_{c,i}: one optional constraint per dimension; None accepts any value.
-/// `new` rejects invalid combinations (a cap that is not positive and finite,
-/// a cap without the statistic it applies to, a window with zero range or step).
+/// The family's predefined θ list (#1207 step 6), each with its error bound
+/// derived through `estimators::local_guarantee` for a given statistic.
+pub fn parameter_list(family: SketchAlgorithm) -> &'static [SketchParams];
+
+/// r^log_{c,i}: only what G_{c,i}'s identity does not fix. `new` rejects a floor
+/// that is not in the family's predefined list.
 pub struct LogicalRequirement {
-    family: Option<SketchAlgorithm>,
-    /// Range and step of the queries reaching the consumer: a width must divide both.
-    window: Option<WindowRequirement>,
-    /// The statistic the consumer reads from this input; the producer's ε is
-    /// derived for it.
-    statistic: Option<SketchStatistic>,
-    /// cap_{c,i} = min(validity cap of g_c, pruning cap max_q ε_q / λ_{q,c,i}).
-    error_cap: Option<f64>,
+    /// θ^min_{c,i}: the smallest θ in the list whose ε, for the statistic the
+    /// consumer reads, is at most cap_{c,i} = min(validity cap of g_c, pruning cap).
+    parameter_floor: Option<SketchParams>,
 }
 impl LogicalRequirement {
-    pub fn new(family: Option<SketchAlgorithm>, window: Option<WindowRequirement>,
-               statistic: Option<SketchStatistic>, error_cap: Option<f64>) -> Result<Self, InvalidLogicalProperties>;
-    pub fn family(&self) -> Option<SketchAlgorithm>;
-    pub fn window(&self) -> Option<&WindowRequirement>;
-    pub fn statistic(&self) -> Option<&SketchStatistic>;
-    pub fn error_cap(&self) -> Option<f64>;
-    /// g_c of a consumer: the propagation factor λ_{c,i} per input, read from the
-    /// operator and its arguments, and the validity cap (None when g_c is linear).
-    /// Sets each input's first `error_cap`; Stage 3 composes the factors into λ_{q,c,i}.
+    pub fn new(parameter_floor: Option<SketchParams>) -> Result<Self, InvalidLogicalProperties>;
+    pub fn parameter_floor(&self) -> Option<&SketchParams>;
+    /// g_c: λ_{c,i} per input, read from the operator and its arguments, and the
+    /// validity cap (None when g_c is linear). Sets each input's first floor;
+    /// Stage 3 composes the factors into λ_{q,c,i}.
     pub fn error_propagation(consumer: &Operator<MemoGroupId>) -> ErrorPropagation;
 }
 /// Approved 2026-11-05.
 pub struct ErrorPropagation { pub factor_per_input: Vec<f64>, pub validity_cap: Option<f64> }
 
-/// α^log_{u,c,i}: one check per dimension, joined by "and". The error check
-/// derives the producer's (ε_u, δ_u) for `requirement.statistic()` through
-/// `estimators::local_guarantee` and compares ε_u with `error_cap`.
+/// α^log_{u,c,i}: θ_u ⪰ θ^min_{c,i}, compared per family on the parameters that set ε.
 pub fn satisfies_logical(producer: &LogicalProperties, requirement: &LogicalRequirement) -> bool;
 ```
 
-The logical and physical sides have the same shape: a properties struct and a requirement struct, each with private fields, a checked `new`, one accessor per dimension, and one `satisfies_*` function. Invalid values of both logical structs are reported through one error type, `InvalidLogicalProperties`, as `InvalidPhysicalProperties` does for the physical side.
+The logical and physical properties have the same shape: private fields, a checked `new`, one accessor per dimension, one error type per side (`InvalidLogicalProperties`, `InvalidPhysicalProperties`), and one `satisfies_*` function. Only the logical side has a stored requirement; the physical requirement is a function of the consumer's own physical properties.
 
-The error bound is not a method of `LogicalProperties`: it depends on the statistic the consumer reads, so `satisfies_logical` derives it from the requirement's statistic. The validity cap is known when the consumer is created (`LogicalRequirement::error_propagation`). The pruning cap needs $\lambda_{q,c,i}$ and the queries that may reach $c$, so Pass 2 builds each input's final requirement with `LogicalRequirement::new` when it builds the logical edges.
+The error bound is not stored: it depends on the statistic the consumer reads, which is the consumer's own operator argument. It is used once, when the consumer's floor is computed: the smallest θ in `parameter_list(family)` whose `local_guarantee` for that statistic has ε ≤ cap. The validity cap is known when the consumer is created (`LogicalRequirement::error_propagation`). The pruning cap needs $\lambda_{q,c,i}$ and the queries that may reach $c$, so Pass 2 builds each input's final requirement with `LogicalRequirement::new` when it builds the logical edges.
 
 Deleted: `root_node` with private nodes, `input_groups` (the expression's children), `accuracy_budget_parts`, the `SharedBuild` and `SummaryResult` origins.
 
@@ -390,27 +422,18 @@ impl PhysicalProperties {
     pub fn is_materialized(&self) -> bool;          // ℓ ≠ None
 }
 
-/// r^phys_{c,i}; `new` rejects (IngestionTime, Later), reported through
-/// `InvalidPhysicalProperties` (one error type per side).
-pub struct PhysicalRequirement {
-    consumer_timing: ExecutionTiming,
-    reads_from: Evaluation,
-    /// (I_κ, φ_κ) of the consumer's execution context, from its query's T_q;
-    /// None for a non-periodic query.
-    consumer_schedule: Option<EvaluationSchedule>,
-}
-impl PhysicalRequirement {
-    pub fn new(consumer_timing: ExecutionTiming, reads_from: Evaluation,
-               consumer_schedule: Option<EvaluationSchedule>) -> Result<Self, InvalidPhysicalProperties>;
-    pub fn consumer_timing(&self) -> ExecutionTiming;
-    pub fn reads_from(&self) -> Evaluation;
-    pub fn consumer_schedule(&self) -> Option<&EvaluationSchedule>;
-}
-/// A periodic evaluation schedule φ + I·ℤ.
+/// A periodic schedule φ + I·ℤ: a materialized consumer's own times, or a
+/// context's times T_κ (Stage 3).
 pub struct EvaluationSchedule { interval_ms: u64, phase_ms: u64 }
-pub enum Evaluation { Same, Later }
-/// α^phys_{u,c,i}
-pub fn satisfies_physical(producer: &PhysicalProperties, requirement: &PhysicalRequirement) -> bool;
+impl PhysicalProperties {
+    /// Whether this producer delivers on `times` (the schedule table in section 1);
+    /// always true when ℓ = None.
+    pub fn delivers_on(&self, times: &EvaluationSchedule) -> bool;
+}
+/// α^phys_{u,c,i} = r^phys_{c,i} as a function of the consumer's own p^phys_c:
+/// timing and lifetime, and, for a materialized consumer, `delivers_on` its σ_c.
+/// For a consumer with ℓ = None, Stage 3 checks `delivers_on(T_κ)` per context.
+pub fn satisfies_physical(producer: &PhysicalProperties, consumer: &PhysicalProperties) -> bool;
 
 // crates/types/src/stages/physical
 pub struct PhysicalCandidateId(pub usize);
@@ -420,7 +443,6 @@ pub struct PhysicalEdgeId(pub usize);
 pub struct PhysicalCandidate {
     pub logical: CandidateForMemoGroupId,             // e_v and p_v^log
     pub properties: PhysicalProperties,               // p_v^phys
-    pub input_requirements: Vec<PhysicalRequirement>, // r^phys_{c,i}
 }
 /// (u, c, i) over physical candidates.
 pub struct PhysicalEdge {
@@ -460,6 +482,8 @@ pub enum Context {
     IngestionPipeline(RefreshWindowId),     // I_r
     Materialized(PhysicalCandidateId),      // κ_m: inside a materialized m's computation
 }
+/// T_κ: when the context runs; y_{κ,u,c,i} exists only if `p^phys_u.delivers_on(T_κ)`.
+fn context_times(context: &Context) -> Option<EvaluationSchedule>;
 
 struct SelectionVariables {
     x_materialized: Vec<Variable>,                                     // x_v, ℓ ≠ None
@@ -519,7 +543,7 @@ Pass 1 adds, for each group a query computes, every way to compute it. Each inte
 |---|---|---|
 | Exact | [`per_computation_candidates.rs`](../../../crates/logical-asap-optimization/src/pass1/per_computation_candidates.rs), [`memo_population.rs`](../../../crates/logical-asap-optimization/src/pass1/memo_population.rs) | a candidate with the exact operator; $\boldsymbol\theta_v$ none, $(\varepsilon_v, \delta_v) = (0, 0)$ |
 | Exact accumulator | same | a state group `ExactAggregate(kind)` over the input group, one candidate; a `FinalizeExactAccumulator` candidate in the result's group reading it |
-| Summary, per family the executor supports | same | a state group `SummaryAgg[family]` over the input group, with **one candidate per $\boldsymbol\theta$ in the family's predefined list**, dropping a $\boldsymbol\theta$ whose $\varepsilon_v$ alone exceeds the $\varepsilon_q$ of every query that reaches the group; a `SummaryEstimate[statistic]` candidate in the result's group reading the state group. Each consumer's `error_cap` starts as its $g_c$'s validity cap (none for a linear $g_c$) |
+| Summary, per family the executor supports | same | a state group `SummaryAgg[family]` over the input group, with **one candidate per $\boldsymbol\theta$ in the family's predefined list**, dropping a $\boldsymbol\theta$ whose $\varepsilon_v$ alone exceeds the $\varepsilon_q$ of every query that reaches the group; a `SummaryEstimate[statistic]` candidate in the result's group reading the state group. Each consumer's `parameter_floor` starts from its $g_c$'s validity cap (none for a linear $g_c$) |
 | Fused build (#1203 2c) | same | a build that computes several targets at once: a candidate of the outer target's state group, with `fused_groups` naming the others |
 
 Example: for A and B, Pass 1 adds G2 = `SummaryAgg[KLL](G1)` with candidates `k = 200` and `k = 345`, and G3, G4, G5 = `SummaryEstimate[q](G2)`. A and B's three estimates read one state group because their expressions over G1 hash-cons to one group.
@@ -530,7 +554,7 @@ Today, Pass 1 instead sizes one $\boldsymbol\theta$ per `accuracy_budget_parts` 
 
 | # | Rule | Code | Matches | Adds | Status |
 |---|---|---|---|---|---|
-| 1 | Local window composition (tumbling windows) | `add_local_window_composition` ([`window_candidates.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/window_candidates.rs)) | a summary state group whose window consumers serve queries whose ranges and steps share a gcd width $w$ | a candidate of the **same state group** with $\omega_v$ = tumbling $(w, n)$, its $r^{\log}$ window requirement on each consumer input | today it copies consumers per layout (`TumblingWindows` origin); #1160 makes it a candidate of the state group |
+| 1 | Local window composition (tumbling windows) | `add_local_window_composition` ([`window_candidates.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/window_candidates.rs)) | a summary state group whose window consumers serve queries whose ranges and steps share a gcd width $w$ | a candidate of the **same state group** with $\omega_v$ = tumbling width $w$; only widths dividing the group's query range are offered, and the step and phase are checked by the schedule rule ($\alpha^{\mathrm{phys}}$) | today it copies consumers per layout (`TumblingWindows` origin); #1160 makes it a candidate of the state group |
 | 2 | Scan widening | `add_scan_label_candidates` ([`scan_labels.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/rules/scan_labels.rs)) | several scan groups of one metric with different label sets | a group for the widened scan (`find_or_add_group`), and in each original scan group a candidate `Project(widened)` | #1203 2a-5 (#1222) |
 | 3 | Summary inputs | `factor_summary_inputs` ([`summary_inputs.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/rules/summary_inputs.rs)) | a value projection or filter below a summary build | that projection or filter as its own group; the build's candidate reads it | #1203 2a-2 (#1218); after 2a, Pass 1 already makes it a group |
 | 4 | Top-k reuse | `add_topk_candidates` ([`topk.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/rules/topk.rs)) | top-k groups over one ranking with different `k` | a candidate of each top-k group reading the largest-`k` group, with an exact-input requirement | #1203 2a-3 (#1220) |
@@ -540,7 +564,7 @@ Today, Pass 1 instead sizes one $\boldsymbol\theta$ per `accuracy_budget_parts` 
 | 8 | Summary results | `factor_summary_results` ([`summary_results.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/rules/summary_results.rs)) | a summary readout inside a composite candidate | the readout as its own group | #1203 2a-2 (#1218) makes the readout a group in Pass 1; the rule is then deleted |
 | 9 | Shared configurations | `add_state_configuration_candidates` ([`shared_configuration_readers.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/rules/shared_configuration_readers.rs)) | consumers that could share a summary at a size or window horizon that covers them | consumer copies at the shared size (`SharedBuild` origin) | deleted in #1203 2b: the state group already holds every $\boldsymbol\theta$, and $y$ chooses per consumer input |
 | 10 | Shared summary state groups | `add_shared_summary_state_groups` ([`state_groups.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/state_groups.rs)) | summary builds directly over input groups | per-size concrete state groups with consumer copies | deleted in #1203 2b and #1160: one state group per state family |
-| — | Logical edges (#1201) | after the last rule | every candidate $c$ and input $i$ | one `LogicalEdge { producer, consumer, input, satisfies_logical_requirement }` per $u \in G_{c,i}$, after tightening each `error_cap` with the pruning cap $\max_q \varepsilon_q / \lambda_{q,c,i}$; $\alpha^{\log}_{u,c,i}$ = `satisfies_logical(p^log_u, r^log_{c,i})`; output `LogicalASAPMemoCandidates { memo, edges }` | #1201 |
+| — | Logical edges (#1201) | after the last rule | every candidate $c$ and input $i$ | one `LogicalEdge { producer, consumer, input, satisfies_logical_requirement }` per $u \in G_{c,i}$, after tightening each `parameter_floor` with the pruning cap $\max_q \varepsilon_q / \lambda_{q,c,i}$; $\alpha^{\log}_{u,c,i}$ = `satisfies_logical(p^log_u, r^log_{c,i})`; output `LogicalASAPMemoCandidates { memo, edges }` | #1201 |
 
 After #1203 2b, every Pass 2 rule has the same shape: match groups, then `find_or_add_group` for any new intermediate result and `add_candidate` for the new way to compute an existing group. A rule adds no candidate a group already has (same expression and $p^{\log}$).
 
@@ -550,8 +574,8 @@ Stage 2 adds no logical candidates. It expands each logical candidate into physi
 
 | Step | Code | Reads | Adds |
 |---|---|---|---|
-| Physical expansion | `enumerate_candidate_configurations` ([`configurations.rs`](../../../crates/physical-asap-optimization/src/catalog/configurations.rs)) | each `CandidateForMemoGroup`, deployment capabilities, the queries' $\mathcal T_q$ | one `PhysicalCandidate { logical, properties, input_requirements }` per valid $p^{\mathrm{phys}} = (\tau, \ell, \sigma)$ that the deployment allows (section 2, levels 4–6), with one `PhysicalRequirement` per input: the consumer's timing, the evaluation it reads from, and its context's schedule |
-| Physical edges (#1201) | after expansion | each `LogicalEdge` | one `PhysicalEdge { producer, consumer, input, satisfies_logical_requirement, satisfies_physical_requirement }` per pair of the two logical candidates' physical candidates, with $\alpha^{\mathrm{phys}}$ = `satisfies_physical(p^phys_u, r^phys_{c,i})`; the admissible ones ($\alpha^{\log} = \alpha^{\mathrm{phys}} = 1$) through `admissible_edges_into` / `admissible_edges_out_of` |
+| Physical expansion | `enumerate_candidate_configurations` ([`configurations.rs`](../../../crates/physical-asap-optimization/src/catalog/configurations.rs)) | each `CandidateForMemoGroup`, deployment capabilities, the queries' $\mathcal T_q$ | one `PhysicalCandidate { logical, properties, input_requirements }` per valid $p^{\mathrm{phys}} = (\tau, \ell, \sigma)$ that the deployment allows (section 2, levels 4–6), |
+| Physical edges (#1201) | after expansion | each `LogicalEdge` | one `PhysicalEdge { producer, consumer, input, satisfies_logical_requirement, satisfies_physical_requirement }` per pair of the two logical candidates' physical candidates, with $\alpha^{\mathrm{phys}}$ = `satisfies_physical(p^phys_u, p^phys_c)`; the admissible ones ($\alpha^{\log} = \alpha^{\mathrm{phys}} = 1$) through `admissible_edges_into` / `admissible_edges_out_of` |
 
 Example: v3 (`k = 345`) becomes, among others, (QueryTime, None), (QueryTime, OneEvaluation, Periodic(10 s, 0)) and (IngestionTime, AcrossEvaluations, grid phase 0). G3's estimate at query time has an admissible edge to each of them: same timing, or a query-time consumer of an ingestion-time result kept across evaluations.
 
