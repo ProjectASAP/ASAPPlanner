@@ -30,7 +30,7 @@ use crate::ir::properties::timing::{
 };
 use crate::ir::properties::timing::{data_state, is_keepable_state_output};
 use crate::ir::schema::{FieldDataType, Schema};
-use crate::physical::{Lifetime, PhysicalProperties};
+use crate::physical::{InvalidPhysicalProperties, Lifetime, PhysicalProperties};
 
 /// A node's operator, with each child replaced by its node id.
 pub type PhysicalASAPOperatorPayload = Operator<NodeId>;
@@ -90,6 +90,14 @@ pub struct PhysicalASAPDAGNode {
     /// enumerates lifetimes before Stage 3 knows retention.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention_ms: Option<u64>,
+}
+
+impl PhysicalASAPDAGNode {
+    /// Its timing (`output_state.timing`) and lifetime, unless they cannot
+    /// go together.
+    pub fn physical_properties(&self) -> Result<PhysicalProperties, InvalidPhysicalProperties> {
+        PhysicalProperties::new(self.output_state.timing, self.lifetime)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -172,15 +180,17 @@ pub struct PhysicalASAPDAG {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PhysicalASAPDAGValidationError {
-    #[error(
-        "node {node:?} runs at {timing:?} with lifetime {lifetime:?}: a timing and lifetime that \
-         cannot go together, or a summary build that is not kept outside query time"
-    )]
+    /// A node whose timing and lifetime cannot go together: a planner bug.
+    #[error("node {node:?}: {reason}")]
     InvalidPhysicalProperties {
         node: PhysicalASAPNodeId,
-        timing: ExecutionTiming,
-        lifetime: Lifetime,
+        #[source]
+        reason: InvalidPhysicalProperties,
     },
+    /// A summary build (or maintained population) that is not kept but does
+    /// not run at query time: a planner bug.
+    #[error("node {node:?} is a summary build that is not kept but does not run at query time")]
+    UnkeptSummaryBuildNotAtQueryTime { node: PhysicalASAPNodeId },
     #[error("ingestion node {consumer:?} depends on query node {producer:?}")]
     QueryDependencyInIngestion {
         producer: PhysicalASAPNodeId,
@@ -601,23 +611,26 @@ impl PhysicalASAPDAG {
             if nodes.insert(node.id, node).is_some() {
                 return Err(PhysicalASAPDAGValidationError::DuplicateNodeId(node.id));
             }
-            // A kept output's timing and lifetime must go together; a summary
+            // A node's timing and lifetime must go together; a summary
             // build that is not kept runs at query time. Any other node that
             // is not kept runs when its consumer runs.
-            let timing = node.output_state.timing;
-            if PhysicalProperties::new(timing, node.lifetime).is_err()
-                || (is_keepable_state_output(&node.payload)
-                    && node.lifetime == Lifetime::None
-                    && timing != ExecutionTiming::QueryTime)
-            {
-                return Err(PhysicalASAPDAGValidationError::InvalidPhysicalProperties {
+            let properties = node.physical_properties().map_err(|reason| {
+                PhysicalASAPDAGValidationError::InvalidPhysicalProperties {
                     node: node.id,
-                    timing,
-                    lifetime: node.lifetime,
-                });
+                    reason,
+                }
+            })?;
+            if is_keepable_state_output(&node.payload)
+                && properties == PhysicalProperties::NOT_KEPT_AT_INGESTION
+            {
+                return Err(
+                    PhysicalASAPDAGValidationError::UnkeptSummaryBuildNotAtQueryTime {
+                        node: node.id,
+                    },
+                );
             }
             if node.retention_ms.is_some()
-                && !matches!(node.lifetime, Lifetime::AcrossEvaluations(_))
+                && !node.lifetime.is_across_evaluations()
                 && !super::materialized_view::is_query_time_scan(node)
             {
                 return Err(PhysicalASAPDAGValidationError::UnexpectedRetention(node.id));

@@ -132,9 +132,7 @@ use asap_types::ir::{
     Operator, OperatorNode, PhysicalPropertiesAssignment, QueryRoot, ScalarExpr,
     SchemaDerivationError, SortKey,
 };
-use asap_types::physical::Medium;
-use asap_types::physical::PhysicalWorkloadPlan;
-use asap_types::physical::{Lifetime, PhysicalProperties};
+use asap_types::physical::{PhysicalProperties, PhysicalWorkloadPlan};
 use asap_types::workload::{
     DataArrival, DataWorkload, Predictability, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
 };
@@ -335,7 +333,7 @@ fn summary_reader_eligibility(
 /// ingestion time over one that is not; Stage 3 prices each.
 /// `at_ingestion` records why ingestion is ruled out when it is (e.g.
 /// `Filtered`, `NotRepeated`). Each physical candidate carries the
-/// resulting assignment ([`PhysicalWorkloadPlan::lifetime`]).
+/// resulting lifetimes on its `dag` nodes.
 #[derive(Debug, Clone)]
 pub(crate) struct KeptOutputCandidate {
     /// The build in the implemented DAG.
@@ -358,13 +356,17 @@ impl KeptOutputCandidate {
     pub(crate) fn options(&self) -> Vec<Option<PhysicalProperties>> {
         let mut options = vec![None];
         if self.at_ingestion.is_ok() {
-            options.push(Some(kept_across_evaluations_at_ingestion()));
+            options.push(Some(
+                PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            ));
         }
         if self.readers.len() > 1 {
-            options.push(Some(kept_for_one_evaluation()));
+            options.push(Some(PhysicalProperties::KEPT_IN_MEMORY_FOR_ONE_EVALUATION));
         }
         if self.may_keep_across_evaluations {
-            options.push(Some(kept_across_evaluations_at_query_time()));
+            options.push(Some(
+                PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME,
+            ));
         }
         options
     }
@@ -445,51 +447,20 @@ pub fn optimize_physical_asap(
         .collect()
 }
 
-/// Stage 2 for one CandidateLogicalASAPDAG and one physical properties
-/// assignment: the physical candidate [`optimize_physical_asap`] lists for
-/// it. `choose(readers)` gives the option for each kept-output
-/// candidate (each summary build in discovery order, query by query, each
-/// query's builds as a walk from its root meets them, then each highest
-/// shared non-summary node in the same order), `readers` being the queries
-/// that read it. `None` when
-/// a chosen option is not one of the build's, or the assignment
-/// materializes a build at ingestion time above one at query time.
-#[cfg(feature = "test-support")]
-pub fn optimize_physical_asap_assigned(
-    from_logical: &str,
-    roots: &[QueryRoot],
-    entries: &[QueryWorkloadEntry],
-    data: &DataWorkload,
-    query_time_results_retained: bool,
-    choose: &mut dyn FnMut(&[usize]) -> Option<Option<PhysicalProperties>>,
-) -> Result<Option<PhysicalWorkloadPlan>, PhysicalASAPOptimizationError> {
-    optimize_physical_asap_chosen(
-        from_logical,
-        roots,
-        entries,
-        data,
-        query_time_results_retained,
-        &mut |_, readers, _| choose(readers),
-    )
-}
-
 /// [`optimize_physical_asap_chosen`]'s choice per kept-output
-/// candidate: from the logical node it implements, its readers and its
-/// options. `None` rejects the assignment.
-pub(crate) type ChoosePhysicalProperties<'a> = dyn FnMut(
-        *const OperatorNode,
-        &[usize],
-        &[Option<PhysicalProperties>],
-    ) -> Option<Option<PhysicalProperties>>
-    + 'a;
+/// candidate, from the logical node it implements, its readers and its
+/// options (`None` = not kept, always first): the index of the chosen
+/// option, or `None` to reject the assignment.
+pub(crate) type ChoosePhysicalProperties<'a> =
+    dyn FnMut(*const OperatorNode, &[usize], &[Option<PhysicalProperties>]) -> Option<usize> + 'a;
 
 /// Stage 2 for one CandidateLogicalASAPDAG and one physical properties
 /// assignment chosen node by node: `choose(logical, readers, options)`
 /// gives the option for each kept-output candidate, `logical` being
 /// the address of the logical node of `roots` it implements (null when it
 /// implements none, e.g. a node the implementation adds) and `readers` the
-/// queries that read it. `None` when `choose` rejects, a chosen option is
-/// not one of the candidate's, or the assignment materializes a build at ingestion time
+/// queries that read it. `None` when `choose` rejects, a chosen index is
+/// out of range, or the assignment keeps a build at ingestion time
 /// above one at query time. The search that decodes one plan from a model
 /// solution uses it to build that plan alone, not every assignment.
 pub(crate) fn optimize_physical_asap_chosen(
@@ -513,12 +484,12 @@ pub(crate) fn optimize_physical_asap_chosen(
             .copied()
             .unwrap_or(std::ptr::null());
         let options = kept_output_candidate.options();
-        let Some(m) = choose(logical, &kept_output_candidate.readers, &options)
-            .filter(|m| options.contains(m))
+        let Some(&chosen) = choose(logical, &kept_output_candidate.readers, &options)
+            .and_then(|index| options.get(index))
         else {
             return Ok(None);
         };
-        assignment.push(m);
+        assignment.push(chosen);
     }
     let nodes: Vec<_> = kept_output_candidates
         .iter()
@@ -550,8 +521,8 @@ fn assigned_candidate(
 ) -> Result<PhysicalWorkloadPlan, PhysicalASAPOptimizationError> {
     let mut options = PhysicalPropertiesAssignment::default();
     for (kept_output_candidate, kept) in kept_output_candidates.iter().zip(&assignment) {
-        if kept.is_some() {
-            options.set(&kept_output_candidate.node, *kept);
+        if let Some(kept) = *kept {
+            options.set(&kept_output_candidate.node, kept);
         }
     }
     let operators: Vec<Rc<OperatorNode>> = implemented
@@ -572,25 +543,11 @@ fn assigned_candidate(
         Ok(apply_physical_properties(node, &options, &mut timing)?)
     })?;
     let dag = compile_physical_asap_workload_with_node_ids(&timed)?.dag;
-    let lifetime = dag
-        .nodes
-        .iter()
-        .filter(|n| {
-            matches!(
-                n.payload,
-                Operator::ASAP(
-                    ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. }
-                )
-            ) || n.lifetime.is_kept()
-        })
-        .map(|n| (n.id, n.lifetime))
-        .collect();
     Ok(PhysicalWorkloadPlan {
         id: String::new(),
         from_logical: from_logical.to_string(),
         roots: timed,
         dag,
-        lifetime,
     })
 }
 
@@ -729,7 +686,10 @@ pub(crate) fn find_kept_output_candidates(
             // Only this build and the builds below it at ingestion time.
             let mut trial = PhysicalPropertiesAssignment::default();
             for &v in below[c].iter().chain([&c]) {
-                trial.set(&nodes[v], Some(kept_across_evaluations_at_ingestion()));
+                trial.set(
+                    &nodes[v],
+                    PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+                );
             }
             apply_physical_properties(node, &trial, &mut NodeToTimedNodeCache::new())
                 .map(|_| ())
@@ -1216,39 +1176,6 @@ pub mod test_support {
     }
 }
 
-/// `timing` and `lifetime`, a pair Stage 2 only builds when valid.
-pub(crate) fn physical_properties(
-    timing: ExecutionTiming,
-    lifetime: Lifetime,
-) -> PhysicalProperties {
-    PhysicalProperties::new(timing, lifetime).expect("Stage 2 builds only valid pairs")
-}
-
-/// Query time, kept in memory until the evaluation's readers finish.
-pub(crate) fn kept_for_one_evaluation() -> PhysicalProperties {
-    physical_properties(
-        ExecutionTiming::QueryTime,
-        Lifetime::OneEvaluation(Medium::Memory),
-    )
-}
-
-/// Ingestion time, kept in memory until a query reads it.
-pub(crate) fn kept_across_evaluations_at_ingestion() -> PhysicalProperties {
-    physical_properties(
-        ExecutionTiming::IngestionTime,
-        Lifetime::AcrossEvaluations(Medium::Memory),
-    )
-}
-
-/// Query time, kept in memory across evaluations (a tumbling-window chain
-/// that builds its newest window at each evaluation).
-pub(crate) fn kept_across_evaluations_at_query_time() -> PhysicalProperties {
-    physical_properties(
-        ExecutionTiming::QueryTime,
-        Lifetime::AcrossEvaluations(Medium::Memory),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1258,6 +1185,7 @@ mod tests {
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::properties::ExecutionTiming;
     use asap_types::ir::ASAPOp;
+    use asap_types::physical::{Lifetime, Medium};
 
     // Candidate-local implementation must leave another group's canonical root untouched.
     #[test]
@@ -1627,14 +1555,13 @@ mod tests {
         pass2_candidates.pop().unwrap().roots.unwrap().remove(0)
     }
 
-    const KEPT_ACROSS: Lifetime = Lifetime::AcrossEvaluations(Medium::Memory);
-
     /// The lifetimes `candidate` chose other than `None`, by node.
-    fn materialized(candidate: &PhysicalWorkloadPlan) -> Vec<Lifetime> {
+    fn kept(candidate: &PhysicalWorkloadPlan) -> Vec<Lifetime> {
         candidate
-            .lifetime
-            .values()
-            .copied()
+            .dag
+            .nodes
+            .iter()
+            .map(|node| node.lifetime)
             .filter(|lifetime| lifetime.is_kept())
             .collect()
     }
@@ -1796,17 +1723,17 @@ mod tests {
         let [b2, b1] = &candidates[..] else {
             unreachable!()
         };
-        assert!(!b2.materializes_any());
+        assert!(!b2.keeps_any());
         assert!(b2
             .dag
             .nodes
             .iter()
             .all(|n| n.output_state.timing == ExecutionTiming::QueryTime));
-        assert_eq!(materialized(b1), [KEPT_ACROSS]);
+        assert_eq!(kept(b1), [Lifetime::AcrossEvaluations(Medium::Memory)]);
         let [chain] = &node_of(b1, "SummaryTumblingWindowChain")[..] else {
             panic!("one chain")
         };
-        assert_eq!(chain.lifetime, KEPT_ACROSS);
+        assert_eq!(chain.lifetime, Lifetime::AcrossEvaluations(Medium::Memory));
         assert_eq!(chain.timing, Some(ExecutionTiming::IngestionTime));
         for below in OperatorNode::reachable(chain) {
             assert_eq!(below.timing, Some(ExecutionTiming::IngestionTime));
@@ -2105,7 +2032,10 @@ mod tests {
             false,
         )
         .unwrap();
-        assert_eq!(materialized(&candidates[1]), [KEPT_ACROSS]);
+        assert_eq!(
+            kept(&candidates[1]),
+            [Lifetime::AcrossEvaluations(Medium::Memory)]
+        );
 
         // The same build with a filter.
         let QueryRoot::Operator(node) = &root else {
@@ -2259,7 +2189,7 @@ mod tests {
             optimize_physical_asap("L1", &roots, &[], &DataWorkload::default(), false).unwrap();
         assert_eq!(candidates.len(), 2);
         assert_eq!(
-            materialized(&candidates[1]),
+            kept(&candidates[1]),
             [Lifetime::OneEvaluation(Medium::Memory)]
         );
         let [build] = &node_of(&candidates[1], "SummaryAgg")[..] else {
@@ -2386,7 +2316,10 @@ mod tests {
             .iter()
             .map(|c| (c.node.operator.kind_name(), c.readers.clone(), c.options()))
             .collect();
-        let options = vec![None, Some(kept_for_one_evaluation())];
+        let options = vec![
+            None,
+            Some(PhysicalProperties::KEPT_IN_MEMORY_FOR_ONE_EVALUATION),
+        ];
         assert_eq!(
             found,
             [

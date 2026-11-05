@@ -111,10 +111,8 @@ use asap_types::ir::operator::operator_properties::{GroupKeys, Reduction, Source
 use asap_types::ir::properties::timing::{
     apply_physical_properties, NodeToTimedNodeCache, PhysicalPropertiesAssignment,
 };
-use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::{ColumnId, DataType, Field, Schema};
 use asap_types::ir::{NonASAPOp, Predicate, ScalarExpr, TimeRangeKind};
-use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
 
 /// A `TimeSeries("m")` scan over `[ts(0), value(1), labels...]`, time index 0,
 /// no unique key.
@@ -236,13 +234,7 @@ pub fn timed(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
 pub fn at_ingestion(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
     apply_physical_properties(
         root,
-        &PhysicalPropertiesAssignment::with_default(
-            PhysicalProperties::new(
-                ExecutionTiming::IngestionTime,
-                Lifetime::AcrossEvaluations(Medium::Memory),
-            )
-            .ok(),
-        ),
+        &PhysicalPropertiesAssignment::kept_at_ingestion_where_allowed(std::slice::from_ref(root)),
         &mut NodeToTimedNodeCache::new(),
     )
     .expect("at-ingestion physical properties apply")

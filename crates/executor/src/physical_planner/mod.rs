@@ -1742,8 +1742,7 @@ pub mod test_support {
             .nodes
             .iter()
             .filter(|node| {
-                nodes.contains(&(node.id as NodeId))
-                    && !matches!(node.lifetime, Lifetime::AcrossEvaluations(_))
+                nodes.contains(&(node.id as NodeId)) && !node.lifetime.is_across_evaluations()
             })
             .map(|node| node.id as NodeId)
             .collect();

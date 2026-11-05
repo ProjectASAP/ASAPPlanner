@@ -220,11 +220,7 @@ fn dominance_needs_every_condition() {
         (
             "lifetime",
             DominanceKey {
-                properties: PhysicalProperties::new(
-                    ExecutionTiming::QueryTime,
-                    Lifetime::OneEvaluation(Medium::Memory),
-                )
-                .unwrap(),
+                properties: PhysicalProperties::KEPT_IN_MEMORY_FOR_ONE_EVALUATION,
                 ..key.clone()
             },
         ),
@@ -493,11 +489,7 @@ fn shared_middle() -> PhysicalASAPMemoCandidates {
     let candidates = vec![
         candidate(0, &[], false),
         PhysicalCandidate {
-            properties: PhysicalProperties::new(
-                ExecutionTiming::QueryTime,
-                Lifetime::OneEvaluation(Medium::Memory),
-            )
-            .unwrap(),
+            properties: PhysicalProperties::KEPT_IN_MEMORY_FOR_ONE_EVALUATION,
             ..candidate(1, &[&[0]], false)
         },
         candidate(2, &[&[1]], true),

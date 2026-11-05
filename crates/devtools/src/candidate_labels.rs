@@ -145,14 +145,9 @@ fn duration_name(ms: u64) -> String {
 /// just `logical` when nothing is.
 pub fn physical_label(logical: &str, candidate: &PhysicalWorkloadPlan) -> String {
     let mut parts: Vec<(&str, Vec<String>)> = Vec::new();
-    for (id, lifetime) in &candidate.lifetime {
-        let node = candidate
-            .dag
-            .nodes
-            .iter()
-            .find(|n| n.id == *id)
-            .expect("an assigned node is in the DAG");
-        let phase = match (node.output_state.timing, lifetime) {
+    for node in &candidate.dag.nodes {
+        let id = &node.id;
+        let phase = match (node.output_state.timing, node.lifetime) {
             (_, Lifetime::None) => continue,
             (ExecutionTiming::IngestionTime, _) => "ingestion time",
             (ExecutionTiming::QueryTime, Lifetime::OneEvaluation(_)) => "query time, shared",
@@ -496,19 +491,14 @@ mod tests {
         let one_chain_at_ingestion: Vec<String> = plans
             .iter()
             .filter(|plan| {
-                plan.lifetime
+                plan.dag
+                    .nodes
                     .iter()
-                    .filter(|(id, lifetime)| {
-                        let node = plan.dag.nodes.iter().find(|n| n.id == **id).unwrap();
-                        lifetime.is_kept()
-                            && node.output_state.timing == ExecutionTiming::IngestionTime
+                    .filter(|node| {
+                        node.output_state.timing == ExecutionTiming::IngestionTime
+                            && node.lifetime.is_kept()
                             && matches!(
-                                plan.dag
-                                    .nodes
-                                    .iter()
-                                    .find(|n| n.id == **id)
-                                    .unwrap()
-                                    .payload,
+                                node.payload,
                                 Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
                             )
                     })

@@ -281,11 +281,7 @@ fn execute_retained(
     for tumbling_window in tumbling_windows {
         assignment.set(
             tumbling_window,
-            PhysicalProperties::new(
-                ExecutionTiming::IngestionTime,
-                Lifetime::AcrossEvaluations(Medium::Memory),
-            )
-            .ok(),
+            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
     }
     execute_retained_as(root, &assignment, samples)
@@ -306,11 +302,7 @@ fn execute_maintained_chain(
     let mut assignment = PhysicalPropertiesAssignment::default();
     assignment.set(
         &chain,
-        PhysicalProperties::new(
-            ExecutionTiming::IngestionTime,
-            Lifetime::AcrossEvaluations(Medium::Memory),
-        )
-        .ok(),
+        PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
     );
     let timed =
         apply_physical_properties(planned, &assignment, &mut NodeToTimedNodeCache::new()).unwrap();

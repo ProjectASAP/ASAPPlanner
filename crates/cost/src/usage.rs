@@ -282,9 +282,7 @@ pub fn plan_cost(
                             .map_err(|error| (id, error))?;
                             rate * latency.get(query).map_or(0.0, QueryLatency::total_ms)
                         }
-                        Consumer::Materialized(node) => {
-                            multipliers[&node].1 * longest_reader_ms(node)
-                        }
+                        Consumer::Kept(node) => multipliers[&node].1 * longest_reader_ms(node),
                     };
                 }
                 sum

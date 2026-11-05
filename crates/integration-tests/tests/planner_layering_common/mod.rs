@@ -675,7 +675,7 @@ pub fn assert_one_not_kept_physical_candidate_per_logical(run: &Run) {
         let base = p.id.split("-m").next().unwrap();
         assert_eq!(&base[1..], &p.from_logical[1..], "{}", p.id);
         let not_kept = !p.id.contains("-m");
-        assert_eq!(not_kept, !p.candidate.materializes_any(), "{}", p.id);
+        assert_eq!(not_kept, !p.candidate.keeps_any(), "{}", p.id);
         if not_kept {
             for n in &p.dag().nodes {
                 assert_eq!(keeping(p, n.id), Keeping::NotKept);
@@ -689,9 +689,7 @@ pub fn assert_one_not_kept_physical_candidate_per_logical(run: &Run) {
 /// The physical candidates with nothing materialized, one per logical
 /// candidate.
 pub fn not_kept(run: &Run) -> impl Iterator<Item = &Physical> {
-    run.physical
-        .iter()
-        .filter(|p| !p.candidate.materializes_any())
+    run.physical.iter().filter(|p| !p.candidate.keeps_any())
 }
 
 /// One selected id; every other candidate rejected once, with a reason.
@@ -772,7 +770,7 @@ pub fn assert_each_node_charged_per_consuming_query(run: &Run) {
 /// nodes and counts each node once. The consumers kept at ingestion time of one
 /// refresh window share one ingestion run and count once (#1151).
 pub fn computations(dag: &PhysicalASAPDAG) -> BTreeMap<NodeId, u64> {
-    let materialized: BTreeSet<_> = dag
+    let kept_nodes: BTreeSet<_> = dag
         .nodes
         .iter()
         .filter(|n| n.lifetime.is_kept())
@@ -789,7 +787,7 @@ pub fn computations(dag: &PhysicalASAPDAG) -> BTreeMap<NodeId, u64> {
                 .iter()
                 .map(|(_, expr)| (expr.operator_refs().into_iter().copied().collect(), None)),
         )
-        .chain(materialized.iter().map(|&id| {
+        .chain(kept_nodes.iter().map(|&id| {
             let at_ingestion = dag
                 .nodes
                 .iter()
@@ -804,7 +802,7 @@ pub fn computations(dag: &PhysicalASAPDAG) -> BTreeMap<NodeId, u64> {
     let mut times: BTreeMap<_, _> = dag
         .nodes
         .iter()
-        .map(|n| (n.id, u64::from(materialized.contains(&n.id))))
+        .map(|n| (n.id, u64::from(kept_nodes.contains(&n.id))))
         .collect();
     // The (node, refresh window) pairs whose ingestion run is counted.
     let mut runs = HashSet::new();
@@ -812,7 +810,7 @@ pub fn computations(dag: &PhysicalASAPDAG) -> BTreeMap<NodeId, u64> {
         let mut seen = HashSet::new();
         let mut stack = start;
         while let Some(id) = stack.pop() {
-            if materialized.contains(&id) || !seen.insert(id) {
+            if kept_nodes.contains(&id) || !seen.insert(id) {
                 continue;
             }
             if window.is_none_or(|window| runs.insert((id, window))) {

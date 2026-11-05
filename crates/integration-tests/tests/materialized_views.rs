@@ -12,8 +12,7 @@ use asap_planner::{
 use asap_types::ir::operator::Source;
 use asap_types::ir::physical_export::{compile_physical_asap_workload, PhysicalASAPDAG};
 use asap_types::ir::properties::ExecutionTiming;
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
-use asap_types::physical::Lifetime;
+use asap_types::ir::{NonASAPOp, Operator};
 use asap_types::workload::PlanningWorkload;
 use serde_json::Value;
 
@@ -49,21 +48,7 @@ fn repeating_with(queries: &[&str], extra: &str) -> PlanningWorkload {
 /// evaluations reading its newest tumbling window, as `asap-plan-selection` prices
 /// it, the longest per source.
 fn stage3_raw_lookback_ms(dag: &PhysicalASAPDAG) -> Vec<(Source, Option<u64>)> {
-    let kept_chains: HashSet<_> = dag
-        .nodes
-        .iter()
-        .filter(|node| {
-            matches!(
-                (&node.payload, node.output_state.timing, node.lifetime),
-                (
-                    Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }),
-                    ExecutionTiming::QueryTime,
-                    Lifetime::AcrossEvaluations(_)
-                )
-            )
-        })
-        .map(|node| node.id)
-        .collect();
+    let kept_chains = asap_cost::kept_tumbling_window_chains(dag);
     let mut lookback: Vec<(Source, Option<u64>)> = Vec::new();
     for node in &dag.nodes {
         let Operator::NonASAP(NonASAPOp::Scan { source, .. }) = &node.payload else {
@@ -148,9 +133,10 @@ fn a_range_evaluated_query_time_scan_keeps_its_window_plus_the_span() {
 }
 
 /// A plan file of wire version 10 (assembled from the parts of a plan
-/// written on `main` before #970: the versioned DAG envelope, `queries`,
-/// `stored_outputs`, `query_time_raw_windows`, `selection`) is refused for
-/// its version, not for a missing field; a file of this version reads back.
+/// written before #970: the versioned DAG envelope, `queries`,
+/// `stored_outputs`, `query_time_raw_windows`, `selection`; its DAG nodes
+/// carry today's node fields, e.g. `lifetime`) is refused for its version,
+/// not for a missing field; its DAG with today's version reads back.
 #[test]
 fn a_plan_file_of_an_older_wire_version_is_refused_by_version() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

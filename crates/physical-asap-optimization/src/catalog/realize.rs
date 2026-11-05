@@ -3,7 +3,7 @@
 //! No fallback modes are chosen. Physical rewrites or timing splits that change
 //! candidate identity are rejected until represented by physical enumeration.
 //! This validates execution legality, not cost estimates or accuracy targets.
-use asap_types::physical::Lifetime;
+use asap_types::physical::PhysicalProperties;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -39,15 +39,11 @@ pub fn realize_selected_candidates(
     }
     let rebuilt = reconstruct_selected_candidates(physical_candidates, selected)?;
     // `reconstruct_selected_candidates` checked every selected candidate exists.
-    // Each selected node's assignment: its properties when it is kept,
-    // `None` when it is not.
-    let assignments: Vec<_> = selected
+    // Each selected node's physical properties.
+    let assignments: Vec<PhysicalProperties> = selected
         .candidate_of_node
         .iter()
-        .map(|id| {
-            let properties = physical_candidates.candidates[id.0].properties;
-            properties.lifetime().is_kept().then_some(properties)
-        })
+        .map(|id| physical_candidates.candidates[id.0].properties)
         .collect();
     let mut node_by_pointer = HashMap::new();
     for (node, operator_node) in rebuilt.operator_node_of_selected_node.iter().enumerate() {
@@ -64,24 +60,28 @@ pub fn realize_selected_candidates(
         query_time_results_retained,
         &mut |logical, _, options| {
             let node = node_by_pointer.get(&logical).copied();
-            let requested = if let Some(node) = node {
+            // A node outside the selection is not kept.
+            let requested = node.map_or(PhysicalProperties::NOT_KEPT_AT_QUERY_TIME, |node| {
                 seen[node] = true;
                 assignments[node]
-            } else {
-                None
-            };
-            if !options.contains(&requested) {
+            });
+            // The option keeping it as requested; option `None` (not kept)
+            // for a requested lifetime `None`, at either timing.
+            let chosen = options.iter().position(|option| match option {
+                Some(kept) => *kept == requested,
+                None => !requested.lifetime().is_kept(),
+            });
+            if chosen.is_none() {
                 let message = format!(
-                    "selected kept output {requested:?} is not offered for selected node {node:?}"
+                    "selected properties {requested:?} are not offered for selected node {node:?}"
                 );
                 assignment_error = Some(if node.is_some() {
                     PhysicalCandidateError::RejectedAssignment(message)
                 } else {
                     PhysicalCandidateError::InvalidOrUnsupported(message)
                 });
-                return None;
             }
-            Some(requested)
+            chosen
         },
     )
     .map_err(|error| error.to_string())?;
@@ -97,8 +97,8 @@ pub fn realize_selected_candidates(
     physical.dag.validate().map_err(|error| error.to_string())?;
     let physical_outputs = ordered_output_references(&physical.roots);
     let identities = paired_node_identities(&rebuilt.outputs, &physical_outputs)?;
-    for (node, kept) in assignments.iter().enumerate() {
-        if kept.is_some() && !seen[node] {
+    for (node, properties) in assignments.iter().enumerate() {
+        if properties.lifetime().is_kept() && !seen[node] {
             // The decoder already established node identity. Stage 2 did
             // not offer this selected node (e.g. a lower shared non-summary),
             // so the assignment is infeasible rather than an adapter failure.
@@ -116,8 +116,7 @@ pub fn realize_selected_candidates(
                 .get(&Rc::as_ptr(&operator_node))
                 .cloned()
                 .ok_or_else(|| format!("selected node {node} has no physical identity"))?;
-            let lifetime = assignments[node].map_or(Lifetime::None, |kept| kept.lifetime());
-            if physical.lifetime != lifetime {
+            if physical.lifetime != assignments[node].lifetime() {
                 return Err(format!(
                     "selected node {node} lifetime changed during physical reconstruction"
                 ));
@@ -232,7 +231,7 @@ mod tests {
     use asap_types::workload::QueryRecurrence;
 
     /// Add a node running `candidate` and, for each input, a node of its
-    /// first not_kept producer (else its first producer),
+    /// first producer that is not kept (else its first producer),
     /// recursively; returns the new node.
     fn select_from(
         physical: &PhysicalASAPMemoCandidates,

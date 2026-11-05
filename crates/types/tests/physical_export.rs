@@ -12,7 +12,7 @@ use asap_types::ir::{
     apply_physical_properties, ASAPOp, NodeToTimedNodeCache, NonASAPOp, Operator, OperatorNode,
     PhysicalPropertiesAssignment, QueryRoot,
 };
-use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
+use asap_types::physical::{InvalidPhysicalProperties, Lifetime, Medium, PhysicalProperties};
 use std::rc::Rc;
 
 /// Scan(t) → SummaryAgg(sum by key) → FinalizeExactAccumulator, untimed.
@@ -51,7 +51,7 @@ fn timed_at_ingestion() -> Rc<OperatorNode> {
     let mut assignment = PhysicalPropertiesAssignment::default();
     assignment.set(
         root.children()[0],
-        PhysicalProperties::new(ExecutionTiming::IngestionTime, ON_DISK).ok(),
+        PhysicalProperties::new(ExecutionTiming::IngestionTime, ON_DISK).unwrap(),
     );
     apply_physical_properties(&root, &assignment, &mut NodeToTimedNodeCache::new()).unwrap()
 }
@@ -106,18 +106,13 @@ fn invalid_physical_properties_are_rejected() {
         dag.validate(),
         Err(PhysicalASAPDAGValidationError::InvalidPhysicalProperties {
             node: 1,
-            timing: ExecutionTiming::IngestionTime,
-            lifetime: Lifetime::OneEvaluation(Medium::Disk),
+            reason: InvalidPhysicalProperties::OneEvaluationAtIngestion,
         })
     );
     dag.nodes[1].lifetime = Lifetime::None;
     assert_eq!(
         dag.validate(),
-        Err(PhysicalASAPDAGValidationError::InvalidPhysicalProperties {
-            node: 1,
-            timing: ExecutionTiming::IngestionTime,
-            lifetime: Lifetime::None,
-        })
+        Err(PhysicalASAPDAGValidationError::UnkeptSummaryBuildNotAtQueryTime { node: 1 })
     );
     dag.nodes[1].lifetime = ON_DISK;
     dag.validate().unwrap();
@@ -209,8 +204,7 @@ fn scalar_roots_export_in_batch_order_and_reference_nodes() {
         scalar_only.validate(),
         Err(PhysicalASAPDAGValidationError::InvalidPhysicalProperties {
             node: scalar_only.nodes[state].id,
-            timing: ExecutionTiming::IngestionTime,
-            lifetime: Lifetime::OneEvaluation(Medium::Disk),
+            reason: InvalidPhysicalProperties::OneEvaluationAtIngestion,
         })
     );
 
@@ -392,13 +386,8 @@ fn exports_summary_over_summary_as_typed_precompute_edges() {
     }))
     .unwrap();
     let mut cache = NodeToTimedNodeCache::new();
-    let at_ingestion = PhysicalPropertiesAssignment::with_default(
-        PhysicalProperties::new(
-            ExecutionTiming::IngestionTime,
-            Lifetime::AcrossEvaluations(Medium::Memory),
-        )
-        .ok(),
-    );
+    let at_ingestion =
+        PhysicalPropertiesAssignment::kept_at_ingestion_where_allowed(std::slice::from_ref(&root));
     let timed = apply_physical_properties(&root, &at_ingestion, &mut cache).unwrap();
     let compiled = compile_physical_asap_dag_with_node_ids(&timed).unwrap();
     assert_eq!(compiled.node_ids.node_id(&timed), Some(3));
@@ -522,7 +511,7 @@ fn every_node_at_query_time_keeps_the_operators_and_stores_nothing() {
         ])
         .unwrap()
     };
-    let materialized = workload(timed_at_ingestion());
+    let kept = workload(timed_at_ingestion());
     let at_query_time = apply_physical_properties(
         &plan(),
         &PhysicalPropertiesAssignment::default(),
@@ -530,7 +519,7 @@ fn every_node_at_query_time_keeps_the_operators_and_stores_nothing() {
     )
     .unwrap();
     assert_eq!(
-        materialized.with_every_node_at_query_time().unwrap(),
+        kept.with_every_node_at_query_time().unwrap(),
         workload(at_query_time)
     );
 }

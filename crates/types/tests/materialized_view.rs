@@ -15,7 +15,6 @@ use asap_types::ir::operator::TimeShift;
 use asap_types::ir::physical_export::{
     compile_physical_asap_dag, compile_physical_asap_workload, PhysicalASAPDAG,
 };
-use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{
     DataType, Field, FieldDataType, GroupingStrategy, Schema, SketchAlgorithm, SketchKind,
@@ -25,7 +24,7 @@ use asap_types::ir::{
     apply_physical_properties, apply_physical_properties_to_roots, ASAPOp, NodeToTimedNodeCache,
     NonASAPOp, Operator, OperatorNode, PhysicalPropertiesAssignment, QueryRoot, TimeRangeKind,
 };
-use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
+use asap_types::physical::PhysicalProperties;
 
 /// A KLL of `m`'s values over `(T - shift - 1 min, T - shift]`.
 fn tumbling_window(scan: &Rc<OperatorNode>, shift_ms: i64) -> Rc<OperatorNode> {
@@ -96,20 +95,12 @@ fn tumbling_windows_and_kept_merge() -> (PhysicalASAPDAG, usize) {
     for tumbling_window in &tumbling_windows {
         assignment.set(
             tumbling_window,
-            PhysicalProperties::new(
-                ExecutionTiming::IngestionTime,
-                Lifetime::AcrossEvaluations(Medium::Memory),
-            )
-            .ok(),
+            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
     }
     assignment.set(
         &merge,
-        PhysicalProperties::new(
-            ExecutionTiming::QueryTime,
-            Lifetime::AcrossEvaluations(Medium::Memory),
-        )
-        .ok(),
+        PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME,
     );
     let timed =
         apply_physical_properties(&merge, &assignment, &mut NodeToTimedNodeCache::new()).unwrap();
@@ -242,11 +233,7 @@ fn three_chains_over_one_scan() -> (PhysicalASAPDAG, PhysicalASAPDAG) {
         .map(|chain| {
             assignment.set(
                 chain,
-                PhysicalProperties::new(
-                    ExecutionTiming::IngestionTime,
-                    Lifetime::AcrossEvaluations(Medium::Memory),
-                )
-                .ok(),
+                PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
             );
             QueryRoot::Operator(
                 OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
@@ -384,11 +371,7 @@ fn a_shifted_tumbling_window_has_its_own_phase() {
     for tumbling_window in &tumbling_windows {
         assignment.set(
             tumbling_window,
-            PhysicalProperties::new(
-                ExecutionTiming::IngestionTime,
-                Lifetime::AcrossEvaluations(Medium::Memory),
-            )
-            .ok(),
+            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
     }
     let roots: Vec<QueryRoot> = tumbling_windows
@@ -435,11 +418,7 @@ fn views_of_unbounded_windows_are_groups_of_their_own() {
             .unwrap();
             assignment.set(
                 &build,
-                PhysicalProperties::new(
-                    ExecutionTiming::IngestionTime,
-                    Lifetime::AcrossEvaluations(Medium::Memory),
-                )
-                .ok(),
+                PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
             );
             QueryRoot::Operator(build)
         })
@@ -472,11 +451,7 @@ fn a_view_reading_a_view_of_its_group_follows_it() {
     for view in [&tumbling_window, &rollup] {
         assignment.set(
             view,
-            PhysicalProperties::new(
-                ExecutionTiming::IngestionTime,
-                Lifetime::AcrossEvaluations(Medium::Memory),
-            )
-            .ok(),
+            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
     }
     let timed =
@@ -529,11 +504,7 @@ fn a_view_has_its_refresh_window_on_a_dag_without_edges() {
     let mut assignment = PhysicalPropertiesAssignment::default();
     assignment.set(
         &view,
-        PhysicalProperties::new(
-            ExecutionTiming::IngestionTime,
-            Lifetime::AcrossEvaluations(Medium::Memory),
-        )
-        .ok(),
+        PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
     );
     let timed =
         apply_physical_properties(&view, &assignment, &mut NodeToTimedNodeCache::new()).unwrap();

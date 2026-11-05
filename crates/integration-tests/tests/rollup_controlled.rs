@@ -12,7 +12,6 @@ use asap_types::{
         schema::{DataType, Field, Schema, SketchAlgorithm},
         ASAPOp, OperatorNode, QueryRoot,
     },
-    physical::PhysicalProperties,
     workload::PlanningWorkload,
 };
 use std::{collections::HashSet, rc::Rc};
@@ -119,20 +118,18 @@ fn controlled_distinct_rollup_prices_the_original_workload() {
                     &mut |node, _, options| {
                         // Kept for one evaluation where offered, as two
                         // queries reading one build allow.
-                        let shared: Option<Option<PhysicalProperties>> = options
-                            .iter()
-                            .find(|kept| {
-                                kept.is_some_and(|p| {
-                                    matches!(
-                                        p.lifetime(),
-                                        asap_types::physical::Lifetime::OneEvaluation(_)
-                                    )
-                                })
+                        let shared = options.iter().position(|kept| {
+                            kept.is_some_and(|p| {
+                                matches!(
+                                    p.lifetime(),
+                                    asap_types::physical::Lifetime::OneEvaluation(_)
+                                )
                             })
-                            .copied();
+                        });
+                        // Option 0: not kept.
                         Some(match shared {
-                            Some(kept) if builds.contains(&node) => kept,
-                            _ => None,
+                            Some(index) if builds.contains(&node) => index,
+                            _ => 0,
                         })
                     },
                 )

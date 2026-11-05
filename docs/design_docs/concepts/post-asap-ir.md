@@ -158,14 +158,14 @@ node reached from two consumers that need different timings;
 assignment is applied. How much a kept output retains (retention) is decided
 later and is not in the assignment.
 
-`PhysicalPropertiesAssignment::with_default(kept)` gives every sub-DAG that is
-not set explicitly `kept` where the DAG allows it; an ingestion-time default
-over a sub-DAG that can only run at query time leaves that sub-DAG not kept
-instead of failing (the default applies to
-`SummaryAgg` and `MaintainPopulation` nodes). The test helpers `validate_at_ingestion` and
-`planned_data_state` (feature `test-support`) use it to check, at planning time and without keeping
-anything, that a candidate stays valid when every sub-DAG is kept at ingestion
-time.
+A node the assignment does not set is not kept. The test helper
+`PhysicalPropertiesAssignment::kept_at_ingestion_where_allowed(roots)`
+(feature `test-support`) sets every `SummaryAgg`, `SummaryTumblingWindowChain`
+and `MaintainPopulation` kept at ingestion time where the DAG allows it (not
+filtered, nothing below it that can only run at query time). The test
+helpers `validate_at_ingestion` and `planned_data_state` use it to check, at
+planning time and without keeping anything, that a candidate stays valid
+when every sub-DAG is kept at ingestion time.
 
 ## Exported DAG
 

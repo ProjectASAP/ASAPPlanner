@@ -157,7 +157,7 @@ fn pattern_a_windows_and_offsets() -> (Vec<u64>, Vec<u64>) {
 
 /// Every materialized output of every candidate of `workload` is kept for at
 /// least its longest reader's `windows[q] + offsets[q]`.
-fn assert_materialized_outputs_cover_their_consumers(
+fn assert_kept_outputs_cover_their_consumers(
     workload: &PlanningWorkload,
     windows: &[u64],
     offsets: &[u64],
@@ -191,24 +191,24 @@ fn assert_materialized_outputs_cover_their_consumers(
 
 /// A materialized output is kept for as long as its consumers read: it covers every reader's lookback and offset.
 /// The monthly variant runs in
-/// `stage2_physical_asap_optimization_monthly_materialized_output_covers_its_consumers`.
+/// `stage2_physical_asap_optimization_monthly_kept_output_covers_its_consumers`.
 #[test]
-fn stage2_physical_asap_optimization_materialized_output_covers_its_consumers() {
+fn stage2_physical_asap_optimization_kept_output_covers_its_consumers() {
     let (windows, offsets) = pattern_a_windows_and_offsets();
     for workload in [once(), at_rest()] {
-        assert_materialized_outputs_cover_their_consumers(&workload, &windows, &offsets);
+        assert_kept_outputs_cover_their_consumers(&workload, &windows, &offsets);
     }
-    assert_materialized_outputs_cover_their_consumers(&pattern_b(), &[PATTERN_B_WINDOW_MS], &[0]);
+    assert_kept_outputs_cover_their_consumers(&pattern_b(), &[PATTERN_B_WINDOW_MS], &[0]);
 }
 
 /// The monthly variant of
-/// `stage2_physical_asap_optimization_materialized_output_covers_its_consumers`:
+/// `stage2_physical_asap_optimization_kept_output_covers_its_consumers`:
 /// it plans 67,228 candidates, too slow for a debug build in CI.
 #[test]
 #[ignore = "slow: run in release by hand"]
-fn stage2_physical_asap_optimization_monthly_materialized_output_covers_its_consumers() {
+fn stage2_physical_asap_optimization_monthly_kept_output_covers_its_consumers() {
     let (windows, offsets) = pattern_a_windows_and_offsets();
-    assert_materialized_outputs_cover_their_consumers(&monthly(), &windows, &offsets);
+    assert_kept_outputs_cover_their_consumers(&monthly(), &windows, &offsets);
 }
 
 // ── Pattern A ────────────────────────────────────────────────────────────
@@ -235,7 +235,7 @@ fn stage2_physical_asap_optimization_a_at_rest_drops_the_ingestion_time_option()
 /// A materialized shared EH is one build node read by all five queries, charged once.
 #[test]
 #[ignore = "needs Pass 2 window segments shared across queries (#628, #634); Stage 2 keeping outputs for one evaluation (OneEvaluation) is in place"]
-fn stage2_physical_asap_optimization_a_materialized_eh_is_built_once_for_all_consumers() {
+fn stage2_physical_asap_optimization_a_kept_eh_is_built_once_for_all_consumers() {
     let run = run_promql(&once());
     for (m, (id, build)) in eh_options(&run) {
         if m == NotKept {

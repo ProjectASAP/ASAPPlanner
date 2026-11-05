@@ -225,9 +225,10 @@ fn select(
         .expect("the selected plan");
     let name = selected.from_logical.clone();
     let built_once = selected
-        .lifetime
-        .values()
-        .any(|lifetime| matches!(lifetime, Lifetime::OneEvaluation(_)));
+        .dag
+        .nodes
+        .iter()
+        .any(|node| matches!(node.lifetime, Lifetime::OneEvaluation(_)));
     let roots = plans
         .iter()
         .find(|(n, _)| *n == name)

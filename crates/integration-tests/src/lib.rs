@@ -98,11 +98,9 @@ pub mod fixtures {
 /// Timing and physical ASAP DAG export helpers for planned candidates.
 pub mod physical_export {
     use asap_types::ir::physical_export::{compile_physical_asap_dag, PhysicalASAPDAG};
-    use asap_types::ir::properties::ExecutionTiming;
     use asap_types::ir::{
         apply_physical_properties, NodeToTimedNodeCache, OperatorNode, PhysicalPropertiesAssignment,
     };
-    use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
     use std::rc::Rc;
 
     /// Time `root` under the default assignment (no sub-DAG kept, so every
@@ -116,13 +114,9 @@ pub mod physical_export {
     pub fn at_ingestion(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
         timed_with(
             root,
-            &PhysicalPropertiesAssignment::with_default(
-                PhysicalProperties::new(
-                    ExecutionTiming::IngestionTime,
-                    Lifetime::AcrossEvaluations(Medium::Memory),
-                )
-                .ok(),
-            ),
+            &PhysicalPropertiesAssignment::kept_at_ingestion_where_allowed(std::slice::from_ref(
+                root,
+            )),
         )
     }
 

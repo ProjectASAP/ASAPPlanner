@@ -24,7 +24,7 @@ use time_series::{series_identity, series_labels, time_series_tables, RawDataSam
 const EVALUATION_MS: i64 = 3_600_000;
 
 #[tokio::test]
-async fn per_sample_updates_build_the_materialized_tumbling_window_the_plan_refreshes() {
+async fn per_sample_updates_build_the_kept_tumbling_window_the_plan_refreshes() {
     // What the user writes: the 5-minute rate of a counter, every minute,
     // exactly, over 1,000 series sampled every 15 s.
     let workload: PlanningWorkload = serde_json::from_str(

@@ -80,7 +80,7 @@ it.
 |---|---|---|
 | Every node upstream of an ingestion-time node also runs at ingestion time (all variants) | `stage2_physical_asap_optimization_ingestion_time_upstream_is_ingestion_time`; the monthly variant in `stage2_physical_asap_optimization_monthly_ingestion_time_upstream_is_ingestion_time` | passes: B1 and the monthly variant's maintained tumbling windows; the monthly test is ignored as slow (run in release by hand) |
 | With data at rest, no node runs at ingestion time | `stage2_physical_asap_optimization_at_rest_runs_nothing_at_ingestion_time` | passes |
-| A materialized output covers its consumers: retention ≥ max over its readers of `lookback` + offset | `stage2_physical_asap_optimization_materialized_output_covers_its_consumers`; the monthly variant in `stage2_physical_asap_optimization_monthly_materialized_output_covers_its_consumers` | passes: B1 keeps 6 min ≥ 5 min; the monthly test is ignored as slow (run in release by hand) |
+| A materialized output covers its consumers: retention ≥ max over its readers of `lookback` + offset | `stage2_physical_asap_optimization_kept_output_covers_its_consumers`; the monthly variant in `stage2_physical_asap_optimization_monthly_kept_output_covers_its_consumers` | passes: B1 keeps 6 min ≥ 5 min; the monthly test is ignored as slow (run in release by hand) |
 
 ### Pattern A
 
@@ -88,7 +88,7 @@ it.
 |---|---|---|
 | The shared EH yields exactly A1, A2, A3 | `stage2_physical_asap_optimization_a_shared_eh_has_three_materialization_options` | ignored: the shared EH (#628, #634) |
 | At rest, A2 is not generated; A1 and A3 remain | `stage2_physical_asap_optimization_a_at_rest_drops_the_ingestion_time_option` | ignored: the shared EH (#628, #634) |
-| A materialized EH is one build node read by all five queries, priced once | `stage2_physical_asap_optimization_a_materialized_eh_is_built_once_for_all_consumers` | ignored: the shared EH (#628, #634) |
+| A materialized EH is one build node read by all five queries, priced once | `stage2_physical_asap_optimization_a_kept_eh_is_built_once_for_all_consumers` | ignored: the shared EH (#628, #634) |
 | A3 costs strictly more than A1 (five builds instead of one: a `Lifetime::None` node is charged per consuming query) | `stage3_plan_selection_a_rebuilding_per_query_costs_more_than_building_once` | ignored: the shared EH (#628, #634) |
 | As given, A1 is the cheapest of the three | `stage3_plan_selection_a_once_adhoc_prefers_the_query_time_eh` | ignored: the shared EH (#628, #634) |
 | Monthly, A2's cost relative to A1 drops: cost(A2)/cost(A1) monthly < as given | `stage3_plan_selection_a_monthly_amortizes_ingestion_time_maintenance` | ignored: the shared EH (#628, #634) |

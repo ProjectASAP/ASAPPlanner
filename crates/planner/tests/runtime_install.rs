@@ -25,14 +25,13 @@ use asap_planner::{
     SelectionBox, Stage1ToStage3Pass, UserInput,
 };
 use asap_types::ir::operator::Source;
-use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams};
 use asap_types::ir::{
     apply_physical_properties_to_roots, ASAPOp, OperatorNode, PhysicalPropertiesAssignment,
     QueryRoot,
 };
-use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
+use asap_types::physical::{Lifetime, PhysicalProperties};
 use asap_types::stages::HowToComputeAggregateMeasure;
 use asap_types::stages::PruneReason;
 use futures::{executor::block_on, StreamExt};
@@ -1577,13 +1576,10 @@ fn untime(
             ASAPOp::SummaryAgg { .. }
             | ASAPOp::SummaryTumblingWindowChain { .. }
             | ASAPOp::SummaryMerge { .. },
-        ) if node.lifetime.is_kept() => Some(
-            PhysicalProperties::new(node.timing.expect("a timed plan"), node.lifetime).unwrap(),
-        ),
+        ) if node.lifetime.is_kept() => node.physical_properties(),
         _ => None,
     };
-    let kept = store(node).or(own);
-    if kept.is_some() {
+    if let Some(kept) = store(node).or(own) {
         assignment.set(&copy, kept);
     }
     untimed.insert(Rc::as_ptr(node), Rc::clone(&copy));
@@ -1592,24 +1588,14 @@ fn untime(
 
 /// Every `SummaryAgg` built at ingestion time.
 fn summaries_at_ingestion(node: &OperatorNode) -> Option<PhysicalProperties> {
-    matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. })).then(|| {
-        PhysicalProperties::new(
-            ExecutionTiming::IngestionTime,
-            Lifetime::AcrossEvaluations(Medium::Memory),
-        )
-        .unwrap()
-    })
+    matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. }))
+        .then(|| PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION)
 }
 
 /// Every `SummaryMerge` built at query time and kept across evaluations.
 fn merges_kept(node: &OperatorNode) -> Option<PhysicalProperties> {
-    matches!(node.asap(), Some(ASAPOp::SummaryMerge { .. })).then(|| {
-        PhysicalProperties::new(
-            ExecutionTiming::QueryTime,
-            Lifetime::AcrossEvaluations(Medium::Memory),
-        )
-        .unwrap()
-    })
+    matches!(node.asap(), Some(ASAPOp::SummaryMerge { .. }))
+        .then(|| PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME)
 }
 
 /// Exact PromQL `queries`, every minute, over 6 ingesting series of `m`

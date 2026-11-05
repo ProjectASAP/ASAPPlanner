@@ -79,7 +79,6 @@ use crate::ir::operator::non_asap::NonASAPOp;
 use crate::ir::operator::operator_properties::Source;
 use crate::ir::properties::execution_data_state::ExecutionTiming;
 use crate::ir::properties::summary_coverage::{CoverageError, SelectionBox, SummaryCoverage};
-use crate::physical::Lifetime;
 
 /// One materialized view of a DAG: what its stored state is, what it is
 /// refreshed from, when, and for how long it is kept.
@@ -401,7 +400,7 @@ impl PhysicalASAPDAG {
         if let Some(node) = self
             .nodes
             .iter()
-            .find(|node| is_view(node) && node.retention_ms.is_none())
+            .find(|node| node.lifetime.is_across_evaluations() && node.retention_ms.is_none())
         {
             return Err(InstallableDagError::ViewWithoutRetention { node_id: node.id });
         }
@@ -730,7 +729,7 @@ impl PhysicalASAPDAG {
         let views: HashSet<PhysicalASAPNodeId> = self
             .nodes
             .iter()
-            .filter(|node| is_view(node))
+            .filter(|node| node.lifetime.is_across_evaluations())
             .map(|node| node.id)
             .collect();
         // The IR of each node, which coverage is derived from.
@@ -1160,10 +1159,4 @@ fn with_replaced(
         result
     }
     replace(node, old, new, &mut HashMap::new())
-}
-
-/// Whether `node` is a materialized view: its output is kept across
-/// evaluations.
-fn is_view(node: &PhysicalASAPDAGNode) -> bool {
-    matches!(node.lifetime, Lifetime::AcrossEvaluations(_))
 }

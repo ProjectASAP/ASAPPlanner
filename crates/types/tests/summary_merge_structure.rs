@@ -13,7 +13,7 @@ use asap_types::ir::{
     apply_physical_properties, ASAPOp, ExprSemantics, NodeToTimedNodeCache, NonASAPOp, Operator,
     OperatorNode, PhysicalPropertiesAssignment, Predicate, ScalarExpr,
 };
-use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
+use asap_types::physical::PhysicalProperties;
 use std::rc::Rc;
 /// KLL over `value` for one `region`, so states of different regions are
 /// disjoint.
@@ -719,8 +719,7 @@ fn summary_merge_timing() {
         timings(&PhysicalPropertiesAssignment::default()),
         (QueryTime, vec![QueryTime, QueryTime])
     );
-    let at_ingestion =
-        PhysicalProperties::new(IngestionTime, Lifetime::AcrossEvaluations(Medium::Memory)).ok();
+    let at_ingestion = PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION;
     let mut stored_tumbling_windows = PhysicalPropertiesAssignment::default();
     for tumbling_window in &tumbling_windows {
         stored_tumbling_windows.set(tumbling_window, at_ingestion);
@@ -736,7 +735,8 @@ fn summary_merge_timing() {
     assert!(
         apply_physical_properties(&root, &only_merge, &mut NodeToTimedNodeCache::new()).is_err()
     );
-    let mut stored_merge = PhysicalPropertiesAssignment::with_default(at_ingestion);
+    let mut stored_merge =
+        PhysicalPropertiesAssignment::kept_at_ingestion_where_allowed(std::slice::from_ref(&root));
     stored_merge.set(&root, at_ingestion);
     assert_eq!(
         timings(&stored_merge),

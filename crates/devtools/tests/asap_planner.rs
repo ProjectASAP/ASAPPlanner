@@ -1579,8 +1579,7 @@ fn scans_projecting_different_labels_are_shared() {
     let data = workload.data_workload.as_ref().unwrap();
     let roots = lower_promql_roots(&workload).unwrap();
     use asap_logical_asap_optimization::test_support::with_union_scan_labels;
-    use asap_types::ir::properties::ExecutionTiming;
-    use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
+    use asap_types::physical::PhysicalProperties;
     // Plans `roots` with identical sub-DAGs made one node, as the memo's
     // groups are, and a node read by several roots kept for the evaluation.
     let plan = |name: &str, roots: &[QueryRoot]| {
@@ -1597,24 +1596,21 @@ fn scans_projecting_different_labels_are_shared() {
         .into_iter()
         .map(|(_, node)| QueryRoot::Operator(node))
         .collect();
-        let physical = asap_physical_asap_optimization::optimize_physical_asap_assigned(
-            name,
-            &shared,
-            &entries,
-            data,
-            false,
-            &mut |readers| {
-                Some((readers.len() > 1).then(|| {
-                    PhysicalProperties::new(
-                        ExecutionTiming::QueryTime,
-                        Lifetime::OneEvaluation(Medium::Memory),
-                    )
-                    .unwrap()
-                }))
-            },
-        )
-        .unwrap()
-        .expect("a node read by several roots can be kept for the evaluation");
+        let physical =
+            asap_physical_asap_optimization::test_support::optimize_physical_asap_chosen(
+                name,
+                &shared,
+                &entries,
+                data,
+                false,
+                &mut |_, readers, options| {
+                    let kept = (readers.len() > 1)
+                        .then_some(PhysicalProperties::KEPT_IN_MEMORY_FOR_ONE_EVALUATION);
+                    options.iter().position(|option| *option == kept)
+                },
+            )
+            .unwrap()
+            .expect("a node read by several roots can be kept for the evaluation");
         let offered = asap_devtools::memo_pricing::reference_select(
             std::slice::from_ref(&physical),
             &entries,

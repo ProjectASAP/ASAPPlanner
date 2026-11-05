@@ -120,7 +120,6 @@ use asap_types::ir::{
     ASAPOp, BinaryOperator, ExprSemantics, NonASAPOp, Operator, OperatorNode, OperatorResultKind,
     Predicate, ProjectItem, QueryRoot, ScalarExpr, SchemaDerivationError,
 };
-use asap_types::physical::Lifetime;
 use thiserror::Error;
 
 use asap_accuracy::composition::parse_raw_data_samples_sign_statistic;
@@ -835,7 +834,7 @@ pub fn generate_per_computation_candidates(
                 if !seen.insert(Rc::as_ptr(&node)) {
                     continue;
                 }
-                if node.timing.is_some() || node.lifetime != Lifetime::None {
+                if node.timing.is_some() || node.lifetime.is_kept() {
                     return Err(PerComputationCandidateError::AssignedPhysicalAnnotation);
                 }
                 for child in node.children() {

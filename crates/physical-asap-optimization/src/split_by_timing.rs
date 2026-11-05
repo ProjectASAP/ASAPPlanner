@@ -18,7 +18,7 @@ type Copies = HashMap<(*const OperatorNode, ExecutionTiming), (Rc<OperatorNode>,
 /// copied, one copy per timing; a sub-DAG reached with one timing stays one
 /// `Rc`, shared by the roots that read it. Returns the (possibly rewritten)
 /// roots, in order, and `assignment` remapped onto them: a rebuilt node
-/// keeps its original's explicit materialization.
+/// keeps its original's assignment.
 pub fn split_shared_by_timing(
     roots: &[Rc<OperatorNode>],
     assignment: &PhysicalPropertiesAssignment,
@@ -108,9 +108,7 @@ pub fn split_shared_by_timing(
         .collect();
     let mut remapped = assignment.clone();
     for (original, copy) in copies.values() {
-        if let Some(kept) = assignment.get(original) {
-            remapped.set(copy, kept);
-        }
+        remapped.copy_assignment(original, copy);
     }
     (split, remapped)
 }
@@ -133,11 +131,6 @@ mod tests {
     use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
 
     const KEPT_ACROSS: Lifetime = Lifetime::AcrossEvaluations(Medium::Memory);
-
-    /// Kept at ingestion time across evaluations.
-    fn at_ingestion() -> Option<PhysicalProperties> {
-        PhysicalProperties::new(ExecutionTiming::IngestionTime, KEPT_ACROSS).ok()
-    }
 
     fn scan() -> Rc<OperatorNode> {
         OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
@@ -247,7 +240,9 @@ mod tests {
         assert_eq!(
             apply_physical_properties(
                 &root,
-                &PhysicalPropertiesAssignment::with_default(at_ingestion()),
+                &PhysicalPropertiesAssignment::kept_at_ingestion_where_allowed(
+                    std::slice::from_ref(&root)
+                ),
                 &mut NodeToTimedNodeCache::new()
             )
             .err(),
@@ -258,7 +253,9 @@ mod tests {
         );
         let (split, assignment) = split_shared_by_timing(
             std::slice::from_ref(&root),
-            &PhysicalPropertiesAssignment::with_default(at_ingestion()),
+            &PhysicalPropertiesAssignment::kept_at_ingestion_where_allowed(std::slice::from_ref(
+                &root,
+            )),
         );
         assert!(apply_physical_properties(
             &split[0],
@@ -279,7 +276,10 @@ mod tests {
         }))
         .unwrap();
         let mut assignment = PhysicalPropertiesAssignment::default();
-        assignment.set(&summary, at_ingestion());
+        assignment.set(
+            &summary,
+            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+        );
         let (split, assignment) = split_shared_by_timing(std::slice::from_ref(&root), &assignment);
         let timed =
             apply_physical_properties(&split[0], &assignment, &mut NodeToTimedNodeCache::new())
@@ -310,7 +310,10 @@ mod tests {
             concat(vec![raw, Rc::clone(&common)]),
         ];
         let mut assignment = PhysicalPropertiesAssignment::default();
-        assignment.set(&summary, at_ingestion());
+        assignment.set(
+            &summary,
+            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+        );
         let timed_unsplit = {
             let mut cache = NodeToTimedNodeCache::new();
             roots
@@ -357,9 +360,18 @@ mod tests {
                 .with_timing(Some(ExecutionTiming::QueryTime)),
         );
         let mut assignment = PhysicalPropertiesAssignment::default();
-        assignment.set(&summary, at_ingestion());
-        assignment.set(&state, at_ingestion());
-        assignment.set(&read, at_ingestion());
+        assignment.set(
+            &summary,
+            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+        );
+        assignment.set(
+            &state,
+            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+        );
+        assignment.set(
+            &read,
+            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+        );
         let (split, assignment) = split_shared_by_timing(&[pair, read], &assignment);
         let mut cache = NodeToTimedNodeCache::new();
         let timed: Result<Vec<_>, _> = split
@@ -372,7 +384,7 @@ mod tests {
                 ExecutionDataStateError::PhysicalPropertiesConflictWithFixedTiming {
                     operator: "FinalizeExactAccumulator",
                     fixed: ExecutionTiming::QueryTime,
-                    assigned: at_ingestion().unwrap(),
+                    assigned: PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
                 }
             )
         );

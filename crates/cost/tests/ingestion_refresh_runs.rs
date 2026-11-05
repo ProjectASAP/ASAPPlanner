@@ -9,7 +9,6 @@ use std::time::Duration;
 use asap_cost::execution_demand::computations;
 use asap_types::ir::operator::operator_properties::{Reduction, Source, TimeShift};
 use asap_types::ir::physical_export::{compile_physical_asap_workload, PhysicalASAPDAG};
-use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{
     DataType, Field, FieldDataType, GroupingStrategy, Schema, SketchAlgorithm, SketchKind,
@@ -19,7 +18,7 @@ use asap_types::ir::{
     apply_physical_properties_to_roots, ASAPOp, NonASAPOp, Operator, OperatorNode,
     PhysicalPropertiesAssignment, QueryRoot, TimeRangeKind,
 };
-use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
+use asap_types::physical::PhysicalProperties;
 use asap_types::workload::{QueryRecurrence, RepeatedDemand, RepetitionInterval};
 
 /// `m` with columns `ts`, `value` and `job`.
@@ -81,7 +80,7 @@ fn dag_of(summaries: &[Rc<OperatorNode>], kept: Option<PhysicalProperties>) -> P
     let roots: Vec<QueryRoot> = summaries
         .iter()
         .map(|summary| {
-            if kept.is_some() {
+            if let Some(kept) = kept {
                 assignment.set(summary, kept);
             }
             QueryRoot::Operator(
@@ -133,15 +132,6 @@ fn shifted(child: &Rc<OperatorNode>, offset_ms: i64) -> Rc<OperatorNode> {
     .unwrap()
 }
 
-/// Kept at ingestion time until a query reads it.
-fn at_ingestion() -> Option<PhysicalProperties> {
-    PhysicalProperties::new(
-        ExecutionTiming::IngestionTime,
-        Lifetime::AcrossEvaluations(Medium::Memory),
-    )
-    .ok()
-}
-
 /// A KLL chain and a DDSketch chain of 10 s tumbling windows over one `Scan`, both
 /// kept at ingestion, are refreshed in one ingestion run per tumbling window: the
 /// `Scan` is computed once per second of arriving data, not twice.
@@ -153,7 +143,7 @@ fn a_scan_under_two_chains_of_one_tumbling_window_width_is_computed_once() {
             chain(&scan, SketchAlgorithm::Kll, 10_000, 6),
             chain(&scan, SketchAlgorithm::DDSketch, 10_000, 30),
         ],
-        at_ingestion(),
+        Some(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
     );
     assert_eq!(scan_computations(&dag), (1, 1.0));
 }
@@ -169,7 +159,7 @@ fn a_scan_under_chains_of_two_tumbling_window_widths_is_computed_for_each() {
             chain(&scan, SketchAlgorithm::Kll, 10_000, 6),
             chain(&scan, SketchAlgorithm::DDSketch, 60_000, 5),
         ],
-        at_ingestion(),
+        Some(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
     );
     assert_eq!(scan_computations(&dag), (2, 2.0));
 }
@@ -219,7 +209,7 @@ fn a_scan_under_chains_of_10_10_and_60_s_is_computed_for_each_width() {
             chain(&scan, SketchAlgorithm::DDSketch, 10_000, 30),
             chain(&scan, SketchAlgorithm::Kll, 60_000, 5),
         ],
-        at_ingestion(),
+        Some(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
     );
     assert_eq!(scan_computations(&dag), (2, 2.0));
 }
@@ -239,7 +229,7 @@ fn chains_of_one_width_and_two_phases_are_computed_apart() {
                 30,
             ),
         ],
-        at_ingestion(),
+        Some(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
     );
     assert_eq!(scan_computations(&dag), (2, 2.0));
 }
@@ -254,7 +244,7 @@ fn nodes_below_a_shared_intermediate_node_are_computed_once_per_run() {
             chain(&shift, SketchAlgorithm::Kll, 10_000, 6),
             chain(&shift, SketchAlgorithm::DDSketch, 10_000, 30),
         ],
-        at_ingestion(),
+        Some(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
     );
     assert_eq!(scan_computations(&dag), (1, 1.0));
     assert_eq!(
@@ -288,7 +278,7 @@ fn consumers_of_unbounded_windows_count_alone() {
             build(SketchAlgorithm::Kll),
             build(SketchAlgorithm::DDSketch),
         ],
-        at_ingestion(),
+        Some(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
     );
     assert_eq!(
         computations_of(&dag, |op| matches!(op, NonASAPOp::Values { .. })),

@@ -51,14 +51,8 @@ pub fn compile_at_ingestion_physical_asap_dag(
 ) -> Result<asap_types::ir::physical_export::PhysicalASAPDAG, Box<dyn std::error::Error>> {
     compile_with(
         root,
-        &asap_types::ir::PhysicalPropertiesAssignment::with_default(
-            asap_types::physical::PhysicalProperties::new(
-                asap_types::ir::properties::ExecutionTiming::IngestionTime,
-                asap_types::physical::Lifetime::AcrossEvaluations(
-                    asap_types::physical::Medium::Memory,
-                ),
-            )
-            .ok(),
+        &asap_types::ir::PhysicalPropertiesAssignment::kept_at_ingestion_where_allowed(
+            std::slice::from_ref(root),
         ),
     )
 }

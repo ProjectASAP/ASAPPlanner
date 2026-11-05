@@ -273,12 +273,11 @@ fn rate_updates_cannot_enter_integer_heap_factory() {
 /// its finalize boundary to query time, which would put the summaries above
 /// it upstream of a query-time node, so the pin is lifted first.
 fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) -> PhysicalASAPDAG {
-    use planner_types::ir::properties::ExecutionTiming;
     use planner_types::ir::{
         apply_physical_properties, NodeToTimedNodeCache, Operator as IrOperator, OperatorNode,
         PhysicalPropertiesAssignment,
     };
-    use planner_types::physical::{Lifetime, Medium, PhysicalProperties};
+    use planner_types::physical::PhysicalProperties;
     fn unpinned(node: &Rc<OperatorNode>) -> Rc<OperatorNode> {
         let mut copy = (**node).clone();
         copy.operator = node.operator.map_children(unpinned);
@@ -296,11 +295,7 @@ fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) 
         if matches!(node.operator, IrOperator::ASAP(ASAPOp::SummaryAgg { .. })) {
             assignment.set(
                 &node,
-                PhysicalProperties::new(
-                    ExecutionTiming::IngestionTime,
-                    Lifetime::AcrossEvaluations(Medium::Memory),
-                )
-                .ok(),
+                PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
             );
         }
     }

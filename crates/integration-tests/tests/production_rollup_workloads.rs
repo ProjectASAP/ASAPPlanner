@@ -262,7 +262,7 @@ fn independent_kll_cost(
         entries,
         data,
         models.deployment_capabilities.query_time_results_retained,
-        &mut |_, _, _| Some(None),
+        &mut |_, _, _| Some(0), // option 0: not kept
     )
     .unwrap()
     .unwrap();

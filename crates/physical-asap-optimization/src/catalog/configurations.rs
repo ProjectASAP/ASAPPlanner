@@ -9,10 +9,7 @@
 use asap_types::stages::{ProducerCandidates, ProducerSetInterner};
 use std::collections::HashMap;
 
-use crate::{
-    kept_across_evaluations_at_ingestion, kept_across_evaluations_at_query_time,
-    kept_for_one_evaluation, physical_properties as properties, summary_keep_eligibility,
-};
+use crate::summary_keep_eligibility;
 use asap_types::ir::operator::{agg_has_exact_per_entity_kernel, Reduction};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
@@ -40,7 +37,7 @@ pub fn may_keep_across_evaluations_per_sole_reader_query(
     data: &DataWorkload,
     query_time_results_retained: bool,
 ) -> Vec<bool> {
-    if properties != kept_across_evaluations_at_query_time()
+    if properties != PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME
         || !matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }))
         || !query_time_results_retained
     {
@@ -141,42 +138,44 @@ pub fn enumerate_candidate_configurations(
             .enumerate()
             .filter_map(|(query, reached)| reached.then_some(query))
             .collect::<Vec<_>>();
-        let mut alternatives = vec![properties(ExecutionTiming::QueryTime, Lifetime::None)];
+        let mut alternatives = vec![PhysicalProperties::NOT_KEPT_AT_QUERY_TIME];
         if summary {
-            alternatives.push(kept_for_one_evaluation());
+            alternatives.push(PhysicalProperties::KEPT_IN_MEMORY_FOR_ONE_EVALUATION);
             if queries.iter().any(|&query| {
                 summary_properties_allowed(
                     node,
                     &[query],
-                    kept_across_evaluations_at_ingestion(),
+                    PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
                     entries,
                     data,
                     query_time_results_retained,
                 )
             }) {
-                alternatives.push(kept_across_evaluations_at_ingestion());
+                alternatives
+                    .push(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION);
             }
             if matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }))
                 && queries.iter().any(|&query| {
                     summary_properties_allowed(
                         node,
                         &[query],
-                        kept_across_evaluations_at_query_time(),
+                        PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME,
                         entries,
                         data,
                         query_time_results_retained,
                     )
                 })
             {
-                alternatives.push(kept_across_evaluations_at_query_time());
+                alternatives
+                    .push(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME);
             }
         } else if !forced_query {
-            alternatives.push(properties(ExecutionTiming::IngestionTime, Lifetime::None));
+            alternatives.push(PhysicalProperties::NOT_KEPT_AT_INGESTION);
         }
         // Potential reach only generates the choice. Selected-reader cardinality
         // and Stage 2's highest-shared rule determine actual eligibility.
         if !summary && queries.len() >= 2 {
-            alternatives.push(kept_for_one_evaluation());
+            alternatives.push(PhysicalProperties::KEPT_IN_MEMORY_FOR_ONE_EVALUATION);
         }
         // Configurations the deployment cannot run are not generated; each is
         // recorded as pruned.
@@ -226,7 +225,7 @@ pub fn enumerate_candidate_configurations(
                         query_time_results_retained,
                     ),
             });
-            if properties == kept_for_one_evaluation() {
+            if properties == PhysicalProperties::KEPT_IN_MEMORY_FOR_ONE_EVALUATION {
                 if !summary {
                     reader_constraints.push(ReaderConstraint::HighestSharedOneEvaluation {
                         candidate: id,

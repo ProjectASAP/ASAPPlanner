@@ -354,7 +354,7 @@ fn population_timing_follows_its_physical_properties() {
     let mut at_ingestion = PhysicalPropertiesAssignment::default();
     at_ingestion.set(
         population,
-        PhysicalProperties::new(IngestionTime, on_disk).ok(),
+        PhysicalProperties::new(IngestionTime, on_disk).unwrap(),
     );
     for (assignment, timing, lifetime) in [
         (

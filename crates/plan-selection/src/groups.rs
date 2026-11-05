@@ -1093,7 +1093,7 @@ fn window_read_through(path: &[&PhysicalASAPDAGNode]) -> ScanWindow {
                 tumbling_window_width_ms,
                 ..
             }) if node.output_state.timing == ExecutionTiming::QueryTime
-                && matches!(node.lifetime, Lifetime::AcrossEvaluations(_)) =>
+                && node.lifetime.is_across_evaluations() =>
             {
                 u128::from(*tumbling_window_width_ms)
             }
@@ -1307,12 +1307,9 @@ fn retained_pane_options(
 ) -> Vec<u64> {
     let node = &nodes[chain.0];
     let kept = matches!(
-        (&node.payload, node.lifetime),
-        (
-            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }),
-            Lifetime::AcrossEvaluations(_)
-        )
-    );
+        node.payload,
+        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+    ) && node.lifetime.is_across_evaluations();
     if !kept {
         return vec![asap_cost::tumbling_windows_of(node)];
     }

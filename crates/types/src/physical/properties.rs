@@ -39,6 +39,12 @@ impl Lifetime {
     pub fn is_kept(self) -> bool {
         self != Self::None
     }
+
+    /// Whether the output is kept across evaluations: a materialized view
+    /// that later evaluations reuse.
+    pub fn is_across_evaluations(self) -> bool {
+        matches!(self, Self::AcrossEvaluations(_))
+    }
 }
 
 /// A timing and a lifetime that cannot go together.
@@ -50,13 +56,40 @@ pub enum InvalidPhysicalProperties {
 
 /// When a candidate runs and how long its output lives: one of the valid
 /// rows of the table in this module's documentation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PhysicalProperties {
     timing: ExecutionTiming,
     lifetime: Lifetime,
 }
 
 impl PhysicalProperties {
+    /// Query time, not kept: runs in each reader's execution.
+    pub const NOT_KEPT_AT_QUERY_TIME: Self = Self {
+        timing: ExecutionTiming::QueryTime,
+        lifetime: Lifetime::None,
+    };
+    /// Ingestion time, not kept: runs inside the ingestion work that reads it.
+    pub const NOT_KEPT_AT_INGESTION: Self = Self {
+        timing: ExecutionTiming::IngestionTime,
+        lifetime: Lifetime::None,
+    };
+    /// Query time, kept in memory until the evaluation's readers finish.
+    pub const KEPT_IN_MEMORY_FOR_ONE_EVALUATION: Self = Self {
+        timing: ExecutionTiming::QueryTime,
+        lifetime: Lifetime::OneEvaluation(Medium::Memory),
+    };
+    /// Ingestion time, kept in memory until a query reads it.
+    pub const KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION: Self = Self {
+        timing: ExecutionTiming::IngestionTime,
+        lifetime: Lifetime::AcrossEvaluations(Medium::Memory),
+    };
+    /// Query time, kept in memory across evaluations (a tumbling-window chain
+    /// that builds its newest window at each evaluation).
+    pub const KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME: Self = Self {
+        timing: ExecutionTiming::QueryTime,
+        lifetime: Lifetime::AcrossEvaluations(Medium::Memory),
+    };
+
     /// The properties `timing` and `lifetime`, unless they cannot go together.
     pub fn new(
         timing: ExecutionTiming,
@@ -85,7 +118,7 @@ impl PhysicalProperties {
         reader == self.timing
             || (reader == ExecutionTiming::QueryTime
                 && self.timing == ExecutionTiming::IngestionTime
-                && matches!(self.lifetime, Lifetime::AcrossEvaluations(_)))
+                && self.lifetime.is_across_evaluations())
     }
 }
 
@@ -116,6 +149,23 @@ mod tests {
                     && matches!(lifetime, Lifetime::OneEvaluation(_)));
                 assert_eq!(PhysicalProperties::new(timing, lifetime).is_ok(), valid);
             }
+        }
+    }
+
+    /// The named properties are valid pairs.
+    #[test]
+    fn named_properties_are_valid() {
+        for named in [
+            PhysicalProperties::NOT_KEPT_AT_QUERY_TIME,
+            PhysicalProperties::NOT_KEPT_AT_INGESTION,
+            PhysicalProperties::KEPT_IN_MEMORY_FOR_ONE_EVALUATION,
+            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME,
+        ] {
+            assert_eq!(
+                PhysicalProperties::new(named.timing(), named.lifetime()),
+                Ok(named)
+            );
         }
     }
 

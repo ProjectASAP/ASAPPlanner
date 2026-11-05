@@ -791,10 +791,9 @@ fn report_of(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::ir::properties::ExecutionTiming;
     use asap_types::ir::schema::{SketchAlgorithm, StatisticKind, SupportedSummary};
     use asap_types::ir::{NonASAPOp, Operator};
-    use asap_types::physical::{Lifetime, PhysicalProperties};
+    use asap_types::physical::PhysicalProperties;
 
     thread_local! {
         /// The plan nodes handed to the executor's compiler by the views'
@@ -951,7 +950,6 @@ mod tests {
         use asap_types::ir::{
             apply_physical_properties, NodeToTimedNodeCache, OperatorNode, TimeRangeKind,
         };
-        use asap_types::physical::Medium;
         use std::time::Duration;
         let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
             source: Source::TimeSeries {
@@ -1002,11 +1000,7 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &merged,
-            PhysicalProperties::new(
-                ExecutionTiming::IngestionTime,
-                Lifetime::AcrossEvaluations(Medium::Memory),
-            )
-            .ok(),
+            PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
         );
         let timed =
             apply_physical_properties(&merged, &assignment, &mut NodeToTimedNodeCache::new())
@@ -1046,11 +1040,7 @@ mod tests {
         for node in tumbling_windows.iter().chain([&merge]) {
             assignment.set(
                 node,
-                PhysicalProperties::new(
-                    ExecutionTiming::IngestionTime,
-                    Lifetime::AcrossEvaluations(Medium::Memory),
-                )
-                .ok(),
+                PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
             );
         }
         let timed =

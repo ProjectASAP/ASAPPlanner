@@ -460,7 +460,7 @@ fn stage2_physical_asap_optimization_preserves_logical_choices() {
         let (option, shared) = classify(p.dag(), &p.query_roots);
         let (logical_option, logical_shared) = classify(&source.dag, &source.query_roots);
         assert_eq!(option, logical_option, "{} vs {}", p.id, source.id);
-        if !p.candidate.materializes_any() {
+        if !p.candidate.keeps_any() {
             assert_eq!(shared, logical_shared, "{} vs {}", p.id, source.id);
         }
     }
@@ -568,7 +568,7 @@ fn stage2_physical_asap_optimization_summary_topk_is_build_then_estimate() {
 /// with every chain at query time, since a chain maintained at ingestion
 /// time leaves one query reading the input at query time.
 #[test]
-fn stage2_physical_asap_optimization_materializes_only_tumbling_windows_at_ingestion() {
+fn stage2_physical_asap_optimization_keeps_only_tumbling_windows_at_ingestion() {
     let run = pipeline();
     let mut counter_maintained = 0;
     let mut shared_once = 0;
@@ -829,7 +829,7 @@ fn stage3_plan_selection_charges_each_node_per_consuming_query() {
 /// two accumulators (rate, sum) and their finalizations twice, once per query; the walks from
 /// both roots stop at the materialized `time_range`, which is computed once
 /// and reads the scan once.
-fn materialized_case() -> Run {
+fn kept_case() -> Run {
     let mut workload = example1();
     let repeating = workload.query_workload.repeating_queries.as_mut().unwrap();
     repeating.truncate(1);
@@ -871,8 +871,8 @@ fn materialized_case() -> Run {
 /// The charging helper agrees with plan selection when a node is
 /// materialized.
 #[test]
-fn stage3_plan_selection_charging_helper_follows_plan_selection_with_a_materialized_node() {
-    let run = materialized_case();
+fn stage3_plan_selection_charging_helper_follows_plan_selection_with_a_kept_node() {
+    let run = kept_case();
     let p = &run.physical[0];
     let mut by_kind: Vec<_> = run.selection.costs[&p.id]
         .per_node
@@ -898,8 +898,8 @@ fn stage3_plan_selection_charging_helper_follows_plan_selection_with_a_materiali
 /// Charging the scan under a materialized node once per query is caught.
 #[test]
 #[should_panic(expected = "multiplier of")]
-fn stage3_plan_selection_charging_helper_rejects_recounting_below_a_materialized_node() {
-    let mut run = materialized_case();
+fn stage3_plan_selection_charging_helper_rejects_recounting_below_a_kept_node() {
+    let mut run = kept_case();
     let p = run.physical[0].clone();
     let scan = p
         .dag()

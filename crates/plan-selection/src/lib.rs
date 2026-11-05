@@ -3462,7 +3462,9 @@ mod tests {
             .find(|n| matches!(n.asap(), Some(ASAPOp::SummaryAgg { .. })))
             .expect("a KLL state");
         let mut assignment = PhysicalPropertiesAssignment::default();
-        assignment.set(&state, kept);
+        if let Some(kept) = kept {
+            assignment.set(&state, kept);
+        }
         let timed =
             apply_physical_properties(root, &assignment, &mut NodeToTimedNodeCache::new()).unwrap();
         asap_types::ir::physical_export::compile_physical_asap_workload_with_node_ids(&[
@@ -3525,26 +3527,13 @@ mod tests {
         assert!(range.detail.contains("keep"), "{}", range.detail);
     }
 
-    /// Kept `lifetime` at `timing`.
-    fn kept(timing: ExecutionTiming, lifetime: Lifetime) -> Option<PhysicalProperties> {
-        Some(PhysicalProperties::new(timing, lifetime).unwrap())
-    }
-
     /// Kept in memory at ingestion time until a query reads it.
-    fn at_ingestion() -> Option<PhysicalProperties> {
-        kept(
-            ExecutionTiming::IngestionTime,
-            Lifetime::AcrossEvaluations(Medium::Memory),
-        )
-    }
+    const AT_INGESTION: Option<PhysicalProperties> =
+        Some(PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION);
 
     /// Kept in memory at query time for one evaluation.
-    fn at_query() -> Option<PhysicalProperties> {
-        kept(
-            ExecutionTiming::QueryTime,
-            Lifetime::OneEvaluation(Medium::Memory),
-        )
-    }
+    const AT_QUERY: Option<PhysicalProperties> =
+        Some(PhysicalProperties::KEPT_IN_MEMORY_FOR_ONE_EVALUATION);
 
     fn node_of(dag: &PhysicalASAPDAG, pick: impl Fn(&Payload) -> bool) -> PhysicalASAPNodeId {
         dag.nodes.iter().find(|n| pick(&n.payload)).unwrap().id
@@ -3581,7 +3570,7 @@ mod tests {
     /// node scales with that rate.
     #[test]
     fn ingestion_time_node_is_priced_per_second_of_arriving_rows() {
-        let dag = kll_dag(at_ingestion());
+        let dag = kll_dag(AT_INGESTION);
         let (fast, slow) = (
             priced(&dag, &[repeating(1_000)]),
             priced(&dag, &[repeating(10_000)]),
@@ -3613,7 +3602,7 @@ mod tests {
             let settings = unit_costs(|c| c.cost_per_memory_byte_second = w);
             price(dag, &recurrences(1), &data(), &settings).unwrap()
         };
-        for kept in [at_ingestion(), at_query(), None] {
+        for kept in [AT_INGESTION, AT_QUERY, None] {
             let dag = kll_dag(kept);
             let build = node_of(&dag, is_build);
             let (with, without) = (cost(&dag, 1.25e-7), cost(&dag, 0.0));
@@ -3626,7 +3615,7 @@ mod tests {
             // each sees its series' 12 samples: the 120 000 rows of its
             // source's 1-min window (data()'s 10 000 rows per second over its
             // five sources); at ingestion time its samples are unknown.
-            let samples = if kept == at_ingestion() {
+            let samples = if kept == AT_INGESTION {
                 StateInputRows::UNKNOWN
             } else {
                 StateInputRows {
@@ -3635,7 +3624,7 @@ mod tests {
                 }
             };
             let state = 10_000.0 * summary_shape(family, samples).1 as f64;
-            let byte_seconds = if kept == at_ingestion() {
+            let byte_seconds = if kept == AT_INGESTION {
                 2.0 * state
             } else {
                 let evaluation_s = with.usage.latency_per_query[0].total_ms() / 1_000.0;
@@ -3694,7 +3683,7 @@ mod tests {
             (query.to_string(), dag)
         })
         .collect();
-        for kept in [at_ingestion(), at_query(), None] {
+        for kept in [AT_INGESTION, AT_QUERY, None] {
             dags.push((format!("{kept:?}"), kll_dag(kept)));
         }
         for (name, dag) in &dags {
@@ -4652,18 +4641,20 @@ mod tests {
         let state = |dag: &PhysicalASAPDAG| node_of(dag, is_build);
         for (on_disk, in_memory) in [
             (
-                kept(
+                PhysicalProperties::new(
                     ExecutionTiming::IngestionTime,
                     Lifetime::AcrossEvaluations(Medium::Disk),
-                ),
-                at_ingestion(),
+                )
+                .ok(),
+                AT_INGESTION,
             ),
             (
-                kept(
+                PhysicalProperties::new(
                     ExecutionTiming::QueryTime,
                     Lifetime::OneEvaluation(Medium::Disk),
-                ),
-                at_query(),
+                )
+                .ok(),
+                AT_QUERY,
             ),
         ] {
             let (disk_dag, memory_dag) = (kll_dag(on_disk), kll_dag(in_memory));

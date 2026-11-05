@@ -26,15 +26,6 @@ use asap_types::ir::{
 };
 use asap_types::physical::{Lifetime, Medium, PhysicalProperties};
 
-/// Kept at ingestion time until a query reads it.
-fn at_ingestion() -> Option<PhysicalProperties> {
-    PhysicalProperties::new(
-        ExecutionTiming::IngestionTime,
-        Lifetime::AcrossEvaluations(Medium::Memory),
-    )
-    .ok()
-}
-
 use crate::physical_common;
 
 /// The logical DAG the planner pipeline selects for `query`, optionally with
@@ -82,12 +73,12 @@ fn sketch_candidate(query: &str) -> Rc<OperatorNode> {
         .expect("a sketch candidate")
 }
 
-/// The two placements under test: nothing stored, and every state stored at
-/// ingestion time where the DAG allows it.
-fn placements() -> [PhysicalPropertiesAssignment; 2] {
+/// The two placements of `root` under test: nothing stored, and every state
+/// stored at ingestion time where the DAG allows it.
+fn placements(root: &Rc<OperatorNode>) -> [PhysicalPropertiesAssignment; 2] {
     [
         PhysicalPropertiesAssignment::default(),
-        PhysicalPropertiesAssignment::with_default(at_ingestion()),
+        PhysicalPropertiesAssignment::kept_at_ingestion_where_allowed(std::slice::from_ref(root)),
     ]
 }
 
@@ -217,7 +208,7 @@ fn values_1_to_100(schema: &SchemaRef, _metric: &str) -> Batch {
 fn physical_properties_decide_precompute_contents() {
     let root = sketch_candidate("quantile(0.99, latency)");
     let mut answers = Vec::new();
-    for assignment in placements() {
+    for assignment in placements(&root) {
         let dag = timed_dag(&root, &assignment);
         let ingestion = Scope::Ingestion {
             window_start_ms: 0,
@@ -228,7 +219,7 @@ fn physical_properties_decide_precompute_contents() {
         answers.push(values);
     }
     assert_eq!(answers[1].len(), 1);
-    assert!(!states(&timed_dag(&root, &placements()[1])).is_empty());
+    assert!(!states(&timed_dag(&root, &placements(&root)[1])).is_empty());
     assert_eq!(answers[0], answers[1]);
 }
 
@@ -264,7 +255,10 @@ fn mixed_placement_answers_like_query_time() {
         "two explicitly selected KLL builds"
     );
     let mut mixed = PhysicalPropertiesAssignment::default();
-    mixed.set(&sketches(&root)[0], at_ingestion());
+    mixed.set(
+        &sketches(&root)[0],
+        PhysicalProperties::KEPT_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+    );
     let mut answers = Vec::new();
     for assignment in [PhysicalPropertiesAssignment::default(), mixed] {
         let dag = timed_dag(&root, &assignment);
@@ -322,7 +316,7 @@ fn arithmetic_over_different_selectors_matches_prometheus() {
         ("m", "b", 250, 5.0),
         ("n", "a", 250, 7.0),
     ];
-    for assignment in placements() {
+    for assignment in placements(&root) {
         let dag = timed_dag(&root, &assignment);
         assert!(!ingestion_binary(&dag));
         let (values, _) = execute(&dag, &job_samples(&disjoint), INGESTION_WINDOW, 300_000);
@@ -334,7 +328,7 @@ fn arithmetic_over_different_selectors_matches_prometheus() {
         "quantile(0.9, sum_over_time(m[1m]) + sum_over_time(n[1m]))",
         true,
     );
-    assert!(!ingestion_binary(&timed_dag(&root, &placements()[1])));
+    assert!(!ingestion_binary(&timed_dag(&root, &placements(&root)[1])));
 }
 
 /// Arithmetic over one selector is aligned maintenance when stored at
@@ -352,7 +346,7 @@ fn arithmetic_over_one_selector_executes() {
         ("m", "a", 290, 2.0),
         ("m", "b", 250, 5.0),
     ];
-    let [not_kept, at_ingestion] = placements().map(|a| timed_dag(&root, &a));
+    let [not_kept, at_ingestion] = placements(&root).map(|a| timed_dag(&root, &a));
     assert!(!ingestion_binary(&not_kept));
     assert!(
         ingestion_binary(&at_ingestion),
