@@ -23,7 +23,7 @@ use super::query::QueryRoot;
 use crate::ir::properties::timing::PhysicalPropertiesAssignment;
 use crate::ir::properties::ExecutionTiming;
 use crate::ir::SchemaDerivationError;
-use crate::physical::PhysicalProperties;
+use crate::physical::{Lifetime, PhysicalProperties};
 
 fn invalid(message: &str) -> SchemaDerivationError {
     SchemaDerivationError::InvalidScalarSignature(message.into())
@@ -365,7 +365,11 @@ fn not_materialized_below(
 ) {
     for child in node.children() {
         if properties.get(child).is_none() {
-            properties.set(child, PhysicalProperties::not_materialized_at(timing));
+            properties.set(
+                child,
+                PhysicalProperties::new(timing, Lifetime::None)
+                    .expect("a valid timing and lifetime"),
+            );
             not_materialized_below(child, timing, properties);
         }
     }

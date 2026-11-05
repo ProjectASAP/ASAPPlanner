@@ -3,6 +3,9 @@
 //! a runtime refreshes the views of one refresh window in one ingestion run
 //! (issue #1151).
 
+use asap_types::ir::properties::ExecutionTiming;
+use asap_types::physical::Lifetime;
+use asap_types::physical::Medium;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -146,7 +149,13 @@ fn a_scan_under_two_chains_of_one_tumbling_window_width_is_computed_once() {
             chain(&scan, SketchAlgorithm::Kll, 10_000, 6),
             chain(&scan, SketchAlgorithm::DDSketch, 10_000, 30),
         ],
-        Some(PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
+        Some(
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
+        ),
     );
     assert_eq!(scan_computations(&dag), (1, 1.0));
 }
@@ -162,7 +171,13 @@ fn a_scan_under_chains_of_two_tumbling_window_widths_is_computed_for_each() {
             chain(&scan, SketchAlgorithm::Kll, 10_000, 6),
             chain(&scan, SketchAlgorithm::DDSketch, 60_000, 5),
         ],
-        Some(PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
+        Some(
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
+        ),
     );
     assert_eq!(scan_computations(&dag), (2, 2.0));
 }
@@ -212,7 +227,13 @@ fn a_scan_under_chains_of_10_10_and_60_s_is_computed_for_each_width() {
             chain(&scan, SketchAlgorithm::DDSketch, 10_000, 30),
             chain(&scan, SketchAlgorithm::Kll, 60_000, 5),
         ],
-        Some(PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
+        Some(
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
+        ),
     );
     assert_eq!(scan_computations(&dag), (2, 2.0));
 }
@@ -232,7 +253,13 @@ fn chains_of_one_width_and_two_phases_are_computed_apart() {
                 30,
             ),
         ],
-        Some(PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
+        Some(
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
+        ),
     );
     assert_eq!(scan_computations(&dag), (2, 2.0));
 }
@@ -247,7 +274,13 @@ fn nodes_below_a_shared_intermediate_node_are_computed_once_per_run() {
             chain(&shift, SketchAlgorithm::Kll, 10_000, 6),
             chain(&shift, SketchAlgorithm::DDSketch, 10_000, 30),
         ],
-        Some(PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
+        Some(
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
+        ),
     );
     assert_eq!(scan_computations(&dag), (1, 1.0));
     assert_eq!(
@@ -281,7 +314,13 @@ fn consumers_of_unbounded_windows_count_alone() {
             build(SketchAlgorithm::Kll),
             build(SketchAlgorithm::DDSketch),
         ],
-        Some(PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
+        Some(
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
+        ),
     );
     assert_eq!(
         computations_of(&dag, |op| matches!(op, NonASAPOp::Values { .. })),
@@ -296,7 +335,13 @@ fn an_invalid_node_is_reported_not_skipped() {
     let scan = scan();
     let mut dag = dag_of(
         &[chain(&scan, SketchAlgorithm::Kll, 10_000, 6)],
-        Some(PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION),
+        Some(
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
+        ),
     );
     let chain = dag
         .nodes
@@ -309,10 +354,12 @@ fn an_invalid_node_is_reported_not_skipped() {
     assert_eq!(
         computations(&dag, &[], &[], 3600.0, None),
         Err(
-            asap_cost::analytical::AnalyticalCostError::InvalidPhysicalProperties {
-                node: chain,
-                reason: asap_types::physical::InvalidPhysicalProperties::OneEvaluationAtIngestion,
-            }
+            asap_cost::analytical::AnalyticalCostError::InvalidPhysicalDag(
+                asap_types::ir::physical_export::PhysicalASAPDAGValidationError::InvalidPhysicalProperties {
+                    node: chain,
+                    reason: asap_types::physical::InvalidPhysicalProperties::OneEvaluationAtIngestion,
+                }
+            )
         )
     );
 }

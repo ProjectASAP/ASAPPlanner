@@ -3,6 +3,9 @@
 //! written by hand, and the planner's window-composition rule's
 //! `SummaryTumblingWindowChain`, expanded into the tumbling windows the executor runs.
 use crate::physical_common;
+use asap_types::ir::properties::ExecutionTiming;
+use asap_types::physical::Lifetime;
+use asap_types::physical::Medium;
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -281,7 +284,11 @@ fn execute_retained(
     for tumbling_window in tumbling_windows {
         assignment.set(
             tumbling_window,
-            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
         );
     }
     execute_retained_as(root, &assignment, samples)
@@ -302,7 +309,11 @@ fn execute_maintained_chain(
     let mut assignment = PhysicalPropertiesAssignment::default();
     assignment.set(
         &chain,
-        PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+        PhysicalProperties::new(
+            ExecutionTiming::IngestionTime,
+            Lifetime::AcrossEvaluations(Medium::Memory),
+        )
+        .expect("a valid timing and lifetime"),
     );
     let physical_properties = apply_physical_properties(planned, &assignment).unwrap();
     let expansion = expand_tumbling_window_chains_in_workload(
@@ -319,7 +330,13 @@ fn execute_maintained_chain(
     {
         assert_eq!(
             expansion.physical_properties.get(tumbling_window),
-            Some(PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION)
+            Some(
+                PhysicalProperties::new(
+                    ExecutionTiming::IngestionTime,
+                    Lifetime::AcrossEvaluations(Medium::Memory)
+                )
+                .expect("a valid timing and lifetime")
+            )
         );
     }
     execute_retained_as(expanded, &expansion.physical_properties, samples)

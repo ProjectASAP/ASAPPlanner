@@ -25,9 +25,7 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use asap_cost::analytical::AnalyticalCostError;
 use asap_cost::{materialized_tumbling_window_chains, node_map, plan_cost, CostInputs};
-use asap_types::ir::physical_export::PhysicalASAPNodeId;
 use asap_types::ir::{ASAPOp, Operator};
 use asap_types::stages::{
     AssignmentRealizer, DagOfSelectedCandidates, PhysicalASAPMemoCandidates,
@@ -48,18 +46,6 @@ use crate::report::{
     ErrorSelectingPlan, InexactObjective, Rejection, RejectionCause, SearchReport, SearchStatus,
     Selection,
 };
-
-/// [`ErrorSelectingPlan::Cost`] of `candidate`, from `plan_cost`'s error at
-/// a node.
-pub(crate) fn cost_error(
-    candidate: &str,
-) -> impl Fn((PhysicalASAPNodeId, AnalyticalCostError)) -> ErrorSelectingPlan + '_ {
-    move |(node, error)| ErrorSelectingPlan::Cost {
-        candidate: candidate.to_owned(),
-        node,
-        error,
-    }
-}
 
 /// The largest relative difference between the objective and `plan_cost`
 /// that counts as equal.
@@ -142,14 +128,24 @@ pub fn select_plan(
     let (cost, _) = plan_cost(
         &plan.dag,
         &node_map(&plan.dag),
-        &materialized_tumbling_window_chains(&plan.dag).map_err(cost_error(&plan.id))?,
+        &materialized_tumbling_window_chains(&plan.dag).map_err(|(node, error)| {
+            ErrorSelectingPlan::Cost {
+                candidate: plan.id.clone(),
+                node,
+                error,
+            }
+        })?,
         &recurrence,
         &ranges,
         data,
         cost_inputs,
         formula_scale,
     )
-    .map_err(cost_error(&plan.id))?;
+    .map_err(|(node, error)| ErrorSelectingPlan::Cost {
+        candidate: plan.id.clone(),
+        node,
+        error,
+    })?;
     let plan_cost_per_second = cost.cost_per_second.ok_or_else(|| {
         ErrorSelectingPlan::UnsupportedCostModel("a cost model without a cost per second".into())
     })? - solution.request_cost_per_second;

@@ -2,6 +2,9 @@
 //! (`asap_types::ir::materialized_view`): two one-minute KLL tumbling windows of `m`
 //! kept at ingestion, merged into a view refreshed on first read.
 
+use asap_types::ir::properties::ExecutionTiming;
+use asap_types::physical::Lifetime;
+use asap_types::physical::Medium;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
@@ -95,12 +98,20 @@ fn tumbling_windows_and_kept_merge() -> (PhysicalASAPDAG, usize) {
     for tumbling_window in &tumbling_windows {
         assignment.set(
             tumbling_window,
-            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
         );
     }
     assignment.set(
         &merge,
-        PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME,
+        PhysicalProperties::new(
+            ExecutionTiming::QueryTime,
+            Lifetime::AcrossEvaluations(Medium::Memory),
+        )
+        .expect("a valid timing and lifetime"),
     );
     let physical_properties = apply_physical_properties(&merge, &assignment).unwrap();
     let dag = compile_physical_asap_dag(&merge, &physical_properties).unwrap();
@@ -232,7 +243,11 @@ fn three_chains_over_one_scan() -> (PhysicalASAPDAG, PhysicalASAPDAG) {
         .map(|chain| {
             assignment.set(
                 chain,
-                PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+                PhysicalProperties::new(
+                    ExecutionTiming::IngestionTime,
+                    Lifetime::AcrossEvaluations(Medium::Memory),
+                )
+                .expect("a valid timing and lifetime"),
             );
             QueryRoot::Operator(
                 OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
@@ -371,7 +386,11 @@ fn a_shifted_tumbling_window_has_its_own_phase() {
     for tumbling_window in &tumbling_windows {
         assignment.set(
             tumbling_window,
-            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
         );
     }
     let roots: Vec<QueryRoot> = tumbling_windows
@@ -418,7 +437,11 @@ fn views_of_unbounded_windows_are_groups_of_their_own() {
             .unwrap();
             assignment.set(
                 &build,
-                PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+                PhysicalProperties::new(
+                    ExecutionTiming::IngestionTime,
+                    Lifetime::AcrossEvaluations(Medium::Memory),
+                )
+                .expect("a valid timing and lifetime"),
             );
             QueryRoot::Operator(build)
         })
@@ -451,7 +474,11 @@ fn a_view_reading_a_view_of_its_group_follows_it() {
     for view in [&tumbling_window, &rollup] {
         assignment.set(
             view,
-            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
         );
     }
     let roots = [QueryRoot::Operator(Rc::clone(&rollup))];
@@ -503,7 +530,11 @@ fn a_view_has_its_refresh_window_on_a_dag_without_edges() {
     let mut assignment = PhysicalPropertiesAssignment::default();
     assignment.set(
         &view,
-        PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+        PhysicalProperties::new(
+            ExecutionTiming::IngestionTime,
+            Lifetime::AcrossEvaluations(Medium::Memory),
+        )
+        .expect("a valid timing and lifetime"),
     );
     let physical_properties = apply_physical_properties(&view, &assignment).unwrap();
     let mut dag = compile_physical_asap_dag(&view, &physical_properties).unwrap();

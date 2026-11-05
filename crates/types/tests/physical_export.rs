@@ -779,7 +779,21 @@ fn workload_export_matches_the_single_root_export() {
 #[test]
 fn export_validation_over_every_valid_state() {
     use ExecutionTiming::{IngestionTime, QueryTime};
-    for properties in PhysicalProperties::every_valid() {
+    for properties in [ExecutionTiming::QueryTime, ExecutionTiming::IngestionTime]
+        .into_iter()
+        .flat_map(|timing| {
+            [
+                Lifetime::None,
+                Lifetime::OneEvaluation(Medium::Memory),
+                Lifetime::OneEvaluation(Medium::Disk),
+                Lifetime::AcrossEvaluations(Medium::Memory),
+                Lifetime::AcrossEvaluations(Medium::Disk),
+            ]
+            .map(|lifetime| PhysicalProperties::new(timing, lifetime))
+        })
+        // Every valid state: the pairs `new` accepts.
+        .filter_map(Result::ok)
+    {
         let root = plan();
         let build = root.children()[0];
         let mut assignment = PhysicalPropertiesAssignment::default();
@@ -790,7 +804,9 @@ fn export_validation_over_every_valid_state() {
         }
         let timed = apply_physical_properties(&root, &assignment).unwrap();
         let mut dag = compile_physical_asap_dag(&root, &timed).unwrap();
-        let [scan, build, _finalize] = [0, 1, 2].map(|i| dag.nodes[i].physical_properties());
+        let [scan, build, _finalize] = [0, 1, 2].map(|i| {
+            PhysicalProperties::new(dag.nodes[i].output_state.timing, dag.nodes[i].lifetime)
+        });
         match (properties.timing(), properties.lifetime()) {
             (QueryTime, Lifetime::None) => {
                 assert_eq!(build, Ok(properties));
@@ -809,7 +825,13 @@ fn export_validation_over_every_valid_state() {
             }
             (IngestionTime, Lifetime::AcrossEvaluations(_)) => {
                 assert_eq!(build, Ok(properties));
-                assert_eq!(scan, Ok(PhysicalProperties::NOT_MATERIALIZED_AT_INGESTION));
+                assert_eq!(
+                    scan,
+                    Ok(
+                        PhysicalProperties::new(ExecutionTiming::IngestionTime, Lifetime::None)
+                            .expect("a valid timing and lifetime")
+                    )
+                );
                 dag.validate().unwrap();
             }
             (QueryTime, Lifetime::OneEvaluation(_)) => {

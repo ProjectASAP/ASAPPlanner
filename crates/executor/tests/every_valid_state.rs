@@ -1,5 +1,6 @@
 //! The executor's physical planner over every valid timing × lifetime
 //! state of one summary build.
+use planner_types::physical::Medium;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
@@ -65,7 +66,21 @@ fn plan() -> Rc<OperatorNode> {
 #[test]
 fn physical_planner_over_every_valid_state() {
     use ExecutionTiming::{IngestionTime, QueryTime};
-    for properties in PhysicalProperties::every_valid() {
+    for properties in [ExecutionTiming::QueryTime, ExecutionTiming::IngestionTime]
+        .into_iter()
+        .flat_map(|timing| {
+            [
+                Lifetime::None,
+                Lifetime::OneEvaluation(Medium::Memory),
+                Lifetime::OneEvaluation(Medium::Disk),
+                Lifetime::AcrossEvaluations(Medium::Memory),
+                Lifetime::AcrossEvaluations(Medium::Disk),
+            ]
+            .map(|lifetime| PhysicalProperties::new(timing, lifetime))
+        })
+        // Every valid state: the pairs `new` accepts.
+        .filter_map(Result::ok)
+    {
         let root = plan();
         let mut assignment = PhysicalPropertiesAssignment::default();
         let unmaterialized_at_ingestion =
@@ -95,8 +110,14 @@ fn physical_planner_over_every_valid_state() {
             (IngestionTime, Lifetime::None) => {
                 // Left unassigned: an unmaterialized build lands at query time.
                 assert_eq!(
-                    dag.nodes[2].physical_properties(),
-                    Ok(PhysicalProperties::NOT_MATERIALIZED_AT_QUERY_TIME)
+                    PhysicalProperties::new(
+                        dag.nodes[2].output_state.timing,
+                        dag.nodes[2].lifetime
+                    ),
+                    Ok(
+                        PhysicalProperties::new(ExecutionTiming::QueryTime, Lifetime::None)
+                            .expect("a valid timing and lifetime")
+                    )
                 );
             }
             (IngestionTime, Lifetime::OneEvaluation(_)) => {

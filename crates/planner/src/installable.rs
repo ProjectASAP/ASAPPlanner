@@ -802,6 +802,8 @@ mod tests {
     use super::*;
     use asap_types::ir::schema::{SketchAlgorithm, StatisticKind, SupportedSummary};
     use asap_types::ir::{NonASAPOp, Operator};
+    use asap_types::physical::Lifetime;
+    use asap_types::physical::Medium;
     use asap_types::physical::PhysicalProperties;
 
     thread_local! {
@@ -1001,7 +1003,11 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &merged,
-            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
         );
         let physical_properties = apply_physical_properties(&merged, &assignment).unwrap();
         let dag = compile_physical_asap_dag(&merged, &physical_properties).unwrap();
@@ -1039,7 +1045,11 @@ mod tests {
         for node in tumbling_windows.iter().chain([&merge]) {
             assignment.set(
                 node,
-                PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+                PhysicalProperties::new(
+                    ExecutionTiming::IngestionTime,
+                    Lifetime::AcrossEvaluations(Medium::Memory),
+                )
+                .expect("a valid timing and lifetime"),
             );
         }
         let physical_properties = apply_physical_properties(&merge, &assignment).unwrap();

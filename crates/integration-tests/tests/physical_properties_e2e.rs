@@ -257,7 +257,11 @@ fn mixed_placement_answers_like_query_time() {
     let mut mixed = PhysicalPropertiesAssignment::default();
     mixed.set(
         &sketches(&root)[0],
-        PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+        PhysicalProperties::new(
+            ExecutionTiming::IngestionTime,
+            Lifetime::AcrossEvaluations(Medium::Memory),
+        )
+        .expect("a valid timing and lifetime"),
     );
     let mut answers = Vec::new();
     for assignment in [PhysicalPropertiesAssignment::default(), mixed] {

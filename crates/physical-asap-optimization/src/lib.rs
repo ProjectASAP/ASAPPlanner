@@ -119,6 +119,8 @@ pub use catalog::{
     ErrorGeneratingPhysicalASAPMemoCandidates, Stage2AssignmentRealizer,
 };
 
+use asap_types::physical::Lifetime;
+use asap_types::physical::Medium;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -362,17 +364,29 @@ impl MaterializedOutputCandidate {
         let mut options = vec![None];
         if self.at_ingestion.is_ok() {
             options.push(Some(
-                PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+                PhysicalProperties::new(
+                    ExecutionTiming::IngestionTime,
+                    Lifetime::AcrossEvaluations(Medium::Memory),
+                )
+                .expect("a valid timing and lifetime"),
             ));
         }
         if self.readers.len() > 1 {
             options.push(Some(
-                PhysicalProperties::MATERIALIZED_IN_MEMORY_FOR_ONE_EVALUATION,
+                PhysicalProperties::new(
+                    ExecutionTiming::QueryTime,
+                    Lifetime::OneEvaluation(Medium::Memory),
+                )
+                .expect("a valid timing and lifetime"),
             ));
         }
         if self.may_keep_across_evaluations {
             options.push(Some(
-                PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME,
+                PhysicalProperties::new(
+                    ExecutionTiming::QueryTime,
+                    Lifetime::AcrossEvaluations(Medium::Memory),
+                )
+                .expect("a valid timing and lifetime"),
             ));
         }
         options
@@ -699,7 +713,11 @@ pub(crate) fn find_materialized_output_candidates(
             for &v in below[c].iter().chain([&c]) {
                 trial.set(
                     &nodes[v],
-                    PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+                    PhysicalProperties::new(
+                        ExecutionTiming::IngestionTime,
+                        Lifetime::AcrossEvaluations(Medium::Memory),
+                    )
+                    .expect("a valid timing and lifetime"),
                 );
             }
             apply_physical_properties(node, &trial)
@@ -1800,7 +1818,11 @@ mod tests {
         let properties = |node: &OperatorNode| b1.physical_properties.get(node).unwrap();
         assert_eq!(
             properties(chain),
-            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory)
+            )
+            .expect("a valid timing and lifetime")
         );
         for below in OperatorNode::reachable(chain) {
             assert_eq!(properties(&below).timing(), ExecutionTiming::IngestionTime);
@@ -2413,7 +2435,13 @@ mod tests {
             .collect();
         let options = vec![
             None,
-            Some(PhysicalProperties::MATERIALIZED_IN_MEMORY_FOR_ONE_EVALUATION),
+            Some(
+                PhysicalProperties::new(
+                    ExecutionTiming::QueryTime,
+                    Lifetime::OneEvaluation(Medium::Memory),
+                )
+                .expect("a valid timing and lifetime"),
+            ),
         ];
         assert_eq!(
             found,

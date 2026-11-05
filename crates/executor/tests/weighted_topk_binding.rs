@@ -13,8 +13,11 @@ use common::{compile_physical_asap_dag, computation_candidates};
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
 use planner_types::ir::properties::AccuracyTarget;
+use planner_types::ir::properties::ExecutionTiming;
 use planner_types::ir::schema::*;
 use planner_types::ir::ASAPOp;
+use planner_types::physical::Lifetime;
+use planner_types::physical::Medium;
 use std::{collections::BTreeMap, rc::Rc, sync::Arc};
 // The heap candidates of `topk by(job)(2, sum by(service, job)(rate(m[1m])))`
 // rank the summed per-series rates of raw counter samples bound at the
@@ -284,7 +287,11 @@ fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) 
         if matches!(node.operator, IrOperator::ASAP(ASAPOp::SummaryAgg { .. })) {
             assignment.set(
                 &node,
-                PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+                PhysicalProperties::new(
+                    ExecutionTiming::IngestionTime,
+                    Lifetime::AcrossEvaluations(Medium::Memory),
+                )
+                .expect("a valid timing and lifetime"),
             );
         }
     }

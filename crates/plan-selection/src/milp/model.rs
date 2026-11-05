@@ -249,7 +249,7 @@ pub(crate) struct SelectionMilp<'a> {
     pub(crate) reach: HashMap<(usize, PhysicalCandidateId), Variable>,
     /// Per materialized candidate, the materialized candidates whose contexts may
     /// read it.
-    pub(crate) materialized_readers: BTreeMap<PhysicalCandidateId, Vec<PhysicalCandidateId>>,
+    pub(crate) materialized_consumers: BTreeMap<PhysicalCandidateId, Vec<PhysicalCandidateId>>,
     /// `L[q]`.
     pub(crate) latency: Vec<Variable>,
     /// An upper bound of each `L[q]` (its bound, or the most it can be), in
@@ -498,7 +498,7 @@ pub(crate) fn build_selection_milp<'a>(
         readers: Vec::new(),
         selected: BTreeMap::new(),
         reach: HashMap::new(),
-        materialized_readers: BTreeMap::new(),
+        materialized_consumers: BTreeMap::new(),
         latency: Vec::new(),
         latency_max: Vec::new(),
         ms_per_latency_unit: 1.0,
@@ -628,7 +628,7 @@ fn choice_variables(milp: &mut SelectionMilp<'_>) {
         if let ContextKind::Materialized(reader) = data.kind {
             for &option in &data.options {
                 if inputs.kind[option.0] == RunKind::Materialized {
-                    milp.materialized_readers
+                    milp.materialized_consumers
                         .entry(option)
                         .or_default()
                         .push(reader);
@@ -1030,7 +1030,7 @@ pub(crate) fn strongly_connected_components(count: usize, edges: &[(usize, usize
 /// candidate its context may read (readers first), so `a[q, m]` exists
 /// before the reach rows of what `m` reads. A cycle among contexts is
 /// broken at the first candidate met.
-pub(crate) fn materialized_readers_first(milp: &SelectionMilp<'_>) -> Vec<PhysicalCandidateId> {
+pub(crate) fn materialized_consumers_first(milp: &SelectionMilp<'_>) -> Vec<PhysicalCandidateId> {
     let inputs = milp.inputs;
     let mut order = Vec::new();
     let mut state: BTreeMap<PhysicalCandidateId, u8> = BTreeMap::new();
@@ -1068,7 +1068,7 @@ pub(crate) fn materialized_readers_first(milp: &SelectionMilp<'_>) -> Vec<Physic
 fn reach_rows(milp: &mut SelectionMilp<'_>) {
     let inputs = milp.inputs;
     milp.builder.scope = Scope::MaterializedContexts;
-    let order = materialized_readers_first(milp);
+    let order = materialized_consumers_first(milp);
     // Which queries may depend on each materialized candidate: read in their
     // context, or in the context of one they may depend on.
     let mut may_reach: BTreeMap<PhysicalCandidateId, BTreeSet<usize>> = BTreeMap::new();
@@ -1105,7 +1105,7 @@ fn reach_rows(milp: &mut SelectionMilp<'_>) {
                     .row("6 reach from below", constraint!(reach >= direct));
             }
             for &reader in milp
-                .materialized_readers
+                .materialized_consumers
                 .get(&materialized)
                 .into_iter()
                 .flatten()
@@ -1135,7 +1135,7 @@ fn reach_rows(milp: &mut SelectionMilp<'_>) {
                 sources += direct;
             }
             for &reader in milp
-                .materialized_readers
+                .materialized_consumers
                 .get(&materialized)
                 .cloned()
                 .unwrap_or_default()
@@ -1200,7 +1200,7 @@ fn materialized_needing_exact_reach(milp: &SelectionMilp<'_>) -> BTreeSet<Physic
             // Highest shared materialization reads the reach of its
             // reading contexts.
             stack.extend(
-                milp.materialized_readers
+                milp.materialized_consumers
                     .get(candidate)
                     .into_iter()
                     .flatten(),
@@ -1218,7 +1218,7 @@ fn materialized_needing_exact_reach(milp: &SelectionMilp<'_>) -> BTreeSet<Physic
     while let Some(materialized) = stack.pop() {
         if exact.insert(materialized) {
             stack.extend(
-                milp.materialized_readers
+                milp.materialized_consumers
                     .get(&materialized)
                     .into_iter()
                     .flatten(),
@@ -1329,7 +1329,7 @@ fn reader_constraint_rows(milp: &mut SelectionMilp<'_>) {
                             }
                         }
                         for &reader in milp
-                            .materialized_readers
+                            .materialized_consumers
                             .get(&candidate)
                             .cloned()
                             .unwrap_or_default()

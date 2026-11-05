@@ -1489,13 +1489,10 @@ pub enum AnalyticalCostError {
     UnsupportedWithoutDistribution(&'static str),
     #[error("analytical arithmetic overflowed")]
     Overflow,
-    /// A node whose timing and lifetime cannot go together: a planner bug.
-    #[error("node {node:?}: {reason}")]
-    InvalidPhysicalProperties {
-        node: asap_types::ir::physical_export::PhysicalASAPNodeId,
-        #[source]
-        reason: asap_types::physical::InvalidPhysicalProperties,
-    },
+    /// The physical DAG fails its validation (e.g. a node whose timing and
+    /// lifetime cannot go together): a planner bug.
+    #[error(transparent)]
+    InvalidPhysicalDag(asap_types::ir::physical_export::PhysicalASAPDAGValidationError),
     #[error("candidate has no supported exact or sketch state")]
     UnsupportedCandidate,
     #[error("inconsistent operator statistics: {0}")]

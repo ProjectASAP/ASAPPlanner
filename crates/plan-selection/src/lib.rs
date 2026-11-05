@@ -3544,12 +3544,26 @@ mod tests {
     }
 
     /// Materialized in memory at ingestion time until a query reads it.
-    const AT_INGESTION: Option<PhysicalProperties> =
-        Some(PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION);
+    fn at_ingestion() -> Option<PhysicalProperties> {
+        Some(
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
+        )
+    }
 
     /// Materialized in memory at query time for one evaluation.
-    const AT_QUERY: Option<PhysicalProperties> =
-        Some(PhysicalProperties::MATERIALIZED_IN_MEMORY_FOR_ONE_EVALUATION);
+    fn at_query() -> Option<PhysicalProperties> {
+        Some(
+            PhysicalProperties::new(
+                ExecutionTiming::QueryTime,
+                Lifetime::OneEvaluation(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
+        )
+    }
 
     fn node_of(dag: &PhysicalASAPDAG, pick: impl Fn(&Payload) -> bool) -> PhysicalASAPNodeId {
         dag.nodes.iter().find(|n| pick(&n.payload)).unwrap().id
@@ -3586,7 +3600,7 @@ mod tests {
     /// node scales with that rate.
     #[test]
     fn ingestion_time_node_is_priced_per_second_of_arriving_rows() {
-        let dag = kll_dag(AT_INGESTION);
+        let dag = kll_dag(at_ingestion());
         let (fast, slow) = (
             priced(&dag, &[repeating(1_000)]),
             priced(&dag, &[repeating(10_000)]),
@@ -3618,7 +3632,7 @@ mod tests {
             let settings = unit_costs(|c| c.cost_per_memory_byte_second = w);
             price(dag, &recurrences(1), &data(), &settings).unwrap()
         };
-        for materialized in [AT_INGESTION, AT_QUERY, None] {
+        for materialized in [at_ingestion(), at_query(), None] {
             let dag = kll_dag(materialized);
             let build = node_of(&dag, is_build);
             let (with, without) = (cost(&dag, 1.25e-7), cost(&dag, 0.0));
@@ -3631,7 +3645,7 @@ mod tests {
             // each sees its series' 12 samples: the 120 000 rows of its
             // source's 1-min window (data()'s 10 000 rows per second over its
             // five sources); at ingestion time its samples are unknown.
-            let samples = if materialized == AT_INGESTION {
+            let samples = if materialized == at_ingestion() {
                 StateInputRows::UNKNOWN
             } else {
                 StateInputRows {
@@ -3640,7 +3654,7 @@ mod tests {
                 }
             };
             let state = 10_000.0 * summary_shape(family, samples).1 as f64;
-            let byte_seconds = if materialized == AT_INGESTION {
+            let byte_seconds = if materialized == at_ingestion() {
                 2.0 * state
             } else {
                 let evaluation_s = with.usage.latency_per_query[0].total_ms() / 1_000.0;
@@ -3699,7 +3713,7 @@ mod tests {
             (query.to_string(), dag)
         })
         .collect();
-        for materialized in [AT_INGESTION, AT_QUERY, None] {
+        for materialized in [at_ingestion(), at_query(), None] {
             dags.push((format!("{materialized:?}"), kll_dag(materialized)));
         }
         for (name, dag) in &dags {
@@ -4664,7 +4678,7 @@ mod tests {
                     Lifetime::AcrossEvaluations(Medium::Disk),
                 )
                 .ok(),
-                AT_INGESTION,
+                at_ingestion(),
             ),
             (
                 PhysicalProperties::new(
@@ -4672,7 +4686,7 @@ mod tests {
                     Lifetime::OneEvaluation(Medium::Disk),
                 )
                 .ok(),
-                AT_QUERY,
+                at_query(),
             ),
         ] {
             let (disk_dag, memory_dag) = (kll_dag(on_disk), kll_dag(in_memory));
@@ -5053,7 +5067,7 @@ mod tests {
     /// materialized runs at query time).
     fn kll_dag_with(properties: PhysicalProperties) -> PhysicalASAPDAG {
         match (properties.timing(), properties.lifetime()) {
-            (ExecutionTiming::IngestionTime, Lifetime::None) => kll_dag(AT_INGESTION),
+            (ExecutionTiming::IngestionTime, Lifetime::None) => kll_dag(at_ingestion()),
             _ => kll_dag(Some(properties)),
         }
     }
@@ -5065,12 +5079,27 @@ mod tests {
     fn cost_over_every_valid_state() {
         let settings = unit_costs(|c| c.cost_per_disk_byte_second = 1e-9);
         let not_materialized = price(&kll_dag(None), &recurrences(1), &data(), &settings).unwrap();
-        for properties in PhysicalProperties::every_valid() {
+        for properties in [ExecutionTiming::QueryTime, ExecutionTiming::IngestionTime]
+            .into_iter()
+            .flat_map(|timing| {
+                [
+                    Lifetime::None,
+                    Lifetime::OneEvaluation(Medium::Memory),
+                    Lifetime::OneEvaluation(Medium::Disk),
+                    Lifetime::AcrossEvaluations(Medium::Memory),
+                    Lifetime::AcrossEvaluations(Medium::Disk),
+                ]
+                .map(|lifetime| PhysicalProperties::new(timing, lifetime))
+            })
+            // Every valid state: the pairs `new` accepts.
+            .filter_map(Result::ok)
+        {
             let dag = kll_dag_with(properties);
             assert!(
-                dag.nodes
-                    .iter()
-                    .any(|node| node.physical_properties() == Ok(properties)),
+                dag.nodes.iter().any(|node| PhysicalProperties::new(
+                    node.output_state.timing,
+                    node.lifetime
+                ) == Ok(properties)),
                 "{properties:?}"
             );
             let cost = price(&dag, &recurrences(1), &data(), &settings)
@@ -5099,14 +5128,31 @@ mod tests {
         use asap_cost::execution_demand::computations;
         use ExecutionTiming::{IngestionTime, QueryTime};
         let per_minute = 1.0 / 60.0;
-        for properties in PhysicalProperties::every_valid() {
+        for properties in [ExecutionTiming::QueryTime, ExecutionTiming::IngestionTime]
+            .into_iter()
+            .flat_map(|timing| {
+                [
+                    Lifetime::None,
+                    Lifetime::OneEvaluation(Medium::Memory),
+                    Lifetime::OneEvaluation(Medium::Disk),
+                    Lifetime::AcrossEvaluations(Medium::Memory),
+                    Lifetime::AcrossEvaluations(Medium::Disk),
+                ]
+                .map(|lifetime| PhysicalProperties::new(timing, lifetime))
+            })
+            // Every valid state: the pairs `new` accepts.
+            .filter_map(Result::ok)
+        {
             let dag = kll_dag_with(properties);
             let times = computations(&dag, &[repeating(MINUTE)], &[], 3600.0, None)
                 .unwrap_or_else(|error| panic!("{properties:?}: {error}"));
             let node = dag
                 .nodes
                 .iter()
-                .find(|node| node.physical_properties() == Ok(properties))
+                .find(|node| {
+                    PhysicalProperties::new(node.output_state.timing, node.lifetime)
+                        == Ok(properties)
+                })
                 .unwrap_or_else(|| panic!("{properties:?}"));
             let (_, rate) = times[&node.id];
             let expected = match (properties.timing(), properties.lifetime()) {
@@ -5137,7 +5183,21 @@ mod tests {
         let rows_per_s = 1e9;
         let b1 = tumbling_window_candidates(rows_per_s).remove(1);
         let chain = node_of(&b1.dag, is_chain);
-        for properties in PhysicalProperties::every_valid() {
+        for properties in [ExecutionTiming::QueryTime, ExecutionTiming::IngestionTime]
+            .into_iter()
+            .flat_map(|timing| {
+                [
+                    Lifetime::None,
+                    Lifetime::OneEvaluation(Medium::Memory),
+                    Lifetime::OneEvaluation(Medium::Disk),
+                    Lifetime::AcrossEvaluations(Medium::Memory),
+                    Lifetime::AcrossEvaluations(Medium::Disk),
+                ]
+                .map(|lifetime| PhysicalProperties::new(timing, lifetime))
+            })
+            // Every valid state: the pairs `new` accepts.
+            .filter_map(Result::ok)
+        {
             let mut dag = b1.dag.clone();
             let node = dag.nodes.iter_mut().find(|n| n.id == chain).unwrap();
             node.output_state.timing = properties.timing();

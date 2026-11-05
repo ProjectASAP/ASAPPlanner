@@ -3,6 +3,8 @@
 //! No fallback modes are chosen. Physical rewrites or timing splits that change
 //! candidate identity are rejected until represented by physical enumeration.
 //! This validates execution legality, not cost estimates or accuracy targets.
+use asap_types::ir::properties::ExecutionTiming;
+use asap_types::physical::Lifetime;
 use asap_types::physical::PhysicalProperties;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -61,11 +63,14 @@ pub fn realize_selected_candidates(
         &mut |logical, _, options| {
             let node = node_by_pointer.get(&logical).copied();
             // A node outside the selection is not materialized.
-            let requested =
-                node.map_or(PhysicalProperties::NOT_MATERIALIZED_AT_QUERY_TIME, |node| {
+            let requested = node.map_or(
+                PhysicalProperties::new(ExecutionTiming::QueryTime, Lifetime::None)
+                    .expect("a valid timing and lifetime"),
+                |node| {
                     seen[node] = true;
                     assignments[node]
-                });
+                },
+            );
             // The option with the requested properties; option `None` (no
             // entry: not materialized, placed by the timing pass) for a
             // requested lifetime `None`, at either timing. The timing pass's

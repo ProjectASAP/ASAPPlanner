@@ -4,6 +4,9 @@
 //! the compiler checks that no internal is used (CI runs
 //! `cargo check -p asap-planner --tests --locked` on its own for that).
 
+use asap_types::ir::properties::ExecutionTiming;
+use asap_types::physical::Lifetime;
+use asap_types::physical::Medium;
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
@@ -1577,14 +1580,24 @@ impl OptimizationPass for StoredAsForced {
 
 /// Every `SummaryAgg` built at ingestion time.
 fn summaries_at_ingestion(node: &OperatorNode) -> Option<PhysicalProperties> {
-    matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. }))
-        .then(|| PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION)
+    matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. })).then(|| {
+        PhysicalProperties::new(
+            ExecutionTiming::IngestionTime,
+            Lifetime::AcrossEvaluations(Medium::Memory),
+        )
+        .expect("a valid timing and lifetime")
+    })
 }
 
 /// Every `SummaryMerge` built at query time and materialized across evaluations.
 fn merges_materialized(node: &OperatorNode) -> Option<PhysicalProperties> {
-    matches!(node.asap(), Some(ASAPOp::SummaryMerge { .. }))
-        .then(|| PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME)
+    matches!(node.asap(), Some(ASAPOp::SummaryMerge { .. })).then(|| {
+        PhysicalProperties::new(
+            ExecutionTiming::QueryTime,
+            Lifetime::AcrossEvaluations(Medium::Memory),
+        )
+        .expect("a valid timing and lifetime")
+    })
 }
 
 /// Exact PromQL `queries`, every minute, over 6 ingesting series of `m`

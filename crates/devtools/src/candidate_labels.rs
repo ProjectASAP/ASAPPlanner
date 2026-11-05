@@ -148,7 +148,10 @@ pub fn physical_label(logical: &str, candidate: &PhysicalWorkloadPlan) -> String
     let mut parts: Vec<(&str, Vec<String>)> = Vec::new();
     for node in &candidate.dag.nodes {
         let id = &node.id;
-        let Some(phase) = phase_label(node.physical_properties()) else {
+        let Some(phase) = phase_label(PhysicalProperties::new(
+            node.output_state.timing,
+            node.lifetime,
+        )) else {
             continue;
         };
         let label = match &node.payload {
@@ -194,7 +197,7 @@ fn phase_label(
         return Some("invalid timing and lifetime");
     };
     match (properties.timing(), properties.lifetime()) {
-        // Not materialized: no phase holds it; it runs inside its reader.
+        // Not materialized: no phase holds it; it runs inside its consumer.
         (QueryTime, Lifetime::None) => None,
         (IngestionTime, Lifetime::None) => None,
         (IngestionTime, Lifetime::AcrossEvaluations(_)) => Some("ingestion time"),
@@ -586,7 +589,21 @@ mod tests {
                 ),
             ]);
         }
-        for properties in PhysicalProperties::every_valid() {
+        for properties in [ExecutionTiming::QueryTime, ExecutionTiming::IngestionTime]
+            .into_iter()
+            .flat_map(|timing| {
+                [
+                    Lifetime::None,
+                    Lifetime::OneEvaluation(Medium::Memory),
+                    Lifetime::OneEvaluation(Medium::Disk),
+                    Lifetime::AcrossEvaluations(Medium::Memory),
+                    Lifetime::AcrossEvaluations(Medium::Disk),
+                ]
+                .map(|lifetime| PhysicalProperties::new(timing, lifetime))
+            })
+            // Every valid state: the pairs `new` accepts.
+            .filter_map(Result::ok)
+        {
             let (_, label) = expected
                 .iter()
                 .find(|(state, _)| *state == properties)

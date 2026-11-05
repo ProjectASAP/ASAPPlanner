@@ -92,14 +92,6 @@ pub struct PhysicalASAPDAGNode {
     pub retention_ms: Option<u64>,
 }
 
-impl PhysicalASAPDAGNode {
-    /// Its timing (`output_state.timing`) and lifetime, unless they cannot
-    /// go together.
-    pub fn physical_properties(&self) -> Result<PhysicalProperties, InvalidPhysicalProperties> {
-        PhysicalProperties::new(self.output_state.timing, self.lifetime)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PhysicalASAPDAGEdge {
@@ -619,14 +611,17 @@ impl PhysicalASAPDAG {
             // A node's timing and lifetime must go together; a summary
             // build that is not materialized runs at query time. Any other node that
             // is not materialized runs when its consumer runs.
-            let properties = node.physical_properties().map_err(|reason| {
-                PhysicalASAPDAGValidationError::InvalidPhysicalProperties {
-                    node: node.id,
-                    reason,
-                }
-            })?;
+            let properties = PhysicalProperties::new(node.output_state.timing, node.lifetime)
+                .map_err(
+                    |reason| PhysicalASAPDAGValidationError::InvalidPhysicalProperties {
+                        node: node.id,
+                        reason,
+                    },
+                )?;
             if is_materializable_state_output(&node.payload)
-                && properties == PhysicalProperties::NOT_MATERIALIZED_AT_INGESTION
+                && properties
+                    == PhysicalProperties::new(ExecutionTiming::IngestionTime, Lifetime::None)
+                        .expect("a valid timing and lifetime")
             {
                 return Err(
                     PhysicalASAPDAGValidationError::UnmaterializedSummaryBuildNotAtQueryTime {

@@ -220,7 +220,11 @@ fn dominance_needs_every_condition() {
         (
             "lifetime",
             DominanceKey {
-                properties: PhysicalProperties::MATERIALIZED_IN_MEMORY_FOR_ONE_EVALUATION,
+                properties: PhysicalProperties::new(
+                    ExecutionTiming::QueryTime,
+                    Lifetime::OneEvaluation(Medium::Memory),
+                )
+                .expect("a valid timing and lifetime"),
                 ..key.clone()
             },
         ),
@@ -489,7 +493,11 @@ fn shared_middle() -> PhysicalASAPMemoCandidates {
     let candidates = vec![
         candidate(0, &[], false),
         PhysicalCandidate {
-            properties: PhysicalProperties::MATERIALIZED_IN_MEMORY_FOR_ONE_EVALUATION,
+            properties: PhysicalProperties::new(
+                ExecutionTiming::QueryTime,
+                Lifetime::OneEvaluation(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
             ..candidate(1, &[&[0]], false)
         },
         candidate(2, &[&[1]], true),
@@ -1124,7 +1132,21 @@ fn run_kind_over_every_valid_state() {
             ),
         ]);
     }
-    for properties in PhysicalProperties::every_valid() {
+    for properties in [ExecutionTiming::QueryTime, ExecutionTiming::IngestionTime]
+        .into_iter()
+        .flat_map(|timing| {
+            [
+                Lifetime::None,
+                Lifetime::OneEvaluation(Medium::Memory),
+                Lifetime::OneEvaluation(Medium::Disk),
+                Lifetime::AcrossEvaluations(Medium::Memory),
+                Lifetime::AcrossEvaluations(Medium::Disk),
+            ]
+            .map(|lifetime| PhysicalProperties::new(timing, lifetime))
+        })
+        // Every valid state: the pairs `new` accepts.
+        .filter_map(Result::ok)
+    {
         let (_, kind) = expected
             .iter()
             .find(|(state, _)| *state == properties)

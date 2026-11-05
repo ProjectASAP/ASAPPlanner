@@ -838,7 +838,7 @@ fn a_phantom_reader_does_not_satisfy_minimum_query_readers() {
         .collect();
     let m = *constrained
         .first()
-        .expect("a two-reader materialized result");
+        .expect("a materialized result with two consumers");
     let selected = milp.selected[&m];
     milp.builder.row("test", constraint!(selected >= 1.0));
     let readers: Vec<PhysicalCandidateId> = milp.readers[1][&m]

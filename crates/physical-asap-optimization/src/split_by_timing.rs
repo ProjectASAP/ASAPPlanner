@@ -261,7 +261,11 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &summary,
-            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
         );
         let (split, assignment) = split_shared_by_timing(std::slice::from_ref(&root), &assignment);
         let physical_properties = apply_physical_properties(&split[0], &assignment).unwrap();
@@ -272,7 +276,13 @@ mod tests {
         ));
         assert_eq!(
             physical_properties.get(&summary),
-            Some(PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION)
+            Some(
+                PhysicalProperties::new(
+                    ExecutionTiming::IngestionTime,
+                    Lifetime::AcrossEvaluations(Medium::Memory)
+                )
+                .expect("a valid timing and lifetime")
+            )
         );
     }
 
@@ -295,7 +305,11 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &summary,
-            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
         );
         let as_roots = |roots: &[Rc<OperatorNode>]| -> Vec<QueryRoot> {
             roots.iter().cloned().map(QueryRoot::Operator).collect()

@@ -707,7 +707,7 @@ fn pane_retention_terms(
             indicators.push(direct.into());
         }
         for &reader in milp
-            .materialized_readers
+            .materialized_consumers
             .get(&chain)
             .cloned()
             .unwrap_or_default()

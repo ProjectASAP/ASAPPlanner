@@ -6,6 +6,7 @@
 //! Stage 2 validation still checks operator legality and upstream timing.
 //! Potential shared non-summary nodes also receive query-time `OneEvaluation`; Stage 2
 //! checks highest-shared eligibility on the selected graph, not all possible consumers.
+use asap_types::physical::Medium;
 use asap_types::stages::{ProducerCandidates, ProducerSetInterner};
 use std::collections::HashMap;
 
@@ -39,7 +40,12 @@ pub fn may_keep_across_evaluations_per_sole_reader_query(
     data: &DataWorkload,
     query_time_results_retained: bool,
 ) -> Vec<bool> {
-    if properties != PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME
+    if properties
+        != PhysicalProperties::new(
+            ExecutionTiming::QueryTime,
+            Lifetime::AcrossEvaluations(Medium::Memory),
+        )
+        .expect("a valid timing and lifetime")
         || !matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }))
         || !query_time_results_retained
     {
@@ -155,21 +161,39 @@ pub fn enumerate_candidate_configurations(
         //   whole each evaluation;
         // - any ingestion-time state for `SummaryEstimate`,
         //   `EvaluatePopulation` and `MaintainPopulation` (`forced_query`).
-        let mut alternatives = vec![PhysicalProperties::NOT_MATERIALIZED_AT_QUERY_TIME];
+        let mut alternatives =
+            vec![
+                PhysicalProperties::new(ExecutionTiming::QueryTime, Lifetime::None)
+                    .expect("a valid timing and lifetime"),
+            ];
         if summary {
-            alternatives.push(PhysicalProperties::MATERIALIZED_IN_MEMORY_FOR_ONE_EVALUATION);
+            alternatives.push(
+                PhysicalProperties::new(
+                    ExecutionTiming::QueryTime,
+                    Lifetime::OneEvaluation(Medium::Memory),
+                )
+                .expect("a valid timing and lifetime"),
+            );
             if queries.iter().any(|&query| {
                 summary_properties_allowed(
                     node,
                     &[query],
-                    PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+                    PhysicalProperties::new(
+                        ExecutionTiming::IngestionTime,
+                        Lifetime::AcrossEvaluations(Medium::Memory),
+                    )
+                    .expect("a valid timing and lifetime"),
                     entries,
                     data,
                     query_time_results_retained,
                 )
             }) {
                 alternatives.push(
-                    PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+                    PhysicalProperties::new(
+                        ExecutionTiming::IngestionTime,
+                        Lifetime::AcrossEvaluations(Medium::Memory),
+                    )
+                    .expect("a valid timing and lifetime"),
                 );
             }
             if matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }))
@@ -177,7 +201,11 @@ pub fn enumerate_candidate_configurations(
                     summary_properties_allowed(
                         node,
                         &[query],
-                        PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME,
+                        PhysicalProperties::new(
+                            ExecutionTiming::QueryTime,
+                            Lifetime::AcrossEvaluations(Medium::Memory),
+                        )
+                        .expect("a valid timing and lifetime"),
                         entries,
                         data,
                         query_time_results_retained,
@@ -185,16 +213,29 @@ pub fn enumerate_candidate_configurations(
                 })
             {
                 alternatives.push(
-                    PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME,
+                    PhysicalProperties::new(
+                        ExecutionTiming::QueryTime,
+                        Lifetime::AcrossEvaluations(Medium::Memory),
+                    )
+                    .expect("a valid timing and lifetime"),
                 );
             }
         } else if !forced_query {
-            alternatives.push(PhysicalProperties::NOT_MATERIALIZED_AT_INGESTION);
+            alternatives.push(
+                PhysicalProperties::new(ExecutionTiming::IngestionTime, Lifetime::None)
+                    .expect("a valid timing and lifetime"),
+            );
         }
         // Potential reach only generates the choice. Selected-reader cardinality
         // and Stage 2's highest-shared rule determine actual eligibility.
         if !summary && queries.len() >= 2 {
-            alternatives.push(PhysicalProperties::MATERIALIZED_IN_MEMORY_FOR_ONE_EVALUATION);
+            alternatives.push(
+                PhysicalProperties::new(
+                    ExecutionTiming::QueryTime,
+                    Lifetime::OneEvaluation(Medium::Memory),
+                )
+                .expect("a valid timing and lifetime"),
+            );
         }
         // Configurations the deployment cannot run are not generated; each is
         // recorded as pruned.
@@ -244,7 +285,13 @@ pub fn enumerate_candidate_configurations(
                         query_time_results_retained,
                     ),
             });
-            if properties == PhysicalProperties::MATERIALIZED_IN_MEMORY_FOR_ONE_EVALUATION {
+            if properties
+                == PhysicalProperties::new(
+                    ExecutionTiming::QueryTime,
+                    Lifetime::OneEvaluation(Medium::Memory),
+                )
+                .expect("a valid timing and lifetime")
+            {
                 if !summary {
                     reader_constraints.push(ReaderConstraint::HighestSharedOneEvaluation {
                         candidate: id,
@@ -321,7 +368,7 @@ pub fn enumerate_candidate_configurations(
             .into_iter()
             .enumerate()
         {
-            let requirement = PhysicalRequirement::new(timing, Evaluation::Same)
+            let requirement = PhysicalRequirement::new(timing, Evaluation::Same, None)
                 .expect("a same-evaluation read is valid at either timing");
             let mut compatible = Vec::new();
             for &producer in configurations {
@@ -417,7 +464,7 @@ fn summary_properties_allowed(
             (ExecutionTiming::QueryTime, Lifetime::None)
             | (ExecutionTiming::QueryTime, Lifetime::OneEvaluation(_)) => true,
             // Runs inside the ingestion refresh of the state that reads it, so
-            // the reader must allow ingestion, as for a build materialized there.
+            // the consumer's query must allow ingestion, as for a build materialized there.
             (ExecutionTiming::IngestionTime, Lifetime::None) => eligibility.at_ingestion.is_ok(),
             (ExecutionTiming::IngestionTime, Lifetime::AcrossEvaluations(_)) => {
                 eligibility.at_ingestion.is_ok()

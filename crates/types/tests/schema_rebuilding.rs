@@ -1,5 +1,6 @@
 use asap_types::ir::operator::{AggIntent, Reduction, Source};
 use asap_types::ir::properties::AccuracyGuarantee;
+use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use asap_types::ir::schema::{ExactKind, ExactParams, GroupingStrategy, SummaryUpdate};
@@ -367,7 +368,8 @@ fn population_timing_follows_its_physical_properties() {
     let mut evaluation_at_ingestion = PhysicalPropertiesAssignment::default();
     evaluation_at_ingestion.set(
         &candidate,
-        PhysicalProperties::NOT_MATERIALIZED_AT_INGESTION,
+        PhysicalProperties::new(ExecutionTiming::IngestionTime, Lifetime::None)
+            .expect("a valid timing and lifetime"),
     );
     assert!(apply_physical_properties(&candidate, &evaluation_at_ingestion).is_err());
 }

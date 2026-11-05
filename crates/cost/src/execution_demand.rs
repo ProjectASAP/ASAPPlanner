@@ -8,6 +8,7 @@
 //! to price once per request, as `computations` does.
 
 use super::analytical::AnalyticalCostError;
+use asap_types::ir::physical_export::PhysicalASAPDAGValidationError;
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::physical::{Lifetime, PhysicalProperties};
@@ -406,12 +407,15 @@ pub fn computations(
     let range_of = |query: usize| range_evaluations.get(query).copied().flatten();
     let mut materialized_nodes: HashMap<PhysicalASAPNodeId, MaterializedRunRate> = HashMap::new();
     for node in &dag.nodes {
-        let properties = node.physical_properties().map_err(|reason| {
-            AnalyticalCostError::InvalidPhysicalProperties {
-                node: node.id,
-                reason,
-            }
-        })?;
+        let properties =
+            PhysicalProperties::new(node.output_state.timing, node.lifetime).map_err(|reason| {
+                AnalyticalCostError::InvalidPhysicalDag(
+                    PhysicalASAPDAGValidationError::InvalidPhysicalProperties {
+                        node: node.id,
+                        reason,
+                    },
+                )
+            })?;
         if let Some(rate) = materialized_run_rate(properties) {
             materialized_nodes.insert(node.id, rate);
         }
@@ -719,7 +723,21 @@ mod tests {
                 ),
             ]);
         }
-        for properties in PhysicalProperties::every_valid() {
+        for properties in [ExecutionTiming::QueryTime, ExecutionTiming::IngestionTime]
+            .into_iter()
+            .flat_map(|timing| {
+                [
+                    Lifetime::None,
+                    Lifetime::OneEvaluation(Medium::Memory),
+                    Lifetime::OneEvaluation(Medium::Disk),
+                    Lifetime::AcrossEvaluations(Medium::Memory),
+                    Lifetime::AcrossEvaluations(Medium::Disk),
+                ]
+                .map(|lifetime| PhysicalProperties::new(timing, lifetime))
+            })
+            // Every valid state: the pairs `new` accepts.
+            .filter_map(Result::ok)
+        {
             let (_, rate) = expected
                 .iter()
                 .find(|(state, _)| *state == properties)

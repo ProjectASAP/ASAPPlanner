@@ -401,10 +401,6 @@ impl OptimizationPass for Stage1ToStage3Pass {
             roots,
             physical_properties,
         } = run.selected_plan.expect("a selection has a plan");
-        debug_assert!(
-            physical_properties.lists_every_node_of(&roots),
-            "the selected plan's physical properties list every node of its roots"
-        );
         let mut output = PlanOutput::new(Vec::new());
         for (entry_index, root) in roots.iter().enumerate() {
             match root {

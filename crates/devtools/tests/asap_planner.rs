@@ -1,6 +1,9 @@
 //! `asap_planner` writes valid stage documents: each stage's output over
 //! #509's examples and ad-hoc workloads, the deployment and cost inputs it
 //! plans with, and the inputs it refuses.
+use asap_types::ir::properties::ExecutionTiming;
+use asap_types::physical::Lifetime;
+use asap_types::physical::Medium;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -1604,8 +1607,13 @@ fn scans_projecting_different_labels_are_shared() {
                 data,
                 false,
                 &mut |_, readers, options| {
-                    let materialized = (readers.len() > 1)
-                        .then_some(PhysicalProperties::MATERIALIZED_IN_MEMORY_FOR_ONE_EVALUATION);
+                    let materialized = (readers.len() > 1).then_some(
+                        PhysicalProperties::new(
+                            ExecutionTiming::QueryTime,
+                            Lifetime::OneEvaluation(Medium::Memory),
+                        )
+                        .expect("a valid timing and lifetime"),
+                    );
                     options.iter().position(|option| *option == materialized)
                 },
             )

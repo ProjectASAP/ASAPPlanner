@@ -1095,6 +1095,28 @@ fn nodes_dag(nodes: &[&PhysicalASAPDAGNode]) -> PhysicalASAPDAG {
 fn window_read_through(
     path: &[&PhysicalASAPDAGNode],
 ) -> Result<ScanWindow, asap_cost::analytical::AnalyticalCostError> {
+    // A chain materialized across evaluations at query time builds only its
+    // newest pane per evaluation, so its scan reads one pane.
+    let materialized_across_evaluations_at_query_time = |node: &PhysicalASAPDAGNode| {
+        use ExecutionTiming::{IngestionTime, QueryTime};
+        let properties = PhysicalProperties::new(node.output_state.timing, node.lifetime)
+            .map_err(|reason| {
+                asap_cost::analytical::AnalyticalCostError::InvalidPhysicalDag(
+                    asap_types::ir::physical_export::PhysicalASAPDAGValidationError::InvalidPhysicalProperties {
+                        node: node.id,
+                        reason,
+                    },
+                )
+            })?;
+        Ok(match (properties.timing(), properties.lifetime()) {
+            (QueryTime, Lifetime::AcrossEvaluations(_)) => true,
+            (QueryTime, Lifetime::None | Lifetime::OneEvaluation(_))
+            | (IngestionTime, Lifetime::None | Lifetime::AcrossEvaluations(_)) => false,
+            (IngestionTime, Lifetime::OneEvaluation(_)) => {
+                unreachable!("rejected by PhysicalProperties::new")
+            }
+        })
+    };
     let mut end_offset_ms: i64 = 0;
     for node in path {
         let width_ms: u128 = match &node.payload {
@@ -1106,7 +1128,7 @@ fn window_read_through(
             Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                 tumbling_window_width_ms,
                 ..
-            }) if asap_cost::is_query_time_materialized_tumbling_window_chain(node)? => {
+            }) if materialized_across_evaluations_at_query_time(node)? => {
                 u128::from(*tumbling_window_width_ms)
             }
             Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {

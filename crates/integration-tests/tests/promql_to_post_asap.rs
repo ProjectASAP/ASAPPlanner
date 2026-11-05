@@ -10,9 +10,7 @@ use asap_types::stages::HowToComputeAggregateMeasure;
 use std::rc::Rc;
 
 use asap_integration_tests::fixtures::lower_promql;
-use asap_integration_tests::physical_export::{
-    at_ingestion_physical_asap_dag, physical_asap_dag, physical_properties_at_ingestion,
-};
+use asap_integration_tests::physical_export::{at_ingestion_physical_asap_dag, physical_asap_dag};
 use asap_integration_tests::planning::{
     logical_candidates, logical_candidates_ignoring_guarantees,
 };
@@ -642,7 +640,13 @@ fn nested_summary_explicitly_finalizes_exact_child_at_ingestion_time() {
         .expect("a KLL over the finalized Sum accumulator");
     // Timings are not stored on the plan: time it with its outer summary
     // maintained and read each node's timing.
-    let physical_properties = physical_properties_at_ingestion(&plan);
+    let physical_properties = asap_types::ir::apply_physical_properties(
+        &plan,
+        &asap_types::ir::PhysicalPropertiesAssignment::materialized_at_ingestion_where_allowed(
+            std::slice::from_ref(&plan),
+        ),
+    )
+    .unwrap();
     let Some(ASAPOp::SummaryEstimate { summary_input, .. }) = plan.asap() else {
         panic!("expected selected quantile summary");
     };

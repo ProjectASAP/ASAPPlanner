@@ -4,6 +4,7 @@
 //! whose module doc, "Cost model", describes the model), so Stage 3 computes
 //! no cost of its own.
 
+use asap_types::ir::physical_export::PhysicalASAPDAGValidationError;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::analytical::{
@@ -1656,7 +1657,7 @@ pub fn materialized_tumbling_window_chains(
 /// retained-window options (`retained_pane_options`) and
 /// [`tumbling_window_retention_ms`] cover both timings, since a chain materialized
 /// at either timing retains windows.
-pub fn is_query_time_materialized_tumbling_window_chain(
+fn is_query_time_materialized_tumbling_window_chain(
     node: &asap_types::ir::physical_export::PhysicalASAPDAGNode,
 ) -> Result<bool, AnalyticalCostError> {
     let chain = matches!(
@@ -1686,12 +1687,15 @@ pub fn is_query_time_materialized_tumbling_window_chain(
 fn timing_and_lifetime(
     node: &asap_types::ir::physical_export::PhysicalASAPDAGNode,
 ) -> Result<(ExecutionTiming, Lifetime), AnalyticalCostError> {
-    let properties: PhysicalProperties = node.physical_properties().map_err(|reason| {
-        AnalyticalCostError::InvalidPhysicalProperties {
-            node: node.id,
-            reason,
-        }
-    })?;
+    let properties: PhysicalProperties =
+        PhysicalProperties::new(node.output_state.timing, node.lifetime).map_err(|reason| {
+            AnalyticalCostError::InvalidPhysicalDag(
+                PhysicalASAPDAGValidationError::InvalidPhysicalProperties {
+                    node: node.id,
+                    reason,
+                },
+            )
+        })?;
     Ok((properties.timing(), properties.lifetime()))
 }
 

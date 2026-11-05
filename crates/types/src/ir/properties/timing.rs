@@ -63,9 +63,9 @@ use crate::ir::properties::execution_data_state::{
     DataPrimitive, ExecutionDataState, ExecutionDataStateError, ExecutionTiming,
 };
 use crate::ir::schema::{DataType, FieldDataType, Schema};
-use crate::physical::{satisfies_physical, Evaluation, PhysicalProperties, PhysicalRequirement};
-#[cfg(test)]
-use crate::physical::{Lifetime, Medium};
+use crate::physical::{
+    satisfies_physical, Evaluation, Lifetime, Medium, PhysicalProperties, PhysicalRequirement,
+};
 
 /// The physical properties of operator nodes, by node identity (#509
 /// §Materialization: "Materialization decides, for each sub-DAG, whether its
@@ -139,30 +139,6 @@ impl PhysicalPropertiesAssignment {
             .map(|(_, properties)| *properties)
     }
 
-    /// Whether the assignment lists every node reachable from `roots`, as a
-    /// completed assignment ([`apply_physical_properties_to_roots`]) does.
-    pub fn lists_every_node_of(&self, roots: &[QueryRoot]) -> bool {
-        fn visit(
-            node: &OperatorNode,
-            assignment: &PhysicalPropertiesAssignment,
-            visited: &mut std::collections::HashSet<*const OperatorNode>,
-        ) -> bool {
-            if !visited.insert(node as *const OperatorNode) {
-                return true;
-            }
-            assignment.get(node).is_some()
-                && node
-                    .children()
-                    .iter()
-                    .all(|child| visit(child, assignment, visited))
-        }
-        let mut visited = std::collections::HashSet::new();
-        roots
-            .iter()
-            .flat_map(QueryRoot::operator_refs)
-            .all(|node| visit(node, self, &mut visited))
-    }
-
     /// Every summary build and `MaintainPopulation` reachable from `roots`
     /// materialized in memory at ingestion time where the DAG allows it: not under a
     /// filter, and with nothing below it that can only run at query time.
@@ -188,7 +164,11 @@ impl PhysicalPropertiesAssignment {
             {
                 assignment.set(
                     node,
-                    PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+                    PhysicalProperties::new(
+                        ExecutionTiming::IngestionTime,
+                        Lifetime::AcrossEvaluations(Medium::Memory),
+                    )
+                    .expect("a valid timing and lifetime"),
                 );
             }
         }
@@ -447,9 +427,10 @@ fn placement(
     // A summary build that is not materialized runs at query time.
     Ok(
         if runs_at_query_time_only(node) || is_materializable_state_output(&node.operator) {
-            PhysicalProperties::NOT_MATERIALIZED_AT_QUERY_TIME
+            PhysicalProperties::new(ExecutionTiming::QueryTime, Lifetime::None)
+                .expect("a valid timing and lifetime")
         } else {
-            PhysicalProperties::not_materialized_at(consumer)
+            PhysicalProperties::new(consumer, Lifetime::None).expect("a valid timing and lifetime")
         },
     )
 }
@@ -868,10 +849,10 @@ fn per_series_rows(node: &OperatorNode) -> Option<&OperatorNode> {
     }
 }
 
-/// r^phys of a reader at `timing` that reads its input's output in the same
+/// r^phys of a consumer at `timing` that reads its input's output in the same
 /// evaluation (or ingestion work), as every edge of the timing pass does.
 fn read_in_the_same_evaluation(timing: ExecutionTiming) -> PhysicalRequirement {
-    PhysicalRequirement::new(timing, Evaluation::Same)
+    PhysicalRequirement::new(timing, Evaluation::Same, None)
         .expect("a same-evaluation read is valid at either timing")
 }
 
@@ -976,7 +957,11 @@ mod tests {
     fn fixed_at_ingestion(nodes: &[&Rc<OperatorNode>]) -> PhysicalPropertiesAssignment {
         let mut assignment = PhysicalPropertiesAssignment::default();
         for node in nodes {
-            assignment.set(node, PhysicalProperties::NOT_MATERIALIZED_AT_INGESTION);
+            assignment.set(
+                node,
+                PhysicalProperties::new(ExecutionTiming::IngestionTime, Lifetime::None)
+                    .expect("a valid timing and lifetime"),
+            );
         }
         assignment
     }
@@ -992,7 +977,11 @@ mod tests {
             std::slice::from_ref(root),
         );
         for node in fixed {
-            assignment.set(node, PhysicalProperties::NOT_MATERIALIZED_AT_INGESTION);
+            assignment.set(
+                node,
+                PhysicalProperties::new(ExecutionTiming::IngestionTime, Lifetime::None)
+                    .expect("a valid timing and lifetime"),
+            );
         }
         apply_physical_properties(root, &assignment)
     }
@@ -1080,7 +1069,11 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &outer,
-            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
         );
         assert_eq!(
             apply_physical_properties(&estimate(outer), &assignment).err(),
@@ -1090,12 +1083,20 @@ mod tests {
         );
         assignment.set(
             &inner,
-            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
         );
         let outer = agg(Rc::clone(&inner), kll());
         assignment.set(
             &outer,
-            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
         );
         let physical_properties =
             apply_physical_properties(&estimate(Rc::clone(&outer)), &assignment).unwrap();
@@ -1251,12 +1252,23 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &node,
-            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
         );
-        assignment.set(&node, PhysicalProperties::NOT_MATERIALIZED_AT_QUERY_TIME);
+        assignment.set(
+            &node,
+            PhysicalProperties::new(ExecutionTiming::QueryTime, Lifetime::None)
+                .expect("a valid timing and lifetime"),
+        );
         assert_eq!(
             assignment.get(&node),
-            Some(PhysicalProperties::NOT_MATERIALIZED_AT_QUERY_TIME)
+            Some(
+                PhysicalProperties::new(ExecutionTiming::QueryTime, Lifetime::None)
+                    .expect("a valid timing and lifetime")
+            )
         );
     }
 
@@ -1270,7 +1282,11 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &tumbling_windows,
-            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
         );
         let physical_properties = apply_physical_properties(&root, &assignment).unwrap();
         assert_eq!(
@@ -1294,7 +1310,11 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &over_evaluation,
-            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
         );
         assert_eq!(
             apply_physical_properties(&over_evaluation, &assignment).err(),
@@ -1341,7 +1361,11 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &filtered,
-            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
         );
         assert_eq!(
             apply_physical_properties(&estimate(Rc::clone(&filtered)), &assignment).err(),
@@ -1409,7 +1433,11 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &agg(scan(), kll()),
-            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
         );
         let text = format!("{assignment:?}");
         assert!(text.contains("SummaryAgg@"), "{text}");
@@ -1436,7 +1464,11 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &rows,
-            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
         );
         let physical_properties = apply_physical_properties(&summary, &assignment).unwrap();
         assert_eq!(
@@ -1468,7 +1500,11 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &state,
-            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
         );
         let physical_properties = apply_physical_properties(&summary, &assignment).unwrap();
         assert_eq!(
@@ -1490,7 +1526,11 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &root,
-            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
         );
         let physical_properties = apply_physical_properties(&root, &assignment).unwrap();
         assert_eq!(
@@ -1507,11 +1547,19 @@ mod tests {
         let mut assignment = PhysicalPropertiesAssignment::default();
         assignment.set(
             &state,
-            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
         );
         assignment.set(
             &root,
-            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+            PhysicalProperties::new(
+                ExecutionTiming::IngestionTime,
+                Lifetime::AcrossEvaluations(Medium::Memory),
+            )
+            .expect("a valid timing and lifetime"),
         );
         let physical_properties = apply_physical_properties(&root, &assignment).unwrap();
         assert_eq!(
