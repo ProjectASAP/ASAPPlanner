@@ -31,7 +31,7 @@ This page defines the memo's data structures in the terms of the optimization pr
 | $\Pi$, $V_\Pi$ | selected physical ASAP DAG and its node set; $\operatorname{Cost}(\Pi) = \sum_{v \in \mathcal C} w_v x_v$ |
 | **(#1207)** $\kappa$ | execution context of a candidate with $\ell_v$ = None: a query evaluation $\kappa_q$, an ingestion pipeline $I_r$, or a materialized candidate's computation $\kappa_m$ |
 | $g_c$ | error propagation function of consumer $c$: $\varepsilon_c \le g_c(\varepsilon_{c,1}, \dots, \varepsilon_{c,n})$ |
-| $\lambda_{q,c,i}$ | slope of the composed propagation functions from input $i$ of $c$ to query $q$'s result |
+| $\lambda_{q,c,i}$ | propagation factor of input $i$ of $c$ to query $q$'s result, read off $q$'s expression |
 | $\text{cap}_{c,i}$ | error cap of input $i$ of $c$: the smaller of $g_c$'s validity cap and the pruning cap |
 | **(#1207)** (K), (R), (L), budgets | accuracy at each query root, $\sum_u \lambda_{q,u}\varepsilon_u a_{q,u} \le \varepsilon_q$ and $\sum_u \delta_u a_{q,u} \le \delta_q$; retention $h_v$; latency; resource budgets |
 
@@ -112,11 +112,15 @@ Composing them from each query's root down gives the query's error, and the accu
 | $X + Y$, $X - Y$ (absolute error) | $\varepsilon_X + \varepsilon_Y$ | yes |
 | $X / Y$ (relative error) | $\dfrac{\varepsilon_X + \varepsilon_Y}{1 - \varepsilon_Y}$ | no |
 
-Row (K) is the composed $g$ made linear: $\lambda_{q,c,i}$ is its slope from input $i$ of $c$ to $q$'s result, so the weights sit on $(q, c, i)$. Failure probabilities add by a union bound and need no $g$.
+Each $g_c$ is a sum of its inputs' errors, each times a constant **propagation factor** $\lambda_{c,i}$: $g_c = \sum_i \lambda_{c,i}\,\varepsilon_{c,i}$ (for a non-linear $g_c$, within its validity cap, below). The factors come from the query expression itself: each operator and its arguments, e.g. `sum by` over $n$ series has factor $n$. No measurement or optimization is involved. A query's factor for input $i$ of $c$ multiplies the factors along the path in $q$'s expression from that input to $q$'s root, and adds over paths when the input reaches the root more than once:
+
+$$\lambda_{q,c,i} = \sum_{\text{paths } c = c_0 \to c_1 \to \dots \to c_m = \text{root of } q} \lambda_{c_0,i}\,\lambda_{c_1,i_1} \cdots \lambda_{c_m,i_m}.$$
+
+Row (K) is $\sum \lambda_{q,c,i}\,\varepsilon_u\,y \le \varepsilon_q$ with these factors, so the weights sit on $(q, c, i)$. Two queries reading one group through different expressions have different factors. Failure probabilities add by a union bound and need no factor.
 
 From $g_c$ come two caps on an input's error, both checked per edge as part of $r^{\log}_{c,i}$:
 
-1. **Validity cap: correctness, non-linear consumers only.** A non-linear $g_c$ is bounded by its linear form only in a region, e.g. $\varepsilon_Y \le$ cap for a ratio, where $\frac{\varepsilon_X+\varepsilon_Y}{1-\varepsilon_Y} \le \frac{1}{1-\text{cap}}(\varepsilon_X+\varepsilon_Y)$, so $\lambda = \frac{1}{1-\text{cap}}$ (1.11 for cap 0.1). Without the cap, row (K) could accept a plan whose true error is unbounded. A linear $g_c$ is exact everywhere and has no validity cap.
+1. **Validity cap: correctness, non-linear consumers only.** A non-linear $g_c$ is bounded by its linear form only in a region, e.g. $\varepsilon_Y \le$ cap for a ratio, where $\frac{\varepsilon_X+\varepsilon_Y}{1-\varepsilon_Y} \le \frac{1}{1-\text{cap}}(\varepsilon_X+\varepsilon_Y)$, so both factors are $\frac{1}{1-\text{cap}}$ (1.11 for cap 0.1). Without the cap, row (K) could accept a plan whose true error is unbounded. A linear $g_c$ is exact everywhere and has no validity cap.
 2. **Pruning cap: efficiency only, every consumer, linear ones included.** An input whose error alone breaks every target it could serve is in no feasible plan: $\lambda_{q,c,i}\,\varepsilon_u > \varepsilon_q$ for every query $q$ that may reach $c$. Removing such edges removes no feasible plan, since row (K) rejects them anyway; it keeps them out of $\mathcal E$ and the MILP. It is the per-edge form of Pass 1's "drop a $\boldsymbol\theta$ whose $\varepsilon$ alone exceeds every reading query's target", and prunes more because it uses each reader's own $\lambda$.
 
 $$\text{cap}_{c,i} = \min\Bigl(\text{validity cap of } g_c,\ \max_{q \text{ that may reach } c} \frac{\varepsilon_q}{\lambda_{q,c,i}}\Bigr), \qquad \alpha^{\log}_{u,c,i} = 0 \text{ when } \varepsilon_u > \text{cap}_{c,i}.$$
@@ -301,9 +305,10 @@ pub struct LogicalRequirement {
 /// α^log_{u,c,i}
 pub fn satisfies(producer: &LogicalProperties, requirement: &LogicalRequirement) -> bool;
 
-/// g_c linearized: λ per input and the validity cap (None when g_c is linear).
+/// g_c as propagation factors λ_{c,i}, read from the consumer's operator and
+/// arguments, and the validity cap (None when g_c is linear).
 /// Approved 2026-11-05.
-pub struct ErrorPropagation { pub slope_per_input: Vec<f64>, pub validity_cap: Option<f64> }
+pub struct ErrorPropagation { pub factor_per_input: Vec<f64>, pub validity_cap: Option<f64> }
 pub fn error_propagation(consumer: &Operator<MemoGroupId>) -> ErrorPropagation;
 ```
 
