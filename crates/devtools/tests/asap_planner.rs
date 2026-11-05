@@ -1604,13 +1604,13 @@ fn scans_projecting_different_labels_are_shared() {
                 data,
                 false,
                 &mut |_, readers, options| {
-                    let kept = (readers.len() > 1)
+                    let materialized = (readers.len() > 1)
                         .then_some(PhysicalProperties::MATERIALIZED_IN_MEMORY_FOR_ONE_EVALUATION);
-                    options.iter().position(|option| *option == kept)
+                    options.iter().position(|option| *option == materialized)
                 },
             )
             .unwrap()
-            .expect("a node read by several roots can be kept for the evaluation");
+            .expect("a node read by several roots can be materialized for the evaluation");
         let offered = asap_devtools::memo_pricing::reference_select(
             std::slice::from_ref(&physical),
             &entries,

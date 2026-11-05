@@ -53,7 +53,7 @@ decided by a `PhysicalPropertiesAssignment`, as the layer contract below states.
    a `PhysicalPropertiesAssignment`. `apply_physical_properties` writes every
    node's `ExecutionTiming` and `Lifetime`: a state materialized at ingestion time and
    all of its inputs run at ingestion time; readouts, other consumers, and the
-   other states run at query time. The default assignment keeps nothing; `PlanOutput::physical_asap_dag` applies it
+   other states run at query time. The default assignment materializes nothing; `PlanOutput::physical_asap_dag` applies it
    only to nodes the optimization pass left untimed (a pass's own timing, such
    as Stage 3's ingestion-time tumbling windows, is kept).
 3. **Physical compile** (executor) reads the plan's materialized views: each

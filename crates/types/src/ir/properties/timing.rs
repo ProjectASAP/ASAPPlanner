@@ -27,7 +27,7 @@
 //!
 //! A node whose timing a candidate builder fixed (e.g. the query-time
 //! `FinalizeExactAccumulator` of `finalize_query_candidate`) keeps that
-//! timing. An explicit assignment on it that agrees is kept; one that needs
+//! timing. An explicit assignment on it that agrees is used; one that needs
 //! the other timing is an error
 //! ([`ExecutionDataStateError::PhysicalPropertiesConflictWithFixedTiming`]).
 //! A root may be materialized at ingestion time across evaluations: the query reads
@@ -75,44 +75,50 @@ use crate::physical::{Lifetime, PhysicalProperties};
 /// output is materialized (by identity); any node may be assigned. A node without
 /// an assignment is not materialized: a summary build or `MaintainPopulation` then
 /// runs at query time, every other node when its consumer runs. `Default`
-/// keeps nothing.
+/// materializes nothing.
 ///
 /// The assignment keeps every assigned node alive, so a later allocation
 /// cannot reuse its address and match a stale entry.
 #[derive(Clone, Default)]
 pub struct PhysicalPropertiesAssignment {
-    kept: HashMap<*const OperatorNode, (Rc<OperatorNode>, PhysicalProperties)>,
+    materialized: HashMap<*const OperatorNode, (Rc<OperatorNode>, PhysicalProperties)>,
 }
 
 /// Each materialized node as its operator kind and address, not its whole sub-DAG.
 impl std::fmt::Debug for PhysicalPropertiesAssignment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let kept: Vec<_> = self
-            .kept
+        let materialized: Vec<_> = self
+            .materialized
             .iter()
             .map(|(ptr, (node, properties))| {
                 (format!("{}@{ptr:p}", node.operator.kind_name()), properties)
             })
             .collect();
         f.debug_struct("PhysicalPropertiesAssignment")
-            .field("kept", &kept)
+            .field("materialized", &materialized)
             .finish()
     }
 }
 
 impl PhysicalPropertiesAssignment {
-    /// Keep the output of the sub-DAG `node` produces with `materialized`'s timing
-    /// and lifetime. `materialized` must keep the output (lifetime not `None`).
-    pub fn set(&mut self, node: &Rc<OperatorNode>, kept: PhysicalProperties) {
-        debug_assert!(kept.lifetime().is_materialized(), "{kept:?} does not keep");
-        self.kept.insert(Rc::as_ptr(node), (Rc::clone(node), kept));
+    /// Materialize the output of the sub-DAG `node` produces with `materialized`'s
+    /// timing and lifetime. A `materialized` whose lifetime is `None` does not
+    /// materialize the output: it removes any assignment of `node`, so `node`
+    /// is not materialized, in debug and release builds alike.
+    pub fn set(&mut self, node: &Rc<OperatorNode>, materialized: PhysicalProperties) {
+        if materialized.lifetime().is_materialized() {
+            self.materialized
+                .insert(Rc::as_ptr(node), (Rc::clone(node), materialized));
+        } else {
+            self.materialized.remove(&Rc::as_ptr(node));
+        }
     }
 
     /// Give `copy` the assignment of `original`, if it has one: for a node
     /// rebuilt as a copy of another.
     pub fn copy_assignment(&mut self, original: &OperatorNode, copy: &Rc<OperatorNode>) {
-        if let Some(kept) = self.get(original) {
-            self.set(copy, kept);
+        if let Some(materialized) = self.get(original) {
+            self.set(copy, materialized);
         }
     }
 
@@ -156,9 +162,9 @@ impl PhysicalPropertiesAssignment {
 
     /// How `node` is materialized, if it is.
     fn get(&self, node: &OperatorNode) -> Option<PhysicalProperties> {
-        self.kept
+        self.materialized
             .get(&(node as *const OperatorNode))
-            .map(|(_, kept)| *kept)
+            .map(|(_, materialized)| *materialized)
     }
 
     /// How `node` is materialized, checked against what is below it:
@@ -170,21 +176,23 @@ impl PhysicalPropertiesAssignment {
         upstream_at_query_time: bool,
     ) -> Result<Option<PhysicalProperties>, ExecutionDataStateError> {
         match self.get(node) {
-            Some(kept)
-                if kept.timing() == ExecutionTiming::IngestionTime && is_filtered_build(node) =>
+            Some(materialized)
+                if materialized.timing() == ExecutionTiming::IngestionTime
+                    && is_filtered_build(node) =>
             {
                 Err(ExecutionDataStateError::FilteredSummaryAtIngestion {
                     operator: node.operator.kind_name(),
                 })
             }
-            Some(kept)
-                if kept.timing() == ExecutionTiming::IngestionTime && upstream_at_query_time =>
+            Some(materialized)
+                if materialized.timing() == ExecutionTiming::IngestionTime
+                    && upstream_at_query_time =>
             {
                 Err(ExecutionDataStateError::UpstreamNotAtIngestion {
                     operator: node.operator.kind_name(),
                 })
             }
-            kept => Ok(kept),
+            materialized => Ok(materialized),
         }
     }
 }
@@ -305,7 +313,7 @@ fn forces_query_time(
             match assignment.resolve(node, upstream) {
                 Ok(None) if !is_materializable_state_output(&node.operator) => upstream,
                 Ok(None) => true,
-                Ok(Some(kept)) => kept.timing() == ExecutionTiming::QueryTime,
+                Ok(Some(materialized)) => materialized.timing() == ExecutionTiming::QueryTime,
                 Err(_) => true,
             }
         }
@@ -390,7 +398,7 @@ pub fn apply_physical_properties_to_roots(
 /// `root` consumed at `root_timing`. For planning-time legality checks of a
 /// candidate before it is assembled into a workload DAG: a candidate must stay
 /// executable if materialization later puts its states at ingestion time.
-/// Nothing is kept.
+/// Nothing is materialized.
 #[cfg(any(test, feature = "test-support"))]
 pub fn validate_at_ingestion(
     root: &Rc<OperatorNode>,
@@ -419,7 +427,7 @@ pub fn planned_data_state(
         std::slice::from_ref(node),
     );
     let (timing, _) = placement(node, consumer, &assignment, &mut forced)
-        .expect("an assignment kept where allowed never fails");
+        .expect("an assignment materialized where allowed never fails");
     ExecutionDataState {
         timing,
         primitive: primitive(node),
@@ -454,29 +462,29 @@ fn placement(
             });
         }
         // An explicit assignment is never silently dropped: one that agrees
-        // with the fixed timing is kept, one that needs the other timing is
+        // with the fixed timing is used, one that needs the other timing is
         // an error.
         return match assignment.get(node) {
-            Some(kept) if kept.timing() != placed => Err(
+            Some(materialized) if materialized.timing() != placed => Err(
                 ExecutionDataStateError::PhysicalPropertiesConflictWithFixedTiming {
                     operator: node.operator.kind_name(),
                     fixed: placed,
-                    assigned: kept,
+                    assigned: materialized,
                 },
             ),
-            Some(kept) => Ok((placed, kept.lifetime())),
+            Some(materialized) => Ok((placed, materialized.lifetime())),
             None => Ok((placed, node.lifetime)),
         };
     }
     Ok(match &node.operator {
         Operator::ASAP(ASAPOp::SummaryEstimate { .. })
         | Operator::ASAP(ASAPOp::EvaluatePopulation { .. }) => match assignment.get(node) {
-            Some(kept) if kept.timing() == ExecutionTiming::IngestionTime => {
+            Some(materialized) if materialized.timing() == ExecutionTiming::IngestionTime => {
                 return Err(ExecutionDataStateError::UpstreamNotAtIngestion {
                     operator: node.operator.kind_name(),
                 })
             }
-            Some(kept) => (ExecutionTiming::QueryTime, kept.lifetime()),
+            Some(materialized) => (ExecutionTiming::QueryTime, materialized.lifetime()),
             None => (ExecutionTiming::QueryTime, Lifetime::None),
         },
         _ if is_materializable_state_output(&node.operator) || assignment.get(node).is_some() => {
@@ -487,7 +495,7 @@ fn placement(
                 }
                 // A summary build that is not materialized runs at query time.
                 None => (ExecutionTiming::QueryTime, Lifetime::None),
-                Some(kept) => (kept.timing(), kept.lifetime()),
+                Some(materialized) => (materialized.timing(), materialized.lifetime()),
             }
         }
         _ => (consumer, Lifetime::None),
@@ -1031,7 +1039,7 @@ mod tests {
 
     const MATERIALIZED_ACROSS: Lifetime = Lifetime::AcrossEvaluations(Medium::Memory);
 
-    fn kept(timing: ExecutionTiming, lifetime: Lifetime) -> PhysicalProperties {
+    fn properties(timing: ExecutionTiming, lifetime: Lifetime) -> PhysicalProperties {
         PhysicalProperties::new(timing, lifetime).unwrap()
     }
 
@@ -1071,7 +1079,7 @@ mod tests {
             ),
         ] {
             let mut assignment = PhysicalPropertiesAssignment::default();
-            assignment.set(&summary, kept(timing, lifetime));
+            assignment.set(&summary, properties(timing, lifetime));
             let root =
                 apply_physical_properties(&summary, &assignment, &mut NodeToTimedNodeCache::new())
                     .unwrap();
@@ -1249,6 +1257,22 @@ mod tests {
         );
     }
 
+    /// Setting a lifetime `None` does not materialize the node, in release
+    /// builds too: it removes the node's assignment.
+    #[test]
+    fn setting_a_lifetime_none_removes_the_assignment() {
+        let node = max(scan());
+        let mut assignment = PhysicalPropertiesAssignment::default();
+        assignment.set(
+            &node,
+            PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION,
+        );
+        assignment.set(&node, PhysicalProperties::NOT_MATERIALIZED_AT_QUERY_TIME);
+        assert_eq!(assignment.get(&node), None);
+        assignment.set(&node, PhysicalProperties::NOT_MATERIALIZED_AT_INGESTION);
+        assert_eq!(assignment.get(&node), None);
+    }
+
     /// Any node may be materialized, not only a summary state: stored rows
     /// at ingestion time are read by a query-time consumer, and a node that
     /// can only run at query time cannot be stored at ingestion time.
@@ -1377,7 +1401,7 @@ mod tests {
         );
         let stored = Lifetime::OneEvaluation(Medium::Disk);
         let mut assignment = PhysicalPropertiesAssignment::default();
-        assignment.set(&read, kept(ExecutionTiming::QueryTime, stored));
+        assignment.set(&read, properties(ExecutionTiming::QueryTime, stored));
         let timed = apply_physical_properties(&read, &assignment, &mut NodeToTimedNodeCache::new())
             .unwrap();
         assert_eq!(timed.timing, Some(ExecutionTiming::QueryTime));
@@ -1426,7 +1450,7 @@ mod tests {
     fn ingestion_fixed_node_rejects_mat_at_query() {
         let fixed = placed_at_ingestion(max(scan()));
         let root = max(Rc::clone(&fixed));
-        let at_query = kept(
+        let at_query = properties(
             ExecutionTiming::QueryTime,
             Lifetime::OneEvaluation(Medium::Memory),
         );

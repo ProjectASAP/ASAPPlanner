@@ -93,7 +93,7 @@ impl Operator {
 /// at construction and retained. `guarantee` is `None` until accuracy
 /// assessment establishes one (`None` never means exact). `timing` is `None`
 /// until a physical properties assignment is applied; export rejects an executable
-/// node without one. `lifetime` is how long that assignment keeps this
+/// node without one. `lifetime` is how long that assignment materializes this
 /// node's output (`None` until then, and for every node whose output is not
 /// materialized); with `timing` it is the node's [`crate::physical::PhysicalProperties`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

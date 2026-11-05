@@ -213,9 +213,9 @@ fn stage2_physical_asap_optimization_monthly_materialized_output_covers_its_cons
 
 // ── Pattern A ────────────────────────────────────────────────────────────
 
-/// The shared EH candidate yields A1 (query time, kept), A2 (ingestion time) and A3 (not materialized).
+/// The shared EH candidate yields A1 (query time, materialized across evaluations), A2 (ingestion time) and A3 (not materialized).
 #[test]
-#[ignore = "needs Pass 2 window segments shared across queries (#628, #634); Stage 2 keeping outputs for one evaluation (OneEvaluation) is in place"]
+#[ignore = "needs Pass 2 window segments shared across queries (#628, #634); Stage 2 materializing outputs for one evaluation (OneEvaluation) is in place"]
 fn stage2_physical_asap_optimization_a_shared_eh_has_three_physical_properties_options() {
     let found: BTreeSet<_> = eh_options(&run_promql(&once())).into_keys().collect();
     assert_eq!(
@@ -230,7 +230,7 @@ fn stage2_physical_asap_optimization_a_shared_eh_has_three_physical_properties_o
 
 /// With data at rest, A2 is not generated; A1 and A3 remain.
 #[test]
-#[ignore = "needs Pass 2 window segments shared across queries (#628, #634); Stage 2 keeping outputs for one evaluation (OneEvaluation) is in place"]
+#[ignore = "needs Pass 2 window segments shared across queries (#628, #634); Stage 2 materializing outputs for one evaluation (OneEvaluation) is in place"]
 fn stage2_physical_asap_optimization_a_at_rest_drops_the_ingestion_time_option() {
     let found: BTreeSet<_> = eh_options(&run_promql(&at_rest())).into_keys().collect();
     assert_eq!(
@@ -241,7 +241,7 @@ fn stage2_physical_asap_optimization_a_at_rest_drops_the_ingestion_time_option()
 
 /// A materialized shared EH is one build node read by all five queries, charged once.
 #[test]
-#[ignore = "needs Pass 2 window segments shared across queries (#628, #634); Stage 2 keeping outputs for one evaluation (OneEvaluation) is in place"]
+#[ignore = "needs Pass 2 window segments shared across queries (#628, #634); Stage 2 materializing outputs for one evaluation (OneEvaluation) is in place"]
 fn stage2_physical_asap_optimization_a_materialized_eh_is_built_once_for_all_consumers() {
     let run = run_promql(&once());
     for (m, (id, build)) in eh_options(&run) {
@@ -271,7 +271,7 @@ fn stage2_physical_asap_optimization_a_materialized_eh_is_built_once_for_all_con
 /// not-materialized node once per consuming query), so it costs more than A1,
 /// which builds it once.
 #[test]
-#[ignore = "needs Pass 2 window segments shared across queries (#628, #634); Stage 2 keeping outputs for one evaluation (OneEvaluation) is in place"]
+#[ignore = "needs Pass 2 window segments shared across queries (#628, #634); Stage 2 materializing outputs for one evaluation (OneEvaluation) is in place"]
 fn stage3_plan_selection_a_rebuilding_per_query_costs_more_than_building_once() {
     let run = run_promql(&once());
     let options = eh_options(&run);
@@ -289,7 +289,7 @@ fn stage3_plan_selection_a_rebuilding_per_query_costs_more_than_building_once() 
 
 /// As given (run once, ad hoc), A1 is the cheapest of the three: A2 maintains years of history for one batch.
 #[test]
-#[ignore = "needs Pass 2 window segments shared across queries (#628, #634); Stage 2 keeping outputs for one evaluation (OneEvaluation) is in place"]
+#[ignore = "needs Pass 2 window segments shared across queries (#628, #634); Stage 2 materializing outputs for one evaluation (OneEvaluation) is in place"]
 fn stage3_plan_selection_a_once_adhoc_prefers_the_query_time_eh() {
     let run = run_promql(&once());
     let options = eh_options(&run);
@@ -301,7 +301,7 @@ fn stage3_plan_selection_a_once_adhoc_prefers_the_query_time_eh() {
 
 /// Repeated monthly and predictable, A2's maintenance is shared by many batches, so A2 gains on A1.
 #[test]
-#[ignore = "needs Pass 2 window segments shared across queries (#628, #634); Stage 2 keeping outputs for one evaluation (OneEvaluation) is in place"]
+#[ignore = "needs Pass 2 window segments shared across queries (#628, #634); Stage 2 materializing outputs for one evaluation (OneEvaluation) is in place"]
 fn stage3_plan_selection_a_monthly_amortizes_ingestion_time_maintenance() {
     let ratio = |workload: PlanningWorkload| {
         let run = run_promql(&workload);
@@ -324,7 +324,7 @@ fn keeping_query_time_results() -> DeploymentCapabilities {
     }
 }
 
-/// The 1-min tumbling KLL candidate yields B1 (ingestion time), B2 (not materialized) and B3 (query time, kept).
+/// The 1-min tumbling KLL candidate yields B1 (ingestion time), B2 (not materialized) and B3 (query time, materialized across evaluations).
 #[test]
 fn stage2_physical_asap_optimization_b_tumbling_kll_has_three_physical_properties_options() {
     let run = run_pattern_b_fixture(

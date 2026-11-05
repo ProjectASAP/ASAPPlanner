@@ -71,7 +71,7 @@ pub struct PhysicalASAPDAGNode {
     pub payload: PhysicalASAPOperatorPayload,
     /// Phase is a placement choice for every operator, independent of payload kind.
     pub output_state: ExecutionDataState,
-    /// How long and where the deployment keeps this node's output: the
+    /// How long and where the deployment materializes this node's output: the
     /// lifetime the physical properties assignment chose for the sub-DAG this
     /// node produces. Any node may be materialized (#509 §Materialization); a node
     /// with no assignment has lifetime `None`. With `output_state.timing` it
@@ -79,7 +79,7 @@ pub struct PhysicalASAPDAGNode {
     pub lifetime: Lifetime,
     pub output_schema: Schema,
     pub guarantee: Option<AccuracyGuarantee>,
-    /// For a materialized view (a node whose lifetime keeps its output
+    /// For a materialized view (a node whose lifetime materializes its output
     /// across evaluations), how far back from the newest evaluation
     /// time its output must stay available once refreshed; for a query-time
     /// `Scan`, how far back its source's rows must stay available (`None`
@@ -189,7 +189,9 @@ pub enum PhysicalASAPDAGValidationError {
     },
     /// A summary build (or maintained population) that is not materialized but does
     /// not run at query time: a planner bug.
-    #[error("node {node:?} is a summary build that is not kept but does not run at query time")]
+    #[error(
+        "node {node:?} is a summary build that is not materialized but does not run at query time"
+    )]
     UnmaterializedSummaryBuildNotAtQueryTime { node: PhysicalASAPNodeId },
     #[error("ingestion node {consumer:?} depends on query node {producer:?}")]
     QueryDependencyInIngestion {
@@ -423,7 +425,7 @@ impl PhysicalASAPDAG {
     /// - a `TimeRange(w)`, range or instant: `(T - s - w, T - s]`;
     /// - a `SummaryTumblingWindowChain` of `n` tumbling windows of width `w`: its whole window `(T - s -
     ///   n·w, T - s]`, or only its newest tumbling window `(T - s - w, T - s]` for a
-    ///   chain in `materialized_chains` (kept across evaluations, so each
+    ///   chain in `materialized_chains` (materialized across evaluations, so each
     ///   evaluation builds one tumbling window).
     ///
     /// `Unbounded` when a root, any other reader, or a shift with an `@`

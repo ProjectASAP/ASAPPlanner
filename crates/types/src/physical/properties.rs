@@ -7,7 +7,7 @@
 //! | query | `OneEvaluation` | once per evaluation; its readers in that evaluation share it |
 //! | query | `AcrossEvaluations` | at query time, materialized for later evaluations (a tumbling-window chain that builds its newest window each evaluation) |
 //! | ingestion | `None` | as data arrives, inside the ingestion work that reads it |
-//! | ingestion | `AcrossEvaluations` | as data arrives; kept until a query reads it |
+//! | ingestion | `AcrossEvaluations` | as data arrives; materialized until a query reads it |
 //! | ingestion | `OneEvaluation` | invalid: there is no evaluation at ingestion time |
 
 use crate::ir::properties::ExecutionTiming;
@@ -27,9 +27,9 @@ pub enum Lifetime {
     /// Discarded after its reader's execution completes.
     #[default]
     None,
-    /// Kept until every reader within one evaluation finishes.
+    /// Materialized until every reader within one evaluation finishes.
     OneEvaluation(Medium),
-    /// Kept across evaluations, so later evaluations reuse it.
+    /// Materialized across evaluations, so later evaluations reuse it.
     AcrossEvaluations(Medium),
 }
 
@@ -40,7 +40,7 @@ impl Lifetime {
         self != Self::None
     }
 
-    /// Whether the output is kept across evaluations: a materialized view
+    /// Whether the output is materialized across evaluations: a materialized view
     /// that later evaluations reuse.
     pub fn is_across_evaluations(self) -> bool {
         matches!(self, Self::AcrossEvaluations(_))
@@ -50,7 +50,7 @@ impl Lifetime {
 /// A timing and a lifetime that cannot go together.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum InvalidPhysicalProperties {
-    #[error("an ingestion-time output cannot be kept for one evaluation: there is no evaluation at ingestion time")]
+    #[error("an ingestion-time output cannot be materialized for one evaluation: there is no evaluation at ingestion time")]
     OneEvaluationAtIngestion,
 }
 

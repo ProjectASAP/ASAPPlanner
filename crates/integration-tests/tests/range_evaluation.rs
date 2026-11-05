@@ -217,20 +217,30 @@ fn stage3_plan_selection_prices_61_evaluations_per_dashboard_request() {
     for id in ["P1", "P2", "P3"] {
         assert!(close(cost(&range, id), 61.0 * cost(&none, id)), "{id}");
     }
-    // B3: 4 → 64 tumbling windows kept between requests; B1: 6 → 66 tumbling windows kept.
-    let keeps = |run: &Run, id: &str, bytes: &str| {
+    // B3: 4 → 64 tumbling windows materialized between requests; B1: 6 → 66.
+    let materializes = |run: &Run, id: &str, detail: &str| {
         assert!(
             run.selection.costs[id]
                 .per_node
                 .values()
-                .any(|n| n.detail.contains(&format!("; keeps {bytes} bytes"))),
-            "{id} keeps {bytes} bytes"
+                .any(|n| n.detail.contains(detail)),
+            "{id}: {detail}"
         )
     };
-    keeps(&none, "P3-m2", "3488000000");
-    keeps(&range, "P3-m2", "55808000000");
-    keeps(&none, "P3-m1", "5232000000");
-    keeps(&range, "P3-m1", "57552000000");
+    // B3, a query-time chain materialized across evaluations.
+    materializes(
+        &none,
+        "P3-m2",
+        "; materializes 3488000000 bytes across evaluations",
+    );
+    materializes(
+        &range,
+        "P3-m2",
+        "; materializes 55808000000 bytes across evaluations",
+    );
+    // B1, an ingestion-time state.
+    materializes(&none, "P3-m1", "; keeps 5232000000 bytes");
+    materializes(&range, "P3-m1", "; keeps 57552000000 bytes");
     assert_eq!(range.selection.selected, "P2");
 }
 

@@ -394,7 +394,7 @@ pub fn computations(
     let mut rate_of_materialized = HashMap::new();
     for (&id, &properties) in &materialized_nodes {
         let at_ingestion = properties.timing() == ExecutionTiming::IngestionTime;
-        // A query-time chain kept across evaluations is built once per request.
+        // A query-time chain materialized across evaluations is built once per request.
         let per_request = !at_ingestion && properties.lifetime().is_across_evaluations();
         let rate = match at_ingestion {
             true => 1.0,

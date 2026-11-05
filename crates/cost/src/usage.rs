@@ -1130,7 +1130,7 @@ pub fn node_usage<'a>(
     // latency, or a materialized consumer's longest reader's, as a
     // OneEvaluation state is).
     let state = out.bytes.max(estimate.peak_memory_bytes());
-    let (kept, medium) = match (ingestion, node.lifetime, &node.payload) {
+    let (materialized_bytes, medium) = match (ingestion, node.lifetime, &node.payload) {
         (_, Lifetime::None, _) => {
             let working_memory_bytes = estimate.peak_memory_bytes();
             peak_memory_bytes = working_memory_bytes.saturating_mul(multiplier);
@@ -1139,7 +1139,7 @@ pub fn node_usage<'a>(
             }
             (0, Medium::Memory)
         }
-        // A tumbling-window chain kept across evaluations holds the tumbling windows its
+        // A tumbling-window chain materialized across evaluations holds the tumbling windows its
         // retention covers ([`tumbling_window_retention_ms`]: N, plus one per tumbling window
         // width of the readers' range-evaluation span), all but the
         // newest between evaluations and all while one runs.
@@ -1169,7 +1169,7 @@ pub fn node_usage<'a>(
                 }
                 Medium::Disk => disk_bytes = between,
             }
-            detail += &format!("; keeps {between} bytes across evaluations");
+            detail += &format!("; materializes {between} bytes across evaluations");
             (0, medium)
         }
         (_, Lifetime::OneEvaluation(medium), _) => {
@@ -1200,7 +1200,7 @@ pub fn node_usage<'a>(
                 medium,
             )
         }
-        // A whole state kept across evaluations: it and the one being built.
+        // A whole state materialized across evaluations: it and the one being built.
         (_, Lifetime::AcrossEvaluations(medium), _) => (
             state.checked_mul(2).ok_or(AnalyticalCostError::Overflow)?,
             medium,
@@ -1209,15 +1209,15 @@ pub fn node_usage<'a>(
     if ingestion && node.lifetime == Lifetime::AcrossEvaluations(Medium::Memory) {
         maintained = Some(state / tumbling_windows_of(node));
     }
-    if kept > 0 {
+    if materialized_bytes > 0 {
         match medium {
             Medium::Memory => {
-                average_memory_bytes = kept as f64;
-                peak_memory_bytes = kept;
+                average_memory_bytes = materialized_bytes as f64;
+                peak_memory_bytes = materialized_bytes;
             }
-            Medium::Disk => disk_bytes = kept,
+            Medium::Disk => disk_bytes = materialized_bytes,
         }
-        detail += &format!("; keeps {kept} bytes");
+        detail += &format!("; keeps {materialized_bytes} bytes");
     }
     if let Payload::NonASAP(NonASAPOp::Scan { source, .. }) = &node.payload {
         if !ingestion {
@@ -1599,7 +1599,7 @@ pub fn node_map(dag: &PhysicalASAPDAG) -> NodeMap<'_> {
 pub type NodeMap<'a> =
     HashMap<PhysicalASAPNodeId, &'a asap_types::ir::physical_export::PhysicalASAPDAGNode>;
 
-/// The query-time tumbling-window chains of `dag` kept across evaluations
+/// The query-time tumbling-window chains of `dag` materialized across evaluations
 /// (lifetime `AcrossEvaluations` at query time, which Stage 2 offers only when the
 /// deployment keeps query-time results and every reader builds one new
 /// tumbling window per evaluation). Each evaluation builds the newest tumbling window, and the

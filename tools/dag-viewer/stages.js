@@ -1079,7 +1079,7 @@ function materializedViewRows(doc) {
       definition: output.coverage.definition_id,
       kind: summary ? `${kind} · ${summary}` : kind,
       tumblingWindow,
-      refresh: output.refresh === 'at_ingestion' ? 'at ingestion' : 'on first read (kept across evaluations)',
+      refresh: output.refresh === 'at_ingestion' ? 'at ingestion' : 'on first read (materialized across evaluations)',
       inputs: `${output.inputs.raw_data_windows.length} raw-data window(s)` +
         (output.inputs.materialized_views.length ? `, views ${output.inputs.materialized_views.join(', ')}` : ''),
       retention: durationText(output.retention_ms),

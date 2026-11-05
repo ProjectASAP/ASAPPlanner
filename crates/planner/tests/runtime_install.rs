@@ -1579,8 +1579,8 @@ fn untime(
         ) if node.lifetime.is_materialized() => node.physical_properties().map(Result::unwrap),
         _ => None,
     };
-    if let Some(kept) = store(node).or(own) {
-        assignment.set(&copy, kept);
+    if let Some(materialized) = store(node).or(own) {
+        assignment.set(&copy, materialized);
     }
     untimed.insert(Rc::as_ptr(node), Rc::clone(&copy));
     copy
@@ -1592,8 +1592,8 @@ fn summaries_at_ingestion(node: &OperatorNode) -> Option<PhysicalProperties> {
         .then(|| PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_INGESTION)
 }
 
-/// Every `SummaryMerge` built at query time and kept across evaluations.
-fn merges_kept(node: &OperatorNode) -> Option<PhysicalProperties> {
+/// Every `SummaryMerge` built at query time and materialized across evaluations.
+fn merges_materialized(node: &OperatorNode) -> Option<PhysicalProperties> {
     matches!(node.asap(), Some(ASAPOp::SummaryMerge { .. }))
         .then(|| PhysicalProperties::MATERIALIZED_IN_MEMORY_ACROSS_EVALUATIONS_AT_QUERY_TIME)
 }
@@ -1825,7 +1825,7 @@ async fn a_summary_across_series_from_per_series_summaries_is_listed_and_built()
 /// from the stored tumbling windows it answers as the reference, and a minute later
 /// only the newest tumbling window and the new merge are refreshed.
 #[tokio::test]
-async fn a_kept_sliding_window_merge_is_listed_and_built() {
+async fn a_materialized_sliding_window_merge_is_listed_and_built() {
     let capabilities = DeploymentCapabilities {
         query_time_results_retained: true,
         ..DeploymentCapabilities::default()
@@ -1843,7 +1843,7 @@ async fn a_kept_sliding_window_merge_is_listed_and_built() {
         .and_then(|data| data.sources.get_mut("m"))
         .unwrap();
     facts.sample_interval = Some(asap_types::workload::DurationMs(1_000));
-    let plan_json = forced_plan_json(&workload, &capabilities, merges_kept).await;
+    let plan_json = forced_plan_json(&workload, &capabilities, merges_materialized).await;
     let plan: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
     let views = plan.materialized_views().unwrap();
     let (merge, tumbling_windows) = views.split_last().unwrap();

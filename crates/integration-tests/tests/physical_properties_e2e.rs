@@ -204,7 +204,7 @@ fn values_1_to_100(schema: &SchemaRef, _metric: &str) -> Batch {
 }
 
 /// Materializing it at ingestion time puts the quantile's state in a materialized view;
-/// Not keeping it has no view and reads the raw source at
+/// Not materializing it has no view and reads the raw source at
 /// query time; both answer alike.
 #[test]
 fn physical_properties_decide_precompute_contents() {

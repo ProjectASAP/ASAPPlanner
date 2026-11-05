@@ -34,7 +34,7 @@ pub struct OperatorNode {
     pub schema: Schema,                       // output schema, derived at construction
     pub guarantee: Option<AccuracyGuarantee>, // None until accuracy assessment establishes one
     pub timing: Option<ExecutionTiming>,      // None until a physical properties assignment is applied
-    pub lifetime: Lifetime,                   // None until Stage 2 keeps the node's output
+    pub lifetime: Lifetime,                   // None until Stage 2 materializes the node's output
 }
 ```
 

@@ -151,7 +151,9 @@ pub fn physical_label(logical: &str, candidate: &PhysicalWorkloadPlan) -> String
             (_, Lifetime::None) => continue,
             (ExecutionTiming::IngestionTime, _) => "ingestion time",
             (ExecutionTiming::QueryTime, Lifetime::OneEvaluation(_)) => "query time, shared",
-            (ExecutionTiming::QueryTime, Lifetime::AcrossEvaluations(_)) => "query time, kept",
+            (ExecutionTiming::QueryTime, Lifetime::AcrossEvaluations(_)) => {
+                "query time, materialized across evaluations"
+            }
         };
         let label = match &node.payload {
             // Name the chain: chains of one family and tumbling-window count differ by

@@ -2424,10 +2424,10 @@ mod tests {
     }
 
     /// `candidates` with every state node (a summary build or an exact
-    /// aggregate) kept across evaluations, so selection charges its materialized
-    /// bytes every second (a state kept for one evaluation is held only for
+    /// aggregate) materialized across evaluations, so selection charges its materialized
+    /// bytes every second (a state materialized for one evaluation is held only for
     /// that evaluation).
-    fn keeping_state(mut candidates: Vec<PhysicalWorkloadPlan>) -> Vec<PhysicalWorkloadPlan> {
+    fn materializing_state(mut candidates: Vec<PhysicalWorkloadPlan>) -> Vec<PhysicalWorkloadPlan> {
         for candidate in &mut candidates {
             for node in &mut candidate.dag.nodes {
                 if matches!(
@@ -2459,7 +2459,7 @@ mod tests {
             ("quantile by (job) (0.99, rate(x[5m]))", false),
         ] {
             let checked = target.clone().accuracy_metric(AccuracyMetric::Rank);
-            let candidates = keeping_state(all_candidates_sized(query, &target, &|roots| {
+            let candidates = materializing_state(all_candidates_sized(query, &target, &|roots| {
                 sized_as_pass1(&roots, std::slice::from_ref(&checked), &data)
             }));
             let selection = select_among_plans(
@@ -2472,7 +2472,7 @@ mod tests {
                 SelectionModels::builtin(),
             )
             .unwrap();
-            let kept_bytes = |sketch: bool| {
+            let materialized_bytes = |sketch: bool| {
                 let candidate = candidates
                     .iter()
                     .find(|c| {
@@ -2488,11 +2488,17 @@ mod tests {
             match large_groups {
                 true => {
                     assert!(has_summary_estimate(selected), "{query}: {selection:?}");
-                    assert!(kept_bytes(true) < kept_bytes(false), "{query}");
+                    assert!(
+                        materialized_bytes(true) < materialized_bytes(false),
+                        "{query}"
+                    );
                 }
                 false => {
                     assert!(!has_summary_estimate(selected), "{query}: {selection:?}");
-                    assert!(kept_bytes(true) >= kept_bytes(false), "{query}");
+                    assert!(
+                        materialized_bytes(true) >= materialized_bytes(false),
+                        "{query}"
+                    );
                 }
             }
         }
@@ -2537,7 +2543,8 @@ mod tests {
         let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
         let one_series = with_series(Some(1));
         for (data, sketch_wins) in [(data(), false), (one_series, true)] {
-            let candidates = keeping_state(all_candidates("distinct_over_time(x[5m])", &target));
+            let candidates =
+                materializing_state(all_candidates("distinct_over_time(x[5m])", &target));
             let selection = select_among_plans(
                 &candidates,
                 &[entry_with(
@@ -3421,7 +3428,7 @@ mod tests {
 
     /// `quantile_over_time(0.99, m[1m])` with its KLL candidate chosen, its
     /// state materialized with `materialized` (`None`: not materialized).
-    fn kll_dag(kept: Option<PhysicalProperties>) -> PhysicalASAPDAG {
+    fn kll_dag(materialized: Option<PhysicalProperties>) -> PhysicalASAPDAG {
         use asap_types::ir::{
             apply_physical_properties, NodeToTimedNodeCache, PhysicalPropertiesAssignment,
         };
@@ -3462,8 +3469,8 @@ mod tests {
             .find(|n| matches!(n.asap(), Some(ASAPOp::SummaryAgg { .. })))
             .expect("a KLL state");
         let mut assignment = PhysicalPropertiesAssignment::default();
-        if let Some(kept) = kept {
-            assignment.set(&state, kept);
+        if let Some(materialized) = materialized {
+            assignment.set(&state, materialized);
         }
         let timed =
             apply_physical_properties(root, &assignment, &mut NodeToTimedNodeCache::new()).unwrap();
@@ -3597,13 +3604,13 @@ mod tests {
     /// and dropped within a query (not materialized) is held while that
     /// query runs too, and charged the same way.
     #[test]
-    fn kept_state_is_charged_per_byte_per_second() {
+    fn materialized_state_is_charged_per_byte_per_second() {
         let cost = |dag: &PhysicalASAPDAG, w| {
             let settings = unit_costs(|c| c.cost_per_memory_byte_second = w);
             price(dag, &recurrences(1), &data(), &settings).unwrap()
         };
-        for kept in [AT_INGESTION, AT_QUERY, None] {
-            let dag = kll_dag(kept);
+        for materialized in [AT_INGESTION, AT_QUERY, None] {
+            let dag = kll_dag(materialized);
             let build = node_of(&dag, is_build);
             let (with, without) = (cost(&dag, 1.25e-7), cost(&dag, 0.0));
             let Payload::ASAP(ASAPOp::SummaryAgg { family, .. }) =
@@ -3615,7 +3622,7 @@ mod tests {
             // each sees its series' 12 samples: the 120 000 rows of its
             // source's 1-min window (data()'s 10 000 rows per second over its
             // five sources); at ingestion time its samples are unknown.
-            let samples = if kept == AT_INGESTION {
+            let samples = if materialized == AT_INGESTION {
                 StateInputRows::UNKNOWN
             } else {
                 StateInputRows {
@@ -3624,7 +3631,7 @@ mod tests {
                 }
             };
             let state = 10_000.0 * summary_shape(family, samples).1 as f64;
-            let byte_seconds = if kept == AT_INGESTION {
+            let byte_seconds = if materialized == AT_INGESTION {
                 2.0 * state
             } else {
                 let evaluation_s = with.usage.latency_per_query[0].total_ms() / 1_000.0;
@@ -3637,7 +3644,7 @@ mod tests {
                 - without.per_node[&build].cost_per_second.unwrap();
             assert!(
                 close(term, 1.25e-7 * byte_seconds),
-                "{kept:?}: {term} vs {}",
+                "{materialized:?}: {term} vs {}",
                 1.25e-7 * byte_seconds
             );
             // The candidate's memory term covers every node's held memory,
@@ -3683,8 +3690,8 @@ mod tests {
             (query.to_string(), dag)
         })
         .collect();
-        for kept in [AT_INGESTION, AT_QUERY, None] {
-            dags.push((format!("{kept:?}"), kll_dag(kept)));
+        for materialized in [AT_INGESTION, AT_QUERY, None] {
+            dags.push((format!("{materialized:?}"), kll_dag(materialized)));
         }
         for (name, dag) in &dags {
             let (term, usage) = memory_term(dag);
@@ -3708,8 +3715,8 @@ mod tests {
     /// keeps: a materialized exact quantile keeps every value of its group,
     /// a sum one value per group.
     #[test]
-    fn kept_exact_state_is_charged_by_the_values_it_keeps() {
-        let kept = |query: &str| {
+    fn materialized_exact_state_is_charged_by_the_values_it_holds() {
+        let materialized_bytes = |query: &str| {
             let root = lower_promql(query, AccuracyTarget::exact());
             let mut dag =
                 optimize_physical_asap("L", &[QueryRoot::Operator(root)], &[], &data(), false)
@@ -3738,8 +3745,8 @@ mod tests {
             (cost(1.0) - cost(0.0)).round() as u64
         };
         let (quantile, sum) = (
-            kept("quantile by (job) (0.99, m)"),
-            kept("sum by (job) (m)"),
+            materialized_bytes("quantile by (job) (0.99, m)"),
+            materialized_bytes("sum by (job) (m)"),
         );
         assert!(quantile > 10 * sum, "{quantile} vs {sum}");
     }
@@ -4071,15 +4078,15 @@ mod tests {
         assert_eq!(*b3, with_chain(Lifetime::AcrossEvaluations(Medium::Memory)));
         let recurrence = [repeating(MINUTE)];
         let settings = CostInputs::default();
-        let kept = price(b3, &recurrence, &arriving(10_000.0), &settings).unwrap();
+        let materialized = price(b3, &recurrence, &arriving(10_000.0), &settings).unwrap();
         let rebuilt = price(b2, &recurrence, &arriving(10_000.0), &settings).unwrap();
         let scan = node_of(b3, is_scan);
-        assert_eq!(scanned_samples(&kept, scan), 10_000 * 60);
+        assert_eq!(scanned_samples(&materialized, scan), 10_000 * 60);
         assert_eq!(
             scanned_samples(&rebuilt, node_of(b2, is_scan)),
             10_000 * 300
         );
-        assert_eq!(kept.usage.disk_bytes * 5, rebuilt.usage.disk_bytes);
+        assert_eq!(materialized.usage.disk_bytes * 5, rebuilt.usage.disk_bytes);
         let Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { family, .. }) =
             &b3.nodes.iter().find(|n| n.id == chain).unwrap().payload
         else {
@@ -4092,29 +4099,29 @@ mod tests {
             non_negative: false,
         };
         let (_, state_bytes) = summary_shape(family, samples);
-        let chain_cost = &kept.per_node[&chain];
+        let chain_cost = &materialized.per_node[&chain];
         assert!(chain_cost.detail.contains("; x 0.0167/s"), "{chain_cost:?}");
         // One state per series: arriving() declares 10 000.
         let between = 4 * 10_000 * state_bytes;
         assert!(chain_cost
             .detail
-            .contains(&format!("keeps {between} bytes across evaluations")));
-        // On disk, the same N − 1 older tumbling windows are kept.
+            .contains(&format!("materializes {between} bytes across evaluations")));
+        // On disk, the same N − 1 older tumbling windows are materialized.
         let on_disk = with_chain(Lifetime::AcrossEvaluations(Medium::Disk));
         let on_disk = price(&on_disk, &recurrence, &arriving(10_000.0), &settings).unwrap();
         assert_eq!(
             on_disk.usage.disk_bytes,
-            kept.usage.disk_bytes + between,
+            materialized.usage.disk_bytes + between,
             "{on_disk:?}"
         );
-        // Shared within one evaluation, nothing is kept between them.
+        // Shared within one evaluation, nothing is materialized between them.
         let shared = with_chain(Lifetime::OneEvaluation(Medium::Memory));
         let within_one = price(&shared, &recurrence, &arriving(10_000.0), &settings).unwrap();
         assert_eq!(scanned_samples(&within_one, scan), 10_000 * 300);
         assert!(!within_one.per_node[&chain]
             .detail
             .contains("across evaluations"));
-        assert!(within_one.usage.average_memory_bytes < kept.usage.average_memory_bytes);
+        assert!(within_one.usage.average_memory_bytes < materialized.usage.average_memory_bytes);
     }
 
     fn is_chain(payload: &Payload) -> bool {
@@ -4171,15 +4178,17 @@ mod tests {
         )
         .unwrap()
         .per_node[&chain];
-        let kept = 6 * 10_000 * state_bytes;
+        let materialized_bytes = 6 * 10_000 * state_bytes;
         assert!(
             close(
                 with_memory.cost_per_second.unwrap() - work.cost_per_second.unwrap(),
-                1.25e-7 * kept as f64
+                1.25e-7 * materialized_bytes as f64
             ),
             "{with_memory:?}"
         );
-        assert!(with_memory.detail.contains(&format!("keeps {kept} bytes")));
+        assert!(with_memory
+            .detail
+            .contains(&format!("keeps {materialized_bytes} bytes")));
     }
 
     /// The latency check (S6, sketch-bench cost model §5): a query's
@@ -5009,24 +5018,24 @@ mod tests {
         let workers = cost.usage.peak_cpu_cores - 1;
         assert!(workers > 1, "{workers}");
         // The chain keeps 6 tumbling windows (5 read and the one being built).
-        let kept: u64 = detail
+        let materialized_bytes: u64 = detail
             .split("; keeps ")
             .nth(1)
             .and_then(|rest| rest.split(' ').next())
             .and_then(|bytes| bytes.parse().ok())
             .unwrap_or_else(|| panic!("{detail}"));
         let copies = workers - 1;
-        let bytes = u64::from(copies) * (kept / 6);
+        let bytes = u64::from(copies) * (materialized_bytes / 6);
         assert!(
             detail.contains(&format!(
                 "; {copies} partial copies of its newest window, {bytes} bytes"
             )),
             "{detail}"
         );
-        // At the peak, not on average: the kept bytes are B1's only
+        // At the peak, not on average: the materialized bytes are B1's only
         // averaged memory beside negligible query-time holds.
-        assert!(cost.usage.peak_memory_bytes >= kept + bytes);
-        assert!(cost.usage.average_memory_bytes < (kept + bytes) as f64);
+        assert!(cost.usage.peak_memory_bytes >= materialized_bytes + bytes);
+        assert!(cost.usage.average_memory_bytes < (materialized_bytes + bytes) as f64);
     }
 
     /// The KLL build of a `quantile_over_time` candidate, with its sketch
@@ -5629,7 +5638,7 @@ mod tests {
     /// A measured `memory_bytes_per_state` sizes the state a build keeps,
     /// in place of the bytes the formulas derive from its parameters.
     #[test]
-    fn measured_state_bytes_size_the_kept_state() {
+    fn measured_state_bytes_size_the_materialized_state() {
         let candidates = tumbling_window_candidates(10_000.0);
         let maintained = &candidates[1];
         let kll = maintained

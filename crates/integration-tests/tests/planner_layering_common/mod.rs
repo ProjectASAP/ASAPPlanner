@@ -847,7 +847,7 @@ pub fn evaluation_interval_ms(workload: &PlanningWorkload, query: usize) -> Opti
 /// (`OneEvaluation` or `AcrossEvaluations`) or its storage medium.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Materializing {
-    /// Runs as data arrives; output kept until a query reads it.
+    /// Runs as data arrives; output materialized until a query reads it.
     MaterializedAtIngestion,
     /// Runs when a query first needs it; output reused by the other
     /// queries of the evaluation, or, as query-time `AcrossEvaluations`,
@@ -857,7 +857,7 @@ pub enum Materializing {
     NotMaterialized,
 }
 
-/// Whether physical ASAP-aware optimization keeps `node`'s output, and at
+/// Whether physical ASAP-aware optimization materializes `node`'s output, and at
 /// which timing (#667).
 pub fn materializing(p: &Physical, node: NodeId) -> Materializing {
     let n = p.dag().nodes.iter().find(|n| n.id == node).expect("node");

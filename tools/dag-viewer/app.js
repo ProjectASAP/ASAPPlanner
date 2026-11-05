@@ -352,9 +352,9 @@
     $('views-meta').innerHTML = selection.materialized_views_error
       ? `<span class="error">no installable plan: ${esc(selection.materialized_views_error)}</span>`
       : `<b>${count}</b> materialized view${count === 1 ? '' : 's'} in <b>${groups.length}</b> group${groups.length === 1 ? '' : 's'} of <b>${esc(selection.selected_candidate)}</b>` +
-        (count ? '' : ': nothing is kept across evaluations; every query computes at query time');
+        (count ? '' : ': nothing is materialized across evaluations; every query computes at query time');
     const tumblingWindowsCell = (g) => (g.tumblingWindows.length > 1
-      ? `<details><summary>${esc(g.tumblingWindows.length)} installed nodes</summary><ul>${g.tumblingWindows.map((p) => `<li>node ${esc(p.nodeId)} · ${esc(p.tumblingWindow)} · window ${esc(p.window)} · kept ${esc(p.retention)}</li>`).join('')}</ul></details>`
+      ? `<details><summary>${esc(g.tumblingWindows.length)} installed nodes</summary><ul>${g.tumblingWindows.map((p) => `<li>node ${esc(p.nodeId)} · ${esc(p.tumblingWindow)} · window ${esc(p.window)} · materialized ${esc(p.retention)}</li>`).join('')}</ul></details>`
       : `node ${esc(g.tumblingWindows[0].nodeId)} · window ${esc(g.tumblingWindows[0].window)}`);
     $('materializedViews').innerHTML = groups.length ? table(
       ['Stage 2 node', 'definition', 'kind', 'tumbling windows', 'refresh', 'retention', 'installed', 'Stage 3 cost', 'read by'],

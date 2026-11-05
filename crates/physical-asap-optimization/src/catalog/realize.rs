@@ -66,10 +66,10 @@ pub fn realize_selected_candidates(
                     seen[node] = true;
                     assignments[node]
                 });
-            // The option keeping it as requested; option `None` (not materialized)
+            // The option materializing it as requested; option `None` (not materialized)
             // for a requested lifetime `None`, at either timing.
             let chosen = options.iter().position(|option| match option {
-                Some(kept) => *kept == requested,
+                Some(materialized) => *materialized == requested,
                 None => !requested.lifetime().is_materialized(),
             });
             if chosen.is_none() {

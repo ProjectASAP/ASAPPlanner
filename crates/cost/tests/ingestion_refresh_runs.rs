@@ -75,13 +75,16 @@ fn chain(
 /// One query per summary of `summaries`, merging it, with each summary
 /// materialized with `materialized` (`None`: not materialized): the DAG Stage 3 costs, chains
 /// unexpanded.
-fn dag_of(summaries: &[Rc<OperatorNode>], kept: Option<PhysicalProperties>) -> PhysicalASAPDAG {
+fn dag_of(
+    summaries: &[Rc<OperatorNode>],
+    materialized: Option<PhysicalProperties>,
+) -> PhysicalASAPDAG {
     let mut assignment = PhysicalPropertiesAssignment::default();
     let roots: Vec<QueryRoot> = summaries
         .iter()
         .map(|summary| {
-            if let Some(kept) = kept {
-                assignment.set(summary, kept);
+            if let Some(materialized) = materialized {
+                assignment.set(summary, materialized);
             }
             QueryRoot::Operator(
                 OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
@@ -133,7 +136,7 @@ fn shifted(child: &Rc<OperatorNode>, offset_ms: i64) -> Rc<OperatorNode> {
 }
 
 /// A KLL chain and a DDSketch chain of 10 s tumbling windows over one `Scan`, both
-/// kept at ingestion, are refreshed in one ingestion run per tumbling window: the
+/// materialized at ingestion, are refreshed in one ingestion run per tumbling window: the
 /// `Scan` is computed once per second of arriving data, not twice.
 #[test]
 fn a_scan_under_two_chains_of_one_tumbling_window_width_is_computed_once() {
@@ -253,7 +256,7 @@ fn nodes_below_a_shared_intermediate_node_are_computed_once_per_run() {
     );
 }
 
-/// Two summaries kept at ingestion over rows with no time window
+/// Two summaries materialized at ingestion over rows with no time window
 /// (`Values`) have no refresh window: each counts alone.
 #[test]
 fn consumers_of_unbounded_windows_count_alone() {
@@ -286,7 +289,7 @@ fn consumers_of_unbounded_windows_count_alone() {
     );
 }
 
-/// A node whose timing and lifetime cannot go together (kept for one
+/// A node whose timing and lifetime cannot go together (materialized for one
 /// evaluation at ingestion time) is reported, not skipped.
 #[test]
 fn an_invalid_node_is_reported_not_skipped() {

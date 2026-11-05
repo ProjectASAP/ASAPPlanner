@@ -200,10 +200,10 @@ type CandidateCosts = Vec<(String, f64)>;
 
 /// The per-second cost of every physical candidate whose tumbling-window chain both
 /// panels read is materialized at query time: shared within one evaluation
-/// (`OneEvaluation`), and kept across evaluations
+/// (`OneEvaluation`), and materialized across evaluations
 /// (query-time `AcrossEvaluations`, which Stage 3 prices as such).
 fn shared_chain_costs(run: &Run) -> (CandidateCosts, CandidateCosts) {
-    let (mut within_one, mut kept) = (Vec::new(), Vec::new());
+    let (mut within_one, mut materialized) = (Vec::new(), Vec::new());
     for p in &run.physical {
         for n in &p.dag().nodes {
             let shared_chain = matches!(
@@ -214,30 +214,32 @@ fn shared_chain_costs(run: &Run) -> (CandidateCosts, CandidateCosts) {
                 continue;
             };
             let entry = (p.id.clone(), cost.cost_per_second.expect("cost model 1"));
-            let kept_detail = cost.per_node[&n.id].detail.contains("across evaluations");
+            let materialized_detail = cost.per_node[&n.id].detail.contains("across evaluations");
             match (n.output_state.timing, n.lifetime) {
                 (_, Lifetime::OneEvaluation(_)) => within_one.push(entry),
-                (ExecutionTiming::QueryTime, Lifetime::AcrossEvaluations(_)) if kept_detail => {
-                    kept.push(entry)
+                (ExecutionTiming::QueryTime, Lifetime::AcrossEvaluations(_))
+                    if materialized_detail =>
+                {
+                    materialized.push(entry)
                 }
                 (ExecutionTiming::QueryTime, Lifetime::AcrossEvaluations(_)) => {
-                    panic!("{}: a kept chain priced as not kept", p.id)
+                    panic!("{}: a materialized chain priced as not materialized", p.id)
                 }
                 _ => {}
             }
         }
     }
-    (within_one, kept)
+    (within_one, materialized)
 }
 
 /// With query-time results retained, a chain two panels read is offered
 /// both ways: shared within one evaluation (rebuilt from the 5-min window
-/// every minute, then reused by both panels) and kept across evaluations
+/// every minute, then reused by both panels) and materialized across evaluations
 /// (B3: one new tumbling window per evaluation, the 4 older tumbling windows held in memory
 /// between evaluations). Holding 1M per-series KLLs between evaluations
 /// costs far more than rebuilding them, so the shared option is cheaper
-/// and the kept one is not selected. Without query-time retention, the
-/// kept option is not offered.
+/// and the materialized one is not selected. Without query-time retention, the
+/// materialized option is not offered.
 #[test]
 fn query_time_results_retained_still_offers_the_chain_shared_within_one_evaluation() {
     let keeping = DeploymentCapabilities {
@@ -245,9 +247,15 @@ fn query_time_results_retained_still_offers_the_chain_shared_within_one_evaluati
         ..DeploymentCapabilities::default()
     };
     let run = shared_tumbling_window_configurations(&keeping);
-    let (within_one, kept) = shared_chain_costs(&run);
-    assert!(!within_one.is_empty(), "no shared option: kept {kept:?}");
-    assert!(!kept.is_empty(), "no kept option: shared {within_one:?}");
+    let (within_one, materialized) = shared_chain_costs(&run);
+    assert!(
+        !within_one.is_empty(),
+        "no shared option: materialized {materialized:?}"
+    );
+    assert!(
+        !materialized.is_empty(),
+        "no materialized option: shared {within_one:?}"
+    );
     let cheapest = |options: &[(String, f64)]| {
         options
             .iter()
@@ -255,18 +263,20 @@ fn query_time_results_retained_still_offers_the_chain_shared_within_one_evaluati
             .fold(f64::INFINITY, f64::min)
     };
     assert!(
-        cheapest(&within_one) < cheapest(&kept),
-        "shared {within_one:?}, kept {kept:?}"
+        cheapest(&within_one) < cheapest(&materialized),
+        "shared {within_one:?}, materialized {materialized:?}"
     );
     assert!(
-        kept.iter().all(|(id, _)| *id != run.selection.selected),
+        materialized
+            .iter()
+            .all(|(id, _)| *id != run.selection.selected),
         "{}",
         run.selection.selected
     );
     assert_selects_cheapest_valid(&run);
 
-    let (_, kept) = shared_chain_costs(&shared_tumbling_window_configurations(
+    let (_, materialized) = shared_chain_costs(&shared_tumbling_window_configurations(
         &DeploymentCapabilities::default(),
     ));
-    assert!(kept.is_empty(), "{kept:?}");
+    assert!(materialized.is_empty(), "{materialized:?}");
 }

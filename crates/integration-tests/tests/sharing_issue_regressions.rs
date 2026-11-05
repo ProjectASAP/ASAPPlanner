@@ -58,7 +58,7 @@ fn cost(w: &FuzzWorkload) -> f64 {
 }
 
 /// #923: deriving the coarse sum costs only a sum over the 150 fine groups.
-/// Stage 2 offers that plan; Stage 3 keeps a `OneEvaluation` build whose
+/// Stage 2 offers that plan; Stage 3 selects a `OneEvaluation` build whose
 /// not-materialized sibling would avoid a second scan (#1142).
 #[test]
 #[ignore = "Stage 3 misses the cheaper plan Stage 2 offers (#1142)"]

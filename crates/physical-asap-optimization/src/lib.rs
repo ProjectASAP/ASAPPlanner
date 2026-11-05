@@ -223,9 +223,9 @@ pub(crate) struct SummaryMaterializationEligibility {
 pub(crate) enum SummaryEligibilityError {
     #[error("selected reader {query} has no workload entry")]
     UnknownReader { query: usize },
-    #[error("keep eligibility requires a summary build or tumbling-window chain")]
+    #[error("materialization eligibility requires a summary build or tumbling-window chain")]
     NotSummary,
-    #[error("keep eligibility requires at least one selected reader")]
+    #[error("materialization eligibility requires at least one selected reader")]
     NoSelectedReaders,
     #[error("tumbling-window width must be positive")]
     ZeroPaneWidth,
@@ -351,7 +351,7 @@ pub(crate) struct MaterializedOutputCandidate {
 impl MaterializedOutputCandidate {
     /// Its options, not materialized first: materialized at ingestion time when eligible,
     /// `OneEvaluation` when two or more queries read it, and
-    /// query-time `AcrossEvaluations` when it may be kept across
+    /// query-time `AcrossEvaluations` when it may be materialized across
     /// evaluations.
     pub(crate) fn options(&self) -> Vec<Option<PhysicalProperties>> {
         let mut options = vec![None];
@@ -462,7 +462,7 @@ pub(crate) type ChoosePhysicalProperties<'a> =
 /// the address of the logical node of `roots` it implements (null when it
 /// implements none, e.g. a node the implementation adds) and `readers` the
 /// queries that read it. `None` when `choose` rejects, a chosen index is
-/// out of range, or the assignment keeps a build at ingestion time
+/// out of range, or the assignment materializes a build at ingestion time
 /// above one at query time. The search that decodes one plan from a model
 /// solution uses it to build that plan alone, not every assignment.
 pub(crate) fn optimize_physical_asap_chosen(
@@ -522,11 +522,11 @@ fn assigned_candidate(
     assignment: Vec<Option<PhysicalProperties>>,
 ) -> Result<PhysicalWorkloadPlan, PhysicalASAPOptimizationError> {
     let mut options = PhysicalPropertiesAssignment::default();
-    for (materialized_output_candidate, kept) in
+    for (materialized_output_candidate, materialized) in
         materialized_output_candidates.iter().zip(&assignment)
     {
-        if let Some(kept) = *kept {
-            options.set(&materialized_output_candidate.node, kept);
+        if let Some(materialized) = *materialized {
+            options.set(&materialized_output_candidate.node, materialized);
         }
     }
     let operators: Vec<Rc<OperatorNode>> = implemented
@@ -936,8 +936,8 @@ fn down_closed(
     below: &[Vec<usize>],
     assignment: &[Option<PhysicalProperties>],
 ) -> bool {
-    let at_ingestion = |kept: &Option<PhysicalProperties>| {
-        kept.is_some_and(|p| p.timing() == ExecutionTiming::IngestionTime)
+    let at_ingestion = |materialized: &Option<PhysicalProperties>| {
+        materialized.is_some_and(|p| p.timing() == ExecutionTiming::IngestionTime)
     };
     assignment.iter().enumerate().all(|(c, m)| {
         !at_ingestion(m)
@@ -1566,7 +1566,7 @@ mod tests {
     }
 
     /// The lifetimes `candidate` chose other than `None`, by node.
-    fn kept(candidate: &PhysicalWorkloadPlan) -> Vec<Lifetime> {
+    fn materialized(candidate: &PhysicalWorkloadPlan) -> Vec<Lifetime> {
         candidate
             .dag
             .nodes
@@ -1774,7 +1774,10 @@ mod tests {
             .nodes
             .iter()
             .all(|n| n.output_state.timing == ExecutionTiming::QueryTime));
-        assert_eq!(kept(b1), [Lifetime::AcrossEvaluations(Medium::Memory)]);
+        assert_eq!(
+            materialized(b1),
+            [Lifetime::AcrossEvaluations(Medium::Memory)]
+        );
         let [chain] = &node_of(b1, "SummaryTumblingWindowChain")[..] else {
             panic!("one chain")
         };
@@ -2095,7 +2098,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            kept(&candidates[1]),
+            materialized(&candidates[1]),
             [Lifetime::AcrossEvaluations(Medium::Memory)]
         );
 
@@ -2251,7 +2254,7 @@ mod tests {
             optimize_physical_asap("L1", &roots, &[], &DataWorkload::default(), false).unwrap();
         assert_eq!(candidates.len(), 2);
         assert_eq!(
-            kept(&candidates[1]),
+            materialized(&candidates[1]),
             [Lifetime::OneEvaluation(Medium::Memory)]
         );
         let [build] = &node_of(&candidates[1], "SummaryAgg")[..] else {

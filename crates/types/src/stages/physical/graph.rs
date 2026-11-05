@@ -25,7 +25,7 @@ pub enum ReaderConstraint {
         query_outputs: Vec<Vec<usize>>,
         minimum: usize,
     },
-    /// A non-summary node kept for one evaluation (`OneEvaluation`): each node produces an
+    /// A non-summary node materialized for one evaluation (`OneEvaluation`): each node produces an
     /// output reference, or has an immediate selected consumer reached by
     /// at most one query (`query_outputs` as in `MinimumQueryReaders`).
     HighestSharedOneEvaluation {

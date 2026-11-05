@@ -104,7 +104,7 @@ pub enum ExecutionDataStateError {
     /// Bad input (a hand-built or candidate-fixed plan), not an internal bug.
     #[error(
         "a query-time {edge} reads {operator} output produced at ingestion time that is not \
-         stored (not kept at ingestion time)"
+         stored (not materialized at ingestion time)"
     )]
     UnstoredIngestionInputUnderQueryTimeSummary {
         edge: &'static str,
@@ -138,7 +138,7 @@ pub enum ExecutionDataStateError {
     /// root assigned materialized at ingestion time is valid; the query reads the stored
     /// output.
     #[error(
-        "{operator} root runs at ingestion time but is not kept there: no query reads its \
+        "{operator} root runs at ingestion time but is not materialized there: no query reads its \
          output"
     )]
     UnstoredIngestionRoot { operator: &'static str },
@@ -146,7 +146,7 @@ pub enum ExecutionDataStateError {
     /// fixed (e.g. a query-time `FinalizeExactAccumulator` read boundary)
     /// that needs the other timing.
     #[error(
-        "{operator} is fixed at {} by its candidate; its assigned kept output {assigned:?} needs \
+        "{operator} is fixed at {} by its candidate; its assigned materialized output {assigned:?} needs \
          the other timing",
         fixed.as_str()
     )]

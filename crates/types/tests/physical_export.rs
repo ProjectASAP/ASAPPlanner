@@ -96,7 +96,7 @@ fn query_time_input_to_ingestion_is_rejected() {
 }
 
 /// A node's timing and lifetime must go together: an ingestion-time output
-/// cannot be kept for one evaluation, and a summary build that is not materialized
+/// cannot be materialized for one evaluation, and a summary build that is not materialized
 /// runs at query time.
 #[test]
 fn invalid_physical_properties_are_rejected() {
@@ -512,7 +512,7 @@ fn every_node_at_query_time_keeps_the_operators_and_stores_nothing() {
         ])
         .unwrap()
     };
-    let kept = workload(timed_at_ingestion());
+    let materialized = workload(timed_at_ingestion());
     let at_query_time = apply_physical_properties(
         &plan(),
         &PhysicalPropertiesAssignment::default(),
@@ -520,7 +520,7 @@ fn every_node_at_query_time_keeps_the_operators_and_stores_nothing() {
     )
     .unwrap();
     assert_eq!(
-        kept.with_every_node_at_query_time().unwrap(),
+        materialized.with_every_node_at_query_time().unwrap(),
         workload(at_query_time)
     );
 }

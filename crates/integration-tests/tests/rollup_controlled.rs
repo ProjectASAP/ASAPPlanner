@@ -116,10 +116,10 @@ fn controlled_distinct_rollup_prices_the_original_workload() {
                     data,
                     models.deployment_capabilities.query_time_results_retained,
                     &mut |node, _, options| {
-                        // Kept for one evaluation where offered, as two
+                        // Materialized for one evaluation where offered, as two
                         // queries reading one build allow.
-                        let shared = options.iter().position(|kept| {
-                            kept.is_some_and(|p| {
+                        let shared = options.iter().position(|materialized| {
+                            materialized.is_some_and(|p| {
                                 matches!(
                                     p.lifetime(),
                                     asap_types::physical::Lifetime::OneEvaluation(_)

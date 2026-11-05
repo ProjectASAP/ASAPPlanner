@@ -65,10 +65,10 @@ between B2 (3.611) and B1 (654.54).
 
 **Reading physical properties.** The physical DAG records each node's
 timing and `Lifetime` (#667, #1200). Tests read them through
-`planner_layering_common::keeping(p, node)` without the lifetime length or
+`planner_layering_common::materializing(p, node)` without the lifetime length or
 storage medium (`MaterializedAtIngestion`, `MaterializedAtQueryTime`, `NotMaterialized`), and the materialized
 event-time span through `retention_ms(p, node)`. The IR does not record
-retention, so the adapter derives it the way plan selection prices kept
+retention, so the adapter derives it the way plan selection prices materialized
 state: a chain of `N` tumbling windows of width `w` keeps `N·w`, plus one tumbling window while
 maintained at ingestion time; a whole-window build keeps its window, plus
 the next one at ingestion time; each plus the offset of the shifts below

@@ -114,15 +114,15 @@ Materialization ([#509 §Materialization](../proposals/planner-layering.md#mater
 decides, for each sub-DAG, whether its output is materialized, and if so with which
 [`PhysicalProperties`](../../../crates/types/src/physical/properties.rs): a
 timing and a `Lifetime` (#1200). The lifetime is `None` (discarded after its
-reader), `OneEvaluation(medium)` (kept until every reader of one evaluation
+reader), `OneEvaluation(medium)` (materialized until every reader of one evaluation
 finishes) or `AcrossEvaluations(medium)` (materialized for later evaluations), with
 `Medium::Memory` or `Medium::Disk`; an ingestion-time output cannot be materialized
 for `OneEvaluation`. A
 [`PhysicalPropertiesAssignment`](../../../crates/types/src/ir/properties/timing.rs) records,
 per sub-DAG, the properties of its materialized output, named by the node whose output
 would be materialized. Any node may be named: a summary state, a population, or, as in
-#509 Example 4, the tumbling windows a query reads. `set(node, Some(properties))`
-keeps one, `set(node, None)` keeps none, and every other sub-DAG is not materialized.
+#509 Example 4, the tumbling windows a query reads. `set(node, properties)`
+materializes one; every other sub-DAG is not materialized.
 Stage 2 chooses the assignment.
 `apply_physical_properties(root, &assignment, &mut NodeToTimedNodeCache)` then writes a
 timing and a lifetime into every node, top-down:
@@ -164,7 +164,7 @@ A node the assignment does not set is not materialized. The test helper
 and `MaintainPopulation` materialized at ingestion time where the DAG allows it (not
 filtered, nothing below it that can only run at query time). The test
 helpers `validate_at_ingestion` and `planned_data_state` use it to check, at
-planning time and without keeping anything, that a candidate stays valid
+planning time and without materializing anything, that a candidate stays valid
 when every sub-DAG is materialized at ingestion time.
 
 ## Exported DAG
@@ -198,7 +198,7 @@ children as edges and no embedded sub-DAGs:
   validation.
 
 Each node also records its `lifetime`, including the medium, so the
-deployment knows which outputs to keep, for how long and where; validation
+deployment knows which outputs to materialize, for how long and where; validation
 rejects a timing and lifetime that cannot go together (an ingestion-time
 output materialized for `OneEvaluation`) and a `SummaryAgg` or `MaintainPopulation`
 that is not materialized outside query time
