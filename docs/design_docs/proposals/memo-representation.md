@@ -64,9 +64,7 @@ merge and emits a new DAG.
 
 ## 2. Today's memo: groups plus concrete candidates
 
-**(a)** A *group* is one distinct sub-expression; equal expressions across queries share one group.
-A *candidate* is one way to implement a group. Each candidate is a chain of concrete operators plus the groups it
-reads. Each combination of choices (sketch, parameters, direct or windowed, width) is written out as its own candidate, with every value fixed. Every shared producer is a separate group.
+**(a)** A *group* is one distinct sub-expression. A *candidate* is one way to implement a group. Each candidate is specified by a chain of operators along with the groups it reads (i.e. the groups these operators take as input). Each combination of choices (sketch, parameters, direct or windowed, width) is written out as its own candidate, with every value fixed. Every shared producer is a separate group.
 ```
 G0 Scan
 G1 TimeRange 300s <- G0
@@ -154,8 +152,8 @@ fn combine(requirements: &[Requirement]) -> Option<DerivedProperties>  // not st
 ```
 
 S's `logical_node` is a new logical operator, `SummaryState { kind, input, window }`: a summary
-with no sketch or parameters fixed. Today's `SummaryAgg` can't serve, because it fixes the
-sketch and is only one way to build S (the direct one).
+with no sketch or parameters fixed. Today's `SummaryAgg` can't be used because it fixes the
+sketch.
 
 - **Consumer:** a group that reads another group. G2 and G3 are consumers of S; in (b), T5 and T10 are consumers of a ranking.
 - **Requirement:** what a consumer needs from the group it reads. Each field comes from somewhere:
@@ -189,7 +187,7 @@ sketch and is only one way to build S (the direct one).
   (so window boundaries line up with evaluation times) and the lookback.
 - **`combine(requirements) -> Option<DerivedProperties>`:** the weakest derived properties that
   serve every given requirement, or none if they can't share. E.g. ε.01 and ε.001 combine to
-  ε.001. Each rule in (b) gives how its field combines.
+  ε.001. Each rule in (b) defines how its field combines.
 - **`subsumes(d: DerivedProperties, r: Requirement) -> bool`:** a producer with properties d can
   serve a consumer requiring r.
 
@@ -269,14 +267,14 @@ implement the trait. This proposed design handles these automatically:
 
 ### (c) Enumeration: details
 
-Enumeration has two steps: choose a candidate per group, as today, then assign consumers to
+Enumeration has two steps. (1) choose a candidate per group (as done today); (2) assign consumers to
 producers.
 
 ```
 for each choice of candidate per reached group     # reached: from a root via chosen candidates' inputs
   for each reached group S with consumers:
     for each Assignment of S (below)               # one DAG per assignment
-  emit the DAG
+      emit the DAG
 ```
 
 **Assign consumers to producers**, once per group S. Input from the 3a structs; output types
