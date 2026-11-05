@@ -166,7 +166,7 @@ fn same_node(
 /// whether or not sharing them is legal: children compared by pointer
 /// first, so two operators over the same groups' nodes compare in `O(1)`
 /// beyond their own fields.
-pub(super) fn equal_nodes(left: &OperatorNode, right: &OperatorNode) -> bool {
+pub fn equal_nodes(left: &OperatorNode, right: &OperatorNode) -> bool {
     same_node(left, right, &mut NodePairToIsSameNodeCache::new())
 }
 

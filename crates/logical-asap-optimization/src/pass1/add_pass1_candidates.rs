@@ -37,8 +37,9 @@
 //! the resulting error contract. The connection planner may select a conservative
 //! larger configuration, and validates the recomposed query-root guarantee.
 
+use asap_types::stages::hash_consing::equal_nodes;
 use asap_types::stages::HowToComputeAggregateMeasure;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use super::per_computation_candidates::{
@@ -170,32 +171,29 @@ fn add_candidates_to_initial_groups(
             most_approximate_inputs[q] += summaries;
         }
     }
-    let mut structural_ids = NodeToStructuralIdCache::default();
     for g in 0..initial_groups {
-        let candidates = match targets_of.get(&MemoGroupId(g as u32)) {
-            None => None,
-            Some(targets) => {
-                let max_accuracy_budget_parts = memo.groups()[g]
-                    .queries
-                    .iter()
-                    .map(|&q| most_approximate_inputs[q])
-                    .max()
-                    .unwrap_or(1)
-                    .max(1);
-                target_candidates(
-                    per_computation,
-                    accuracy_targets,
-                    data,
-                    memo,
-                    &mut structural_ids,
-                    &logical_nodes,
-                    MemoGroupId(g as u32),
-                    targets,
-                    max_accuracy_budget_parts,
-                )?
-            }
-        };
-        memo.candidates[g] = candidates.unwrap_or_else(|| vec![own(&memo.groups()[g])]);
+        if let Some(targets) = targets_of.get(&MemoGroupId(g as u32)) {
+            let max_accuracy_budget_parts = memo.groups()[g]
+                .queries
+                .iter()
+                .map(|&q| most_approximate_inputs[q])
+                .max()
+                .unwrap_or(1)
+                .max(1);
+            target_candidates(
+                per_computation,
+                accuracy_targets,
+                data,
+                memo,
+                &logical_nodes,
+                MemoGroupId(g as u32),
+                targets,
+                max_accuracy_budget_parts,
+            )?;
+        }
+        if memo.candidates[g].is_empty() {
+            memo.candidates[g] = vec![own(&memo.groups()[g])];
+        }
     }
     memo.rebuild_parents();
     Ok(())
@@ -206,27 +204,21 @@ fn add_candidates_to_initial_groups(
 /// target varying fastest), each the aggregate composed alone with that
 /// choice, its summaries sized for its queries' failure probability (query
 /// `q`'s target `accuracy_targets[q]`, over `data`); the groups beneath it
-/// are found or added ([`operator_over_groups`]). `None` when none composes.
+/// are found or added ([`operator_over_groups`]), each added to `g`
+/// ([`Memo::add_candidate`]). None is added when none composes.
 #[allow(clippy::too_many_arguments)]
 fn target_candidates(
     per_computation: &PerComputationCandidates,
     accuracy_targets: &[AccuracyTarget],
     data: &DataWorkload,
     memo: &mut Memo,
-    structural_ids: &mut NodeToStructuralIdCache,
     logical_nodes: &Rc<[Rc<OperatorNode>]>,
     g: MemoGroupId,
     targets: &[usize],
     max_accuracy_budget_parts: usize,
-) -> Result<Option<Vec<CandidateForMemoGroup>>, SchemaDerivationError> {
+) -> Result<(), SchemaDerivationError> {
     let aggregate = Rc::clone(&memo.groups()[g.0 as usize].logical_node);
     let queries = memo.groups()[g.0 as usize].queries.clone();
-    let own_key = structural_ids.structural_id(&aggregate);
-    let mut candidates = Vec::new();
-    // Each candidate's identity in the memo: its node's structural id, its
-    // input groups, the groups it fuses and its accuracy budget parts. A candidate
-    // equal to one already listed is not added again.
-    let mut known = HashSet::new();
     let mut choice = vec![0; per_computation.targets.len()];
     loop {
         let mut implements = vec![g];
@@ -258,61 +250,63 @@ fn target_candidates(
             if accuracy_budget_parts > 1 && !builds_a_sketch(&root) {
                 break;
             }
-            let (node, children) = if structural_ids.structural_id(&root) == own_key {
+            let root = size_for_failure_probability(
+                &root,
+                &queries,
+                accuracy_budget_parts,
+                &per_computation.roots,
+                accuracy_targets,
+                data,
+            )?;
+            let (node, children) = operator_over_groups(
+                memo,
+                &root,
+                &queries,
+                &OriginOfCandidateForMemoGroup::Pass1,
+                accuracy_budget_parts,
+            );
+            // A parent reads the candidate in the group's place, so it
+            // outputs the group's schema when it has the same columns, with
+            // the group's metadata (composition may derive a closed label set
+            // where the frontend's node leaves it open). A query's top-k root
+            // may output other columns (the ranked value beside the key): it
+            // keeps its own.
+            let same_columns = node.schema.fields == aggregate.schema.fields
+                && node.schema.time_index == aggregate.schema.time_index;
+            let node = if !same_columns || node.schema == aggregate.schema {
+                node
+            } else {
+                Rc::new(OperatorNode {
+                    schema: aggregate.schema.clone(),
+                    ..(*node).clone()
+                })
+            };
+            // The exact composition of the group's own node is the group's
+            // node itself (Stage 0's equality, its exact guarantee aside).
+            let own = node.guarantee.as_ref().is_none_or(|g| g.is_exact())
+                && equal_nodes(
+                    &OperatorNode {
+                        guarantee: None,
+                        ..(*node).clone()
+                    },
+                    &aggregate,
+                );
+            let (node, children) = if own {
                 (
                     Rc::clone(&aggregate),
                     memo.groups()[g.0 as usize].child_groups.clone(),
                 )
             } else {
-                let root = size_for_failure_probability(
-                    &root,
-                    &queries,
-                    accuracy_budget_parts,
-                    &per_computation.roots,
-                    accuracy_targets,
-                    data,
-                )?;
-                let (node, children) = operator_over_groups(
-                    memo,
-                    &root,
-                    &queries,
-                    &OriginOfCandidateForMemoGroup::Pass1,
-                    accuracy_budget_parts,
-                );
-                // A parent reads the candidate in the group's place, so it
-                // outputs the group's schema when it has the same columns,
-                // with the group's metadata (composition may derive a closed
-                // label set where the frontend's node leaves it open). A
-                // query's top-k root may output other columns (the ranked
-                // value beside the key): it keeps its own.
-                let group_node = &aggregate;
-                let same_columns = node.schema.fields == group_node.schema.fields
-                    && node.schema.time_index == group_node.schema.time_index;
-                let node = if !same_columns || node.schema == group_node.schema {
-                    node
-                } else {
-                    Rc::new(OperatorNode {
-                        schema: group_node.schema.clone(),
-                        ..(*node).clone()
-                    })
-                };
                 (node, children)
             };
-            if !known.insert((
-                structural_ids.structural_id(&node),
-                children.clone(),
-                implements[1..].to_vec(),
-                accuracy_budget_parts,
-            )) {
-                continue;
-            }
-            candidates.push(CandidateForMemoGroup {
+            let candidate = CandidateForMemoGroup {
                 fused_groups: implements[1..].to_vec(),
                 root_node: node,
                 input_groups: children,
                 origin: OriginOfCandidateForMemoGroup::Pass1,
                 accuracy_budget_parts,
-            });
+            };
+            memo.add_candidate(g, candidate);
         }
         // Mixed-radix over this group's targets only.
         let mut advanced = false;
@@ -328,7 +322,7 @@ fn target_candidates(
             break;
         }
     }
-    Ok((!candidates.is_empty()).then_some(candidates))
+    Ok(())
 }
 
 /// `root`, a candidate of a group `queries` reach, with each approximate
@@ -454,85 +448,10 @@ fn builds_a_sketch(node: &Rc<OperatorNode>) -> bool {
     })
 }
 
-/// Interned structural identities: the operator over its children's identities,
-/// without the schema, guarantee, timing and materialization composition
-/// derives. Memoized per node (the cache keeps each node alive, so its
-/// address is not reused).
-#[derive(Default)]
-pub(crate) struct NodeToStructuralIdCache {
-    id_of_node: HashMap<*const OperatorNode, (Rc<OperatorNode>, u64)>,
-    id_of_encoded_operator: HashMap<Vec<u8>, u64>,
-}
-
-impl NodeToStructuralIdCache {
-    pub(crate) fn structural_id(&mut self, node: &Rc<OperatorNode>) -> u64 {
-        if let Some((_, key)) = self.id_of_node.get(&Rc::as_ptr(node)) {
-            return *key;
-        }
-        let children: HashMap<*const OperatorNode, u64> = node
-            .children()
-            .into_iter()
-            .map(|child| (Rc::as_ptr(child), self.structural_id(child)))
-            .collect();
-        let operator = node.operator.map_children(|c| children[&Rc::as_ptr(c)]);
-        // MessagePack preserves non-finite floats and signed zero. HashMap
-        // compares the complete byte key, so a hash collision cannot merge
-        // different computations. Cloned/recomposed NaN literals retain identity.
-        let encoded =
-            rmp_serde::to_vec(&operator).expect("an IR operator over child IDs must serialize");
-        let next = self.id_of_encoded_operator.len() as u64;
-        let key = *self.id_of_encoded_operator.entry(encoded).or_insert(next);
-        self.id_of_node
-            .insert(Rc::as_ptr(node), (Rc::clone(node), key));
-        key
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::stage0::generate_dag_of_logical_memo_groups;
-
-    #[test]
-    fn structural_keys_preserve_nonfinite_and_signed_zero_literals() {
-        let input = crate::test_support::lower_promql(
-            "m",
-            asap_types::ir::properties::AccuracyTarget::exact(),
-        );
-        let literal = |value| {
-            OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(
-                asap_types::ir::NonASAPOp::Project {
-                    cols: vec![asap_types::ir::ProjectItem {
-                        alias: Some("value".into()),
-                        expr: asap_types::ir::ScalarExpr::literal_f64(value),
-                    }],
-                    qualifier: None,
-                    child: Rc::clone(&input),
-                },
-            ))
-            .unwrap()
-        };
-        let mut structural_ids = NodeToStructuralIdCache::default();
-        for (left, right) in [
-            (f64::NAN, f64::INFINITY),
-            (f64::INFINITY, f64::NEG_INFINITY),
-            (0.0, -0.0),
-        ] {
-            assert_ne!(
-                structural_ids.structural_id(&literal(left)),
-                structural_ids.structural_id(&literal(right))
-            );
-        }
-        assert_eq!(
-            structural_ids.structural_id(&literal(1.0)),
-            structural_ids.structural_id(&literal(1.0))
-        );
-        let node = literal(f64::NAN);
-        assert_eq!(
-            structural_ids.structural_id(&node),
-            structural_ids.structural_id(&literal(f64::NAN))
-        );
-    }
 
     fn populate_pass1(
         initial: DagOfLogicalMemoGroups,
@@ -552,8 +471,8 @@ mod tests {
     use asap_types::ir::properties::AccuracyTarget;
 
     use asap_types::ir::ASAPOp;
+    use std::collections::HashSet;
 
-    /// The cross-stage API rejects mismatched root identities without panicking.
     #[test]
     fn population_rejects_an_inventory_from_other_roots() {
         let roots = vec![QueryRoot::Operator(lower_promql(
