@@ -1528,6 +1528,54 @@ mod tests {
         );
     }
 
+    /// `node` fixed at ingestion time with a lifetime that cannot go with it.
+    fn invalid_at_ingestion(node: Rc<OperatorNode>) -> Rc<OperatorNode> {
+        Rc::new(
+            (*placed_at_ingestion(node))
+                .clone()
+                .with_lifetime(Lifetime::OneEvaluation(Medium::Memory)),
+        )
+    }
+
+    /// A query-time summary build whose ingestion-time input has an invalid
+    /// timing and lifetime reports that (`validate_asap`), not "not stored".
+    #[test]
+    fn a_summary_build_over_an_invalid_input_reports_its_error() {
+        let root = agg(invalid_at_ingestion(scan()), exact_sum());
+        assert_eq!(
+            apply_physical_properties(
+                &root,
+                &PhysicalPropertiesAssignment::default(),
+                &mut NodeToTimedNodeCache::new()
+            )
+            .err(),
+            Some(ExecutionDataStateError::InvalidPhysicalProperties {
+                operator: "Scan",
+                reason: crate::physical::InvalidPhysicalProperties::OneEvaluationAtIngestion,
+            })
+        );
+    }
+
+    /// A query-time `NonASAP` node whose ingestion-time input has an invalid
+    /// timing and lifetime reports that (`validate_non_asap`), not an illegal
+    /// child data state.
+    #[test]
+    fn a_non_asap_node_over_an_invalid_input_reports_its_error() {
+        let root = max(invalid_at_ingestion(max(scan())));
+        assert_eq!(
+            apply_physical_properties(
+                &root,
+                &PhysicalPropertiesAssignment::default(),
+                &mut NodeToTimedNodeCache::new()
+            )
+            .err(),
+            Some(ExecutionDataStateError::InvalidPhysicalProperties {
+                operator: "Aggregate",
+                reason: crate::physical::InvalidPhysicalProperties::OneEvaluationAtIngestion,
+            })
+        );
+    }
+
     /// A root stored at ingestion time is valid: the query reads the stored
     /// output. A root that runs at ingestion time without being stored there
     /// is not.

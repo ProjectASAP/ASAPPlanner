@@ -302,12 +302,14 @@ fn an_invalid_node_is_reported_not_skipped() {
         .unwrap();
     chain.lifetime =
         asap_types::physical::Lifetime::OneEvaluation(asap_types::physical::Medium::Memory);
-    assert!(matches!(
+    let chain = chain.id;
+    assert_eq!(
         computations(&dag, &[], &[], 3600.0, None),
         Err(
-            asap_cost::analytical::AnalyticalCostError::InvalidPhysicalProperties(
-                asap_types::physical::InvalidPhysicalProperties::OneEvaluationAtIngestion
-            )
+            asap_cost::analytical::AnalyticalCostError::InvalidPhysicalProperties {
+                node: chain,
+                reason: asap_types::physical::InvalidPhysicalProperties::OneEvaluationAtIngestion,
+            }
         )
-    ));
+    );
 }

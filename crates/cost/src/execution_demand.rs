@@ -361,9 +361,12 @@ pub fn computations(
     let range_of = |query: usize| range_evaluations.get(query).copied().flatten();
     let mut kept_nodes: HashMap<PhysicalASAPNodeId, PhysicalProperties> = HashMap::new();
     for node in &dag.nodes {
-        let properties = node
-            .physical_properties()
-            .map_err(AnalyticalCostError::InvalidPhysicalProperties)?;
+        let properties = node.physical_properties().map_err(|reason| {
+            AnalyticalCostError::InvalidPhysicalProperties {
+                node: node.id,
+                reason,
+            }
+        })?;
         if properties.lifetime().is_kept() {
             kept_nodes.insert(node.id, properties);
         }
