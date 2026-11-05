@@ -5,7 +5,7 @@ use asap_devtools::planning_stages::run_search_over;
 use asap_executor::values::Value;
 use asap_logical_asap_optimization::generate_dag_of_logical_memo_groups;
 use asap_logical_asap_optimization::test_support::{
-    generate_per_computation_candidates, try_populate_pass1,
+    generate_per_computation_candidates, try_add_pass1_candidates,
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
 use asap_types::stages::{CandidateForMemoGroup, Memo, OriginOfCandidateForMemoGroup};
@@ -53,7 +53,7 @@ fn expanded(queries: &[String]) -> Memo {
         &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
     )
     .unwrap();
-    let memo = try_populate_pass1(initial, &inventory, None).unwrap();
+    let memo = try_add_pass1_candidates(initial, &inventory, &[], &Default::default()).unwrap();
     asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(memo)
         .unwrap()
 }
@@ -67,13 +67,13 @@ fn rollups(memo: &Memo, query: usize) -> (usize, Vec<&CandidateForMemoGroup>) {
             .collect()
     };
     // The query's own aggregate group, or, for a rollup of summary states,
-    // the group of the readout Pass 1 interned beneath it, which the rule
+    // the group of the readout Pass 1 added beneath it, which the rule
     // rewrites.
     let own = |group: &asap_types::stages::MemoGroup| group.reached_by_queries() == [query];
-    let owner = (0..memo.groups.len())
-        .find(|&group| own(&memo.groups[group]) && !rollups_of(group).is_empty())
+    let owner = (0..memo.groups().len())
+        .find(|&group| own(&memo.groups()[group]) && !rollups_of(group).is_empty())
         .or_else(|| {
-            memo.groups.iter().position(|group| {
+            memo.groups().iter().position(|group| {
                 own(group)
                     && matches!(
                         group.logical_node.non_asap(),
@@ -132,7 +132,7 @@ fn assert_same_rows(memo: &Memo, owner: usize, candidate: &CandidateForMemoGroup
     };
     for rows in row_sets() {
         let before = physical_common::execute_raw_rows_at(
-            &memo.groups[owner].logical_node,
+            &memo.groups()[owner].logical_node,
             rows.clone(),
             1000,
         );

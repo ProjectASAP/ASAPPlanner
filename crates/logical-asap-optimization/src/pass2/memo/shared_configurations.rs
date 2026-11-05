@@ -1,10 +1,10 @@
 //! Finite state configurations shared by memo rules and candidate selection.
-use crate::stage0::cse::same_value;
 use asap_accuracy::estimators::size_for_all_readers;
 use asap_types::ir::schema::{
     sketch::{SketchKind, SketchParams},
     FieldDataType,
 };
+use asap_types::stages::hash_consing::same_value;
 use asap_types::workload::greatest_common_divisor;
 use std::collections::BTreeSet;
 

@@ -182,7 +182,7 @@ pub fn run_planning(
         let logical = logical_asap_candidates.insert(
             logical.map_err(|error| SelectionError::LogicalASAPCandidates(error.to_string()))?,
         );
-        report.memo_groups = logical.memo.groups.len();
+        report.memo_groups = logical.memo.groups().len();
         report.logical_candidates = logical.memo.candidates.iter().map(Vec::len).sum();
         // Stage 2.
         let started = Instant::now();

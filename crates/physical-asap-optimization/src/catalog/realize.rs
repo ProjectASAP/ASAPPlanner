@@ -215,7 +215,7 @@ mod tests {
     use super::*;
     use asap_logical_asap_optimization::generate_dag_of_logical_memo_groups;
     use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
-    use asap_logical_asap_optimization::test_support::try_populate_pass1;
+    use asap_logical_asap_optimization::test_support::try_add_pass1_candidates;
     use asap_logical_asap_optimization::test_support::{
         entry, lower_promql, sharing_rules_and_shared_state_groups,
     };
@@ -272,7 +272,8 @@ mod tests {
                 roots[0].clone()
             ]))
             .unwrap();
-        let memo = try_populate_pass1(initial, &per_computation, None).unwrap();
+        let memo =
+            try_add_pass1_candidates(initial, &per_computation, &[], &Default::default()).unwrap();
         let logical = LogicalASAPMemoCandidates {
             memo: sharing_rules_and_shared_state_groups(memo).unwrap(),
         };

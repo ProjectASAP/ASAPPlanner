@@ -8,8 +8,8 @@ use crate::pass2::asap_aware_cse::{
 };
 use asap_types::ir::flat::flatten;
 use asap_types::ir::{OperatorNode, QueryRoot};
+use asap_types::stages::MemoGroupId as GroupId;
 use asap_types::stages::{CandidateForMemoGroup, Memo, OriginOfCandidateForMemoGroup};
-use asap_types::stages::{MemoGroup, MemoGroupId as GroupId};
 use asap_types::workload::QueryWorkloadEntry;
 #[cfg(test)]
 use std::collections::BTreeSet;
@@ -55,13 +55,12 @@ fn local_tumbling_window_candidates(
     memo: &Memo,
     entries: &[QueryWorkloadEntry],
 ) -> Vec<(usize, CandidateForMemoGroup)> {
-    let group_of = group_of_node(&memo.groups);
-    let workload_groups = workload_groups(memo);
+    let workload_groups = memo.workload_groups();
     let mut own: Vec<(usize, CandidateForMemoGroup)> = Vec::new();
-    for (g, group) in memo.groups.iter().enumerate() {
+    for (g, group) in memo.groups().iter().enumerate() {
         // Pass 1's intermediate groups (a summary build, its readout) are
         // rewritten inside their readers' candidates instead.
-        if !workload_groups.contains(&g) {
+        if !workload_groups.contains(&GroupId(g as u32)) {
             continue;
         }
         let grids = tumbling_window_width_domain(
@@ -85,7 +84,7 @@ fn local_tumbling_window_candidates(
                         matches!(
                             node.non_asap(),
                             Some(asap_types::ir::NonASAPOp::Scan { .. })
-                        ) && group_of.contains_key(&Rc::as_ptr(node))
+                        ) && memo.group_with_node(node).is_some()
                     })
                     .collect::<Vec<_>>();
                 let roots = [QueryRoot::Operator(Rc::clone(&candidate.root_node))];
@@ -128,7 +127,7 @@ fn local_tumbling_window_candidates(
                     own.push((
                         g,
                         rewritten_candidate(
-                            &group_of,
+                            memo,
                             GroupId(g as u32),
                             candidate,
                             node,
@@ -140,22 +139,6 @@ fn local_tumbling_window_candidates(
         }
     }
     own
-}
-
-/// The groups of the workload's logical DAG: the query roots' groups and
-/// every group below them through logical child groups. Pass 1's
-/// intermediate groups, which only candidates read, are not among them.
-pub(super) fn workload_groups(memo: &Memo) -> HashSet<usize> {
-    let mut pending: Vec<GroupId> = asap_types::stages::root_groups(&memo.query_roots)
-        .into_iter()
-        .collect();
-    let mut reached = HashSet::new();
-    while let Some(group) = pending.pop() {
-        if reached.insert(group.0 as usize) {
-            pending.extend(memo.groups[group.0 as usize].child_groups.iter().copied());
-        }
-    }
-    reached
 }
 
 fn restore_scan_boundaries(
@@ -193,7 +176,10 @@ fn restore_scan_boundaries(
 // compatible subset: common widths belong to each reader's divisor domain.
 // Nongridded potential consumers do not veto a repeated reader's tumbling windows.
 #[cfg(test)]
-fn compatible_reader_grids(group: &MemoGroup, entries: &[QueryWorkloadEntry]) -> Vec<u64> {
+fn compatible_reader_grids(
+    group: &asap_types::stages::MemoGroup,
+    entries: &[QueryWorkloadEntry],
+) -> Vec<u64> {
     super::shared_configurations::tumbling_window_width_domain(
         group
             .queries
@@ -202,17 +188,9 @@ fn compatible_reader_grids(group: &MemoGroup, entries: &[QueryWorkloadEntry]) ->
     )
 }
 
-fn group_of_node(groups: &[MemoGroup]) -> HashMap<*const OperatorNode, usize> {
-    groups
-        .iter()
-        .enumerate()
-        .map(|(g, group)| (Rc::as_ptr(&group.logical_node), g))
-        .collect()
-}
-
 /// `from`, a candidate of group `owner`, with root `node` and `origin`.
 fn rewritten_candidate(
-    group_of: &HashMap<*const OperatorNode, usize>,
+    memo: &Memo,
     owner: GroupId,
     from: &CandidateForMemoGroup,
     node: Rc<OperatorNode>,
@@ -221,7 +199,7 @@ fn rewritten_candidate(
     let implements: Vec<GroupId> = std::iter::once(owner)
         .chain(from.fused_groups.iter().copied())
         .collect();
-    let reached = |node: &Rc<OperatorNode>| child_groups(group_of, node, &implements);
+    let reached = |node: &Rc<OperatorNode>| child_groups(memo, node, &implements);
     let children = if reached(&from.root_node) == from.input_groups {
         reached(&node)
     } else {
@@ -236,14 +214,10 @@ fn rewritten_candidate(
     }
 }
 
-fn child_groups(
-    group_of: &HashMap<*const OperatorNode, usize>,
-    node: &Rc<OperatorNode>,
-    implements: &[GroupId],
-) -> Vec<GroupId> {
+fn child_groups(memo: &Memo, node: &Rc<OperatorNode>, implements: &[GroupId]) -> Vec<GroupId> {
     fn walk(
         node: &Rc<OperatorNode>,
-        group_of: &HashMap<*const OperatorNode, usize>,
+        memo: &Memo,
         implements: &[GroupId],
         seen: &mut HashSet<*const OperatorNode>,
         out: &mut Vec<GroupId>,
@@ -252,18 +226,18 @@ fn child_groups(
             if !seen.insert(Rc::as_ptr(child)) {
                 continue;
             }
-            match group_of.get(&Rc::as_ptr(child)) {
-                Some(&g) if !implements.contains(&GroupId(g as u32)) => {
-                    if !out.contains(&GroupId(g as u32)) {
-                        out.push(GroupId(g as u32));
+            match memo.group_with_node(child) {
+                Some(g) if !implements.contains(&g) => {
+                    if !out.contains(&g) {
+                        out.push(g);
                     }
                 }
-                _ => walk(child, group_of, implements, seen, out),
+                _ => walk(child, memo, implements, seen, out),
             }
         }
     }
     let mut out = Vec::new();
-    walk(node, group_of, implements, &mut HashSet::new(), &mut out);
+    walk(node, memo, implements, &mut HashSet::new(), &mut out);
     out
 }
 
@@ -274,7 +248,7 @@ fn candidate_signature(candidate: &CandidateForMemoGroup) -> Result<String, serd
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pass1::memo_population::try_populate_pass1;
+    use crate::pass1::add_pass1_candidates::try_add_pass1_candidates;
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
     use crate::stage0::generate_dag_of_logical_memo_groups;
     use crate::test_support::{entry_with, lower_promql};
@@ -296,7 +270,7 @@ mod tests {
         let generated =
             generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
                 .unwrap();
-        let memo = try_populate_pass1(initial, &generated, None).unwrap();
+        let memo = try_add_pass1_candidates(initial, &generated, &[], &Default::default()).unwrap();
         let entries = recurrences
             .iter()
             .map(|recurrence| entry_with(target.clone(), recurrence.clone()))
@@ -323,7 +297,7 @@ mod tests {
             repeated(180_000),
             QueryRecurrence::Unknown,
         ]);
-        let group = &memo.groups[memo.query_roots[0].as_operator().unwrap().0 as usize];
+        let group = &memo.groups()[memo.query_roots[0].as_operator().unwrap().0 as usize];
         assert_eq!(
             compatible_reader_grids(group, &entries),
             tumbling_window_width_divisors(120_000)

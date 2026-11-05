@@ -1,6 +1,6 @@
 //! Expand compatible readers at finite shared sizes and tumbling-window horizons before
 //! interning concrete states. Local candidates remain available.
-use crate::stage0::cse::same_value;
+use asap_types::stages::hash_consing::same_value;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -11,6 +11,7 @@ use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
 use super::shared_producer::{
     add_shared_producer_candidates, spans_groups, Reader, SharedProducer,
 };
+use crate::own_candidate_sizing::size_own_candidate_for;
 use crate::pass2::asap_aware_cse::{with_resized_build, with_tumbling_window_chain};
 use crate::pass2::memo::shared_configurations::{
     shared_size, state_size_configurations, tumbling_window_configurations,
@@ -19,7 +20,7 @@ use crate::pass2::memo::shared_configurations::{
 use crate::pass2::memo::state_groups::{
     boundary_ptrs, input_group_build, same_range_input, simple_build, Pass2RuleError,
 };
-use asap_types::stages::{Memo, MemoGroupId};
+use asap_types::stages::{GroupFoundOrAdded, Memo, MemoGroupId};
 
 /// `resized` (a rewrite of `original` with the same shape) with each node
 /// that is a child group's node in `original` put back, and the nodes above
@@ -66,7 +67,7 @@ struct StateNeed {
     candidate: usize,
     build: Rc<OperatorNode>,
     /// The build's group when the candidate reads it as an input group (a
-    /// build Pass 1 interned); `None` when the build is one of the
+    /// build Pass 1 added); `None` when the build is one of the
     /// candidate's private nodes.
     build_group: Option<MemoGroupId>,
     merge: Option<Rc<OperatorNode>>,
@@ -307,8 +308,16 @@ impl SharedProducer for SummaryStates {
         };
         let mut boundaries = boundary_ptrs(memo, &original);
         // A build read as an input group is the node resized: it is not put
-        // back.
-        boundaries.remove(&Rc::as_ptr(&need.build));
+        // back, and the resized build reads the build group's own inputs.
+        if let Some(build_group) = need.build_group {
+            boundaries.remove(&Rc::as_ptr(&need.build));
+            boundaries.extend(
+                memo.groups()[build_group.0 as usize]
+                    .child_groups
+                    .iter()
+                    .map(|child| Rc::as_ptr(&memo.groups()[child.0 as usize].logical_node)),
+            );
+        }
         let roots =
             result.map_err(|error| Pass2RuleError::StateConfiguration(error.to_string()))?;
         let [QueryRoot::Operator(node)] = roots.as_slice() else {
@@ -327,8 +336,8 @@ impl SharedProducer for SummaryStates {
                 ..
             } => (*accuracy_budget_parts).max(original.accuracy_budget_parts),
         };
-        // A build read as an input group stays one: the resized build is
-        // interned, and the reader reads its group.
+        // A build read as an input group stays one: the resized build's group
+        // is found or added, and the reader reads it.
         let (node, input_groups) = match need.build_group {
             None => (node, original.input_groups.clone()),
             Some(build_group) => {
@@ -340,14 +349,22 @@ impl SharedProducer for SummaryStates {
                     .find(|(before, _)| Rc::ptr_eq(before, &need.build))
                     .map(|(_, after)| Rc::clone(after))
                     .expect("the reader reads its build group directly");
-                let queries = memo.groups[reader.group].queries.clone();
-                let resized_group = memo.intern(
+                let queries = memo.groups()[reader.group].queries.clone();
+                let resized_group = match memo.find_or_add_group(
                     &resized_build,
                     &queries,
                     &original.origin,
                     accuracy_budget_parts,
-                );
-                let group_node = Rc::clone(&memo.groups[resized_group.0 as usize].logical_node);
+                ) {
+                    GroupFoundOrAdded::Found(group) => {
+                        // A reader sized for more parts may find a build
+                        // added for fewer.
+                        size_own_candidate_for(memo, group, accuracy_budget_parts);
+                        group
+                    }
+                    GroupFoundOrAdded::Added(group) => group,
+                };
+                let group_node = Rc::clone(&memo.groups()[resized_group.0 as usize].logical_node);
                 let node = super::reuse::replace(
                     &node,
                     &HashMap::from([(Rc::as_ptr(&resized_build), group_node)]),
@@ -551,7 +568,7 @@ fn compatible(left: &StateNeed, right: &StateNeed) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pass1::memo_population::try_populate_pass1;
+    use crate::pass1::add_pass1_candidates::try_add_pass1_candidates;
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
     use crate::stage0::generate_dag_of_logical_memo_groups;
     use crate::test_support::{entry_with, lower_promql};
@@ -576,7 +593,8 @@ mod tests {
         let inventory =
             generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
                 .unwrap();
-        let mut memo = try_populate_pass1(initial, &inventory, None).unwrap();
+        let mut memo =
+            try_add_pass1_candidates(initial, &inventory, &[], &Default::default()).unwrap();
         let entries = vec![
             entry_with(
                 target,
@@ -659,7 +677,8 @@ mod tests {
         let inventory =
             generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
                 .unwrap();
-        let mut memo = try_populate_pass1(initial, &inventory, None).unwrap();
+        let mut memo =
+            try_add_pass1_candidates(initial, &inventory, &[], &Default::default()).unwrap();
         // Pass 1's parts per KLL size.
         let mut parts_of_size: HashMap<u32, usize> = HashMap::new();
         for candidate in memo.candidates.iter().flatten() {

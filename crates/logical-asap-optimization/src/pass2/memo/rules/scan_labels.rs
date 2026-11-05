@@ -19,18 +19,9 @@ pub(crate) fn add_scan_label_candidates(memo: &mut Memo) -> Result<usize, Pass2R
     // Pass 1's intermediate groups (a summary build, its readout) are
     // widened inside their readers' candidates, down to the workload's
     // groups.
-    let workload_groups = super::super::window_candidates::workload_groups(memo);
-    let workload_group_of: HashMap<*const OperatorNode, MemoGroupId> = workload_groups
-        .iter()
-        .map(|&group| {
-            (
-                Rc::as_ptr(&memo.groups[group].logical_node),
-                MemoGroupId(group as u32),
-            )
-        })
-        .collect();
+    let workload_groups = memo.workload_groups();
     for (group, candidates) in memo.candidates.iter().enumerate() {
-        if !workload_groups.contains(&group) {
+        if !workload_groups.contains(&MemoGroupId(group as u32)) {
             continue;
         }
         for (index, candidate) in candidates.iter().enumerate() {
@@ -46,7 +37,7 @@ pub(crate) fn add_scan_label_candidates(memo: &mut Memo) -> Result<usize, Pass2R
                 continue;
             }
             let Some((build, children)) =
-                build_down_to_workload_groups(candidate, &workload_group_of)
+                build_down_to_workload_groups(memo, &workload_groups, candidate)
             else {
                 continue;
             };
@@ -63,12 +54,14 @@ pub(crate) fn add_scan_label_candidates(memo: &mut Memo) -> Result<usize, Pass2R
                         ..
                     }
                 )
-            ) || workload_groups_read(candidate, &workload_group_of)
+            ) || memo
+                .groups_read_through_added_groups(&candidate.input_groups, &workload_groups)
+                .workload_groups
                 .iter()
                 .any(|child| !children.contains(child))
                 || children
                     .iter()
-                    .any(|child| !is_source_chain(&memo.groups[child.0 as usize].logical_node))
+                    .any(|child| !is_source_chain(&memo.groups()[child.0 as usize].logical_node))
             {
                 continue;
             }
@@ -100,13 +93,9 @@ pub(crate) fn add_scan_label_candidates(memo: &mut Memo) -> Result<usize, Pass2R
         if *node == *unwidened || !same_output_contract(&original.root_node, &node) {
             continue;
         }
-        let queries = memo.groups[group].queries.clone();
+        let queries = memo.groups()[group].queries.clone();
         let mut node = intern_inputs(&node, memo, &queries, &mut canonical)?;
-        if memo
-            .groups
-            .iter()
-            .any(|group| Rc::ptr_eq(&group.logical_node, &node))
-        {
+        if memo.group_with_node(&node).is_some() {
             // Interning an equivalent range/source can return another group's
             // canonical value. Keep a concrete reader instead of a root alias.
             node =
@@ -130,7 +119,7 @@ pub(crate) fn add_scan_label_candidates(memo: &mut Memo) -> Result<usize, Pass2R
             }
         }
         let boundaries = memo
-            .groups
+            .groups()
             .iter()
             .enumerate()
             .map(|(id, group)| (Rc::as_ptr(&group.logical_node), MemoGroupId(id as u32)))
@@ -152,86 +141,49 @@ pub(crate) fn add_scan_label_candidates(memo: &mut Memo) -> Result<usize, Pass2R
     Ok(added)
 }
 
-/// The one summary build `candidate` computes down to the workload's groups
-/// (`workload_group_of`), through the groups Pass 1 interned, with the
-/// workload groups it reads; `None` unless there is exactly one.
+/// The one summary build `candidate` computes down to `workload_groups`,
+/// through the groups added beneath them, with the workload groups it
+/// reads; `None` unless there is exactly one.
 fn build_down_to_workload_groups(
+    memo: &Memo,
+    workload_groups: &HashSet<MemoGroupId>,
     candidate: &CandidateForMemoGroup,
-    workload_group_of: &HashMap<*const OperatorNode, MemoGroupId>,
 ) -> Option<(Rc<OperatorNode>, Vec<MemoGroupId>)> {
-    let mut builds = OperatorNode::reachable(&candidate.root_node)
-        .into_iter()
-        .filter(|node| {
-            !Rc::ptr_eq(node, &candidate.root_node)
-                && matches!(
-                    node.asap(),
-                    Some(ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. })
-                )
-                && !below_a_workload_group(&candidate.root_node, node, workload_group_of)
-        });
-    let build = builds.next()?;
-    if builds.next().is_some() {
-        return None;
-    }
-    let mut children: Vec<MemoGroupId> = build
-        .children()
-        .iter()
-        .map(|child| workload_group_of.get(&Rc::as_ptr(child)).copied())
-        .collect::<Option<_>>()?;
-    children.dedup();
-    Some((build, children))
-}
-
-/// Whether `node` is reached from `root` only through a workload group's
-/// node (`workload_group_of`), below `root` itself.
-fn below_a_workload_group(
-    root: &Rc<OperatorNode>,
-    node: &Rc<OperatorNode>,
-    workload_group_of: &HashMap<*const OperatorNode, MemoGroupId>,
-) -> bool {
-    let mut pending: Vec<Rc<OperatorNode>> = root.children().into_iter().cloned().collect();
-    let mut seen = HashSet::new();
-    while let Some(next) = pending.pop() {
-        if !seen.insert(Rc::as_ptr(&next)) || workload_group_of.contains_key(&Rc::as_ptr(&next)) {
-            continue;
-        }
-        if Rc::ptr_eq(&next, node) {
-            return false;
-        }
-        pending.extend(next.children().into_iter().cloned());
-    }
-    true
-}
-
-/// The workload groups (`workload_group_of`) `candidate` reads, directly or
-/// through the groups Pass 1 interned, in the order first reached.
-fn workload_groups_read(
-    candidate: &CandidateForMemoGroup,
-    workload_group_of: &HashMap<*const OperatorNode, MemoGroupId>,
-) -> Vec<MemoGroupId> {
+    let workload_group_with_node = |node: &Rc<OperatorNode>| {
+        memo.group_with_node(node)
+            .filter(|group| workload_groups.contains(group))
+    };
+    // The nodes from the root down to the workload groups' nodes.
     let mut pending: Vec<Rc<OperatorNode>> = candidate
         .root_node
         .children()
         .into_iter()
-        .rev()
         .cloned()
         .collect();
     let mut seen = HashSet::new();
-    let mut read = Vec::new();
+    let mut builds = Vec::new();
     while let Some(next) = pending.pop() {
-        if !seen.insert(Rc::as_ptr(&next)) {
+        if !seen.insert(Rc::as_ptr(&next)) || workload_group_with_node(&next).is_some() {
             continue;
         }
-        match workload_group_of.get(&Rc::as_ptr(&next)) {
-            Some(group) => {
-                if !read.contains(group) {
-                    read.push(*group);
-                }
-            }
-            None => pending.extend(next.children().into_iter().rev().cloned()),
+        if matches!(
+            next.asap(),
+            Some(ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. })
+        ) {
+            builds.push(Rc::clone(&next));
         }
+        pending.extend(next.children().into_iter().cloned());
     }
-    read
+    let [build] = builds.as_slice() else {
+        return None;
+    };
+    let mut children: Vec<MemoGroupId> = build
+        .children()
+        .iter()
+        .map(|child| workload_group_with_node(child))
+        .collect::<Option<_>>()?;
+    children.dedup();
+    Some((Rc::clone(build), children))
 }
 
 fn same_output_contract(expected: &OperatorNode, actual: &OperatorNode) -> bool {
@@ -293,42 +245,39 @@ fn intern_inputs(
     });
     let result = if is_source_chain(&rewritten) {
         if let Some(existing) = memo
-            .groups
+            .groups()
             .iter()
             .find(|group| same_source_node(&group.logical_node, &rewritten))
         {
             Rc::clone(&existing.logical_node)
         } else {
             // The new group's id must fit a `MemoGroupId`.
-            u32::try_from(memo.groups.len()).map_err(|_| Pass2RuleError::TooManyGroups)?;
+            u32::try_from(memo.groups().len()).map_err(|_| Pass2RuleError::TooManyGroups)?;
             let mut seen = HashSet::new();
             let inputs: Vec<_> = rewritten
                 .children()
                 .iter()
                 .map(|child| {
-                    MemoGroupId(
-                        memo.groups
-                            .iter()
-                            .position(|group| Rc::ptr_eq(child, &group.logical_node))
-                            .expect("source-chain children were interned")
-                            as u32,
-                    )
+                    memo.group_with_node(child)
+                        .expect("source-chain children were interned")
                 })
                 .filter(|input| seen.insert(*input))
                 .collect();
-            memo.groups.push(MemoGroup {
-                logical_node: Rc::clone(&rewritten),
-                child_groups: inputs.clone(),
-                parents: Vec::new(),
-                queries: queries.to_vec(),
-            });
-            memo.candidates.push(vec![CandidateForMemoGroup {
-                fused_groups: Vec::new(),
-                root_node: Rc::clone(&rewritten),
-                input_groups: inputs,
-                origin: OriginOfCandidateForMemoGroup::WidenedScans,
-                accuracy_budget_parts: 1,
-            }]);
+            memo.push_group(
+                MemoGroup {
+                    logical_node: Rc::clone(&rewritten),
+                    child_groups: inputs.clone(),
+                    parents: Vec::new(),
+                    queries: queries.to_vec(),
+                },
+                vec![CandidateForMemoGroup {
+                    fused_groups: Vec::new(),
+                    root_node: Rc::clone(&rewritten),
+                    input_groups: inputs,
+                    origin: OriginOfCandidateForMemoGroup::WidenedScans,
+                    accuracy_budget_parts: 1,
+                }],
+            );
             rewritten
         }
     } else {

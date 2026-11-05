@@ -52,7 +52,7 @@ pub(crate) fn factor_summary_results(memo: &mut Memo) -> Result<usize, Pass2Rule
         if readouts.is_empty() {
             continue;
         }
-        let queries = memo.groups[owner].queries.clone();
+        let queries = memo.groups()[owner].queries.clone();
         let mut replacements = HashMap::new();
         for readout in readouts {
             let group = append_producer(
@@ -66,7 +66,7 @@ pub(crate) fn factor_summary_results(memo: &mut Memo) -> Result<usize, Pass2Rule
             // parameters; lifting the boundary must not reset that provenance.
             replacements.insert(
                 Rc::as_ptr(&readout),
-                Rc::clone(&memo.groups[group.0 as usize].logical_node),
+                Rc::clone(&memo.groups()[group.0 as usize].logical_node),
             );
         }
         let reader = replace(&original.root_node, &replacements);

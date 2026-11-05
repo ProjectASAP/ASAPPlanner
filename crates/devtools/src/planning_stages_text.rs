@@ -242,7 +242,7 @@ fn write_memo(out: &mut String, memo: &Memo, previous: Option<&Memo>, with_candi
     // The group lines share one set of column widths, with each group's
     // candidates printed under its line.
     let group_rows: Vec<Vec<String>> = memo
-        .groups
+        .groups()
         .iter()
         .enumerate()
         .map(|(id, group)| {
@@ -525,9 +525,12 @@ fn root_label(node: &Rc<OperatorNode>) -> String {
 fn chain_label(memo: &Memo, root: &Rc<OperatorNode>, input_groups: &[MemoGroupId]) -> String {
     let (flat, originals) = flatten(&[QueryRoot::Operator(root.clone())]);
     let is_input = |id: usize| {
-        input_groups
-            .iter()
-            .any(|group| Rc::ptr_eq(&memo.groups[group.0 as usize].logical_node, &originals[id]))
+        input_groups.iter().any(|group| {
+            Rc::ptr_eq(
+                &memo.groups()[group.0 as usize].logical_node,
+                &originals[id],
+            )
+        })
     };
     let mut labels = Vec::new();
     let mut pending = vec![flat.nodes.len() - 1];

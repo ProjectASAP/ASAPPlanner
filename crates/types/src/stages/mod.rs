@@ -9,15 +9,18 @@
 //! live here.
 
 mod candidates;
+pub mod hash_consing;
 mod logical_memo_candidates;
 mod memo;
 mod per_computation_logical_memo_candidates;
 mod physical;
 mod pruning;
 mod realizer;
-mod structural_id;
 
-pub use candidates::{CandidateForMemoGroup, Memo, OriginOfCandidateForMemoGroup};
+pub use candidates::{
+    CandidateForMemoGroup, GroupFoundOrAdded, GroupsReadThroughAddedGroups, Memo,
+    OriginOfCandidateForMemoGroup,
+};
 pub use logical_memo_candidates::LogicalASAPMemoCandidates;
 pub use memo::{queries_rooted_at, root_groups, DagOfLogicalMemoGroups, MemoGroup, MemoGroupId};
 pub use per_computation_logical_memo_candidates::{
@@ -34,4 +37,3 @@ pub use physical::{
 pub use physical::{producer_storage_metrics, ProducerStorageMetrics};
 pub use pruning::{PruneReason, PrunedCandidate};
 pub use realizer::{AssignmentRealizer, PhysicalCandidateError, RealizedPlan};
-pub use structural_id::NodeToStructuralIdCache;

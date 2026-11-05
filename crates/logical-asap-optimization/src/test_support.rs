@@ -7,7 +7,7 @@ use std::rc::Rc;
 // Stage 1 internals other crates' tests call: Pass 1's working form and its
 // population step, single-candidate composition, Stage 0 hash-consing, and
 // the Pass 2 rule entry points those tests build memos with.
-pub use crate::pass1::memo_population::try_populate_pass1;
+pub use crate::pass1::add_pass1_candidates::try_add_pass1_candidates;
 pub use crate::pass1::per_computation_candidates::{
     compose_logical_candidate, generate_per_computation_candidates, PerComputationCandidates,
 };
@@ -41,7 +41,7 @@ pub fn sharing_rules_and_shared_state_groups(
 
 /// The shared summary-state groups of an expanded memo, in order: each
 /// group `add_shared_summary_state_groups` added (one candidate, the shared
-/// build, origin `SharedBuild`), and each summary build Pass 1 interned
+/// build, origin `SharedBuild`), and each summary build Pass 1 added
 /// (logical node `SummaryAgg` or `SummaryTumblingWindowChain`) whose result
 /// candidates of two or more groups read.
 pub fn shared_summary_state_groups(
@@ -55,10 +55,10 @@ pub fn shared_summary_state_groups(
             [only] if only.origin == OriginOfCandidateForMemoGroup::SharedBuild
         )
     };
-    let interned_and_shared = |group: usize| {
+    let added_and_shared = |group: usize| {
         let id = MemoGroupId(group as u32);
         matches!(
-            memo.groups[group].logical_node.asap(),
+            memo.groups()[group].logical_node.asap(),
             Some(ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. })
         ) && memo
             .candidates
@@ -71,8 +71,8 @@ pub fn shared_summary_state_groups(
             .count()
             >= 2
     };
-    (0..memo.groups.len())
-        .filter(|&group| added_by_the_shared_step(group) || interned_and_shared(group))
+    (0..memo.groups().len())
+        .filter(|&group| added_by_the_shared_step(group) || added_and_shared(group))
         .map(|group| MemoGroupId(group as u32))
         .collect()
 }

@@ -35,7 +35,7 @@ pub(crate) fn factor_summary_inputs(memo: &mut Memo) -> Result<(), Pass2RuleErro
                 }
             }
         }
-        let queries = memo.groups[owner].queries.clone();
+        let queries = memo.groups()[owner].queries.clone();
         let mut replacements = HashMap::new();
         for input in inputs {
             canonical_preprocessing(memo, &input, &boundaries, &queries, &mut replacements)?;
@@ -62,7 +62,7 @@ fn canonical_preprocessing(
         // Logical TimeRange groups can remain distinct when their inputs
         // differ structurally. The existing state-sharing rule nevertheless
         // permits identical range descriptors over the same canonical source.
-        if let Some(group) = memo.groups.iter().find(|group| {
+        if let Some(group) = memo.groups().iter().find(|group| {
             crate::pass2::memo::state_groups::same_range_input(&group.logical_node, node)
         }) {
             replacements.insert(Rc::as_ptr(node), Rc::clone(&group.logical_node));
@@ -94,7 +94,7 @@ fn canonical_preprocessing(
     )?;
     replacements.insert(
         Rc::as_ptr(node),
-        Rc::clone(&memo.groups[group.0 as usize].logical_node),
+        Rc::clone(&memo.groups()[group.0 as usize].logical_node),
     );
     Ok(true)
 }

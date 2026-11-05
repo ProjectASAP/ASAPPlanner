@@ -1524,7 +1524,7 @@ fn widened_scans_keep_memo_groups_and_stage2_candidates_acyclic() {
             .flat_map(|candidate| candidate.input_groups.iter().map(|g| g.0 as usize))
             .collect()
     };
-    for group in 0..memo.groups.len() {
+    for group in 0..memo.groups().len() {
         assert!(
             !reaches(&group_reads, group, group),
             "memo group {group} reads itself"
@@ -2068,7 +2068,7 @@ fn memo_section_lists_each_step_and_the_selected_choice() {
     // 5 + 5 + 5 Pass 1 candidates (each quantile group: exact, DDSketch and
     // a KLL sized for the whole result for the whole budget, DDSketch and a
     // KLL for half of it). Each summary candidate is one operator over the
-    // groups Pass 1 interns beneath it: the 4 builds both quantiles share,
+    // groups Pass 1 adds beneath it: the 4 builds both quantiles share,
     // each quantile's 4 estimates, and the `avg`'s 6 (two states, their
     // finalizes, a `Project` and the division), one candidate each.
     assert_eq!(steps[0]["groups"].as_array().unwrap().len(), 7);

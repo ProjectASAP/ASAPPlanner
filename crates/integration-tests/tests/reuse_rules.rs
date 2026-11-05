@@ -172,7 +172,7 @@ fn candidates_of<'a>(
         .enumerate()
         .filter(move |(group, _)| {
             let is_root = root_groups.contains(&MemoGroupId(*group as u32));
-            let group = &memo.groups[*group];
+            let group = &memo.groups()[*group];
             is_root
                 || matches!(
                     group.logical_node.non_asap(),
@@ -262,7 +262,7 @@ fn own_candidates<'a>(
     origins: &'a [OriginOfCandidateForMemoGroup],
 ) -> impl Iterator<Item = (usize, &'a Rc<OperatorNode>)> + 'a {
     candidates_of(memo, origins)
-        .filter(|(group, node)| !Rc::ptr_eq(node, &memo.groups[*group].logical_node))
+        .filter(|(group, node)| !Rc::ptr_eq(node, &memo.groups()[*group].logical_node))
 }
 
 /// `sum by (job) (sum_over_time(m[5m]))`: the nested sums and their merge
@@ -388,7 +388,7 @@ fn every_candidate_answers_alike(query: &str) {
     for (group, node) in own_candidates(&memo, &[OriginOfCandidateForMemoGroup::Pass1]) {
         assert_eq!(
             execute_implemented(node, &entry),
-            execute_implemented(&memo.groups[group].logical_node, &entry),
+            execute_implemented(&memo.groups()[group].logical_node, &entry),
             "{query}: a candidate of group {group} differs"
         );
         checked += 1;
@@ -426,7 +426,7 @@ fn reuse_answers_alike_in(
             OriginOfCandidateForMemoGroup::TopKReuse,
         ],
     ) {
-        if memo.groups[group]
+        if memo.groups()[group]
             .reached_by_queries()
             .iter()
             .any(|&q| q >= first_approximate_query)
@@ -435,7 +435,7 @@ fn reuse_answers_alike_in(
         }
         assert_eq!(
             execute_implemented(node, &entry),
-            execute_implemented(&memo.groups[group].logical_node, &entry),
+            execute_implemented(&memo.groups()[group].logical_node, &entry),
             "{queries:?}: a reuse candidate of group {group} differs"
         );
         checked += 1;
@@ -520,7 +520,7 @@ fn a_rollup_over_a_shared_summary_candidate_answers_as_without_it() {
     ];
     let memo = memo(&queries, repeating());
     let shared = memo
-        .groups
+        .groups()
         .iter()
         .find(|group| {
             group.reached_by_queries().len() > 1
@@ -536,7 +536,7 @@ fn a_rollup_over_a_shared_summary_candidate_answers_as_without_it() {
             memo.candidates
                 .iter()
                 .enumerate()
-                .filter(|(group, _)| memo.groups[*group].reached_by_queries() == [q])
+                .filter(|(group, _)| memo.groups()[*group].reached_by_queries() == [q])
                 .flat_map(|(group, candidates)| {
                     candidates
                         .iter()
@@ -555,7 +555,7 @@ fn a_rollup_over_a_shared_summary_candidate_answers_as_without_it() {
     let without = compose_memo_plan(&memo, queries.len(), &sharing);
     let (group, index) = choices(&memo, &[OriginOfCandidateForMemoGroup::Rollup])
         .into_iter()
-        .find(|(group, _)| memo.groups[*group].reached_by_queries() == [0])
+        .find(|(group, _)| memo.groups()[*group].reached_by_queries() == [0])
         .expect("a rollup of the coarse sum");
     sharing.insert(group, index);
     let with = compose_memo_plan(&memo, queries.len(), &sharing);

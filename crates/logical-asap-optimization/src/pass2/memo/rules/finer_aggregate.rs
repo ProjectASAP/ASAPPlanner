@@ -72,7 +72,7 @@ pub(crate) fn add_finer_aggregate_candidates(memo: &mut Memo) -> Result<usize, P
     // Only aggregates of equal measures can match; bucket by them (the
     // first levels of the paper's filter tree) instead of trying all pairs.
     let mut buckets: HashMap<String, Vec<usize>> = HashMap::new();
-    for (group, entry) in memo.groups.iter().enumerate() {
+    for (group, entry) in memo.groups().iter().enumerate() {
         if let Some(aggregate) = Aggregate::of(&entry.logical_node) {
             buckets
                 .entry(format!("{:?}", aggregate.measures))
@@ -96,8 +96,8 @@ pub(crate) fn add_finer_aggregate_candidates(memo: &mut Memo) -> Result<usize, P
 /// Adds to group `owner` a read of group `finer`'s result when it computes
 /// `owner`'s aggregate; the number of candidates added (0 or 1).
 fn add_read(memo: &mut Memo, owner: usize, finer: usize) -> Result<usize, Pass2RuleError> {
-    let query_node = Rc::clone(&memo.groups[owner].logical_node);
-    let finer_node = Rc::clone(&memo.groups[finer].logical_node);
+    let query_node = Rc::clone(&memo.groups()[owner].logical_node);
+    let finer_node = Rc::clone(&memo.groups()[finer].logical_node);
     let (Some(query), Some(fine)) = (Aggregate::of(&query_node), Aggregate::of(&finer_node)) else {
         return Ok(0);
     };

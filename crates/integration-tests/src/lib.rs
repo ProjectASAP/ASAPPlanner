@@ -343,14 +343,15 @@ pub mod planning {
     ) -> asap_types::stages::Memo {
         use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
         use asap_logical_asap_optimization::test_support::{
-            add_local_window_composition, try_populate_pass1,
+            add_local_window_composition, try_add_pass1_candidates,
         };
         let initial = asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots);
         let inventory = generate_per_computation_candidates(
             &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
         )
         .unwrap();
-        let mut memo = try_populate_pass1(initial, &inventory, None).unwrap();
+        let mut memo =
+            try_add_pass1_candidates(initial, &inventory, &[], &Default::default()).unwrap();
         add_local_window_composition(&mut memo, entries);
         asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(memo)
             .unwrap()
@@ -451,7 +452,7 @@ pub mod planning {
             .candidates
             .iter()
             .enumerate()
-            .filter(|(group, _)| memo.groups[*group].reached_by_queries() == [q])
+            .filter(|(group, _)| memo.groups()[*group].reached_by_queries() == [q])
             .flat_map(|(group, candidates)| {
                 candidates
                     .iter()
@@ -463,9 +464,9 @@ pub mod planning {
             .collect();
         // Group indices don't give the order: Pass 2 appends groups at the
         // end. Depth from the root does.
-        let mut depth = vec![usize::MAX; memo.groups.len()];
+        let mut depth = vec![usize::MAX; memo.groups().len()];
         let mut pending: std::collections::VecDeque<_> = memo
-            .groups
+            .groups()
             .iter()
             .enumerate()
             .filter(|(group, _)| {
@@ -481,7 +482,7 @@ pub mod planning {
             }
             depth[group] = d;
             pending.extend(
-                memo.groups[group]
+                memo.groups()[group]
                     .child_groups
                     .iter()
                     .map(|child| (child.0 as usize, d + 1)),
@@ -534,7 +535,7 @@ pub mod planning {
                 )
             })
             .collect();
-        for (state, group) in memo.groups.iter().enumerate() {
+        for (state, group) in memo.groups().iter().enumerate() {
             if !is_build(&group.logical_node) || group.reached_by_queries().len() < queries {
                 continue;
             }

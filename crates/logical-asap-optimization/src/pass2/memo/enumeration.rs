@@ -160,7 +160,7 @@ pub fn build_logical_asap_dags_from_chosen_candidates(
             .collect();
         let mut replacements = HashMap::new();
         for &child in &candidate.input_groups {
-            let old = &memo.groups[child.0 as usize].logical_node;
+            let old = &memo.groups()[child.0 as usize].logical_node;
             if !own_nodes.contains(&Rc::as_ptr(old)) {
                 return Err(
                     ErrorBuildingLogicalASAPDagsFromChosenCandidates::ChildNotInCandidate {

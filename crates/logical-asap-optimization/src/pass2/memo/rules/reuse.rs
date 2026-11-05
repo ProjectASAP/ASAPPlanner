@@ -22,7 +22,7 @@ pub(in crate::pass2::memo) fn restore_inputs(
     // contract because the intermediate state's guarantee is part of its API.
     let canonical: Vec<_> = inputs
         .iter()
-        .flat_map(|id| OperatorNode::reachable(&memo.groups[id.0 as usize].logical_node))
+        .flat_map(|id| OperatorNode::reachable(&memo.groups()[id.0 as usize].logical_node))
         .collect();
     fn visit(
         node: &Rc<OperatorNode>,
@@ -101,7 +101,7 @@ pub(in crate::pass2::memo) fn append_producer(
     // Reuse only dedicated producer groups. A logical result group can contain
     // other implementations and cannot enforce this producer's exact contract.
     let root_groups = asap_types::stages::root_groups(&memo.query_roots);
-    if let Some((index, _)) = memo.groups.iter().enumerate().find(|(index, group)| {
+    if let Some((index, _)) = memo.groups().iter().enumerate().find(|(index, group)| {
         !root_groups.contains(&MemoGroupId(*index as u32))
             && memo.candidates[*index].len() == 1
             && memo.candidates[*index][0].origin == origin
@@ -110,30 +110,31 @@ pub(in crate::pass2::memo) fn append_producer(
     }) {
         return Ok(MemoGroupId(index as u32));
     }
-    let id =
-        MemoGroupId(u32::try_from(memo.groups.len()).map_err(|_| Pass2RuleError::TooManyGroups)?);
+    // The new group's id must fit a `MemoGroupId`.
+    u32::try_from(memo.groups().len()).map_err(|_| Pass2RuleError::TooManyGroups)?;
     let node = Rc::new((*node).clone());
     let boundaries = memo
-        .groups
+        .groups()
         .iter()
         .enumerate()
         .map(|(id, group)| (Rc::as_ptr(&group.logical_node), MemoGroupId(id as u32)))
         .collect();
     let children = boundary_groups(&node, &boundaries);
-    memo.groups.push(MemoGroup {
-        logical_node: Rc::clone(&node),
-        child_groups: children.clone(),
-        parents: Vec::new(),
-        queries: queries.to_vec(),
-    });
-    memo.candidates.push(vec![CandidateForMemoGroup {
-        fused_groups: Vec::new(),
-        root_node: node,
-        input_groups: children,
-        origin,
-        accuracy_budget_parts,
-    }]);
-    Ok(id)
+    Ok(memo.push_group(
+        MemoGroup {
+            logical_node: Rc::clone(&node),
+            child_groups: children.clone(),
+            parents: Vec::new(),
+            queries: queries.to_vec(),
+        },
+        vec![CandidateForMemoGroup {
+            fused_groups: Vec::new(),
+            root_node: node,
+            input_groups: children,
+            origin,
+            accuracy_budget_parts,
+        }],
+    ))
 }
 
 pub(in crate::pass2::memo) fn append_reader(
@@ -155,7 +156,7 @@ pub(in crate::pass2::memo) fn append_reader(
         )));
     }
     let boundaries = memo
-        .groups
+        .groups()
         .iter()
         .enumerate()
         .filter(|(id, _)| *id != owner)

@@ -47,7 +47,7 @@ impl SharedProducer for TopKRankings {
     fn sets(&mut self, memo: &Memo) -> Result<Vec<Vec<Reader<Rc<OperatorNode>>>>, Pass2RuleError> {
         let mut owners = HashMap::new();
         let mut roots = Vec::new();
-        for (group, entry) in memo.groups.iter().enumerate() {
+        for (group, entry) in memo.groups().iter().enumerate() {
             let [input] = entry.logical_node.children()[..] else {
                 continue;
             };
@@ -101,7 +101,7 @@ impl SharedProducer for TopKRankings {
     ) -> Result<usize, Pass2RuleError> {
         // Interning the ranking is idempotent, so every reader of the set
         // reads the producer the first one interned.
-        let Some(input_group) = memo.groups[covering.reader_groups[0]]
+        let Some(input_group) = memo.groups()[covering.reader_groups[0]]
             .child_groups
             .first()
             .copied()
@@ -112,11 +112,11 @@ impl SharedProducer for TopKRankings {
         else {
             return Ok(0);
         };
-        let input = Rc::clone(&memo.groups[exact_input.0 as usize].logical_node);
+        let input = Rc::clone(&memo.groups()[exact_input.0 as usize].logical_node);
         let queries: Vec<_> = covering
             .reader_groups
             .iter()
-            .flat_map(|&group| memo.groups[group].queries.iter().copied())
+            .flat_map(|&group| memo.groups()[group].queries.iter().copied())
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect();
@@ -130,7 +130,7 @@ impl SharedProducer for TopKRankings {
             OriginOfCandidateForMemoGroup::TopKReuse,
             1,
         )?;
-        let sort = Rc::clone(&memo.groups[sort_group.0 as usize].logical_node);
+        let sort = Rc::clone(&memo.groups()[sort_group.0 as usize].logical_node);
         let ranking = covering
             .ranking
             .with_new_children(|_| Rc::clone(&sort))
@@ -142,9 +142,9 @@ impl SharedProducer for TopKRankings {
             OriginOfCandidateForMemoGroup::TopKReuse,
             1,
         )?;
-        let ranking = Rc::clone(&memo.groups[ranking_group.0 as usize].logical_node);
+        let ranking = Rc::clone(&memo.groups()[ranking_group.0 as usize].logical_node);
         let owner = reader.group;
-        let logical = Rc::clone(&memo.groups[owner].logical_node);
+        let logical = Rc::clone(&memo.groups()[owner].logical_node);
         let Some(NonASAPOp::Aggregate {
             reduction: Reduction::Reduce(keys),
             measures,
@@ -221,8 +221,8 @@ fn exact_input_group(
                 break;
             };
             replacements.insert(
-                Rc::as_ptr(&memo.groups[child.0 as usize].logical_node),
-                Rc::clone(&memo.groups[exact_child.0 as usize].logical_node),
+                Rc::as_ptr(&memo.groups()[child.0 as usize].logical_node),
+                Rc::clone(&memo.groups()[exact_child.0 as usize].logical_node),
             );
             children.push(exact_child);
         }
@@ -250,7 +250,7 @@ fn exact_input_group(
     let node = Rc::new((*candidates[0].root_node).clone().with_guarantee(Some(
         AccuracyGuarantee::exact("only exact implementations and exact inputs"),
     )));
-    let queries = memo.groups[group.0 as usize].queries.clone();
+    let queries = memo.groups()[group.0 as usize].queries.clone();
     let id = append_producer(
         memo,
         node,

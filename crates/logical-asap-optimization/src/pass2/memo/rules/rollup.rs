@@ -130,7 +130,7 @@ pub(crate) fn add_rollup_candidates(memo: &mut Memo) -> Result<usize, Pass2RuleE
                 // implementation of the group is still checked by plan
                 // reconstruction (input contract) and Stage 3 (guarantee).
                 let fine_result_is_value = *fine_node == *value
-                    && memo.groups[*fine_group].logical_node.schema == value.schema
+                    && memo.groups()[*fine_group].logical_node.schema == value.schema
                     && memo.candidates[*fine_group].iter().all(|candidate| {
                         candidate
                             .root_node
@@ -139,7 +139,7 @@ pub(crate) fn add_rollup_candidates(memo: &mut Memo) -> Result<usize, Pass2RuleE
                             .is_some_and(|guarantee| guarantee.is_exact())
                     });
                 if fine_result_is_value {
-                    let fine_result = Rc::clone(&memo.groups[*fine_group].logical_node);
+                    let fine_result = Rc::clone(&memo.groups()[*fine_group].logical_node);
                     let coarse_node = replace(
                         &coarse_node,
                         &HashMap::from([(Rc::as_ptr(&value), fine_result)]),
@@ -153,8 +153,8 @@ pub(crate) fn add_rollup_candidates(memo: &mut Memo) -> Result<usize, Pass2RuleE
                     )?);
                     continue;
                 }
-                let mut queries = memo.groups[*coarse_group].queries.clone();
-                queries.extend(&memo.groups[*fine_group].queries);
+                let mut queries = memo.groups()[*coarse_group].queries.clone();
+                queries.extend(&memo.groups()[*fine_group].queries);
                 queries.sort_unstable();
                 queries.dedup();
                 let producer = append_producer(
@@ -164,7 +164,7 @@ pub(crate) fn add_rollup_candidates(memo: &mut Memo) -> Result<usize, Pass2RuleE
                     OriginOfCandidateForMemoGroup::Rollup,
                     1,
                 )?;
-                let canonical = Rc::clone(&memo.groups[producer.0 as usize].logical_node);
+                let canonical = Rc::clone(&memo.groups()[producer.0 as usize].logical_node);
                 let coarse_node = replace(
                     &coarse_node,
                     &HashMap::from([(Rc::as_ptr(&value), Rc::clone(&canonical))]),
@@ -222,7 +222,7 @@ pub(crate) fn add_window_rollup_candidates(memo: &mut Memo) -> Result<usize, Pas
     use crate::pass2::asap_aware_cse::{
         tumbling_window_candidates, window_composition_shared_chain_candidates,
     };
-    let mut grids = vec![std::collections::BTreeSet::new(); memo.groups.len()];
+    let mut grids = vec![std::collections::BTreeSet::new(); memo.groups().len()];
     for (group, candidates) in memo.candidates.iter().enumerate() {
         for candidate in candidates.iter().filter(|candidate| {
             candidate.origin == OriginOfCandidateForMemoGroup::TumblingWindows
@@ -317,7 +317,7 @@ pub(crate) fn add_window_rollup_candidates(memo: &mut Memo) -> Result<usize, Pas
 
 #[cfg(test)]
 mod tests {
-    use crate::pass1::memo_population::try_populate_pass1;
+    use crate::pass1::add_pass1_candidates::try_add_pass1_candidates;
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
     use crate::stage0::generate_dag_of_logical_memo_groups;
     use crate::test_support::{lower_promql, sharing_rules_and_shared_state_groups};
@@ -340,7 +340,7 @@ mod tests {
             generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
                 .unwrap();
         let memo = sharing_rules_and_shared_state_groups(
-            try_populate_pass1(initial, &inventory, None).unwrap(),
+            try_add_pass1_candidates(initial, &inventory, &[], &Default::default()).unwrap(),
         )
         .unwrap();
         let root_of = |query: usize| memo.query_roots[query].as_operator().unwrap().0 as usize;

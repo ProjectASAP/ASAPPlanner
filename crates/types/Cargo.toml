@@ -15,9 +15,6 @@ edition = "2021"
 # value, once per reference, exactly like the old Box.
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
-# Structural ids of operator nodes (`NodeToStructuralIdCache`): MessagePack
-# keeps non-finite floats and signed zero apart.
-rmp-serde = "1"
 thiserror = "2"
 # The sketch rows of the family-capability table (`SketchFamily::capability`).
 asap_sketchlib = { workspace = true }

@@ -10,8 +10,9 @@ use std::rc::Rc;
 
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
 
-use asap_types::stages::{CandidateForMemoGroup, Memo, OriginOfCandidateForMemoGroup};
-use asap_types::stages::{MemoGroup, MemoGroupId};
+use crate::own_candidate_sizing::size_own_candidate_for;
+use asap_types::stages::hash_consing::HashConsingTable;
+use asap_types::stages::{CandidateForMemoGroup, Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
 
 /// Why Pass 2's rules failed on a memo: its precondition check, a rule
 /// (2–9), or the shared summary-state groups (10).
@@ -33,9 +34,12 @@ pub enum Pass2RuleError {
     ReuseRule(String),
 }
 
+/// A private summary build and its occurrences: equal builds (Stage 0's
+/// equality) are one.
 struct BuildReaders {
     build: Rc<OperatorNode>,
-    children: Vec<MemoGroupId>,
+    /// Each occurrence: the reader's group, its candidate's index there, and
+    /// the build node in that candidate.
     readers: Vec<(usize, usize, Rc<OperatorNode>)>,
 }
 
@@ -50,49 +54,29 @@ pub(crate) fn check_memo_well_formed(memo: &Memo) -> Result<(), Pass2RuleError> 
     Ok(())
 }
 
-/// Pass 2's last step, after its rules: give each summary build that two or
-/// more candidates make identically its own group, and add to each reader
-/// group a candidate reading that group; a build equal to one Pass 1
-/// interned as a group is read from that group instead. Every existing candidate stays
-/// (unsupported candidate shapes unchanged). Then rebuilds every group's
-/// parents and the queries it may serve. On error, discard `memo`: it may
-/// hold partial work.
+/// Pass 2's last step, after its rules: give each private summary build that
+/// two or more candidates make equally (Stage 0's equality) its own group,
+/// and add to each reader group a candidate reading that group; a build
+/// equal to an existing group's node is read from that group instead, its
+/// own candidate sized for the most budget parts of its readers. Every
+/// existing candidate stays (unsupported candidate shapes unchanged). Then
+/// rebuilds every group's parents and the queries it may serve. On error,
+/// discard `memo`: it may hold partial work.
 pub(crate) fn add_shared_summary_state_groups(memo: &mut Memo) -> Result<(), Pass2RuleError> {
-    add_shared_summary_state_groups_with_index(memo, true)
-}
-
-/// `indexed` looks builds up by fingerprint; otherwise by a linear scan
-/// (the reference the index is tested against).
-fn add_shared_summary_state_groups_with_index(
-    memo: &mut Memo,
-    indexed: bool,
-) -> Result<(), Pass2RuleError> {
     let mut builds: Vec<BuildReaders> = Vec::new();
-    let mut build_index: HashMap<Option<BuildFingerprint>, Vec<usize>> = HashMap::new();
+    let mut equal_builds: HashConsingTable<usize> = HashConsingTable::default();
     for (group, candidates) in memo.candidates.iter().enumerate() {
         for (index, candidate) in candidates.iter().enumerate() {
-            for (build, children) in direct_input_builds(memo, candidate) {
-                let fingerprint = build_fingerprint(&build);
-                let bucket = build_index.entry(fingerprint).or_default();
-                let matching = if indexed {
-                    bucket
-                        .iter()
-                        .copied()
-                        .find(|&index| same_concrete_build(&builds[index].build, &build))
-                } else {
-                    builds
-                        .iter()
-                        .position(|entry| same_concrete_build(&entry.build, &build))
-                };
-                if let Some(build_index) = matching {
-                    builds[build_index].readers.push((group, index, build));
-                } else {
-                    bucket.push(builds.len());
-                    builds.push(BuildReaders {
-                        build: Rc::clone(&build),
-                        children,
-                        readers: vec![(group, index, build)],
-                    });
+            for (build, _) in direct_input_builds(memo, candidate) {
+                match equal_builds.find(&build) {
+                    Some(entry) => builds[entry].readers.push((group, index, build)),
+                    None => {
+                        equal_builds.insert(Rc::clone(&build), builds.len());
+                        builds.push(BuildReaders {
+                            build: Rc::clone(&build),
+                            readers: vec![(group, index, build)],
+                        });
+                    }
                 }
             }
         }
@@ -101,41 +85,6 @@ fn add_shared_summary_state_groups_with_index(
     let mut replacements: BTreeMap<(usize, usize), HashMap<*const OperatorNode, Rc<OperatorNode>>> =
         BTreeMap::new();
     for build in builds {
-        // A private build equal to a build Pass 1 interned reads that group.
-        if let Some(interned) = memo.group_of(&build.build) {
-            let node = Rc::clone(&memo.groups[interned.0 as usize].logical_node);
-            for (group, index, own_build) in build.readers {
-                replacements
-                    .entry((group, index))
-                    .or_default()
-                    .insert(Rc::as_ptr(&own_build), Rc::clone(&node));
-            }
-            if !state_groups.contains(&interned) {
-                state_groups.push(interned);
-            }
-            continue;
-        }
-        // Repeated private builds within one result are reusable too. The
-        // reader list records concrete build occurrences, not just owners.
-        if build.readers.len() < 2 {
-            continue;
-        }
-        let state_group = MemoGroupId(
-            u32::try_from(memo.groups.len()).map_err(|_| Pass2RuleError::TooManyGroups)?,
-        );
-        let mut queries: Vec<_> = build
-            .readers
-            .iter()
-            .flat_map(|(group, _, _)| memo.groups[*group].queries.iter().copied())
-            .collect();
-        queries.sort_unstable();
-        queries.dedup();
-        memo.groups.push(MemoGroup {
-            logical_node: Rc::clone(&build.build),
-            child_groups: build.children.clone(),
-            parents: Vec::new(),
-            queries,
-        });
         // The build is its readers' own build, so it is sized for their
         // shares of the budget (equal builds have equal sizes).
         let accuracy_budget_parts = build
@@ -144,20 +93,41 @@ fn add_shared_summary_state_groups_with_index(
             .map(|(group, index, _)| memo.candidates[*group][*index].accuracy_budget_parts)
             .max()
             .unwrap_or(1);
-        memo.candidates.push(vec![CandidateForMemoGroup {
-            fused_groups: Vec::new(),
-            root_node: Rc::clone(&build.build),
-            input_groups: build.children,
-            origin: OriginOfCandidateForMemoGroup::SharedBuild,
-            accuracy_budget_parts,
-        }]);
+        let state_group = match memo.group_of(&build.build) {
+            Some(existing) => {
+                size_own_candidate_for(memo, existing, accuracy_budget_parts);
+                existing
+            }
+            // Repeated private builds within one result are reusable too. The
+            // reader list records concrete build occurrences, not just owners.
+            None if build.readers.len() < 2 => continue,
+            None => {
+                let mut queries: Vec<_> = build
+                    .readers
+                    .iter()
+                    .flat_map(|(group, _, _)| memo.groups()[*group].queries.iter().copied())
+                    .collect();
+                queries.sort_unstable();
+                queries.dedup();
+                memo.find_or_add_group(
+                    &build.build,
+                    &queries,
+                    &OriginOfCandidateForMemoGroup::SharedBuild,
+                    accuracy_budget_parts,
+                )
+                .group()
+            }
+        };
+        let node = Rc::clone(&memo.groups()[state_group.0 as usize].logical_node);
         for (group, index, own_build) in build.readers {
             replacements
                 .entry((group, index))
                 .or_default()
-                .insert(Rc::as_ptr(&own_build), Rc::clone(&build.build));
+                .insert(Rc::as_ptr(&own_build), Rc::clone(&node));
         }
-        state_groups.push(state_group);
+        if !state_groups.contains(&state_group) {
+            state_groups.push(state_group);
+        }
     }
     for ((group, index), replacements) in replacements {
         // Factor every available producer boundary together. A producer used by
@@ -171,78 +141,52 @@ fn add_shared_summary_state_groups_with_index(
             .input_groups
             .iter()
             .chain(&state_groups)
-            .map(|id| (Rc::as_ptr(&memo.groups[id.0 as usize].logical_node), *id))
+            .map(|id| (Rc::as_ptr(&memo.groups()[id.0 as usize].logical_node), *id))
             .collect();
         reader.root_node = super::rules::reuse::replace(&reader.root_node, &replacements);
         reader.input_groups = boundary_groups(&reader.root_node, &boundaries);
         reader.origin = OriginOfCandidateForMemoGroup::SharedBuild;
-        memo.candidates[group].push(reader);
-    }
-    // Parents describe every possible group/candidate dependency, not a selected plan.
-    for group in &mut memo.groups {
-        group.parents.clear();
-    }
-    for group in 0..memo.groups.len() {
-        let dependencies: HashSet<_> = memo.groups[group]
-            .child_groups
-            .iter()
-            .chain(
-                memo.candidates[group]
-                    .iter()
-                    .flat_map(|candidate| &candidate.input_groups),
-            )
-            .copied()
-            .collect();
-        for child in dependencies {
-            memo.groups[child.0 as usize]
-                .parents
-                .push(MemoGroupId(group as u32));
+        // A reader this step added before (it ran on this memo already) is
+        // not added again.
+        if !memo.candidates[group].iter().any(|known| {
+            known.origin == reader.origin
+                && known.input_groups == reader.input_groups
+                && known.accuracy_budget_parts == reader.accuracy_budget_parts
+                && *known.root_node == *reader.root_node
+        }) {
+            memo.candidates[group].push(reader);
         }
     }
-    if memo.topological_order().is_none() {
-        return Err(Pass2RuleError::CyclicDependencies);
-    }
+    // Parents describe every possible group/candidate dependency, not a selected plan.
+    memo.rebuild_parents();
     // The chosen representative input may now serve additional queries through
-    // state reuse; propagate potential reach along the expanded dependency DAG.
+    // state reuse; propagate potential reach along the expanded dependency
+    // DAG, readers first.
     for group in memo
         .topological_order()
         .ok_or(Pass2RuleError::CyclicDependencies)?
         .into_iter()
         .rev()
     {
-        let queries = memo.groups[group.0 as usize].queries.clone();
-        let children: HashSet<_> = memo.groups[group.0 as usize]
-            .child_groups
-            .iter()
-            .chain(
-                memo.candidates[group.0 as usize]
-                    .iter()
-                    .flat_map(|candidate| &candidate.input_groups),
-            )
-            .copied()
-            .collect();
-        for child in children {
-            memo.groups[child.0 as usize].queries.extend(&queries);
-            memo.groups[child.0 as usize].queries.sort_unstable();
-            memo.groups[child.0 as usize].queries.dedup();
-        }
+        let queries = memo.groups()[group.0 as usize].queries.clone();
+        memo.add_queries(group, &queries);
     }
     Ok(())
 }
 
 fn validate_references(memo: &Memo) -> Result<(), Pass2RuleError> {
-    if memo.groups.len() != memo.candidates.len() {
+    if memo.groups().len() != memo.candidates.len() {
         return Err(Pass2RuleError::MismatchedGroups);
     }
-    if memo.groups.len() > u32::MAX as usize {
+    if memo.groups().len() > u32::MAX as usize {
         return Err(Pass2RuleError::TooManyGroups);
     }
-    for group in &memo.groups {
+    for group in memo.groups() {
         if group
             .child_groups
             .iter()
             .chain(&group.parents)
-            .any(|id| id.0 as usize >= memo.groups.len())
+            .any(|id| id.0 as usize >= memo.groups().len())
         {
             return Err(Pass2RuleError::InvalidGroupReference);
         }
@@ -252,7 +196,7 @@ fn validate_references(memo: &Memo) -> Result<(), Pass2RuleError> {
             .input_groups
             .iter()
             .chain(&candidate.fused_groups)
-            .any(|id| id.0 as usize >= memo.groups.len())
+            .any(|id| id.0 as usize >= memo.groups().len())
         {
             return Err(Pass2RuleError::InvalidGroupReference);
         }
@@ -269,7 +213,7 @@ pub(super) fn simple_build(
 }
 
 /// The summary build `candidate` reads as an input group, with that group:
-/// a build Pass 1 interned, read by a candidate with no private build. `None`
+/// a build Pass 1 added, read by a candidate with no private build. `None`
 /// unless exactly one input group is a `SummaryAgg` and the candidate is one
 /// [`simple_build`] would take by origin.
 pub(super) fn input_group_build(
@@ -282,7 +226,7 @@ pub(super) fn input_group_build(
     }
     let mut builds = candidate.input_groups.iter().filter(|group| {
         matches!(
-            memo.groups[group.0 as usize].logical_node.asap(),
+            memo.groups()[group.0 as usize].logical_node.asap(),
             Some(ASAPOp::SummaryAgg { .. })
         )
     });
@@ -292,12 +236,12 @@ pub(super) fn input_group_build(
             .root_node
             .children()
             .iter()
-            .any(|child| Rc::ptr_eq(child, &memo.groups[group.0 as usize].logical_node))
+            .any(|child| Rc::ptr_eq(child, &memo.groups()[group.0 as usize].logical_node))
     {
         return None;
     }
     Some((
-        Rc::clone(&memo.groups[group.0 as usize].logical_node),
+        Rc::clone(&memo.groups()[group.0 as usize].logical_node),
         group,
     ))
 }
@@ -327,7 +271,7 @@ pub(super) fn direct_input_builds(
         .iter()
         .map(|&group| {
             (
-                Rc::as_ptr(&memo.groups[group.0 as usize].logical_node),
+                Rc::as_ptr(&memo.groups()[group.0 as usize].logical_node),
                 group,
             )
         })
@@ -390,7 +334,7 @@ pub(super) fn boundary_ptrs(
     candidate
         .input_groups
         .iter()
-        .map(|group| Rc::as_ptr(&memo.groups[group.0 as usize].logical_node))
+        .map(|group| Rc::as_ptr(&memo.groups()[group.0 as usize].logical_node))
         .collect()
 }
 
@@ -411,61 +355,6 @@ pub(super) fn nodes_within(
         nodes.push(node);
     }
     nodes
-}
-
-// Hashing narrows comparisons only; full strict equality below remains the
-// authority, including probability metadata and floating-point corner cases.
-#[derive(Hash, PartialEq, Eq)]
-struct BuildFingerprint {
-    local: String,
-    inputs: Vec<(usize, Option<String>)>,
-}
-
-fn local_fingerprint(node: &OperatorNode) -> Option<String> {
-    serde_json::to_string(&(
-        node.operator.map_children(|_| ()),
-        &node.schema,
-        node.result_kind,
-        &node.guarantee,
-        node.timing,
-        node.materialization,
-    ))
-    .ok()
-}
-
-fn build_fingerprint(node: &OperatorNode) -> Option<BuildFingerprint> {
-    let inputs = node
-        .children()
-        .into_iter()
-        .map(|input| {
-            match input.non_asap() {
-                Some(NonASAPOp::TimeRange { child, .. }) => {
-                    // Exactly the existing same_range_input contract: identical
-                    // local range semantics over the same canonical source.
-                    Some((Rc::as_ptr(child) as usize, Some(local_fingerprint(input)?)))
-                }
-                _ => Some((Rc::as_ptr(input) as usize, None)),
-            }
-        })
-        .collect::<Option<Vec<_>>>()?;
-    Some(BuildFingerprint {
-        local: local_fingerprint(node)?,
-        inputs,
-    })
-}
-
-// Immediate inputs are canonical memo nodes. Compare local fields without
-// recursively walking their potentially shared DAGs; serialization additionally
-// distinguishes signed-zero parameters, matching conservative CSE semantics.
-fn same_concrete_build(left: &OperatorNode, right: &OperatorNode) -> bool {
-    let left_inputs = left.children();
-    let right_inputs = right.children();
-    left_inputs.len() == right_inputs.len()
-        && left_inputs
-            .iter()
-            .zip(right_inputs)
-            .all(|(left, right)| Rc::ptr_eq(left, right) || same_range_input(left, right))
-        && same_local_fields(left, right)
 }
 
 // TimeRange lacks a unique row key and therefore is not generally memo-interned.
@@ -515,7 +404,7 @@ fn replace_node(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pass1::memo_population::try_populate_pass1;
+    use crate::pass1::add_pass1_candidates::try_add_pass1_candidates;
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
     use crate::stage0::generate_dag_of_logical_memo_groups;
     use asap_types::ir::properties::AccuracyTarget;
@@ -540,55 +429,6 @@ mod tests {
         Expanded {
             state_groups: crate::test_support::shared_summary_state_groups(&memo),
             memo,
-        }
-    }
-
-    // Hash indexing is only an acceleration: independently run the original
-    // linear state lookup and compare every generated candidate and state.
-    #[test]
-    fn indexed_state_interning_preserves_linear_catalog() {
-        let memo = with_local_tumbling_windows(
-            workload(&[
-                ("quantile_over_time(0.95, latency[5m])", 0.01),
-                ("quantile_over_time(0.99, latency[15m])", 0.02),
-                ("quantile_over_time(0.9, latency{job=\"other\"}[5m])", 0.01),
-            ]),
-            &[6, 6, 6],
-        );
-        let mut memo = memo;
-        crate::pass2::logical_memo_candidates::apply_sharing_rules(&mut memo).unwrap();
-        let mut linear = memo.clone();
-        let mut indexed = memo;
-        add_shared_summary_state_groups_with_index(&mut indexed, true).unwrap();
-        add_shared_summary_state_groups_with_index(&mut linear, false).unwrap();
-        let (indexed, linear) = (expanded(indexed), expanded(linear));
-        assert_eq!(indexed.state_groups, linear.state_groups);
-        assert_eq!(indexed.memo.groups.len(), linear.memo.groups.len());
-        for (left, right) in indexed.memo.candidates.iter().zip(&linear.memo.candidates) {
-            let signatures = |candidates: &[CandidateForMemoGroup]| {
-                candidates
-                    .iter()
-                    .map(|candidate| {
-                        (
-                            candidate.input_groups.clone(),
-                            candidate.accuracy_budget_parts,
-                            serde_json::to_string(
-                                &asap_types::ir::flat::flatten(&[QueryRoot::Operator(Rc::clone(
-                                    &candidate.root_node,
-                                ))])
-                                .0,
-                            )
-                            .unwrap(),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            };
-            assert_eq!(signatures(left), signatures(right));
-        }
-        for (left, right) in indexed.memo.groups.iter().zip(&linear.memo.groups) {
-            assert_eq!(left.child_groups, right.child_groups);
-            assert_eq!(left.parents, right.parents);
-            assert_eq!(left.queries, right.queries);
         }
     }
 
@@ -617,10 +457,10 @@ mod tests {
         let inventory =
             generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
                 .unwrap();
-        try_populate_pass1(initial, &inventory, None).unwrap()
+        try_add_pass1_candidates(initial, &inventory, &[], &Default::default()).unwrap()
     }
 
-    // Equal-sized quantiles share one canonical state (Pass 1 interns it)
+    // Equal-sized quantiles share one canonical state (Pass 1 adds it as a group)
     // while local choices remain.
     #[test]
     fn quantile_readers_share_concrete_state_and_retain_local_candidates() {
@@ -628,18 +468,18 @@ mod tests {
             ("quantile_over_time(0.95, latency[5m])", 0.01),
             ("quantile_over_time(0.99, latency[5m])", 0.01),
         ]);
-        let original_count = original.groups.len();
+        let original_count = original.groups().len();
         let expanded = expand(original.clone()).unwrap();
         assert!(!expanded.state_groups.is_empty());
         let order = expanded.memo.topological_order().unwrap();
         for state in &expanded.state_groups {
-            let group = &expanded.memo.groups[state.0 as usize];
+            let group = &expanded.memo.groups()[state.0 as usize];
             assert_eq!(group.queries, vec![0, 1]);
             for input in &group.child_groups {
-                assert_eq!(expanded.memo.groups[input.0 as usize].queries, vec![0, 1]);
+                assert_eq!(expanded.memo.groups()[input.0 as usize].queries, vec![0, 1]);
                 assert!(group.logical_node.children().iter().any(|node| Rc::ptr_eq(
                     node,
-                    &expanded.memo.groups[input.0 as usize].logical_node
+                    &expanded.memo.groups()[input.0 as usize].logical_node
                 )));
             }
             assert_eq!(group.parents.len(), 2);
@@ -689,7 +529,7 @@ mod tests {
         assert!(expanded
             .state_groups
             .iter()
-            .any(|id| expanded.memo.groups[id.0 as usize].queries == vec![0, 1]));
+            .any(|id| expanded.memo.groups()[id.0 as usize].queries == vec![0, 1]));
     }
 
     // Resizing never makes different source predicates compatible.
@@ -699,10 +539,10 @@ mod tests {
             ("quantile_over_time(0.95, latency{job=\"a\"}[5m])", 0.01),
             ("quantile_over_time(0.99, latency{job=\"b\"}[5m])", 0.02),
         ]);
-        let count = original.groups.len();
+        let count = original.groups().len();
         let expanded = expand(original).unwrap();
         assert!(expanded.state_groups.is_empty());
-        assert_eq!(expanded.memo.groups.len(), count);
+        assert_eq!(expanded.memo.groups().len(), count);
     }
 
     fn with_local_tumbling_windows(mut memo: Memo, grids: &[u64]) -> Memo {
@@ -711,18 +551,18 @@ mod tests {
         };
 
         let boundaries: HashMap<_, _> = memo
-            .groups
+            .groups()
             .iter()
             .enumerate()
             .map(|(id, group)| (Rc::as_ptr(&group.logical_node), MemoGroupId(id as u32)))
             .collect();
         // As local window composition does: the workload's groups only.
-        let workload_groups = super::super::window_candidates::workload_groups(&memo);
-        for group in 0..memo.groups.len() {
-            if !workload_groups.contains(&group) {
+        let workload_groups = memo.workload_groups();
+        for group in 0..memo.groups().len() {
+            if !workload_groups.contains(&MemoGroupId(group as u32)) {
                 continue;
             }
-            let grid = grids[memo.groups[group].queries[0]];
+            let grid = grids[memo.groups()[group].queries[0]];
             for candidate in memo.candidates[group].clone() {
                 let roots = vec![QueryRoot::Operator(Rc::clone(&candidate.root_node))];
                 let tumbling_windows = tumbling_window_candidates(&roots, &[Some(grid)]);
@@ -771,7 +611,7 @@ mod tests {
             ]),
             &[60_000, 60_000],
         );
-        assert!(!original.groups.iter().any(|group| matches!(
+        assert!(!original.groups().iter().any(|group| matches!(
             group.logical_node.non_asap(),
             Some(NonASAPOp::Scan { .. })
         ) && group
@@ -801,7 +641,7 @@ mod tests {
             .state_groups
             .iter()
             .find(|id| {
-                let group = &expanded.memo.groups[id.0 as usize];
+                let group = &expanded.memo.groups()[id.0 as usize];
                 matches!(
                     group.logical_node.asap(),
                     Some(ASAPOp::SummaryTumblingWindowChain { .. })
@@ -816,7 +656,7 @@ mod tests {
                     })
             })
             .expect("one state over union labels");
-        let state = &expanded.memo.groups[shared.0 as usize];
+        let state = &expanded.memo.groups()[shared.0 as usize];
         assert!(state.parents.len() >= 2);
         for parent in &state.parents {
             let reader = expanded.memo.candidates[parent.0 as usize]
@@ -825,7 +665,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 reader.root_node.schema.fields,
-                expanded.memo.groups[parent.0 as usize]
+                expanded.memo.groups()[parent.0 as usize]
                     .logical_node
                     .schema
                     .fields
@@ -845,7 +685,7 @@ mod tests {
         assert!(state
             .child_groups
             .iter()
-            .all(|child| expanded.memo.groups[child.0 as usize].queries == vec![0, 1]));
+            .all(|child| expanded.memo.groups()[child.0 as usize].queries == vec![0, 1]));
     }
 
     // Widening shifts identity's position but must retain its full typed field
@@ -869,7 +709,7 @@ mod tests {
         let state = expanded
             .state_groups
             .iter()
-            .map(|id| &expanded.memo.groups[id.0 as usize])
+            .map(|id| &expanded.memo.groups()[id.0 as usize])
             .find(|group| {
                 matches!(
                     group.logical_node.asap(),
@@ -904,7 +744,7 @@ mod tests {
                     candidate.input_groups.contains(&MemoGroupId(
                         expanded
                             .memo
-                            .groups
+                            .groups()
                             .iter()
                             .position(|group| Rc::ptr_eq(&group.logical_node, &state.logical_node))
                             .unwrap() as u32,
@@ -913,7 +753,9 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 reader.root_node.schema,
-                expanded.memo.groups[parent.0 as usize].logical_node.schema
+                expanded.memo.groups()[parent.0 as usize]
+                    .logical_node
+                    .schema
             );
         }
     }
@@ -960,7 +802,7 @@ mod tests {
                 ),
                 "{queries:?}: the narrower scan is widened"
             );
-            for group in 0..memo.groups.len() {
+            for group in 0..memo.groups().len() {
                 assert!(
                     !groups_read_by(&memo, group).contains(&group),
                     "{queries:?}: group {group} reads itself: {:?}",
@@ -971,7 +813,7 @@ mod tests {
                 );
             }
             let expanded = expand(workload_with_identity(&queries, true)).unwrap();
-            for group in 0..expanded.memo.groups.len() {
+            for group in 0..expanded.memo.groups().len() {
                 assert!(!groups_read_by(&expanded.memo, group).contains(&group));
             }
         }
@@ -1012,7 +854,7 @@ mod tests {
         assert!(expanded
             .state_groups
             .iter()
-            .all(|id| expanded.memo.groups[id.0 as usize].queries.len() == 1));
+            .all(|id| expanded.memo.groups()[id.0 as usize].queries.len() == 1));
     }
 
     // Real tumbling window rewrites expose one identical chain to distinct quantile readers.
@@ -1038,14 +880,14 @@ mod tests {
             .iter()
             .filter(|id| {
                 matches!(
-                    expanded.memo.groups[id.0 as usize].logical_node.asap(),
+                    expanded.memo.groups()[id.0 as usize].logical_node.asap(),
                     Some(ASAPOp::SummaryTumblingWindowChain { .. })
                 )
             })
             .collect();
         assert!(!chains.is_empty());
         for id in chains {
-            let group = &expanded.memo.groups[id.0 as usize];
+            let group = &expanded.memo.groups()[id.0 as usize];
             assert_eq!(group.queries, vec![0, 1]);
             assert_eq!(group.parents.len(), 2);
             assert!(group.child_groups.iter().all(|input| group
@@ -1054,7 +896,7 @@ mod tests {
                 .iter()
                 .any(|node| Rc::ptr_eq(
                     node,
-                    &expanded.memo.groups[input.0 as usize].logical_node
+                    &expanded.memo.groups()[input.0 as usize].logical_node
                 ))));
         }
         for (group, candidates) in original.candidates.iter().enumerate() {
@@ -1082,7 +924,7 @@ mod tests {
             .iter()
             .find(|id| {
                 matches!(
-                    expanded.memo.groups[id.0 as usize].logical_node.asap(),
+                    expanded.memo.groups()[id.0 as usize].logical_node.asap(),
                     Some(ASAPOp::SummaryTumblingWindowChain {
                         tumbling_window_width_ms: 30_000,
                         tumbling_window_count: 30,
@@ -1091,7 +933,7 @@ mod tests {
                 )
             })
             .expect("shared fine grid covering fifteen minutes");
-        assert_eq!(expanded.memo.groups[state.0 as usize].queries, vec![0, 1]);
+        assert_eq!(expanded.memo.groups()[state.0 as usize].queries, vec![0, 1]);
         assert!(expanded.memo.candidates.iter().flatten().any(|reader| {
             reader.input_groups.contains(state)
                 && OperatorNode::reachable(&reader.root_node)
@@ -1183,7 +1025,7 @@ mod tests {
             ("topk by (job) (5, sum_over_time(m[1m]))", 0.01),
         ]);
         let expanded = expand(original).unwrap();
-        assert!(expanded.memo.groups.iter().any(|group| matches!(
+        assert!(expanded.memo.groups().iter().any(|group| matches!(
             group.logical_node.non_asap(),
             Some(NonASAPOp::Limit { n: Some(5), .. })
         ) && group.parents.len() >= 2));
@@ -1207,7 +1049,7 @@ mod tests {
         let expanded = expand(original.clone()).unwrap();
         let union = expanded
             .memo
-            .groups
+            .groups()
             .iter()
             .enumerate()
             .find(|(_, group)| {
@@ -1224,7 +1066,7 @@ mod tests {
             .map(|(id, _)| MemoGroupId(id as u32))
             .expect("union scan");
         let readers = original
-            .groups
+            .groups()
             .iter()
             .enumerate()
             .filter(|(_, group)| {
@@ -1241,7 +1083,7 @@ mod tests {
     }
 
     // A composite average shares only its sum state with another query and
-    // keeps its count state: Pass 1 interns each state as its own group.
+    // keeps its count state: Pass 1 adds each state as its own group.
     #[test]
     fn multiple_states_share_only_the_common_state() {
         let original = workload(&[("avg(m)", 0.01), ("sum(m)", 0.01)]);
@@ -1249,7 +1091,7 @@ mod tests {
         let states_of = |queries: &[usize]| {
             expanded
                 .memo
-                .groups
+                .groups()
                 .iter()
                 .filter(|group| {
                     matches!(group.logical_node.asap(), Some(ASAPOp::SummaryAgg { .. }))
@@ -1313,7 +1155,7 @@ mod tests {
             generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
                 .unwrap();
         let memo = with_local_tumbling_windows(
-            try_populate_pass1(initial, &generated, None).unwrap(),
+            try_add_pass1_candidates(initial, &generated, &[], &Default::default()).unwrap(),
             &[10_000, 10_000],
         );
         let expanded = expand(memo).unwrap();
@@ -1334,7 +1176,7 @@ mod tests {
                             })
                         ))
                     && candidate.input_groups.iter().any(|group| matches!(
-                        expanded.memo.groups[group.0 as usize].logical_node.asap(),
+                        expanded.memo.groups()[group.0 as usize].logical_node.asap(),
                         Some(ASAPOp::SummaryTumblingWindowChain {
                             tumbling_window_count: 120,
                             ..
@@ -1360,7 +1202,7 @@ mod tests {
     fn check_private_inputs(filter: bool) {
         use asap_types::ir::scalar::ScalarValue;
         use asap_types::ir::{Operator, Predicate, ProjectItem, ScalarExpr};
-        // Pass 1 interns its builds as groups; the local tumbling-window
+        // Pass 1 adds its builds as groups; the local tumbling-window
         // candidates keep private builds.
         let mut memo = with_local_tumbling_windows(
             workload(&[
@@ -1416,7 +1258,7 @@ mod tests {
         assert!(injected >= 2);
         let expanded = expand(memo).unwrap();
         assert!(expanded.state_groups.iter().any(|state| {
-            let group = &expanded.memo.groups[state.0 as usize];
+            let group = &expanded.memo.groups()[state.0 as usize];
             group.queries == vec![0, 1]
                 && group.child_groups.iter().any(|input| {
                     expanded.memo.candidates[input.0 as usize]
@@ -1445,9 +1287,9 @@ mod tests {
             .collect();
         assert!(!before.is_empty(), "real generation must offer UnivMon");
         crate::pass2::memo::rules::summary_inputs::factor_summary_inputs(&mut memo).unwrap();
-        // Pass 1 interned the UnivMon build as its own group.
+        // Pass 1 added the UnivMon build as its own group.
         assert!(memo
-            .groups
+            .groups()
             .iter()
             .any(|group| is_univmon(&group.logical_node)));
         for original in before {
@@ -1488,7 +1330,7 @@ mod tests {
         let boundaries: HashSet<_> = base
             .input_groups
             .iter()
-            .map(|id| Rc::as_ptr(&memo.groups[id.0 as usize].logical_node))
+            .map(|id| Rc::as_ptr(&memo.groups()[id.0 as usize].logical_node))
             .collect();
         fn without_private_guarantees(
             node: &Rc<OperatorNode>,
@@ -1571,7 +1413,7 @@ mod tests {
         let boundaries: HashSet<_> = candidate
             .input_groups
             .iter()
-            .map(|id| Rc::as_ptr(&memo.groups[id.0 as usize].logical_node))
+            .map(|id| Rc::as_ptr(&memo.groups()[id.0 as usize].logical_node))
             .collect();
         fn duplicate(
             node: &Rc<OperatorNode>,
@@ -1594,11 +1436,11 @@ mod tests {
             }))
             .unwrap();
         candidate.root_node = Rc::clone(&combined);
-        memo.groups[owner].logical_node = combined;
+        memo.groups_mut()[owner].logical_node = combined;
         memo.candidates[owner] = vec![candidate];
         let expanded = expand(memo).unwrap();
         assert!(expanded.state_groups.iter().any(|state| {
-            expanded.memo.groups[state.0 as usize]
+            expanded.memo.groups()[state.0 as usize]
                 .parents
                 .contains(&MemoGroupId(owner as u32))
                 && expanded.memo.candidates[owner].iter().any(|candidate| {
@@ -1608,11 +1450,77 @@ mod tests {
         }));
     }
 
+    /// The shared summary-state step changes nothing on a memo it already
+    /// ran on: no group and no candidate is added again.
+    #[test]
+    fn shared_summary_state_step_is_idempotent() {
+        let memo = with_local_tumbling_windows(
+            workload(&[
+                ("quantile_over_time(0.95, latency[5m])", 0.01),
+                ("quantile_over_time(0.99, latency[5m])", 0.02),
+            ]),
+            &[60_000, 60_000],
+        );
+        let mut once = expand(memo).unwrap().memo;
+        let groups = once.groups().len();
+        let candidates: Vec<usize> = once.candidates.iter().map(Vec::len).collect();
+        add_shared_summary_state_groups(&mut once).unwrap();
+        assert_eq!(once.groups().len(), groups);
+        assert_eq!(
+            once.candidates.iter().map(Vec::len).collect::<Vec<_>>(),
+            candidates
+        );
+    }
+
+    /// A private build equal to a build group is read from that group, and
+    /// the group's own candidate is sized for the most budget parts of its
+    /// readers.
+    #[test]
+    fn a_private_build_equal_to_a_group_raises_its_budget_parts() {
+        let mut memo = workload(&[("quantile_over_time(0.95, latency[5m])", 0.01)]);
+        let (build_group, estimate_group) = (0..memo.groups().len())
+            .find_map(|group| {
+                let [own] = memo.candidates[group].as_slice() else {
+                    return None;
+                };
+                let (_, build) = input_group_build(&memo, own)?;
+                matches!(
+                    memo.groups()[build.0 as usize].logical_node.asap(),
+                    Some(ASAPOp::SummaryAgg { .. })
+                )
+                .then_some((build, group))
+            })
+            .expect("an estimate over a build group");
+        assert_eq!(
+            memo.candidates[build_group.0 as usize][0].accuracy_budget_parts,
+            1
+        );
+        // The estimate over a private copy of the build, sized for 2 parts.
+        let build_node = Rc::clone(&memo.groups()[build_group.0 as usize].logical_node);
+        let private_build = Rc::new((*build_node).clone());
+        let mut reader = memo.candidates[estimate_group][0].clone();
+        reader.root_node = replace_node(&reader.root_node, &build_node, &private_build);
+        reader.input_groups = memo.groups()[build_group.0 as usize].child_groups.clone();
+        reader.accuracy_budget_parts = 2;
+        memo.candidates[estimate_group].push(reader);
+        add_shared_summary_state_groups(&mut memo).unwrap();
+        assert_eq!(
+            memo.candidates[build_group.0 as usize][0].accuracy_budget_parts,
+            2
+        );
+        assert!(memo.candidates[estimate_group].iter().any(|candidate| {
+            candidate.origin == OriginOfCandidateForMemoGroup::SharedBuild
+                && candidate.input_groups == [build_group]
+        }));
+    }
+
     // Public expansion rejects malformed IDs before indexing dependency arrays.
     #[test]
     fn malformed_references_fail_before_dependency_traversal() {
         let mut memo = workload(&[("quantile_over_time(0.95, latency[5m])", 0.01)]);
-        memo.groups[0].child_groups.push(MemoGroupId(u32::MAX));
+        memo.groups_mut()[0]
+            .child_groups
+            .push(MemoGroupId(u32::MAX));
         assert!(matches!(
             expand(memo),
             Err(Pass2RuleError::InvalidGroupReference)

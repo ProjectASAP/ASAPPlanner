@@ -321,7 +321,7 @@ fn ratio_of_quantiles_production_memo() {
     // and its Pass 2 memo is recorded.
     let enforced = production_run(&ratio_of_quantiles());
     // 7 groups with one candidate each; the `avg`'s exact accumulator reads
-    // 6 more Pass 1 interns (its two states, their finalizes, a `Project`
+    // 6 more groups Pass 1 adds (its two states, their finalizes, a `Project`
     // and the division), one candidate each.
     assert_eq!(candidate_count(pass1_memo(&enforced)), 13);
     let models = PlanningModels::builtin().with_accuracy(&AcceptsNoOutput);
@@ -333,8 +333,8 @@ fn ratio_of_quantiles_production_memo() {
     // for half of it; the other 5 groups one each. Each summary candidate
     // reads its estimate's group, over its build's group: the 4 builds are
     // shared by the two quantiles, the 8 estimates are not; with the `avg`'s
-    // 6, Pass 1 interns 18 groups, one candidate each.
-    assert_eq!(pass1_memo(&run).groups.len(), 25);
+    // 6, Pass 1 adds 18 groups, one candidate each.
+    assert_eq!(pass1_memo(&run).groups().len(), 25);
     assert_eq!(candidate_count(pass1_memo(&run)), 33);
     // 5 × 5 choices, 3 × 3 of them for the whole budget. The inventory has
     // 3 × 3 assignments (one target per quantile group and measure, so the
@@ -349,7 +349,7 @@ fn ratio_of_quantiles_production_memo() {
     );
     // The last step, over the complete tumbling-window-width domain.
     let last = pass2_memo(&run);
-    assert_eq!(last.groups.len(), 265);
+    assert_eq!(last.groups().len(), 265);
     assert_eq!(candidate_count(last), 1237);
     let enumeration = enumerate(last, 2_000);
     assert!(!enumeration.complete);
@@ -372,7 +372,7 @@ fn ratio_of_quantiles_production_memo() {
     // build group the half-budget candidate's estimate reads, so one sketch,
     // sized for half the budget.
     let pass1 = pass1_memo(&run);
-    let quantile_groups: Vec<_> = (0..pass1.groups.len())
+    let quantile_groups: Vec<_> = (0..pass1.groups().len())
         .filter(|&group| pass1.candidates[group].len() == 5)
         .collect();
     assert_eq!(quantile_groups.len(), 2);
@@ -460,7 +460,7 @@ fn choices_whose_candidates_read_each_other_are_left_out() {
         build_logical_asap_dags_from_chosen_candidates(&memo, choice).unwrap();
     }
 
-    let (group, index, child) = (0..memo.groups.len())
+    let (group, index, child) = (0..memo.groups().len())
         .flat_map(|group| (0..memo.candidates[group].len()).map(move |index| (group, index)))
         .find_map(|(group, index)| {
             memo.candidates[group][index]
@@ -471,7 +471,7 @@ fn choices_whose_candidates_read_each_other_are_left_out() {
         .expect("a candidate reading another group");
     let mut cyclic = memo.clone();
     let mut back = cyclic.candidates[child.0 as usize][0].clone();
-    back.root_node = Rc::clone(&cyclic.groups[group.0 as usize].logical_node);
+    back.root_node = Rc::clone(&cyclic.groups()[group.0 as usize].logical_node);
     back.input_groups = vec![group];
     cyclic.candidates[child.0 as usize].push(back);
     let back_index = cyclic.candidates[child.0 as usize].len() - 1;

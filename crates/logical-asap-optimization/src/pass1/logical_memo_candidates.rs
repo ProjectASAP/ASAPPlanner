@@ -7,9 +7,7 @@ use asap_types::workload::DataWorkload;
 
 use asap_accuracy::{AccuracyEvidenceProvider, AccuracyModel};
 
-use super::memo_population::{
-    try_populate_pass1, CandidatePopulationError, FailureProbabilitySizing,
-};
+use super::add_pass1_candidates::{try_add_pass1_candidates, AddPass1CandidatesError};
 use crate::deployment_capabilities::SupportedSummary;
 use crate::pass1::per_computation_candidates::{
     generate_per_computation_candidates, PerComputationCandidateError,
@@ -25,10 +23,11 @@ pub enum PerComputationLogicalMemoCandidatesError {
     /// annotations, or a measure's accuracy target is invalid.
     #[error(transparent)]
     PerComputation(#[from] PerComputationCandidateError),
-    /// The targets do not belong to the DAG of logical memo groups, or a
-    /// candidate's summaries did not size.
+    /// Adding Pass 1's candidates to the memo failed
+    /// ([`AddPass1CandidatesError`]): the targets do not belong to the DAG of
+    /// logical memo groups, or a candidate's summaries did not size.
     #[error(transparent)]
-    Population(#[from] CandidatePopulationError),
+    AddPass1Candidates(#[from] AddPass1CandidatesError),
 }
 
 /// Stage 1, Pass 1: the per-computation candidates on the memo groups of
@@ -41,7 +40,7 @@ pub enum PerComputationLogicalMemoCandidatesError {
 /// its guarantee, the summaries no query reading them can use (a query
 /// `q`'s target is `accuracy_targets[q]`). It then attaches each group's
 /// candidates, each with its summaries sized for its readers' failure
-/// probabilities (`memo_population::size_for_failure_probability`): one sized candidate
+/// probabilities (`size_for_failure_probability`): one sized candidate
 /// per accuracy-budget split. Every pruned way to compute a measure is in
 /// the output's `pruned_candidates`.
 pub fn generate_per_computation_logical_memo_candidates(
@@ -58,13 +57,11 @@ pub fn generate_per_computation_logical_memo_candidates(
         per_computation =
             per_computation.without_summaries_no_query_can_use(accuracy_targets, data, accuracy);
     }
-    let memo = try_populate_pass1(
+    let memo = try_add_pass1_candidates(
         dag_of_logical_memo_groups,
         &per_computation,
-        Some(&FailureProbabilitySizing {
-            accuracy_targets,
-            data,
-        }),
+        accuracy_targets,
+        data,
     )?;
     let pruned_candidates = per_computation
         .pruned_ways_to_compute
@@ -249,7 +246,7 @@ mod tests {
         let found = kll_failure_probabilities(
             shared_summary_state_groups(&memo)
                 .iter()
-                .filter(|group| memo.groups[group.0 as usize].reached_by_queries() == [0, 1])
+                .filter(|group| memo.groups()[group.0 as usize].reached_by_queries() == [0, 1])
                 .flat_map(|group| &memo.candidates[group.0 as usize]),
         );
         assert!(!found.is_empty());
