@@ -1,7 +1,7 @@
 # Memo groups, properties and requirements
 
 This page defines the memo's main data structures: groups, candidates, properties and requirements. It also lists every property and requirement, and gives the decision tree Stage 1 and Stage 2 walk to enumerate candidates. The symbols follow the planner formulation:
-- a candidate is $v = (e_v, p_v)$;
+- a group has an expression $e_G$ over its producer groups, and a candidate $v$ of it has properties $p_v$;
 - its logical properties are $p^{\log}$ and its physical properties are $p^{\mathrm{phys}}$;
 - a consumer input's requirements are $r^{\log}_{c,i}$ and $r^{\mathrm{phys}}_{c,i}$;
 - whether a producer satisfies them is $\alpha^{\log}$ and $\alpha^{\mathrm{phys}}$.
@@ -30,7 +30,7 @@ The ε values are illustrative.
 - G3, G4 and G5 are consumers of G2. They are not stored in G2; each is a group with its own producers whose expression reads G2.
 - A meets 0.01 with either size. B adds its two operands' errors (0.016 with `k = 200`, 0.010 with `k = 345`) and needs `k = 345` for both, so a plan where all three read v3 builds one KLL state.
 
-## 1. Properties and requirements
+## 1. Properties and requirements over properties
 
 ### Properties
 
@@ -38,9 +38,9 @@ A property is a value a candidate has. Every property is one dimension of a prod
 
 | Dimension | Values | Logical or physical | Fixed by |
 |---|---|---|---|
-| Which sketch to use (representation) | `Exact` (exact accumulator kinds: Sum, Count, Min, Max, Increase, Rate, IRate), or `Summary { family }` with family in KLL, DDSketch, CMS, CountSketch, CMS with heap, CountSketch with heap, UnivMon, HLL, KMV, the Hydra variants | logical | the operator $\operatorname{op}_v$ |
-| Sketch parameters $\theta$ | per family, from a predefined list: KLL `k`; DDSketch `alpha`; CMS / CountSketch `width × depth`; CMS / CountSketch with heap `width × depth × heap_size`; UnivMon `heap_size × rows × cols × layers`; HLL `precision`; KMV `k` | logical | enumerated |
-| Error bound $(\varepsilon_v, \delta_v)$ | precomputed per $\theta$, in the family's accuracy metric (below); exact is $(0, 0)$ | logical | derived from $\theta$, not chosen |
+| Which family to use (operator) | `Exact` (exact accumulator kinds: Sum, Count, Min, Max, Increase, Rate, IRate), or `Summary { family }` with family in KLL, DDSketch, CMS, CountSketch, CMS with heap, CountSketch with heap, UnivMon, HLL, KMV, the Hydra variants | logical | enumerated |
+| Parameter configuration $\theta$ | per family, from a predefined list: KLL `k`; DDSketch `alpha`; CMS / CountSketch `width × depth`; CMS / CountSketch with heap `width × depth × heap_size`; UnivMon `heap_size × rows × cols × layers`; HLL `precision`; KMV `k` | logical | enumerated |
+| Error bound $(\varepsilon_v, \delta_v)$ | computed on demand from $\theta$ and the statistic, in the family's accuracy metric (below); exact is $(0, 0)$ | logical | derived from $\theta$, not stored or chosen |
 | Window configuration $\omega$ | none; or tumbling windows of width $w$ and count $n$, with $w$ from the gcd closure of the readers' ranges and steps. Later: sliding windows by merge or by subtraction | logical | enumerated |
 | Timing $\tau$ | `IngestionTime`, `QueryTime` | physical | enumerated |
 | Lifetime $\ell$ | `None`, `OneEvaluation(Medium)`, `AcrossEvaluations(Medium)`, with `Medium` in `Memory`, `Disk` | physical | enumerated |
@@ -56,21 +56,20 @@ Invalid combinations, rejected by `new`:
 | $\ell$ = None with a schedule | where an unmaterialized result runs is its reader's execution context, not a property |
 | $\ell \ne$ None without a schedule | a materialized result must say on which times or grid it is delivered |
 | OneEvaluation with a grid, AcrossEvaluations with a periodic schedule | each lifetime has one kind of schedule |
-| `Exact` with a non-zero error bound | exact is $(0, 0)$ |
 
 Valid physical states: (QueryTime, None), (IngestionTime, None), (QueryTime, OneEvaluation(m)), (QueryTime, AcrossEvaluations(m)), (IngestionTime, AcrossEvaluations(m)), for each medium $m$.
 
-### Requirements
+### Requirements over properties
 
 A requirement is a constraint that a consumer, a query or the deployment puts on producers. One requirement can constrain several property dimensions, and one dimension can be constrained by several requirements.
 
 | Requirement | Who states it | Values | Constrains | Checked where |
 |---|---|---|---|---|
-| Accuracy | each query, at its root | metric: absolute (in the value's units, or times the stream's L1 or L2 norm), relative, rank; bound $\varepsilon_q$; failure probability $\delta_q$; scope: per value, whole result, or groups above a share of the records | representation and $\theta$ of every approximate candidate the query reads, through their $(\varepsilon_v, \delta_v)$ | Stage 3, row (K): the composed error at the root. Not per edge, because a per-input bound would fix each input's share of the budget |
+| Accuracy | each query, at its root | metric: absolute (in the value's units, or times the stream's L1 or L2 norm), relative, rank; bound $\varepsilon_q$; failure probability $\delta_q$; scope: per value, whole result, or groups above a share of the records | operator family and $\theta$ of every approximate candidate the query reads, through their $(\varepsilon_v, \delta_v)$ | Stage 3, row (K): the composed error at the root. Not per edge, because a per-input bound would fix each input's share of the budget |
 | Validity cap `error_cap` | a non-linear consumer (ratio, product), per input | $\varepsilon$ cap | $\theta$ of the producer | per edge, $\alpha^{\log}$: row (K)'s linear bound holds only below the cap |
-| Summary family | a consumer that reads summary state, per input | a family, e.g. KLL for a quantile readout | representation | per edge, $\alpha^{\log}$ |
+| Summary family | a consumer that reads summary state, per input | a family, e.g. KLL for a quantile readout | operator family | per edge, $\alpha^{\log}$ |
 | Window | a consumer that reads windows, per input | the reader's range and step | window configuration: the width must divide both | per edge, $\alpha^{\log}$ |
-| Capability of ingestion-time compute | the deployment and the data workload | the source has an ingestion pipeline; the executor supports the family; query-time results may be kept across evaluations | timing; representation; (QueryTime, AcrossEvaluations) | candidate generation: such candidates are not offered |
+| Capability of ingestion-time compute | the deployment and the data workload | the source has an ingestion pipeline; the executor supports the family; query-time results may be kept across evaluations | timing; operator family; (QueryTime, AcrossEvaluations) | candidate generation: such candidates are not offered |
 | Reader timing and evaluation | a consumer, per input | when it reads (ingestion or query time) and from which evaluation (same or later) | timing and lifetime of the producer | per edge, $\alpha^{\mathrm{phys}}$ |
 | Reader schedule | a periodic consumer, per input | its interval and phase $(I_c, \varphi_c)$ | schedule of the producer | per edge, $\alpha^{\mathrm{phys}}$ |
 | Latency, resource budgets | the workload | per-query latency bound; memory and CPU budgets | the whole plan | Stage 3, rows (L) and (B) |
@@ -80,11 +79,11 @@ Accuracy metrics that may be added later, when a primitive needs them: top-k rec
 How requirements map to property dimensions:
 
 ```
-Accuracy (query)             ──► representation, θ          (through ε_v, δ_v; row (K))
+Accuracy (query)             ──► operator family, θ          (through ε_v, δ_v; row (K))
 error_cap (edge)             ──► θ
-Summary family (edge)        ──► representation
+Summary family (edge)        ──► operator family
 Window (edge)                ──► window configuration
-Ingestion capability (deploy)──► timing, representation, lifetime
+Ingestion capability (deploy)──► timing, operator family, lifetime
 Reader timing/evaluation     ──► timing, lifetime
 Reader schedule              ──► schedule
 Latency, budgets (workload)  ──► every dimension, through cost
@@ -127,7 +126,7 @@ The levels, top to bottom:
 
 | Level | Dimension | Stage | Values offered | Pruned when |
 |---|---|---|---|---|
-| 1 | representation (operator) | Stage 1, Pass 1 and Pass 2 rules | each way to compute the group | the executor cannot build the family; no consumer's family requirement accepts it |
+| 1 | family (operator) | Stage 1, Pass 1 and Pass 2 rules | each way to compute the group | the executor cannot build the family; no consumer's family requirement accepts it |
 | 2 | $\theta$ | Stage 1, Pass 1 | the family's predefined list | $\varepsilon_v$ alone exceeds every reading query's target |
 | 3 | window configuration $\omega$ | Stage 1, Pass 2 | tumbling widths from the gcd closure of readers' ranges and steps | no reader's range and step is a multiple of the width |
 | 4 | timing $\tau$ | Stage 2 | QueryTime; IngestionTime | the source has no ingestion pipeline |
@@ -145,7 +144,7 @@ What the tree does not decide:
 
 **The order affects the efficiency of enumeration.** The number of nodes visited is $\sum_{d} \prod_{d' \le d} |\text{values kept at } d'|$, so a dimension that prunes much should come early, and a dimension whose values multiply without pruning should come late. Four considerations set the order above:
 
-1. **Logical before physical.** Logical dimensions (representation, $\theta$, $\omega$) change the result's values or error; physical dimensions ($\tau$, $\ell$, $\sigma$) change only when and how long it is computed. Deciding logical dimensions first lets Stage 1 hash-cons groups and check $\alpha^{\log}$ on edges once, before Stage 2 multiplies each logical candidate by its physical alternatives.
+1. **Logical before physical.** Logical dimensions (operator family, $\theta$, $\omega$) change the result's values or error; physical dimensions ($\tau$, $\ell$, $\sigma$) change only when and how long it is computed. Deciding logical dimensions first lets Stage 1 hash-cons groups and check $\alpha^{\log}$ on edges once, before Stage 2 multiplies each logical candidate by its physical alternatives.
 2. **Strong prunes early.** The family is pruned by the executor and by consumers' family requirements, and $\theta$ by the accuracy target, before the window and physical levels multiply them.
 3. **Dependent dimensions adjacent.** $\ell$ is constrained by $\tau$ (no OneEvaluation at ingestion), and $\sigma$ exists only when $\ell \ne$ None and its kind follows $\ell$. Deciding them in the order $\tau \to \ell \to \sigma$ means each invalid combination is pruned at the first level where it can be detected.
 4. **Deployment-wide prunes as early as they can go.** If the deployment has no ingestion pipeline, the IngestionTime subtree is pruned once per candidate. Moving $\tau$ above $\omega$ would prune it once per group instead; this is an alternative order with the same leaves.
@@ -155,25 +154,30 @@ Alternative orders worth comparing:
 - **$\theta$ last among logical dimensions.** $\theta$ has the most values. Deciding $\omega$ before $\theta$ visits fewer nodes when many widths are pruned by readers' ranges.
 - **Requirement-driven (top-down) vs producer-driven (bottom-up).** Top-down enumeration starts from each consumer's requirement and offers only the values it accepts; bottom-up offers every value and lets $\alpha$ filter edges. Top-down visits fewer nodes but must union the requirements of all consumers of a group, so that sharing between consumers is not lost.
 
-## 3. Modeling a memo group by its producers
+## 3. Modeling a memo group  
 
-### Producers, not consumers
+A memo group stores its **producers**: all candidate ways to compute its result, before Stage 3 selects any. A consumer of $G$ is a candidate of another group whose expression reads $G$; the producer–consumer edges $(u, c, i)$ connect them. Here, `consumers(G)` is derived from those input references rather than stored in the group.
 
-A memo group stores its **producers**: the candidates that compute it. It does not store its consumers. A consumer of $G$ is a candidate of another group whose expression reads $G$; the producer–consumer edges $(u, c, i)$ connect them.
+> Side note: [CMU-DB's optd-original](https://github.com/cmu-db/optd-original) stores the list of children as input producers to a memo group; while storing consumers vs storing producers in the memo group structure to form the DAG are equivalent in terms of correctness and efficiency. 
 
-| | Group stores its producers (chosen) | Group stores each consumer's own producer |
-|---|---|---|
-| Group identity | what is computed: operator and input groups, without properties | what is computed **for one reader** |
-| Two readers of the same state | one group, two edges | two copies, joined only by an extra "shared build" candidate |
-| A rule adds a new way to compute | one new producer in the group; every reader sees it | the rule must copy every reader that could use it |
-| Where requirements live | on the consumer's input, $r_{c,i}$ | on the producer, so a producer is fixed to one reader |
-| Accuracy | checked at each query root over the chosen edges | fixed per producer as a share of one query's budget |
+Candidate enumeration efficiency depends on:
 
-Groups found by hash-consing are therefore shared automatically. Two queries that read the same state read one group, and Stage 3 decides through edges whether they read the same producer.
+- **Property and requirement fields:** which dimensions are represented, their legal values, which values are derived, and which constraints permit pruning or sharing (Section 1).
+- **Decision-tree order:** when each dimension is decided and its requirements are checked, so invalid combinations can be pruned before later dimensions multiply them (Section 2).
 
-Consumers of a group are derived, not stored: `consumers(G)` is the set of candidates whose expression has $G$ as an input.
+Groups found by hash-consing expose the same producer alternatives to all their readers. Stage 3 decides whether readers use the same producer candidate or different ones. **Reusing a computation alternative in the memo is distinct from reusing its computed result at runtime. Selecting the same candidate for multiple readers does not by itself mean computing it only once.**
+
+- **Materialized candidate** ($\ell \ne$ None): its result is retained. Readers connected to the same materialized producer can reuse that result instead of computing it separately, subject to its lifetime and schedule.
+- **Unmaterialized candidate** ($\ell =$ None): no independent shared result is retained. The computation runs as part of each reader's execution, so multiple readers selecting the same candidate may each execute it separately.
+
+For example, if p50 and p99 select the same KLL candidate, a shared materialized producer builds and retains one KLL state for both readouts within the applicable lifetime and schedule. With an unmaterialized candidate, the p50 execution can build its own KLL state and the p99 execution another, even though both builds use the same candidate configuration.
 
 ### Memo group data structure
+
+A memo group holds three things:
+- **Query semantics:** its expression, and the producer groups the expression reads.
+- **Eligibility:** for each input, the requirement a producer must meet.
+- **Candidates:** the ways to compute it.
 
 ```rust
 /// The memo: every group, and each query's root over groups.
@@ -182,39 +186,66 @@ pub struct Memo {
     pub query_roots: Vec<QueryRoot<MemoGroupId>>,
 }
 
-/// G: one logical result, or one state family, over specified input data.
-/// Groups are hash-consed on `identity`, so an identical sub-expression of two
-/// queries is one group.
 pub struct MemoGroup {
-    pub id: MemoGroupId,
-    /// What is computed, without any property: the operator kind, its input
-    /// groups, and the arguments that change the result's meaning (family,
-    /// reduction, grouping, filter, query window). Sketch parameters, error
-    /// bounds and window layout are not part of it.
-    pub identity: GroupIdentity,
-    /// The producers of this group: every way to compute it.
-    pub candidates: Vec<CandidateForMemoGroup>,
+    // Query semantics.
+    /// The logical operator, from the existing IR. Its children are the
+    /// producer groups G_i it reads, in order (`expression.children()`), which
+    /// fix the input data and schema.
+    pub expression: Operator<MemoGroupId>,
+    // Eligibility.
+    /// r_i: one requirement per producer group, by input index i.
+    pub input_requirements: Vec<PropertyRequirement>,
+    // Candidates.
+    /// The ways to compute this group; x_v in the MILP.
+    pub candidates: Vec<Candidate>,
 }
+```
+
+The expression is the existing IR's [`Operator<C>`](../../../crates/types/src/ir/operator/node.rs), with `C = MemoGroupId`. It wraps [`NonASAPOp<C>`](../../../crates/types/src/ir/operator/non_asap.rs) or [`ASAPOp<C>`](../../../crates/types/src/ir/operator/asap.rs), and each variant carries its own arguments and its inputs. For example, `Scan` carries the source, predicates and schema, and `Filter` carries a predicate and its child. No new identity type is needed.
+
+Hash-consing finds or inserts a group by its expression: the operator, its arguments and its input group ids. For example, the KLL state over one source and query window is one group for `k = 200` and `k = 345`; these are two candidates of that group. A different source, filter or query window gives a different group. Properties are not part of the expression: the family, sketch parameters, window layout, timing, lifetime and schedule belong to candidates. A requested query window belongs to the expression; the internal window layout used to compute it does not.
+
+`MemoGroupId` is the handle of an interned group. Looking up an existing expression returns that group's id instead of adding a second group.
+
+### Candidate data structure definition
+
+```rust
+/// v: one way to compute its group. The group's expression says what is
+/// computed; the candidate's properties say how.
+pub struct Candidate {
+    /// One value per property dimension.
+    pub properties: Properties,
+}
+```
+
+Stage 1 decides the logical dimensions of each candidate, and Stage 2 expands each one into its physical alternatives:
+
+```rust
+pub struct Properties {
+    pub logical: LogicalProperties,     // Stage 1
+    pub physical: PhysicalProperties,   // Stage 2
+}
+
+/// (u, c, i): producer u may serve input i of consumer c when u's properties
+/// satisfy c's group's input_requirements[i].
+pub struct Edge { pub producer: CandidateId, pub consumer: CandidateId, pub input: usize }
 ```
 
 ### Property definition
 
+A property is a struct with one field per dimension (P1, P2, …), each its own enum:
+
 ```rust
-/// p_v^log: one field per dimension. `new` rejects `Exact` with a non-zero
-/// error bound.
+/// p_v^log.
 pub struct LogicalProperties {
-    representation: Representation,       // which sketch, and θ
-    error_bound: ErrorBound,              // (ε_v, δ_v), precomputed per θ
-    window_layout: Option<WindowLayout>,  // ω_v
+    family: Family,                                // which sketch, or exact
+    parameter_configuration: Option<SketchParams>, // θ; None for exact
+    window_layout: Option<WindowLayout>,           // ω_v
 }
-pub enum Representation {
-    Exact,
-    Summary { family: SummaryFamily, parameters: SummaryParameters },
-}
-pub struct ErrorBound { metric: AccuracyMetric, epsilon: f64, delta: f64 }
+pub enum Family { Exact(ExactKind), Sketch(SketchAlgorithm) }
 pub enum WindowLayout { Tumbling { width_ms: u64, count: u32 } }  // sliding variants later
 
-/// p_v^phys: one field per dimension. `new` rejects the invalid combinations.
+/// p_v^phys. `new` rejects the invalid combinations.
 pub struct PhysicalProperties {
     timing: ExecutionTiming,               // τ
     lifetime: Lifetime,                    // ℓ
@@ -227,58 +258,71 @@ pub enum Schedule {
     Periodic { interval_ms: u64, phase_ms: u64 },
     TumblingWindowGrid { phase_ms: u64 },
 }
+
+// Reuse the existing family-specific conversions in asap_accuracy.
+// Parameter configuration → error bound (including metric and failure probability).
+// `family` describes the exact value or sketch, including its parameters;
+// `query` identifies the statistic read from it.
+pub(crate) fn local_guarantee(
+    family: &FieldDataType,
+    query: &SketchStatistic,
+) -> Option<AccuracyGuarantee>;
+
+// Error target → parameter configuration for the chosen family and intent.
+pub(crate) fn size_params(
+    kind: SketchAlgorithm,
+    intent: &AggIntent,
+    eps: f64,
+    delta: f64,
+) -> SketchParams;
 ```
+
+`new` checks that `parameter_configuration` belongs to `family`, as [`SketchKind::new`](../../../crates/types/src/ir/schema/sketch.rs) does today, and reuses the existing `SketchParams` type.
+
+`error_bound` is derived when needed, not stored in `LogicalProperties`. Reuse [`estimators::local_guarantee`](../../../crates/accuracy/src/estimators/mod.rs) for parameters → guarantee and [`estimators::size_params`](../../../crates/accuracy/src/estimators/mod.rs) for target → parameters. These existing crate-private functions dispatch to the family's accuracy and sizing implementations; the declarations above document those interfaces, not new implementations. [`sizing::default_size_params`](../../../crates/accuracy/src/sizing.rs) already delegates to `size_params`. If another crate needs direct access, expose the existing implementation through the accuracy crate rather than duplicate its formulas.
+
+Deriving a guarantee also needs the statistic being read: one family's parameters can give different guarantees for different statistics. Exact values yield an exact guarantee; an unsupported statistic or missing error model yields `None`. Target → parameters is a sizing operation with discrete values and family limits, not an exact mathematical inverse; validate the derived guarantee against the target rather than assume the target is achievable.
 
 ### Property requirement definition
 
+A property requirement is also a struct with one field per dimension (R1, R2, …), each its own enum. `None` accepts any value.
+
 ```rust
-/// r^log_{c,i}: one optional constraint per dimension; `None` accepts any value.
-pub struct LogicalRequirement {
+/// r_i: what input i's producer must satisfy.
+pub struct PropertyRequirement {
+    pub accuracy: Option<AccuracyRequirement>,
     pub family: Option<SummaryFamily>,
-    pub window: Option<WindowRequirement>,   // the reader's range and step
-    pub error_cap: Option<f64>,              // validity of row (K)'s linear bound
+    pub window: Option<WindowRequirement>,       // the reader's range and step
+    pub reader_timing: Option<ExecutionTiming>,
+    pub reads_from: Option<Evaluation>,          // Same or Later
+    pub reader_schedule: Option<ReaderSchedule>, // (I_c, φ_c) of a periodic reader
 }
 
-/// r^phys_{c,i}: one field per dimension. `new` rejects (IngestionTime, Later).
-pub struct PhysicalRequirement {
-    reader_timing: ExecutionTiming,
-    reads_from: Evaluation,                  // Same or Later
-    reader_schedule: Option<ReaderSchedule>, // (I_c, φ_c) of a periodic reader
-}
-
-/// α^log and α^phys: one check per dimension, joined by "and".
-pub fn satisfies(producer: &LogicalProperties, requirement: &LogicalRequirement) -> bool;
-pub fn satisfies_physical(producer: &PhysicalProperties, requirement: &PhysicalRequirement) -> bool;
-
-/// The accuracy target stays at the query root; Stage 3 checks it (row (K)).
-pub struct QueryRequirement { pub accuracy: AccuracyTarget }
+/// The set of legal properties for an input: legal_properties(r) = f(r).
+pub fn satisfies(producer: &Properties, requirement: &PropertyRequirement) -> bool;
 ```
 
-### Candidate data structure definition
+The set of legal properties is a function of the requirement, $\text{legal}(r) = f(r)$. One requirement can be written at different levels. For example, the same accuracy requirement can be stated two ways:
+
+| Requirement | Mapped to properties | Producer candidates enumerated |
+|---|---|---|
+| Accuracy = 95% rank accuracy | every family with rank error, and every configuration of it that meets 95% rank accuracy | (KLL, `k = 100`), (KLL, `k = 200`), … |
+| Accuracy = KLL's `k ≥ 100` | KLL with `k ≥ 100` | (KLL, `k = 100`), (KLL, `k = 200`), … |
 
 ```rust
-/// v = (e_v, p_v^log): one producer of a memo group, from Stage 1.
-pub struct CandidateForMemoGroup {
-    pub expression: CandidateExpression,          // e_v
-    pub logical_properties: LogicalProperties,    // p_v^log
-    /// r^log_{c,i}: one per input group of `expression`.
-    pub input_requirements: Vec<LogicalRequirement>,
+pub enum AccuracyRequirement {
+    /// Stated on the result: a metric, bound and failure probability. The
+    /// legal properties are derived through `size_params` / `local_guarantee`.
+    Target(AccuracyTarget),
+    /// Stated on the properties directly, e.g. KLL with k ≥ 100.
+    Parameters { family: SketchAlgorithm, at_least: SketchParams },
 }
-
-/// e_v = op_v(G_{v,1}, …, G_{v,n}): one operator with its arguments, whose
-/// children are groups. No private nodes.
-pub struct CandidateExpression { pub operator: Operator<MemoGroupId> }
-
-/// One physical alternative of a logical candidate, from Stage 2.
-pub struct PhysicalCandidate {
-    pub logical: (MemoGroupId, usize),            // which logical candidate
-    pub properties: PhysicalProperties,           // p_v^phys
-    pub input_requirements: Vec<PhysicalRequirement>,  // r^phys_{c,i}
-}
-
-/// (u, c, i): producer u may serve input i of consumer c, when α^log and α^phys hold.
-pub struct Edge { pub producer: CandidateId, pub consumer: CandidateId, pub input: usize }
 ```
+
+What goes into a property requirement affects only the efficiency of enumeration, not correctness:
+- **Some requirements already hold by the query semantics.** The expression and its producer groups already fix the input data and its fields, so no requirement needs to restate them.
+- **It depends on how rules generate the candidate space.** A rule that only generates legal candidates needs no requirement for that dimension; a rule that generates every value needs the requirement to filter them.
+- **A requirement prunes; it does not decide the plan.** A tighter requirement removes candidates earlier. Each query's composed error is still checked at its root in Stage 3 (row (K)), so a requirement that is too loose costs enumeration time, not a wrong plan.
 
 ### Extensibility
 
@@ -289,19 +333,19 @@ pub struct Edge { pub producer: CandidateId, pub consumer: CandidateId, pub inpu
 4. Add any new invalid combinations to `new`.
 
 **Add a property dimension**, e.g. a compression codec or a partitioning:
-1. Decide whether it is logical (it changes the result's values or error) or physical (it changes only when, where or how long the result is computed). Add a field to `LogicalProperties` or `PhysicalProperties`.
-2. If consumers can constrain it, add an optional field to the matching requirement struct and one check to `satisfies` or `satisfies_physical`.
+1. Decide whether it is logical (it changes the result's values or error) or physical (it changes only when, where or how long the result is computed). Add a field (a new enum) to `LogicalProperties` or `PhysicalProperties`.
+2. If consumers can constrain it, add an optional field to `PropertyRequirement` and one check to `satisfies`.
 3. Add its invalid combinations with the other dimensions to `new`.
 4. Add a level to the decision tree, with its prune rule, and place it by the considerations in "Order of decisions".
 5. Add its cost terms.
 
 **Add a requirement:**
-1. If it constrains one edge (a consumer input), add an optional field to `LogicalRequirement` or `PhysicalRequirement`, set it where the consumer is created, and check it in `satisfies`.
+1. If it constrains one edge (a consumer input), add an optional field to `PropertyRequirement`, set it where the consumer's group is created, and check it in `satisfies`.
 2. If it constrains a whole query or the whole plan (accuracy, latency, budgets), add it to the query's or workload's requirements and a row to Stage 3. Do not split it into per-edge requirements: that fixes each input's share in advance.
 3. If it comes from the deployment, prune the values it rules out during candidate generation.
 
 **Add a rule:**
 1. A rule matches over groups and their candidates' expressions, never over a reader's private operators.
-2. It adds candidates $(e, p^{\log})$ to an existing group, or adds a new group with its candidates. It never copies a reader: every existing consumer of the group sees the new candidate through edges.
+2. It adds candidates to an existing group, or adds a new group with its expression, input requirements and candidates. It never copies a reader: every existing consumer of the group sees the new candidate through edges.
 3. A candidate whose result has the same meaning as an existing group is added to that group, so hash-consing keeps sharing.
-4. Each new candidate states its input requirements.
+4. Each new group states its input requirements.
