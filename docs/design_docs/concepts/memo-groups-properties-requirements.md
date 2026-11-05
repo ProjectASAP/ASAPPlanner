@@ -30,6 +30,9 @@ This page defines the memo's data structures in the terms of the optimization pr
 | $w_v$ | fixed cost: $C_{\text{read}}(v) + C_{\text{compute}}(v)$ plus $C^{\text{one}}_{\text{retain}}(v)$ or $C^{\text{across}}_{\text{retain}}(v)$ by $\ell_v$ |
 | $\Pi$, $V_\Pi$ | selected physical ASAP DAG and its node set; $\operatorname{Cost}(\Pi) = \sum_{v \in \mathcal C} w_v x_v$ |
 | **(#1207)** $\kappa$ | execution context of a candidate with $\ell_v$ = None: a query evaluation $\kappa_q$, an ingestion pipeline $I_r$, or a materialized candidate's computation $\kappa_m$ |
+| $g_c$ | error propagation function of consumer $c$: $\varepsilon_c \le g_c(\varepsilon_{c,1}, \dots, \varepsilon_{c,n})$ |
+| $\lambda_{q,c,i}$ | slope of the composed propagation functions from input $i$ of $c$ to query $q$'s result |
+| $\text{cap}_{c,i}$ | error cap of input $i$ of $c$: the smaller of $g_c$'s validity cap and the pruning cap |
 | **(#1207)** (K), (R), (L), budgets | accuracy at each query root, $\sum_u \lambda_{q,u}\varepsilon_u a_{q,u} \le \varepsilon_q$ and $\sum_u \delta_u a_{q,u} \le \delta_q$; retention $h_v$; latency; resource budgets |
 
 ## Example
@@ -46,7 +49,7 @@ G2   KLL state over G1                              one group, whatever θ
 G3 = G_A   SummaryEstimate[q=0.95](G2)
 G4         SummaryEstimate[q=0.99](G2)
 G5         SummaryEstimate[q=0.50](G2)
-G6 = G_B   Divide(G4, G5)      r^log on each input: error cap (#1207)
+G6 = G_B   Divide(G4, G5)      r^log on each input: cap = min(validity cap of /, ε_B / λ)
 ```
 
 The ε values are illustrative.
@@ -94,10 +97,39 @@ Each input $i$ of consumer $c$ names a producer group $G_{c,i}$ and a property r
 
 The workload's accuracy target $A_q$ is not an input requirement **(#1207)**: a per-input bound would fix each input's share of the query's budget. Row (K) bounds each query's composed error at its root instead. What stays in $r^{\log}$ is what depends only on the consumer.
 
+#### Error propagation and the error cap
+
+Each consumer $c$ has an error propagation function $g_c$ that bounds its output error by its input errors:
+
+$$\varepsilon_c \le g_c(\varepsilon_{c,1}, \dots, \varepsilon_{c,n}).$$
+
+Composing them from each query's root down gives the query's error, and the accuracy target $A_q$ is $g_q(\dots) \le \varepsilon_q$ at the root.
+
+| Consumer | $g_c$ | Linear |
+|---|---|---|
+| single readout, `Project`, filter | $\varepsilon_{c,1}$ | yes |
+| `sum by` over $n$ series (absolute error) | $n\,\varepsilon_{c,1}$ | yes |
+| $X + Y$, $X - Y$ (absolute error) | $\varepsilon_X + \varepsilon_Y$ | yes |
+| $X / Y$ (relative error) | $\dfrac{\varepsilon_X + \varepsilon_Y}{1 - \varepsilon_Y}$ | no |
+
+Row (K) is the composed $g$ made linear: $\lambda_{q,c,i}$ is its slope from input $i$ of $c$ to $q$'s result, so the weights sit on $(q, c, i)$. Failure probabilities add by a union bound and need no $g$.
+
+From $g_c$ come two caps on an input's error, both checked per edge as part of $r^{\log}_{c,i}$:
+
+1. **Validity cap: correctness, non-linear consumers only.** A non-linear $g_c$ is bounded by its linear form only in a region, e.g. $\varepsilon_Y \le$ cap for a ratio, where $\frac{\varepsilon_X+\varepsilon_Y}{1-\varepsilon_Y} \le \frac{1}{1-\text{cap}}(\varepsilon_X+\varepsilon_Y)$, so $\lambda = \frac{1}{1-\text{cap}}$ (1.11 for cap 0.1). Without the cap, row (K) could accept a plan whose true error is unbounded. A linear $g_c$ is exact everywhere and has no validity cap.
+2. **Pruning cap: efficiency only, every consumer, linear ones included.** An input whose error alone breaks every target it could serve is in no feasible plan: $\lambda_{q,c,i}\,\varepsilon_u > \varepsilon_q$ for every query $q$ that may reach $c$. Removing such edges removes no feasible plan, since row (K) rejects them anyway; it keeps them out of $\mathcal E$ and the MILP. It is the per-edge form of Pass 1's "drop a $\boldsymbol\theta$ whose $\varepsilon$ alone exceeds every reading query's target", and prunes more because it uses each reader's own $\lambda$.
+
+$$\text{cap}_{c,i} = \min\Bigl(\text{validity cap of } g_c,\ \max_{q \text{ that may reach } c} \frac{\varepsilon_q}{\lambda_{q,c,i}}\Bigr), \qquad \alpha^{\log}_{u,c,i} = 0 \text{ when } \varepsilon_u > \text{cap}_{c,i}.$$
+
+For a monotone size parameter, $\varepsilon_u \le \text{cap}_{c,i}$ is a minimum size, e.g. $k_u \ge k_{\text{required}}$ for KLL.
+
+**What stays at the root.** A per-input cap cannot replace row (K): with several inputs, $\varepsilon_X + \varepsilon_Y \le \varepsilon_q$ couples them, and one cap per input would fix each input's share in advance (the rejected budget shares). The caps only prune; row (K) decides.
+
+
 | Requirement | Stated by | Values | Constrains | Checked by |
 |---|---|---|---|---|
 | Accuracy target $A_q$ | the workload, per query | metric: absolute (in the value's units, or times the stream's L1 or L2 norm), relative, rank; bound $\varepsilon_q$; failure probability $\delta_q$; scope: per value, whole result, or groups above a share of the records | $\boldsymbol\theta_u$ of every approximate candidate $q$ depends on, through $(\varepsilon_u, \delta_u)$ | row (K) **(#1207)** |
-| Error cap, in $r^{\log}_{c,i}$ | a non-linear consumer (ratio, product), per input | a cap on $\varepsilon_u$; for a monotone size parameter, a minimum size $k_u \ge k_{\text{required}}$ | $\boldsymbol\theta_u$ | $\alpha^{\log}$, row (G): row (K)'s linear bound holds only below the cap |
+| Error cap $\text{cap}_{c,i}$, in $r^{\log}_{c,i}$ | every consumer, per input, from $g_c$ and the targets of the queries that may reach it | the smaller of the validity cap (non-linear $g_c$ only) and the pruning cap; for a monotone size parameter, a minimum size $k_u \ge k_{\text{required}}$ | $\boldsymbol\theta_u$ | $\alpha^{\log}$, row (G): validity cap for correctness of (K), pruning cap for efficiency |
 | Window, in $r^{\log}_{c,i}$ **(#1207)** | a consumer that reads windows, per input | the reader's range and step | $\omega_u$: the width must divide both | $\alpha^{\log}$, row (G) |
 | Summary family, in $r^{\log}_{c,i}$ | a consumer that reads summary state | a family | usually already fixed by $G_{c,i}$, whose $\operatorname{op}$ names the family | $\alpha^{\log}$, row (G) |
 | Reader timing and evaluation, in $r^{\mathrm{phys}}_{c,i}$ | the consumer, per input | when it reads (ingestion or query time) and from which evaluation (same or later) | $\tau_u$, $\ell_u$ | $\alpha^{\mathrm{phys}}$, row (H) |
@@ -111,7 +143,7 @@ How requirements map to properties:
 
 ```
 A_q (workload)               ──► θ_u of every approximate input   (through ε_u, δ_u; row (K))
-error cap      r^log         ──► θ_u
+error cap      r^log         ──► θ_u            (validity cap from g_c; pruning cap from ε_q / λ_{q,c,i})
 window         r^log         ──► ω_u
 reader timing  r^phys        ──► τ_u, ℓ_u
 reader schedule r^phys       ──► σ_u
@@ -264,11 +296,18 @@ pub enum WindowLayout { Tumbling { width_ms: u64, count: u32 } }
 pub struct LogicalRequirement {
     pub family: Option<SketchAlgorithm>,
     pub window: Option<WindowRequirement>,  // reader's range and step: a width must divide both
-    pub error_cap: Option<f64>,             // validity of row (K)'s linear bound
+    pub error_cap: Option<f64>,             // cap_{c,i}: min(validity cap of g_c, pruning cap)
 }
 /// α^log_{u,c,i}
 pub fn satisfies(producer: &LogicalProperties, requirement: &LogicalRequirement) -> bool;
+
+/// g_c linearized: λ per input and the validity cap (None when g_c is linear).
+/// New abstraction, not yet in #1207: pending approval.
+pub struct ErrorPropagation { pub slope_per_input: Vec<f64>, pub validity_cap: Option<f64> }
+pub fn error_propagation(consumer: &Operator<MemoGroupId>) -> ErrorPropagation;
 ```
+
+The validity cap is known when the consumer is created. The pruning cap needs $\lambda_{q,c,i}$ and the queries that may reach $c$, so it is filled in when Pass 2 builds the logical edges.
 
 Deleted: `root_node` with private nodes, `input_groups` (the expression's children), `accuracy_budget_parts`, the `SharedBuild` and `SummaryResult` origins.
 
@@ -435,7 +474,7 @@ Pass 1 adds, for each group a query computes, every way to compute it. Each inte
 |---|---|---|
 | Exact | [`per_computation_candidates.rs`](../../../crates/logical-asap-optimization/src/pass1/per_computation_candidates.rs), [`memo_population.rs`](../../../crates/logical-asap-optimization/src/pass1/memo_population.rs) | a candidate with the exact operator; $\boldsymbol\theta_v$ none, $(\varepsilon_v, \delta_v) = (0, 0)$ |
 | Exact accumulator | same | a state group `ExactAggregate(kind)` over the input group, one candidate; a `FinalizeExactAccumulator` candidate in the result's group reading it |
-| Summary, per family the executor supports | same | a state group `SummaryAgg[family]` over the input group, with **one candidate per $\boldsymbol\theta$ in the family's predefined list**, dropping a $\boldsymbol\theta$ whose $\varepsilon_v$ alone exceeds every reading query's $\varepsilon_q$; a `SummaryEstimate[statistic]` candidate in the result's group reading the state group, with $r^{\log}$ = error cap where the consumer is non-linear |
+| Summary, per family the executor supports | same | a state group `SummaryAgg[family]` over the input group, with **one candidate per $\boldsymbol\theta$ in the family's predefined list**, dropping a $\boldsymbol\theta$ whose $\varepsilon_v$ alone exceeds every reading query's $\varepsilon_q$; a `SummaryEstimate[statistic]` candidate in the result's group reading the state group. Each consumer's `error_cap` starts as its $g_c$'s validity cap (none for a linear $g_c$) |
 | Fused build (#1203 2c) | same | a build that computes several targets at once: a candidate of the outer target's state group, with `fused_groups` naming the others |
 
 Example: for A and B, Pass 1 adds G2 = `SummaryAgg[KLL](G1)` with candidates `k = 200` and `k = 345`, and G3, G4, G5 = `SummaryEstimate[q](G2)`. A and B's three estimates read one state group because their expressions over G1 hash-cons to one group.
@@ -456,7 +495,7 @@ Today, Pass 1 instead sizes one $\boldsymbol\theta$ per `accuracy_budget_parts` 
 | 8 | Summary results | `factor_summary_results` ([`summary_results.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/rules/summary_results.rs)) | a summary readout inside a composite candidate | the readout as its own group | #1203 2a-2 (#1218) makes the readout a group in Pass 1; the rule is then deleted |
 | 9 | Shared configurations | `add_state_configuration_candidates` ([`shared_configuration_readers.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/rules/shared_configuration_readers.rs)) | readers that could share a summary at a size or window horizon that covers them | reader copies at the shared size (`SharedBuild` origin) | deleted in #1203 2b: the state group already holds every $\boldsymbol\theta$, and $y$ chooses per reader |
 | 10 | Shared summary state groups | `add_shared_summary_state_groups` ([`state_groups.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/state_groups.rs)) | summary builds directly over input groups | per-size concrete state groups with reader copies | deleted in #1203 2b and #1160: one state group per state family |
-| — | Logical edges (#1201) | after the last rule | every candidate $c$ and input $i$ | one `LogicalEdge { producer, consumer, input, satisfies_logical_requirement }` per $u \in G_{c,i}$, with $\alpha^{\log}_{u,c,i}$ = `satisfies(p^log_u, r^log_{c,i})`; output `LogicalASAPMemoCandidates { memo, edges }` | #1201 |
+| — | Logical edges (#1201) | after the last rule | every candidate $c$ and input $i$ | one `LogicalEdge { producer, consumer, input, satisfies_logical_requirement }` per $u \in G_{c,i}$, after tightening each `error_cap` with the pruning cap $\max_q \varepsilon_q / \lambda_{q,c,i}$; $\alpha^{\log}_{u,c,i}$ = `satisfies(p^log_u, r^log_{c,i})`; output `LogicalASAPMemoCandidates { memo, edges }` | #1201 |
 
 After #1203 2b, every Pass 2 rule has the same shape: match groups, then `find_or_add_group` for any new intermediate result and `add_candidate` for the new way to compute an existing group. A rule adds no candidate a group already has (same expression and $p^{\log}$).
 
