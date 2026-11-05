@@ -1,7 +1,7 @@
 # Memo groups, properties and requirements
 
 This page defines the memo's main data structures: groups, candidates, properties and requirements. It also lists every property and requirement, and gives the decision tree Stage 1 and Stage 2 walk to enumerate candidates. The symbols follow the planner formulation:
-- a group has an expression $e_G$ over its producer groups, and a candidate $v$ of it has properties $p_v$;
+- a candidate is $v = (e_v, p_v)$;
 - its logical properties are $p^{\log}$ and its physical properties are $p^{\mathrm{phys}}$;
 - a consumer input's requirements are $r^{\log}_{c,i}$ and $r^{\mathrm{phys}}_{c,i}$;
 - whether a producer satisfies them is $\alpha^{\log}$ and $\alpha^{\mathrm{phys}}$.
@@ -36,19 +36,19 @@ The ε values are illustrative.
 
 A property is a value a candidate has. Every property is one dimension of a product: a struct with one field per dimension, never a flat enum that lists the combinations. Invalid combinations are rejected by the struct's checked constructor.
 
-| Dimension | Values | Logical or physical | Fixed by |
-|---|---|---|---|
-| Which family to use (operator) | `Exact` (exact accumulator kinds: Sum, Count, Min, Max, Increase, Rate, IRate), or `Summary { family }` with family in KLL, DDSketch, CMS, CountSketch, CMS with heap, CountSketch with heap, UnivMon, HLL, KMV, the Hydra variants | logical | enumerated |
-| Parameter configuration $\theta$ | per family, from a predefined list: KLL `k`; DDSketch `alpha`; CMS / CountSketch `width × depth`; CMS / CountSketch with heap `width × depth × heap_size`; UnivMon `heap_size × rows × cols × layers`; HLL `precision`; KMV `k` | logical | enumerated |
-| Error bound $(\varepsilon_v, \delta_v)$ | computed on demand from $\theta$ and the statistic, in the family's accuracy metric (below); exact is $(0, 0)$ | logical | derived from $\theta$, not stored or chosen |
-| Window configuration $\omega$ | none; or tumbling windows of width $w$ and count $n$, with $w$ from the gcd closure of the readers' ranges and steps. Later: sliding windows by merge or by subtraction | logical | enumerated |
-| Timing $\tau$ | `IngestionTime`, `QueryTime` | physical | enumerated |
-| Lifetime $\ell$ | `None`, `OneEvaluation(Medium)`, `AcrossEvaluations(Medium)`, with `Medium` in `Memory`, `Disk` | physical | enumerated |
-| Schedule $\sigma$ | only when $\ell \ne$ None. `Periodic { interval, phase }` for `OneEvaluation`; `TumblingWindowGrid { phase }` for `AcrossEvaluations` | physical | enumerated from the readers' schedules |
+| Dimension | Values | Logical or physical | Fixed by | Code |
+|---|---|---|---|---|
+| Which family to use (operator) | `Exact` (exact accumulator kinds: Sum, Count, Min, Max, Increase, Rate, IRate), or `Summary { family }` with family in KLL, DDSketch, CMS, CountSketch, CMS with heap, CountSketch with heap, UnivMon, HLL, KMV, the Hydra variants | logical | enumerated | `FieldDataType::{ExactAggregate, Sketch}` in the candidate's operator ([`schema/mod.rs`](../../../crates/types/src/ir/schema/mod.rs)); `SketchAlgorithm` |
+| Parameter configuration $\theta$ | per family, from a predefined list: KLL `k`; DDSketch `alpha`; CMS / CountSketch `width × depth`; CMS / CountSketch with heap `width × depth × heap_size`; UnivMon `heap_size × rows × cols × layers`; HLL `precision`; KMV `k` | logical | enumerated | `SketchParams` inside `SketchKind` ([`sketch.rs`](../../../crates/types/src/ir/schema/sketch.rs)), sized by `size_params` per `accuracy_budget_parts` |
+| Error bound $(\varepsilon_v, \delta_v)$ | computed on demand from $\theta$ and the statistic, in the family's accuracy metric (below); exact is $(0, 0)$ | logical | derived from $\theta$, not stored or chosen | `local_guarantee` → `AccuracyGuarantee` ([`estimators`](../../../crates/accuracy/src/estimators/mod.rs)) |
+| Window configuration $\omega$ | none; or tumbling windows of width $w$ and count $n$, with $w$ from the gcd closure of the readers' ranges and steps. Later: sliding windows by merge or by subtraction | logical | enumerated | `SummaryTumblingWindowChain` arguments, added by Pass 2 ([`window_candidates.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/window_candidates.rs)) |
+| Timing $\tau$ | `IngestionTime`, `QueryTime` | physical | enumerated | `ExecutionTiming` ([`execution_data_state.rs`](../../../crates/types/src/ir/properties/execution_data_state.rs)); `PhysicalCandidate::timing` |
+| Lifetime $\ell$ | `None`, `OneEvaluation(Medium)`, `AcrossEvaluations(Medium)`, with `Medium` in `Memory`, `Disk` | physical | enumerated | `Materialization` on main; `Lifetime`, `Medium` in #1214 ([`physical/`](../../../crates/types/src/physical)) |
+| Schedule $\sigma$ | only when $\ell \ne$ None. `Periodic { interval, phase }` for `OneEvaluation`; `TumblingWindowGrid { phase }` for `AcrossEvaluations` | physical | enumerated from the readers' schedules | not a property: schedule groups `z[m, G]` in the MILP ([`cost_terms.rs`](../../../crates/plan-selection/src/milp/cost_terms.rs)); a property in #1200 PR 2 |
 
 A candidate is materialized when $\ell \ne$ None. This is derived, not stored.
 
-Invalid combinations, rejected by `new`:
+Invalid combinations, rejected by `PhysicalProperties::new` (the list in #1200; #1214 implements the first, the others come with the schedule in #1200 PR 2):
 
 | Combination | Why |
 |---|---|
@@ -56,6 +56,8 @@ Invalid combinations, rejected by `new`:
 | $\ell$ = None with a schedule | where an unmaterialized result runs is its reader's execution context, not a property |
 | $\ell \ne$ None without a schedule | a materialized result must say on which times or grid it is delivered |
 | OneEvaluation with a grid, AcrossEvaluations with a periodic schedule | each lifetime has one kind of schedule |
+| a phase at or above the grid width or interval, or interval 0 | the phase is taken modulo the width or interval |
+| IngestionTime with a grid phase ≠ 0 | ingestion-time grids are anchored at the epoch today: the plan carries no origin |
 
 Valid physical states: (QueryTime, None), (IngestionTime, None), (QueryTime, OneEvaluation(m)), (QueryTime, AcrossEvaluations(m)), (IngestionTime, AcrossEvaluations(m)), for each medium $m$.
 
@@ -124,14 +126,14 @@ flowchart TD
 
 The levels, top to bottom:
 
-| Level | Dimension | Stage | Values offered | Pruned when |
-|---|---|---|---|---|
-| 1 | family (operator) | Stage 1, Pass 1 and Pass 2 rules | each way to compute the group | the executor cannot build the family; no consumer's family requirement accepts it |
-| 2 | $\theta$ | Stage 1, Pass 1 | the family's predefined list | $\varepsilon_v$ alone exceeds every reading query's target |
-| 3 | window configuration $\omega$ | Stage 1, Pass 2 | tumbling widths from the gcd closure of readers' ranges and steps | no reader's range and step is a multiple of the width |
-| 4 | timing $\tau$ | Stage 2 | QueryTime; IngestionTime | the source has no ingestion pipeline |
-| 5 | lifetime $\ell$ | Stage 2 | None, OneEvaluation(m), AcrossEvaluations(m) | invalid with $\tau$; the deployment keeps no query-time results across evaluations |
-| 6 | schedule $\sigma$ | Stage 2 | the gcd closure $\Sigma$ of the readers' schedules | only offered when $\ell \ne$ None |
+| Level | Dimension | Stage | Values offered | Pruned when | Code |
+|---|---|---|---|---|---|
+| 1 | family (operator) | Stage 1, Pass 1 and Pass 2 rules | each way to compute the group | the executor cannot build the family; no consumer's family requirement accepts it | Pass 1 ([`per_computation_candidates.rs`](../../../crates/logical-asap-optimization/src/pass1/per_computation_candidates.rs)); Pass 2 rules ([`rules/`](../../../crates/logical-asap-optimization/src/pass2/memo/rules)) |
+| 2 | $\theta$ | Stage 1, Pass 1 | the family's predefined list | $\varepsilon_v$ alone exceeds every reading query's target | Pass 1 sizing per `accuracy_budget_parts` ([`memo_population.rs`](../../../crates/logical-asap-optimization/src/pass1/memo_population.rs)); a predefined list in #1203 PR 2 |
+| 3 | window configuration $\omega$ | Stage 1, Pass 2 | tumbling widths from the gcd closure of readers' ranges and steps | no reader's range and step is a multiple of the width | Pass 2 ([`window_candidates.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/window_candidates.rs), [`state_groups.rs`](../../../crates/logical-asap-optimization/src/pass2/memo/state_groups.rs)) |
+| 4 | timing $\tau$ | Stage 2 | QueryTime; IngestionTime | the source has no ingestion pipeline | Stage 2 `enumerate_candidate_configurations` ([`configurations.rs`](../../../crates/physical-asap-optimization/src/catalog/configurations.rs)) |
+| 5 | lifetime $\ell$ | Stage 2 | None, OneEvaluation(m), AcrossEvaluations(m) | invalid with $\tau$; the deployment keeps no query-time results across evaluations | same function, with `DeploymentCapabilities::query_time_results_retained` |
+| 6 | schedule $\sigma$ | Stage 2 | the gcd closure $\Sigma$ of the readers' schedules | only offered when $\ell \ne$ None | Stage 3 MILP today; Stage 2 in #1200 PR 2 |
 
 What the tree does not decide:
 - **Which producer each consumer input reads.** That is the edge choice $y_{u,c,i}$ in Stage 3. Two consumers of one group may read different leaves, e.g. A reads `k = 200` and B reads `k = 345`.
@@ -179,128 +181,189 @@ A memo group holds three things:
 - **Eligibility:** for each input, the requirement a producer must meet.
 - **Candidates:** the ways to compute it.
 
+In the code, these three parts are stored in two places: the group itself ([`MemoGroup`](../../../crates/types/src/stages/memo.rs)) holds the query semantics, and the memo ([`Memo`](../../../crates/types/src/stages/candidates.rs)) holds each group's candidates by group index. Eligibility is not stored yet.
+
 ```rust
-/// The memo: every group, and each query's root over groups.
+// crates/types/src/stages/memo.rs
+pub struct MemoGroup {
+    // Query semantics.
+    /// Its logical node as the frontends see it; its children are other
+    /// groups' nodes.
+    pub logical_node: Rc<OperatorNode>,
+    /// Its child groups (the producer groups G_i), in the node's child order.
+    pub child_groups: Vec<MemoGroupId>,
+    // Derived, kept for traversal.
+    pub parents: Vec<MemoGroupId>,
+    pub queries: Vec<usize>,
+}
+
+// crates/types/src/stages/candidates.rs
 pub struct Memo {
     pub groups: Vec<MemoGroup>,
     pub query_roots: Vec<QueryRoot<MemoGroupId>>,
-}
-
-pub struct MemoGroup {
-    // Query semantics.
-    /// The logical operator, from the existing IR. Its children are the
-    /// producer groups G_i it reads, in order (`expression.children()`), which
-    /// fix the input data and schema.
-    pub expression: Operator<MemoGroupId>,
-    // Eligibility.
-    /// r_i: one requirement per producer group, by input index i.
-    pub input_requirements: Vec<PropertyRequirement>,
-    // Candidates.
-    /// The ways to compute this group; x_v in the MILP.
-    pub candidates: Vec<Candidate>,
+    // Candidates: one list per group, by group index; x_v in the MILP.
+    pub candidates: Vec<Vec<CandidateForMemoGroup>>,
 }
 ```
 
-The expression is the existing IR's [`Operator<C>`](../../../crates/types/src/ir/operator/node.rs), with `C = MemoGroupId`. It wraps [`NonASAPOp<C>`](../../../crates/types/src/ir/operator/non_asap.rs) or [`ASAPOp<C>`](../../../crates/types/src/ir/operator/asap.rs), and each variant carries its own arguments and its inputs. For example, `Scan` carries the source, predicates and schema, and `Filter` carries a predicate and its child. No new identity type is needed.
+| Part | Code | Target |
+|---|---|---|
+| Expression | `MemoGroup::logical_node`, an [`OperatorNode`](../../../crates/types/src/ir/operator/node.rs) whose [`Operator`](../../../crates/types/src/ir/operator/node.rs) is a `NonASAPOp` or `ASAPOp` variant with its own arguments | unchanged: the existing IR, no new identity type |
+| Producer groups $G_i$ | `MemoGroup::child_groups` | unchanged |
+| Eligibility $r_{G,i}$ | not stored: each candidate's private node chain fixes its producer | one logical requirement (#1203) and one physical requirement (#1200) per consumer input; see "Property requirement definition" |
+| Candidates | `Memo::candidates[g]` | unchanged place; each candidate restructured (#1203) |
+| Consumers | `MemoGroup::parents` (derived) | unchanged: derived from the producer groups |
 
-Hash-consing finds or inserts a group by its expression: the operator, its arguments and its input group ids. For example, the KLL state over one source and query window is one group for `k = 200` and `k = 345`; these are two candidates of that group. A different source, filter or query window gives a different group. Properties are not part of the expression: the family, sketch parameters, window layout, timing, lifetime and schedule belong to candidates. A requested query window belongs to the expression; the internal window layout used to compute it does not.
+Hash-consing finds or inserts a group by its logical node: the operator, its arguments and its child groups. Stage 0 does this today (`hash_consed` in [`stage0.rs`](../../../crates/logical-asap-optimization/src/stage0.rs)); #1203 makes Pass 1 look up existing groups the same way. A different source, filter or query window gives a different group. A requested query window belongs to the logical node; the internal window layout used to compute it does not.
 
-`MemoGroupId` is the handle of an interned group. Looking up an existing expression returns that group's id instead of adding a second group.
+The group's logical node is the frontend's operator, e.g. `quantile_over_time(0.95, latency[1m])`. It names no family and no sketch parameters: those are chosen by the candidates. A candidate's own operator (below) is an `ASAPOp` such as `SummaryAgg`, whose `FieldDataType::Sketch(SketchKind, …)` carries the family and $\theta$. Today the KLL state is not its own group: it is a private node inside each reader's candidate. #1203 makes every intermediate result its own group, so the KLL state over `latency[1m]` becomes a group, and `k = 200` and `k = 345` become two candidates of it. Its identity drops the sketch parameters, $\delta$ and the tumbling-window layout (#1203, decision 1).
 
 ### Candidate data structure definition
 
+A candidate is one way to compute its group: an operator over producer groups, plus its properties.
+
 ```rust
-/// v: one way to compute its group. The group's expression says what is
-/// computed; the candidate's properties say how.
-pub struct Candidate {
-    /// One value per property dimension.
-    pub properties: Properties,
+// crates/types/src/stages/candidates.rs (code today)
+pub struct CandidateForMemoGroup {
+    pub fused_groups: Vec<MemoGroupId>,
+    /// The implementation's operator, and its private nodes down to
+    /// `input_groups`. Family and θ are inside it (FieldDataType).
+    pub root_node: Rc<OperatorNode>,
+    pub input_groups: Vec<MemoGroupId>,
+    pub origin: OriginOfCandidateForMemoGroup,
+    pub accuracy_budget_parts: usize,
 }
 ```
 
-Stage 1 decides the logical dimensions of each candidate, and Stage 2 expands each one into its physical alternatives:
+```rust
+// Target (#1203): e_v and p_v^log as separate fields, one operator, no private nodes.
+pub struct CandidateForMemoGroup {
+    pub expression: CandidateExpression,          // e_v
+    pub logical_properties: LogicalProperties,    // p_v^log
+    pub input_requirements: Vec<LogicalRequirement>, // r^log_{c,i}, one per input group
+    pub origin: OriginOfCandidateForMemoGroup,
+    pub fused_groups: Vec<MemoGroupId>,
+}
+pub struct CandidateExpression { pub operator: Operator<MemoGroupId> }
+```
+
+Stage 2 expands each operator node of a logical candidate into physical candidates, one per valid physical property value:
 
 ```rust
-pub struct Properties {
-    pub logical: LogicalProperties,     // Stage 1
-    pub physical: PhysicalProperties,   // Stage 2
+// crates/types/src/stages/physical/memo_candidates.rs, after #1200 PR 1 (#1214)
+pub struct PhysicalCandidate {
+    pub operator_node: OperatorNodeOfCandidateForMemoGroupId,
+    pub properties: PhysicalProperties,           // p_v^phys; was timing + materialization
+    /// Per input, the candidates that may produce it (filtered by α^phys).
+    pub producer_candidates_per_input: Vec<ProducerCandidates>,
+    pub may_produce_query_output: bool,
+    pub may_keep_across_evaluations_per_sole_reader_query: Vec<bool>,
 }
-
-/// (u, c, i): producer u may serve input i of consumer c when u's properties
-/// satisfy c's group's input_requirements[i].
-pub struct Edge { pub producer: CandidateId, pub consumer: CandidateId, pub input: usize }
 ```
+
+| Formulation | Code today | Target |
+|---|---|---|
+| $e_v$ | `root_node` + `input_groups` (may hold private nodes) | `expression: Operator<MemoGroupId>` (#1203) |
+| $p^{\log}_v$ | inside `root_node`'s `FieldDataType`; sized per `accuracy_budget_parts` | `logical_properties` (#1203) |
+| $p^{\mathrm{phys}}_v$ | `PhysicalCandidate::{timing, materialization}` on main | `PhysicalCandidate::properties` (#1200 PR 1, #1214) |
+| edges $(u, c, i)$ | `producer_candidates_per_input` (sets, no edge ids) | `LogicalEdge`, `PhysicalEdge` (#1201) |
 
 ### Property definition
 
-A property is a struct with one field per dimension (P1, P2, …), each its own enum:
+Each property is a struct with one field per dimension, each its own enum.
+
+**Logical properties** (#1203 target; today inside `root_node`):
 
 ```rust
-/// p_v^log.
 pub struct LogicalProperties {
-    family: Family,                                // which sketch, or exact
-    parameter_configuration: Option<SketchParams>, // θ; None for exact
-    window_layout: Option<WindowLayout>,           // ω_v
+    representation: Representation,       // family and θ
+    window_layout: Option<WindowLayout>,  // ω_v
 }
-pub enum Family { Exact(ExactKind), Sketch(SketchAlgorithm) }
-pub enum WindowLayout { Tumbling { width_ms: u64, count: u32 } }  // sliding variants later
-
-/// p_v^phys. `new` rejects the invalid combinations.
-pub struct PhysicalProperties {
-    timing: ExecutionTiming,               // τ
-    lifetime: Lifetime,                    // ℓ
-    schedule: Option<Schedule>,            // σ, only when ℓ ≠ None
+/// Reuses the code's checked types: `SketchKind::new` already rejects
+/// parameters of another algorithm.
+pub enum Representation {
+    Exact(ExactKind),                     // crates/types/src/ir/schema/sketch.rs
+    Summary(SketchKind),                  // SketchKind { algorithm, params }
 }
-pub enum ExecutionTiming { IngestionTime, QueryTime }
-pub enum Lifetime { None, OneEvaluation(Medium), AcrossEvaluations(Medium) }
-pub enum Medium { Memory, Disk }
-pub enum Schedule {
-    Periodic { interval_ms: u64, phase_ms: u64 },
-    TumblingWindowGrid { phase_ms: u64 },
-}
-
-// Reuse the existing family-specific conversions in asap_accuracy.
-// Parameter configuration → error bound (including metric and failure probability).
-// `family` describes the exact value or sketch, including its parameters;
-// `query` identifies the statistic read from it.
-pub(crate) fn local_guarantee(
-    family: &FieldDataType,
-    query: &SketchStatistic,
-) -> Option<AccuracyGuarantee>;
-
-// Error target → parameter configuration for the chosen family and intent.
-pub(crate) fn size_params(
-    kind: SketchAlgorithm,
-    intent: &AggIntent,
-    eps: f64,
-    delta: f64,
-) -> SketchParams;
+pub enum WindowLayout { Tumbling { width_ms: u64, count: u32 } }  // sliding variants: #1206
 ```
 
-`new` checks that `parameter_configuration` belongs to `family`, as [`SketchKind::new`](../../../crates/types/src/ir/schema/sketch.rs) does today, and reuses the existing `SketchParams` type.
+Today these values are the `FieldDataType` of the candidate's summary operator: `ExactAggregate(ExactKind, ExactParams)` or `Sketch(SketchKind, GroupingStrategy)` ([`schema/mod.rs`](../../../crates/types/src/ir/schema/mod.rs)). The tumbling-window layout is the `SummaryTumblingWindowChain` operator's arguments.
 
-`error_bound` is derived when needed, not stored in `LogicalProperties`. Reuse [`estimators::local_guarantee`](../../../crates/accuracy/src/estimators/mod.rs) for parameters → guarantee and [`estimators::size_params`](../../../crates/accuracy/src/estimators/mod.rs) for target → parameters. These existing crate-private functions dispatch to the family's accuracy and sizing implementations; the declarations above document those interfaces, not new implementations. [`sizing::default_size_params`](../../../crates/accuracy/src/sizing.rs) already delegates to `size_params`. If another crate needs direct access, expose the existing implementation through the accuracy crate rather than duplicate its formulas.
+`error_bound` is derived when needed, not stored in `LogicalProperties`. Reuse [`estimators::local_guarantee`](../../../crates/accuracy/src/estimators/mod.rs) for parameters → guarantee and [`estimators::size_params`](../../../crates/accuracy/src/estimators/mod.rs) for target → parameters. These existing crate-private functions dispatch to the family's accuracy and sizing implementations. [`sizing::default_size_params`](../../../crates/accuracy/src/sizing.rs) already delegates to `size_params`. If another crate needs direct access, expose the existing implementation through the accuracy crate rather than duplicate its formulas. (#1203 currently proposes storing `error_bound`; this page derives it instead.)
+
+```rust
+// crates/accuracy/src/estimators/mod.rs (code today)
+pub(crate) fn local_guarantee(family: &FieldDataType, query: &SketchStatistic) -> Option<AccuracyGuarantee>;
+pub(crate) fn size_params(kind: SketchAlgorithm, intent: &AggIntent, eps: f64, delta: f64) -> SketchParams;
+```
 
 Deriving a guarantee also needs the statistic being read: one family's parameters can give different guarantees for different statistics. Exact values yield an exact guarantee; an unsupported statistic or missing error model yields `None`. Target → parameters is a sizing operation with discrete values and family limits, not an exact mathematical inverse; validate the derived guarantee against the target rather than assume the target is achievable.
 
-### Property requirement definition
-
-A property requirement is also a struct with one field per dimension (R1, R2, …), each its own enum. `None` accepts any value.
+**Physical properties** (#1200). PR 1 (#1214) adds timing and lifetime; PR 2 adds the schedule.
 
 ```rust
-/// r_i: what input i's producer must satisfy.
-pub struct PropertyRequirement {
-    pub accuracy: Option<AccuracyRequirement>,
-    pub family: Option<SummaryFamily>,
-    pub window: Option<WindowRequirement>,       // the reader's range and step
-    pub reader_timing: Option<ExecutionTiming>,
-    pub reads_from: Option<Evaluation>,          // Same or Later
-    pub reader_schedule: Option<ReaderSchedule>, // (I_c, φ_c) of a periodic reader
+// crates/types/src/ir/properties/execution_data_state.rs (code today)
+pub enum ExecutionTiming { IngestionTime, QueryTime }
+
+// crates/types/src/physical/properties.rs (#1214)
+pub enum Medium { Memory, Disk }
+pub enum Lifetime { None, OneEvaluation(Medium), AcrossEvaluations(Medium) }
+pub struct PhysicalProperties {
+    timing: ExecutionTiming,               // τ
+    lifetime: Lifetime,                    // ℓ
+    // schedule: Option<Schedule>,         // σ, #1200 PR 2
+}
+impl PhysicalProperties {
+    pub fn new(timing: ExecutionTiming, lifetime: Lifetime) -> Result<Self, InvalidPhysicalProperties>;
+    pub fn timing(self) -> ExecutionTiming;
+    pub fn lifetime(self) -> Lifetime;
+    pub fn is_materialized(self) -> bool;  // ℓ ≠ None
 }
 
-/// The set of legal properties for an input: legal_properties(r) = f(r).
-pub fn satisfies(producer: &Properties, requirement: &PropertyRequirement) -> bool;
+// #1200 PR 2
+pub enum Schedule {
+    Periodic { interval_ms: u64, phase_ms: u64 },  // OneEvaluation
+    TumblingWindowGrid { phase_ms: u64 },          // AcrossEvaluations
+}
 ```
+
+On main, timing and lifetime are still folded into one enum, [`Materialization`](../../../crates/types/src/physical/materialization.rs) (`NotMaterialized`, `MatAtQuery`, `MatAtQueryKeptAcrossEvaluations`, `MatAtIngestion`), next to `PhysicalCandidate::timing`. #1214 deletes it. The schedule is chosen in the MILP today (schedule groups `z[m, G]`, [`cost_terms.rs`](../../../crates/plan-selection/src/milp/cost_terms.rs)); #1200 PR 2 makes it a property.
+
+### Property requirement definition
+
+A requirement is stated per consumer input $(c, i)$, in two parts that follow the two property parts. Each is a struct with one field per dimension.
+
+```rust
+/// r^log_{c,i} (#1203): one optional constraint per dimension; None accepts any value.
+pub struct LogicalRequirement {
+    pub family: Option<SummaryFamily>,
+    pub window: Option<WindowRequirement>,   // the reader's range and step
+    pub error_cap: Option<f64>,              // validity of row (K)'s linear bound
+}
+/// α^log
+pub fn satisfies(producer: &LogicalProperties, requirement: &LogicalRequirement) -> bool;
+
+/// r^phys_{c,i} (#1200): when the consumer reads the input, and on which times.
+/// `new` rejects (IngestionTime, Later): ingestion has no evaluations.
+pub struct PhysicalRequirement {
+    reader_timing: ExecutionTiming,
+    reads_from: Evaluation,                  // which evaluation's output the reader reads
+    reader_schedule: Option<ReaderSchedule>, // (I_c, φ_c); None for a non-periodic reader
+}
+pub enum Evaluation { Same, Later }
+/// α^phys
+pub fn satisfies_physical(producer: PhysicalProperties, requirement: PhysicalRequirement) -> bool;
+```
+
+| Requirement | Code today | Target |
+|---|---|---|
+| $r^{\log}_{c,i}$ | not represented | `LogicalRequirement` (#1203) |
+| $\alpha^{\log}$ | not computed | `satisfies` (#1203) |
+| $r^{\mathrm{phys}}_{c,i}$ | the consumer's timing | `PhysicalRequirement` (#1200 PR 2) |
+| $\alpha^{\mathrm{phys}}$ | [`compatible_timing`](../../../crates/physical-asap-optimization/src/catalog/configurations.rs) on main; `PhysicalProperties::readable_at(reader_timing)` in #1214 | `satisfies_physical` (#1200 PR 2) |
+| accuracy | [`AccuracyTarget`](../../../crates/types/src/ir/properties/accuracy.rs) at the query root, split into equal shares by `accuracy_budget_parts` | `AccuracyTarget` at the query root, checked by row (K) (#1204) |
+| deployment capability | [`DeploymentCapabilities`](../../../crates/logical-asap-optimization/src/deployment_capabilities.rs): `supported_summaries`, `raw_data_retained`, `query_time_results_retained` | unchanged; prunes during generation |
 
 The set of legal properties is a function of the requirement, $\text{legal}(r) = f(r)$. One requirement can be written at different levels. For example, the same accuracy requirement can be stated two ways:
 
@@ -309,15 +372,7 @@ The set of legal properties is a function of the requirement, $\text{legal}(r) =
 | Accuracy = 95% rank accuracy | every family with rank error, and every configuration of it that meets 95% rank accuracy | (KLL, `k = 100`), (KLL, `k = 200`), … |
 | Accuracy = KLL's `k ≥ 100` | KLL with `k ≥ 100` | (KLL, `k = 100`), (KLL, `k = 200`), … |
 
-```rust
-pub enum AccuracyRequirement {
-    /// Stated on the result: a metric, bound and failure probability. The
-    /// legal properties are derived through `size_params` / `local_guarantee`.
-    Target(AccuracyTarget),
-    /// Stated on the properties directly, e.g. KLL with k ≥ 100.
-    Parameters { family: SketchAlgorithm, at_least: SketchParams },
-}
-```
+In the code, the first form is the query's `AccuracyTarget`; Pass 1 maps it to parameters with `size_params`. The second form is what a sized candidate's `SketchParams` fixes today. #1203 keeps the first form at the query root and adds only `error_cap` per edge.
 
 What goes into a property requirement affects only the efficiency of enumeration, not correctness:
 - **Some requirements already hold by the query semantics.** The expression and its producer groups already fix the input data and its fields, so no requirement needs to restate them.
@@ -334,18 +389,18 @@ What goes into a property requirement affects only the efficiency of enumeration
 
 **Add a property dimension**, e.g. a compression codec or a partitioning:
 1. Decide whether it is logical (it changes the result's values or error) or physical (it changes only when, where or how long the result is computed). Add a field (a new enum) to `LogicalProperties` or `PhysicalProperties`.
-2. If consumers can constrain it, add an optional field to `PropertyRequirement` and one check to `satisfies`.
+2. If consumers can constrain it, add an optional field to `LogicalRequirement` or `PhysicalRequirement` and one check to `satisfies` or `satisfies_physical`.
 3. Add its invalid combinations with the other dimensions to `new`.
 4. Add a level to the decision tree, with its prune rule, and place it by the considerations in "Order of decisions".
 5. Add its cost terms.
 
 **Add a requirement:**
-1. If it constrains one edge (a consumer input), add an optional field to `PropertyRequirement`, set it where the consumer's group is created, and check it in `satisfies`.
+1. If it constrains one edge (a consumer input), add a field to `LogicalRequirement` or `PhysicalRequirement`, set it where the consumer is created, and check it in `satisfies` or `satisfies_physical`.
 2. If it constrains a whole query or the whole plan (accuracy, latency, budgets), add it to the query's or workload's requirements and a row to Stage 3. Do not split it into per-edge requirements: that fixes each input's share in advance.
 3. If it comes from the deployment, prune the values it rules out during candidate generation.
 
 **Add a rule:**
 1. A rule matches over groups and their candidates' expressions, never over a reader's private operators.
-2. It adds candidates to an existing group, or adds a new group with its expression, input requirements and candidates. It never copies a reader: every existing consumer of the group sees the new candidate through edges.
+2. It adds candidates to an existing group, or adds a new group with its candidates. It never copies a reader: every existing consumer of the group sees the new candidate through edges.
 3. A candidate whose result has the same meaning as an existing group is added to that group, so hash-consing keeps sharing.
-4. Each new group states its input requirements.
+4. Each new candidate states its input requirements.
