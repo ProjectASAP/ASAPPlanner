@@ -88,7 +88,7 @@ This is the single reference table for property dimensions. Stage descriptions b
 | Window layout — Extension | No layout, or tumbling windows with a positive width. Every grid is anchored at phase 0 (the epoch), so the width alone fixes it. Candidate widths come from the gcd closure of the queries' ranges, steps and phases. Sliding merge/subtraction layouts remain future work. Window count is derived from range and width; retention amount is selected later. | `WindowLayout`; `pass2/memo/window_candidates.rs`; #1160 |
 | Timing | `IngestionTime` or `QueryTime` | `ExecutionTiming` |
 | Lifetime | `None`: discard after the consuming execution; `OneEvaluation`: retain until consumers within that evaluation finish; `AcrossEvaluations`: retain across evaluations in the specified period. A non-`None` lifetime means materialized. | `Lifetime`; #1200 / #1214 |
-| Medium — Extension | `Memory` or `Disk`, carried by a materialized lifetime | `Medium`; #1214 |
+| Storage medium — Extension | `Memory` or `Disk`, carried by a materialized lifetime | `StorageMedium`; #1214 |
 
 Error guarantees are derived from parameters and the statistic being read. They include an error metric, a bound, and a failure probability; exact computation introduces no approximation error. The same state may support different readouts, so its guarantee must be interpreted for the relevant statistic.
 
@@ -101,7 +101,7 @@ $$
 
 ### Logical requirements
 
-The proposed `LogicalRequirement` stores a **parameter floor** $\boldsymbol\theta^{\min}$: the weakest parameters whose ε is at most the applicable input error cap, or a direct need such as heap_size ≥ k for a top-k. The floor is any value of the family's parameter type and need not be in the family's list; a listed producer satisfies it when $\boldsymbol\theta_u \succeq \boldsymbol\theta^{\min}$. Section 4 defines the cap and distinguishes validity from pruning. It does not allocate a fixed share of the query's error budget to each input.
+The proposed `LogicalRequirements` stores a **parameter floor** $\boldsymbol\theta^{\min}$: the weakest parameters whose ε is at most the applicable input error cap, or a direct need such as heap_size ≥ k for a top-k. The floor is any value of the family's parameter type and need not be in the family's list; a listed producer satisfies it when $\boldsymbol\theta_u \succeq \boldsymbol\theta^{\min}$. Section 4 defines the cap and distinguishes validity from pruning. It does not allocate a fixed share of the query's error budget to each input.
 
 For KLL, a larger `k` satisfies a smaller minimum `k`. For DDSketch, a smaller `alpha` can be stronger. Multi-parameter families require the family's comparison rule, including parameters needed for failure guarantees. A single floor is valid only if the accepted configurations form an upward-closed set with a representable least element. Otherwise, compatibility must use an explicit admissible set or predicate; it must not invent a unique minimum.
 
@@ -276,7 +276,7 @@ pub struct CandidateExpression {
 pub struct CandidateForMemoGroup {
     pub expression: CandidateExpression,
     pub logical_properties: LogicalProperties,
-    pub input_requirements: Vec<LogicalRequirement>,
+    pub input_requirements: Vec<LogicalRequirements>,
     pub fused_groups: Vec<MemoGroupId>,
     // Diagnostic provenance; not a planning decision.
     pub origin: OriginOfCandidateForMemoGroup,
@@ -299,7 +299,7 @@ impl LogicalProperties {
         expression: &CandidateExpression,
         parameters: Option<SketchParams>,
         window_layout: Option<WindowLayout>,
-    ) -> Result<Self, InvalidLogicalProperties>;
+    ) -> Result<Self, LogicalPropertiesError>;
 
     pub fn parameters(&self) -> Option<&SketchParams>;
     pub fn window_layout(&self) -> Option<&WindowLayout>;
@@ -307,20 +307,20 @@ impl LogicalProperties {
 
 pub fn parameter_list(family: SketchAlgorithm) -> &'static [SketchParams];
 
-pub struct LogicalRequirement {
-    parameter_floor: Option<SketchParams>,
+pub struct LogicalRequirements {
+    parameter_floor_for_required_accuracy: Option<SketchParams>,
 }
 
-impl LogicalRequirement {
+impl LogicalRequirements {
     /// Any floor of the family's parameter type, listed or not.
-    pub fn new(parameter_floor: Option<SketchParams>) -> Self;
+    pub fn new(parameter_floor_for_required_accuracy: Option<SketchParams>) -> Self;
 
-    pub fn parameter_floor(&self) -> Option<&SketchParams>;
+    pub fn parameter_floor_for_required_accuracy(&self) -> Option<&SketchParams>;
 }
 
-pub fn satisfies_logical(
+pub fn producer_satisfies_logical_requirements(
     producer: &LogicalProperties,
-    requirement: &LogicalRequirement,
+    requirement: &LogicalRequirements,
 ) -> bool;
 ```
 
@@ -351,8 +351,8 @@ After the rules, Pass 2 builds the logical edges and applies the pruning caps of
 fn apply(memo: &mut Memo) -> Result<(), Pass2RuleError>;
 
 pub struct LogicalEdge {
-    pub producer: CandidateForMemoGroupId,
-    pub consumer: CandidateForMemoGroupId,
+    pub producer_candidate_id: CandidateForMemoGroupId,
+    pub consumer_candidate_id: CandidateForMemoGroupId,
     pub input_index_of_consumer: usize,
     pub satisfies_logical_requirement: bool,
 }
@@ -374,15 +374,15 @@ pub enum ExecutionTiming {
     QueryTime,
 }
 
-pub enum Medium {
+pub enum StorageMedium {
     Memory,
     Disk,
 }
 
 pub enum Lifetime {
     None,
-    OneEvaluation(Medium),
-    AcrossEvaluations(Medium),
+    OneEvaluation(StorageMedium),
+    AcrossEvaluations(StorageMedium),
 }
 pub struct PhysicalProperties {
     timing: ExecutionTiming,
@@ -393,7 +393,7 @@ impl PhysicalProperties {
     pub fn new(
         timing: ExecutionTiming,
         lifetime: Lifetime,
-    ) -> Result<Self, InvalidPhysicalProperties>;
+    ) -> Result<Self, PhysicalPropertiesError>;
     pub fn timing(&self) -> ExecutionTiming;
     pub fn lifetime(&self) -> Lifetime;
     pub fn is_materialized(&self) -> bool;
@@ -413,24 +413,27 @@ impl PhysicalCandidate {
 }
 /// α^phys: timing and lifetime only (Section 2's table). Alignment is
 /// checked per context in Stage 3 with `delivers_on`.
-pub fn satisfies_physical(producer: &PhysicalCandidate, consumer: &PhysicalCandidate) -> bool;
+pub fn producer_satisfies_physical_requirements(
+    producer: &PhysicalCandidate,
+    consumer: &PhysicalCandidate,
+) -> bool;
 pub struct PhysicalCandidateId(pub usize);
 pub struct PhysicalEdgeId(pub usize);
 
 pub struct PhysicalCandidate {
-    pub logical: CandidateForMemoGroupId,
-    pub properties: PhysicalProperties,
+    pub logical_candidate_id: CandidateForMemoGroupId,
+    pub physical_properties: PhysicalProperties,
 }
 pub struct PhysicalEdge {
-    pub producer: PhysicalCandidateId,
-    pub consumer: PhysicalCandidateId,
+    pub producer_candidate_id: PhysicalCandidateId,
+    pub consumer_candidate_id: PhysicalCandidateId,
     pub input_index_of_consumer: usize,
     pub satisfies_logical_requirement: bool,
     pub satisfies_physical_requirement: bool,
 }
 pub struct PhysicalASAPMemoCandidates {
-    pub logical: LogicalASAPMemoCandidates,
-    pub candidates: Vec<PhysicalCandidate>,
+    pub logical_candidates: LogicalASAPMemoCandidates,
+    pub physical_candidates: Vec<PhysicalCandidate>,
     pub query_roots: Vec<QueryRoot<MemoGroupId>>,
     pub pruned_candidates: Vec<PrunedCandidate<PhysicalCandidateKey>>,
 }
@@ -449,8 +452,8 @@ impl PhysicalASAPMemoCandidates {
 
 // Identifies a rejected alternative by content: it has no allocated candidate ID.
 pub struct PhysicalCandidateKey {
-    pub logical: CandidateForMemoGroupId,
-    pub properties: PhysicalProperties,
+    pub logical_candidate_id: CandidateForMemoGroupId,
+    pub physical_properties: PhysicalProperties,
 }
 ```
 
@@ -580,7 +583,7 @@ pub struct ErrorPropagation {
     pub validity_cap_per_input: Vec<Option<f64>>,
 }
 
-impl LogicalRequirement {
+impl LogicalRequirements {
     pub fn error_propagation(
         consumer: &Operator<MemoGroupId>,
     ) -> ErrorPropagation;
@@ -658,15 +661,15 @@ An AcrossEvaluations candidate has its own computation: each window is built whe
 A **context** identifies a class of executions with a common owner and schedule across the accounting horizon. It is not necessarily one timestamp. There is one evaluation context per evaluation schedule (interval, phase): all queries with that schedule are evaluated together and share its OneEvaluation results. Queries A and B of the running example, both every 10 s at phase 0, form one context. A non-periodic (one-off) query has no evaluation context yet: it is out of scope, as in Section 2.
 
 ```rust
-pub struct ContextId(pub usize);
+pub struct ExecutionContextId(pub usize);
 
-pub enum Context {
+pub enum ExecutionContext {
     Evaluation(EvaluationSchedule),
     IngestionPipeline(RefreshWindowId),
     Materialized(PhysicalCandidateId),
 }
 
-impl Context {
+impl ExecutionContext {
     // An evaluation context's schedule; None for the other contexts, which
     // is not an implicit compatibility pass.
     pub fn evaluation_schedule(&self) -> Option<EvaluationSchedule>;
@@ -771,7 +774,7 @@ fn expand(
     for choice in cartesian_product(inputs.iter().enumerate().map(|(i, &group)| {
         candidates_of(memo, group)
             .filter(|&u| {
-                satisfies_logical(
+                producer_satisfies_logical_requirements(
                     &memo.candidate(u).logical_properties,
                     &candidate.input_requirements[i],
                 )
