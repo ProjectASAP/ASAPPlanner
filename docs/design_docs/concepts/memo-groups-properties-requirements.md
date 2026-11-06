@@ -84,7 +84,7 @@ This is the single reference table for property dimensions. Stage descriptions b
 
 | Dimension | Values and meaning | Code reference or target |
 |---|---|---|
-| Parameters | A predefined configuration list per family: KLL and KMV `k`; DDSketch `alpha`; HLL `precision`; CMS and CountSketch `width` and `depth`; heap variants also `heap_size`; UnivMon its sizing parameters. Exact operators have no sketch parameters. | `SketchParams` in `crates/types/src/ir/schema/sketch.rs`; predefined lists are the #1203 target |
+| Parameters | A predefined configuration list per family: KLL and KMV `k`; DDSketch `alpha`; HLL `precision`; CMS and CountSketch `width` and `depth`; heap variants also `heap_size`; UnivMon its sizing parameters. The lists are today's sizing over ε = 0.1 down to 0.001; KMV's and UnivMon's distinct-count entries stop at ε = 0.01. A heap variant combines each width × depth with heap sizes from the 1-2-5 series 10, 20, 50, …, 10 000: a top-k consumer's floor is heap_size ≥ k, and the smallest listed heap that meets it is the next step up, at most 2.5× too large. A sketch build's parameters must be in its family's list; exact operators have no sketch parameters. | `SketchParams` in `crates/types/src/ir/schema/sketch.rs`; predefined lists are the #1203 target |
 | Window layout — Extension | No layout, or tumbling windows with a positive width. Every grid is anchored at phase 0 (the epoch), so the width alone fixes it. Candidate widths come from the gcd closure of the queries' ranges, steps and phases. Sliding merge/subtraction layouts remain future work. Window count is derived from range and width; retention amount is selected later. | `WindowLayout`; `pass2/memo/window_candidates.rs`; #1160 |
 | Timing | `IngestionTime` or `QueryTime` | `ExecutionTiming` |
 | Lifetime | `None`: discard after the consuming execution; `OneEvaluation`: retain until consumers within that evaluation finish; `AcrossEvaluations`: retain across evaluations in the specified period. A non-`None` lifetime means materialized. | `Lifetime`; #1200 / #1214 |
@@ -101,7 +101,7 @@ $$
 
 ### Logical requirements
 
-The proposed `LogicalRequirement` stores a **parameter floor**: the weakest configuration in a family's ordered list that satisfies the applicable input error cap. Section 4 defines the cap and distinguishes validity from pruning. It does not allocate a fixed share of the query's error budget to each input.
+The proposed `LogicalRequirement` stores a **parameter floor** $\boldsymbol\theta^{\min}$: the weakest parameters whose ε is at most the applicable input error cap, or a direct need such as heap_size ≥ k for a top-k. The floor is any value of the family's parameter type and need not be in the family's list; a listed producer satisfies it when $\boldsymbol\theta_u \succeq \boldsymbol\theta^{\min}$. Section 4 defines the cap and distinguishes validity from pruning. It does not allocate a fixed share of the query's error budget to each input.
 
 For KLL, a larger `k` satisfies a smaller minimum `k`. For DDSketch, a smaller `alpha` can be stronger. Multi-parameter families require the family's comparison rule, including parameters needed for failure guarantees. A single floor is valid only if the accepted configurations form an upward-closed set with a representable least element. Otherwise, compatibility must use an explicit admissible set or predicate; it must not invent a unique minimum.
 
@@ -292,6 +292,9 @@ pub enum WindowLayout {
 }
 
 impl LogicalProperties {
+    /// Rejects parameters missing on a sketch build, present on an exact
+    /// operator, of another family or not in the family's list, and a window
+    /// of width 0 or on an operator that cannot be windowed.
     pub fn new(
         expression: &CandidateExpression,
         parameters: Option<SketchParams>,
@@ -309,9 +312,8 @@ pub struct LogicalRequirement {
 }
 
 impl LogicalRequirement {
-    pub fn new(
-        parameter_floor: Option<SketchParams>,
-    ) -> Result<Self, InvalidLogicalProperties>;
+    /// Any floor of the family's parameter type, listed or not.
+    pub fn new(parameter_floor: Option<SketchParams>) -> Self;
 
     pub fn parameter_floor(&self) -> Option<&SketchParams>;
 }
@@ -411,11 +413,7 @@ impl PhysicalCandidate {
 }
 /// α^phys: timing and lifetime only (Section 2's table). Alignment is
 /// checked per context in Stage 3 with `delivers_on`.
-pub fn satisfies_physical(
-    memo: &Memo,
-    producer: &PhysicalCandidate,
-    consumer: &PhysicalCandidate,
-) -> bool;
+pub fn satisfies_physical(producer: &PhysicalCandidate, consumer: &PhysicalCandidate) -> bool;
 pub struct PhysicalCandidateId(pub usize);
 pub struct PhysicalEdgeId(pub usize);
 
@@ -655,21 +653,22 @@ These extensions go beyond constraints (A)–(I) and the formulation's fixed-cos
 
 ### Execution identity
 
-An AcrossEvaluations candidate has its own computation: each window is built when it ends. A candidate with ℓ = None runs inside an execution that needs it. For example, a finalize candidate used by queries A and B may execute in both query contexts even though Stage 2 enumerates it only once. A OneEvaluation candidate also runs inside one evaluation context κ: queries with the same schedule are evaluated together, and that evaluation's consumers share the result.
+An AcrossEvaluations candidate has its own computation: each window is built when it ends. A candidate with ℓ = None runs inside an execution that needs it. For example, a finalize candidate used by queries A (every 10 s) and C (every 15 s) may execute in both evaluation contexts even though Stage 2 enumerates it only once. A OneEvaluation candidate also runs inside one evaluation context κ, and that evaluation's consumers share the result.
 
-A **context** identifies a class of executions with a common owner and schedule across the accounting horizon. It is not necessarily one timestamp.
+A **context** identifies a class of executions with a common owner and schedule across the accounting horizon. It is not necessarily one timestamp. There is one evaluation context per evaluation schedule (interval, phase): all queries with that schedule are evaluated together and share its OneEvaluation results. Queries A and B of the running example, both every 10 s at phase 0, form one context. A non-periodic (one-off) query has no evaluation context yet: it is out of scope, as in Section 2.
 
 ```rust
 pub struct ContextId(pub usize);
 
 pub enum Context {
-    QueryEvaluation(QueryId),
+    Evaluation(EvaluationSchedule),
     IngestionPipeline(RefreshWindowId),
     Materialized(PhysicalCandidateId),
 }
 
 impl Context {
-    // Periodic schedule when supported; None is not an implicit compatibility pass.
+    // An evaluation context's schedule; None for the other contexts, which
+    // is not an implicit compatibility pass.
     pub fn evaluation_schedule(&self) -> Option<EvaluationSchedule>;
 }
 ```
