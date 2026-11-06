@@ -89,7 +89,7 @@ This is the single reference table for property dimensions. Stage descriptions b
 | Timing | `IngestionTime` or `QueryTime` | `ExecutionTiming` |
 | Lifetime | `None`: discard after the consuming execution; `OneEvaluation`: retain until consumers within that evaluation finish; `AcrossEvaluations`: retain across evaluations in the specified period. A non-`None` lifetime means materialized. | `Lifetime`; #1200 / #1214 |
 | Medium — Extension | `Memory` or `Disk`, carried by a materialized lifetime | `Medium`; #1214 |
-| Schedule — Extension | For `OneEvaluation`, a periodic interval and phase; for windowed `AcrossEvaluations`, a tumbling-window grid phase. Unmaterialized candidates have no independent schedule. | `Schedule`; #1200 PR 2 |
+| Schedule — Extension | When a materialized result can be read. For `OneEvaluation`: the periodic times it is computed (interval and phase). For windowed `AcrossEvaluations`: the phase of its tumbling-window grid; the width is the window layout's, and each window is readable as soon as it ends. Unmaterialized candidates have no independent schedule. | `Schedule`; #1200 PR 2 |
 
 Error guarantees are derived from parameters and the statistic being read. They include an error metric, a bound, and a failure probability; exact computation introduces no approximation error. The same state may support different readouts, so its guarantee must be interpreted for the relevant statistic.
 
@@ -119,7 +119,11 @@ Physical requirements are derived from the consumer's timing and schedule, rathe
 
 QT means QueryTime; IT means IngestionTime. Schedule, data coverage, and retention checks still apply to allowed combinations.
 
-**Periodic versus grid.** A periodic schedule with interval ten seconds and phase two produces at 2, 12, 22, … seconds. A five-second tumbling grid with phase zero partitions the input into windows [0, 5), [5, 10), … . The first describes evaluation times; the second describes window boundaries. Grid alignment alone does not ensure sufficient retained history.
+**Periodic versus grid.** The schedule σ says when a materialized result can be read.
+- **Periodic** (`OneEvaluation`): the result is computed at φ + I·ℤ and held until that evaluation's consumers finish. With interval 10 s and phase 2 s it exists at 2, 12, 22, … s.
+- **Tumbling-window grid** (windowed `AcrossEvaluations`): the input is cut into windows [φ + k·w, φ + (k+1)·w), with w from the window layout ω. Each window is built once, when it ends, and is readable from then on (decided 2026-11-06; there is no separate refresh interval). A consumer can read a range that ends on a window boundary. With w = 10 s and phase 0, a `[1m]` query evaluated every 30 s at phase 0 merges the newest 6 windows; one evaluated at phase 15 s cannot, because its range ends inside a window.
+
+The grid stores only its phase: the width is ω's, so nothing is stored twice. Building each window when it ends costs the same number of window builds as building several at once later. Grid alignment alone does not ensure sufficient retained history; that is $h_v$ (Section 5).
 
 For the proposed periodic consumer path, let the consumer interval and phase be $I$ and $\varphi$. Let the producer interval and phase be $I_s$ and $\varphi_s$, and its tumbling width and grid phase be $w$ and $\varphi_g$.
 
@@ -390,6 +394,8 @@ pub enum Lifetime {
 }
 pub enum Schedule {
     Periodic { interval_ms: u64, phase_ms: u64 },
+    /// Phase of the window grid; the width is the window layout's (ω), and
+    /// each window is readable once it ends.
     TumblingWindowGrid { phase_ms: u64 },
 }
 pub struct PhysicalProperties {
