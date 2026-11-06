@@ -872,7 +872,7 @@ impl MemoNodes {
 /// before) has no such candidate.
 fn memo_groups_json(table: &mut MemoNodes, memo: &Memo, previous: Option<&Memo>) -> Vec<Value> {
     let ids = |groups: &[MemoGroupId]| groups.iter().map(|g| g.0).collect::<Vec<_>>();
-    memo.groups
+    memo.groups()
         .iter()
         .enumerate()
         .map(|(id, group)| {

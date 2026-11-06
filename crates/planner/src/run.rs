@@ -118,7 +118,7 @@ pub fn run_planning(
         root.validate_structure()?;
     }
     // Stage 0: the memo of logical groups.
-    let initial = memo_of_queries(&roots);
+    let initial = memo_of_queries(&roots)?;
     // Pass 1: the per-computation candidates the deployment can run and
     // some query can use.
     let accuracy_targets: Vec<_> = entries
@@ -172,10 +172,10 @@ pub fn run_planning(
         let logical = logical_asap_candidates.insert(
             logical.map_err(|error| SelectionError::LogicalASAPCandidates(error.to_string()))?,
         );
-        report.memo_groups = logical.memo.groups.len();
+        report.memo_groups = logical.memo.groups().len();
         report.logical_candidates = logical
             .memo
-            .groups
+            .groups()
             .iter()
             .map(|group| group.candidates.len())
             .sum();

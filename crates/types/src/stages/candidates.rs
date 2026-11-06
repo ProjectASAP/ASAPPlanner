@@ -24,12 +24,27 @@ pub struct CandidateForMemoGroupId {
 /// query's root over them.
 #[derive(Debug, Clone, Default)]
 pub struct Memo {
-    pub groups: Vec<MemoGroup>,
+    /// The groups, by id ([`Self::groups`]); added only through
+    /// [`Self::find_or_add_group`].
+    groups: Vec<MemoGroup>,
     /// Each query's root over groups, by index in the workload.
     pub query_roots: Vec<QueryRoot<MemoGroupId>>,
 }
 
 impl Memo {
+    /// The groups, by id.
+    pub fn groups(&self) -> &[MemoGroup] {
+        &self.groups
+    }
+
+    /// Adds a query whose root is `root` and returns its index: the root's
+    /// groups and every group below them list it
+    /// ([`MemoGroup::reached_by_queries`]). Stage 0 adds each query once.
+    pub fn add_query(&mut self, root: QueryRoot<MemoGroupId>) -> usize {
+        let _ = root;
+        todo!("#1207 PR 2")
+    }
+
     /// Hash-consing: the group with this expression, added if new. Fails
     /// when the expression breaks the node rules (schema derivation, input
     /// validation, merge check).

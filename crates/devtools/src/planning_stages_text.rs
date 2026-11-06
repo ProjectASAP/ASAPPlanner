@@ -186,7 +186,7 @@ fn write_memo(out: &mut String, memo: &Memo, previous: Option<&Memo>, with_candi
     // The group lines share one set of column widths, with each group's
     // candidates printed under its line.
     let group_rows: Vec<Vec<String>> = memo
-        .groups
+        .groups()
         .iter()
         .enumerate()
         .map(|(id, group)| {
@@ -209,7 +209,7 @@ fn write_memo(out: &mut String, memo: &Memo, previous: Option<&Memo>, with_candi
         if !with_candidates {
             continue;
         }
-        let _ = (previous, &memo.groups[id].candidates);
+        let _ = (previous, &memo.groups()[id].candidates);
         todo!("#1207 PR 9: print each candidate's expression, logical properties and input requirements")
     }
     let roots: Vec<String> = memo

@@ -60,8 +60,12 @@ fn analyze_corpus(
     let mut rejected = 0;
     let mut summaries = Vec::new();
     for (id, root) in roots {
+        let Ok(memo) = memo_of_queries(&[QueryRoot::Operator(root)]) else {
+            rejected += 1;
+            continue;
+        };
         let Ok(pass1) = pass1_memo(
-            memo_of_queries(&[QueryRoot::Operator(root)]),
+            memo,
             std::slice::from_ref(accuracy),
             &IgnoreAccuracyGuarantees,
             &NoAccuracyEvidence,
@@ -76,7 +80,7 @@ fn analyze_corpus(
         // excluded. A way to compute a measure that Pass 1 offers but cannot
         // compose into a candidate is not counted.
         let mut offered = BTreeSet::new();
-        for candidate in pass1.groups.iter().flat_map(|group| &group.candidates) {
+        for candidate in pass1.groups().iter().flat_map(|group| &group.candidates) {
             if candidate.fused_groups.is_empty() {
                 summary_family(&candidate.expression.operator, &mut offered);
             }

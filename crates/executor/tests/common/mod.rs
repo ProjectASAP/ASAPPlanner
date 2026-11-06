@@ -28,11 +28,10 @@ pub fn computation_candidates(root: Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
     use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
-    let inventory =
-        generate_per_computation_candidates(&asap_logical_asap_optimization::memo_of_queries(&[
-            QueryRoot::Operator(root),
-        ]))
-        .expect("Pass 1 accepts the query");
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
+    )
+    .expect("Pass 1 accepts the query");
     let mut choices = vec![vec![0; inventory.targets.len()]];
     for (index, target) in inventory.targets.iter().enumerate() {
         for choice in 1..target.choice_count() {
