@@ -1,7 +1,7 @@
 //! Post-lowering canonicalization of the operator DAG.
 //!
 //! Rewrites equivalent spellings of a query into one shape, so that common
-//! sub-DAG sharing (Stage 0 hash-consing, `cse` in `asap_stage0_memo`) can match
+//! sub-DAG sharing (hash-consing, `Memo::find_or_add_group`) can match
 //! them by structural equality, whichever front end produced them.
 //!
 //! ## Heavy-hitter promotion
