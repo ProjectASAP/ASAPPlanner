@@ -521,10 +521,7 @@ fn count_updates(memo: &Memo) -> Vec<SummaryUpdate> {
 
 /// Whether `update` reads only the column `name` of `t`.
 fn reads_only(update: &SummaryUpdate, name: &str) -> bool {
-    let column = SummaryInputExpr::Column(ColumnRef::Qualified {
-        table: "t".into(),
-        name: name.into(),
-    });
+    let column = SummaryInputExpr::Column(ColumnRef::Named(name.into()));
     match &update.item {
         Some(item) => *item == column && update.weight == SummaryInputExpr::Constant(1.0),
         None => update.weight == column,

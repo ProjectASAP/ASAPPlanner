@@ -20,8 +20,10 @@
 //!   it, read by the result group.
 //! - **Fused builds.** A whole-expression top-k (a heap over the rows below
 //!   a per-item `sum` or `count`) and a nested sum (one exact `Sum` state
-//!   over the rows below a `sum` of a `sum`): their builds list the groups
-//!   they absorb in `fused_groups`.
+//!   over the rows below a `sum` of a `sum`): each computes several
+//!   operators of one appearance as one operator, and its builds list the
+//!   groups of the operators it replaces in `fused_groups` (concepts doc
+//!   §3, "Fused groups").
 //!
 //! Every intermediate result is its own group, and every candidate is one
 //! operator over input groups. A candidate outputs its group's schema
@@ -49,7 +51,6 @@
 //! operator is rejected. No cost model and no accuracy target is read.
 use std::collections::BTreeMap;
 
-use asap_types::ir::operator::input::OperatorInput;
 use asap_types::ir::operator::non_asap::any_measure_filtered;
 use asap_types::ir::operator::operator_properties::{BinaryOpKind, JoinKind, Reduction, Source};
 use asap_types::ir::operator::AggIntent;
@@ -73,11 +74,13 @@ use asap_types::stages::{
 };
 use thiserror::Error;
 
-use asap_accuracy::propagation::raw_data_samples_of_metric;
 use asap_accuracy::sizing::{accuracy_budget, sizing_target, sketch_statistic};
 use asap_types::deployment_capabilities::summary_supported;
 
-use crate::realization::{non_asap, realize_keyed_additive_summary_input, summary_candidates};
+use crate::realization::{
+    non_asap, raw_data_samples_of_metric, realize_keyed_additive_summary_input, schema,
+    summary_candidates,
+};
 
 /// Unranked candidates of one measure and the candidates pruned for it.
 #[derive(Debug, Clone, PartialEq)]
@@ -239,11 +242,6 @@ fn expression(memo: &Memo, group: MemoGroupId) -> &Operator<MemoGroupId> {
     &memo.groups()[group.0 as usize].expression
 }
 
-/// The output schema of group `group`.
-fn schema(memo: &Memo, group: MemoGroupId) -> &Schema {
-    &memo.groups()[group.0 as usize].group_properties.schema
-}
-
 /// Discover one target per measure of each eligible aggregate group of
 /// `memo`, nested aggregates and those read by scalar roots included:
 /// Pass 1 walks the groups, so an aggregate several queries read is one
@@ -381,9 +379,9 @@ fn without_unsupported_summaries(
 }
 
 /// Adds to each fused computation's `absorbed_targets` the targets its
-/// absorbed targets' own fused computations absorb, transitively: none of
-/// them is read when the fused computation is picked, so its builds list
-/// all their groups in `fused_groups`.
+/// absorbed targets' own fused computations absorb, transitively: the
+/// fused computation replaces all their operators, so its builds list all
+/// their groups in `fused_groups`.
 fn close_absorptions(targets: &mut [ComputationTarget]) {
     loop {
         let mut changed = false;
@@ -455,7 +453,7 @@ fn add_nested_sum_targets(memo: &Memo, targets: &mut [ComputationTarget]) {
         // computation of its own.
         if !targets[inner].having_filters.is_empty()
             || targets[inner].fused_computation.is_some()
-            || nested_sum_input(&memo.group_as_input(target.aggregate_group)).is_none()
+            || nested_sum_input(memo, target.aggregate_group).is_none()
         {
             continue;
         }
@@ -474,7 +472,10 @@ fn add_nested_sum_targets(memo: &Memo, targets: &mut [ComputationTarget]) {
 /// grouped `sum` (not by `without`) of the value column of a per-series or
 /// grouped `sum` directly beneath it, neither filtered nor with `HAVING`,
 /// and not grouped by the metric name a per-series inner sum drops.
-fn nested_sum_input<I: OperatorInput>(target: &I) -> Option<(I, AggIntent, Reduction)> {
+fn nested_sum_input(
+    memo: &Memo,
+    target: MemoGroupId,
+) -> Option<(MemoGroupId, AggIntent, Reduction)> {
     let Some(NonASAPOp::Aggregate {
         child: inner,
         reduction: reduction @ Reduction::Reduce(_),
@@ -482,7 +483,7 @@ fn nested_sum_input<I: OperatorInput>(target: &I) -> Option<(I, AggIntent, Reduc
         filters,
         having: None,
         ..
-    }) = non_asap(target)
+    }) = non_asap(memo, target)
     else {
         return None;
     };
@@ -499,7 +500,7 @@ fn nested_sum_input<I: OperatorInput>(target: &I) -> Option<(I, AggIntent, Reduc
         filters: inner_filters,
         having: None,
         ..
-    }) = non_asap(&inner)
+    }) = non_asap(memo, inner)
     else {
         return None;
     };
@@ -512,12 +513,14 @@ fn nested_sum_input<I: OperatorInput>(target: &I) -> Option<(I, AggIntent, Reduc
     // The inner sum's value column: a per-series sum keeps its labels and
     // carries the value as the sample value; a grouped one ends with it.
     let value = match &inner_reduction {
-        Reduction::PerEntity => resolve_column_ref(&ColumnRef::SampleValue, inner.schema()).ok()?,
+        Reduction::PerEntity => {
+            resolve_column_ref(&ColumnRef::SampleValue, schema(memo, inner)).ok()?
+        }
         Reduction::Reduce(keys) if !keys.is_without() => keys.len(),
         Reduction::Reduce(_) => return None,
     };
     let summed = match col {
-        None => resolve_column_ref(&ColumnRef::SampleValue, inner.schema()).ok()?,
+        None => resolve_column_ref(&ColumnRef::SampleValue, schema(memo, inner)).ok()?,
         Some(column) => *column,
     };
     if summed != value || by.keys().contains(&value) {
@@ -527,8 +530,7 @@ fn nested_sum_input<I: OperatorInput>(target: &I) -> Option<(I, AggIntent, Reduc
     // grouping them by it would name groups the nested sums leave unnamed.
     if matches!(inner_reduction, Reduction::PerEntity)
         && by.keys().iter().any(|&key| {
-            inner
-                .schema()
+            schema(memo, inner)
                 .fields
                 .get(key)
                 .is_some_and(|f| f.name == "__name__")
@@ -536,7 +538,7 @@ fn nested_sum_input<I: OperatorInput>(target: &I) -> Option<(I, AggIntent, Reduc
     {
         return None;
     }
-    let partitions = reduction.partitions_over(inner.schema(), rows.schema())?;
+    let partitions = reduction.partitions_over(schema(memo, inner), schema(memo, rows))?;
     Some((rows, inner_sum.clone(), partitions))
 }
 
@@ -574,9 +576,7 @@ fn add_whole_expression_targets(memo: &Memo, targets: &mut [ComputationTarget]) 
         {
             continue;
         }
-        let Some((input, ..)) =
-            whole_expression_input(&memo.group_as_input(target.aggregate_group))
-        else {
+        let Some((input, ..)) = whole_expression_input(memo, target.aggregate_group) else {
             continue;
         };
         // A heap over the raw data samples beneath a grouped sum of per-series
@@ -586,9 +586,7 @@ fn add_whole_expression_targets(memo: &Memo, targets: &mut [ComputationTarget]) 
             child: per_series, ..
         }) = expression(memo, targets[inner].aggregate_group)
         {
-            let reads_below = expression(memo, *per_series)
-                .children()
-                .contains(&&input.group_id());
+            let reads_below = expression(memo, *per_series).children().contains(&&input);
             if reads_below {
                 absorbs.extend(
                     targets
@@ -637,7 +635,7 @@ fn prune_topk_heaps_over_one_row_per_item(memo: &Memo, targets: &mut [Computatio
         }
         // A PromQL top-k ranks an instant vector: one row per series or
         // group. (A SQL top-k keeps its heaps.)
-        if !reads_only_time_series(&memo.group_as_input(*child)) {
+        if !reads_only_time_series(memo, *child) {
             continue;
         }
         prune_own(&mut target.ways_to_compute, |candidate| {
@@ -648,15 +646,15 @@ fn prune_topk_heaps_over_one_row_per_item(memo: &Memo, targets: &mut [Computatio
 }
 
 /// Whether every scan below `input` reads a time series (PromQL rows).
-fn reads_only_time_series<I: OperatorInput>(input: &I) -> bool {
-    match input.operator() {
+fn reads_only_time_series(memo: &Memo, input: MemoGroupId) -> bool {
+    match expression(memo, input) {
         Operator::NonASAP(NonASAPOp::Scan { source, .. }) => {
             matches!(source, Source::TimeSeries { .. })
         }
         operator => operator
             .children()
             .into_iter()
-            .all(|child| reads_only_time_series(child)),
+            .all(|&child| reads_only_time_series(memo, child)),
     }
 }
 
@@ -665,7 +663,10 @@ fn reads_only_time_series<I: OperatorInput>(input: &I) -> bool {
 /// does not apply. Rows that carry the full series identity rank it as a
 /// column, as [`summary_update`] does. The partitions are `target`'s, moved
 /// onto the input the heap reads ([`Reduction::partitions_over`]).
-fn whole_expression_input<I: OperatorInput>(target: &I) -> Option<(I, SummaryUpdate, Reduction)> {
+fn whole_expression_input(
+    memo: &Memo,
+    target: MemoGroupId,
+) -> Option<(MemoGroupId, SummaryUpdate, Reduction)> {
     let Some(NonASAPOp::Aggregate {
         child,
         reduction,
@@ -673,7 +674,7 @@ fn whole_expression_input<I: OperatorInput>(target: &I) -> Option<(I, SummaryUpd
         filters,
         having: None,
         ..
-    }) = non_asap(target)
+    }) = non_asap(memo, target)
     else {
         return None;
     };
@@ -691,22 +692,23 @@ fn whole_expression_input<I: OperatorInput>(target: &I) -> Option<(I, SummaryUpd
         SketchAlgorithm::CountSketchWithHeap,
         GroupingStrategy::default(),
     );
-    let realized = realize_keyed_additive_summary_input(intent, &family, &reduction, &child)?;
+    let realized = realize_keyed_additive_summary_input(memo, intent, &family, &reduction, child)?;
     let mut input = realized.input;
     let per_series = matches!(
-        non_asap(&child),
+        non_asap(memo, child),
         Some(NonASAPOp::Aggregate {
             reduction: Reduction::PerEntity,
             ..
         })
     );
-    let partitions = reduction.partitions_over(child.schema(), realized.child.schema())?;
-    if per_series && realized.child.schema().has_promql_series_identity() {
+    let partitions =
+        reduction.partitions_over(schema(memo, child), schema(memo, realized.child))?;
+    if per_series && schema(memo, realized.child).has_promql_series_identity() {
         input.item = Some(asap_types::ir::schema::topk::series_identity_item(
-            realized.child.schema(),
+            schema(memo, realized.child),
             partitions.group_keys().map_or(&[][..], |keys| keys.keys()),
         ));
-    } else if realized.child.schema().closed
+    } else if schema(memo, realized.child).closed
         && matches!(input.item, Some(SummaryInputExpr::EntityIdentity(_)))
     {
         // An encoded label set needs an open PromQL schema. PromQL rows that
@@ -859,7 +861,7 @@ fn add_aggregate_candidates(
             Operator::NonASAP(NonASAPOp::Filter { pred, child: input }),
         )?;
     }
-    let raw_data_samples = raw_data_samples_of_metric(&memo.group_as_input(child).operator());
+    let raw_data_samples = raw_data_samples_of_metric(memo, child);
     let measure = |index: usize| SingleMeasure {
         input,
         reduction: &reduction,
@@ -958,7 +960,8 @@ fn unless_unsupported(
 
 /// Adds the fused computation `way` of `ways`' single measure: a whole-
 /// expression heap (a summary way) or a nested-sum merge (an exact
-/// accumulator way). Its builds list `absorbed_groups` in `fused_groups`.
+/// accumulator way). Its builds list `absorbed_groups`, the groups of the
+/// operators it replaces, in `fused_groups`.
 fn add_fused_candidate(
     memo: &mut Memo,
     ways: &AggregateWays<'_>,
@@ -966,13 +969,12 @@ fn add_fused_candidate(
     way: &HowToComputeAggregateMeasure,
     absorbed_groups: &[MemoGroupId],
 ) -> Result<(), PerComputationCandidateError> {
-    let target = memo.group_as_input(ways.aggregate_group);
     match way {
         HowToComputeAggregateMeasure::Summary(algorithm) => {
-            let (rows, update, partitions) = whole_expression_input(&target).ok_or(
-                PerComputationCandidateError::Unsupported("whole-expression top-k input"),
-            )?;
-            let rows = rows.group_id();
+            let (rows, update, partitions) = whole_expression_input(memo, ways.aggregate_group)
+                .ok_or(PerComputationCandidateError::Unsupported(
+                    "whole-expression top-k input",
+                ))?;
             let query = sketch_statistic(measure.intent).ok_or(
                 PerComputationCandidateError::Unsupported("sketch evaluation"),
             )?;
@@ -1002,10 +1004,10 @@ fn add_fused_candidate(
             // The merged build computes the outer sum's own accumulator
             // state, from the rows below the inner sum: a candidate of that
             // state group (#1203, fused builds).
-            let (rows, inner_sum, partitions) = nested_sum_input(&target).ok_or(
-                PerComputationCandidateError::Unsupported("nested-sum merge input"),
-            )?;
-            let rows = rows.group_id();
+            let (rows, inner_sum, partitions) = nested_sum_input(memo, ways.aggregate_group)
+                .ok_or(PerComputationCandidateError::Unsupported(
+                    "nested-sum merge input",
+                ))?;
             let outer_state = accumulator_state(memo, ExactKind::Sum, measure)?;
             let merged =
                 exact_accumulator_build(memo, ExactKind::Sum, &inner_sum, rows, partitions)?;
@@ -1050,11 +1052,7 @@ fn measure_output(
                 PerComputationCandidateError::Unsupported("sketch evaluation"),
             )?;
             let family = FieldDataType::Sketch(*algorithm, GroupingStrategy::default());
-            let read = measure_input(
-                measure.intent,
-                &memo.group_as_input(measure.input),
-                measure.filter,
-            )?;
+            let read = measure_input(measure.intent, memo, measure.input, measure.filter)?;
             let update = with_raw_data_samples_requirement(
                 summary_update(
                     measure.intent,
@@ -1104,11 +1102,7 @@ fn measure_output(
             let count_intent = AggIntent::Count {
                 accuracy: AccuracyTarget::exact(),
             };
-            let read = measure_input(
-                &sum_intent,
-                &memo.group_as_input(measure.input),
-                measure.filter,
-            )?;
+            let read = measure_input(&sum_intent, memo, measure.input, measure.filter)?;
             let sum = finalized_with(memo, ExactKind::Sum, &sum_intent, measure, read.clone())?;
             let count = finalized_with(memo, ExactKind::Count, &count_intent, measure, read)?;
             let sum = add_group(memo, sum)?;
@@ -1175,11 +1169,7 @@ fn accumulator_state(
     kind: ExactKind,
     measure: &SingleMeasure<'_>,
 ) -> Result<MemoGroupId, PerComputationCandidateError> {
-    let read = measure_input(
-        measure.intent,
-        &memo.group_as_input(measure.input),
-        measure.filter,
-    )?;
+    let read = measure_input(measure.intent, memo, measure.input, measure.filter)?;
     let build = accumulator_build(memo, kind, measure.intent, measure, read)?;
     add_state_group(memo, build, &[])
 }
@@ -1237,7 +1227,7 @@ fn exact_accumulator_build(
     reduction: Reduction,
 ) -> Result<Operator<MemoGroupId>, PerComputationCandidateError> {
     let family = FieldDataType::exact(kind);
-    let read = measure_input::<_, MemoGroupId>(intent, &memo.group_as_input(input), None)?;
+    let read = measure_input(intent, memo, input, None)?;
     Ok(Operator::ASAP(ASAPOp::SummaryAgg {
         input: summary_update(intent, &family, &reduction, schema(memo, input), read)?,
         child: input,
@@ -1249,7 +1239,7 @@ fn exact_accumulator_build(
 }
 
 /// Adds `output` as a candidate of `result_group`, then the `above` filters
-/// over it. When its column names or qualifiers differ from the group's,
+/// over it. When its column names differ from the group's,
 /// `output` becomes its own group, read through a `Project` that names its
 /// columns as the group does ([`renaming_project`]). With `above`
 /// predicates the output (named as the group) is a group, read by one
@@ -1300,8 +1290,7 @@ fn add_output_candidate(
     Ok(())
 }
 
-/// A `Project` over `output` that names its columns, and qualifies them,
-/// as `result_group`'s. `output` must have the group's number of columns,
+/// A `Project` over `output` that names its columns as `result_group`'s. `output` must have the group's number of columns,
 /// and the group's schema must be closed (list every column its rows carry).
 fn renaming_project(
     memo: &Memo,
@@ -1322,14 +1311,6 @@ fn renaming_project(
             "substituted output with other columns than the aggregate",
         ));
     }
-    // One qualifier for all columns when the group's share one; a key's
-    // table qualifier is not compared (`Memo::add_candidate`).
-    let qualifier = to.fields.first().and_then(|field| field.table.clone());
-    let qualifier = qualifier.filter(|table| {
-        to.fields
-            .iter()
-            .all(|field| field.table.as_ref() == Some(table))
-    });
     let cols = to
         .fields
         .iter()
@@ -1341,7 +1322,6 @@ fn renaming_project(
         .collect();
     Ok(Operator::NonASAP(NonASAPOp::Project {
         cols,
-        qualifier,
         child: output,
     }))
 }
@@ -1398,7 +1378,6 @@ fn ranked_as_topk(
         .collect::<Result<Vec<_>, PerComputationCandidateError>>()?;
     Ok(Operator::NonASAP(NonASAPOp::Project {
         cols,
-        qualifier: None,
         child: estimate,
     }))
 }
@@ -1549,11 +1528,7 @@ fn last_as_float64(
     });
     add_group(
         memo,
-        Operator::NonASAP(NonASAPOp::Project {
-            cols,
-            qualifier: None,
-            child: group,
-        }),
+        Operator::NonASAP(NonASAPOp::Project { cols, child: group }),
     )
 }
 
@@ -1616,7 +1591,6 @@ fn sql_avg(
     let joined = add_group(memo, join_on_keys(memo, keys, sum, count))?;
     Ok(Operator::NonASAP(NonASAPOp::Project {
         cols,
-        qualifier: None,
         child: joined,
     }))
 }
@@ -1707,7 +1681,6 @@ fn join_measures(
     }
     Ok(Operator::NonASAP(NonASAPOp::Project {
         cols,
-        qualifier: to.fields.first().and_then(|field| field.table.clone()),
         child: joined,
     }))
 }
@@ -1724,19 +1697,23 @@ fn key_items(keys: usize) -> Vec<ProjectItem<MemoGroupId>> {
 /// What a measure's state reads from each row of `input`, resolvable there.
 /// A SQL `count` reads [`counted_column`]; any other measure, a PromQL count
 /// included, reads its input column (the sample value when it names none).
-fn measure_input<I: OperatorInput, C>(
+fn measure_input(
     intent: &AggIntent,
-    input: &I,
-    filter: Option<&Predicate<C>>,
+    memo: &Memo,
+    input: MemoGroupId,
+    filter: Option<&Predicate<MemoGroupId>>,
 ) -> Result<SummaryInputExpr, PerComputationCandidateError> {
-    let schema = input.schema();
+    let schema = schema(memo, input);
     let read = match intent {
-        AggIntent::Count { .. } if input.result_kind() == OperatorResultKind::Relation => {
+        AggIntent::Count { .. }
+            if memo.groups()[input.0 as usize].group_properties.result_kind
+                == OperatorResultKind::Relation =>
+        {
             SummaryInputExpr::Column(counted_column(schema, filter)?)
         }
         // A top-k ranks its child's aggregate output, not a column of its own.
         AggIntent::TopK { .. } => SummaryInputExpr::Column(
-            crate::realization::ranked_value(input)
+            crate::realization::ranked_value(memo, input)
                 .map_err(|_| {
                     PerComputationCandidateError::Unsupported("Top-K has no ranked column")
                 })?
@@ -1758,11 +1735,11 @@ fn measure_input<I: OperatorInput, C>(
 /// so it is a column non-null on every counted row: one the measure filter
 /// proves non-null (`count(col)` lowers to the filter `col IS NOT NULL`), else
 /// a non-nullable one, Float64 first (the runtime's numeric update).
-fn counted_column<C>(
+fn counted_column(
     schema: &Schema,
-    filter: Option<&Predicate<C>>,
+    filter: Option<&Predicate<MemoGroupId>>,
 ) -> Result<ColumnRef, PerComputationCandidateError> {
-    fn not_null<C>(expr: &ScalarExpr<C>) -> Vec<usize> {
+    fn not_null(expr: &ScalarExpr<MemoGroupId>) -> Vec<usize> {
         match expr {
             ScalarExpr::IsNotNull(inner) => match **inner {
                 ScalarExpr::Column(column) => vec![column],

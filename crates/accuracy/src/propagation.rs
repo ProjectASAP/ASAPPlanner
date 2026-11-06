@@ -6,7 +6,6 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use asap_types::ir::operator::input::OperatorInput;
 use asap_types::ir::operator::operator_properties::{BinaryOpKind, JoinKind, Reduction, Source};
 use asap_types::ir::operator::tumbling_window_chain::merged_chain;
 use asap_types::ir::operator::AggIntent;
@@ -40,30 +39,26 @@ use crate::PropagationStats;
 type NodeToRewrittenNodeCache = HashMap<*const OperatorNode, Rc<OperatorNode>>;
 
 /// The metric whose raw data samples, or plain sums of them, are every value
-/// `operator` outputs, or `None`. Only a time-series scan, a time range over
-/// it, an `offset`-only time shift (it moves the window, not the samples)
-/// and a plain `sum` keep that; any other operator (rate and arithmetic
-/// included) ends it. The metric's type is not read here: whether its
+/// `node` outputs, or `None`. Only a time-series scan, a time range over it,
+/// an `offset`-only time shift (it moves the window, not the samples) and a
+/// plain `sum` keep that; any other operator (rate and arithmetic included)
+/// ends it. The metric's type is not read here: whether its
 /// samples are non-negative is plan selection's question
-/// ([`WeightDomain::RawDataSamplesOfMetric`]). It reads a node's operator
-/// and a memo group's expression alike ([`OperatorInput`]).
-pub fn raw_data_samples_of_metric<I: OperatorInput>(operator: &Operator<I>) -> Option<String> {
-    let Operator::NonASAP(operator) = operator else {
-        return None;
-    };
-    match operator {
+/// ([`WeightDomain::RawDataSamplesOfMetric`]).
+pub fn raw_data_samples_of_metric(node: &OperatorNode) -> Option<String> {
+    match node.non_asap()? {
         NonASAPOp::Scan {
             source: Source::TimeSeries { metric },
             ..
         } => Some(metric.clone()),
-        NonASAPOp::TimeRange { child, .. } => raw_data_samples_of_metric(&child.operator()),
+        NonASAPOp::TimeRange { child, .. } => raw_data_samples_of_metric(child),
         NonASAPOp::TimeShift { shift, child } if shift.at.is_none() => {
-            raw_data_samples_of_metric(&child.operator())
+            raw_data_samples_of_metric(child)
         }
         NonASAPOp::Aggregate {
             measures, child, ..
         } if matches!(measures.as_slice(), [AggIntent::Sum { col: None }]) => {
-            raw_data_samples_of_metric(&child.operator())
+            raw_data_samples_of_metric(child)
         }
         _ => None,
     }
@@ -722,7 +717,7 @@ pub(crate) fn estimates_raw_data_samples_of(node: &OperatorNode) -> Option<Strin
         {
             estimates_raw_data_samples_of(child)
         }
-        _ => raw_data_samples_of_metric(&node.operator),
+        _ => raw_data_samples_of_metric(node),
     }
 }
 
