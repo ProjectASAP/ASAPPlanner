@@ -1,5 +1,6 @@
 //! Dispatch committed estimator parameters to their accuracy models.
 use super::*;
+#[cfg(test)]
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::FamilyCapability;
 
@@ -142,7 +143,10 @@ pub fn with_failure_probability(params: &SketchParams, delta: f64) -> SketchPara
     }
 }
 
-#[allow(dead_code)] // Read again for the predefined θ lists (`parameter_list`), in #1207 PR 1.
+/// Today's sizing: the parameters of family `kind` for error `eps` at failure
+/// probability `delta`. Test-only: the predefined lists (`parameter_list`)
+/// are this sizing over an error grid, which a test keeps equal.
+#[cfg(test)]
 pub(crate) fn size_params(
     kind: SketchAlgorithm,
     intent: &AggIntent,
@@ -249,6 +253,7 @@ pub(crate) fn binomial_upper_tail(n: u32, p: f64, k: u32) -> f64 {
 
 /// Accuracy-dependent candidate budget, not a completeness theorem. The
 /// membership model must still certify the selected set independently.
+#[cfg(test)]
 pub(crate) fn topk_capacity(k: usize, eps: f64) -> u32 {
     u32::try_from(k)
         .unwrap_or(u32::MAX)
@@ -268,6 +273,180 @@ pub(crate) fn saturating_ceil(x: f64, lo: u32, hi: u32) -> u32 {
 mod tests {
     use super::*;
     use asap_types::ir::operator::agg_intent::{default_cardinality, default_quantile};
+
+    /// Each family's predefined list is today's sizing at failure
+    /// probability 0.01 over the error grid, weakest first, without repeats
+    /// (a UnivMon's: its L2-norm, distinct-count and other shapes). KMV's and
+    /// UnivMon's distinct counts stop at ε = 0.01. A heap variant's width × depth is the top-1
+    /// sizing, each with every heap size of the 1-2-5 series 10 … 10 000.
+    #[test]
+    fn parameter_list_is_the_sizing_over_the_error_grid() {
+        use asap_types::ir::properties::AccuracyTarget;
+        use asap_types::stages::parameter_list;
+        let full_grid = [0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001];
+        let distinct_grid = [0.1, 0.05, 0.02, 0.01];
+        let heap_sizes = [10, 20, 50, 100, 200, 500, 1_000, 2_000, 5_000, 10_000];
+        let l2 = AggIntent::FrequencyL2 {
+            col: None,
+            accuracy: AccuracyTarget::max_error(0.01),
+        };
+        let top_1 = AggIntent::TopK {
+            k: 1,
+            accuracy: AccuracyTarget::max_error(0.01),
+        };
+        let quantile = default_quantile(0.5);
+        let distinct = default_cardinality();
+        for (family, intents) in [
+            (SketchAlgorithm::Kll, vec![&quantile]),
+            (SketchAlgorithm::DDSketch, vec![&quantile]),
+            (SketchAlgorithm::Hll, vec![&distinct]),
+            (SketchAlgorithm::Kmv, vec![&distinct]),
+            (SketchAlgorithm::Cms, vec![&distinct]),
+            (SketchAlgorithm::CountSketch, vec![&distinct]),
+            (SketchAlgorithm::CmsWithHeap, vec![&top_1]),
+            (SketchAlgorithm::CountSketchWithHeap, vec![&top_1]),
+            (SketchAlgorithm::UnivMon, vec![&l2, &distinct, &quantile]),
+        ] {
+            let mut sized: Vec<SketchParams> = Vec::new();
+            for intent in intents {
+                let grid: &[f64] = match (family, intent) {
+                    (
+                        SketchAlgorithm::Kmv | SketchAlgorithm::UnivMon,
+                        AggIntent::Cardinality { .. },
+                    ) => &distinct_grid,
+                    _ => &full_grid,
+                };
+                for &eps in grid {
+                    let params = size_params(family, intent, eps, sizing::DEFAULT_DELTA);
+                    let with_heaps: Vec<SketchParams> = match params {
+                        SketchParams::CmsWithHeap { width, depth, .. } => heap_sizes
+                            .iter()
+                            .map(|&heap_size| SketchParams::CmsWithHeap {
+                                width,
+                                depth,
+                                heap_size,
+                            })
+                            .collect(),
+                        SketchParams::CountSketchWithHeap { width, depth, .. } => heap_sizes
+                            .iter()
+                            .map(|&heap_size| SketchParams::CountSketchWithHeap {
+                                width,
+                                depth,
+                                heap_size,
+                            })
+                            .collect(),
+                        other => vec![other],
+                    };
+                    for params in with_heaps {
+                        if !sized.contains(&params) {
+                            sized.push(params);
+                        }
+                    }
+                }
+            }
+            assert_eq!(
+                format!("{:?}", parameter_list(family)),
+                format!("{sized:?}"),
+                "{family:?}"
+            );
+        }
+    }
+
+    /// Within each family's list, a configuration that satisfies another's
+    /// floor (`producer_satisfies_logical_requirements`) has no larger error, at the lists' failure
+    /// probability 0.01, for every statistic the family answers.
+    #[test]
+    fn a_configuration_satisfying_a_listed_floor_is_no_less_accurate() {
+        use asap_types::ir::operator::operator_properties::Reduction;
+        use asap_types::ir::schema::{GroupingStrategy, SummaryUpdate};
+        use asap_types::ir::ASAPOp;
+        use asap_types::ir::Operator;
+        use asap_types::stages::{
+            parameter_list, producer_satisfies_logical_requirements, CandidateExpression,
+            LogicalProperties, LogicalRequirements, MemoGroupId,
+        };
+        let point = SketchStatistic::PointCount {
+            key: asap_types::ir::scalar::expr_ir::ColumnRef::SampleValue,
+            value: None,
+        };
+        let statistics = [
+            SketchStatistic::Quantile { q: 0.5 },
+            SketchStatistic::Cardinality,
+            SketchStatistic::FrequencyL2,
+            SketchStatistic::FrequencyEntropy,
+            SketchStatistic::TopK { k: 1 },
+            point,
+        ];
+        for family in [
+            SketchAlgorithm::Kll,
+            SketchAlgorithm::DDSketch,
+            SketchAlgorithm::Hll,
+            SketchAlgorithm::Kmv,
+            SketchAlgorithm::Cms,
+            SketchAlgorithm::CountSketch,
+            SketchAlgorithm::CmsWithHeap,
+            SketchAlgorithm::CountSketchWithHeap,
+            SketchAlgorithm::UnivMon,
+        ] {
+            let build = CandidateExpression {
+                operator: Operator::ASAP(ASAPOp::SummaryAgg {
+                    child: MemoGroupId(0),
+                    family: FieldDataType::Sketch(family, GroupingStrategy::default()),
+                    input: SummaryUpdate::column(
+                        asap_types::ir::scalar::expr_ir::ColumnRef::SampleValue,
+                    ),
+                    reduction: Reduction::PerEntity,
+                    grouping: GroupingStrategy::default(),
+                    filter: None,
+                }),
+            };
+            let capability =
+                FamilyCapability::of(&FieldDataType::Sketch(family, GroupingStrategy::default()));
+            let list = parameter_list(family);
+            for producer in list {
+                let properties =
+                    LogicalProperties::new(&build, Some(producer.clone()), None).unwrap();
+                for floor in list {
+                    let requirement = LogicalRequirements::new(Some(floor.clone()));
+                    if !producer_satisfies_logical_requirements(&properties, &requirement) {
+                        continue;
+                    }
+                    for statistic in statistics.iter().filter(|s| capability.answers(s)) {
+                        let Some(needed) = sketch_guarantee(&family, floor, statistic) else {
+                            continue;
+                        };
+                        let delivered = sketch_guarantee(&family, producer, statistic)
+                            .unwrap_or_else(|| panic!("{producer:?} {statistic:?}"));
+                        // A bound that does not evaluate (an unknown term) is
+                        // compared by its expression.
+                        let error_no_larger = match (
+                            delivered.spec.error.evaluate(),
+                            needed.spec.error.evaluate(),
+                        ) {
+                            (Some(error), Some(needed)) => error <= needed * (1.0 + 1e-9),
+                            (_, _) => delivered.spec.error == needed.spec.error,
+                        };
+                        let failure_no_likelier = match (
+                            delivered.spec.failure_probability.evaluate(),
+                            needed.spec.failure_probability.evaluate(),
+                        ) {
+                            (Some(delta), Some(needed)) => {
+                                delta <= needed.max(sizing::DEFAULT_DELTA) * (1.0 + 1e-9)
+                            }
+                            (_, _) => {
+                                delivered.spec.failure_probability
+                                    == needed.spec.failure_probability
+                            }
+                        };
+                        assert!(
+                            error_no_larger && failure_no_likelier,
+                            "{producer:?} ⪰ {floor:?} for {statistic:?}: {delivered:?} vs {needed:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     fn delta_and_error(params: &SketchParams, query: &SketchStatistic) -> (f64, f64) {
         let algorithm = match params {

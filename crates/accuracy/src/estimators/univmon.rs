@@ -17,18 +17,22 @@
 //! (OctoSketch aggregators fed promoted deltas) are not covered: the
 //! executor rejects them.
 use super::*;
+#[cfg(test)]
 use asap_types::ir::operator::AggIntent;
 
 /// Layers `asap_sketchlib` builds: layer `i` hashes at seed index `i`, and
 /// seed 19 picks the layers a key reaches.
+#[cfg(test)]
 pub(crate) const MAX_LAYERS: u8 =
     asap_sketchlib::sketch_framework::univmon::UNIVMON_MAX_LAYERS as u8;
 /// The most rows an L2 sketch is sized with: the deepest odd shape within
 /// the 20 rows the executor builds ([`hash_independent`]), so the row median
 /// is one row's estimate, and within the hash budget at the more than 20
 /// columns an L2 guarantee needs (5 column bits: 19 · 6 = 114 ≤ 128).
+#[cfg(test)]
 const MAX_L2_ROWS: u32 = 19;
 /// Each row of a layer reads its column and sign bits from one hash.
+#[cfg(test)]
 const HASH_BITS: u32 = 128;
 /// The per-row failure probability the L2 guarantee fixes: a row misses by
 /// more than `ε₂ F2` with probability at most `2q/ε₂² = 0.1`. Fixing it
@@ -50,6 +54,7 @@ const MAX_DISTINCT: &str = "max_distinct";
 
 /// The shape baseline for readouts without a size model: the total (exact
 /// whatever the shape) and entropy (uncertified).
+#[cfg(test)]
 const BASELINE: SketchParams = SketchParams::UnivMon {
     heap_size: 256,
     sketch_rows: 5,
@@ -148,6 +153,7 @@ fn l2_failure_probability(rows: u32) -> f64 {
 /// clamped to the hash budget: with more rows than [`MAX_L2_ROWS`], or more
 /// columns than `rows` leave bits for, the shape is the largest one built
 /// and its guarantee misses the target.
+#[cfg(test)]
 fn l2_shape(eps: f64, delta: f64) -> (u32, u32) {
     let rows = (1..=MAX_L2_ROWS)
         .find(|&rows| l2_failure_probability(rows) <= delta)
@@ -347,6 +353,7 @@ pub(crate) fn with_failure_probability(params: &SketchParams, delta: f64) -> Ske
 ///   counter;
 /// - total and entropy: the baseline shape (the total is exact; entropy
 ///   has no certified bound).
+#[cfg(test)]
 pub(super) fn size_params(intent: &AggIntent, eps: f64, delta: f64) -> SketchParams {
     match intent {
         AggIntent::FrequencyL2 { .. } => {
