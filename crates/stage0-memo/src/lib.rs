@@ -1,7 +1,12 @@
-//! Stage 0: the memo groups of the workload's query roots (a [`Memo`]
-//! without candidates). Each node of the queries' DAGs becomes the group of
-//! its expression, found or added by [`Memo::find_or_add_group`], so
-//! identical sub-expressions are one group. Stage 1 starts from these groups.
+//! `asap-stage0-memo` — #509 Stage 0: the memo groups of the workload's
+//! query roots (a [`Memo`] without candidates). Each node of the queries'
+//! DAGs becomes the group of its expression, found or added by
+//! [`Memo::find_or_add_group`], so identical sub-expressions are one group.
+//! Stage 1 starts from these groups.
+//!
+//! It depends only on `asap-types`, where its output (`Memo`) lives; no
+//! other stage crate depends on it except in their tests, and the planner
+//! facade calls it first.
 
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{QueryRoot, SchemaDerivationError};

@@ -3,7 +3,7 @@
 //! ranks.
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
+use asap_stage1_pass1_per_computation_candidates::test_support::generate_per_computation_candidates;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::QueryRoot;
@@ -21,7 +21,7 @@ async fn targets(sql: &str) -> Vec<ComputationTarget> {
         .await
         .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"));
     generate_per_computation_candidates(
-        &asap_logical_asap_optimization::memo_of_queries(
+        &asap_stage0_memo::memo_of_queries(
             &[QueryRoot::Operator(root)],
             &[None],
             &Default::default(),

@@ -1,7 +1,7 @@
 //! Scan-label widening for explicit memo state sharing. Reuses the existing
 //! Pass 2 widening rule; only its source-chain boundaries are interned here.
 
-use crate::pass2::memo::rules::Pass2RuleError;
+use crate::memo::rules::Pass2RuleError;
 use asap_types::stages::Memo;
 
 /// Rule 2, scan widening: a group for the widened scan, and in each original scan group a candidate `Project(widened)`.

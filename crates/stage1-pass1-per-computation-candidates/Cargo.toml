@@ -1,29 +1,27 @@
 [package]
-name = "asap-logical-asap-optimization"
+name = "asap-stage1-pass1-per-computation-candidates"
 version = "0.1.0"
 edition = "2021"
 
-# #509 Stage 1, logical ASAP-aware optimization: Pass 1 per-computation
-# candidates and Pass 2 ASAP-aware CSE over asap-types' operator DAG, with
-# the shared analytical accuracy model (`asap-accuracy`). Depends on no
-# later stage, and on no query-language frontend except through the
-# `test-support` feature.
+# #509 Stage 1, Pass 1: the initial candidates of each memo group (exact,
+# exact accumulator, summaries, fused builds), with the shared analytical
+# accuracy model (`asap-accuracy`). Reads Stage 0's memo through
+# `asap_types::stages`; depends on no other stage crate, and on no
+# query-language frontend except through the `test-support` feature.
 [dependencies]
-asap_sketchlib = { workspace = true }
 asap-types = { path = "../types" }
 asap-accuracy = { path = "../accuracy" }
 thiserror = "2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-rmp-serde = "1"
 # Only for `test-support`: lowering PromQL test queries.
 asap-frontend-promql = { path = "../frontend-promql", optional = true }
 
 [features]
-# The test helpers (`test_support`) the later stage crates' tests share.
+# The test helpers (`test_support`) other crates' tests share.
 test-support = ["dep:asap-frontend-promql", "asap-types/test-support"]
 
 [dev-dependencies]
 asap-types = { path = "../types", features = ["test-support"] }
 asap-accuracy = { path = "../accuracy", features = ["test-support"] }
 asap-frontend-promql = { path = "../frontend-promql" }
+# Stage 0's memo of the test queries.
+asap-stage0-memo = { path = "../stage0-memo" }

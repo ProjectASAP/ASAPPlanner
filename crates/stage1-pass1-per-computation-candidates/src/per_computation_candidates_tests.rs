@@ -1,9 +1,9 @@
 //! Frontend-to-Pass-1 acceptance: candidate discovery precedes empirical selection.
-use crate::pass1::per_computation_candidates::{
+use crate::per_computation_candidates::{
     computation_candidates_for_intent, generate_per_computation_candidates,
     PerComputationCandidateError,
 };
-use crate::stage0::memo_of_queries;
+use asap_stage0_memo::memo_of_queries;
 use asap_types::ir::operator::operator_properties::{Reduction, Source};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::AccuracyTarget;
@@ -304,7 +304,7 @@ fn filtered_measure_keeps_candidates_and_records_its_filter() {
 
 /// Target `target`'s own ways to compute.
 fn choices_of(
-    inventory: &crate::pass1::per_computation_candidates::PerComputationCandidates,
+    inventory: &crate::per_computation_candidates::PerComputationCandidates,
     target: usize,
 ) -> Vec<HowToComputeAggregateMeasure> {
     inventory.targets[target].ways_to_compute.clone()
@@ -556,7 +556,7 @@ fn global_aggregate_having_stays_above() {
 
 /// The `HAVING` entries of the target whose measure satisfies `is`.
 fn having_of(
-    inventory: &crate::pass1::per_computation_candidates::PerComputationCandidates,
+    inventory: &crate::per_computation_candidates::PerComputationCandidates,
     is: impl Fn(&AggIntent) -> bool,
 ) -> Vec<HavingEntry> {
     let target = inventory
