@@ -706,7 +706,7 @@ To avoid confusing per-execution costs with the baseline's horizon-wide cost, us
 | $\rho_\kappa$ | Fixed number or expected number of context executions over the common horizon |
 | $h_v$ | Retention amount in a declared unit, such as retained windows |
 | $\pi_v$ | Horizon-wide retention cost per unit of retained amount |
-| $\operatorname{need}_{\kappa,v,c,i}$ | Retention amount producer v needs to serve this consumer input in this context |
+| $\operatorname{need}_{\kappa,v,c,i}$ | Retention amount producer v needs to serve this consumer input in this context: the time horizon the queries served by that context read, e.g. a 5m range over 10 s tumbling windows needs 30 windows. Query latency is ignored for now (decided 2026-11-06) |
 
 A proposed linear objective is:
 
@@ -724,7 +724,7 @@ $$
 h_v\ge\operatorname{need}_{\kappa,v,c,i}\,y_{\kappa,v,c,i}.
 $$
 
-The retention domain, upper bounds, activation linking, and all coefficient units must be specified by the implementation. If required retention depends on selected downstream queries, that dependence needs explicit linking constraints; it is not a fixed coefficient merely because it has a name.
+The need is fixed per edge from the time horizon of the queries it serves, so constraint (R) is linear. It ignores query latency: a result is assumed read as soon as its evaluation starts, so a slow consumer that reads later does not extend the horizon. Modeling that needs the latency design, which is out of scope (Section 5). The retention unit (windows, or seconds of data) and an upper bound on $h_v$ are fixed per candidate when Stage 2 builds it.
 
 ### No consumer-count policies
 
