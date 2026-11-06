@@ -118,6 +118,16 @@ fn an_hll_readout_renamed_to_the_aggregate_column_is_its_candidate() {
     for group in [g3, g4, g5] {
         assert_eq!(lineage(&memo, group), key_then_computed);
     }
+    // The state's selection names the filtered column by its lineage.
+    let coverage = memo.groups()[g4.0 as usize]
+        .group_properties
+        .summary_coverage
+        .as_ref()
+        .expect("a summary state");
+    assert_eq!(
+        coverage.selection()[0].columns()[&ColumnIdentity::new("flows", "proto")],
+        Constraint::In(vec![ScalarValue::Utf8("tcp".into())])
+    );
 
     let operator = Operator::NonASAP(NonASAPOp::Project {
         cols: vec![
@@ -147,8 +157,8 @@ fn an_hll_readout_renamed_to_the_aggregate_column_is_its_candidate() {
 /// Example 2: `SELECT source, count(*) FROM (SELECT f.src AS source FROM
 /// flows f) GROUP BY source`. The renaming `Project` keeps `flows.src`; a
 /// state grouped by `source` has the key lineage of one grouped by `src`
-/// over the scan, a selection on `source` names `flows.src`, and the
-/// rollup's group-key check, which compares lineage, passes.
+/// over the scan, a selection on the renamed `area` names `flows.region`,
+/// and the rollup's group-key check, which compares lineage, passes.
 #[test]
 fn a_rename_keeps_lineage_and_the_rollup_key_check_compares_it() {
     let mut memo = Memo::default();
