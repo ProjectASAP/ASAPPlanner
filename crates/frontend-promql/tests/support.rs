@@ -76,16 +76,6 @@ pub fn promql_scalar(node: &ScalarExpr) -> Option<f64> {
     }
 }
 
-/// Time `root` under the default physical properties assignment (every summary
-/// at query time) and export the physical DAG — export needs every node
-/// timed first.
-#[allow(dead_code)]
-pub fn physical_asap_dag(
-    root: &Rc<OperatorNode>,
-) -> asap_types::ir::physical_export::PhysicalASAPDAG {
-    asap_types::test_support::physical_asap_dag_at_query_time(root).expect("post-ASAP DAG export")
-}
-
 #[allow(dead_code)]
 pub fn scalar_root(query: &str) -> ScalarExpr {
     match lower_promql_query_workload(&workload(query, AccuracyTarget::exact()))
@@ -105,34 +95,5 @@ pub fn sample_expression(node: &OperatorNode) -> &ScalarExpr {
         }
         NonASAPOp::Filter { pred, .. } => &pred.0,
         other => panic!("expected sample expression, got {other:?}"),
-    }
-}
-
-/// The data these tests plan over, declared: 1,000 rows arriving per
-/// second, and each metric `root` reads holding 1,000 series.
-#[allow(dead_code)]
-pub fn declared_data(root: &Rc<OperatorNode>) -> DataWorkload {
-    let sources = OperatorNode::reachable(root)
-        .into_iter()
-        .filter_map(|node| match node.non_asap() {
-            Some(NonASAPOp::Scan {
-                source: asap_types::ir::operator::Source::TimeSeries { metric },
-                ..
-            }) => Some((
-                metric.clone(),
-                asap_types::workload::SourceFacts {
-                    series_count: Some(1_000),
-                    ..Default::default()
-                },
-            )),
-            _ => None,
-        })
-        .collect();
-    DataWorkload {
-        arrival: asap_types::workload::DataArrival::Ingesting {
-            rows_per_second: 1_000.0,
-            max_out_of_order_ms: None,
-        },
-        sources,
     }
 }

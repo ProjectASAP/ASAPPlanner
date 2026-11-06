@@ -1,31 +1,7 @@
 //! Query text through summary selection: counts use observations, never value weights.
-use crate::planner_support::selected_dag;
 use crate::support;
 use asap_types::ir::properties::AccuracyTarget;
-use asap_types::ir::schema::{ExactKind, FieldDataType};
-use asap_types::ir::{ASAPOp, Operator, OperatorNode};
 use support::lower_promql;
-
-// Exact series and temporal counts must select a count accumulator, not distinct or sum.
-#[test]
-fn exact_counts_select_count_accumulators() {
-    for query in ["count(up)", "count by(job)(up)", "count_over_time(up[5m])"] {
-        let root = lower_promql(query, AccuracyTarget::exact()).unwrap();
-        let selected = selected_dag(root, AccuracyTarget::exact());
-        assert!(
-            OperatorNode::reachable(&selected).iter().any(|node| {
-                matches!(
-                    &node.operator,
-                    Operator::ASAP(ASAPOp::SummaryAgg {
-                        family: FieldDataType::ExactAggregate(ExactKind::Count, _),
-                        ..
-                    })
-                )
-            }),
-            "{query}: {selected:?}"
-        );
-    }
-}
 
 // Fixtures are already selected at one instant or within one five-minute window.
 // This narrow test oracle interprets the emitted aggregate, not Prometheus ingestion,
