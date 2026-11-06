@@ -8,7 +8,7 @@ use asap_types::workload::DataWorkload;
 
 use asap_accuracy::{AccuracyEvidenceProvider, AccuracyModel};
 
-use crate::pass1::per_computation_candidates::{
+use crate::per_computation_candidates::{
     generate_per_computation_candidates, PerComputationCandidateError,
 };
 use asap_types::deployment_capabilities::SupportedSummary;

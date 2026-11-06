@@ -92,7 +92,7 @@ Based on our requirement, each field should contain the following information.
      | `FrequencyL2`, `FrequencyEntropy` | `Sketch`: `UnivMon` | `SummaryEstimate(FrequencyL2 \| FrequencyEntropy)` |
      | `Sum`, `Count`, `Min`, `Max`, `Rate`, `IRate`, `Increase` (exact) | `ExactAggregate(ExactKind, …)` | `FinalizeExactAccumulator` |
 
-     The sketch candidates are `summary_candidates(intent)` in `crates/logical-asap-optimization/src/pass1/realization.rs`; exact accumulators come from Pass 1's `ExactAccumulator` candidates in `pass1/per_computation_candidates.rs`; the evaluations are `SketchStatistic` ([§6.5](#65-update-input-and-evaluations-irschemasketchrs-iroperatormaintained_populationrs)).
+     The sketch candidates are `summary_candidates(intent)` in `crates/stage1-pass1-per-computation-candidates/src/realization.rs`; exact accumulators come from Pass 1's `ExactAccumulator` candidates in `pass1/per_computation_candidates.rs`; the evaluations are `SketchStatistic` ([§6.5](#65-update-input-and-evaluations-irschemasketchrs-iroperatormaintained_populationrs)).
 
    - **Time window aggregation intents**: whether states built over smaller windows can answer a larger one. This depends on how the family combines states:
      - **Merge** (`SummaryMerge`, §5.6): states over disjoint tumbling windows combine into the state of their union, e.g. two 1-minute KLL states answer a 2-minute quantile. Requires a mergeable family.
@@ -1238,7 +1238,7 @@ This part of the code answers two questions about summary state:
 1. **Update input** (`SummaryUpdate`): when a `SummaryAgg` reads one input row, what does it add to the state? It adds a **weight**, optionally under an **item** key.
 2. **Evaluations**: once the state is built, what can be asked of it? `SketchStatistic` is what `SummaryEstimate` asks a sketch (§5.2). `MaintainedPopulation` and `PopulationStatistic` are the exact-population counterpart, used by `MaintainPopulation` and `EvaluatePopulation` (§5.4, §5.5).
 
-**Update input examples** (as the planner builds them in Stage 1, `asap-logical-asap-optimization`):
+**Update input examples** (as the planner builds them in Stage 1, `asap-stage1-pass1-per-computation-candidates`):
 
 | Query | Sketch | `item` | `weight` | `weight_domain` |
 |---|---|---|---|---|

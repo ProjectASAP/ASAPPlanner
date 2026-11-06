@@ -1,7 +1,7 @@
 use asap_types::ir::physical_export::WindowEdgeCompatibility;
 
 // The renamed window-edge compatibility still reads and emits the deployed
-// wire value. (Tumbling-window coverage names are checked in physical-asap-optimization.)
+// wire value. (Tumbling-window coverage names are checked in asap-stage2-physical-optimization.)
 #[test]
 fn window_edge_compatibility_names_preserve_wire_values() {
     let compatibility =

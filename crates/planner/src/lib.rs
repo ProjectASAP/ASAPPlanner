@@ -8,7 +8,7 @@
 //! The default pass, [`Stage1ToStage3Pass`], orchestrates the stages
 //! ([`run_planning`]): Stage 0, Pass 1, Pass 2 over every tumbling-window width,
 //! Stage 2 (`generate_physical_asap_memo_candidates`) and Stage 3
-//! (`asap_plan_selection::select_plan`), and builds the selected plan through
+//! (`asap_stage3_plan_selection::select_plan`), and builds the selected plan through
 //! Stage 2's realizer. The stages never call each other.
 //!
 //! [`e2e_plan`] runs both steps. [`plan_installable`] runs them for a
@@ -51,7 +51,7 @@ pub use asap_cost::{
     ResourceSpeed, ResourceUnitCost, SummaryOperation,
 };
 pub use asap_frontend_sql::SqlCatalog;
-pub use asap_plan_selection::{
+pub use asap_stage3_plan_selection::{
     AcceptedAccuracy, ErrorSelectingPlan, RejectionCause, SearchReport, SearchStatus, Selection,
 };
 pub use asap_types::deployment_capabilities::{DeploymentCapabilities, SupportedSummary};

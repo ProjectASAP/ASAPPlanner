@@ -1,5 +1,5 @@
-//! Summary realization helpers shared by Pass 1 (`per_computation_candidates`)
-//! and Pass 2 (`asap_aware_cse`): which sketch kinds can serve an intent,
+//! Summary realization helpers of Pass 1 (`per_computation_candidates`):
+//! which sketch kinds can serve an intent,
 //! the column/tuple a summary consumes, the column a top-k ranks, and the
 //! keyed-additive rule for a heap sketch that reads a larger sub-DAG.
 
@@ -352,7 +352,7 @@ fn summed_per_series_samples(grouped: &OperatorNode) -> Option<(Rc<OperatorNode>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::metric_scan;
+    use crate::test_fixtures::metric_scan;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::scalar::{CompareOpKind, ScalarValue};
     use asap_types::ir::schema::GroupingStrategy;
