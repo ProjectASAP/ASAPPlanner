@@ -74,20 +74,21 @@ and when it must not; an end-to-end test like
 `crates/integration-tests/tests/reuse_rules.rs` that the planned workload
 contains the candidate and that Stage 3 prices it.
 
-## 3. Add a Stage 2 materialization option
+## 3. Add a Stage 2 physical properties option
 
-1. Add the `Materialization` variant
-   (`crates/types/src/physical/materialization.rs`) and its timing in
+1. Add the `Lifetime` variant or the valid (timing, lifetime) pair
+   (`crates/types/src/physical/properties.rs`, `PhysicalProperties::new` and
+   `readable_at`) and its placement in
    `crates/types/src/ir/properties/timing.rs`, with its data-state edge rules.
 2. Offer it in `crates/physical-asap-optimization/src/lib.rs` (the
-   `MaterializationCandidate` options), after the existing options so default
+   `MaterializedOutputCandidate` options), after the existing options so default
    candidate ids stay the same, and gate it on the deployment input that
    allows it.
 3. Price it in `crates/cost/src/usage.rs` (`asap_cost::node_usage`): what it keeps in memory or on
    disk, and what each evaluation rebuilds.
 
 Tests: Stage 2 unit tests for when the option is offered;
-`crates/integration-tests/tests/materialization_e2e.rs` and the Example 4
+`crates/integration-tests/tests/physical_properties_e2e.rs` and the Example 4
 tests in `planner_layering_example4.rs`.
 
 ## 4. Add a Stage 3 check or a deployment input

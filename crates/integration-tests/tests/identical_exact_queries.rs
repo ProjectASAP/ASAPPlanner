@@ -35,7 +35,6 @@ fn cost(w: &FuzzWorkload) -> f64 {
         &w.data,
         models,
         PlanSearchSettings::default(),
-        None,
     )
     .unwrap();
     let selection = run.run.selection.as_ref().unwrap();

@@ -11,9 +11,7 @@ use asap_types::ir::operator::tumbling_window_chain::{
 };
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
-use asap_types::ir::schema::{
-    GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SketchStatistic, SummaryUpdate,
-};
+use asap_types::ir::schema::{GroupingStrategy, SketchAlgorithm, SketchStatistic, SummaryUpdate};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, TimeRangeKind};
 use asap_types::test_support::{tumbling_window, whole_window_build};
 
@@ -47,16 +45,7 @@ fn shifted(child: Rc<OperatorNode>, offset_ms: i64) -> Rc<OperatorNode> {
 }
 
 fn kll() -> FieldDataType {
-    FieldDataType::Sketch(
-        SketchKind::new(
-            SketchAlgorithm::Kll,
-            SketchParams::Kll {
-                k: 200,
-                failure_probability: None,
-            },
-        ),
-        GroupingStrategy::default(),
-    )
+    FieldDataType::Sketch(SketchAlgorithm::Kll, GroupingStrategy::default())
 }
 
 /// Five 1-min KLL tumbling windows per series over `input`.
@@ -174,49 +163,6 @@ fn expansion_merges_the_tumbling_windows() {
     assert!(expand_tumbling_window_chains(&chain).is_err());
 }
 
-/// Expanding a timed chain carries its timing and materialization onto its
-/// tumbling windows: a chain materialized at ingestion time expands into tumbling windows each
-/// built and stored at ingestion time, over ranges and shifts that run at
-/// ingestion time too, while the merge reading them stays at query time.
-/// An unmaterialized chain expands into query-time tumbling windows.
-#[test]
-fn expansion_carries_the_chains_timing_onto_its_tumbling_windows() {
-    use asap_types::ir::properties::ExecutionTiming;
-    use asap_types::ir::{
-        apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
-    };
-    use asap_types::physical::{Materialization, Medium};
-    let at_ingestion = Materialization::MatAtIngestion(Medium::Memory);
-    for (materialization, timing) in [
-        (at_ingestion, ExecutionTiming::IngestionTime),
-        (Materialization::NotMaterialized, ExecutionTiming::QueryTime),
-    ] {
-        let chain = chain(shifted(scan(), MINUTE as i64));
-        let estimate = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryEstimate {
-            summary_input: merge(vec![Rc::clone(&chain)]),
-            query: SketchStatistic::Quantile { q: 0.99 },
-        }))
-        .unwrap();
-        let mut assignment = MaterializationAssignment::default();
-        assignment.set(&chain, materialization);
-        let timed =
-            apply_materialization_timings(&estimate, &assignment, &mut NodeToTimedNodeCache::new())
-                .unwrap();
-        let expanded = expand_tumbling_window_chains(&timed).unwrap();
-        let merged = expanded.children()[0];
-        assert_eq!(merged.timing, Some(ExecutionTiming::QueryTime));
-        assert_eq!(merged.children().len(), 5);
-        for tumbling_window in merged.children() {
-            assert_eq!(tumbling_window.timing, Some(timing), "{materialization:?}");
-            assert_eq!(tumbling_window.materialization, materialization);
-            for below in OperatorNode::reachable(tumbling_window).iter().skip(1) {
-                assert_eq!(below.timing, Some(timing), "{}", below.operator.kind_name());
-                assert_eq!(below.materialization, Materialization::NotMaterialized);
-            }
-        }
-    }
-}
-
 /// A chain needs a positive width and count, and reads the instant vector
 /// a range selector would.
 #[test]
@@ -243,33 +189,6 @@ fn a_chain_reads_an_instant_vector() {
     }))
     .unwrap();
     assert!(empty.validate_structure().is_err());
-}
-
-/// Two merges over one chain (two queries reading the same tumbling windows) expand
-/// into one set of tumbling windows: the same five `SummaryAgg` nodes, not ten.
-#[test]
-fn merges_over_one_chain_share_its_tumbling_windows() {
-    use asap_types::ir::operator::tumbling_window_chain::expand_tumbling_window_chains_in_workload;
-    use asap_types::ir::QueryRoot;
-    let shared = chain(scan());
-    let roots = [
-        QueryRoot::Operator(merge(vec![Rc::clone(&shared)])),
-        QueryRoot::Operator(merge(vec![shared])),
-    ];
-    let expansion = expand_tumbling_window_chains_in_workload(&roots).unwrap();
-    assert_eq!(expansion.chains.len(), 1);
-    assert_eq!(expansion.chains[0].tumbling_windows.len(), 5);
-    let expanded = expansion.roots;
-    let tumbling_windows = |root: &QueryRoot| match root {
-        QueryRoot::Operator(node) => node.children().into_iter().cloned().collect::<Vec<_>>(),
-        QueryRoot::Scalar(_) => unreachable!(),
-    };
-    let (first, second) = (
-        tumbling_windows(&expanded[0]),
-        tumbling_windows(&expanded[1]),
-    );
-    assert_eq!(first.len(), 5);
-    assert!(first.iter().zip(&second).all(|(a, b)| Rc::ptr_eq(a, b)));
 }
 
 fn newest(chain: Rc<OperatorNode>, newest_tumbling_windows: u32) -> Rc<OperatorNode> {
@@ -321,42 +240,6 @@ fn a_merge_of_the_newest_tumbling_windows_reads_one_chain_and_fewer_than_all_tum
             group_by: None,
         }));
         assert!(merge.is_err(), "newest {newest_tumbling_windows}");
-    }
-}
-
-/// A merge of the newest 2 tumbling windows and a merge of all 5 over one chain
-/// expand into one set of tumbling windows: the partial merge reads the first 2 of
-/// the full merge's 5 nodes, newest first, and the chain lists all 5.
-#[test]
-fn a_merge_of_the_newest_tumbling_windows_reads_the_first_tumbling_windows_of_the_chain() {
-    use asap_types::ir::operator::tumbling_window_chain::expand_tumbling_window_chains_in_workload;
-    use asap_types::ir::QueryRoot;
-    let shared = chain(scan());
-    let roots = [
-        QueryRoot::Operator(newest(Rc::clone(&shared), 2)),
-        QueryRoot::Operator(merge(vec![shared])),
-    ];
-    let expansion = expand_tumbling_window_chains_in_workload(&roots).unwrap();
-    assert_eq!(expansion.chains.len(), 1);
-    assert_eq!(expansion.chains[0].tumbling_windows.len(), 5);
-    let tumbling_windows = |root: &QueryRoot| match root {
-        QueryRoot::Operator(node) => node.children().into_iter().cloned().collect::<Vec<_>>(),
-        QueryRoot::Scalar(_) => unreachable!(),
-    };
-    let (partial, full) = (
-        tumbling_windows(&expansion.roots[0]),
-        tumbling_windows(&expansion.roots[1]),
-    );
-    assert_eq!((partial.len(), full.len()), (2, 5));
-    assert!(partial.iter().zip(&full).all(|(a, b)| Rc::ptr_eq(a, b)));
-    for (root, window) in expansion.roots.iter().zip([2, 5]) {
-        let QueryRoot::Operator(node) = root else {
-            unreachable!()
-        };
-        assert_eq!(
-            relative_time(node),
-            (Bound::Excluded(-window * MINUTE as i64), Bound::Included(0))
-        );
     }
 }
 
@@ -441,33 +324,6 @@ fn a_rollup_of_the_newest_tumbling_windows_covers_their_window() {
         coverage.selection()[0].relative_time(),
         Some((Bound::Excluded(-2 * MINUTE as i64), Bound::Included(0)))
     );
-}
-
-/// Expansion keeps every tumbling window and the identity of a chain two
-/// readers share.
-#[test]
-fn expansion_preserves_every_tumbling_window_and_shared_reader() {
-    use asap_types::ir::operator::tumbling_window_chain::expand_tumbling_window_chains_in_workload;
-    use asap_types::ir::QueryRoot;
-    let shared = chain(scan());
-    let roots = [
-        QueryRoot::Operator(merge(vec![shared.clone()])),
-        QueryRoot::Operator(merge(vec![shared])),
-    ];
-    let result = expand_tumbling_window_chains_in_workload(&roots).unwrap();
-    assert_eq!(result.chains.len(), 1);
-    assert_eq!(result.chains[0].tumbling_windows.len(), 5);
-    let QueryRoot::Operator(first) = &result.roots[0] else {
-        unreachable!()
-    };
-    let QueryRoot::Operator(second) = &result.roots[1] else {
-        unreachable!()
-    };
-    assert!(first
-        .children()
-        .iter()
-        .zip(second.children())
-        .all(|(a, b)| Rc::ptr_eq(a, b)));
 }
 
 /// JSON written before #1163 names the chain `PaneChain`, its fields

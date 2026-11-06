@@ -224,7 +224,7 @@ function stageDag(dag, physical) {
       const [kind, body] = stageOperatorParts(node.payload);
       return {
         id: node.id, kind, body, schema: node.output_schema, guarantee: node.guarantee,
-        materialization: node.materialization, timing: node.output_state ? node.output_state.timing : undefined, raw: node,
+        lifetime: node.lifetime, timing: node.output_state ? node.output_state.timing : undefined, raw: node,
       };
     });
     const edges = dag.edges.map((edge) => ({ producer: edge.producer, consumer: edge.consumer, raw: edge }));
@@ -241,8 +241,7 @@ function stageDag(dag, physical) {
     const [kind, body] = stageOperatorParts(node.operator);
     stageLogicalChildren(body).forEach((producer) => edges.push({ producer, consumer: id, raw: null }));
     return {
-      id, kind, body, schema: node.schema, guarantee: node.guarantee,
-      materialization: node.materialization, timing: node.timing === null ? undefined : node.timing, raw: node,
+      id, kind, body, schema: node.schema, guarantee: node.guarantee, raw: node,
     };
   });
   const queries = dag.roots.map((root) => ('Scalar' in root ? { scalar: root.Scalar } : { node: root.Operator }));
@@ -1079,7 +1078,7 @@ function materializedViewRows(doc) {
       definition: output.coverage.definition_id,
       kind: summary ? `${kind} · ${summary}` : kind,
       tumblingWindow,
-      refresh: output.refresh === 'at_ingestion' ? 'at ingestion' : 'on first read (kept across evaluations)',
+      refresh: output.refresh === 'at_ingestion' ? 'at ingestion' : 'on first read (materialized across evaluations)',
       inputs: `${output.inputs.raw_data_windows.length} raw-data window(s)` +
         (output.inputs.materialized_views.length ? `, views ${output.inputs.materialized_views.join(', ')}` : ''),
       retention: durationText(output.retention_ms),

@@ -305,7 +305,7 @@ alternative stays visible in `PlanningRun`.
 PlanningWorkload + frontend dependencies + PlanningModels
     -> Stage 0: frontend lowering, one root per normalized query entry
     -> Stage 1: Pass 1 per-computation candidates, Pass 2 sharing, tumbling windows, reuse
-    -> Stage 2: one physical candidate per materialization assignment
+    -> Stage 2: one physical candidate per physical properties assignment
     -> Stage 3: check, measure and select
     -> PlanOutput
 ```

@@ -216,14 +216,11 @@ mod tests {
     fn local_guarantee_inverts_rank_sizing() {
         use crate::estimators::size_params;
         use asap_types::ir::operator::agg_intent::default_quantile;
-        use asap_types::ir::schema::{GroupingStrategy, SketchKind};
         let q = default_quantile(0.99);
         let params = size_params(SketchAlgorithm::Kll, &q, 0.01, 0.01);
-        let g = local_guarantee(
-            &FieldDataType::Sketch(
-                SketchKind::new(SketchAlgorithm::Kll, params),
-                GroupingStrategy::default(),
-            ),
+        let g = sketch_guarantee(
+            &SketchAlgorithm::Kll,
+            &params,
             &SketchStatistic::Quantile { q: 0.99 },
         )
         .unwrap();

@@ -95,54 +95,21 @@ pub mod fixtures {
     }
 }
 
-/// Timing and physical ASAP DAG export helpers for planned candidates.
+/// Physical ASAP DAG export helpers for planned candidates.
 pub mod physical_export {
-    use asap_types::ir::physical_export::{compile_physical_asap_dag, PhysicalASAPDAG};
-    use asap_types::ir::{
-        apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
-        OperatorNode,
-    };
-    use asap_types::physical::{Materialization, Medium};
+    use asap_types::ir::physical_export::PhysicalASAPDAG;
+    use asap_types::ir::OperatorNode;
     use std::rc::Rc;
 
-    /// Time `root` under the default assignment (every sub-DAG
-    /// `NotMaterialized`, so every summary computed at query time). Returns the timed copy; read `node.timing` on it.
-    pub fn timed(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
-        timed_with(root, &MaterializationAssignment::default())
-    }
-
-    /// Time `root` with every sub-DAG `MatAtIngestion` where the DAG allows it.
-    pub fn at_ingestion(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
-        timed_with(
-            root,
-            &MaterializationAssignment::with_default(Materialization::MatAtIngestion(
-                Medium::Memory,
-            )),
-        )
-    }
-
-    fn timed_with(
-        root: &Rc<OperatorNode>,
-        assignment: &MaterializationAssignment,
-    ) -> Rc<OperatorNode> {
-        apply_materialization_timings(root, assignment, &mut NodeToTimedNodeCache::new())
-            .expect("materialization timing failed")
-    }
-
-    /// Time `root` (default assignment), then export the physical DAG.
+    /// Export the physical DAG of `root`.
     pub fn physical_asap_dag(root: &Rc<OperatorNode>) -> PhysicalASAPDAG {
-        compile_physical_asap_dag(&timed(root)).expect("physical ASAP DAG export failed")
-    }
-
-    /// Time `root` with every sub-DAG `MatAtIngestion` where the DAG allows
-    /// it, then export the physical DAG.
-    pub fn at_ingestion_physical_asap_dag(root: &Rc<OperatorNode>) -> PhysicalASAPDAG {
-        compile_physical_asap_dag(&at_ingestion(root)).expect("physical ASAP DAG export failed")
+        asap_types::test_support::physical_asap_dag_at_query_time(root)
+            .expect("physical ASAP DAG export failed")
     }
 }
 
 /// Plans and candidates from the planner pipeline (the facade's
-/// `run_planning`, with the developer tools' reference enumeration) for one
+/// `run_planning`) for one
 /// query, with the built-in models.
 pub mod planning {
     use asap_types::ir::properties::AccuracyTarget;
@@ -184,8 +151,7 @@ pub mod planning {
         }
     }
 
-    /// Every planning stage's output for the single query `root`, with
-    /// the reference enumeration of its memo.
+    /// Every planning stage's output for the single query `root`.
     pub fn run_all_stages(
         root: Rc<OperatorNode>,
         accuracy: AccuracyTarget,
@@ -213,7 +179,6 @@ pub mod planning {
                 range_evaluation: None,
             }],
             &data,
-            None,
             models,
         )
         .expect("Pass 1 accepts the query")
@@ -235,9 +200,7 @@ pub mod planning {
             compose_logical_candidate, generate_per_computation_candidates,
         };
         let local = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
-                QueryRoot::Operator(root),
-            ]),
+            &asap_logical_asap_optimization::memo_of_queries(&[QueryRoot::Operator(root)]),
         )
         .unwrap();
         let mut choices = std::collections::BTreeSet::from([vec![0; local.targets.len()]]);
@@ -273,9 +236,7 @@ pub mod planning {
         };
         use asap_types::stages::HowToComputeAggregateMeasure;
         let local = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
-                QueryRoot::Operator(root),
-            ]),
+            &asap_logical_asap_optimization::memo_of_queries(&[QueryRoot::Operator(root)]),
         )
         .unwrap();
         let choices = local.targets.iter().map(|target| target.ways_to_compute.iter()
@@ -334,99 +295,6 @@ pub mod planning {
             })
             .collect()
     }
-    /// Pass 1, local tumbling windows for `entries`' recurrences and every Pass 2 rule
-    /// on the seed grids (no query pruning). Rule tests read a group's
-    /// candidates by `OriginOfCandidateForMemoGroup`.
-    pub fn expanded_memo(
-        roots: Vec<QueryRoot>,
-        entries: &[asap_types::workload::QueryWorkloadEntry],
-    ) -> asap_types::stages::Memo {
-        use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
-        use asap_logical_asap_optimization::test_support::{
-            add_local_window_composition, try_populate_pass1,
-        };
-        let initial = asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots);
-        let inventory = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
-        )
-        .unwrap();
-        let mut memo = try_populate_pass1(initial, &inventory).unwrap();
-        add_local_window_composition(&mut memo, entries);
-        asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(memo)
-            .unwrap()
-    }
-
-    /// One plan of `memo`'s first `queries` queries (`memo::enumeration::build_logical_asap_dags_from_chosen_candidates`):
-    /// each query's first root group's DAG, every group `choice` does not
-    /// name implemented by its first candidate.
-    pub fn compose_memo_plan(
-        memo: &asap_types::stages::Memo,
-        queries: usize,
-        choice: &std::collections::BTreeMap<usize, usize>,
-    ) -> Vec<Rc<OperatorNode>> {
-        use asap_logical_asap_optimization::build_logical_asap_dags_from_chosen_candidates;
-        use asap_types::stages::MemoGroupId;
-        let choice = choice
-            .iter()
-            .map(|(&group, &index)| (MemoGroupId(group as u32), index))
-            .collect();
-        let roots = build_logical_asap_dags_from_chosen_candidates(memo, &choice)
-            .expect("the choice composes");
-        (0..queries)
-            .map(|query| {
-                let (_, root) = roots
-                    .iter()
-                    .find(|(group, _)| memo.query_roots[query].operator_refs().contains(&group))
-                    .expect("the query's root group");
-                Rc::clone(root)
-            })
-            .collect()
-    }
-
-    /// Stage 2 and plan selection over fixed workload plans, without a timed
-    /// search: each `(name, roots)` is implemented by Stage 2 (plan ids start
-    /// with `name`), and all are priced together.
-    pub fn select_among(
-        variants: &[(&str, Vec<QueryRoot>)],
-        entries: &[asap_types::workload::QueryWorkloadEntry],
-        data: &DataWorkload,
-    ) -> (
-        Vec<asap_types::physical::PhysicalWorkloadPlan>,
-        asap_plan_selection::reference_pricer::WholePlanSelection,
-    ) {
-        let models = asap_planner::PlanningModels::builtin();
-        let mut physical = Vec::new();
-        for (name, roots) in variants {
-            // Composed nodes lose their guarantees; recompose them as
-            // `run_explicit_candidates` does.
-            let roots = asap_accuracy::propagation::recompose_guarantees(roots)
-                .unwrap_or_else(|error| panic!("{name} composes guarantees: {error}"));
-            // Composed outside the memo: sized as Pass 1 sizes a candidate.
-            let targets: Vec<_> = entries
-                .iter()
-                .map(|entry| entry.requirements.accuracy.clone())
-                .collect();
-            let roots =
-                asap_accuracy::sizing::with_summaries_sized_for_targets(&roots, &targets, data)
-                    .unwrap_or_else(|error| panic!("{name} sizes its summaries: {error}"));
-            let mut plans = asap_physical_asap_optimization::optimize_physical_asap(
-                name,
-                &roots,
-                entries,
-                data,
-                models.deployment_capabilities.query_time_results_retained,
-            )
-            .unwrap_or_else(|error| panic!("Stage 2 implements {name}: {error}"));
-            for (index, plan) in plans.iter_mut().enumerate() {
-                plan.id = format!("{name}-{index}");
-            }
-            physical.extend(plans);
-        }
-        let selection =
-            asap_devtools::memo_pricing::reference_select(&physical, entries, data, models)
-                .unwrap();
-        (physical, selection)
-    }
 
     /// Whether `node` builds a summary.
     fn is_build(node: &Rc<OperatorNode>) -> bool {
@@ -448,12 +316,13 @@ pub mod planning {
         keep: impl Fn(&asap_types::stages::CandidateForMemoGroup) -> bool,
     ) -> Vec<(usize, usize)> {
         let mut found: Vec<_> = memo
-            .candidates
+            .groups
             .iter()
             .enumerate()
-            .filter(|(group, _)| memo.groups[*group].reached_by_queries() == [q])
-            .flat_map(|(group, candidates)| {
-                candidates
+            .filter(|(_, group)| group.reached_by_queries() == [q])
+            .flat_map(|(group, memo_group)| {
+                memo_group
+                    .candidates
                     .iter()
                     .enumerate()
                     .filter(|(_, c)| keep(c))
@@ -491,105 +360,6 @@ pub mod planning {
         found
     }
 
-    /// The selected plan's roots among fixed plans of `memo`'s queries, and
-    /// the selection's lowest prices of `separate` and of the `shared` plans:
-    /// - `separate{k}`: each query reads its own summary build, its topmost
-    ///   own group's `k`-th Pass 1 candidate that builds one (the last when
-    ///   it has fewer);
-    /// - `shared{g}`: every query reads the summary state group `g`, its own
-    ///   estimate or a regrouping merge of it, when every query can.
-    pub fn select_rollup(
-        memo: &asap_types::stages::Memo,
-        queries: usize,
-        entries: &[asap_types::workload::QueryWorkloadEntry],
-        data: &DataWorkload,
-    ) -> (Vec<Rc<OperatorNode>>, f64, f64) {
-        let builds = |node: &Rc<OperatorNode>| OperatorNode::reachable(node).iter().any(is_build);
-        let own_builds: Vec<Vec<(usize, usize)>> = (0..queries)
-            .map(|q| {
-                let found = own_choices(memo, q, |c| {
-                    c.origin == asap_types::stages::OriginOfCandidateForMemoGroup::Pass1
-                        && builds(&c.root_node)
-                });
-                let top = found
-                    .first()
-                    .unwrap_or_else(|| panic!("Q{} has a summary candidate", q + 1))
-                    .0;
-                found
-                    .into_iter()
-                    .filter(|(group, _)| *group == top)
-                    .collect()
-            })
-            .collect();
-        let separate_plans = own_builds.iter().map(Vec::len).max().unwrap_or(0);
-        let mut plans: Vec<(String, Vec<Rc<OperatorNode>>)> = (0..separate_plans)
-            .map(|k| {
-                let choice = own_builds
-                    .iter()
-                    .map(|found| found[k.min(found.len() - 1)])
-                    .collect();
-                (
-                    format!("separate{k}"),
-                    compose_memo_plan(memo, queries, &choice),
-                )
-            })
-            .collect();
-        for (state, group) in memo.groups.iter().enumerate() {
-            if !is_build(&group.logical_node) || group.reached_by_queries().len() < queries {
-                continue;
-            }
-            let reading: Option<std::collections::BTreeMap<usize, usize>> = (0..queries)
-                .map(|q| {
-                    own_choices(memo, q, |c| {
-                        c.input_groups.iter().any(|child| child.0 as usize == state)
-                    })
-                    .into_iter()
-                    .next()
-                })
-                .collect();
-            if let Some(choice) = reading {
-                plans.push((
-                    format!("shared{state}"),
-                    compose_memo_plan(memo, queries, &choice),
-                ));
-            }
-        }
-        assert!(
-            plans.len() > separate_plans,
-            "a plan in which every query reads one build"
-        );
-        let named: Vec<(&str, Vec<QueryRoot>)> = plans
-            .iter()
-            .map(|(name, roots)| {
-                (
-                    name.as_str(),
-                    roots.iter().cloned().map(QueryRoot::Operator).collect(),
-                )
-            })
-            .collect();
-        let (physical, selection) = select_among(&named, entries, data);
-        let selected = physical
-            .iter()
-            .find(|plan| plan.id == selection.selected)
-            .expect("the selected plan");
-        let roots = plans
-            .iter()
-            .find(|(name, _)| *name == selected.from_logical)
-            .map(|(_, roots)| roots.clone())
-            .unwrap();
-        let cheapest = |plans: &[(String, Vec<Rc<OperatorNode>>)]| {
-            plans
-                .iter()
-                .map(|(name, _)| cheapest_of(&selection, name))
-                .fold(f64::INFINITY, f64::min)
-        };
-        let separate = cheapest(&plans[..separate_plans]);
-        // Every separate plan rejected would make `shared < separate` hold
-        // trivially.
-        assert!(separate.is_finite(), "a valid plan with a build per query");
-        (roots, separate, cheapest(&plans[separate_plans..]))
-    }
-
     /// The summary builds and rollups (regrouping merges) `roots` read, each
     /// once.
     pub fn builds_and_rollups(roots: &[Rc<OperatorNode>]) -> (usize, usize) {
@@ -608,19 +378,5 @@ pub mod planning {
             }
         }
         (builds, rollups)
-    }
-
-    /// The lowest price per second among `selection`'s plans whose id starts
-    /// with `name`.
-    pub fn cheapest_of(
-        selection: &asap_plan_selection::reference_pricer::WholePlanSelection,
-        name: &str,
-    ) -> f64 {
-        selection
-            .costs
-            .iter()
-            .filter(|(id, _)| id.starts_with(&format!("{name}-")))
-            .filter_map(|(_, cost)| cost.cost_per_second)
-            .fold(f64::INFINITY, f64::min)
     }
 }

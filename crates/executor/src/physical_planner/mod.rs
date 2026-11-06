@@ -1336,7 +1336,7 @@ fn summary_agg_build(
         let PlannerReduction::Reduce(keys) = reduction else {
             return Err(invalid("keyed summary requires explicit partitions"));
         };
-        if matches!(family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &planner_types::ir::schema::SketchAlgorithm::CmsWithHeap)
+        if matches!(family, FieldDataType::Sketch(kind, _) if kind == &planner_types::ir::schema::SketchAlgorithm::CmsWithHeap)
             && !matches!(
                 update.weight_domain,
                 planner_types::ir::schema::WeightDomain::NonNegative { .. }
@@ -1406,7 +1406,7 @@ fn row_weight(input: &SchemaRef, weight: &SummaryInputExpr) -> Result<RowWeight,
 /// their unit-frequency update builds over that column.
 fn unkeyed_frequency_family(family: &FieldDataType) -> bool {
     matches!(family, FieldDataType::Sketch(kind, _) if matches!(
-        kind.algorithm(),
+        kind,
         planner_types::ir::schema::SketchAlgorithm::UnivMon
             | planner_types::ir::schema::SketchAlgorithm::Hll
     ))
@@ -1579,7 +1579,6 @@ fn local_scalar(expr: &ScalarExpr<PhysicalASAPNodeId>) -> Result<ScalarExpr, Err
 #[cfg(test)]
 mod compilation_tests {
     use super::*;
-    use std::time::{Duration, Instant};
 
     fn empty_dag() -> PhysicalASAPDAG {
         PhysicalASAPDAG {
@@ -1598,130 +1597,17 @@ mod compilation_tests {
             Err(Error::Invalid(_))
         ));
     }
-
-    /// `window_count` one-minute windows over one table `Scan`, the `i`-th
-    /// shifted `i` minutes back, each window a root (the shape of a
-    /// tumbling-window-expanded DAG), with the roots' node ids.
-    fn shifted_windows_over_one_scan(window_count: i64) -> (PhysicalASAPDAG, Vec<NodeId>) {
-        use planner_types::ir::operator::{Source, TimeShift};
-        use planner_types::ir::physical_export::compile_physical_asap_workload;
-        use planner_types::ir::schema::{Field, Schema};
-        use planner_types::ir::{
-            apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
-            Operator, QueryRoot,
-        };
-        let minute_ms = 60_000;
-        let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
-            source: Source::Table {
-                table_ref: "t".into(),
-            },
-            predicates: vec![],
-            schema: Schema::with_time_index(
-                vec![
-                    Field::plain("ts", DataType::Timestamp, false),
-                    Field::plain("value", DataType::Float64, false),
-                ],
-                0,
-                vec![],
-            ),
-        }))
-        .unwrap();
-        let windows: Vec<_> = (0..window_count)
-            .map(|i| {
-                let shifted = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeShift {
-                    shift: TimeShift {
-                        offset_ms: i * minute_ms,
-                        at: None,
-                    },
-                    child: std::rc::Rc::clone(&scan),
-                }))
-                .unwrap();
-                OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
-                    range: Duration::from_millis(minute_ms as u64),
-                    kind: TimeRangeKind::Range,
-                    child: shifted,
-                }))
-                .unwrap()
-            })
-            .collect();
-        // One timing cache, so every window reads the one `Scan`. The cache is
-        // keyed by node address, so `windows` stays alive while it runs.
-        let mut cache = NodeToTimedNodeCache::new();
-        let roots: Vec<_> = windows
-            .iter()
-            .map(|window| {
-                let timed = apply_materialization_timings(
-                    window,
-                    &MaterializationAssignment::default(),
-                    &mut cache,
-                )
-                .unwrap();
-                QueryRoot::Operator(timed)
-            })
-            .collect();
-        let dag = compile_physical_asap_workload(&roots).unwrap();
-        let roots = dag.roots.iter().map(|&id| id as NodeId).collect();
-        (dag, roots)
-    }
-
-    /// Three one-minute windows shifted 0, 1 and 2 minutes back over one
-    /// `Scan`: the `Scan` reads the union `(T - 3m, T]`, and each window's
-    /// `TimeRange` ends its shift before `T` and is one minute wide.
-    #[test]
-    fn shifted_windows_over_one_scan_compile_to_their_windows() {
-        let (dag, roots) = shifted_windows_over_one_scan(3);
-        let compiled = serde_json::to_value(compile(&dag, &[], &roots).unwrap()).unwrap();
-        let nodes = compiled["nodes"].as_object().unwrap();
-        let scan_windows: Vec<_> = nodes
-            .values()
-            .filter_map(|node| node.get("RawData"))
-            .map(|slot| slot["window"].clone())
-            .collect();
-        assert_eq!(
-            scan_windows,
-            [serde_json::json!({"Within": {"end_offset_ms": 0, "width_ms": 180_000}})]
-        );
-        let mut time_ranges: Vec<(i64, i64)> = nodes
-            .values()
-            .filter_map(|node| node.pointer("/Operator/operator/kind/TimeRange"))
-            .map(|kind| {
-                (
-                    kind["end_offset_ms"].as_i64().unwrap(),
-                    kind["width_ms"].as_i64().unwrap(),
-                )
-            })
-            .collect();
-        time_ranges.sort();
-        assert_eq!(
-            time_ranges,
-            [(0, 60_000), (60_000, 60_000), (120_000, 60_000)]
-        );
-    }
-
-    /// 20,000 shifted windows over one `Scan` compile in linear time. A
-    /// search over every node per window, and over every root per reader of
-    /// the `Scan`, made the compile quadratic in the number of windows
-    /// (#993): in a debug build, 10,000 windows compiled in 5.4 s and 20,000
-    /// in over 10 s before, 1.4 s and 3.1 s after.
-    #[test]
-    #[ignore = "slow: run by hand"]
-    fn many_windows_over_one_scan_compile_in_linear_time() {
-        let (dag, roots) = shifted_windows_over_one_scan(20_000);
-        let started = Instant::now();
-        compile(&dag, &[], &roots).unwrap();
-        eprintln!("compiled 20,000 windows in {:?}", started.elapsed());
-    }
 }
 
 /// Helpers for the Planner's own tests (`test-support`).
 #[cfg(feature = "test-support")]
 pub mod test_support {
     use super::*;
-    use planner_types::physical::{Materialization, Medium};
+    use planner_types::physical::{Lifetime, Medium};
     use std::collections::HashMap;
 
     /// The materialized views at `nodes`, in that order: each node that is
-    /// not a view is marked `MatAtIngestion`, and it and every node below it
+    /// not a view is marked materialized at ingestion time, and it and every node below it
     /// run at ingestion time (their outputs and outgoing edges); then every
     /// view's `retention_ms` is set ([`PhysicalASAPDAG::set_retention`])
     /// with no tumbling window or range-evaluation span. For tests that bind states at
@@ -1743,7 +1629,10 @@ pub mod test_support {
             .iter()
             .filter(|node| {
                 nodes.contains(&(node.id as NodeId))
-                    && !planner_types::test_support::is_materialized_view(node.materialization)
+                    && !matches!(
+                        node.lifetime,
+                        planner_types::physical::Lifetime::AcrossEvaluations(_)
+                    )
             })
             .map(|node| node.id as NodeId)
             .collect();
@@ -1757,7 +1646,7 @@ pub mod test_support {
         for node in &mut dag.nodes {
             let id = node.id as NodeId;
             if marked.contains(&id) {
-                node.materialization = Materialization::MatAtIngestion(Medium::Memory);
+                node.lifetime = Lifetime::AcrossEvaluations(Medium::Memory);
             }
             if at_ingestion.contains(&id) {
                 node.output_state.timing = ExecutionTiming::IngestionTime;

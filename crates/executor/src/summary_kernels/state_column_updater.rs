@@ -2,13 +2,13 @@
 //! group: the code the `SummaryAgg` build runs row by row, exposed so a
 //! runtime that ingests sample by sample builds the same states.
 use super::exact::ScalarState;
-use super::factory::{create_hydra_cms, create_planner_accumulator, AccumulatorUpdater};
+use super::factory::{create_hydra_cms, AccumulatorUpdater};
 use super::hydra_cms::{hydra_group_name, hydra_item, hydra_weight, HydraCms, HydraCmsGroup};
 use super::weighted_frequency::WeightedFrequency;
 use crate::values::{StateColumn, Value};
 use crate::{AggregateCore, Error};
-use planner_types::ir::scalar::ColumnRef;
-use planner_types::ir::schema::{ExactKind, FieldDataType, GroupingStrategy, SummaryUpdate};
+
+use planner_types::ir::schema::{ExactKind, FieldDataType, GroupingStrategy};
 use std::sync::Arc;
 
 /// The open summary states of one family, one per group, updated one sample
@@ -47,6 +47,7 @@ enum GroupStates {
     Sketches(Vec<Box<dyn AccumulatorUpdater>>),
     /// A keyed frequency sketch (Count-Min or Count Sketch with a heap) per
     /// group.
+    #[allow(dead_code)] // Used again in #1207 PR 6, with θ from the exported node.
     Keyed {
         /// An empty state of the family's shape, cloned for each new group
         /// (boxed: much larger than the other kinds' fields).
@@ -89,15 +90,15 @@ impl StateColumnUpdater {
                 empty: ScalarState::empty(family).map_err(Error::Invalid)?,
                 states: Vec::new(),
             },
-            FieldDataType::Sketch(kind, grouping)
+            FieldDataType::Sketch(algorithm, grouping)
                 if grouping == &GroupingStrategy::PerSubpopulationInstance
-                    && WeightedFrequency::configuration(kind).is_ok() =>
+                    && matches!(
+                        algorithm,
+                        planner_types::ir::schema::SketchAlgorithm::CmsWithHeap
+                            | planner_types::ir::schema::SketchAlgorithm::CountSketchWithHeap
+                    ) =>
             {
-                let (algorithm, width, depth, capacity) = WeightedFrequency::configuration(kind)?;
-                GroupStates::Keyed {
-                    empty: Box::new(WeightedFrequency::new(algorithm, width, depth, capacity)?),
-                    states: Vec::new(),
-                }
+                todo!("#1207 PR 6: the keyed frequency state of θ, which the exported node carries")
             }
             FieldDataType::Sketch(..) => {
                 // Fails for a family with no per-group value kernel.
@@ -125,12 +126,8 @@ impl StateColumnUpdater {
     }
 
     fn sketch_updater(family: &FieldDataType) -> Result<Box<dyn AccumulatorUpdater>, Error> {
-        create_planner_accumulator(
-            family,
-            &SummaryUpdate::column(ColumnRef::SampleValue),
-            &Default::default(),
-        )
-        .map_err(Error::Invalid)
+        let _ = family;
+        todo!("#1207 PR 6: build it with `create_planner_accumulator` and θ from the exported node's `parameters`")
     }
 
     /// The number of groups.

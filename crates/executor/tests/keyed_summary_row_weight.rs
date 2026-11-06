@@ -17,7 +17,7 @@ use planner_types::ir::properties::ExecutionDataState;
 use planner_types::ir::scalar::ColumnRef;
 use planner_types::ir::schema::*;
 use planner_types::ir::ASAPOp;
-use planner_types::physical::Materialization;
+use planner_types::physical::Lifetime;
 use std::sync::Arc;
 
 /// `(job, service)` rows: jobs are the groups, services the items.
@@ -32,14 +32,7 @@ const ROWS: [(&str, &str); 6] = [
 
 fn heap_family() -> FieldDataType {
     FieldDataType::Sketch(
-        SketchKind::new(
-            SketchAlgorithm::CmsWithHeap,
-            SketchParams::CmsWithHeap {
-                width: 1024,
-                depth: 3,
-                heap_size: 8,
-            },
-        ),
+        SketchAlgorithm::CmsWithHeap,
         GroupingStrategy::PerSubpopulationInstance,
     )
 }
@@ -159,7 +152,8 @@ fn query_time_count_heap_binds_a_constant_row_weight() {
             filter: None,
         }),
         output_state: ExecutionDataState::QUERY_ROWS,
-        materialization: Materialization::NotMaterialized,
+        lifetime: Lifetime::None,
+        parameters: None,
         output_schema: (*schema(vec![
             Field::plain("job", DataType::Utf8, false),
             Field {
@@ -248,14 +242,7 @@ fn int64_weight_column_equals_float64_column() {
         counts(limit as f64)
     );
     let count_sketch = FieldDataType::Sketch(
-        SketchKind::new(
-            SketchAlgorithm::CountSketchWithHeap,
-            SketchParams::CountSketchWithHeap {
-                width: 1024,
-                depth: 3,
-                heap_size: 8,
-            },
-        ),
+        SketchAlgorithm::CountSketchWithHeap,
         GroupingStrategy::PerSubpopulationInstance,
     );
     let signed = Operator::per_group_keyed_summary_build(

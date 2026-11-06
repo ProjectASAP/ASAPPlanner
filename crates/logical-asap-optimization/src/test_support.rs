@@ -4,19 +4,11 @@
 
 use std::rc::Rc;
 
-// Stage 1 internals other crates' tests call: Pass 1's working form and its
-// population step, single-candidate composition, Stage 0 hash-consing, and
-// the Pass 2 rule entry points those tests build memos with.
-pub use crate::pass1::memo_population::try_populate_pass1;
+// Stage 1 internals other crates' tests call: Pass 1's working form,
+// single-candidate composition and Stage 0 hash-consing.
 pub use crate::pass1::per_computation_candidates::{
     compose_logical_candidate, generate_per_computation_candidates, PerComputationCandidates,
 };
-pub use crate::pass2::asap_aware_cse::{
-    rollup_candidates, rollup_pass2_candidates, tumbling_window_candidates,
-    window_composition_pass2_candidates, window_composition_shared_chain_candidates,
-    with_union_scan_labels,
-};
-pub use crate::pass2::memo::window_candidates::add_local_window_composition;
 pub use crate::stage0::cse::share_common_sub_dags;
 
 use asap_types::ir::properties::AccuracyTarget;
@@ -25,40 +17,6 @@ use asap_types::workload::{
     BatchEntry, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query, QueryLanguage,
     QueryRequirements, QueryWorkload,
 };
-
-/// Pass 2 after local window composition, on a memo the test composed
-/// itself (or not at all): rules 2–9, then
-/// `add_shared_summary_state_groups`.
-/// Production runs these through
-/// [`generate_logical_asap_memo_candidates`](crate::pass2::logical_memo_candidates::generate_logical_asap_memo_candidates).
-pub fn sharing_rules_and_shared_state_groups(
-    mut memo: asap_types::stages::Memo,
-) -> Result<asap_types::stages::Memo, crate::pass2::memo::state_groups::Pass2RuleError> {
-    crate::pass2::logical_memo_candidates::apply_sharing_rules(&mut memo)?;
-    crate::pass2::memo::state_groups::add_shared_summary_state_groups(&mut memo)?;
-    Ok(memo)
-}
-
-/// The groups `add_shared_summary_state_groups`
-/// added to an expanded memo, in order: each has one candidate, the
-/// shared build (origin `SharedBuild`); no other group's candidates are
-/// only that.
-pub fn shared_summary_state_groups(
-    memo: &asap_types::stages::Memo,
-) -> Vec<asap_types::stages::MemoGroupId> {
-    memo.candidates
-        .iter()
-        .enumerate()
-        .filter(|(_, candidates)| {
-            matches!(
-                candidates.as_slice(),
-                [only] if only.origin
-                    == asap_types::stages::OriginOfCandidateForMemoGroup::SharedBuild
-            )
-        })
-        .map(|(group, _)| asap_types::stages::MemoGroupId(group as u32))
-        .collect()
-}
 
 /// The statistic classic HLL's failure probability at `precision` and
 /// `relative_error` over `source` is left as, for Stage 3 tests that bind
@@ -108,12 +66,8 @@ use std::time::Duration;
 
 use asap_types::ir::operator::agg_intent::AggIntent;
 use asap_types::ir::operator::operator_properties::{GroupKeys, Reduction, Source};
-use asap_types::ir::properties::timing::{
-    apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
-};
 use asap_types::ir::schema::{ColumnId, DataType, Field, Schema};
 use asap_types::ir::{NonASAPOp, Predicate, ScalarExpr, TimeRangeKind};
-use asap_types::physical::{Materialization, Medium};
 
 /// A `TimeSeries("m")` scan over `[ts(0), value(1), labels...]`, time index 0,
 /// no unique key.
@@ -220,27 +174,6 @@ pub fn time_range(range: Duration, child: Rc<OperatorNode>) -> Rc<OperatorNode> 
     .unwrap()
 }
 
-/// `root` timed under the default (every sub-DAG `NotMaterialized`)
-/// assignment — the shape export and the post-ASAP validators consume.
-pub fn timed(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
-    apply_materialization_timings(
-        root,
-        &MaterializationAssignment::default(),
-        &mut NodeToTimedNodeCache::new(),
-    )
-    .expect("default materialization timings apply")
-}
-
-/// `root` timed with every sub-DAG `MatAtIngestion` where the DAG allows it.
-pub fn at_ingestion(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
-    apply_materialization_timings(
-        root,
-        &MaterializationAssignment::with_default(Materialization::MatAtIngestion(Medium::Memory)),
-        &mut NodeToTimedNodeCache::new(),
-    )
-    .expect("at-ingestion materialization timings apply")
-}
-
 /// The Count-Min summary of a Stage 1 candidate of `query`.
 pub fn cms_summary(query: &str) -> OperatorNode {
     use crate::pass1::per_computation_candidates::compose_logical_candidate;
@@ -250,9 +183,9 @@ pub fn cms_summary(query: &str) -> OperatorNode {
     let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
     let root = lower_promql(query, target);
     // Inspect each local computation choice under the built-in deployment.
-    let per_computation = generate_per_computation_candidates(
-        &crate::stage0::generate_dag_of_logical_memo_groups(&[QueryRoot::Operator(root)]),
-    )
+    let per_computation = generate_per_computation_candidates(&crate::stage0::memo_of_queries(&[
+        QueryRoot::Operator(root),
+    ]))
     .unwrap()
     .without_unsupported_summaries(None);
     let summary = per_computation
@@ -277,7 +210,7 @@ pub fn cms_summary(query: &str) -> OperatorNode {
                 Some(ASAPOp::SummaryAgg {
                     family: FieldDataType::Sketch(kind, _),
                     ..
-                }) if *kind.algorithm() == SketchAlgorithm::Cms
+                }) if *kind == SketchAlgorithm::Cms
             )
         })
         .map(|node| (*node).clone())

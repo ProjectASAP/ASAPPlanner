@@ -164,11 +164,11 @@ pub enum FieldDataType {
     /// `Increase`). Value consumers require an explicit finalization boundary.
     ExactAggregate(ExactKind, ExactParams),
     /// Approximate sketch state (KLL/CMS/HLL/…), evaluated by a
-    /// `SummaryEstimate`. A [`SketchKind`] already carries the concrete
-    /// algorithm, params, and grouping layout committed to, not just its
-    /// category — a bound node needs to know it's specifically independent
-    /// KLL or shared Hydra-backed CMS, not merely "some sketch".
-    Sketch(SketchKind, GroupingStrategy),
+    /// `SummaryEstimate`: its family and grouping layout. The family's
+    /// parameters θ are not part of the state's type, so states of one family
+    /// and grouping are one memo group whatever their size; θ is a
+    /// candidate's `LogicalProperties::parameters` (concepts doc, section 3).
+    Sketch(SketchAlgorithm, GroupingStrategy),
     /// A summary sample: the subset of input rows a [`SamplingKind`] keeps,
     /// such as a reservoir. Not raw data samples. Serialized as `Sample`.
     #[serde(rename = "Sample")]

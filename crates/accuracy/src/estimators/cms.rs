@@ -42,14 +42,11 @@ mod tests {
     #[test]
     fn local_guarantee_inverts_frequency_sizing() {
         use crate::estimators::size_params;
-        use asap_types::ir::schema::{GroupingStrategy, SketchKind};
         let c = asap_types::ir::operator::agg_intent::default_cardinality();
         let params = size_params(SketchAlgorithm::Cms, &c, 0.01, 0.001);
-        let g = local_guarantee(
-            &FieldDataType::Sketch(
-                SketchKind::new(SketchAlgorithm::Cms, params),
-                GroupingStrategy::default(),
-            ),
+        let g = sketch_guarantee(
+            &SketchAlgorithm::Cms,
+            &params,
             &SketchStatistic::PointCount {
                 key: asap_types::ir::scalar::expr_ir::ColumnRef::SampleValue,
                 value: None,
@@ -68,17 +65,14 @@ mod tests {
 
     #[test]
     fn heap_evaluation_retains_frequency_metric() {
-        use asap_types::ir::schema::{GroupingStrategy, SketchKind};
         let cms_heap = SketchParams::CmsWithHeap {
             width: 272,
             depth: 5,
             heap_size: 10,
         };
-        let topk_frequency = local_guarantee(
-            &FieldDataType::Sketch(
-                SketchKind::new(SketchAlgorithm::CmsWithHeap, cms_heap),
-                GroupingStrategy::default(),
-            ),
+        let topk_frequency = sketch_guarantee(
+            &SketchAlgorithm::CmsWithHeap,
+            &cms_heap,
             &SketchStatistic::TopK { k: 10 },
         )
         .expect("heap sketch still provides per-key frequency intervals");

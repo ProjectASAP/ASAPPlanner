@@ -30,8 +30,8 @@ use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::expr_ir::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::schema::{
-    ExactKind, ExactParams, FieldDataType, GroupingStrategy, SketchAlgorithm, SketchKind,
-    SketchParams, SketchStatistic, SummaryUpdate,
+    ExactKind, ExactParams, FieldDataType, GroupingStrategy, SketchAlgorithm, SketchStatistic,
+    SummaryUpdate,
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr};
 use asap_types::workload::SqlDialect;
@@ -593,16 +593,7 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
     };
     assert_eq!(
         family,
-        &FieldDataType::Sketch(
-            SketchKind::new(
-                SketchAlgorithm::Kll,
-                SketchParams::Kll {
-                    k: 269,
-                    failure_probability: None
-                }
-            ),
-            GroupingStrategy::default()
-        )
+        &FieldDataType::Sketch(SketchAlgorithm::Kll, GroupingStrategy::default())
     );
     assert_eq!(
         input,
@@ -619,16 +610,7 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
     );
     assert_eq!(
         summary_input.schema.fields[0].dtype,
-        FieldDataType::Sketch(
-            SketchKind::new(
-                SketchAlgorithm::Kll,
-                SketchParams::Kll {
-                    k: 269,
-                    failure_probability: None
-                }
-            ),
-            GroupingStrategy::default()
-        )
+        FieldDataType::Sketch(SketchAlgorithm::Kll, GroupingStrategy::default())
     );
 
     assert!(
@@ -690,16 +672,7 @@ async fn sql_count_distinct_with_epsilon_binds_hll_over_named_column() {
     };
     assert_eq!(
         family,
-        &FieldDataType::Sketch(
-            SketchKind::new(
-                SketchAlgorithm::Hll,
-                SketchParams::Hll {
-                    precision: 18,
-                    relative_error: Some(0.01)
-                }
-            ),
-            GroupingStrategy::default()
-        )
+        &FieldDataType::Sketch(SketchAlgorithm::Hll, GroupingStrategy::default())
     );
     assert_eq!(
         input,

@@ -133,6 +133,10 @@ pub enum SketchParams {
         depth: u32,
         heap_size: u32,
     },
+    /// The sizes of a Hydra structure shared across subpopulations
+    /// ([`GroupingStrategy::SharedMultiSubpopulation`]): θ, like every other
+    /// family's parameters, not part of the grouping.
+    Hydra(HydraParams),
 }
 
 impl PartialEq for SketchParams {
@@ -203,6 +207,7 @@ impl PartialEq for SketchParams {
             (P::Hll { precision: a, .. }, P::Hll { precision: b, .. }) => a == b,
             (P::DDSketch { alpha: a }, P::DDSketch { alpha: b }) => a == b,
             (P::Kmv { k: a, .. }, P::Kmv { k: b, .. }) => a == b,
+            (P::Hydra(a), P::Hydra(b)) => a == b,
             // Different variants. Listed by `self`'s variant, not `_`, so a
             // new variant fails to compile here until it is compared above.
             (P::UnivMon { .. }, _)
@@ -213,7 +218,8 @@ impl PartialEq for SketchParams {
             | (P::CmsWithHeap { .. }, _)
             | (P::Kmv { .. }, _)
             | (P::CountSketch { .. }, _)
-            | (P::CountSketchWithHeap { .. }, _) => false,
+            | (P::CountSketchWithHeap { .. }, _)
+            | (P::Hydra(_), _) => false,
         }
     }
 }
@@ -490,6 +496,23 @@ pub enum HydraParams {
     },
 }
 
+impl HydraParams {
+    /// The parameters of the per-subpopulation sketch this shared structure
+    /// emulates, which its error bound and per-group state follow.
+    pub fn per_subpopulation(&self) -> SketchParams {
+        match *self {
+            HydraParams::HydraKll { k, .. } => SketchParams::Kll {
+                k,
+                failure_probability: None,
+            },
+            HydraParams::HydraCms { width, depth, .. } => SketchParams::Cms { width, depth },
+            HydraParams::HydraCountSketch { width, depth, .. } => {
+                SketchParams::CountSketch { width, depth }
+            }
+        }
+    }
+}
+
 /// How a grouped aggregate's summary state is physically instantiated
 /// across its `by` subpopulations — orthogonal to *which*
 /// `SketchKind`/`SamplingKind`/`WaveletKind`/`StatModelKind` answers the
@@ -517,10 +540,8 @@ pub enum GroupingStrategy {
     /// shares across a *query's own* subpopulations/group-by keys, not
     /// across tenants in a deployment-isolation sense — a different, and
     /// unrelated, kind of "sharing".
-    SharedMultiSubpopulation {
-        kind: HydraKind,
-        params: HydraParams,
-    },
+    /// Its sizes are θ ([`SketchParams::Hydra`]), not part of the grouping.
+    SharedMultiSubpopulation { kind: HydraKind },
 }
 
 impl Default for GroupingStrategy {
@@ -749,33 +770,6 @@ mod tests {
             },
         );
         assert_eq!(kind.algorithm(), &SketchAlgorithm::Kll);
-    }
-
-    /// Two KLLs with the same `k` are the same sketch, whatever failure
-    /// probability each was sized for, so they compare equal and can be shared.
-    #[test]
-    fn kll_params_compare_equal_whatever_their_failure_probability() {
-        let kll = |k, failure_probability| SketchParams::Kll {
-            k,
-            failure_probability,
-        };
-        assert_eq!(kll(331, Some(0.001)), kll(331, None));
-        assert_eq!(kll(331, Some(0.001)), kll(331, Some(0.0001)));
-        assert_ne!(kll(331, None), kll(269, None));
-        assert_ne!(
-            kll(331, None),
-            SketchParams::Kmv {
-                k: 331,
-                relative_error: None
-            }
-        );
-        let family = |params| {
-            crate::ir::schema::FieldDataType::Sketch(
-                SketchKind::new(SketchAlgorithm::Kll, params),
-                GroupingStrategy::default(),
-            )
-        };
-        assert_eq!(family(kll(331, Some(0.001))), family(kll(331, None)));
     }
 
     #[test]

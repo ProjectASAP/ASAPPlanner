@@ -15,10 +15,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::ir::operator::node::{Operator, OperatorNode, OperatorResultKind};
 use crate::ir::operator::query::QueryRoot;
-use crate::ir::properties::execution_data_state::ExecutionTiming;
 use crate::ir::properties::guarantee::AccuracyGuarantee;
 use crate::ir::schema::Schema;
-use crate::physical::materialization::Materialization;
 
 /// Index of a node in [`FlatDag::nodes`].
 pub type NodeId = usize;
@@ -30,8 +28,6 @@ pub struct FlatNode {
     pub(crate) result_kind: OperatorResultKind,
     pub(crate) schema: Schema,
     pub(crate) guarantee: Option<AccuracyGuarantee>,
-    pub(crate) timing: Option<ExecutionTiming>,
-    pub(crate) materialization: Materialization,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -78,8 +74,6 @@ fn visit(
         result_kind: node.result_kind,
         schema: node.schema.clone(),
         guarantee: node.guarantee.clone(),
-        timing: node.timing,
-        materialization: node.materialization,
     });
     originals.push(Rc::clone(node));
     ids.insert(Rc::as_ptr(node), id);
@@ -165,7 +159,6 @@ mod tests {
     #[test]
     fn json_round_trips() {
         let (dag, _) = flatten(&[QueryRoot::Operator(filter(values()))]);
-        assert!(dag.nodes.iter().all(|n| n.timing.is_none()));
         let json = serde_json::to_string(&dag).unwrap();
         assert_eq!(serde_json::from_str::<FlatDag>(&json).unwrap(), dag);
     }

@@ -15,12 +15,12 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
 | --- | --- | --- |
 | Stage 0 (frontends) | `NonASAPOp` nodes only; aggregates carry `AggIntent` measures with each query's `AccuracyTarget` as written | none |
 | Stage 1 (`compose_logical_candidate`, Pass 2 rules) | `ASAPOp` nodes where a candidate chose an exact accumulator or a summary (`SummaryAgg`, `SummaryTumblingWindowChain`, `SummaryMerge`, `SummaryEstimate`, `FinalizeExactAccumulator`); everything else stays `NonASAPOp` | none: Stage 1 never decides when anything runs |
-| Stage 2 (`generate_physical_asap_memo_candidates`; a selected plan built by `Stage2AssignmentRealizer`) | the same operators, with a `Materialization` on each summary build | every node timed from the candidate's `MaterializationAssignment` |
+| Stage 2 (`generate_physical_asap_memo_candidates`; a selected plan built by `Stage2AssignmentRealizer`) | the same operators, with a timing and a `Lifetime` on each summary build | every node timed from the candidate's `PhysicalPropertiesAssignment` |
 
 - Structurally equal sub-DAGs are interned before Stage 1
   (`stage0/cse.rs` in `asap_logical_asap_optimization`), so Stage 1 compares nodes by structure and Pass 2
   matches readers structurally, never by pointer.
-- Timing is applied with `apply_materialization_timings`, which validates
+- Timing is applied with `apply_physical_properties`, which validates
   every data-state edge. A violation is an `ExecutionDataStateError`:
   for example `QueryTimeValueUnderIngestionSummary` (a query-time value
   beneath an ingestion-time build), `ConflictingTiming` (one shared node
@@ -78,13 +78,14 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
 ## 4. Stage 2
 
 - Only summary builds (`SummaryAgg`, `SummaryTumblingWindowChain`) get materialization
-  options: `NotMaterialized` always; `MatAtIngestion(Memory)` when the build
-  is eligible to run as data arrives; `MatAtQuery(Memory)` when two or more
-  queries read it (reused within one evaluation);
-  `MatAtQueryKeptAcrossEvaluations(Memory)` for a tumbling-window chain that
+  options, each a timing and a lifetime (`PhysicalProperties`): not materialized always;
+  materialized at ingestion time, `AcrossEvaluations(Memory)`, when the build is
+  eligible to run as data arrives; materialized at query time for `OneEvaluation(Memory)`
+  when two or more queries read it (reused within one evaluation); materialized at
+  query time `AcrossEvaluations(Memory)` for a tumbling-window chain that
   builds one new tumbling window per evaluation, when the deployment declares
   `query_time_results_retained`.
-- One `PhysicalCandidate` per assignment, the all-`NotMaterialized` one first
+- One `PhysicalCandidate` per assignment, the all-not-materialized one first
   (`P<n>`, then `P<n>-m<k>`). An assignment that puts a build at ingestion
   time over one that is not is not generated. A logical candidate Stage 2
   cannot implement becomes a `PrunedCandidate` with its reason.
@@ -98,7 +99,7 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
   candidate no buildable input, query output or reader count can use is
   removed (`InputHasNoBuildableProducer`, `ReachesNoQueryOutput`,
   `TooFewQueryReaders`). Stage 2 emits one candidate per operator node,
-  timing and materialization; it makes no execution-scope copies.
+  timing and lifetime; it makes no execution-scope copies.
 
 ## 5. Stage 3
 

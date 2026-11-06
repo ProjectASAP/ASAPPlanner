@@ -41,7 +41,7 @@ pub use measured::{
 pub use operator_statistics::EdgeStatistics;
 pub use ranking::{cheaper, worst_latency_ms, PlanRanking};
 pub use usage::{
-    family_name, kept_tumbling_window_chains, maintained_window_ms, node_map, node_usage,
+    family_name, maintained_window_ms, materialized_tumbling_window_chains, node_map, node_usage,
     plan_cost, query_reach, retained_tumbling_windows, trailing_window,
     tumbling_window_retention_ms, tumbling_window_retention_ms_of_plan, tumbling_windows_of,
     NodeMap, NodeUsage, ProducerOutput,
@@ -80,7 +80,7 @@ pub struct ResourceUsage {
     pub average_memory_bytes: f64,
     /// The most memory live at once, assuming every evaluation overlaps:
     /// in-memory kept state plus each computation's working memory, once
-    /// per consumer that recomputes it, with the `MatAtIngestion` consumers
+    /// per consumer that recomputes it, with the consumers materialized at ingestion time
     /// of one refresh window counted once.
     pub peak_memory_bytes: u64,
     /// Bytes kept on disk: state materialized on `Medium::Disk`, plus the
@@ -375,7 +375,7 @@ pub struct NodeCost {
     /// node the query reads first.
     pub cpu_core_seconds_per_second: f64,
     /// The number of consumers it is computed for, with the
-    /// `MatAtIngestion` consumers of one refresh window counted once (1
+    /// consumers materialized at ingestion time of one refresh window counted once (1
     /// when materialized, [`execution_demand::computations`]).
     pub multiplier: u64,
     /// How it was measured, e.g. "scan 1000 samples; x 1.0000/s; keeps

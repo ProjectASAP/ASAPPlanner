@@ -30,7 +30,7 @@ fn logical_schema(family: FieldDataType) -> Schema {
         time_index: None,
     }
 }
-/// The stored state at node 0 (`MatAtIngestion`): a global `family`
+/// The stored state at node 0 (materialized at ingestion time): a global `family`
 /// `SummaryAgg` over a minute of raw `m` samples (`Scan` node `scan`,
 /// `TimeRange` node `scan + 1`).
 fn view_over_samples(
@@ -50,14 +50,15 @@ fn view_over_samples(
         id,
         payload,
         output_state,
-        materialization: Default::default(),
+        lifetime: Default::default(),
+        parameters: None,
         output_schema,
         guarantee: None,
         retention_ms: None,
     };
     [
         PhysicalASAPDAGNode {
-            materialization: planner_types::physical::Materialization::MatAtIngestion(
+            lifetime: planner_types::physical::Lifetime::AcrossEvaluations(
                 planner_types::physical::Medium::Memory,
             ),
             ..node(
@@ -137,9 +138,10 @@ fn try_state_dag(
                 group_by: None,
             }),
             output_state: ExecutionDataState::INGESTION_SUMMARY,
-            materialization: planner_types::physical::Materialization::MatAtIngestion(
+            lifetime: planner_types::physical::Lifetime::AcrossEvaluations(
                 planner_types::physical::Medium::Memory,
             ),
+            parameters: None,
             output_schema: logical_schema(family.clone()),
             guarantee: None,
             retention_ms: None,
@@ -152,7 +154,8 @@ fn try_state_dag(
             child: read_id - 1,
         }),
         output_state: ExecutionDataState::INGESTION_ROWS,
-        materialization: Default::default(),
+        lifetime: Default::default(),
+        parameters: None,
         output_schema: logical_schema(FieldDataType::Plain(DataType::Float64)),
         guarantee: None,
         retention_ms: None,
@@ -169,9 +172,10 @@ fn try_state_dag(
                 child: read_id,
             }),
             output_state: ExecutionDataState::INGESTION_SUMMARY,
-            materialization: planner_types::physical::Materialization::MatAtIngestion(
+            lifetime: planner_types::physical::Lifetime::AcrossEvaluations(
                 planner_types::physical::Medium::Memory,
             ),
+            parameters: None,
             output_schema: logical_schema(target),
             guarantee: None,
             retention_ms: None,
@@ -286,13 +290,7 @@ fn explicit_merge_changes_tumbling_window_cardinality() {
 #[test]
 fn precompute_rejects_nonfinite_and_out_of_range_dds_updates() {
     let source = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
-    let target = FieldDataType::Sketch(
-        SketchKind::new(
-            SketchAlgorithm::DDSketch,
-            SketchParams::DDSketch { alpha: 0.01 },
-        ),
-        GroupingStrategy::default(),
-    );
+    let target = FieldDataType::Sketch(SketchAlgorithm::DDSketch, GroupingStrategy::default());
     let program = state_dag(source.clone(), Some(target), false);
     for value in [20., -20., 0.] {
         assert!(

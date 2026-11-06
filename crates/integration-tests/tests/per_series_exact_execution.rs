@@ -14,13 +14,10 @@ use asap_executor::sources::InMemoryDataStore;
 use asap_executor::values::{Batch, Value};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_types::ir::operator::{Reduction, Source};
-use asap_types::ir::physical_export::{compile_physical_asap_dag, PhysicalASAPOperatorPayload};
+use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{Schema, PROMQL_SERIES_IDENTITY};
-use asap_types::ir::{
-    apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache, NonASAPOp,
-    OperatorNode,
-};
+use asap_types::ir::{NonASAPOp, OperatorNode};
 use futures::{executor::block_on, StreamExt};
 
 /// One raw data sample: every label of its series, its time and value.
@@ -96,13 +93,8 @@ fn series_labels(schema: &Schema, row: &[Value]) -> BTreeMap<String, String> {
 /// Run `query`'s exact per-entity plan at query time over `samples`, bound
 /// at its `Scan` of `x`: each answered series' `instance` and value.
 fn execute(query: &str, samples: &[RawDataSample]) -> Vec<(String, f64)> {
-    let timed = apply_materialization_timings(
-        &per_entity_plan(query),
-        &MaterializationAssignment::default(),
-        &mut NodeToTimedNodeCache::new(),
-    )
-    .unwrap();
-    let dag = compile_physical_asap_dag(&timed).unwrap();
+    let plan = per_entity_plan(query);
+    let dag = asap_types::test_support::physical_asap_dag_at_query_time(&plan).unwrap();
     let node = |matches: fn(&PhysicalASAPOperatorPayload) -> bool| {
         let found: Vec<_> = dag
             .nodes

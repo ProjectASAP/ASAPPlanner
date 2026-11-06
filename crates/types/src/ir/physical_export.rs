@@ -1,11 +1,11 @@
 //! Physical ASAP DAG (planner-layering stage 2 output).
 //!
-//! The flattened operators of [`super::flat`], plus the materialization and
-//! execution timing (data state) of every node and edge. The input must
-//! already be timed ([`crate::ir::properties::timing::apply_materialization_timings`]); export
-//! reads each node's timing and materialization and does not re-run
-//! data-state validation. The deployment executes the plan as given
-//! (#509 Assumption 8): it does not change materialization or timing.
+//! The flattened operators of [`super::flat`], plus the lifetime and
+//! execution timing (data state) of every node and edge. The realizer
+//! (`AssignmentRealizer::realize`) builds it from a `DagOfSelectedCandidates`,
+//! each node's timing and lifetime from the `PhysicalCandidate` it realizes.
+//! The deployment executes the plan as given
+//! (#509 Assumption 8): it does not change lifetime or timing.
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -13,24 +13,16 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::flat::{flatten, NodeId};
+use super::flat::NodeId;
 use super::scalar::ScalarExpr;
 use crate::ir::operator::asap::ASAPOp;
 use crate::ir::operator::node::{Operator, OperatorNode};
 use crate::ir::operator::non_asap::NonASAPOp;
-use crate::ir::operator::operator_properties::Reduction;
-use crate::ir::operator::query::QueryRoot;
-use crate::ir::properties::execution_data_state::{
-    ExecutionDataState, ExecutionDataStateError, ExecutionTiming,
-};
+
+use crate::ir::properties::execution_data_state::{ExecutionDataState, ExecutionTiming};
 use crate::ir::properties::guarantee::AccuracyGuarantee;
-#[cfg(any(test, feature = "test-support"))]
-use crate::ir::properties::timing::{
-    apply_materialization_timings_to_roots, MaterializationAssignment,
-};
-use crate::ir::properties::timing::{data_state, is_materialization_point};
-use crate::ir::schema::{FieldDataType, Schema};
-use crate::physical::materialization::Materialization;
+use crate::ir::schema::{FieldDataType, Schema, SketchParams};
+use crate::physical::{InvalidPhysicalProperties, Lifetime};
 
 /// A node's operator, with each child replaced by its node id.
 pub type PhysicalASAPOperatorPayload = Operator<NodeId>;
@@ -71,22 +63,28 @@ pub struct PhysicalASAPDAGNode {
     pub payload: PhysicalASAPOperatorPayload,
     /// Phase is a placement choice for every operator, independent of payload kind.
     pub output_state: ExecutionDataState,
-    /// Whether and where the deployment stores this node's output: the
-    /// option the materialization assignment chose for the sub-DAG this node
-    /// produces. Any node may be stored (#509 §Materialization); a node with
-    /// no assignment is `NotMaterialized`.
-    pub materialization: Materialization,
+    /// How long and where the deployment materializes this node's output: the
+    /// lifetime the physical properties assignment chose for the sub-DAG this
+    /// node produces. Any node may be materialized (#509 §Materialization); a node
+    /// with no assignment has lifetime `None`. With `output_state.timing` it
+    /// is the node's [`PhysicalProperties`].
+    pub lifetime: Lifetime,
+    /// θ of a summary build (`SummaryAgg`, `SummaryTumblingWindowChain`): its
+    /// candidate's `LogicalProperties::parameters`, which the executor builds
+    /// the sketch from. `None` on every other node and for an exact build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<SketchParams>,
     pub output_schema: Schema,
     pub guarantee: Option<AccuracyGuarantee>,
-    /// For a materialized view (a node whose materialization keeps its
-    /// output across evaluations), how far back from the newest evaluation
+    /// For a materialized view (a node whose lifetime materializes its output
+    /// across evaluations), how far back from the newest evaluation
     /// time its output must stay available once refreshed; for a query-time
     /// `Scan`, how far back its source's rows must stay available (`None`
     /// when it reads them unbounded). `None` on every other node, and on
     /// every node of a DAG exported before installation sets it
     /// ([`PhysicalASAPDAG::set_retention`]). A
-    /// node field rather than part of [`Materialization`], because Stage 2
-    /// enumerates materializations before Stage 3 knows retention.
+    /// node field rather than part of [`Lifetime`], because Stage 2
+    /// enumerates lifetimes before Stage 3 knows retention.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention_ms: Option<u64>,
 }
@@ -171,14 +169,19 @@ pub struct PhysicalASAPDAG {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PhysicalASAPDAGValidationError {
-    #[error(
-        "node {node:?} runs at {timing:?}, which its materialization {materialization:?} does not"
-    )]
-    MaterializationTimingMismatch {
+    /// A node whose timing and lifetime cannot go together: a planner bug.
+    #[error("node {node:?}: {reason}")]
+    InvalidPhysicalProperties {
         node: PhysicalASAPNodeId,
-        timing: ExecutionTiming,
-        materialization: Materialization,
+        #[source]
+        reason: InvalidPhysicalProperties,
     },
+    /// A summary build (or maintained population) that is not materialized but does
+    /// not run at query time: a planner bug.
+    #[error(
+        "node {node:?} is a summary build that is not materialized but does not run at query time"
+    )]
+    UnmaterializedSummaryBuildNotAtQueryTime { node: PhysicalASAPNodeId },
     #[error("ingestion node {consumer:?} depends on query node {producer:?}")]
     QueryDependencyInIngestion {
         producer: PhysicalASAPNodeId,
@@ -337,39 +340,9 @@ pub(crate) fn offset_below<'a>(
     Some(end_offset_ms)
 }
 
-/// Why `PhysicalASAPDAG::with_every_node_at_query_time` failed.
-#[derive(Debug, Error)]
-pub enum ReferencePlanError {
-    /// Bad input: the DAG is not a valid physical ASAP DAG.
-    #[error("invalid physical ASAP DAG: {0}")]
-    InvalidDag(#[from] PhysicalASAPDAGValidationError),
-    /// Bad input: the plan cannot run at query time (a data-state rule of
-    /// the timing pass fails).
-    #[error("the plan does not run at query time: {0}")]
-    Timing(#[from] ExecutionDataStateError),
-}
-
 impl PhysicalASAPDAG {
-    /// This DAG's plan with nothing materialized: the same operators,
-    /// summaries and summary parameters, with every sub-DAG
-    /// `NotMaterialized` and so every node at query time (the default
-    /// [`MaterializationAssignment`]). Node ids are renumbered, and `roots`
-    /// and `scalar_roots` keep their order.
-    ///
-    /// The correctness reference of a selected plan: a deployment runtime
-    /// compares the answers of the plan it installed with the executor
-    /// running this one over raw data, which needs the raw data the
-    /// installed plan may not keep.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn with_every_node_at_query_time(&self) -> Result<PhysicalASAPDAG, ReferencePlanError> {
-        let roots = self.untimed_query_roots()?;
-        let timed =
-            apply_materialization_timings_to_roots(&roots, &MaterializationAssignment::default())?;
-        Ok(compile_physical_asap_workload(&timed)?)
-    }
-
-    /// Every node of this DAG as IR, by node id, untimed and
-    /// `NotMaterialized` with its exported guarantee: what a caller derives
+    /// Every node of this DAG as IR, by node id, with its exported
+    /// guarantee (an operator node has no physical properties): what a caller derives
     /// IR properties of a plan file's node from, such as its
     /// [`SummaryCoverage`](crate::ir::properties::summary_coverage::SummaryCoverage).
     /// Shared inputs stay shared. Validates the DAG first.
@@ -411,7 +384,7 @@ impl PhysicalASAPDAG {
     /// - a `TimeRange(w)`, range or instant: `(T - s - w, T - s]`;
     /// - a `SummaryTumblingWindowChain` of `n` tumbling windows of width `w`: its whole window `(T - s -
     ///   n·w, T - s]`, or only its newest tumbling window `(T - s - w, T - s]` for a
-    ///   chain in `kept_chains` (kept across evaluations, so each
+    ///   chain in `materialized_chains` (materialized across evaluations, so each
     ///   evaluation builds one tumbling window).
     ///
     /// `Unbounded` when a root, any other reader, or a shift with an `@`
@@ -419,9 +392,9 @@ impl PhysicalASAPDAG {
     pub fn scan_window(
         &self,
         scan: PhysicalASAPNodeId,
-        kept_chains: &HashSet<PhysicalASAPNodeId>,
+        materialized_chains: &HashSet<PhysicalASAPNodeId>,
     ) -> ScanWindow {
-        self.scan_windows([scan], kept_chains)[&scan]
+        self.scan_windows([scan], materialized_chains)[&scan]
     }
 
     /// [`Self::scan_window`] of each of `scans`, by id, with the DAG
@@ -429,7 +402,7 @@ impl PhysicalASAPDAG {
     pub fn scan_windows(
         &self,
         scans: impl IntoIterator<Item = PhysicalASAPNodeId>,
-        kept_chains: &HashSet<PhysicalASAPNodeId>,
+        materialized_chains: &HashSet<PhysicalASAPNodeId>,
     ) -> HashMap<PhysicalASAPNodeId, ScanWindow> {
         let payloads = self.payloads_by_id();
         let mut consumers: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
@@ -461,7 +434,7 @@ impl PhysicalASAPDAG {
                         Some(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                             tumbling_window_width_ms,
                             ..
-                        })) if kept_chains.contains(&consumer) => {
+                        })) if materialized_chains.contains(&consumer) => {
                             u128::from(*tumbling_window_width_ms)
                         }
                         Some(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
@@ -567,54 +540,35 @@ impl PhysicalASAPDAG {
             .collect()
     }
 
-    /// The IR this DAG exports, one root per query in batch order, every
-    /// node untimed and `NotMaterialized`: the inverse of
-    /// [`compile_physical_asap_workload`] up to `Rc` identity and timing.
-    #[cfg(any(test, feature = "test-support"))]
-    fn untimed_query_roots(&self) -> Result<Vec<QueryRoot>, PhysicalASAPDAGValidationError> {
-        let rebuilt = self.operator_nodes()?;
-        let mut operator_roots = self.roots.iter();
-        let mut scalar_roots = self.scalar_roots.iter().peekable();
-        let mut roots = Vec::with_capacity(self.roots.len() + self.scalar_roots.len());
-        for position in 0..self.roots.len() + self.scalar_roots.len() {
-            match scalar_roots.peek() {
-                Some((at, expr)) if *at == position => {
-                    roots.push(QueryRoot::Scalar(
-                        expr.map_operator_refs(&mut |id| Rc::clone(&rebuilt[id])),
-                    ));
-                    scalar_roots.next();
-                }
-                _ => {
-                    let id = operator_roots.next().expect("validated root positions");
-                    roots.push(QueryRoot::Operator(Rc::clone(&rebuilt[id])));
-                }
-            }
-        }
-        Ok(roots)
-    }
-
     pub fn validate(&self) -> Result<(), PhysicalASAPDAGValidationError> {
         let mut nodes = HashMap::new();
         for node in &self.nodes {
             if nodes.insert(node.id, node).is_some() {
                 return Err(PhysicalASAPDAGValidationError::DuplicateNodeId(node.id));
             }
-            // A sub-DAG output runs when its materialization says; any other
-            // node is not stored and runs when its consumer runs.
-            if (is_materialization_point(&node.payload)
-                || node.materialization != Materialization::NotMaterialized)
-                && node.materialization.timing() != node.output_state.timing
+            // A node's timing and lifetime must go together; a summary
+            // build that is not materialized runs at query time. Any other node that
+            // is not materialized runs when its consumer runs.
+            if node.output_state.timing == ExecutionTiming::IngestionTime
+                && matches!(node.lifetime, Lifetime::OneEvaluation(_))
+            {
+                return Err(PhysicalASAPDAGValidationError::InvalidPhysicalProperties {
+                    node: node.id,
+                    reason: InvalidPhysicalProperties::OneEvaluationAtIngestion,
+                });
+            }
+            if is_materializable_state_output(&node.payload)
+                && node.output_state.timing == ExecutionTiming::IngestionTime
+                && node.lifetime == Lifetime::None
             {
                 return Err(
-                    PhysicalASAPDAGValidationError::MaterializationTimingMismatch {
+                    PhysicalASAPDAGValidationError::UnmaterializedSummaryBuildNotAtQueryTime {
                         node: node.id,
-                        timing: node.output_state.timing,
-                        materialization: node.materialization,
                     },
                 );
             }
             if node.retention_ms.is_some()
-                && !node.materialization.is_materialized_view()
+                && !matches!(node.lifetime, Lifetime::AcrossEvaluations(_))
                 && !super::materialized_view::is_query_time_scan(node)
             {
                 return Err(PhysicalASAPDAGValidationError::UnexpectedRetention(node.id));
@@ -800,127 +754,6 @@ impl PhysicalASAPDAG {
     }
 }
 
-// ── Compilation from the IR ──────────────────────────────────────────────
-
-/// Compiler-local identity assignment. It deliberately retains `Rc` handles
-/// and is not serialized; deployed artifacts persist the physical ASAP node ID
-/// together with their physical materialization/query IDs.
-#[derive(Debug, Clone)]
-pub struct PhysicalASAPNodeIdentityMap {
-    nodes_by_id: Vec<Rc<OperatorNode>>,
-}
-
-impl PhysicalASAPNodeIdentityMap {
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn node_id(&self, node: &Rc<OperatorNode>) -> Option<PhysicalASAPNodeId> {
-        self.nodes_by_id
-            .iter()
-            .position(|candidate| Rc::ptr_eq(candidate, node))
-    }
-
-    pub fn operator_node(&self, id: PhysicalASAPNodeId) -> Option<&Rc<OperatorNode>> {
-        self.nodes_by_id.get(id)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct PhysicalASAPDAGCompilation {
-    pub dag: PhysicalASAPDAG,
-    pub node_ids: PhysicalASAPNodeIdentityMap,
-}
-
-#[cfg(any(test, feature = "test-support"))]
-pub fn compile_physical_asap_dag(
-    root: &Rc<OperatorNode>,
-) -> Result<PhysicalASAPDAG, ExecutionDataStateError> {
-    Ok(compile_physical_asap_dag_with_node_ids(root)?.dag)
-}
-
-/// Export the timed DAG below `root`. Every reachable node must carry a
-/// timing (see [`crate::ir::properties::timing::apply_materialization_timings`]); the data-state
-/// rules were checked by that pass and are not re-run here.
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) fn compile_physical_asap_dag_with_node_ids(
-    root: &Rc<OperatorNode>,
-) -> Result<PhysicalASAPDAGCompilation, ExecutionDataStateError> {
-    compile_physical_asap_workload_with_node_ids(&[QueryRoot::Operator(Rc::clone(root))])
-}
-
-/// Export a timed batch as one DAG: operator queries become `roots` and
-/// standalone scalar queries `scalar_roots`, keyed by their position in the
-/// batch.
-pub fn compile_physical_asap_workload(
-    roots: &[QueryRoot],
-) -> Result<PhysicalASAPDAG, ExecutionDataStateError> {
-    Ok(compile_physical_asap_workload_with_node_ids(roots)?.dag)
-}
-
-pub fn compile_physical_asap_workload_with_node_ids(
-    roots: &[QueryRoot],
-) -> Result<PhysicalASAPDAGCompilation, ExecutionDataStateError> {
-    let (flat, nodes_by_id) = flatten(roots);
-    let mut scalar_roots = Vec::new();
-    let roots = flat
-        .roots
-        .into_iter()
-        .enumerate()
-        .filter_map(|(position, root)| match root {
-            QueryRoot::Operator(id) => Some(id),
-            QueryRoot::Scalar(expr) => {
-                scalar_roots.push((position, expr));
-                None
-            }
-        })
-        .collect();
-    let mut nodes: Vec<PhysicalASAPDAGNode> = Vec::with_capacity(flat.nodes.len());
-    let mut edges = Vec::new();
-    for (id, flat_node) in flat.nodes.into_iter().enumerate() {
-        let node = &nodes_by_id[id];
-        let output_state = data_state(node).ok_or(ExecutionDataStateError::UntimedNode {
-            operator: node.operator.kind_name(),
-        })?;
-        // Children come before their parents, so every producer is already in `nodes`.
-        for (producer, role) in edge_roles(&flat_node.operator) {
-            let producer_state = nodes[producer].output_state;
-            let ingestion_dependency = producer_state.timing == ExecutionTiming::IngestionTime
-                && output_state.timing == ExecutionTiming::IngestionTime;
-            edges.push(PhysicalASAPDAGEdge {
-                producer,
-                consumer: id,
-                role,
-                intermediate_schema: nodes[producer].output_schema.clone(),
-                data_state: producer_state,
-                grouping: grouping_compatibility(&nodes[producer].payload, &flat_node.operator),
-                window: if ingestion_dependency {
-                    WindowEdgeCompatibility::RequiresAlignedTumblingWindowPhaseOrExactWindowEdgeResidual
-                } else {
-                    WindowEdgeCompatibility::NotApplicable
-                },
-            });
-        }
-        nodes.push(PhysicalASAPDAGNode {
-            id,
-            payload: flat_node.operator,
-            output_state,
-            materialization: flat_node.materialization,
-            output_schema: flat_node.schema,
-            guarantee: flat_node.guarantee,
-            retention_ms: None,
-        });
-    }
-    let dag = PhysicalASAPDAG {
-        nodes,
-        edges,
-        roots,
-        scalar_roots,
-    };
-    dag.validate().map_err(ExecutionDataStateError::from)?;
-    Ok(PhysicalASAPDAGCompilation {
-        dag,
-        node_ids: PhysicalASAPNodeIdentityMap { nodes_by_id },
-    })
-}
-
 /// Each input of `operator` with its edge role: the operator inputs, then the
 /// nodes read by its scalar expressions (the order of [`Operator::children`]).
 /// A node referenced several times from the scalar expressions is one
@@ -956,10 +789,99 @@ fn edge_roles<C: Copy + PartialEq>(operator: &Operator<C>) -> Vec<(C, EdgeRole)>
     edges
 }
 
+/// Whether `operator`'s output is a sub-DAG output that materialization may
+/// store: a `SummaryAgg`, a `SummaryTumblingWindowChain` or a `MaintainPopulation`.
+pub(crate) fn is_materializable_state_output<C>(operator: &Operator<C>) -> bool {
+    matches!(
+        operator,
+        Operator::ASAP(
+            ASAPOp::SummaryAgg { .. }
+                | ASAPOp::SummaryTumblingWindowChain { .. }
+                | ASAPOp::MaintainPopulation { .. }
+        )
+    )
+}
+
+/// Test-only: `roots` exported as one DAG with every node at query time and
+/// not materialized, and no θ (every `parameters` is `None`), with each
+/// exported node's operator node by node id. Executor tests hand-build DAGs
+/// this way; planning exports only through the realizer
+/// (`AssignmentRealizer::realize`).
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn physical_asap_dag_at_query_time_with_node_ids(
+    roots: &[crate::ir::QueryRoot],
+) -> Result<(PhysicalASAPDAG, Vec<Rc<OperatorNode>>), PhysicalASAPDAGValidationError> {
+    use crate::ir::properties::execution_data_state::DataPrimitive;
+    use crate::ir::QueryRoot;
+    let (flat, nodes_by_id) = super::flat::flatten(roots);
+    let mut scalar_roots = Vec::new();
+    let roots = flat
+        .roots
+        .into_iter()
+        .enumerate()
+        .filter_map(|(position, root)| match root {
+            QueryRoot::Operator(id) => Some(id),
+            QueryRoot::Scalar(expr) => {
+                scalar_roots.push((position, expr));
+                None
+            }
+        })
+        .collect();
+    let mut nodes: Vec<PhysicalASAPDAGNode> = Vec::with_capacity(flat.nodes.len());
+    let mut edges = Vec::new();
+    for (id, flat_node) in flat.nodes.into_iter().enumerate() {
+        let node = &nodes_by_id[id];
+        let primitive = match &node.operator {
+            Operator::ASAP(op) if op.produced_state().is_some() => DataPrimitive::SummaryState,
+            Operator::ASAP(ASAPOp::MaintainPopulation { .. }) => DataPrimitive::SummaryState,
+            _ if node.result_kind == crate::ir::OperatorResultKind::State => {
+                DataPrimitive::SummaryState
+            }
+            _ => DataPrimitive::Raw,
+        };
+        let output_state = ExecutionDataState {
+            timing: ExecutionTiming::QueryTime,
+            primitive,
+        };
+        // Children come before their parents, so every producer is already in `nodes`.
+        for (producer, role) in edge_roles(&flat_node.operator) {
+            edges.push(PhysicalASAPDAGEdge {
+                producer,
+                consumer: id,
+                role,
+                intermediate_schema: nodes[producer].output_schema.clone(),
+                data_state: nodes[producer].output_state,
+                grouping: grouping_compatibility(&nodes[producer].payload, &flat_node.operator),
+                window: WindowEdgeCompatibility::NotApplicable,
+            });
+        }
+        nodes.push(PhysicalASAPDAGNode {
+            id,
+            payload: flat_node.operator,
+            output_state,
+            lifetime: Lifetime::None,
+            parameters: None,
+            output_schema: flat_node.schema,
+            guarantee: flat_node.guarantee,
+            retention_ms: None,
+        });
+    }
+    let dag = PhysicalASAPDAG {
+        nodes,
+        edges,
+        roots,
+        scalar_roots,
+    };
+    dag.validate()?;
+    Ok((dag, nodes_by_id))
+}
+
+#[cfg(any(test, feature = "test-support"))]
 fn grouping_compatibility<C>(
     producer: &Operator<C>,
     consumer: &Operator<C>,
 ) -> GroupingEdgeCompatibility {
+    use crate::ir::operator::operator_properties::Reduction;
     let (
         Operator::ASAP(ASAPOp::SummaryAgg {
             reduction: producer,

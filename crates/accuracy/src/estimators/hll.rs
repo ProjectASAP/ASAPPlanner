@@ -81,6 +81,7 @@ pub fn parse_classic_failure_statistic(statistic: &str) -> Option<(u8, f64, &str
 /// distinct bound ([`classic_failure_statistic`]). The failure probability
 /// is per output row: each group's estimate fails with at most it. `None`
 /// for a precision outside the contract's.
+#[allow(dead_code)] // Read again in #1207 PR 4, with θ from `LogicalProperties::parameters`.
 pub(crate) fn classic_guarantee(
     precision: u8,
     relative_error: Option<f64>,
@@ -479,14 +480,11 @@ mod tests {
     fn generic_rse_sizing_does_not_certify_confidence() {
         use crate::estimators::size_params;
         use asap_types::ir::operator::agg_intent::default_cardinality;
-        use asap_types::ir::schema::{GroupingStrategy, SketchKind};
         let c = default_cardinality();
         let params = size_params(SketchAlgorithm::Hll, &c, 0.01, 0.01);
-        let g = local_guarantee(
-            &FieldDataType::Sketch(
-                SketchKind::new(SketchAlgorithm::Hll, params),
-                GroupingStrategy::default(),
-            ),
+        let g = sketch_guarantee(
+            &SketchAlgorithm::Hll,
+            &params,
             &SketchStatistic::Cardinality,
         )
         .unwrap();

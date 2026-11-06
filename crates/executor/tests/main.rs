@@ -17,7 +17,6 @@ mod physical_dag;
 mod physical_semantics;
 mod plan_properties;
 mod planspace_series_identity_heap;
-mod precompute_candidates;
 mod precompute_population;
 mod promql_binary;
 mod promql_values;

@@ -10,13 +10,11 @@ use asap_types::ir::operator::TimeShift;
 use asap_types::ir::properties::summary_coverage::{
     ColumnIdentity, Constraint, CoverageError, SelectionBox,
 };
-use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::scalar::expr_ir::{ArithmeticOpKind, CompareOpKind, ScalarValue};
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use asap_types::ir::schema::{
-    ExactKind, ExactParams, GroupingStrategy, MergeInputRule, SketchAlgorithm, SketchKind,
-    SketchParams, SummaryUpdate,
+    ExactKind, ExactParams, GroupingStrategy, MergeInputRule, SketchAlgorithm, SummaryUpdate,
 };
 use asap_types::ir::{
     ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorNode, OperatorResultKind, Predicate,
@@ -91,16 +89,7 @@ fn kll(child: Rc<OperatorNode>, column: &str) -> Rc<OperatorNode> {
     summary(
         child,
         column,
-        FieldDataType::Sketch(
-            SketchKind::new(
-                SketchAlgorithm::Kll,
-                SketchParams::Kll {
-                    k: 200,
-                    failure_probability: None,
-                },
-            ),
-            Default::default(),
-        ),
+        FieldDataType::Sketch(SketchAlgorithm::Kll, Default::default()),
     )
 }
 
@@ -554,22 +543,6 @@ fn merges_nest() {
     );
 }
 
-/// When a state is computed is not what it computes.
-#[test]
-fn timing_does_not_block_merges() {
-    let ingested = Rc::new(
-        (*tumbling_window(60_000, vec![]))
-            .clone()
-            .with_timing(Some(ExecutionTiming::IngestionTime)),
-    );
-    let queried = Rc::new(
-        (*tumbling_window(0, vec![]))
-            .clone()
-            .with_timing(Some(ExecutionTiming::QueryTime)),
-    );
-    merge(vec![ingested, queried]).unwrap();
-}
-
 /// A merge built around `new` is still checked by `validate_structure`.
 #[test]
 fn forged_merges_fail_validation() {
@@ -741,16 +714,7 @@ fn design_doc_worked_example() {
     let below_100 = compare(2, CompareOpKind::Lt, ScalarValue::Int64(100));
     let state = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
         child: project,
-        family: FieldDataType::Sketch(
-            SketchKind::new(
-                SketchAlgorithm::Kll,
-                SketchParams::Kll {
-                    k: 200,
-                    failure_probability: None,
-                },
-            ),
-            Default::default(),
-        ),
+        family: FieldDataType::Sketch(SketchAlgorithm::Kll, Default::default()),
         input: SummaryUpdate::column(ColumnRef::Named("latency".into())),
         reduction: Reduction::by(vec![0]),
         grouping: GroupingStrategy::default(),
@@ -805,11 +769,9 @@ fn equal_definitions_get_equal_ids() {
     let us = latency_where(eq(REGION, "us"));
     let eu = latency_where(eq(REGION, "eu"));
     assert_eq!(id(&us), id(&eu));
-    let ingested = (*tumbling_window(0, vec![]))
-        .clone()
-        .with_timing(Some(ExecutionTiming::IngestionTime));
-    assert_eq!(id(&ingested), id(&tumbling_window(60_000, vec![])));
-    assert_eq!(id(&ingested).len(), 32);
+    let newest = tumbling_window(0, vec![]);
+    assert_eq!(id(&newest), id(&tumbling_window(60_000, vec![])));
+    assert_eq!(id(&newest).len(), 32);
     let size = kll(filter(table(), eq(REGION, "eu")), "size");
     assert_ne!(id(&size), id(&eu));
     assert_ne!(
@@ -905,16 +867,7 @@ fn grouped(
 }
 
 fn kll_family() -> FieldDataType {
-    FieldDataType::Sketch(
-        SketchKind::new(
-            SketchAlgorithm::Kll,
-            SketchParams::Kll {
-                k: 200,
-                failure_probability: None,
-            },
-        ),
-        GroupingStrategy::default(),
-    )
+    FieldDataType::Sketch(SketchAlgorithm::Kll, GroupingStrategy::default())
 }
 
 fn rollup(state: Rc<OperatorNode>, keys: Vec<usize>) -> Result<Rc<OperatorNode>, String> {

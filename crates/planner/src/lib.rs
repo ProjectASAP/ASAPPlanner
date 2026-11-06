@@ -32,8 +32,8 @@ pub use pass::{
     PassNameConflict, PassRegistry, PlanOutput, PlanningModels, QueryPlan,
 };
 pub use run::{
-    run_planning, selected_chosen_candidates, PlanSearchSettings, PlanningReport, PlanningRun,
-    SelectionError, Stage1ToStage3Pass,
+    run_planning, PlanSearchSettings, PlanningReport, PlanningRun, SelectionError,
+    Stage1ToStage3Pass,
 };
 
 mod installable;
@@ -42,32 +42,6 @@ pub use installable::{
     PredictedNodeUsage, PredictedQueryUsage, PredictedUsage, SelectedPlanReport,
     INSTALLABLE_PLAN_WIRE_VERSION,
 };
-
-/// Helpers for a runtime's correctness tests (feature `test-support`).
-#[cfg(any(test, feature = "test-support"))]
-pub mod test_support {
-    use std::collections::HashMap;
-
-    use crate::{InstallablePlan, InstallablePlanError};
-
-    /// For correctness tests only, never for installing: `plan` with
-    /// nothing materialized, the same operators, summaries and parameters
-    /// with every node at query time, and the same query texts. A runtime's
-    /// test compares its installed plan's answers with the executor running
-    /// this one over raw data samples. Validates `plan` first.
-    pub fn query_time_reference(
-        plan: &InstallablePlan,
-    ) -> Result<InstallablePlan, InstallablePlanError> {
-        plan.validate()?;
-        let dag = plan.dag.with_every_node_at_query_time()?;
-        InstallablePlan::of_dag(
-            dag,
-            plan.query_texts.clone(),
-            &HashMap::new(),
-            &HashMap::new(),
-        )
-    }
-}
 
 // What a deployment runtime needs to build a `UserInput` and read an
 // `InstallablePlan`, so it depends on this crate and `asap-executor` alone.

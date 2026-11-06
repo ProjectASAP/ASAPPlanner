@@ -79,9 +79,9 @@ input
 
 `EvaluatePopulation` runs at query time. `MaintainPopulation` has no fixed
 timing: like a `SummaryAgg`, it follows its materialization
-(`NotMaterialized`, `MatAtIngestion(medium)` or `MatAtQuery(medium)`, #509
+(`Lifetime::None`, `(IngestionTime, AcrossEvaluations(medium))` or `(QueryTime, OneEvaluation(medium))`, #509
 §Materialization), which Stage 2 chooses; it runs at ingestion time only when
-it is `MatAtIngestion`.
+it is ingestion-time `AcrossEvaluations`.
 
 The rule examines compatible workload roots, sets `max_k` to the largest requested
 k and enables quantile readout if any consumer needs it. It emits a candidate for

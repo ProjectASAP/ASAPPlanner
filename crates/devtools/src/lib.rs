@@ -23,7 +23,6 @@
 
 pub mod candidate_labels;
 pub mod corpora;
-pub mod memo_pricing;
 pub mod planner_fuzz;
 pub mod planner_layering_examples;
 pub mod planning_stages;

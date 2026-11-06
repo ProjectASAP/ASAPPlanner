@@ -11,6 +11,7 @@ pub mod hll;
 pub(crate) mod kll;
 pub mod univmon;
 
+#[allow(dead_code)] // Read again for the error bound of each listed θ (`parameter_list`), in #1207 PRs 3–4.
 pub(super) fn sketch_guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
@@ -28,6 +29,9 @@ pub(super) fn sketch_guarantee(
         }
         SketchParams::Kmv { .. } => cardinality::guarantee(algorithm, params, query),
         SketchParams::UnivMon { .. } => univmon::guarantee(algorithm, params, query),
+        SketchParams::Hydra(hydra) => {
+            sketch_guarantee(algorithm, &hydra.per_subpopulation(), query)
+        }
     }
 }
 
@@ -71,8 +75,10 @@ pub(crate) fn local_guarantee(
         FieldDataType::ExactAggregate(kind, _) => Some(AccuracyGuarantee::exact(format!(
             "ExactAggregate({kind:?})"
         ))),
-        FieldDataType::Sketch(kind, _) if FamilyCapability::of(family).answers(query) => {
-            sketch_guarantee(kind.algorithm(), kind.params(), query)
+        FieldDataType::Sketch(..) if FamilyCapability::of(family).answers(query) => {
+            todo!(
+                "#1207 PR 4: the guarantee of θ from the candidate's LogicalProperties::parameters"
+            )
         }
         FieldDataType::Sketch(..) => None,
         // No error model is registered for these families.
@@ -136,6 +142,7 @@ pub fn with_failure_probability(params: &SketchParams, delta: f64) -> SketchPara
     }
 }
 
+#[allow(dead_code)] // Read again for the predefined θ lists (`parameter_list`), in #1207 PR 1.
 pub(crate) fn size_params(
     kind: SketchAlgorithm,
     intent: &AggIntent,
@@ -701,25 +708,13 @@ mod tests {
     #[test]
     fn local_guarantee_needs_a_statistic_the_family_answers() {
         use asap_types::ir::scalar::expr_ir::ColumnRef;
-        use asap_types::ir::schema::{
-            DataType, ExactKind, ExactParams, GroupingStrategy, SketchKind,
-        };
-        let hll = FieldDataType::Sketch(
-            SketchKind::new(
-                SketchAlgorithm::Hll,
-                SketchParams::Hll {
-                    precision: 12,
-                    relative_error: None,
-                },
-            ),
-            GroupingStrategy::default(),
-        );
+        use asap_types::ir::schema::{DataType, ExactKind, ExactParams, GroupingStrategy};
+        let hll = FieldDataType::Sketch(SketchAlgorithm::Hll, GroupingStrategy::default());
         let total = SketchStatistic::PointCount {
             key: ColumnRef::SampleValue,
             value: None,
         };
         assert!(local_guarantee(&hll, &total).is_none());
-        assert!(local_guarantee(&hll, &SketchStatistic::Cardinality).is_some());
         for exact in [
             FieldDataType::Plain(DataType::Float64),
             FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count),

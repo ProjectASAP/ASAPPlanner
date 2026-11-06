@@ -15,26 +15,14 @@ use planner_types::ir::properties::ExecutionDataState;
 use planner_types::ir::scalar::ColumnRef;
 use planner_types::ir::schema::{DataType, Schema};
 use planner_types::ir::schema::{
-    Field, FieldDataType, GroupingStrategy, NonNegativeWeightProof, SketchAlgorithm, SketchKind,
-    SketchParams, SketchStatistic, SummaryInputExpr, SummaryUpdate, WeightDomain,
+    Field, FieldDataType, GroupingStrategy, NonNegativeWeightProof, SketchAlgorithm,
+    SketchStatistic, SummaryInputExpr, SummaryUpdate, WeightDomain,
 };
 use planner_types::ir::ASAPOp;
 use std::sync::Arc;
 
 fn family() -> FieldDataType {
-    FieldDataType::Sketch(
-        SketchKind::new(
-            SketchAlgorithm::UnivMon,
-            SketchParams::UnivMon {
-                heap_size: 64,
-                sketch_rows: 5,
-                sketch_cols: 128,
-                layers: 4,
-                distinct_failure_probability: None,
-            },
-        ),
-        GroupingStrategy::default(),
-    )
+    FieldDataType::Sketch(SketchAlgorithm::UnivMon, GroupingStrategy::default())
 }
 
 fn context() -> RunContext {
@@ -191,7 +179,8 @@ fn planner_unit_frequency_update_binds_as_a_value_frequency_build() -> Result<()
             filter: None,
         }),
         output_state: ExecutionDataState::QUERY_ROWS,
-        materialization: Default::default(),
+        lifetime: Default::default(),
+        parameters: None,
         output_schema: (*state).clone(),
         guarantee: None,
         retention_ms: None,

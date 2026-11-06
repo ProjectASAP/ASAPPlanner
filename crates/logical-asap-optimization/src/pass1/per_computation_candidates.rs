@@ -3,7 +3,7 @@
 //! `docs/design_docs/proposals/planner-layering.md`.
 //!
 //! [`generate_per_computation_candidates`] walks the memo groups of the
-//! workload's hash-consed logical DAG ([`DagOfLogicalMemoGroups`]) and
+//! workload's memo groups ([`Memo`]) and
 //! returns, for every eligible computation, its unranked candidates. A
 //! computation ([`ComputationTarget`]) is one measure of an `Aggregate`
 //! group whose intent has a realization besides plain exact execution, once
@@ -21,17 +21,13 @@
 //!   has its own candidates: the whole-expression top-k over a per-item
 //!   `sum` or `count` (`Summary` of a heap family) and the nested sum, a
 //!   grouped `sum` over a `sum` (`ExactAccumulator([Sum])`).
-//! - Summary choices here are unsized families. Attaching them to memo
-//!   groups creates sized candidates, one per split of the accuracy budget
-//!   (`CandidateForMemoGroup::accuracy_budget_parts`), each sized for ε, its
-//!   accuracy budget parts and δ over the values its readers' targets cover; Pass 2
-//!   inherits sizes or takes the strictest shared reader's, and Stage 3 only
-//!   checks.
+//! - Summary choices here are unsized families. Adding them to memo groups
+//!   creates one build candidate per listed parameter configuration
+//!   (`parameter_list`); Stage 3 checks each query's composed accuracy at its
+//!   root.
 //! - Candidates are pruned only when provably unable to meet the accuracy
 //!   requirement or to run, or when the exact candidate provably dominates
-//!   them (a PromQL top-k's heap over its instant vector, one row per item:
-//!   [`PruneReason::TopKHeapOverOneRowPerItem`]); each pruned candidate
-//!   keeps its [`PruneReason`].
+//!   them (a PromQL top-k's heap over its instant vector, one row per item).
 //! - A measure filter or `HAVING` prunes nothing. The target records the
 //!   measure filter (applied as `SummaryAgg.filter`) and one [`HavingEntry`]
 //!   per consumer `Filter` directly above the aggregate: a key-only predicate
@@ -40,8 +36,8 @@
 //!   outputs then get guarantee `None`). So every candidate of a group
 //!   computes the group's own rows.
 //!
-//! The input must be a logical DAG: ASAP operators, execution timing or a
-//! materialization are rejected. No cost model is used. The accuracy model
+//! The input must be a logical DAG: ASAP operators are rejected. A logical
+//! DAG has no physical properties (#1200). No cost model is used. The accuracy model
 //! is used only to prune summaries no query reading them can use
 //! ([`PerComputationCandidates::without_summaries_no_query_can_use`]);
 //! ranking and discarding valid candidates belong to Stage 3.
@@ -89,7 +85,7 @@
 //! per output value; attached to the memo groups, each candidate's
 //! approximate inputs are sized for the values its readers' targets cover
 //! (`δ / (n · V)`,
-//! [`generate_per_computation_logical_memo_candidates`](crate::pass1::logical_memo_candidates::generate_per_computation_logical_memo_candidates)),
+//! [`pass1_memo`](crate::pass1::logical_memo_candidates::pass1_memo)),
 //! their final sizes. Pass 2 inherits them or takes the strictest shared
 //! reader's, and Stage 3 only checks the composed accuracy.
 //!
@@ -114,22 +110,20 @@ use asap_types::ir::scalar::{resolve_column_ref, ColumnRef, CompareOpKind, Scala
 use asap_types::ir::schema::{DataType, Schema};
 use asap_types::ir::schema::{
     EntityIdentity, ExactKind, FieldDataType, GroupingStrategy, NonNegativeWeightProof,
-    SketchAlgorithm, SketchKind, StatisticKind, SummaryInputExpr, SummaryUpdate, WeightDomain,
+    SketchAlgorithm, StatisticKind, SummaryInputExpr, SummaryUpdate, WeightDomain,
 };
 use asap_types::ir::{
     ASAPOp, BinaryOperator, ExprSemantics, NonASAPOp, Operator, OperatorNode, OperatorResultKind,
     Predicate, ProjectItem, QueryRoot, ScalarExpr, SchemaDerivationError,
 };
-use asap_types::physical::Materialization;
 use thiserror::Error;
 
 use asap_accuracy::composition::parse_raw_data_samples_sign_statistic;
 use asap_accuracy::estimators::hll;
 use asap_accuracy::propagation::{
-    approximate_inputs, bind_guarantees, raw_data_samples_of_metric, root_guarantee,
-    with_guarantees,
+    bind_guarantees, raw_data_samples_of_metric, root_guarantee, with_guarantees,
 };
-use asap_accuracy::sizing::{accuracy_budget, sized, sizing_target, sketch_statistic};
+use asap_accuracy::sizing::{accuracy_budget, sizing_target, sketch_statistic};
 use asap_accuracy::AccuracyModel;
 use asap_types::ir::properties::AccuracyGuarantee;
 use asap_types::workload::bounds::{declared_non_negative, series_read, values_per_result};
@@ -138,28 +132,23 @@ use asap_types::workload::DataWorkload;
 use crate::deployment_capabilities::{summary_supported, SupportedSummary};
 use crate::pass1::realization::summary_candidates;
 use asap_types::stages::{
-    ComputationTarget, DagOfLogicalMemoGroups, FusedComputation, HavingEntry, HavingPlacement,
-    HowToComputeAggregateMeasure, MemoGroupId, PruneReason,
+    ComputationTarget, FusedComputation, HavingEntry, HavingPlacement,
+    HowToComputeAggregateMeasure, Memo, MemoGroupId,
 };
 
 /// Unranked candidates of one measure and the candidates pruned for it.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct ComputationChoices {
     pub candidates: Vec<HowToComputeAggregateMeasure>,
-    pub pruned: Vec<(HowToComputeAggregateMeasure, PruneReason)>,
+    pub pruned: Vec<HowToComputeAggregateMeasure>,
 }
 
 impl ComputationChoices {
     /// Prune matching candidates; a pruned exact accumulator form is replaced by
     /// plain `Exact`, so the target keeps one exact option.
-    fn prune(
-        &mut self,
-        reason: PruneReason,
-        applies: impl Fn(&HowToComputeAggregateMeasure) -> bool,
-    ) {
+    fn prune(&mut self, applies: impl Fn(&HowToComputeAggregateMeasure) -> bool) {
         let pruned = prune_own(&mut self.candidates, applies);
-        self.pruned
-            .extend(pruned.into_iter().map(|choice| (choice, reason)));
+        self.pruned.extend(pruned);
     }
 }
 
@@ -183,22 +172,10 @@ fn prune_own(
     pruned
 }
 
-/// A way to compute a target's measure that Pass 1 pruned, and why.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct PrunedWayToCompute {
-    /// The target, by index in [`PerComputationCandidates::targets`].
-    pub target: usize,
-    /// Whether it was a way of the target's fused computation
-    /// ([`ComputationTarget::fused_computation`]) rather than its own.
-    pub of_fused_computation: bool,
-    pub way_to_compute: HowToComputeAggregateMeasure,
-    pub reason: PruneReason,
-}
-
 /// Compact Pass 1 inventory over the memo groups it walked: one target per
 /// measure of each aggregate group, however many queries read the group.
 /// Pass 1's working form, not its output:
-/// [`generate_per_computation_logical_memo_candidates`](crate::pass1::generate_per_computation_logical_memo_candidates)
+/// [`pass1_memo`](crate::pass1::pass1_memo)
 /// builds, prunes and attaches it to the memo groups. Public only to tests
 /// (feature `test-support`).
 #[derive(Debug, Clone)]
@@ -212,56 +189,9 @@ pub struct PerComputationCandidates {
     /// The targets; a whole-workload choice has one digit per target,
     /// ranging over [`ComputationTarget::choice_count`].
     pub targets: Vec<ComputationTarget>,
-    /// The ways to compute the targets' measures that Pass 1 pruned, in the
-    /// order it pruned them.
-    pub(crate) pruned_ways_to_compute: Vec<PrunedWayToCompute>,
 }
 
 impl PerComputationCandidates {
-    /// Whether this inventory walked `dag`, or a DAG built the same way from
-    /// the same roots: the same groups (by structural id, in the same order)
-    /// and each query's root over the same groups. Its targets' group ids
-    /// then name `dag`'s groups.
-    pub(crate) fn walked(&self, dag: &DagOfLogicalMemoGroups) -> bool {
-        use super::memo_population::NodeToStructuralIdCache;
-        let mut structural_ids = NodeToStructuralIdCache::default();
-        let group_of: HashMap<*const OperatorNode, MemoGroupId> = self
-            .logical_nodes
-            .iter()
-            .enumerate()
-            .map(|(g, node)| (Rc::as_ptr(node), MemoGroupId(g as u32)))
-            .collect();
-        dag.groups.len() == self.logical_nodes.len()
-            && dag.query_roots.len() == self.roots.len()
-            && dag
-                .groups
-                .iter()
-                .zip(self.logical_nodes.iter())
-                .all(|(group, node)| {
-                    Rc::ptr_eq(&group.logical_node, node)
-                        || structural_ids.structural_id(&group.logical_node)
-                            == structural_ids.structural_id(node)
-                })
-            && dag
-                .query_roots
-                .iter()
-                .zip(&self.roots)
-                .all(|(groups, root)| {
-                    let nodes = match root {
-                        QueryRoot::Operator(node) => vec![node],
-                        QueryRoot::Scalar(expr) => expr.operator_refs(),
-                    };
-                    matches!(groups, QueryRoot::Operator(_))
-                        == matches!(root, QueryRoot::Operator(_))
-                        && groups.operator_refs().len() == nodes.len()
-                        && groups
-                            .operator_refs()
-                            .into_iter()
-                            .zip(nodes)
-                            .all(|(g, node)| group_of.get(&Rc::as_ptr(node)) == Some(g))
-                })
-    }
-
     /// The `Aggregate` node of `target`'s memo group.
     pub fn aggregate(&self, target: &ComputationTarget) -> &Rc<OperatorNode> {
         &self.logical_nodes[target.aggregate_group.0 as usize]
@@ -323,37 +253,18 @@ impl PerComputationCandidates {
         })
     }
 
-    /// The ways to compute target `target`'s measure that Pass 1 pruned,
-    /// with their reasons, in pruning order: its own, or its fused
-    /// computation's when `of_fused_computation`.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn pruned_of_target(
-        &self,
-        target: usize,
-        of_fused_computation: bool,
-    ) -> Vec<(HowToComputeAggregateMeasure, PruneReason)> {
-        self.pruned_ways_to_compute
-            .iter()
-            .filter(|pruned| {
-                pruned.target == target && pruned.of_fused_computation == of_fused_computation
-            })
-            .map(|pruned| (pruned.way_to_compute.clone(), pruned.reason))
-            .collect()
-    }
-
     /// This inventory without the summary candidates the executor does not
     /// support (`supported_summaries`, the deployment's
     /// `DeploymentCapabilities::supported_summaries`; `None` supports
-    /// every one): a target's own are moved to its pruned candidates with
-    /// [`PruneReason::UnsupportedByDeployment`], and so are a fused
-    /// computation's (with all of them pruned, the fusion is not offered).
+    /// every one): a target's own are removed, and so are a fused
+    /// computation's (with all of them removed, the fusion is not offered).
     /// The readout is the statistic the measure's estimate reads (the outer measure's for a
     /// fused computation). With every summary supported it is unchanged.
     pub fn without_unsupported_summaries(
         mut self,
         supported_summaries: Option<&[SupportedSummary]>,
     ) -> Self {
-        for (index, target) in self.targets.iter_mut().enumerate() {
+        for target in self.targets.iter_mut() {
             let aggregate = &self.logical_nodes[target.aggregate_group.0 as usize];
             let Some(NonASAPOp::Aggregate { measures, .. }) = aggregate.non_asap() else {
                 continue;
@@ -366,24 +277,9 @@ impl PerComputationCandidates {
                 matches!(candidate, HowToComputeAggregateMeasure::Summary(family)
                     if !summary_supported(supported_summaries, family, readout))
             };
-            let pruned = |of_fused_computation| {
-                move |way_to_compute| PrunedWayToCompute {
-                    target: index,
-                    of_fused_computation,
-                    way_to_compute,
-                    reason: PruneReason::UnsupportedByDeployment,
-                }
-            };
-            let own = prune_own(&mut target.ways_to_compute, unsupported);
-            self.pruned_ways_to_compute
-                .extend(own.into_iter().map(pruned(false)));
+            prune_own(&mut target.ways_to_compute, unsupported);
             if let Some(fused) = &mut target.fused_computation {
-                let (removed, kept): (Vec<_>, _) = std::mem::take(&mut fused.ways_to_compute)
-                    .into_iter()
-                    .partition(unsupported);
-                fused.ways_to_compute = kept;
-                self.pruned_ways_to_compute
-                    .extend(removed.into_iter().map(pruned(true)));
+                fused.ways_to_compute.retain(|way| !unsupported(way));
             }
         }
         self
@@ -391,8 +287,7 @@ impl PerComputationCandidates {
 
     /// This inventory without the summary candidates no query can use
     /// (#1047, accuracy A1 of #1095): a summary of a target (its own, or
-    /// its fused computation's) is moved to its pruned candidates with
-    /// [`PruneReason::NoErrorBoundForQueryTarget`] when, for every query
+    /// its fused computation's) is removed when, for every query
     /// whose root reaches the target's aggregate,
     /// `output_can_meet_target` says no: the query's output, composed
     /// with that summary and every other target exact, has no error bound
@@ -413,7 +308,7 @@ impl PerComputationCandidates {
     /// pruned, and with every fused summary pruned the fusion is not
     /// offered. A summary whose composition fails is kept.
     ///
-    /// Pass 1's entry (`generate_per_computation_logical_memo_candidates`)
+    /// Pass 1's entry (`pass1_memo`)
     /// calls it only when the deployment's accuracy model and evidence
     /// cannot accept an output without its guarantee.
     pub fn without_summaries_no_query_can_use(
@@ -471,9 +366,7 @@ impl PerComputationCandidates {
                 };
                 let mut choices = vec![0; self.targets.len()];
                 choices[index] = choice;
-                let Ok(composed) =
-                    compose_with_accuracy_budget_parts(&self, &roots, &choices, Some(1))
-                else {
+                let Ok(composed) = compose(&self, &roots, &choices) else {
                     continue;
                 };
                 if !queries
@@ -550,24 +443,11 @@ impl PerComputationCandidates {
                     fused.ways_to_compute.get(choice - own).cloned()
                 })
                 .collect();
-            let pruned = |of_fused_computation| {
-                move |way_to_compute| PrunedWayToCompute {
-                    target: index,
-                    of_fused_computation,
-                    way_to_compute,
-                    reason: PruneReason::NoErrorBoundForQueryTarget,
-                }
-            };
-            let removed = prune_own(&mut target.ways_to_compute, |way| own_pruned.contains(way));
-            self.pruned_ways_to_compute
-                .extend(removed.into_iter().map(pruned(false)));
+            prune_own(&mut target.ways_to_compute, |way| own_pruned.contains(way));
             if let Some(fused) = &mut target.fused_computation {
-                let (removed, kept): (Vec<_>, _) = std::mem::take(&mut fused.ways_to_compute)
-                    .into_iter()
-                    .partition(|way| fused_pruned.contains(way));
-                fused.ways_to_compute = kept;
-                self.pruned_ways_to_compute
-                    .extend(removed.into_iter().map(pruned(true)));
+                fused
+                    .ways_to_compute
+                    .retain(|way| !fused_pruned.contains(way));
             }
         }
         self
@@ -667,8 +547,6 @@ fn absorbed_targets(targets: &[ComputationTarget]) -> impl Iterator<Item = usize
 pub enum PerComputationCandidateError {
     #[error(transparent)]
     Structure(#[from] SchemaDerivationError),
-    #[error("logical candidate input already has assigned execution timing or materialization")]
-    AssignedPhysicalAnnotation,
     #[error("logical candidate input already contains ASAP operators")]
     ContainsAsap,
     /// `root` (the query's index in the workload) and `measure` locate the target;
@@ -727,20 +605,12 @@ pub(super) fn computation_candidates_for_intent(
             }
         }
         let summaries = summary_candidates(intent).into_iter();
-        if matches!(intent, AggIntent::Quantile { q, .. } if !(0.0..=1.0).contains(q)) {
-            choices.pruned.extend(summaries.map(|algorithm| {
-                (
-                    HowToComputeAggregateMeasure::Summary(algorithm),
-                    PruneReason::QuantileOutsideUnitInterval,
-                )
-            }));
-        } else if target.is_exact() {
-            choices.pruned.extend(summaries.map(|algorithm| {
-                (
-                    HowToComputeAggregateMeasure::Summary(algorithm),
-                    PruneReason::RequiresExact,
-                )
-            }));
+        if matches!(intent, AggIntent::Quantile { q, .. } if !(0.0..=1.0).contains(q))
+            || target.is_exact()
+        {
+            choices
+                .pruned
+                .extend(summaries.map(HowToComputeAggregateMeasure::Summary));
         } else {
             choices
                 .candidates
@@ -801,9 +671,9 @@ fn placement(below: bool) -> HavingPlacement {
 /// the group applies the same predicate, so every candidate of a shared
 /// aggregate computes the group's own rows (#1089).
 pub fn generate_per_computation_candidates(
-    dag: &DagOfLogicalMemoGroups,
+    memo: &Memo,
 ) -> Result<PerComputationCandidates, PerComputationCandidateError> {
-    let logical_nodes: Rc<[Rc<OperatorNode>]> = dag
+    let logical_nodes: Rc<[Rc<OperatorNode>]> = memo
         .groups
         .iter()
         .map(|group| Rc::clone(&group.logical_node))
@@ -813,7 +683,17 @@ pub fn generate_per_computation_candidates(
         .enumerate()
         .map(|(g, node)| (Rc::as_ptr(node), MemoGroupId(g as u32)))
         .collect();
-    let roots = dag.roots_over_groups();
+    // Each query's root over the groups' logical nodes, in workload order:
+    // a group several queries read is one node.
+    let node = |g: &MemoGroupId| Rc::clone(&logical_nodes[g.0 as usize]);
+    let roots: Vec<QueryRoot> = memo
+        .query_roots
+        .iter()
+        .map(|root| match root {
+            QueryRoot::Operator(g) => QueryRoot::Operator(node(g)),
+            QueryRoot::Scalar(expr) => QueryRoot::Scalar(expr.map_operator_refs(&mut |g| node(g))),
+        })
+        .collect();
     let mut seen = HashSet::new();
     // Each aggregate group with the first query that reaches it.
     let mut aggregates = Vec::new();
@@ -835,10 +715,6 @@ pub fn generate_per_computation_candidates(
                 if !seen.insert(Rc::as_ptr(&node)) {
                     continue;
                 }
-                if node.timing.is_some() || node.materialization != Materialization::NotMaterialized
-                {
-                    return Err(PerComputationCandidateError::AssignedPhysicalAnnotation);
-                }
                 for child in node.children() {
                     consumers
                         .entry(Rc::as_ptr(child))
@@ -852,7 +728,6 @@ pub fn generate_per_computation_candidates(
         }
     }
     let mut targets = Vec::new();
-    let mut pruned_ways_to_compute = Vec::new();
     for (query, node) in aggregates {
         let Some(NonASAPOp::Aggregate {
             measures,
@@ -914,25 +789,15 @@ pub fn generate_per_computation_candidates(
                 continue;
             }
             if matches!(intent, AggIntent::Avg { .. }) && nullable_avg_input(&node, intent) {
-                choices.prune(PruneReason::NullableAvgInput, |choice| {
+                choices.prune(|choice| {
                     matches!(choice, HowToComputeAggregateMeasure::ExactAccumulator(_))
                 });
             }
             if matches!(intent, AggIntent::Count { .. })
                 && node.children()[0].result_kind == OperatorResultKind::Relation
             {
-                choices.prune(PruneReason::NoRelationalCountSketchRealization, |choice| {
-                    matches!(choice, HowToComputeAggregateMeasure::Summary(_))
-                });
+                choices.prune(|choice| matches!(choice, HowToComputeAggregateMeasure::Summary(_)));
             }
-            pruned_ways_to_compute.extend(choices.pruned.into_iter().map(
-                |(way_to_compute, reason)| PrunedWayToCompute {
-                    target: targets.len(),
-                    of_fused_computation: false,
-                    way_to_compute,
-                    reason,
-                },
-            ));
             targets.push(ComputationTarget {
                 aggregate_group,
                 measure_index: measure,
@@ -944,18 +809,13 @@ pub fn generate_per_computation_candidates(
         }
     }
     add_whole_expression_targets(&mut targets, &logical_nodes);
-    prune_topk_heaps_over_one_row_per_item(
-        &mut targets,
-        &logical_nodes,
-        &mut pruned_ways_to_compute,
-    );
+    prune_topk_heaps_over_one_row_per_item(&mut targets, &logical_nodes);
     add_nested_sum_targets(&mut targets, &logical_nodes);
     close_absorptions(&mut targets);
     Ok(PerComputationCandidates {
         roots,
         logical_nodes,
         targets,
-        pruned_ways_to_compute,
     })
 }
 
@@ -1199,15 +1059,14 @@ fn add_whole_expression_targets(
     }
 }
 
-/// Prunes the own heap candidates of each PromQL top-k
-/// ([`PruneReason::TopKHeapOverOneRowPerItem`]); a fused whole-expression
+/// Prunes the own heap candidates of each PromQL top-k: the heap reads
+/// one row per item, so exact is no costlier; a fused whole-expression
 /// heap ([`add_whole_expression_targets`]) has already moved out of them.
 fn prune_topk_heaps_over_one_row_per_item(
     targets: &mut [ComputationTarget],
     logical_nodes: &[Rc<OperatorNode>],
-    pruned_ways_to_compute: &mut Vec<PrunedWayToCompute>,
 ) {
-    for (index, target) in targets.iter_mut().enumerate() {
+    for target in targets.iter_mut() {
         let Some(NonASAPOp::Aggregate {
             measures, child, ..
         }) = logical_nodes[target.aggregate_group.0 as usize].non_asap()
@@ -1225,18 +1084,10 @@ fn prune_topk_heaps_over_one_row_per_item(
         if !reads_only_time_series(child) {
             continue;
         }
-        let pruned = prune_own(&mut target.ways_to_compute, |candidate| {
+        prune_own(&mut target.ways_to_compute, |candidate| {
             matches!(candidate, HowToComputeAggregateMeasure::Summary(family)
                 if family.capability().answers(StatisticKind::TopK))
         });
-        pruned_ways_to_compute.extend(pruned.into_iter().map(|way_to_compute| {
-            PrunedWayToCompute {
-                target: index,
-                of_fused_computation: false,
-                way_to_compute,
-                reason: PruneReason::TopKHeapOverOneRowPerItem,
-            }
-        }));
     }
 }
 
@@ -1279,14 +1130,7 @@ fn whole_expression_input(
     // update serves both heap families; plan selection decides whether
     // Count-Min is admissible, as for every other Count-Min candidate.
     let family = FieldDataType::Sketch(
-        SketchKind::new(
-            SketchAlgorithm::CountSketchWithHeap,
-            asap_types::ir::schema::SketchParams::CountSketchWithHeap {
-                width: 1,
-                depth: 1,
-                heap_size: 1,
-            },
-        ),
+        SketchAlgorithm::CountSketchWithHeap,
         GroupingStrategy::default(),
     );
     let realized = realize_keyed_additive_summary_input(intent, &family, reduction, child)?;
@@ -1342,9 +1186,8 @@ fn with_raw_data_samples_requirement(
 /// accumulators divided, a fused computation by one state over the absorbed
 /// target's input, and any other measure by its own single-measure
 /// aggregate; several measures are joined back on the group keys. A summary
-/// is sized here for its measure's accuracy requirement; Pass 1 leaves it
-/// unsized; several approximate inputs of one query share its budget
-/// equally (`accuracy_budget_parts_per_measure`). A measure filter becomes `SummaryAgg.filter`;
+/// is sized here for its measure's accuracy requirement. A measure filter
+/// becomes `SummaryAgg.filter`;
 /// `HAVING` is applied as its target records. A sub-DAG shared between roots
 /// stays shared. Every node carries the guarantee `asap_accuracy::propagation::composed_guarantee`
 /// gives it.
@@ -1353,38 +1196,15 @@ pub fn compose_logical_candidate(
     inventory: &PerComputationCandidates,
     choice: &[usize],
 ) -> Result<Vec<QueryRoot>, PerComputationCandidateError> {
-    compose_with_accuracy_budget_parts(inventory, &inventory.roots, choice, None)
-}
-
-/// [`compose_logical_candidate`] with every sketch summary sized for one of
-/// `accuracy_budget_parts` equal parts of its measure's budget, whatever the
-/// roots compose: the size a summary gets when it is one of
-/// `accuracy_budget_parts` approximate inputs of a query
-/// ([`accuracy_budget_parts_per_measure`]). `accuracy_budget_parts` 1 sizes
-/// for the whole budget. The sub-expression memo composes one aggregate
-/// alone this way, once per number of parts its readers may give it.
-pub(crate) fn compose_logical_candidate_with_accuracy_budget_parts(
-    inventory: &PerComputationCandidates,
-    choice: &[usize],
-    accuracy_budget_parts: usize,
-) -> Result<Vec<QueryRoot>, PerComputationCandidateError> {
-    compose_with_accuracy_budget_parts(
-        inventory,
-        &inventory.roots,
-        choice,
-        Some(accuracy_budget_parts),
-    )
+    compose(inventory, &inventory.roots, choice)
 }
 
 /// [`compose_logical_candidate`] of `roots` (some of `inventory.roots`),
-/// each summary sized for one of `accuracy_budget_parts` equal parts of its
-/// budget, or as
-/// [`accuracy_budget_parts_per_measure`] splits it when `None`.
-fn compose_with_accuracy_budget_parts(
+/// each summary sized for its measure's whole budget.
+fn compose(
     inventory: &PerComputationCandidates,
     roots: &[QueryRoot],
     choice: &[usize],
-    accuracy_budget_parts: Option<usize>,
 ) -> Result<Vec<QueryRoot>, PerComputationCandidateError> {
     if choice.len() != inventory.targets.len() {
         return Err(PerComputationCandidateError::InvalidChoice);
@@ -1412,29 +1232,7 @@ fn compose_with_accuracy_budget_parts(
         .filter(|entry| entry.placement == HavingPlacement::BelowAggregate)
         .filter_map(|entry| entry.filter.as_ref().map(Rc::as_ptr))
         .collect();
-    // Each summary is first sized for its measure's whole budget. A query
-    // whose value composes several approximate inputs is then composed
-    // again with each sized for an equal share ([`accuracy_budget_parts_per_measure`]).
-    let whole = Sizing::default();
-    let composed = compose_roots(roots, &chosen, &pushed_below, &whole)?;
-    let shares = match accuracy_budget_parts {
-        None => accuracy_budget_parts_per_measure(&composed, &whole.built.into_inner()),
-        Some(share) if share > 1 => whole
-            .built
-            .into_inner()
-            .into_iter()
-            .map(|(_, key)| (key, share))
-            .collect(),
-        Some(_) => HashMap::new(),
-    };
-    if shares.is_empty() {
-        return Ok(composed);
-    }
-    let shared = Sizing {
-        shares,
-        ..Sizing::default()
-    };
-    compose_roots(roots, &chosen, &pushed_below, &shared)
+    compose_roots(roots, &chosen, &pushed_below, &Sizing::default())
 }
 
 /// One measure of an aggregate: the aggregate and the measure's index.
@@ -1443,42 +1241,8 @@ type MeasureKey = (*const OperatorNode, usize);
 /// How [`compose_logical_candidate`] sizes summaries in one composition.
 #[derive(Default)]
 struct Sizing {
-    /// How many approximate inputs each measure's summary shares its
-    /// query's budget with; a measure not listed has the whole budget.
-    shares: HashMap<MeasureKey, usize>,
     /// Every sketch summary state built, with the measure it sizes.
     built: std::cell::RefCell<Vec<(Rc<OperatorNode>, MeasureKey)>>,
-}
-
-/// The equal budget split among the approximate inputs of each query
-/// (#669b): a query whose value carries a guarantee that is not exact
-/// composes every sketch summary state below its root
-/// ([`approximate_inputs`]), so with `n ≥ 2` of them each is sized for one
-/// of `n` equal shares of the query's target. A state several queries read
-/// takes the largest `n`. Only states `built` lists (by the measure they
-/// size) are split. Empty when no query composes two approximate inputs.
-fn accuracy_budget_parts_per_measure(
-    roots: &[QueryRoot],
-    built: &[(Rc<OperatorNode>, MeasureKey)],
-) -> HashMap<MeasureKey, usize> {
-    let measure: HashMap<_, _> = built
-        .iter()
-        .map(|(state, key)| (Rc::as_ptr(state), *key))
-        .collect();
-    let mut shares = HashMap::new();
-    for root in roots {
-        let inputs = approximate_inputs(root);
-        if inputs.len() < 2 {
-            continue;
-        }
-        for state in &inputs {
-            if let Some(key) = measure.get(&Rc::as_ptr(state)) {
-                let share = shares.entry(*key).or_insert(1);
-                *share = inputs.len().max(*share);
-            }
-        }
-    }
-    shares
 }
 
 /// Every root of `roots` with the chosen candidates substituted, each
@@ -1762,10 +1526,7 @@ fn whole_expression(
     let state = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
         child: cache[&Rc::as_ptr(&input)].clone(),
         input: with_raw_data_samples_requirement(update, raw_data_samples_of),
-        family: FieldDataType::Sketch(
-            sized(algorithm, intent, sizing.share(key)),
-            GroupingStrategy::default(),
-        ),
+        family: FieldDataType::Sketch(*algorithm, GroupingStrategy::default()),
         reduction: partitions,
         grouping: GroupingStrategy::default(),
         filter: None,
@@ -1929,10 +1690,7 @@ fn substitute_measure(
             finalized(&kinds[0], intent, read)?
         }
         HowToComputeAggregateMeasure::Summary(algorithm) => {
-            let family = FieldDataType::Sketch(
-                sized(algorithm, intent, sizing.share(key)),
-                GroupingStrategy::default(),
-            );
+            let family = FieldDataType::Sketch(*algorithm, GroupingStrategy::default());
             let summary_input = state(
                 family,
                 intent,
@@ -2212,14 +1970,6 @@ fn key_items(keys: usize) -> Vec<ProjectItem> {
         .collect()
 }
 
-impl Sizing {
-    /// How many approximate inputs `key`'s summary shares its query's
-    /// budget with.
-    fn share(&self, key: MeasureKey) -> usize {
-        self.shares.get(&key).copied().unwrap_or(1)
-    }
-}
-
 /// What a measure's state reads from each row of `input`, resolvable there.
 /// A SQL `count` reads [`counted_column`]; any other measure, a PromQL count
 /// included, reads its input column (the sample value when it names none).
@@ -2313,7 +2063,7 @@ fn summary_update(
     weight: SummaryInputExpr,
 ) -> Result<SummaryUpdate, PerComputationCandidateError> {
     let algorithm = match family {
-        FieldDataType::Sketch(kind, _) => Some(kind.algorithm()),
+        FieldDataType::Sketch(kind, _) => Some(kind),
         _ => None,
     };
     Ok(match (intent, algorithm) {
@@ -2432,7 +2182,7 @@ mod tests {
         AccuracyGuarantee, AccuracyMetric, BoundExpr, ProbabilityExpr,
     };
     use asap_types::ir::properties::AccuracyTarget;
-    use asap_types::ir::schema::{SketchParams, SketchStatistic};
+    use asap_types::ir::schema::SketchStatistic;
     /// Approximate count keeps one exact option, its accumulator, beside the
     /// universal summary; plain exact execution is not offered.
     #[test]
@@ -3143,7 +2893,7 @@ mod tests {
         // as a column; a query over aggregated rows is planned over labels.
         let root = asap_types::ir::schema::schema_support::with_promql_series_identity(&root)
             .unwrap_or(root);
-        generate_per_computation_candidates(&crate::stage0::generate_dag_of_logical_memo_groups(&[
+        generate_per_computation_candidates(&crate::stage0::memo_of_queries(&[
             QueryRoot::Operator(root),
         ]))
         .unwrap()
@@ -3175,7 +2925,7 @@ mod tests {
             .filter(|node| {
                 matches!(node.asap(), Some(ASAPOp::SummaryAgg {
                     family: FieldDataType::Sketch(kind, _), ..
-                }) if kind.algorithm().capability().answers(StatisticKind::TopK))
+                }) if kind.capability().answers(StatisticKind::TopK))
             })
             .collect()
     }
@@ -3259,9 +3009,9 @@ mod tests {
             "topk by (job) (2, sum by (service, job) (rate(m[1m])))",
             AccuracyTarget::max_error(0.1),
         );
-        let inventory = generate_per_computation_candidates(
-            &crate::stage0::generate_dag_of_logical_memo_groups(&[QueryRoot::Operator(root)]),
-        )
+        let inventory = generate_per_computation_candidates(&crate::stage0::memo_of_queries(&[
+            QueryRoot::Operator(root),
+        ]))
         .unwrap();
         let topk = topk_target(&inventory);
         let mut heaps = 0;
@@ -3895,89 +3645,6 @@ mod tests {
         assert_eq!(sign_statistic(&stats), None);
     }
 
-    /// The sketch parameters of every summary state below `root`.
-    fn sketch_params(root: &Rc<OperatorNode>) -> Vec<SketchParams> {
-        OperatorNode::reachable(root)
-            .into_iter()
-            .filter_map(|node| match node.asap() {
-                Some(ASAPOp::SummaryAgg {
-                    family: FieldDataType::Sketch(kind, _),
-                    ..
-                }) => Some(kind.params().clone()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// `query` composed with target `t` at the candidate `pick(t, its
-    /// candidates)` returns the position of.
-    fn composed_picking(
-        query: &str,
-        pick: impl Fn(usize, &[HowToComputeAggregateMeasure]) -> usize,
-    ) -> Rc<OperatorNode> {
-        let inventory = inventory(query);
-        let choice: Vec<usize> = inventory
-            .targets
-            .iter()
-            .enumerate()
-            .map(|(t, target)| pick(t, &target.ways_to_compute))
-            .collect();
-        let composed = compose_logical_candidate(&inventory, &choice).unwrap();
-        let QueryRoot::Operator(root) = &composed[0] else {
-            panic!("operator root")
-        };
-        root.clone()
-    }
-
-    fn position_of(
-        candidates: &[HowToComputeAggregateMeasure],
-        candidate: HowToComputeAggregateMeasure,
-    ) -> usize {
-        candidates
-            .iter()
-            .position(|c| *c == candidate)
-            .expect("the candidate is offered")
-    }
-
-    fn cms(eps: f64, delta: f64) -> SketchParams {
-        SketchParams::Cms {
-            width: asap_accuracy::test_support::cms_width(eps),
-            depth: asap_accuracy::test_support::cms_depth(delta),
-        }
-    }
-
-    /// A combination of approximate values splits the query's budget
-    /// equally among them (#669b): the difference of two Count-Min counts
-    /// sizes each for ε/2 and δ/2 of the query's ε = 0.01, δ = 0.001.
-    #[test]
-    fn approximate_inputs_of_a_combination_share_the_budget_equally() {
-        let both = composed_picking("count by (job) (a) - count by (job) (b)", |_, c| {
-            position_of(
-                c,
-                HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Cms),
-            )
-        });
-        assert!(both.guarantee.as_ref().is_some_and(|g| !g.is_exact()));
-        assert_eq!(sketch_params(&both), vec![cms(0.005, 0.0005); 2]);
-    }
-
-    /// Only the inputs that are approximate in the combination share the
-    /// budget: with one count exact, the other gets all of it.
-    #[test]
-    fn an_exact_input_takes_no_share_of_the_budget() {
-        let one = composed_picking("count by (job) (a) - count by (job) (b)", |t, c| {
-            if t == 0 {
-                position_of(
-                    c,
-                    HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Cms),
-                )
-            } else {
-                0
-            }
-        });
-        assert_eq!(sketch_params(&one), vec![cms(0.01, 0.001)]);
-    }
-
     /// The first composed candidate of `query`.
     fn inventory_root(query: &str) -> Rc<OperatorNode> {
         let inventory = inventory(query);
@@ -3993,13 +3660,7 @@ mod tests {
     /// non-negative: an open requirement (`RawDataSamplesOfMetric`) is not a proof.
     #[test]
     fn count_min_estimate_has_no_bound_over_an_open_requirement() {
-        let family = FieldDataType::Sketch(
-            SketchKind::new(
-                SketchAlgorithm::Cms,
-                asap_types::ir::schema::SketchParams::Cms { width: 8, depth: 2 },
-            ),
-            GroupingStrategy::default(),
-        );
+        let family = FieldDataType::Sketch(SketchAlgorithm::Cms, GroupingStrategy::default());
         let query = SketchStatistic::PointCount {
             key: ColumnRef::SampleValue,
             value: None,
@@ -4033,16 +3694,7 @@ mod tests {
     /// once bound to 1.
     #[test]
     fn count_min_estimate_over_raw_data_samples_is_gated_on_the_metric() {
-        let family = FieldDataType::Sketch(
-            SketchKind::new(
-                SketchAlgorithm::Cms,
-                asap_types::ir::schema::SketchParams::Cms {
-                    width: 272,
-                    depth: 5,
-                },
-            ),
-            GroupingStrategy::default(),
-        );
+        let family = FieldDataType::Sketch(SketchAlgorithm::Cms, GroupingStrategy::default());
         let query = SketchStatistic::PointCount {
             key: ColumnRef::SampleValue,
             value: None,
@@ -4076,19 +3728,8 @@ mod tests {
     /// every group, whose distinct items the source's bound does not bound.
     #[test]
     fn classic_hll_confidence_needs_one_instance_over_a_sources_own_rows() {
-        use asap_types::ir::schema::{HydraKind, HydraParams};
-        let hll = |grouping| {
-            FieldDataType::Sketch(
-                SketchKind::new(
-                    SketchAlgorithm::Hll,
-                    SketchParams::Hll {
-                        precision: 15,
-                        relative_error: Some(0.05),
-                    },
-                ),
-                grouping,
-            )
-        };
+        use asap_types::ir::schema::HydraKind;
+        let hll = |grouping| FieldDataType::Sketch(SketchAlgorithm::Hll, grouping);
         let input = |query| crate::test_support::lower_promql(query, AccuracyTarget::exact());
         let guarantee = |family: &FieldDataType, query| {
             source_distinct_guarantee(family, &SketchStatistic::Cardinality, &input(query))
@@ -4106,258 +3747,8 @@ mod tests {
         }
         let hydra = hll(GroupingStrategy::SharedMultiSubpopulation {
             kind: HydraKind::HydraCms,
-            params: HydraParams::HydraCms {
-                width: 8,
-                depth: 2,
-                shared_rows: 2,
-                shared_columns: 8,
-            },
         });
         assert!(guarantee(&hydra, "a").is_none());
-    }
-
-    /// A deployment whose executor supports only `supported`: each family
-    /// with its readouts.
-    fn supporting(supported: &[(SketchAlgorithm, &[StatisticKind])]) -> Vec<SupportedSummary> {
-        supported
-            .iter()
-            .map(|(family, readouts)| SupportedSummary {
-                family: *family,
-                readouts: readouts.to_vec(),
-            })
-            .collect()
-    }
-
-    /// A family the deployment cannot build is pruned from Pass 1 with
-    /// `UnsupportedByDeployment`; the supported family and the exact option
-    /// stay. With every summary supported the inventory is unchanged.
-    #[test]
-    fn a_family_the_deployment_cannot_build_is_pruned() {
-        let query = "quantile_over_time(0.99, m[5m])";
-        let unrestricted = inventory(query);
-        let restricted = inventory(query).without_unsupported_summaries(Some(&supporting(&[(
-            SketchAlgorithm::Kll,
-            &[StatisticKind::Quantile],
-        )])));
-        let target = &restricted.targets[0];
-        assert_eq!(
-            target.ways_to_compute,
-            [
-                HowToComputeAggregateMeasure::Exact,
-                HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Kll)
-            ]
-        );
-        assert_eq!(
-            restricted.pruned_of_target(0, false),
-            [(
-                HowToComputeAggregateMeasure::Summary(SketchAlgorithm::DDSketch),
-                PruneReason::UnsupportedByDeployment
-            )]
-        );
-        let default = inventory(query).without_unsupported_summaries(None);
-        assert_eq!(
-            default.targets[0].ways_to_compute,
-            unrestricted.targets[0].ways_to_compute
-        );
-    }
-
-    /// A family the deployment builds but cannot answer the measure's
-    /// readout from is pruned: UnivMon, supported for distinct counts and
-    /// L2 only, is no count candidate; Count-Min, supported for the total,
-    /// stays.
-    #[test]
-    fn a_readout_the_deployment_cannot_answer_prunes_its_family() {
-        let restricted = inventory("count_over_time(m[1m])").without_unsupported_summaries(Some(
-            &supporting(&[
-                (SketchAlgorithm::Cms, &[StatisticKind::Total]),
-                (
-                    SketchAlgorithm::UnivMon,
-                    &[StatisticKind::Distinct, StatisticKind::FrequencyL2],
-                ),
-            ]),
-        ));
-        let target = &restricted.targets[0];
-        assert_eq!(
-            target.ways_to_compute,
-            [
-                HowToComputeAggregateMeasure::ExactAccumulator(vec![ExactKind::Count]),
-                HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Cms),
-            ]
-        );
-        assert_eq!(
-            restricted.pruned_of_target(0, false),
-            [(
-                HowToComputeAggregateMeasure::Summary(SketchAlgorithm::UnivMon),
-                PruneReason::UnsupportedByDeployment
-            )]
-        );
-    }
-
-    /// A fused whole-expression top-k loses the heap families the
-    /// deployment cannot answer top-k from, each recorded with its reason,
-    /// and is not offered once it has none left: the target and the inner
-    /// sum keep their exact options.
-    #[test]
-    fn a_fused_computation_loses_its_unsupported_heaps() {
-        let query = "topk by (job) (10, sum_over_time(m[1m]))";
-        let one_heap = inventory(query).without_unsupported_summaries(Some(&supporting(&[(
-            SketchAlgorithm::CountSketchWithHeap,
-            &[StatisticKind::TopK],
-        )])));
-        let topk = topk_target(&one_heap);
-        assert_eq!(
-            one_heap.targets[topk]
-                .fused_computation
-                .as_ref()
-                .unwrap()
-                .ways_to_compute,
-            [HowToComputeAggregateMeasure::Summary(
-                SketchAlgorithm::CountSketchWithHeap
-            )]
-        );
-        assert_eq!(
-            one_heap.pruned_of_target(topk, true),
-            [(
-                HowToComputeAggregateMeasure::Summary(SketchAlgorithm::CmsWithHeap),
-                PruneReason::UnsupportedByDeployment
-            )]
-        );
-        assert_eq!(one_heap.combinations(), 2);
-        // Count-Min with a heap answers item frequencies, not top-k.
-        let none = inventory(query).without_unsupported_summaries(Some(&supporting(&[(
-            SketchAlgorithm::CmsWithHeap,
-            &[StatisticKind::ItemFrequency],
-        )])));
-        let topk = topk_target(&none);
-        let fused = none.targets[topk].fused_computation.as_ref().unwrap();
-        assert!(fused.ways_to_compute.is_empty());
-        assert_eq!(
-            none.pruned_of_target(topk, true),
-            [
-                (
-                    HowToComputeAggregateMeasure::Summary(SketchAlgorithm::CmsWithHeap),
-                    PruneReason::UnsupportedByDeployment
-                ),
-                (
-                    HowToComputeAggregateMeasure::Summary(SketchAlgorithm::CountSketchWithHeap),
-                    PruneReason::UnsupportedByDeployment
-                ),
-            ]
-        );
-        assert_eq!(
-            none.targets[topk].ways_to_compute,
-            [HowToComputeAggregateMeasure::Exact]
-        );
-        assert_eq!(none.combinations(), 1);
-    }
-
-    /// Mergeable intents give exactly their accumulator (`avg`: sum, count); other exact-only intents give `Exact`.
-    #[test]
-    fn intent_candidate_matrix() {
-        use asap_types::ir::operator::agg_intent::{MathFunc, TimeFunc};
-        use AggIntent as A;
-        use ExactKind as E;
-        let accumulator = |kinds: Vec<E>| HowToComputeAggregateMeasure::ExactAccumulator(kinds);
-        let exact_count = A::Count {
-            accuracy: AccuracyTarget::exact(),
-        };
-        let mut matrix: Vec<(A, ComputationChoices)> = [
-            (A::Min { col: None }, vec![E::Min]),
-            (A::Max { col: None }, vec![E::Max]),
-            (A::IRate, vec![E::IRate]),
-            (A::Increase, vec![E::Increase]),
-            (A::Sum { col: None }, vec![E::Sum]),
-            (A::Rate, vec![E::Rate]),
-            (A::Avg { col: None }, vec![E::Sum, E::Count]),
-        ]
-        .into_iter()
-        .map(|(intent, kinds)| {
-            (
-                intent,
-                ComputationChoices {
-                    candidates: vec![accumulator(kinds)],
-                    pruned: vec![],
-                },
-            )
-        })
-        .collect();
-        // An exact count prunes its summaries for requiring an exact answer.
-        matrix.push((
-            exact_count.clone(),
-            ComputationChoices {
-                candidates: vec![accumulator(vec![E::Count])],
-                pruned: summary_candidates(&exact_count)
-                    .iter()
-                    .map(|a| {
-                        (
-                            HowToComputeAggregateMeasure::Summary(*a),
-                            PruneReason::RequiresExact,
-                        )
-                    })
-                    .collect(),
-            },
-        ));
-        let exact_only = [
-            A::PearsonCorr { left: 0, right: 1 },
-            A::Extension {
-                ext_kind: "frequency".into(),
-                payload: serde_json::json!({ "item": "checkout" }),
-            },
-            A::HistogramQuantile { q: 0.99, le: 0 },
-            A::Changes,
-            A::Delta,
-            A::IDelta,
-            A::Deriv,
-            A::Resets,
-            A::PredictLinear { seconds: 60.0 },
-            A::DoubleExpSmoothing {
-                smoothing: 0.5,
-                trend: 0.5,
-            },
-            A::HistogramCount,
-            A::HistogramSum,
-            A::HistogramAvg,
-            A::HistogramStdDev,
-            A::HistogramStdVar,
-            A::HistogramFraction {
-                lower: 0.0,
-                upper: 1.0,
-            },
-            A::Math(MathFunc::Abs),
-            A::TimeFn(TimeFunc::Hour),
-            A::Absent {
-                labels: Default::default(),
-            },
-            A::AbsentOverTime,
-            A::PresentOverTime,
-            A::Group,
-            A::CountValues { label: "v".into() },
-            A::LastOverTime,
-            A::FirstOverTime,
-            A::MadOverTime,
-            A::TsOfMinOverTime,
-            A::TsOfMaxOverTime,
-            A::TsOfFirstOverTime,
-            A::TsOfLastOverTime,
-        ];
-        matrix.extend(exact_only.into_iter().map(|intent| {
-            (
-                intent,
-                ComputationChoices {
-                    candidates: vec![HowToComputeAggregateMeasure::Exact],
-                    pruned: vec![],
-                },
-            )
-        }));
-        for (intent, expected) in &matrix {
-            assert_eq!(
-                &computation_candidates_for_intent(intent).unwrap(),
-                expected,
-                "{intent:?}"
-            );
-        }
-        // Correlation never gets a single-input summary.
-        assert!(summary_candidates(&A::PearsonCorr { left: 0, right: 1 }).is_empty());
     }
 
     /// `avg_over_time` divides with a finite-division guard; a grouped `avg` does not.
@@ -4390,7 +3781,7 @@ mod tests {
     /// (closed) rows a grouped top-k gets no whole-expression heap.
     fn inventory_at(query: &str, accuracy: AccuracyTarget) -> PerComputationCandidates {
         let root = crate::test_support::lower_promql(query, accuracy);
-        generate_per_computation_candidates(&crate::stage0::generate_dag_of_logical_memo_groups(&[
+        generate_per_computation_candidates(&crate::stage0::memo_of_queries(&[
             QueryRoot::Operator(root),
         ]))
         .unwrap()
@@ -4580,343 +3971,5 @@ mod tests {
             heap_update(&state).item,
             Some(SummaryInputExpr::Tuple(_))
         ));
-    }
-
-    /// A KLL quantile over an exact sum accumulator composes per node, the sum adding no error.
-    #[test]
-    fn nested_quantile_over_an_exact_sum_composes_per_node() {
-        let sum = HowToComputeAggregateMeasure::ExactAccumulator(vec![ExactKind::Sum]);
-        let kll = HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Kll);
-        let inventory = inventory_at(
-            "quantile(0.9, sum by (job) (m))",
-            AccuracyTarget::max_error(0.01).failure_probability(0.01),
-        );
-        let choice: Vec<usize> = inventory
-            .targets
-            .iter()
-            .map(|target| {
-                let candidates = &target.ways_to_compute;
-                if candidates.contains(&kll) {
-                    position_of(candidates, kll.clone())
-                } else {
-                    position_of(candidates, sum.clone())
-                }
-            })
-            .collect();
-        let composed = compose_logical_candidate(&inventory, &choice).unwrap();
-        let QueryRoot::Operator(root) = &composed[0] else {
-            panic!("operator root")
-        };
-        let estimate = OperatorNode::reachable(root)
-            .into_iter()
-            .find(|node| matches!(node.asap(), Some(ASAPOp::SummaryEstimate { .. })))
-            .expect("a quantile estimate");
-        let Some(ASAPOp::SummaryEstimate { summary_input, .. }) = estimate.asap() else {
-            unreachable!()
-        };
-        let Some(ASAPOp::SummaryAgg { child, family, .. }) = summary_input.asap() else {
-            panic!("a KLL state: {summary_input:#?}")
-        };
-        let FieldDataType::Sketch(kind, _) = family else {
-            panic!("a sketch: {family:?}")
-        };
-        assert_eq!(kind.algorithm(), &SketchAlgorithm::Kll);
-        assert_eq!(
-            kind.params(),
-            &SketchParams::Kll {
-                k: 269,
-                failure_probability: None
-            }
-        );
-        let Some(ASAPOp::FinalizeExactAccumulator { child: sum_state }) = child.asap() else {
-            panic!("the finalized sum: {child:#?}")
-        };
-        let Some(ASAPOp::SummaryAgg {
-            family: sum_family,
-            child: leaf,
-            ..
-        }) = sum_state.asap()
-        else {
-            panic!("the sum's accumulator: {sum_state:#?}")
-        };
-        assert_eq!(
-            sum_family,
-            &FieldDataType::ExactAggregate(
-                ExactKind::Sum,
-                asap_types::ir::schema::ExactParams::Sum
-            )
-        );
-        assert!(!leaf.contains_asap());
-        assert!(child
-            .guarantee
-            .as_ref()
-            .is_some_and(AccuracyGuarantee::is_exact));
-        let guarantee = root.guarantee.as_ref().expect("a rank bound");
-        assert_eq!(guarantee.spec.accuracy_metric, AccuracyMetric::Rank);
-        assert_eq!(
-            guarantee.spec.error.evaluate(),
-            Some(asap_accuracy::test_support::kll_rank_error_99(269))
-        );
-    }
-
-    /// Pass 1's inventory of `queries`, each lowered with its target, less
-    /// the summaries no query can use over `data`.
-    fn usable_inventory(
-        queries: &[(&str, AccuracyTarget)],
-        data: &DataWorkload,
-    ) -> PerComputationCandidates {
-        let roots: Vec<QueryRoot> = queries
-            .iter()
-            .map(|(query, target)| {
-                let root = crate::test_support::lower_promql(query, target.clone());
-                QueryRoot::Operator(root)
-            })
-            .collect();
-        let targets: Vec<AccuracyTarget> =
-            queries.iter().map(|(_, target)| target.clone()).collect();
-        generate_per_computation_candidates(&crate::stage0::generate_dag_of_logical_memo_groups(
-            &roots,
-        ))
-        .unwrap()
-        .without_summaries_no_query_can_use(
-            &targets,
-            data,
-            &asap_accuracy::BuiltinAccuracyModel,
-        )
-    }
-
-    /// A per-value target at ε 0.05, δ 0.01 in `metric`.
-    fn target_in(metric: AccuracyMetric) -> AccuracyTarget {
-        AccuracyTarget::max_error(0.05)
-            .failure_probability(0.01)
-            .accuracy_metric(metric)
-            .accuracy_scope(asap_types::ir::properties::AccuracyScope::PerValue)
-    }
-
-    /// Metric `x`, its samples declared non-negative or not.
-    fn x_data(non_negative: bool) -> DataWorkload {
-        let mut data =
-            DataWorkload::sampled_every(["x".to_string()], asap_types::workload::DurationMs(1_000));
-        data.sources.get_mut("x").unwrap().values_non_negative = non_negative;
-        data
-    }
-
-    /// The summary families pruned for `reason`, and those still offered.
-    fn pruned_and_offered(
-        inventory: &PerComputationCandidates,
-        reason: PruneReason,
-    ) -> (Vec<SketchAlgorithm>, Vec<SketchAlgorithm>) {
-        let summary = |way: &HowToComputeAggregateMeasure| match way {
-            HowToComputeAggregateMeasure::Summary(algorithm) => Some(*algorithm),
-            _ => None,
-        };
-        let pruned = inventory
-            .pruned_ways_to_compute
-            .iter()
-            .filter(|pruned| pruned.reason == reason)
-            .filter_map(|pruned| summary(&pruned.way_to_compute))
-            .collect();
-        let offered = inventory
-            .targets
-            .iter()
-            .flat_map(|target| &target.ways_to_compute)
-            .filter_map(summary)
-            .collect();
-        (pruned, offered)
-    }
-
-    /// An average of per-series p99s at a relative target: a relative error
-    /// passes through `avg` only over samples declared non-negative, and a
-    /// rank error never meets a relative target. Over an undeclared gauge
-    /// every quantile sketch is pruned with
-    /// [`PruneReason::NoErrorBoundForQueryTarget`]; declared non-negative,
-    /// DDSketch is kept and KLL still pruned. At a rank target, a rank
-    /// error has no rule through `avg`, so KLL is pruned too.
-    #[test]
-    fn a_relative_bound_through_avg_is_pruned_without_a_sign_declaration() {
-        let query = "avg by (g) (quantile_over_time(0.99, x[100s]))";
-        let reason = PruneReason::NoErrorBoundForQueryTarget;
-        let relative = target_in(AccuracyMetric::Relative);
-        let undeclared = usable_inventory(&[(query, relative.clone())], &x_data(false));
-        let (pruned, offered) = pruned_and_offered(&undeclared, reason);
-        assert!(pruned.contains(&SketchAlgorithm::DDSketch), "{pruned:?}");
-        assert!(pruned.contains(&SketchAlgorithm::Kll), "{pruned:?}");
-        assert!(offered.is_empty(), "{offered:?}");
-        let declared = usable_inventory(&[(query, relative)], &x_data(true));
-        let (pruned, offered) = pruned_and_offered(&declared, reason);
-        assert_eq!(offered, vec![SketchAlgorithm::DDSketch], "{pruned:?}");
-        assert!(pruned.contains(&SketchAlgorithm::Kll), "{pruned:?}");
-        let rank = usable_inventory(&[(query, target_in(AccuracyMetric::Rank))], &x_data(true));
-        let (pruned, offered) = pruned_and_offered(&rank, reason);
-        assert!(pruned.contains(&SketchAlgorithm::Kll), "{pruned:?}");
-        assert!(offered.is_empty(), "{offered:?}");
-    }
-
-    /// A summary one of the queries reading its group can use is kept: the
-    /// per-series p99s are both a query's result, which a KLL rank bound
-    /// meets, and the input of an average, which no rank bound reaches.
-    #[test]
-    fn a_summary_one_of_two_queries_can_use_is_kept() {
-        let rank = target_in(AccuracyMetric::Rank);
-        let alone = usable_inventory(
-            &[("avg(quantile_over_time(0.99, x[5m]))", rank.clone())],
-            &x_data(false),
-        );
-        let (pruned, _) = pruned_and_offered(&alone, PruneReason::NoErrorBoundForQueryTarget);
-        assert!(pruned.contains(&SketchAlgorithm::Kll), "{pruned:?}");
-        let shared = usable_inventory(
-            &[
-                ("quantile_over_time(0.99, x[5m])", rank.clone()),
-                ("avg(quantile_over_time(0.99, x[5m]))", rank),
-            ],
-            &x_data(false),
-        );
-        let (pruned, offered) =
-            pruned_and_offered(&shared, PruneReason::NoErrorBoundForQueryTarget);
-        assert!(offered.contains(&SketchAlgorithm::Kll), "{offered:?}");
-        assert!(!pruned.contains(&SketchAlgorithm::Kll), "{pruned:?}");
-    }
-
-    /// Exact candidates are never pruned: every target keeps its exact
-    /// option first, and only summaries are pruned for the target.
-    #[test]
-    fn exact_candidates_are_never_pruned_for_the_target() {
-        let rank = target_in(AccuracyMetric::Rank);
-        for query in [
-            "avg by (g) (quantile_over_time(0.99, x[100s]))",
-            "avg(quantile_over_time(0.99, x[5m])) > 3",
-            "sum(count_over_time(x[5m])) / avg(quantile_over_time(0.5, x[5m]))",
-        ] {
-            let inventory = usable_inventory(&[(query, rank.clone())], &x_data(false));
-            assert!(!inventory.targets.is_empty(), "{query}");
-            for target in &inventory.targets {
-                assert!(
-                    matches!(
-                        target.ways_to_compute.first(),
-                        Some(
-                            HowToComputeAggregateMeasure::Exact
-                                | HowToComputeAggregateMeasure::ExactAccumulator(_)
-                        )
-                    ),
-                    "{query}: {:?}",
-                    target.ways_to_compute
-                );
-            }
-            assert!(
-                inventory
-                    .pruned_ways_to_compute
-                    .iter()
-                    .filter(|pruned| pruned.reason == PruneReason::NoErrorBoundForQueryTarget)
-                    .all(|pruned| matches!(
-                        pruned.way_to_compute,
-                        HowToComputeAggregateMeasure::Summary(_)
-                    )),
-                "{query}"
-            );
-        }
-    }
-
-    /// A summary another aggregate over the same source also offers is
-    /// kept, though no query reading its own group can use it: Pass 2 may
-    /// build the other group's state from it (a rollup or window rollup),
-    /// which Pass 1 does not see.
-    #[test]
-    fn a_summary_pass2_may_reuse_for_another_aggregate_is_kept() {
-        let rank = target_in(AccuracyMetric::Rank);
-        let reason = PruneReason::NoErrorBoundForQueryTarget;
-        let with_other = usable_inventory(
-            &[
-                ("avg(quantile_over_time(0.99, x[5m]))", rank.clone()),
-                ("quantile_over_time(0.99, x[10m])", rank),
-            ],
-            &x_data(false),
-        );
-        let (pruned, _) = pruned_and_offered(&with_other, reason);
-        assert!(!pruned.contains(&SketchAlgorithm::Kll), "{pruned:?}");
-    }
-
-    /// A whole-result target with a failure probability over a number of
-    /// values the data does not bound cannot be met by a per-value
-    /// guarantee that may fail, whatever its size: KLL is pruned. With the
-    /// series count declared, it is kept. DDSketch's relative bound never
-    /// fails, so it is not pruned for the scope (only for the metric under
-    /// a rank target).
-    #[test]
-    fn a_whole_result_target_over_unbound_values_prunes_a_failing_guarantee() {
-        let whole = target_in(AccuracyMetric::Rank)
-            .accuracy_scope(asap_types::ir::properties::AccuracyScope::WholeResult);
-        let query = "quantile_over_time(0.99, x[5m])";
-        let reason = PruneReason::NoErrorBoundForQueryTarget;
-        let unbound = usable_inventory(&[(query, whole.clone())], &x_data(false));
-        let (pruned, _) = pruned_and_offered(&unbound, reason);
-        assert!(pruned.contains(&SketchAlgorithm::Kll), "{pruned:?}");
-        let bound = usable_inventory(&[(query, whole)], &x_data(false).with_series_count(10_000));
-        let (pruned, offered) = pruned_and_offered(&bound, reason);
-        assert!(offered.contains(&SketchAlgorithm::Kll), "{pruned:?}");
-    }
-
-    /// The reuse escape keeps a summary only for another target whose own
-    /// queries can use the family: two averages of p99s over different
-    /// windows of one metric at a rank target both offer KLL, and neither
-    /// can use it (a rank error has no rule through `avg`), so it is
-    /// pruned for both. Before, each kept it for the other.
-    #[test]
-    fn a_summary_no_reusing_target_can_use_is_pruned() {
-        let rank = target_in(AccuracyMetric::Rank);
-        let inventory = usable_inventory(
-            &[
-                ("avg(quantile_over_time(0.99, x[5m]))", rank.clone()),
-                ("avg(quantile_over_time(0.99, x[10m]))", rank),
-            ],
-            &x_data(false),
-        );
-        let (pruned, offered) =
-            pruned_and_offered(&inventory, PruneReason::NoErrorBoundForQueryTarget);
-        assert_eq!(
-            pruned
-                .iter()
-                .filter(|&&family| family == SketchAlgorithm::Kll)
-                .count(),
-            2,
-            "{pruned:?}"
-        );
-        assert!(!offered.contains(&SketchAlgorithm::Kll), "{offered:?}");
-    }
-
-    /// Classic HLL is pruned when its source's declared distinct bound is
-    /// outside the contract at every precision (above 2^17 distinct items):
-    /// its failure probability is 1 at any size. Under the bound it is kept,
-    /// and with no declared bound too (plan selection may bind one). Two
-    /// queries over the same metric do not keep it for each other.
-    #[test]
-    fn hll_over_a_distinct_bound_outside_its_contract_is_pruned() {
-        let relative = target_in(AccuracyMetric::Relative);
-        let queries = [
-            ("distinct_over_time(x[5m])", relative.clone()),
-            ("distinct_over_time(x[10m])", relative),
-        ];
-        let with_bound = |bound: Option<u64>| {
-            let mut data = x_data(true);
-            data.sources
-                .get_mut("x")
-                .unwrap()
-                .max_distinct_per_evaluation = bound;
-            data
-        };
-        let reason = PruneReason::NoErrorBoundForQueryTarget;
-        let (_, offered) =
-            pruned_and_offered(&usable_inventory(&queries, &with_bound(None)), reason);
-        assert!(offered.contains(&SketchAlgorithm::Hll), "{offered:?}");
-        let (_, offered) = pruned_and_offered(
-            &usable_inventory(&queries, &with_bound(Some(1_000))),
-            reason,
-        );
-        assert!(offered.contains(&SketchAlgorithm::Hll), "{offered:?}");
-        let (pruned, offered) = pruned_and_offered(
-            &usable_inventory(&queries, &with_bound(Some(1_000_000))),
-            reason,
-        );
-        assert!(pruned.contains(&SketchAlgorithm::Hll), "{pruned:?}");
-        assert!(!offered.contains(&SketchAlgorithm::Hll), "{offered:?}");
     }
 }

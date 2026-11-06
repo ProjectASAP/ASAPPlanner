@@ -17,7 +17,7 @@ in `asap-integration-tests` (`crate_graph`) checks these edges with
 
 | Crate | Role |
 | --- | --- |
-| `asap-types` (`crates/types`) | Shared vocabulary, by IR section: `ir::operator` (`OperatorNode`, `NonASAPOp`, `ASAPOp`, operator parameters, `AggIntent`), `ir::scalar` (`ScalarExpr`, `ColumnRef`), `ir::schema` (`Schema`, `FieldDataType`, summary-state types such as `SketchAlgorithm` and `FamilyCapability`), `ir::properties` (`AccuracyTarget`, `AccuracyMetric`, `AccuracyGuarantee`, execution timing, summary coverage), plus `ir::flat` and `ir::physical_export`; the planner inputs (`workload`); Stage 2 decision data (`physical`: `Materialization`, tumbling windows) |
+| `asap-types` (`crates/types`) | Shared vocabulary, by IR section: `ir::operator` (`OperatorNode`, `NonASAPOp`, `ASAPOp`, operator parameters, `AggIntent`), `ir::scalar` (`ScalarExpr`, `ColumnRef`), `ir::schema` (`Schema`, `FieldDataType`, summary-state types such as `SketchAlgorithm` and `FamilyCapability`), `ir::properties` (`AccuracyTarget`, `AccuracyMetric`, `AccuracyGuarantee`, execution timing, summary coverage), plus `ir::flat` and `ir::physical_export`; the planner inputs (`workload`); Stage 2 decision data (`physical`: `PhysicalProperties` (timing and `Lifetime`), tumbling windows) |
 | `asap-frontend-sql`, `asap-frontend-promql`, `asap-frontend-metricsql` (with `asap-frontend-common`) | Stage 0, the query-language frontends: lower each query into the logical DAG (`QueryRoot`s of `NonASAPOp` nodes, no summaries, no timing) |
 | `asap-logical-asap-optimization` (`crates/logical-asap-optimization`) | Stage 1: Pass 1 and Pass 2 (the memo rules) |
 | `asap-accuracy` (`crates/accuracy`) | The accuracy model the stages share: the analytical rules (per-family estimators, composition, budget split, target check) and the deployment's `AccuracyModel` and `AccuracyEvidenceProvider`; depends only on `asap-types` |
@@ -42,8 +42,8 @@ asap-types ◄── asap-executor (Stage 4; no stage crate depends on it)
 
 ```text
 QueryRoots (Stage 0)
-  │  generate_dag_of_logical_memo_groups → DagOfLogicalMemoGroups, then
-  │  generate_per_computation_logical_memo_candidates
+  │  memo_of_queries → DagOfLogicalMemoGroups, then
+  │  pass1_memo
   ▼                                                                     Stage 1, Pass 1
 PerComputationLogicalMemoCandidates (Memo + pruned_candidates)
   │  generate_logical_asap_memo_candidates
@@ -71,8 +71,8 @@ same pipeline behind the `OptimizationPass` trait.
 | Pass 2 memo rules: shared producers (identical expressions by memo group identity, one build at different sizes), scan-label widening, window composition (tumbling windows), rollup, exact top-k reuse and finer-aggregate reuse | `asap-logical-asap-optimization`, `pass2/memo/rules/` and `pass2/memo/window_candidates.rs`, over the helpers in `pass2/asap_aware_cse.rs` |
 | Enumeration of the plans a memo stands for (reference pricer, DAG viewer) | `asap-logical-asap-optimization`, `pass2/memo/enumeration.rs` |
 | What each summary family can merge and answer (`FamilyCapability::of`: `merge_inputs`, `readouts`) | `asap-types`, `ir/schema/family_capability.rs` |
-| Stage 2: materialization options per summary build (`NotMaterialized`, `MatAtIngestion`, `MatAtQuery`, `MatAtQueryKeptAcrossEvaluations`), ingestion-time eligibility, physical operator implementation | `asap-physical-asap-optimization` |
-| Timing and data-state edge rules applied from a `MaterializationAssignment` | `asap-types`, `ir/properties/timing.rs` and `ir/properties/execution_data_state.rs`; `Materialization` in `physical/materialization.rs` |
+| Stage 2: physical properties options per summary build (not materialized; materialized at ingestion time `AcrossEvaluations`; materialized at query time `OneEvaluation` or `AcrossEvaluations`), ingestion-time eligibility, physical operator implementation | `asap-physical-asap-optimization` |
+| Timing and data-state edge rules applied from a `PhysicalPropertiesAssignment` | `asap-types`, `ir/properties/timing.rs` and `ir/properties/execution_data_state.rs`; `PhysicalProperties` and `Lifetime` in `physical/properties.rs` |
 | Stage 3: accuracy check, latency check, resource usage (`ResourceUsage`), cost models 1–3 (`CostModel`), measured operation costs | `asap-plan-selection`, `lib.rs`; `asap-cost`, `lib.rs` and `measured.rs` |
 | The analytical per-operator resource model Stage 3 measures with | `asap-cost`, `analytical.rs` and `operator_statistics.rs` |
 | The accuracy algebra: per-family guarantees, composition, budget split; guarantee propagation through a DAG; sizing a summary for its target, (ε, δ) budget and default sizes | `asap-accuracy` (`AccuracyModel`, `BuiltinAccuracyModel`, `estimators/`, `composition.rs`, `budget.rs`, `propagation.rs`, `sizing.rs`) |
@@ -98,8 +98,8 @@ The unwired maintained-population rule has been removed as well; no Stage 1 pass
    For each composed DAG, the Pass 2 rules find what can be shared, split into
    tumbling windows or reused, and each subset of their candidates becomes another
    Stage 1 candidate.
-3. **Stage 2** gives each summary build its materialization options and emits
-   one physical candidate per assignment (the all-`NotMaterialized` one
+3. **Stage 2** gives each summary build its physical properties options and emits
+   one physical candidate per assignment (the all-not-materialized one
    first), skipping assignments that put a build at ingestion time over one
    that is not.
 4. **Stage 3** checks each physical candidate: every query's root guarantee
@@ -121,7 +121,7 @@ No stage caps the candidates it plans, and neither does `asap_planner`.
   Pass 1.
 - `crates/integration-tests/tests/planner_layering_example{1,2,3,4}.rs` pin
   the design document's examples through every stage;
-  `reuse_rules.rs`, `deployment_capabilities.rs`, `materialization_e2e.rs`
+  `reuse_rules.rs`, `deployment_capabilities.rs`, `physical_properties_e2e.rs`
   and `stage1_logical_asap_optimization.rs` cover single rules end to end.
 - `crates/devtools/tests/asap_planner.rs` checks the stage document and the
   committed viewer examples; `asap_planner_acceptance.rs` checks

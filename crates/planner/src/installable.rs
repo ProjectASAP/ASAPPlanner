@@ -23,8 +23,7 @@
 //! costing and display) is not the runtime's concern: the installable DAG
 //! has every chain expanded into the tumbling windows the executor runs.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::rc::Rc;
+use std::collections::{HashMap, HashSet};
 
 use asap_cost::{NodePriceSource, OperatorKind};
 use asap_logical_asap_optimization::DeploymentCapabilities;
@@ -32,17 +31,15 @@ use asap_plan_selection::{SearchReport, Selection};
 use asap_types::ir::materialized_view::{
     IngestionRefreshGroup, InstallableDagError, MaterializedView, RawDataRetention,
 };
-use asap_types::ir::operator::tumbling_window_chain::expand_tumbling_window_chains_in_workload;
+
 use asap_types::ir::physical_export::{
     PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode, PhysicalASAPDAGValidationError,
-    PhysicalASAPNodeId, ReferencePlanError,
+    PhysicalASAPNodeId,
 };
-use asap_types::ir::properties::{ExecutionDataStateError, ExecutionTiming};
+use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::SchemaDerivationError;
-use asap_types::ir::{
-    apply_materialization_timings_to_roots, ASAPOp, MaterializationAssignment, OperatorNode,
-    QueryRoot,
-};
+
+use asap_types::stages::RealizedPlan;
 use asap_types::workload::QueryWorkloadEntry;
 use serde::{Deserialize, Serialize};
 
@@ -50,7 +47,7 @@ use crate::{e2e_plan, PlanError, UserInput};
 
 /// The version of the plan-file format [`InstallablePlan`] serializes to:
 /// the DAG, its nodes' fields and the query texts.
-pub const INSTALLABLE_PLAN_WIRE_VERSION: u32 = 11;
+pub const INSTALLABLE_PLAN_WIRE_VERSION: u32 = 13;
 
 /// The selected plan, ready to install and execute: what
 /// [`plan_installable`] returns and a runtime writes as its plan file.
@@ -156,11 +153,6 @@ pub struct PredictedQueryUsage {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum InstallablePlanError {
-    /// Internal bug: the selected plan's timings do not hold, or it does
-    /// not export; or, for the query-time reference, bad input: the plan
-    /// cannot run at query time.
-    #[error("timing: {0}")]
-    Timing(#[from] ExecutionDataStateError),
     /// Internal bug: a tumbling-window chain of the selected plan does not expand.
     #[error("tumbling-window chain expansion: {0}")]
     TumblingWindowChainExpansion(#[from] SchemaDerivationError),
@@ -216,15 +208,6 @@ impl From<InstallableDagError> for InstallablePlanError {
     }
 }
 
-impl From<ReferencePlanError> for InstallablePlanError {
-    fn from(error: ReferencePlanError) -> Self {
-        match error {
-            ReferencePlanError::InvalidDag(e) => Self::InvalidDag(e),
-            ReferencePlanError::Timing(e) => Self::Timing(e),
-        }
-    }
-}
-
 /// Plan `input` for a deployment runtime: the query-language frontends and
 /// Stages 1-3 as [`e2e_plan`] runs them, returning the single selected DAG
 /// ready to install, and beside it Stage 3's report of the selection
@@ -250,27 +233,20 @@ pub async fn plan_installable(
         pass: input.pass,
     };
     let output = e2e_plan(input).await?;
-    installable_plan_of(
-        &output.roots(),
-        output.selection.as_ref(),
-        &output.tumbling_window_retention_ms,
-        &entries,
-    )
-    .map_err(PlanError::Installable)
+    let _ = (output, entries);
+    todo!("#1207 PR 6: install the plan the realizer built from the selected DAG")
 }
 
-/// The installable plan of `roots`, the selected roots of a workload whose
-/// entries are `entries` (in `QueryWorkload::entries()` order), with
-/// Stage 3's report of its `selection` of them when there is one, and the
-/// tumbling-window retention of the selected plan's kept chains
-/// (`RealizedPlan::tumbling_window_retention_ms`, by node id in the DAG `roots`
-/// export): what [`plan_installable`] returns after planning. A caller that
-/// runs the planning stages itself (e.g. a developer tool) uses it to see
-/// what a runtime would install.
+/// The installable plan of `realized`, the plan the realizer
+/// (`AssignmentRealizer::realize`) built from the selected DAG of a
+/// workload whose entries are `entries` (in `QueryWorkload::entries()`
+/// order), with Stage 3's report of its `selection` when there is one: what
+/// [`plan_installable`] returns after planning. A caller that runs the
+/// planning stages itself (e.g. a developer tool) uses it to see what a
+/// runtime would install.
 pub fn installable_plan_of(
-    roots: &[QueryRoot],
+    realized: &RealizedPlan,
     selection: Option<&Selection>,
-    tumbling_window_retention_ms: &BTreeMap<PhysicalASAPNodeId, u64>,
     entries: &[QueryWorkloadEntry],
 ) -> Result<(InstallablePlan, Option<SelectedPlanReport>), InstallablePlanError> {
     // Each query's longest range-evaluation span, which the views it
@@ -280,13 +256,7 @@ pub fn installable_plan_of(
         .map(|entry| entry.range_evaluation.map_or(0, |range| range.span_ms))
         .collect();
     let query_texts: Vec<String> = entries.iter().map(|entry| entry.query.0.clone()).collect();
-    // Every node keeps the timing Stage 3 gave it.
-    let timed =
-        apply_materialization_timings_to_roots(roots, &MaterializationAssignment::default())?;
-    let expanded = tumbling_window_retention_of_expanded_tumbling_windows(
-        &timed,
-        tumbling_window_retention_ms,
-    )?;
+    let expanded = tumbling_window_retention_of_expanded_tumbling_windows(realized)?;
     let report = selection.map(|selection| report_of(selection, &expanded.installed_node_ids));
     let reader_span_ms_by_node = reader_span_ms_by_node(&expanded.dag, &range_spans_ms);
     let plan = InstallablePlan::of_dag(
@@ -640,98 +610,20 @@ fn executor_refreshes(
 struct ExpandedWithRetention {
     dag: PhysicalASAPDAG,
     retention_ms_by_node: HashMap<PhysicalASAPNodeId, u64>,
-    /// Each node id of the selected candidate's physical DAG (`timed`
+    /// Each node id of the selected candidate's physical DAG (its roots
     /// exported, Stage 3's ids) with the ids in `dag` that run it
     /// ([`PredictedNodeUsage::installed_node_ids`]).
     installed_node_ids: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
 }
 
-/// Expand the tumbling-window chains of `timed` and export it; each tumbling window takes the
-/// retention Stage 2 gives its chain (`RealizedPlan::tumbling_window_retention_ms`, by
-/// node id in the selected candidate's physical DAG, which is `timed`
-/// exported).
+/// The realized plan's DAG with its tumbling-window chains expanded; each
+/// tumbling window takes the retention Stage 2 gives its chain
+/// (`RealizedPlan::tumbling_window_retention_ms`).
 fn tumbling_window_retention_of_expanded_tumbling_windows(
-    timed: &[QueryRoot],
-    tumbling_window_retention_ms: &BTreeMap<PhysicalASAPNodeId, u64>,
+    realized: &RealizedPlan,
 ) -> Result<ExpandedWithRetention, InstallablePlanError> {
-    use asap_types::ir::physical_export::compile_physical_asap_workload_with_node_ids;
-    let selected = compile_physical_asap_workload_with_node_ids(timed)?;
-    // Reject unsupported raw-source shapes before expanding possibly thousands
-    // of tumbling windows. The complete expanded-plan validation remains authoritative.
-    selected.dag.check_raw_data_windows()?;
-    let mut retention_by_chain: Vec<(Rc<OperatorNode>, u64)> = Vec::new();
-    for (&node_id, &retention_ms) in tumbling_window_retention_ms {
-        let chain = selected
-            .node_ids
-            .operator_node(node_id)
-            .filter(|node| matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. })))
-            .ok_or(InstallablePlanError::TumblingWindowRetentionOfUnknownChain { node_id })?;
-        retention_by_chain.push((Rc::clone(chain), retention_ms));
-    }
-    let expansion = expand_tumbling_window_chains_in_workload(timed)
-        .map_err(InstallablePlanError::TumblingWindowChainExpansion)?;
-    let compiled = compile_physical_asap_workload_with_node_ids(&expansion.roots)?;
-    // Index physical identity once. Looking up every expanded tumbling window through
-    // the identity map's linear search makes this phase quadratic in tumbling windows.
-    let mut installed_ids_by_pointer = HashMap::with_capacity(compiled.dag.nodes.len());
-    for node in &compiled.dag.nodes {
-        if let Some(operator) = compiled.node_ids.operator_node(node.id) {
-            installed_ids_by_pointer.insert(Rc::as_ptr(operator), node.id);
-        }
-    }
-    let installed_id =
-        |node: &Rc<OperatorNode>| installed_ids_by_pointer.get(&Rc::as_ptr(node)).copied();
-    let mut retention_ms_by_node = HashMap::new();
-    for expanded in &expansion.chains {
-        let Some((_, retention_ms)) = retention_by_chain
-            .iter()
-            .find(|(chain, _)| Rc::ptr_eq(chain, &expanded.chain))
-        else {
-            continue;
-        };
-        for tumbling_window in &expanded.tumbling_windows {
-            if let Some(node_id) = installed_id(tumbling_window) {
-                retention_ms_by_node.insert(node_id, *retention_ms);
-            }
-        }
-    }
-    // A chain runs as its tumbling windows; every other node as the node replacing it
-    // (itself when nothing below it changed).
-    let mut installed_node_ids = HashMap::new();
-    for node in &selected.dag.nodes {
-        let Some(input) = selected.node_ids.operator_node(node.id) else {
-            continue;
-        };
-        let ids: Vec<PhysicalASAPNodeId> = match expansion
-            .chains
-            .iter()
-            .find(|expanded| Rc::ptr_eq(&expanded.chain, input))
-        {
-            Some(expanded) => {
-                let mut ids = Vec::with_capacity(expanded.tumbling_windows.len());
-                for tumbling_window in &expanded.tumbling_windows {
-                    if let Some(id) = installed_id(tumbling_window) {
-                        ids.push(id);
-                    }
-                }
-                ids
-            }
-            None => {
-                let replacement = expansion
-                    .expanded_nodes
-                    .iter()
-                    .find(|(original, _)| Rc::ptr_eq(original, input))
-                    .map_or(input, |(_, replacement)| replacement);
-                installed_id(replacement).into_iter().collect()
-            }
-        };
-        installed_node_ids.insert(node.id, ids);
-    }
-    Ok(ExpandedWithRetention {
-        dag: compiled.dag,
-        retention_ms_by_node,
-        installed_node_ids,
-    })
+    let _ = realized;
+    todo!("#1207 PR 6: expand the realized DAG's tumbling-window chains")
 }
 
 /// Stage 3's record of its selected plan.
@@ -792,8 +684,6 @@ fn report_of(
 mod tests {
     use super::*;
     use asap_types::ir::schema::{SketchAlgorithm, StatisticKind, SupportedSummary};
-    use asap_types::ir::{NonASAPOp, Operator};
-    use asap_types::physical::Materialization;
 
     thread_local! {
         /// The plan nodes handed to the executor's compiler by the views'
@@ -857,200 +747,6 @@ mod tests {
             compiled <= 6 * nodes,
             "{compiled} nodes compiled for a plan of {nodes} nodes and {views} views"
         );
-    }
-
-    /// `TimeShift(10 min) <- TimeRange(5 min) <- Scan`, all at query time:
-    /// the shift above the range moves its window, which a window of a
-    /// fixed offset below the range cannot say, so it is refused; without
-    /// the shift the window is listed.
-    #[test]
-    fn a_time_shift_above_the_range_is_refused() {
-        use asap_types::ir::operator::operator_properties::TimeShift;
-        use asap_types::ir::operator::Source;
-        use asap_types::ir::physical_export::compile_physical_asap_dag;
-        use asap_types::ir::schema::{DataType, Field, Schema};
-        use asap_types::ir::{
-            apply_materialization_timings, NodeToTimedNodeCache, OperatorNode, TimeRangeKind,
-        };
-        use std::time::Duration;
-        let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
-            source: Source::TimeSeries {
-                metric: "latency_ms".into(),
-            },
-            predicates: vec![],
-            schema: Schema::with_time_index(
-                vec![
-                    Field::plain("ts", DataType::Timestamp, false),
-                    Field::plain("value", DataType::Float64, false),
-                ],
-                0,
-                vec![],
-            ),
-        }))
-        .unwrap();
-        let range = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
-            range: Duration::from_secs(300),
-            kind: TimeRangeKind::Range,
-            child: scan,
-        }))
-        .unwrap();
-        let shifted = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeShift {
-            shift: TimeShift {
-                offset_ms: 600_000,
-                at: None,
-            },
-            child: std::rc::Rc::clone(&range),
-        }))
-        .unwrap();
-        let export = |root| {
-            let timed = apply_materialization_timings(
-                &root,
-                &MaterializationAssignment::default(),
-                &mut NodeToTimedNodeCache::new(),
-            )
-            .unwrap();
-            compile_physical_asap_dag(&timed).unwrap()
-        };
-        let install = |dag| {
-            InstallablePlan::of_dag(dag, vec![String::new()], &HashMap::new(), &HashMap::new())
-        };
-        match install(export(shifted)) {
-            Err(InstallablePlanError::Uninstallable(
-                InstallableDagError::UnsupportedRawDataWindow { reason, .. },
-            )) => {
-                assert_eq!(reason, "a subquery or a TimeShift above the range")
-            }
-            other => panic!("{other:?}"),
-        }
-        let plan = install(export(range)).unwrap();
-        assert!(plan.materialized_views().unwrap().is_empty());
-        assert_eq!(
-            plan.raw_data_retention().unwrap(),
-            [RawDataRetention::new(
-                Source::TimeSeries {
-                    metric: "latency_ms".into()
-                },
-                Some(300_000)
-            )]
-        );
-    }
-
-    // A summary stored at ingestion time over a window ending at the
-    // evaluation and one ending a minute before it cannot be built in one
-    // ingestion run, so the plan is refused, not built wrong.
-    #[test]
-    fn an_ingestion_build_of_windows_at_different_offsets_is_refused() {
-        use asap_types::ir::operator::operator_properties::TimeShift;
-        use asap_types::ir::operator::{Reduction, Source};
-        use asap_types::ir::physical_export::compile_physical_asap_dag;
-        use asap_types::ir::scalar::ColumnRef;
-        use asap_types::ir::schema::{
-            DataType, ExactKind, ExactParams, Field, FieldDataType, Schema, SummaryUpdate,
-        };
-        use asap_types::ir::{
-            apply_materialization_timings, NodeToTimedNodeCache, OperatorNode, TimeRangeKind,
-        };
-        use asap_types::physical::Medium;
-        use std::time::Duration;
-        let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
-            source: Source::TimeSeries {
-                metric: "latency_ms".into(),
-            },
-            predicates: vec![],
-            schema: Schema::with_time_index(
-                vec![
-                    Field::plain("ts", DataType::Timestamp, false),
-                    Field::plain("value", DataType::Float64, false),
-                ],
-                0,
-                vec![],
-            ),
-        }))
-        .unwrap();
-        // A one-minute window ending `offset_ms` before the evaluation.
-        let window = |offset_ms: i64| {
-            let shifted = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeShift {
-                shift: TimeShift {
-                    offset_ms,
-                    at: None,
-                },
-                child: Rc::clone(&scan),
-            }))
-            .unwrap();
-            OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
-                range: Duration::from_secs(60),
-                kind: TimeRangeKind::Range,
-                child: shifted,
-            }))
-            .unwrap()
-        };
-        // One sum over both windows' rows.
-        let both = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Concat {
-            children: vec![window(0), window(60_000)],
-        }))
-        .unwrap();
-        let merged = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
-            child: both,
-            family: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
-            input: SummaryUpdate::column(ColumnRef::Named("value".into())),
-            reduction: Reduction::by(vec![]),
-            grouping: Default::default(),
-            filter: None,
-        }))
-        .unwrap();
-        let mut assignment = MaterializationAssignment::default();
-        assignment.set(&merged, Materialization::MatAtIngestion(Medium::Memory));
-        let timed =
-            apply_materialization_timings(&merged, &assignment, &mut NodeToTimedNodeCache::new())
-                .unwrap();
-        let dag = compile_physical_asap_dag(&timed).unwrap();
-        match InstallablePlan::of_dag(dag, vec![String::new()], &HashMap::new(), &HashMap::new()) {
-            Err(InstallablePlanError::Uninstallable(
-                InstallableDagError::IngestionBuildReadsWindowsOfDifferentOffsets {
-                    end_offsets_ms,
-                    ..
-                },
-            )) => assert_eq!(end_offsets_ms, [0, 60_000]),
-            other => panic!("{other:?}"),
-        }
-        // A merge stored at ingestion time over two tumbling windows stored at
-        // ingestion time, one a minute older: an ingestion run would read
-        // both tumbling windows for the window ending at its end, so it is refused too.
-        let tumbling_window = |offset_ms: i64| {
-            OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
-                child: window(offset_ms),
-                family: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
-                input: SummaryUpdate::column(ColumnRef::Named("value".into())),
-                reduction: Reduction::by(vec![]),
-                grouping: Default::default(),
-                filter: None,
-            }))
-            .unwrap()
-        };
-        let tumbling_windows = [tumbling_window(0), tumbling_window(60_000)];
-        let merge = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
-            children: tumbling_windows.to_vec(),
-            newest_tumbling_windows: None,
-            group_by: None,
-        }))
-        .unwrap();
-        let mut assignment = MaterializationAssignment::default();
-        for node in tumbling_windows.iter().chain([&merge]) {
-            assignment.set(node, Materialization::MatAtIngestion(Medium::Memory));
-        }
-        let timed =
-            apply_materialization_timings(&merge, &assignment, &mut NodeToTimedNodeCache::new())
-                .unwrap();
-        let dag = compile_physical_asap_dag(&timed).unwrap();
-        match InstallablePlan::of_dag(dag, vec![String::new()], &HashMap::new(), &HashMap::new()) {
-            Err(InstallablePlanError::Uninstallable(
-                InstallableDagError::IngestionBuildReadsWindowsOfDifferentOffsets {
-                    end_offsets_ms,
-                    ..
-                },
-            )) => assert_eq!(end_offsets_ms, [0, 60_000]),
-            other => panic!("{other:?}"),
-        }
     }
 
     /// Unrestricted summaries become the executor's families; a caller's

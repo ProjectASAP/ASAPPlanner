@@ -38,7 +38,7 @@ impl From<&str> for PhysicalCandidateError {
 #[derive(Debug, Clone)]
 pub struct RealizedPlan {
     /// The selection rebuilt as one physical plan, one operator node per
-    /// selected node, each with its candidate's timing and materialization.
+    /// selected node, each with its candidate's timing and lifetime.
     pub plan: PhysicalWorkloadPlan,
     /// For each tumbling-window chain of `plan` kept beyond one evaluation
     /// (maintained at ingestion time, or built at query time and kept
@@ -68,7 +68,7 @@ pub struct RealizedPlan {
 /// recomposed, and every output contract (result kind and schema) met; a
 /// realized assignment also passes Stage 2's timing and dependency rules
 /// and the physical DAG validator, with every node keeping its
-/// candidate's timing and materialization.
+/// candidate's timing and lifetime.
 ///
 /// It checks structure and execution legality only. It does not check cost,
 /// and it does not check accuracy targets: Stage 3 does both.

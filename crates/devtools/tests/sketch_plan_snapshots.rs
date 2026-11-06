@@ -6,7 +6,7 @@
 //! queries or nested windows, answer a ratio of two quantiles from one tumbling window
 //! chain, and materialize tumbling windows, under the MVP deployment (raw data not
 //! retained) and raw data retained. A change to sketch kinds, parameters,
-//! sizes, sharing, timing, materialization or cost shows up as a snapshot
+//! sizes, sharing, timing, lifetime or cost shows up as a snapshot
 //! diff.
 //!
 //! `tests/sketch_plan_snapshots/manifest.json` lists each workload by id:

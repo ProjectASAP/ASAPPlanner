@@ -476,9 +476,7 @@ pub fn with_confirmed_weights_at(
         let rebuilt = if changed {
             Rc::new(
                 OperatorNode::with_schema(operator, node.schema.clone())
-                    .with_guarantee(node.guarantee.clone())
-                    .with_timing(node.timing)
-                    .with_materialization(node.materialization),
+                    .with_guarantee(node.guarantee.clone()),
             )
         } else {
             Rc::clone(node)

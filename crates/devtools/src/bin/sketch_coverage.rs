@@ -3,7 +3,7 @@
 // Lowers every query in every corpus we have (mirrors `variant_coverage`'s
 // corpus list exactly, so the two reports are directly comparable) with an
 // *approximate* `AccuracyTarget`, runs Pass 1 of logical ASAP-aware
-// optimization (`generate_per_computation_logical_memo_candidates`, every
+// optimization (`pass1_memo`, every
 // summary supported, no accuracy pruning) over each query, and
 // reports which summary candidates Pass 1 offers for it, plus the fraction of
 // lowered queries with at least one.
@@ -20,11 +20,11 @@ use asap_devtools::corpora::{
 };
 use asap_devtools::{lower_promql_with_sample_interval, SqlCatalog};
 use asap_frontend_sql::lower_sql_dialect;
-use asap_logical_asap_optimization::generate_dag_of_logical_memo_groups;
-use asap_logical_asap_optimization::generate_per_computation_logical_memo_candidates;
+use asap_logical_asap_optimization::memo_of_queries;
+use asap_logical_asap_optimization::pass1_memo;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::FieldDataType;
-use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
+use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
 use asap_types::workload::{DataWorkload, SqlDialect};
 use std::collections::BTreeSet;
 use std::rc::Rc;
@@ -60,8 +60,8 @@ fn analyze_corpus(
     let mut rejected = 0;
     let mut summaries = Vec::new();
     for (id, root) in roots {
-        let Ok(pass1) = generate_per_computation_logical_memo_candidates(
-            generate_dag_of_logical_memo_groups(&[QueryRoot::Operator(root)]),
+        let Ok(pass1) = pass1_memo(
+            memo_of_queries(&[QueryRoot::Operator(root)]),
             std::slice::from_ref(accuracy),
             &IgnoreAccuracyGuarantees,
             &NoAccuracyEvidence,
@@ -76,9 +76,9 @@ fn analyze_corpus(
         // excluded. A way to compute a measure that Pass 1 offers but cannot
         // compose into a candidate is not counted.
         let mut offered = BTreeSet::new();
-        for candidate in pass1.memo.candidates.iter().flatten() {
+        for candidate in pass1.groups.iter().flat_map(|group| &group.candidates) {
             if candidate.fused_groups.is_empty() {
-                summary_families(&candidate.root_node, &mut offered);
+                summary_family(&candidate.expression.operator, &mut offered);
             }
         }
         summaries.push((id, offered));
@@ -92,19 +92,15 @@ fn analyze_corpus(
     }
 }
 
-/// Adds the family of every summary `node` and its descendants build to
-/// `families`.
-fn summary_families(node: &OperatorNode, families: &mut BTreeSet<String>) {
-    if let Some(
+/// Adds the family of the summary `operator` builds, if any, to `families`.
+fn summary_family<C>(operator: &Operator<C>, families: &mut BTreeSet<String>) {
+    if let Operator::ASAP(
         ASAPOp::SummaryAgg { family, .. } | ASAPOp::SummaryTumblingWindowChain { family, .. },
-    ) = node.asap()
+    ) = operator
     {
         if let FieldDataType::Sketch(kind, _) = family {
-            families.insert(format!("{:?}", kind.algorithm()));
+            families.insert(format!("{:?}", kind));
         }
-    }
-    for child in node.children() {
-        summary_families(child, families);
     }
 }
 

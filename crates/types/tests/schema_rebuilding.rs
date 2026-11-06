@@ -1,5 +1,5 @@
 use asap_types::ir::operator::{AggIntent, Reduction, Source};
-use asap_types::ir::properties::{AccuracyGuarantee, ExecutionTiming};
+use asap_types::ir::properties::AccuracyGuarantee;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use asap_types::ir::schema::{ExactKind, ExactParams, GroupingStrategy, SummaryUpdate};
@@ -67,8 +67,7 @@ fn rebuilding_preserves_only_explicit_naming_overrides() {
         schema.fields[0].name = "alias".into();
         schema.fields[0].table = Some("result".into());
         let renamed = OperatorNode::with_schema(original.operator.clone(), schema)
-            .with_guarantee(Some(AccuracyGuarantee::exact("fixture")))
-            .with_timing(Some(ExecutionTiming::QueryTime));
+            .with_guarantee(Some(AccuracyGuarantee::exact("fixture")));
         let original = Rc::new(renamed);
         original.validate_structure().unwrap();
         let replacement = scan(DataType::Utf8, "new_key");
@@ -80,7 +79,6 @@ fn rebuilding_preserves_only_explicit_naming_overrides() {
             Some(&DataType::Utf8)
         );
         assert!(rebuilt.guarantee.is_none());
-        assert!(rebuilt.timing.is_none());
         rebuilt.validate_structure().unwrap();
     }
 }
@@ -229,50 +227,6 @@ fn series_selector() -> Rc<OperatorNode> {
     .unwrap()
 }
 
-/// `topk(5, a)` read from a current-series population of `a`, built by hand.
-fn current_series_topk() -> Rc<OperatorNode> {
-    use asap_types::ir::operator::maintained_population::*;
-    let selector = series_selector();
-    let population = OperatorNode::new_shared(Operator::ASAP(ASAPOp::MaintainPopulation {
-        child: selector,
-        population: MaintainedPopulation {
-            input: PopulationInput::CurrentSeries(CurrentSeriesInput {
-                metric: "a".into(),
-                matchers: vec![],
-                grouping: vec![],
-                without: false,
-                lookback_ms: 1_000,
-            }),
-            max_k: 5,
-            quantiles: false,
-        },
-    }))
-    .unwrap();
-    OperatorNode::new_shared(Operator::ASAP(ASAPOp::EvaluatePopulation {
-        child: population,
-        evaluation: PopulationStatistic::TopK { k: 5 },
-    }))
-    .unwrap()
-}
-
-/// Time `root` under the default materialization assignment, which runs the
-/// data-state and population-contract validation, and export it.
-fn compile_physical_asap_dag(root: &Rc<OperatorNode>) -> Result<(), String> {
-    use asap_types::ir::{
-        apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
-    };
-    root.validate_structure().map_err(|e| e.to_string())?;
-    let timed = apply_materialization_timings(
-        root,
-        &MaterializationAssignment::default(),
-        &mut NodeToTimedNodeCache::new(),
-    )
-    .map_err(|e| format!("{e:?}"))?;
-    asap_types::ir::physical_export::compile_physical_asap_dag(&timed)
-        .map_err(|e| format!("{e:?}"))?;
-    Ok(())
-}
-
 /// A table-row population maintains a numeric value column: one that names
 /// a label column fails validation.
 #[test]
@@ -330,81 +284,4 @@ fn a_current_series_population_matches_only_its_selectors_lookback() {
         ..spec
     };
     assert!(!asap_types::test_support::matches_node(&wrong, &selector));
-}
-
-/// Population timing is a materialization choice: the population follows its
-/// assignment (`NotMaterialized` by default), while its evaluation always
-/// runs at query time.
-#[test]
-fn population_timing_follows_its_materialization() {
-    use asap_types::ir::physical_export::compile_physical_asap_dag as export_timed;
-    use asap_types::ir::properties::ExecutionTiming::{IngestionTime, QueryTime};
-    use asap_types::ir::{
-        apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
-    };
-    use asap_types::physical::{Materialization, Medium};
-    let candidate = current_series_topk();
-    let Some(ASAPOp::EvaluatePopulation {
-        child: population, ..
-    }) = candidate.asap()
-    else {
-        unreachable!()
-    };
-    let on_disk = Materialization::MatAtIngestion(Medium::Disk);
-    let mut at_ingestion = MaterializationAssignment::default();
-    at_ingestion.set(population, on_disk);
-    for (assignment, timing, materialization) in [
-        (
-            MaterializationAssignment::default(),
-            QueryTime,
-            Materialization::NotMaterialized,
-        ),
-        (at_ingestion, IngestionTime, on_disk),
-    ] {
-        let timed = apply_materialization_timings(
-            &candidate,
-            &assignment,
-            &mut NodeToTimedNodeCache::new(),
-        )
-        .unwrap();
-        let dag = export_timed(&timed).unwrap();
-        let [population, evaluation] = &dag.nodes[dag.nodes.len() - 2..] else {
-            unreachable!()
-        };
-        assert_eq!(population.output_state.timing, timing);
-        assert_eq!(population.materialization, materialization);
-        assert_eq!(evaluation.output_state.timing, QueryTime);
-    }
-    let mut evaluation_at_ingestion = (*candidate).clone();
-    evaluation_at_ingestion.timing = Some(IngestionTime);
-    assert!(compile_physical_asap_dag(&Rc::new(evaluation_at_ingestion)).is_err());
-}
-
-/// An evaluation cannot exceed its population's contract (`max_k`), and a
-/// population cannot claim a source it does not read.
-#[test]
-fn malformed_population_dags_fail_closed() {
-    use asap_types::ir::operator::maintained_population::{PopulationInput, PopulationStatistic};
-    let candidate = current_series_topk();
-    compile_physical_asap_dag(&candidate).expect("the unmodified candidate is legal");
-    let mut bad = (*candidate).clone();
-    let Operator::ASAP(ASAPOp::EvaluatePopulation { evaluation, .. }) = &mut bad.operator else {
-        unreachable!()
-    };
-    *evaluation = PopulationStatistic::TopK { k: 6 };
-    assert!(compile_physical_asap_dag(&Rc::new(bad.clone())).is_err());
-    let Operator::ASAP(ASAPOp::EvaluatePopulation { child, evaluation }) = &mut bad.operator else {
-        unreachable!()
-    };
-    *evaluation = PopulationStatistic::TopK { k: 5 };
-    let producer = Rc::make_mut(child);
-    let Operator::ASAP(ASAPOp::MaintainPopulation { population, .. }) = &mut producer.operator
-    else {
-        unreachable!()
-    };
-    let PopulationInput::CurrentSeries(spec) = &mut population.input else {
-        unreachable!()
-    };
-    spec.metric = "b".into();
-    assert!(compile_physical_asap_dag(&Rc::new(bad)).is_err());
 }

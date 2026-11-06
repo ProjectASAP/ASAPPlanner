@@ -281,7 +281,7 @@ lists each stage's input and output types.
 one. It makes no implementation choice, so this section counts it as Stage 0
 (its output); the code runs it as Stage 1 starts, which is why
 [Stage inputs and outputs](#stage-inputs-and-outputs-whole-workload-candidates-and-memo)
-lists `generate_dag_of_logical_memo_groups` with Pass 1. `generate_dag_of_logical_memo_groups` runs
+lists `memo_of_queries` with Pass 1. `memo_of_queries` runs
 `share_common_sub_dags` (`crates/logical-asap-optimization/src/stage0/cse.rs`) over the frontends'
 roots and numbers the shared nodes as groups. Two structurally equal nodes
 become one group only when sharing them is legal, that is, when every reader
@@ -345,7 +345,7 @@ One query, evaluated every minute, with `max_error 0.01` and
 avg by (job) (quantile_over_time(0.5, data[5m]) / quantile_over_time(0.5, data[5m]) + quantile_over_time(0.9, data[5m]))
 ```
 
-**Step 1, Stage 0.** `generate_dag_of_logical_memo_groups` makes 7 groups:
+**Step 1, Stage 0.** `memo_of_queries` makes 7 groups:
 
 | Group | Logical sub-expression | Reads |
 |---|---|---|
@@ -523,12 +523,12 @@ candidates is in `crates/plan-selection/src/` (`select.rs`, `groups/`, `milp/`).
 
 | Step | Entry point | Path |
 |---|---|---|
-| Stage 0 | `generate_dag_of_logical_memo_groups` → `DagOfLogicalMemoGroups`, `MemoGroup`, `MemoGroupId` | `stage0.rs` (the types: `asap_types::stages`); hash-consing is `share_common_sub_dags` in `stage0/cse.rs` |
-| Pass 1 | `generate_per_computation_logical_memo_candidates` → `PerComputationLogicalMemoCandidates` (its `Memo` and its `PrunedCandidate<HowToComputeAggregateMeasure>`s; `ComputationTarget` is Pass 1's working type, in `asap_types::stages`), the one entry: inside it, the computation targets (walking the memo groups), the summaries the deployment does not support and those no query can use pruned, the candidates attached to the groups (`try_populate_pass1`), then the accuracy-scoped sizes | `pass1/logical_memo_candidates.rs`; `pass1/per_computation_candidates.rs`; `pass1/memo_population.rs` |
+| Stage 0 | `memo_of_queries` → `DagOfLogicalMemoGroups`, `MemoGroup`, `MemoGroupId` | `stage0.rs` (the types: `asap_types::stages`); hash-consing is `share_common_sub_dags` in `stage0/cse.rs` |
+| Pass 1 | `pass1_memo` → `PerComputationLogicalMemoCandidates` (its `Memo` and its `PrunedCandidate<HowToComputeAggregateMeasure>`s; `ComputationTarget` is Pass 1's working type, in `asap_types::stages`), the one entry: inside it, the computation targets (walking the memo groups), the summaries the deployment does not support and those no query can use pruned, the candidates attached to the groups (`try_populate_pass1`), then the accuracy-scoped sizes | `pass1/logical_memo_candidates.rs`; `pass1/per_computation_candidates.rs`; `pass1/memo_population.rs` |
 | Memo types | `DagOfLogicalMemoGroups`, `PerComputationLogicalMemoCandidates`, `HowToComputeAggregateMeasure`, Pass 1's working types (`ComputationTarget`, `FusedComputation`, `HavingEntry`, `HavingPlacement`), `Memo`, `CandidateForMemoGroup`, `OriginOfCandidateForMemoGroup`, `LogicalASAPMemoCandidates`, `CandidateGenerationTimeout`, `root_groups`, `queries_rooted_at` | `crates/types/src/stages/` (`asap_types::stages`) |
 | Pass 2 | `generate_logical_asap_memo_candidates` → `LogicalASAPMemoCandidates`, from Pass 1's output. It calls in this order: 1. window composition for every legal tumbling-window width (`add_local_window_composition`); 2–9. the rules in `pass2/memo/rules/`: scan widening, summary inputs, top-k reuse, finer aggregate, rollup, window rollup, summary results, state configurations; 10. `add_shared_summary_state_groups`, the shared builds | `pass2/logical_memo_candidates.rs` (`LogicalASAPMemoCandidates` itself: `asap_types::stages`); `pass2/memo/window_candidates.rs`, `pass2/memo/rules/`, `pass2/memo/state_groups.rs`, `pass2/memo/shared_configurations.rs` |
 | Memo to candidate DAGs | `enumerate`, `build_logical_asap_dags_from_chosen_candidates`, `ChosenCandidatePerMemoGroup`, `AllChosenCandidatesPerMemoGroup`, `ErrorBuildingLogicalASAPDagsFromChosenCandidates` | `pass2/memo/enumeration.rs` (re-exported at the crate root) |
-| Production memo build and search | The facade's `run_planning` builds the DAG of logical memo groups and runs Pass 1 (`generate_per_computation_logical_memo_candidates`) once; then `generate_logical_asap_memo_candidates`, `generate_physical_asap_memo_candidates` and Stage 3's `select_plan`, once each, and builds the selected plan with Stage 2's `AssignmentRealizer::realize`. Behind `select_plan`: the group selection MILP (#1095), `groups/` and `milp/` | `crates/planner/src/run.rs`; `crates/plan-selection/src/select.rs` |
+| Production memo build and search | The facade's `run_planning` builds the DAG of logical memo groups and runs Pass 1 (`pass1_memo`) once; then `generate_logical_asap_memo_candidates`, `generate_physical_asap_memo_candidates` and Stage 3's `select_plan`, once each, and builds the selected plan with Stage 2's `AssignmentRealizer::realize`. Behind `select_plan`: the group selection MILP (#1095), `groups/` and `milp/` | `crates/planner/src/run.rs`; `crates/plan-selection/src/select.rs` |
 
 ## ASAPPlanner Detailed Design: Planning Stages and their decisions/Strategies
 
@@ -567,14 +567,14 @@ The sections below describe each stage.
 | 0. Frontends | nothing: a query that cannot be lowered fails planning with an error | — | — |
 | 1, Pass 1 | what the measure or the deployment cannot compute: `RequiresExact`, `NullableAvgInput`, `NoRelationalCountSketchRealization`, `UnsupportedByDeployment`, `QuantileOutsideUnitInterval`, `TopKHeapOverOneRowPerItem`; and, only when the deployment's accuracy model and evidence cannot accept an output without its guarantee, a summary no query reading it can use: `NoErrorBoundForQueryTarget` | `PerComputationLogicalMemoCandidates::pruned_candidates`, each on its aggregate's memo group | the way to compute the measure (`HowToComputeAggregateMeasure`) |
 | 1, Pass 2 | nothing: it only adds candidates | — | — |
-| 2 | what cannot be implemented, built or kept: `PerEntityAggregateNotExecutable` (an exact per-entity `Aggregate` the executor has no kernel for), `RawDataNotRetained` (a query-time scan of raw data the deployment does not keep), `InputHasNoBuildableProducer`, `ReachesNoQueryOutput`, `TooFewQueryReaders` (shared within one evaluation with fewer than two reading queries) | `PhysicalASAPMemoCandidates::pruned_candidates`, each on its operator node's memo group | `PhysicalCandidateKey { operator_node, timing, materialization }` |
+| 2 | what cannot be implemented, built or materialized: `PerEntityAggregateNotExecutable` (an exact per-entity `Aggregate` the executor has no kernel for), `RawDataNotRetained` (a query-time scan of raw data the deployment does not keep), `InputHasNoBuildableProducer`, `ReachesNoQueryOutput`, `TooFewQueryReaders` (shared within one evaluation with fewer than two reading queries) | `PhysicalASAPMemoCandidates::pruned_candidates`, each on its operator node's memo group | `PhysicalCandidateKey { operator_node, properties }` |
 | 3 | valid candidates that lose, and the checks only a whole plan can make (accuracy, latency, cluster capacity) | its own `RejectionCause` | — |
 
 Stage 2's key names what a pruned candidate would have been, since kept
 candidates are renumbered after pruning and a pruned one has no
 `PhysicalCandidateId`. Stage 2 emits one candidate per operator node,
-timing and materialization, and makes no copies of it, so (`operator_node`,
-`timing`, `materialization`) is unique. Operator
+timing and lifetime, and makes no copies of it, so (`operator_node`,
+`properties`) is unique. Operator
 nodes are kept whole, so `operator_node` indexes the output's
 `operator_nodes_of_candidates_for_memo_groups`. Pass 1's accuracy pruning
 (`NoErrorBoundForQueryTarget`) runs inside Pass 1's entry, before the
@@ -597,10 +597,10 @@ the memo path's entry points.
 | Stage | Whole-workload candidates: input → output | Memo: input → output | Entry point (memo path) |
 |---|---|---|---|
 | 0. Frontends | Query text, language → one logical root per query, carrying its accuracy target | Same: a `QueryRoot` per query | `lower_promql_query_workload`, `lower_sql_dialect` (`asap-frontend-*`); `plan_installable` (`asap_planner`) runs the frontends and Stages 1–3 on the user input |
-| 1, Pass 1 | Logical roots; the deployment's supported summaries → the Pass 1 inventory, every computation's candidates (`PerComputationCandidates`, now Pass 1's crate-private working form) | Logical roots → `DagOfLogicalMemoGroups` (hash-consed `MemoGroup`s); with the Pass 1 inventory, less the summaries the deployment does not support and those no query reading them can use → `PerComputationLogicalMemoCandidates`: the `Memo` (each group's `CandidateForMemoGroup`s, with the accuracy-scoped sizes) and the pruned candidates (`PrunedCandidate<HowToComputeAggregateMeasure>`) | `generate_dag_of_logical_memo_groups`, `generate_per_computation_logical_memo_candidates` |
+| 1, Pass 1 | Logical roots; the deployment's supported summaries → the Pass 1 inventory, every computation's candidates (`PerComputationCandidates`, now Pass 1's crate-private working form) | Logical roots → `DagOfLogicalMemoGroups` (hash-consed `MemoGroup`s); with the Pass 1 inventory, less the summaries the deployment does not support and those no query reading them can use → `PerComputationLogicalMemoCandidates`: the `Memo` (each group's `CandidateForMemoGroup`s, with the accuracy-scoped sizes) and the pruned candidates (`PrunedCandidate<HowToComputeAggregateMeasure>`) | `memo_of_queries`, `pass1_memo` |
 | 1, Pass 2 | One Pass 1 choice per computation → that choice rewritten by each sharing rule, every subset of sharing choices (no longer in the code) | `Memo`; the entries' recurrence and range steps → the same memo with each rule's candidates added to the groups they implement | the memo rules (`pass2/memo/rules/`), `pass2::memo::window_candidates` |
 | 1, concrete summary-state groups | (part of Pass 2) | `Memo` → the memo with concrete summary-state groups: one group per shared size or tumbling-window layout that readers can read | `add_shared_summary_state_groups`, Pass 2's last step; the Pass 2 output is `LogicalASAPMemoCandidates` (`generate_logical_asap_memo_candidates`) |
-| 2 | One whole-workload logical candidate; entries (recurrence, predictability), `DataWorkload`, query-time retention → its physical candidates, one per materialization assignment | `LogicalASAPMemoCandidates`; entries, `DataWorkload`, query-time and raw-data retention → `PhysicalASAPMemoCandidates`: every operator node of every candidate with each allowed timing and materialization (one physical candidate each, no copies), the producers of each input, reader constraints (each applied to every selected run of its candidate), and the pruned candidates (`PrunedCandidate<PhysicalCandidateKey>`) | `generate_physical_asap_memo_candidates` (`asap_physical_asap_optimization`) |
+| 2 | One whole-workload logical candidate; entries (recurrence, predictability), `DataWorkload`, query-time retention → its physical candidates, one per physical properties assignment | `LogicalASAPMemoCandidates`; entries, `DataWorkload`, query-time and raw-data retention → `PhysicalASAPMemoCandidates`: every operator node of every candidate with each allowed timing and lifetime (one physical candidate each, no copies), the producers of each input, reader constraints (each applied to every selected run of its candidate), and the pruned candidates (`PrunedCandidate<PhysicalCandidateKey>`) | `generate_physical_asap_memo_candidates` (`asap_physical_asap_optimization`) |
 | 3 | Every physical candidate; accuracy targets, accuracy model and evidence, cost model → one plan | `PhysicalASAPMemoCandidates`; entries, `DataWorkload`, `AccuracyCheckInputs`, `CostInputs`, Stage 2's realizer → `Selection`: the selected plan (`selected_dag`, a `DagOfSelectedCandidates`: one node per run of a candidate, so a candidate recomputed by two readers or shared as two instances over different inputs is two nodes, with an edge per input), its cost, the accepted accuracy per query and the search report | `select_plan` (`asap_plan_selection`); the facade (`run_planning`, output `PlanningRun`) runs it once and builds the selected `PhysicalWorkloadPlan` with `AssignmentRealizer::realize`, one plan node per selected node |
 | 4. Execution | The selected `PhysicalASAPDAG` → query results | Same: an `InstallablePlan` (`{dag, query_texts}`) → query results | The deployment runtime installs the `InstallablePlan` |
 
@@ -611,7 +611,7 @@ What changed with the memo:
   jointly.
 - Stage 2 is no longer a pass over whole candidate DAGs. It implements every
   operator node of every candidate for a memo group once, enumerates each
-  node's timings and materializations, and prunes what cannot be built,
+  node's timings and lifetimes, and prunes what cannot be built,
   used or kept; Stage 3 selects among what remains.
 - The concrete summary-state groups are expanded by Stage 3's search today,
   through the Stage 1 functions above. A planned change moves this expansion
@@ -844,7 +844,7 @@ tumbling windows keeps the guarantee when the family's merged error is `Exact` o
 `AsIfBuiltOverUnion`), and a build shared by several readers takes the
 strictest reader's size, one state group per distinct size. The failure
 probability is part of Pass 1's size too
-(`generate_per_computation_logical_memo_candidates`): each approximate input
+(`pass1_memo`): each approximate input
 of a candidate with `n` budget parts is sized for `δ / (n · V)`, the smallest
 over the queries reaching its group, where `V` is the number of values the
 query's accuracy scope covers (1 per value, at most `⌊1 / share⌋` for a record
@@ -1198,21 +1198,26 @@ the `DataWorkload`. Typical outcomes:
 
 A shared summary is materialized once for all its consumers. See Example 4.
 
-The planner implements a subset of these options today. Stage 2 enumerates
+The planner implements a subset of these options today. In code each option
+is a timing and a lifetime (`PhysicalProperties`, #1200): materialized at
+ingestion time is ingestion time with lifetime `AcrossEvaluations`;
+materialized at query time is query time with lifetime `OneEvaluation`
+(reused within one evaluation) or `AcrossEvaluations` (materialized for later
+evaluations); not materialized is lifetime `None`. Stage 2 enumerates
 materialization for summary builds (`SummaryAgg` and `SummaryTumblingWindowChain`); each
-gets `NotMaterialized`, `MatAtIngestion(Memory)` when it is eligible to run
-at ingestion time, and `MatAtQuery(Memory)` when two or more queries read
-it. Of every other sub-DAG that two or more queries read (for example a
-`Scan` that a 1 m and a 5 m window both read), only the highest node is a
-materialization candidate: one that a query's output, or a node only one
-query reads, consumes. It gets `NotMaterialized` and `MatAtQuery(Memory)`
-only, since raw rows are not maintained at ingestion time. Below an
-ingestion-time build it stays `NotMaterialized`: the ingestion side reads
-its own copy. A `MatAtQuery` state is reused within one evaluation only. When the
-deployment's capabilities declare `query_time_results_retained`, a
-tumbling-window chain that builds exactly one new tumbling window per evaluation also gets
-`MatAtQueryKeptAcrossEvaluations(Memory)`: the tumbling windows built at query time are
-kept for the next evaluations. Nothing is placed on disk yet.
+is offered not materialized, materialized at ingestion time `AcrossEvaluations(Memory)` when
+it is eligible to run at ingestion time, and materialized at query time
+`OneEvaluation(Memory)` when two or more queries read it. Of every other
+sub-DAG that two or more queries read (for example a `Scan` that a 1 m and a
+5 m window both read), only the highest node is a materialized-output candidate:
+one that a query's output, or a node only one query reads, consumes. It is
+offered not materialized and `OneEvaluation(Memory)` only, since raw rows are not
+maintained at ingestion time. Below an ingestion-time build it stays not
+materialized: the ingestion side reads its own copy. When the deployment's
+capabilities declare `query_time_results_retained`, a tumbling-window chain
+that builds exactly one new tumbling window per evaluation is also offered
+query time `AcrossEvaluations(Memory)`: the tumbling windows built at query
+time are materialized for the next evaluations. Nothing is placed on disk yet.
 
 A runtime builds every ingestion-time state on the grid of its width anchored
 at the epoch, so an ingestion-time build must end on that grid at every
@@ -1243,20 +1248,20 @@ Output: C3 — CandidatePhysicalASAPDAGs
 2:  for each LogicalASAPDAG d in C2 do
 3:      // Materialization: options per sub-DAG
 4:      for each sub-DAG s in d do
-5:          Opt(s) ← { NotMaterialized }
+5:          Opt(s) ← { (QueryTime, None) }
 6:          for each medium in {memory, disk} do
-7:              Opt(s) ← Opt(s) ∪ { MatAtIngestion(medium), MatAtQuery(medium) }
+7:              Opt(s) ← Opt(s) ∪ { (IngestionTime, AcrossEvaluations(medium)), (QueryTime, OneEvaluation(medium)) }
 8:          end for
 9:      end for
 10:
 11:     for each assignment m in Opt(s_1) × … × Opt(s_n) do
 12:         // constraint: everything upstream of an ingestion-time node also runs at ingestion time
-13:         if some s with m(s) = MatAtIngestion has an upstream node u with m(u) ≠ MatAtIngestion then
+13:         if some s with timing(m(s)) = IngestionTime has an upstream node u with timing(m(u)) ≠ IngestionTime then
 14:             PRUNE(m, "upstream of ingestion-time node not at ingestion time")
 15:             continue
 16:         end if
 17:         // constraint: keep a materialized output as long as any consumer needs it
-18:         for each s with m(s) ≠ NotMaterialized do
+18:         for each s with lifetime(m(s)) ≠ None do
 19:             retention(s) ← latest time any consumer of s reads it    // from recurrence, windows
 20:         end for
 21:         // a shared summary is one node, so it is materialized once for all consumers
@@ -1299,7 +1304,7 @@ into a node.
 
 *Example for Algorithm 3* ([Example 4, Pattern B](#example-4-materialization-of-window-summaries-in-physical-planning)).
 The logical candidate is the `Tumbling(1m)` KLL option from Algorithm 2. The
-diagram shows three of its materialization assignments, each drawn as a copy
+diagram shows three of its physical properties assignments, each drawn as a copy
 of the DAG with every node colored by its materialization. Line 13 enforces one
 rule: a node can run at ingestion time only if every node it reads from also
 runs at ingestion time, because otherwise its input does not exist yet when
@@ -1328,7 +1333,7 @@ flowchart TB
   end
   subgraph LEG["Legend: when a node runs and whether its output is stored"]
     direction LR
-    l1["MatAtIngestion"]:::ingest ~~~ l2["MatAtQuery"]:::qtime ~~~ l3["NotMaterialized"]:::notmat
+    l1["(IngestionTime, AcrossEvaluations)"]:::ingest ~~~ l2["(QueryTime, OneEvaluation)"]:::qtime ~~~ l3["(QueryTime, None)"]:::notmat
   end
   M1 --> P1
   LEG ~~~ M1

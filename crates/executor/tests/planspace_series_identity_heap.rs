@@ -2,7 +2,7 @@
 //! the query's rows do not carry: the planner pipeline plans the logical DAG
 //! the frontend lowered, and a deployment prices heaps.
 use crate::common;
-use common::{compile_physical_asap_dag, selected_dag};
+use common::selected_dag;
 use planner_types::ir::OperatorNode;
 
 use asap_executor::physical_planner::promql_rows::SERIES_IDENTITY_COLUMN;
@@ -44,7 +44,7 @@ fn lower(query: &str, accuracy: &AccuracyTarget) -> Rc<OperatorNode> {
 }
 
 fn carries_identity(root: &Rc<OperatorNode>) -> bool {
-    compile_physical_asap_dag(root)
+    planner_types::test_support::physical_asap_dag_at_query_time(root)
         .unwrap()
         .nodes
         .iter()

@@ -90,16 +90,10 @@ fn frequency_count_candidates_use_unit_weights() {
                 continue;
             };
             assert!(
-                !matches!(
-                    kind.algorithm(),
-                    SketchAlgorithm::Hll | SketchAlgorithm::CountSketch
-                ),
+                !matches!(kind, SketchAlgorithm::Hll | SketchAlgorithm::CountSketch),
                 "{query}: {node:?}"
             );
-            if !matches!(
-                kind.algorithm(),
-                SketchAlgorithm::Cms | SketchAlgorithm::UnivMon
-            ) {
+            if !matches!(kind, SketchAlgorithm::Cms | SketchAlgorithm::UnivMon) {
                 continue;
             }
             let dag = physical_asap_dag(node);
@@ -110,7 +104,7 @@ fn frequency_count_candidates_use_unit_weights() {
                 )),
                 "post-ASAP DAG must preserve the count update contract"
             );
-            algorithms.push(*kind.algorithm());
+            algorithms.push(*kind);
             assert!(input.item.is_some(), "frequency keys must be explicit");
             assert_eq!(
                 input.weight,
@@ -242,7 +236,7 @@ fn cms_count_updates_total_ten_for_zero_positive_and_negative_samples() {
                 .any(|node| {
                     matches!(&node.payload,
             PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
-                if kind.algorithm() == &SketchAlgorithm::Cms)
+                if kind == &SketchAlgorithm::Cms)
                 })
                 .then_some(dag)
         })

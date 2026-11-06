@@ -47,7 +47,7 @@ or `Operator::ASAP(ASAPOp)`. Old public names are not kept as aliases.
 | `SummaryExpr::ValueOperation { .. }` over an evaluation | An ordinary `NonASAPOp` (`Project`, `Filter`, `Sort`, `Limit`, `Aggregate`) reading an ASAP node; `FinalizeExactAccumulator`, `MaintainPopulation`, `EvaluatePopulation` are `ASAPOp` variants |
 | `Replacement::Summary(..)` / `Replacement::Rewrite(..)` | `Replacement::SubDAG(Rc<OperatorNode>)`; `is_logical_rewrite` tells them apart |
 | `SummaryFamilyType` | `FieldDataType` (its non-`Plain` variants) |
-| Timing stored on post-ASAP nodes | `OperatorNode::timing`, `None` until `ir::timing::apply_materialization_timings` writes it from a `MaterializationAssignment` (default: all query time) |
+| Timing stored on post-ASAP nodes | `OperatorNode::timing`, `None` until `ir::timing::apply_physical_properties` writes it from a `PhysicalPropertiesAssignment` (default: all query time) |
 | `UnresolvedQueryExpr` + `asap_types::pre_asap::resolve_root` | `UnresolvedOp` / `UnresolvedScalar` + `asap_frontend_common::resolve_root` |
 | `pre_asap::canonicalize`, `pre_asap::cse::share_common_sub_dags` | `asap_frontend_common` `canonicalize` (crate-private), `share_common_sub_dags` (crate-private in `asap_logical_asap_optimization`, `stage0/cse.rs`) |
 | `asap_types::post_asap::compile_post_asap_dag` (wire version 5, `Fallback`/`Binary`/`Value` payloads) | `asap_types::ir::physical_export::compile_physical_asap_dag` (`PhysicalASAPDAG`, carried in the plan file versioned by `asap_planner::INSTALLABLE_PLAN_WIRE_VERSION`: one node per operator, `Operator<NodeId>` payloads, `ScalarRef` edges); input must be timed |

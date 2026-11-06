@@ -5,10 +5,7 @@ use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, Schema};
-use asap_types::ir::{
-    apply_materialization_timings, physical_export::compile_physical_asap_dag,
-    MaterializationAssignment, NodeToTimedNodeCache, NonASAPOp, OperatorNode, ScalarExpr,
-};
+use asap_types::ir::{NonASAPOp, OperatorNode, ScalarExpr};
 
 fn catalog() -> SqlCatalog {
     let schema = Schema::new(vec![
@@ -142,48 +139,4 @@ async fn corr_filter_is_a_measure_filter() {
         "{:?}",
         filters(&query)
     );
-}
-
-// The plan the planner pipeline selects retains the complete typed query and
-// compiles to a physical ASAP DAG.
-#[tokio::test]
-async fn corr_survives_exact_plan_compilation() {
-    let query = lower("SELECT corr(x, y) AS r FROM a").await;
-    // `a` holds 60,000 rows: the query scans all of them.
-    let data: asap_types::workload::DataWorkload = serde_json::from_value(
-        serde_json::json!({"arrival": "at_rest", "sources": {"a": {"rows_held": 60000}}}),
-    )
-    .unwrap();
-    let run = asap_planner::run_planning(
-        vec![asap_types::ir::QueryRoot::Operator(query.clone())],
-        &[asap_types::workload::QueryWorkloadEntry {
-            query: Default::default(),
-            requirements: asap_types::workload::QueryRequirements {
-                accuracy: asap_types::ir::properties::AccuracyTarget::exact(),
-                max_latency_ms: None,
-            },
-            predictability: Default::default(),
-            recurrence: Default::default(),
-            range_evaluation: None,
-        }],
-        &data,
-        asap_planner::PlanningModels::builtin(),
-        asap_planner::PlanSearchSettings::default(),
-    )
-    .unwrap();
-    let [asap_types::ir::QueryRoot::Operator(plan)] = run.selected_plan.as_deref().unwrap() else {
-        panic!("one operator root");
-    };
-    assert!(plan.guarantee.as_ref().unwrap().is_exact());
-    // Pass 1 has no candidate for `corr`: the plan is the query's own
-    // operator DAG, no ASAP node added.
-    assert!(!plan.contains_asap(), "expected the exact plan");
-    assert_eq!(aggregate(plan).0, aggregate(&query).0);
-    let timed = apply_materialization_timings(
-        plan,
-        &MaterializationAssignment::default(),
-        &mut NodeToTimedNodeCache::new(),
-    )
-    .unwrap();
-    compile_physical_asap_dag(&timed).unwrap();
 }

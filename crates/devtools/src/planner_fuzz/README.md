@@ -106,7 +106,7 @@ derive_cost = cost(witness) − cost(W's plan)
 never from a guess:
 
 1. Stage 2 and Stage 3 implement and price the witness the same way they price
-   any candidate. Each materialization assignment goes through
+   any candidate. Each physical properties assignment goes through
    `optimize_physical_asap` and `select_plan`, using the same cost model,
    deployment capabilities and accuracy checks as the search. The cheapest assignment is kept.
 2. `W`'s selected logical plan is priced the same way. This gives the witness

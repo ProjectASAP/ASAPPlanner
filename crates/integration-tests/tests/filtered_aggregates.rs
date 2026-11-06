@@ -1,7 +1,6 @@
 //! Filtered aggregates (`FILTER (WHERE …)`, a per-measure filter, or a
 //! filtered `SummaryAgg`) execute with SQL semantics: a row that fails the
 //! filter contributes nothing, but its group is kept.
-use crate::physical_common;
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -57,7 +56,7 @@ fn rows() -> Vec<Vec<Value>> {
 
 /// Run the logical DAG `root` over [`rows`]; rows come back shown and sorted.
 fn execute(root: &Rc<OperatorNode>) -> Vec<String> {
-    let dag = physical_common::compile_physical_asap_dag(root).unwrap();
+    let dag = asap_types::test_support::physical_asap_dag_at_query_time(root).unwrap();
     let scan = dag
         .nodes
         .iter()
@@ -259,7 +258,7 @@ async fn hand_filtered_kll_compiles_and_executes() {
     .await;
     let roots = hand_filtered(
         "SELECT g, approx_percentile_cont(x, 0.5) AS q FROM events GROUP BY g",
-        |f| matches!(f, FieldDataType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::Kll),
+        |f| matches!(f, FieldDataType::Sketch(kind, _) if kind == &SketchAlgorithm::Kll),
         &filter,
     )
     .await;
@@ -278,7 +277,7 @@ async fn kll_candidates(sql: &str) -> Vec<Rc<OperatorNode>> {
         .filter(|root| {
             OperatorNode::reachable(root).iter().any(|n| {
                 matches!(n.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
-                    if kind.algorithm() == &SketchAlgorithm::Kll)
+                    if kind == &SketchAlgorithm::Kll)
             })
         })
         .collect();

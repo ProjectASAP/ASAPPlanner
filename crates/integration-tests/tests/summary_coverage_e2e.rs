@@ -31,7 +31,7 @@ fn kll_state(pre: Rc<OperatorNode>) -> Rc<OperatorNode> {
         .into_iter()
         .filter(|node| {
             matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
-                if kind.algorithm() == &SketchAlgorithm::Kll)
+                if kind == &SketchAlgorithm::Kll)
         })
         .collect();
     assert_eq!(

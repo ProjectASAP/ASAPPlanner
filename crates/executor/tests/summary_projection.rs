@@ -52,7 +52,8 @@ fn raw_node(id: usize, payload: NonASAPOp<usize>) -> PhysicalASAPDAGNode {
         payload: PhysicalASAPOperatorPayload::NonASAP(payload),
         output_schema: sample_schema(),
         output_state: ExecutionDataState::QUERY_ROWS,
-        materialization: Default::default(),
+        lifetime: Default::default(),
+        parameters: None,
         guarantee: None,
         retention_ms: None,
     }
@@ -123,7 +124,8 @@ fn summary_projection_survives_recovery() {
                 }),
                 output_schema: (*schema).clone(),
                 output_state: ExecutionDataState::INGESTION_SUMMARY,
-                materialization: Default::default(),
+                lifetime: Default::default(),
+                parameters: None,
                 guarantee: None,
                 retention_ms: None,
             },
@@ -151,7 +153,8 @@ fn summary_projection_survives_recovery() {
                 }),
                 output_schema: output.clone(),
                 output_state: ExecutionDataState::INGESTION_SUMMARY,
-                materialization: Default::default(),
+                lifetime: Default::default(),
+                parameters: None,
                 guarantee: None,
                 retention_ms: None,
             },
@@ -191,6 +194,7 @@ fn summary_projection_survives_recovery() {
     assert_eq!(*program.output_schema(1).unwrap(), output);
     let mut accumulator = create_planner_accumulator(
         &family,
+        None,
         &SummaryUpdate::column(ColumnRef::SampleValue),
         &GroupingStrategy::PerSubpopulationInstance,
     )
@@ -259,7 +263,8 @@ fn summary_merge_without_inputs_is_rejected() {
             }),
             output_schema: schema,
             output_state: ExecutionDataState::INGESTION_SUMMARY,
-            materialization: Default::default(),
+            lifetime: Default::default(),
+            parameters: None,
             guarantee: None,
             retention_ms: None,
         }],

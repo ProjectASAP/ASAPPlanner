@@ -16,11 +16,6 @@
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use asap_types::ir::physical_export::compile_physical_asap_workload;
-use asap_types::ir::properties::timing::{
-    apply_materialization_timings_to_roots, MaterializationAssignment,
-};
-use asap_types::ir::properties::ExecutionDataStateError;
 use asap_types::ir::OperatorNode;
 use asap_types::workload::parsed_workload::ParsedWorkload;
 use asap_types::workload::WorkloadError;
@@ -296,32 +291,6 @@ impl PlanOutput {
             }
         }
         nodes
-    }
-
-    /// The workload as one physical ASAP DAG, with shared sub-DAGs exported
-    /// once. A node keeps the timing and materialization its pass gave it:
-    /// for [`Stage1ToStage3Pass`] that is Stage 3's selected plan as
-    /// selected (e.g. ingestion-time tumbling windows), the document a deployment
-    /// runtime executes. Only a node the pass left untimed takes the default
-    /// [`MaterializationAssignment`] (not materialized, computed when its
-    /// consumer runs). Operator queries become its `roots` and standalone scalar
-    /// queries its `scalar_roots`, keyed by position in the batch. That
-    /// position is the entry index, because `check_contract` requires dense
-    /// entry indices.
-    ///
-    /// An empty workload is an error
-    /// ([`PhysicalASAPDAGValidationError::NoRoots`](asap_types::ir::physical_export::PhysicalASAPDAGValidationError::NoRoots)).
-    /// A workload of only literal scalars yields a DAG with no nodes: just
-    /// its `scalar_roots`.
-    pub fn physical_asap_dag(
-        &self,
-    ) -> Result<asap_types::ir::physical_export::PhysicalASAPDAG, ExecutionDataStateError> {
-        // A node several roots share by `Rc` is timed and exported once.
-        let timed = apply_materialization_timings_to_roots(
-            &self.roots(),
-            &MaterializationAssignment::default(),
-        )?;
-        compile_physical_asap_workload(&timed)
     }
 
     pub fn len(&self) -> usize {
@@ -627,28 +596,6 @@ mod tests {
     fn contract_accepts_an_empty_workload() {
         let output = PlanOutput::new(Vec::new());
         assert!(check_contract(&output, "stub", 0).is_ok());
-    }
-
-    /// An empty workload has no DAG: the export's `NoRoots`, wrapped in
-    /// `InvalidPhysicalDAG`. A workload of only literal scalars exports a DAG
-    /// with no nodes, just its `scalar_roots`.
-    #[test]
-    fn physical_asap_dag_of_an_empty_and_a_literal_only_workload() {
-        use asap_types::ir::physical_export::PhysicalASAPDAGValidationError;
-        use asap_types::ir::ScalarExpr;
-        assert_eq!(
-            PlanOutput::new(Vec::new()).physical_asap_dag().err(),
-            Some(ExecutionDataStateError::InvalidPhysicalDAG(
-                PhysicalASAPDAGValidationError::NoRoots
-            ))
-        );
-        let mut literal = PlanOutput::new(Vec::new());
-        literal.scalar_roots = vec![(0, ScalarExpr::literal_f64(1.0))];
-        let dag = literal.physical_asap_dag().unwrap();
-        assert!(dag.nodes.is_empty() && dag.roots.is_empty());
-        let [(0, ScalarExpr::Literal(_))] = dag.scalar_roots.as_slice() else {
-            panic!("one literal scalar root: {:?}", dag.scalar_roots)
-        };
     }
 
     /// Registering a name twice fails instead of overwriting, so a comparison
