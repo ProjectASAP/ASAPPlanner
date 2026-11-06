@@ -369,9 +369,7 @@ dependencies = [
 name = "asap-frontend-promql"
 version = "0.1.0"
 dependencies = [
- "asap-accuracy",
  "asap-frontend-common",
- "asap-planner",
  "asap-types",
  "promql-parser",
 ]
@@ -382,7 +380,6 @@ version = "0.1.0"
 dependencies = [
  "asap-frontend-common",
  "asap-frontend-sql",
- "asap-planner",
  "asap-sql-function-catalog",
  "asap-types",
  "datafusion",

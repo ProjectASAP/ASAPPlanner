@@ -2,8 +2,9 @@
 //!
 //! The test reads `cargo metadata --format-version 1 --no-deps` and checks every
 //! `[dependencies]` edge between two workspace crates, and every
-//! `[dev-dependencies]` edge between two stage crates (a test of one stage
-//! never calls another stage). Build-dependencies are not checked. Each crate
+//! `[dev-dependencies]` edge from a stage crate to another stage crate or to
+//! the facade (a test of one stage never calls another stage, directly or
+//! through `asap-planner`). Build-dependencies are not checked. Each crate
 //! has a role ([`role_of`]), and [`rule_violated`] says which role may depend
 //! on which:
 //!
@@ -21,7 +22,7 @@
 //!
 //! The `[dependencies]` edges the rules forbid but the workspace has today are
 //! listed, each with its reason, in [`EXCEPTIONS`]; no `[dev-dependencies]`
-//! edge between stage crates is excepted. A new workspace crate fails the test
+//! edge is excepted. A new workspace crate fails the test
 //! until it gets a role.
 
 use serde_json::Value;
@@ -107,7 +108,8 @@ const EXCEPTIONS: &[Exception] = &[
 /// One message per edge of `metadata` (the JSON of
 /// `cargo metadata --format-version 1 --no-deps`) that breaks a rule, naming
 /// the edge and the rule: a `[dependencies]` edge that [`rule_violated`]
-/// forbids, or a `[dev-dependencies]` edge between two stage crates.
+/// forbids, or a `[dev-dependencies]` edge from a stage crate to another
+/// stage crate or the facade.
 fn crate_graph_violations(metadata: &Value) -> Vec<String> {
     let packages = metadata["packages"]
         .as_array()
@@ -144,8 +146,11 @@ fn crate_graph_violations(metadata: &Value) -> Vec<String> {
                 ),
                 Some("dev") => (
                     "[dev-dependencies]",
-                    (from_role == Role::Stage && to_role == Role::Stage)
-                        .then_some("a stage crate's tests never call another stage crate"),
+                    (from_role == Role::Stage && matches!(to_role, Role::Stage | Role::Facade))
+                        .then_some(
+                            "a stage crate's tests never call another stage crate, \
+                             directly or through the facade",
+                        ),
                     &[][..],
                 ),
                 Some(_) => continue,
@@ -249,7 +254,27 @@ fn checker_rejects_a_dev_dependency_between_stage_crates() {
         crate_graph_violations(&metadata),
         vec![
             "forbidden [dev-dependencies] edge asap-stage1-pass1-per-computation-candidates -> \
-             asap-stage0-memo: a stage crate's tests never call another stage crate (#1054)"
+             asap-stage0-memo: a stage crate's tests never call another stage crate, \
+             directly or through the facade (#1054)"
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+fn checker_rejects_a_frontend_dev_dependency_on_the_facade() {
+    let metadata = serde_json::json!({"packages": [
+        package("asap-types", &[], &[]),
+        package("asap-planner", &["asap-types"], &[]),
+        // Forbidden: the PromQL frontend's tests plan through the facade.
+        package("asap-frontend-promql", &["asap-types"], &["asap-planner"]),
+    ]});
+    assert_eq!(
+        crate_graph_violations(&metadata),
+        vec![
+            "forbidden [dev-dependencies] edge asap-frontend-promql -> asap-planner: \
+             a stage crate's tests never call another stage crate, directly or through \
+             the facade (#1054)"
                 .to_string()
         ]
     );
