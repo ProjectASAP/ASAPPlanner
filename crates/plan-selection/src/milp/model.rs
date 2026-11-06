@@ -35,8 +35,11 @@ pub struct ContextId(pub usize);
 /// a candidate with $\ell$ = None or `OneEvaluation` runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Context {
-    /// $\kappa_q$: an evaluation of a query.
-    QueryEvaluation(QueryId),
+    /// The evaluation of every query with this schedule: queries with the
+    /// same (interval, phase) are evaluated together and share its
+    /// `OneEvaluation` results. A and B both every 10 s at phase 0 give one
+    /// context. A non-periodic query has no context yet (out of scope).
+    Evaluation(EvaluationSchedule),
     /// $I_r$: the ingestion pipeline of a refresh window.
     IngestionPipeline(RefreshWindowId),
     /// $\kappa_m$: inside an `AcrossEvaluations` candidate's own computation.
@@ -44,11 +47,16 @@ pub enum Context {
 }
 
 impl Context {
-    /// $T_\kappa$: the context's periodic evaluation schedule when it has
-    /// one; `None` (a non-periodic query) is not an implicit compatibility
-    /// pass.
+    /// $T_\kappa$: an evaluation context's schedule; `None` for an ingestion
+    /// pipeline or a materialized candidate's own computation, which is not
+    /// an implicit compatibility pass.
     pub fn evaluation_schedule(&self) -> Option<EvaluationSchedule> {
-        todo!("#1207 PR 7: each context's schedule from its query's 𝒯_q")
+        match self {
+            Context::Evaluation(schedule) => Some(*schedule),
+            Context::IngestionPipeline(_) | Context::Materialized(_) => {
+                todo!("#1207 PR 7: whether an ingestion or materialized context has times")
+            }
+        }
     }
 }
 
