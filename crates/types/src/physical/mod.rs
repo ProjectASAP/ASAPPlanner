@@ -1,14 +1,14 @@
 //! #509 Stage 2 decision data: the physical properties of each candidate.
 //!
 //! - [`properties`] — when a candidate runs and how long its output lives
-//!   ([`PhysicalProperties`], [`Lifetime`], [`Medium`]).
+//!   ([`PhysicalProperties`], [`Lifetime`], [`StorageMedium`]).
 //! - [`workload_plan`] — one evaluated assignment rebuilt as a physical DAG
 //!   ([`PhysicalWorkloadPlan`]).
 pub mod properties;
 pub mod workload_plan;
 
 pub use properties::{
-    EvaluationSchedule, ExecutionTiming, InvalidPhysicalProperties, Lifetime, Medium,
-    PhysicalProperties,
+    EvaluationSchedule, ExecutionTiming, Lifetime, PhysicalProperties, PhysicalPropertiesError,
+    StorageMedium,
 };
 pub use workload_plan::PhysicalWorkloadPlan;

@@ -30,7 +30,7 @@ use asap_types::ir::schema::{
     FieldDataType, GroupingStrategy, Schema, SketchParams, SketchStatistic,
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, TimeRangeKind};
-use asap_types::physical::{Lifetime, Medium};
+use asap_types::physical::{Lifetime, StorageMedium};
 use asap_types::workload::{DataWorkload, QueryRecurrence, RangeEvaluation};
 
 use asap_types::workload::bounds::{
@@ -1137,7 +1137,7 @@ pub fn node_usage<'a>(
             if !ingestion && working_memory_bytes > 0 {
                 held = Some((working_memory_bytes, per_second, true));
             }
-            (0, Medium::Memory)
+            (0, StorageMedium::Memory)
         }
         // A tumbling-window chain materialized across evaluations holds the tumbling windows its
         // retention covers ([`tumbling_window_retention_ms`]: N, plus one per tumbling window
@@ -1158,7 +1158,7 @@ pub fn node_usage<'a>(
                 )
                 .ok_or(AnalyticalCostError::Overflow)?;
             match medium {
-                Medium::Memory => {
+                StorageMedium::Memory => {
                     average_memory_bytes = between as f64;
                     peak_memory_bytes = match retained == tumbling_windows {
                         true => state,
@@ -1167,18 +1167,18 @@ pub fn node_usage<'a>(
                             .ok_or(AnalyticalCostError::Overflow)?,
                     };
                 }
-                Medium::Disk => disk_bytes = between,
+                StorageMedium::Disk => disk_bytes = between,
             }
             detail += &format!("; materializes {between} bytes across evaluations");
             (0, medium)
         }
         (_, Lifetime::OneEvaluation(medium), _) => {
             match medium {
-                Medium::Memory => {
+                StorageMedium::Memory => {
                     held = Some((state, per_second, false));
                     peak_memory_bytes = state;
                 }
-                Medium::Disk => disk_bytes = state,
+                StorageMedium::Disk => disk_bytes = state,
             }
             (0, medium)
         }
@@ -1206,16 +1206,16 @@ pub fn node_usage<'a>(
             medium,
         ),
     };
-    if ingestion && node.lifetime == Lifetime::AcrossEvaluations(Medium::Memory) {
+    if ingestion && node.lifetime == Lifetime::AcrossEvaluations(StorageMedium::Memory) {
         maintained = Some(state / tumbling_windows_of(node));
     }
     if materialized_bytes > 0 {
         match medium {
-            Medium::Memory => {
+            StorageMedium::Memory => {
                 average_memory_bytes = materialized_bytes as f64;
                 peak_memory_bytes = materialized_bytes;
             }
-            Medium::Disk => disk_bytes = materialized_bytes,
+            StorageMedium::Disk => disk_bytes = materialized_bytes,
         }
         detail += &format!("; keeps {materialized_bytes} bytes");
     }

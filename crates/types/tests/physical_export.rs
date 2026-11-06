@@ -7,7 +7,7 @@ use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use asap_types::ir::schema::{ExactKind, ExactParams, SummaryUpdate};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot};
-use asap_types::physical::{InvalidPhysicalProperties, Lifetime, Medium};
+use asap_types::physical::{Lifetime, PhysicalPropertiesError, StorageMedium};
 use std::rc::Rc;
 
 /// Scan(t) → SummaryAgg(sum by key) → FinalizeExactAccumulator, untimed.
@@ -107,12 +107,12 @@ fn scalar_roots_export_in_batch_order_and_reference_nodes() {
         })
         .unwrap();
     scalar_only.nodes[state].output_state.timing = ExecutionTiming::IngestionTime;
-    scalar_only.nodes[state].lifetime = Lifetime::OneEvaluation(Medium::Disk);
+    scalar_only.nodes[state].lifetime = Lifetime::OneEvaluation(StorageMedium::Disk);
     assert_eq!(
         scalar_only.validate(),
         Err(PhysicalASAPDAGValidationError::InvalidPhysicalProperties {
             node: scalar_only.nodes[state].id,
-            reason: InvalidPhysicalProperties::OneEvaluationAtIngestion,
+            reason: PhysicalPropertiesError::OneEvaluationAtIngestion,
         })
     );
 

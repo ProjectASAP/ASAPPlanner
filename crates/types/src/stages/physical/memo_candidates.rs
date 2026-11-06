@@ -21,9 +21,9 @@ pub struct PhysicalEdgeId(pub usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PhysicalCandidate {
     /// $e_v$ and $p^{\log}_v$.
-    pub logical: CandidateForMemoGroupId,
+    pub logical_candidate_id: CandidateForMemoGroupId,
     /// $p^{\mathrm{phys}}_v$.
-    pub properties: PhysicalProperties,
+    pub physical_properties: PhysicalProperties,
 }
 
 impl PhysicalCandidate {
@@ -41,7 +41,10 @@ impl PhysicalCandidate {
 /// $\alpha^{\mathrm{phys}}_{u,c,i}$: timing and lifetime only (the concepts
 /// doc's table, section 2). Alignment is checked per context in Stage 3 with
 /// [`PhysicalCandidate::delivers_on`].
-pub fn satisfies_physical(producer: &PhysicalCandidate, consumer: &PhysicalCandidate) -> bool {
+pub fn producer_satisfies_physical_requirements(
+    producer: &PhysicalCandidate,
+    consumer: &PhysicalCandidate,
+) -> bool {
     let _ = (producer, consumer);
     todo!("#1207 PR 1: the timing x lifetime table of section 2")
 }
@@ -49,8 +52,8 @@ pub fn satisfies_physical(producer: &PhysicalCandidate, consumer: &PhysicalCandi
 /// $(u, c, i)$ over physical candidates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PhysicalEdge {
-    pub producer: PhysicalCandidateId,
-    pub consumer: PhysicalCandidateId,
+    pub producer_candidate_id: PhysicalCandidateId,
+    pub consumer_candidate_id: PhysicalCandidateId,
     pub input_index_of_consumer: usize,
     /// $\alpha^{\log}_{u,c,i}$.
     pub satisfies_logical_requirement: bool,
@@ -63,8 +66,8 @@ pub struct PhysicalEdge {
 /// [`PhysicalCandidateId`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PhysicalCandidateKey {
-    pub logical: CandidateForMemoGroupId,
-    pub properties: PhysicalProperties,
+    pub logical_candidate_id: CandidateForMemoGroupId,
+    pub physical_properties: PhysicalProperties,
 }
 
 /// Stage 2's output, which Stage 3 selects from.
@@ -72,9 +75,9 @@ pub struct PhysicalCandidateKey {
 pub struct PhysicalASAPMemoCandidates {
     /// Pass 2's output: the memo, its candidates' $e_v$, $p^{\log}_v$,
     /// $r^{\log}_{c,i}$, and the logical edges.
-    pub logical: LogicalASAPMemoCandidates,
+    pub logical_candidates: LogicalASAPMemoCandidates,
     /// $\mathcal C$, indexed by [`PhysicalCandidateId`].
-    pub candidates: Vec<PhysicalCandidate>,
+    pub physical_candidates: Vec<PhysicalCandidate>,
     /// Each query's root over groups, by index in the workload, passed
     /// through from Pass 2.
     pub query_roots: Vec<QueryRoot<MemoGroupId>>,
@@ -90,15 +93,15 @@ pub struct PhysicalASAPMemoCandidates {
 }
 
 impl PhysicalASAPMemoCandidates {
-    /// Stage 2's output over `candidates` and `edges` (grouped by
+    /// Stage 2's output over `physical_candidates` and `edges` (grouped by
     /// (consumer, input)), with the admissible-edge indexes built once.
     pub fn new(
-        logical: LogicalASAPMemoCandidates,
-        candidates: Vec<PhysicalCandidate>,
+        logical_candidates: LogicalASAPMemoCandidates,
+        physical_candidates: Vec<PhysicalCandidate>,
         query_roots: Vec<QueryRoot<MemoGroupId>>,
         edges: Vec<PhysicalEdge>,
     ) -> Self {
-        let _ = (logical, candidates, query_roots, edges);
+        let _ = (logical_candidates, physical_candidates, query_roots, edges);
         todo!("#1207 PR 5: index the admissible edges")
     }
 

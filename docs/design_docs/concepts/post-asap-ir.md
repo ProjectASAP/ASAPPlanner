@@ -116,7 +116,7 @@ decides, for each sub-DAG, whether its output is materialized, and if so with wh
 timing and a `Lifetime` (#1200). The lifetime is `None` (discarded after its
 reader), `OneEvaluation(medium)` (materialized until every reader of one evaluation
 finishes) or `AcrossEvaluations(medium)` (materialized for later evaluations), with
-`Medium::Memory` or `Medium::Disk`; an ingestion-time output cannot be materialized
+`StorageMedium::Memory` or `StorageMedium::Disk`; an ingestion-time output cannot be materialized
 for `OneEvaluation`. A
 [`PhysicalPropertiesAssignment`](../../../crates/types/src/ir/properties/timing.rs) records,
 per sub-DAG, the properties of its materialized output, named by the node whose output

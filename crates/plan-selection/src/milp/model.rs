@@ -27,14 +27,14 @@ pub struct QueryId(pub usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RefreshWindowId(pub usize);
 
-/// Index of a [`Context`] among the workload's contexts.
+/// Index of a [`ExecutionContext`] among the workload's contexts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ContextId(pub usize);
+pub struct ExecutionContextId(pub usize);
 
 /// $\kappa$: a class of executions with a common owner and schedule, where
 /// a candidate with $\ell$ = None or `OneEvaluation` runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Context {
+pub enum ExecutionContext {
     /// The evaluation of every query with this schedule: queries with the
     /// same (interval, phase) are evaluated together and share its
     /// `OneEvaluation` results. A and B both every 10 s at phase 0 give one
@@ -46,14 +46,14 @@ pub enum Context {
     Materialized(PhysicalCandidateId),
 }
 
-impl Context {
+impl ExecutionContext {
     /// $T_\kappa$: an evaluation context's schedule; `None` for an ingestion
     /// pipeline or a materialized candidate's own computation, which is not
     /// an implicit compatibility pass.
     pub fn evaluation_schedule(&self) -> Option<EvaluationSchedule> {
         match self {
-            Context::Evaluation(schedule) => Some(*schedule),
-            Context::IngestionPipeline(_) | Context::Materialized(_) => {
+            ExecutionContext::Evaluation(schedule) => Some(*schedule),
+            ExecutionContext::IngestionPipeline(_) | ExecutionContext::Materialized(_) => {
                 todo!("#1207 PR 7: whether an ingestion or materialized context has times")
             }
         }
@@ -78,9 +78,9 @@ struct ExecutionContextVariables {
     /// $x^{\mathrm{mat}}_v$, for an `AcrossEvaluations` candidate.
     x_materialized: HashMap<PhysicalCandidateId, Variable>,
     /// $x_{\kappa,v}$, for a candidate with $\ell$ = None or `OneEvaluation`.
-    x_in_context: HashMap<(ContextId, PhysicalCandidateId), Variable>,
+    x_in_execution_context: HashMap<(ExecutionContextId, PhysicalCandidateId), Variable>,
     /// $y_{\kappa,u,c,i}$, indexed by the consumer's context.
-    y_in_context: HashMap<(ContextId, PhysicalEdgeId), Variable>,
+    y_in_execution_context: HashMap<(ExecutionContextId, PhysicalEdgeId), Variable>,
     /// $h_v$, for an `AcrossEvaluations` producer.
     retention_amount: HashMap<PhysicalCandidateId, Variable>,
 }
