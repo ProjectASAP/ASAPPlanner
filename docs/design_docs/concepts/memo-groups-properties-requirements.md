@@ -14,20 +14,21 @@ The expression includes the operator's arguments, including the summary family. 
 
 ### Running example
 
-Query A requests the p95 latency over one minute. Query B requests p99 divided by p50 over the same input. Both run every ten seconds.
+Query A requests the p95 latency over one minute with a rank-error target. Query B requests p99 divided by p50 over the same input with a relative-error target. Both run every ten seconds.
 
 | Group | Result | Candidate expressions |
 |---|---|---|
 | G1 | Raw latency input | `Scan latency[1m]` |
 | G2 | KLL state over G1 | `SummaryAgg[KLL](G1)` with `k = 200` or `k = 345` |
+| G2′ | DDSketch state over G1 | `SummaryAgg[DDSketch](G1)` with `alpha = 0.01` or `alpha = 0.02` |
 | G3 | Query A output | `SummaryEstimate[q=0.95](G2)` |
-| G4 | p99 latency | `SummaryEstimate[q=0.99](G2)` |
-| G5 | p50 latency | `SummaryEstimate[q=0.50](G2)` |
+| G4 | p99 latency | `SummaryEstimate[q=0.99](G2′)` |
+| G5 | p50 latency | `SummaryEstimate[q=0.50](G2′)` |
 | G6 | Query B output | `Divide(G4, G5)` |
 
-G3, G4, and G5 choose a G2 producer independently. If all choose the same retained physical producer, they can reuse one computed state when their schedules and windows are compatible. An unmaterialized candidate may instead execute separately in different contexts; Section 5 explains that distinction.
+KLL and DDSketch states are separate groups because the family is part of the expression. The metric rule of Section 4 decides which consumer may read which: KLL bounds **rank** error, which does not bound a quantile's value error or a ratio's relative error, so B's operands read the DDSketch state (relative value error), and A reads the KLL state.
 
-The example shows representation and sharing. Accuracy is checked by Section 4, whose metric rule matters here: KLL bounds **rank** error, and rank error does not bound a quantile's value error or the relative error of a ratio. Query B's relative ratio target therefore needs operands with a relative value-error guarantee, e.g. a DDSketch state group over G1 with `alpha` candidates, unless a declared distribution assumption converts rank error to value error. Query A, with a rank target, can use the KLL candidates directly.
+G4 and G5 choose a G2′ producer independently. If both choose the same retained physical producer, they reuse one computed state when their schedules and windows are compatible. An unmaterialized candidate may instead execute separately in different contexts; Section 5 explains that distinction.
 
 ### Notation used by the baseline model
 
@@ -842,14 +843,14 @@ fn print(memo: &Memo, dag: &LogicalDag) {
 
 For a workload, choose one root candidate per query and initialize the pending queue with the distinct chosen roots. Deduplicate that queue before expansion so a shared root is processed once.
 
-Before accuracy filtering, the running example has two alternatives for A and four for B: G4 and G5 choose independently between the two G2 builds. Joint enumeration therefore has eight choices. These are structural choices only; no claim is made that they meet B's ratio-accuracy requirement.
+Before accuracy filtering, the running example has two alternatives for A (the two G2 builds) and four for B: G4 and G5 choose independently between the two G2′ builds. Joint enumeration therefore has eight choices. These are structural choices only; constraint (K) decides which meet each target.
 
 | B's p99 producer | B's p50 producer | State sharing within B |
 |---|---|---|
-| `k = 200` | `k = 200` | One logical state candidate |
-| `k = 200` | `k = 345` | Two state candidates |
-| `k = 345` | `k = 200` | Two state candidates |
-| `k = 345` | `k = 345` | One logical state candidate |
+| `alpha = 0.01` | `alpha = 0.01` | One logical state candidate |
+| `alpha = 0.01` | `alpha = 0.02` | Two state candidates |
+| `alpha = 0.02` | `alpha = 0.01` | Two state candidates |
+| `alpha = 0.02` | `alpha = 0.02` | One logical state candidate |
 
 The printer marks repeated candidates as references rather than expanding them twice. Physical sharing and cost additionally depend on lifetime and execution context.
 
