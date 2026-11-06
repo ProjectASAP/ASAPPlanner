@@ -8,6 +8,7 @@
 //! live here.
 
 mod candidates;
+mod hash_consing;
 mod logical_memo_candidates;
 mod memo;
 mod per_computation_logical_memo_candidates;
