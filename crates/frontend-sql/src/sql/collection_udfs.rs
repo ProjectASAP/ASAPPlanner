@@ -118,7 +118,7 @@ impl CollectionUdf {
                         Ok(ScalarExpr::Column(index))
                     }
                 })
-                .collect::<Result<Vec<_>>>()?;
+                .collect::<Result<Vec<ScalarExpr>>>()?;
             match self.function {
                 CollectionFunction::Element => element_access_type(&args, &schema),
                 CollectionFunction::StructField => struct_field_type(&args, &schema),

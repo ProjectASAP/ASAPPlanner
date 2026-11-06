@@ -8,7 +8,7 @@
 //! the family merges (the family-capability table), and the executor runs
 //! the chain as its tumbling windows (`expand_tumbling_window_chains`). A merge of only the
 //! newest `m < n` tumbling windows (`SummaryMerge::newest_tumbling_windows`) is the state of one
-//! build over `TimeRange(m·w)` ([`merged_window_build`]): one chain materialized for
+//! build over `TimeRange(m·w)` (`merged_window_build`): one chain materialized for
 //! the longest window serves every query whose window, on the same tumbling windows,
 //! ends at the same time and is shorter.
 #[cfg(any(test, feature = "test-support"))]
@@ -16,36 +16,39 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
-use super::asap::ASAPOp;
+use super::asap::{summary_agg_schema, ASAPOp};
+use super::input::node_of_build;
+use super::input::{BuiltOrInput, OperatorInput};
 use super::node::{Operator, OperatorNode};
 use super::non_asap::{NonASAPOp, TimeRangeKind};
 #[cfg(any(test, feature = "test-support"))]
 use super::operator_properties::TimeShift;
+use crate::ir::schema::Schema;
 use crate::ir::SchemaDerivationError;
 
 fn invalid(message: &str) -> SchemaDerivationError {
     SchemaDerivationError::InvalidScalarSignature(message.into())
 }
 
-/// The `SummaryTumblingWindowChain` a summary-state node carries merged: the chain itself,
+/// The `SummaryTumblingWindowChain` a summary state carries merged: the chain itself,
 /// or the one chain a `SummaryMerge` that keeps its groups reads, in full
-/// or its newest tumbling windows (`merged_tumbling_window_count`). `None` for any other node,
+/// or its newest tumbling windows (`merged_tumbling_window_count`). `None` for any other input,
 /// a rollup (regrouping merge) included.
-pub fn merged_chain(state: &OperatorNode) -> Option<&OperatorNode> {
-    match state.asap()? {
-        ASAPOp::SummaryTumblingWindowChain { .. } => Some(state),
-        ASAPOp::SummaryMerge {
+pub fn merged_chain<I: OperatorInput>(state: &I) -> Option<I> {
+    match state.operator() {
+        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => Some(state.clone()),
+        Operator::ASAP(ASAPOp::SummaryMerge {
             children,
             group_by: None,
             ..
-        } => match children.as_slice() {
+        }) => match children.as_slice() {
             [child]
                 if matches!(
-                    child.asap(),
-                    Some(ASAPOp::SummaryTumblingWindowChain { .. })
+                    child.operator(),
+                    Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
                 ) =>
             {
-                Some(child)
+                Some(child.clone())
             }
             _ => None,
         },
@@ -53,45 +56,51 @@ pub fn merged_chain(state: &OperatorNode) -> Option<&OperatorNode> {
     }
 }
 
-/// How many of its chain's tumbling windows, newest first, a summary-state node with
+/// How many of its chain's tumbling windows, newest first, a summary state with
 /// a [`merged_chain`] merges: the merge's `newest_tumbling_windows`, otherwise the
-/// chain's `tumbling_window_count`. `None` for any other node.
-fn merged_tumbling_window_count(state: &OperatorNode) -> Option<u32> {
-    let Some(ASAPOp::SummaryTumblingWindowChain {
+/// chain's `tumbling_window_count`. `None` for any other input.
+fn merged_tumbling_window_count<I: OperatorInput>(state: &I) -> Option<u32> {
+    let Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
         tumbling_window_count,
         ..
-    }) = merged_chain(state)?.asap()
+    }) = merged_chain(state)?.operator()
     else {
         return None;
     };
-    match state.asap()? {
-        ASAPOp::SummaryMerge {
+    match state.operator() {
+        Operator::ASAP(ASAPOp::SummaryMerge {
             newest_tumbling_windows: Some(newest),
             ..
-        } => Some(*newest),
-        _ => Some(*tumbling_window_count),
+        }) => Some(newest),
+        _ => Some(tumbling_window_count),
     }
 }
 
+/// A build over the inputs of a chain over `I`, with its schema.
+pub(crate) type BuildWithSchema<I> = (ASAPOp<BuiltOrInput<I>>, Schema);
+
 /// The `SummaryAgg` over `TimeRange(tumbling_window_count · tumbling_window_width_ms)` over the
 /// chain's input whose state the merged tumbling windows of `chain` equal.
-pub(crate) fn whole_window_build(
-    chain: &OperatorNode,
-) -> Result<OperatorNode, SchemaDerivationError> {
-    let Some(ASAPOp::SummaryTumblingWindowChain {
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn whole_window_build<I: OperatorInput>(
+    chain: &I,
+) -> Result<BuildWithSchema<I>, SchemaDerivationError> {
+    let Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
         tumbling_window_count,
         ..
-    }) = chain.asap()
+    }) = chain.operator()
     else {
         return Err(invalid("expected a tumbling-window chain"));
     };
-    newest_tumbling_windows_build(chain, *tumbling_window_count)
+    newest_tumbling_windows_build(chain, tumbling_window_count)
 }
 
-/// The `SummaryAgg` whose state a summary-state node with a
+/// The `SummaryAgg` whose state a summary state with a
 /// [`merged_chain`] carries: one build over the window of the tumbling windows it
 /// merges (`merged_tumbling_window_count`).
-pub fn merged_window_build(state: &OperatorNode) -> Result<OperatorNode, SchemaDerivationError> {
+pub(crate) fn merged_window_build<I: OperatorInput>(
+    state: &I,
+) -> Result<BuildWithSchema<I>, SchemaDerivationError> {
     let (Some(chain), Some(tumbling_window_count)) =
         (merged_chain(state), merged_tumbling_window_count(state))
     else {
@@ -99,65 +108,94 @@ pub fn merged_window_build(state: &OperatorNode) -> Result<OperatorNode, SchemaD
             "expected merged tumbling windows of one tumbling-window chain",
         ));
     };
-    newest_tumbling_windows_build(chain, tumbling_window_count)
+    newest_tumbling_windows_build(&chain, tumbling_window_count)
+}
+
+/// [`merged_window_build`] over a node tree, as a node (the accuracy
+/// propagation reads node trees).
+pub fn merged_window_build_node(
+    state: &Rc<OperatorNode>,
+) -> Result<OperatorNode, SchemaDerivationError> {
+    merged_window_build(state).map(node_of_build)
 }
 
 /// The `SummaryAgg` over `TimeRange(tumbling_window_count · tumbling_window_width_ms)` over the
 /// chain's input: the state of the chain's newest `tumbling_window_count` tumbling windows.
-fn newest_tumbling_windows_build(
-    chain: &OperatorNode,
+fn newest_tumbling_windows_build<I: OperatorInput>(
+    chain: &I,
     tumbling_window_count: u32,
-) -> Result<OperatorNode, SchemaDerivationError> {
-    let Some(ASAPOp::SummaryTumblingWindowChain {
+) -> Result<BuildWithSchema<I>, SchemaDerivationError> {
+    let Operator::ASAP(chain_op) = chain.operator() else {
+        return Err(invalid("expected a tumbling-window chain"));
+    };
+    named_as_chain(
+        window_build(&chain_op, tumbling_window_count)?,
+        chain.schema(),
+    )
+}
+
+/// [`newest_tumbling_windows_build`] of the chain operator `chain`, without
+/// its schema.
+pub(crate) fn window_build<I: OperatorInput>(
+    chain: &ASAPOp<I>,
+    tumbling_window_count: u32,
+) -> Result<ASAPOp<BuiltOrInput<I>>, SchemaDerivationError> {
+    let ASAPOp::SummaryTumblingWindowChain {
         child,
         tumbling_window_width_ms,
         ..
-    }) = chain.asap()
+    } = chain
     else {
         return Err(invalid("expected a tumbling-window chain"));
     };
     let window = tumbling_window_width_ms
         .checked_mul(u64::from(tumbling_window_count))
         .ok_or_else(|| invalid("tumbling-window chain window overflows"))?;
-    build_over(chain, range(Rc::clone(child), window)?)
+    build_over(chain, range(BuiltOrInput::Input(child.clone()), window)?)
 }
 
 #[cfg(any(test, feature = "test-support"))]
 /// Tumbling window `index` (0 = newest) of `chain`: its `SummaryAgg` over the range
 /// `TimeRange(tumbling_window_width_ms)` ending `index · tumbling_window_width_ms` before the
 /// chain's input.
-pub(crate) fn tumbling_window(
-    chain: &OperatorNode,
+pub(crate) fn tumbling_window<I: OperatorInput>(
+    chain: &I,
     index: u32,
-) -> Result<OperatorNode, SchemaDerivationError> {
-    let Some(ASAPOp::SummaryTumblingWindowChain {
+) -> Result<BuildWithSchema<I>, SchemaDerivationError> {
+    let Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
         child,
         tumbling_window_width_ms,
         ..
-    }) = chain.asap()
+    }) = chain.operator()
     else {
         return Err(invalid("expected a tumbling-window chain"));
     };
     let back = i64::try_from(tumbling_window_width_ms.saturating_mul(u64::from(index)))
         .map_err(|_| invalid("tumbling window offset overflows"))?;
-    build_over(
-        chain,
-        range(shifted(child, back)?, *tumbling_window_width_ms)?,
+    let Operator::ASAP(chain_op) = chain.operator() else {
+        return Err(invalid("expected a tumbling-window chain"));
+    };
+    named_as_chain(
+        build_over(
+            &chain_op,
+            range(shifted(child, back)?, tumbling_window_width_ms)?,
+        )?,
+        chain.schema(),
     )
 }
 
 #[cfg(any(test, feature = "test-support"))]
 /// `child` evaluated `back_ms` earlier: one `TimeShift`, folded into a
 /// `TimeShift` directly below.
-fn shifted(
-    child: &Rc<OperatorNode>,
+fn shifted<I: OperatorInput>(
+    child: I,
     back_ms: i64,
-) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
+) -> Result<BuiltOrInput<I>, SchemaDerivationError> {
     if back_ms == 0 {
-        return Ok(Rc::clone(child));
+        return Ok(BuiltOrInput::Input(child));
     }
-    let (shift, input) = match child.non_asap() {
-        Some(NonASAPOp::TimeShift {
+    let (shift, input) = match child.operator() {
+        Operator::NonASAP(NonASAPOp::TimeShift {
             shift,
             child: input,
         }) => (
@@ -178,52 +216,70 @@ fn shifted(
             child,
         ),
     };
-    OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeShift {
+    BuiltOrInput::build(NonASAPOp::TimeShift {
         shift,
-        child: Rc::clone(input),
-    }))
+        child: BuiltOrInput::Input(input),
+    })
 }
 
-fn range(
-    child: Rc<OperatorNode>,
+/// A range `TimeRange(width_ms)` over `child`.
+fn range<I: OperatorInput>(
+    child: BuiltOrInput<I>,
     width_ms: u64,
-) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
-    OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
+) -> Result<BuiltOrInput<I>, SchemaDerivationError> {
+    BuiltOrInput::build(NonASAPOp::TimeRange {
         range: Duration::from_millis(width_ms),
         kind: TimeRangeKind::Range,
         child,
-    }))
+    })
 }
 
-/// The chain's `SummaryAgg` over `input`, with the chain's column names.
-fn build_over(
-    chain: &OperatorNode,
-    input: Rc<OperatorNode>,
-) -> Result<OperatorNode, SchemaDerivationError> {
-    let Some(ASAPOp::SummaryTumblingWindowChain {
+/// The chain's `SummaryAgg` over `input`.
+fn build_over<I: OperatorInput>(
+    chain: &ASAPOp<I>,
+    input: BuiltOrInput<I>,
+) -> Result<ASAPOp<BuiltOrInput<I>>, SchemaDerivationError> {
+    let ASAPOp::SummaryTumblingWindowChain {
         family,
         input: update,
         reduction,
         grouping,
         filter,
         ..
-    }) = chain.asap()
+    } = chain.map_children(|child| BuiltOrInput::Input(child.clone()))
     else {
         return Err(invalid("expected a tumbling-window chain"));
     };
-    let mut build = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryAgg {
+    Ok(ASAPOp::SummaryAgg {
         child: input,
-        family: family.clone(),
-        input: update.clone(),
-        reduction: reduction.clone(),
-        grouping: grouping.clone(),
-        filter: filter.clone(),
-    }))?;
-    for (field, kept) in build.schema.fields.iter_mut().zip(&chain.schema.fields) {
+        family,
+        input: update,
+        reduction,
+        grouping,
+        filter,
+    })
+}
+
+/// `build` with its schema, named as the chain of schema `chain`.
+fn named_as_chain<I: OperatorInput>(
+    build: ASAPOp<BuiltOrInput<I>>,
+    chain: &Schema,
+) -> Result<BuildWithSchema<I>, SchemaDerivationError> {
+    let ASAPOp::SummaryAgg {
+        child,
+        family,
+        reduction,
+        ..
+    } = &build
+    else {
+        return Err(invalid("expected a summary build"));
+    };
+    let mut schema = summary_agg_schema(child.schema(), family, reduction)?;
+    for (field, kept) in schema.fields.iter_mut().zip(&chain.fields) {
         field.name = kept.name.clone();
         field.table = kept.table.clone();
     }
-    Ok(build)
+    Ok((build, schema))
 }
 
 /// `root` with every `SummaryTumblingWindowChain` expanded into its tumbling windows: a `SummaryMerge`
@@ -284,7 +340,8 @@ fn expand(
                                 inputs.push(Rc::clone(done));
                                 continue;
                             }
-                            let tumbling_window = Rc::new(tumbling_window(child, index)?);
+                            let tumbling_window =
+                                Rc::new(node_of_build(tumbling_window(child, index)?));
                             if index == 0 {
                                 cache.chains.push(Rc::clone(child));
                             }

@@ -4,6 +4,7 @@
 //! to the crate-private function of the same name.
 
 use crate::ir::materialized_view::RawDataWindow;
+use crate::ir::operator::input::node_of_build;
 use crate::ir::operator::maintained_population::CurrentSeriesInput;
 use crate::ir::operator::node::Operator;
 use crate::ir::properties::summary_coverage::SummaryCoverage;
@@ -18,17 +19,17 @@ pub fn definition_id(coverage: &SummaryCoverage) -> String {
     coverage.definition_id()
 }
 
-/// `tumbling_window_chain::whole_window_build`.
-pub fn whole_window_build(chain: &OperatorNode) -> Result<OperatorNode, SchemaDerivationError> {
-    crate::ir::operator::tumbling_window_chain::whole_window_build(chain)
+/// `tumbling_window_chain::whole_window_build`, as a node.
+pub fn whole_window_build(chain: &Rc<OperatorNode>) -> Result<OperatorNode, SchemaDerivationError> {
+    crate::ir::operator::tumbling_window_chain::whole_window_build(chain).map(node_of_build)
 }
 
-/// `tumbling_window_chain::tumbling_window`.
+/// `tumbling_window_chain::tumbling_window`, as a node.
 pub fn tumbling_window(
-    chain: &OperatorNode,
+    chain: &Rc<OperatorNode>,
     index: u32,
 ) -> Result<OperatorNode, SchemaDerivationError> {
-    crate::ir::operator::tumbling_window_chain::tumbling_window(chain, index)
+    crate::ir::operator::tumbling_window_chain::tumbling_window(chain, index).map(node_of_build)
 }
 
 /// `Operator::output_schema`.
@@ -47,7 +48,7 @@ pub fn validate_asap_inputs(op: &ASAPOp) -> Result<(), SchemaDerivationError> {
 }
 
 /// `CurrentSeriesInput::matches_node`.
-pub fn matches_node(input: &CurrentSeriesInput, node: &OperatorNode) -> bool {
+pub fn matches_node(input: &CurrentSeriesInput, node: &Rc<OperatorNode>) -> bool {
     input.matches_node(node)
 }
 

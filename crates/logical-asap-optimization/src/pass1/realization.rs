@@ -83,7 +83,9 @@ pub(crate) fn summarised_column(intent: &AggIntent, child_schema: &Schema) -> Co
 
 /// [`ranked_column`] as a reference: the sample value when it is that
 /// column, else the column by name.
-pub(crate) fn ranked_value(child: &OperatorNode) -> Result<(ColumnId, ColumnRef), ResolveError> {
+pub(crate) fn ranked_value(
+    child: &Rc<OperatorNode>,
+) -> Result<(ColumnId, ColumnRef), ResolveError> {
     let ranked = ranked_column(child)?;
     let column = match resolve_column_ref(&ColumnRef::SampleValue, &child.schema) {
         Ok(value) if value == ranked => ColumnRef::SampleValue,

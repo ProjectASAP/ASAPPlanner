@@ -351,8 +351,9 @@ pub mod planning {
             depth[group] = d;
             pending.extend(
                 memo.groups()[group]
-                    .child_groups
-                    .iter()
+                    .expression
+                    .children()
+                    .into_iter()
                     .map(|child| (child.0 as usize, d + 1)),
             );
         }

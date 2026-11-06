@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::ir::operator::operator_properties::{BinaryOpKind, JoinKind, Reduction, Source};
-use asap_types::ir::operator::tumbling_window_chain::{merged_chain, merged_window_build};
+use asap_types::ir::operator::tumbling_window_chain::{merged_chain, merged_window_build_node};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::guarantee::{
     AccuracyGuarantee, AccuracyMetric, BoundExpr, CompositionOperator, GuaranteeSource,
@@ -497,7 +497,8 @@ fn rolled_up_guarantee(node: &OperatorNode) -> Option<Option<AccuracyGuarantee>>
         return Some(None);
     };
     // Kept whole, a selected state keeps the guarantee it was built with.
-    let input = asap_types::ir::operator::asap::selected_from(input).unwrap_or(input);
+    let input =
+        asap_types::ir::operator::asap::selected_from(input).unwrap_or_else(|| Rc::clone(input));
     let family = state.asap()?.produced_state()?;
     let merged = match node.asap()? {
         ASAPOp::SummaryEstimate { query, .. } => FamilyCapability::of(family).merged_error(query),
@@ -513,7 +514,7 @@ fn rolled_up_guarantee(node: &OperatorNode) -> Option<Option<AccuracyGuarantee>>
     let consumer = OperatorNode::with_schema(
         node.operator.map_children(|child| {
             if Rc::ptr_eq(child, state) {
-                Rc::clone(input)
+                Rc::clone(&input)
             } else {
                 Rc::clone(child)
             }
@@ -525,7 +526,7 @@ fn rolled_up_guarantee(node: &OperatorNode) -> Option<Option<AccuracyGuarantee>>
 
 /// The guarantee of an estimate or finalized value read from merged
 /// tumbling windows ([`merged_chain`]): the guarantee of the same read of one
-/// build over the merged tumbling windows' time range ([`merged_window_build`]: the whole
+/// build over the merged tumbling windows' time range ([`merged_window_build_node`]: the whole
 /// chain's, or its newest tumbling windows') when the
 /// family's merged error for that read is exact or the same as that build's
 /// (the family-capability table); none when it is approximate (evidence
@@ -537,14 +538,16 @@ fn merged_tumbling_windows_guarantee(node: &OperatorNode) -> Option<Option<Accur
             summary_input,
             query,
         } => {
-            let family = merged_chain(summary_input)?.asap()?.produced_state()?;
+            let chain = merged_chain(summary_input)?;
+            let family = chain.asap()?.produced_state()?;
             (
                 summary_input,
                 FamilyCapability::of(family).merged_error(query),
             )
         }
         ASAPOp::FinalizeExactAccumulator { child } => {
-            let family = merged_chain(child)?.asap()?.produced_state()?;
+            let chain = merged_chain(child)?;
+            let family = chain.asap()?.produced_state()?;
             // An exact accumulator's merged state is exact.
             let merged = FamilyCapability::of(family).merge_inputs;
             (child, merged.map(|_| MergedError::Exact))
@@ -558,7 +561,7 @@ fn merged_tumbling_windows_guarantee(node: &OperatorNode) -> Option<Option<Accur
         return Some(None);
     }
     let chain = merged_chain(state)?;
-    let Ok(mut window_build) = merged_window_build(state) else {
+    let Ok(mut window_build) = merged_window_build_node(state) else {
         return Some(None);
     };
     // The merged tumbling windows' time range over the chain's input carries the
@@ -692,7 +695,7 @@ pub(crate) fn estimates_raw_data_samples_of(node: &OperatorNode) -> Option<Strin
             summary_input,
             query: SketchStatistic::Quantile { q },
         }) if (0.0..=1.0).contains(q) => match merged_chain(summary_input)
-            .unwrap_or(summary_input)
+            .unwrap_or_else(|| Rc::clone(summary_input))
             .asap()?
         {
             ASAPOp::SummaryAgg {
