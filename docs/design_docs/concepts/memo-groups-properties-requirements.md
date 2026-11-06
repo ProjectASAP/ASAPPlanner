@@ -247,8 +247,10 @@ pub struct GroupProperties {
 pub struct SummaryStateDefinition {
     /// The group the operators below read: the first input under the
     /// SummaryAgg that is not Filter / range TimeRange / TimeShift without @
-    /// / direct-column Project.
-    pub input_group: MemoGroupId,
+    /// / direct-column Project. `None` only when a Scan's predicates are
+    /// lifted; the Scan, with its residual predicates, is then the last
+    /// unlifted operator.
+    pub input_group: Option<MemoGroupId>,
     /// The operators not lifted into the selection, listed top down from
     /// the SummaryAgg, each with only its residual arguments. `None` marks
     /// an operator's main input (the next unlifted operator, or input_group);
@@ -327,7 +329,7 @@ A group is its expression: one operator, with its arguments, over input groups. 
 Everything that was computed on operator-node trees is computed on groups. `find_or_add_group` derives `GroupProperties` once, when the group is created, with `derive_group_properties`: the rules that check operator nodes (schema derivation, input validation, merge check), applied to the expression over `MemoGroupAsInput`s, which read only the input groups' `expression` and `group_properties`, never a node tree:
 
 - `schema` and `result_kind` from the operator and its input groups' schemas and result kinds; a scalar subquery reads the referenced group's schema.
-- `summary_coverage`, for a summary state: walking down from the SummaryAgg through the input groups' expressions while each is a Filter, a range TimeRange, a TimeShift without `@` or a direct-column Project, lifting their predicates into the selection. The group below them is the definition's `input_group`; a Scan is never lifted through, so its predicates stay in that group. The operators not lifted, each with its residual arguments, are `unlifted_operators`. A tumbling-window chain covers what one build over its whole window does. A merge's coverage comes from its inputs' stored coverage; a merge is valid only over inputs with equal definitions and disjoint selections.
+- `summary_coverage`, for a summary state: walking down from the SummaryAgg through the input groups' expressions while each is a Filter, a range TimeRange, a TimeShift without `@` or a direct-column Project, lifting their predicates into the selection. The group below them is the definition's `input_group`. A Scan's predicates (PromQL label matchers) are lifted too; the Scan with its residual predicates is then the last unlifted operator and `input_group` is `None`. The operators not lifted, each with its residual arguments, are `unlifted_operators`. A tumbling-window chain covers what one build over its whole window does. A merge's coverage comes from its inputs' stored coverage; a merge is valid only over inputs with equal definitions and disjoint selections.
 - The checks that read an input's operator (a merge of the newest windows reads a window chain; a selected build) read the input group's `expression`.
 - `shareable_when_equal`: a `LIMIT` is shareable over a `Sort` with the same partitions (the input group's `expression`); a `Dedup` on every column (the input group's schema).
 
@@ -419,7 +421,7 @@ Implementation locations: `crates/logical-asap-optimization/src/pass1/per_comput
 | Exact | Exact candidate in the result group |
 | Exact accumulator | Accumulator-state group plus a finalize candidate in the result group |
 | Summary | One state group per supported family; one build candidate per listed parameter configuration; separate readout candidates |
-| Fused build (#1203 2c) | Candidate with `fused_groups` identifying additional results; selection must enforce their availability consistently |
+| Fused build (#1203 2c) | Several operators of one sub-DAG pattern, in one appearance of the sub-expression, fused into one candidate operator; `fused_groups` lists the groups of the operators it replaces |
 
 ```rust
 pub struct CandidateForMemoGroupId {
@@ -468,6 +470,10 @@ pub struct CandidateForMemoGroup {
     pub expression: CandidateExpression,
     pub logical_properties: LogicalProperties,
     pub input_requirements: Vec<LogicalRequirements>,
+    /// The groups of the operators this candidate fuses: a sub-DAG pattern
+    /// of several operators, in one appearance of the sub-expression,
+    /// computed by this one operator. Empty for a candidate that fuses
+    /// nothing.
     pub fused_groups: Vec<MemoGroupId>,
     // Diagnostic provenance; not a planning decision.
     pub origin: OriginOfCandidateForMemoGroup,
@@ -516,6 +522,13 @@ pub fn producer_satisfies_logical_requirements(
 ```
 
 The floor representation has the applicability condition stated in Section 2. Creating requirements also needs the input family's configuration domain; a constructor without that context can validate only the information encoded in its argument. Error-model interfaces are grouped with accuracy in Section 4.
+
+**Fused groups.** A fused candidate computes, as one operator, a sub-DAG pattern of several operators in one appearance of the sub-expression; `fused_groups` lists the groups of the operators it replaces. Reusing a common sub-expression across appearances is Pass 2's reuse, not fusion. Fusion rules:
+- top-k (a sort and limit over an aggregate, as one heap summary);
+- sum over sum, min over min, max over max (distributive aggregates, as one aggregate);
+- possibly Hydra (a summary over every sub-population at once).
+
+TODO: revisit each fused candidate's inputs and outputs to check that the fusing rules are correct.
 
 Migration targets: remove private `root_node` chains, duplicate `input_groups`, and `accuracy_budget_parts`. The proposed predefined parameter lists replace sizing one candidate per budget partition.
 
