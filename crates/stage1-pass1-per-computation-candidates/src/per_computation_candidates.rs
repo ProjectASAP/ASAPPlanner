@@ -1302,13 +1302,21 @@ fn add_output_candidate(
 
 /// A `Project` over `output` that names its columns, and qualifies them,
 /// as `result_group`'s. `output` must have the group's number of columns,
-/// and the group's columns one qualifier (or none).
+/// and the group's schema must be closed (list every column its rows carry).
 fn renaming_project(
     memo: &Memo,
     output: MemoGroupId,
     result_group: MemoGroupId,
 ) -> Result<Operator<MemoGroupId>, PerComputationCandidateError> {
     let (from, to) = (schema(memo, output), schema(memo, result_group));
+    // An open schema's rows carry columns it does not list (a PromQL
+    // series whose identity is not realized as a column): a `Project` lists
+    // its columns, so it would drop them, and its rows are not the group's.
+    if !to.closed {
+        return Err(PerComputationCandidateError::Unsupported(
+            "a rename drops the columns an open schema does not list",
+        ));
+    }
     if from.fields.len() != to.fields.len() {
         return Err(PerComputationCandidateError::Unsupported(
             "substituted output with other columns than the aggregate",

@@ -67,9 +67,18 @@ fn promql(query: &str) -> QueryRoot {
             DurationMs(1000),
         )),
     };
-    asap_frontend_promql::lower_promql_query_workload(&workload)
+    // As the planner does before Stage 0 (`Stage1ToStage3Pass`): each
+    // series' identity is realized as a column.
+    match asap_frontend_promql::lower_promql_query_workload(&workload)
         .unwrap_or_else(|e| panic!("lower failed for {query:?}: {e}"))
         .remove(0)
+    {
+        QueryRoot::Operator(node) => QueryRoot::Operator(
+            asap_types::ir::schema::schema_support::with_promql_series_identity(&node)
+                .unwrap_or(node),
+        ),
+        scalar => scalar,
+    }
 }
 
 /// Pass 1's memo of the one query `root`.
