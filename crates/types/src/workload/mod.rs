@@ -209,6 +209,48 @@ impl QueryRecurrence {
             _ => None,
         }
     }
+
+    /// The grid every evaluation with this recurrence and `range_evaluation`
+    /// falls on, in milliseconds, anchored at the epoch (every evaluation
+    /// time is a multiple of it). The times' grid is the fixed interval
+    /// ([`Self::fixed_interval_ms`]; with a declared
+    /// [`RepeatedDemand::FixedIntervalAt`] phase, the greatest common divisor
+    /// with that phase: every 20 s at phase 5 s is on a 5 s grid), the
+    /// greatest common divisor of the scheduled times, or a one-off query's
+    /// time. A range evaluation of more than one step also takes the greatest
+    /// common divisor with its step, since each run evaluates at every step
+    /// up to its end. `None` when the times are not known: an estimated
+    /// rate, a one-off query without a time, an unknown recurrence, or a
+    /// zero interval. A fixed interval without a declared phase is taken at
+    /// phase 0.
+    pub fn evaluation_grid_ms(&self, range_evaluation: Option<RangeEvaluation>) -> Option<u64> {
+        let times_grid_ms = match self {
+            QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(_)) => {
+                self.fixed_interval_ms()?
+            }
+            QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+                evaluation_phase, ..
+            }) => greatest_common_divisor(self.fixed_interval_ms()?, evaluation_phase.0),
+            QueryRecurrence::Repeated(RepeatedDemand::Scheduled(times)) => times
+                .iter()
+                .fold(0, |grid_ms, time| greatest_common_divisor(grid_ms, time.0)),
+            QueryRecurrence::OneTime {
+                execute_at: Some(time),
+                ..
+            } => time.0,
+            QueryRecurrence::Repeated(RepeatedDemand::EstimatedRate(_))
+            | QueryRecurrence::OneTime {
+                execute_at: None, ..
+            }
+            | QueryRecurrence::Unknown => return None,
+        };
+        Some(match range_evaluation {
+            Some(range) if range.step_ms > 0 && range.evaluations_per_request() > 1 => {
+                greatest_common_divisor(times_grid_ms, range.step_ms)
+            }
+            _ => times_grid_ms,
+        })
+    }
 }
 
 /// The most evaluation steps one range request may have, as Prometheus
@@ -370,30 +412,11 @@ pub struct QueryWorkloadEntry {
 }
 
 impl QueryWorkloadEntry {
-    /// The grid every evaluation of this query falls on, in milliseconds,
-    /// anchored at the epoch (every evaluation time is a multiple of it):
-    /// its fixed interval ([`QueryRecurrence::fixed_interval_ms`]), or with
-    /// a range evaluation of more than one step the greatest common divisor
-    /// of the interval and the step, since each run evaluates at every step
-    /// up to its end; with a declared evaluation phase
-    /// ([`RepeatedDemand::FixedIntervalAt`]) also the greatest common
-    /// divisor with that phase (every 20 s at phase 5 s is on a 5 s grid).
-    /// `None` when it does not repeat at a positive fixed interval.
+    /// The grid every evaluation of this query falls on, in milliseconds
+    /// ([`QueryRecurrence::evaluation_grid_ms`] of its recurrence and range
+    /// evaluation).
     pub fn evaluation_grid_ms(&self) -> Option<u64> {
-        let interval_ms = self.recurrence.fixed_interval_ms()?;
-        let step_ms = match self.range_evaluation {
-            Some(range) if range.step_ms > 0 && range.evaluations_per_request() > 1 => {
-                greatest_common_divisor(interval_ms, range.step_ms)
-            }
-            _ => interval_ms,
-        };
-        let phase_ms = match &self.recurrence {
-            QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
-                evaluation_phase, ..
-            }) => evaluation_phase.0,
-            _ => 0,
-        };
-        Some(greatest_common_divisor(step_ms, phase_ms))
+        self.recurrence.evaluation_grid_ms(self.range_evaluation)
     }
 }
 
