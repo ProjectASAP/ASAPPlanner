@@ -202,7 +202,7 @@ deployment knows which outputs to materialize, for how long and where; validatio
 rejects a timing and lifetime that cannot go together (an ingestion-time
 output materialized for `OneEvaluation`) and a `SummaryAgg` or `MaintainPopulation`
 that is not materialized outside query time
-(`PhysicalASAPDAGValidationError::InvalidPhysicalProperties`). Ingestion
+(`PhysicalASAPDAGValidationError::PhysicalProperties`). Ingestion
 work cannot depend on a future query result. The
 deployment executes the plan as given and does not change its lifetime
 or timing ([#509 Assumption 8](../proposals/planner-layering.md#assumptions)); it must

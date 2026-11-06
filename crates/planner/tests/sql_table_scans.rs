@@ -298,7 +298,7 @@ fn run_data_plane(plan: &InstallablePlan) -> Vec<Vec<Vec<Value>>> {
         .collect()
 }
 
-/// A 5 and a 15 minute distinct count kept in tumbling windows at ingestion
+/// A 5 and a 15 minute distinct count materialized in tumbling windows at ingestion
 /// time (the deployment keeps no raw data): each tumbling window is built in an ingestion run from the table rows of its
 /// window, and both queries answer exactly from the tumbling windows (the sketch is
 /// exact below its capacity), as the query-time reference does.

@@ -26,7 +26,7 @@ pub struct SelectedEdge {
 /// The selected plan as a DAG with one node per run of a candidate: what
 /// Stage 3 selects and the facade builds through
 /// [`AssignmentRealizer::realize`](crate::stages::AssignmentRealizer::realize).
-/// A candidate that runs twice (recomputed by two readers, or two shared
+/// A candidate that runs twice (recomputed by two consumers, or two shared
 /// instances over different inputs) is two nodes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DagOfSelectedCandidates {

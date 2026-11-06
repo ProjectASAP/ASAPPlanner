@@ -262,9 +262,9 @@ pub(crate) fn binomial_upper_tail(n: u32, p: f64, k: u32) -> f64 {
 ///
 /// A KLL's `k` and a distinct-count UnivMon's heap are the exceptions to
 /// the largest value: their error grows as their failure probability
-/// shrinks, so each reader's `k` or heap is first resized to the shared
+/// shrinks, so each consumer's `k` or heap is first resized to the shared
 /// (smallest) failure probability at no larger error (`kll::shared_k`,
-/// `univmon::shared_heap`), and the shared build meets every reader.
+/// `univmon::shared_heap`), and the shared build meets every consumer.
 pub fn size_for_all_readers(params: &[&SketchParams]) -> Option<SketchParams> {
     use SketchParams as P;
     let (first, rest) = params.split_first()?;
@@ -287,7 +287,7 @@ pub fn size_for_all_readers(params: &[&SketchParams]) -> Option<SketchParams> {
                 },
             ) => P::UnivMon {
                 // Not the largest heap: a distinct count's error grows as
-                // its failure probability shrinks, so each reader's heap
+                // its failure probability shrinks, so each consumer's heap
                 // first grows to the shared one at no larger error.
                 heap_size: univmon::shared_heap(heap_size, distinct_failure_probability, *h, *f),
                 sketch_rows: sketch_rows.max(*r),
@@ -476,7 +476,7 @@ mod shared_size_tests {
         else {
             unreachable!()
         };
-        // The `k = 200` reader, sized at the calibration's δ = 0.01, is
+        // The `k = 200` consumer, sized at the calibration's δ = 0.01, is
         // resized to the shared δ = 0.001 at its own rank error.
         assert_eq!((k, failure_probability), (258, Some(0.001)));
         assert_eq!(
@@ -499,18 +499,18 @@ mod shared_size_tests {
         assert_eq!(size_for_all_readers(&[]), None);
     }
 
-    /// A KLL shared by a reader at rank (0.01, δ = 0.01) and one at
-    /// (0.05, δ = 1e-4) meets both: each reader's `k` is resized to the
+    /// A KLL shared by a consumer at rank (0.01, δ = 0.01) and one at
+    /// (0.05, δ = 1e-4) meets both: each consumer's `k` is resized to the
     /// shared δ = 1e-4 at no larger rank error (A's 0.00997) before the
     /// larger is taken (k = 412), not 269 stated at 1e-4 (rank error 0.0151).
     #[test]
     fn a_kll_shared_across_failure_probabilities_meets_each_reader() {
-        let readers = [(0.01, 0.01), (0.05, 1e-4)];
-        let params = readers.map(|(eps, delta)| kll::size_params(eps, delta));
+        let consumers = [(0.01, 0.01), (0.05, 1e-4)];
+        let params = consumers.map(|(eps, delta)| kll::size_params(eps, delta));
         let shared = size_for_all_readers(&[&params[0], &params[1]]).unwrap();
         let quantile = SketchStatistic::Quantile { q: 0.99 };
         let guarantee = sketch_guarantee(&SketchAlgorithm::Kll, &shared, &quantile).unwrap();
-        for (eps, delta) in readers {
+        for (eps, delta) in consumers {
             assert!(
                 satisfies(
                     &guarantee,
@@ -555,15 +555,15 @@ mod shared_size_tests {
         );
     }
 
-    /// A distinct-count UnivMon shared by a reader at relative (0.05,
-    /// δ = 0.01) and one at (0.2, δ = 1e-4) meets both: each reader's heap
+    /// A distinct-count UnivMon shared by a consumer at relative (0.05,
+    /// δ = 0.01) and one at (0.2, δ = 1e-4) meets both: each consumer's heap
     /// grows to the shared δ = 1e-4 at no larger error before the larger is
     /// taken (5 400 000), not B's 337 500 stated at 1e-4 (error 0.2).
     #[test]
     fn a_distinct_univmon_shared_across_failure_probabilities_meets_each_reader() {
         use asap_types::ir::operator::agg_intent::default_cardinality;
-        let readers = [(0.05, 0.01), (0.2, 1e-4)];
-        let params = readers.map(|(eps, delta)| {
+        let consumers = [(0.05, 0.01), (0.2, 1e-4)];
+        let params = consumers.map(|(eps, delta)| {
             size_params(SketchAlgorithm::UnivMon, &default_cardinality(), eps, delta)
         });
         let shared = size_for_all_readers(&[&params[0], &params[1]]).unwrap();
@@ -575,7 +575,7 @@ mod shared_size_tests {
             panic!("{guarantee:?}")
         };
         let chebyshev = terms[0].evaluate().unwrap();
-        for (eps, delta) in readers {
+        for (eps, delta) in consumers {
             assert!(
                 error <= eps && chebyshev <= delta,
                 "{shared:?} misses ({eps}, {delta}): error {error}"

@@ -65,7 +65,7 @@ pub const MIXED_COST_SOURCE: &str =
 pub(crate) const DEFAULT_NON_REPEATING_QUERY_HORIZON_SECONDS: f64 = 3_600.0;
 
 /// What one candidate uses, per second of wall time unless the name says
-/// otherwise, without prices: its nodes' CPU, scans, kept memory and disk
+/// otherwise, without prices: its nodes' CPU, scans, retained memory and disk
 /// added up, with the candidate's peak cores and per-query latency. Every [`CostModel`] reads
 /// it.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -79,11 +79,11 @@ pub struct ResourceUsage {
     /// state while its evaluation runs).
     pub average_memory_bytes: f64,
     /// The most memory live at once, assuming every evaluation overlaps:
-    /// in-memory kept state plus each computation's working memory, once
+    /// in-memory materialized state plus each computation's working memory, once
     /// per consumer that recomputes it, with the consumers materialized at ingestion time
     /// of one refresh window counted once.
     pub peak_memory_bytes: u64,
-    /// Bytes kept on disk: state materialized on `StorageMedium::Disk`, plus the
+    /// Bytes retained on disk: state materialized on `StorageMedium::Disk`, plus the
     /// raw data query-time scans read (the longest window of each source).
     pub disk_bytes: u64,
     /// CPU cores to provision for the peak: the ingestion work's cores plus
@@ -115,7 +115,7 @@ pub struct ResourceUnitCost {
 
 impl ResourceUnitCost {
     /// The prices plan selection uses until a deployment is calibrated:
-    /// 1 ns of CPU per operation, 0.1 ns per scanned byte, 1 GB kept for a
+    /// 1 ns of CPU per operation, 0.1 ns per scanned byte, 1 GB retained for a
     /// second costs 1/8 vCPU (125 CPU-ms), held or provisioned alike; one
     /// provisioned core-second is 1,000 CPU-ms. Disk is not priced (0).
     pub fn illustrative() -> Self {

@@ -39,7 +39,7 @@
 //! same input rows returns the same output rows
 //! ([`NonASAPOp::is_shareable_when_equal`]). Equal nodes are
 //! interned children first, so two equal nodes read one input, and one copy
-//! returns each reader the rows it would have computed alone. A unique key
+//! returns each consumer the rows it would have computed alone. A unique key
 //! is not needed: equal per-series quantiles without a provable key are one
 //! node. An operator that picks rows by input order alone (an unordered
 //! `LIMIT`) is always inserted fresh, because two copies may return
@@ -428,7 +428,7 @@ mod tests {
     }
 
     /// Two equal scans of a keyless table (SQL rows) are one node: each
-    /// reader reads every row the scan outputs.
+    /// consumer reads every row the scan outputs.
     #[test]
     fn equal_scans_without_a_unique_key_are_shared() {
         let table_scan = || {
@@ -720,7 +720,7 @@ mod tests {
     }
 
     /// `LIMIT 10` without an order may return any 10 rows, so two copies may
-    /// differ; one shared copy would make both readers see the same rows.
+    /// differ; one shared copy would make both consumers see the same rows.
     #[test]
     fn unordered_limits_are_not_shared() {
         let limit = || {

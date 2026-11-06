@@ -10,7 +10,7 @@
 //! Everything else a runtime needs is derived from the DAG
 //! (`asap_types::ir::materialized_view`): the views to maintain, with what
 //! each is refreshed from and when ([`InstallablePlan::materialized_views`]),
-//! and how far back each raw-data source is kept for query-time scans
+//! and how far back each raw-data source is retained for query-time scans
 //! ([`InstallablePlan::raw_data_retention`]). A runtime reads the file with
 //! [`InstallablePlan::from_json`]. Raw data is read only at the DAG's
 //! `Scan`s, by their `Source`, and a view by its `MaterializedView`: the
@@ -101,7 +101,7 @@ pub struct PredictedUsage {
     pub average_memory_bytes: f64,
     /// The most memory live at once.
     pub peak_memory_bytes: u64,
-    /// Bytes kept on disk, raw data query-time scans read included.
+    /// Bytes retained on disk, raw data query-time scans read included.
     pub disk_bytes: u64,
     /// CPU cores to provision for the peak.
     pub peak_cpu_cores: u32,
@@ -285,7 +285,7 @@ impl InstallablePlan {
         Ok(self.dag.ingestion_refresh_groups()?)
     }
 
-    /// How far back each raw-data source is kept for query-time scans
+    /// How far back each raw-data source is retained for query-time scans
     /// ([`PhysicalASAPDAG::raw_data_retention`]): the raw data a runtime
     /// keeps, the raw-data counterpart of each view's retention.
     pub fn raw_data_retention(&self) -> Result<Vec<RawDataRetention>, InstallablePlanError> {
@@ -692,7 +692,7 @@ mod tests {
         pub(super) static COMPILED_NODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
 
-    /// A p99 panel over a 300 s window every second, with no raw data kept:
+    /// A p99 panel over a 300 s window every second, with no raw data retained:
     /// one DDSketch per series in each of 300 one-second tumbling windows built at
     /// ingestion, about 300 materialized views in a DAG of about 900 nodes.
     /// Each refresh (here one refresh group of all the tumbling windows) is compiled

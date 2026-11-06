@@ -31,7 +31,7 @@
 //! - A measure filter or `HAVING` prunes nothing. The target records the
 //!   measure filter (applied as `SummaryAgg.filter`) and one [`HavingEntry`]
 //!   per consumer `Filter` directly above the aggregate: a key-only predicate
-//!   applied by every reader of the aggregate's group, across queries, may go
+//!   applied by every consumer of the aggregate's group, across queries, may go
 //!   below the aggregate, anything else stays above the output (approximate
 //!   outputs then get guarantee `None`). So every candidate of a group
 //!   computes the group's own rows.
@@ -83,11 +83,11 @@
 //! `1 − (1 + ε)^{−1/n}`) and `δ/n` for `n` inputs (#669b). Only the inputs
 //! approximate in this candidate count. This composition sizes for ε and δ
 //! per output value; attached to the memo groups, each candidate's
-//! approximate inputs are sized for the values its readers' targets cover
+//! approximate inputs are sized for the values its consumers' targets cover
 //! (`δ / (n · V)`,
 //! [`pass1_memo`](crate::pass1::logical_memo_candidates::pass1_memo)),
 //! their final sizes. Pass 2 inherits them or takes the strictest shared
-//! reader's, and Stage 3 only checks the composed accuracy.
+//! consumer's, and Stage 3 only checks the composed accuracy.
 //!
 //! Every node of the candidate gets a theoretical guarantee, composed with
 //! the built-in accuracy model through operators (#669): exact over exact
@@ -665,9 +665,9 @@ fn placement(below: bool) -> HavingPlacement {
 /// An aggregate measure is eligible when it has a realization besides exact
 /// execution, even if every such realization is pruned; the prune reasons
 /// are reported on the target. Measure filters and `HAVING` keep every
-/// candidate; the target records how they are applied. A group's readers
+/// candidate; the target records how they are applied. A group's consumers
 /// are its parent groups and the query roots that read it; a consumer
-/// `Filter`'s key-only `HAVING` is pushed below only when every reader of
+/// `Filter`'s key-only `HAVING` is pushed below only when every consumer of
 /// the group applies the same predicate, so every candidate of a shared
 /// aggregate computes the group's own rows (#1089).
 pub fn generate_per_computation_candidates(
@@ -697,7 +697,7 @@ pub fn generate_per_computation_candidates(
     let mut seen = HashSet::new();
     // Each aggregate group with the first query that reaches it.
     let mut aggregates = Vec::new();
-    // Every reader of each group's node: `Some(parent)`, or `None` for a
+    // Every consumer of each group's node: `Some(parent)`, or `None` for a
     // query root or scalar reference.
     let mut consumers: HashMap<*const OperatorNode, Vec<Option<Rc<OperatorNode>>>> = HashMap::new();
     for (query, root) in roots.iter().enumerate() {
@@ -763,7 +763,7 @@ pub fn generate_per_computation_candidates(
             }
         }
         for (filter, predicate) in &filters_above {
-            // Every reader of the group, across queries, applies it.
+            // Every consumer of the group, across queries, applies it.
             let shared_by_all = filters_above.len() == parents.len()
                 && filters_above.iter().all(|(_, other)| other == predicate);
             entries.push(HavingEntry {
@@ -864,7 +864,7 @@ fn close_absorptions(targets: &mut [ComputationTarget]) {
 /// sum of the inner groups' sums is the sum of their rows), absorbing the
 /// inner target. Offered whatever else reads the inner sum: it is one more
 /// candidate of the outer sum's group, and the inner sum's group keeps its
-/// own candidates for its other readers. Applied when neither has a filter
+/// own candidates for its other consumers. Applied when neither has a filter
 /// or `HAVING`
 /// ([`nested_sum_input`]), and when the outer sum is not itself absorbed by
 /// a merge and has no fused computation yet, and the inner sum has none, so
@@ -990,7 +990,7 @@ fn nested_sum_input(target: &OperatorNode) -> Option<(Rc<OperatorNode>, AggInten
 /// counts of raw data samples, the heap reads those samples and absorbs the
 /// per-series target too. Offered whatever else reads the inner aggregate:
 /// it is one more candidate of the top-k's group, and the absorbed groups
-/// keep their own candidates for their other readers. Applied when neither
+/// keep their own candidates for their other consumers. Applied when neither
 /// has a filter or `HAVING`, and when the keyed-additive rule realizes it
 /// ([`whole_expression_input`]).
 fn add_whole_expression_targets(
@@ -1546,7 +1546,7 @@ fn whole_expression(
 /// `topk_k` the estimated Float64 weight, then the item columns. This is
 /// the exact top-k's physical shape (its ranked rows' value, then the
 /// columns naming each ranked item: PromQL labels, SQL group keys), so
-/// readers of `[keys.., topk_k]` find those columns where they were.
+/// consumers of `[keys.., topk_k]` find those columns where they were.
 fn ranked_as_topk(
     target: &OperatorNode,
     estimate: Rc<OperatorNode>,

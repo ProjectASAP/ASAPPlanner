@@ -89,7 +89,7 @@ pub enum RejectionCause {
     /// order.
     TiedLostOnEnumerationOrder,
     /// No plan meets every query's accuracy target, latency bound and the
-    /// catalog's reader constraints together: the selection MILP is
+    /// catalog's consumer constraints together: the selection MILP is
     /// infeasible. The reason names a query when it has no plan even alone.
     Infeasible,
 }

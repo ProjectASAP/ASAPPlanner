@@ -456,7 +456,7 @@ impl Planner {
     /// assignment implemented and priced, the cheapest selected, with the
     /// same models as [`plan`](Self::plan). Guarantees are composed again
     /// first, so a derived node carries the guarantee of what it reads, and
-    /// summaries are sized for their readers as Pass 1 sizes them.
+    /// summaries are sized for their consumers as Pass 1 sizes them.
     /// With `last_root_is_key_filter`, the last root is a `Filter` on
     /// group-key columns only and keeps its input's guarantee (whole groups
     /// selected by an exact key keep each remaining row's bound), which

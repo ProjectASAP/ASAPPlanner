@@ -264,7 +264,7 @@ pub fn closure(dag: &impl ExportedDag, root: NodeId) -> HashSet<NodeId> {
 }
 
 /// The queries (indexes into `query_roots`) whose result depends on `node`.
-pub fn readers(dag: &impl ExportedDag, query_roots: &[NodeId], node: NodeId) -> BTreeSet<usize> {
+pub fn queries(dag: &impl ExportedDag, query_roots: &[NodeId], node: NodeId) -> BTreeSet<usize> {
     query_roots
         .iter()
         .enumerate()
@@ -338,7 +338,7 @@ pub fn estimates_of(dag: &impl ExportedDag, build: NodeId) -> Vec<(NodeId, Sketc
 pub fn cross_query_nodes(dag: &impl ExportedDag, query_roots: &[NodeId]) -> BTreeSet<NodeId> {
     dag.node_ids()
         .into_iter()
-        .filter(|&id| readers(dag, query_roots, id).len() > 1)
+        .filter(|&id| queries(dag, query_roots, id).len() > 1)
         .collect()
 }
 
@@ -421,9 +421,9 @@ pub enum Materializing {
     MaterializedAtIngestion,
     /// Runs when a query first needs it; output reused by the other
     /// queries of the evaluation, or, as query-time `AcrossEvaluations`,
-    /// kept for later evaluations.
+    /// retained for later evaluations.
     MaterializedAtQueryTime,
-    /// Output discarded after its reader (lifetime `None`).
+    /// Output discarded after its query (lifetime `None`).
     NotMaterialized,
 }
 
@@ -475,7 +475,7 @@ pub fn window_form(dag: &impl ExportedDag, build: NodeId) -> WindowForm {
     }
 }
 
-/// How far back from an evaluation a materialized node's kept output
+/// How far back from an evaluation a materialized node's materialized output
 /// reaches in event time, derived the way plan selection prices what it
 /// keeps: a tumbling-window chain keeps its `N`
 /// tumbling windows of width `w`, plus the one being built when maintained at

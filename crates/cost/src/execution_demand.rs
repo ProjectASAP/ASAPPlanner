@@ -3,7 +3,7 @@
 //! This preserves the configured accounting policy, not an exact timestamp
 //! union: different fixed intervals add, unknown phases join a known phase,
 //! estimated rates add, and one-off/scheduled demand uses a batch maximum.
-//! Call `schedule_groups` or `evaluation_rate` on the chosen reader subset
+//! Call `schedule_groups` or `evaluation_rate` on the chosen query subset
 //! only; neither enumerates subsets. For retained query-time state pass `None` for each range evaluation
 //! to price once per request, as `computations` does.
 
@@ -17,61 +17,61 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 /// How a [`ScheduleGroup`]'s evaluations add to the others'.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Schedule {
-    /// Repeating readers on one interval and phase: evaluated together,
+    /// Repeating queries on one interval and phase: evaluated together,
     /// once per distinct instant their steps fall on.
     FixedInterval,
-    /// One reader with an estimated rate: its rate times its steps.
+    /// One query with an estimated rate: its rate times its steps.
     EstimatedRate,
-    /// The one-off, scheduled and unknown readers, run as one batch: the
+    /// The one-off, scheduled and unknown queries, run as one batch: the
     /// most evaluations among them, spread over the horizon.
     NonRepeating,
 }
 
-/// Readers of one node that are evaluated together, and how often the node
+/// Queries of one node that are evaluated together, and how often the node
 /// is computed for them. Groups add ([`evaluation_rate`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScheduleGroup {
-    /// The readers in the group, as positions in the reader list given to
+    /// The queries in the group, as positions in the query list given to
     /// [`schedule_groups`], ascending.
-    pub readers: Vec<usize>,
-    /// How often the node is computed per second for these readers.
+    pub queries: Vec<usize>,
+    /// How often the node is computed per second for these queries.
     pub evaluations_per_second: f64,
     /// Which kind of group it is.
     pub schedule: Schedule,
 }
 
-/// One fixed (interval, phase) schedule's readers: each step in ms they
-/// use with the longest span in ms at that step, and the readers.
+/// One fixed (interval, phase) schedule's queries: each step in ms they
+/// use with the longest span in ms at that step, and the queries.
 type FixedSchedule = (BTreeMap<u64, u64>, Vec<usize>);
 
-/// The groups of `readers` evaluated together (each a recurrence with its
+/// The groups of `queries` evaluated together (each a recurrence with its
 /// range evaluation), in the order [`evaluation_rate`] adds them: fixed
 /// intervals by (interval, phase), then each estimated rate, then the
 /// non-repeating batch. A request with a range evaluation is
 /// [`RangeEvaluation::evaluations_per_request`] evaluations, one without it
-/// one. Repeating readers with equal intervals and equal phases form one
+/// one. Repeating queries with equal intervals and equal phases form one
 /// group, every request ending at the same instant: a node they share is
 /// computed once per distinct instant their steps fall on,
-/// `end − k · step_ms` for `k · step_ms ≤ span_ms`. A reader of unknown
+/// `end − k · step_ms` for `k · step_ms ≤ span_ms`. A query of unknown
 /// phase joins the group of the first known phase on its interval, if any.
-/// A reader evaluated once per request (no range, or one step) evaluates
+/// A query evaluated once per request (no range, or one step) evaluates
 /// only at the end. Different intervals or phases are different groups (an
 /// over-estimate for intervals whose instants coincide, e.g. every 20 s and
 /// every 30 s meet every 60 s); each estimated rate is its own group.
-/// One-off, scheduled and unknown readers form one batch group: the most
+/// One-off, scheduled and unknown queries form one batch group: the most
 /// evaluations among them, spread over `non_repeating_query_horizon_seconds`.
 pub fn schedule_groups<'r>(
-    readers: impl IntoIterator<Item = (&'r QueryRecurrence, Option<RangeEvaluation>)>,
+    queries: impl IntoIterator<Item = (&'r QueryRecurrence, Option<RangeEvaluation>)>,
     non_repeating_query_horizon_seconds: f64,
 ) -> Result<Vec<ScheduleGroup>, AnalyticalCostError> {
     // Per interval in ms and phase in ms on it (`None`: unknown), each step
-    // in ms its readers use and the longest span in ms at that step, with
-    // the readers; once per request is the interval with span 0.
+    // in ms its queries use and the longest span in ms at that step, with
+    // the queries; once per request is the interval with span 0.
     let mut by_schedule: BTreeMap<(u32, Option<u64>), FixedSchedule> = BTreeMap::new();
     let mut estimated = Vec::new();
     let mut invocations = 0u64;
     let mut non_repeating = Vec::new();
-    for (reader, (recurrence, range_evaluation)) in readers.into_iter().enumerate() {
+    for (query, (recurrence, range_evaluation)) in queries.into_iter().enumerate() {
         let steps = range_evaluation.map_or(1, |range| range.evaluations_per_request());
         match recurrence {
             QueryRecurrence::Repeated(
@@ -97,7 +97,7 @@ pub fn schedule_groups<'r>(
                     by_schedule.entry((interval.0, phase_ms)).or_default();
                 let longest_span_ms = longest_span_ms_by_step_ms.entry(step_ms).or_default();
                 *longest_span_ms = (*longest_span_ms).max(span_ms);
-                members.push(reader);
+                members.push(query);
             }
             QueryRecurrence::Repeated(RepeatedDemand::EstimatedRate(estimate)) => {
                 let rate = estimate.expected_rate.0;
@@ -105,28 +105,28 @@ pub fn schedule_groups<'r>(
                     return Err(AnalyticalCostError::InvalidRecurrence);
                 }
                 estimated.push(ScheduleGroup {
-                    readers: vec![reader],
+                    queries: vec![query],
                     evaluations_per_second: rate * steps as f64,
                     schedule: Schedule::EstimatedRate,
                 });
             }
             QueryRecurrence::Repeated(RepeatedDemand::Scheduled(times)) => {
                 invocations = invocations.max(times.len() as u64 * steps);
-                non_repeating.push(reader);
+                non_repeating.push(query);
             }
             QueryRecurrence::OneTime {
                 invocations: count, ..
             } => {
                 invocations = invocations.max(*count * steps);
-                non_repeating.push(reader);
+                non_repeating.push(query);
             }
             QueryRecurrence::Unknown => {
                 invocations = invocations.max(steps);
-                non_repeating.push(reader);
+                non_repeating.push(query);
             }
         }
     }
-    // Readers of unknown phase run with the first known phase on their
+    // Queries of unknown phase run with the first known phase on their
     // interval.
     let unknown_phase_intervals_ms: Vec<u32> = by_schedule
         .keys()
@@ -153,8 +153,8 @@ pub fn schedule_groups<'r>(
     let mut groups: Vec<ScheduleGroup> = by_schedule
         .into_iter()
         .map(
-            |((interval_ms, _), (longest_span_ms_by_step_ms, readers))| ScheduleGroup {
-                readers,
+            |((interval_ms, _), (longest_span_ms_by_step_ms, queries))| ScheduleGroup {
+                queries,
                 evaluations_per_second: 1_000.0 / f64::from(interval_ms)
                     * distinct_instants_per_request(&longest_span_ms_by_step_ms) as f64,
                 schedule: Schedule::FixedInterval,
@@ -164,7 +164,7 @@ pub fn schedule_groups<'r>(
     groups.extend(estimated);
     if !non_repeating.is_empty() {
         groups.push(ScheduleGroup {
-            readers: non_repeating,
+            queries: non_repeating,
             evaluations_per_second: invocations as f64 / non_repeating_query_horizon_seconds,
             schedule: Schedule::NonRepeating,
         });
@@ -336,10 +336,10 @@ pub fn consumers(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, Vec<Consu
 
 /// How often each node of `dag` is computed: `(multiplier, per_second)`
 /// (module doc, "Cost model"). A materialized node is computed once for all
-/// its readers: once per second at ingestion time (materialized at ingestion time), at
+/// its queries: once per second at ingestion time (materialized at ingestion time), at
 /// the combined rate of the queries reaching it (`OneEvaluation`,
 /// [`evaluation_rate`]), or once per request of those queries for a chain
-/// kept across evaluations, whose request builds only its newest tumbling window
+/// materialized across evaluations, whose request builds only its newest tumbling window
 /// however many range steps it evaluates. `range_evaluations[q]` is query
 /// `q`'s range evaluation (none when missing). A not-materialized node is computed once per
 /// consumer that reaches it ([`consumers`]), at that consumer's rate. A consumer is a query
@@ -476,20 +476,20 @@ mod tests {
     // Unknown phases join the first known phase; separate known phases add.
     #[test]
     fn chosen_readers_preserve_phase_accounting() {
-        let readers = [
+        let queries = [
             fixed(20_000, None),
             fixed(20_000, Some(5_000)),
             fixed(20_000, Some(0)),
         ];
         close(
-            evaluation_rate(readers[..2].iter().map(|r| (r, None)), 3600.0).unwrap(),
+            evaluation_rate(queries[..2].iter().map(|r| (r, None)), 3600.0).unwrap(),
             1.0 / 20.0,
         );
         close(
-            evaluation_rate(readers.iter().map(|r| (r, None)), 3600.0).unwrap(),
+            evaluation_rate(queries.iter().map(|r| (r, None)), 3600.0).unwrap(),
             2.0 / 20.0,
         );
-        // No global subset cache: each caller's selected readers determine the rate.
+        // No global subset cache: each caller's selected queries determine the rate.
         close(evaluation_rate(std::iter::empty(), 3600.0).unwrap(), 0.0);
     }
 
@@ -521,9 +521,9 @@ mod tests {
     // Different fixed intervals remain additive even if timestamps can coincide.
     #[test]
     fn different_intervals_preserve_existing_conservative_rate() {
-        let readers = [fixed(20_000, Some(0)), fixed(30_000, Some(0))];
+        let queries = [fixed(20_000, Some(0)), fixed(30_000, Some(0))];
         close(
-            evaluation_rate(readers.iter().map(|r| (r, None)), 3600.0).unwrap(),
+            evaluation_rate(queries.iter().map(|r| (r, None)), 3600.0).unwrap(),
             1.0 / 20.0 + 1.0 / 30.0,
         );
     }

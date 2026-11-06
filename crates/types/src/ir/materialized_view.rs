@@ -5,12 +5,12 @@
 //! `retention_ms` installation sets on its nodes
 //! ([`PhysicalASAPDAG::set_retention`]).
 //!
-//! A **materialized view** is a node whose output is kept across
+//! A **materialized view** is a node whose output is materialized across
 //! evaluations: its lifetime is `AcrossEvaluations`, at ingestion time or
 //! at query time, and it carries its `retention_ms`. A node materialized for
 //! `OneEvaluation` is not a view: its output is discarded after one
 //! evaluation. A query-time `Scan` carries how long its source's rows are
-//! kept for it (`None` when it reads them unbounded).
+//! retained for it (`None` when it reads them unbounded).
 //!
 //! ## Refreshing a view
 //!
@@ -82,11 +82,11 @@ use crate::ir::properties::summary_coverage::{CoverageError, SelectionBox, Summa
 use crate::physical::Lifetime;
 
 /// One materialized view of a DAG: what its stored state is, what it is
-/// refreshed from, when, and for how long it is kept.
+/// refreshed from, when, and for how long it is retained.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MaterializedView {
-    /// The node whose output is kept.
+    /// The node whose output is materialized.
     pub node_id: PhysicalASAPNodeId,
     /// Which run refreshes it.
     pub(crate) refresh: MaterializedViewRefresh,
@@ -240,7 +240,7 @@ pub enum MaterializedViewRefresh {
     /// samples have arrived and the views it reads are refreshed), and
     /// keeps the result.
     AtIngestion,
-    /// Refreshed at query time and kept across evaluations
+    /// Refreshed at query time and materialized across evaluations
     /// (query-time `AcrossEvaluations`): when an evaluation reads this
     /// view for a selection it has not been refreshed for yet, the runtime
     /// runs the node in a query run over its inputs, keeps the result, and
@@ -375,18 +375,18 @@ pub enum InstallableDagError {
     /// Bad input (a plan file): view `node_id` has no `retention_ms`.
     #[error("materialized view {node_id} has no retention_ms")]
     ViewWithoutRetention { node_id: PhysicalASAPNodeId },
-    /// Bad input (a plan file): view `node_id` is kept for less than the
+    /// Bad input (a plan file): view `node_id` is retained for less than the
     /// data it summarizes reaches back, so a later evaluation would miss
     /// it.
-    #[error("materialized view {node_id} is kept for less than its data reaches back")]
+    #[error("materialized view {node_id} is retained for less than its data reaches back")]
     ViewRetentionTooShort { node_id: PhysicalASAPNodeId },
     /// Bad input (a plan file): query-time `Scan` `node_id` reads a bounded
     /// window but has no `retention_ms`.
     #[error("query-time scan {node_id} reads a bounded window but has no retention_ms")]
     ScanWithoutRetention { node_id: PhysicalASAPNodeId },
     /// Bad input (a plan file): query-time `Scan` `node_id` keeps its rows
-    /// for less than its readers' window reaches back.
-    #[error("query-time scan {node_id} is kept for less than its window reaches back")]
+    /// for less than its consumers' window reaches back.
+    #[error("query-time scan {node_id} is retained for less than its window reaches back")]
     ScanRetentionTooShort { node_id: PhysicalASAPNodeId },
 }
 
@@ -569,25 +569,25 @@ impl PhysicalASAPDAG {
     ///
     /// A view takes `tumbling_window_retention_ms_by_node`'s value (Stage 3's retention
     /// of a tumbling window's chain: its offset plus its window plus the longest
-    /// range-evaluation span of its readers); otherwise how far back its
-    /// data reaches, plus, for a view built from other views, its readers'
+    /// range-evaluation span of its consumers); otherwise how far back its
+    /// data reaches, plus, for a view built from other views, its consumers'
     /// longest range-evaluation span (`reader_span_ms_by_node`). Then each
-    /// view is kept at least as long as every view built from it needs it:
+    /// view is retained at least as long as every view built from it needs it:
     /// as long as that view's own retention when it is refreshed on first
     /// read (a range request may refresh it for its oldest step), else as
     /// far back as that view's data reaches. This is each node's own
     /// requirement: a runtime that stores identical outputs of several
     /// nodes once keeps them for the largest requirement among those nodes.
     ///
-    /// A query-time `Scan` keeps its rows for its readers' window
+    /// A query-time `Scan` keeps its rows for its consumers' window
     /// ([`Self::scan_window`]'s `lookback_ms`) plus their longest
     /// range-evaluation span, and at least the retention of every view
     /// refreshed on first read from it (which may be refreshed for its
     /// oldest step); `None` when its window is unbounded. In an installed
-    /// DAG a chain kept across evaluations is its expanded tumbling windows, so its
+    /// DAG a chain materialized across evaluations is its expanded tumbling windows, so its
     /// scan keeps the reach of all of them: reusing a tumbling window refreshed at an
     /// earlier evaluation is optional, and a restart or an older range step
-    /// refreshes older tumbling windows from raw data. (Stage 3 prices a kept chain on
+    /// refreshes older tumbling windows from raw data. (Stage 3 prices a materialized chain on
     /// the unexpanded DAG as reading its newest tumbling window.)
     pub fn set_retention(
         &mut self,
@@ -623,8 +623,8 @@ impl PhysicalASAPDAG {
                 MaterializedViewRefresh::AtIngestion => reach_ms_by_node[&view.node_id],
             };
             for input in view.inputs.materialized_views.clone() {
-                let kept = &mut views[position_of[&input]].retention_ms;
-                *kept = (*kept).max(needed_ms);
+                let retained = &mut views[position_of[&input]].retention_ms;
+                *retained = (*retained).max(needed_ms);
             }
         }
         let mut retention_ms_by_node: HashMap<PhysicalASAPNodeId, Option<u64>> = views
@@ -685,9 +685,13 @@ impl PhysicalASAPDAG {
                     return Err(InstallableDagError::ScanWithoutRetention { node_id: node.id })
                 }
             };
-            match retention.iter_mut().find(|kept| &kept.source == source) {
-                Some(kept) => {
-                    kept.lookback_ms = kept.lookback_ms.zip(lookback_ms).map(|(a, b)| a.max(b))
+            match retention
+                .iter_mut()
+                .find(|retained| &retained.source == source)
+            {
+                Some(retained) => {
+                    retained.lookback_ms =
+                        retained.lookback_ms.zip(lookback_ms).map(|(a, b)| a.max(b))
                 }
                 None => retention.push(RawDataRetention {
                     source: source.clone(),
@@ -698,7 +702,7 @@ impl PhysicalASAPDAG {
         Ok(retention)
     }
 
-    /// [`Self::scan_window`] of each query-time `Scan`, with no chain kept,
+    /// [`Self::scan_window`] of each query-time `Scan`, with no chain materialized,
     /// by id.
     fn query_time_scan_windows(&self) -> HashMap<PhysicalASAPNodeId, ScanWindow> {
         let scans = self
@@ -817,7 +821,7 @@ impl PhysicalASAPDAG {
 /// `inputs` summarizes reaches: the farthest of its raw-data windows and of
 /// the views it reads (`reach_ms_by_node`, each already computed).
 /// Whether `node` is a `Scan` run at query time, which carries how long its
-/// source's rows are kept for it.
+/// source's rows are retained for it.
 pub(crate) fn is_query_time_scan(node: &PhysicalASAPDAGNode) -> bool {
     matches!(node.payload, Operator::NonASAP(NonASAPOp::Scan { .. }))
         && node.output_state.timing == ExecutionTiming::QueryTime

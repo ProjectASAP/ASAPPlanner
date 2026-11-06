@@ -101,7 +101,7 @@ fn slower_repeat_reuses_faster_sum() {
     );
 }
 
-/// #902: the filtered reader avoids its independent scan and aggregation.
+/// #902: the filtered query avoids its independent scan and aggregation.
 #[test]
 fn grouped_filtered_quantile_plans() {
     assert!(
@@ -110,7 +110,7 @@ fn grouped_filtered_quantile_plans() {
     );
 }
 
-/// #922: duplicate exact TopK readers share their result and inner window work.
+/// #922: duplicate exact TopK queries share their result and inner window work.
 #[test]
 fn duplicate_exact_topk_shares_work() {
     let mut w = workload(924);
@@ -124,7 +124,7 @@ fn duplicate_exact_topk_shares_work() {
     assert!(duplicate <= single * 1.001, "{duplicate} vs {single}");
 }
 
-/// #924/#925 SQL variants: nested windows and slower readers reuse one sum.
+/// #924/#925 SQL variants: nested windows and slower queries reuse one sum.
 #[test]
 fn sql_sum_shares_nested_windows_and_slower_readers() {
     let mut w = workload(922);

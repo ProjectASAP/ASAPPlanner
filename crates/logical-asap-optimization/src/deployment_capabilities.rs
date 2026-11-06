@@ -13,16 +13,16 @@
 //!   accumulators and plain exact execution are always supported;
 //! * whether raw data samples are retained. If they are, Stage 3 counts them on
 //!   disk once per source, at the longest window a query-time scan of it
-//!   reads. If they are not, raw data samples are not kept after they arrive, so
+//!   reads. If they are not, raw data samples are not retained after they arrive, so
 //!   a candidate that scans raw data at query time is invalid (the
 //!   rejection lists every such scan): only ingestion-time work reads raw
 //!   rows. Stored data (at rest or mixed) with no raw data retained is a
 //!   contradiction, refused as bad input ([`DeploymentCapabilities::validate`]);
 //! * whether query-time results are retained across evaluations. If they
-//!   are, Stage 2 also offers a tumbling-window chain whose readers evaluate
+//!   are, Stage 2 also offers a tumbling-window chain whose queries evaluate
 //!   together at its tumbling-window width as query-time `AcrossEvaluations`: each
 //!   evaluation builds one new tumbling window and keeps the others for the next ones,
-//!   covering the readers' longest look-back. A chain two or more queries
+//!   covering the queries' longest look-back. A chain two or more queries
 //!   read keeps its `OneEvaluation` option too (shared within one evaluation),
 //!   and Stage 3 picks the cheaper. If they are not, a query-time result is
 //!   reused only within one evaluation.
@@ -50,9 +50,9 @@ pub struct DeploymentCapabilities {
     /// it can answer from one; `None` (the default) supports every family
     /// and readout the planner can build.
     pub supported_summaries: Option<Vec<SupportedSummary>>,
-    /// Whether raw data samples are kept for query-time scans; default `true`.
+    /// Whether raw data samples are retained for query-time scans; default `true`.
     pub raw_data_retained: bool,
-    /// Whether a query-time result may be kept across evaluations
+    /// Whether a query-time result may be materialized across evaluations
     /// (query-time `AcrossEvaluations`); default `false`.
     pub query_time_results_retained: bool,
 }

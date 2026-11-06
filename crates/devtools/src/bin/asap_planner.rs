@@ -69,7 +69,7 @@
 //     `search_report`; `error` when no plan was selected.
 //     `tumbling_window_retention_ms` maps each tumbling-window chain the plan
 //     keeps beyond one evaluation (by node id in `P1`) to how far back its
-//     tumbling windows are kept.
+//     tumbling windows are retained.
 //     `materialized_views` are the plan's materialized views as
 //     `plan_installable` derives them, each with the node of `P1` it is
 //     installed from (`stage2_node_id`), its position among that node's

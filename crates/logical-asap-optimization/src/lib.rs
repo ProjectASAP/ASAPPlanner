@@ -55,7 +55,7 @@
 //! candidate. Pass 1 takes the deployment's `AccuracyModel` and evidence
 //! only to prune summaries no query reading them can use (when they cannot
 //! accept an output without its guarantee) and sizes every summary for its
-//! readers; plan selection (Stage 3) checks each selected candidate's
+//! consumers; plan selection (Stage 3) checks each selected candidate's
 //! guarantee against its query's `AccuracyTarget` and never resizes.
 
 /// The deployment's capabilities: supported summaries and what it retains.

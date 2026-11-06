@@ -110,7 +110,7 @@ fn scalar_roots_export_in_batch_order_and_reference_nodes() {
     scalar_only.nodes[state].lifetime = Lifetime::OneEvaluation(StorageMedium::Disk);
     assert_eq!(
         scalar_only.validate(),
-        Err(PhysicalASAPDAGValidationError::InvalidPhysicalProperties {
+        Err(PhysicalASAPDAGValidationError::PhysicalProperties {
             node: scalar_only.nodes[state].id,
             reason: PhysicalPropertiesError::OneEvaluationAtIngestion,
         })

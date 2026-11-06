@@ -1299,7 +1299,7 @@ fn undeclared_supported_summaries_default_to_the_executors_families() {
 /// Two windowed quantiles over one metric (Q1 over 1 m, Q2 over 5 m, both
 /// every 10 s): with a shared scan, Stage 2 also offers the scan built once
 /// per evaluation, which reads the 5 m window once (≈0.1364/s) instead of
-/// once per reader (0.2203/s); the selected plan costs at most 0.143/s.
+/// once per query (0.2203/s); the selected plan costs at most 0.143/s.
 #[test]
 fn a_scan_two_queries_share_is_offered_built_once_per_evaluation() {
     let workload = json!({
