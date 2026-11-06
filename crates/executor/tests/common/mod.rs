@@ -25,11 +25,11 @@ pub fn selected_dag(
 /// computations at their default choice. A bounded solver archive need not
 /// contain every algorithm that executor binding tests need to exercise.
 pub fn computation_candidates(root: Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
-    use asap_logical_asap_optimization::test_support::{
+    use asap_stage1_pass1_per_computation_candidates::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
+        &asap_stage0_memo::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
     )
     .expect("Pass 1 accepts the query");
     let mut choices = vec![vec![0; inventory.targets.len()]];

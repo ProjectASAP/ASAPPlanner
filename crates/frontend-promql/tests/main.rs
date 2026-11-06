@@ -2,7 +2,6 @@
 //! its own copy of every dependency, which outgrew CI's disk.
 //! One file: `cargo test -p asap-frontend-promql --test promql <file>::`.
 
-mod planner_support;
 mod support;
 
 mod count_planning;
@@ -12,4 +11,3 @@ mod promql_conformance;
 mod promql_equivalence;
 mod promql_lowering;
 mod scalar_design;
-mod univmon_candidates;

@@ -196,11 +196,11 @@ pub mod planning {
     /// Exact computation and each explicit single-target rule application.
     /// This fixture catalog is independent of the bounded MILP's visited plans.
     pub fn explicit_local_candidates(root: Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
-        use asap_logical_asap_optimization::test_support::{
+        use asap_stage1_pass1_per_computation_candidates::test_support::{
             compose_logical_candidate, generate_per_computation_candidates,
         };
         let local = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
+            &asap_stage0_memo::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
         )
         .unwrap();
         let mut choices = std::collections::BTreeSet::from([vec![0; local.targets.len()]]);
@@ -231,12 +231,12 @@ pub mod planning {
         root: Rc<OperatorNode>,
         family: asap_types::ir::schema::SketchAlgorithm,
     ) -> Rc<OperatorNode> {
-        use asap_logical_asap_optimization::test_support::{
+        use asap_stage1_pass1_per_computation_candidates::test_support::{
             compose_logical_candidate, generate_per_computation_candidates,
         };
         use asap_types::stages::HowToComputeAggregateMeasure;
         let local = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
+            &asap_stage0_memo::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
         )
         .unwrap();
         let choices = local.targets.iter().map(|target| target.ways_to_compute.iter()

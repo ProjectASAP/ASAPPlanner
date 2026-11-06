@@ -1131,7 +1131,7 @@ fn workload_set_index_and_files_validate() {
             );
         }
         if let Some(capabilities) = set.get("deployment_capabilities") {
-            serde_json::from_value::<asap_logical_asap_optimization::DeploymentCapabilities>(
+            serde_json::from_value::<asap_types::deployment_capabilities::DeploymentCapabilities>(
                 capabilities.clone(),
             )
             .unwrap();

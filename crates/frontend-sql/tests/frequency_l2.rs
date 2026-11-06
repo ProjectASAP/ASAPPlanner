@@ -7,7 +7,6 @@ use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{NonASAPOp, OperatorNode};
-use asap_types::stages::HowToComputeAggregateMeasure;
 use std::rc::Rc;
 
 fn catalog(nullable: bool) -> SqlCatalog {
@@ -118,41 +117,6 @@ async fn frequency_empty_input_guard_uses_an_exact_count() {
         measures.as_slice(),
         [AggIntent::Count { accuracy }] if accuracy.is_exact()
     ));
-}
-
-/// Stage 1 offers the exact option and summary candidates for the
-/// recognized L2 intent.
-#[tokio::test]
-async fn stage1_offers_exact_and_summary_l2_candidates() {
-    use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
-    use asap_types::ir::QueryRoot;
-    let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
-    let root = lower_sql(CAST_COUNT, &catalog(false), target)
-        .await
-        .unwrap();
-    let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
-    )
-    .unwrap();
-    let l2 = inventory
-        .targets
-        .iter()
-        .find(|t| has_l2(inventory.aggregate(t)))
-        .expect("L2 target");
-    let candidates = &l2.ways_to_compute;
-    assert!(
-        candidates.iter().any(|c| matches!(
-            c,
-            HowToComputeAggregateMeasure::Exact | HowToComputeAggregateMeasure::ExactAccumulator(_)
-        )),
-        "{candidates:?}"
-    );
-    assert!(
-        candidates
-            .iter()
-            .any(|c| matches!(c, HowToComputeAggregateMeasure::Summary(_))),
-        "{candidates:?}"
-    );
 }
 
 /// #509 Example 2 over `flows(ts, src_ip)` with its one-minute window: Q2

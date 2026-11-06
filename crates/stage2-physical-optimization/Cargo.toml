@@ -1,0 +1,12 @@
+[package]
+name = "asap-stage2-physical-optimization"
+version = "0.1.0"
+edition = "2021"
+
+# #509 Stage 2, physical ASAP-aware optimization: materialization and
+# physical operator implementation of each Stage 1 candidate, and the
+# PhysicalASAPMemoCandidates Stage 3 selects from (`catalog`). Depends only on
+# asap-types, never on Stage 1's crate, plan selection or the executor.
+[dependencies]
+asap-types = { path = "../types" }
+thiserror = "2"

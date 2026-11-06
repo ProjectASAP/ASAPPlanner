@@ -3,19 +3,21 @@
 //! finally the selected plan built through Stage 2's realizer. No stage
 //! calls another, and none has a deadline: each runs to completion.
 
-use asap_logical_asap_optimization::memo_of_queries;
+use asap_stage0_memo::memo_of_queries;
 
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::Instant;
 
-use asap_logical_asap_optimization::generate_logical_asap_memo_candidates;
-use asap_logical_asap_optimization::DeploymentCapabilitiesError;
-use asap_logical_asap_optimization::{pass1_memo, Pass1Error, PerComputationCandidateError};
-use asap_physical_asap_optimization::{
+use asap_stage1_pass1_per_computation_candidates::{
+    pass1_memo, Pass1Error, PerComputationCandidateError,
+};
+use asap_stage1_pass2_reuse_candidates::generate_logical_asap_memo_candidates;
+use asap_stage2_physical_optimization::{
     generate_physical_asap_memo_candidates, Stage2AssignmentRealizer,
 };
-use asap_plan_selection::{select_plan, ErrorSelectingPlan, SearchReport, Selection};
+use asap_stage3_plan_selection::{select_plan, ErrorSelectingPlan, SearchReport, Selection};
+use asap_types::deployment_capabilities::DeploymentCapabilitiesError;
 use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::stages::{
