@@ -48,8 +48,8 @@ This section fixes the words used below. They follow relational databases and Ap
 |---|---|---|
 | **Relation / table** | A set (bag) of rows with the same columns. A base table is stored; a derived relation is the output of a query operator. | Every edge in the DAG carries a relation. A `Scan` reads a base table (SQL table or PromQL metric); every other operator outputs a derived relation. |
 | **Row / tuple** | One element of a relation: one value per column. | One output row of a node. For PromQL, one sample of one series at one time. |
-| **Column** | One position in every row, with a name and a type. Qualified as `table.column` when names can collide (DataFusion `Column { relation, name }`). | `ColumnId` refers to a column of the input schema; `(table, name)` identifies it across nodes (§4.2.2). |
-| **Schema** | The ordered list of columns of a relation: name, data type, nullability (Arrow `Schema` of `Field { name, data_type, nullable }`; DataFusion `DFSchema` adds the table qualifier). The schema is *metadata*: it describes rows, it contains none. | `Schema` of `Field { name, dtype, nullable, table }` in `crates/types/src/ir/schema/mod.rs`. Unlike Arrow, `dtype` can be a summary state type (§3). |
+| **Column** | One position in every row, with a name and a type. Qualified as `table.column` when names can collide (DataFusion `Column { relation, name }`). | `ColumnId` refers to a column of the input schema; its memo group's column lineage, the source column `(source, column)` its values are copied from, identifies it across nodes (§4.2.2). A front end binds `table.column` with its own scope while it lowers. |
+| **Schema** | The ordered list of columns of a relation: name, data type, nullability (Arrow `Schema` of `Field { name, data_type, nullable }`; DataFusion `DFSchema` adds the table qualifier). The schema is *metadata*: it describes rows, it contains none. | `Schema` of `Field { name, dtype, nullable }` in `crates/types/src/ir/schema/mod.rs`, with no table qualifier. Unlike Arrow, `dtype` can be a summary state type (§3). |
 | **Data type** | The type of a column's values (`Int64`, `Utf8`, `Timestamp`, …). | `DataType`, wrapped as `FieldDataType::Plain`. |
 | **Aggregate state** | The intermediate value of an aggregate function before its final result, e.g. `(sum, count)` for `AVG` (DataFusion `Accumulator::state`, partial/final aggregation). It is never exposed as a column type to users. | Summary state *is* a column type here (`FieldDataType::Sketch`, `ExactAggregate`, …), so state can flow along edges and be merged, stored and read by later operators. |
 | **View / materialized view** | A view is a named query (its *definition*). A materialized view also stores the query's result rows; a query can then be answered from it when its definition matches (view matching, §4.1). | A built summary state is a materialized aggregation view whose aggregate is a summary family. Its definition and which rows it took are its coverage (§4). |
@@ -216,9 +216,9 @@ With an error target, the planner answers each quantile from a KLL state. All th
 
 | State | Sub-DAG | `definition` | `selection` |
 |---|---|---|---|
-| `S_us` | `KLL(latency) by[job]` over `Filter(region = 'us', Scan t)` | `KLL(latency) by[job]` over `Scan t` | `region ∈ {us}` |
-| `S_eu` | `KLL(latency) by[job]` over `Filter(region = 'eu', Scan t)` | `KLL(latency) by[job]` over `Scan t` | `region ∈ {eu}` |
-| `S_size` | `KLL(size) by[job]` over `Filter(region = 'eu', Scan t)` | `KLL(size) by[job]` over `Scan t` | `region ∈ {eu}` |
+| `S_us` | `KLL(latency) by[job]` over `Filter(region = 'us', Scan t)` | `KLL(latency) by[job]` over `Scan t` | `t.region ∈ {us}` |
+| `S_eu` | `KLL(latency) by[job]` over `Filter(region = 'eu', Scan t)` | `KLL(latency) by[job]` over `Scan t` | `t.region ∈ {eu}` |
+| `S_size` | `KLL(size) by[job]` over `Filter(region = 'eu', Scan t)` | `KLL(size) by[job]` over `Scan t` | `t.region ∈ {eu}` |
 
 - `S_us + S_eu` ✓: same computation, different rows. The result is the KLL of latency by job for US and EU, with every row counted once.
 - `S_us + S_us` ✗: same computation, same rows. Every US row would be counted twice.
@@ -293,11 +293,13 @@ G4.summary_coverage = SummaryCoverage {
         input_group: Some(G1),
         unlifted_operators: [SummaryAgg[KLL]],
     },
-    selection: [ { job ∈ {api}, time (−60 s, 0] } ],
+    selection: [ { latency.job ∈ {api}, time (−60 s, 0] } ],
 }
 ```
 
-**Case 2, G7: the same definition, a disjoint selection.** The walk over G6 and G5 lifts `job = "web"` and the same minute, so G7's definition is G4's (`input_group: Some(G1)`, `unlifted_operators: [SummaryAgg[KLL]]`) and its `definition_id()` is the same; its selection is `{ job ∈ {web}, time (−60 s, 0] }`. The two selections are disjoint, so `SummaryMerge(G4, G7)` is a valid candidate (and group), covering `{ job ∈ {api, web}, time (−60 s, 0] }`.
+A selection names a column by its lineage: `latency.job` is the `job` column of the series `latency` (see *Which column a condition is on* below).
+
+**Case 2, G7: the same definition, a disjoint selection.** The walk over G6 and G5 lifts `job = "web"` and the same minute, so G7's definition is G4's (`input_group: Some(G1)`, `unlifted_operators: [SummaryAgg[KLL]]`) and its `definition_id()` is the same; its selection is `{ latency.job ∈ {web}, time (−60 s, 0] }`. The two selections are disjoint, so `SummaryMerge(G4, G7)` is a valid candidate (and group), covering `{ latency.job ∈ {api, web}, time (−60 s, 0] }`.
 
 **Case 3, G10: `a + b > 10` cannot be lifted.** It spans two columns, so it is no selection. At G8 the walk lifts `job = "api"` and keeps the rest:
 
@@ -307,7 +309,7 @@ G10.summary_coverage = SummaryCoverage {
         input_group: Some(G1),
         unlifted_operators: [SummaryAgg[KLL], Filter(a + b > 10)],
     },
-    selection: [ { job ∈ {api}, time (−60 s, 0] } ],
+    selection: [ { latency.job ∈ {api}, time (−60 s, 0] } ],
 }
 ```
 
@@ -368,11 +370,11 @@ GROUP BY job;
 
 | Condition | Found at | Rule 1: same rows at the `SummaryAgg`? | Rule 2: simple? | Result |
 |---|---|---|---|---|
-| `latency < 100` | `SummaryAgg.filter` | yes, it is already there | yes, an interval | `selection`: `latency ∈ (−∞, 100)` |
-| `region = 'us'` | `Scan.predicates` | yes: `Project` passes `region` through (renamed `r`) | yes, a value set | `selection`: `r ∈ {us}` |
+| `latency < 100` | `SummaryAgg.filter` | yes, it is already there | yes, an interval | `selection`: `t.latency ∈ (−∞, 100)` |
+| `region = 'us'` | `Scan.predicates` | yes: `Project` passes `region` through (renamed `r`) | yes, a value set | `selection`: `t.region ∈ {us}` |
 | `latency * 2 > 10` | `Scan.predicates` | yes | **no**: it is on an expression, not a column | stays in `definition` |
 
-So the `selection` is `latency ∈ (−∞, 100)`, `r ∈ {us}`. A PromQL example with a time window is under **Time** below.
+So the `selection` is `t.latency ∈ (−∞, 100)`, `t.region ∈ {us}`. A PromQL example with a time window is under **Time** below.
 
 **Rule 1 in detail.** Imagine moving the condition up, one operator at a time, until it is just below the `SummaryAgg`. Every operator it passes must leave the picked rows unchanged. Whether it can pass depends on what the operator does:
 
@@ -380,16 +382,16 @@ So the `selection` is `latency ∈ (−∞, 100)`, `r ∈ {us}`. A PromQL exampl
 |---|---|---|---|
 | another `Filter` (also `Scan.predicates`, `SummaryAgg.filter`) | yes | filters only drop rows, so their order does not matter | `region = 'us'` below `Filter(value < 100)` ✓ |
 | `TimeRange` (range) or `TimeShift` (without `@`) | yes | they choose a time window, but do not change any row's values | `region = 'us'` below `TimeRange(1m)` ✓ |
-| `Project` | only if its column is passed through unchanged (a rename is fine) | the column must still be there, with the same values, above the `Project` | `Project [job, region AS r]`: `region = 'us'` ✓, it becomes `r = 'us'`. `Project [job, value * 2 AS v2]`: `value > 5` ✗, `value` is gone |
+| `Project` | only if its column is passed through unchanged (a rename is fine) | the column must still be there, with the same values, above the `Project` | `Project [job, region AS r]`: `region = 'us'` ✓, on `r`, whose lineage is still `t.region`. `Project [job, value * 2 AS v2]`: `value > 5` ✗, `value` is gone |
 | `Aggregate` (later) | only if it uses group columns | a group column has one value per group, so filtering before or after grouping keeps the same groups | below `SUM(value) by job`: `job = 'api'` ✓; `value > 5` ✗, it changes the sums |
 | `rate`, a window function, or an instant `TimeRange` (later) | only if it uses series labels | a label is the same for every sample of a series | below `rate(...)`: `job = 'api'` ✓; `value > 5` ✗, dropping raw samples changes the rate. Below an instant selector: `job = 'api'` ✓; `value > 5` ✗, the latest sample with value > 5 is not the latest sample |
 | any other operator, e.g. `Join`, a vector/vector `BinaryOp`, `Limit`, a `TimeShift` with `@` | no | | |
 
-A `Filter` *above* `rate` has nothing to pass: it keeps some rate outputs, and those are exactly the rows the `SummaryAgg` reads. How a PromQL comparison is lowered decides whether it is such a `Filter`:
+A `Filter` *above* `rate` has nothing to pass: it keeps some rate outputs, and those are exactly the rows the `SummaryAgg` reads. But its condition is on the rate value, a computed column with no source column to name it by, so it stays in `definition` too. How a PromQL comparison is lowered decides whether it is such a `Filter`:
 
 | PromQL | Lowered to | Coverage |
 |---|---|---|
-| `rate(m[5m]) > 0` (vector and scalar) | `Filter` | `selection`: `value ∈ (0, ∞)` |
+| `rate(m[5m]) > 0` (vector and scalar) | `Filter` | stays in `definition`: `value` is computed by `rate` |
 | `rate(m[5m]) > bool 0` | `Project` (values become 0 or 1, no row is dropped) | stays in `definition`: it does not pick rows |
 | `rate(a[5m]) > rate(b[5m])` (vector and vector) | `BinaryOp` (matches the two sides by labels, like a join) | stays in `definition`: the walk does not enter a `BinaryOp` |
 
@@ -415,11 +417,11 @@ Any other shape stays in `definition`:
 
 **Which column a condition is on.**
 
-- A column is named by its table and name, `(table, name)`, **as the `SummaryAgg` reads it** (in the schema of its child). Directly above a join, `shipping.region = 'us'` and `billing.region = 'us'` are different conditions.
-- A `Project` gives its columns new names and replaces their table with its own qualifier (none by default): after `region AS r`, the column is `(none, r)`, so the condition becomes `r ∈ {us}`. Since the `definition` contains the same `Project`, two states that rename the same way still compare equal.
-- Only a `Project` may rename. Any other operator whose output names a column differently from its input (allowed for every operator, e.g. a `Filter` with an explicit schema) stays in `definition`, and so do the conditions at and below it. Removing it would drop the rename: if a `Filter` calls the `tier` column `region`, its `tier = 'eu'` would read as `region ∈ {eu}` and look disjoint from another state's `region ∈ {us}`, though a row with `region = 'us', tier = 'eu'` is in both.
-- If two columns the `SummaryAgg` reads have the same `(table, name)` (for example `Project [a AS k, b AS k]`), a condition on `k` cannot tell them apart and stays in `definition`.
-- PromQL labels have no table, so a label is named by its name alone.
+- A column is named by its **lineage** ([concepts doc, section 3](../concepts/memo-groups-properties-requirements.md#column-lineage)) in the group the `SummaryAgg` reads: the source column `(source, column)` its values are copied from, a `Scan`'s table or metric and its column there. Directly above a join, `shipping.region = 'us'` and `billing.region = 'us'` are different conditions, though both columns are named `region`.
+- A rename keeps lineage: after `Project [region AS r]`, `r` is still `t.region`, so the condition is `t.region ∈ {us}`. A memo group's schema is derived, so no other operator renames a column. Since the `definition` contains the same `Project`, two states that rename the same way still compare equal.
+- A condition on a computed column (a `Project` expression item, an aggregate's measure, a readout's value) has no source column to name and stays in `definition`.
+- If two columns the `SummaryAgg` reads have the same lineage (for example `Project [a AS k, a AS k2]`), the selection cannot name one of them apart, and their conditions stay in `definition`.
+- A PromQL label is named by its metric and label: `latency.job`.
 - Values of different types are never treated as different: `1` and `1.0` might be equal, so `x = 1` and `x = 1.0` are treated as possibly overlapping.
 - A constant may come from a cast: type coercion turns `latency < 100` on a `DOUBLE` column into `latency < CAST(100 AS DOUBLE)`, and the SQL front end folds a numeric cast of a literal as DataFusion's constant folding does, so the condition reads `latency < 100.0`.
 
@@ -440,11 +442,11 @@ Any other shape stays in `definition`:
 
 | Query | Sub-DAG below `SummaryAgg` | `definition` keeps | `selection` takes |
 |---|---|---|---|
-| SQL `… FROM t WHERE region = 'us'` | `Scan t {region = 'us'}` | `Scan t` | `region ∈ {us}` |
-| SQL `… FROM t WHERE latency < 100` | `Scan t {latency < 100}` | `Scan t` | `latency ∈ (−∞, 100)` |
+| SQL `… FROM t WHERE region = 'us'` | `Scan t {region = 'us'}` | `Scan t` | `t.region ∈ {us}` |
+| SQL `… FROM t WHERE latency < 100` | `Scan t {latency < 100}` | `Scan t` | `t.latency ∈ (−∞, 100)` |
 | PromQL `quantile_over_time(0.99, m[1m] offset 2m)` | `TimeRange(1m, TimeShift(2m, Scan m))` | `Scan m` | the last 3 to 2 minutes before evaluation, `(−3m, −2m]` |
 | PromQL `quantile(0.99, rate(m{job="api"}[5m]))` | `rate(TimeRange(5m, Scan m {job = 'api'}))` | all of it | nothing: `job = 'api'` is under `rate`, which the walk cannot pass yet (Rule 1, later) |
-| PromQL `quantile(0.99, rate(m[5m]) > 0)` | `Filter(value > 0, rate(TimeRange(5m, Scan m)))` | `rate(TimeRange(5m, Scan m))` | `value ∈ (0, ∞)`: the `Filter` is above `rate` |
+| PromQL `quantile(0.99, rate(m[5m]) > 0)` | `Filter(value > 0, rate(TimeRange(5m, Scan m)))` | all of it | nothing: the `Filter` is above `rate`, but `value` is computed by `rate`, so no selection can name it |
 | PromQL `quantile(0.99, rate(a[5m]) > rate(b[5m]))` | `BinaryOp(>, rate(TimeRange(5m, Scan a)), rate(TimeRange(5m, Scan b)))` | all of it | nothing: a vector/vector comparison is a `BinaryOp`, not a `Filter` |
 
 `Scan t {…}` is a `Scan` with those predicates. In the last three rows `TimeRange(5m)` stays in `definition` in any case: it is the input window of `rate` and changes the rate values, so it does not just pick rows.
@@ -542,7 +544,7 @@ With an error target, the planner answers the quantile from a KLL sketch with `k
 coverage() of the SummaryAgg
 ┌──────────────────────────────────────────────────────────────────┐
 │ definition: this SummaryAgg over Scan t   (the Filter removed)   │
-│ selection:  region ∈ {us},  latency ∈ (−∞, 10000)                │
+│ selection:  t.region ∈ {us},  t.latency ∈ (−∞, 10000)            │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -781,13 +783,13 @@ The first two build `KLL(latency) by[job]` states. The third can be answered by 
                                    │  State: job Utf8, state Sketch(KLL k=200)
                                    │
                           [[ SummaryMerge ]]
-                                   ▲             selection: region ∈ {us, eu}
+                                   ▲             selection: t.region ∈ {us, eu}
                                    │
                  ┌─────────────────┴─────────────────┐
                  │                                   │
      [[ SummaryAgg ]]                     [[ SummaryAgg ]]
      KLL k=200, by job                    KLL k=200, by job
-     selection: region ∈ {us}             selection: region ∈ {eu}
+     selection: t.region ∈ {us}           selection: t.region ∈ {eu}
                  ▲                                   ▲
                  │                                   │
      [ Filter region = 'us' ]             [ Filter region = 'eu' ]
@@ -1128,9 +1130,6 @@ impl Schema {
     pub fn is_all_plain(&self) -> bool;
     /// Position of the first field with this name, or `None`.
     pub fn column_id(&self, name: &str) -> Option<ColumnId>;
-    /// Position of the field with this table and name, or `None`. Tells apart
-    /// `a.k` and `b.k` after a join.
-    pub fn column_id_qualified(&self, table: &str, name: &str) -> Option<ColumnId>;
 }
 
 /// One column of a `Schema`. `T` is `FieldDataType` on DAG edges, and plain
@@ -1143,13 +1142,9 @@ pub struct Field<T = FieldDataType> {
     pub dtype: T,
     /// Whether the column may contain NULL. PromQL value columns are never NULL.
     pub nullable: bool,
-    /// Table or alias the column comes from (`t` in `t.col`), so two columns
-    /// with the same name from a join stay apart. `None` for PromQL labels and
-    /// unqualified columns.
-    pub table: Option<String>,
 }
 impl Field<FieldDataType> {
-    /// An unqualified field holding a plain value of type `dtype`.
+    /// A field holding a plain value of type `dtype`.
     pub fn plain(name: impl Into<String>, dtype: DataType, nullable: bool) -> Self;
     /// The value type if the field is plain; `None` for summary state.
     pub fn plain_dtype(&self) -> Option<&DataType>;
@@ -1414,12 +1409,13 @@ pub struct SelectionBox {
     pub relative_time: Option<(Bound<i64>, Bound<i64>)>,
 }
 
-/// Names a column across nodes, independent of its position.
+/// Names a column across nodes, independent of its position and name: the
+/// source column of its lineage (`ColumnLineage::SourceColumn`).
 pub struct ColumnIdentity {
-    /// The table or alias the column comes from; `None` if unqualified.
-    pub table: Option<String>,
-    /// The column name.
-    pub name: String,
+    /// The table or metric a `Scan` reads.
+    pub source: String,
+    /// The column's name in that source.
+    pub column: String,
 }
 
 /// A constraint on one column.
