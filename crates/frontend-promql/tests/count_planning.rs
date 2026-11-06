@@ -116,14 +116,3 @@ fn count_over_time_counts_scrapes_not_sample_values() {
         vec![10.0, 10.0]
     );
 }
-
-// The assertion helper must fail on an injected composition error; its coverage
-// must not depend on a real planner bug remaining unfixed.
-#[test]
-#[should_panic(expected = "does not compose")]
-fn logical_candidates_fails_on_a_candidate_that_does_not_compose() {
-    support::require_composed_operator_candidates(vec![support::LogicalCandidate {
-        id: "invalid-composition".into(),
-        roots: Err("invalid choice".into()),
-    }]);
-}

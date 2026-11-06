@@ -143,23 +143,3 @@ pub struct LogicalCandidate {
     pub id: String,
     pub roots: Result<Vec<asap_types::ir::QueryRoot>, String>,
 }
-
-/// Fail on a rejected candidate rather than silently dropping it from assertions.
-#[allow(dead_code)]
-pub fn require_composed_operator_candidates(
-    candidates: Vec<LogicalCandidate>,
-) -> Vec<Rc<OperatorNode>> {
-    candidates
-        .into_iter()
-        .filter_map(|candidate| {
-            match candidate
-                .roots
-                .unwrap_or_else(|e| panic!("{} does not compose: {e}", candidate.id))
-                .remove(0)
-            {
-                asap_types::ir::QueryRoot::Operator(node) => Some(node),
-                asap_types::ir::QueryRoot::Scalar(_) => None,
-            }
-        })
-        .collect()
-}
