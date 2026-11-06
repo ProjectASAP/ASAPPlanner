@@ -60,9 +60,8 @@ fn population_dag(
     grouping: &[&str],
 ) -> PhysicalASAPDAG {
     let root = promql_rows::with_series_identity(&lower(query)).unwrap();
-    let selected = asap_logical_asap_optimization::test_support::population_over_selector(
-        &root, statistic, grouping,
-    );
+    let selected =
+        planner_types::test_support::population_over_selector(&root, statistic, grouping);
     planner_types::test_support::physical_asap_dag_at_query_time(&selected).unwrap()
 }
 

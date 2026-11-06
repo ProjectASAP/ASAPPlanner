@@ -9,11 +9,12 @@ autotests = false
 asap-types = { path = "../types", features = ["test-support"] }
 asap-frontend-promql = { path = "../frontend-promql" }
 asap-frontend-sql = { path = "../frontend-sql" }
-asap-logical-asap-optimization = { path = "../logical-asap-optimization", features = ["test-support"] }
-asap-physical-asap-optimization = { path = "../physical-asap-optimization" }
+asap-stage0-memo = { path = "../stage0-memo" }
+asap-stage1-pass1-per-computation-candidates = { path = "../stage1-pass1-per-computation-candidates", features = ["test-support"] }
+asap-stage2-physical-optimization = { path = "../stage2-physical-optimization" }
 asap-accuracy = { path = "../accuracy" }
 asap-cost = { path = "../cost" }
-asap-plan-selection = { path = "../plan-selection" }
+asap-stage3-plan-selection = { path = "../stage3-plan-selection" }
 # The fixtures plan through the facade and the developer tools' reference
 # enumeration.
 asap-planner = { path = "../planner" }
@@ -22,7 +23,7 @@ asap-devtools = { path = "../devtools" }
 [dev-dependencies]
 asap-types = { path = "../types", features = ["test-support"] }
 asap-accuracy = { path = "../accuracy", features = ["test-support"] }
-asap-physical-asap-optimization = { path = "../physical-asap-optimization" }
+asap-stage2-physical-optimization = { path = "../stage2-physical-optimization" }
 asap-devtools = { path = "../devtools" }
 # The tests plan PromQL and SQL workloads through the facade.
 asap-planner = { path = "../planner" }

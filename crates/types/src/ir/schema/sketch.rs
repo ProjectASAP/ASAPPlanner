@@ -233,7 +233,7 @@ impl PartialEq for SketchParams {
 /// ([`FamilyCapability`](crate::ir::schema::FamilyCapability)).
 ///
 /// Construct through [`SketchKind::new`], which rejects parameters of a
-/// different algorithm. See `asap_logical_asap_optimization::summary_candidates` for the
+/// different algorithm. See `asap_stage1_pass1_per_computation_candidates`'s `summary_candidates` for the
 /// `AggIntent -> [SketchAlgorithm]` candidate list.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SketchKind {

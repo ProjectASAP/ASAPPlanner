@@ -75,7 +75,7 @@ Both current `Concat`-constructing call sites, and every consumer of
   test fixtures) — none of them builds a fresh `Concat` with a `Dedup` on top
   that this feature could remove.
 - **Every consumer of `Schema::unique_keys`** in the DAG, to check for a
-  cost beyond "a literal `Dedup` node": `share_common_sub_dags` (crate-private in `asap_logical_asap_optimization`, `stage0/cse.rs`)
+  cost beyond "a literal `Dedup` node": `share_common_sub_dags` (crate-private in `asap_stage0_memo`, `cse.rs`)
   (gates CSE producer-sharing on `Schema::has_unique_key()`) and
   `asap_aware_mapping::rollup::is_legal_rollup_source` (gates rollup-source
   legality the same way, on an *`Aggregate`'s* own output schema). Neither

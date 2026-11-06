@@ -2,10 +2,10 @@
 //! rules over groups, and the logical edges
 //! ([`asap_types::stages::LogicalASAPMemoCandidates`]), which Stage 2 expands.
 
-use crate::pass2::memo::rules::{
+use crate::memo::rules::{
     finer_aggregate, rollup, scan_labels, summary_inputs, topk, Pass2RuleError,
 };
-use crate::pass2::memo::window_candidates::add_local_window_composition;
+use crate::memo::window_candidates::add_local_window_composition;
 use asap_types::stages::{LogicalASAPMemoCandidates, Memo};
 use asap_types::workload::QueryWorkloadEntry;
 
