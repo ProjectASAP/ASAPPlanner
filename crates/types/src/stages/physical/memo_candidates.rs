@@ -200,19 +200,17 @@ pub fn output_references<C: Clone>(query_roots: &[QueryRoot<C>]) -> Vec<(usize, 
 
 #[cfg(test)]
 mod tests {
-    use std::rc::Rc;
-
     use super::*;
-    use crate::ir::operator::operator_properties::Reduction;
-    use crate::ir::scalar::expr_ir::{ColumnRef, ScalarValue};
+    use crate::ir::operator::operator_properties::{Reduction, Source};
+    use crate::ir::scalar::expr_ir::ColumnRef;
     use crate::ir::schema::{
         DataType, Field, FieldDataType, GroupingStrategy, Schema, SketchAlgorithm, SketchParams,
         SummaryUpdate,
     };
-    use crate::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
+    use crate::ir::{ASAPOp, NonASAPOp, Operator};
     use crate::physical::StorageMedium;
     use crate::stages::{
-        CandidateExpression, CandidateForMemoGroup, LogicalProperties, MemoGroup,
+        CandidateExpression, CandidateForMemoGroup, LogicalProperties, LogicalRequirements,
         OriginOfCandidateForMemoGroup,
     };
     use crate::workload::{DemandEstimate, RangeEvaluation, Rate, RepetitionInterval, TimestampMs};
@@ -220,26 +218,44 @@ mod tests {
 
     /// Candidate 0 of the test memo has no window layout.
     const UNWINDOWED: CandidateForMemoGroupId = CandidateForMemoGroupId {
-        group: MemoGroupId(0),
+        group: MemoGroupId(1),
         index_in_group: 0,
     };
     /// Candidate 1 has tumbling windows 5 s wide.
     const WINDOWS_5S: CandidateForMemoGroupId = CandidateForMemoGroupId {
-        group: MemoGroupId(0),
+        group: MemoGroupId(1),
         index_in_group: 1,
     };
     /// Candidate 2 has tumbling windows 10 s wide.
     const WINDOWS_10S: CandidateForMemoGroupId = CandidateForMemoGroupId {
-        group: MemoGroupId(0),
+        group: MemoGroupId(1),
         index_in_group: 2,
     };
 
-    /// One group of KLL states with three candidates: no window layout,
-    /// 5 s tumbling windows and 10 s tumbling windows.
+    /// Group 1, KLL states over the scan group 0, with three candidates:
+    /// no window layout, 5 s tumbling windows and 10 s tumbling windows.
+    /// Built through `find_or_add_group` and `add_candidate` (#1207 PR 2).
     fn memo() -> Memo {
+        let mut memo = Memo::default();
+        let scan = memo
+            .find_or_add_group(Operator::NonASAP(NonASAPOp::Scan {
+                source: Source::TimeSeries {
+                    metric: "latency".into(),
+                },
+                predicates: vec![],
+                schema: Schema::with_time_index(
+                    vec![
+                        Field::plain("ts", DataType::Timestamp, false),
+                        Field::plain("value", DataType::Float64, false),
+                    ],
+                    0,
+                    vec![],
+                ),
+            }))
+            .unwrap();
         let expression = CandidateExpression {
             operator: Operator::ASAP(ASAPOp::SummaryAgg {
-                child: MemoGroupId(0),
+                child: scan,
                 family: FieldDataType::Sketch(SketchAlgorithm::Kll, GroupingStrategy::default()),
                 input: SummaryUpdate::column(ColumnRef::SampleValue),
                 reduction: Reduction::PerEntity,
@@ -247,40 +263,30 @@ mod tests {
                 filter: None,
             }),
         };
-        let candidate = |window_layout| CandidateForMemoGroup {
-            logical_properties: LogicalProperties::new(
-                &expression,
-                Some(SketchParams::Kll {
-                    k: 269,
-                    failure_probability: None,
-                }),
-                window_layout,
-            )
-            .unwrap(),
-            expression: expression.clone(),
-            input_requirements: vec![],
-            fused_groups: vec![],
-            origin: OriginOfCandidateForMemoGroup::Pass1,
-        };
-        let values = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Values {
-            rows: vec![vec![ScalarExpr::Literal(ScalarValue::Float64(1.0))]],
-            schema: Schema::lifted(vec![Field::plain("value", DataType::Float64, false)], None),
-        }))
-        .unwrap();
-        Memo {
-            groups: vec![MemoGroup {
-                logical_node: Rc::clone(&values),
-                child_groups: vec![],
-                parents: vec![],
-                queries: vec![],
-                candidates: vec![
-                    candidate(None),
-                    candidate(Some(WindowLayout::Tumbling { width_ms: 5_000 })),
-                    candidate(Some(WindowLayout::Tumbling { width_ms: 10_000 })),
-                ],
-            }],
-            query_roots: vec![],
+        let states = memo.find_or_add_group(expression.operator.clone()).unwrap();
+        for window_layout in [
+            None,
+            Some(WindowLayout::Tumbling { width_ms: 5_000 }),
+            Some(WindowLayout::Tumbling { width_ms: 10_000 }),
+        ] {
+            let candidate = CandidateForMemoGroup {
+                logical_properties: LogicalProperties::new(
+                    &expression,
+                    Some(SketchParams::Kll {
+                        k: 269,
+                        failure_probability: None,
+                    }),
+                    window_layout,
+                )
+                .unwrap(),
+                expression: expression.clone(),
+                input_requirements: vec![LogicalRequirements::new(None)],
+                fused_groups: vec![],
+                origin: OriginOfCandidateForMemoGroup::Pass1,
+            };
+            memo.add_candidate(states, candidate).unwrap();
         }
+        memo
     }
 
     fn candidate(
