@@ -3,15 +3,16 @@
 //! [`run_stages_until`] for `asap_planner`.
 
 use asap_frontend_sql::SqlCatalog;
-use asap_logical_asap_optimization::{
-    memo_of_queries, pass1_memo, pass2_after_local_window_composition,
-    pass2_local_window_composition, Pass1Error,
-};
-use asap_physical_asap_optimization::generate_physical_asap_memo_candidates;
-use asap_plan_selection::select_plan;
 use asap_planner::{
     run_planning, PlanSearchSettings, PlanningModels, PlanningReport, PlanningRun, SelectionError,
 };
+use asap_stage0_memo::memo_of_queries;
+use asap_stage1_pass1_per_computation_candidates::{pass1_memo, Pass1Error};
+use asap_stage1_pass2_reuse_candidates::{
+    pass2_after_local_window_composition, pass2_local_window_composition,
+};
+use asap_stage2_physical_optimization::generate_physical_asap_memo_candidates;
+use asap_stage3_plan_selection::select_plan;
 use asap_types::ir::schema::series_identity::with_promql_series_identity;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::QueryRoot;

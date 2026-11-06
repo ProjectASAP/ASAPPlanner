@@ -21,7 +21,7 @@ use asap_types::workload::WorkloadError;
 use crate::run::{SelectionError, Stage1ToStage3Pass};
 use asap_accuracy::{AccuracyEvidence, NoMeasuredGuarantees};
 use asap_cost::CostInputs;
-use asap_logical_asap_optimization::PerComputationCandidateError;
+use asap_stage1_pass1_per_computation_candidates::PerComputationCandidateError;
 use asap_types::deployment_capabilities::DeploymentCapabilities;
 use asap_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPDAGValidationError};
 

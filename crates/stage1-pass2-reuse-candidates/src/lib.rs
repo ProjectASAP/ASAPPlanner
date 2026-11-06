@@ -1,15 +1,22 @@
-//! Stage 1, Pass 2: the rules over groups and the logical edges. Its entry,
-//! [`generate_logical_asap_memo_candidates`], extends the Pass 1 memo by the
-//! rules over groups and adds the logical edges
-//! ([`asap_types::stages::LogicalASAPMemoCandidates`]), which Stage 2 expands.
+//! `asap-stage1-pass2-reuse-candidates` — #509 Stage 1, Pass 2: the reuse
+//! rules over memo groups and the logical edges. Its entry,
+//! [`generate_logical_asap_memo_candidates`], extends Pass 1's memo into
+//! the [`LogicalASAPMemoCandidates`](asap_types::stages::LogicalASAPMemoCandidates)
+//! Stage 2 expands, e.g. `Quantile(x, 0.99)` and `Quantile(x, 0.95)` reading
+//! one built sketch.
+//!
+//! It depends only on `asap-types`, where its input and output are. It
+//! depends on no other stage crate, and the planner facade calls it after
+//! Pass 1.
 
 /// The rules over groups.
-pub(crate) mod memo;
+mod memo;
 
 use asap_accuracy::AccuracyEvidence;
 use asap_types::stages::{LogicalASAPMemoCandidates, Memo};
 use asap_types::workload::QueryWorkloadEntry;
-use memo::rules::{finer_aggregate, rollup, scan_labels, summary_inputs, topk, Pass2RuleError};
+pub use memo::rules::Pass2RuleError;
+use memo::rules::{finer_aggregate, rollup, scan_labels, summary_inputs, topk};
 use memo::window_candidates::add_local_window_composition;
 
 /// Stage 1, Pass 2: rule 1 ([`pass2_local_window_composition`]), then rules

@@ -1,5 +1,5 @@
 [package]
-name = "asap-physical-asap-optimization"
+name = "asap-stage2-physical-optimization"
 version = "0.1.0"
 edition = "2021"
 

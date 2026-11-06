@@ -3,15 +3,17 @@
 //! builds the selected plan. No stage calls another, and none has a
 //! deadline: each runs to completion.
 
-use asap_logical_asap_optimization::memo_of_queries;
+use asap_stage0_memo::memo_of_queries;
 
 use std::rc::Rc;
 use std::time::Instant;
 
-use asap_logical_asap_optimization::generate_logical_asap_memo_candidates;
-use asap_logical_asap_optimization::{pass1_memo, Pass1Error, PerComputationCandidateError};
-use asap_physical_asap_optimization::generate_physical_asap_memo_candidates;
-use asap_plan_selection::{select_plan, ErrorSelectingPlan, Selection};
+use asap_stage1_pass1_per_computation_candidates::{
+    pass1_memo, Pass1Error, PerComputationCandidateError,
+};
+use asap_stage1_pass2_reuse_candidates::generate_logical_asap_memo_candidates;
+use asap_stage2_physical_optimization::generate_physical_asap_memo_candidates;
+use asap_stage3_plan_selection::{select_plan, ErrorSelectingPlan, Selection};
 use asap_types::deployment_capabilities::DeploymentCapabilitiesError;
 use asap_types::ir::schema::series_identity::with_promql_series_identity;
 use asap_types::ir::QueryRoot;
