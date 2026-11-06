@@ -465,7 +465,7 @@ pub struct PhysicalCandidateKey {
 
 `PhysicalCandidateId` indexes an emitted candidate. `PhysicalCandidateKey` describes an alternative rejected before it received an ID, allowing diagnostics to explain pruning. The admissible-edge accessor returns edge IDs, not the unfiltered producer set from Section 1. `delivers_on` and `satisfies_physical` take candidates rather than bare properties because a tumbling grid's width lives in the logical window layout.
 
-Migration targets include replacing `Materialization` and duplicated physical fields with checked properties, and replacing `ReaderConstraint::{IncompatibleOutputs, AllowedOutputs}` with compatibility and schedule checks. Policy constraints involving the number of selected consuming queries are a separate concern; see Section 5.
+Migration targets include replacing `Materialization` and duplicated physical fields with checked properties, and replacing `ReaderConstraint::{IncompatibleOutputs, AllowedOutputs}` with compatibility and schedule checks. `ReaderConstraint::{MinimumQueryReaders, HighestSharedQueryMaterialization}` are deleted too; see Section 5.
 
 ### Stage 3: baseline selection and realization
 
@@ -725,23 +725,9 @@ $$
 
 The retention domain, upper bounds, activation linking, and all coefficient units must be specified by the implementation. If required retention depends on selected downstream queries, that dependence needs explicit linking constraints; it is not a fixed coefficient merely because it has a name.
 
-### Consumer-count policies (J)
+### No consumer-count policies
 
-Two policies from today's code (`ReaderConstraint` in `crates/types/src/stages/physical/graph.rs`) restrict which queries may reach a node. They need reach indicators $a_{q,v} \in \{0,1\}$: query $q$'s selected plan contains $v$.
-
-$$
-a_{q,v} \ge z_{q,v},\qquad
-a_{q,u} \ge a_{q,c} + y_{u,c,i} - 1,\qquad
-a_{q,u} \le z_{q,u} + \sum_{(u,c,i)\in\mathcal E} w_{q,u,c,i},\qquad
-w_{q,u,c,i} \le a_{q,c},\ w_{q,u,c,i} \le y_{u,c,i}.
-$$
-
-| Policy | Meaning | Constraint (J) |
-|---|---|---|
-| `MinimumQueryReaders { candidate, minimum }` | a selected candidate is worth keeping only when at least `minimum` queries reach it | $\sum_q a_{q,v} \ge \text{minimum}\cdot x_v$ |
-| `HighestSharedQueryMaterialization { candidate }` | a non-summary query materialization is placed where sharing stops: it is a query output, or one of its selected consumers is reached by at most one query | $\sum_q z_{q,v} + \sum_{(v,c,i)} s_{v,c,i} \ge x_v$, with $s_{v,c,i} \le y_{v,c,i}$ and $\sum_q a_{q,c} \le 1 + \lvert\mathcal Q\rvert\,(1 - s_{v,c,i})$ |
-
-`ReaderConstraint::{IncompatibleOutputs, AllowedOutputs}` are not kept: the schedule check of Section 2 replaces them.
+Today's `ReaderConstraint` (`crates/types/src/stages/physical/graph.rs`) is deleted with all four variants (decided 2026-11-06). `IncompatibleOutputs` and `AllowedOutputs` are replaced by the schedule check of Section 2. `MinimumQueryReaders` (keep a candidate only if enough queries reach it) and `HighestSharedQueryMaterialization` (materialize where sharing stops) are left to the cost model: materializing for one query, or below the point where sharing stops, costs more and is not chosen. There is no constraint (J).
 
 ### Out of this design
 
