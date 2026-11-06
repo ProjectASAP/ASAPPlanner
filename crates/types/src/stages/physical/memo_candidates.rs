@@ -1,5 +1,5 @@
 //! Stage 2's output: each logical candidate's physical alternatives
-//! $\mathcal C$, one per valid $p^{\mathrm{phys}} = (\tau, \ell, \sigma)$, and
+//! $\mathcal C$, one per valid $p^{\mathrm{phys}} = (\tau, \ell)$, and
 //! the physical edges $\mathcal E$ with $\alpha^{\log}$ and
 //! $\alpha^{\mathrm{phys}}$ (#1200, #1201). Stage 3 selects among them;
 //! Stage 2 prices nothing.
@@ -27,27 +27,27 @@ pub struct PhysicalCandidate {
 }
 
 impl PhysicalCandidate {
-    /// Whether this producer delivers on `times` (the concepts doc's
-    /// alignment table, section 2). Reads the grid width from the candidate's
-    /// logical window layout in `memo`.
+    /// Whether a consumer running on `times` can read this producer (the
+    /// concepts doc's alignment table, section 2): $w \mid I$ and
+    /// $w \mid \varphi$ for a windowed `AcrossEvaluations` producer, with $w$
+    /// read from its logical window layout in `memo`; true for $\ell$ = None,
+    /// and for `OneEvaluation` when the result belongs to that context.
     pub fn delivers_on(&self, memo: &Memo, times: &EvaluationSchedule) -> bool {
         let _ = (memo, times);
         todo!("#1207 PR 1: the alignment table of section 2")
     }
 }
 
-/// $\alpha^{\mathrm{phys}}_{u,c,i}$: timing and lifetime (the concepts doc's
-/// table, section 2), and, for a materialized consumer, that the producer
-/// delivers on the consumer's own schedule. Takes candidates rather than
-/// bare properties because a tumbling grid's width lives in the logical
-/// window layout.
+/// $\alpha^{\mathrm{phys}}_{u,c,i}$: timing and lifetime only (the concepts
+/// doc's table, section 2). Alignment is checked per context in Stage 3 with
+/// [`PhysicalCandidate::delivers_on`].
 pub fn satisfies_physical(
     memo: &Memo,
     producer: &PhysicalCandidate,
     consumer: &PhysicalCandidate,
 ) -> bool {
     let _ = (memo, producer, consumer);
-    todo!("#1207 PR 1: the timing x lifetime table and the alignment table of section 2")
+    todo!("#1207 PR 1: the timing x lifetime table of section 2")
 }
 
 /// $(u, c, i)$ over physical candidates.
