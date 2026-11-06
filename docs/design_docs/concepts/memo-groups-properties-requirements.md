@@ -258,18 +258,35 @@ pub struct CandidateForMemoGroupId {
 }
 
 impl Memo {
+    /// The group of `expression` (operator, arguments and input groups),
+    /// added if new. Fails when the expression breaks the node rules
+    /// (schema derivation, input validation, merge check).
     pub fn find_or_add_group(
         &mut self,
         expression: Operator<MemoGroupId>,
-    ) -> MemoGroupId;
+    ) -> Result<MemoGroupId, SchemaDerivationError>;
 
+    /// Adds `candidate` to `group`, or returns the id of the candidate there
+    /// with the same expression and logical properties. The candidate's
+    /// expression is checked by the same node rules as a group's, and its
+    /// output schema and kind must equal the group's; a rejected candidate
+    /// leaves the memo unchanged.
     pub fn add_candidate(
         &mut self,
         group: MemoGroupId,
         candidate: CandidateForMemoGroup,
-    ) -> CandidateForMemoGroupId;
+    ) -> Result<CandidateForMemoGroupId, CandidateError>;
 
     pub fn candidate(&self, id: CandidateForMemoGroupId) -> &CandidateForMemoGroup;
+}
+
+pub enum CandidateError {
+    /// The candidate's expression fails the node rules (schema derivation,
+    /// input validation, merge check).
+    Schema(SchemaDerivationError),
+    /// Its output schema or output kind differs from the group's: it does
+    /// not compute the group's result.
+    OutputDiffersFromGroup { group: MemoGroupId },
 }
 
 pub struct CandidateExpression {
