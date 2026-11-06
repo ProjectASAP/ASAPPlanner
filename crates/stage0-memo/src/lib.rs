@@ -5,8 +5,8 @@
 //! Stage 1 starts from these groups.
 //!
 //! It depends only on `asap-types`, where its output (`Memo`) lives; no
-//! other stage crate depends on it except in their tests, and the planner
-//! facade calls it first.
+//! other stage crate depends on it (the frontends' tests aside, listed in
+//! `crate_graph.rs`), and the planner facade calls it first.
 
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{QueryRoot, SchemaDerivationError};
