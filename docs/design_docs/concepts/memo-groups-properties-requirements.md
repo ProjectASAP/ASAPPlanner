@@ -1,8 +1,8 @@
 # Memo groups, properties and requirements
 
-This document explains how the optimizer represents alternatives, checks whether they can be composed, and selects an executable plan. It follows the supplied **Optimization Problem Formulation** for the baseline model and labels additional design work **Extension (#1207)**.
+This document explains how the optimizer represents alternatives, checks whether they can be composed, and selects an executable plan. It follows the optimization problem formulation (paper, "Optimization Problem Formulation") for the baseline model and labels additional design work **Extension (#1207)**.
 
-The Rust blocks are interface sketches, not standalone compilable implementations. Repository paths and issue references are retained from the supplied draft; their current implementation status has not been independently checked.
+The Rust blocks are interface sketches, not compilable code. Paths name today's code; issue numbers name the work that changes it.
 
 ## 1. Model and running example
 
@@ -10,7 +10,7 @@ A **workload** contains query expressions, their evaluation schedules, and their
 
 Input groups leave producer choices open. Selecting a candidate does not select its entire input plan. Each consumer input chooses a producer separately, and several inputs may choose the same producer.
 
-The expression includes the operator's arguments, including the summary family. In this design, KLL and DDSketch states belong to separate state groups. A final-result group can offer readout candidates that use either family. This resolves the old decision tree's contradiction: it must not put KLL and DDSketch builds in one state group.
+The expression includes the operator's arguments, including the summary family. In this design, KLL and DDSketch states belong to separate state groups. A final-result group can offer readout candidates that use either family. So the decision tree's first level (Section 2) chooses the expression, family included; a state group never mixes families.
 
 ### Running example
 
@@ -27,7 +27,7 @@ Query A requests the p95 latency over one minute. Query B requests p99 divided b
 
 G3, G4, and G5 choose a G2 producer independently. If all choose the same retained physical producer, they can reuse one computed state when their schedules and windows are compatible. An unmaterialized candidate may instead execute separately in different contexts; Section 5 explains that distinction.
 
-The old example assigned illustrative KLL rank errors of 0.008 and 0.005 and added them to obtain Query B's ratio error. That inference is invalid: rank error does not directly bound numerical quantile error or relative ratio error. The example here demonstrates representation and sharing only. Accepting Query B requires an applicable error model, including assumptions about its denominator.
+The example shows representation and sharing. Accuracy is checked by Section 4, whose metric rule matters here: KLL bounds **rank** error, and rank error does not bound a quantile's value error or the relative error of a ratio. Query B's relative ratio target therefore needs operands with a relative value-error guarantee, e.g. a DDSketch state group over G1 with `alpha` candidates, unless a declared distribution assumption converts rank error to value error. Query A, with a rank target, can use the KLL candidates directly.
 
 ### Notation used by the baseline model
 
@@ -58,7 +58,7 @@ p_v^{\mathrm{log}}=\boldsymbol\theta_v,\qquad
 p_v^{\mathrm{phys}}=(\tau_v,\ell_v).
 $$
 
-The supplied LaTeX uses the producer-set symbol in two different ways: the prose defines a filtered set, while its notation table defines an unfiltered set. This document follows the table and constraints (G)–(H), and gives the filtered set a separate name:
+The formulation's text defines the producer set after the requirement check, and its notation table before it. This document follows the table and constraints (G)–(H), and names the filtered set separately:
 
 $$
 P_{c,i}=G_{c,i}\cap\mathcal C,
@@ -128,7 +128,7 @@ For the proposed periodic consumer path, let the consumer interval and phase be 
 | Tumbling grid | $w\mid I$ and $\varphi\equiv\varphi_g\pmod w$ |
 | None | Runs in the consuming context; no independent delivery schedule |
 
-The supplied formulation also permits a single, non-periodic evaluation. The interval/phase interface below covers only periodic consumers. Rejecting non-periodic consumers is a current scope restriction of that proposed interface, not a mathematical impossibility; supporting them needs explicit evaluation-time membership checks.
+The formulation also permits a single, non-periodic evaluation. The interval/phase interface below covers only periodic consumers. Rejecting non-periodic consumers is a current scope restriction of that proposed interface, not a mathematical impossibility; supporting them needs explicit evaluation-time membership checks.
 
 ### Invalid combinations
 
@@ -141,28 +141,83 @@ Checked constructors reject these combinations under the proposed schedule model
 | Materialized lifetime without its required schedule | Delivery times or window grid would be unspecified |
 | OneEvaluation with a grid, or windowed AcrossEvaluations with a periodic schedule | Schedule kind does not match this model's lifetime representation |
 | Zero interval/width, or phase outside the canonical interval/width | Invalid schedule representation |
-| Ingestion-time grid with nonzero phase | Unsupported by the draft's epoch-anchored ingestion representation |
+| Ingestion-time grid with nonzero phase | Ingestion-time grids are anchored at the epoch: the plan carries no origin |
 
-A tumbling grid also needs a known positive width. The `PhysicalProperties` constructor alone cannot validate a width held in logical properties; physical candidate construction must validate the pair. Non-windowed AcrossEvaluations schedules need an explicit representation before that alternative can be offered.
+A tumbling grid's width is the candidate's logical window layout $\omega_v$; it is not repeated in the schedule. Building a `PhysicalCandidate` checks the pair: a grid schedule needs a tumbling layout, and its phase must be below the width. Non-windowed AcrossEvaluations schedules need their own representation before that alternative can be offered.
+
+### Decision tree and order of decisions
+
+A memo group's candidates are the leaves of a tree. The first level chooses the expression $e_v$ (operator and family); each later level decides one property dimension. A path from the root to a leaf is one physical candidate.
+
+```mermaid
+flowchart TD
+    G["Memo group G<br/>(logical result)"] --> R1["e_v: exact operator"]
+    G --> R2["e_v: readout of KLL state"]
+    G --> R3["e_v: readout of DDSketch state"]
+    G --> R4["e_v: other operators<br/>(prune: executor support)"]
+
+    R2 --> T1["θ: k = 200"]
+    R2 --> T2["θ: k = 345"]
+    R2 --> T3["θ: k = …<br/>(prune: pruning cap)"]
+
+    T2 --> W1["ω: no windows"]
+    T2 --> W2["ω: tumbling, width w<br/>(prune: w must divide<br/>the group's query range)"]
+
+    W2 --> P1["τ = QueryTime"]
+    W2 --> P2["τ = IngestionTime<br/>(prune: no ingestion pipeline)"]
+
+    P1 --> L1["ℓ = None"]
+    P1 --> L2["ℓ = OneEvaluation"]
+    P1 --> L3["ℓ = AcrossEvaluations<br/>(prune: deployment keeps<br/>no query-time results)"]
+    P2 --> L4["ℓ = None"]
+    P2 --> L5["ℓ = AcrossEvaluations"]
+    P2 -. invalid .-> L6["ℓ = OneEvaluation"]
+
+    L2 --> S1["σ: Periodic (I, φ)<br/>from the gcd closure<br/>of the queries' schedules"]
+    L3 --> S2["σ: grid phase φ mod w"]
+    L5 --> S3["σ: grid phase 0"]
+```
+
+| Level | Decides | Stage | Values offered | Pruned when |
+|---|---|---|---|---|
+| 1 | expression $e_v$ | Pass 1 and Pass 2 rules | each way to compute the group | the executor cannot build the family |
+| 2 | $\boldsymbol\theta_v$ | Pass 1 | the family's predefined list | the pruning cap (Section 4) |
+| 3 | $\omega_v$ — Extension | Pass 2 | tumbling widths from the gcd closure of the queries' ranges and steps | the width does not divide the group's query range |
+| 4 | $\tau_v$ | Stage 2 | QueryTime, IngestionTime | the source has no ingestion pipeline |
+| 5 | $\ell_v$ | Stage 2 | None, OneEvaluation, AcrossEvaluations | invalid with $\tau_v$; the deployment keeps no query-time results |
+| 6 | $\sigma_v$ — Extension | Stage 2 | the gcd closure of the schedules of the queries reaching the group | only when $\ell_v \ne$ None |
+
+The tree does not decide which producer each consumer input reads ($y$), where an unmaterialized candidate runs (its context, Section 5), or how much a materialized candidate retains ($h_v$). Those are Stage 3 choices.
+
+**The order does not change the candidate set.** The leaves are the product of the dimensions' values minus invalid combinations and pruned values. Each prune rule reads only the value it removes and values decided above it, so any order that keeps each prune rule below the dimensions it reads yields the same leaves.
+
+**The order changes how many nodes enumeration visits:** $\sum_d \prod_{d' \le d} \lvert \text{values kept at } d' \rvert$. Dimensions that prune much go early; dimensions that multiply without pruning go late. The order above follows four rules:
+
+1. **Logical before physical.** Stage 1 hash-conses groups and computes $\alpha^{\log}$ once, before Stage 2 multiplies each logical candidate by its physical alternatives.
+2. **Strong prunes early.** Executor support and the pruning cap act before windows and physical properties multiply the tree.
+3. **Dependent dimensions adjacent.** $\tau \to \ell \to \sigma$ rejects each invalid combination at the first level that can detect it.
+4. **Deployment-wide prunes as early as possible.** Without an ingestion pipeline the IngestionTime subtree is pruned once per candidate; moving $\tau$ above $\omega$ would prune it once per group, with the same leaves.
+
+Alternative orders worth measuring: $\tau$ first, when most sources lack an ingestion pipeline; $\omega$ before $\boldsymbol\theta$, when queries' ranges prune many widths; and requirement-driven (top-down) enumeration, which visits fewer nodes but must take the union of all consumers' requirements so that sharing is not lost.
 
 ## 3. Pipeline: interfaces and rules
 
 | Stage | Input | Output | Responsibility |
 |---|---|---|---|
-| Stage 0 | Query IR | `DagOfLogicalMemoGroups` | Hash-cons logical expressions |
+| Stage 0 | Query IR | `Memo` (groups without candidates) | Hash-cons logical expressions |
 | Stage 1, Pass 1 | Group DAG | `Memo` | Add initial logical candidates and intermediate groups |
 | Stage 1, Pass 2 | Memo | `LogicalASAPMemoCandidates` | Add reuse alternatives and compute logical edges |
 | Stage 2 | Logical memo candidates | `PhysicalASAPMemoCandidates` | Expand physical alternatives and compute compatibility |
 | Stage 3 | Physical memo candidates | `DagOfSelectedCandidates` | Select implementations, dependencies, and executions |
 | Realizer/export | Selected DAG | `PhysicalASAPDAG` | Build and export the executable graph |
 
-Enumeration proceeds through expression, parameters, window layout, timing, lifetime, and schedule. Executor and deployment restrictions prune unsupported alternatives as soon as their prerequisites are known. Accuracy pruning is allowed only under the conditions in Section 4. Reordering dimensions preserves the candidate set only when the same alternatives and sound pruning predicates are retained.
+Enumeration follows the decision tree in Section 2. Accuracy pruning uses only the caps of Section 4.
 
 Rules add groups through `find_or_add_group` and candidates through `add_candidate`. They match group expressions, avoid duplicating an existing expression/property pair, and do not copy consumers to make a new producer visible. After logical generation finishes, edge construction records the possible producer choices.
 
 ### Stage 0: groups
 
-`hash_consed` in `crates/logical-asap-optimization/src/stage0.rs` identifies shared logical expressions and query roots. The following preserves the existing group representation described in the draft. Candidate ownership is exposed through the group in the proposed Stage 1 interface.
+`hash_consed` in `crates/logical-asap-optimization/src/stage0.rs` identifies shared logical expressions and query roots. Stage 0 and Stage 1 share one type, `Memo`: Stage 0 returns it with every group's candidate list empty, and Stage 1 fills the lists.
 
 ```rust
 pub struct MemoGroupId(pub u32);
@@ -176,7 +231,7 @@ pub struct MemoGroup {
     pub candidates: Vec<CandidateForMemoGroup>,
 }
 
-pub struct DagOfLogicalMemoGroups {
+pub struct Memo {
     pub groups: Vec<MemoGroup>,
     pub query_roots: Vec<QueryRoot<MemoGroupId>>,
 }
@@ -184,7 +239,7 @@ pub struct DagOfLogicalMemoGroups {
 
 `OperatorNode` recursively contains chosen child nodes and therefore describes a fixed plan fragment. `Operator<MemoGroupId>` contains input group IDs and leaves their implementations open. A candidate needs its own expression because a group may offer several ways to compute the same result; it cannot reuse the group's representative `logical_node` as every candidate's expression.
 
-Replacing the group's representative node and child list with a single group-based expression, or removing the one-field `CandidateExpression` wrapper, remains an optional simplification from the review. Neither is required here.
+Two simplifications are possible but not adopted: storing the group as one `Operator<MemoGroupId>` instead of its node and child list, and removing the one-field `CandidateExpression` wrapper.
 
 ### Stage 1, Pass 1: initial candidates
 
@@ -201,11 +256,6 @@ Implementation locations: `crates/logical-asap-optimization/src/pass1/per_comput
 pub struct CandidateForMemoGroupId {
     pub group: MemoGroupId,
     pub index: usize,
-}
-
-pub struct Memo {
-    pub groups: Vec<MemoGroup>,
-    pub query_roots: Vec<QueryRoot<MemoGroupId>>,
 }
 
 impl Memo {
@@ -282,7 +332,7 @@ Migration targets: remove private `root_node` chains, duplicate `input_groups`, 
 
 ### Stage 1, Pass 2: reuse rules and logical edges
 
-The following preserves the supplied rule inventory and tracking references. Paths are relative to `crates/logical-asap-optimization/src/pass2/memo/`.
+Paths are relative to `crates/logical-asap-optimization/src/pass2/memo/`.
 
 | Rule / function | File | Result or migration target |
 |---|---|---|
@@ -297,7 +347,7 @@ The following preserves the supplied rule inventory and tracking references. Pat
 | Shared configurations: `add_state_configuration_candidates` | `rules/shared_configuration_readers.rs` | Remove copied consumers once producer variants are selectable; #1203 2b |
 | Shared state groups: `add_shared_summary_state_groups` | `state_groups.rs` | Remove per-size groups; #1203 2b / #1160 |
 
-After the rules, build logical edges and apply any proven-safe accuracy pruning. `input_index_of_consumer` replaces the ambiguous `input` field name throughout this document's edge interfaces.
+After the rules, Pass 2 builds the logical edges and applies the pruning caps of Section 4. Edges name the consumer input `input_index_of_consumer`.
 
 ```rust
 fn apply(memo: &mut Memo) -> Result<(), Pass2RuleError>;
@@ -361,12 +411,17 @@ pub struct EvaluationSchedule {
     interval_ms: u64,
     phase_ms: u64,
 }
-impl PhysicalProperties {
-    pub fn delivers_on(&self, times: &EvaluationSchedule) -> bool;
+impl PhysicalCandidate {
+    /// Whether this producer delivers on `times` (Section 2's alignment table).
+    /// Reads the grid width from the candidate's logical window layout.
+    pub fn delivers_on(&self, memo: &Memo, times: &EvaluationSchedule) -> bool;
 }
+/// α^phys: timing and lifetime (Section 2's table), and, for a materialized
+/// consumer, that the producer delivers on the consumer's own schedule.
 pub fn satisfies_physical(
-    producer: &PhysicalProperties,
-    consumer: &PhysicalProperties,
+    memo: &Memo,
+    producer: &PhysicalCandidate,
+    consumer: &PhysicalCandidate,
 ) -> bool;
 pub struct PhysicalCandidateId(pub usize);
 pub struct PhysicalEdgeId(pub usize);
@@ -408,15 +463,13 @@ pub struct PhysicalCandidateKey {
 }
 ```
 
-`PhysicalCandidateId` indexes an emitted candidate. `PhysicalCandidateKey` describes an alternative rejected before it received an ID, allowing diagnostics to explain pruning. The admissible-edge accessor returns edge IDs, not the unfiltered producer set from Section 1.
-
-The `delivers_on` sketch needs access to a tumbling producer's logical window width. Supply that context in its implementation or move the check to the full physical-candidate interface; the phase-only schedule is insufficient by itself.
+`PhysicalCandidateId` indexes an emitted candidate. `PhysicalCandidateKey` describes an alternative rejected before it received an ID, allowing diagnostics to explain pruning. The admissible-edge accessor returns edge IDs, not the unfiltered producer set from Section 1. `delivers_on` and `satisfies_physical` take candidates rather than bare properties because a tumbling grid's width lives in the logical window layout.
 
 Migration targets include replacing `Materialization` and duplicated physical fields with checked properties, and replacing `ReaderConstraint::{IncompatibleOutputs, AllowedOutputs}` with compatibility and schedule checks. Policy constraints involving the number of selected consuming queries are a separate concern; see Section 5.
 
 ### Stage 3: baseline selection and realization
 
-The baseline uses the variables and constraints in the supplied LaTeX. Stage 3 adds no candidates or potential dependencies.
+The baseline uses the formulation's variables and constraints. Stage 3 adds no candidates or potential dependencies.
 
 | Variable | Meaning |
 |---|---|
@@ -480,7 +533,7 @@ The realizer uses the selected dependencies to build the executable graph. Expor
 
 ## 4. Accuracy and safe pruning — Extension (#1207)
 
-The supplied LaTeX checks logical requirements per edge. The proposed extension additionally checks composed accuracy at each query root. This section describes the error model needed for that check; it is not an additional property dimension.
+The formulation checks logical requirements per edge. This extension also checks composed accuracy at each query root. This section gives the error model and its MILP encoding; error is not a property dimension.
 
 ### Local propagation
 
@@ -504,7 +557,9 @@ $$
 | Sum over a known number of values | Sum of their bounds; a common per-value bound can be multiplied by that count |
 | Ratio, relative error | Requires nonzero true denominator and denominator relative error below one; bound given below |
 
-A filter does not automatically preserve every accuracy guarantee. Group counts and metric conversions may need metadata or assumptions beyond the expression syntax. Propagation factors must be justified by the relevant operator/error contract.
+A filter does not automatically preserve every accuracy guarantee. Group counts may need metadata beyond the expression syntax. Each factor must follow from the operator's error contract.
+
+**Metric rule.** Every local guarantee states its metric: absolute (in value units, or a multiple of a stream norm), relative, or rank. A factor $\beta_{c,i}$ is defined for one input metric and one output metric. An input whose metric the consumer's error contract cannot convert gives no edge ($\alpha^{\log} = 0$); the conversion is never assumed. For example, a relative-error ratio cannot read a KLL quantile (rank error) unless a declared distribution assumption supplies the conversion.
 
 For a ratio, let the operand relative-error bounds be $\varepsilon_X$ and $\varepsilon_Y$. If the numerator's relative error is defined and the denominator is nonzero, then:
 
@@ -523,12 +578,15 @@ $$
 
 Both local factors are then `1 / (1 - b)`. This is a sufficient bound, not an exact equality or a claim that all feasible nonlinear plans remain represented.
 
-The draft's approved interface is retained here as an interface proposal:
+Interface (approved 2026-11-05):
 
 ```rust
 pub struct ErrorPropagation {
+    /// β_{c,i} per input, for that input's metric.
     pub factor_per_input: Vec<f64>,
-    pub validity_cap: Option<f64>,
+    /// b_{c,i} per input: the cap under which the linear bound holds; None
+    /// when the bound holds everywhere (e.g. a ratio caps only its denominator).
+    pub validity_cap_per_input: Vec<Option<f64>>,
 }
 
 impl LogicalRequirement {
@@ -538,7 +596,7 @@ impl LogicalRequirement {
 }
 ```
 
-`factor_per_input` contains the local beta factors. A scalar `validity_cap` can represent a conservative common cap. Operator-specific caps, such as a bound only on a ratio's denominator, need either a documented input mapping or a per-input representation before implementation. Unsupported error models must be reported as unsupported rather than supplied with guessed factors.
+`factor_per_input` holds the local β factors and `validity_cap_per_input` the per-input caps, aligned by input index. An operator without an error contract is reported as unsupported; no factor is guessed.
 
 ### Query composition and root checks
 
@@ -554,9 +612,33 @@ $$
 
 Here, $\varepsilon_q$ and $\delta_q$ are the query target's error and failure limits. Repeated paths can amplify error and therefore contribute to lambda. A shared failure event is counted once in the union bound; distinct readout events need distinct source identities unless a joint guarantee is available.
 
-These equations describe the required bound. They are a linear MILP encoding only when the factors and source identities are fixed for the indexed alternatives and the reachability indicators are correctly linked to selected edges and outputs. Candidate-dependent paths, metric changes, or execution-dependent random events require a more detailed encoding. The draft does not supply that encoding, so the equations must not be described as a completed constraint implementation.
+**MILP encoding.** Path factors $\lambda_{q,s}$ depend on which edges are selected, so the MILP does not use them directly. It carries an error bound per selected candidate instead, which needs no path enumeration and is the same for every query reading that candidate:
 
-This replaces the old unexplained `a_{q,u}` and the mixture of candidate-, edge-, and query-indexed lambda symbols. Local propagation uses beta; query propagation uses lambda; neither should be inferred from bare edge selection alone.
+$$
+E_c \ge \varepsilon^{\mathrm{loc}}_c + \sum_{i} \beta_{c,i} F_{c,i},
+\qquad
+F_{c,i} \ge E_u - M_{c,i}\,(1 - y_{u,c,i}) \quad \forall (u,c,i)\in\mathcal E,
+$$
+
+$$
+D_c \ge \delta^{\mathrm{loc}}_c + \sum_{i} H_{c,i},
+\qquad
+H_{c,i} \ge D_u - (1 - y_{u,c,i}) \quad \forall (u,c,i)\in\mathcal E,
+$$
+
+$$
+E_v \le \varepsilon_q + M_q\,(1 - z_{q,v}),
+\qquad
+D_v \le \delta_q + (1 - z_{q,v})
+\qquad \forall q,\ v\in G_q. \tag{K}
+$$
+
+- $E_c, F_{c,i}, D_c, H_{c,i} \ge 0$ are continuous. $\varepsilon^{\mathrm{loc}}_c$ and $\delta^{\mathrm{loc}}_c$ are the candidate's own guarantee (zero for an exact operator); $\beta_{c,i}$ and the metric rule come from `error_propagation`.
+- $M_{c,i}$ is any upper bound on $E_u$ over the producers of input $i$ (their largest feasible bound); $M_q$ likewise for the root. Exactly one $y_{u,c,i} = 1$ per selected input (constraint (A)), so $F_{c,i}$ equals the chosen producer's error bound.
+- A producer reached by two paths contributes on both, which is the worst-case sum. The failure probabilities add by a union bound; a failure event reached twice is counted twice, which is conservative.
+- Under the context extension (Section 5), the variables are indexed by context, $E_{\kappa,c}$, and the edges by $y_{\kappa,u,c,i}$.
+
+$\lambda_{q,c,i}$ is still used, but only for the pruning caps below, where a fixed lower bound suffices.
 
 ### Validity caps and pruning caps
 
@@ -576,7 +658,7 @@ Compute the parameter floor from this cap only under the ordering condition in S
 
 ## 5. Execution contexts and other selection extensions — #1207
 
-These extensions go beyond constraints (A)–(I) and the fixed-cost assumption in the supplied LaTeX. They are separated here so that the baseline remains understandable without an unfinished context MILP.
+These extensions go beyond constraints (A)–(I) and the formulation's fixed-cost assumption. They are separated here so that the baseline reads on its own.
 
 ### Execution identity
 
@@ -643,19 +725,27 @@ $$
 
 The retention domain, upper bounds, activation linking, and all coefficient units must be specified by the implementation. If required retention depends on selected downstream queries, that dependence needs explicit linking constraints; it is not a fixed coefficient merely because it has a name.
 
-### Extension status and legacy policy names
+### Consumer-count policies (J)
 
-| Earlier label | Meaning and status |
-|---|---|
-| (J) | Placeholder for consumer/reachability policies; absent from the supplied LaTeX and not defined by this document |
-| `MinimumQueryReaders` | Legacy policy name suggesting a minimum number of distinct consuming queries. Its threshold, counting scope, and activation rule are unspecified in the supplied material; no constraint is asserted here. |
-| `HighestSharedQueryMaterialization` | Legacy policy name with no supplied mathematical definition; retained as a migration question, not a defined constraint |
-| (K) | Proposed root-accuracy check; Section 4 states the semantic bound and encoding conditions |
-| (R) | Proposed retention constraints; lower-bound pattern above |
-| (L) | Proposed per-query latency bounds; requires an execution/critical-path model |
-| Resource budgets | Proposed memory and CPU limits; requires explicit accounting units and aggregation rules |
+Two policies from today's code (`ReaderConstraint` in `crates/types/src/stages/physical/graph.rs`) restrict which queries may reach a node. They need reach indicators $a_{q,v} \in \{0,1\}$: query $q$'s selected plan contains $v$.
 
-These labels must not be presented as an implemented sequence of constraints (A)–(K). The review text contains no definitions that would justify filling the gaps by assumption.
+$$
+a_{q,v} \ge z_{q,v},\qquad
+a_{q,u} \ge a_{q,c} + y_{u,c,i} - 1,\qquad
+a_{q,u} \le z_{q,u} + \sum_{(u,c,i)\in\mathcal E} w_{q,u,c,i},\qquad
+w_{q,u,c,i} \le a_{q,c},\ w_{q,u,c,i} \le y_{u,c,i}.
+$$
+
+| Policy | Meaning | Constraint (J) |
+|---|---|---|
+| `MinimumQueryReaders { candidate, minimum }` | a selected candidate is worth keeping only when at least `minimum` queries reach it | $\sum_q a_{q,v} \ge \text{minimum}\cdot x_v$ |
+| `HighestSharedQueryMaterialization { candidate }` | a non-summary query materialization is placed where sharing stops: it is a query output, or one of its selected consumers is reached by at most one query | $\sum_q z_{q,v} + \sum_{(v,c,i)} s_{v,c,i} \ge x_v$, with $s_{v,c,i} \le y_{v,c,i}$ and $\sum_q a_{q,c} \le 1 + \lvert\mathcal Q\rvert\,(1 - s_{v,c,i})$ |
+
+`ReaderConstraint::{IncompatibleOutputs, AllowedOutputs}` are not kept: the schedule check of Section 2 replaces them.
+
+### Out of this design
+
+Latency bounds (L) and resource budgets need an execution and critical-path model, and accounting units, that this document does not define. They are left to a later design; no interface for them is part of this one.
 
 ## Appendix A. Enumerating DAGs for debugging
 
@@ -663,7 +753,7 @@ This is an inspection tool for small memos, not a planning stage. The MILP selec
 
 A logical DAG has one selected root candidate, one compatible producer per input of every reached candidate, no unused nodes, and no cycles. Producer choices are per consumer input, not per group. Two consumers can choose different candidates of the same group; choosing the same candidate shares one logical node.
 
-The following Rust-style pseudocode preserves the draft's enumeration procedure. Helpers such as `cartesian_product` are schematic; `reaches` follows the stored consumer-to-producer dependency direction and is reflexive. This direction makes the cycle test precise.
+Rust-style pseudocode follows. Helpers such as `cartesian_product` are schematic; `reaches` follows the stored consumer-to-producer dependency direction and is reflexive. This direction makes the cycle test precise.
 
 ```rust
 /// One logical DAG: its nodes and, for each node's inputs, the chosen producer.
