@@ -35,6 +35,9 @@ serde_json = "1"
 thiserror = "2"
 
 [dev-dependencies]
+# The tests read `SelectionBox::new`, `RawDataRetention::lookback_ms`, … and
+# build `PhysicalASAPDAG`s directly (`asap_types::test_support`).
+asap-types = { path = "../types", features = ["test-support"] }
 asap-stage3-plan-selection = { path = "../stage3-plan-selection" }
 asap-stage2-physical-optimization = { path = "../stage2-physical-optimization" }
 # The deployment accuracy model tests implement `AccuracyModel`.
