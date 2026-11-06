@@ -9,6 +9,9 @@
 //!   [`ir::properties`] (§2.2–2.3 accuracy, guarantee, execution timing and
 //!   summary coverage), the flat DAG
 //!   form ([`ir::flat`]) and the physical ASAP DAG ([`ir::physical_export`]).
+//! - [`deployment_capabilities`] — what the deployment's executor can run and
+//!   keep ([`deployment_capabilities::DeploymentCapabilities`]), the deployment
+//!   input Stages 1–3 read.
 //! - [`workload`] — the planner inputs (#509): the query and data
 //!   workloads and the parsed workload the query-language frontends produce
 //!   ([`workload::parsed_workload`]).
@@ -20,6 +23,7 @@
 //!   physical candidates ([`stages::PhysicalASAPMemoCandidates`]).
 //!
 //! No execution logic lives in this crate (issue #190).
+pub mod deployment_capabilities;
 pub mod ir;
 pub mod physical;
 pub mod serde_f64;

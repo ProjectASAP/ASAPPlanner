@@ -12,7 +12,7 @@ use asap_executor::{
     values::{Batch, Value},
 };
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_logical_asap_optimization::test_support::{
+use asap_stage1_pass1_per_computation_candidates::test_support::{
     compose_logical_candidate, generate_per_computation_candidates,
 };
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
@@ -97,10 +97,9 @@ fn output_columns(root: &QueryRoot) -> Vec<(String, String, bool)> {
 /// Compose every candidate of `root`; returns how many there were.
 fn compose_all(label: &str, root: QueryRoot) -> usize {
     let expected = output_columns(&root);
-    let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::memo_of_queries(&[root]).unwrap(),
-    )
-    .unwrap();
+    let inventory =
+        generate_per_computation_candidates(&asap_stage0_memo::memo_of_queries(&[root]).unwrap())
+            .unwrap();
     let radix: Vec<_> = inventory
         .targets
         .iter()
@@ -176,10 +175,9 @@ fn promql_candidates_compose() {
 /// The summary estimates of `root`'s candidates that vary one target's
 /// choice, every other target taking its first.
 fn composed_estimates(root: QueryRoot) -> Vec<Rc<OperatorNode>> {
-    let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::memo_of_queries(&[root]).unwrap(),
-    )
-    .unwrap();
+    let inventory =
+        generate_per_computation_candidates(&asap_stage0_memo::memo_of_queries(&[root]).unwrap())
+            .unwrap();
     let targets = inventory.targets.len();
     let choices: Vec<_> = inventory
         .targets
@@ -267,7 +265,7 @@ async fn subquery_in_a_measure_filter_is_substituted() {
     let query = "SELECT src, count(*) FILTER (WHERE bytes > (SELECT approx_percentile_cont(bytes, 0.5) FROM flows)) \
                  FROM flows GROUP BY src";
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::memo_of_queries(&[sql(query).await]).unwrap(),
+        &asap_stage0_memo::memo_of_queries(&[sql(query).await]).unwrap(),
     )
     .unwrap();
     assert_eq!(inventory.targets.len(), 2);
@@ -401,8 +399,7 @@ async fn avg_as_sum_and_count(
 ) -> (Rc<OperatorNode>, Rc<OperatorNode>) {
     let exact = lower_sql(query, catalog, accuracy()).await.unwrap();
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::memo_of_queries(&[QueryRoot::Operator(exact.clone())])
-            .unwrap(),
+        &asap_stage0_memo::memo_of_queries(&[QueryRoot::Operator(exact.clone())]).unwrap(),
     )
     .unwrap();
     let choice: Vec<_> = inventory
@@ -536,7 +533,7 @@ async fn filtered_sql_avg_is_null_without_matching_rows() {
 #[test]
 fn promql_avg_divides_sum_and_count_vectors() {
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::memo_of_queries(&[promql("avg by (job) (m)")]).unwrap(),
+        &asap_stage0_memo::memo_of_queries(&[promql("avg by (job) (m)")]).unwrap(),
     )
     .unwrap();
     assert_eq!(
@@ -574,11 +571,14 @@ async fn every_candidate(
     query: &str,
 ) -> Vec<(
     HowToComputeAggregateMeasure,
-    Result<Vec<QueryRoot>, asap_logical_asap_optimization::PerComputationCandidateError>,
+    Result<
+        Vec<QueryRoot>,
+        asap_stage1_pass1_per_computation_candidates::PerComputationCandidateError,
+    >,
 )> {
     let root = lower_sql(query, catalog, accuracy()).await.unwrap();
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
+        &asap_stage0_memo::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
     )
     .unwrap();
     assert_eq!(inventory.targets.len(), 1, "{query}");
@@ -699,7 +699,7 @@ async fn sql_count_star_without_a_non_null_column_is_unsupported() {
             every_candidate(&catalog, "SELECT k, count(*) FROM t GROUP BY k").await
         {
             match composed {
-                Err(asap_logical_asap_optimization::PerComputationCandidateError::Unsupported(
+                Err(asap_stage1_pass1_per_computation_candidates::PerComputationCandidateError::Unsupported(
                     _,
                 )) => {}
                 other => panic!("{columns:?} {candidate:?}: {other:?}"),

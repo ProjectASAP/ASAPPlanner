@@ -390,7 +390,7 @@ mod tests {
     use super::*;
     use crate::planner_layering_examples::example1;
     use crate::planning_stages::lower_promql_roots;
-    use asap_logical_asap_optimization::test_support::{
+    use asap_stage1_pass1_per_computation_candidates::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
 
@@ -399,10 +399,7 @@ mod tests {
     fn connected_labels_describe_selected_states() {
         let workload = example1();
         let inventory = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::memo_of_queries(
-                &lower_promql_roots(&workload).unwrap(),
-            )
-            .unwrap(),
+            &asap_stage0_memo::memo_of_queries(&lower_promql_roots(&workload).unwrap()).unwrap(),
         )
         .unwrap();
         let choice = vec![0; inventory.targets.len()];
@@ -417,10 +414,7 @@ mod tests {
     fn connected_labels_name_actual_shared_state() {
         let workload = example1();
         let inventory = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::memo_of_queries(
-                &lower_promql_roots(&workload).unwrap(),
-            )
-            .unwrap(),
+            &asap_stage0_memo::memo_of_queries(&lower_promql_roots(&workload).unwrap()).unwrap(),
         )
         .unwrap();
         let roots =

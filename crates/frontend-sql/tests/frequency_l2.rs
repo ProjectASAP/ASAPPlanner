@@ -124,14 +124,14 @@ async fn frequency_empty_input_guard_uses_an_exact_count() {
 /// recognized L2 intent.
 #[tokio::test]
 async fn stage1_offers_exact_and_summary_l2_candidates() {
-    use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
+    use asap_stage1_pass1_per_computation_candidates::test_support::generate_per_computation_candidates;
     use asap_types::ir::QueryRoot;
     let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
     let root = lower_sql(CAST_COUNT, &catalog(false), target)
         .await
         .unwrap();
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
+        &asap_stage0_memo::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
     )
     .unwrap();
     let l2 = inventory

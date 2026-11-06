@@ -24,4 +24,5 @@ asap-types = { path = "../types", features = ["test-support"] }
 asap-frontend-metricsql = { path = ".", features = ["test-support"] }
 asap-frontend-promql = { path = "../frontend-promql" }
 # `support.rs` (shared with frontend-promql's tests) binds through Pass 1.
-asap-logical-asap-optimization = { path = "../logical-asap-optimization", features = ["test-support"] }
+asap-stage0-memo = { path = "../stage0-memo" }
+asap-stage1-pass1-per-computation-candidates = { path = "../stage1-pass1-per-computation-candidates", features = ["test-support"] }

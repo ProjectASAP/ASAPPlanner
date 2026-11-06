@@ -108,9 +108,9 @@ use asap_devtools::planning_stages::{
 use asap_devtools::planning_stages_text::planning_stages_text;
 use asap_devtools::SqlCatalog;
 use asap_frontend_promql::{metric_type_warnings, promql_metric_names};
-use asap_logical_asap_optimization::DeploymentCapabilities;
-use asap_plan_selection::{large_peak_memory_warning, AcceptedAccuracy, Selection};
 use asap_planner::{installable_plan_of, PlanningModels, SelectionError};
+use asap_stage3_plan_selection::{large_peak_memory_warning, AcceptedAccuracy, Selection};
+use asap_types::deployment_capabilities::DeploymentCapabilities;
 use asap_types::ir::flat::{flatten, FlatDag, FlatNode};
 use asap_types::ir::properties::{default_metric_for_root, AccuracyTarget};
 use asap_types::ir::QueryRoot;

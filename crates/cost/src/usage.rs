@@ -1,6 +1,6 @@
 //! Costing a physical plan DAG node by node: each node's resource usage
 //! ([`node_usage`]), then the plan's usage, latency, retention, retained tumbling window
-//! chains and cost ([`plan_cost`]). Moved from Stage 3 (`asap-plan-selection`,
+//! chains and cost ([`plan_cost`]). Moved from Stage 3 (`asap-stage3-plan-selection`,
 //! whose module doc, "Cost model", describes the model), so Stage 3 computes
 //! no cost of its own.
 

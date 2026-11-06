@@ -233,14 +233,16 @@ pass no longer runs these steps; another pass need not run any of them.
 | Crate | What it holds |
 |---|---|
 | `asap-types` | `ParsedWorkload` |
-| `asap-plan-selection` | Stage 3: `select_plan`, `Selection`, `SearchReport`, `AccuracyCheckInputs` |
+| `asap-stage3-plan-selection` | Stage 3: `select_plan`, `Selection`, `SearchReport`, `AccuracyCheckInputs` |
 | `asap-planner` *(new)* | `e2e_plan`, `UserInput`, `FrontendInput`, lowering dispatch; `OptimizationPass`, `OptimizationInput`, `PlanOutput`, `PlanningModels`, `optimize`, `PassRegistry`, `Stage1ToStage3Pass`, `run_planning` |
 
 ```text
 asap-planner ──┬──> asap-frontend-{sql, promql, metricsql}
-               ├──> asap-logical-asap-optimization ──> asap-types
-               ├──> asap-physical-asap-optimization ──> asap-types
-               └──> asap-plan-selection ──> asap-types, asap-cost, asap-accuracy
+               ├──> asap-stage0-memo ──> asap-types
+               ├──> asap-stage1-pass1-per-computation-candidates ──> asap-types, asap-accuracy
+               ├──> asap-stage1-pass2-reuse-candidates ──> asap-types
+               ├──> asap-stage2-physical-optimization ──> asap-types
+               └──> asap-stage3-plan-selection ──> asap-types, asap-cost, asap-accuracy
 ```
 
 `asap-planner` is separate because it is the only crate depending on every

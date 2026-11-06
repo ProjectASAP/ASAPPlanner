@@ -1,0 +1,10 @@
+[package]
+name = "asap-stage0-memo"
+version = "0.1.0"
+edition = "2021"
+
+# #509 Stage 0: hash-consing the workload's logical DAGs into the memo groups
+# (`asap_types::stages::Memo`, without candidates) that Stage 1 fills. Depends
+# only on asap-types; no other stage crate depends on it except in their tests.
+[dependencies]
+asap-types = { path = "../types" }

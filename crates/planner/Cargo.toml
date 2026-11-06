@@ -8,21 +8,24 @@ edition = "2021"
 # returns the selected DAG. It is the only crate that depends on every
 # frontend — before it, the sole facade re-exporting more than one was `asap-devtools`,
 # a developer-tools crate. Everything below the frontend boundary lives in the
-# stage crates (`asap-logical-asap-optimization`, `asap-physical-asap-optimization`,
-# `asap-plan-selection`), so a third party writing an optimization pass (issue
-# #430) depends on `asap-plan-selection` (plus `asap-accuracy` to supply its own
+# stage crates (`asap-stage0-memo`, `asap-stage1-pass1-per-computation-candidates`,
+# `asap-stage1-pass2-reuse-candidates`, `asap-stage2-physical-optimization`,
+# `asap-stage3-plan-selection`), so a third party writing an optimization pass (issue
+# #430) depends on `asap-stage3-plan-selection` (plus `asap-accuracy` to supply its own
 # accuracy model or evidence) and never pulls in DataFusion.
 [dependencies]
 asap-types = { path = "../types" }
 asap-cost = { path = "../cost" }
-asap-plan-selection = { path = "../plan-selection" }
+asap-stage3-plan-selection = { path = "../stage3-plan-selection" }
 asap-frontend-sql = { path = "../frontend-sql" }
 asap-frontend-promql = { path = "../frontend-promql" }
 asap-frontend-metricsql = { path = "../frontend-metricsql" }
-asap-logical-asap-optimization = { path = "../logical-asap-optimization" }
+asap-stage0-memo = { path = "../stage0-memo" }
+asap-stage1-pass1-per-computation-candidates = { path = "../stage1-pass1-per-computation-candidates" }
+asap-stage1-pass2-reuse-candidates = { path = "../stage1-pass2-reuse-candidates" }
 # The facade runs every stage: Stage 2's catalog and realizer, Stage 3's
 # `select_plan`, with the deployment's accuracy model.
-asap-physical-asap-optimization = { path = "../physical-asap-optimization" }
+asap-stage2-physical-optimization = { path = "../stage2-physical-optimization" }
 asap-accuracy = { path = "../accuracy" }
 # The Planner's own executor: `plan_installable` offers only the summary
 # families it runs when the caller leaves them unrestricted.
@@ -32,10 +35,8 @@ serde_json = "1"
 thiserror = "2"
 
 [dev-dependencies]
-asap-plan-selection = { path = "../plan-selection" }
-asap-physical-asap-optimization = { path = "../physical-asap-optimization" }
-# Pass 1's target list (`per_computation_candidates`) for the tests.
-asap-logical-asap-optimization = { path = "../logical-asap-optimization", features = ["test-support"] }
+asap-stage3-plan-selection = { path = "../stage3-plan-selection" }
+asap-stage2-physical-optimization = { path = "../stage2-physical-optimization" }
 # The deployment accuracy model tests implement `AccuracyModel`.
 asap-accuracy = { path = "../accuracy", features = ["test-support"] }
 # The SQL frontend plans through DataFusion, which is async; `e2e_plan` is

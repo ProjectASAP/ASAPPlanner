@@ -5,8 +5,8 @@ the stage code relies on: what each stage's input and output may contain,
 and which component owns each decision. Read the
 [architecture](asap-aware-mapping-architecture.md) first; use the
 [extension guide](extend-asap-aware-mapping.md) when changing one. Field-level
-details are in the rustdoc (`cargo doc -p asap-logical-asap-optimization -p
-asap-physical-asap-optimization -p asap-plan-selection -p asap-types
+details are in the rustdoc (`cargo doc -p asap-stage0-memo -p asap-stage1-pass1-per-computation-candidates -p
+asap-stage1-pass2-reuse-candidates -p asap-stage2-physical-optimization -p asap-stage3-plan-selection -p asap-types
 --no-deps`).
 
 ## 1. IR at each stage
@@ -18,7 +18,7 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
 | Stage 2 (`generate_physical_asap_memo_candidates`; a selected plan built by `Stage2AssignmentRealizer`) | the same operators, with a timing and a `Lifetime` on each summary build | every node timed from the candidate's `PhysicalPropertiesAssignment` |
 
 - Structurally equal sub-DAGs are interned before Stage 1
-  (`stage0/cse.rs` in `asap_logical_asap_optimization`), so Stage 1 compares nodes by structure and Pass 2
+  (`cse.rs` in `asap_stage0_memo`), so Stage 1 compares nodes by structure and Pass 2
   matches readers structurally, never by pointer.
 - Timing is applied with `apply_physical_properties`, which validates
   every data-state edge. A violation is an `ExecutionDataStateError`:

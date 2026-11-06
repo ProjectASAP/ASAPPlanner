@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use asap_cost::CostInputs;
 use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
-use asap_logical_asap_optimization::DeploymentCapabilities;
+use asap_types::deployment_capabilities::DeploymentCapabilities;
 use asap_types::ir::flat::{flatten, FlatDag, NodeId};
 use asap_types::ir::physical_export::PhysicalASAPDAG;
 use asap_types::ir::properties::ExecutionTiming;
