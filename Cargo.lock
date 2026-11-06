@@ -360,9 +360,6 @@ version = "0.1.0"
 dependencies = [
  "asap-frontend-common",
  "asap-frontend-metricsql",
- "asap-frontend-promql",
- "asap-stage0-memo",
- "asap-stage1-pass1-per-computation-candidates",
  "asap-types",
  "metricsql_parser",
  "thiserror 2.0.18",
@@ -375,8 +372,6 @@ dependencies = [
  "asap-accuracy",
  "asap-frontend-common",
  "asap-planner",
- "asap-stage0-memo",
- "asap-stage1-pass1-per-computation-candidates",
  "asap-types",
  "promql-parser",
 ]
@@ -389,8 +384,6 @@ dependencies = [
  "asap-frontend-sql",
  "asap-planner",
  "asap-sql-function-catalog",
- "asap-stage0-memo",
- "asap-stage1-pass1-per-computation-candidates",
  "asap-types",
  "datafusion",
  "serde",
@@ -461,7 +454,6 @@ name = "asap-stage1-pass1-per-computation-candidates"
 version = "0.1.0"
 dependencies = [
  "asap-accuracy",
- "asap-frontend-promql",
  "asap-types",
  "thiserror 2.0.18",
 ]
