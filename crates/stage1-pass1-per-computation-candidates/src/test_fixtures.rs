@@ -2,8 +2,6 @@
 //! groups through `Memo::find_or_add_group` and `Memo::add_query`, as
 //! Stage 0 does, so no test calls another stage crate.
 
-use std::rc::Rc;
-
 use asap_types::ir::operator::operator_properties::{Reduction, Source};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::schema_support::with_promql_series_identity;
@@ -23,11 +21,6 @@ pub fn metric_schema(labels: &[&str], unique_keys: Vec<Vec<ColumnId>>) -> Schema
             .map(|n| Field::plain(*n, DataType::Utf8, true)),
     );
     Schema::with_time_index(columns, 0, unique_keys)
-}
-
-/// A `TimeSeries("m")` scan node over [`metric_schema`], no unique key.
-pub fn metric_scan(labels: &[&str]) -> Rc<OperatorNode> {
-    OperatorNode::new_shared(scan_operator("m", metric_schema(labels, vec![]))).unwrap()
 }
 
 /// A predicate-free `TimeSeries(metric)` scan with `schema`.

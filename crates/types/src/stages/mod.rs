@@ -22,9 +22,8 @@ pub use candidates::{
     LogicalPropertiesError, LogicalRequirements, Memo, OriginOfCandidateForMemoGroup, WindowLayout,
 };
 pub use logical_memo_candidates::{LogicalASAPMemoCandidates, LogicalEdge};
-pub use memo::{
-    queries_rooted_at, root_groups, GroupProperties, MemoGroup, MemoGroupAsInput, MemoGroupId,
-};
+pub(crate) use memo::MemoGroupAsInput;
+pub use memo::{queries_rooted_at, root_groups, GroupProperties, MemoGroup, MemoGroupId};
 pub use per_computation_logical_memo_candidates::{
     ComputationTarget, FusedComputation, HavingEntry, HavingPlacement, HowToComputeAggregateMeasure,
 };

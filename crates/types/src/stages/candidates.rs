@@ -196,15 +196,6 @@ impl Memo {
         }
     }
 
-    /// Group `group_id` read as an operator's input: the node rules and the
-    /// rules that read an input's operator take it as they take a node.
-    pub fn group_as_input(&self, group_id: MemoGroupId) -> MemoGroupAsInput<'_> {
-        MemoGroupAsInput {
-            memo: self,
-            group_id,
-        }
-    }
-
     /// The candidate `id`.
     pub fn candidate(&self, id: CandidateForMemoGroupId) -> &CandidateForMemoGroup {
         &self.groups[id.group.0 as usize].candidates[id.index_in_group]
@@ -330,8 +321,12 @@ pub struct CandidateForMemoGroup {
     /// $r^{\log}_{c,i}$, one per input group: per child of
     /// `expression.operator`, in [`Operator::children`] order.
     pub input_requirements: Vec<LogicalRequirements>,
-    /// The groups a fused computation also implements, beyond the group
-    /// whose candidate it is; empty otherwise.
+    /// A fused candidate computes, as one operator, a sub-DAG pattern of
+    /// several operators in one appearance of the sub-expression (a top-k
+    /// over an aggregate as one heap summary; a sum over a sum as one
+    /// aggregate): the groups of the operators it replaces. Empty otherwise.
+    /// Reuse across appearances is Pass 2's, not fusion (concepts doc §3,
+    /// "Fused groups").
     pub fused_groups: Vec<MemoGroupId>,
     /// Which rule added it. Not in the formulation: kept for
     /// `stage_pipeline --text` and the viewer (approved 2026-11-05).

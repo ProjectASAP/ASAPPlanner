@@ -77,11 +77,14 @@ pub struct ComputationTarget {
     pub fused_computation: Option<FusedComputation>,
 }
 
-/// A target's measure computed together with the targets beneath it, which
-/// it absorbs (they are not computed): the whole-expression top-k over a
-/// per-item `sum` or `count` (`Summary` of a heap family), or the nested
-/// sum, a grouped `sum` over a `sum` (`ExactAccumulator([Sum])`). It has the
-/// outer target's aggregate, measure, filter and `HAVING`.
+/// A target's measure computed together with the targets beneath it, as
+/// one operator that replaces their operators in this appearance of the
+/// sub-expression (concepts doc §3, "Fused groups"): the whole-expression
+/// top-k over a per-item `sum` or `count` (`Summary` of a heap family), or
+/// the nested sum, a grouped `sum` over a `sum` (`ExactAccumulator([Sum])`).
+/// Its build candidates list the replaced targets' groups in
+/// `fused_groups`. It has the outer target's aggregate, measure, filter and
+/// `HAVING`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FusedComputation {
     /// Indices, into Pass 1's computation-target list, of the targets it
@@ -89,7 +92,7 @@ pub struct FusedComputation {
     /// heap over the raw data samples beneath a grouped sum of per-series sums or
     /// counts (`topk(k, sum by (G) (sum_over_time(m[W])))`), the per-series
     /// target beneath that, then the targets any of these targets' own fused
-    /// computations absorb. None of them is computed when this is picked.
+    /// computations absorb: the operators it replaces.
     pub absorbed_targets: Vec<usize>,
     /// How the fused computation is computed: exact or a summary. Empty
     /// when Pass 1 pruned every one (today only for a family the deployment
