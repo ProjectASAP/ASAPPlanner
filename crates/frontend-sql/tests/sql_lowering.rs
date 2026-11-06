@@ -2947,6 +2947,34 @@ async fn lower_err(sql: &str) -> String {
         .to_string()
 }
 
+/// Both join sides have a `service` column; the front end binds `h.service`
+/// with its own scope while lowering, so the group key is the right side's
+/// column, the IR schema carrying no qualifier.
+#[tokio::test]
+async fn a_qualified_group_key_binds_its_join_side() {
+    let qe = lower(
+        "SELECT h.service, SUM(m.bytes) FROM metrics m JOIN hosts h ON m.service = h.service \
+         GROUP BY h.service",
+    )
+    .await;
+    let aggregate = find_aggregate_node(&qe).expect("aggregate");
+    let NonASAPOp::Aggregate {
+        reduction, child, ..
+    } = op(aggregate)
+    else {
+        unreachable!()
+    };
+    let [key] = reduction.expect_reduce().keys() else {
+        panic!("one key: {reduction:?}")
+    };
+    let metrics_columns = 4;
+    assert!(
+        *key >= metrics_columns,
+        "{key} is a metrics column: {child:#?}"
+    );
+    assert_eq!(child.schema.fields[*key].name, "service");
+}
+
 /// After a join the `Project` drops table qualifiers, so `h.service` must not
 /// fall back to the first bare `service` (`m.service`): the reference is
 /// ambiguous and rejected rather than sorting by the wrong column.
@@ -2957,7 +2985,7 @@ async fn qualified_order_by_after_a_join_does_not_bind_the_wrong_column() {
          ORDER BY h.service",
     )
     .await;
-    assert!(err.contains("several unqualified columns"), "{err}");
+    assert!(err.contains("several columns"), "{err}");
 }
 
 /// `WITHIN GROUP (ORDER BY x DESC)` reads the percentile from the top, as

@@ -166,6 +166,7 @@ impl Lowerer<'_> {
                 .map(|f| UnresolvedPredicate(matcher(f)))
                 .collect(),
             schema: None,
+            qualifier: None,
         })
     }
 

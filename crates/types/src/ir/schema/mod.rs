@@ -42,8 +42,10 @@ use serde::{Deserialize, Serialize};
 /// joins, and does not own data or prescribe a row/column-oriented storage layout.
 pub type ColumnId = usize;
 
-/// One field of a [`Schema`]: `name + dtype + nullable`, plus an optional
-/// table qualifier. The struct describes a column and holds none of its data.
+/// One field of a [`Schema`]: `name + dtype + nullable`. The struct describes
+/// a column and holds none of its data. Where a column's values come from is
+/// its memo group's column lineage, not part of the field; a front end binds
+/// qualified names (`t.col`) with its own scope while it lowers.
 ///
 /// `T` is the type vocabulary: [`FieldDataType`] on an operator edge (the
 /// default, and what [`Schema::fields`] holds), plain [`DataType`] for the
@@ -59,46 +61,25 @@ pub struct Field<T = FieldDataType> {
     /// Whether NULL values are allowed in this field. PromQL value
     /// columns are non-nullable; SQL columns inherit their DDL nullability.
     pub nullable: bool,
-    /// Optional table/alias qualifier (SQL `t.col` / `t AS a` → `a`). Travels
-    /// with the field through joins so a `ColumnRef::Qualified` can pick the
-    /// right side when both carry the same `name`. `None` for PromQL labels and
-    /// unqualified columns.
-    #[serde(default)]
-    pub table: Option<String>,
 }
 
 impl<T> Field<T> {
-    /// An unqualified field (`table = None`).
     pub fn new(name: impl Into<String>, dtype: T, nullable: bool) -> Self {
         Self {
             name: name.into(),
             dtype,
             nullable,
-            table: None,
         }
     }
 
-    /// This field re-qualified under `table` (e.g. by a `SubqueryAlias`).
-    pub fn with_table(mut self, table: impl Into<String>) -> Self {
-        self.table = Some(table.into());
-        self
-    }
-
-    /// A reference to this field: qualified by its table when it has one.
+    /// A reference to this field by its name.
     pub fn column_ref(&self) -> crate::ir::scalar::ColumnRef {
-        use crate::ir::scalar::ColumnRef;
-        match &self.table {
-            Some(table) => ColumnRef::Qualified {
-                table: table.clone(),
-                name: self.name.clone(),
-            },
-            None => ColumnRef::Named(self.name.clone()),
-        }
+        crate::ir::scalar::ColumnRef::Named(self.name.clone())
     }
 }
 
 impl Field<FieldDataType> {
-    /// An unqualified field carrying an ordinary readable value.
+    /// A field carrying an ordinary readable value.
     pub fn plain(name: impl Into<String>, dtype: DataType, nullable: bool) -> Self {
         Self::new(name, FieldDataType::Plain(dtype), nullable)
     }
@@ -135,7 +116,6 @@ impl From<Field<DataType>> for Field<FieldDataType> {
             name: field.name,
             dtype: FieldDataType::Plain(field.dtype),
             nullable: field.nullable,
-            table: field.table,
         }
     }
 }
@@ -247,7 +227,7 @@ pub enum DataType {
     /// catalog tables.
     Date,
     /// Variable-length sequence. The existing column contract preserves the
-    /// element field name, type, and nullability. Nested fields are unqualified.
+    /// element field name, type, and nullability.
     List { element: Box<Field<DataType>> },
     /// Ordered named fields, including each field's independent nullability.
     Struct { fields: Vec<Field<DataType>> },
@@ -312,7 +292,6 @@ impl Schema {
                 field.name == PROMQL_SERIES_IDENTITY
                     && field.dtype == DataType::Utf8
                     && !field.nullable
-                    && field.table.is_none()
             })
     }
 
@@ -363,15 +342,6 @@ impl Schema {
     /// Look up a field by name (first match). `None` if not present.
     pub fn column_id(&self, name: &str) -> Option<ColumnId> {
         self.fields.iter().position(|c| c.name == name)
-    }
-
-    /// Look up a field by `(table, name)` qualifier — disambiguates columns
-    /// that share a `name` across a join (`a.k` vs `b.k`). `None` if no field
-    /// has both that qualifier and name.
-    pub(crate) fn column_id_qualified(&self, table: &str, name: &str) -> Option<ColumnId> {
-        self.fields
-            .iter()
-            .position(|c| c.name == name && c.table.as_deref() == Some(table))
     }
 
     /// Whether this schema has *any* provable unique key.
@@ -453,13 +423,5 @@ mod tests {
     #[test]
     fn schema_without_fields_is_rejected() {
         assert!(serde_json::from_str::<Schema>(r#"{"closed":true}"#).is_err());
-    }
-
-    #[test]
-    fn qualified_field_serde_roundtrip() {
-        let c = col("service", DataType::Utf8).with_table("hosts");
-        let back: Field = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
-        assert_eq!(back, c);
-        assert_eq!(back.table.as_deref(), Some("hosts"));
     }
 }

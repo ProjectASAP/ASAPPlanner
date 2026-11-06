@@ -2,8 +2,9 @@
 //!
 //! Front ends emit `ColumnRef` (name-based, optionally table-qualified); the
 //! IR uses positional [`ColumnId`] resolved against a per-node [`Schema`].
-//! These helpers turn name-based refs into positional ids, qualifier-aware.
-//! Front-end name resolution (`asap_frontend_common::resolve`) calls them.
+//! These helpers turn name-based refs into positional ids. A schema carries
+//! no qualifier, so front-end name resolution (`asap_frontend_common::resolve`)
+//! binds a qualified name with its own scope before it calls them.
 
 use thiserror::Error;
 
@@ -22,38 +23,24 @@ pub enum ResolveError {
     NoSampleValue { available: Vec<String> },
     #[error("ColumnRef::Wildcard cannot be resolved to a single ColumnId")]
     WildcardNotPositional,
-    #[error("column `{name}` matches several unqualified columns")]
+    #[error("column `{name}` matches several columns")]
     Ambiguous { name: String },
 }
 
 /// Resolve a single [`ColumnRef`] to a positional [`ColumnId`].
 pub fn resolve_column_ref(col: &ColumnRef, schema: &Schema) -> Result<ColumnId, ResolveError> {
     match col {
-        // A bare name must be unique: after a join `k` could be `a.k` or `b.k`.
-        ColumnRef::Named(name) => match schema.fields.iter().filter(|c| &c.name == name).count() {
-            0 => Err(ResolveError::NotFound {
-                name: name.clone(),
-                available: schema.fields.iter().map(|c| c.name.clone()).collect(),
-            }),
-            1 => Ok(schema.column_id(name).expect("one field has this name")),
-            _ => Err(ResolveError::Ambiguous { name: name.clone() }),
-        },
-        // Prefer the (table, name) match; fall back to the bare name for
-        // schemas whose columns carry no qualifier, but only when that name
-        // is unique: after a join `b.k` must not bind to `a.k`.
-        ColumnRef::Qualified { table, name } => {
-            if let Some(id) = schema.column_id_qualified(table, name) {
-                return Ok(id);
-            }
+        // A name must be unique: after a join `k` could be either side's.
+        // A schema carries no qualifier; the front end binds a qualified
+        // name with its own scope before it calls this.
+        ColumnRef::Named(name) | ColumnRef::Qualified { name, .. } => {
             match schema.fields.iter().filter(|c| &c.name == name).count() {
                 0 => Err(ResolveError::NotFound {
-                    name: format!("{table}.{name}"),
+                    name: name.clone(),
                     available: schema.fields.iter().map(|c| c.name.clone()).collect(),
                 }),
                 1 => Ok(schema.column_id(name).expect("one field has this name")),
-                _ => Err(ResolveError::Ambiguous {
-                    name: format!("{table}.{name}"),
-                }),
+                _ => Err(ResolveError::Ambiguous { name: name.clone() }),
             }
         }
         ColumnRef::SampleValue => schema

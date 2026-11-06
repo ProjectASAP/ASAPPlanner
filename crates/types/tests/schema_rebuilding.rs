@@ -65,7 +65,6 @@ fn rebuilding_preserves_only_explicit_naming_overrides() {
         let original = aggregate(scan(DataType::Int64, "key"), asap);
         let mut schema = original.schema.clone();
         schema.fields[0].name = "alias".into();
-        schema.fields[0].table = Some("result".into());
         let renamed = OperatorNode::with_schema(original.operator.clone(), schema)
             .with_guarantee(Some(AccuracyGuarantee::exact("fixture")));
         let original = Rc::new(renamed);
@@ -73,7 +72,6 @@ fn rebuilding_preserves_only_explicit_naming_overrides() {
         let replacement = scan(DataType::Utf8, "new_key");
         let rebuilt = Rc::new(original.with_new_children(|_| replacement.clone()).unwrap());
         assert_eq!(rebuilt.schema.fields[0].name, "alias");
-        assert_eq!(rebuilt.schema.fields[0].table.as_deref(), Some("result"));
         assert_eq!(
             rebuilt.schema.fields[0].plain_dtype(),
             Some(&DataType::Utf8)

@@ -272,7 +272,6 @@ fn named_as_chain<I: OperatorInput>(
     let mut schema = summary_agg_schema(child.schema(), family, reduction)?;
     for (field, kept) in schema.fields.iter_mut().zip(&chain.fields) {
         field.name = kept.name.clone();
-        field.table = kept.table.clone();
     }
     Ok((build, schema))
 }

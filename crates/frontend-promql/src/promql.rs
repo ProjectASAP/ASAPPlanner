@@ -1651,6 +1651,7 @@ fn filtered_source(metric: String, matchers: Vec<Scalar>, shift: TimeShift) -> U
         predicates: matchers.into_iter().map(UnresolvedPredicate).collect(),
         // Usage-derived (PromQL is schemaless) — the schema resolver fills this in.
         schema: None,
+        qualifier: None,
     };
     if shift.is_identity() {
         scan

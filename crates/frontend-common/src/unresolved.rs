@@ -114,6 +114,10 @@ pub enum UnresolvedOp {
         /// `Some` for a catalog-backed (SQL) leaf; `None` defers to the
         /// usage-derived schema resolver.
         schema: Option<Schema>,
+        /// The SQL table or alias qualifying the leaf's columns, which
+        /// qualified references (`t.col`) above resolve by; `None` for a
+        /// PromQL leaf.
+        qualifier: Option<String>,
     },
     Values {
         rows: Vec<Vec<UnresolvedScalar>>,
@@ -125,6 +129,9 @@ pub enum UnresolvedOp {
     },
     Project {
         cols: Vec<UnresolvedProjectItem>,
+        /// The alias of a derived table (`FROM (SELECT …) t`) qualifying
+        /// every output column, which qualified references above resolve
+        /// by; `None` for an ordinary SELECT list.
         qualifier: Option<String>,
         child: Rc<UnresolvedOp>,
     },

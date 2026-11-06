@@ -812,7 +812,6 @@ mod tests {
             name: name.into(),
             dtype: FieldDataType::Plain(dtype),
             nullable,
-            table: None,
         }
     }
 

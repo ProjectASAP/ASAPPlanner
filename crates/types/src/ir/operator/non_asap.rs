@@ -74,14 +74,7 @@ pub enum NonASAPOp<C = Rc<OperatorNode>> {
     /// σ — row-level filter. Output schema = child schema.
     Filter { pred: Predicate<C>, child: C },
     /// π — projection.
-    Project {
-        cols: Vec<ProjectItem<C>>,
-        /// Re-qualifies every output column with this table alias (a derived
-        /// table / inline view). `None` for an ordinary SELECT list.
-        #[serde(default)]
-        qualifier: Option<String>,
-        child: C,
-    },
+    Project { cols: Vec<ProjectItem<C>>, child: C },
     /// γ + α — grouping + aggregate intents.
     Aggregate {
         reduction: Reduction,
@@ -299,11 +292,7 @@ impl<C> NonASAPOp<C> {
                     child: f(child),
                 }
             }
-            Project {
-                cols,
-                qualifier,
-                child,
-            } => {
+            Project { cols, child } => {
                 let cols = cols
                     .iter()
                     .map(|c| ProjectItem {
@@ -313,7 +302,6 @@ impl<C> NonASAPOp<C> {
                     .collect();
                 Project {
                     cols,
-                    qualifier: qualifier.clone(),
                     child: f(child),
                 }
             }
@@ -605,7 +593,6 @@ impl<I: OperatorInput> NonASAPOp<I> {
                         crate::ir::schema::topk::ranked_row_projection(child, reduction, &name)?;
                     return NonASAPOp::Project {
                         cols,
-                        qualifier: None,
                         child: child.clone(),
                     }
                     .output_schema();
@@ -694,11 +681,7 @@ impl<I: OperatorInput> NonASAPOp<I> {
             // keeps its field verbatim, so an `ExactAggregate` state column
             // can pass through a projection unchanged; any other expression
             // is typed against the input and must read plain values.
-            Project {
-                cols,
-                qualifier,
-                child,
-            } => {
+            Project { cols, child } => {
                 let in_schema = child.schema();
                 let fields: Vec<Field> = cols
                     .iter()
@@ -706,9 +689,7 @@ impl<I: OperatorInput> NonASAPOp<I> {
                     .map(|(i, item)| {
                         let mut field = match &item.expr {
                             ScalarExpr::Column(id) if in_schema.fields.get(*id).is_some() => {
-                                let mut f = in_schema.fields[*id].clone();
-                                f.table = None;
-                                f
+                                in_schema.fields[*id].clone()
                             }
                             expr => {
                                 let (dtype, nullable) = expr.scalar_type(in_schema)?;
@@ -719,10 +700,7 @@ impl<I: OperatorInput> NonASAPOp<I> {
                             .alias
                             .clone()
                             .unwrap_or_else(|| default_proj_name(&item.expr, i, in_schema));
-                        Ok(match qualifier {
-                            Some(q) => field.with_table(q),
-                            None => field,
-                        })
+                        Ok(field)
                     })
                     .collect::<Result<Vec<_>, SchemaDerivationError>>()?;
                 let time_index = fields.iter().position(|c| c.name == "ts");
@@ -1403,7 +1381,6 @@ mod tests {
     fn project(cols: Vec<ProjectItem>, child: NonASAPOp) -> NonASAPOp {
         NonASAPOp::Project {
             cols,
-            qualifier: None,
             child: node(child),
         }
     }

@@ -12,6 +12,7 @@ use std::ops::Bound;
 use std::time::Duration;
 
 use asap_types::ir::operator::operator_properties::{GroupKeys, Reduction, Source};
+use asap_types::ir::properties::column_lineage::ColumnLineage;
 use asap_types::ir::properties::summary_coverage::{
     ColumnIdentity, Constraint, CoverageError, SummaryCoverage,
 };
@@ -213,7 +214,7 @@ fn a_summary_agg_over_a_job_filter_lifts_it_into_the_selection() {
         panic!("one box: {coverage:?}")
     };
     assert_eq!(
-        selection.columns()[&ColumnIdentity::new(None, "job")],
+        selection.columns()[&ColumnIdentity::new("latency", "job")],
         jobs(&["api"])
     );
     assert_eq!(selection.relative_time(), last_minute());
@@ -242,7 +243,7 @@ fn states_with_equal_definitions_and_disjoint_selections_merge() {
         panic!("one box: {coverage:?}")
     };
     assert_eq!(
-        selection.columns()[&ColumnIdentity::new(None, "job")],
+        selection.columns()[&ColumnIdentity::new("latency", "job")],
         jobs(&["api", "web"])
     );
 }
@@ -288,7 +289,7 @@ fn a_filter_that_is_no_selection_stays_unlifted() {
         ]
     );
     assert_eq!(
-        coverage_of_g10.selection()[0].columns()[&ColumnIdentity::new(None, "job")],
+        coverage_of_g10.selection()[0].columns()[&ColumnIdentity::new("latency", "job")],
         jobs(&["api"])
     );
     assert!(matches!(
@@ -343,19 +344,31 @@ fn states_whose_definitions_read_the_same_subquery_merge() {
     assert_eq!(definition, coverage(&memo, web).definition());
     let merged = memo.find_or_add_group(merge(vec![api, web])).unwrap();
     assert_eq!(
-        coverage(&memo, merged).selection()[0].columns()[&ColumnIdentity::new(None, "job")],
+        coverage(&memo, merged).selection()[0].columns()[&ColumnIdentity::new("latency", "job")],
         jobs(&["api", "web"])
     );
 }
 
 /// PromQL label matchers are the scan's predicates: they are lifted too, so
 /// `latency{job="api"}` and `latency{job="web"}` states merge. The scan,
-/// without them, is the last unlifted operator.
+/// without them, is the last unlifted operator. Each scan's `job` column has
+/// lineage `latency.job`, so the selections `latency.job ∈ {api}` and
+/// `latency.job ∈ {web}` are disjoint selections on one column (concepts doc,
+/// section 3, column lineage example 4).
 #[test]
 fn scan_predicates_lift_and_their_states_merge() {
     let mut memo = Memo::default();
     let state_of_job = |memo: &mut Memo, job: &str| {
         let series = memo.find_or_add_group(scan(vec![job_is(job)])).unwrap();
+        assert_eq!(
+            memo.groups()[series.0 as usize]
+                .group_properties
+                .column_lineage[JOB],
+            ColumnLineage::SourceColumn {
+                source: "latency".into(),
+                column: "job".into(),
+            }
+        );
         let last_minute = memo.find_or_add_group(range(MINUTE_MS, series)).unwrap();
         memo.find_or_add_group(kll(last_minute)).unwrap()
     };
@@ -368,12 +381,12 @@ fn scan_predicates_lift_and_their_states_merge() {
         vec![kll_unlifted(), scan(vec![]).map_children(|_| None)]
     );
     assert_eq!(
-        coverage(&memo, api).selection()[0].columns()[&ColumnIdentity::new(None, "job")],
+        coverage(&memo, api).selection()[0].columns()[&ColumnIdentity::new("latency", "job")],
         jobs(&["api"])
     );
     let merged = memo.find_or_add_group(merge(vec![api, web])).unwrap();
     assert_eq!(
-        coverage(&memo, merged).selection()[0].columns()[&ColumnIdentity::new(None, "job")],
+        coverage(&memo, merged).selection()[0].columns()[&ColumnIdentity::new("latency", "job")],
         jobs(&["api", "web"])
     );
 }

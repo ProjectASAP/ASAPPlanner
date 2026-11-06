@@ -1130,7 +1130,6 @@ mod columnar_tests {
             name: name.into(),
             dtype: SummaryFamilyType::Plain(dtype),
             nullable,
-            table: None,
         }
     }
 
