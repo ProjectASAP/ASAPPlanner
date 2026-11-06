@@ -249,11 +249,11 @@ pub struct SummaryStateDefinition {
     /// SummaryAgg that is not Filter / range TimeRange / TimeShift without @
     /// / direct-column Project.
     pub input_group: MemoGroupId,
-    /// From the SummaryAgg down, each operator not lifted into the
-    /// selection, with only its residual arguments; `()` marks its single
-    /// input (the next one, or input_group). Two states may merge only if
-    /// input_group and these operators are equal.
-    pub operators_kept_in_definition: Vec<Operator<()>>,
+    /// The operators not lifted into the selection, listed top down from
+    /// the SummaryAgg, each with only its residual arguments; `()` marks its
+    /// single input (the next one, or input_group). Two states may merge only
+    /// if input_group and these operators are equal.
+    pub unlifted_operators: Vec<Operator<()>>,
 }
 
 pub struct SummaryCoverage {
@@ -286,6 +286,8 @@ impl Memo {
     pub fn add_query(&mut self, root: QueryRoot<MemoGroupId>) -> usize;
 }
 ```
+
+How the definition and selection are derived, with examples: `docs/design_docs/proposals/asap-primitive-schema.md` §4.2.2.
 
 The rules read an operator's inputs through one trait, so the same rules derive a front-end node's schema and a group's `GroupProperties`:
 
@@ -323,7 +325,7 @@ A group is its expression: one operator, with its arguments, over input groups. 
 Everything that was computed on operator-node trees is computed on groups. `find_or_add_group` derives `GroupProperties` once, when the group is created, with `derive_group_properties`: the rules that check operator nodes (schema derivation, input validation, merge check), applied to the expression over `MemoGroupAsInput`s, which read only the input groups' `expression` and `group_properties`, never a node tree:
 
 - `schema` and `result_kind` from the operator and its input groups' schemas and result kinds; a scalar subquery reads the referenced group's schema.
-- `summary_coverage`, for a summary state: walking down from the SummaryAgg through the input groups' expressions while each is a Filter, a range TimeRange, a TimeShift without `@` or a direct-column Project, lifting their predicates into the selection. The group below them is the definition's `input_group`; a Scan is never lifted through, so its predicates stay in that group. The operators not lifted, each with its residual arguments, are `operators_kept_in_definition`. A tumbling-window chain covers what one build over its whole window does. A merge's coverage comes from its inputs' stored coverage; a merge is valid only over inputs with equal definitions and disjoint selections.
+- `summary_coverage`, for a summary state: walking down from the SummaryAgg through the input groups' expressions while each is a Filter, a range TimeRange, a TimeShift without `@` or a direct-column Project, lifting their predicates into the selection. The group below them is the definition's `input_group`; a Scan is never lifted through, so its predicates stay in that group. The operators not lifted, each with its residual arguments, are `unlifted_operators`. A tumbling-window chain covers what one build over its whole window does. A merge's coverage comes from its inputs' stored coverage; a merge is valid only over inputs with equal definitions and disjoint selections.
 - The checks that read an input's operator (a merge of the newest windows reads a window chain; a selected build) read the input group's `expression`.
 - `shareable_when_equal`: a `LIMIT` is shareable over a `Sort` with the same partitions (the input group's `expression`); a `Dedup` on every column (the input group's schema).
 
