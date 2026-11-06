@@ -8,8 +8,10 @@ use asap_types::ir::operator::operator_properties::Source;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{ColumnId, DataType, Field, Schema};
 use asap_types::ir::{NonASAPOp, OperatorNode};
-
-use crate::test_support::lower_promql;
+use asap_types::workload::{
+    BatchEntry, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query, QueryLanguage,
+    QueryRequirements, QueryWorkload,
+};
 
 /// A `TimeSeries("m")` scan over `[ts(0), value(1), labels...]`, time index 0,
 /// no unique key.
@@ -51,84 +53,33 @@ pub fn scan_from(source: Source, schema: Schema) -> Rc<OperatorNode> {
     .unwrap()
 }
 
-/// The Count-Min summary of a Stage 1 candidate of `query`.
-pub fn cms_summary(query: &str) -> OperatorNode {
-    use crate::composition::compose_logical_candidate;
-    use crate::per_computation_candidates::generate_per_computation_candidates;
-    use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
-    use asap_types::ir::{ASAPOp, QueryRoot};
-    let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
-    let root = lower_promql(query, target);
-    // Inspect each local computation choice under the built-in deployment.
-    let per_computation = generate_per_computation_candidates(
-        &asap_stage0_memo::memo_of_queries(
-            &[QueryRoot::Operator(root)],
-            &[None],
-            &asap_types::workload::DataWorkload::default(),
-        )
-        .unwrap(),
-    )
-    .unwrap()
-    .without_unsupported_summaries(None);
-    let summary = per_computation
-        .targets
-        .iter()
-        .enumerate()
-        .flat_map(|(target, choices)| {
-            let inventory = &per_computation;
-            (0..choices.choice_count()).filter_map(move |candidate| {
-                let mut assignment = vec![0; inventory.targets.len()];
-                assignment[target] = candidate;
-                compose_logical_candidate(inventory, &assignment).ok()
-            })
-        })
-        .flat_map(|roots| match &roots[0] {
-            QueryRoot::Operator(node) => OperatorNode::reachable(node),
-            QueryRoot::Scalar(_) => vec![],
-        })
-        .find(|node| {
-            matches!(
-                node.asap(),
-                Some(ASAPOp::SummaryAgg {
-                    summary_type: FieldDataType::Sketch(kind),
-                    ..
-                }) if *kind == SketchAlgorithm::Cms
-            )
-        })
-        .map(|node| (*node).clone())
-        .unwrap_or_else(|| panic!("{query}: a Count-Min summary"));
-    summary
-}
-
-/// `summary` with its update weight replaced by `weight`.
-pub fn weighted(
-    mut summary: OperatorNode,
-    weight: asap_types::ir::schema::SummaryInputExpr,
-) -> Rc<OperatorNode> {
-    use asap_types::ir::{ASAPOp, Operator};
-    if let Operator::ASAP(ASAPOp::SummaryAgg { input, .. }) = &mut summary.operator {
-        input.weight = weight;
-    }
-    Rc::new(summary)
-}
-
-/// A point-count estimate over `summary` carrying `guarantee`.
-pub fn estimate_over(
-    summary: Rc<OperatorNode>,
-    guarantee: asap_types::ir::properties::AccuracyGuarantee,
-) -> Rc<OperatorNode> {
-    use asap_types::ir::scalar::ColumnRef;
-    use asap_types::ir::schema::SketchStatistic;
-    use asap_types::ir::{ASAPOp, Operator};
-    Rc::new(
-        OperatorNode::new(Operator::ASAP(ASAPOp::SummaryEstimate {
-            summary_input: summary,
-            query: SketchStatistic::PointCount {
-                key: ColumnRef::SampleValue,
-                value: None,
-            },
-        }))
+/// `query` lowered by the PromQL frontend, with accuracy target `accuracy`.
+pub fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
+    let workload = PlanningWorkload {
+        query_workload: QueryWorkload {
+            language: QueryLanguage::PromQL,
+            query_batch: Some(vec![BatchEntry {
+                query: Query(query.into()),
+                requirements: QueryRequirements {
+                    accuracy,
+                    ..Default::default()
+                },
+                predictability: Predictability::Unknown,
+                invocations: 1,
+                execute_at: None,
+                range_evaluation: None,
+            }]),
+            repeating_queries: None,
+        },
+        data_workload: Some(DataWorkload::sampled_every(
+            asap_frontend_promql::promql_metric_names(query).unwrap_or_default(),
+            DurationMs(1_000),
+        )),
+    };
+    asap_frontend_promql::lower_promql_query_workload(&workload)
         .unwrap()
-        .with_guarantee(Some(guarantee)),
-    )
+        .remove(0)
+        .as_operator()
+        .cloned()
+        .expect("operator root")
 }

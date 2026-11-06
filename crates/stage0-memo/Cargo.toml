@@ -5,6 +5,6 @@ edition = "2021"
 
 # #509 Stage 0: hash-consing the workload's logical DAGs into the memo groups
 # (`asap_types::stages::Memo`, without candidates) that Stage 1 fills. Depends
-# only on asap-types; no other stage crate depends on it except in their tests.
+# only on asap-types; no other stage crate depends on it.
 [dependencies]
 asap-types = { path = "../types" }
