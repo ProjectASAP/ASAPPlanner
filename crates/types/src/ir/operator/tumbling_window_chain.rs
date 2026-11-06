@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use super::asap::{summary_agg_schema, ASAPOp};
 use super::input::node_of_build;
-use super::input::{BuiltOrInput, OperatorInput};
+use super::input::{InputOrTemporaryBuild, OperatorInput};
 use super::node::{Operator, OperatorNode};
 use super::non_asap::{NonASAPOp, TimeRangeKind};
 #[cfg(any(test, feature = "test-support"))]
@@ -77,7 +77,7 @@ fn merged_tumbling_window_count<I: OperatorInput>(state: &I) -> Option<u32> {
 }
 
 /// A build over the inputs of a chain over `I`, with its schema.
-pub(crate) type BuildWithSchema<I> = (ASAPOp<BuiltOrInput<I>>, Schema);
+pub(crate) type BuildWithSchema<I> = (ASAPOp<InputOrTemporaryBuild<I>>, Schema);
 
 /// The `SummaryAgg` over `TimeRange(tumbling_window_count · tumbling_window_width_ms)` over the
 /// chain's input whose state the merged tumbling windows of `chain` equal.
@@ -111,14 +111,6 @@ pub(crate) fn merged_window_build<I: OperatorInput>(
     newest_tumbling_windows_build(&chain, tumbling_window_count)
 }
 
-/// [`merged_window_build`] over a node tree, as a node (the accuracy
-/// propagation reads node trees).
-pub fn merged_window_build_node(
-    state: &Rc<OperatorNode>,
-) -> Result<OperatorNode, SchemaDerivationError> {
-    merged_window_build(state).map(node_of_build)
-}
-
 /// The `SummaryAgg` over `TimeRange(tumbling_window_count · tumbling_window_width_ms)` over the
 /// chain's input: the state of the chain's newest `tumbling_window_count` tumbling windows.
 fn newest_tumbling_windows_build<I: OperatorInput>(
@@ -139,7 +131,7 @@ fn newest_tumbling_windows_build<I: OperatorInput>(
 pub(crate) fn window_build<I: OperatorInput>(
     chain: &ASAPOp<I>,
     tumbling_window_count: u32,
-) -> Result<ASAPOp<BuiltOrInput<I>>, SchemaDerivationError> {
+) -> Result<ASAPOp<InputOrTemporaryBuild<I>>, SchemaDerivationError> {
     let ASAPOp::SummaryTumblingWindowChain {
         child,
         tumbling_window_width_ms,
@@ -151,7 +143,10 @@ pub(crate) fn window_build<I: OperatorInput>(
     let window = tumbling_window_width_ms
         .checked_mul(u64::from(tumbling_window_count))
         .ok_or_else(|| invalid("tumbling-window chain window overflows"))?;
-    build_over(chain, range(BuiltOrInput::Input(child.clone()), window)?)
+    build_over(
+        chain,
+        range(InputOrTemporaryBuild::Input(child.clone()), window)?,
+    )
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -190,9 +185,9 @@ pub(crate) fn tumbling_window<I: OperatorInput>(
 fn shifted<I: OperatorInput>(
     child: I,
     back_ms: i64,
-) -> Result<BuiltOrInput<I>, SchemaDerivationError> {
+) -> Result<InputOrTemporaryBuild<I>, SchemaDerivationError> {
     if back_ms == 0 {
-        return Ok(BuiltOrInput::Input(child));
+        return Ok(InputOrTemporaryBuild::Input(child));
     }
     let (shift, input) = match child.operator() {
         Operator::NonASAP(NonASAPOp::TimeShift {
@@ -216,18 +211,18 @@ fn shifted<I: OperatorInput>(
             child,
         ),
     };
-    BuiltOrInput::build(NonASAPOp::TimeShift {
+    InputOrTemporaryBuild::build(NonASAPOp::TimeShift {
         shift,
-        child: BuiltOrInput::Input(input),
+        child: InputOrTemporaryBuild::Input(input),
     })
 }
 
 /// A range `TimeRange(width_ms)` over `child`.
 fn range<I: OperatorInput>(
-    child: BuiltOrInput<I>,
+    child: InputOrTemporaryBuild<I>,
     width_ms: u64,
-) -> Result<BuiltOrInput<I>, SchemaDerivationError> {
-    BuiltOrInput::build(NonASAPOp::TimeRange {
+) -> Result<InputOrTemporaryBuild<I>, SchemaDerivationError> {
+    InputOrTemporaryBuild::build(NonASAPOp::TimeRange {
         range: Duration::from_millis(width_ms),
         kind: TimeRangeKind::Range,
         child,
@@ -237,8 +232,8 @@ fn range<I: OperatorInput>(
 /// The chain's `SummaryAgg` over `input`.
 fn build_over<I: OperatorInput>(
     chain: &ASAPOp<I>,
-    input: BuiltOrInput<I>,
-) -> Result<ASAPOp<BuiltOrInput<I>>, SchemaDerivationError> {
+    input: InputOrTemporaryBuild<I>,
+) -> Result<ASAPOp<InputOrTemporaryBuild<I>>, SchemaDerivationError> {
     let ASAPOp::SummaryTumblingWindowChain {
         family,
         input: update,
@@ -246,7 +241,7 @@ fn build_over<I: OperatorInput>(
         grouping,
         filter,
         ..
-    } = chain.map_children(|child| BuiltOrInput::Input(child.clone()))
+    } = chain.map_children(|child| InputOrTemporaryBuild::Input(child.clone()))
     else {
         return Err(invalid("expected a tumbling-window chain"));
     };
@@ -262,7 +257,7 @@ fn build_over<I: OperatorInput>(
 
 /// `build` with its schema, named as the chain of schema `chain`.
 fn named_as_chain<I: OperatorInput>(
-    build: ASAPOp<BuiltOrInput<I>>,
+    build: ASAPOp<InputOrTemporaryBuild<I>>,
     chain: &Schema,
 ) -> Result<BuildWithSchema<I>, SchemaDerivationError> {
     let ASAPOp::SummaryAgg {

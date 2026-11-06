@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::ir::operator::operator_properties::{BinaryOpKind, JoinKind, Reduction, Source};
-use asap_types::ir::operator::tumbling_window_chain::{merged_chain, merged_window_build_node};
+use asap_types::ir::operator::tumbling_window_chain::merged_chain;
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::guarantee::{
     AccuracyGuarantee, AccuracyMetric, BoundExpr, CompositionOperator, GuaranteeSource,
@@ -526,31 +526,28 @@ fn rolled_up_guarantee(node: &OperatorNode) -> Option<Option<AccuracyGuarantee>>
 
 /// The guarantee of an estimate or finalized value read from merged
 /// tumbling windows ([`merged_chain`]): the guarantee of the same read of one
-/// build over the merged tumbling windows' time range ([`merged_window_build_node`]: the whole
-/// chain's, or its newest tumbling windows') when the
+/// build over the merged tumbling windows' time range (the whole chain's, or
+/// its newest tumbling windows') when the
 /// family's merged error for that read is exact or the same as that build's
 /// (the family-capability table); none when it is approximate (evidence
 /// only, for plan selection to judge) or the family has no merge. `None` for
 /// any node that does not read merged tumbling windows.
 fn merged_tumbling_windows_guarantee(node: &OperatorNode) -> Option<Option<AccuracyGuarantee>> {
-    let (state, merged) = match node.asap()? {
+    let merged = match node.asap()? {
         ASAPOp::SummaryEstimate {
             summary_input,
             query,
         } => {
             let chain = merged_chain(summary_input)?;
             let family = chain.asap()?.produced_state()?;
-            (
-                summary_input,
-                FamilyCapability::of(family).merged_error(query),
-            )
+            FamilyCapability::of(family).merged_error(query)
         }
         ASAPOp::FinalizeExactAccumulator { child } => {
             let chain = merged_chain(child)?;
             let family = chain.asap()?.produced_state()?;
             // An exact accumulator's merged state is exact.
             let merged = FamilyCapability::of(family).merge_inputs;
-            (child, merged.map(|_| MergedError::Exact))
+            merged.map(|_| MergedError::Exact)
         }
         _ => return None,
     };
@@ -560,33 +557,9 @@ fn merged_tumbling_windows_guarantee(node: &OperatorNode) -> Option<Option<Accur
     ) {
         return Some(None);
     }
-    let chain = merged_chain(state)?;
-    let Ok(mut window_build) = merged_window_build_node(state) else {
-        return Some(None);
-    };
-    // The merged tumbling windows' time range over the chain's input carries the
-    // guarantee composed over that input.
-    let ASAPOp::SummaryTumblingWindowChain { child: input, .. } = chain.asap()? else {
-        return Some(None);
-    };
-    if let Operator::ASAP(ASAPOp::SummaryAgg { child: range, .. }) = &mut window_build.operator {
-        let mut composed = (**range).clone();
-        composed.guarantee = composed_guarantee(&composed);
-        debug_assert!(Rc::ptr_eq(composed.children()[0], input));
-        *range = Rc::new(composed);
-    }
-    let window_build = Rc::new(window_build);
-    let consumer = OperatorNode::with_schema(
-        node.operator.map_children(|child| {
-            if Rc::ptr_eq(child, state) {
-                Rc::clone(&window_build)
-            } else {
-                Rc::clone(child)
-            }
-        }),
-        node.schema.clone(),
-    );
-    Some(composed_guarantee(&consumer))
+    todo!(
+        "#1207 PR 4: the guarantee of a read of merged tumbling windows, as of one build over their window, over memo groups"
+    )
 }
 
 /// The guarantee of a distinct count of one instance per group over a

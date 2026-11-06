@@ -42,37 +42,42 @@ impl OperatorInput for Rc<OperatorNode> {
     }
 }
 
-/// An input a rule builds while it derives (one build over a chain's
-/// window, the build a rollup stands for, the build a selection of states
-/// stands for): an operator over `I`s that is neither a node of a tree nor
-/// a memo group. A rule never builds one over another rule's built input,
-/// so the type does not nest.
+/// An input of a rule: a real input `I`, or a build the rule constructs
+/// only while it derives.
 #[derive(Clone)]
-pub(crate) enum BuiltOrInput<I> {
+pub(crate) enum InputOrTemporaryBuild<I> {
     Input(I),
-    Built(Rc<BuiltInput<I>>),
+    TemporaryBuild(Rc<TemporaryBuild<I>>),
 }
 
-pub(crate) struct BuiltInput<I> {
-    operator: Operator<BuiltOrInput<I>>,
+/// A build a rule constructs only while it derives (the whole-window build
+/// of a chain, the build a rollup stands for, the build a selection of
+/// states stands for): an operator over `I`s with its derived schema and
+/// kind. Never stored in the memo. A rule never builds one over another
+/// rule's temporary build, so the type does not nest.
+pub(crate) struct TemporaryBuild<I> {
+    operator: Operator<InputOrTemporaryBuild<I>>,
     schema: Schema,
     result_kind: OperatorResultKind,
 }
 
-impl<I: OperatorInput> BuiltOrInput<I> {
+impl<I: OperatorInput> InputOrTemporaryBuild<I> {
     /// A non-ASAP `operator` with its derived schema and kind. Only non-ASAP
     /// rules derive it, which build no input themselves.
     pub(crate) fn build(
-        operator: NonASAPOp<BuiltOrInput<I>>,
+        operator: NonASAPOp<InputOrTemporaryBuild<I>>,
     ) -> Result<Self, SchemaDerivationError> {
         let schema = operator.output_schema()?;
         Ok(Self::with_schema(Operator::NonASAP(operator), schema))
     }
 
     /// `operator` with `schema` and its derived kind.
-    pub(crate) fn with_schema(operator: Operator<BuiltOrInput<I>>, schema: Schema) -> Self {
+    pub(crate) fn with_schema(
+        operator: Operator<InputOrTemporaryBuild<I>>,
+        schema: Schema,
+    ) -> Self {
         let result_kind = operator.output_kind();
-        Self::Built(Rc::new(BuiltInput {
+        Self::TemporaryBuild(Rc::new(TemporaryBuild {
             operator,
             schema,
             result_kind,
@@ -80,18 +85,18 @@ impl<I: OperatorInput> BuiltOrInput<I> {
     }
 }
 
-impl<I: OperatorInput> OperatorInput for BuiltOrInput<I> {
+impl<I: OperatorInput> OperatorInput for InputOrTemporaryBuild<I> {
     fn schema(&self) -> &Schema {
         match self {
             Self::Input(input) => input.schema(),
-            Self::Built(built) => &built.schema,
+            Self::TemporaryBuild(build) => &build.schema,
         }
     }
 
     fn result_kind(&self) -> OperatorResultKind {
         match self {
             Self::Input(input) => input.result_kind(),
-            Self::Built(built) => built.result_kind,
+            Self::TemporaryBuild(build) => build.result_kind,
         }
     }
 
@@ -100,27 +105,27 @@ impl<I: OperatorInput> OperatorInput for BuiltOrInput<I> {
             Self::Input(input) => input
                 .operator()
                 .map_children(|child| Self::Input(child.clone())),
-            Self::Built(built) => built.operator.clone(),
+            Self::TemporaryBuild(build) => build.operator.clone(),
         }
     }
 
     fn summary_coverage(&self) -> Option<&SummaryCoverage> {
         match self {
             Self::Input(input) => input.summary_coverage(),
-            Self::Built(_) => None,
+            Self::TemporaryBuild(_) => None,
         }
     }
 }
 
-impl BuiltOrInput<Rc<OperatorNode>> {
-    /// The node tree of this input: a built input as a new node over its
-    /// inputs' trees.
+impl InputOrTemporaryBuild<Rc<OperatorNode>> {
+    /// The node tree of this input: a temporary build as a new node over
+    /// its inputs' trees.
     pub(crate) fn to_node(&self) -> Rc<OperatorNode> {
         match self {
             Self::Input(node) => Rc::clone(node),
-            Self::Built(built) => Rc::new(OperatorNode::with_schema(
-                built.operator.map_children(Self::to_node),
-                built.schema.clone(),
+            Self::TemporaryBuild(build) => Rc::new(OperatorNode::with_schema(
+                build.operator.map_children(Self::to_node),
+                build.schema.clone(),
             )),
         }
     }
@@ -128,10 +133,13 @@ impl BuiltOrInput<Rc<OperatorNode>> {
 
 /// A build over node trees (`tumbling_window_chain`'s builds) as a node.
 pub(crate) fn node_of_build(
-    (build, schema): (super::asap::ASAPOp<BuiltOrInput<Rc<OperatorNode>>>, Schema),
+    (build, schema): (
+        super::asap::ASAPOp<InputOrTemporaryBuild<Rc<OperatorNode>>>,
+        Schema,
+    ),
 ) -> OperatorNode {
     OperatorNode::with_schema(
-        Operator::ASAP(build.map_children(BuiltOrInput::to_node)),
+        Operator::ASAP(build.map_children(InputOrTemporaryBuild::to_node)),
         schema,
     )
 }
