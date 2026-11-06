@@ -193,61 +193,23 @@ pub mod planning {
         }
     }
 
-    /// Exact computation and each explicit single-target rule application.
-    /// This fixture catalog is independent of the bounded MILP's visited plans.
+    /// Exact computation and each explicit single-target rule application,
+    /// each as one plan for `root`. Pass 1 now adds these ways as memo
+    /// candidates; realizing one plan per way from the memo is #1207 PR 6.
     pub fn explicit_local_candidates(root: Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
-        use asap_stage1_pass1_per_computation_candidates::test_support::{
-            compose_logical_candidate, generate_per_computation_candidates,
-        };
-        let local = generate_per_computation_candidates(
-            &asap_stage0_memo::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
-        )
-        .unwrap();
-        let mut choices = std::collections::BTreeSet::from([vec![0; local.targets.len()]]);
-        for (target, options) in local.targets.iter().enumerate() {
-            for choice in 1..options.choice_count() {
-                let mut selected = vec![0; local.targets.len()];
-                selected[target] = choice;
-                choices.insert(selected);
-            }
-        }
-        choices
-            .into_iter()
-            .map(|choice| {
-                match compose_logical_candidate(&local, &choice)
-                    .expect("explicit local rule composes")
-                    .remove(0)
-                {
-                    QueryRoot::Operator(node) => node,
-                    QueryRoot::Scalar(_) => panic!("operator fixture"),
-                }
-            })
-            .collect()
+        let _ = root;
+        todo!("#1207 PR 6: realize one plan per way to compute from Pass 1's memo")
     }
 
     /// One explicit plan using `family` wherever a local target supports it,
-    /// keeping all other computations exact. No workload Cartesian enumeration.
+    /// keeping all other computations exact. Realizing it from Pass 1's
+    /// memo is #1207 PR 6.
     pub fn explicit_summary_candidate(
         root: Rc<OperatorNode>,
         family: asap_types::ir::schema::SketchAlgorithm,
     ) -> Rc<OperatorNode> {
-        use asap_stage1_pass1_per_computation_candidates::test_support::{
-            compose_logical_candidate, generate_per_computation_candidates,
-        };
-        use asap_types::stages::HowToComputeAggregateMeasure;
-        let local = generate_per_computation_candidates(
-            &asap_stage0_memo::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
-        )
-        .unwrap();
-        let choices = local.targets.iter().map(|target| target.ways_to_compute.iter()
-            .position(|candidate| matches!(candidate, HowToComputeAggregateMeasure::Summary(found) if *found == family)).unwrap_or(0)).collect::<Vec<_>>();
-        match compose_logical_candidate(&local, &choices)
-            .expect("explicit family choices compose")
-            .remove(0)
-        {
-            QueryRoot::Operator(node) => node,
-            QueryRoot::Scalar(_) => panic!("operator fixture"),
-        }
+        let _ = (root, family);
+        todo!("#1207 PR 6: realize the plan of one summary family from Pass 1's memo")
     }
 
     /// Logical plans visited by the bounded search for `root`, in archive order.

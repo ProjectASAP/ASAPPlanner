@@ -1,6 +1,6 @@
-//! Frontends → Pass 1 → composed candidate logical ASAP DAGs: every candidate of
-//! a query is a valid DAG with the query's output columns (names, types and
-//! nullability).
+//! Frontends → Pass 1's memo: every candidate Pass 1 adds outputs its
+//! group's schema (`Memo::add_candidate` checks it), so every way to compute
+//! a query keeps its output columns (names, types and nullability).
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -12,18 +12,14 @@ use asap_executor::{
     values::{Batch, Value},
 };
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_stage1_pass1_per_computation_candidates::test_support::{
-    compose_logical_candidate, generate_per_computation_candidates,
-};
+use asap_stage1_pass1_per_computation_candidates::pass1_memo;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::{ColumnRef, CompareOpKind, ScalarValue};
 use asap_types::ir::schema::{DataType, Field, Schema};
-use asap_types::ir::schema::{
-    ExactKind, FieldDataType, SketchAlgorithm, SummaryInputExpr, SummaryUpdate,
-};
-use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot, ScalarExpr};
-use asap_types::stages::HowToComputeAggregateMeasure;
+use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SummaryInputExpr, SummaryUpdate};
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr};
+use asap_types::stages::{Memo, MemoGroupId};
 use asap_types::workload::{
     BatchEntry, DataWorkload, DurationMs, PlanningWorkload, Query, QueryLanguage,
     QueryRequirements, QueryWorkload,
@@ -76,71 +72,49 @@ fn promql(query: &str) -> QueryRoot {
         .remove(0)
 }
 
-fn output_columns(root: &QueryRoot) -> Vec<(String, String, bool)> {
-    match root {
-        QueryRoot::Operator(node) => node
-            .schema
-            .fields
-            .iter()
-            .map(|field| {
-                (
-                    field.name.clone(),
-                    format!("{:?}", field.dtype),
-                    field.nullable,
-                )
-            })
-            .collect(),
-        QueryRoot::Scalar(_) => vec![],
-    }
+/// Pass 1's memo of the one query `root`.
+fn pass1(root: QueryRoot) -> Memo {
+    let memo = asap_stage0_memo::memo_of_queries(&[root]).unwrap();
+    pass1_memo(memo, None).unwrap()
 }
 
-/// Compose every candidate of `root`; returns how many there were.
-fn compose_all(label: &str, root: QueryRoot) -> usize {
-    let expected = output_columns(&root);
-    let inventory =
-        generate_per_computation_candidates(&asap_stage0_memo::memo_of_queries(&[root]).unwrap())
-            .unwrap();
-    let radix: Vec<_> = inventory
-        .targets
+/// The one `Aggregate` group of `memo`.
+fn root_group(memo: &Memo) -> MemoGroupId {
+    let [group] = aggregate_groups(memo)[..] else {
+        panic!("one aggregate group expected")
+    };
+    group
+}
+
+/// Pass 1 over `root`; returns how many candidates its aggregate groups
+/// have. Each outputs its group's schema, or `Memo::add_candidate` would
+/// have rejected it and Pass 1 failed.
+fn candidates_of_aggregates(label: &str, root: QueryRoot) -> usize {
+    let memo = asap_stage0_memo::memo_of_queries(&[root]).unwrap();
+    let memo = pass1_memo(memo, None).unwrap_or_else(|e| panic!("{label}: {e}"));
+    aggregate_groups(&memo)
         .iter()
-        .map(|target| target.choice_count())
-        .collect();
-    let total: usize = radix.iter().product();
-    let mut choice = vec![0; radix.len()];
-    for _ in 0..total {
-        let composed = compose_logical_candidate(&inventory, &choice)
-            .unwrap_or_else(|e| panic!("{label} {choice:?}: {e}"));
-        let root = &composed[0];
-        root.validate_structure()
-            .unwrap_or_else(|e| panic!("{label} {choice:?}: {e}"));
-        let columns = output_columns(root);
-        // A heap top-k answers the declared `[keys.., topk_k]` with one row
-        // per ranked item: `topk_k` its Float64 estimate (the value the
-        // exact top-k's physical plan answers too), then the item labels.
-        let heap_topk = expected
-            .last()
-            .is_some_and(|(name, _, _)| name.starts_with("topk_"))
-            && columns.get(expected.len() - 1).map(|c| c.1.as_str()) == Some("Plain(Float64)");
-        if heap_topk {
-            let (ranked, keys) = expected.split_last().unwrap();
-            assert_eq!(&columns[..keys.len()], keys, "{label} {choice:?}");
-            assert_eq!(columns[keys.len()].0, ranked.0, "{label} {choice:?}");
-        } else {
-            assert_eq!(columns, expected, "{label} {choice:?}");
-        }
-        for (digit, radix) in choice.iter_mut().zip(&radix).rev() {
-            *digit += 1;
-            if *digit < *radix {
-                break;
-            }
-            *digit = 0;
-        }
-    }
-    total
+        .map(|group| memo.groups()[group.0 as usize].candidates.len())
+        .sum()
+}
+
+/// The groups of `memo` whose expression is an `Aggregate`.
+fn aggregate_groups(memo: &Memo) -> Vec<MemoGroupId> {
+    memo.groups()
+        .iter()
+        .enumerate()
+        .filter(|(_, group)| {
+            matches!(
+                group.expression,
+                Operator::NonASAP(NonASAPOp::Aggregate { .. })
+            )
+        })
+        .map(|(index, _)| MemoGroupId(index as u32))
+        .collect()
 }
 
 #[tokio::test]
-async fn sql_candidates_compose() {
+async fn sql_candidates_output_the_query_columns() {
     for query in [
         "SELECT src, count(*) FROM flows GROUP BY src HAVING src = 'a'",
         "SELECT src, count(*) FROM flows GROUP BY src HAVING count(*) > 10",
@@ -151,12 +125,12 @@ async fn sql_candidates_compose() {
         "SELECT src, approx_percentile_cont(bytes, 0.99) FILTER (WHERE bytes > 10) FROM flows GROUP BY src",
         "SELECT approx_percentile_cont(bytes, 0.99) FILTER (WHERE bytes > 10) FROM flows",
     ] {
-        assert!(compose_all(query, sql(query).await) >= 1, "{query}");
+        assert!(candidates_of_aggregates(query, sql(query).await) > 1, "{query}");
     }
 }
 
 #[test]
-fn promql_candidates_compose() {
+fn promql_candidates_output_the_query_columns() {
     for query in [
         "avg by (job) (m)",
         "avg_over_time(m[5m])",
@@ -168,64 +142,36 @@ fn promql_candidates_compose() {
         "count_over_time(m[5m])",
         "quantile_over_time(0.99, m[5m])",
     ] {
-        assert!(compose_all(query, promql(query)) >= 1, "{query}");
+        assert!(
+            candidates_of_aggregates(query, promql(query)) > 1,
+            "{query}"
+        );
     }
 }
 
-/// The summary estimates of `root`'s candidates that vary one target's
-/// choice, every other target taking its first.
-fn composed_estimates(root: QueryRoot) -> Vec<Rc<OperatorNode>> {
-    let inventory =
-        generate_per_computation_candidates(&asap_stage0_memo::memo_of_queries(&[root]).unwrap())
-            .unwrap();
-    let targets = inventory.targets.len();
-    let choices: Vec<_> = inventory
-        .targets
+/// The family and update of every sketch state group of Pass 1's memo
+/// of `root`.
+fn sketch_builds(root: QueryRoot) -> Vec<(SketchAlgorithm, SummaryUpdate)> {
+    pass1(root)
+        .groups()
         .iter()
-        .enumerate()
-        .flat_map(|(target, computation)| {
-            (1..computation.choice_count()).map(move |index| {
-                let mut choice = vec![0; targets];
-                choice[target] = index;
-                choice
-            })
+        .filter_map(|group| match &group.expression {
+            Operator::ASAP(ASAPOp::SummaryAgg {
+                family: FieldDataType::Sketch(kind, _),
+                input,
+                ..
+            }) => Some((*kind, input.clone())),
+            _ => None,
         })
-        .collect();
-    choices
-        .into_iter()
-        .flat_map(|choice| {
-            let composed = compose_logical_candidate(&inventory, &choice).unwrap();
-            let QueryRoot::Operator(node) = &composed[0] else {
-                panic!("operator root expected")
-            };
-            OperatorNode::reachable(node)
-        })
-        .filter(|node| matches!(node.asap(), Some(ASAPOp::SummaryEstimate { .. })))
         .collect()
 }
 
-fn update_of(estimate: &OperatorNode) -> (SketchAlgorithm, SummaryUpdate) {
-    let Some(ASAPOp::SummaryEstimate { summary_input, .. }) = estimate.asap() else {
-        unreachable!()
-    };
-    let Some(ASAPOp::SummaryAgg {
-        family: FieldDataType::Sketch(kind, _),
-        input,
-        ..
-    }) = summary_input.asap()
-    else {
-        panic!("sketch state expected")
-    };
-    (*kind, input.clone())
-}
-
-/// A heap sketch's bound is per item frequency, not Top-K membership, and
-/// its weights are not proven non-negative: a Top-K estimate gets no
-/// guarantee. A unit-count CMS estimate keeps its bound.
+/// A PromQL top-k over per-series sums offers both heap families, and a
+/// count offers Count-Min.
 #[test]
-fn topk_estimates_carry_no_frequency_bound() {
-    let topk = composed_estimates(promql("topk by (job) (10, sum_over_time(m[1m]))"));
-    let algorithms: Vec<_> = topk.iter().map(|node| update_of(node).0).collect();
+fn topk_offers_both_heap_families() {
+    let topk = sketch_builds(promql("topk by (job) (10, sum_over_time(m[1m]))"));
+    let algorithms: Vec<_> = topk.iter().map(|(kind, _)| *kind).collect();
     assert_eq!(
         algorithms,
         [
@@ -233,89 +179,62 @@ fn topk_estimates_carry_no_frequency_bound() {
             SketchAlgorithm::CountSketchWithHeap
         ]
     );
-    assert!(topk.iter().all(|node| node.guarantee.is_none()));
-
-    let count = composed_estimates(promql("count by (job) (m)"));
-    let cms = count
-        .iter()
-        .find(|node| update_of(node).0 == SketchAlgorithm::Cms)
-        .expect("CMS candidate");
-    assert!(cms.guarantee.as_ref().is_some_and(|g| !g.is_exact()));
+    let count = sketch_builds(promql("count by (job) (m)"));
+    assert!(count.iter().any(|(kind, _)| *kind == SketchAlgorithm::Cms));
 }
 
 /// Top-K over a grouped sum is a whole-expression heap: it absorbs the
 /// sum and ranks its group keys, read from the rows the sum reads.
 #[test]
 fn topk_over_an_aggregate_ranks_its_labels() {
-    let estimates = composed_estimates(promql("topk(3, sum by (job) (rate(m[5m])))"));
-    assert_eq!(estimates.len(), 2);
-    for estimate in &estimates {
+    let builds = sketch_builds(promql("topk(3, sum by (job) (rate(m[5m])))"));
+    assert_eq!(builds.len(), 2);
+    for (_, update) in &builds {
         assert_eq!(
-            update_of(estimate).1.item,
+            update.item,
             Some(SummaryInputExpr::Column(ColumnRef::Named("job".into())))
         );
     }
 }
 
-/// A subquery inside a measure filter is substituted too: each choice for
-/// the inner quantile gives its own DAG, and an approximate inner result clears
-/// the outer measure's guarantee.
+/// A subquery inside a measure filter is an input group of the filtered
+/// state: the outer count's state reads the inner quantile's group, which
+/// has its own candidates (exact and the quantile sketches' readouts).
 #[tokio::test]
-async fn subquery_in_a_measure_filter_is_substituted() {
+async fn subquery_in_a_measure_filter_is_an_input_group_of_the_state() {
     let query = "SELECT src, count(*) FILTER (WHERE bytes > (SELECT approx_percentile_cont(bytes, 0.5) FROM flows)) \
                  FROM flows GROUP BY src";
-    let inventory = generate_per_computation_candidates(
-        &asap_stage0_memo::memo_of_queries(&[sql(query).await]).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(inventory.targets.len(), 2);
-    let inner = inventory
-        .targets
+    let memo = pass1(sql(query).await);
+    let subqueries: Vec<MemoGroupId> = memo
+        .groups()
         .iter()
-        .position(|target| {
-            inventory
-                .aggregate(target)
-                .non_asap()
-                .and_then(|op| match op {
-                    NonASAPOp::Aggregate { reduction, .. } => reduction.group_keys(),
-                    _ => None,
-                })
-                .is_some_and(|by| by.keys().is_empty())
+        .filter_map(|group| match &group.expression {
+            Operator::ASAP(ASAPOp::SummaryAgg {
+                filter: Some(filter),
+                ..
+            }) => Some(
+                filter
+                    .0
+                    .operator_refs()
+                    .into_iter()
+                    .copied()
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
         })
-        .expect("inner quantile");
-    let candidates = &inventory.targets[inner].ways_to_compute;
-    assert!(candidates.len() > 1);
-    let (mut seen, mut approximate_inner) = (Vec::new(), false);
-    for (index, candidate) in candidates.iter().enumerate() {
-        let mut choice = vec![0; 2];
-        choice[inner] = index;
-        let composed = compose_logical_candidate(&inventory, &choice).unwrap();
-        let QueryRoot::Operator(root) = &composed[0] else {
-            panic!("operator root expected")
-        };
-        let shown = format!("{root:?}");
-        assert!(!seen.contains(&shown), "{candidate:?} composes as another");
-        seen.push(shown);
-        let finalize = OperatorNode::reachable(root)
-            .into_iter()
-            .find(|node| {
-                matches!(
-                    node.asap(),
-                    Some(ASAPOp::FinalizeExactAccumulator { child })
-                        if matches!(child.asap(), Some(ASAPOp::SummaryAgg { filter: Some(_), .. }))
-                )
-            })
-            .expect("filtered outer count");
-        let Some(ASAPOp::FinalizeExactAccumulator { child }) = finalize.asap() else {
-            unreachable!()
-        };
-        let exact = |node: &OperatorNode| node.guarantee.as_ref().is_some_and(|g| g.is_exact());
-        // The state's children: its input rows, then the subquery.
-        let inputs_exact = child.children().into_iter().all(|node| exact(node));
-        assert_eq!(exact(&finalize), inputs_exact, "{candidate:?}");
-        approximate_inner |= !inputs_exact;
+        .flatten()
+        .collect();
+    assert!(!subqueries.is_empty());
+    // The subquery reads the inner quantile's aggregate group.
+    for subquery in subqueries {
+        let below = memo.groups()[subquery.0 as usize].expression.children();
+        assert!(below.iter().any(|group| {
+            matches!(
+                memo.groups()[group.0 as usize].expression,
+                Operator::NonASAP(NonASAPOp::Aggregate { .. })
+            ) && memo.groups()[group.0 as usize].candidates.len() > 1
+        }));
     }
-    assert!(approximate_inner);
 }
 
 /// Run the logical DAG `root` over `rows` of its one scanned table, each row
@@ -392,49 +311,48 @@ fn execute(root: &Rc<OperatorNode>, rows: &[Vec<(&str, Value)>]) -> Vec<Vec<Stri
     out
 }
 
-/// SQL `avg` from its `sum` and `count` states, composed for the query.
+/// SQL `avg` from its `sum` and `count` states: the exact plan and the
+/// plan computing `avg` as `sum` and `count`, to execute. Realizing the
+/// second from Pass 1's memo is #1207 PR 6.
 async fn avg_as_sum_and_count(
     catalog: &SqlCatalog,
     query: &str,
 ) -> (Rc<OperatorNode>, Rc<OperatorNode>) {
-    let exact = lower_sql(query, catalog, accuracy()).await.unwrap();
-    let inventory = generate_per_computation_candidates(
-        &asap_stage0_memo::memo_of_queries(&[QueryRoot::Operator(exact.clone())]).unwrap(),
-    )
-    .unwrap();
-    let choice: Vec<_> = inventory
-        .targets
+    let _ = (catalog, query);
+    todo!("#1207 PR 6: realize the sum-and-count plan of `avg` from Pass 1's memo")
+}
+
+/// The candidate of `memo`'s root group that is not its own expression
+/// and computes `avg` from its `sum` and `count` states, and every group
+/// below it.
+fn avg_candidate_groups(memo: &Memo) -> Vec<MemoGroupId> {
+    let root = root_group(memo);
+    let group = &memo.groups()[root.0 as usize];
+    let mut below: Vec<MemoGroupId> = Vec::new();
+    let mut to_visit: Vec<MemoGroupId> = group.candidates[1..]
         .iter()
-        .map(|target| {
-            target
-                .ways_to_compute
-                .iter()
-                .position(|c| {
-                    *c == HowToComputeAggregateMeasure::ExactAccumulator(vec![
-                        ExactKind::Sum,
-                        ExactKind::Count,
-                    ])
-                })
-                .expect("avg as sum and count")
+        .flat_map(|candidate| {
+            candidate
+                .expression
+                .operator
+                .children()
+                .into_iter()
+                .copied()
         })
         .collect();
-    let composed =
-        compose_logical_candidate(&inventory, &choice).unwrap_or_else(|e| panic!("{query}: {e}"));
-    let QueryRoot::Operator(root) = &composed[0] else {
-        panic!("operator root expected")
-    };
-    assert!(
-        OperatorNode::reachable(root)
-            .iter()
-            .any(|node| matches!(node.non_asap(), Some(NonASAPOp::Join { .. }))),
-        "{query}: sum joined with count expected"
-    );
-    assert_eq!(
-        output_columns(&QueryRoot::Operator(root.clone())),
-        output_columns(&QueryRoot::Operator(exact.clone())),
-        "{query}"
-    );
-    (exact, root.clone())
+    while let Some(next) = to_visit.pop() {
+        if !below.contains(&next) {
+            below.push(next);
+            to_visit.extend(
+                memo.groups()[next.0 as usize]
+                    .expression
+                    .children()
+                    .into_iter()
+                    .copied(),
+            );
+        }
+    }
+    below
 }
 
 fn avg_table() -> SqlCatalog {
@@ -507,13 +425,25 @@ async fn filtered_sql_avg_is_null_without_matching_rows() {
         "SELECT k, avg(value) FILTER (WHERE value > 100) FROM t GROUP BY k",
         "SELECT avg(value) FILTER (WHERE value > 100) FROM t",
     ] {
-        let (_, root) = avg_as_sum_and_count(&catalog, query).await;
-        assert!(root.schema.fields.last().unwrap().nullable, "{query}");
-        let null_when_no_count = OperatorNode::reachable(&root).iter().any(|node| {
-            let Some(NonASAPOp::Project { cols, child, .. }) = node.non_asap() else {
+        let exact = lower_sql(query, &catalog, accuracy()).await.unwrap();
+        let memo = pass1(QueryRoot::Operator(exact));
+        let root = &memo.groups()[root_group(&memo).0 as usize];
+        assert!(
+            root.group_properties.schema.fields.last().unwrap().nullable,
+            "{query}"
+        );
+        assert!(root.candidates.len() > 1, "{query}");
+        let null_when_no_count = memo.groups().iter().any(|group| {
+            let Operator::NonASAP(NonASAPOp::Project { cols, child, .. }) = &group.expression
+            else {
                 return false;
             };
-            let count = child.schema.fields.len() - 1;
+            let count = memo.groups()[child.0 as usize]
+                .group_properties
+                .schema
+                .fields
+                .len()
+                - 1;
             matches!(
                 &cols.last().unwrap().expr,
                 ScalarExpr::Case { branches, .. } if matches!(
@@ -525,28 +455,19 @@ async fn filtered_sql_avg_is_null_without_matching_rows() {
                 )
             )
         });
-        assert!(null_when_no_count, "{query}: {root:#?}");
+        assert!(null_when_no_count, "{query}");
     }
 }
 
 /// PromQL `avg` divides its `sum` and `count` vectors with a `BinaryOp`.
 #[test]
 fn promql_avg_divides_sum_and_count_vectors() {
-    let inventory = generate_per_computation_candidates(
-        &asap_stage0_memo::memo_of_queries(&[promql("avg by (job) (m)")]).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        inventory.targets[0].ways_to_compute[0],
-        HowToComputeAggregateMeasure::ExactAccumulator(vec![ExactKind::Sum, ExactKind::Count])
-    );
-    let composed = compose_logical_candidate(&inventory, &[0]).unwrap();
-    let QueryRoot::Operator(root) = &composed[0] else {
-        panic!("operator root expected")
-    };
-    let kinds: Vec<_> = OperatorNode::reachable(root)
+    let memo = pass1(promql("avg by (job) (m)"));
+    let root = &memo.groups()[root_group(&memo).0 as usize];
+    assert!(root.candidates.len() > 1);
+    let kinds: Vec<_> = avg_candidate_groups(&memo)
         .iter()
-        .map(|node| node.operator.kind_name())
+        .map(|group| memo.groups()[group.0 as usize].expression.kind_name())
         .collect();
     assert!(
         kinds.contains(&"BinaryOp") && !kinds.contains(&"Join"),
@@ -565,45 +486,18 @@ fn table(columns: &[(&str, bool)]) -> SqlCatalog {
     SqlCatalog::new().with_table("t", Schema::new(fields))
 }
 
-/// Every candidate of `query` over `catalog`, composed, by candidate.
-async fn every_candidate(
-    catalog: &SqlCatalog,
-    query: &str,
-) -> Vec<(
-    HowToComputeAggregateMeasure,
-    Result<
-        Vec<QueryRoot>,
-        asap_stage1_pass1_per_computation_candidates::PerComputationCandidateError,
-    >,
-)> {
+/// Pass 1's memo of `query` over `catalog`.
+async fn pass1_sql(catalog: &SqlCatalog, query: &str) -> Memo {
     let root = lower_sql(query, catalog, accuracy()).await.unwrap();
-    let inventory = generate_per_computation_candidates(
-        &asap_stage0_memo::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(inventory.targets.len(), 1, "{query}");
-    inventory.targets[0]
-        .ways_to_compute
-        .iter()
-        .enumerate()
-        .map(|(index, candidate)| {
-            (
-                candidate.clone(),
-                compose_logical_candidate(&inventory, &[index]),
-            )
-        })
-        .collect()
+    pass1(QueryRoot::Operator(root))
 }
 
-/// The update of every `count` state (exact or sketch) below `root`.
-fn count_updates(root: &QueryRoot) -> Vec<SummaryUpdate> {
-    let QueryRoot::Operator(root) = root else {
-        panic!("operator root expected")
-    };
-    OperatorNode::reachable(root)
+/// The update of every `count` state (exact or sketch) in `memo`.
+fn count_updates(memo: &Memo) -> Vec<SummaryUpdate> {
+    memo.groups()
         .iter()
-        .filter_map(|node| match node.asap() {
-            Some(ASAPOp::SummaryAgg { family, input, .. })
+        .filter_map(|group| match &group.expression {
+            Operator::ASAP(ASAPOp::SummaryAgg { family, input, .. })
                 if !matches!(
                     family,
                     FieldDataType::ExactAggregate(asap_types::ir::schema::ExactKind::Sum, _)
@@ -655,12 +549,17 @@ async fn sql_avg_counts_its_own_input() {
     assert_eq!(execute(&root, &rows), want);
 }
 
-/// SQL `avg` as `sum` and `count` keeps an explicit output alias.
+/// SQL `avg` as `sum` and `count` keeps an explicit output alias: its
+/// candidate outputs the root group's schema, which names it.
 #[tokio::test]
 async fn sql_avg_keeps_its_explicit_output_name() {
-    let (_, root) =
-        avg_as_sum_and_count(&avg_table(), "SELECT avg(value) AS avg_latency FROM t").await;
-    assert_eq!(root.schema.fields.last().unwrap().name, "avg_latency");
+    let memo = pass1_sql(&avg_table(), "SELECT avg(value) AS avg_latency FROM t").await;
+    assert!(memo.groups()[root_group(&memo).0 as usize].candidates.len() > 1);
+    let QueryRoot::Operator(query_root) = &memo.query_roots[0] else {
+        panic!("operator root expected")
+    };
+    let output = &memo.groups()[query_root.0 as usize].group_properties.schema;
+    assert_eq!(output.fields.last().unwrap().name, "avg_latency");
 }
 
 /// SQL `avg` of a non-null Int64 column as `sum` and `count` keeps the exact plan's Float64 columns.
@@ -689,22 +588,19 @@ async fn sql_avg_of_an_int64_column_keeps_the_exact_columns() {
 }
 
 /// `count(*)` with no column known to be non-null (one nullable numeric
-/// column, or several and none named `value`) is unsupported for every
-/// candidate, not a count of a nullable column or an invalid DAG.
+/// column, or several and none named `value`) gets no accumulator or
+/// sketch: the root group keeps only its plain exact aggregate, not a count
+/// of a nullable column.
 #[tokio::test]
-async fn sql_count_star_without_a_non_null_column_is_unsupported() {
+async fn sql_count_star_without_a_non_null_column_is_only_exact() {
     for columns in [&[("v", true)][..], &[("a", true), ("b", true)][..]] {
-        let catalog = table(columns);
-        for (candidate, composed) in
-            every_candidate(&catalog, "SELECT k, count(*) FROM t GROUP BY k").await
-        {
-            match composed {
-                Err(asap_stage1_pass1_per_computation_candidates::PerComputationCandidateError::Unsupported(
-                    _,
-                )) => {}
-                other => panic!("{columns:?} {candidate:?}: {other:?}"),
-            }
-        }
+        let memo = pass1_sql(&table(columns), "SELECT k, count(*) FROM t GROUP BY k").await;
+        assert_eq!(
+            memo.groups()[root_group(&memo).0 as usize].candidates.len(),
+            1,
+            "{columns:?}"
+        );
+        assert!(count_updates(&memo).is_empty(), "{columns:?}");
     }
 }
 
@@ -714,13 +610,10 @@ async fn sql_count_star_without_a_non_null_column_is_unsupported() {
 #[tokio::test]
 async fn sql_count_of_a_nullable_column_counts_its_values() {
     let catalog = table(&[("v", true), ("n", false)]);
-    for (candidate, composed) in
-        every_candidate(&catalog, "SELECT k, count(v) FROM t GROUP BY k").await
-    {
-        let composed = composed.unwrap_or_else(|e| panic!("{candidate:?}: {e}"));
-        composed[0].validate_structure().unwrap();
-        let updates = count_updates(&composed[0]);
-        assert_eq!(updates.len(), 1, "{candidate:?}");
-        assert!(reads_only(&updates[0], "v"), "{candidate:?}: {updates:?}");
+    let memo = pass1_sql(&catalog, "SELECT k, count(v) FROM t GROUP BY k").await;
+    let updates = count_updates(&memo);
+    assert!(!updates.is_empty());
+    for update in &updates {
+        assert!(reads_only(update, "v"), "{updates:?}");
     }
 }

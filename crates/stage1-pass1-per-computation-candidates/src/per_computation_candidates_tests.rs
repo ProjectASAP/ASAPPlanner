@@ -1,96 +1,73 @@
-//! Frontend-to-Pass-1 acceptance: candidate discovery precedes empirical selection.
-use crate::per_computation_candidates::computation_candidates_for_intent;
+//! Pass 1's tests. Each builds its input memo through `Memo::find_or_add_group`
+//! and `Memo::add_query`, as Stage 0 does, and reads the candidates
+//! [`pass1_memo`](crate::pass1_memo) adds.
+use std::fmt::Write as _;
+
+use asap_types::ir::operator::operator_properties::Reduction;
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::AccuracyTarget;
-use asap_types::ir::schema::SketchAlgorithm;
+use asap_types::ir::{ASAPOp, Operator};
+use asap_types::stages::{Memo, MemoGroupId};
 
-use asap_types::stages::HowToComputeAggregateMeasure;
+use crate::pass1_memo;
+use crate::test_fixtures::{aggregate_group, query, scan_group};
 
-fn approximate() -> AccuracyTarget {
-    AccuracyTarget::max_error(0.05).failure_probability(0.01)
-}
-fn candidates_for(intent: AggIntent) -> Vec<HowToComputeAggregateMeasure> {
-    computation_candidates_for_intent(&intent)
-        .unwrap()
-        .candidates
-}
-fn algorithms(choices: &[HowToComputeAggregateMeasure]) -> Vec<SketchAlgorithm> {
-    choices
-        .iter()
-        .filter_map(|choice| match choice {
-            HowToComputeAggregateMeasure::Summary(algorithm) => Some(*algorithm),
-            _ => None,
-        })
-        .collect()
-}
-
-/// Example 2 preserves specialized distinct summaries and the universal alternative.
-#[test]
-fn cardinality_keeps_exact_specialized_and_universal_candidates() {
-    let choices = candidates_for(AggIntent::Cardinality {
-        cols: vec![0],
-        accuracy: approximate(),
-    });
-    assert_eq!(choices[0], HowToComputeAggregateMeasure::Exact);
-    assert_eq!(
-        algorithms(&choices),
-        vec![
-            SketchAlgorithm::Hll,
-            SketchAlgorithm::Kmv,
-            SketchAlgorithm::UnivMon
-        ]
-    );
-    let tuple = candidates_for(AggIntent::Cardinality {
-        cols: vec![0, 1],
-        accuracy: approximate(),
-    });
-    assert!(!algorithms(&tuple).contains(&SketchAlgorithm::UnivMon));
+/// A compact printout of every group and its candidates.
+fn memo_printout(memo: &Memo) -> String {
+    let mut out = String::new();
+    for (index, group) in memo.groups().iter().enumerate() {
+        let _ = writeln!(out, "G{index}: {}", label(&group.expression));
+        for (position, candidate) in group.candidates.iter().enumerate() {
+            let inputs: Vec<String> = candidate
+                .expression
+                .operator
+                .children()
+                .iter()
+                .map(|g| format!("G{}", g.0))
+                .collect();
+            let _ = writeln!(
+                out,
+                "  [{position}] {} inputs=[{}] θ={:?} floors={:?} fused={:?}",
+                label(&candidate.expression.operator),
+                inputs.join(", "),
+                candidate.logical_properties.parameters(),
+                candidate
+                    .input_requirements
+                    .iter()
+                    .map(|r| r.parameter_floor_for_required_accuracy().cloned())
+                    .collect::<Vec<_>>(),
+                candidate.fused_groups,
+            );
+        }
+    }
+    out
 }
 
-/// Frequency moments retain exact execution and a universal sketch without certification.
-#[test]
-fn frequency_statistics_keep_universal_choices() {
-    for intent in [
-        AggIntent::FrequencyL2 {
-            col: Some(0),
-            accuracy: approximate(),
-        },
-        AggIntent::FrequencyEntropy {
-            col: Some(0),
-            accuracy: approximate(),
-        },
-    ] {
-        let choices = candidates_for(intent);
-        assert_eq!(choices[0], HowToComputeAggregateMeasure::Exact);
-        assert_eq!(algorithms(&choices), vec![SketchAlgorithm::UnivMon]);
+fn label(operator: &Operator<MemoGroupId>) -> String {
+    match operator {
+        Operator::ASAP(ASAPOp::SummaryAgg { family, .. }) => format!("SummaryAgg[{family:?}]"),
+        Operator::ASAP(ASAPOp::SummaryEstimate { query, .. }) => {
+            format!("SummaryEstimate[{query:?}]")
+        }
+        operator => operator.kind_name().to_string(),
     }
 }
 
-/// TopK keeps both declared heap substrates without choosing an implementation.
-#[test]
-fn topk_keeps_both_specialized_heap_choices() {
-    let choices = candidates_for(AggIntent::TopK {
-        k: 10,
-        accuracy: approximate(),
-    });
-    assert_eq!(choices[0], HowToComputeAggregateMeasure::Exact);
-    assert_eq!(
-        algorithms(&choices),
-        vec![
-            SketchAlgorithm::CmsWithHeap,
-            SketchAlgorithm::CountSketchWithHeap
-        ]
-    );
+fn quantile(q: f64) -> AggIntent {
+    AggIntent::Quantile {
+        col: None,
+        q,
+        accuracy: AccuracyTarget::max_error(0.01).failure_probability(0.01),
+    }
 }
 
-/// Summary candidates are unsized, so they do not depend on the requested error.
+/// The running example (concepts doc, section 1).
 #[test]
-fn summary_candidates_are_unsized() {
-    let loose = candidates_for(AggIntent::Count {
-        accuracy: approximate(),
-    });
-    let tight = candidates_for(AggIntent::Count {
-        accuracy: AccuracyTarget::max_error(0.0001).failure_probability(0.0001),
-    });
-    assert_eq!(loose, tight);
+fn running_example() {
+    let mut memo = Memo::default();
+    let g1 = scan_group(&mut memo, "latency", &[]);
+    let g3 = aggregate_group(&mut memo, g1, Reduction::by(vec![]), vec![quantile(0.95)]);
+    query(&mut memo, g3);
+    let memo = pass1_memo(memo, None).unwrap();
+    println!("{}", memo_printout(&memo));
 }

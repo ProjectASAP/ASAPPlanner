@@ -9,8 +9,8 @@ use super::hash_consing::{expression_hash, same_expression, same_value};
 use super::{GroupProperties, MemoGroup, MemoGroupAsInput, MemoGroupId};
 use crate::ir::properties::summary_coverage::SummaryCoverage;
 use crate::ir::schema::{
-    FamilyCapability, FieldDataType, GroupingStrategy, HydraKind, HydraParams, SketchAlgorithm,
-    SketchParams,
+    FamilyCapability, FieldDataType, GroupingStrategy, HydraKind, HydraParams, Schema,
+    SketchAlgorithm, SketchParams,
 };
 use crate::ir::ASAPOp;
 use crate::ir::Operator;
@@ -128,7 +128,7 @@ impl Memo {
         let output = derive_group_properties(self, &candidate.expression.operator)
             .map_err(CandidateError::Schema)?;
         let group_properties = &self.groups[group.0 as usize].group_properties;
-        if output.schema != group_properties.schema
+        if !same_output_columns(&output.schema, &group_properties.schema)
             || output.result_kind != group_properties.result_kind
         {
             return Err(CandidateError::OutputDiffersFromGroup { group });
@@ -193,6 +193,15 @@ impl Memo {
                         .copied(),
                 );
             }
+        }
+    }
+
+    /// Group `group_id` read as an operator's input: the node rules and the
+    /// rules that read an input's operator take it as they take a node.
+    pub fn group_as_input(&self, group_id: MemoGroupId) -> MemoGroupAsInput<'_> {
+        MemoGroupAsInput {
+            memo: self,
+            group_id,
         }
     }
 
@@ -287,6 +296,26 @@ pub enum CandidateError {
     /// not compute the group's result (a bug in the rule that built it).
     #[error("the candidate's output differs from group {group:?}'s")]
     OutputDiffersFromGroup { group: MemoGroupId },
+}
+
+/// Whether `left` and `right` are one output: the same columns (names,
+/// types, nullability), time index and unique keys. Two schema fields
+/// that no operator can set per column are not compared:
+/// - each field's table qualifier, which only resolves a qualified name (a
+///   `Project` sets one qualifier for all columns, while a grouped SQL
+///   aggregate's keys keep their table and its measures have none);
+/// - `closed`, whether the columns are all the row carries (a `Project`
+///   that names a readout's value as a PromQL per-series aggregate names it
+///   closes the schema the aggregate leaves open).
+fn same_output_columns(left: &Schema, right: &Schema) -> bool {
+    left.fields.len() == right.fields.len()
+        && left
+            .fields
+            .iter()
+            .zip(&right.fields)
+            .all(|(l, r)| l.name == r.name && l.dtype == r.dtype && l.nullable == r.nullable)
+        && left.time_index == right.time_index
+        && left.unique_keys == right.unique_keys
 }
 
 /// Lists `parent` among `group`'s parents, once.
