@@ -255,6 +255,7 @@ pub fn min_precision(
 /// bound up to `⌈1/ε⌉` (18 when none up to 18 does). Pass 1 then raises
 /// the precision by the same rule ([`min_precision`]) when the source's own
 /// bound or a smaller failure probability needs it.
+#[cfg(test)]
 pub(crate) fn hll_precision(eps: f64, delta: f64) -> u8 {
     if !(eps.is_finite() && eps > 0.0 && delta.is_finite() && delta > 0.0) {
         return 18;

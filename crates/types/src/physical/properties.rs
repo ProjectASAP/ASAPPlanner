@@ -64,8 +64,12 @@ impl PhysicalProperties {
         timing: ExecutionTiming,
         lifetime: Lifetime,
     ) -> Result<Self, PhysicalPropertiesError> {
-        let _ = (timing, lifetime);
-        todo!("#1207 PR 1: reject the invalid combination of section 2")
+        match (timing, lifetime) {
+            (ExecutionTiming::IngestionTime, Lifetime::OneEvaluation(_)) => {
+                Err(PhysicalPropertiesError::OneEvaluationAtIngestion)
+            }
+            _ => Ok(Self { timing, lifetime }),
+        }
     }
 
     /// $\tau_v$.
@@ -89,32 +93,35 @@ mod tests {
     use super::*;
     use ExecutionTiming::{IngestionTime, QueryTime};
 
-    const MEMORY: StorageMedium = StorageMedium::Memory;
-
-    /// The one invalid combination of the concepts doc, section 2.
+    /// `new` accepts every (τ, ℓ) except (IngestionTime, OneEvaluation), for
+    /// both media, and keeps what it was given.
     #[test]
-    fn new_rejects_one_evaluation_at_ingestion() {
-        assert_eq!(
-            PhysicalProperties::new(IngestionTime, Lifetime::OneEvaluation(MEMORY)),
-            Err(PhysicalPropertiesError::OneEvaluationAtIngestion)
-        );
-    }
-
-    /// The valid (τ, ℓ) pairs of section 2.
-    #[test]
-    fn new_accepts_each_valid_pair() {
-        for (timing, lifetime) in [
-            (QueryTime, Lifetime::None),
-            (IngestionTime, Lifetime::None),
-            (QueryTime, Lifetime::OneEvaluation(MEMORY)),
-            (QueryTime, Lifetime::AcrossEvaluations(MEMORY)),
-            (
-                IngestionTime,
-                Lifetime::AcrossEvaluations(StorageMedium::Disk),
-            ),
-        ] {
-            let properties = PhysicalProperties::new(timing, lifetime).unwrap();
-            assert_eq!(properties.is_materialized(), lifetime != Lifetime::None);
+    fn new_over_every_timing_and_lifetime() {
+        for medium in [StorageMedium::Memory, StorageMedium::Disk] {
+            for (timing, lifetime, valid) in [
+                (QueryTime, Lifetime::None, true),
+                (QueryTime, Lifetime::OneEvaluation(medium), true),
+                (QueryTime, Lifetime::AcrossEvaluations(medium), true),
+                (IngestionTime, Lifetime::None, true),
+                (IngestionTime, Lifetime::OneEvaluation(medium), false),
+                (IngestionTime, Lifetime::AcrossEvaluations(medium), true),
+            ] {
+                let properties = PhysicalProperties::new(timing, lifetime);
+                match valid {
+                    true => {
+                        let properties = properties.unwrap();
+                        assert_eq!(
+                            (properties.timing(), properties.lifetime()),
+                            (timing, lifetime)
+                        );
+                        assert_eq!(properties.is_materialized(), lifetime != Lifetime::None);
+                    }
+                    false => assert_eq!(
+                        properties,
+                        Err(PhysicalPropertiesError::OneEvaluationAtIngestion)
+                    ),
+                }
+            }
         }
     }
 }

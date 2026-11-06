@@ -20,6 +20,7 @@ pub(super) fn guarantee(
     ))
 }
 
+#[cfg(test)]
 pub(super) fn size_params(epsilon: f64) -> SketchParams {
     SketchParams::DDSketch { alpha: epsilon }
 }
