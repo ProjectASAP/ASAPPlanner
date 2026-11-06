@@ -648,7 +648,7 @@ fn compacted_kll_tumbling_windows_merge_within_the_calibrated_rank_error() {
     const ROWS_PER_TUMBLING_WINDOW: u64 = 1000;
     const K: u32 = 200;
     // The planner's empirical 99% KLL rank error, `2.296 / k^0.9723`
-    // (`asap_logical_asap_optimization`'s `kll_rank_error_99`).
+    // (`asap_accuracy`'s `kll_rank_error_99`).
     let bound = 2.296 / f64::from(K).powf(0.9723);
     let n = (TUMBLING_WINDOW_COUNT * ROWS_PER_TUMBLING_WINDOW) as f64;
     let input = schema(&[("v", DataType::Float64, false)]);

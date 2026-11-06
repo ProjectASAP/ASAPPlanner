@@ -3,7 +3,7 @@
 //! configuration, fused builds), with every intermediate result its own
 //! group (a [`Memo`]), which Pass 2 extends.
 
-use crate::pass1::per_computation_candidates::{
+use crate::per_computation_candidates::{
     generate_per_computation_candidates, PerComputationCandidateError,
 };
 use asap_types::deployment_capabilities::SupportedSummary;

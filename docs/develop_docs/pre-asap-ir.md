@@ -149,7 +149,7 @@ yet — and calls `asap_frontend_common::resolve_root`, which does three things 
 The result is `Rc<OperatorNode>`. `lower_sql` / `lower_sql_dialect` and
 `lower_metricsql` return it; `lower_promql_query_workload` returns a `QueryRoot` per query.
 
-Workload search then runs structural CSE (`share_common_sub_dags` (crate-private in `asap_logical_asap_optimization`, `stage0/cse.rs`)) once
+Workload search then runs structural CSE (`share_common_sub_dags` (crate-private in `asap_stage0_memo`, `cse.rs`)) once
 across every root: bottom-up hash-consing where the structural hash is only a filter and the
 typed `PartialEq` decides sharing, following scalar references like any other input, and
 gated by `NonASAPOp::is_shareable_when_equal` for non-ASAP producers.

@@ -1,9 +1,9 @@
 //! Frontend-to-Pass-1 acceptance: candidate discovery precedes empirical selection.
-use crate::pass1::per_computation_candidates::{
+use crate::per_computation_candidates::{
     computation_candidates_for_intent, generate_per_computation_candidates,
     PerComputationCandidateError,
 };
-use crate::stage0::memo_of_queries;
+use asap_stage0_memo::memo_of_queries;
 use asap_types::ir::operator::operator_properties::{Reduction, Source};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::AccuracyTarget;
@@ -304,7 +304,7 @@ fn filtered_measure_keeps_candidates_and_records_its_filter() {
 
 /// Target `target`'s own ways to compute.
 fn choices_of(
-    inventory: &crate::pass1::per_computation_candidates::PerComputationCandidates,
+    inventory: &crate::per_computation_candidates::PerComputationCandidates,
     target: usize,
 ) -> Vec<HowToComputeAggregateMeasure> {
     inventory.targets[target].ways_to_compute.clone()
@@ -575,7 +575,7 @@ fn global_aggregate_having_stays_above() {
 
 /// The `HAVING` entries of the target whose measure satisfies `is`.
 fn having_of(
-    inventory: &crate::pass1::per_computation_candidates::PerComputationCandidates,
+    inventory: &crate::per_computation_candidates::PerComputationCandidates,
     is: impl Fn(&AggIntent) -> bool,
 ) -> Vec<HavingEntry> {
     let target = inventory
@@ -749,7 +749,7 @@ fn without_and_per_entity_having_stays_above() {
 /// with an exact guarantee.
 #[test]
 fn composed_candidate_replaces_chosen_target_with_summary_evaluation() {
-    use crate::pass1::composition::compose_logical_candidate;
+    use crate::composition::compose_logical_candidate;
     let producer = aggregate(AggIntent::Cardinality { cols: vec![0] });
     let inventory = generate_per_computation_candidates(
         &memo_of_queries(
@@ -782,7 +782,7 @@ fn composed_candidate_replaces_chosen_target_with_summary_evaluation() {
 
 /// The one root of the workload candidate composed from `roots` and `choice`.
 fn composed(roots: Vec<Rc<OperatorNode>>, choice: &[usize]) -> Vec<Rc<OperatorNode>> {
-    use crate::pass1::composition::compose_logical_candidate;
+    use crate::composition::compose_logical_candidate;
     let inventory = generate_per_computation_candidates(
         &memo_of_queries(
             &roots
@@ -1026,7 +1026,7 @@ fn composed_guarantees() {
 /// a subquery in it reads the subquery's substitution.
 #[test]
 fn own_having_subquery_is_substituted() {
-    use crate::pass1::composition::compose_logical_candidate;
+    use crate::composition::compose_logical_candidate;
     let inner = aggregate(quantile());
     let outer = grouped_quantile(Some(above_scalar(1, inner.clone())));
     let inventory = generate_per_computation_candidates(

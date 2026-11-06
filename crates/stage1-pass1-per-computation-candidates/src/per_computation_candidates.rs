@@ -83,7 +83,7 @@
 //! per output value; attached to the memo groups, each candidate's
 //! approximate inputs are sized for the values its consumers' targets cover
 //! (`δ / (n · V)`,
-//! [`pass1_memo`](crate::pass1::logical_memo_candidates::pass1_memo)),
+//! [`pass1_memo`](crate::logical_memo_candidates::pass1_memo)),
 //! their final sizes. Pass 2 inherits them or takes the strictest shared
 //! consumer's, and Stage 3 only checks the composed accuracy.
 //!
@@ -113,7 +113,7 @@ use thiserror::Error;
 
 use asap_accuracy::sizing::sketch_statistic;
 
-use crate::pass1::realization::summary_candidates;
+use crate::realization::summary_candidates;
 use asap_types::deployment_capabilities::{summary_supported, SupportedSummary};
 use asap_types::stages::{
     ComputationTarget, FusedComputation, HavingEntry, HavingPlacement,
@@ -159,7 +159,7 @@ fn prune_own(
 /// Compact Pass 1 inventory over the memo groups it walked: one target per
 /// measure of each aggregate group, however many queries read the group.
 /// Pass 1's working form, not its output:
-/// [`pass1_memo`](crate::pass1::pass1_memo)
+/// [`pass1_memo`](crate::pass1_memo)
 /// builds, prunes and attaches it to the memo groups. Public only to tests
 /// (feature `test-support`).
 #[derive(Debug, Clone)]
@@ -819,7 +819,7 @@ fn reads_only_time_series(node: &OperatorNode) -> bool {
 pub(super) fn whole_expression_input(
     target: &OperatorNode,
 ) -> Option<(Rc<OperatorNode>, SummaryUpdate, Reduction)> {
-    use crate::pass1::realization::realize_keyed_additive_summary_input;
+    use crate::realization::realize_keyed_additive_summary_input;
     let Some(NonASAPOp::Aggregate {
         child,
         reduction,
@@ -901,7 +901,7 @@ mod tests {
     }
 
     use super::*;
-    use crate::pass1::composition::*;
+    use crate::composition::*;
     use asap_types::ir::operator::operator_properties::{BinaryOpKind, JoinKind};
     use asap_types::ir::properties::{AccuracyGuarantee, AccuracyTarget};
     use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
@@ -1082,9 +1082,9 @@ mod tests {
             let count_sketch = with_bound(AccuracyMetric::ABSOLUTE_STREAM_L2, 0.02, 0.002);
             // Summaries of each source's raw value column.
             let raw = |query: &str, guarantee: AccuracyGuarantee| {
-                ScalarExpr::PromqlScalarFromVector(crate::test_support::estimate_over(
-                    crate::test_support::weighted(
-                        crate::test_support::cms_summary(query),
+                ScalarExpr::PromqlScalarFromVector(crate::test_fixtures::estimate_over(
+                    crate::test_fixtures::weighted(
+                        crate::test_fixtures::cms_summary(query),
                         SummaryInputExpr::Column(ColumnRef::SampleValue),
                     ),
                     guarantee,
@@ -1535,7 +1535,7 @@ mod tests {
     /// Which stream norm bounds a Count-Min or Count Sketch estimate (#669).
     mod stream_norms {
         use super::*;
-        use crate::test_support::{cms_summary, weighted};
+        use crate::test_fixtures::{cms_summary, weighted};
         use asap_accuracy::composition::STREAM_L1_NORM;
         use asap_accuracy::test_support::{source_norm_statistic, STREAM_ROW_COUNT};
 
@@ -1579,7 +1579,7 @@ mod tests {
                 vec![],
             );
             let estimate = |summary: Rc<OperatorNode>| {
-                operand_guarantee(&crate::test_support::estimate_over(
+                operand_guarantee(&crate::test_fixtures::estimate_over(
                     summary,
                     frequency.clone(),
                 ))
@@ -1625,7 +1625,7 @@ mod tests {
         let root = asap_types::ir::schema::schema_support::with_promql_series_identity(&root)
             .unwrap_or(root);
         generate_per_computation_candidates(
-            &crate::stage0::memo_of_queries(
+            &asap_stage0_memo::memo_of_queries(
                 &[QueryRoot::Operator(root)],
                 &[None],
                 &Default::default(),
@@ -1746,7 +1746,7 @@ mod tests {
             AccuracyTarget::max_error(0.1),
         );
         let inventory = generate_per_computation_candidates(
-            &crate::stage0::memo_of_queries(
+            &asap_stage0_memo::memo_of_queries(
                 &[QueryRoot::Operator(root)],
                 &[None],
                 &Default::default(),
@@ -2484,7 +2484,7 @@ mod tests {
     fn inventory_at(query: &str, accuracy: AccuracyTarget) -> PerComputationCandidates {
         let root = crate::test_support::lower_promql(query, accuracy);
         generate_per_computation_candidates(
-            &crate::stage0::memo_of_queries(
+            &asap_stage0_memo::memo_of_queries(
                 &[QueryRoot::Operator(root)],
                 &[None],
                 &Default::default(),
