@@ -674,7 +674,7 @@ pub fn generate_per_computation_candidates(
     memo: &Memo,
 ) -> Result<PerComputationCandidates, PerComputationCandidateError> {
     let logical_nodes: Rc<[Rc<OperatorNode>]> = memo
-        .groups
+        .groups()
         .iter()
         .map(|group| Rc::clone(&group.logical_node))
         .collect();
@@ -2893,9 +2893,9 @@ mod tests {
         // as a column; a query over aggregated rows is planned over labels.
         let root = asap_types::ir::schema::schema_support::with_promql_series_identity(&root)
             .unwrap_or(root);
-        generate_per_computation_candidates(&crate::stage0::memo_of_queries(&[
-            QueryRoot::Operator(root),
-        ]))
+        generate_per_computation_candidates(
+            &crate::stage0::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
+        )
         .unwrap()
     }
 
@@ -3009,9 +3009,9 @@ mod tests {
             "topk by (job) (2, sum by (service, job) (rate(m[1m])))",
             AccuracyTarget::max_error(0.1),
         );
-        let inventory = generate_per_computation_candidates(&crate::stage0::memo_of_queries(&[
-            QueryRoot::Operator(root),
-        ]))
+        let inventory = generate_per_computation_candidates(
+            &crate::stage0::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
+        )
         .unwrap();
         let topk = topk_target(&inventory);
         let mut heaps = 0;
@@ -3781,9 +3781,9 @@ mod tests {
     /// (closed) rows a grouped top-k gets no whole-expression heap.
     fn inventory_at(query: &str, accuracy: AccuracyTarget) -> PerComputationCandidates {
         let root = crate::test_support::lower_promql(query, accuracy);
-        generate_per_computation_candidates(&crate::stage0::memo_of_queries(&[
-            QueryRoot::Operator(root),
-        ]))
+        generate_per_computation_candidates(
+            &crate::stage0::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
+        )
         .unwrap()
     }
 

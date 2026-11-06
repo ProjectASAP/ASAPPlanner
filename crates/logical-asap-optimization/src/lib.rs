@@ -32,7 +32,7 @@
 //! re-exports the internals other crates' tests call.
 //!
 //! - `stage0` — Stage 0: hash-consing the workload's logical DAG into memo
-//!   groups (`stage0::cse`), behind [`memo_of_queries`].
+//!   groups through `Memo::find_or_add_group`, behind [`memo_of_queries`].
 //! - `pass1::per_computation_candidates` — Pass 1: per-computation candidate
 //!   generation and composition, behind
 //!   [`pass1_memo`].

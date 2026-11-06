@@ -97,11 +97,10 @@ fn output_columns(root: &QueryRoot) -> Vec<(String, String, bool)> {
 /// Compose every candidate of `root`; returns how many there were.
 fn compose_all(label: &str, root: QueryRoot) -> usize {
     let expected = output_columns(&root);
-    let inventory =
-        generate_per_computation_candidates(&asap_logical_asap_optimization::memo_of_queries(&[
-            root,
-        ]))
-        .unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::memo_of_queries(&[root]).unwrap(),
+    )
+    .unwrap();
     let radix: Vec<_> = inventory
         .targets
         .iter()
@@ -177,11 +176,10 @@ fn promql_candidates_compose() {
 /// The summary estimates of `root`'s candidates that vary one target's
 /// choice, every other target taking its first.
 fn composed_estimates(root: QueryRoot) -> Vec<Rc<OperatorNode>> {
-    let inventory =
-        generate_per_computation_candidates(&asap_logical_asap_optimization::memo_of_queries(&[
-            root,
-        ]))
-        .unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::memo_of_queries(&[root]).unwrap(),
+    )
+    .unwrap();
     let targets = inventory.targets.len();
     let choices: Vec<_> = inventory
         .targets
@@ -268,11 +266,10 @@ fn topk_over_an_aggregate_ranks_its_labels() {
 async fn subquery_in_a_measure_filter_is_substituted() {
     let query = "SELECT src, count(*) FILTER (WHERE bytes > (SELECT approx_percentile_cont(bytes, 0.5) FROM flows)) \
                  FROM flows GROUP BY src";
-    let inventory =
-        generate_per_computation_candidates(&asap_logical_asap_optimization::memo_of_queries(&[
-            sql(query).await,
-        ]))
-        .unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::memo_of_queries(&[sql(query).await]).unwrap(),
+    )
+    .unwrap();
     assert_eq!(inventory.targets.len(), 2);
     let inner = inventory
         .targets
@@ -403,11 +400,11 @@ async fn avg_as_sum_and_count(
     query: &str,
 ) -> (Rc<OperatorNode>, Rc<OperatorNode>) {
     let exact = lower_sql(query, catalog, accuracy()).await.unwrap();
-    let inventory =
-        generate_per_computation_candidates(&asap_logical_asap_optimization::memo_of_queries(&[
-            QueryRoot::Operator(exact.clone()),
-        ]))
-        .unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::memo_of_queries(&[QueryRoot::Operator(exact.clone())])
+            .unwrap(),
+    )
+    .unwrap();
     let choice: Vec<_> = inventory
         .targets
         .iter()
@@ -538,11 +535,10 @@ async fn filtered_sql_avg_is_null_without_matching_rows() {
 /// PromQL `avg` divides its `sum` and `count` vectors with a `BinaryOp`.
 #[test]
 fn promql_avg_divides_sum_and_count_vectors() {
-    let inventory =
-        generate_per_computation_candidates(&asap_logical_asap_optimization::memo_of_queries(&[
-            promql("avg by (job) (m)"),
-        ]))
-        .unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::memo_of_queries(&[promql("avg by (job) (m)")]).unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         inventory.targets[0].ways_to_compute[0],
         HowToComputeAggregateMeasure::ExactAccumulator(vec![ExactKind::Sum, ExactKind::Count])
@@ -581,11 +577,10 @@ async fn every_candidate(
     Result<Vec<QueryRoot>, asap_logical_asap_optimization::PerComputationCandidateError>,
 )> {
     let root = lower_sql(query, catalog, accuracy()).await.unwrap();
-    let inventory =
-        generate_per_computation_candidates(&asap_logical_asap_optimization::memo_of_queries(&[
-            QueryRoot::Operator(root),
-        ]))
-        .unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
+    )
+    .unwrap();
     assert_eq!(inventory.targets.len(), 1, "{query}");
     inventory.targets[0]
         .ways_to_compute

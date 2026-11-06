@@ -266,7 +266,8 @@ pub fn run_stages_until(
     until: RunUntil,
 ) -> Result<PlanningStagesRun, PlanningStagesError> {
     validate(&roots)?;
-    let stage0_dag = memo_of_queries(&roots);
+    let stage0_dag =
+        memo_of_queries(&roots).map_err(|e| PlanningStagesError::Validation(e.to_string()))?;
     let mut stages = PlanningStagesRun {
         run_until: until,
         stage0_memo_groups: Some(stage0_dag.clone()),

@@ -40,25 +40,6 @@ pub fn needs_merge(form: WindowForm, query_window_ms: u64) -> bool {
     }
 }
 
-/// `roots` with every identical sub-DAG made one node (the identical-
-/// expression rule, as the memo's group identity applies it).
-#[allow(dead_code)]
-pub fn share_identical(roots: &[QueryRoot]) -> Vec<QueryRoot> {
-    asap_logical_asap_optimization::test_support::share_common_sub_dags(
-        roots
-            .iter()
-            .enumerate()
-            .map(|(id, root)| match root {
-                QueryRoot::Operator(node) => (id, std::rc::Rc::clone(node)),
-                QueryRoot::Scalar(_) => panic!("operator root"),
-            })
-            .collect(),
-    )
-    .into_iter()
-    .map(|(_, node)| QueryRoot::Operator(node))
-    .collect()
-}
-
 /// `roots` with no node shared between queries: each query reads its own
 /// copy of every node it reaches (sharing within one query is kept). Pass 1
 /// composes a candidate from memo groups, so queries that read an identical
@@ -90,22 +71,6 @@ pub fn unshare(roots: &[QueryRoot]) -> Vec<QueryRoot> {
             QueryRoot::Scalar(scalar) => QueryRoot::Scalar(scalar.clone()),
         })
         .collect()
-}
-
-/// The number of distinct nodes (by identity) `roots` reach: smaller after
-/// [`share_identical`] exactly when some sub-DAG was shared.
-#[allow(dead_code)]
-pub fn distinct_nodes(roots: &[QueryRoot]) -> usize {
-    roots
-        .iter()
-        .filter_map(|root| match root {
-            QueryRoot::Operator(node) => Some(node),
-            QueryRoot::Scalar(_) => None,
-        })
-        .flat_map(asap_types::ir::OperatorNode::reachable)
-        .map(|node| std::rc::Rc::as_ptr(&node))
-        .collect::<std::collections::HashSet<_>>()
-        .len()
 }
 
 // ── Query-language frontends ──────────────────────────────────────────

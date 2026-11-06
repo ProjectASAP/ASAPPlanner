@@ -398,11 +398,13 @@ mod tests {
     #[test]
     fn connected_labels_describe_selected_states() {
         let workload = example1();
-        let inventory =
-            generate_per_computation_candidates(&asap_logical_asap_optimization::memo_of_queries(
+        let inventory = generate_per_computation_candidates(
+            &asap_logical_asap_optimization::memo_of_queries(
                 &lower_promql_roots(&workload).unwrap(),
-            ))
-            .unwrap();
+            )
+            .unwrap(),
+        )
+        .unwrap();
         let choice = vec![0; inventory.targets.len()];
         let roots: Vec<_> = compose_logical_candidate(&inventory, &choice).unwrap();
         let label = connected_candidate_label(&roots);
@@ -414,11 +416,13 @@ mod tests {
     #[test]
     fn connected_labels_name_actual_shared_state() {
         let workload = example1();
-        let inventory =
-            generate_per_computation_candidates(&asap_logical_asap_optimization::memo_of_queries(
+        let inventory = generate_per_computation_candidates(
+            &asap_logical_asap_optimization::memo_of_queries(
                 &lower_promql_roots(&workload).unwrap(),
-            ))
-            .unwrap();
+            )
+            .unwrap(),
+        )
+        .unwrap();
         let roots =
             compose_logical_candidate(&inventory, &vec![0; inventory.targets.len()]).unwrap();
         let label = connected_candidate_label(&[roots[1].clone(), roots[1].clone()]);

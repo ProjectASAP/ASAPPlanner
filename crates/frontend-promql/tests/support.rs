@@ -148,11 +148,10 @@ fn local_computation_candidates(root: Rc<OperatorNode>) -> Result<Vec<Rc<Operato
         compose_logical_candidate, generate_per_computation_candidates,
     };
     use asap_types::ir::QueryRoot;
-    let inventory =
-        generate_per_computation_candidates(&asap_logical_asap_optimization::memo_of_queries(&[
-            QueryRoot::Operator(root),
-        ]))
-        .map_err(|error| error.to_string())?;
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
+    )
+    .map_err(|error| error.to_string())?;
     let mut choices = vec![vec![0; inventory.targets.len()]];
     for (index, target) in inventory.targets.iter().enumerate() {
         for choice in 1..target.choice_count() {

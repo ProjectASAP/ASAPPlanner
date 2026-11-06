@@ -200,7 +200,7 @@ pub mod planning {
             compose_logical_candidate, generate_per_computation_candidates,
         };
         let local = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::memo_of_queries(&[QueryRoot::Operator(root)]),
+            &asap_logical_asap_optimization::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
         )
         .unwrap();
         let mut choices = std::collections::BTreeSet::from([vec![0; local.targets.len()]]);
@@ -236,7 +236,7 @@ pub mod planning {
         };
         use asap_types::stages::HowToComputeAggregateMeasure;
         let local = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::memo_of_queries(&[QueryRoot::Operator(root)]),
+            &asap_logical_asap_optimization::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
         )
         .unwrap();
         let choices = local.targets.iter().map(|target| target.ways_to_compute.iter()
@@ -316,7 +316,7 @@ pub mod planning {
         keep: impl Fn(&asap_types::stages::CandidateForMemoGroup) -> bool,
     ) -> Vec<(usize, usize)> {
         let mut found: Vec<_> = memo
-            .groups
+            .groups()
             .iter()
             .enumerate()
             .filter(|(_, group)| group.reached_by_queries() == [q])
@@ -332,9 +332,9 @@ pub mod planning {
             .collect();
         // Group indices don't give the order: Pass 2 appends groups at the
         // end. Depth from the root does.
-        let mut depth = vec![usize::MAX; memo.groups.len()];
+        let mut depth = vec![usize::MAX; memo.groups().len()];
         let mut pending: std::collections::VecDeque<_> = memo
-            .groups
+            .groups()
             .iter()
             .enumerate()
             .filter(|(group, _)| {
@@ -350,7 +350,7 @@ pub mod planning {
             }
             depth[group] = d;
             pending.extend(
-                memo.groups[group]
+                memo.groups()[group]
                     .child_groups
                     .iter()
                     .map(|child| (child.0 as usize, d + 1)),

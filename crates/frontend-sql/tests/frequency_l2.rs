@@ -130,11 +130,10 @@ async fn stage1_offers_exact_and_summary_l2_candidates() {
     let root = lower_sql(CAST_COUNT, &catalog(false), target)
         .await
         .unwrap();
-    let inventory =
-        generate_per_computation_candidates(&asap_logical_asap_optimization::memo_of_queries(&[
-            QueryRoot::Operator(root),
-        ]))
-        .unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
+    )
+    .unwrap();
     let l2 = inventory
         .targets
         .iter()

@@ -5,11 +5,10 @@
 use std::rc::Rc;
 
 // Stage 1 internals other crates' tests call: Pass 1's working form,
-// single-candidate composition and Stage 0 hash-consing.
+// and single-candidate composition.
 pub use crate::pass1::per_computation_candidates::{
     compose_logical_candidate, generate_per_computation_candidates, PerComputationCandidates,
 };
-pub use crate::stage0::cse::share_common_sub_dags;
 
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::OperatorNode;
@@ -183,9 +182,9 @@ pub fn cms_summary(query: &str) -> OperatorNode {
     let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
     let root = lower_promql(query, target);
     // Inspect each local computation choice under the built-in deployment.
-    let per_computation = generate_per_computation_candidates(&crate::stage0::memo_of_queries(&[
-        QueryRoot::Operator(root),
-    ]))
+    let per_computation = generate_per_computation_candidates(
+        &crate::stage0::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
+    )
     .unwrap()
     .without_unsupported_summaries(None);
     let summary = per_computation
