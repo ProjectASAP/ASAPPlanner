@@ -540,6 +540,7 @@ fn exact_state_evaluations_recover_and_finalize_tumbling_windows() {
                 .map(|samples| {
                     let mut state = create_planner_accumulator(
                         &family,
+                        None,
                         &SummaryUpdate::column(ColumnRef::SampleValue),
                         &GroupingStrategy::PerSubpopulationInstance,
                     )
@@ -588,6 +589,7 @@ fn recovered_exact_counter_uses_window_and_omits_insufficient_samples() {
             .map(|count| {
                 let mut state = create_planner_accumulator(
                     &family,
+                    None,
                     &SummaryUpdate::column(ColumnRef::SampleValue),
                     &GroupingStrategy::PerSubpopulationInstance,
                 )

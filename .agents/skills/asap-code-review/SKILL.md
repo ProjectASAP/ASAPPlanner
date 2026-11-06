@@ -72,7 +72,7 @@ a trade-off, give the author choices here too.
 For example:
 
 - `price` recomputes `query_reach(dag)`, a walk over the whole DAG, for every
-  MatAtQuery node: O(n · (n + e)) per candidate, times every candidate. At
+  `OneEvaluation` node: O(n · (n + e)) per candidate, times every candidate. At
   Example 3's 972 candidates, if each DAG has about 50 nodes, that is about 2.5·10⁶
   node visits instead of 5·10⁴. Alternative: compute it once per candidate
   before the loop and pass it in.

@@ -6,29 +6,23 @@
 //! the summary-bound shape node by node, including the family `(Kind,
 //! Params)` committed on each edge's schema.
 
-use asap_types::stages::HowToComputeAggregateMeasure;
 use std::rc::Rc;
 
 use asap_integration_tests::fixtures::lower_promql;
-use asap_integration_tests::physical_export::{
-    at_ingestion, at_ingestion_physical_asap_dag, physical_asap_dag,
-};
+use asap_integration_tests::physical_export::physical_asap_dag;
 use asap_integration_tests::planning::{
     logical_candidates, logical_candidates_ignoring_guarantees,
 };
-use asap_plan_selection::reference_pricer::WholePlanSelection as Selection;
 use asap_types::ir::operator::operator_properties::Reduction;
-use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
-use asap_types::ir::properties::AccuracyMetric;
+
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::expr_ir::ColumnRef;
 use asap_types::ir::schema::DataType;
 use asap_types::ir::schema::{
     EntityIdentity, ExactKind, ExactParams, FieldDataType, GroupingStrategy, Schema,
-    SketchAlgorithm, SketchKind, SketchParams, SketchStatistic, SummaryInputExpr, SummaryUpdate,
+    SketchAlgorithm, SketchStatistic, SummaryInputExpr, SummaryUpdate,
 };
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr};
-use asap_types::physical::PhysicalWorkloadPlan;
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
 
 /// The first logical candidate (Stage 1, in enumeration order) of `root` as
 /// a query at `accuracy` that uses an ASAP operator, or the plain exact one
@@ -52,7 +46,7 @@ fn uses_sketch(node: &OperatorNode, algorithm: &SketchAlgorithm) -> bool {
         Operator::ASAP(ASAPOp::SummaryAgg {
             family: FieldDataType::Sketch(kind, _),
             ..
-        }) if kind.algorithm() == algorithm => true,
+        }) if kind == algorithm => true,
         _ => node
             .children()
             .iter()
@@ -254,90 +248,6 @@ fn promql_binary_arithmetic_preserves_nested_structure_and_vector_matching() {
     }
 }
 
-#[test]
-fn planner_only_e2e_temporal_topk_preserves_query_update_and_evaluation_contract() {
-    // Self-contained Planner E2E: each case starts from PromQL text and ends
-    // at the post-ASAP summary DAG. No controller/backend types,
-    // fixtures, configuration, or runtime are involved.
-    let cases = [
-        (
-            "topk by (service) (5, count_over_time(requests[1m]))",
-            SummaryInputExpr::Constant(1.0),
-            SketchAlgorithm::CmsWithHeap,
-            vec![ColumnRef::Named("service".into())],
-        ),
-        (
-            "topk(5, sum_over_time(requests[1m]))",
-            SummaryInputExpr::Column(ColumnRef::SampleValue),
-            SketchAlgorithm::CountSketchWithHeap,
-            vec![],
-        ),
-    ];
-    for (source, expected_update, expected_family, excluded_labels) in cases {
-        let pre = lower_promql(
-            source,
-            AccuracyTarget::max_error(0.01).failure_probability(0.01),
-        )
-        .expect("lower temporal Top-K");
-        let candidates = heap_topk_candidates_using(
-            &pre,
-            AccuracyTarget::max_error(0.01).failure_probability(0.01),
-            expected_family,
-        );
-        assert!(
-            !candidates.is_empty(),
-            "heap-backed temporal Top-K candidate"
-        );
-        // The search archive may visit tighter local error allocations first.
-        // Every visited configuration must preserve the same update contract.
-        for candidate in candidates {
-            let Some(ASAPOp::SummaryEstimate {
-                summary_input,
-                query: SketchStatistic::TopK { k, .. },
-            }) = candidate.asap()
-            else {
-                panic!("expected Top-K estimate, got {:?}", candidate.operator)
-            };
-            assert_eq!(
-                *k, 5,
-                "the requested Top-K cardinality must survive binding"
-            );
-            let Some(ASAPOp::SummaryAgg {
-                input: state_input,
-                family,
-                child,
-                ..
-            }) = summary_input.asap()
-            else {
-                panic!("expected structured Top-K state input")
-            };
-            let FieldDataType::Sketch(kind, _) = family else {
-                panic!("expected a heap-backed sketch family, got {family:?}")
-            };
-            assert_eq!(kind.algorithm(), &expected_family);
-            let heap_size = match kind.params() {
-                SketchParams::CmsWithHeap { heap_size, .. }
-                | SketchParams::CountSketchWithHeap { heap_size, .. } => *heap_size,
-                params => panic!("expected heap-bearing Top-K parameters, got {params:?}"),
-            };
-            assert!(
-                heap_size >= 100u32.max(*k as u32),
-                "a tighter local error budget may increase, never reduce, capacity"
-            );
-            assert_eq!(
-                state_input.item.as_ref(),
-                Some(&SummaryInputExpr::EntityIdentity(
-                    EntityIdentity::PromqlLabelSet {
-                        excluding: excluded_labels.clone()
-                    }
-                ))
-            );
-            assert_eq!(state_input.weight, expected_update);
-            assert!(!child.contains_asap());
-        }
-    }
-}
-
 /// Execute the ungrouped temporal TopK subset with exact state. This tests
 /// the emitted update contract, not sketch approximation or backend execution.
 fn execute_topk_reference(plan: &OperatorNode) -> Vec<(String, f64)> {
@@ -533,16 +443,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     };
     assert_eq!(
         family,
-        &FieldDataType::Sketch(
-            SketchKind::new(
-                SketchAlgorithm::Kll,
-                SketchParams::Kll {
-                    k: 269,
-                    failure_probability: None
-                }
-            ),
-            GroupingStrategy::default()
-        )
+        &FieldDataType::Sketch(SketchAlgorithm::Kll, GroupingStrategy::default())
     );
     assert_eq!(input, &SummaryUpdate::column(ColumnRef::SampleValue));
     assert_eq!(
@@ -552,16 +453,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     );
     assert_eq!(
         dtype(&summary_input.schema, "state"),
-        &FieldDataType::Sketch(
-            SketchKind::new(
-                SketchAlgorithm::Kll,
-                SketchParams::Kll {
-                    k: 269,
-                    failure_probability: None
-                }
-            ),
-            GroupingStrategy::default()
-        )
+        &FieldDataType::Sketch(SketchAlgorithm::Kll, GroupingStrategy::default())
     );
 
     let Some(ASAPOp::FinalizeExactAccumulator { child }) = child.asap() else {
@@ -620,255 +512,6 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
             .all(|f| matches!(f.dtype, FieldDataType::Plain(_))),
         "logical edges carry only plain columns"
     );
-}
-
-#[test]
-fn nested_summary_explicitly_finalizes_exact_child_at_ingestion_time() {
-    // Real workload selection must expose the state-to-value edge; an outer
-    // sketch must not interpret exact accumulator bytes as input samples.
-    let pre = lower_promql(
-        "quantile(0.9, sum_over_time(m[1m]))",
-        AccuracyTarget::max_error(0.05),
-    )
-    .unwrap();
-    // The KLL candidate over the inner exact Sum accumulator.
-    let plan = candidates_using(&pre, AccuracyTarget::max_error(0.05), SketchAlgorithm::Kll)
-        .into_iter()
-        .find(|plan| {
-            matches!(plan.asap(), Some(ASAPOp::SummaryEstimate { summary_input, .. })
-                if matches!(summary_input.asap(), Some(ASAPOp::SummaryAgg { child, .. })
-                    if matches!(child.asap(), Some(ASAPOp::FinalizeExactAccumulator { .. }))))
-        })
-        .expect("a KLL over the finalized Sum accumulator");
-    // Stored timings are gone: time the plan with its outer summary
-    // maintained and read the timed copy.
-    let timed_plan = at_ingestion(&plan);
-    let Some(ASAPOp::SummaryEstimate { summary_input, .. }) = timed_plan.asap() else {
-        panic!("expected selected quantile summary");
-    };
-    let Some(ASAPOp::SummaryAgg { child, .. }) = summary_input.asap() else {
-        panic!("expected maintained outer summary");
-    };
-    let Some(ASAPOp::FinalizeExactAccumulator { child: source }) = child.asap() else {
-        panic!(
-            "missing explicit accumulator finalization: {:?}",
-            child.operator
-        );
-    };
-    assert_eq!(
-        child.timing,
-        Some(asap_types::ir::properties::ExecutionTiming::IngestionTime)
-    );
-    assert!(matches!(
-        source.asap(),
-        Some(ASAPOp::SummaryAgg {
-            family: FieldDataType::ExactAggregate(ExactKind::Sum, _),
-            ..
-        })
-    ));
-    assert!(child
-        .schema
-        .fields
-        .iter()
-        .all(|field| matches!(field.dtype, FieldDataType::Plain(_))));
-    assert!(child
-        .schema
-        .fields
-        .iter()
-        .any(|field| matches!(field.dtype, FieldDataType::Plain(DataType::Float64))));
-    // Explicit boundary is a valid post-ASAP DAG.
-    physical_asap_dag(&plan);
-}
-
-#[test]
-fn physical_node_owns_phase_independently_of_binary_payload() {
-    use asap_types::ir::properties::ExecutionTiming;
-    // The one-selector case (both operands over the same series, so the
-    // BinaryOp may run at ingestion) is `arithmetic_over_one_selector_executes`
-    // in materialization_e2e.rs, ignored until #580.
-    let query = "sum_over_time(m[1m]) + sum_over_time(n[1m])";
-    let expected = ExecutionTiming::QueryTime;
-    let input = lower_promql(query, AccuracyTarget::max_error(0.05)).unwrap();
-    let plan = realize(&input, AccuracyTarget::max_error(0.05));
-    let dag = at_ingestion_physical_asap_dag(&plan);
-    let node = dag
-        .nodes
-        .iter()
-        .find(|node| {
-            matches!(
-                node.payload,
-                PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::BinaryOp { .. })
-            )
-        })
-        .unwrap();
-    assert_eq!(node.output_state.timing, expected);
-    let wire = serde_json::to_value(&node.payload).unwrap();
-    assert!(wire.get("timing").is_none());
-    let mut obsolete = wire.clone();
-    obsolete["timing"] = serde_json::json!(expected.as_str());
-    assert!(serde_json::from_value::<PhysicalASAPOperatorPayload>(obsolete).is_err());
-    let restored: PhysicalASAPOperatorPayload = serde_json::from_value(wire).unwrap();
-    assert_eq!(restored, node.payload);
-}
-
-/// `query` lowered at `planned` and selected at `accuracy`: the physical
-/// candidates whose two summaries are both DDSketch, and plan selection over
-/// all of them.
-fn ddsketch_ratio_selection(
-    query: &str,
-    planned: AccuracyTarget,
-    accuracy: AccuracyTarget,
-    non_negative: bool,
-) -> (Vec<PhysicalWorkloadPlan>, Selection) {
-    let root = lower_promql(query, planned).unwrap();
-    let mut data = asap_integration_tests::planning::declared_data(&root);
-    for facts in data.sources.values_mut() {
-        facts.values_non_negative = non_negative;
-    }
-    use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
-    let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
-            QueryRoot::Operator(root),
-        ]),
-    )
-    .unwrap();
-    let exact = vec![0; inventory.targets.len()];
-    let dds = inventory
-        .targets
-        .iter()
-        .map(|target| {
-            target
-                .ways_to_compute
-                .iter()
-                .position(|candidate| {
-                    *candidate == HowToComputeAggregateMeasure::Summary(SketchAlgorithm::DDSketch)
-                })
-                .expect("quantile supports DDS")
-        })
-        .collect();
-    let entries = [asap_types::workload::QueryWorkloadEntry {
-        query: Default::default(),
-        requirements: asap_types::workload::QueryRequirements {
-            accuracy,
-            max_latency_ms: None,
-        },
-        predictability: Default::default(),
-        recurrence: Default::default(),
-        range_evaluation: None,
-    }];
-    // Pass 1 choices composed and implemented by Stage 2; one query, so no
-    // sharing rule applies.
-    use asap_accuracy::propagation::recompose_guarantees;
-    use asap_logical_asap_optimization::test_support::compose_logical_candidate;
-    let models = asap_planner::PlanningModels::builtin();
-    let mut physical = Vec::new();
-    for choice in [exact, dds] {
-        let roots: Vec<_> = compose_logical_candidate(&inventory, &choice).unwrap();
-        let roots = recompose_guarantees(&roots).unwrap();
-        physical.extend(
-            asap_physical_asap_optimization::optimize_physical_asap(
-                &format!("L{}", physical.len() + 1),
-                &roots,
-                &entries,
-                &data,
-                models.deployment_capabilities.query_time_results_retained,
-            )
-            .unwrap(),
-        );
-    }
-    for (index, plan) in physical.iter_mut().enumerate() {
-        plan.id = format!("fixture-{index}");
-    }
-    let selection =
-        asap_devtools::memo_pricing::reference_select(&physical, &entries, &data, models).unwrap();
-    let ratios = physical
-        .into_iter()
-        .filter(|candidate| {
-            let sketches: Vec<_> = candidate
-                .dag
-                .nodes
-                .iter()
-                .filter_map(|node| match &node.payload {
-                    PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
-                        family: FieldDataType::Sketch(kind, _),
-                        ..
-                    }) => Some(*kind.algorithm()),
-                    _ => None,
-                })
-                .collect();
-            sketches == [SketchAlgorithm::DDSketch, SketchAlgorithm::DDSketch]
-        })
-        .collect();
-    (ratios, selection)
-}
-
-/// Declared nonnegative inputs permit formal ratio admission; an unknown
-/// sign does not. The same explicitly sized DDS fixture is also evaluated
-/// numerically on all-positive and all-negative samples without claiming
-/// a general bound for arbitrary signed interpolation.
-#[test]
-fn ddsketch_ratio_checks_sign_contract_and_one_sided_sketch_evaluations() {
-    for sign in [-1., 1.] {
-        let target = AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative);
-        let (ratios, selection) = ddsketch_ratio_selection(
-            "quantile_over_time(0.9, data[5m]) / quantile_over_time(0.5, data[5m])",
-            AccuracyTarget::max_error(0.01),
-            target.clone(),
-            sign > 0.0,
-        );
-        let accepted: Vec<_> = ratios
-            .iter()
-            .filter(|candidate| selection.costs.contains_key(&candidate.id))
-            .collect();
-        assert!(
-            !ratios.is_empty(),
-            "explicit DDS fixture exists regardless of admission"
-        );
-        assert_eq!(!accepted.is_empty(), sign > 0.0, "{selection:?}");
-        // Both explicit operands use the planner's composed-budget alpha.
-        let alphas: Vec<f64> = ratios[0]
-            .dag
-            .nodes
-            .iter()
-            .filter_map(|node| match &node.payload {
-                PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
-                    family: FieldDataType::Sketch(kind, _),
-                    ..
-                }) => match kind.params() {
-                    SketchParams::DDSketch { alpha } => Some(*alpha),
-                    _ => None,
-                },
-                _ => None,
-            })
-            .collect();
-        assert_eq!(alphas.len(), 2);
-        assert_eq!(alphas[0], alphas[1]);
-        let alpha = alphas[0];
-        let bound = target.max_error;
-        for values in [
-            vec![sign; 30],
-            (1..=100).map(|i| sign * i as f64).collect(),
-            vec![sign, sign, sign, sign * 30., sign * 100.],
-        ] {
-            let mut sorted = values.clone();
-            sorted.sort_by(f64::total_cmp);
-            let exact = |q: f64| {
-                let r = q * (sorted.len() - 1) as f64;
-                sorted[r.floor() as usize] * (1. - r.fract())
-                    + sorted[r.ceil() as usize] * r.fract()
-            };
-            let mut sketch = asap_sketchlib::DdSketch::new(alpha);
-            for v in values {
-                sketch.try_add(&v).unwrap();
-            }
-            // PromQL's quantile: interpolated between neighbouring order
-            // statistics.
-            let interpolated = |q: f64| sketch.quantile_interpolated(q).unwrap().unwrap();
-            let want = exact(0.9) / exact(0.5);
-            let got = interpolated(0.9) / interpolated(0.5);
-            assert!((got - want).abs() / want.abs() <= bound + 1e-12);
-        }
-    }
 }
 
 // Every `without` aggregation candidate exports a valid DAG: its summary state

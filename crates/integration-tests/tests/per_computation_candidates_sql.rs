@@ -26,9 +26,7 @@ async fn targets(sql: &str) -> Vec<ComputationTarget> {
         .await
         .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"));
     generate_per_computation_candidates(
-        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
-            QueryRoot::Operator(root),
-        ]),
+        &asap_logical_asap_optimization::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
     )
     .unwrap()
     .targets
@@ -79,7 +77,7 @@ fn reads_quantile_sketch(node: &std::rc::Rc<asap_types::ir::OperatorNode>) -> bo
                 Some(asap_types::ir::ASAPOp::SummaryAgg {
                     family: asap_types::ir::schema::FieldDataType::Sketch(kind, _),
                     ..
-                }) if matches!(kind.algorithm(), SketchAlgorithm::Kll | SketchAlgorithm::DDSketch)
+                }) if matches!(kind, SketchAlgorithm::Kll | SketchAlgorithm::DDSketch)
             )
         })
 }
@@ -154,7 +152,7 @@ fn reads_ddsketch(node: &std::rc::Rc<asap_types::ir::OperatorNode>) -> bool {
                 Some(asap_types::ir::ASAPOp::SummaryAgg {
                     family: asap_types::ir::schema::FieldDataType::Sketch(kind, _),
                     ..
-                }) if matches!(kind.algorithm(), SketchAlgorithm::DDSketch)
+                }) if matches!(kind, SketchAlgorithm::DDSketch)
             )
         })
 }
@@ -214,9 +212,7 @@ async fn heap_updates_over(fields: Vec<Field>, sql: &str) -> Vec<(String, String
     let accuracy = AccuracyTarget::max_error(0.01).failure_probability(0.01);
     let root = lower_sql(sql, &catalog, accuracy).await.unwrap();
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
-            QueryRoot::Operator(root),
-        ]),
+        &asap_logical_asap_optimization::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
     )
     .unwrap();
     let name = |expr: &SummaryInputExpr| match expr {

@@ -64,7 +64,7 @@ pub fn with_promql_series_identity(
                 // A series has at most one sample per timestamp, so the full
                 // identity and the timestamp key each row. Pass 2's
                 // identical-expression rule reads this key: only a keyed
-                // node is legal to share (Stage 0 hash-consing, `cse` in `asap_logical_asap_optimization`).
+                // node is legal to share (hash-consing, `Memo::find_or_add_group`).
                 if let Some(time) = schema.time_index {
                     schema.add_unique_key(vec![schema.fields.len() - 1, time]);
                 }
@@ -92,8 +92,6 @@ pub fn with_promql_series_identity(
         }
         let mut rebuilt = OperatorNode::new(operator).map_err(|e| e.to_string())?;
         rebuilt.guarantee = node.guarantee.clone();
-        rebuilt.timing = node.timing;
-        rebuilt.materialization = node.materialization;
         let rebuilt = Rc::new(rebuilt);
         cache.insert(Rc::as_ptr(node), Rc::clone(&rebuilt));
         Ok(rebuilt)

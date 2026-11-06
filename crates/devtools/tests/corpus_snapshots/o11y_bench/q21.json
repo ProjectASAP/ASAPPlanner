@@ -694,7 +694,7 @@
             }
           },
           "id": 0,
-          "materialization": "NotMaterialized",
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -835,7 +835,7 @@
             }
           },
           "id": 1,
-          "materialization": "NotMaterialized",
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -899,8 +899,8 @@
         {
           "guarantee": null,
           "id": 2,
-          "materialization": {
-            "MatAtIngestion": "Memory"
+          "lifetime": {
+            "AcrossEvaluations": "Memory"
           },
           "output_schema": {
             "closed": true,
@@ -984,7 +984,7 @@
         {
           "guarantee": null,
           "id": 3,
-          "materialization": "NotMaterialized",
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -1066,7 +1066,7 @@
             }
           },
           "id": 4,
-          "materialization": "NotMaterialized",
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -1126,7 +1126,7 @@
         {
           "guarantee": null,
           "id": 5,
-          "materialization": "NotMaterialized",
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -1197,7 +1197,7 @@
             }
           },
           "id": 6,
-          "materialization": "NotMaterialized",
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [

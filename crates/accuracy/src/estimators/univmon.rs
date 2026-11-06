@@ -213,6 +213,7 @@ fn distinct_heap(eps: f64, delta: f64) -> u32 {
 
 /// The statistic a UnivMon distinct count over `source` leaves its
 /// top-layer failure probability as.
+#[allow(dead_code)] // Read again in #1207 PR 4, with θ from `LogicalProperties::parameters`.
 pub(crate) fn incomplete_top_layer_statistic(heap_size: u32, layers: u8, source: &str) -> String {
     format!("{INCOMPLETE_TOP_LAYER}[k={heap_size},layers={layers}]({MAX_DISTINCT}[{source}])")
 }
@@ -257,6 +258,7 @@ pub fn incomplete_top_layer_probability(heap_size: u32, layers: u8, max_distinct
 /// `δ_c` plus the chance of an incomplete top layer, left symbolic in the
 /// source's distinct bound. `None` for a shape that was not sized for a
 /// distinct count, a heap under 8, or a shape the library would not build.
+#[allow(dead_code)] // Read again in #1207 PR 4, with θ from `LogicalProperties::parameters`.
 pub(crate) fn distinct_guarantee(params: &SketchParams, source: &str) -> Option<AccuracyGuarantee> {
     let SketchParams::UnivMon {
         heap_size,
@@ -366,45 +368,6 @@ pub(super) fn size_params(intent: &AggIntent, eps: f64, delta: f64) -> SketchPar
         },
         _ => BASELINE,
     }
-}
-
-/// The heap of one UnivMon shared by two readers with heaps `heap_size`
-/// and `heap_size2`, sized for a distinct count at the failure
-/// probabilities they record (`None`: not sized for one): each distinct
-/// reader's heap grown to the smaller failure probability at no larger
-/// relative error ([`with_failure_probability`]), then the larger. The
-/// shared build states its distinct guarantee at that smaller δ, where a
-/// heap sized for a larger δ has a larger error, so the larger heap alone
-/// could miss its reader's ε. A reader not sized for a distinct count keeps
-/// its heap.
-pub(crate) fn shared_heap(
-    heap_size: u32,
-    distinct_failure_probability: Option<f64>,
-    heap_size2: u32,
-    distinct_failure_probability2: Option<f64>,
-) -> u32 {
-    let delta = match (distinct_failure_probability, distinct_failure_probability2) {
-        (Some(a), Some(b)) => a.min(b),
-        (a, b) => match a.or(b) {
-            Some(delta) => delta,
-            None => return heap_size.max(heap_size2),
-        },
-    };
-    let resized = |heap_size, distinct_failure_probability| match with_failure_probability(
-        &SketchParams::UnivMon {
-            heap_size,
-            sketch_rows: 1,
-            sketch_cols: 1,
-            layers: 1,
-            distinct_failure_probability,
-        },
-        delta,
-    ) {
-        SketchParams::UnivMon { heap_size, .. } => heap_size,
-        _ => heap_size,
-    };
-    resized(heap_size, distinct_failure_probability)
-        .max(resized(heap_size2, distinct_failure_probability2))
 }
 
 #[cfg(test)]

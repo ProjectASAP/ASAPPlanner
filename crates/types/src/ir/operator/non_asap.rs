@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use super::node::{OperatorNode, OperatorResultKind};
+use super::input::OperatorInput;
+use super::node::{Operator, OperatorNode, OperatorResultKind};
 use crate::ir::operator::agg_intent::AggIntent;
 use crate::ir::operator::operator_properties::{
     BinaryOpKind, GroupKeys, InfoMatcher, JoinKind, Reduction, RelationalSetOpKind, SampleKind,
@@ -491,7 +492,7 @@ impl<C> NonASAPOp<C> {
     }
 }
 
-impl NonASAPOp {
+impl<I: OperatorInput> NonASAPOp<I> {
     /// Whether two structurally equal copies of this node may be one shared
     /// node: every execution over the same input rows returns the same
     /// output rows, so one copy over their one input can be computed (or
@@ -514,7 +515,7 @@ impl NonASAPOp {
     /// function the IR accepts is deterministic (no `random()`; unregistered
     /// SQL functions are rejected) and that a deployment's
     /// `AggIntent::Extension` returns the same rows for the same input.
-    pub fn is_shareable_when_equal(&self) -> bool {
+    pub(crate) fn is_shareable_when_equal(&self) -> bool {
         use NonASAPOp::*;
         match self {
             Limit {
@@ -524,14 +525,14 @@ impl NonASAPOp {
                 child,
             } => {
                 (n.is_none() && *offset == 0)
-                    || matches!(child.non_asap(), Some(Sort { partition_by: sorted_by, .. })
-                        if sorted_by == partition_by)
+                    || matches!(child.operator(), Operator::NonASAP(Sort { partition_by: sorted_by, .. })
+                        if sorted_by == *partition_by)
             }
             // Empty `cols` means every column.
             Dedup { cols, child } => {
                 cols.is_empty()
                     || cols.iter().collect::<std::collections::BTreeSet<_>>().len()
-                        == child.schema.fields.len()
+                        == child.schema().fields.len()
             }
             SQLWindowFunc {
                 func,
@@ -610,7 +611,7 @@ impl NonASAPOp {
                     .output_schema();
                 }
                 let mut output =
-                    aggregate_output_schema(&child.schema, reduction, measures, output_names)?;
+                    aggregate_output_schema(child.schema(), reduction, measures, output_names)?;
                 let offset = reduction.group_keys().map_or(0, |keys| keys.len());
                 // A filtered quantile is NULL for a group without a matching
                 // row, as its summary estimate is.
@@ -625,14 +626,14 @@ impl NonASAPOp {
                 }
                 // Over a relation, a quantile is also NULL for a global
                 // aggregate of no row and a group whose values are all NULL.
-                if child.result_kind == OperatorResultKind::Relation {
+                if child.result_kind() == OperatorResultKind::Relation {
                     for (index, measure) in measures.iter().enumerate() {
                         if matches!(measure, AggIntent::Quantile { .. })
                             && (offset == 0
                                 || measure
                                     .input_cols()
                                     .iter()
-                                    .any(|i| child.schema.fields[*i].nullable))
+                                    .any(|i| child.schema().fields[*i].nullable))
                         {
                             if let Some(field) = output.fields.get_mut(offset + index) {
                                 field.nullable = true;
@@ -640,7 +641,7 @@ impl NonASAPOp {
                         }
                     }
                 }
-                if child.result_kind == OperatorResultKind::Relation {
+                if child.result_kind() == OperatorResultKind::Relation {
                     for (index, measure) in measures.iter().enumerate() {
                         if matches!(
                             measure,
@@ -654,7 +655,7 @@ impl NonASAPOp {
                                 || measure
                                     .input_cols()
                                     .iter()
-                                    .any(|i| child.schema.fields[*i].nullable);
+                                    .any(|i| child.schema().fields[*i].nullable);
                             if let Some(field) = output.fields.get_mut(offset + index) {
                                 field.nullable = nullable;
                             }
@@ -671,13 +672,13 @@ impl NonASAPOp {
             | PromqlSeriesSample { child, .. }
             | PromqlInfoEnrich { child, .. }
             | TimeRange { child, .. }
-            | TimeShift { child, .. } => child.schema.clone(),
+            | TimeShift { child, .. } => child.schema().clone(),
 
             // ρ — relabel preserves every input column and writes one label
             // `dst` (Utf8): overwritten in place if it already exists, else
             // appended (nullable). Row-uniqueness is no longer provable.
             PromqlRelabel { dst, child, .. } => {
-                let mut out = child.schema.clone();
+                let mut out = child.schema().clone();
                 if let Some(existing) = out.fields.iter_mut().find(|c| c.name == *dst) {
                     existing.dtype = FieldDataType::Plain(DataType::Utf8);
                     existing.nullable = true;
@@ -698,7 +699,7 @@ impl NonASAPOp {
                 qualifier,
                 child,
             } => {
-                let in_schema = &child.schema;
+                let in_schema = child.schema();
                 let fields: Vec<Field> = cols
                     .iter()
                     .enumerate()
@@ -747,7 +748,7 @@ impl NonASAPOp {
             }
 
             Dedup { cols, child } => {
-                let mut out = child.schema.clone();
+                let mut out = child.schema().clone();
                 if !cols.is_empty() {
                     out.add_unique_key(cols.clone());
                 }
@@ -758,12 +759,12 @@ impl NonASAPOp {
                 let mut s = children
                     .first()
                     .ok_or(SchemaDerivationError::EmptyConcat)?
-                    .schema
+                    .schema()
                     .clone();
                 // A column is nullable if any child's is: a rolled-up
                 // grouping key is NULL only in the coarser levels.
                 for child in &children[1..] {
-                    for (field, other) in s.fields.iter_mut().zip(&child.schema.fields) {
+                    for (field, other) in s.fields.iter_mut().zip(&child.schema().fields) {
                         field.nullable |= other.nullable;
                     }
                 }
@@ -771,7 +772,7 @@ impl NonASAPOp {
                 s
             }
             SetOp { left, .. } => {
-                let mut s = left.schema.clone();
+                let mut s = left.schema().clone();
                 s.unique_keys.clear();
                 s
             }
@@ -781,8 +782,8 @@ impl NonASAPOp {
                 left,
                 right,
             } => {
-                let l = &left.schema;
-                let r = &right.schema;
+                let l = left.schema();
+                let r = right.schema();
                 if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
                     return Ok(Schema {
                         unique_keys: Vec::new(),
@@ -825,7 +826,7 @@ impl NonASAPOp {
                 child,
                 ..
             } => {
-                let mut out = child.schema.clone();
+                let mut out = child.schema().clone();
                 let arg = args.first().map(|a| a.scalar_type(&out)).transpose()?;
                 let arg_dtype = || {
                     arg.as_ref()
@@ -871,7 +872,7 @@ impl NonASAPOp {
             BinaryOp {
                 lhs, rhs, operator, ..
             } => {
-                let mut output = lhs.schema.clone();
+                let mut output = lhs.schema().clone();
                 let grouping = operator
                     .vector_match
                     .as_ref()
@@ -883,7 +884,7 @@ impl NonASAPOp {
                 let mut additions = Vec::new();
                 if right_rows {
                     additions.extend(
-                        rhs.schema
+                        rhs.schema()
                             .fields
                             .iter()
                             .filter(|c| c.plain_dtype() == Some(&DataType::Utf8))
@@ -917,7 +918,7 @@ impl NonASAPOp {
                 Source::Table { .. } => OperatorResultKind::Relation,
             },
             Values { .. } | SQLWindowFunc { .. } => OperatorResultKind::Relation,
-            TimeRange { child, .. } if child.result_kind == OperatorResultKind::Relation => {
+            TimeRange { child, .. } if child.result_kind() == OperatorResultKind::Relation => {
                 OperatorResultKind::Relation
             }
             TimeRange { kind, .. } => match kind {
@@ -931,12 +932,12 @@ impl NonASAPOp {
             // category (a SQL GROUP BY stays a relation).
             Aggregate {
                 reduction, child, ..
-            } => match (reduction, child.result_kind) {
+            } => match (reduction, child.result_kind()) {
                 (Reduction::PerEntity, OperatorResultKind::RangeVector)
                 | (_, OperatorResultKind::State) => OperatorResultKind::InstantVector,
                 (_, kind) => kind,
             },
-            Project { child, cols, .. } if cols.iter().any(|item| matches!(item.expr, ScalarExpr::Column(i) if child.schema.fields.get(i).is_some_and(|f| !f.is_plain()))) => OperatorResultKind::State,
+            Project { child, cols, .. } if cols.iter().any(|item| matches!(item.expr, ScalarExpr::Column(i) if child.schema().fields.get(i).is_some_and(|f| !f.is_plain()))) => OperatorResultKind::State,
             // Selecting whole states by their plain (key) columns keeps them states.
             Filter { child, pred } if selects_states(child, pred) => OperatorResultKind::State,
             Filter { child, .. }
@@ -947,12 +948,12 @@ impl NonASAPOp {
             | TimeShift { child, .. }
             | PromqlRelabel { child, .. }
             | PromqlInfoEnrich { child, .. }
-            | PromqlSeriesSample { child, .. } => readable(child.result_kind),
-            Join { left, .. } | SetOp { left, .. } => readable(left.result_kind),
+            | PromqlSeriesSample { child, .. } => readable(child.result_kind()),
+            Join { left, .. } | SetOp { left, .. } => readable(left.result_kind()),
             Concat { children, .. } => children
                 .first()
-                .map_or(OperatorResultKind::Relation, |c| readable(c.result_kind)),
-            BinaryOp { lhs, .. } => readable(lhs.result_kind),
+                .map_or(OperatorResultKind::Relation, |c| readable(c.result_kind())),
+            BinaryOp { lhs, .. } => readable(lhs.result_kind()),
         }
     }
 
@@ -960,8 +961,8 @@ impl NonASAPOp {
     /// and its children's output categories.
     pub(crate) fn validate_inputs(&self) -> Result<(), SchemaDerivationError> {
         use NonASAPOp::*;
-        let no_state = |node: &OperatorNode, what: &str| {
-            if node.result_kind == OperatorResultKind::State {
+        let no_state = |node: &I, what: &str| {
+            if node.result_kind() == OperatorResultKind::State {
                 Err(SchemaDerivationError::InvalidScalarSignature(format!(
                     "{what} consumes summary state; read it out first"
                 )))
@@ -970,18 +971,19 @@ impl NonASAPOp {
             }
         };
         let invalid = |message: &str| SchemaDerivationError::InvalidScalarSignature(message.into());
-        let predicate = |pred: &Predicate, scope: &Schema| -> Result<(), SchemaDerivationError> {
-            if matches!(
-                pred.0.scalar_type(scope)?.0,
-                DataType::Bool | DataType::Null
-            ) {
-                Ok(())
-            } else {
-                Err(invalid("predicate must be boolean"))
-            }
-        };
-        let instant = |child: &OperatorNode| -> Result<(), SchemaDerivationError> {
-            if child.result_kind == OperatorResultKind::InstantVector {
+        let predicate =
+            |pred: &Predicate<I>, scope: &Schema| -> Result<(), SchemaDerivationError> {
+                if matches!(
+                    pred.0.scalar_type(scope)?.0,
+                    DataType::Bool | DataType::Null
+                ) {
+                    Ok(())
+                } else {
+                    Err(invalid("predicate must be boolean"))
+                }
+            };
+        let instant = |child: &I| -> Result<(), SchemaDerivationError> {
+            if child.result_kind() == OperatorResultKind::InstantVector {
                 Ok(())
             } else {
                 Err(invalid("operation requires an instant vector"))
@@ -1025,14 +1027,14 @@ impl NonASAPOp {
                 if !selects_states(child, pred) {
                     no_state(child, "Filter")?;
                 }
-                predicate(pred, &child.schema)?;
+                predicate(pred, child.schema())?;
             }
             Project { child, cols, .. } => {
                 for col in cols {
                     if let ScalarExpr::Column(index) = col.expr {
-                        columns(&[index], &child.schema)?;
+                        columns(&[index], child.schema())?;
                     } else {
-                        col.expr.scalar_type(&child.schema)?;
+                        col.expr.scalar_type(child.schema())?;
                     }
                 }
             }
@@ -1044,8 +1046,8 @@ impl NonASAPOp {
             } => {
                 no_state(lhs, "BinaryOp")?;
                 no_state(rhs, "BinaryOp")?;
-                if lhs.result_kind != rhs.result_kind
-                    || lhs.result_kind == OperatorResultKind::RangeVector
+                if lhs.result_kind() != rhs.result_kind()
+                    || lhs.result_kind() == OperatorResultKind::RangeVector
                 {
                     return Err(invalid("binary operands have incompatible result kinds"));
                 }
@@ -1058,16 +1060,16 @@ impl NonASAPOp {
             } => {
                 no_state(left, "Join")?;
                 no_state(right, "Join")?;
-                if left.result_kind != OperatorResultKind::Relation
-                    || right.result_kind != OperatorResultKind::Relation
+                if left.result_kind() != OperatorResultKind::Relation
+                    || right.result_kind() != OperatorResultKind::Relation
                 {
                     return Err(invalid("SQL join requires relations"));
                 }
                 let scope = Schema::new(
-                    left.schema
+                    left.schema()
                         .fields
                         .iter()
-                        .chain(&right.schema.fields)
+                        .chain(&right.schema().fields)
                         .cloned()
                         .collect(),
                 );
@@ -1076,8 +1078,8 @@ impl NonASAPOp {
             SetOp { left, right, .. } => {
                 no_state(left, "SetOp")?;
                 no_state(right, "SetOp")?;
-                if left.result_kind != OperatorResultKind::Relation
-                    || right.result_kind != OperatorResultKind::Relation
+                if left.result_kind() != OperatorResultKind::Relation
+                    || right.result_kind() != OperatorResultKind::Relation
                 {
                     return Err(invalid("SQL set operation requires relations"));
                 }
@@ -1097,16 +1099,16 @@ impl NonASAPOp {
             } => {
                 no_state(child, "Aggregate")?;
                 if let Reduction::Reduce(keys) = reduction {
-                    columns(keys.keys(), &child.schema)?;
+                    columns(keys.keys(), child.schema())?;
                 }
                 for measure in measures {
-                    columns(&measure.input_cols(), &child.schema)?;
+                    columns(&measure.input_cols(), child.schema())?;
                 }
                 if !filters.is_empty() && filters.len() != measures.len() {
                     return Err(invalid("aggregate filter count differs from measure count"));
                 }
                 for pred in filters.iter().flatten() {
-                    predicate(pred, &child.schema)?;
+                    predicate(pred, child.schema())?;
                 }
                 if let Some(pred) = having {
                     predicate(pred, &self.output_schema()?)?;
@@ -1114,23 +1116,23 @@ impl NonASAPOp {
             }
             Dedup { child, cols } => {
                 no_state(child, "Dedup")?;
-                columns(cols, &child.schema)?;
+                columns(cols, child.schema())?;
             }
             Sort {
                 child,
                 keys,
                 partition_by,
             } => {
-                columns(partition_by.keys(), &child.schema)?;
+                columns(partition_by.keys(), child.schema())?;
                 for key in keys {
-                    key.expr.scalar_type(&child.schema)?;
+                    key.expr.scalar_type(child.schema())?;
                 }
             }
             Limit {
                 child,
                 partition_by,
                 ..
-            } => columns(partition_by.keys(), &child.schema)?,
+            } => columns(partition_by.keys(), child.schema())?,
             SQLWindowFunc {
                 child,
                 args,
@@ -1138,12 +1140,12 @@ impl NonASAPOp {
                 partition_by,
                 ..
             } => {
-                if child.result_kind != OperatorResultKind::Relation {
+                if child.result_kind() != OperatorResultKind::Relation {
                     return Err(invalid("SQL window requires a relation"));
                 }
-                columns(partition_by.keys(), &child.schema)?;
+                columns(partition_by.keys(), child.schema())?;
                 for expr in args.iter().chain(order_by.iter().map(|k| &k.expr)) {
-                    expr.scalar_type(&child.schema)?;
+                    expr.scalar_type(child.schema())?;
                 }
             }
             PromqlVectorFromScalar(expr) => {
@@ -1156,12 +1158,12 @@ impl NonASAPOp {
             | PromqlSeriesSample { child, .. } => instant(child)?,
             PromqlRelabel { child, value, .. } => {
                 instant(child)?;
-                if value.scalar_type(&child.schema)?.0 != DataType::Utf8 {
+                if value.scalar_type(child.schema())?.0 != DataType::Utf8 {
                     return Err(invalid("label expression requires a string"));
                 }
             }
             TimeRange { child, .. } => {
-                if child.result_kind != OperatorResultKind::Relation {
+                if child.result_kind() != OperatorResultKind::Relation {
                     instant(child)?;
                 }
             }
@@ -1169,7 +1171,7 @@ impl NonASAPOp {
                 // A relation is a SQL table's rows, shifted under a trailing
                 // window's tumbling window.
                 if !matches!(
-                    child.result_kind,
+                    child.result_kind(),
                     OperatorResultKind::InstantVector
                         | OperatorResultKind::RangeVector
                         | OperatorResultKind::Relation
@@ -1187,13 +1189,13 @@ impl NonASAPOp {
 /// Each input retains its keys only when the equality predicates constrain
 /// the other input to at most one matching row. In particular this preserves
 /// grouped sum/count keys through the SQL-average implementation.
-fn inner_join_unique_keys(
-    predicate: &ScalarExpr,
+fn inner_join_unique_keys<I>(
+    predicate: &ScalarExpr<I>,
     left: &Schema,
     right: &Schema,
 ) -> Vec<Vec<ColumnId>> {
     use crate::ir::scalar::CompareOpKind;
-    fn columns(expr: &ScalarExpr) -> Option<(ColumnId, ColumnId)> {
+    fn columns<I>(expr: &ScalarExpr<I>) -> Option<(ColumnId, ColumnId)> {
         if let ScalarExpr::Compare {
             left,
             op: CompareOpKind::Eq,
@@ -1208,7 +1210,7 @@ fn inner_join_unique_keys(
         }
         None
     }
-    fn equality(expr: &ScalarExpr) -> Option<(ColumnId, ColumnId)> {
+    fn equality<I>(expr: &ScalarExpr<I>) -> Option<(ColumnId, ColumnId)> {
         if let Some(pair) = columns(expr) {
             return Some(pair);
         }
@@ -1241,7 +1243,7 @@ fn inner_join_unique_keys(
         }
         None
     }
-    fn collect(expr: &ScalarExpr, pairs: &mut Vec<(ColumnId, ColumnId)>) {
+    fn collect<I>(expr: &ScalarExpr<I>, pairs: &mut Vec<(ColumnId, ColumnId)>) {
         if let ScalarExpr::BoolAnd(terms) = expr {
             for term in terms {
                 collect(term, pairs);
@@ -1289,11 +1291,11 @@ fn inner_join_unique_keys(
 
 /// Whether a `Filter` of `pred` over `child` selects whole summary states:
 /// `child` is state and `pred` reads only its plain columns, such as group keys.
-fn selects_states(child: &OperatorNode, pred: &Predicate) -> bool {
-    child.result_kind == OperatorResultKind::State
+fn selects_states<I: OperatorInput>(child: &I, pred: &Predicate<I>) -> bool {
+    child.result_kind() == OperatorResultKind::State
         && pred.0.columns_referenced().iter().all(|&column| {
             child
-                .schema
+                .schema()
                 .fields
                 .get(column)
                 .is_some_and(|field| field.is_plain())
@@ -1309,7 +1311,11 @@ fn readable(kind: OperatorResultKind) -> OperatorResultKind {
 
 /// Default output-column name for a projection item with no explicit alias:
 /// a bare column keeps its (schema) name; anything else gets `col_{i}`.
-fn default_proj_name(expr: &ScalarExpr, idx: usize, schema: &Schema) -> String {
+fn default_proj_name<I: OperatorInput>(
+    expr: &ScalarExpr<I>,
+    idx: usize,
+    schema: &Schema,
+) -> String {
     match expr {
         ScalarExpr::Column(id) => schema
             .fields
@@ -1793,7 +1799,7 @@ mod tests {
             unique_keys: vec![vec![0, 1]],
             closed: true,
         };
-        let equal = |left, right| ScalarExpr::Compare {
+        let equal = |left, right| ScalarExpr::<Rc<OperatorNode>>::Compare {
             left: Box::new(ScalarExpr::Column(left)),
             op: CompareOpKind::Eq,
             right: Box::new(ScalarExpr::Column(right)),

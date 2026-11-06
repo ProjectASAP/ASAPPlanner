@@ -5,9 +5,7 @@ use asap_executor::arrow::array::{DictionaryArray, UInt32Array};
 use asap_executor::arrow::datatypes::UInt32Type;
 use asap_executor::operators::{Operator, SortKey};
 use asap_executor::plan::PhysicalDAG;
-use asap_executor::planner::ir::schema::{
-    DataType, Field, FieldDataType, Schema, SketchAlgorithm, SketchKind, SketchParams,
-};
+use asap_executor::planner::ir::schema::{DataType, Field, FieldDataType, Schema, SketchAlgorithm};
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::values::{Batch, BatchColumn};
 use asap_executor::{Error, StateColumnUpdater};
@@ -27,16 +25,7 @@ fn tumbling_window() -> (Arc<Schema>, Batch) {
 
 /// One tumbling window of `series` KLL states (k = 200), keyed by series.
 fn tumbling_window_of(series_count: u32) -> (Arc<Schema>, Batch) {
-    let family = FieldDataType::Sketch(
-        SketchKind::new(
-            SketchAlgorithm::Kll,
-            SketchParams::Kll {
-                k: 200,
-                failure_probability: None,
-            },
-        ),
-        Default::default(),
-    );
+    let family = FieldDataType::Sketch(SketchAlgorithm::Kll, Default::default());
     let schema = Arc::new(Schema {
         fields: vec![
             Field {
@@ -328,7 +317,8 @@ fn merge_over_a_stored_tumbling_window(
         payload,
         output_schema: output_schema.clone(),
         output_state,
-        materialization: Default::default(),
+        lifetime: Default::default(),
+        parameters: None,
         guarantee: None,
         retention_ms: None,
     };

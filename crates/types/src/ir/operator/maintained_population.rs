@@ -2,6 +2,8 @@
 //! Resource limits, ingestion placement and data structures belong to the executor.
 use serde::{Deserialize, Serialize};
 
+use crate::ir::operator::input::OperatorInput;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CurrentSeriesInput {
     pub metric: String,
@@ -56,35 +58,35 @@ pub struct MaintainedPopulation<N = crate::ir::OperatorNode> {
 
 impl CurrentSeriesInput {
     /// Verify the named contract against the canonical maintenance input.
-    pub(crate) fn matches_node(&self, input: &crate::ir::OperatorNode) -> bool {
+    pub(crate) fn matches_node<I: OperatorInput>(&self, input: &I) -> bool {
         use crate::ir::operator::Source;
         use crate::ir::scalar::{CompareOpKind, ScalarValue};
         use crate::ir::schema::DataType;
         use crate::ir::{NonASAPOp, Operator, ScalarExpr, TimeRangeKind};
-        let input = match &input.operator {
+        let input = match input.operator() {
             Operator::NonASAP(NonASAPOp::TimeRange {
                 range,
                 kind: TimeRangeKind::Instant,
                 child,
             }) if self.lookback_ms > 0
-                && *range == std::time::Duration::from_millis(self.lookback_ms) =>
+                && range == std::time::Duration::from_millis(self.lookback_ms) =>
             {
-                child.as_ref()
+                child
             }
             Operator::NonASAP(NonASAPOp::TimeRange { .. }) => return false,
-            _ if self.lookback_ms == 300_000 => input,
+            _ if self.lookback_ms == 300_000 => input.clone(),
             _ => return false,
         };
         let Operator::NonASAP(NonASAPOp::Scan {
             source: Source::TimeSeries { metric },
             predicates,
             schema,
-        }) = &input.operator
+        }) = input.operator()
         else {
             return false;
         };
         if self.metric.is_empty()
-            || *metric != self.metric
+            || metric != self.metric
             || (schema.closed && !schema.has_promql_series_identity())
             || schema.time_index.is_none()
         {
@@ -99,7 +101,7 @@ impl CurrentSeriesInput {
             return false;
         }
         let mut matchers = Vec::new();
-        for predicate in predicates {
+        for predicate in &predicates {
             let ScalarExpr::Compare {
                 left, op, right, ..
             } = &predicate.0
@@ -138,7 +140,7 @@ impl CurrentSeriesInput {
 
 impl MaintainedPopulation<crate::ir::OperatorNode> {
     /// Whether `input` is the maintenance input this population declares.
-    pub(crate) fn matches_node(&self, input: &crate::ir::OperatorNode) -> bool {
+    pub(crate) fn matches_node<I: OperatorInput>(&self, input: &I) -> bool {
         use crate::ir::operator::Source;
         use crate::ir::schema::DataType;
         use crate::ir::{NonASAPOp, Operator};
@@ -149,18 +151,21 @@ impl MaintainedPopulation<crate::ir::OperatorNode> {
                 value_column,
                 grouping,
             } => {
+                let operator = input.operator();
                 let Operator::NonASAP(NonASAPOp::Scan {
                     source: Source::Table { .. },
                     schema,
                     ..
-                }) = &input.operator
+                }) = &operator
                 else {
                     return false;
                 };
                 // The same computation, whatever accuracy or timing has
-                // been attached to the node since.
-                let same_source =
-                    expected.operator == input.operator && expected.schema == input.schema;
+                // been attached to the node since. A `Scan` has no input,
+                // so its operator without inputs is all of it.
+                let same_source = expected.operator.map_children(|_| ())
+                    == operator.map_children(|_| ())
+                    && expected.schema == *input.schema();
                 same_source
                     && schema.closed
                     && schema

@@ -3,19 +3,19 @@ use crate::pass1::per_computation_candidates::{
     computation_candidates_for_intent, generate_per_computation_candidates,
     PerComputationCandidateError,
 };
-use crate::stage0::generate_dag_of_logical_memo_groups;
+use crate::stage0::memo_of_queries;
 use asap_types::ir::operator::operator_properties::{Reduction, Source};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::{ColumnRef, CompareOpKind, ScalarValue};
 use asap_types::ir::schema::{
     DataType, ExactKind, Field, FieldDataType, GroupingStrategy, Schema, SketchAlgorithm,
-    SketchKind, SketchParams, SummaryUpdate,
+    SummaryUpdate,
 };
 use asap_types::ir::{
     ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorNode, Predicate, QueryRoot, ScalarExpr,
 };
-use asap_types::stages::PruneReason;
+
 use asap_types::stages::{HavingEntry, HavingPlacement, HowToComputeAggregateMeasure};
 use std::rc::Rc;
 
@@ -117,41 +117,6 @@ fn frequency_statistics_keep_universal_choices() {
     }
 }
 
-/// An exact request cannot acquire an approximate sketch merely because one is
-/// available; each pruned family records why.
-#[test]
-fn exact_quantile_stays_exact_and_approximate_keeps_both_families() {
-    let choices = candidates_for(AggIntent::Quantile {
-        col: Some(0),
-        q: 0.99,
-        accuracy: approximate(),
-    });
-    assert_eq!(
-        algorithms(&choices),
-        vec![SketchAlgorithm::Kll, SketchAlgorithm::DDSketch]
-    );
-    let exact = computation_candidates_for_intent(&AggIntent::Quantile {
-        col: Some(0),
-        q: 0.99,
-        accuracy: AccuracyTarget::exact(),
-    })
-    .unwrap();
-    assert_eq!(exact.candidates, vec![HowToComputeAggregateMeasure::Exact]);
-    assert_eq!(
-        exact.pruned,
-        vec![
-            (
-                HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Kll),
-                PruneReason::RequiresExact
-            ),
-            (
-                HowToComputeAggregateMeasure::Summary(SketchAlgorithm::DDSketch),
-                PruneReason::RequiresExact
-            ),
-        ]
-    );
-}
-
 /// Scalar roots expose their producer targets; repeated references retain one target identity.
 #[test]
 fn scalar_root_producers_are_discovered_once() {
@@ -164,14 +129,14 @@ fn scalar_root_producers_are_discovered_once() {
         QueryRoot::Operator(producer.clone()),
     ];
     let candidates =
-        generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots)).unwrap();
+        generate_per_computation_candidates(&memo_of_queries(&roots).unwrap()).unwrap();
     assert_eq!(candidates.roots.len(), 2);
     for root in &candidates.roots {
         root.validate_structure().unwrap();
     }
     assert_eq!(candidates.targets.len(), 1);
     assert_eq!(**candidates.aggregate(&candidates.targets[0]), *producer);
-    assert!(producer.timing.is_none());
+
     assert!(producer.guarantee.is_none());
     producer.validate_structure().unwrap();
 }
@@ -212,7 +177,7 @@ fn exact_promql(query: &str) -> Vec<QueryRoot> {
 fn example_1_exact_q1_keeps_exact_accumulators_only() {
     let roots = exact_promql("sum by (job) (rate(http_requests_total[1m]))");
     let candidates =
-        generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots)).unwrap();
+        generate_per_computation_candidates(&memo_of_queries(&roots).unwrap()).unwrap();
     let found: Vec<_> = candidates
         .targets
         .iter()
@@ -229,61 +194,15 @@ fn example_1_exact_q1_keeps_exact_accumulators_only() {
             ])],
         ]
     );
-    assert!(candidates
-        .targets
-        .iter()
-        .all(|target| candidates.aggregate(target).timing.is_none()));
 }
 
-/// Physical annotations, ASAP operators and invalid probability requirements
-/// fail at the stage boundary.
+/// ASAP operators and invalid probability requirements fail at the stage
+/// boundary.
 #[test]
-fn assigned_physical_annotation_asap_input_and_invalid_accuracy_are_rejected() {
-    let mut producer = (*aggregate(AggIntent::Count {
-        accuracy: approximate(),
-    }))
-    .clone();
-    producer.timing = Some(asap_types::ir::properties::ExecutionTiming::QueryTime);
-    assert!(matches!(
-        generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
-            QueryRoot::Operator(Rc::new(producer.clone()))
-        ])),
-        Err(PerComputationCandidateError::AssignedPhysicalAnnotation)
-    ));
-    let mut stored = (*aggregate(AggIntent::Count {
-        accuracy: approximate(),
-    }))
-    .clone();
-    stored.materialization =
-        asap_types::physical::Materialization::MatAtQuery(asap_types::physical::Medium::Memory);
-    assert!(matches!(
-        generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
-            QueryRoot::Operator(Rc::new(stored.clone()))
-        ])),
-        Err(PerComputationCandidateError::AssignedPhysicalAnnotation)
-    ));
-    // An annotated node below an unannotated root is rejected too.
-    for annotated in [producer, stored] {
-        let root = having_filter(Rc::new(annotated), always());
-        assert!(matches!(
-            generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
-                QueryRoot::Operator(root)
-            ])),
-            Err(PerComputationCandidateError::AssignedPhysicalAnnotation)
-        ));
-    }
+fn asap_input_and_invalid_accuracy_are_rejected() {
     let summary = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
         child: scan(false),
-        family: FieldDataType::Sketch(
-            SketchKind::new(
-                SketchAlgorithm::Kll,
-                SketchParams::Kll {
-                    k: 200,
-                    failure_probability: None,
-                },
-            ),
-            Default::default(),
-        ),
+        family: FieldDataType::Sketch(SketchAlgorithm::Kll, Default::default()),
         input: SummaryUpdate::column(ColumnRef::SampleValue),
         reduction: Reduction::by(vec![]),
         grouping: GroupingStrategy::default(),
@@ -291,9 +210,9 @@ fn assigned_physical_annotation_asap_input_and_invalid_accuracy_are_rejected() {
     }))
     .unwrap();
     assert!(matches!(
-        generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
-            QueryRoot::Operator(summary)
-        ])),
+        generate_per_computation_candidates(
+            &memo_of_queries(&[QueryRoot::Operator(summary)]).unwrap()
+        ),
         Err(PerComputationCandidateError::ContainsAsap)
     ));
     let epsilon_delta =
@@ -333,9 +252,9 @@ fn assigned_physical_annotation_asap_input_and_invalid_accuracy_are_rejected() {
         vec![],
         None,
     );
-    let error = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
-        QueryRoot::Operator(invalid),
-    ]))
+    let error = generate_per_computation_candidates(
+        &memo_of_queries(&[QueryRoot::Operator(invalid)]).unwrap(),
+    )
     .unwrap_err();
     assert!(
         matches!(
@@ -394,9 +313,9 @@ fn multi_measure_aggregate_has_one_target_per_measure() {
         vec![],
         None,
     );
-    let inventory = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
-        QueryRoot::Operator(node),
-    ]))
+    let inventory = generate_per_computation_candidates(
+        &memo_of_queries(&[QueryRoot::Operator(node)]).unwrap(),
+    )
     .unwrap();
     let candidates = &inventory.targets;
     assert_eq!(
@@ -422,14 +341,12 @@ fn aggregate_without_realization_is_not_a_target() {
         col: Some(1),
         population: true,
     });
-    assert!(
-        generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
-            QueryRoot::Operator(node)
-        ]))
-        .unwrap()
-        .targets
-        .is_empty()
-    );
+    assert!(generate_per_computation_candidates(
+        &memo_of_queries(&[QueryRoot::Operator(node)]).unwrap()
+    )
+    .unwrap()
+    .targets
+    .is_empty());
 }
 
 /// A filtered SQL count keeps its executable accumulator and records its
@@ -445,9 +362,9 @@ fn filtered_measure_keeps_candidates_and_records_its_filter() {
         vec![Some(always()), None],
         None,
     );
-    let inventory = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
-        QueryRoot::Operator(filtered),
-    ]))
+    let inventory = generate_per_computation_candidates(
+        &memo_of_queries(&[QueryRoot::Operator(filtered)]).unwrap(),
+    )
     .unwrap();
     let targets = &inventory.targets;
     assert_eq!(targets.len(), 2);
@@ -459,35 +376,20 @@ fn filtered_measure_keeps_candidates_and_records_its_filter() {
     assert_eq!(targets[1].measure_filter, None);
 }
 
-/// Target `target`'s own ways to compute and the ones Pass 1 pruned.
+/// Target `target`'s own ways to compute.
 fn choices_of(
     inventory: &crate::pass1::per_computation_candidates::PerComputationCandidates,
     target: usize,
-) -> crate::pass1::per_computation_candidates::ComputationChoices {
-    crate::pass1::per_computation_candidates::ComputationChoices {
-        candidates: inventory.targets[target].ways_to_compute.clone(),
-        pruned: inventory.pruned_of_target(target, false),
-    }
+) -> Vec<HowToComputeAggregateMeasure> {
+    inventory.targets[target].ways_to_compute.clone()
 }
 
-fn assert_sql_count_choices(
-    choices: &crate::pass1::per_computation_candidates::ComputationChoices,
-) {
+fn assert_sql_count_choices(choices: &[HowToComputeAggregateMeasure]) {
     assert_eq!(
-        choices.candidates,
+        choices,
         vec![HowToComputeAggregateMeasure::ExactAccumulator(vec![
             ExactKind::Count
         ])]
-    );
-    assert_eq!(
-        choices.pruned,
-        [SketchAlgorithm::Cms, SketchAlgorithm::UnivMon]
-            .into_iter()
-            .map(|algorithm| (
-                HowToComputeAggregateMeasure::Summary(algorithm),
-                PruneReason::NoRelationalCountSketchRealization,
-            ))
-            .collect::<Vec<_>>()
     );
 }
 
@@ -545,9 +447,9 @@ fn equals(column: usize, value: ScalarValue) -> Predicate {
 fn key_only_having_is_pushed_below_and_keeps_candidates() {
     let node = grouped_count(None);
     let root = having_filter(node.clone(), equals(0, ScalarValue::Utf8("a".into())));
-    let inventory = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
-        QueryRoot::Operator(root.clone()),
-    ]))
+    let inventory = generate_per_computation_candidates(
+        &memo_of_queries(&[QueryRoot::Operator(root.clone())]).unwrap(),
+    )
     .unwrap();
     let targets = &inventory.targets;
     assert_eq!(targets.len(), 1);
@@ -568,10 +470,13 @@ fn key_only_having_is_pushed_below_and_keeps_candidates() {
 #[test]
 fn value_having_stays_above_output_and_keeps_candidates() {
     let value = || equals(1, ScalarValue::Int64(10));
-    let inventory = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
-        QueryRoot::Operator(having_filter(grouped_count(None), value())),
-        QueryRoot::Operator(grouped_count(Some(value()))),
-    ]))
+    let inventory = generate_per_computation_candidates(
+        &memo_of_queries(&[
+            QueryRoot::Operator(having_filter(grouped_count(None), value())),
+            QueryRoot::Operator(grouped_count(Some(value()))),
+        ])
+        .unwrap(),
+    )
     .unwrap();
     let targets = &inventory.targets;
     assert_eq!(targets.len(), 2);
@@ -586,37 +491,6 @@ fn value_having_stays_above_output_and_keeps_candidates() {
     }
 }
 
-/// `avg`'s one exact option is sum and count states when its input is never
-/// null, and plain `Exact` when that rewrite is pruned.
-#[test]
-fn avg_rewrites_to_sum_and_count_states() {
-    let avg = || vec![AggIntent::Avg { col: None }];
-    let inventory = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
-        QueryRoot::Operator(aggregate_over(scan(false), avg(), vec![], None)),
-        QueryRoot::Operator(aggregate_over(scan(true), avg(), vec![], None)),
-    ]))
-    .unwrap();
-    let targets = &inventory.targets;
-    assert_eq!(
-        targets[0].ways_to_compute,
-        vec![HowToComputeAggregateMeasure::ExactAccumulator(vec![
-            ExactKind::Sum,
-            ExactKind::Count
-        ])]
-    );
-    assert_eq!(
-        targets[1].ways_to_compute,
-        vec![HowToComputeAggregateMeasure::Exact]
-    );
-    assert_eq!(
-        inventory.pruned_of_target(1, false),
-        vec![(
-            HowToComputeAggregateMeasure::ExactAccumulator(vec![ExactKind::Sum, ExactKind::Count]),
-            PruneReason::NullableAvgInput
-        )]
-    );
-}
-
 /// A key-only `HAVING` above a shared aggregate stays above the output when
 /// another consumer reads the aggregate without it.
 #[test]
@@ -624,10 +498,13 @@ fn having_on_one_consumer_of_a_shared_aggregate_stays_above() {
     let node = grouped_count(None);
     let key = equals(0, ScalarValue::Utf8("a".into()));
     let filtered = having_filter(node.clone(), key.clone());
-    let targets = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
-        QueryRoot::Operator(filtered.clone()),
-        QueryRoot::Operator(node.clone()),
-    ]))
+    let targets = generate_per_computation_candidates(
+        &memo_of_queries(&[
+            QueryRoot::Operator(filtered.clone()),
+            QueryRoot::Operator(node.clone()),
+        ])
+        .unwrap(),
+    )
     .unwrap()
     .targets;
     assert_eq!(targets.len(), 1);
@@ -643,10 +520,9 @@ fn having_on_one_consumer_of_a_shared_aggregate_stays_above() {
     // Two consumers applying the same key-only predicate push it below.
     let first = having_filter(node.clone(), key.clone());
     let second = having_filter(node, key);
-    let targets = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
-        QueryRoot::Operator(first),
-        QueryRoot::Operator(second),
-    ]))
+    let targets = generate_per_computation_candidates(
+        &memo_of_queries(&[QueryRoot::Operator(first), QueryRoot::Operator(second)]).unwrap(),
+    )
     .unwrap()
     .targets;
     assert!(targets[0]
@@ -672,10 +548,13 @@ fn a_scalar_reference_consumer_keeps_a_key_only_having_above() {
             negated: false,
         }),
     );
-    let inventory = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
-        QueryRoot::Operator(filtered.clone()),
-        QueryRoot::Operator(exists),
-    ]))
+    let inventory = generate_per_computation_candidates(
+        &memo_of_queries(&[
+            QueryRoot::Operator(filtered.clone()),
+            QueryRoot::Operator(exists),
+        ])
+        .unwrap(),
+    )
     .unwrap();
     let targets = &inventory.targets;
     let target = targets
@@ -700,9 +579,9 @@ fn only_the_adjacent_of_stacked_filters_is_having() {
     let inner_key = equals(0, ScalarValue::Utf8("a".into()));
     let inner = having_filter(node.clone(), inner_key.clone());
     let outer = having_filter(inner.clone(), equals(0, ScalarValue::Utf8("b".into())));
-    let targets = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
-        QueryRoot::Operator(outer),
-    ]))
+    let targets = generate_per_computation_candidates(
+        &memo_of_queries(&[QueryRoot::Operator(outer)]).unwrap(),
+    )
     .unwrap()
     .targets;
     assert_eq!(targets.len(), 1);
@@ -726,13 +605,16 @@ fn global_aggregate_having_stays_above() {
         }]
     };
     let never = Predicate(ScalarExpr::Literal(ScalarValue::Boolean(false)));
-    let targets = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
-        QueryRoot::Operator(having_filter(
-            aggregate_over(scan(false), count(), vec![], None),
-            never.clone(),
-        )),
-        QueryRoot::Operator(aggregate_over(scan(false), count(), vec![], Some(never))),
-    ]))
+    let targets = generate_per_computation_candidates(
+        &memo_of_queries(&[
+            QueryRoot::Operator(having_filter(
+                aggregate_over(scan(false), count(), vec![], None),
+                never.clone(),
+            )),
+            QueryRoot::Operator(aggregate_over(scan(false), count(), vec![], Some(never))),
+        ])
+        .unwrap(),
+    )
     .unwrap()
     .targets;
     assert_eq!(targets.len(), 2);
@@ -744,45 +626,6 @@ fn global_aggregate_having_stays_above() {
             .collect();
         assert_eq!(placements, vec![HavingPlacement::AboveOutput]);
     }
-}
-
-/// #509 Example 1 Q2 under the default exact target: the top-k's one option is plain
-/// `Exact`, its heap summaries pruned `RequiresExact`; `sum_over_time` gets
-/// its exact Sum accumulator.
-#[test]
-fn example_1_exact_q2_prunes_topk_heaps() {
-    let roots = exact_promql("topk by (job) (10, sum_over_time(http_requests_total[1m]))");
-    let candidates =
-        generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots)).unwrap();
-    let found: Vec<_> = candidates
-        .targets
-        .iter()
-        .enumerate()
-        .map(|(index, _)| choices_of(&candidates, index))
-        .collect();
-    let topk = found
-        .iter()
-        .find(|choices| choices.candidates == [HowToComputeAggregateMeasure::Exact])
-        .expect("top-k target");
-    assert_eq!(
-        topk.pruned,
-        vec![
-            (
-                HowToComputeAggregateMeasure::Summary(SketchAlgorithm::CmsWithHeap),
-                PruneReason::RequiresExact
-            ),
-            (
-                HowToComputeAggregateMeasure::Summary(SketchAlgorithm::CountSketchWithHeap),
-                PruneReason::RequiresExact
-            ),
-        ]
-    );
-    assert!(found.iter().any(|choices| choices.candidates
-        == [HowToComputeAggregateMeasure::ExactAccumulator(vec![
-            ExactKind::Sum
-        ])]
-        && choices.pruned.is_empty()));
-    assert_eq!(found.len(), 2, "{found:#?}");
 }
 
 /// The `HAVING` entries of the target whose measure satisfies `is`.
@@ -822,9 +665,9 @@ fn scalar_reference_filter_is_not_having() {
     };
     let agg = aggregate_over(scan(false), count(), vec![], None);
     let root = having_filter(scan(false), above_scalar(1, agg.clone()));
-    let inventory = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
-        QueryRoot::Operator(root),
-    ]))
+    let inventory = generate_per_computation_candidates(
+        &memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
+    )
     .unwrap();
     let targets = &inventory.targets;
     assert_eq!(targets.len(), 1);
@@ -837,9 +680,9 @@ fn scalar_reference_filter_is_not_having() {
 
     let agg = aggregate_over(scan(false), count(), vec![], None);
     let root = having_filter(agg.clone(), above_scalar(0, agg.clone()));
-    let targets = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
-        QueryRoot::Operator(root.clone()),
-    ]))
+    let targets = generate_per_computation_candidates(
+        &memo_of_queries(&[QueryRoot::Operator(root.clone())]).unwrap(),
+    )
     .unwrap()
     .targets;
     assert_eq!(targets.len(), 1);
@@ -857,7 +700,7 @@ fn scalar_reference_filter_is_not_having() {
 #[test]
 fn promql_scalar_operand_is_not_having() {
     let roots = exact_promql("http_requests_total > scalar(sum(http_requests_total))");
-    let targets = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
+    let targets = generate_per_computation_candidates(&memo_of_queries(&roots).unwrap())
         .unwrap()
         .targets;
     assert!(!targets.is_empty());
@@ -870,8 +713,7 @@ fn promql_scalar_operand_is_not_having() {
     }
 
     let roots = exact_promql("sum by (job) (x) > scalar(count(x))");
-    let inventory =
-        generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots)).unwrap();
+    let inventory = generate_per_computation_candidates(&memo_of_queries(&roots).unwrap()).unwrap();
     assert!(having_of(&inventory, |intent| matches!(
         intent,
         AggIntent::Count { .. }
@@ -897,10 +739,9 @@ fn having_shared_with_a_project_consumer_stays_above() {
         child: node,
     }))
     .unwrap();
-    let targets = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
-        QueryRoot::Operator(filtered),
-        QueryRoot::Operator(project),
-    ]))
+    let targets = generate_per_computation_candidates(
+        &memo_of_queries(&[QueryRoot::Operator(filtered), QueryRoot::Operator(project)]).unwrap(),
+    )
     .unwrap()
     .targets;
     assert_eq!(targets.len(), 1);
@@ -934,9 +775,9 @@ fn without_and_per_entity_having_stays_above() {
         }))
         .unwrap();
         let root = having_filter(node, equals(0, ScalarValue::Utf8("a".into())));
-        let targets = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
-            QueryRoot::Operator(root),
-        ]))
+        let targets = generate_per_computation_candidates(
+            &memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
+        )
         .unwrap()
         .targets;
         assert_eq!(targets.len(), 1, "{reduction:?}");
@@ -963,9 +804,9 @@ fn composed_candidate_replaces_chosen_target_with_summary_evaluation() {
         cols: vec![0],
         accuracy: approximate(),
     });
-    let inventory = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
-        QueryRoot::Operator(producer.clone()),
-    ]))
+    let inventory = generate_per_computation_candidates(
+        &memo_of_queries(&[QueryRoot::Operator(producer.clone())]).unwrap(),
+    )
     .unwrap();
     let exact = compose_logical_candidate(&inventory, &[0]).unwrap();
     let QueryRoot::Operator(kept) = &exact[0] else {
@@ -979,20 +820,10 @@ fn composed_candidate_replaces_chosen_target_with_summary_evaluation() {
     let QueryRoot::Operator(estimate) = &hll[0] else {
         panic!("operator root expected")
     };
-    let Some(ASAPOp::SummaryEstimate { summary_input, .. }) = estimate.asap() else {
-        panic!("summary evaluation expected")
-    };
-    // The state takes every row of its source: one unrestricted selection box.
-    let coverage = summary_input.coverage().unwrap();
-    assert!(OperatorNode::reachable(coverage.definition()).iter().any(|node| matches!(
-        node.non_asap(),
-        Some(NonASAPOp::Scan { source: Source::Table { table_ref }, .. }) if table_ref == "flows"
-    )));
-    assert_eq!(coverage.selection().len(), 1);
-    assert!(
-        coverage.selection()[0].columns().is_empty()
-            && coverage.selection()[0].relative_time().is_none()
-    );
+    assert!(matches!(
+        estimate.asap(),
+        Some(ASAPOp::SummaryEstimate { .. })
+    ));
     hll[0].validate_structure().unwrap();
     assert!(compose_logical_candidate(&inventory, &[99]).is_err());
 }
@@ -1000,12 +831,15 @@ fn composed_candidate_replaces_chosen_target_with_summary_evaluation() {
 /// The one root of the workload candidate composed from `roots` and `choice`.
 fn composed(roots: Vec<Rc<OperatorNode>>, choice: &[usize]) -> Vec<Rc<OperatorNode>> {
     use crate::pass1::per_computation_candidates::compose_logical_candidate;
-    let inventory = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(
-        &roots
-            .into_iter()
-            .map(QueryRoot::Operator)
-            .collect::<Vec<_>>(),
-    ))
+    let inventory = generate_per_computation_candidates(
+        &memo_of_queries(
+            &roots
+                .into_iter()
+                .map(QueryRoot::Operator)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap(),
+    )
     .unwrap();
     compose_logical_candidate(&inventory, choice)
         .unwrap()
@@ -1047,27 +881,6 @@ fn summary_agg(node: &OperatorNode) -> &ASAPOp {
         Some(agg @ ASAPOp::SummaryAgg { .. }) => agg,
         _ => panic!("summary evaluation expected, got {node:#?}"),
     }
-}
-
-/// A summary is sized when the workload candidate is composed, for its
-/// measure's accuracy requirement.
-#[test]
-fn composed_summary_is_sized_for_its_measure() {
-    use asap_accuracy::test_support::default_size_params;
-    let intent = quantile();
-    let [root] = <[_; 1]>::try_from(composed(vec![aggregate(intent.clone())], &[1])).unwrap();
-    let ASAPOp::SummaryAgg {
-        family: FieldDataType::Sketch(kind, _),
-        ..
-    } = summary_agg(&root)
-    else {
-        panic!("sketch state expected")
-    };
-    assert_eq!(*kind.algorithm(), SketchAlgorithm::Kll);
-    assert_eq!(
-        kind.params(),
-        &default_size_params(SketchAlgorithm::Kll, &intent, 0.05, 0.01)
-    );
 }
 
 /// A measure filter becomes the state's filter; a key-only `HAVING` applied
@@ -1268,9 +1081,9 @@ fn own_having_subquery_is_substituted() {
     use crate::pass1::per_computation_candidates::compose_logical_candidate;
     let inner = aggregate(quantile());
     let outer = grouped_quantile(Some(above_scalar(1, inner.clone())));
-    let inventory = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
-        QueryRoot::Operator(outer.clone()),
-    ]))
+    let inventory = generate_per_computation_candidates(
+        &memo_of_queries(&[QueryRoot::Operator(outer.clone())]).unwrap(),
+    )
     .unwrap();
     assert_eq!(inventory.targets.len(), 2);
     let kll = 1;
@@ -1379,7 +1192,7 @@ fn memo_cached_rules_preserve_occurrence_specific_having() {
         QueryRoot::Operator(shared),
         QueryRoot::Operator(having_filter(other, key)),
     ];
-    let memo = generate_dag_of_logical_memo_groups(&roots);
+    let memo = memo_of_queries(&roots).unwrap();
     let cached = generate_per_computation_candidates(&memo).unwrap();
     assert_eq!(cached.targets.len(), 1);
     // Roots 0 and 2 apply the same `Filter`, one memo group: one entry.

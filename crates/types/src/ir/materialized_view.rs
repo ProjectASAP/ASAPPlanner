@@ -5,12 +5,12 @@
 //! `retention_ms` installation sets on its nodes
 //! ([`PhysicalASAPDAG::set_retention`]).
 //!
-//! A **materialized view** is a node whose output is kept across
-//! evaluations: its materialization is `MatAtIngestion` or
-//! `MatAtQueryKeptAcrossEvaluations`, and it carries its `retention_ms`. A
-//! `MatAtQuery` node is not a view: its output is discarded after one
+//! A **materialized view** is a node whose output is materialized across
+//! evaluations: its lifetime is `AcrossEvaluations`, at ingestion time or
+//! at query time, and it carries its `retention_ms`. A node materialized for
+//! `OneEvaluation` is not a view: its output is discarded after one
 //! evaluation. A query-time `Scan` carries how long its source's rows are
-//! kept for it (`None` when it reads them unbounded).
+//! retained for it (`None` when it reads them unbounded).
 //!
 //! ## Refreshing a view
 //!
@@ -79,14 +79,14 @@ use crate::ir::operator::non_asap::NonASAPOp;
 use crate::ir::operator::operator_properties::Source;
 use crate::ir::properties::execution_data_state::ExecutionTiming;
 use crate::ir::properties::summary_coverage::{CoverageError, SelectionBox, SummaryCoverage};
-use crate::physical::materialization::Materialization;
+use crate::physical::Lifetime;
 
 /// One materialized view of a DAG: what its stored state is, what it is
-/// refreshed from, when, and for how long it is kept.
+/// refreshed from, when, and for how long it is retained.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MaterializedView {
-    /// The node whose output is kept.
+    /// The node whose output is materialized.
     pub node_id: PhysicalASAPNodeId,
     /// Which run refreshes it.
     pub(crate) refresh: MaterializedViewRefresh,
@@ -235,13 +235,13 @@ impl RawDataWindow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MaterializedViewRefresh {
-    /// Refreshed at ingestion time (`MatAtIngestion`): the runtime runs the
+    /// Refreshed at ingestion time (materialized at ingestion time): the runtime runs the
     /// node in an ingestion run once its inputs are complete (its windows'
     /// samples have arrived and the views it reads are refreshed), and
     /// keeps the result.
     AtIngestion,
-    /// Refreshed at query time and kept across evaluations
-    /// (`MatAtQueryKeptAcrossEvaluations`): when an evaluation reads this
+    /// Refreshed at query time and materialized across evaluations
+    /// (query-time `AcrossEvaluations`): when an evaluation reads this
     /// view for a selection it has not been refreshed for yet, the runtime
     /// runs the node in a query run over its inputs, keeps the result, and
     /// binds it like a view refreshed at ingestion.
@@ -375,18 +375,18 @@ pub enum InstallableDagError {
     /// Bad input (a plan file): view `node_id` has no `retention_ms`.
     #[error("materialized view {node_id} has no retention_ms")]
     ViewWithoutRetention { node_id: PhysicalASAPNodeId },
-    /// Bad input (a plan file): view `node_id` is kept for less than the
+    /// Bad input (a plan file): view `node_id` is retained for less than the
     /// data it summarizes reaches back, so a later evaluation would miss
     /// it.
-    #[error("materialized view {node_id} is kept for less than its data reaches back")]
+    #[error("materialized view {node_id} is retained for less than its data reaches back")]
     ViewRetentionTooShort { node_id: PhysicalASAPNodeId },
     /// Bad input (a plan file): query-time `Scan` `node_id` reads a bounded
     /// window but has no `retention_ms`.
     #[error("query-time scan {node_id} reads a bounded window but has no retention_ms")]
     ScanWithoutRetention { node_id: PhysicalASAPNodeId },
     /// Bad input (a plan file): query-time `Scan` `node_id` keeps its rows
-    /// for less than its readers' window reaches back.
-    #[error("query-time scan {node_id} is kept for less than its window reaches back")]
+    /// for less than its consumers' window reaches back.
+    #[error("query-time scan {node_id} is retained for less than its window reaches back")]
     ScanRetentionTooShort { node_id: PhysicalASAPNodeId },
 }
 
@@ -398,11 +398,9 @@ impl PhysicalASAPDAG {
     /// covers how far back its data reaches. O(views · nodes) for the
     /// coverages, plus O(nodes + edges).
     pub fn materialized_views(&self) -> Result<Vec<MaterializedView>, InstallableDagError> {
-        if let Some(node) = self
-            .nodes
-            .iter()
-            .find(|node| node.materialization.is_materialized_view() && node.retention_ms.is_none())
-        {
+        if let Some(node) = self.nodes.iter().find(|node| {
+            matches!(node.lifetime, Lifetime::AcrossEvaluations(_)) && node.retention_ms.is_none()
+        }) {
             return Err(InstallableDagError::ViewWithoutRetention { node_id: node.id });
         }
         self.validate()?;
@@ -571,25 +569,25 @@ impl PhysicalASAPDAG {
     ///
     /// A view takes `tumbling_window_retention_ms_by_node`'s value (Stage 3's retention
     /// of a tumbling window's chain: its offset plus its window plus the longest
-    /// range-evaluation span of its readers); otherwise how far back its
-    /// data reaches, plus, for a view built from other views, its readers'
+    /// range-evaluation span of its consumers); otherwise how far back its
+    /// data reaches, plus, for a view built from other views, its consumers'
     /// longest range-evaluation span (`reader_span_ms_by_node`). Then each
-    /// view is kept at least as long as every view built from it needs it:
+    /// view is retained at least as long as every view built from it needs it:
     /// as long as that view's own retention when it is refreshed on first
     /// read (a range request may refresh it for its oldest step), else as
     /// far back as that view's data reaches. This is each node's own
     /// requirement: a runtime that stores identical outputs of several
     /// nodes once keeps them for the largest requirement among those nodes.
     ///
-    /// A query-time `Scan` keeps its rows for its readers' window
+    /// A query-time `Scan` keeps its rows for its consumers' window
     /// ([`Self::scan_window`]'s `lookback_ms`) plus their longest
     /// range-evaluation span, and at least the retention of every view
     /// refreshed on first read from it (which may be refreshed for its
     /// oldest step); `None` when its window is unbounded. In an installed
-    /// DAG a chain kept across evaluations is its expanded tumbling windows, so its
+    /// DAG a chain materialized across evaluations is its expanded tumbling windows, so its
     /// scan keeps the reach of all of them: reusing a tumbling window refreshed at an
     /// earlier evaluation is optional, and a restart or an older range step
-    /// refreshes older tumbling windows from raw data. (Stage 3 prices a kept chain on
+    /// refreshes older tumbling windows from raw data. (Stage 3 prices a materialized chain on
     /// the unexpanded DAG as reading its newest tumbling window.)
     pub fn set_retention(
         &mut self,
@@ -625,8 +623,8 @@ impl PhysicalASAPDAG {
                 MaterializedViewRefresh::AtIngestion => reach_ms_by_node[&view.node_id],
             };
             for input in view.inputs.materialized_views.clone() {
-                let kept = &mut views[position_of[&input]].retention_ms;
-                *kept = (*kept).max(needed_ms);
+                let retained = &mut views[position_of[&input]].retention_ms;
+                *retained = (*retained).max(needed_ms);
             }
         }
         let mut retention_ms_by_node: HashMap<PhysicalASAPNodeId, Option<u64>> = views
@@ -687,9 +685,13 @@ impl PhysicalASAPDAG {
                     return Err(InstallableDagError::ScanWithoutRetention { node_id: node.id })
                 }
             };
-            match retention.iter_mut().find(|kept| &kept.source == source) {
-                Some(kept) => {
-                    kept.lookback_ms = kept.lookback_ms.zip(lookback_ms).map(|(a, b)| a.max(b))
+            match retention
+                .iter_mut()
+                .find(|retained| &retained.source == source)
+            {
+                Some(retained) => {
+                    retained.lookback_ms =
+                        retained.lookback_ms.zip(lookback_ms).map(|(a, b)| a.max(b))
                 }
                 None => retention.push(RawDataRetention {
                     source: source.clone(),
@@ -700,7 +702,7 @@ impl PhysicalASAPDAG {
         Ok(retention)
     }
 
-    /// [`Self::scan_window`] of each query-time `Scan`, with no chain kept,
+    /// [`Self::scan_window`] of each query-time `Scan`, with no chain materialized,
     /// by id.
     fn query_time_scan_windows(&self) -> HashMap<PhysicalASAPNodeId, ScanWindow> {
         let scans = self
@@ -730,7 +732,7 @@ impl PhysicalASAPDAG {
         let views: HashSet<PhysicalASAPNodeId> = self
             .nodes
             .iter()
-            .filter(|node| node.materialization.is_materialized_view())
+            .filter(|node| matches!(node.lifetime, Lifetime::AcrossEvaluations(_)))
             .map(|node| node.id)
             .collect();
         // The IR of each node, which coverage is derived from.
@@ -764,7 +766,8 @@ impl PhysicalASAPDAG {
             {
                 window_by_view.insert(id, window);
             }
-            if matches!(node.materialization, Materialization::MatAtIngestion(_)) {
+            let refreshed_at_ingestion = node.output_state.timing == ExecutionTiming::IngestionTime;
+            if refreshed_at_ingestion {
                 // An ingestion run reads each view for the window ending at
                 // its end, so a view read must end where the raw windows do.
                 let mut end_offsets_ms: Vec<i64> = inputs
@@ -796,9 +799,10 @@ impl PhysicalASAPDAG {
             coverage_by_node.insert(id, coverage.clone());
             let view = MaterializedView {
                 node_id: id,
-                refresh: match node.materialization {
-                    Materialization::MatAtIngestion(_) => MaterializedViewRefresh::AtIngestion,
-                    _ => MaterializedViewRefresh::OnFirstRead,
+                refresh: if refreshed_at_ingestion {
+                    MaterializedViewRefresh::AtIngestion
+                } else {
+                    MaterializedViewRefresh::OnFirstRead
                 },
                 coverage: ViewCoverage {
                     definition_id: coverage.definition_id(),
@@ -817,7 +821,7 @@ impl PhysicalASAPDAG {
 /// `inputs` summarizes reaches: the farthest of its raw-data windows and of
 /// the views it reads (`reach_ms_by_node`, each already computed).
 /// Whether `node` is a `Scan` run at query time, which carries how long its
-/// source's rows are kept for it.
+/// source's rows are retained for it.
 pub(crate) fn is_query_time_scan(node: &PhysicalASAPDAGNode) -> bool {
     matches!(node.payload, Operator::NonASAP(NonASAPOp::Scan { .. }))
         && node.output_state.timing == ExecutionTiming::QueryTime
@@ -1083,79 +1087,15 @@ impl<'a> ViewIndex<'a> {
     }
 }
 
-/// The coverage of view `id` (IR `ir`), refreshed from `inputs`. A merge's
-/// is the union of its inputs' selections under their shared definition
-/// ([`SummaryCoverage::derive`]). A summary built from exactly one view and
-/// nothing else, with no selection of its own (a rollup to a coarser
-/// grouping, or across series), takes that input's selection: its
-/// definition is its own sub-DAG with the input replaced by the input's
-/// definition, so the rollups of equal inputs share one definition.
-/// Anything else keeps its own derived coverage.
+/// The coverage of view `id` (IR `ir`), refreshed from `inputs`: the
+/// coverage its memo group stores, which the realized plan will carry.
+/// Coverage is derived only in the memo, never on node trees.
 fn coverage_of(
     id: PhysicalASAPNodeId,
     inputs: &MaterializedViewInputs,
     ir: &HashMap<PhysicalASAPNodeId, Rc<OperatorNode>>,
     coverage_by_node: &HashMap<PhysicalASAPNodeId, SummaryCoverage>,
 ) -> Result<SummaryCoverage, CoverageError> {
-    let node = &ir[&id];
-    let own = SummaryCoverage::derive(node)?;
-    let [input] = inputs.materialized_views.as_slice() else {
-        return Ok(own);
-    };
-    if !inputs.raw_data_windows.is_empty()
-        || matches!(node.asap(), Some(ASAPOp::SummaryMerge { .. }))
-        || own.selection != [SelectionBox::default()]
-    {
-        return Ok(own);
-    }
-    let input_coverage = &coverage_by_node[input];
-    let over_definition = with_replaced(node, &ir[input], &input_coverage.definition);
-    Ok(SummaryCoverage {
-        definition: SummaryCoverage::derive(&over_definition)?.definition,
-        selection: input_coverage.selection.clone(),
-    })
-}
-
-/// `node` with every use of `old` (by address) replaced by `new`; nodes
-/// that do not reach `old` are shared, not copied.
-fn with_replaced(
-    node: &Rc<OperatorNode>,
-    old: &Rc<OperatorNode>,
-    new: &Rc<OperatorNode>,
-) -> Rc<OperatorNode> {
-    fn replace(
-        node: &Rc<OperatorNode>,
-        old: &Rc<OperatorNode>,
-        new: &Rc<OperatorNode>,
-        cache: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
-    ) -> Rc<OperatorNode> {
-        if Rc::ptr_eq(node, old) {
-            return Rc::clone(new);
-        }
-        if let Some(done) = cache.get(&Rc::as_ptr(node)) {
-            return Rc::clone(done);
-        }
-        let children = node.children();
-        let replaced: Vec<Rc<OperatorNode>> = children
-            .iter()
-            .map(|child| replace(child, old, new, cache))
-            .collect();
-        let result = if children
-            .iter()
-            .zip(&replaced)
-            .all(|(a, b)| Rc::ptr_eq(a, b))
-        {
-            Rc::clone(node)
-        } else {
-            let mut next = replaced.into_iter();
-            let mut copy = (**node).clone();
-            copy.operator = node
-                .operator
-                .map_children(|_| next.next().expect("one per child"));
-            Rc::new(copy)
-        };
-        cache.insert(Rc::as_ptr(node), Rc::clone(&result));
-        result
-    }
-    replace(node, old, new, &mut HashMap::new())
+    let _ = (id, inputs, ir, coverage_by_node);
+    todo!("#1207 PR 6: the view's coverage from its memo group's GroupProperties::summary_coverage")
 }

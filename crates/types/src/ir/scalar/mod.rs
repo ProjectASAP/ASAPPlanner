@@ -19,6 +19,7 @@ use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::ir::operator::input::OperatorInput;
 use crate::ir::operator::node::OperatorNode;
 use crate::ir::scalar::scalar_type_rules::MapScalarFunction;
 use crate::ir::schema::{ColumnId, DataType, Schema};
@@ -353,7 +354,7 @@ impl<C> ScalarExpr<C> {
     }
 }
 
-impl ScalarExpr {
+impl<C: OperatorInput> ScalarExpr<C> {
     /// Infer the `(DataType, nullable)` this expression produces against the
     /// input schema its owner evaluates it in. Unregistered functions are
     /// rejected. A reference to a field carrying summary state is an error:
@@ -579,7 +580,7 @@ impl ScalarExpr {
             // `scalar(v)` is one float sample (NaN when the vector is not
             // exactly one series); a scalar subquery is its single column.
             ScalarExpr::PromqlScalarFromVector(node) => {
-                if node.result_kind != super::OperatorResultKind::InstantVector {
+                if node.result_kind() != super::OperatorResultKind::InstantVector {
                     return Err(signature("scalar() requires an instant vector"));
                 }
                 (DataType::Float64, false)
@@ -622,25 +623,25 @@ fn common_scalar_type(a: &DataType, b: &DataType) -> Result<DataType, SchemaDeri
         Err(signature("incompatible scalar types"))
     }
 }
-fn relation(node: &OperatorNode) -> Result<(), SchemaDerivationError> {
-    if node.result_kind == super::OperatorResultKind::Relation {
+fn relation<C: OperatorInput>(node: &C) -> Result<(), SchemaDerivationError> {
+    if node.result_kind() == super::OperatorResultKind::Relation {
         Ok(())
     } else {
         Err(signature("SQL subquery requires a relation"))
     }
 }
-fn scalar_subquery_field(
-    node: &OperatorNode,
+fn scalar_subquery_field<C: OperatorInput>(
+    node: &C,
 ) -> Result<&crate::ir::schema::Field, SchemaDerivationError> {
     relation(node)?;
-    match node.schema.fields.as_slice() {
+    match node.schema().fields.as_slice() {
         [field] => Ok(field),
         _ => Err(signature("scalar subquery requires exactly one column")),
     }
 }
-fn sql_function_type(
+fn sql_function_type<C: OperatorInput>(
     name: &str,
-    args: &[ScalarExpr],
+    args: &[ScalarExpr<C>],
     schema: &Schema,
 ) -> Result<(DataType, bool), SchemaDerivationError> {
     let types = args
@@ -720,7 +721,10 @@ fn sql_function_type(
 
 /// Resolve the bounded canonical `asap_struct_field(struct, selector)` operation.
 /// Selectors are positive 1-based literal ordinals or exact literal field names.
-pub fn struct_field_type(args: &[ScalarExpr], schema: &Schema) -> Result<(DataType, bool), String> {
+pub fn struct_field_type<C: OperatorInput>(
+    args: &[ScalarExpr<C>],
+    schema: &Schema,
+) -> Result<(DataType, bool), String> {
     let [input, selector] = args else {
         return Err("struct field access requires a struct and constant selector".into());
     };
@@ -757,8 +761,8 @@ pub fn struct_field_type(args: &[ScalarExpr], schema: &Schema) -> Result<(DataTy
 
 /// Resolve `asap_element_access(collection, index)`: Map access through the
 /// map function contract, List access with integer indices.
-pub fn element_access_type(
-    args: &[ScalarExpr],
+pub fn element_access_type<C: OperatorInput>(
+    args: &[ScalarExpr<C>],
     schema: &Schema,
 ) -> Result<(DataType, bool), String> {
     let [input, index] = args else {

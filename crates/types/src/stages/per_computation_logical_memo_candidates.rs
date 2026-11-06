@@ -1,26 +1,10 @@
-//! Stage 1, Pass 1's output, which Pass 2 extends (the memo groups with
-//! their Pass 1 candidates), and the computation-target types Pass 1 builds
-//! those candidates from.
+//! The computation-target types Stage 1, Pass 1 builds its candidates from.
 
 use std::rc::Rc;
 
-use super::{Memo, MemoGroupId, PrunedCandidate};
+use super::MemoGroupId;
 use crate::ir::schema::{ExactKind, SketchAlgorithm};
 use crate::ir::{OperatorNode, Predicate};
-
-/// Stage 1, Pass 1's output: the workload's memo groups, each with its
-/// Pass 1 candidates, and the candidates Pass 1 pruned. It is also Pass 2's
-/// input.
-#[derive(Debug, Clone)]
-pub struct PerComputationLogicalMemoCandidates {
-    /// The groups moved from the [`DagOfLogicalMemoGroups`](super::DagOfLogicalMemoGroups),
-    /// its query roots, and every group's candidates (origin
-    /// [`Pass1`](super::OriginOfCandidateForMemoGroup::Pass1)).
-    pub memo: Memo,
-    /// The ways to compute a target's measure that Pass 1 pruned, each on
-    /// its target's aggregate group, in pruning order.
-    pub pruned_candidates: Vec<PrunedCandidate<HowToComputeAggregateMeasure>>,
-}
 
 /// How one Pass 1 target is computed: exact or a summary.
 ///
@@ -84,8 +68,6 @@ pub struct ComputationTarget {
     /// Index into the aggregate's measures.
     pub measure_index: usize,
     /// The measure's unranked ways to compute it, the exact option first.
-    /// The ones Pass 1 pruned are in
-    /// [`PerComputationLogicalMemoCandidates::pruned_candidates`].
     pub ways_to_compute: Vec<HowToComputeAggregateMeasure>,
     /// The measure's own filter; only rows that pass it update the state
     /// (`SummaryAgg.filter`).
@@ -114,10 +96,8 @@ pub struct FusedComputation {
     /// computations absorb. None of them is computed when this is picked.
     pub absorbed_targets: Vec<usize>,
     /// How the fused computation is computed: exact or a summary. Empty
-    /// when Pass 1 pruned every one (today only for
-    /// [`PruneReason::UnsupportedByDeployment`](super::PruneReason::UnsupportedByDeployment),
-    /// recorded in [`PerComputationLogicalMemoCandidates::pruned_candidates`]); the fusion is
-    /// then not offered.
+    /// when Pass 1 pruned every one (today only for a family the deployment
+    /// does not support); the fusion is then not offered.
     pub ways_to_compute: Vec<HowToComputeAggregateMeasure>,
 }
 

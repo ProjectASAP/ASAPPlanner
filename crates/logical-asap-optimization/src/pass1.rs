@@ -1,14 +1,10 @@
 //! Stage 1, Pass 1: per-computation candidate generation and composition,
 //! and the summary realizations it offers. Its one entry is
-//! [`generate_per_computation_logical_memo_candidates`], whose output
-//! ([`PerComputationLogicalMemoCandidates`](asap_types::stages::PerComputationLogicalMemoCandidates))
-//! Pass 2 extends.
+//! [`pass1_memo`], whose output
+//! memo Pass 2 extends.
 
-/// Stage 1, Pass 1's entry and output: the per-computation candidates on
-/// the memo groups ([`PerComputationLogicalMemoCandidates`](asap_types::stages::PerComputationLogicalMemoCandidates)).
+/// Stage 1, Pass 1's entry: the initial candidates of the memo groups.
 pub(crate) mod logical_memo_candidates;
-/// Pass 1's candidates on Stage 0's memo groups (`try_populate_pass1`).
-pub(crate) mod memo_population;
 /// Stage 1, Pass 1's computation targets, their candidates and their
 /// composition. No execution timing is assigned: that is a Stage 2
 /// materialization decision. Its target list
@@ -20,7 +16,5 @@ pub(crate) mod per_computation_candidates;
 mod per_computation_candidates_tests;
 pub(crate) mod realization;
 
-pub use logical_memo_candidates::{
-    generate_per_computation_logical_memo_candidates, PerComputationLogicalMemoCandidatesError,
-};
+pub use logical_memo_candidates::{pass1_memo, Pass1Error};
 pub use per_computation_candidates::PerComputationCandidateError;

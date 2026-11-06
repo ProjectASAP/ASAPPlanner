@@ -48,8 +48,8 @@ workload itself.
 | Query-language frontends | One summary-free DAG: `Distinct`, `Entropy`, `L2` over `flows.src_ip`, last 1 m | Same. Q1 is a distinct count; Q2 is `Entropy` and Q3 is `L2` over the per-source counts, each with an exact population count for the empty-input NULL. |
 | Logical ASAP-aware optimization, Pass 1 | Each computation: exact, a specialized summary, UnivMon. 3 × 3 × 3 = **27** | Q1: exact, HLL, KMV, UnivMon (no Theta: `asap_sketchlib` has no Theta sketch). Q2, Q3: exact, UnivMon (no specialized entropy or norm summary). 4 × 2 × 2 = **16** |
 | Logical ASAP-aware optimization, Pass 2 | Summary-capability rule: + 1 (one UnivMon for all three, sized for ε = 0.01) + 9 (3 pairs share a UnivMon × 3 options of the third). Independent kept. **37**. Window composition left out. | Identical-expression rule (Q2 and Q3's shared per-source count, and the shared scan) and summary-capability rule (one UnivMon for two of the queries or all three, sized with each parameter's largest value among its readers): **82** |
-| Physical ASAP-aware optimization | Same options as Example 1: no window form → rebuilt from raw samples each refresh. | Each logical candidate with every sub-DAG `NotMaterialized`, plus `MatAtQuery(Memory)` for each summary build two or more queries read: **184** |
-| Plan selection | One UnivMon sized for ε = 0.01 vs three separate summaries; the shared one usually wins (one update per flow record instead of three). | 164 invalid: HLL or UnivMon for Q1 (120), whose bound has failure probability None without a distinct bound for `flows`, and UnivMon for Q2 (44), whose entropy has no guarantee. 20 valid. Under cost model 1, KMV for Q1 with the other two exact (P33) costs 6.097 per second and P1, all exact, 6.104, the exact distinct count's values held while Q1 runs; the shared per-source count costs 7.46 rebuilt for each query and 7.06 kept `MatAtQuery`; with the shared scan also built once per evaluation, KMV for Q1 (P35-m3) is selected at 5.745, and all exact costs 5.752; UnivMon for Q3 costs 8.09. |
+| Physical ASAP-aware optimization | Same options as Example 1: no window form → rebuilt from raw samples each refresh. | Each logical candidate with every sub-DAG `Lifetime::None`, plus `(QueryTime, OneEvaluation(Memory))` for each summary build two or more queries read: **184** |
+| Plan selection | One UnivMon sized for ε = 0.01 vs three separate summaries; the shared one usually wins (one update per flow record instead of three). | 164 invalid: HLL or UnivMon for Q1 (120), whose bound has failure probability None without a distinct bound for `flows`, and UnivMon for Q2 (44), whose entropy has no guarantee. 20 valid. Under cost model 1, KMV for Q1 with the other two exact (P33) costs 6.097 per second and P1, all exact, 6.104, the exact distinct count's values held while Q1 runs; the shared per-source count costs 7.46 rebuilt for each query and 7.06 materialized `OneEvaluation`; with the shared scan also built once per evaluation, KMV for Q1 (P35-m3) is selected at 5.745, and all exact costs 5.752; UnivMon for Q3 costs 8.09. |
 
 ## Invariants and tests
 
@@ -84,12 +84,12 @@ workload itself.
 
 | Invariant | Test | Status |
 |---|---|---|
-| Each logical candidate keeps one physical candidate with nothing materialized, plus one per other materialization assignment; none pruned | `stage2_physical_asap_optimization_keeps_every_logical_candidate` | passes |
+| Each logical candidate keeps one physical candidate with nothing materialized, plus one per other physical properties assignment; none pruned | `stage2_physical_asap_optimization_keeps_every_logical_candidate` | passes |
 | The shared UnivMon stays one build read by all three queries | `stage2_physical_asap_optimization_keeps_the_shared_univmon_as_one_build` | passes |
 
 Window-composition candidates are out of scope: the doc leaves them out for
 this example, and a summary with no window form is rebuilt at every refresh
-(Example 1's table) unless a shared build is kept `MatAtQuery` within one
+(Example 1's table) unless a shared build is materialized `OneEvaluation` within one
 evaluation.
 
 ### Plan selection
@@ -98,7 +98,7 @@ evaluation.
 |---|---|---|
 | One selected id; every other candidate rejected once with a reason | `stage3_plan_selection_selects_one_and_explains_the_rest` | passes |
 | The selected plan is the cheapest valid one | `stage3_plan_selection_selects_cheapest_valid` | passes |
-| Each node of a valid candidate is charged once per consuming query while `NotMaterialized`, once when materialized | `stage3_plan_selection_charges_each_node_per_consuming_query` | passes |
+| Each node of a valid candidate is charged once per consuming query while `Lifetime::None`, once when materialized | `stage3_plan_selection_charges_each_node_per_consuming_query` | passes |
 | No candidate builds a Theta sketch | `stage3_plan_selection_has_no_theta_candidate` | passes |
 | A UnivMon estimate has a guarantee, so it is judged against its target instead of rejected for having none | `stage3_plan_selection_judges_univmon_with_an_accuracy_model` | ignored: needs a UnivMon entropy accuracy model (#788); L2 and the distinct count have one |
 | Given a distinct bound for the source, classic HLL's failure probability is bound and Q1's HLL is accepted; a larger bound enlarges its precision, also in a tumbling-window chain | `stage3_plan_selection_accepts_hll_given_a_distinct_bound`, `…_enlarges_hll_for_a_larger_distinct_bound`, `…_enlarges_tumbling_window_hll` | passes |
@@ -112,8 +112,8 @@ The doc's "the shared candidate usually wins" depends on the cost model, so
 it is tested only as the dominance above: one build sized for the strictest
 consumer costs no more than three builds that include one of that size. Whether
 it also beats the exact plans is the model's call. The dominance needs the
-shared UnivMon materialized: plan selection charges a `NotMaterialized`
-node once per consuming query, so unmaterialized it costs three builds of the
+shared UnivMon materialized: plan selection charges a `Lifetime::None`
+node once per consuming query, so not_materialized it costs three builds of the
 strictest size.
 
 ## Ambiguities and conflicts with the planner

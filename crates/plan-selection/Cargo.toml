@@ -9,33 +9,12 @@ edition = "2021"
 # the facade's `AssignmentRealizer`: no dependency on Stages 1 or 2, nor on
 # the executor (#1054 X1, #1047 P7). Tests build their inputs with them.
 [dependencies]
-asap_sketchlib = { workspace = true }
 asap-types = { path = "../types" }
 asap-accuracy = { path = "../accuracy" }
 asap-cost = { path = "../cost" }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rmp-serde = "1"
 
 good_lp = { version = "=1.15.3", default-features = false, features = ["highs"] }
 highs = "=2.4.0"
-
-[features]
-# `reference_pricer`: the whole-workload selector over enumerated plans, for
-# the developer tools' reference pricing (`asap-devtools`).
-reference-pricer = []
-# `lp-diagnosis`: with `ASAP_STAGE3_LP_DIAGNOSIS=<path>`, each selection MILP
-# solve also reports where its LP relaxation loses its bound (measurement
-# only, for the developer tools; a diagnosed run's timings are not
-# comparable with an undiagnosed one's).
-lp-diagnosis = []
-
-[dev-dependencies]
-asap-types = { path = "../types", features = ["test-support"] }
-asap-accuracy = { path = "../accuracy", features = ["test-support"] }
-asap-logical-asap-optimization = { path = "../logical-asap-optimization", features = ["test-support"] }
-asap-physical-asap-optimization = { path = "../physical-asap-optimization", features = ["test-support"] }
-asap-frontend-promql = { path = "../frontend-promql" }
-# The executor's charge for each summary state, checked against the bytes
-# plan selection prices for it plus the accumulator's own fields (#947).

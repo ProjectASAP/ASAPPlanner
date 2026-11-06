@@ -1,131 +1,144 @@
-//! Stage 2's output: every operator node of every implementation candidate,
-//! each with the timings and materializations Stage 2 allows, and which
-//! candidates may produce each input. Stage 3 selects among them; Stage 2
-//! prices nothing.
-use std::rc::Rc;
+//! Stage 2's output: each logical candidate's physical alternatives
+//! $\mathcal C$, one per valid $p^{\mathrm{phys}} = (\tau, \ell)$, and
+//! the physical edges $\mathcal E$ with $\alpha^{\log}$ and
+//! $\alpha^{\mathrm{phys}}$ (#1200, #1201). Stage 3 selects among them;
+//! Stage 2 prices nothing.
 
-use super::graph::{PhysicalCandidateId, ReaderConstraint};
-use super::producers::ProducerCandidates;
-use crate::ir::properties::ExecutionTiming;
-use crate::ir::{OperatorNode, QueryRoot};
-use crate::physical::Materialization;
-use crate::stages::{MemoGroupId, PrunedCandidate};
+use std::collections::HashMap;
 
-/// One implementation candidate: index `index` in group `group`'s
-/// candidates ([`Memo::candidates`](crate::stages::Memo::candidates)).
+use super::execution_context::ExecutionContext;
+use super::graph::PhysicalCandidateId;
+use crate::ir::QueryRoot;
+use crate::physical::PhysicalProperties;
+use crate::stages::{
+    CandidateForMemoGroupId, LogicalASAPMemoCandidates, Memo, MemoGroupId, PrunedCandidate,
+};
+
+/// Index into [`PhysicalASAPMemoCandidates::edges`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct CandidateForMemoGroupId {
-    pub group: MemoGroupId,
-    pub index: usize,
+pub struct PhysicalEdgeId(pub usize);
+
+/// One physical alternative of a logical candidate: what Stage 3 selects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PhysicalCandidate {
+    /// $e_v$ and $p^{\log}_v$.
+    pub logical_candidate_id: CandidateForMemoGroupId,
+    /// $p^{\mathrm{phys}}_v$.
+    pub physical_properties: PhysicalProperties,
 }
 
-/// Index into
-/// [`PhysicalASAPMemoCandidates::operator_nodes_of_candidates_for_memo_groups`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct OperatorNodeOfCandidateForMemoGroupId(pub usize);
-
-/// One operator node of one or more candidates for a memo group, before
-/// Stage 2 chose its timing and materialization.
-#[derive(Debug, Clone)]
-pub struct OperatorNodeOfCandidateForMemoGroup {
-    /// Every candidate of the group this node can implement, ascending:
-    /// identical terminal readers of different candidates are factored into
-    /// one node, and the selected producers decide which one it implements.
-    /// A private node belongs to the one candidate it was lowered from.
-    pub candidates_for_memo_group: Vec<CandidateForMemoGroupId>,
-    /// Whether it is its candidates' root; false for an implementation's
-    /// private nodes.
-    pub is_implementation_root: bool,
-    /// How many equal shares of a query's accuracy budget this node's sketch sizes meet
-    /// (`CandidateForMemoGroup::accuracy_budget_parts`). For a factored node, the largest among its
-    /// candidates: equal nodes have equal sizes. 1 for an exact node.
-    pub accuracy_budget_parts: usize,
-    /// The operator node, with Stage 2's physical implementation; its
-    /// children are the expected inputs, which the selected producers replace.
-    pub physical_node: Rc<OperatorNode>,
-}
-
-impl OperatorNodeOfCandidateForMemoGroup {
-    /// The memo group whose candidates this node implements.
-    /// `candidates_for_memo_group` is never empty, and all its entries are
-    /// candidates of this one group.
-    pub fn group(&self) -> MemoGroupId {
-        let group = self.candidates_for_memo_group[0].group;
-        debug_assert!(self
-            .candidates_for_memo_group
-            .iter()
-            .all(|candidate| candidate.group == group));
-        group
+impl PhysicalCandidate {
+    /// Whether a consumer running in `context` can read this producer (the
+    /// concepts doc's alignment table, section 2). True for $\ell$ = None,
+    /// and for `OneEvaluation` in the same context. A windowed
+    /// `AcrossEvaluations` producer, with $w$ read from its logical window
+    /// layout in `memo`, needs every evaluation time of the context on its
+    /// grid: $w$ divides the context's evaluation grid (interval, range step
+    /// and phase), each scheduled time, or a one-off query's time; false
+    /// when the times are not known (an interval without a phase, an
+    /// estimated rate, an unknown recurrence).
+    pub fn delivers_on(&self, memo: &Memo, context: &ExecutionContext) -> bool {
+        let _ = (memo, context);
+        todo!("#1207 PR 1: the alignment table of section 2")
     }
 }
 
-/// One operator node with one timing and materialization: what Stage 3
-/// selects. A selection may run it more than once, each run a node of the
-/// [`DagOfSelectedCandidates`](super::DagOfSelectedCandidates).
-#[derive(Debug, Clone)]
-pub struct PhysicalCandidate {
-    /// The operator node it runs.
-    pub operator_node: OperatorNodeOfCandidateForMemoGroupId,
-    /// When it runs. A node that is not materialized under an ingestion-time
-    /// build still runs at ingestion time, so both are kept.
-    pub timing: ExecutionTiming,
-    /// Whether and where its result is kept.
-    pub materialization: Materialization,
-    /// Per input of its operator node (in `map_children` order), the
-    /// candidates that may produce it. Depends on its timing.
-    pub producer_candidates_per_input: Vec<ProducerCandidates>,
-    /// Whether it may produce a query's output: an implementation root at
-    /// query time whose output matches its group's logical node, in a group
-    /// some query's root reads.
-    pub may_produce_query_output: bool,
-    /// One entry per workload query: whether this tumbling-window chain may be kept
-    /// across evaluations when that query is its only reader. Filled only
-    /// for a `MatAtQueryKeptAcrossEvaluations(Memory)` tumbling-window chain in a
-    /// deployment that keeps query-time results; empty otherwise.
-    pub may_keep_across_evaluations_per_sole_reader_query: Vec<bool>,
+/// $\alpha^{\mathrm{phys}}_{u,c,i}$: timing and lifetime only (the concepts
+/// doc's table, section 2). Alignment is checked per context in Stage 3 with
+/// [`PhysicalCandidate::delivers_on`].
+pub fn producer_satisfies_physical_requirements(
+    producer: &PhysicalCandidate,
+    consumer: &PhysicalCandidate,
+) -> bool {
+    let _ = (producer, consumer);
+    todo!("#1207 PR 1: the timing x lifetime table of section 2")
+}
+
+/// $(u, c, i)$ over physical candidates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PhysicalEdge {
+    pub producer_candidate_id: PhysicalCandidateId,
+    pub consumer_candidate_id: PhysicalCandidateId,
+    pub input_index_of_consumer: usize,
+    /// $\alpha^{\log}_{u,c,i}$.
+    pub satisfies_logical_requirement: bool,
+    /// $\alpha^{\mathrm{phys}}_{u,c,i}$.
+    pub satisfies_physical_requirement: bool,
 }
 
 /// A physical candidate Stage 2 pruned, named by what it would have been:
 /// candidates are renumbered after pruning, so a pruned one has no
-/// [`PhysicalCandidateId`]. Unique among a [`PhysicalASAPMemoCandidates`]'
-/// `pruned_candidates`: an operator node has at most one candidate per
-/// timing and materialization.
+/// [`PhysicalCandidateId`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PhysicalCandidateKey {
-    /// Its operator node: an index into the output's
-    /// `operator_nodes_of_candidates_for_memo_groups`, which pruning keeps
-    /// whole.
-    pub operator_node: OperatorNodeOfCandidateForMemoGroupId,
-    pub timing: ExecutionTiming,
-    pub materialization: Materialization,
+    pub logical_candidate_id: CandidateForMemoGroupId,
+    pub physical_properties: PhysicalProperties,
 }
 
 /// Stage 2's output, which Stage 3 selects from.
 #[derive(Debug, Clone)]
 pub struct PhysicalASAPMemoCandidates {
-    /// One per operator node of an implementation, before Stage 2 chose its
-    /// timing and materialization.
-    pub operator_nodes_of_candidates_for_memo_groups: Vec<OperatorNodeOfCandidateForMemoGroup>,
-    /// One per (operator node, timing, materialization): what Stage 3
-    /// selects. Indexed by [`PhysicalCandidateId`].
-    pub candidates: Vec<PhysicalCandidate>,
+    /// Pass 2's output: the memo, its candidates' $e_v$, $p^{\log}_v$,
+    /// $r^{\log}_{c,i}$, and the logical edges.
+    pub logical_candidates: LogicalASAPMemoCandidates,
+    /// $\mathcal C$, indexed by [`PhysicalCandidateId`].
+    pub physical_candidates: Vec<PhysicalCandidate>,
     /// Each query's root over groups, by index in the workload, passed
-    /// through from Pass 2. Its group references, in order, are the output
-    /// references of [`Self::query_output_candidates`].
+    /// through from Pass 2.
     pub query_roots: Vec<QueryRoot<MemoGroupId>>,
-    /// Legality that depends on which readers are selected.
-    pub reader_constraints: Vec<ReaderConstraint>,
-    /// The candidates Stage 2 pruned, each on its operator node's memo
-    /// group, in pruning order: configurations it does not generate, then
-    /// candidates no buildable input, query output or reader count can use.
-    /// Empty when built by [`Self::new`].
+    /// The candidates Stage 2 pruned, in pruning order.
     pub pruned_candidates: Vec<PrunedCandidate<PhysicalCandidateKey>>,
-    /// By group index: the candidates whose operator node is an
-    /// implementation root of that group, ascending.
-    implementation_roots_of_group: Vec<Vec<PhysicalCandidateId>>,
-    /// Each output reference's group: [`output_references`] of
-    /// `query_roots`, built once.
-    output_reference_groups: Vec<MemoGroupId>,
+    /// $\mathcal E$, grouped by (consumer, input); indexed by
+    /// [`PhysicalEdgeId`].
+    edges: Vec<PhysicalEdge>,
+    /// $P_{c,i}$ after $\alpha$: the admissible edges into each (consumer, input).
+    admissible_edges_into_input: HashMap<(PhysicalCandidateId, usize), Vec<PhysicalEdgeId>>,
+    /// The admissible edges out of each candidate, by [`PhysicalCandidateId`].
+    admissible_edges_out_of_candidate: Vec<Vec<PhysicalEdgeId>>,
+}
+
+impl PhysicalASAPMemoCandidates {
+    /// Stage 2's output over `physical_candidates` and `edges` (grouped by
+    /// (consumer, input)), with the admissible-edge indexes built once.
+    pub fn new(
+        logical_candidates: LogicalASAPMemoCandidates,
+        physical_candidates: Vec<PhysicalCandidate>,
+        query_roots: Vec<QueryRoot<MemoGroupId>>,
+        edges: Vec<PhysicalEdge>,
+    ) -> Self {
+        let _ = (logical_candidates, physical_candidates, query_roots, edges);
+        todo!("#1207 PR 5: index the admissible edges")
+    }
+
+    /// $\mathcal E$: every edge, in (consumer, input) order.
+    pub fn edges(&self) -> impl Iterator<Item = (PhysicalEdgeId, PhysicalEdge)> + '_ {
+        self.edges
+            .iter()
+            .enumerate()
+            .map(|(id, edge)| (PhysicalEdgeId(id), *edge))
+    }
+
+    /// $P^{\mathrm{adm}}_{c,i}$: the admissible edges into input
+    /// `input_index_of_consumer` of `consumer`
+    /// ($\alpha^{\log} = \alpha^{\mathrm{phys}} = 1$).
+    pub fn admissible_edges_into(
+        &self,
+        consumer: PhysicalCandidateId,
+        input_index_of_consumer: usize,
+    ) -> &[PhysicalEdgeId] {
+        let _ = (
+            consumer,
+            input_index_of_consumer,
+            &self.admissible_edges_into_input,
+        );
+        todo!("#1207 PR 5")
+    }
+
+    /// The admissible edges out of `producer`: every consumer that may share it.
+    pub fn admissible_edges_out_of(&self, producer: PhysicalCandidateId) -> &[PhysicalEdgeId] {
+        let _ = (producer, &self.admissible_edges_out_of_candidate);
+        todo!("#1207 PR 5")
+    }
 }
 
 /// The output references of `query_roots`: each operator reference, in
@@ -144,83 +157,4 @@ pub fn output_references<C: Clone>(query_roots: &[QueryRoot<C>]) -> Vec<(usize, 
         }
     }
     references
-}
-
-impl PhysicalASAPMemoCandidates {
-    /// Builds the private per-group index over `candidates`. Stage 3's
-    /// component search uses it to build one smaller catalog per component.
-    pub fn new(
-        operator_nodes_of_candidates_for_memo_groups: Vec<OperatorNodeOfCandidateForMemoGroup>,
-        candidates: Vec<PhysicalCandidate>,
-        query_roots: Vec<QueryRoot<MemoGroupId>>,
-        reader_constraints: Vec<ReaderConstraint>,
-    ) -> Self {
-        let mut implementation_roots_of_group: Vec<Vec<PhysicalCandidateId>> = Vec::new();
-        for (id, candidate) in candidates.iter().enumerate() {
-            let node = &operator_nodes_of_candidates_for_memo_groups[candidate.operator_node.0];
-            if node.is_implementation_root {
-                let group = node.group().0 as usize;
-                if implementation_roots_of_group.len() <= group {
-                    implementation_roots_of_group.resize(group + 1, Vec::new());
-                }
-                implementation_roots_of_group[group].push(PhysicalCandidateId(id));
-            }
-        }
-        let output_reference_groups = output_references(&query_roots)
-            .into_iter()
-            .map(|(_, group)| group)
-            .collect();
-        Self {
-            operator_nodes_of_candidates_for_memo_groups,
-            candidates,
-            query_roots,
-            reader_constraints,
-            pruned_candidates: Vec::new(),
-            implementation_roots_of_group,
-            output_reference_groups,
-        }
-    }
-
-    /// The implementation roots of `group`, ascending.
-    pub fn implementation_roots(&self, group: MemoGroupId) -> &[PhysicalCandidateId] {
-        self.implementation_roots_of_group
-            .get(group.0 as usize)
-            .map_or(&[], Vec::as_slice)
-    }
-
-    /// The candidates that may produce output reference `output_reference`
-    /// (each group reference of `query_roots`, in order; a scalar query has
-    /// several): its group's roots with `may_produce_query_output`.
-    pub fn query_output_candidates(
-        &self,
-        output_reference: usize,
-    ) -> impl Iterator<Item = PhysicalCandidateId> + '_ {
-        let roots = self
-            .output_reference_groups
-            .get(output_reference)
-            .map_or(&[][..], |&group| self.implementation_roots(group));
-        roots
-            .iter()
-            .copied()
-            .filter(|id| self.candidates[id.0].may_produce_query_output)
-    }
-
-    /// The number of output references: group references of `query_roots`.
-    pub fn output_reference_count(&self) -> usize {
-        self.output_reference_groups.len()
-    }
-
-    /// The operator node candidate `candidate` runs.
-    pub fn physical_node(&self, candidate: PhysicalCandidateId) -> &Rc<OperatorNode> {
-        &self.operator_nodes_of_candidates_for_memo_groups
-            [self.candidates[candidate.0].operator_node.0]
-            .physical_node
-    }
-
-    /// The memo group whose candidates candidate `candidate` implements.
-    pub fn memo_group_of(&self, candidate: PhysicalCandidateId) -> MemoGroupId {
-        self.operator_nodes_of_candidates_for_memo_groups
-            [self.candidates[candidate.0].operator_node.0]
-            .group()
-    }
 }

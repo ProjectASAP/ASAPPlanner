@@ -8,44 +8,47 @@
 //! the family merges (the family-capability table), and the executor runs
 //! the chain as its tumbling windows (`expand_tumbling_window_chains`). A merge of only the
 //! newest `m < n` tumbling windows (`SummaryMerge::newest_tumbling_windows`) is the state of one
-//! build over `TimeRange(m·w)` ([`merged_window_build`]): one chain kept for
+//! build over `TimeRange(m·w)` (`merged_window_build`): one chain materialized for
 //! the longest window serves every query whose window, on the same tumbling windows,
 //! ends at the same time and is shorter.
+#[cfg(any(test, feature = "test-support"))]
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
-use super::asap::ASAPOp;
+use super::asap::{summary_agg_schema, ASAPOp};
+use super::input::node_of_build;
+use super::input::{InputOrTemporaryBuild, OperatorInput};
 use super::node::{Operator, OperatorNode};
 use super::non_asap::{NonASAPOp, TimeRangeKind};
+#[cfg(any(test, feature = "test-support"))]
 use super::operator_properties::TimeShift;
-use super::query::QueryRoot;
-use crate::ir::properties::ExecutionTiming;
+use crate::ir::schema::Schema;
 use crate::ir::SchemaDerivationError;
 
 fn invalid(message: &str) -> SchemaDerivationError {
     SchemaDerivationError::InvalidScalarSignature(message.into())
 }
 
-/// The `SummaryTumblingWindowChain` a summary-state node carries merged: the chain itself,
+/// The `SummaryTumblingWindowChain` a summary state carries merged: the chain itself,
 /// or the one chain a `SummaryMerge` that keeps its groups reads, in full
-/// or its newest tumbling windows (`merged_tumbling_window_count`). `None` for any other node,
+/// or its newest tumbling windows (`merged_tumbling_window_count`). `None` for any other input,
 /// a rollup (regrouping merge) included.
-pub fn merged_chain(state: &OperatorNode) -> Option<&OperatorNode> {
-    match state.asap()? {
-        ASAPOp::SummaryTumblingWindowChain { .. } => Some(state),
-        ASAPOp::SummaryMerge {
+pub fn merged_chain<I: OperatorInput>(state: &I) -> Option<I> {
+    match state.operator() {
+        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => Some(state.clone()),
+        Operator::ASAP(ASAPOp::SummaryMerge {
             children,
             group_by: None,
             ..
-        } => match children.as_slice() {
+        }) => match children.as_slice() {
             [child]
                 if matches!(
-                    child.asap(),
-                    Some(ASAPOp::SummaryTumblingWindowChain { .. })
+                    child.operator(),
+                    Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
                 ) =>
             {
-                Some(child)
+                Some(child.clone())
             }
             _ => None,
         },
@@ -53,45 +56,51 @@ pub fn merged_chain(state: &OperatorNode) -> Option<&OperatorNode> {
     }
 }
 
-/// How many of its chain's tumbling windows, newest first, a summary-state node with
+/// How many of its chain's tumbling windows, newest first, a summary state with
 /// a [`merged_chain`] merges: the merge's `newest_tumbling_windows`, otherwise the
-/// chain's `tumbling_window_count`. `None` for any other node.
-fn merged_tumbling_window_count(state: &OperatorNode) -> Option<u32> {
-    let Some(ASAPOp::SummaryTumblingWindowChain {
+/// chain's `tumbling_window_count`. `None` for any other input.
+fn merged_tumbling_window_count<I: OperatorInput>(state: &I) -> Option<u32> {
+    let Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
         tumbling_window_count,
         ..
-    }) = merged_chain(state)?.asap()
+    }) = merged_chain(state)?.operator()
     else {
         return None;
     };
-    match state.asap()? {
-        ASAPOp::SummaryMerge {
+    match state.operator() {
+        Operator::ASAP(ASAPOp::SummaryMerge {
             newest_tumbling_windows: Some(newest),
             ..
-        } => Some(*newest),
-        _ => Some(*tumbling_window_count),
+        }) => Some(newest),
+        _ => Some(tumbling_window_count),
     }
 }
 
+/// A build over the inputs of a chain over `I`, with its schema.
+pub(crate) type BuildWithSchema<I> = (ASAPOp<InputOrTemporaryBuild<I>>, Schema);
+
 /// The `SummaryAgg` over `TimeRange(tumbling_window_count · tumbling_window_width_ms)` over the
 /// chain's input whose state the merged tumbling windows of `chain` equal.
-pub(crate) fn whole_window_build(
-    chain: &OperatorNode,
-) -> Result<OperatorNode, SchemaDerivationError> {
-    let Some(ASAPOp::SummaryTumblingWindowChain {
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn whole_window_build<I: OperatorInput>(
+    chain: &I,
+) -> Result<BuildWithSchema<I>, SchemaDerivationError> {
+    let Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
         tumbling_window_count,
         ..
-    }) = chain.asap()
+    }) = chain.operator()
     else {
         return Err(invalid("expected a tumbling-window chain"));
     };
-    newest_tumbling_windows_build(chain, *tumbling_window_count)
+    newest_tumbling_windows_build(chain, tumbling_window_count)
 }
 
-/// The `SummaryAgg` whose state a summary-state node with a
+/// The `SummaryAgg` whose state a summary state with a
 /// [`merged_chain`] carries: one build over the window of the tumbling windows it
 /// merges (`merged_tumbling_window_count`).
-pub fn merged_window_build(state: &OperatorNode) -> Result<OperatorNode, SchemaDerivationError> {
+pub(crate) fn merged_window_build<I: OperatorInput>(
+    state: &I,
+) -> Result<BuildWithSchema<I>, SchemaDerivationError> {
     let (Some(chain), Some(tumbling_window_count)) =
         (merged_chain(state), merged_tumbling_window_count(state))
     else {
@@ -99,63 +108,89 @@ pub fn merged_window_build(state: &OperatorNode) -> Result<OperatorNode, SchemaD
             "expected merged tumbling windows of one tumbling-window chain",
         ));
     };
-    newest_tumbling_windows_build(chain, tumbling_window_count)
+    newest_tumbling_windows_build(&chain, tumbling_window_count)
 }
 
 /// The `SummaryAgg` over `TimeRange(tumbling_window_count · tumbling_window_width_ms)` over the
 /// chain's input: the state of the chain's newest `tumbling_window_count` tumbling windows.
-fn newest_tumbling_windows_build(
-    chain: &OperatorNode,
+fn newest_tumbling_windows_build<I: OperatorInput>(
+    chain: &I,
     tumbling_window_count: u32,
-) -> Result<OperatorNode, SchemaDerivationError> {
-    let Some(ASAPOp::SummaryTumblingWindowChain {
+) -> Result<BuildWithSchema<I>, SchemaDerivationError> {
+    let Operator::ASAP(chain_op) = chain.operator() else {
+        return Err(invalid("expected a tumbling-window chain"));
+    };
+    named_as_chain(
+        window_build(&chain_op, tumbling_window_count)?,
+        chain.schema(),
+    )
+}
+
+/// [`newest_tumbling_windows_build`] of the chain operator `chain`, without
+/// its schema.
+pub(crate) fn window_build<I: OperatorInput>(
+    chain: &ASAPOp<I>,
+    tumbling_window_count: u32,
+) -> Result<ASAPOp<InputOrTemporaryBuild<I>>, SchemaDerivationError> {
+    let ASAPOp::SummaryTumblingWindowChain {
         child,
         tumbling_window_width_ms,
         ..
-    }) = chain.asap()
+    } = chain
     else {
         return Err(invalid("expected a tumbling-window chain"));
     };
     let window = tumbling_window_width_ms
         .checked_mul(u64::from(tumbling_window_count))
         .ok_or_else(|| invalid("tumbling-window chain window overflows"))?;
-    build_over(chain, range(Rc::clone(child), window)?)
+    build_over(
+        chain,
+        range(InputOrTemporaryBuild::Input(child.clone()), window)?,
+    )
 }
 
+#[cfg(any(test, feature = "test-support"))]
 /// Tumbling window `index` (0 = newest) of `chain`: its `SummaryAgg` over the range
 /// `TimeRange(tumbling_window_width_ms)` ending `index · tumbling_window_width_ms` before the
 /// chain's input.
-pub(crate) fn tumbling_window(
-    chain: &OperatorNode,
+pub(crate) fn tumbling_window<I: OperatorInput>(
+    chain: &I,
     index: u32,
-) -> Result<OperatorNode, SchemaDerivationError> {
-    let Some(ASAPOp::SummaryTumblingWindowChain {
+) -> Result<BuildWithSchema<I>, SchemaDerivationError> {
+    let Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
         child,
         tumbling_window_width_ms,
         ..
-    }) = chain.asap()
+    }) = chain.operator()
     else {
         return Err(invalid("expected a tumbling-window chain"));
     };
     let back = i64::try_from(tumbling_window_width_ms.saturating_mul(u64::from(index)))
         .map_err(|_| invalid("tumbling window offset overflows"))?;
-    build_over(
-        chain,
-        range(shifted(child, back)?, *tumbling_window_width_ms)?,
+    let Operator::ASAP(chain_op) = chain.operator() else {
+        return Err(invalid("expected a tumbling-window chain"));
+    };
+    named_as_chain(
+        build_over(
+            &chain_op,
+            range(shifted(child, back)?, tumbling_window_width_ms)?,
+        )?,
+        chain.schema(),
     )
 }
 
+#[cfg(any(test, feature = "test-support"))]
 /// `child` evaluated `back_ms` earlier: one `TimeShift`, folded into a
 /// `TimeShift` directly below.
-fn shifted(
-    child: &Rc<OperatorNode>,
+fn shifted<I: OperatorInput>(
+    child: I,
     back_ms: i64,
-) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
+) -> Result<InputOrTemporaryBuild<I>, SchemaDerivationError> {
     if back_ms == 0 {
-        return Ok(Rc::clone(child));
+        return Ok(InputOrTemporaryBuild::Input(child));
     }
-    let (shift, input) = match child.non_asap() {
-        Some(NonASAPOp::TimeShift {
+    let (shift, input) = match child.operator() {
+        Operator::NonASAP(NonASAPOp::TimeShift {
             shift,
             child: input,
         }) => (
@@ -176,64 +211,77 @@ fn shifted(
             child,
         ),
     };
-    OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeShift {
+    InputOrTemporaryBuild::build(NonASAPOp::TimeShift {
         shift,
-        child: Rc::clone(input),
-    }))
+        child: InputOrTemporaryBuild::Input(input),
+    })
 }
 
-fn range(
-    child: Rc<OperatorNode>,
+/// A range `TimeRange(width_ms)` over `child`.
+fn range<I: OperatorInput>(
+    child: InputOrTemporaryBuild<I>,
     width_ms: u64,
-) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
-    OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
+) -> Result<InputOrTemporaryBuild<I>, SchemaDerivationError> {
+    InputOrTemporaryBuild::build(NonASAPOp::TimeRange {
         range: Duration::from_millis(width_ms),
         kind: TimeRangeKind::Range,
         child,
-    }))
+    })
 }
 
-/// The chain's `SummaryAgg` over `input`, with the chain's column names.
-fn build_over(
-    chain: &OperatorNode,
-    input: Rc<OperatorNode>,
-) -> Result<OperatorNode, SchemaDerivationError> {
-    let Some(ASAPOp::SummaryTumblingWindowChain {
+/// The chain's `SummaryAgg` over `input`.
+fn build_over<I: OperatorInput>(
+    chain: &ASAPOp<I>,
+    input: InputOrTemporaryBuild<I>,
+) -> Result<ASAPOp<InputOrTemporaryBuild<I>>, SchemaDerivationError> {
+    let ASAPOp::SummaryTumblingWindowChain {
         family,
         input: update,
         reduction,
         grouping,
         filter,
         ..
-    }) = chain.asap()
+    } = chain.map_children(|child| InputOrTemporaryBuild::Input(child.clone()))
     else {
         return Err(invalid("expected a tumbling-window chain"));
     };
-    let mut build = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryAgg {
+    Ok(ASAPOp::SummaryAgg {
         child: input,
-        family: family.clone(),
-        input: update.clone(),
-        reduction: reduction.clone(),
-        grouping: grouping.clone(),
-        filter: filter.clone(),
-    }))?;
-    for (field, kept) in build.schema.fields.iter_mut().zip(&chain.schema.fields) {
+        family,
+        input: update,
+        reduction,
+        grouping,
+        filter,
+    })
+}
+
+/// `build` with its schema, named as the chain of schema `chain`.
+fn named_as_chain<I: OperatorInput>(
+    build: ASAPOp<InputOrTemporaryBuild<I>>,
+    chain: &Schema,
+) -> Result<BuildWithSchema<I>, SchemaDerivationError> {
+    let ASAPOp::SummaryAgg {
+        child,
+        family,
+        reduction,
+        ..
+    } = &build
+    else {
+        return Err(invalid("expected a summary build"));
+    };
+    let mut schema = summary_agg_schema(child.schema(), family, reduction)?;
+    for (field, kept) in schema.fields.iter_mut().zip(&chain.fields) {
         field.name = kept.name.clone();
         field.table = kept.table.clone();
     }
-    Ok(build)
+    Ok((build, schema))
 }
 
 /// `root` with every `SummaryTumblingWindowChain` expanded into its tumbling windows: a `SummaryMerge`
 /// reads each tumbling window of each chain it read, newest first, as plain
 /// `SummaryAgg` nodes the executor runs; a merge of the newest `n` tumbling windows
 /// reads the first `n`, the same nodes a merge of the whole chain reads. Every other node keeps its
-/// guarantee, timing and materialization. Each tumbling window takes its chain's
-/// timing and materialization, and the range and shift it reads take the
-/// chain's timing: a chain materialized at ingestion time expands into
-/// tumbling windows each built and stored at ingestion time. Expanding before timings
-/// are applied leaves the tumbling windows untimed. A chain read by anything but a
-/// `SummaryMerge` is an error.
+/// guarantee. A chain read by anything but a `SummaryMerge` is an error.
 #[cfg(any(test, feature = "test-support"))]
 pub fn expand_tumbling_window_chains(
     root: &Rc<OperatorNode>,
@@ -241,110 +289,7 @@ pub fn expand_tumbling_window_chains(
     expand(root, &mut NodeToExpandedNodeCache::default())
 }
 
-/// A workload with its tumbling-window chains expanded
-/// ([`expand_tumbling_window_chains_in_workload`]).
-#[derive(Debug, Clone)]
-pub struct TumblingWindowChainExpansion {
-    /// The workload's roots, in order, with every chain expanded.
-    pub roots: Vec<QueryRoot>,
-    /// Each expanded chain with its tumbling windows some merge reads, newest first,
-    /// in the order the chains were first reached.
-    pub chains: Vec<ExpandedTumblingWindowChain>,
-    /// Every other node of the input workload the expansion reached, with
-    /// the node that replaces it (itself when nothing below it changed),
-    /// so a caller can carry what it knows about a node to the expanded
-    /// workload.
-    pub expanded_nodes: Vec<(Rc<OperatorNode>, Rc<OperatorNode>)>,
-}
-
-/// One expanded chain: the `SummaryTumblingWindowChain` node of the input workload and the
-/// `SummaryAgg` tumbling windows that replace it.
-#[derive(Debug, Clone)]
-pub struct ExpandedTumblingWindowChain {
-    /// The chain node, as the input workload holds it.
-    pub chain: Rc<OperatorNode>,
-    /// Its tumbling windows in the expanded workload that some merge reads, newest
-    /// first.
-    pub tumbling_windows: Vec<Rc<OperatorNode>>,
-}
-
-/// `expand_tumbling_window_chains` over every root of one workload, with one cache, so
-/// a node several roots share stays one node and a chain several merges
-/// read expands into one set of tumbling windows. A standalone scalar root has the
-/// operators it reads expanded. Also returns each chain's tumbling windows, so a
-/// caller can carry what it knows about a chain (e.g. its retention) to
-/// them.
-pub fn expand_tumbling_window_chains_in_workload(
-    roots: &[QueryRoot],
-) -> Result<TumblingWindowChainExpansion, SchemaDerivationError> {
-    let mut cache = NodeToExpandedNodeCache::default();
-    let roots = roots
-        .iter()
-        .map(|root| match root {
-            QueryRoot::Operator(node) => expand(node, &mut cache).map(QueryRoot::Operator),
-            QueryRoot::Scalar(expr) => {
-                let mut error = None;
-                let expr = expr.map_operator_refs(&mut |node| {
-                    expand(node, &mut cache).unwrap_or_else(|e| {
-                        error.get_or_insert(e);
-                        Rc::clone(node)
-                    })
-                });
-                match error {
-                    Some(e) => Err(e),
-                    None => Ok(QueryRoot::Scalar(expr)),
-                }
-            }
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let chains = cache
-        .chains
-        .into_iter()
-        .map(|chain| {
-            let tumbling_window_count = match chain.asap() {
-                Some(ASAPOp::SummaryTumblingWindowChain {
-                    tumbling_window_count,
-                    ..
-                }) => *tumbling_window_count,
-                _ => unreachable!("only chains are recorded"),
-            };
-            let tumbling_windows = (0..tumbling_window_count)
-                .map_while(|index| {
-                    cache
-                        .tumbling_window_of
-                        .get(&(Rc::as_ptr(&chain), index))
-                        .cloned()
-                })
-                .collect();
-            ExpandedTumblingWindowChain {
-                chain,
-                tumbling_windows,
-            }
-        })
-        .collect();
-    Ok(TumblingWindowChainExpansion {
-        roots,
-        chains,
-        expanded_nodes: cache.expanded,
-    })
-}
-
-/// The untimed `node` with `timing` written into it and into every untimed
-/// node below it: the nodes [`tumbling_window`] created, over the chain's input, which
-/// the timing pass already timed.
-fn timed_like(node: &Rc<OperatorNode>, timing: ExecutionTiming) -> OperatorNode {
-    OperatorNode::with_schema(
-        node.operator.map_children(|child| match child.timing {
-            Some(_) => Rc::clone(child),
-            None => Rc::new(timed_like(child, timing)),
-        }),
-        node.schema.clone(),
-    )
-    .with_guarantee(node.guarantee.clone())
-    .with_materialization(node.materialization)
-    .with_timing(Some(timing))
-}
-
+#[cfg(any(test, feature = "test-support"))]
 /// What one expansion has built: each expanded node by its input's
 /// address, and each tumbling window by its chain's address and index, so a chain two
 /// merges read expands into one set of tumbling windows.
@@ -358,6 +303,7 @@ struct NodeToExpandedNodeCache {
     expanded: Vec<(Rc<OperatorNode>, Rc<OperatorNode>)>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn expand(
     node: &Rc<OperatorNode>,
     cache: &mut NodeToExpandedNodeCache,
@@ -389,14 +335,8 @@ fn expand(
                                 inputs.push(Rc::clone(done));
                                 continue;
                             }
-                            let tumbling_window = Rc::new(tumbling_window(child, index)?);
-                            let tumbling_window = match child.timing {
-                                Some(timing) => Rc::new(
-                                    timed_like(&tumbling_window, timing)
-                                        .with_materialization(child.materialization),
-                                ),
-                                None => tumbling_window,
-                            };
+                            let tumbling_window =
+                                Rc::new(node_of_build(tumbling_window(child, index)?));
                             if index == 0 {
                                 cache.chains.push(Rc::clone(child));
                             }
@@ -416,9 +356,7 @@ fn expand(
             }))?;
             Rc::new(
                 OperatorNode::with_schema(merge.operator, node.schema.clone())
-                    .with_guarantee(node.guarantee.clone())
-                    .with_timing(node.timing)
-                    .with_materialization(node.materialization),
+                    .with_guarantee(node.guarantee.clone()),
             )
         }
         _ => {
@@ -436,9 +374,7 @@ fn expand(
                             .map_children(|child| Rc::clone(&children[&Rc::as_ptr(child)])),
                         node.schema.clone(),
                     )
-                    .with_guarantee(node.guarantee.clone())
-                    .with_timing(node.timing)
-                    .with_materialization(node.materialization),
+                    .with_guarantee(node.guarantee.clone()),
                 )
             } else {
                 Rc::clone(node)

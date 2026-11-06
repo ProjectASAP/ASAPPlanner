@@ -1,31 +1,86 @@
-//! Memo groups: the distinct logical sub-expressions of the workload.
+//! Memo groups: the distinct logical sub-expressions of the workload, each
+//! with its candidates.
 
-use std::collections::{BTreeSet, HashMap};
-use std::rc::Rc;
+use std::collections::BTreeSet;
 
-use crate::ir::{OperatorNode, QueryRoot};
+use super::{CandidateForMemoGroup, Memo};
+use crate::ir::operator::input::OperatorInput;
+use crate::ir::properties::summary_coverage::SummaryCoverage;
+use crate::ir::schema::Schema;
+use crate::ir::{Operator, OperatorResultKind, QueryRoot};
 
 /// A group, by index in the memo's groups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MemoGroupId(pub u32);
 
-/// One distinct logical sub-expression of the workload.
+/// One distinct logical sub-expression of the workload: what it computes
+/// and the output every candidate of it must produce.
 #[derive(Debug, Clone)]
 pub struct MemoGroup {
-    /// Its logical node as the frontends (and Pass 1 targets) see it; its
-    /// children are other groups' nodes.
-    pub logical_node: Rc<OperatorNode>,
-    /// Its child groups, in the node's child order.
-    pub child_groups: Vec<MemoGroupId>,
-    /// The groups that read it ([`Self::parent_groups`]). Public only so
-    /// Stage 1, which builds and extends the memo, can maintain it; later
-    /// stages read it through [`Self::parent_groups`].
+    /// What it computes: one operator, with its arguments. Each
+    /// `MemoGroupId` in it is an input group, never this group's own id. θ
+    /// is no argument of an operator, so it is not part of a group.
+    pub expression: Operator<MemoGroupId>,
+    /// Derived once when the group is created, from its input groups; never
+    /// changes.
+    pub group_properties: GroupProperties,
+    /// The groups that read it ([`Self::parent_groups`]) through their
+    /// expression or a candidate's.
     pub parents: Vec<MemoGroupId>,
-    /// The queries whose roots reach it ([`Self::reached_by_queries`]).
-    /// Public only so Stage 1, which builds and extends the memo, can
-    /// maintain it; later stages read it through
-    /// [`Self::reached_by_queries`].
+    /// The queries whose roots reach it ([`Self::reached_by_queries`]),
+    /// ascending.
     pub queries: Vec<usize>,
+    /// Its candidates: empty after Stage 0, filled by Stage 1.
+    pub candidates: Vec<CandidateForMemoGroup>,
+}
+
+/// What every candidate of a group produces, derived from the group's
+/// expression and its input groups' properties by the rules that check
+/// operator nodes.
+#[derive(Debug, Clone)]
+pub struct GroupProperties {
+    pub schema: Schema,
+    pub result_kind: OperatorResultKind,
+    /// What a summary-state group covers; `None` for any other group.
+    pub summary_coverage: Option<SummaryCoverage>,
+    /// Whether two equal expressions return the same rows for the same
+    /// input rows, so they may be one group (not an unordered `LIMIT`).
+    pub shareable_when_equal: bool,
+}
+
+/// A memo group read as an operator's input: its `group_properties` and
+/// its `expression`, whose inputs are read the same way.
+#[derive(Clone, Copy)]
+pub(crate) struct MemoGroupAsInput<'m> {
+    pub(crate) memo: &'m Memo,
+    pub(crate) group_id: MemoGroupId,
+}
+
+impl<'m> MemoGroupAsInput<'m> {
+    fn group(&self) -> &'m MemoGroup {
+        &self.memo.groups()[self.group_id.0 as usize]
+    }
+}
+
+impl OperatorInput for MemoGroupAsInput<'_> {
+    fn schema(&self) -> &Schema {
+        &self.group().group_properties.schema
+    }
+
+    fn result_kind(&self) -> OperatorResultKind {
+        self.group().group_properties.result_kind
+    }
+
+    fn operator(&self) -> Operator<Self> {
+        self.group().expression.map_children(|&group_id| Self {
+            memo: self.memo,
+            group_id,
+        })
+    }
+
+    fn summary_coverage(&self) -> Option<&SummaryCoverage> {
+        self.group().group_properties.summary_coverage.as_ref()
+    }
 }
 
 impl MemoGroup {
@@ -37,57 +92,6 @@ impl MemoGroup {
     /// The queries whose roots reach it, by index in the workload, ascending.
     pub fn reached_by_queries(&self) -> &[usize] {
         &self.queries
-    }
-}
-
-/// Stage 0's output, Pass 1's input: the workload's memo groups, one per
-/// distinct logical sub-expression, without implementation choices or
-/// solver state. Stage 1 builds it by hash-consing the query roots.
-#[derive(Debug, Clone)]
-pub struct DagOfLogicalMemoGroups {
-    pub groups: Vec<MemoGroup>,
-    /// Each query's root over groups, by index in the workload: its
-    /// operator's group, or its scalar expression with every operator
-    /// reference replaced by that operator's group.
-    pub query_roots: Vec<QueryRoot<MemoGroupId>>,
-    /// Each node of the original workload, by address, to its group.
-    group_of: HashMap<*const OperatorNode, MemoGroupId>,
-}
-
-impl DagOfLogicalMemoGroups {
-    /// The memo groups `groups` (children before parents), each query's
-    /// root over them, and `group_of`: each node of the original workload,
-    /// by address, to its group.
-    pub fn new(
-        groups: Vec<MemoGroup>,
-        query_roots: Vec<QueryRoot<MemoGroupId>>,
-        group_of: HashMap<*const OperatorNode, MemoGroupId>,
-    ) -> Self {
-        Self {
-            groups,
-            query_roots,
-            group_of,
-        }
-    }
-
-    /// Group of a node from the original workload, not a rewritten candidate.
-    pub fn group_for_node(&self, node: &Rc<OperatorNode>) -> Option<MemoGroupId> {
-        self.group_of.get(&Rc::as_ptr(node)).copied()
-    }
-
-    /// Each query's root over the groups' logical nodes, in workload order:
-    /// a group several queries read is one node.
-    pub fn roots_over_groups(&self) -> Vec<QueryRoot> {
-        let node = |g: &MemoGroupId| Rc::clone(&self.groups[g.0 as usize].logical_node);
-        self.query_roots
-            .iter()
-            .map(|root| match root {
-                QueryRoot::Operator(g) => QueryRoot::Operator(node(g)),
-                QueryRoot::Scalar(expr) => {
-                    QueryRoot::Scalar(expr.map_operator_refs(&mut |g| node(g)))
-                }
-            })
-            .collect()
     }
 }
 

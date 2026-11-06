@@ -49,7 +49,8 @@ fn sorted_scan(schema: &Schema, identity: &Source) -> PhysicalASAPDAG {
         id,
         payload,
         output_state: ExecutionDataState::QUERY_ROWS,
-        materialization: Default::default(),
+        lifetime: Default::default(),
+        parameters: None,
         output_schema: schema.clone(),
         guarantee: None,
         retention_ms: None,
@@ -128,72 +129,6 @@ fn blocking_inputs_over_a_raw_data_slot_are_finite() {
     assert_eq!(opens.load(Ordering::SeqCst), 1);
 }
 
-/// A KLL kernel accepts `k` only up to the 26 602 `asap_sketchlib` caps it at.
-#[test]
-fn kll_kernel_rejects_a_k_above_the_library_cap() {
-    use asap_executor::capability::validate_summary_kernel;
-    use planner_types::ir::scalar::ColumnRef;
-    use planner_types::ir::schema::{
-        GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryInputExpr,
-        SummaryUpdate,
-    };
-    let grouping = GroupingStrategy::default();
-    let update = SummaryUpdate {
-        item: None,
-        weight: SummaryInputExpr::Column(ColumnRef::SampleValue),
-        weight_domain: Default::default(),
-    };
-    let kll = |k| {
-        FieldDataType::Sketch(
-            SketchKind::new(
-                SketchAlgorithm::Kll,
-                SketchParams::Kll {
-                    k,
-                    failure_probability: None,
-                },
-            ),
-            grouping.clone(),
-        )
-    };
-    assert!(validate_summary_kernel(&kll(26_602), &update, &grouping).is_ok());
-    assert!(validate_summary_kernel(&kll(26_603), &update, &grouping).is_err());
-}
-
-/// A plain CountSketch reads the median of its rows, so plan validation and
-/// kernel construction both require a positive odd depth.
-#[test]
-fn count_sketch_kernel_requires_an_odd_depth() {
-    use asap_executor::{capability::validate_summary_kernel, factory::create_planner_accumulator};
-    use planner_types::ir::scalar::ColumnRef;
-    use planner_types::ir::schema::{
-        GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryInputExpr,
-        SummaryUpdate,
-    };
-    let grouping = GroupingStrategy::default();
-    let mut update = SummaryUpdate::column(ColumnRef::SampleValue);
-    update.item = Some(SummaryInputExpr::Column(ColumnRef::Named("host".into())));
-    let count_sketch = |depth| {
-        FieldDataType::Sketch(
-            SketchKind::new(
-                SketchAlgorithm::CountSketch,
-                SketchParams::CountSketch { width: 64, depth },
-            ),
-            grouping.clone(),
-        )
-    };
-    for (depth, valid) in [(5, true), (4, false)] {
-        let family = count_sketch(depth);
-        assert_eq!(
-            validate_summary_kernel(&family, &update, &grouping).is_ok(),
-            valid
-        );
-        assert_eq!(
-            create_planner_accumulator(&family, &update, &grouping).is_ok(),
-            valid
-        );
-    }
-}
-
 // Kernel support must not be mistaken for executable native state/evaluation support.
 #[test]
 fn summary_capability_levels_are_distinct() {
@@ -202,20 +137,9 @@ fn summary_capability_levels_are_distinct() {
         planner::ir::schema::SketchStatistic,
     };
     use planner_types::ir::scalar::ColumnRef;
-    use planner_types::ir::schema::{
-        GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryUpdate,
-    };
+    use planner_types::ir::schema::{GroupingStrategy, SketchAlgorithm, SummaryUpdate};
     let grouping = GroupingStrategy::default();
-    let cms = FieldDataType::Sketch(
-        SketchKind::new(
-            SketchAlgorithm::Cms,
-            SketchParams::Cms {
-                width: 64,
-                depth: 4,
-            },
-        ),
-        grouping.clone(),
-    );
+    let cms = FieldDataType::Sketch(SketchAlgorithm::Cms, grouping.clone());
     let update = SummaryUpdate {
         item: Some(planner_types::ir::schema::SummaryInputExpr::Column(
             ColumnRef::Named("host".into()),
@@ -239,16 +163,7 @@ fn summary_capability_levels_are_distinct() {
         }
     )
     .is_err());
-    let kll = FieldDataType::Sketch(
-        SketchKind::new(
-            SketchAlgorithm::Kll,
-            SketchParams::Kll {
-                k: 128,
-                failure_probability: None,
-            },
-        ),
-        grouping,
-    );
+    let kll = FieldDataType::Sketch(SketchAlgorithm::Kll, grouping);
     assert!(validate_native_family(&kll).is_ok());
     assert!(validate_sketch_evaluation(&kll, &SketchStatistic::Quantile { q: 1.5 }).is_err());
     assert!(validate_sketch_evaluation(&kll, &SketchStatistic::Cardinality).is_err());

@@ -175,8 +175,8 @@ impl FamilyCapability {
                     HydraKind::HydraKll => SketchAlgorithm::HydraKll,
                 })
             }
-            FieldDataType::Sketch(kind, GroupingStrategy::PerSubpopulationInstance) => {
-                return Self::of_per_instance_sketch(kind.algorithm())
+            FieldDataType::Sketch(algorithm, GroupingStrategy::PerSubpopulationInstance) => {
+                return Self::of_per_instance_sketch(algorithm)
             }
             FieldDataType::Plain(_)
             | FieldDataType::SummarySample(..)
@@ -194,13 +194,10 @@ impl FamilyCapability {
 mod tests {
     use super::*;
     use crate::ir::scalar::expr_ir::ColumnRef;
-    use crate::ir::schema::{ExactParams, SketchKind, SketchParams};
+    use crate::ir::schema::{ExactParams, SketchParams};
 
-    fn sketch(algorithm: SketchAlgorithm, params: SketchParams) -> FieldDataType {
-        FieldDataType::Sketch(
-            SketchKind::new(algorithm, params),
-            GroupingStrategy::default(),
-        )
+    fn sketch(algorithm: SketchAlgorithm, _params: SketchParams) -> FieldDataType {
+        FieldDataType::Sketch(algorithm, GroupingStrategy::default())
     }
 
     fn total() -> SketchStatistic {
@@ -335,7 +332,7 @@ mod tests {
     /// per group: not counters, IRate or a Hydra.
     #[test]
     fn only_per_group_mergeable_families_merge_groups() {
-        use crate::ir::schema::{HydraKind, HydraParams};
+        use crate::ir::schema::HydraKind;
         let kll = sketch(
             SketchAlgorithm::Kll,
             SketchParams::Kll {
@@ -369,12 +366,6 @@ mod tests {
             kind,
             GroupingStrategy::SharedMultiSubpopulation {
                 kind: HydraKind::HydraCms,
-                params: HydraParams::HydraCms {
-                    width: 64,
-                    depth: 5,
-                    shared_rows: 3,
-                    shared_columns: 256,
-                },
             },
         );
         assert_eq!(
