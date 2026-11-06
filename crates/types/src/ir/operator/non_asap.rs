@@ -1305,7 +1305,7 @@ fn default_proj_name<I: OperatorInput>(
 }
 
 /// Whether any aggregate measure has its own input predicate.
-pub fn any_measure_filtered(filters: &[Option<Predicate>]) -> bool {
+pub fn any_measure_filtered<C>(filters: &[Option<Predicate<C>>]) -> bool {
     filters.iter().any(Option::is_some)
 }
 

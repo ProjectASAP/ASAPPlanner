@@ -121,19 +121,9 @@ pub fn run_planning(
     }
     // Stage 0: the memo of logical groups.
     let initial = memo_of_queries(&roots)?;
-    // Pass 1: the per-computation candidates the deployment can run and
-    // some query can use.
-    let accuracy_targets: Vec<_> = entries
-        .iter()
-        .map(|entry| entry.requirements.accuracy.clone())
-        .collect();
-    let accuracy = models.accuracy_check_inputs();
+    // Pass 1: the initial candidates the deployment can run.
     let pass1 = pass1_memo(
         initial,
-        &accuracy_targets,
-        accuracy.model,
-        accuracy.evidence,
-        data,
         models
             .deployment_capabilities
             .supported_summaries

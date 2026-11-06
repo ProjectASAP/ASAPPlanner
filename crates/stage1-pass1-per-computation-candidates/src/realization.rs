@@ -4,6 +4,7 @@
 //! keyed-additive rule for a heap sketch that reads a larger sub-DAG.
 
 use asap_types::ir::operator::agg_intent::AggIntent;
+use asap_types::ir::operator::input::OperatorInput;
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::scalar::column_resolution::{resolve_column_ref, ResolveError};
 use asap_types::ir::scalar::expr_ir::ColumnRef;
@@ -13,10 +14,7 @@ use asap_types::ir::schema::{
     EntityIdentity, FamilyCapability, Field, FieldDataType, NonNegativeWeightProof, Schema,
     SketchAlgorithm, SummaryInputExpr, SummaryUpdate, WeightDomain,
 };
-use asap_types::ir::{NonASAPOp, OperatorNode};
-#[cfg(test)]
-use asap_types::ir::{Operator, ScalarExpr};
-use std::rc::Rc;
+use asap_types::ir::{NonASAPOp, Operator};
 
 use asap_accuracy::sizing::sketch_statistic;
 
@@ -83,13 +81,13 @@ pub(crate) fn summarised_column(intent: &AggIntent, child_schema: &Schema) -> Co
 
 /// [`ranked_column`] as a reference: the sample value when it is that
 /// column, else the column by name.
-pub(crate) fn ranked_value(
-    child: &Rc<OperatorNode>,
+pub(crate) fn ranked_value<I: OperatorInput>(
+    child: &I,
 ) -> Result<(ColumnId, ColumnRef), ResolveError> {
     let ranked = ranked_column(child)?;
-    let column = match resolve_column_ref(&ColumnRef::SampleValue, &child.schema) {
+    let column = match resolve_column_ref(&ColumnRef::SampleValue, child.schema()) {
         Ok(value) if value == ranked => ColumnRef::SampleValue,
-        _ => child.schema.fields[ranked].column_ref(),
+        _ => child.schema().fields[ranked].column_ref(),
     };
     Ok((ranked, column))
 }
@@ -126,8 +124,8 @@ pub(crate) fn summarised_input(
 /// consume the logical aggregate's immediate child and summarize its declared
 /// input value. Composite realizations can instead consume a larger
 /// logical sub-DAG and bind a different key or value.
-pub(crate) struct PhysicalSummaryInput {
-    pub(crate) child: Rc<OperatorNode>,
+pub(crate) struct PhysicalSummaryInput<I> {
+    pub(crate) child: I,
     pub(crate) input: SummaryUpdate,
 }
 
@@ -136,12 +134,12 @@ pub(crate) struct PhysicalSummaryInput {
 /// it does not consume an independently materialized Count result. `None`
 /// when the rule does not apply or the shape is unsupported (each reason is
 /// noted where it returns).
-pub(crate) fn realize_keyed_additive_summary_input(
+pub(crate) fn realize_keyed_additive_summary_input<I: OperatorInput>(
     intent: &AggIntent,
     family: &FieldDataType,
     output_reduction: &Reduction,
-    child: &Rc<OperatorNode>,
-) -> Option<PhysicalSummaryInput> {
+    child: &I,
+) -> Option<PhysicalSummaryInput<I>> {
     if !matches!(intent, AggIntent::TopK { .. }) {
         return None;
     }
@@ -162,18 +160,18 @@ pub(crate) fn realize_keyed_additive_summary_input(
         having: None,
         child: raw_child,
         ..
-    }) = child.non_asap()
+    }) = non_asap(child)
     else {
         return None;
     };
     // The heap sketch consumes every raw row; a filtered measure counts only
     // some of them (#466).
-    if asap_types::ir::operator::non_asap::any_measure_filtered(filters) {
+    if asap_types::ir::operator::non_asap::any_measure_filtered(&filters) {
         return None;
     }
     // A grouped sum of per-series `rate`/`increase`/`irate` values: the
     // metric they derive from, whose declared type decides their sign.
-    let derivative_of = match (measures.as_slice(), raw_child.non_asap()) {
+    let derivative_of = match (measures.as_slice(), non_asap(&raw_child)) {
         (
             [AggIntent::Sum { .. }],
             Some(NonASAPOp::Aggregate {
@@ -187,7 +185,7 @@ pub(crate) fn realize_keyed_additive_summary_input(
         ) =>
         {
             Some(asap_accuracy::propagation::raw_data_samples_of_metric(
-                samples,
+                &samples.operator(),
             ))
         }
         _ => None,
@@ -209,7 +207,7 @@ pub(crate) fn realize_keyed_additive_summary_input(
         }
         [AggIntent::Sum { col }] => SummaryInputExpr::Column(match col {
             None => ColumnRef::SampleValue,
-            Some(index) => match raw_child.schema.fields.get(*index).map(Field::column_ref) {
+            Some(index) => match raw_child.schema().fields.get(*index).map(Field::column_ref) {
                 Some(column) => column,
                 None => {
                     // Unsupported: sum-ranked Top-K value column is outside the raw input schema.
@@ -239,7 +237,7 @@ pub(crate) fn realize_keyed_additive_summary_input(
         Reduction::PerEntity => vec![],
         Reduction::Reduce(keys) => keys
             .iter()
-            .filter_map(|index| child.schema.fields.get(*index).map(Field::column_ref))
+            .filter_map(|index| child.schema().fields.get(*index).map(Field::column_ref))
             .collect(),
     };
     let item = match reduction {
@@ -249,7 +247,7 @@ pub(crate) fn realize_keyed_additive_summary_input(
         Reduction::Reduce(keys) if !keys.is_without() && !keys.is_empty() => {
             let Some(columns) = keys
                 .iter()
-                .map(|index| raw_child.schema.fields.get(*index).map(Field::column_ref))
+                .map(|index| raw_child.schema().fields.get(*index).map(Field::column_ref))
                 .collect::<Option<Vec<_>>>()
             else {
                 // Unsupported: ranked item column is outside the raw input schema.
@@ -279,7 +277,7 @@ pub(crate) fn realize_keyed_additive_summary_input(
         }
     };
     Some(PhysicalSummaryInput {
-        child: samples.map_or_else(|| Rc::clone(raw_child), |(rows, _)| rows),
+        child: samples.map_or_else(|| raw_child.clone(), |(rows, _)| rows),
         input: SummaryUpdate {
             item: Some(item),
             weight,
@@ -294,7 +292,7 @@ pub(crate) fn realize_keyed_additive_summary_input(
 /// `count` of raw data samples (`sum by (G) (sum_over_time(m[W]))`), neither
 /// filtered nor with `HAVING`; `None` otherwise. The grouped sum is then the
 /// sum (count) of those samples by `G`.
-fn summed_per_series_samples(grouped: &OperatorNode) -> Option<(Rc<OperatorNode>, AggIntent)> {
+fn summed_per_series_samples<I: OperatorInput>(grouped: &I) -> Option<(I, AggIntent)> {
     use asap_types::ir::operator::non_asap::any_measure_filtered;
     let Some(NonASAPOp::Aggregate {
         reduction: Reduction::Reduce(by),
@@ -303,7 +301,7 @@ fn summed_per_series_samples(grouped: &OperatorNode) -> Option<(Rc<OperatorNode>
         having: None,
         child: per_series,
         ..
-    }) = grouped.non_asap()
+    }) = non_asap(grouped)
     else {
         return None;
     };
@@ -317,7 +315,7 @@ fn summed_per_series_samples(grouped: &OperatorNode) -> Option<(Rc<OperatorNode>
         having: None,
         child: rows,
         ..
-    }) = per_series.non_asap()
+    }) = non_asap(&per_series)
     else {
         return None;
     };
@@ -326,27 +324,35 @@ fn summed_per_series_samples(grouped: &OperatorNode) -> Option<(Rc<OperatorNode>
         return None;
     };
     if by.is_without()
-        || any_measure_filtered(filters)
-        || any_measure_filtered(inner_filters)
-        || matches!(rows.non_asap(), Some(NonASAPOp::Aggregate { .. }))
+        || any_measure_filtered(&filters)
+        || any_measure_filtered(&inner_filters)
+        || matches!(non_asap(&rows), Some(NonASAPOp::Aggregate { .. }))
     {
         return None;
     }
     // The grouped sum reads the per-series value.
-    let value = resolve_column_ref(&ColumnRef::SampleValue, &per_series.schema).ok()?;
+    let value = resolve_column_ref(&ColumnRef::SampleValue, per_series.schema()).ok()?;
     if col.is_some_and(|col| col != value) || by.keys().contains(&value) {
         return None;
     }
     if by.keys().iter().any(|&key| {
         per_series
-            .schema
+            .schema()
             .fields
             .get(key)
             .is_none_or(|field| field.name == "__name__")
     }) {
         return None;
     }
-    Some((Rc::clone(rows), inner.clone()))
+    Some((rows, inner.clone()))
+}
+
+/// `input`'s operator when it is not an ASAP one.
+pub(crate) fn non_asap<I: OperatorInput>(input: &I) -> Option<NonASAPOp<I>> {
+    match input.operator() {
+        Operator::NonASAP(operator) => Some(operator),
+        Operator::ASAP(_) => None,
+    }
 }
 
 #[cfg(test)]
@@ -357,6 +363,7 @@ mod tests {
     use asap_types::ir::scalar::{CompareOpKind, ScalarValue};
     use asap_types::ir::schema::GroupingStrategy;
     use asap_types::ir::{ExprSemantics, Predicate};
+    use asap_types::ir::{OperatorNode, ScalarExpr};
 
     /// A heap sketch consumes every raw row, so the keyed input rule refuses
     /// a TopK over a filtered count.

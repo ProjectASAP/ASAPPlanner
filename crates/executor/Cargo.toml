@@ -27,8 +27,6 @@ test-support = ["planner-types/test-support"]
 [dev-dependencies]
 asap-executor = { path = ".", features = ["test-support"] }
 rmp-serde = "1"
-asap-stage0-memo = { path = "../stage0-memo" }
-asap-stage1-pass1-per-computation-candidates = { path = "../stage1-pass1-per-computation-candidates", features = ["test-support"] }
 # The planning stages through the facade (a dev-dependency cycle, for
 # integration tests only).
 asap-planner = { path = "../planner" }

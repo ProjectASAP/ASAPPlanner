@@ -288,17 +288,8 @@ pub fn run_stages_until(
         return Ok(stages);
     }
     let run = &mut stages.run;
-    let accuracy_targets: Vec<_> = entries
-        .iter()
-        .map(|entry| entry.requirements.accuracy.clone())
-        .collect();
-    let accuracy = models.accuracy_check_inputs();
     let pass1 = pass1_memo(
         stage0_dag,
-        &accuracy_targets,
-        accuracy.model,
-        accuracy.evidence,
-        data,
         models
             .deployment_capabilities
             .supported_summaries
@@ -372,7 +363,7 @@ pub fn run_stages_until(
         &physical,
         entries,
         data,
-        &accuracy,
+        &models.accuracy_check_inputs(),
         models.cost_inputs,
         &realizer,
     ) {

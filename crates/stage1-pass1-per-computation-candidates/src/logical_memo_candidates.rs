@@ -3,22 +3,19 @@
 //! configuration, fused builds), with every intermediate result its own
 //! group (a [`Memo`]), which Pass 2 extends.
 
-use asap_types::ir::properties::AccuracyTarget;
-use asap_types::workload::DataWorkload;
-
-use asap_accuracy::{AccuracyEvidenceProvider, AccuracyModel};
-
-use crate::per_computation_candidates::{
-    generate_per_computation_candidates, PerComputationCandidateError,
-};
 use asap_types::ir::schema::SupportedSummary;
 use asap_types::stages::Memo;
+
+use crate::per_computation_candidates::{
+    add_pass1_candidates, computation_targets, PerComputationCandidateError,
+};
 
 /// Why [`pass1_memo`] failed.
 #[derive(Debug, thiserror::Error)]
 pub enum Pass1Error {
-    /// A query's DAG cannot be planned: it already holds ASAP or physical
-    /// annotations, or a measure's accuracy target is invalid.
+    /// A query's memo cannot be planned: a group's expression is already an
+    /// ASAP operator, a measure's accuracy target is invalid, or a
+    /// candidate Pass 1 built is rejected by the memo.
     #[error(transparent)]
     PerComputation(#[from] PerComputationCandidateError),
 }
@@ -29,25 +26,17 @@ pub enum Pass1Error {
 /// execution, drops the summaries the deployment does not support
 /// (`supported_summaries`, the deployment's
 /// `DeploymentCapabilities::supported_summaries`; `None` supports every
-/// one) and, unless `accuracy` or `evidence` may accept an output without
-/// its guarantee, the summaries no query reading them can use (a query
-/// `q`'s target is `accuracy_targets[q]`). It then adds each way to compute
-/// a group as candidates, through `Memo::find_or_add_group` and
-/// `Memo::add_candidate`.
+/// one), and adds each way to compute a group as candidates, through
+/// `Memo::find_or_add_group` and `Memo::add_candidate`: every group's own
+/// expression, exact accumulators, one summary build per configuration of
+/// the family's predefined list with separate readouts, and fused builds.
+/// Pruning by the queries' accuracy targets is decided per edge, after
+/// Pass 2 (#1207 PR 4).
 pub fn pass1_memo(
-    memo: Memo,
-    accuracy_targets: &[AccuracyTarget],
-    accuracy: &dyn AccuracyModel,
-    evidence: &dyn AccuracyEvidenceProvider,
-    data: &DataWorkload,
+    mut memo: Memo,
     supported_summaries: Option<&[SupportedSummary]>,
 ) -> Result<Memo, Pass1Error> {
-    let mut per_computation = generate_per_computation_candidates(&memo)?
-        .without_unsupported_summaries(supported_summaries);
-    if !accuracy.may_accept_regardless_of_guarantee() && !evidence.may_provide_evidence() {
-        per_computation =
-            per_computation.without_summaries_no_query_can_use(accuracy_targets, data, accuracy);
-    }
-    let _ = (memo, per_computation);
-    todo!("#1207 PR 3: add each way to compute as candidates, one per listed θ")
+    let targets = computation_targets(&memo, supported_summaries)?;
+    add_pass1_candidates(&mut memo, &targets)?;
+    Ok(memo)
 }

@@ -1,69 +1,80 @@
-//! SQL → Pass 1 per-computation candidates: where each `HAVING` is applied,
-//! the guarantees composed over estimates, and what a Top-K heap sketch
-//! ranks.
+//! SQL → Pass 1 memo candidates: where each `HAVING` is applied, the
+//! guarantees composed over estimates, and what a Top-K heap sketch ranks.
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_stage1_pass1_per_computation_candidates::test_support::{
-    compose_logical_candidate, generate_per_computation_candidates,
-};
+use asap_stage1_pass1_per_computation_candidates::pass1_memo;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SummaryInputExpr};
-use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
-use asap_types::stages::{ComputationTarget, HavingPlacement, HowToComputeAggregateMeasure};
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot};
+use asap_types::stages::Memo;
 
-async fn targets(sql: &str) -> Vec<ComputationTarget> {
-    let catalog = SqlCatalog::new().with_table(
-        "flows",
-        Schema::new(vec![
+/// Pass 1's memo of `sql` over `flows(src, bytes)`.
+async fn pass1(sql: &str) -> Memo {
+    pass1_over(
+        vec![
             Field::plain("src", DataType::Utf8, false),
             Field::plain("bytes", DataType::Float64, false),
-        ]),
-    );
+        ],
+        sql,
+    )
+    .await
+}
+
+/// Pass 1's memo of `sql` over `flows(fields)`.
+async fn pass1_over(fields: Vec<Field>, sql: &str) -> Memo {
+    let catalog = SqlCatalog::new().with_table("flows", Schema::new(fields));
     let accuracy = AccuracyTarget::max_error(0.01).failure_probability(0.01);
     let root = lower_sql(sql, &catalog, accuracy)
         .await
         .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"));
-    generate_per_computation_candidates(
-        &asap_stage0_memo::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
-    )
-    .unwrap()
-    .targets
+    let memo = asap_stage0_memo::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap();
+    pass1_memo(memo, None).unwrap_or_else(|e| panic!("Pass 1 failed for {sql:?}: {e}"))
 }
 
-fn placements(targets: &[ComputationTarget]) -> Vec<HavingPlacement> {
-    targets
-        .iter()
-        .flat_map(|target| target.having_filters.iter().map(|entry| entry.placement))
-        .collect()
+/// Whether some candidate applies a `HAVING` below the aggregate: a
+/// `Filter` group over the aggregate's input, which a state build reads.
+fn having_pushed_below(memo: &Memo) -> bool {
+    let groups = memo.groups();
+    groups.iter().any(|group| {
+        let Operator::NonASAP(NonASAPOp::Aggregate { child, .. }) = &group.expression else {
+            return false;
+        };
+        groups.iter().any(|filter| {
+            matches!(&filter.expression, Operator::NonASAP(NonASAPOp::Filter { child: input, .. }) if input == child)
+        })
+    })
 }
 
+/// A key-only `HAVING` is pushed below the aggregate.
 #[tokio::test]
 async fn key_only_having_is_pushed_below() {
-    let targets = targets("SELECT src, count(*) FROM flows GROUP BY src HAVING src = 'a'").await;
-    assert_eq!(placements(&targets), vec![HavingPlacement::BelowAggregate]);
+    let memo = pass1("SELECT src, count(*) FROM flows GROUP BY src HAVING src = 'a'").await;
+    assert!(having_pushed_below(&memo));
 }
 
+/// A `HAVING` over an aggregate value stays above the output.
 #[tokio::test]
 async fn value_having_stays_above() {
-    let targets =
-        targets("SELECT src, count(*) FROM flows GROUP BY src HAVING count(*) > 10").await;
-    assert_eq!(placements(&targets), vec![HavingPlacement::AboveOutput]);
+    let memo = pass1("SELECT src, count(*) FROM flows GROUP BY src HAVING count(*) > 10").await;
+    assert!(!having_pushed_below(&memo));
 }
 
+/// A global aggregate's `HAVING`, even a constant one, stays above the output.
 #[tokio::test]
 async fn global_constant_having_stays_above() {
-    let targets = targets("SELECT count(*) FROM flows HAVING false").await;
-    assert_eq!(placements(&targets), vec![HavingPlacement::AboveOutput]);
+    let memo = pass1("SELECT count(*) FROM flows HAVING false").await;
+    assert!(!having_pushed_below(&memo));
 }
 
+/// A `HAVING` that reads a key and a value stays above the output.
 #[tokio::test]
 async fn mixed_key_and_value_having_stays_above() {
-    let targets =
-        targets("SELECT src, count(*) FROM flows GROUP BY src HAVING src = 'a' AND count(*) > 10")
+    let memo =
+        pass1("SELECT src, count(*) FROM flows GROUP BY src HAVING src = 'a' AND count(*) > 10")
             .await;
-    assert_eq!(placements(&targets), vec![HavingPlacement::AboveOutput]);
+    assert!(!having_pushed_below(&memo));
 }
 
 /// Whether `node` reads a quantile sketch (KLL or DDSketch) anywhere below it.
@@ -192,9 +203,8 @@ async fn a_sql_fold_over_estimates_leaves_its_row_count_unbound() {
     }
 }
 
-/// The item and weight columns of every heap sketch build in each composed
-/// candidate of `sql` over `flows(key: key_type, bytes)` that picks a heap
-/// sketch for its top-k.
+/// The item and weight columns of every heap sketch state group in Pass 1's
+/// memo of `sql` over `flows(key: key_type, bytes)`.
 async fn heap_updates(key: &str, key_type: DataType, sql: &str) -> Vec<(String, String)> {
     heap_updates_over(
         vec![
@@ -208,13 +218,7 @@ async fn heap_updates(key: &str, key_type: DataType, sql: &str) -> Vec<(String, 
 
 /// [`heap_updates`] over `flows(fields)`.
 async fn heap_updates_over(fields: Vec<Field>, sql: &str) -> Vec<(String, String)> {
-    let catalog = SqlCatalog::new().with_table("flows", Schema::new(fields));
-    let accuracy = AccuracyTarget::max_error(0.01).failure_probability(0.01);
-    let root = lower_sql(sql, &catalog, accuracy).await.unwrap();
-    let inventory = generate_per_computation_candidates(
-        &asap_stage0_memo::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
-    )
-    .unwrap();
+    let memo = pass1_over(fields, sql).await;
     let name = |expr: &SummaryInputExpr| match expr {
         SummaryInputExpr::Column(ColumnRef::Named(name)) => name.clone(),
         SummaryInputExpr::Column(ColumnRef::Qualified { table, name }) => {
@@ -234,45 +238,28 @@ async fn heap_updates_over(fields: Vec<Field>, sql: &str) -> Vec<(String, String
         SummaryInputExpr::Constant(value) => value.to_string(),
         other => panic!("a named column or constant: {other:?}"),
     };
-    let mut updates = Vec::new();
-    for (t, target) in inventory.targets.iter().enumerate() {
-        for c in 0..target.choice_count() {
-            let (candidate, _) = target.computation_for(c).unwrap();
-            if !matches!(
-                candidate,
-                HowToComputeAggregateMeasure::Summary(
-                    SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap
-                )
-            ) {
-                continue;
-            }
-            let mut choice = vec![0; inventory.targets.len()];
-            choice[t] = c;
-            let composed = compose_logical_candidate(&inventory, &choice)
-                .unwrap_or_else(|e| panic!("{candidate:?} composes: {e}"));
-            let QueryRoot::Operator(root) = &composed[0] else {
-                panic!("operator root")
-            };
-            for node in OperatorNode::reachable(root) {
-                if let Some(ASAPOp::SummaryAgg {
-                    family: FieldDataType::Sketch(..),
-                    input,
-                    ..
-                }) = node.asap()
-                {
-                    updates.push((name(input.item.as_ref().unwrap()), name(&input.weight)));
-                }
-            }
-        }
-    }
-    updates
+    memo.groups()
+        .iter()
+        .filter_map(|group| match &group.expression {
+            Operator::ASAP(ASAPOp::SummaryAgg {
+                family:
+                    FieldDataType::Sketch(
+                        SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap,
+                        _,
+                    ),
+                input,
+                ..
+            }) => Some((name(input.item.as_ref().unwrap()), name(&input.weight))),
+            _ => None,
+        })
+        .collect()
 }
 
 const COUNT_RANKED_TOPK: &str =
     "SELECT KEY, count(*) FROM flows GROUP BY KEY ORDER BY count(*) DESC LIMIT 10";
 
 /// An Int64 key is not mistaken for the ranked value: both heap sketches
-/// compose over raw rows, keyed by the key with unit weight.
+/// are built over raw rows, keyed by the key with unit weight.
 #[tokio::test]
 async fn topk_heap_over_an_int64_key_counts_raw_rows() {
     let updates = heap_updates(
@@ -311,7 +298,7 @@ async fn topk_heap_over_a_key_named_value_counts_raw_rows() {
 
 /// SQL's per-group top-k idiom (`ROW_NUMBER() OVER (PARTITION BY city
 /// ORDER BY COUNT(*) DESC) … WHERE rn <= 5`) is a heavy-hitter top-k, as
-/// PromQL `topk by (city)` is: both heap sketches compose, keyed by the
+/// PromQL `topk by (city)` is: both heap sketches are offered, keyed by the
 /// host and fed raw rows with unit weight.
 #[tokio::test]
 async fn rownumber_per_group_topk_offers_heap_sketches() {
