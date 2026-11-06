@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 
-use super::input::{BuiltOrInput, OperatorInput};
+use super::input::{InputOrTemporaryBuild, OperatorInput};
 use super::node::{Operator, OperatorNode, OperatorResultKind};
 use crate::ir::operator::maintained_population::{MaintainedPopulation, PopulationStatistic};
 use crate::ir::operator::operator_properties::Reduction;
@@ -692,7 +692,9 @@ impl<I: OperatorInput> ASAPOp<I> {
 /// stands for, with its schema: the input's build (one build over a merged
 /// chain's window) grouped by the input columns the rollup's keys name.
 /// `None` for any other input, or a rollup whose build does not derive.
-fn rolled_up_build<I: OperatorInput>(state: &I) -> Option<(ASAPOp<BuiltOrInput<I>>, Schema)> {
+fn rolled_up_build<I: OperatorInput>(
+    state: &I,
+) -> Option<(ASAPOp<InputOrTemporaryBuild<I>>, Schema)> {
     let Operator::ASAP(ASAPOp::SummaryMerge {
         children,
         group_by: Some(keys),
@@ -707,7 +709,7 @@ fn rolled_up_build<I: OperatorInput>(state: &I) -> Option<(ASAPOp<BuiltOrInput<I
     let input = selected_from(input).unwrap_or_else(|| input.clone());
     let build = match input.operator() {
         Operator::ASAP(op @ ASAPOp::SummaryAgg { .. }) => {
-            op.map_children(|child| BuiltOrInput::Input(child.clone()))
+            op.map_children(|child| InputOrTemporaryBuild::Input(child.clone()))
         }
         _ if super::tumbling_window_chain::merged_chain(&input).is_some() => {
             super::tumbling_window_chain::merged_window_build(&input)

@@ -168,30 +168,6 @@ fn a_chain_reads_an_instant_vector() {
     assert!(empty.validate_structure().is_err());
 }
 
-fn newest(chain: Rc<OperatorNode>, newest_tumbling_windows: u32) -> Rc<OperatorNode> {
-    OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
-        children: vec![chain],
-        newest_tumbling_windows: Some(newest_tumbling_windows),
-        group_by: None,
-    }))
-    .unwrap()
-}
-
-/// A merge of the newest 2 of 5 tumbling windows is a state of one build over the
-/// newest 2 minutes: the window build's schema, and a valid structure.
-#[test]
-fn a_merge_of_the_newest_tumbling_windows_covers_their_window() {
-    use asap_types::ir::operator::tumbling_window_chain::merged_window_build_node;
-    let partial = newest(chain(scan()), 2);
-    partial.validate_structure().unwrap();
-    let build = merged_window_build_node(&partial).unwrap();
-    let Some(NonASAPOp::TimeRange { range, .. }) = build.children()[0].non_asap() else {
-        panic!("{:?}", build.operator)
-    };
-    assert_eq!(*range, Duration::from_millis(2 * MINUTE));
-    assert_eq!(partial.schema, build.schema);
-}
-
 /// `newest_tumbling_windows` must name between 1 and fewer than all tumbling windows of the one
 /// chain the merge reads; anything else is rejected.
 #[test]

@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::ir::operator::asap::{selected_from, summary_agg_schema, ASAPOp};
-use crate::ir::operator::input::{BuiltOrInput, OperatorInput};
+use crate::ir::operator::input::{InputOrTemporaryBuild, OperatorInput};
 use crate::ir::operator::node::{Operator, OperatorResultKind};
 use crate::ir::operator::non_asap::{NonASAPOp, TimeRangeKind};
 use crate::ir::operator::operator_properties::Reduction;
@@ -44,10 +44,12 @@ pub struct SummaryStateDefinition {
     /// so states over one source with different matchers may merge.
     pub input_group: Option<MemoGroupId>,
     /// The operators not lifted into the selection, listed top down from the
-    /// SummaryAgg, each with only its residual arguments; `()` marks its
-    /// single input (the next one, or input_group). Two states may merge only
-    /// if input_group and these operators are equal.
-    pub unlifted_operators: Vec<Operator<()>>,
+    /// SummaryAgg, each with only its residual arguments. `None` marks an
+    /// operator's main input (the next unlifted operator, or input_group);
+    /// `Some(g)` is another input group it reads, such as the group a scalar
+    /// subquery in a Filter reads. Two states may merge only if input_group
+    /// and these operators are equal.
+    pub unlifted_operators: Vec<Operator<Option<MemoGroupId>>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -276,10 +278,6 @@ pub enum CoverageError {
     /// nothing, and a Hydra's groups share one state. Bad input.
     #[error("the inputs' family cannot merge different groups")]
     FamilyCannotRegroup,
-    /// A `SummaryAgg` whose filter reads a scalar subquery: its definition
-    /// cannot name the group the subquery reads, so it merges with nothing.
-    #[error("a summary filter with a scalar subquery has no comparable definition")]
-    SubqueryInDefinition,
     /// The build a regrouping `SummaryMerge` stands for does not derive:
     /// bad input.
     #[error("the regrouped build does not derive: {reason}")]
@@ -288,7 +286,7 @@ pub enum CoverageError {
 
 /// A memo group read as an input, and the inputs a rule builds over such
 /// groups.
-type GroupInput<'m> = BuiltOrInput<MemoGroupAsInput<'m>>;
+type GroupInput<'m> = InputOrTemporaryBuild<MemoGroupAsInput<'m>>;
 
 impl SummaryCoverage {
     /// Coverage of a summary state a memo group computes with `operator`
@@ -310,7 +308,7 @@ impl SummaryCoverage {
                 reason: error.to_string(),
             };
         let as_built = |op: &ASAPOp<MemoGroupAsInput<'m>>| -> ASAPOp<GroupInput<'m>> {
-            op.map_children(|input| BuiltOrInput::Input(*input))
+            op.map_children(|input| InputOrTemporaryBuild::Input(*input))
         };
         match operator {
             Operator::NonASAP(_) => match selected_build(operator)? {
@@ -425,13 +423,13 @@ fn selected_build<'m>(
     if let Some(key) = unmapped {
         return Err(CoverageError::NotAGroupKey { key });
     }
-    let mut built = |input: &MemoGroupAsInput<'m>| BuiltOrInput::Input(*input);
+    let mut built = |input: &MemoGroupAsInput<'m>| InputOrTemporaryBuild::Input(*input);
     let regrouped_build = |error: SchemaDerivationError| CoverageError::RegroupedBuild {
         reason: error.to_string(),
     };
-    let rows = BuiltOrInput::build(NonASAPOp::Filter {
+    let rows = InputOrTemporaryBuild::build(NonASAPOp::Filter {
         pred: Predicate(rows_pred.map_operator_refs(&mut built)),
-        child: BuiltOrInput::Input(child),
+        child: InputOrTemporaryBuild::Input(child),
     })
     .map_err(regrouped_build)?;
     let reduction = Reduction::Reduce(by);
@@ -553,7 +551,7 @@ fn regrouped(
     // A direct build's definition, so its definition id is the same.
     let mut definition = merged.definition.clone();
     definition.unlifted_operators[0] = Operator::ASAP(ASAPOp::SummaryAgg {
-        child: (),
+        child: None,
         family: family.clone(),
         input: input.clone(),
         reduction,
@@ -625,33 +623,27 @@ fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, Cov
     else {
         unreachable!("called on a SummaryAgg");
     };
-    // Operator<()> cannot say which group a scalar subquery reads.
-    if build.children().len() > 1 {
-        return Err(CoverageError::SubqueryInDefinition);
-    }
-
     // The operators a predicate can be lifted through, top to bottom, and
-    // the first input below them. One with a scalar subquery stays below.
+    // the first input below them. A subquery's group stays named in the
+    // residual of the operator that reads it.
     let mut chain: Vec<Operator<GroupInput<'_>>> = Vec::new();
     let mut base = child.clone();
     loop {
         let operator = base.operator();
-        let passes = operator.children().len() == 1
-            && match &operator {
-                Operator::NonASAP(NonASAPOp::Project { .. } | NonASAPOp::Filter { .. }) => true,
-                Operator::NonASAP(NonASAPOp::TimeRange { kind, .. }) => {
-                    *kind == TimeRangeKind::Range
-                }
-                Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }) => shift.at.is_none(),
-                _ => false,
-            };
+        let passes = match &operator {
+            Operator::NonASAP(NonASAPOp::Project { .. } | NonASAPOp::Filter { .. }) => true,
+            Operator::NonASAP(NonASAPOp::TimeRange { kind, .. }) => *kind == TimeRangeKind::Range,
+            Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }) => shift.at.is_none(),
+            _ => false,
+        };
         if !passes {
             break;
         }
+        // The main input is an operator's first child.
         base = operator.children()[0].clone();
         chain.push(operator);
     }
-    let BuiltOrInput::Input(input_group) = &base else {
+    let InputOrTemporaryBuild::Input(input_group) = &base else {
         unreachable!("a rule builds only liftable operators over memo groups");
     };
     // Time is lifted only from exactly one range window.
@@ -668,7 +660,7 @@ fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, Cov
     let agg_filter = filter
         .as_ref()
         .and_then(|pred| residual(pred, top, &[], &mut lifted));
-    let kept: Vec<Option<Predicate<()>>> = chain
+    let kept: Vec<Option<Predicate<Option<MemoGroupId>>>> = chain
         .iter()
         .enumerate()
         .map(|(depth, link)| match link {
@@ -702,7 +694,7 @@ fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, Cov
     };
 
     let mut unlifted_operators = vec![Operator::ASAP(ASAPOp::SummaryAgg {
-        child: (),
+        child: None,
         family: family.clone(),
         input: input.clone(),
         reduction: reduction.clone(),
@@ -716,7 +708,7 @@ fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, Cov
                 if let Some(rest) = kept[depth].clone() {
                     unlifted_operators.push(Operator::NonASAP(NonASAPOp::Filter {
                         pred: rest,
-                        child: (),
+                        child: None,
                     }));
                 }
             }
@@ -726,7 +718,7 @@ fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, Cov
             Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }) if lift_time => {
                 shift_ms += shift.offset_ms;
             }
-            other => unlifted_operators.push(other.map_children(|_| ())),
+            other => unlifted_operators.push(unlifted(other)),
         }
     }
     let input_group = match scan {
@@ -764,18 +756,18 @@ fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, Cov
 }
 
 /// Lift what `pred`'s conjuncts can into `lifted` (keyed by the column of
-/// `top`, the agg child's schema) and return the rest, without input refs
-/// (the caller keeps only predicates without scalar subqueries). `above`
+/// `top`, the agg child's schema) and return the rest, each scalar subquery
+/// naming the group it reads. `above`
 /// are the operators between the predicate and the `SummaryAgg`, top to
 /// bottom. A column whose `(table, name)` is not unique in `top` cannot be
 /// named in a selection, so its conjuncts stay.
-fn residual<C>(
-    pred: &Predicate<C>,
+fn residual(
+    pred: &Predicate<GroupInput<'_>>,
     top: &Schema,
-    above: &[Operator<C>],
+    above: &[Operator<GroupInput<'_>>],
     lifted: &mut BTreeMap<ColumnId, Constraint>,
-) -> Option<Predicate<()>> {
-    let mut rest: Vec<ScalarExpr<()>> = Vec::new();
+) -> Option<Predicate<Option<MemoGroupId>>> {
+    let mut rest: Vec<ScalarExpr<Option<MemoGroupId>>> = Vec::new();
     for conjunct in pred.0.conjuncts() {
         let lift = constraint_of(conjunct).and_then(|(column, constraint)| {
             let column = column_at_top(column, above)?;
@@ -798,7 +790,7 @@ fn residual<C>(
             Some((column, constraint)) => {
                 lifted.insert(column, constraint);
             }
-            None => rest.push(conjunct.map_operator_refs(&mut |_| ())),
+            None => rest.push(conjunct.map_operator_refs(&mut group_id)),
         }
     }
     match rest.len() {
@@ -806,6 +798,30 @@ fn residual<C>(
         1 => rest.pop().map(Predicate),
         _ => Some(Predicate(ScalarExpr::BoolAnd(rest))),
     }
+}
+
+/// The memo group `input` is; `None` for a rule's temporary build.
+fn group_id(input: &GroupInput<'_>) -> Option<MemoGroupId> {
+    match input {
+        InputOrTemporaryBuild::Input(group) => Some(group.group_id),
+        InputOrTemporaryBuild::TemporaryBuild(_) => None,
+    }
+}
+
+/// `link`, a liftable operator kept whole in a definition: its main input
+/// `None`, every other input the group it is.
+fn unlifted(link: &Operator<GroupInput<'_>>) -> Operator<Option<MemoGroupId>> {
+    let mut operator = link.map_children(group_id);
+    match &mut operator {
+        Operator::NonASAP(
+            NonASAPOp::Filter { child, .. }
+            | NonASAPOp::Project { child, .. }
+            | NonASAPOp::TimeRange { child, .. }
+            | NonASAPOp::TimeShift { child, .. },
+        ) => *child = None,
+        _ => unreachable!("only liftable operators are walked"),
+    }
+    operator
 }
 
 /// Map a column of the input of `above.last()` up to the agg child's output:
