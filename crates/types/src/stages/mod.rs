@@ -27,8 +27,9 @@ pub use per_computation_logical_memo_candidates::{
 };
 pub use physical::{
     output_references, producer_satisfies_physical_requirements, DagOfSelectedCandidates,
-    PhysicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateId, PhysicalCandidateKey,
-    PhysicalEdge, PhysicalEdgeId, SelectedEdge, SelectedNodeId,
+    ExecutionContext, ExecutionContextId, PhysicalASAPMemoCandidates, PhysicalCandidate,
+    PhysicalCandidateId, PhysicalCandidateKey, PhysicalEdge, PhysicalEdgeId, RefreshWindowId,
+    SelectedEdge, SelectedNodeId,
 };
 pub use pruning::{PruneReason, PrunedCandidate};
 pub use realizer::{AssignmentRealizer, PhysicalCandidateError, RealizedPlan};

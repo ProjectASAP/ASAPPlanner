@@ -16,49 +16,13 @@ use std::collections::HashMap;
 
 use good_lp::{Constraint, Variable};
 
-use asap_types::physical::EvaluationSchedule;
-use asap_types::stages::{PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalEdgeId};
+use asap_types::stages::{
+    ExecutionContextId, PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalEdgeId,
+};
 
 /// A query, by index in the workload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct QueryId(pub usize);
-
-/// A refresh window of the workload's ingestion pipelines, by index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct RefreshWindowId(pub usize);
-
-/// Index of a [`ExecutionContext`] among the workload's contexts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ExecutionContextId(pub usize);
-
-/// $\kappa$: a class of executions with a common owner and schedule, where
-/// a candidate with $\ell$ = None or `OneEvaluation` runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ExecutionContext {
-    /// The evaluation of every query with this schedule: queries with the
-    /// same (interval, phase) are evaluated together and share its
-    /// `OneEvaluation` results. A and B both every 10 s at phase 0 give one
-    /// context. A non-periodic query has no context yet (out of scope).
-    Evaluation(EvaluationSchedule),
-    /// $I_r$: the ingestion pipeline of a refresh window.
-    IngestionPipeline(RefreshWindowId),
-    /// $\kappa_m$: inside an `AcrossEvaluations` candidate's own computation.
-    Materialized(PhysicalCandidateId),
-}
-
-impl ExecutionContext {
-    /// $T_\kappa$: an evaluation context's schedule; `None` for an ingestion
-    /// pipeline or a materialized candidate's own computation, which is not
-    /// an implicit compatibility pass.
-    pub fn evaluation_schedule(&self) -> Option<EvaluationSchedule> {
-        match self {
-            ExecutionContext::Evaluation(schedule) => Some(*schedule),
-            ExecutionContext::IngestionPipeline(_) | ExecutionContext::Materialized(_) => {
-                todo!("#1207 PR 7: whether an ingestion or materialized context has times")
-            }
-        }
-    }
-}
 
 /// The baseline variables (section 3).
 struct SelectionVariables {

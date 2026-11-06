@@ -84,13 +84,6 @@ impl PhysicalProperties {
     }
 }
 
-/// When a context κ runs: $\varphi_\kappa + I_\kappa\cdot\mathbb Z$ (Stage 3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct EvaluationSchedule {
-    interval_ms: u64,
-    phase_ms: u64,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

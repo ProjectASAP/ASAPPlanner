@@ -8,7 +8,6 @@ pub mod properties;
 pub mod workload_plan;
 
 pub use properties::{
-    EvaluationSchedule, ExecutionTiming, Lifetime, PhysicalProperties, PhysicalPropertiesError,
-    StorageMedium,
+    ExecutionTiming, Lifetime, PhysicalProperties, PhysicalPropertiesError, StorageMedium,
 };
 pub use workload_plan::PhysicalWorkloadPlan;

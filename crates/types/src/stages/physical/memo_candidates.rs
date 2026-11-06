@@ -6,9 +6,10 @@
 
 use std::collections::HashMap;
 
+use super::execution_context::ExecutionContext;
 use super::graph::PhysicalCandidateId;
 use crate::ir::QueryRoot;
-use crate::physical::{EvaluationSchedule, PhysicalProperties};
+use crate::physical::PhysicalProperties;
 use crate::stages::{
     CandidateForMemoGroupId, LogicalASAPMemoCandidates, Memo, MemoGroupId, PrunedCandidate,
 };
@@ -27,13 +28,17 @@ pub struct PhysicalCandidate {
 }
 
 impl PhysicalCandidate {
-    /// Whether a consumer running on `times` can read this producer (the
-    /// concepts doc's alignment table, section 2): $w \mid I$ and
-    /// $w \mid \varphi$ for a windowed `AcrossEvaluations` producer, with $w$
-    /// read from its logical window layout in `memo`; true for $\ell$ = None,
-    /// and for `OneEvaluation` when the result belongs to that context.
-    pub fn delivers_on(&self, memo: &Memo, times: &EvaluationSchedule) -> bool {
-        let _ = (memo, times);
+    /// Whether a consumer running in `context` can read this producer (the
+    /// concepts doc's alignment table, section 2). True for $\ell$ = None,
+    /// and for `OneEvaluation` in the same context. A windowed
+    /// `AcrossEvaluations` producer, with $w$ read from its logical window
+    /// layout in `memo`, needs every evaluation time of the context on its
+    /// grid: $w$ divides the context's evaluation grid (interval, range step
+    /// and phase), each scheduled time, or a one-off query's time; false
+    /// when the times are not known (an interval without a phase, an
+    /// estimated rate, an unknown recurrence).
+    pub fn delivers_on(&self, memo: &Memo, context: &ExecutionContext) -> bool {
+        let _ = (memo, context);
         todo!("#1207 PR 1: the alignment table of section 2")
     }
 }
