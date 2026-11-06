@@ -15,8 +15,8 @@ use asap_devtools::corpora::{
 };
 use asap_devtools::{lower_promql_with_sample_interval, SqlCatalog};
 use asap_frontend_sql::lower_sql_dialect;
-use asap_logical_asap_optimization::memo_of_queries;
-use asap_logical_asap_optimization::pass1_memo;
+use asap_stage0_memo::memo_of_queries;
+use asap_stage1_pass1_per_computation_candidates::pass1_memo;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
 use asap_types::workload::SqlDialect;

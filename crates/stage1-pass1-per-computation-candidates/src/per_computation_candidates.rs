@@ -55,7 +55,7 @@ use thiserror::Error;
 
 use asap_accuracy::sizing::sketch_statistic;
 
-use crate::pass1::realization::summary_candidates;
+use crate::realization::summary_candidates;
 use asap_types::deployment_capabilities::{summary_supported, SupportedSummary};
 use asap_types::stages::{
     ComputationTarget, FusedComputation, HavingEntry, HavingPlacement,
@@ -101,7 +101,7 @@ fn prune_own(
 /// Compact Pass 1 inventory over the memo groups it walked: one target per
 /// measure of each aggregate group, however many queries read the group.
 /// Pass 1's working form, not its output:
-/// [`pass1_memo`](crate::pass1::pass1_memo)
+/// [`pass1_memo`](crate::pass1_memo)
 /// builds, prunes and attaches it to the memo groups. Public only to tests
 /// (feature `test-support`).
 #[derive(Debug, Clone)]
@@ -761,7 +761,7 @@ fn reads_only_time_series(node: &OperatorNode) -> bool {
 pub(super) fn whole_expression_input(
     target: &OperatorNode,
 ) -> Option<(Rc<OperatorNode>, SummaryUpdate, Reduction)> {
-    use crate::pass1::realization::realize_keyed_additive_summary_input;
+    use crate::realization::realize_keyed_additive_summary_input;
     let Some(NonASAPOp::Aggregate {
         child,
         reduction,
@@ -1407,7 +1407,7 @@ mod tests {
         let root = asap_types::ir::schema::schema_support::with_promql_series_identity(&root)
             .unwrap_or(root);
         generate_per_computation_candidates(
-            &crate::stage0::memo_of_queries(
+            &asap_stage0_memo::memo_of_queries(
                 &[QueryRoot::Operator(root)],
                 &[None],
                 &Default::default(),

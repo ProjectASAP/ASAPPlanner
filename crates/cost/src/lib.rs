@@ -16,7 +16,7 @@
 //!   [`NodeUsage`]; [`plan_cost`] the whole plan's [`PlanCost`]. Stage 3
 //!   computes no cost of its own.
 //!
-//! Plan selection (Stage 3, `asap-plan-selection`) documents how it prices
+//! Plan selection (Stage 3, `asap-stage3-plan-selection`) documents how it prices
 //! a candidate with these.
 use std::collections::BTreeMap;
 
