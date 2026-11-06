@@ -587,11 +587,17 @@ impl<I: OperatorInput> NonASAPOp<I> {
                     let name = crate::ir::schema::topk::topk_output_name(*k, output_names);
                     let cols =
                         crate::ir::schema::topk::ranked_row_projection(child, reduction, &name)?;
-                    return NonASAPOp::Project {
+                    let mut output = NonASAPOp::Project {
                         cols,
                         child: child.clone(),
                     }
-                    .output_schema();
+                    .output_schema()?;
+                    output.unique_keys = crate::ir::schema::topk::exact_topk_unique_keys(
+                        child,
+                        reduction.group_keys().map_or(0, |keys| keys.len()),
+                        &output,
+                    );
+                    return Ok(output);
                 }
                 let mut output =
                     aggregate_output_schema(child.schema(), reduction, measures, output_names)?;
