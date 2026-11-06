@@ -41,12 +41,8 @@ impl PhysicalCandidate {
 /// $\alpha^{\mathrm{phys}}_{u,c,i}$: timing and lifetime only (the concepts
 /// doc's table, section 2). Alignment is checked per context in Stage 3 with
 /// [`PhysicalCandidate::delivers_on`].
-pub fn satisfies_physical(
-    memo: &Memo,
-    producer: &PhysicalCandidate,
-    consumer: &PhysicalCandidate,
-) -> bool {
-    let _ = (memo, producer, consumer);
+pub fn satisfies_physical(producer: &PhysicalCandidate, consumer: &PhysicalCandidate) -> bool {
+    let _ = (producer, consumer);
     todo!("#1207 PR 1: the timing x lifetime table of section 2")
 }
 
