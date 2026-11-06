@@ -673,8 +673,33 @@ fn sql_function_type(
         ("date_trunc", [(DataType::Utf8, _), (DataType::Timestamp, _)]) => {
             Ok((DataType::Timestamp, nullable))
         }
+        // `EXTRACT(part FROM t)` plans as `date_part`. DataFusion requires a
+        // constant part and returns Float64 for `epoch`, an integer otherwise.
+        // Like DataFusion, strip one pair of quotes first: the generic dialect
+        // plans `EXTRACT('epoch' FROM t)` with the part `'epoch'`.
+        ("date_part", [(DataType::Utf8, _), (DataType::Timestamp | DataType::Date, _)]) => {
+            match &args[0] {
+                ScalarExpr::Literal(ScalarValue::Utf8(part)) => Ok((
+                    if part
+                        .strip_prefix(['\'', '"'])
+                        .and_then(|p| p.strip_suffix(['\'', '"']))
+                        .unwrap_or(part)
+                        .eq_ignore_ascii_case("epoch")
+                    {
+                        DataType::Float64
+                    } else {
+                        DataType::Int64
+                    },
+                    nullable,
+                )),
+                _ => Err(signature("date_part requires a constant part")),
+            }
+        }
         ("regexp_like", [(DataType::Utf8, _), (DataType::Utf8, _)]) => {
             Ok((DataType::Bool, nullable))
+        }
+        ("regexp_replace", [(DataType::Utf8, _), (DataType::Utf8, _), (DataType::Utf8, _)]) => {
+            Ok((DataType::Utf8, nullable))
         }
         ("nullif", [(a, _), (b, _)]) => {
             common_scalar_type(a, b)?;
@@ -826,6 +851,46 @@ mod tests {
             ty(shift(thirty_days(), ArithmeticOpKind::Add)),
             DataType::Interval
         );
+    }
+
+    /// `date_part` (what SQL `EXTRACT` plans to) and `regexp_replace` type as
+    /// DataFusion types them: an integer, or Float64 for the `epoch` part, and
+    /// a string. A non-constant part and a non-string input stay rejected.
+    #[test]
+    fn date_part_and_regexp_replace_type_like_datafusion() {
+        let schema = Schema::new(vec![
+            Field::plain("ts", DataType::Timestamp, false),
+            Field::plain("d", DataType::Date, true),
+            Field::plain("url", DataType::Utf8, false),
+        ]);
+        let ty = |e: ScalarExpr| e.scalar_type(&schema);
+        let col = ScalarExpr::Column;
+        assert_eq!(
+            ty(call("date_part", vec![utf8("MINUTE"), col(0)])).unwrap(),
+            (DataType::Int64, false)
+        );
+        assert_eq!(
+            ty(call("date_part", vec![utf8("epoch"), col(0)])).unwrap(),
+            (DataType::Float64, false)
+        );
+        assert_eq!(
+            ty(call("date_part", vec![utf8("'epoch'"), col(0)])).unwrap(),
+            (DataType::Float64, false)
+        );
+        assert_eq!(
+            ty(call("date_part", vec![utf8("year"), col(1)])).unwrap(),
+            (DataType::Int64, true)
+        );
+        assert!(ty(call("date_part", vec![col(2), col(0)])).is_err());
+        assert_eq!(
+            ty(call(
+                "regexp_replace",
+                vec![col(2), utf8("^https?://([^/]+)/.*$"), utf8("\\1")]
+            ))
+            .unwrap(),
+            (DataType::Utf8, false)
+        );
+        assert!(ty(call("regexp_replace", vec![col(0), utf8("a"), utf8("b")])).is_err());
     }
 
     #[test]
