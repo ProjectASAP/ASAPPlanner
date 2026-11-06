@@ -140,8 +140,9 @@ pub struct CandidateExpression {
 
 /// $p^{\log}_v = (\boldsymbol\theta_v, \omega_v)$. The family is the
 /// operator's argument, not a property. [`Self::new`] rejects parameters of
-/// another family (or on an exact operator) and a window on an operator that
-/// cannot be windowed.
+/// another family, not in the family's list, missing on a sketch build or
+/// present on an exact operator, and a window on an operator that cannot be
+/// windowed.
 #[derive(Debug, Clone)]
 pub struct LogicalProperties {
     /// $\boldsymbol\theta_v$, from the family's predefined list; `None` for
@@ -158,7 +159,7 @@ impl LogicalProperties {
         window_layout: Option<WindowLayout>,
     ) -> Result<Self, InvalidLogicalProperties> {
         let _ = (expression, parameters, window_layout);
-        todo!("#1207 PR 1: reject parameters of another family and invalid windows")
+        todo!("#1207 PR 1: reject invalid parameters and invalid windows")
     }
 
     /// $\boldsymbol\theta_v$.
@@ -179,9 +180,8 @@ pub enum WindowLayout {
     Tumbling { width_ms: u64 },
 }
 
-/// Logical properties or a logical requirement whose dimensions cannot go
-/// together: bad input to [`LogicalProperties::new`] or
-/// [`LogicalRequirement::new`].
+/// Logical properties whose dimensions cannot go together: bad input to
+/// [`LogicalProperties::new`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum InvalidLogicalProperties {
     #[error("the parameters belong to another family than the operator's")]
@@ -192,8 +192,10 @@ pub enum InvalidLogicalProperties {
     WindowOnOperatorThatCannotBeWindowed,
     #[error("a tumbling window has a positive width")]
     ZeroWindowWidth,
-    #[error("the parameter floor is not in its family's predefined list")]
-    FloorNotInParameterList,
+    #[error("a sketch build needs parameters from its family's list")]
+    SketchBuildWithoutParameters,
+    #[error("the parameters are not in their family's predefined list")]
+    ParametersNotInList,
 }
 
 /// The family's predefined $\boldsymbol\theta$ list (#1207 step 6), each with
@@ -205,19 +207,19 @@ pub fn parameter_list(family: SketchAlgorithm) -> &'static [SketchParams] {
 }
 
 /// $r^{\log}_{c,i}$: only what $G_{c,i}$'s identity does not fix.
-/// [`Self::new`] rejects a floor that is not in the family's predefined list.
 #[derive(Debug, Clone)]
 pub struct LogicalRequirement {
-    /// $\boldsymbol\theta^{\min}_{c,i}$: the smallest $\boldsymbol\theta$ in
-    /// the list whose $\varepsilon$, for the statistic the consumer reads, is
-    /// at most $\text{cap}_{c,i}$ = min(validity cap of $g_c$, pruning cap).
+    /// $\boldsymbol\theta^{\min}_{c,i}$: the weakest parameters whose
+    /// $\varepsilon$, for the statistic the consumer reads, is at most
+    /// $\text{cap}_{c,i}$ = min(validity cap of $g_c$, pruning cap), or a
+    /// direct need such as heap_size ≥ k. Any value of the family's parameter
+    /// type; it need not be in the family's list.
     parameter_floor: Option<SketchParams>,
 }
 
 impl LogicalRequirement {
-    pub fn new(parameter_floor: Option<SketchParams>) -> Result<Self, InvalidLogicalProperties> {
-        let _ = parameter_floor;
-        todo!("#1207 PR 1: reject a floor not in the family's predefined list")
+    pub fn new(parameter_floor: Option<SketchParams>) -> Self {
+        Self { parameter_floor }
     }
 
     /// $\boldsymbol\theta^{\min}_{c,i}$.
