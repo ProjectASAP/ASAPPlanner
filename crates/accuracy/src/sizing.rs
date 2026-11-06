@@ -7,7 +7,7 @@
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
 use asap_types::ir::scalar::ColumnRef;
-use asap_types::ir::schema::{SketchAlgorithm, SketchParams, SketchStatistic};
+use asap_types::ir::schema::SketchStatistic;
 
 /// Confidence δ assumed when the target carries only an ε
 /// (`AccuracyTarget::epsilon`): the (ε, δ)-parameterised sketches (CMS) need
@@ -67,7 +67,7 @@ fn target_in(target: &AccuracyTarget, metric: AccuracyMetric) -> AccuracyTarget 
 }
 
 /// Resolve an [`AccuracyTarget`] into the `(eps, delta)` budget
-/// `default_size_params` needs — one place this resolution happens, so
+/// today's sizing needs — one place this resolution happens, so
 /// nothing can drift apart on it.
 ///
 /// An exact target degrades to the tightest parameters for a caller that
@@ -82,26 +82,10 @@ pub fn accuracy_budget(accuracy: &AccuracyTarget) -> (f64, f64) {
     )
 }
 
-/// `asap-plan`'s built-in `SketchParams` sizing, keyed off the resolved
-/// `(eps, delta)` accuracy budget.
-///
-/// Each formula inverts the sketch family's standard error bound to the
-/// smallest parameter satisfying the target, clamped to the family's sane
-/// range. A non-positive ε saturates to the clamp maximum (tightest
-/// allowed).
-#[allow(dead_code)] // Read by `test_support` until #1207 PR 1 replaces it with `parameter_list`.
-pub(crate) fn default_size_params(
-    kind: SketchAlgorithm,
-    intent: &AggIntent,
-    eps: f64,
-    delta: f64,
-) -> SketchParams {
-    crate::estimators::size_params(kind, intent, eps, delta)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asap_types::ir::schema::{SketchAlgorithm, SketchParams};
 
     /// CMS width is `⌈e/ε⌉` and depth `⌈ln(1/δ)⌉`, with an ε-only target
     /// taking `DEFAULT_DELTA` (depth 5).
@@ -111,7 +95,7 @@ mod tests {
             accuracy: AccuracyTarget::max_error(0.001).failure_probability(0.001),
         };
         assert_eq!(
-            default_size_params(SketchAlgorithm::Cms, &intent, 0.001, 0.001),
+            crate::estimators::size_params(SketchAlgorithm::Cms, &intent, 0.001, 0.001),
             SketchParams::Cms {
                 width: 2719,
                 depth: 7
@@ -122,14 +106,14 @@ mod tests {
         assert_eq!((eps, delta), (0.001, DEFAULT_DELTA));
         let intent = AggIntent::Count { accuracy: target };
         assert_eq!(
-            default_size_params(SketchAlgorithm::Cms, &intent, eps, delta),
+            crate::estimators::size_params(SketchAlgorithm::Cms, &intent, eps, delta),
             SketchParams::Cms {
                 width: 2719,
                 depth: 5
             }
         );
         assert_eq!(
-            default_size_params(SketchAlgorithm::Cms, &intent, 0.01, 0.01),
+            crate::estimators::size_params(SketchAlgorithm::Cms, &intent, 0.01, 0.01),
             SketchParams::Cms {
                 width: 272,
                 depth: 5
