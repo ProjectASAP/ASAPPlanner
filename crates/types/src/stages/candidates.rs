@@ -10,12 +10,12 @@ use crate::ir::schema::{SketchAlgorithm, SketchParams};
 use crate::ir::Operator;
 use crate::ir::QueryRoot;
 
-/// One candidate: index `index` in group `group`'s candidates
+/// One candidate: position `index_in_group` in group `group`'s candidates
 /// ([`MemoGroup::candidates`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CandidateForMemoGroupId {
     pub group: MemoGroupId,
-    pub index: usize,
+    pub index_in_group: usize,
 }
 
 /// The memo, Stage 0's and Stage 1's one type: the memo groups, each with
