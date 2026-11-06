@@ -145,12 +145,12 @@ pub fn logical_candidates(root: Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
 }
 
 fn local_computation_candidates(root: Rc<OperatorNode>) -> Result<Vec<Rc<OperatorNode>>, String> {
-    use asap_logical_asap_optimization::test_support::{
+    use asap_stage1_pass1_per_computation_candidates::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
     use asap_types::ir::QueryRoot;
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::memo_of_queries(
+        &asap_stage0_memo::memo_of_queries(
             &[QueryRoot::Operator(root)],
             &[None],
             &Default::default(),

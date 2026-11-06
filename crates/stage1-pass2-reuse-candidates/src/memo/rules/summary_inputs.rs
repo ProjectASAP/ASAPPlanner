@@ -2,7 +2,7 @@
 //! This preserves their full expressions and schema, including opaque series
 //! identity, rather than assuming that a projection is an identity operation.
 
-use crate::pass2::memo::rules::Pass2RuleError;
+use crate::memo::rules::Pass2RuleError;
 use asap_types::stages::Memo;
 
 /// Rule 3, summary inputs: a value projection or filter below a summary build as its own input group.

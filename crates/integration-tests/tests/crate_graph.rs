@@ -5,7 +5,8 @@
 //! build-dependencies are not checked. Each crate has a role ([`role_of`]), and
 //! [`rule_violated`] says which role may depend on which:
 //!
-//! - **stage crates** (the frontends, logical, physical, plan-selection) never
+//! - **stage crates** (the frontends, Stage 0's memo, Stage 1's Pass 1 and
+//!   Pass 2, Stage 2's physical optimization, Stage 3's plan selection) never
 //!   depend on each other; they may depend on the shared crates;
 //! - **asap-accuracy** and **asap-cost** depend only on asap-types;
 //! - **asap-types** depends on no workspace crate;
@@ -31,8 +32,8 @@ enum Role {
     SharedModel,
     /// Helper crates of the frontends that are no stage themselves.
     FrontendHelper,
-    /// A stage crate: a frontend (Stage 0), logical (Stage 1), physical
-    /// (Stage 2) or plan-selection (Stage 3).
+    /// A stage crate: a frontend, Stage 0 (memo), Stage 1 (Pass 1 or Pass 2),
+    /// Stage 2 (physical optimization) or Stage 3 (plan selection).
     Stage,
     /// `asap-planner`: orchestrates the stages and owns the public API.
     Facade,
@@ -53,9 +54,11 @@ fn role_of(name: &str) -> Option<Role> {
         "asap-frontend-promql"
         | "asap-frontend-sql"
         | "asap-frontend-metricsql"
-        | "asap-logical-asap-optimization"
-        | "asap-physical-asap-optimization"
-        | "asap-plan-selection" => Role::Stage,
+        | "asap-stage0-memo"
+        | "asap-stage1-pass1-per-computation-candidates"
+        | "asap-stage1-pass2-reuse-candidates"
+        | "asap-stage2-physical-optimization"
+        | "asap-stage3-plan-selection" => Role::Stage,
         "asap-planner" => Role::Facade,
         "asap-executor" => Role::Runtime,
         "asap-devtools" | "asap-integration-tests" => Role::Unrestricted,
@@ -97,12 +100,12 @@ struct Exception {
 
 /// The forbidden edges the workspace keeps today.
 const EXCEPTIONS: &[Exception] = &[
-    // Logical's `test-support` feature lowers PromQL test queries for other
+    // Pass 1's `test-support` feature lowers PromQL test queries for other
     // crates' tests. The dependency is optional and enabled only by that
-    // feature, so no production build links Stage 0 into Stage 1. Made
+    // feature, so no production build links a frontend into Stage 1. Made
     // non-optional, the edge fails the test.
     Exception {
-        from: "asap-logical-asap-optimization",
+        from: "asap-stage1-pass1-per-computation-candidates",
         to: "asap-frontend-promql",
         only_if_optional: true,
     },
@@ -209,19 +212,21 @@ fn checker_rejects_an_edge_between_stage_crates() {
     let metadata = serde_json::json!({"packages": [
         package("asap-types", &[], &[]),
         package("asap-cost", &[("asap-types", false)], &[]),
-        package("asap-physical-asap-optimization", &[("asap-types", false)], &[]),
+        package("asap-stage2-physical-optimization", &[("asap-types", false)], &[]),
         // Forbidden: Stage 3 on Stage 2.
         package(
-            "asap-plan-selection",
-            &[("asap-cost", false), ("asap-physical-asap-optimization", false)],
+            "asap-stage3-plan-selection",
+            &[("asap-cost", false), ("asap-stage2-physical-optimization", false)],
             &[],
         ),
     ]});
     assert_eq!(
         crate_graph_violations(&metadata),
-        vec!["forbidden [dependencies] edge asap-plan-selection -> \
-             asap-physical-asap-optimization: stage crates never depend on each other (#1054)"
-            .to_string()]
+        vec![
+            "forbidden [dependencies] edge asap-stage3-plan-selection -> \
+             asap-stage2-physical-optimization: stage crates never depend on each other (#1054)"
+                .to_string()
+        ]
     );
 }
 
@@ -229,11 +234,11 @@ fn checker_rejects_an_edge_between_stage_crates() {
 fn checker_ignores_dev_dependencies_and_external_crates() {
     let metadata = serde_json::json!({"packages": [
         package("asap-types", &[("serde", false)], &[]),
-        package("asap-logical-asap-optimization", &[("asap-types", false)], &[]),
+        package("asap-stage1-pass1-per-computation-candidates", &[("asap-types", false)], &[]),
         package(
-            "asap-plan-selection",
+            "asap-stage3-plan-selection",
             &[("asap-types", false)],
-            &["asap-logical-asap-optimization"],
+            &["asap-stage1-pass1-per-computation-candidates"],
         ),
     ]});
     assert!(crate_graph_violations(&metadata).is_empty());
@@ -246,7 +251,7 @@ fn optional_only_exception_rejects_the_edge_made_non_optional() {
             package("asap-types", &[], &[]),
             package("asap-frontend-promql", &[("asap-types", false)], &[]),
             package(
-                "asap-logical-asap-optimization",
+                "asap-stage1-pass1-per-computation-candidates",
                 &[("asap-types", false), ("asap-frontend-promql", optional)],
                 &[],
             ),
@@ -256,7 +261,7 @@ fn optional_only_exception_rejects_the_edge_made_non_optional() {
     assert_eq!(
         crate_graph_violations(&metadata(false)),
         vec![
-            "forbidden [dependencies] edge asap-logical-asap-optimization -> \
+            "forbidden [dependencies] edge asap-stage1-pass1-per-computation-candidates -> \
              asap-frontend-promql: stage crates never depend on each other (#1054)"
                 .to_string()
         ]
@@ -267,14 +272,14 @@ fn optional_only_exception_rejects_the_edge_made_non_optional() {
 fn checker_rejects_an_unclassified_crate_and_shared_model_edges() {
     let metadata = serde_json::json!({"packages": [
         package("asap-types", &[], &[]),
-        package("asap-logical-asap-optimization", &[("asap-types", false)], &[]),
-        package("asap-accuracy", &[("asap-logical-asap-optimization", false)], &[]),
+        package("asap-stage1-pass1-per-computation-candidates", &[("asap-types", false)], &[]),
+        package("asap-accuracy", &[("asap-stage1-pass1-per-computation-candidates", false)], &[]),
         package("asap-new-crate", &[], &[]),
     ]});
     assert_eq!(
         crate_graph_violations(&metadata),
         vec![
-            "forbidden [dependencies] edge asap-accuracy -> asap-logical-asap-optimization: \
+            "forbidden [dependencies] edge asap-accuracy -> asap-stage1-pass1-per-computation-candidates: \
              asap-accuracy and asap-cost depend only on asap-types (#1054)"
                 .to_string(),
             "workspace crate `asap-new-crate` has no role: add it to `role_of` in \

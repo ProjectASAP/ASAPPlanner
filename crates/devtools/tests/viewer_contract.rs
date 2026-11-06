@@ -322,8 +322,8 @@ fn wire_name<T: serde::Serialize>(value: T) -> String {
 /// `RejectionCause::failed_a_check` does.
 #[test]
 fn viewer_knows_every_view_refresh_and_rejection_cause() {
-    use asap_plan_selection::RejectionCause as C;
     use asap_planner::MaterializedViewRefresh as R;
+    use asap_stage3_plan_selection::RejectionCause as C;
     let refreshes = [R::AtIngestion, R::OnFirstRead];
     for refresh in refreshes {
         // A new variant fails to compile here until it is listed above.

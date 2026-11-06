@@ -294,8 +294,6 @@ name = "asap-cost"
 version = "0.1.0"
 dependencies = [
  "asap-executor",
- "asap-logical-asap-optimization",
- "asap-physical-asap-optimization",
  "asap-types",
  "asap_sketchlib",
  "serde",
@@ -312,10 +310,12 @@ dependencies = [
  "asap-executor",
  "asap-frontend-promql",
  "asap-frontend-sql",
- "asap-logical-asap-optimization",
- "asap-physical-asap-optimization",
- "asap-plan-selection",
  "asap-planner",
+ "asap-stage0-memo",
+ "asap-stage1-pass1-per-computation-candidates",
+ "asap-stage1-pass2-reuse-candidates",
+ "asap-stage2-physical-optimization",
+ "asap-stage3-plan-selection",
  "asap-types",
  "serde",
  "serde_json",
@@ -331,8 +331,9 @@ dependencies = [
  "arrow",
  "asap-executor",
  "asap-frontend-promql",
- "asap-logical-asap-optimization",
  "asap-planner",
+ "asap-stage0-memo",
+ "asap-stage1-pass1-per-computation-candidates",
  "asap-types",
  "asap_sketchlib",
  "chrono",
@@ -360,7 +361,8 @@ dependencies = [
  "asap-frontend-common",
  "asap-frontend-metricsql",
  "asap-frontend-promql",
- "asap-logical-asap-optimization",
+ "asap-stage0-memo",
+ "asap-stage1-pass1-per-computation-candidates",
  "asap-types",
  "metricsql_parser",
  "thiserror 2.0.18",
@@ -372,8 +374,9 @@ version = "0.1.0"
 dependencies = [
  "asap-accuracy",
  "asap-frontend-common",
- "asap-logical-asap-optimization",
  "asap-planner",
+ "asap-stage0-memo",
+ "asap-stage1-pass1-per-computation-candidates",
  "asap-types",
  "promql-parser",
 ]
@@ -384,9 +387,10 @@ version = "0.1.0"
 dependencies = [
  "asap-frontend-common",
  "asap-frontend-sql",
- "asap-logical-asap-optimization",
  "asap-planner",
  "asap-sql-function-catalog",
+ "asap-stage0-memo",
+ "asap-stage1-pass1-per-computation-candidates",
  "asap-types",
  "datafusion",
  "serde",
@@ -405,51 +409,16 @@ dependencies = [
  "asap-executor",
  "asap-frontend-promql",
  "asap-frontend-sql",
- "asap-logical-asap-optimization",
- "asap-physical-asap-optimization",
- "asap-plan-selection",
  "asap-planner",
+ "asap-stage0-memo",
+ "asap-stage1-pass1-per-computation-candidates",
+ "asap-stage2-physical-optimization",
+ "asap-stage3-plan-selection",
  "asap-types",
  "asap_sketchlib",
  "futures",
  "serde_json",
  "tokio",
-]
-
-[[package]]
-name = "asap-logical-asap-optimization"
-version = "0.1.0"
-dependencies = [
- "asap-accuracy",
- "asap-frontend-promql",
- "asap-types",
- "asap_sketchlib",
- "rmp-serde",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "asap-physical-asap-optimization"
-version = "0.1.0"
-dependencies = [
- "asap-types",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "asap-plan-selection"
-version = "0.1.0"
-dependencies = [
- "asap-accuracy",
- "asap-cost",
- "asap-types",
- "good_lp",
- "highs",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -463,9 +432,11 @@ dependencies = [
  "asap-frontend-metricsql",
  "asap-frontend-promql",
  "asap-frontend-sql",
- "asap-logical-asap-optimization",
- "asap-physical-asap-optimization",
- "asap-plan-selection",
+ "asap-stage0-memo",
+ "asap-stage1-pass1-per-computation-candidates",
+ "asap-stage1-pass2-reuse-candidates",
+ "asap-stage2-physical-optimization",
+ "asap-stage3-plan-selection",
  "asap-types",
  "futures",
  "serde",
@@ -477,6 +448,55 @@ dependencies = [
 [[package]]
 name = "asap-sql-function-catalog"
 version = "0.1.0"
+
+[[package]]
+name = "asap-stage0-memo"
+version = "0.1.0"
+dependencies = [
+ "asap-types",
+]
+
+[[package]]
+name = "asap-stage1-pass1-per-computation-candidates"
+version = "0.1.0"
+dependencies = [
+ "asap-accuracy",
+ "asap-frontend-promql",
+ "asap-stage0-memo",
+ "asap-types",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "asap-stage1-pass2-reuse-candidates"
+version = "0.1.0"
+dependencies = [
+ "asap-accuracy",
+ "asap-types",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "asap-stage2-physical-optimization"
+version = "0.1.0"
+dependencies = [
+ "asap-types",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "asap-stage3-plan-selection"
+version = "0.1.0"
+dependencies = [
+ "asap-accuracy",
+ "asap-cost",
+ "asap-types",
+ "good_lp",
+ "highs",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "asap-types"

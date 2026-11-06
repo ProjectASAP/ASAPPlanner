@@ -1,5 +1,5 @@
 [package]
-name = "asap-plan-selection"
+name = "asap-stage3-plan-selection"
 version = "0.1.0"
 edition = "2021"
 
