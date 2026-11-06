@@ -120,7 +120,7 @@ fn checked_ratio_must_not_certify_cross_zero_interpolation() {
     )
     .unwrap();
     let node = explicit_summary_candidate(root, asap_types::ir::schema::SketchAlgorithm::DDSketch);
-    assert_eq!(OperatorNode::reachable(&node).iter().filter(|node| matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }) if *kind.algorithm() == asap_types::ir::schema::SketchAlgorithm::DDSketch)).count(), 2,
+    assert_eq!(OperatorNode::reachable(&node).iter().filter(|node| matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }) if *kind == asap_types::ir::schema::SketchAlgorithm::DDSketch)).count(), 2,
         "the signed interpolation counterexample requires two explicit DDSketch builds");
     assert!(
         matches!(node.operator, Operator::NonASAP(NonASAPOp::BinaryOp { .. }))
@@ -273,7 +273,7 @@ fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
             .find_map(|node| {
                 let state = heap(node)?;
                 let (family, _, _) = aggregate(&state);
-                matches!(family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &wanted)
+                matches!(family, FieldDataType::Sketch(kind, _) if kind == &wanted)
                     .then_some((node, state))
             })
             .expect("weighted sketch candidate");
@@ -295,7 +295,7 @@ fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
             // so plan selection rejects it.
             for state in candidates.iter().filter_map(heap) {
                 let (family, update, _) = aggregate(&state);
-                if matches!(family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::CmsWithHeap)
+                if matches!(family, FieldDataType::Sketch(kind, _) if kind == &SketchAlgorithm::CmsWithHeap)
                 {
                     assert!(!matches!(
                         update.weight_domain,

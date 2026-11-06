@@ -1,5 +1,5 @@
 //! Spatial heap weights come from a fresh instant vector, never sample history.
-use crate::common;
+
 use asap_executor::sources::InMemoryDataStore;
 use asap_executor::{
     operators::Operator,
@@ -10,7 +10,6 @@ use asap_executor::{
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
-use common::compile_physical_asap_dag;
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use planner_types::ir::properties::AccuracyTarget;
@@ -161,7 +160,7 @@ fn spatial_heap_ranks_latest_values_in_independent_runs() {
         SketchAlgorithm::CmsWithHeap,
         SketchAlgorithm::CountSketchWithHeap,
     ] {
-        let params = match algorithm {
+        let _params = match algorithm {
             SketchAlgorithm::CmsWithHeap => SketchParams::CmsWithHeap {
                 width: 2048,
                 depth: 5,
@@ -173,7 +172,7 @@ fn spatial_heap_ranks_latest_values_in_independent_runs() {
                 heap_size: 100,
             },
         };
-        let family = FieldDataType::Sketch(SketchKind::new(algorithm, params), Default::default());
+        let family = FieldDataType::Sketch(algorithm, Default::default());
         let build = Operator::per_group_keyed_summary_build(
             schema(),
             family,
@@ -341,7 +340,7 @@ fn population_fixture_compiles_with_dynamic_identity() {
         topk,
         &["job"],
     );
-    let logical = compile_physical_asap_dag(&selected).unwrap();
+    let logical = planner_types::test_support::physical_asap_dag_at_query_time(&selected).unwrap();
     let (source, raw_schema) = logical
         .nodes
         .iter()

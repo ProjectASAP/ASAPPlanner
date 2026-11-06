@@ -7,8 +7,6 @@ use asap_cost::analytical::AnalyticalCostError;
 use asap_cost::{CostModel, PlanCost};
 use asap_types::ir::physical_export::PhysicalASAPNodeId;
 use asap_types::ir::properties::AccuracyMetric;
-#[cfg(any(test, feature = "reference-pricer"))]
-use asap_types::ir::QueryRoot;
 use asap_types::stages::{
     DagOfSelectedCandidates, PhysicalCandidateId, PrunedCandidate, SelectedNodeId,
 };
@@ -181,32 +179,6 @@ impl std::fmt::Display for AcceptedAccuracy {
         }
         Ok(())
     }
-}
-
-/// The whole-plan selector's result (`PlanSelector`):
-/// the selected candidate among whole physical plans and the plan to run,
-/// with what it kept of the other candidates. The reference pricer (feature
-/// `reference-pricer`) selects among enumerated plans with it. Keeping
-/// every candidate, `costs` and `accepted` list every valid candidate and
-/// `rejected` every other one; otherwise only the selected candidate is
-/// kept, and `rejected` holds the first rejection of each cause.
-#[cfg(any(test, feature = "reference-pricer"))]
-#[derive(Debug, Clone, PartialEq)]
-pub struct WholePlanSelection {
-    pub selected: String,
-    /// The selected candidate's query roots with every weight requirement
-    /// Stage 3 confirmed made a proof: the plan to run. The Stage 2
-    /// candidate keeps the open requirement.
-    pub plan: Vec<QueryRoot>,
-    pub costs: BTreeMap<String, PlanCost>,
-    /// For each valid candidate, per query, the accuracy Stage 3 accepted.
-    pub accepted: BTreeMap<String, Vec<AcceptedAccuracy>>,
-    pub rejected: Vec<Rejection>,
-    /// The selected plan's tumbling-window retention, by node id in its physical DAG
-    /// ([`RealizedPlan::tumbling_window_retention_ms`](asap_types::stages::RealizedPlan::tumbling_window_retention_ms)).
-    pub tumbling_window_retention_ms: BTreeMap<PhysicalASAPNodeId, u64>,
-    /// The physical candidates checked, valid or not.
-    pub candidates_checked: u64,
 }
 
 /// Stage 3's result ([`select_plan`](crate::select_plan)): the selected DAG

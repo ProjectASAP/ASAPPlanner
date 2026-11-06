@@ -40,58 +40,8 @@ impl Operator {
         row_weight: RowWeight,
         groups: Vec<usize>,
     ) -> Result<Self, Error> {
-        use crate::summary_kernels::weighted_frequency::WeightedFrequency;
-        crate::values::validate_family(&family)?;
-        let SummaryFamilyType::Sketch(kind, _) = &family else {
-            return Err(invalid("keyed sketch required"));
-        };
-        WeightedFrequency::configuration(kind)?;
-        validate_groups(&input, &groups)?;
-        if items.is_empty() {
-            return Err(invalid("keyed summary requires item columns"));
-        }
-        if let RowWeight::Column(weight) = row_weight {
-            if !matches!(
-                plain(&input, weight)?.0,
-                DataType::Float64 | DataType::Int64
-            ) {
-                return Err(invalid("keyed summary weights must be Float64 or Int64"));
-            }
-        }
-        for &item in &items {
-            if !matches!(
-                plain(&input, item)?.0,
-                DataType::Utf8
-                    | DataType::Timestamp
-                    | DataType::Int64
-                    | DataType::Float64
-                    | DataType::Bool
-                    | DataType::Null
-            ) {
-                return Err(invalid("unsupported keyed summary identity type"));
-            }
-        }
-        let mut fields = groups
-            .iter()
-            .map(|&i| input.fields[i].clone())
-            .collect::<Vec<_>>();
-        fields.push(SummaryField {
-            name: "state".into(),
-            dtype: family.clone(),
-            nullable: false,
-            table: None,
-        });
-        Ok(Self {
-            kind: Kind::PerGroupKeyedSummaryBuild {
-                family,
-                items,
-                row_weight,
-                groups,
-                filter: None,
-            },
-            inputs: vec![input],
-            output: schema(fields),
-        })
+        let _ = (input, family, items, row_weight, groups);
+        todo!("#1207 PR 6: the weighted-frequency θ, which the exported node carries")
     }
     /// One summary state shared by all groups (a HydraCms grid), emitted as
     /// one row per group that reads its own part of it. Each row adds its
@@ -177,29 +127,8 @@ impl Operator {
         k: usize,
         output: SchemaRef,
     ) -> Result<Self, Error> {
-        use crate::summary_kernels::weighted_frequency::WeightedFrequency;
-        crate::values::validate_family(&field(&input, state)?.dtype)?;
-        let SummaryFamilyType::Sketch(kind, _) = &field(&input, state)?.dtype else {
-            return Err(invalid("keyed evaluation requires summary state"));
-        };
-        let (_, _, _, capacity) = WeightedFrequency::configuration(kind)?;
-        if k > capacity || output.fields.len() <= input.fields.len() {
-            return Err(invalid("invalid keyed evaluation shape or capacity"));
-        }
-        if state + 1 != input.fields.len()
-            || output.fields[..state] != input.fields[..state]
-            || output.fields.last().unwrap().dtype != SummaryFamilyType::Plain(DataType::Float64)
-        {
-            return Err(invalid(
-                "keyed evaluation must preserve partitions and return a Float64 score",
-            ));
-        }
-        crate::values::validate_schema(&output)?;
-        Ok(Self {
-            kind: Kind::KeyedEvaluation { state, k },
-            inputs: vec![input],
-            output,
-        })
+        let _ = (input, state, k, output);
+        todo!("#1207 PR 6: the weighted-frequency capacity of θ, which the exported node carries")
     }
     /// One summary state per group, updated from the value of one input
     /// column per row (`time` orders counter samples): an exact aggregate,
@@ -366,8 +295,8 @@ fn accepts_update_type(family: &SummaryFamilyType, dtype: &DataType) -> bool {
     };
     match dtype {
         DataType::Float64 | DataType::Int64 => true,
-        DataType::Utf8 => matches!(kind.algorithm(), A::Kmv | A::Hll | A::UnivMon),
-        DataType::Bool => kind.algorithm() == &A::UnivMon,
+        DataType::Utf8 => matches!(kind, A::Kmv | A::Hll | A::UnivMon),
+        DataType::Bool => kind == &A::UnivMon,
         _ => false,
     }
 }
@@ -401,7 +330,7 @@ impl Operator {
 /// non-integral total rather than rounding it.
 fn integral_count(family: &SummaryFamilyType, query: &SummaryEvaluation) -> bool {
     matches!(family, SummaryFamilyType::Sketch(kind, _)
-        if kind.algorithm() == &planner_types::ir::schema::SketchAlgorithm::Cms)
+        if kind == &planner_types::ir::schema::SketchAlgorithm::Cms)
         && matches!(
             query,
             SummaryEvaluation::Sketch(planner_types::ir::schema::SketchStatistic::PointCount {

@@ -73,13 +73,10 @@ const SECTIONS: [(&str, &[&str]); 5] = [
         "stage0",
         &[
             "Stage 0 output: the frontends' roots",
-            "Stage 0 → Stage 1: DagOfLogicalMemoGroups",
+            "Stage 0 → Stage 1: Memo (the roots hash-consed, without candidates)",
         ],
     ),
-    (
-        "stage1_pass1",
-        &["Stage 1 Pass 1 output: PerComputationLogicalMemoCandidates"],
-    ),
+    ("stage1_pass1", &["Stage 1 Pass 1 output: Memo"]),
     (
         "stage1_pass2",
         &[

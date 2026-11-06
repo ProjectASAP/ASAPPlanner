@@ -609,9 +609,7 @@ impl Batch {
 mod tests {
     use super::*;
     use crate::summary_kernels::DDSketchAccumulator;
-    use planner_types::ir::schema::{
-        DataType, Field, Schema, SketchAlgorithm, SketchKind, SketchParams,
-    };
+    use planner_types::ir::schema::{DataType, Field, Schema, SketchAlgorithm};
 
     fn field(name: &str, dtype: DataType, nullable: bool) -> Field {
         Field {
@@ -774,13 +772,7 @@ mod tests {
     }
 
     fn dd_family() -> FieldDataType {
-        FieldDataType::Sketch(
-            SketchKind::new(
-                SketchAlgorithm::DDSketch,
-                SketchParams::DDSketch { alpha: 0.01 },
-            ),
-            Default::default(),
-        )
+        FieldDataType::Sketch(SketchAlgorithm::DDSketch, Default::default())
     }
 
     // Rows sharing a state keep sharing one state; filtering rows shares the
@@ -1134,22 +1126,11 @@ mod tests {
     /// exact sums.
     fn state_batch(count: u32, exact: bool) -> Batch {
         use crate::StateColumnUpdater;
-        use planner_types::ir::schema::{
-            ExactKind, ExactParams, SketchAlgorithm, SketchKind, SketchParams,
-        };
+        use planner_types::ir::schema::{ExactKind, ExactParams, SketchAlgorithm};
         let family = if exact {
             FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
         } else {
-            FieldDataType::Sketch(
-                SketchKind::new(
-                    SketchAlgorithm::Kll,
-                    SketchParams::Kll {
-                        k: 200,
-                        failure_probability: None,
-                    },
-                ),
-                Default::default(),
-            )
+            FieldDataType::Sketch(SketchAlgorithm::Kll, Default::default())
         };
         let mut updater = StateColumnUpdater::new(&family).unwrap();
         updater.ensure_groups(count as usize).unwrap();

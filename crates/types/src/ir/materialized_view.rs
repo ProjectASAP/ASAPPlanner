@@ -6,9 +6,9 @@
 //! ([`PhysicalASAPDAG::set_retention`]).
 //!
 //! A **materialized view** is a node whose output is kept across
-//! evaluations: its materialization is `MatAtIngestion` or
-//! `MatAtQueryKeptAcrossEvaluations`, and it carries its `retention_ms`. A
-//! `MatAtQuery` node is not a view: its output is discarded after one
+//! evaluations: its lifetime is `AcrossEvaluations`, at ingestion time or
+//! at query time, and it carries its `retention_ms`. A node materialized for
+//! `OneEvaluation` is not a view: its output is discarded after one
 //! evaluation. A query-time `Scan` carries how long its source's rows are
 //! kept for it (`None` when it reads them unbounded).
 //!
@@ -79,7 +79,7 @@ use crate::ir::operator::non_asap::NonASAPOp;
 use crate::ir::operator::operator_properties::Source;
 use crate::ir::properties::execution_data_state::ExecutionTiming;
 use crate::ir::properties::summary_coverage::{CoverageError, SelectionBox, SummaryCoverage};
-use crate::physical::materialization::Materialization;
+use crate::physical::Lifetime;
 
 /// One materialized view of a DAG: what its stored state is, what it is
 /// refreshed from, when, and for how long it is kept.
@@ -235,13 +235,13 @@ impl RawDataWindow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MaterializedViewRefresh {
-    /// Refreshed at ingestion time (`MatAtIngestion`): the runtime runs the
+    /// Refreshed at ingestion time (materialized at ingestion time): the runtime runs the
     /// node in an ingestion run once its inputs are complete (its windows'
     /// samples have arrived and the views it reads are refreshed), and
     /// keeps the result.
     AtIngestion,
     /// Refreshed at query time and kept across evaluations
-    /// (`MatAtQueryKeptAcrossEvaluations`): when an evaluation reads this
+    /// (query-time `AcrossEvaluations`): when an evaluation reads this
     /// view for a selection it has not been refreshed for yet, the runtime
     /// runs the node in a query run over its inputs, keeps the result, and
     /// binds it like a view refreshed at ingestion.
@@ -398,11 +398,9 @@ impl PhysicalASAPDAG {
     /// covers how far back its data reaches. O(views · nodes) for the
     /// coverages, plus O(nodes + edges).
     pub fn materialized_views(&self) -> Result<Vec<MaterializedView>, InstallableDagError> {
-        if let Some(node) = self
-            .nodes
-            .iter()
-            .find(|node| node.materialization.is_materialized_view() && node.retention_ms.is_none())
-        {
+        if let Some(node) = self.nodes.iter().find(|node| {
+            matches!(node.lifetime, Lifetime::AcrossEvaluations(_)) && node.retention_ms.is_none()
+        }) {
             return Err(InstallableDagError::ViewWithoutRetention { node_id: node.id });
         }
         self.validate()?;
@@ -730,7 +728,7 @@ impl PhysicalASAPDAG {
         let views: HashSet<PhysicalASAPNodeId> = self
             .nodes
             .iter()
-            .filter(|node| node.materialization.is_materialized_view())
+            .filter(|node| matches!(node.lifetime, Lifetime::AcrossEvaluations(_)))
             .map(|node| node.id)
             .collect();
         // The IR of each node, which coverage is derived from.
@@ -764,7 +762,8 @@ impl PhysicalASAPDAG {
             {
                 window_by_view.insert(id, window);
             }
-            if matches!(node.materialization, Materialization::MatAtIngestion(_)) {
+            let refreshed_at_ingestion = node.output_state.timing == ExecutionTiming::IngestionTime;
+            if refreshed_at_ingestion {
                 // An ingestion run reads each view for the window ending at
                 // its end, so a view read must end where the raw windows do.
                 let mut end_offsets_ms: Vec<i64> = inputs
@@ -796,9 +795,10 @@ impl PhysicalASAPDAG {
             coverage_by_node.insert(id, coverage.clone());
             let view = MaterializedView {
                 node_id: id,
-                refresh: match node.materialization {
-                    Materialization::MatAtIngestion(_) => MaterializedViewRefresh::AtIngestion,
-                    _ => MaterializedViewRefresh::OnFirstRead,
+                refresh: if refreshed_at_ingestion {
+                    MaterializedViewRefresh::AtIngestion
+                } else {
+                    MaterializedViewRefresh::OnFirstRead
                 },
                 coverage: ViewCoverage {
                     definition_id: coverage.definition_id(),

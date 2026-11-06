@@ -85,7 +85,7 @@ fn own_fields(node: &OperatorNode) -> Operator<()> {
 /// hash is SipHash over two parts:
 ///
 /// 1. the canonical JSON of [`own_fields`] plus `result_kind`, `schema`,
-///    `guarantee`, `timing` and `materialization` — every field `PartialEq` compares except the
+///    `guarantee` — every field `PartialEq` compares except the
 ///    children. A scalar expression is serialized as data with each operator
 ///    node it reads replaced by `()`, so a reference to an
 ///    interned sub-DAG contributes nothing of its own here;
@@ -116,8 +116,6 @@ pub(crate) fn structural_hash(node: &OperatorNode, cache: &mut NodeToStructuralH
         node.result_kind,
         &node.schema,
         &node.guarantee,
-        node.timing,
-        node.materialization,
     );
     serde_json::to_string(&own)
         .unwrap_or_default()
@@ -177,8 +175,6 @@ fn same_node(
     children_equal
         && left.result_kind == right.result_kind
         && left.schema == right.schema
-        && left.timing == right.timing
-        && left.materialization == right.materialization
         && same_value(&left.guarantee, &right.guarantee)
         && same_value(&own_fields(left), &own_fields(right))
 }
@@ -242,8 +238,7 @@ impl InternTable {
 type NodeToInternedNodeCache = HashMap<*const OperatorNode, (Rc<OperatorNode>, Rc<OperatorNode>)>;
 
 /// Intern `node`'s children (recursively), then `node` itself. The rebuilt
-/// node keeps `node`'s retained schema, result kind, guarantee, timing and
-/// materialization:
+/// node keeps `node`'s retained schema, result kind and guarantee:
 /// every child is replaced by an equal node, so each derived property stays
 /// valid, and the result is `PartialEq`-equal to the input.
 fn intern_bottom_up(
@@ -258,9 +253,7 @@ fn intern_bottom_up(
         .operator
         .map_children(|child| intern_bottom_up(table, visited, child));
     let rebuilt = OperatorNode::with_schema(operator, node.schema.clone())
-        .with_guarantee(node.guarantee.clone())
-        .with_timing(node.timing)
-        .with_materialization(node.materialization);
+        .with_guarantee(node.guarantee.clone());
     let interned = table.intern(rebuilt);
     visited.insert(Rc::as_ptr(node), (Rc::clone(node), Rc::clone(&interned)));
     interned
@@ -294,9 +287,7 @@ mod tests {
     };
     use asap_types::ir::properties::guarantee::AccuracyGuarantee;
     use asap_types::ir::scalar::expr_ir::{ColumnRef, CompareOpKind};
-    use asap_types::ir::schema::sketch::{
-        GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryUpdate,
-    };
+    use asap_types::ir::schema::sketch::{GroupingStrategy, SketchAlgorithm, SummaryUpdate};
     use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
     use asap_types::ir::ScalarExpr;
     use asap_types::ir::{BinaryOperator, NonASAPOp};
@@ -605,11 +596,8 @@ mod tests {
 
     // ── ASAP nodes ──────────────────────────────────────────────────────
 
-    fn summary_agg(alpha: f64, guarantee: Option<AccuracyGuarantee>) -> Rc<OperatorNode> {
-        let family = FieldDataType::Sketch(
-            SketchKind::new(SketchAlgorithm::DDSketch, SketchParams::DDSketch { alpha }),
-            GroupingStrategy::default(),
-        );
+    fn summary_agg(_alpha: f64, guarantee: Option<AccuracyGuarantee>) -> Rc<OperatorNode> {
+        let family = FieldDataType::Sketch(SketchAlgorithm::DDSketch, GroupingStrategy::default());
         let schema = Schema::lifted(vec![Field::new("state", family.clone(), false)], None);
         assert!(!schema.has_unique_key(), "fixture sanity");
         Rc::new(
@@ -636,11 +624,14 @@ mod tests {
         assert!(ra.guarantee.is_some());
     }
 
+    /// θ is not part of a node's identity (#1207): two sizes of one family
+    /// over one input are one group. A different guarantee still keeps them
+    /// apart.
     #[test]
-    fn asap_nodes_with_distinct_parameters_or_guarantees_are_not_shared() {
+    fn asap_nodes_with_distinct_parameters_are_shared_but_distinct_guarantees_are_not() {
         let exact = || Some(AccuracyGuarantee::exact("fixture"));
         let (ra, rb) = two_roots(summary_agg(0.01, exact()), summary_agg(0.001, exact()));
-        assert!(!Rc::ptr_eq(&ra, &rb), "different sketch parameters");
+        assert!(Rc::ptr_eq(&ra, &rb), "θ is not part of the group identity");
         let (ra, rb) = two_roots(summary_agg(0.01, exact()), summary_agg(0.01, None));
         assert!(
             !Rc::ptr_eq(&ra, &rb),

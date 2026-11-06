@@ -146,7 +146,7 @@ pub(crate) fn realize_keyed_additive_summary_input(
     let FieldDataType::Sketch(kind, _) = family else {
         return None;
     };
-    let heap_algorithm = kind.algorithm();
+    let heap_algorithm = kind;
     if !matches!(
         heap_algorithm,
         SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap
@@ -353,7 +353,7 @@ mod tests {
     use crate::test_support::metric_scan;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::scalar::{CompareOpKind, ScalarValue};
-    use asap_types::ir::schema::{GroupingStrategy, SketchKind, SketchParams};
+    use asap_types::ir::schema::GroupingStrategy;
     use asap_types::ir::{ExprSemantics, Predicate};
 
     /// A heap sketch consumes every raw row, so the keyed input rule refuses
@@ -377,17 +377,8 @@ mod tests {
             k: 5,
             accuracy: AccuracyTarget::max_error(0.01),
         };
-        let family = FieldDataType::Sketch(
-            SketchKind::new(
-                SketchAlgorithm::CmsWithHeap,
-                SketchParams::CmsWithHeap {
-                    width: 64,
-                    depth: 4,
-                    heap_size: 5,
-                },
-            ),
-            GroupingStrategy::default(),
-        );
+        let family =
+            FieldDataType::Sketch(SketchAlgorithm::CmsWithHeap, GroupingStrategy::default());
         let output =
             Reduction::Reduce(asap_types::ir::operator::operator_properties::GroupKeys::none());
         assert!(realize_keyed_additive_summary_input(

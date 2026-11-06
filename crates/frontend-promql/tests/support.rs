@@ -76,24 +76,14 @@ pub fn promql_scalar(node: &ScalarExpr) -> Option<f64> {
     }
 }
 
-/// Time `root` under the default materialization assignment (every summary
+/// Time `root` under the default physical properties assignment (every summary
 /// at query time) and export the physical DAG — export needs every node
 /// timed first.
 #[allow(dead_code)]
 pub fn physical_asap_dag(
     root: &Rc<OperatorNode>,
 ) -> asap_types::ir::physical_export::PhysicalASAPDAG {
-    use asap_types::ir::{
-        apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
-    };
-    let timed = apply_materialization_timings(
-        root,
-        &MaterializationAssignment::default(),
-        &mut NodeToTimedNodeCache::new(),
-    )
-    .expect("default materialization timings");
-    asap_types::ir::physical_export::compile_physical_asap_dag(&timed)
-        .expect("post-ASAP DAG export")
+    asap_types::test_support::physical_asap_dag_at_query_time(root).expect("post-ASAP DAG export")
 }
 
 #[allow(dead_code)]
@@ -158,12 +148,11 @@ fn local_computation_candidates(root: Rc<OperatorNode>) -> Result<Vec<Rc<Operato
         compose_logical_candidate, generate_per_computation_candidates,
     };
     use asap_types::ir::QueryRoot;
-    let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
+    let inventory =
+        generate_per_computation_candidates(&asap_logical_asap_optimization::memo_of_queries(&[
             QueryRoot::Operator(root),
-        ]),
-    )
-    .map_err(|error| error.to_string())?;
+        ]))
+        .map_err(|error| error.to_string())?;
     let mut choices = vec![vec![0; inventory.targets.len()]];
     for (index, target) in inventory.targets.iter().enumerate() {
         for choice in 1..target.choice_count() {

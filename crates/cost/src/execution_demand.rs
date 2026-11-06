@@ -9,7 +9,8 @@
 
 use super::analytical::AnalyticalCostError;
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
-use asap_types::physical::Materialization;
+use asap_types::ir::properties::ExecutionTiming;
+use asap_types::physical::Lifetime;
 use asap_types::workload::{QueryRecurrence, RangeEvaluation, RepeatedDemand};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -280,7 +281,7 @@ pub fn query_starts(dag: &PhysicalASAPDAG) -> Vec<Vec<PhysicalASAPNodeId>> {
         .collect()
 }
 
-/// What computes a `NotMaterialized` node once per its own execution
+/// What computes a not-materialized node once per its own execution
 /// ([`consumers`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Consumer {
@@ -290,19 +291,19 @@ pub enum Consumer {
     Materialized(PhysicalASAPNodeId),
 }
 
-/// The consumers of each `NotMaterialized` node of `dag` that any consumer
+/// The consumers of each not-materialized node of `dag` that any consumer
 /// reaches ([`computations`]): the queries and the materialized nodes whose
 /// walk down their inputs reaches it before meeting a materialized node,
 /// each once; the queries first, in order, then the materialized nodes in
 /// `dag`'s node order.
 pub fn consumers(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, Vec<Consumer>> {
-    let materialized: Vec<PhysicalASAPNodeId> = dag
+    let materialized_nodes: Vec<PhysicalASAPNodeId> = dag
         .nodes
         .iter()
-        .filter(|n| n.materialization != Materialization::NotMaterialized)
+        .filter(|n| n.lifetime != Lifetime::None)
         .map(|n| n.id)
         .collect();
-    let is_materialized: HashSet<PhysicalASAPNodeId> = materialized.iter().copied().collect();
+    let is_materialized: HashSet<PhysicalASAPNodeId> = materialized_nodes.iter().copied().collect();
     let inputs = |id: PhysicalASAPNodeId| {
         dag.edges
             .iter()
@@ -314,7 +315,7 @@ pub fn consumers(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, Vec<Consu
         .enumerate()
         .map(|(query, start)| (Consumer::Query(query), start))
         .chain(
-            materialized
+            materialized_nodes
                 .iter()
                 .map(|&id| (Consumer::Materialized(id), inputs(id).collect())),
         );
@@ -335,17 +336,17 @@ pub fn consumers(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, Vec<Consu
 
 /// How often each node of `dag` is computed: `(multiplier, per_second)`
 /// (module doc, "Cost model"). A materialized node is computed once for all
-/// its readers: once per second at ingestion time (`MatAtIngestion`), at
-/// the combined rate of the queries reaching it (`MatAtQuery`,
+/// its readers: once per second at ingestion time (materialized at ingestion time), at
+/// the combined rate of the queries reaching it (`OneEvaluation`,
 /// [`evaluation_rate`]), or once per request of those queries for a chain
 /// kept across evaluations, whose request builds only its newest tumbling window
 /// however many range steps it evaluates. `range_evaluations[q]` is query
-/// `q`'s range evaluation (none when missing). A `NotMaterialized` node is computed once per
+/// `q`'s range evaluation (none when missing). A not-materialized node is computed once per
 /// consumer that reaches it ([`consumers`]), at that consumer's rate. A consumer is a query
 /// (operator or scalar root), at its own rate, or a materialized node, at
 /// that node's rate; a walk stops at the first materialized node it meets,
 /// and a node read several times within one consumer's walk counts once for
-/// it. The `MatAtIngestion` consumers of one refresh window
+/// it. The consumers materialized at ingestion time of one refresh window
 /// ([`PhysicalASAPDAG::refresh_window`]) are refreshed in one ingestion run,
 /// which computes the node once for all of them: they count as one
 /// consumer (a consumer with an unbounded window counts alone). Its
@@ -358,11 +359,12 @@ pub fn computations(
     root_rates: Option<&[f64]>,
 ) -> Result<HashMap<PhysicalASAPNodeId, (u64, f64)>, AnalyticalCostError> {
     let range_of = |query: usize| range_evaluations.get(query).copied().flatten();
-    let materialized: HashMap<_, _> = dag
+    // Each materialized node's timing and lifetime.
+    let materialized_nodes: HashMap<PhysicalASAPNodeId, (ExecutionTiming, Lifetime)> = dag
         .nodes
         .iter()
-        .filter(|n| n.materialization != Materialization::NotMaterialized)
-        .map(|n| (n.id, n.materialization))
+        .filter(|node| node.lifetime != Lifetime::None)
+        .map(|node| (node.id, (node.output_state.timing, node.lifetime)))
         .collect();
     let inputs = |id: PhysicalASAPNodeId| {
         dag.edges
@@ -385,14 +387,12 @@ pub fn computations(
         }
     }
     let mut rate_of_materialized = HashMap::new();
-    for (&id, materialization) in &materialized {
-        // A chain kept across evaluations is built once per request.
-        let per_request = matches!(
-            materialization,
-            Materialization::MatAtQueryKeptAcrossEvaluations(_)
-        );
-        let rate = match materialization {
-            Materialization::MatAtIngestion(_) => 1.0,
+    for (&id, &(timing, lifetime)) in &materialized_nodes {
+        let at_ingestion = timing == ExecutionTiming::IngestionTime;
+        // A query-time chain materialized across evaluations is built once per request.
+        let per_request = !at_ingestion && matches!(lifetime, Lifetime::AcrossEvaluations(_));
+        let rate = match at_ingestion {
+            true => 1.0,
             _ => evaluation_rate(
                 reached.get(&id).into_iter().flatten().filter_map(|&q| {
                     let range = if per_request { None } else { range_of(q) };
@@ -416,9 +416,9 @@ pub fn computations(
     }
     // The refresh window of each node refreshed at ingestion.
     let refresh_windows = dag.refresh_windows(
-        materialized
+        materialized_nodes
             .iter()
-            .filter(|(_, m)| matches!(m, Materialization::MatAtIngestion(_)))
+            .filter(|(_, (timing, _))| *timing == ExecutionTiming::IngestionTime)
             .map(|(&id, _)| id),
     );
     let mut count: HashMap<_, (u64, f64)> = HashMap::new();

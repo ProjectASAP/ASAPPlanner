@@ -101,7 +101,7 @@ pub struct QueryPlan {
 ```
 
 `Stage1ToStage3Pass` returns the selected plan's roots, as Stage 2's realizer
-built them with each node's timing and materialization, and with the weight
+built them with each node's timing and lifetime, and with the weight
 proofs Stage 3 made applied; `PlanOutput::physical_asap_dag()` exports them. Physical ASAP-aware optimization decides per
 sub-DAG whether to materialize, and whether at ingestion or query time, from
 #604 on.
@@ -125,7 +125,7 @@ tracked in #580.
 | Step | Call |
 |---|---|
 | Prepare roots | Entries in `entries()` order, the accuracy target from each entry's `requirements`; PromQL operator roots carry the series identity (`with_promql_series_identity`) where it has a realization |
-| Stage 1: logical ASAP-aware optimization | `generate_per_computation_logical_memo_candidates` (Pass 1), then `generate_logical_asap_memo_candidates` (Pass 2) over every tumbling-window width |
+| Stage 1: logical ASAP-aware optimization | `pass1_memo` (Pass 1), then `generate_logical_asap_memo_candidates` (Pass 2) over every tumbling-window width |
 | Stage 2: physical ASAP-aware optimization | `generate_physical_asap_memo_candidates` |
 | Stage 3: plan selection | `select_plan`: check accuracy and latency, price under the cost model, select one plan; the facade builds it with Stage 2's `AssignmentRealizer::realize` |
 

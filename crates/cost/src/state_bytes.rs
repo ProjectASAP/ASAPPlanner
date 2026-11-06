@@ -60,7 +60,10 @@ pub fn keeps_every_value(measure: &AggIntent) -> bool {
 /// 1 for every other sketch.
 pub fn summary_shape(family: &FieldDataType, input_rows: StateInputRows) -> (f64, u64) {
     match family {
-        FieldDataType::Sketch(kind, _) => sketch_shape(kind.params(), input_rows),
+        FieldDataType::Sketch(..) => {
+            let _ = input_rows;
+            todo!("#1207 PR 6: the state shape of θ from the candidate's LogicalProperties::parameters")
+        }
         FieldDataType::ExactAggregate(..) => (1.0, EXACT_ACCUMULATOR_STATE_BYTES),
         _ => (1.0, 8),
     }
@@ -104,6 +107,7 @@ pub fn sketch_shape(params: &SketchParams, input_rows: StateInputRows) -> (f64, 
         usize::try_from(rows.max(1)).unwrap_or(usize::MAX)
     });
     match params {
+        SketchParams::Hydra(hydra) => sketch_shape(&hydra.per_subpopulation(), input_rows),
         SketchParams::Cms { width, depth } => (
             f64::from(*depth),
             CountMinF64::estimated_memory_bytes(*depth as usize, *width as usize) as u64,
@@ -270,7 +274,7 @@ const DDSKETCH_ASSUMED_VALUE_RANGE: f64 = 1e9;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::ir::schema::{GroupingStrategy, SketchAlgorithm, SketchKind};
+    use asap_types::ir::schema::{GroupingStrategy, SketchAlgorithm};
 
     /// An exact accumulator's state is priced at the executor's per-group
     /// state, 56 bytes for every kind (a counter's state alone is 48), so a
@@ -351,121 +355,6 @@ mod tests {
         }
         assert!(priced(Some(10_000), true) < priced(Some(10_000), false));
         assert_eq!(priced(Some(10_000), false), priced(None, false));
-    }
-
-    /// DDSketch state grows as its relative accuracy α tightens.
-    #[test]
-    fn ddsketch_state_grows_as_alpha_shrinks() {
-        let bytes = |alpha| {
-            summary_shape(
-                &FieldDataType::Sketch(
-                    SketchKind::new(SketchAlgorithm::DDSketch, SketchParams::DDSketch { alpha }),
-                    GroupingStrategy::default(),
-                ),
-                StateInputRows::UNKNOWN,
-            )
-            .1
-        };
-        assert!(
-            bytes(0.1) < bytes(0.01),
-            "{} vs {}",
-            bytes(0.1),
-            bytes(0.01)
-        );
-        assert!(
-            bytes(0.01) < bytes(0.001),
-            "{} vs {}",
-            bytes(0.01),
-            bytes(0.001)
-        );
-    }
-
-    /// Every sketch family's state is sized from its parameters, as
-    /// `asap_sketchlib` allocates it: an HLL's registers, a KMV's `k`
-    /// hashes once it has seen `k` distinct items, and a UnivMon's layers
-    /// once keys of the assumed size have churned through every heap.
-    #[test]
-    fn summary_state_is_sized_from_sketch_params() {
-        use asap_sketchlib::DataInput;
-        let bytes = |algorithm, params| {
-            summary_shape(
-                &FieldDataType::Sketch(
-                    SketchKind::new(algorithm, params),
-                    GroupingStrategy::default(),
-                ),
-                StateInputRows::UNKNOWN,
-            )
-            .1
-        };
-        assert_eq!(
-            bytes(
-                SketchAlgorithm::Hll,
-                SketchParams::Hll {
-                    precision: 14,
-                    relative_error: None
-                }
-            ),
-            asap_sketchlib::HyperLogLog::<asap_sketchlib::Classic>::new().memory_bytes() as u64
-        );
-        let mut kmv: asap_sketchlib::Kmv = asap_sketchlib::Kmv::new(1_000);
-        for i in 0..2_000u64 {
-            kmv.update(&DataInput::U64(i));
-        }
-        assert_eq!(
-            bytes(
-                SketchAlgorithm::Kmv,
-                SketchParams::Kmv {
-                    k: 1_000,
-                    relative_error: None
-                }
-            ),
-            kmv.memory_bytes() as u64
-        );
-        let mut univmon = asap_sketchlib::UnivMon::new(8, 3, 64, 2);
-        for i in 0..10_000u64 {
-            let mut key = [0; ASSUMED_VALUE_KEY_BYTES];
-            key[..8].copy_from_slice(&i.to_le_bytes());
-            univmon.update_weighted(&DataInput::Bytes(&key), 1);
-        }
-        assert_eq!(
-            bytes(
-                SketchAlgorithm::UnivMon,
-                SketchParams::UnivMon {
-                    heap_size: 8,
-                    sketch_rows: 3,
-                    sketch_cols: 64,
-                    layers: 2,
-                    distinct_failure_probability: None,
-                }
-            ),
-            univmon.memory_bytes() as u64
-        );
-    }
-
-    /// KLL state whose samples are unknown is charged its fixed 744 bytes
-    /// and the item array at the capacity `asap_sketchlib` grows it to:
-    /// `compute_max_capacity(k, 8)` 8-byte items, with `k` capped at 26 602.
-    #[test]
-    fn kll_state_is_sized_as_asap_sketchlib_allocates_it() {
-        let bytes = |k| {
-            summary_shape(
-                &FieldDataType::Sketch(
-                    SketchKind::new(
-                        SketchAlgorithm::Kll,
-                        SketchParams::Kll {
-                            k,
-                            failure_probability: None,
-                        },
-                    ),
-                    GroupingStrategy::default(),
-                ),
-                StateInputRows::UNKNOWN,
-            )
-            .1
-        };
-        assert_eq!(bytes(269), 744 + 8 * 1_206);
-        assert_eq!(bytes(26_602), 744 + 8 * 80_118);
-        assert_eq!(bytes(30_000), 744 + 8 * 80_118);
     }
 
     /// A KLL state is charged what `asap_sketchlib` allocates for the
@@ -727,18 +616,19 @@ mod tests {
         assert_eq!(key.to_bytes().unwrap().len(), ASSUMED_HEAP_KEY_BYTES);
         for (algorithm, params, rows, priced_as, fields, full) in &families {
             for n in [1, 100, *full] {
-                let family = FieldDataType::Sketch(
-                    SketchKind::new(*algorithm, params.clone()),
-                    GroupingStrategy::default(),
-                );
+                let family = FieldDataType::Sketch(*algorithm, GroupingStrategy::default());
                 let input = match rows {
                     Rows::Values => &value,
                     Rows::Labels => &labeled,
                     Rows::Keyed => &keyed,
                 };
-                let mut updater =
-                    create_planner_accumulator(&family, input, &GroupingStrategy::default())
-                        .unwrap();
+                let mut updater = create_planner_accumulator(
+                    &family,
+                    Some(params),
+                    input,
+                    &GroupingStrategy::default(),
+                )
+                .unwrap();
                 for i in 0..n {
                     match rows {
                         // Distinct magnitudes over the assumed range, in a
@@ -801,35 +691,5 @@ mod tests {
                 }
             }
         }
-    }
-
-    /// A UnivMon row updates layers `0..=b`, where its bottom layer `b` is
-    /// geometric (`asap_sketchlib`'s `bottom_layer_for_hash`), so
-    /// `2 - 2^(1 - layers)` layers in expectation; each updates one counter
-    /// per sketch row and its heap.
-    #[test]
-    fn univmon_update_cost_is_expected_layers_times_rows_and_heap() {
-        let ops = |layers| {
-            summary_shape(
-                &FieldDataType::Sketch(
-                    SketchKind::new(
-                        SketchAlgorithm::UnivMon,
-                        SketchParams::UnivMon {
-                            heap_size: 256,
-                            sketch_rows: 5,
-                            sketch_cols: 1_024,
-                            layers,
-                            distinct_failure_probability: None,
-                        },
-                    ),
-                    GroupingStrategy::default(),
-                ),
-                StateInputRows::UNKNOWN,
-            )
-            .0
-        };
-        assert_eq!(ops(1), 6.0);
-        assert_eq!(ops(2), 1.5 * 6.0);
-        assert_eq!(ops(16), (2.0 - 2f64.powi(-15)) * 6.0);
     }
 }

@@ -22,4 +22,4 @@ asap-executor = { path = "../executor" }
 # by the stages above this crate; `tests/held_memory.rs` builds them with
 # the reference pricer's `optimize_physical_asap`.
 asap-logical-asap-optimization = { path = "../logical-asap-optimization", features = ["test-support"] }
-asap-physical-asap-optimization = { path = "../physical-asap-optimization", features = ["reference-pricer"] }
+asap-physical-asap-optimization = { path = "../physical-asap-optimization" }

@@ -385,7 +385,8 @@ fn global_extrema_bind_with_planner_derived_schema() {
                 child: 0,
             }),
             output_state: ExecutionDataState::QUERY_ROWS,
-            materialization: Default::default(),
+            lifetime: Default::default(),
+            parameters: None,
             output_schema: (*output).clone(),
             guarantee: None,
             retention_ms: None,
@@ -554,19 +555,10 @@ fn boolean_truth_tables_agree_between_expression_paths() {
 // Partial/final execution must agree with one build for an uncompacted KLL population.
 #[test]
 fn kll_partial_merge_and_multiple_evaluations_preserve_population() {
-    use planner_types::ir::schema::{SketchAlgorithm, SketchKind, SketchParams};
+    use planner_types::ir::schema::SketchAlgorithm;
 
     let input = schema(&[("v", DataType::Float64, false)]);
-    let family = FieldDataType::Sketch(
-        SketchKind::new(
-            SketchAlgorithm::Kll,
-            SketchParams::Kll {
-                k: 512,
-                failure_probability: None,
-            },
-        ),
-        Default::default(),
-    );
+    let family = FieldDataType::Sketch(SketchAlgorithm::Kll, Default::default());
     let mut dag = PhysicalDAG::default();
     for (id, range) in [(0, 0..64), (1, 64..128), (2, 0..128)] {
         let rows = range.map(|n| vec![Value::Float64(n as f64)]).collect();
@@ -650,7 +642,7 @@ fn kll_partial_merge_and_multiple_evaluations_preserve_population() {
 // single-build rank error: 60 tumbling windows of 1000 values at k = 200.
 #[test]
 fn compacted_kll_tumbling_windows_merge_within_the_calibrated_rank_error() {
-    use planner_types::ir::schema::{SketchAlgorithm, SketchKind, SketchParams, SketchStatistic};
+    use planner_types::ir::schema::{SketchAlgorithm, SketchStatistic};
     const TUMBLING_WINDOW_COUNT: u64 = 60;
     const ROWS_PER_TUMBLING_WINDOW: u64 = 1000;
     const K: u32 = 200;
@@ -659,16 +651,7 @@ fn compacted_kll_tumbling_windows_merge_within_the_calibrated_rank_error() {
     let bound = 2.296 / f64::from(K).powf(0.9723);
     let n = (TUMBLING_WINDOW_COUNT * ROWS_PER_TUMBLING_WINDOW) as f64;
     let input = schema(&[("v", DataType::Float64, false)]);
-    let family = FieldDataType::Sketch(
-        SketchKind::new(
-            SketchAlgorithm::Kll,
-            SketchParams::Kll {
-                k: K,
-                failure_probability: None,
-            },
-        ),
-        Default::default(),
-    );
+    let family = FieldDataType::Sketch(SketchAlgorithm::Kll, Default::default());
     let build = || {
         Operator::per_group_summary_build(input.clone(), family.clone(), 0, None, vec![]).unwrap()
     };
@@ -935,7 +918,8 @@ fn planner_node(
         id: 1,
         payload,
         output_state: planner_types::ir::properties::ExecutionDataState::QUERY_ROWS,
-        materialization: Default::default(),
+        lifetime: Default::default(),
+        parameters: None,
         output_schema: planner_types::ir::schema::Schema::new(
             fields
                 .iter()
@@ -1032,21 +1016,11 @@ fn filtered_summary_build_keeps_empty_groups() {
     use planner_types::ir::operator::{GroupKeys, Reduction as Plan};
     use planner_types::ir::scalar::ColumnRef;
     use planner_types::ir::schema::{
-        ExactKind, ExactParams, SketchAlgorithm, SketchKind, SketchParams, SketchStatistic,
-        SummaryUpdate,
+        ExactKind, ExactParams, SketchAlgorithm, SketchStatistic, SummaryUpdate,
     };
     use planner_types::ir::ASAPOp;
     let (input, rows) = filtered_input();
-    let kll = FieldDataType::Sketch(
-        SketchKind::new(
-            SketchAlgorithm::Kll,
-            SketchParams::Kll {
-                k: 200,
-                failure_probability: None,
-            },
-        ),
-        Default::default(),
-    );
+    let kll = FieldDataType::Sketch(SketchAlgorithm::Kll, Default::default());
     let count = FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count);
     let cases = [
         (
@@ -1192,7 +1166,8 @@ fn exact_aggregate_node(
             child: 0,
         }),
         output_state: ExecutionDataState::QUERY_ROWS,
-        materialization: Default::default(),
+        lifetime: Default::default(),
+        parameters: None,
         output_schema: (*schema(&[(name, dtype, false)])).clone(),
         guarantee: None,
         retention_ms: None,

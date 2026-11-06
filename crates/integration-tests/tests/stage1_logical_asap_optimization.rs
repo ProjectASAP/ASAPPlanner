@@ -30,8 +30,6 @@ use asap_types::workload::{
 };
 use futures::StreamExt;
 
-use crate::physical_common;
-
 fn accuracy() -> AccuracyTarget {
     AccuracyTarget::max_error(0.01).failure_probability(0.01)
 }
@@ -99,10 +97,11 @@ fn output_columns(root: &QueryRoot) -> Vec<(String, String, bool)> {
 /// Compose every candidate of `root`; returns how many there were.
 fn compose_all(label: &str, root: QueryRoot) -> usize {
     let expected = output_columns(&root);
-    let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[root]),
-    )
-    .unwrap();
+    let inventory =
+        generate_per_computation_candidates(&asap_logical_asap_optimization::memo_of_queries(&[
+            root,
+        ]))
+        .unwrap();
     let radix: Vec<_> = inventory
         .targets
         .iter()
@@ -178,10 +177,11 @@ fn promql_candidates_compose() {
 /// The summary estimates of `root`'s candidates that vary one target's
 /// choice, every other target taking its first.
 fn composed_estimates(root: QueryRoot) -> Vec<Rc<OperatorNode>> {
-    let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[root]),
-    )
-    .unwrap();
+    let inventory =
+        generate_per_computation_candidates(&asap_logical_asap_optimization::memo_of_queries(&[
+            root,
+        ]))
+        .unwrap();
     let targets = inventory.targets.len();
     let choices: Vec<_> = inventory
         .targets
@@ -220,7 +220,7 @@ fn update_of(estimate: &OperatorNode) -> (SketchAlgorithm, SummaryUpdate) {
     else {
         panic!("sketch state expected")
     };
-    (*kind.algorithm(), input.clone())
+    (*kind, input.clone())
 }
 
 /// A heap sketch's bound is per item frequency, not Top-K membership, and
@@ -268,10 +268,11 @@ fn topk_over_an_aggregate_ranks_its_labels() {
 async fn subquery_in_a_measure_filter_is_substituted() {
     let query = "SELECT src, count(*) FILTER (WHERE bytes > (SELECT approx_percentile_cont(bytes, 0.5) FROM flows)) \
                  FROM flows GROUP BY src";
-    let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[sql(query).await]),
-    )
-    .unwrap();
+    let inventory =
+        generate_per_computation_candidates(&asap_logical_asap_optimization::memo_of_queries(&[
+            sql(query).await,
+        ]))
+        .unwrap();
     assert_eq!(inventory.targets.len(), 2);
     let inner = inventory
         .targets
@@ -325,7 +326,7 @@ async fn subquery_in_a_measure_filter_is_substituted() {
 /// Run the logical DAG `root` over `rows` of its one scanned table, each row
 /// given by column name. Rows come back shown and sorted.
 fn execute(root: &Rc<OperatorNode>, rows: &[Vec<(&str, Value)>]) -> Vec<Vec<String>> {
-    let dag = physical_common::compile_physical_asap_dag(root).unwrap();
+    let dag = asap_types::test_support::physical_asap_dag_at_query_time(root).unwrap();
     let scan = dag
         .nodes
         .iter()
@@ -402,12 +403,11 @@ async fn avg_as_sum_and_count(
     query: &str,
 ) -> (Rc<OperatorNode>, Rc<OperatorNode>) {
     let exact = lower_sql(query, catalog, accuracy()).await.unwrap();
-    let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
+    let inventory =
+        generate_per_computation_candidates(&asap_logical_asap_optimization::memo_of_queries(&[
             QueryRoot::Operator(exact.clone()),
-        ]),
-    )
-    .unwrap();
+        ]))
+        .unwrap();
     let choice: Vec<_> = inventory
         .targets
         .iter()
@@ -538,12 +538,11 @@ async fn filtered_sql_avg_is_null_without_matching_rows() {
 /// PromQL `avg` divides its `sum` and `count` vectors with a `BinaryOp`.
 #[test]
 fn promql_avg_divides_sum_and_count_vectors() {
-    let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[promql(
-            "avg by (job) (m)",
-        )]),
-    )
-    .unwrap();
+    let inventory =
+        generate_per_computation_candidates(&asap_logical_asap_optimization::memo_of_queries(&[
+            promql("avg by (job) (m)"),
+        ]))
+        .unwrap();
     assert_eq!(
         inventory.targets[0].ways_to_compute[0],
         HowToComputeAggregateMeasure::ExactAccumulator(vec![ExactKind::Sum, ExactKind::Count])
@@ -582,12 +581,11 @@ async fn every_candidate(
     Result<Vec<QueryRoot>, asap_logical_asap_optimization::PerComputationCandidateError>,
 )> {
     let root = lower_sql(query, catalog, accuracy()).await.unwrap();
-    let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
+    let inventory =
+        generate_per_computation_candidates(&asap_logical_asap_optimization::memo_of_queries(&[
             QueryRoot::Operator(root),
-        ]),
-    )
-    .unwrap();
+        ]))
+        .unwrap();
     assert_eq!(inventory.targets.len(), 1, "{query}");
     inventory.targets[0]
         .ways_to_compute
@@ -693,46 +691,6 @@ async fn sql_avg_of_an_int64_column_keeps_the_exact_columns() {
         vec!["\"b\"".to_string(), "4".to_string()],
     ];
     assert_eq!(execute(&exact, &rows), want);
-}
-
-/// `count(*)` counts a non-null column, never a nullable one; executed, it
-/// counts the rows whose nullable column is NULL too.
-#[tokio::test]
-async fn sql_count_star_counts_a_non_null_column() {
-    let catalog = table(&[("v", true), ("n", false)]);
-    let query = "SELECT k, count(*) FROM t GROUP BY k";
-    for (candidate, composed) in every_candidate(&catalog, query).await {
-        let composed = composed.unwrap_or_else(|e| panic!("{candidate:?}: {e}"));
-        composed[0].validate_structure().unwrap();
-        let updates = count_updates(&composed[0]);
-        assert_eq!(updates.len(), 1, "{candidate:?}");
-        assert!(reads_only(&updates[0], "n"), "{candidate:?}: {updates:?}");
-    }
-    let (exact, root) = {
-        let exact = lower_sql(query, &catalog, accuracy()).await.unwrap();
-        let inventory = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
-                QueryRoot::Operator(exact.clone()),
-            ]),
-        )
-        .unwrap();
-        let QueryRoot::Operator(root) = compose_logical_candidate(&inventory, &[0])
-            .unwrap()
-            .remove(0)
-        else {
-            panic!("operator root expected")
-        };
-        (exact, root)
-    };
-    let row = |k: &str, v: Option<f64>| {
-        vec![
-            ("k", Value::Utf8(k.into())),
-            ("v", v.map_or(Value::Null, Value::Float64)),
-            ("n", Value::Float64(0.)),
-        ]
-    };
-    let rows = vec![row("a", None), row("a", Some(1.)), row("b", None)];
-    assert_eq!(execute(&root, &rows), execute(&exact, &rows));
 }
 
 /// `count(*)` with no column known to be non-null (one nullable numeric

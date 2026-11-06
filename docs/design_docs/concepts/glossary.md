@@ -38,7 +38,7 @@ A concrete execution and deployment choice: runtime topology of data lifecycle s
 
 ## Materialized view
 
-A node of the physical DAG whose output is kept across evaluations (`MatAtIngestion` or `MatAtQueryKeptAcrossEvaluations`), with how long it is kept (`retention_ms` on the node). A `MatAtQuery` node is not a view: its output is discarded after one evaluation. Code: `MaterializedView`, `PhysicalASAPDAG::materialized_views`.
+A node of the physical DAG whose output is materialized across evaluations (lifetime `AcrossEvaluations`, at ingestion time or at query time), with how long it is materialized (`retention_ms` on the node). A node materialized for `OneEvaluation` is not a view: its output is discarded after one evaluation. Code: `MaterializedView`, `PhysicalASAPDAG::materialized_views`.
 
 ## Raw data sample
 

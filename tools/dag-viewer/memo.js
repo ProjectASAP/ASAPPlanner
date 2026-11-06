@@ -50,11 +50,11 @@ const memoIsNode = (nodes, id) => Number.isInteger(id) && id >= 0 && id < nodes.
 
 // One line per entry of a stage's `pruned_candidates` on group `group`:
 // Pass 1's `candidate`, or Stage 2's operator with its timing,
-// materialization and scope copy; then the reason. 'none' without any.
+// lifetime and scope copy; then the reason. 'none' without any.
 function memoPrunedText(entries, group) {
   const lines = (Array.isArray(entries) ? entries : []).filter((p) => p && p.group === group).map((p) => {
     const what = 'candidate' in p ? p.candidate
-      : `node ${p.operator_node} ${p.operator} ${p.timing} ${JSON.stringify(p.materialization)}`;
+      : `node ${p.operator_node} ${p.operator} ${p.timing} ${JSON.stringify(p.lifetime)}`;
     return `${what}: ${p.reason}`;
   });
   return lines.length ? lines.join('; ') : 'none';

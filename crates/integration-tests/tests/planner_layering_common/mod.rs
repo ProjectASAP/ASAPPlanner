@@ -18,40 +18,18 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use asap_cost::CostInputs;
 use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
 use asap_logical_asap_optimization::DeploymentCapabilities;
-use asap_plan_selection::reference_pricer::WholePlanSelection as Selection;
 use asap_types::ir::flat::{flatten, FlatDag, NodeId};
 use asap_types::ir::physical_export::PhysicalASAPDAG;
+use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot};
-use asap_types::physical::Materialization;
+use asap_types::physical::Lifetime;
 use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::workload::{PlanningWorkload, QueryRecurrence, RepeatedDemand};
 
 pub use asap_devtools::planner_layering_examples::*;
 
 pub type Payload = Operator<NodeId>;
-
-/// Lower and plan a PromQL workload.
-pub fn run_promql(workload: &PlanningWorkload) -> Run {
-    run_stages(workload, lower_promql(workload))
-}
-
-/// Lower and plan a PromQL workload, selecting under `settings` (a cost
-/// model other than the default).
-pub fn run_promql_under(workload: &PlanningWorkload, settings: &CostInputs) -> Run {
-    run_stages_under(workload, lower_promql(workload), settings)
-}
-
-/// Lower and plan a PromQL workload for a deployment with `deployment`'s
-/// capabilities, under the default cost model.
-pub fn run_promql_for(workload: &PlanningWorkload, deployment: &DeploymentCapabilities) -> Run {
-    run_stages_with(
-        workload,
-        lower_promql(workload),
-        &CostInputs::default(),
-        deployment,
-    )
-}
 
 /// Whether `form` answers a query window by merging several summaries.
 pub fn needs_merge(form: WindowForm, query_window_ms: u64) -> bool {
@@ -193,42 +171,6 @@ impl Physical {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Run {
-    pub stage0_query_language_frontends: Logical,
-    pub logical: Vec<Logical>,
-    pub physical: Vec<Physical>,
-    /// Logical candidates physical ASAP-aware optimization cannot implement:
-    /// (logical id, reason).
-    pub pruned: Vec<(String, String)>,
-    pub selection: Selection,
-}
-
-impl Run {
-    pub fn invalid(&self) -> BTreeMap<&str, &str> {
-        self.selection
-            .rejected
-            .iter()
-            .filter(|r| r.cause.failed_a_check())
-            .map(|r| (r.id.as_str(), r.reason.as_str()))
-            .collect()
-    }
-
-    pub fn cost(&self, id: &str) -> Option<f64> {
-        self.selection.costs.get(id).and_then(|c| c.cost_per_second)
-    }
-
-    pub fn physical(&self, id: &str) -> &Physical {
-        self.physical.iter().find(|p| p.id == id).expect("id")
-    }
-
-    pub fn physical_of<'a>(&'a self, logical: &'a Logical) -> impl Iterator<Item = &'a Physical> {
-        self.physical
-            .iter()
-            .filter(move |p| p.from_logical == logical.id)
-    }
-}
-
 fn logical(id: String, roots: Vec<QueryRoot>) -> Logical {
     let dag = flatten(&roots).0;
     let query_roots = dag
@@ -245,212 +187,6 @@ fn logical(id: String, roots: Vec<QueryRoot>) -> Logical {
         query_roots,
         roots,
     }
-}
-
-/// The bounded production stages over `roots`, retaining the selected plan
-/// and search diagnostics. Tests that require a particular algorithm or window
-/// use `run_explicit_candidates` instead of assuming it appears in the archive.
-pub fn run_stages(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
-    run_stages_under(workload, roots, &CostInputs::default())
-}
-
-/// [`run_stages`], selecting under `settings`.
-pub fn run_stages_under(
-    workload: &PlanningWorkload,
-    roots: Vec<QueryRoot>,
-    settings: &CostInputs,
-) -> Run {
-    run_stages_with(
-        workload,
-        roots,
-        settings,
-        &DeploymentCapabilities::default(),
-    )
-}
-
-/// [`run_stages`], selecting under `settings` for a deployment with
-/// `deployment`'s capabilities.
-pub fn run_stages_with(
-    workload: &PlanningWorkload,
-    roots: Vec<QueryRoot>,
-    settings: &CostInputs,
-    deployment: &DeploymentCapabilities,
-) -> Run {
-    let models = asap_planner::PlanningModels::builtin()
-        .with_cost_inputs(settings)
-        .with_deployment_capabilities(deployment);
-    run_stages_over(workload, roots, models)
-}
-
-fn run_stages_over(
-    workload: &PlanningWorkload,
-    roots: Vec<QueryRoot>,
-    models: asap_planner::PlanningModels<'_>,
-) -> Run {
-    let entries: Vec<_> = workload.query_workload.entries().collect();
-    let data = workload.data_workload.clone().unwrap_or_default();
-    // The facade's run, with the reference pricer over the Stage 2
-    // memo choices: the whole-plan costs and rejections these tests read.
-    let run = run_planning_stages_over(roots, &entries, &data, None, models)
-        .expect("planning stages run");
-    let reference = run.reference.expect("the memo is enumerated");
-    let logical_candidates = reference
-        .choices
-        .into_iter()
-        .map(|c| {
-            let roots = c.roots.unwrap_or_else(|e| panic!("{} composes: {e}", c.id));
-            logical(c.id, roots)
-        })
-        .collect();
-    let physical = reference
-        .physical
-        .into_iter()
-        .map(|candidate| Physical {
-            id: candidate.id.clone(),
-            from_logical: candidate.from_logical.clone(),
-            query_roots: candidate.dag.roots.clone(),
-            candidate,
-        })
-        .collect();
-    Run {
-        stage0_query_language_frontends: logical(
-            "stage0-query-language-frontends".into(),
-            run.stage0_query_language_frontends,
-        ),
-        logical: logical_candidates,
-        physical,
-        pruned: reference.stage2_failed,
-        selection: reference.selection.expect("plan selection selects"),
-    }
-}
-
-/// Evaluate deliberately supplied logical configurations. This fixture helper
-/// does not search or enumerate cross-query combinations; it exercises the
-/// existing physical rules and evaluator on the computations named by a test.
-/// Production-search tests continue to use `run_stages`.
-pub fn run_explicit_candidates(
-    workload: &PlanningWorkload,
-    original_roots: Vec<QueryRoot>,
-    candidates: Vec<Vec<QueryRoot>>,
-    models: asap_planner::PlanningModels<'_>,
-) -> Run {
-    let entries: Vec<_> = workload.query_workload.entries().collect();
-    let data = workload.data_workload.clone().unwrap_or_default();
-    let targets: Vec<_> = entries
-        .iter()
-        .map(|entry| entry.requirements.accuracy.clone())
-        .collect();
-    // Explicit candidates are composed outside the memo: their summaries are
-    // sized as Pass 1 sizes a candidate, which Stage 3 only checks.
-    let logical: Vec<_> = candidates
-        .into_iter()
-        .enumerate()
-        .map(|(index, roots)| {
-            let roots = asap_accuracy::propagation::recompose_guarantees(&roots)
-                .expect("explicit fixture contracts compose");
-            logical(
-                format!("P{}", index + 1),
-                asap_accuracy::sizing::with_summaries_sized_for_targets(&roots, &targets, &data)
-                    .expect("explicit fixture summaries rebuild"),
-            )
-        })
-        .collect();
-    let mut physical = Vec::new();
-    for candidate in &logical {
-        for (index, mut plan) in asap_physical_asap_optimization::optimize_physical_asap(
-            &candidate.id,
-            &candidate.roots,
-            &entries,
-            &data,
-            models.deployment_capabilities.query_time_results_retained,
-        )
-        .expect("explicit computation has executable physical configurations")
-        .into_iter()
-        .enumerate()
-        {
-            plan.id = if index == 0 {
-                candidate.id.clone()
-            } else {
-                format!("{}-m{}", candidate.id, index)
-            };
-            physical.push(Physical {
-                id: plan.id.clone(),
-                from_logical: plan.from_logical.clone(),
-                query_roots: plan.dag.roots.clone(),
-                candidate: plan,
-            });
-        }
-    }
-    // Stage 2's deployment rules (raw data retention) prune the plans the
-    // deployment cannot run before Stage 3 prices the rest.
-    let mut plans: Vec<_> = physical.iter().map(|plan| plan.candidate.clone()).collect();
-    asap_devtools::memo_pricing::retain_deployable(&mut plans, models);
-    physical.retain(|p| plans.iter().any(|plan| plan.id == p.id));
-    let selection = asap_devtools::memo_pricing::reference_select(&plans, &entries, &data, models)
-        .expect("explicit fixture contains a valid physical configuration");
-    Run {
-        stage0_query_language_frontends: logical_stage0(original_roots),
-        logical,
-        physical,
-        pruned: Vec::new(),
-        selection,
-    }
-}
-
-pub fn run_pattern_b_fixture(
-    workload: &PlanningWorkload,
-    settings: &CostInputs,
-    deployment: &DeploymentCapabilities,
-) -> Run {
-    run_explicit_candidates(
-        workload,
-        lower_promql(workload),
-        pattern_b_computations(workload),
-        asap_planner::PlanningModels::builtin()
-            .with_cost_inputs(settings)
-            .with_deployment_capabilities(deployment),
-    )
-}
-
-/// Three fixed Pattern-B computations used by cost/retention fixtures:
-/// exact, whole-window KLL, and a KLL chain of sixty-second tumbling windows.
-pub fn pattern_b_computations(workload: &PlanningWorkload) -> Vec<Vec<QueryRoot>> {
-    use asap_logical_asap_optimization::test_support::{
-        compose_logical_candidate, generate_per_computation_candidates,
-    };
-    use asap_logical_asap_optimization::test_support::{
-        tumbling_window_candidates, window_composition_pass2_candidates,
-    };
-    use asap_types::stages::HowToComputeAggregateMeasure;
-    let roots = lower_promql(workload);
-    let local = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
-    )
-    .unwrap();
-    assert_eq!(
-        local.targets.len(),
-        1,
-        "Pattern B has one quantile computation"
-    );
-    let kll = local.targets[0]
-        .ways_to_compute
-        .iter()
-        .position(|candidate| {
-            matches!(
-                candidate,
-                HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Kll)
-            )
-        })
-        .unwrap();
-    let whole: Vec<_> = compose_logical_candidate(&local, &[kll]).unwrap();
-    let tumbling_windows = tumbling_window_candidates(&whole, &[Some(60_000)]);
-    assert_eq!(tumbling_windows.len(), 1);
-    let chain = window_composition_pass2_candidates(&whole, &tumbling_windows)
-        .unwrap()
-        .remove(0)
-        .roots
-        .expect("sixty-second tumbling windows compose");
-    vec![roots, whole, chain]
 }
 
 fn logical_stage0(roots: Vec<QueryRoot>) -> Logical {
@@ -576,27 +312,6 @@ pub fn is_merge(payload: &Payload) -> bool {
     matches!(payload, Operator::ASAP(ASAPOp::SummaryMerge { .. }))
 }
 
-/// The sketch build nodes (`SummaryAgg` or tumbling-window `SummaryTumblingWindowChain` over a
-/// sketch family) of `dag`, with their algorithm and parameters.
-pub fn sketch_builds(dag: &impl ExportedDag) -> Vec<(NodeId, SketchAlgorithm, SketchParams)> {
-    dag.node_ids()
-        .into_iter()
-        .filter_map(|id| match dag.payload(id) {
-            Operator::ASAP(
-                ASAPOp::SummaryAgg {
-                    family: FieldDataType::Sketch(kind, _),
-                    ..
-                }
-                | ASAPOp::SummaryTumblingWindowChain {
-                    family: FieldDataType::Sketch(kind, _),
-                    ..
-                },
-            ) => Some((id, *kind.algorithm(), kind.params().clone())),
-            _ => None,
-        })
-        .collect()
-}
-
 /// The estimation nodes that read `build`, directly or through merges.
 pub fn estimates_of(dag: &impl ExportedDag, build: NodeId) -> Vec<(NodeId, SketchStatistic)> {
     let mut out = Vec::new();
@@ -619,23 +334,6 @@ pub fn estimates_of(dag: &impl ExportedDag, build: NodeId) -> Vec<(NodeId, Sketc
     out
 }
 
-/// One query's per-computation choice: the sorted sketch algorithms built in
-/// its closure, or `"exact"` when it builds none.
-pub fn query_option(dag: &impl ExportedDag, query_roots: &[NodeId], query: usize) -> String {
-    let reach = closure(dag, query_roots[query]);
-    let mut names: Vec<_> = sketch_builds(dag)
-        .into_iter()
-        .filter(|(id, ..)| reach.contains(id))
-        .map(|(_, algorithm, _)| format!("{algorithm:?}"))
-        .collect();
-    names.sort();
-    if names.is_empty() {
-        "exact".into()
-    } else {
-        names.join("+")
-    }
-}
-
 /// Nodes reachable from more than one query root.
 pub fn cross_query_nodes(dag: &impl ExportedDag, query_roots: &[NodeId]) -> BTreeSet<NodeId> {
     dag.node_ids()
@@ -644,143 +342,18 @@ pub fn cross_query_nodes(dag: &impl ExportedDag, query_roots: &[NodeId]) -> BTre
         .collect()
 }
 
-pub fn assert_valid_and_uniquely_named(run: &Run) {
-    let ids: BTreeSet<_> = run.logical.iter().map(|c| c.id.as_str()).collect();
-    assert_eq!(ids.len(), run.logical.len(), "unique logical ids");
-    for c in &run.logical {
-        for root in &c.roots {
-            root.validate_structure()
-                .unwrap_or_else(|e| panic!("{}: {e}", c.id));
-        }
-    }
-}
-
-/// No candidate is discarded before plan selection: physical ASAP-aware
-/// optimization gives each logical candidate `L<n>` exactly one physical
-/// candidate with nothing materialized, `P<n>`, and one `P<n>-m<k>` for each
-/// other materialization assignment.
-pub fn assert_one_unmaterialized_physical_candidate_per_logical(run: &Run) {
-    assert!(run.pruned.is_empty(), "pruned: {:?}", run.pruned);
-    let unmaterialized: Vec<_> = run
-        .physical
-        .iter()
-        .filter(|p| !p.id.contains("-m"))
-        .collect();
-    let sources: BTreeSet<_> = unmaterialized
-        .iter()
-        .map(|p| p.from_logical.as_str())
-        .collect();
-    let logical: BTreeSet<_> = run.logical.iter().map(|c| c.id.as_str()).collect();
-    assert_eq!(sources, logical);
-    assert_eq!(unmaterialized.len(), run.logical.len());
-    for p in &run.physical {
-        let base = p.id.split("-m").next().unwrap();
-        assert_eq!(&base[1..], &p.from_logical[1..], "{}", p.id);
-        let unmaterialized = !p.id.contains("-m");
-        assert_eq!(unmaterialized, !p.candidate.materializes_any(), "{}", p.id);
-        if unmaterialized {
-            for n in &p.dag().nodes {
-                assert_eq!(
-                    materialization(p, n.id),
-                    MaterializationOption::NotMaterialized
-                );
-            }
-        }
-    }
-    let ids: BTreeSet<_> = run.physical.iter().map(|p| p.id.as_str()).collect();
-    assert_eq!(ids.len(), run.physical.len(), "unique physical ids");
-}
-
-/// The physical candidates with nothing materialized, one per logical
-/// candidate.
-pub fn unmaterialized(run: &Run) -> impl Iterator<Item = &Physical> {
-    run.physical
-        .iter()
-        .filter(|p| !p.candidate.materializes_any())
-}
-
-/// One selected id; every other candidate rejected once, with a reason.
-pub fn assert_selects_one_and_explains_the_rest(run: &Run) {
-    let all: BTreeSet<_> = run.physical.iter().map(|p| p.id.clone()).collect();
-    let mut accounted: BTreeSet<_> = run
-        .selection
-        .rejected
-        .iter()
-        .map(|r| r.id.clone())
-        .collect();
-    assert_eq!(
-        accounted.len(),
-        run.selection.rejected.len(),
-        "rejected once each"
-    );
-    assert!(run.selection.rejected.iter().all(|r| !r.reason.is_empty()));
-    assert!(
-        accounted.insert(run.selection.selected.clone()),
-        "selected is not rejected"
-    );
-    assert_eq!(accounted, all);
-}
-
-/// The selected plan costs no more than any valid candidate.
-pub fn assert_selects_cheapest_valid(run: &Run) {
-    let invalid = run.invalid();
-    let best = run
-        .cost(&run.selection.selected)
-        .expect("selected is priced");
-    for p in run
-        .physical
-        .iter()
-        .filter(|p| !invalid.contains_key(p.id.as_str()))
-    {
-        // Totals within rounding of each other tie (plan selection's rule).
-        let cost = run.cost(&p.id).unwrap();
-        assert!(best <= cost + cost.abs() * 1e-9, "{} is cheaper", p.id);
-    }
-}
-
-/// Each valid candidate's cost has one entry per DAG node, `total` is their
-/// sum, and each node's multiplier is [`computations`]. Invalid candidates
-/// are not priced.
-pub fn assert_each_node_charged_per_consuming_query(run: &Run) {
-    let invalid = run.invalid();
-    for p in &run.physical {
-        if invalid.contains_key(p.id.as_str()) {
-            assert!(run.cost(&p.id).is_none(), "{} is priced", p.id);
-            continue;
-        }
-        let cost = &run.selection.costs[&p.id];
-        let nodes: BTreeSet<_> = p.dag().nodes.iter().map(|n| n.id).collect();
-        let charged: BTreeSet<_> = cost.per_node.keys().copied().collect();
-        assert_eq!(charged, nodes, "{}", p.id);
-        let sum: f64 = cost
-            .per_node
-            .values()
-            .map(|c| c.cost_per_second.unwrap())
-            .sum();
-        assert!(
-            (cost.cost_per_second.unwrap() - sum).abs() <= 1e-9 * sum.abs().max(1.0),
-            "{}",
-            p.id
-        );
-        let times = computations(p.dag());
-        for (id, c) in &cost.per_node {
-            assert_eq!(c.multiplier, times[id], "{}: multiplier of {id:?}", p.id);
-        }
-    }
-}
-
 /// How many times each node is computed per evaluation of its consumers (#509; the
 /// rule of plan selection's private `computations`): 1 for a materialized
-/// node; for a `NotMaterialized` one, the number of consumers that reach
+/// node; for a not-materialized one, the number of consumers that reach
 /// it. A consumer is a query (operator or scalar root) or a materialized
 /// node, whose walk starts at its inputs; a walk stops at materialized
-/// nodes and counts each node once. The `MatAtIngestion` consumers of one
+/// nodes and counts each node once. The consumers materialized at ingestion time of one
 /// refresh window share one ingestion run and count once (#1151).
 pub fn computations(dag: &PhysicalASAPDAG) -> BTreeMap<NodeId, u64> {
-    let materialized: BTreeSet<_> = dag
+    let materialized_nodes: BTreeSet<_> = dag
         .nodes
         .iter()
-        .filter(|n| n.materialization != Materialization::NotMaterialized)
+        .filter(|n| n.lifetime != asap_types::physical::Lifetime::None)
         .map(|n| n.id)
         .collect();
     // Each walk's start and, for a consumer refreshed at ingestion, its
@@ -794,22 +367,22 @@ pub fn computations(dag: &PhysicalASAPDAG) -> BTreeMap<NodeId, u64> {
                 .iter()
                 .map(|(_, expr)| (expr.operator_refs().into_iter().copied().collect(), None)),
         )
-        .chain(materialized.iter().map(|&id| {
-            let at_ingestion = matches!(
-                dag.nodes
-                    .iter()
-                    .find(|n| n.id == id)
-                    .unwrap()
-                    .materialization,
-                Materialization::MatAtIngestion(_)
-            );
+        .chain(materialized_nodes.iter().map(|&id| {
+            let at_ingestion = dag
+                .nodes
+                .iter()
+                .find(|n| n.id == id)
+                .unwrap()
+                .output_state
+                .timing
+                == ExecutionTiming::IngestionTime;
             let window = at_ingestion.then(|| dag.refresh_window(id)).flatten();
             (dag.producers(id), window)
         }));
     let mut times: BTreeMap<_, _> = dag
         .nodes
         .iter()
-        .map(|n| (n.id, u64::from(materialized.contains(&n.id))))
+        .map(|n| (n.id, u64::from(materialized_nodes.contains(&n.id))))
         .collect();
     // The (node, refresh window) pairs whose ingestion run is counted.
     let mut runs = HashSet::new();
@@ -817,7 +390,7 @@ pub fn computations(dag: &PhysicalASAPDAG) -> BTreeMap<NodeId, u64> {
         let mut seen = HashSet::new();
         let mut stack = start;
         while let Some(id) = stack.pop() {
-            if materialized.contains(&id) || !seen.insert(id) {
+            if materialized_nodes.contains(&id) || !seen.insert(id) {
                 continue;
             }
             if window.is_none_or(|window| runs.insert((id, window))) {
@@ -838,57 +411,36 @@ pub fn evaluation_interval_ms(workload: &PlanningWorkload, query: usize) -> Opti
     }
 }
 
-// ── Materialization ──────────────────────────────────────────────────────
+// ── Materialized outputs ─────────────────────────────────────────────────────────
 
-/// A node's materialization option (#509 "Materialization"), without its
-/// storage medium.
+/// Whether a node's output is materialized and at which timing, without how long
+/// (`OneEvaluation` or `AcrossEvaluations`) or its storage medium.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum MaterializationOption {
-    /// Runs as data arrives; output stored before any query asks.
-    MatAtIngestion,
+pub enum Materializing {
+    /// Runs as data arrives; output materialized until a query reads it.
+    MaterializedAtIngestion,
     /// Runs when a query first needs it; output reused by the other
-    /// queries of the evaluation, or, as `MatAtQueryKeptAcrossEvaluations`,
+    /// queries of the evaluation, or, as query-time `AcrossEvaluations`,
     /// kept for later evaluations.
-    MatAtQuery,
-    /// Runs at query time for each execution; output discarded.
+    MaterializedAtQueryTime,
+    /// Output discarded after its reader (lifetime `None`).
     NotMaterialized,
 }
 
-/// The materialization option physical ASAP-aware optimization assigned to
-/// `node` (#667).
-pub fn materialization(p: &Physical, node: NodeId) -> MaterializationOption {
+/// Whether physical ASAP-aware optimization materializes `node`'s output, and at
+/// which timing (#667).
+pub fn materializing(p: &Physical, node: NodeId) -> Materializing {
     let n = p.dag().nodes.iter().find(|n| n.id == node).expect("node");
-    match n.materialization {
-        Materialization::MatAtIngestion(_) => MaterializationOption::MatAtIngestion,
-        Materialization::MatAtQuery(_) | Materialization::MatAtQueryKeptAcrossEvaluations(_) => {
-            MaterializationOption::MatAtQuery
-        }
-        Materialization::NotMaterialized => MaterializationOption::NotMaterialized,
+    match (n.output_state.timing, n.lifetime) {
+        (_, Lifetime::None) => Materializing::NotMaterialized,
+        (ExecutionTiming::IngestionTime, _) => Materializing::MaterializedAtIngestion,
+        (ExecutionTiming::QueryTime, _) => Materializing::MaterializedAtQueryTime,
     }
 }
 
 pub fn runs_at_ingestion(p: &Physical, node: NodeId) -> bool {
     let n = p.dag().nodes.iter().find(|n| n.id == node).expect("node");
     n.output_state.timing == asap_types::ir::properties::ExecutionTiming::IngestionTime
-}
-
-/// Every node upstream of an ingestion-time node also runs at ingestion time.
-pub fn assert_ingestion_upstream_is_ingestion(run: &Run) {
-    for p in &run.physical {
-        for n in &p.dag().nodes {
-            if !runs_at_ingestion(p, n.id) {
-                continue;
-            }
-            for up in closure(p.dag(), n.id) {
-                assert!(
-                    runs_at_ingestion(p, up),
-                    "{}: {up:?} feeds ingestion-time {:?} at query time",
-                    p.id,
-                    n.id
-                );
-            }
-        }
-    }
 }
 
 // ── Pending adapters ─────────────────────────────────────────────────────

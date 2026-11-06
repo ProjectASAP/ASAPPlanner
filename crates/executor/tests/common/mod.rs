@@ -1,21 +1,7 @@
 #![allow(dead_code)]
-use planner_types::ir::physical_export::PhysicalASAPDAG;
-use planner_types::ir::{
-    apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache, OperatorNode,
-    QueryRoot,
-};
-use std::rc::Rc;
 
-pub fn compile_physical_asap_dag(
-    root: &Rc<OperatorNode>,
-) -> Result<PhysicalASAPDAG, Box<dyn std::error::Error>> {
-    let root = apply_materialization_timings(
-        root,
-        &MaterializationAssignment::default(),
-        &mut NodeToTimedNodeCache::default(),
-    )?;
-    Ok(planner_types::ir::physical_export::compile_physical_asap_dag(&root)?)
-}
+use planner_types::ir::{OperatorNode, QueryRoot};
+use std::rc::Rc;
 
 /// The logical DAG the planner pipeline (`asap_planner::run_planning`) selects for the
 /// single query `root` at `accuracy`, over a continuously ingested source,
@@ -42,12 +28,11 @@ pub fn computation_candidates(root: Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
     use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
-    let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
+    let inventory =
+        generate_per_computation_candidates(&asap_logical_asap_optimization::memo_of_queries(&[
             QueryRoot::Operator(root),
-        ]),
-    )
-    .expect("Pass 1 accepts the query");
+        ]))
+        .expect("Pass 1 accepts the query");
     let mut choices = vec![vec![0; inventory.targets.len()]];
     for (index, target) in inventory.targets.iter().enumerate() {
         for choice in 1..target.choice_count() {

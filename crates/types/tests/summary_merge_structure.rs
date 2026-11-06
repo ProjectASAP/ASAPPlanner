@@ -1,34 +1,22 @@
 //! Window composition merges compatible summary states without consuming raw rows.
 use asap_types::ir::operator::operator_properties::{Reduction, Source};
-use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::scalar::expr_ir::{CompareOpKind, ScalarValue};
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{
     DataType, ExactKind, ExactParams, FamilyCapability, Field, FieldDataType, GroupingStrategy,
     HydraKind, HydraParams, MergeInputRule, MergedError, SamplingKind, SamplingParams, Schema,
-    SketchAlgorithm, SketchKind, SketchParams, SketchStatistic, StatModelKind, StatModelParams,
-    StatisticKind, SummaryUpdate, WaveletKind, WaveletParams,
+    SketchAlgorithm, SketchParams, SketchStatistic, StatModelKind, StatModelParams, StatisticKind,
+    SummaryUpdate, WaveletKind, WaveletParams,
 };
 use asap_types::ir::{
-    apply_materialization_timings, ASAPOp, ExprSemantics, MaterializationAssignment,
-    NodeToTimedNodeCache, NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr,
+    ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr,
 };
-use asap_types::physical::{Materialization, Medium};
 use std::rc::Rc;
 /// KLL over `value` for one `region`, so states of different regions are
 /// disjoint.
-fn state(k: u32, region: &str) -> Rc<OperatorNode> {
+fn state(_k: u32, region: &str) -> Rc<OperatorNode> {
     family_state(
-        FieldDataType::Sketch(
-            SketchKind::new(
-                SketchAlgorithm::Kll,
-                SketchParams::Kll {
-                    k,
-                    failure_probability: None,
-                },
-            ),
-            Default::default(),
-        ),
+        FieldDataType::Sketch(SketchAlgorithm::Kll, Default::default()),
         region,
     )
 }
@@ -77,14 +65,12 @@ fn compatible_tumbling_windows_merge_structurally() {
     root.validate_structure().unwrap();
     assert_eq!(root.schema.fields.len(), 1);
 }
-/// An empty merge, raw rows and differently sized state cannot masquerade as compatible tumbling windows.
+/// An empty merge and raw rows cannot masquerade as compatible tumbling
+/// windows. (State sizes are no longer part of the state's type: θ is a
+/// candidate's `LogicalProperties::parameters`.)
 #[test]
 fn incompatible_merge_inputs_fail() {
-    for children in [
-        vec![],
-        vec![state(200, "us"), state(300, "eu")],
-        vec![state(200, "us").children()[0].clone()],
-    ] {
+    for children in [vec![], vec![state(200, "us").children()[0].clone()]] {
         assert!(
             OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
                 children,
@@ -96,21 +82,18 @@ fn incompatible_merge_inputs_fail() {
     }
 }
 
-fn sketch(algorithm: SketchAlgorithm, params: SketchParams) -> FieldDataType {
-    FieldDataType::Sketch(SketchKind::new(algorithm, params), Default::default())
+fn sketch(algorithm: SketchAlgorithm, _params: SketchParams) -> FieldDataType {
+    FieldDataType::Sketch(algorithm, Default::default())
 }
 fn hydra(
     algorithm: SketchAlgorithm,
-    params: SketchParams,
+    _params: SketchParams,
     kind: HydraKind,
-    hydra_params: HydraParams,
+    _hydra_params: HydraParams,
 ) -> FieldDataType {
     FieldDataType::Sketch(
-        SketchKind::new(algorithm, params),
-        GroupingStrategy::SharedMultiSubpopulation {
-            kind,
-            params: hydra_params,
-        },
+        algorithm,
+        GroupingStrategy::SharedMultiSubpopulation { kind },
     )
 }
 fn exact(kind: ExactKind, params: ExactParams) -> FieldDataType {
@@ -577,6 +560,7 @@ fn estimate_validation_matches_the_category_match_except_the_fixed_rows() {
             SketchParams::CmsWithHeap { .. } => A::CmsWithHeap,
             SketchParams::CountSketchWithHeap { .. } => A::CountSketchWithHeap,
             SketchParams::UnivMon { .. } => A::UnivMon,
+            SketchParams::Hydra(_) => unreachable!("no Hydra parameters in this list"),
         };
         sketch(algorithm, params)
     })
@@ -638,7 +622,7 @@ fn estimate_validation_matches_the_category_match_except_the_fixed_rows() {
         };
         for query in &statistics {
             let fixed = matches!(
-                (kind.algorithm(), query.kind()),
+                (kind, query.kind()),
                 (
                     SketchAlgorithm::UnivMon,
                     StatisticKind::ItemFrequency | StatisticKind::TopK
@@ -648,7 +632,7 @@ fn estimate_validation_matches_the_category_match_except_the_fixed_rows() {
                         StatisticKind::ItemFrequency,
                     )
             );
-            let before = accepted_by_category(kind.algorithm(), query);
+            let before = accepted_by_category(kind, query);
             let after = estimate(family.clone(), query.clone()).is_ok();
             assert_eq!(after, before != fixed, "{family:?} {query:?}");
         }
@@ -693,54 +677,4 @@ fn idempotent_families_merge_overlapping_states() {
         let error = same_region(family).unwrap_err();
         assert!(error.contains("not proven disjoint"), "{error}");
     }
-}
-
-/// `SummaryMerge` takes the timing of its consumer, and reads tumbling-window states
-/// stored at ingestion time (#509 Example 3/4 Pattern B1) or built at query
-/// time (B2). Merging at ingestion time needs every tumbling window at ingestion time.
-#[test]
-fn summary_merge_timing() {
-    let tumbling_windows = [state(200, "us"), state(200, "eu")];
-    let root = merge(tumbling_windows.to_vec()).unwrap();
-    let timings = |assignment: &MaterializationAssignment| {
-        let timed =
-            apply_materialization_timings(&root, assignment, &mut NodeToTimedNodeCache::new())
-                .unwrap();
-        let children = timed.children();
-        (
-            timed.timing.unwrap(),
-            children
-                .iter()
-                .map(|c| c.timing.unwrap())
-                .collect::<Vec<_>>(),
-        )
-    };
-    use ExecutionTiming::{IngestionTime, QueryTime};
-    assert_eq!(
-        timings(&MaterializationAssignment::default()),
-        (QueryTime, vec![QueryTime, QueryTime])
-    );
-    let at_ingestion = Materialization::MatAtIngestion(Medium::Memory);
-    let mut stored_tumbling_windows = MaterializationAssignment::default();
-    for tumbling_window in &tumbling_windows {
-        stored_tumbling_windows.set(tumbling_window, at_ingestion);
-    }
-    assert_eq!(
-        timings(&stored_tumbling_windows),
-        (QueryTime, vec![IngestionTime, IngestionTime])
-    );
-    // A `SummaryAgg` without an assignment runs at query time, so a merge
-    // stored at ingestion time needs its tumbling windows there too.
-    let mut only_merge = MaterializationAssignment::default();
-    only_merge.set(&root, at_ingestion);
-    assert!(
-        apply_materialization_timings(&root, &only_merge, &mut NodeToTimedNodeCache::new())
-            .is_err()
-    );
-    let mut stored_merge = MaterializationAssignment::with_default(at_ingestion);
-    stored_merge.set(&root, at_ingestion);
-    assert_eq!(
-        timings(&stored_merge),
-        (IngestionTime, vec![IngestionTime, IngestionTime])
-    );
 }

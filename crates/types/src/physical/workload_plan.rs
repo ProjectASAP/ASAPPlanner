@@ -1,10 +1,8 @@
-//! One evaluated materialization assignment rebuilt as a physical DAG.
-use std::collections::BTreeMap;
-
-use crate::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
+//! One realized selection as a physical DAG.
+use crate::ir::physical_export::PhysicalASAPDAG;
 use crate::ir::QueryRoot;
-
-use super::Materialization;
+#[cfg(any(test, feature = "test-support"))]
+use crate::physical::Lifetime;
 
 /// One CandidatePhysicalASAPDAG (Stage 2 output), derived from exactly one
 /// CandidateLogicalASAPDAG (Stage 1 output). It holds planning data only;
@@ -15,25 +13,20 @@ pub struct PhysicalWorkloadPlan {
     pub id: String,
     /// The id of the logical candidate it implements.
     pub from_logical: String,
-    /// The timed query roots, one per query in workload order, that `dag`
+    /// The query roots, one per query in workload order, that `dag`
     /// exports.
     pub roots: Vec<QueryRoot>,
     pub dag: PhysicalASAPDAG,
-    /// Its materialization assignment: the option chosen for each summary
-    /// build (`SummaryAgg` or `SummaryTumblingWindowChain`) of `dag`, by node id, including
-    /// the builds left `NotMaterialized`, and each other node materialized
-    /// (a shared node built once per evaluation). A build one query reads
-    /// at ingestion time and another at query time appears once per copy.
-    pub materialization: BTreeMap<PhysicalASAPNodeId, Materialization>,
 }
 
 impl PhysicalWorkloadPlan {
-    /// Whether any node is materialized: a summary build, or a shared
+    /// Whether any node of `dag` is materialized: a summary build, or a shared
     /// non-summary node built once per evaluation.
     #[cfg(any(test, feature = "test-support"))]
     pub fn materializes_any(&self) -> bool {
-        self.materialization
-            .values()
-            .any(|m| *m != Materialization::NotMaterialized)
+        self.dag
+            .nodes
+            .iter()
+            .any(|node| node.lifetime != Lifetime::None)
     }
 }

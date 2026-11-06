@@ -90,20 +90,10 @@ fn state_evaluations_and_passthrough_keep_their_contracts() {
     use asap_types::ir::operator::Reduction;
     use asap_types::ir::scalar::ColumnRef;
     use asap_types::ir::schema::{
-        FieldDataType, GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams,
-        SketchStatistic, SummaryUpdate,
+        FieldDataType, GroupingStrategy, SketchAlgorithm, SketchStatistic, SummaryUpdate,
     };
     use asap_types::ir::{ASAPOp, Operator, ProjectItem};
-    let family = FieldDataType::Sketch(
-        SketchKind::new(
-            SketchAlgorithm::Kll,
-            SketchParams::Kll {
-                k: 100,
-                failure_probability: None,
-            },
-        ),
-        GroupingStrategy::default(),
-    );
+    let family = FieldDataType::Sketch(SketchAlgorithm::Kll, GroupingStrategy::default());
     let state = Rc::new(
         OperatorNode::new(Operator::ASAP(ASAPOp::SummaryAgg {
             child: scan(),
@@ -141,36 +131,6 @@ fn state_evaluations_and_passthrough_keep_their_contracts() {
     assert!(validate_asap_inputs(&ASAPOp::FinalizeExactAccumulator { child: state }).is_err());
 }
 
-/// Phase validation checks dependencies, without declaring a computation query-only.
-#[test]
-fn execution_timing_checks_edges_not_function_names() {
-    use asap_types::ir::properties::ExecutionTiming::{IngestionTime, QueryTime};
-    use asap_types::ir::ProjectItem;
-    let input = Rc::new((*scan()).clone().with_timing(Some(IngestionTime)));
-    let mut project = OperatorNode::new(asap_types::ir::Operator::NonASAP(NonASAPOp::Project {
-        child: input,
-        cols: vec![ProjectItem {
-            expr: ScalarExpr::FunctionCall {
-                name: "promql_abs".into(),
-                args: vec![ScalarExpr::Column(0)],
-            },
-            alias: None,
-        }],
-        qualifier: None,
-    }))
-    .unwrap()
-    .with_timing(Some(IngestionTime));
-    Rc::new(project.clone())
-        .validate_execution_timing()
-        .unwrap();
-    if let asap_types::ir::Operator::NonASAP(NonASAPOp::Project { child, .. }) =
-        &mut project.operator
-    {
-        *child = Rc::new(child.as_ref().clone().with_timing(Some(QueryTime)));
-    }
-    assert!(Rc::new(project).validate_execution_timing().is_err());
-}
-
 /// Both operator categories use the same fallible schema-deriving constructor.
 #[test]
 fn shared_construction_derives_both_operator_categories() {
@@ -195,7 +155,6 @@ fn shared_construction_derives_both_operator_categories() {
     assert_eq!(state.result_kind, OperatorResultKind::State);
     assert!(!state.schema.fields.last().unwrap().is_plain());
     assert!(state.guarantee.is_none());
-    assert!(state.timing.is_none());
     state.validate_structure().unwrap();
 
     assert!(

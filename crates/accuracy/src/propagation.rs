@@ -18,8 +18,8 @@ use asap_types::ir::scalar::{resolve_column_ref, ColumnRef, CompareOpKind, Scala
 use asap_types::ir::schema::{DataType, Schema};
 use asap_types::ir::schema::{
     ExactKind, FamilyCapability, FieldDataType, GroupingStrategy, MergedError,
-    NonNegativeWeightProof, SketchAlgorithm, SketchKind, SketchParams, SketchStatistic,
-    SummaryInputExpr, SummaryUpdate, WeightDomain,
+    NonNegativeWeightProof, SketchAlgorithm, SketchStatistic, SummaryInputExpr, SummaryUpdate,
+    WeightDomain,
 };
 use asap_types::ir::{
     ASAPOp, BinaryOperator, NonASAPOp, Operator, OperatorNode, ProjectItem, QueryRoot, ScalarExpr,
@@ -31,7 +31,7 @@ use crate::composition::{
     PRODUCT_OPERAND_DOMAINS, QUOTIENT_OPERAND_DOMAINS,
 };
 use crate::estimators::local_guarantee;
-use crate::estimators::{hll, univmon};
+
 use crate::function_rules::approximate_input_composition;
 use crate::PropagationStats;
 
@@ -122,7 +122,7 @@ pub fn root_guarantee(root: &QueryRoot) -> Option<AccuracyGuarantee> {
 
 /// Bind known statistics in existing contracts, then recover compositions
 /// that previously required constant child bounds. Physical state contracts,
-/// schemas, timing, materialization, and sharing are preserved. This does not
+/// schemas and sharing are preserved. This does not
 /// infer facts: `bind` must leave unsupported statistics unknown.
 pub fn bind_guarantees(
     root: &QueryRoot,
@@ -137,9 +137,7 @@ pub fn bind_guarantees(
             return done.clone();
         }
         let operator = node.operator.map_children(|child| walk(child, bind, cache));
-        let mut rebuilt = OperatorNode::with_schema(operator, node.schema.clone())
-            .with_timing(node.timing)
-            .with_materialization(node.materialization);
+        let mut rebuilt = OperatorNode::with_schema(operator, node.schema.clone());
         rebuilt.guarantee = node
             .guarantee
             .as_ref()
@@ -157,90 +155,6 @@ pub fn bind_guarantees(
         }
     };
     root_guarantee(&bound)
-}
-
-/// `roots` with every sketch summary state rebuilt with the parameters
-/// `resize` gives it (same algorithm; `None` keeps them), and every node
-/// above one rebuilt over its new inputs with its guarantee composed again
-/// ([`composed_guarantee`]; a node that had none keeps none). Timing,
-/// materialization and sharing are kept. Pass 1 sizes summaries
-/// for a failure probability this way.
-pub fn with_resized_summaries(
-    roots: &[QueryRoot],
-    resize: &dyn Fn(&OperatorNode, &SketchParams) -> Option<SketchParams>,
-) -> Result<Vec<QueryRoot>, SchemaDerivationError> {
-    fn walk(
-        node: &Rc<OperatorNode>,
-        resize: &dyn Fn(&OperatorNode, &SketchParams) -> Option<SketchParams>,
-        cache: &mut NodeToRewrittenNodeCache,
-    ) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
-        if let Some(done) = cache.get(&Rc::as_ptr(node)) {
-            return Ok(done.clone());
-        }
-        for child in node.children() {
-            walk(child, resize, cache)?;
-        }
-        let mut changed = node
-            .children()
-            .iter()
-            .any(|child| !Rc::ptr_eq(child, &cache[&Rc::as_ptr(child)]));
-        let mut operator = node.operator.clone();
-        if let Operator::ASAP(
-            ASAPOp::SummaryAgg {
-                family: FieldDataType::Sketch(kind, _),
-                ..
-            }
-            | ASAPOp::SummaryTumblingWindowChain {
-                family: FieldDataType::Sketch(kind, _),
-                ..
-            },
-        ) = &mut operator
-        {
-            if let Some(params) = resize(node, kind.params()).filter(|p| p != kind.params()) {
-                *kind = SketchKind::new(*kind.algorithm(), params);
-                changed = true;
-            }
-        }
-        let rebuilt = if changed {
-            let template = OperatorNode {
-                operator,
-                ..(**node).clone()
-            };
-            let mut rebuilt =
-                template.with_new_children(|child| cache[&Rc::as_ptr(child)].clone())?;
-            rebuilt.guarantee = node
-                .guarantee
-                .as_ref()
-                .and_then(|_| composed_guarantee(&rebuilt));
-            Rc::new(
-                rebuilt
-                    .with_timing(node.timing)
-                    .with_materialization(node.materialization),
-            )
-        } else {
-            node.clone()
-        };
-        cache.insert(Rc::as_ptr(node), rebuilt.clone());
-        Ok(rebuilt)
-    }
-    let mut cache = HashMap::new();
-    roots
-        .iter()
-        .map(|root| {
-            Ok(match root {
-                QueryRoot::Operator(node) => QueryRoot::Operator(walk(node, resize, &mut cache)?),
-                QueryRoot::Scalar(expr) => {
-                    let mut rebuilt = HashMap::new();
-                    for node in expr.operator_refs() {
-                        rebuilt.insert(Rc::as_ptr(node), walk(node, resize, &mut cache)?);
-                    }
-                    QueryRoot::Scalar(
-                        expr.map_operator_refs(&mut |node| rebuilt[&Rc::as_ptr(node)].clone()),
-                    )
-                }
-            })
-        })
-        .collect()
 }
 
 /// The one source a summary state counts the distinct items of its own
@@ -653,10 +567,10 @@ fn merged_tumbling_windows_guarantee(node: &OperatorNode) -> Option<Option<Accur
         return Some(None);
     };
     if let Operator::ASAP(ASAPOp::SummaryAgg { child: range, .. }) = &mut window_build.operator {
-        let mut timed = (**range).clone();
-        timed.guarantee = composed_guarantee(&timed);
-        debug_assert!(Rc::ptr_eq(timed.children()[0], input));
-        *range = Rc::new(timed);
+        let mut composed = (**range).clone();
+        composed.guarantee = composed_guarantee(&composed);
+        debug_assert!(Rc::ptr_eq(composed.children()[0], input));
+        *range = Rc::new(composed);
     }
     let window_build = Rc::new(window_build);
     let reader = OperatorNode::with_schema(
@@ -685,20 +599,19 @@ pub(crate) fn source_distinct_guarantee(
     query: &SketchStatistic,
     input: &Rc<OperatorNode>,
 ) -> Option<AccuracyGuarantee> {
-    let FieldDataType::Sketch(kind, GroupingStrategy::PerSubpopulationInstance) = family else {
+    let FieldDataType::Sketch(algorithm, GroupingStrategy::PerSubpopulationInstance) = family
+    else {
         return None;
     };
     if *query != SketchStatistic::Cardinality {
         return None;
     }
     source_scan(input)?;
-    match kind.params() {
-        SketchParams::Hll {
-            precision,
-            relative_error,
-        } => hll::classic_guarantee(*precision, *relative_error, &source(input)?),
-        params @ SketchParams::UnivMon { .. } => {
-            univmon::distinct_guarantee(params, &source(input)?)
+    match algorithm {
+        SketchAlgorithm::Hll | SketchAlgorithm::UnivMon => {
+            todo!(
+                "#1207 PR 4: the distinct-count guarantee of θ from LogicalProperties::parameters"
+            )
         }
         _ => None,
     }
@@ -1219,10 +1132,10 @@ pub(crate) fn stream_norm(node: &Rc<OperatorNode>) -> Option<StreamNorm> {
             matches!(
                 node.asap(),
                 Some(ASAPOp::SummaryAgg {
-                    family: FieldDataType::Sketch(kind, _),
+                    family: FieldDataType::Sketch(algorithm, _),
                     ..
                 }) if matches!(
-                    kind.algorithm(),
+                    algorithm,
                     SketchAlgorithm::Cms
                         | SketchAlgorithm::CmsWithHeap
                         | SketchAlgorithm::CountSketch
@@ -1598,8 +1511,8 @@ pub(crate) fn estimate_has_bound(
 ) -> bool {
     let count_min = matches!(
         family,
-        FieldDataType::Sketch(kind, _)
-            if matches!(kind.algorithm(), SketchAlgorithm::Cms | SketchAlgorithm::CmsWithHeap)
+        FieldDataType::Sketch(algorithm, _)
+            if matches!(algorithm, SketchAlgorithm::Cms | SketchAlgorithm::CmsWithHeap)
     );
     !matches!(query, SketchStatistic::TopK { .. })
         && !(count_min && !matches!(update.weight_domain, WeightDomain::NonNegative { .. }))
@@ -1616,8 +1529,7 @@ fn interpolation_guarantee(
     input: &OperatorNode,
     mut guarantee: AccuracyGuarantee,
 ) -> Option<AccuracyGuarantee> {
-    let interpolates = matches!(family, FieldDataType::Sketch(kind, _)
-        if *kind.algorithm() == SketchAlgorithm::DDSketch)
+    let interpolates = matches!(family, FieldDataType::Sketch(SketchAlgorithm::DDSketch, _))
         && matches!(query, SketchStatistic::Quantile { q } if *q > 0.0 && *q < 1.0);
     if !interpolates || matches!(update.weight_domain, WeightDomain::NonNegative { .. }) {
         return Some(guarantee);

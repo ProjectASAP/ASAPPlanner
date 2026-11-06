@@ -282,7 +282,7 @@ impl SummaryCoverage {
     /// A stable identity of `definition`: the 128-bit FNV-1a hash, in hex,
     /// of its sub-DAG's operators, output kinds and schemas, children
     /// first, without planning metadata (`timing`, `guarantee`,
-    /// `materialization`). Two equal definitions (the equality a merge
+    /// `lifetime`). Two equal definitions (the equality a merge
     /// requires) get equal ids on any node and in any process, so a summary
     /// store can key states by this id and a concrete selection.
     pub(crate) fn definition_id(&self) -> String {

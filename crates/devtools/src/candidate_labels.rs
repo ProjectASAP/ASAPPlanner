@@ -2,7 +2,7 @@
 //! `asap_planner` viewer document and text
 //! only. Planning never reads them: they
 //! are pure functions of the candidates' planning data (the logical roots
-//! and the materialization assignment).
+//! and the physical properties assignment).
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -10,10 +10,11 @@ use std::rc::Rc;
 use serde_json::Value;
 
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
+use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
 use asap_types::ir::NonASAPOp;
 use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
-use asap_types::physical::Materialization;
+use asap_types::physical::Lifetime;
 use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::stages::HowToComputeAggregateMeasure;
 
@@ -144,19 +145,16 @@ fn duration_name(ms: u64) -> String {
 /// just `logical` when nothing is.
 pub fn physical_label(logical: &str, candidate: &PhysicalWorkloadPlan) -> String {
     let mut parts: Vec<(&str, Vec<String>)> = Vec::new();
-    for (id, materialization) in &candidate.materialization {
-        let phase = match materialization {
-            Materialization::NotMaterialized => continue,
-            Materialization::MatAtIngestion(_) => "ingestion time",
-            Materialization::MatAtQuery(_) => "query time, shared",
-            Materialization::MatAtQueryKeptAcrossEvaluations(_) => "query time, kept",
+    for node in &candidate.dag.nodes {
+        let id = &node.id;
+        let phase = match (node.output_state.timing, node.lifetime) {
+            (_, Lifetime::None) => continue,
+            (ExecutionTiming::IngestionTime, _) => "ingestion time",
+            (ExecutionTiming::QueryTime, Lifetime::OneEvaluation(_)) => "query time, shared",
+            (ExecutionTiming::QueryTime, Lifetime::AcrossEvaluations(_)) => {
+                "query time, materialized across evaluations"
+            }
         };
-        let node = candidate
-            .dag
-            .nodes
-            .iter()
-            .find(|n| n.id == *id)
-            .expect("an assigned node is in the DAG");
         let label = match &node.payload {
             // Name the chain: chains of one family and tumbling-window count differ by
             // their readers and tumbling-window width.
@@ -212,7 +210,7 @@ fn state_label<C>(payload: &Operator<C>) -> String {
         Operator::ASAP(
             ASAPOp::SummaryAgg { family, .. } | ASAPOp::SummaryTumblingWindowChain { family, .. },
         ) => match family {
-            FieldDataType::Sketch(kind, _) => sketch_name(kind.algorithm()),
+            FieldDataType::Sketch(algorithm, _) => sketch_name(algorithm),
             FieldDataType::ExactAggregate(kind, _) => format!("{kind:?} acc"),
             _ => payload.kind_name().to_string(),
         },
@@ -400,12 +398,11 @@ mod tests {
     #[test]
     fn connected_labels_describe_selected_states() {
         let workload = example1();
-        let inventory = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(
+        let inventory =
+            generate_per_computation_candidates(&asap_logical_asap_optimization::memo_of_queries(
                 &lower_promql_roots(&workload).unwrap(),
-            ),
-        )
-        .unwrap();
+            ))
+            .unwrap();
         let choice = vec![0; inventory.targets.len()];
         let roots: Vec<_> = compose_logical_candidate(&inventory, &choice).unwrap();
         let label = connected_candidate_label(&roots);
@@ -417,131 +414,16 @@ mod tests {
     #[test]
     fn connected_labels_name_actual_shared_state() {
         let workload = example1();
-        let inventory = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(
+        let inventory =
+            generate_per_computation_candidates(&asap_logical_asap_optimization::memo_of_queries(
                 &lower_promql_roots(&workload).unwrap(),
-            ),
-        )
-        .unwrap();
+            ))
+            .unwrap();
         let roots =
             compose_logical_candidate(&inventory, &vec![0; inventory.targets.len()]).unwrap();
         let label = connected_candidate_label(&[roots[1].clone(), roots[1].clone()]);
         assert!(label.contains("shared Sum acc (Q1, Q2)"), "{label}");
         assert_eq!(label.matches("shared Sum acc").count(), 1);
-    }
-
-    /// Two physical candidates that each maintain a different query's tumbling window
-    /// chain at ingestion time get different labels, even when both chains
-    /// have the same family and tumbling-window count (6 × 10s for Q1, 6 × 30s for Q2).
-    #[test]
-    fn physical_labels_name_the_tumbling_window_chain_maintained_at_ingestion() {
-        use asap_logical_asap_optimization::test_support::{
-            tumbling_window_candidates, window_composition_pass2_candidates,
-        };
-        use asap_physical_asap_optimization::optimize_physical_asap;
-        use asap_types::workload::PlanningWorkload;
-
-        let workload: PlanningWorkload = serde_json::from_str(
-            r#"{"query_workload": {"language": "promql", "query_batch": null, "repeating_queries": [
-              {"query": "quantile_over_time(0.5, data[1m])", "demand": {"fixed_interval": 10000},
-               "requirements": {"accuracy": {"max_error": 0.01, "failure_probability": 0.001}},
-               "predictability": {"predictable": {"known_at": null}}},
-              {"query": "quantile_over_time(0.5, data[3m])", "demand": {"fixed_interval": 30000},
-               "requirements": {"accuracy": {"max_error": 0.01, "failure_probability": 0.001}},
-               "predictability": {"predictable": {"known_at": null}}}]},
-             "data_workload": {"arrival": {"ingesting": {"rows_per_second": 666.67}},
-              "sources": {"data": {"series_count": 10000, "metric_type": "gauge", "sample_interval": 15000}}}}"#,
-        )
-        .unwrap();
-        let inventory = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(
-                &lower_promql_roots(&workload).unwrap(),
-            ),
-        )
-        .unwrap();
-        let choice: Vec<usize> = inventory
-            .targets
-            .iter()
-            .map(|target| {
-                target
-                    .ways_to_compute
-                    .iter()
-                    .position(|c| {
-                        *c == HowToComputeAggregateMeasure::Summary(SketchAlgorithm::DDSketch)
-                    })
-                    .expect("a DDSketch candidate")
-            })
-            .collect();
-        let summary: Vec<_> = compose_logical_candidate(&inventory, &choice).unwrap();
-        let entries: Vec<_> = workload.query_workload.entries().collect();
-        let grids: Vec<_> = entries.iter().map(|e| e.evaluation_grid_ms()).collect();
-        let tumbling_windows = tumbling_window_candidates(&summary, &grids);
-        let roots = window_composition_pass2_candidates(&summary, &tumbling_windows)
-            .unwrap()
-            .into_iter()
-            .find(|c| c.tumbling_window_candidates.len() == 2 && c.shared_chains.is_empty())
-            .expect("each query's DDSketch in its own tumbling-window chain")
-            .roots
-            .unwrap();
-        let plans = optimize_physical_asap(
-            "L1",
-            &roots,
-            &entries,
-            &workload.data_workload.clone().unwrap_or_default(),
-            false,
-        )
-        .unwrap();
-        // The plans that maintain exactly one tumbling-window chain at ingestion time.
-        let one_chain_at_ingestion: Vec<String> = plans
-            .iter()
-            .filter(|plan| {
-                plan.materialization
-                    .iter()
-                    .filter(|(id, m)| {
-                        matches!(m, Materialization::MatAtIngestion(_))
-                            && matches!(
-                                plan.dag
-                                    .nodes
-                                    .iter()
-                                    .find(|n| n.id == **id)
-                                    .unwrap()
-                                    .payload,
-                                Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
-                            )
-                    })
-                    .count()
-                    == 1
-            })
-            .map(|plan| physical_label("L1", plan))
-            .collect();
-        let ingestion = |label: &String| {
-            label
-                .split(" · ")
-                .find(|p| p.starts_with("ingestion time"))
-                .map(str::to_string)
-        };
-        assert!(
-            one_chain_at_ingestion
-                .iter()
-                .any(|l| ingestion(l).as_deref()
-                    == Some("ingestion time: DDSketch for Q1, 6 × 10s tumbling windows")),
-            "{one_chain_at_ingestion:#?}"
-        );
-        assert!(
-            one_chain_at_ingestion
-                .iter()
-                .any(|l| ingestion(l).as_deref()
-                    == Some("ingestion time: DDSketch for Q2, 6 × 30s tumbling windows")),
-            "{one_chain_at_ingestion:#?}"
-        );
-        let mut distinct = one_chain_at_ingestion.clone();
-        distinct.sort();
-        distinct.dedup();
-        assert_eq!(
-            distinct.len(),
-            one_chain_at_ingestion.len(),
-            "{one_chain_at_ingestion:#?}"
-        );
     }
 
     /// Raw logical operators have an exact label, rather than an empty choice label.

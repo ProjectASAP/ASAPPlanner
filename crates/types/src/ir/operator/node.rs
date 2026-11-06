@@ -1,7 +1,9 @@
 //! The unified operator node: one node type before and after ASAP
 //! optimization. A node is an operator plus the common planning properties
-//! every traversal needs (output category and schema, accuracy guarantee,
-//! execution timing).
+//! every traversal needs (output category and schema, accuracy guarantee).
+//! Physical properties (timing, lifetime, schedule) are not on the node:
+//! each physical candidate holds its own
+//! ([`crate::stages::PhysicalCandidate::properties`]).
 
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -10,12 +12,10 @@ use serde::{Deserialize, Serialize};
 
 use super::asap::ASAPOp;
 use super::non_asap::NonASAPOp;
-use crate::ir::properties::execution_data_state::ExecutionTiming;
 use crate::ir::properties::guarantee::AccuracyGuarantee;
 use crate::ir::properties::summary_coverage::{NodeToSummaryCoverageCache, SummaryCoverage};
 use crate::ir::schema::Schema;
 use crate::ir::SchemaDerivationError;
-use crate::physical::materialization::Materialization;
 
 /// The output category of an operator, derived from the operation and its
 /// inputs. Matching column schemas do not make categories interchangeable.
@@ -91,19 +91,13 @@ impl Operator {
 ///
 /// `schema` and `result_kind` are derived from `operator` and its children
 /// at construction and retained. `guarantee` is `None` until accuracy
-/// assessment establishes one (`None` never means exact). `timing` is `None`
-/// until a materialization assignment is applied; export rejects an executable
-/// node without one. `materialization` is the option that assignment chose
-/// for this node (`NotMaterialized` until then, and for every node whose
-/// output is not stored).
+/// assessment establishes one (`None` never means exact).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OperatorNode {
     pub operator: Operator,
     pub result_kind: OperatorResultKind,
     pub schema: Schema,
     pub guarantee: Option<AccuracyGuarantee>,
-    pub timing: Option<ExecutionTiming>,
-    pub materialization: Materialization,
 }
 
 impl OperatorNode {
@@ -127,8 +121,6 @@ impl OperatorNode {
             result_kind,
             schema,
             guarantee: None,
-            timing: None,
-            materialization: Materialization::NotMaterialized,
         }
     }
 
@@ -141,16 +133,6 @@ impl OperatorNode {
 
     pub fn with_guarantee(mut self, guarantee: Option<AccuracyGuarantee>) -> Self {
         self.guarantee = guarantee;
-        self
-    }
-
-    pub fn with_timing(mut self, timing: Option<ExecutionTiming>) -> Self {
-        self.timing = timing;
-        self
-    }
-
-    pub fn with_materialization(mut self, materialization: Materialization) -> Self {
-        self.materialization = materialization;
         self
     }
 
@@ -237,8 +219,7 @@ impl OperatorNode {
     /// the old derived schema are retained, for either operator category. A
     /// change in output arity with such overrides needs an explicit new
     /// naming assignment.
-    /// `guarantee`, `timing` and `materialization` depend on the inputs and
-    /// are cleared.
+    /// `guarantee` depends on the inputs and is cleared.
     pub fn with_new_children(
         &self,
         f: impl FnMut(&Rc<OperatorNode>) -> Rc<OperatorNode>,
@@ -302,35 +283,11 @@ impl OperatorNode {
         out
     }
 
-    /// Validate assigned phases without imposing any particular runtime implementation.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn validate_execution_timing(self: &Rc<Self>) -> Result<(), SchemaDerivationError> {
-        self.validate_structure()?;
-        for node in Self::reachable(self) {
-            let timing = node.timing.ok_or_else(|| {
-                SchemaDerivationError::InvalidScalarSignature(
-                    "execution timing is unassigned".into(),
-                )
-            })?;
-            if timing == crate::ir::properties::ExecutionTiming::IngestionTime
-                && node.children().iter().any(|child| {
-                    child.timing != Some(crate::ir::properties::ExecutionTiming::IngestionTime)
-                })
-            {
-                return Err(SchemaDerivationError::InvalidScalarSignature(
-                    "ingestion-time operation depends on a query-time or unassigned input".into(),
-                ));
-            }
-        }
-        Ok(())
-    }
-
     /// Validate the whole DAG reachable from this node: every operator's
     /// input contract, scalar typing against the owning operator's input
     /// schema, and agreement between each retained schema and the one
     /// derived from the operator. Both operator categories may override field
     /// names and qualifiers; all structural metadata must match derivation.
-    /// `timing` may be `None`.
     pub fn validate_structure(self: &Rc<Self>) -> Result<(), SchemaDerivationError> {
         // Each summary state's coverage is derived once, not once per merge
         // above it; `reachable` keeps every node alive while it is used.

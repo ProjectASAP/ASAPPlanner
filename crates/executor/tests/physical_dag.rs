@@ -350,17 +350,11 @@ fn binding_rejects_unsupported_operations() {
 // KLL is one family example: precomputation changes input sources, not operators.
 #[test]
 fn kll_raw_partial_and_precomputed_are_native_dags() {
-    use planner_types::ir::schema::{GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams};
+    use planner_types::ir::schema::{GroupingStrategy, SketchAlgorithm};
 
     let input = schema(&[("value", DataType::Float64, false)]);
     let family = FieldDataType::Sketch(
-        SketchKind::new(
-            SketchAlgorithm::Kll,
-            SketchParams::Kll {
-                k: 512,
-                failure_probability: None,
-            },
-        ),
+        SketchAlgorithm::Kll,
         GroupingStrategy::PerSubpopulationInstance,
     );
     let build = Operator::per_group_summary_build(input.clone(), family, 0, None, vec![]).unwrap();
@@ -539,7 +533,8 @@ fn bind_physical_asap_dag_before_execution() {
         id,
         payload,
         output_state: ExecutionDataState::QUERY_ROWS,
-        materialization: Default::default(),
+        lifetime: Default::default(),
+        parameters: None,
         output_schema: (*schema).clone(),
         guarantee: None,
         retention_ms: None,
@@ -700,7 +695,8 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
         payload,
         output_schema: (**schema).clone(),
         output_state: ExecutionDataState::QUERY_ROWS,
-        materialization: Default::default(),
+        lifetime: Default::default(),
+        parameters: None,
         guarantee: None,
         retention_ms: None,
     };
@@ -975,7 +971,7 @@ fn weighted_rate_topk_preserves_partitions_fractional_scores_and_evaluation_scop
     }
 }
 fn assert_weighted_rate_topk(count_sketch: bool) {
-    use planner_types::ir::schema::{SketchAlgorithm, SketchKind, SketchParams};
+    use planner_types::ir::schema::SketchAlgorithm;
 
     let raw = schema(&[
         ("service", DataType::Utf8, false),
@@ -1015,26 +1011,11 @@ fn assert_weighted_rate_topk(count_sketch: bool) {
     )
     .unwrap();
     let family = FieldDataType::Sketch(
-        SketchKind::new(
-            if count_sketch {
-                SketchAlgorithm::CountSketchWithHeap
-            } else {
-                SketchAlgorithm::CmsWithHeap
-            },
-            if count_sketch {
-                SketchParams::CountSketchWithHeap {
-                    width: 4096,
-                    depth: 5,
-                    heap_size: 8,
-                }
-            } else {
-                SketchParams::CmsWithHeap {
-                    width: 4096,
-                    depth: 5,
-                    heap_size: 8,
-                }
-            },
-        ),
+        if count_sketch {
+            SketchAlgorithm::CountSketchWithHeap
+        } else {
+            SketchAlgorithm::CmsWithHeap
+        },
         Default::default(),
     );
     let build = Operator::per_group_keyed_summary_build(
@@ -1136,7 +1117,8 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
         id,
         payload,
         output_state: ExecutionDataState::QUERY_ROWS,
-        materialization: Default::default(),
+        lifetime: Default::default(),
+        parameters: None,
         output_schema: (*input).clone(),
         guarantee: None,
         retention_ms: None,
@@ -1226,7 +1208,8 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
             id: 2,
             output_schema: (*schema).clone(),
             output_state: ExecutionDataState::QUERY_ROWS,
-            materialization: Default::default(),
+            lifetime: Default::default(),
+            parameters: None,
             guarantee: None,
             retention_ms: None,
             payload: PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::Join {
@@ -1331,7 +1314,8 @@ fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
         id: 2,
         output_schema: (*input).clone(),
         output_state: ExecutionDataState::INGESTION_ROWS,
-        materialization: Default::default(),
+        lifetime: Default::default(),
+        parameters: None,
         guarantee: None,
         retention_ms: None,
         payload: PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::BinaryOp {
