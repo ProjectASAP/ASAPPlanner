@@ -250,10 +250,12 @@ pub struct SummaryStateDefinition {
     /// / direct-column Project.
     pub input_group: MemoGroupId,
     /// The operators not lifted into the selection, listed top down from
-    /// the SummaryAgg, each with only its residual arguments; `()` marks its
-    /// single input (the next one, or input_group). Two states may merge only
-    /// if input_group and these operators are equal.
-    pub unlifted_operators: Vec<Operator<()>>,
+    /// the SummaryAgg, each with only its residual arguments. `None` marks
+    /// an operator's main input (the next unlifted operator, or input_group);
+    /// `Some(g)` is another input group it reads, such as the group a scalar
+    /// subquery in a Filter reads. Two states may merge only if input_group
+    /// and these operators are equal.
+    pub unlifted_operators: Vec<Operator<Option<MemoGroupId>>>,
 }
 
 pub struct SummaryCoverage {
