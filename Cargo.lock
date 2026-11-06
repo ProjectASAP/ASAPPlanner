@@ -462,7 +462,6 @@ version = "0.1.0"
 dependencies = [
  "asap-accuracy",
  "asap-frontend-promql",
- "asap-stage0-memo",
  "asap-types",
  "thiserror 2.0.18",
 ]

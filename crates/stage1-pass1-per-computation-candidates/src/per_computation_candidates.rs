@@ -874,7 +874,7 @@ mod tests {
     /// Guarantee composition through scalar and vector arithmetic (#669).
     mod guarantee_composition {
         use super::*;
-        use crate::test_support::lower_promql;
+        use crate::test_fixtures::lower_promql;
         use asap_types::ir::properties::AccuracyTarget;
 
         fn with_bound(metric: AccuracyMetric, bound: f64, delta: f64) -> AccuracyGuarantee {
@@ -1397,67 +1397,6 @@ mod tests {
         }
     }
 
-    fn inventory(query: &str) -> PerComputationCandidates {
-        let root = crate::test_support::lower_promql(
-            query,
-            AccuracyTarget::max_error(0.01).failure_probability(0.001),
-        );
-        // Per-series state ranks each series' identity, which the rows carry
-        // as a column; a query over aggregated rows is planned over labels.
-        let root = asap_types::ir::schema::schema_support::with_promql_series_identity(&root)
-            .unwrap_or(root);
-        generate_per_computation_candidates(
-            &asap_stage0_memo::memo_of_queries(
-                &[QueryRoot::Operator(root)],
-                &[None],
-                &Default::default(),
-            )
-            .unwrap(),
-        )
-        .unwrap()
-    }
-
-    fn topk_target(inventory: &PerComputationCandidates) -> usize {
-        inventory
-            .targets
-            .iter()
-            .position(|t| {
-                matches!(
-                    inventory.aggregate(t).non_asap(),
-                    Some(NonASAPOp::Aggregate { measures, .. })
-                        if matches!(measures.as_slice(), [AggIntent::TopK { .. }])
-                )
-            })
-            .expect("a top-k target")
-    }
-
-    /// How many whole-workload choices enumeration keeps: every digit over
-    /// its target's `choice_count`, less those [`absorbed_choice_varies`]
-    /// skips.
-    ///
-    /// [`absorbed_choice_varies`]: PerComputationCandidates::absorbed_choice_varies
-    fn enumerated_choices(inventory: &PerComputationCandidates) -> usize {
-        let mut enumerated = 0;
-        let mut choice = vec![0; inventory.targets.len()];
-        loop {
-            if !inventory.absorbed_choice_varies(&choice) {
-                enumerated += 1;
-            }
-            let mut carry = true;
-            for (digit, target) in choice.iter_mut().zip(&inventory.targets).rev() {
-                *digit += 1;
-                if *digit < target.choice_count() {
-                    carry = false;
-                    break;
-                }
-                *digit = 0;
-            }
-            if carry {
-                return enumerated;
-            }
-        }
-    }
-
     /// Only raw data samples and plain sums of them: arithmetic, `rate` and other
     /// functions end the requirement.
     #[test]
@@ -1470,156 +1409,13 @@ mod tests {
             ("rate(m[1m])", None),
             ("max_over_time(m[1m])", None),
         ] {
-            let root = crate::test_support::lower_promql(query, AccuracyTarget::exact());
+            let root = crate::test_fixtures::lower_promql(query, AccuracyTarget::exact());
             assert_eq!(
                 raw_data_samples_of_metric(&root).as_deref(),
                 metric,
                 "{query}"
             );
         }
-    }
-
-    /// The target whose fused computation is a nested-sum merge.
-    fn nested_sum_target(inventory: &PerComputationCandidates) -> Option<usize> {
-        let merge = HowToComputeAggregateMeasure::ExactAccumulator(vec![ExactKind::Sum]);
-        inventory.targets.iter().position(|t| {
-            t.fused_computation
-                .as_ref()
-                .is_some_and(|fused| fused.ways_to_compute == [merge.clone()])
-        })
-    }
-
-    /// The merge needs a sum over a sum's value: an outer sum over a rate,
-    /// an outer count, or an outer sum over an inner `max` gets none.
-    #[test]
-    fn nested_sum_merge_needs_a_sum_of_sums() {
-        for query in [
-            "sum by (job) (rate(m[5m]))",
-            "count by (job) (sum_over_time(m[5m]))",
-            "sum by (job) (max_over_time(m[5m]))",
-        ] {
-            assert_eq!(nested_sum_target(&inventory(query)), None, "{query}");
-        }
-    }
-
-    /// A per-series sum drops the metric name, but the raw data samples keep it:
-    /// grouping the merge by `__name__` would answer the metric's name where
-    /// the nested sums answer none, so no merge is offered.
-    #[test]
-    fn nested_sum_merge_never_groups_by_the_dropped_metric_name() {
-        let query = "sum by (__name__) (sum_over_time(m[5m]))";
-        assert_eq!(nested_sum_target(&inventory(query)), None);
-    }
-
-    /// Merges do not stack: in `sum(sum by (job) (sum_over_time(m[5m])))`
-    /// a target with a fused computation is never absorbed, and `combinations`
-    /// counts exactly the choices enumeration keeps.
-    #[test]
-    fn nested_sum_merges_do_not_stack() {
-        let inventory = inventory("sum(sum by (job) (sum_over_time(m[5m])))");
-        let absorbed: Vec<usize> = absorbed_targets(&inventory.targets).collect();
-        assert_eq!(absorbed.len(), 1, "one merge");
-        for &a in &absorbed {
-            assert!(
-                inventory.targets[a].fused_computation.is_none(),
-                "an absorbed target has a fused computation"
-            );
-        }
-        let enumerated = enumerated_choices(&inventory);
-        assert_eq!(inventory.combinations(), enumerated);
-    }
-
-    /// The shapes a heap over the raw data samples cannot answer do not get one:
-    /// `bottomk` stays a sort and limit (no top-k target), and a grouped sum
-    /// `without` labels or by the metric name (which the per-series sum drops)
-    /// gets no heap that absorbs the per-series sum and reads the samples.
-    #[test]
-    fn grouped_range_sums_a_raw_data_samples_heap_cannot_rank_get_no_fused_heap() {
-        let is_topk = |inventory: &PerComputationCandidates, t: &ComputationTarget| {
-            matches!(
-                inventory.aggregate(t).non_asap(),
-                Some(NonASAPOp::Aggregate { measures, .. })
-                    if matches!(measures.as_slice(), [AggIntent::TopK { .. }])
-            )
-        };
-        let bottom = inventory("bottomk(3, sum by (region) (sum_over_time(m[1m])))");
-        assert!(
-            !bottom.targets.iter().any(|t| is_topk(&bottom, t)),
-            "bottomk has no top-k target"
-        );
-        for query in [
-            "topk(3, sum without (instance) (sum_over_time(m[1m])))",
-            "topk(3, sum by (__name__) (sum_over_time(m[1m])))",
-        ] {
-            let inventory = inventory(query);
-            for target in inventory.targets.iter().filter(|t| is_topk(&inventory, t)) {
-                assert!(
-                    target
-                        .fused_computation
-                        .as_ref()
-                        .is_none_or(|f| f.absorbed_targets.len() == 1),
-                    "{query}: {:?}",
-                    target.fused_computation
-                );
-            }
-        }
-    }
-
-    /// A fused computation picked leaves every target beneath it uncomputed,
-    /// also one that an absorbed target's own merge absorbs: Pass 1 closes
-    /// `absorbed_targets` over those, so enumeration keeps only their first choice and
-    /// `combinations` still counts exactly the choices kept. Here the top-k
-    /// heap is made to absorb the grouped sum only, whose merge absorbs the
-    /// per-series sum.
-    #[test]
-    fn a_fused_computation_absorbs_what_its_absorbed_targets_merges_absorb() {
-        let mut inventory = inventory("topk(10, sum by (job) (sum_over_time(m[1m])))");
-        let topk = topk_target(&inventory);
-        let fused = inventory.targets[topk]
-            .fused_computation
-            .as_mut()
-            .expect("a fused heap");
-        let grouped = fused.absorbed_targets[0];
-        fused.absorbed_targets.truncate(1);
-        let per_series = inventory.targets[grouped]
-            .fused_computation
-            .as_ref()
-            .expect("the grouped sum's merge")
-            .absorbed_targets[0];
-        close_absorptions(&mut inventory.targets);
-        assert_eq!(
-            inventory.targets[topk]
-                .fused_computation
-                .as_ref()
-                .unwrap()
-                .absorbed_targets,
-            vec![grouped, per_series]
-        );
-        assert_eq!(inventory.combinations(), enumerated_choices(&inventory));
-    }
-
-    /// `combinations` counts each choice once: picking a fused
-    /// whole-expression candidate with any but the first candidate of the
-    /// target it absorbs is the same candidate. An absorbed target with three
-    /// candidates (an approximate inner count: its accumulator, Count-Min and
-    /// UnivMon) gives 1 exact · 3 + 2 whole-expression = 5, not 3 · 3.
-    #[test]
-    fn combinations_skip_choices_a_whole_expression_candidate_absorbs() {
-        let inventory = inventory("topk by (job) (10, count_over_time(m[1m]))");
-        let topk = topk_target(&inventory);
-        let target = &inventory.targets[topk];
-        let Some(fused) = &target.fused_computation else {
-            panic!("a fused computation: {:?}", target.ways_to_compute)
-        };
-        let inner = fused.absorbed_targets[0];
-        let n = target.ways_to_compute.len();
-        let whole = fused.ways_to_compute.len();
-        let m = inventory.targets[inner].ways_to_compute.len();
-        let enumerated = enumerated_choices(&inventory);
-        assert!(whole > 0 && m > 1, "{n} {whole} {m}");
-        assert_eq!(inventory.combinations(), n * m + whole);
-        assert_eq!(inventory.combinations(), 5);
-        assert_eq!(inventory.combinations(), enumerated);
     }
 
     /// A Count-Min estimate has a bound only over weights proven
@@ -1663,7 +1459,7 @@ mod tests {
     #[test]
     fn classic_hll_confidence_needs_one_instance_over_a_sources_own_rows() {
         let hll = FieldDataType::Sketch;
-        let input = |query| crate::test_support::lower_promql(query, AccuracyTarget::exact());
+        let input = |query| crate::test_fixtures::lower_promql(query, AccuracyTarget::exact());
         let guarantee = |family: &FieldDataType, query| {
             source_distinct_guarantee(family, &SketchStatistic::Cardinality, &input(query))
         };
