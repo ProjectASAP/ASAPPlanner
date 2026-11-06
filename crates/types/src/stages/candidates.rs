@@ -9,6 +9,7 @@ use super::{MemoGroup, MemoGroupId};
 use crate::ir::schema::{SketchAlgorithm, SketchParams};
 use crate::ir::Operator;
 use crate::ir::QueryRoot;
+use crate::ir::SchemaDerivationError;
 
 /// One candidate: position `index_in_group` in group `group`'s candidates
 /// ([`MemoGroup::candidates`]).
@@ -29,18 +30,24 @@ pub struct Memo {
 }
 
 impl Memo {
-    /// Hash-consing: the group with this expression, added if new.
-    pub fn find_or_add_group(&mut self, expression: Operator<MemoGroupId>) -> MemoGroupId {
+    /// Hash-consing: the group with this expression, added if new. Fails
+    /// when the expression breaks the node rules (schema derivation, input
+    /// validation, merge check).
+    pub fn find_or_add_group(
+        &mut self,
+        expression: Operator<MemoGroupId>,
+    ) -> Result<MemoGroupId, SchemaDerivationError> {
         let _ = expression;
         todo!("#1207 PR 2: hash-consing over groups")
     }
 
-    /// Adds `candidate` to `group`'s candidates.
+    /// Adds `candidate` to `group`'s candidates. Fails when its expression
+    /// breaks the node rules or its output differs from the group's.
     pub fn add_candidate(
         &mut self,
         group: MemoGroupId,
         candidate: CandidateForMemoGroup,
-    ) -> CandidateForMemoGroupId {
+    ) -> Result<CandidateForMemoGroupId, CandidateError> {
         let _ = (group, candidate);
         todo!("#1207 PR 2")
     }
@@ -92,6 +99,19 @@ impl Memo {
         }
         (order.len() == count).then_some(order)
     }
+}
+
+/// A candidate [`Memo::add_candidate`] rejects; the memo is unchanged.
+#[derive(Debug, thiserror::Error)]
+pub enum CandidateError {
+    /// The candidate's expression fails the node rules (schema derivation,
+    /// input validation, merge check): a bug in the rule that built it.
+    #[error("the candidate's expression breaks the node rules: {0}")]
+    Schema(SchemaDerivationError),
+    /// Its output schema or output kind differs from the group's: it does
+    /// not compute the group's result (a bug in the rule that built it).
+    #[error("the candidate's output differs from group {group:?}'s")]
+    OutputDiffersFromGroup { group: MemoGroupId },
 }
 
 /// $v = (e_v, p^{\log}_v)$: one candidate of a memo group.
