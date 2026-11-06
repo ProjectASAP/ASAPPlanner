@@ -3,7 +3,7 @@
 //! over the `TimeRange` (and `TimeShift`s) over it as a candidate of the
 //! summary state group.
 
-use crate::pass2::memo::rules::Pass2RuleError;
+use crate::memo::rules::Pass2RuleError;
 use asap_types::stages::Memo;
 use asap_types::workload::QueryWorkloadEntry;
 

@@ -1,6 +1,6 @@
 //! Producer-level exact and sketch rollups, using the existing capability rules.
 
-use crate::pass2::memo::rules::Pass2RuleError;
+use crate::memo::rules::Pass2RuleError;
 use asap_types::stages::Memo;
 
 /// Rule 6, rollup: a candidate of a coarse aggregate or summary group reading

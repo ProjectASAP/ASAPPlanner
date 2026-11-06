@@ -26,7 +26,7 @@
 use std::collections::{HashMap, HashSet};
 
 use asap_cost::{NodePriceSource, OperatorKind};
-use asap_plan_selection::{SearchReport, Selection};
+use asap_stage3_plan_selection::{SearchReport, Selection};
 use asap_types::deployment_capabilities::DeploymentCapabilities;
 use asap_types::ir::materialized_view::{
     IngestionRefreshGroup, InstallableDagError, MaterializedView, RawDataRetention,
