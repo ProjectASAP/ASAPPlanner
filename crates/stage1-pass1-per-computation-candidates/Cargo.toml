@@ -6,22 +6,18 @@ edition = "2021"
 # #509 Stage 1, Pass 1: the initial candidates of each memo group (exact,
 # exact accumulator, summaries, fused builds), with the shared analytical
 # accuracy model (`asap-accuracy`). Reads Stage 0's memo through
-# `asap_types::stages`; depends on no other stage crate, and on no
-# query-language frontend except through the `test-support` feature.
+# `asap_types::stages`; depends on no other stage crate and on no
+# query-language frontend.
 [dependencies]
 asap-types = { path = "../types" }
 asap-accuracy = { path = "../accuracy" }
 thiserror = "2"
-# Only for `test-support`: lowering PromQL test queries.
-asap-frontend-promql = { path = "../frontend-promql", optional = true }
 
 [features]
 # The test helpers (`test_support`) other crates' tests share.
-test-support = ["dep:asap-frontend-promql", "asap-types/test-support"]
+test-support = []
 
 [dev-dependencies]
 asap-types = { path = "../types", features = ["test-support"] }
 asap-accuracy = { path = "../accuracy", features = ["test-support"] }
 asap-frontend-promql = { path = "../frontend-promql" }
-# Stage 0's memo of the test queries.
-asap-stage0-memo = { path = "../stage0-memo" }

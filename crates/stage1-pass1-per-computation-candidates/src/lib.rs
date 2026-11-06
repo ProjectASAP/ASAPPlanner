@@ -7,10 +7,10 @@
 //! It depends only on `asap-types` (its input and output memo are in
 //! `asap_types::stages`) and the shared accuracy model (`asap-accuracy`).
 //! It depends on no other stage crate, and the planner facade calls it
-//! after Stage 0. It depends on no query-language frontend either, except
-//! with the `test-support` feature, whose test helpers (`test_support`)
-//! lower PromQL test queries through `asap-frontend-promql`; other crates
-//! enable that feature only for their tests.
+//! after Stage 0. It depends on no query-language frontend either; its own
+//! tests lower PromQL through `asap-frontend-promql` (a dev-dependency).
+//! The `test-support` feature exports the Pass 1 internals other crates'
+//! tests call (`test_support`).
 //!
 //! Accuracy guarantees come from the built-in analytical accuracy rules in
 //! `asap-accuracy` (per-family estimators, composition and budget
