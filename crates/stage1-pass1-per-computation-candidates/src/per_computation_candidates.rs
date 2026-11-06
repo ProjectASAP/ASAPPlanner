@@ -904,8 +904,12 @@ fn add_aggregate_candidates(
         }
         return Ok(());
     }
-    // The measures are joined back on their group keys.
-    if !matches!(&reduction, Reduction::Reduce(by) if !by.is_without()) {
+    // The measures are joined back on their group keys: SQL rows grouped
+    // `by` keys (PromQL aggregates have one measure each).
+    if !matches!(&reduction, Reduction::Reduce(by) if !by.is_without())
+        || memo.groups()[input.0 as usize].group_properties.result_kind
+            != OperatorResultKind::Relation
+    {
         return Ok(());
     }
     let mut parts = Vec::with_capacity(measures.len());
