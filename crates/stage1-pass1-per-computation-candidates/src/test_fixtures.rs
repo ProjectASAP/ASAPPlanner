@@ -4,14 +4,9 @@
 
 use std::rc::Rc;
 
-use asap_types::accuracy::AccuracyTarget;
 use asap_types::ir::operator::arguments::Source;
 use asap_types::ir::schema::{ColumnId, DataType, Field, Schema};
 use asap_types::ir::{NonASAPOp, OperatorNode};
-use asap_types::workload::{
-    BatchEntry, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query, QueryLanguage,
-    QueryRequirements, QueryWorkload,
-};
 
 /// A `TimeSeries("m")` scan over `[ts(0), value(1), labels...]`, time index 0,
 /// no unique key.
@@ -51,35 +46,4 @@ pub fn scan_from(source: Source, schema: Schema) -> Rc<OperatorNode> {
         schema,
     }))
     .unwrap()
-}
-
-/// `query` lowered by the PromQL frontend, with accuracy target `accuracy`.
-pub fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
-    let workload = PlanningWorkload {
-        query_workload: QueryWorkload {
-            language: QueryLanguage::PromQL,
-            query_batch: Some(vec![BatchEntry {
-                query: Query(query.into()),
-                requirements: QueryRequirements {
-                    accuracy,
-                    ..Default::default()
-                },
-                predictability: Predictability::Unknown,
-                invocations: 1,
-                execute_at: None,
-                range_evaluation: None,
-            }]),
-            repeating_queries: None,
-        },
-        data_workload: Some(DataWorkload::sampled_every(
-            asap_frontend_promql::promql_metric_names(query).unwrap_or_default(),
-            DurationMs(1_000),
-        )),
-    };
-    asap_frontend_promql::lower_promql_query_workload(&workload)
-        .unwrap()
-        .remove(0)
-        .as_operator()
-        .cloned()
-        .expect("operator root")
 }

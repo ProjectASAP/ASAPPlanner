@@ -19,9 +19,6 @@ promql-parser = { git = "https://github.com/ProjectASAP/promql-parser", rev = "1
 [dev-dependencies]
 asap-types = { path = "../types", features = ["test-support"] }
 asap-accuracy = { path = "../accuracy", features = ["test-support"] }
-# Stage 0's memo and Pass 1's target list (`per_computation_candidates`) for the tests.
-asap-stage0-memo = { path = "../stage0-memo" }
-asap-stage1-pass1-per-computation-candidates = { path = "../stage1-pass1-per-computation-candidates", features = ["test-support"] }
 # The planning stages through the facade (a dev-dependency cycle, for
 # integration tests only).
 asap-planner = { path = "../planner" }
