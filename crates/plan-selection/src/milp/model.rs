@@ -32,14 +32,14 @@ pub struct RefreshWindowId(pub usize);
 pub struct ContextId(pub usize);
 
 /// $\kappa$: a class of executions with a common owner and schedule, where
-/// an unmaterialized candidate runs.
+/// a candidate with $\ell$ = None or `OneEvaluation` runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Context {
     /// $\kappa_q$: an evaluation of a query.
     QueryEvaluation(QueryId),
     /// $I_r$: the ingestion pipeline of a refresh window.
     IngestionPipeline(RefreshWindowId),
-    /// $\kappa_m$: inside a materialized candidate's own computation.
+    /// $\kappa_m$: inside an `AcrossEvaluations` candidate's own computation.
     Materialized(PhysicalCandidateId),
 }
 
@@ -67,13 +67,13 @@ struct SelectionVariables {
 /// The execution-context variables (section 5), which replace $x$ and the
 /// unindexed $y$ of the baseline.
 struct ExecutionContextVariables {
-    /// $x^{\mathrm{mat}}_v$, for a materialized candidate.
+    /// $x^{\mathrm{mat}}_v$, for an `AcrossEvaluations` candidate.
     x_materialized: HashMap<PhysicalCandidateId, Variable>,
-    /// $x_{\kappa,v}$, for an unmaterialized candidate.
+    /// $x_{\kappa,v}$, for a candidate with $\ell$ = None or `OneEvaluation`.
     x_in_context: HashMap<(ContextId, PhysicalCandidateId), Variable>,
     /// $y_{\kappa,u,c,i}$, indexed by the consumer's context.
     y_in_context: HashMap<(ContextId, PhysicalEdgeId), Variable>,
-    /// $h_v$, for a materialized producer.
+    /// $h_v$, for an `AcrossEvaluations` producer.
     retention_amount: HashMap<PhysicalCandidateId, Variable>,
 }
 
