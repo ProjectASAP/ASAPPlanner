@@ -1626,11 +1626,9 @@ mod memo_tests {
         let g1 = memo.find_or_add_group(scan("latency")).unwrap();
         let g2 = memo.find_or_add_group(kll_state(g1)).unwrap();
         let g3 = memo.find_or_add_group(quantile_readout(g2, 0.95)).unwrap();
-        let over_raw_rows = quantile_readout(g1, 0.95).map_children(|&group_id| {
-            MemoGroupAsInput {
-                memo: &memo,
-                group_id,
-            }
+        let over_raw_rows = quantile_readout(g1, 0.95).map_children(|&group_id| MemoGroupAsInput {
+            memo: &memo,
+            group_id,
         });
         assert!(
             over_raw_rows.output_schema().is_ok(),
