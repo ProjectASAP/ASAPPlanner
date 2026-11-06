@@ -256,7 +256,8 @@ Implementation locations: `crates/logical-asap-optimization/src/pass1/per_comput
 ```rust
 pub struct CandidateForMemoGroupId {
     pub group: MemoGroupId,
-    pub index: usize,
+    /// Position in the group's `candidates` list.
+    pub index_in_group: usize,
 }
 
 impl Memo {
@@ -809,7 +810,7 @@ fn candidates_of(
     group: MemoGroupId,
 ) -> impl Iterator<Item = CandidateForMemoGroupId> + '_ {
     (0..memo.groups[group.0 as usize].candidates.len())
-        .map(move |index| CandidateForMemoGroupId { group, index })
+        .map(move |index_in_group| CandidateForMemoGroupId { group, index_in_group })
 }
 
 /// Whether `from` reaches `to` through the producers chosen so far
@@ -828,10 +829,10 @@ fn print(memo: &Memo, dag: &LogicalDag) {
     ) {
         let candidate = memo.candidate(c);
         if !seen.insert(c) {
-            println!("{}↑ G{}[{}] (shared)", "  ".repeat(depth), c.group.0, c.index);
+            println!("{}↑ G{}[{}] (shared)", "  ".repeat(depth), c.group.0, c.index_in_group);
             return;
         }
-        println!("{}G{}[{}] {} {:?}", "  ".repeat(depth), c.group.0, c.index,
+        println!("{}G{}[{}] {} {:?}", "  ".repeat(depth), c.group.0, c.index_in_group,
                  candidate.expression.operator.name(), candidate.logical_properties);
         for &u in dag.producers.get(&c).into_iter().flatten() {
             node(memo, dag, u, depth + 1, seen);
