@@ -112,10 +112,10 @@ A node in the physical data will represent the data or summary instance, so a no
 | Why not put it in the schema? | States worth merging cover different data but must have the same schema | below |
 | What is it based on? | Goldstein & Larson view matching (SIGMOD 2001), explained with an example | §4.1 |
 | What does it store? | `definition` (what is computed) + `selection` (which rows were taken) | §4.2.1 |
-| How is it computed? | by the planner, from the sub-DAG the node covers, in one walk that yields both the definition and the selection | §4.2.2 |
-| How expensive is it? | proportional to the few operators directly under the `SummaryAgg`, not to the whole sub-DAG; cached per node | §4.2.3 |
+| How is it computed? | by the planner, from the memo group's input groups, in one walk that yields both the definition and the selection | §4.2.2 |
+| How expensive is it? | proportional to the few operators directly under the `SummaryAgg`, not to the whole sub-DAG; derived once per memo group | §4.2.3 |
 | What uses it? | merge (in #646), rollup; slice, reuse (planned); subtract (reserved) | §5.6, §5.7 |
-| Where is it in the code? | `OperatorNode::coverage()`, `SummaryCoverage::derive` | §6.1, §6.6 |
+| Where is it in the code? | `GroupProperties::summary_coverage`, `SummaryCoverage::derive_from_inputs` | §6.6 |
 | What is left out? | the deployment and runtime implementation, e.g. SDS | §4.3 |
 
 **Why coverage is not part of the schema.**
@@ -235,9 +235,127 @@ Formally, a state means `family(input(σ(C)))` for each group of `G`, where `C` 
 
 #### 4.2.2 Deriving the definition and the selection
 
-The planner computes the coverage of a node from the sub-DAG the node covers, not from a declaration. One walk down the sub-DAG produces both parts: every filter condition either moves into `selection` or stays in `definition`. The definition is described first, then how the planner decides which conditions move into the selection.
+Coverage is derived for memo groups, never declared and never computed on operator-node trees. When `Memo::find_or_add_group` creates a summary-state group, `SummaryCoverage::derive_from_inputs` walks down from the group's `SummaryAgg` through its input groups' `expression`s in the memo and stores the result once in the group's `GroupProperties::summary_coverage`. One walk produces both parts: every filter condition either moves into the `selection` or stays in the `definition`. A `SummaryMerge` group reads its input groups' stored coverage; it is a valid group only when their definitions are equal and their selections are disjoint.
 
-**Worked example.** p99 latency per job over table `t` (columns `job`, `region`, `latency`):
+```rust
+/// What a summary state computes, with every lifted selection removed.
+pub struct SummaryStateDefinition {
+    /// The group the unlifted operators read: the first input under the
+    /// SummaryAgg that is not Filter / range TimeRange / TimeShift without @
+    /// / direct-column Project. `None` when that input is a `Scan` with a
+    /// liftable predicate (a PromQL label matcher): it is lifted too, and the
+    /// `Scan` with the rest of its predicates is the last unlifted operator.
+    pub input_group: Option<MemoGroupId>,
+    /// The operators not lifted into the selection, listed top down from the
+    /// SummaryAgg, each with only its residual arguments. `None` marks an
+    /// operator's main input (the next unlifted operator, or input_group);
+    /// `Some(g)` is another input group it reads, such as the group a scalar
+    /// subquery in a Filter reads.
+    pub unlifted_operators: Vec<Operator<Option<MemoGroupId>>>,
+}
+
+pub struct SummaryCoverage {
+    pub(crate) definition: SummaryStateDefinition,
+    /// Union of boxes over the output rows of the unlifted operators' input.
+    pub(crate) selection: Vec<SelectionBox>,
+}
+
+impl SummaryCoverage {
+    pub(crate) fn derive_from_inputs(
+        operator: &Operator<MemoGroupAsInput<'_>>,
+    ) -> Result<Self, CoverageError>;
+    /// A hash of the definition: equal definitions of one memo get equal ids.
+    pub(crate) fn definition_id(&self) -> String;
+}
+```
+
+**Worked example.** Three queries over the series `latency` (labels `job`, `a`, `b`), each a KLL state over the last minute:
+
+```text
+G1  Scan latency
+G2  Filter(job = "api")(G1);  G3 TimeRange[1m](G2);  G4 SummaryAgg[KLL](G3)                 ← Q1
+G5  Filter(job = "web")(G1);  G6 TimeRange[1m](G5);  G7 SummaryAgg[KLL](G6)                 ← Q2
+G8  Filter(job = "api" ∧ a + b > 10)(G1);  G9 TimeRange[1m](G8);  G10 SummaryAgg[KLL](G9)  ← Q3
+```
+
+**Case 1, G4: everything is lifted.** The walk starts at G4's `SummaryAgg` and reads each input group's `expression`:
+
+| Step | Group | Expression | What the walk does |
+|---|---|---|---|
+| 1 | G4 | `SummaryAgg[KLL](G3)` | the first unlifted operator, with no filter of its own |
+| 2 | G3 | `TimeRange[1m](G2)` | the one range window: lifted as time `(−60 s, 0]` |
+| 3 | G2 | `Filter(job = "api")(G1)` | `job = "api"` is a value set on one column: lifted, nothing of the `Filter` remains |
+| 4 | G1 | `Scan latency` | not liftable, no predicate to lift: the walk stops; G1 is the `input_group` |
+
+```text
+G4.summary_coverage = SummaryCoverage {
+    definition: SummaryStateDefinition {
+        input_group: Some(G1),
+        unlifted_operators: [SummaryAgg[KLL]],
+    },
+    selection: [ { job ∈ {api}, time (−60 s, 0] } ],
+}
+```
+
+**Case 2, G7: the same definition, a disjoint selection.** The walk over G6 and G5 lifts `job = "web"` and the same minute, so G7's definition is G4's (`input_group: Some(G1)`, `unlifted_operators: [SummaryAgg[KLL]]`) and its `definition_id()` is the same; its selection is `{ job ∈ {web}, time (−60 s, 0] }`. The two selections are disjoint, so `SummaryMerge(G4, G7)` is a valid candidate (and group), covering `{ job ∈ {api, web}, time (−60 s, 0] }`.
+
+**Case 3, G10: `a + b > 10` cannot be lifted.** It spans two columns, so it is no selection. At G8 the walk lifts `job = "api"` and keeps the rest:
+
+```text
+G10.summary_coverage = SummaryCoverage {
+    definition: SummaryStateDefinition {
+        input_group: Some(G1),
+        unlifted_operators: [SummaryAgg[KLL], Filter(a + b > 10)],
+    },
+    selection: [ { job ∈ {api}, time (−60 s, 0] } ],
+}
+```
+
+Its definition differs from G4's, so G10 cannot merge with G4, even though both select `job = api`.
+
+**The fields.**
+
+- `input_group`: the group the definition reads, below everything the walk passed (`None` when the walk lifted a predicate out of a `Scan`).
+- `unlifted_operators`: what the state computes over `input_group`, top down from the `SummaryAgg`, each operator with only the conditions that stayed. Each operator's main input is `None`; any other group it reads, such as the group of a scalar subquery in a `Filter`'s condition, is `Some(group)`.
+- `selection`: which output rows of that computation the state took, as a union of boxes.
+- `definition_id()`: a hash of the definition, the key a summary store files states under together with a concrete selection.
+
+##### The definition
+
+The `definition` is what remains of the operators the walk passed, with every condition that moves into `selection` (below) taken out:
+
+| On the walk | In `unlifted_operators` |
+|---|---|
+| a `Filter` whose conditions all move into `selection` | removed |
+| a `Filter` with some conditions that stay | kept, with only the conditions that stay; a scalar subquery among them names its group |
+| `SummaryAgg.filter` | trimmed the same way |
+| the one range `TimeRange`, and any `TimeShift`s, when they become relative time | removed |
+| a `TimeShift` with no range `TimeRange`, or two or more range `TimeRange`s | unchanged: no time is taken out |
+| a direct-column `Project` | unchanged |
+| a `Scan` with a predicate that moves into `selection` (a PromQL label matcher) | the last operator, with only the predicates that stay; `input_group` is `None` |
+| any other operator (the first group the walk cannot pass) | not in the list: it is the `input_group` |
+
+A `SummaryTumblingWindowChain` covers what one build over its whole window does: the walk starts at that build's `SummaryAgg` over a range `TimeRange` of the whole window over the chain's input. A rollup (`SummaryMerge` with `group_by`) has its input's definition with the `SummaryAgg` grouped by the rollup's keys.
+
+**When two definitions are equal.** Merging (§5.6) requires equal definitions: the same `input_group` and the same `unlifted_operators`, compared as values. A definition with a scalar subquery compares like any other: two states whose `Filter(a > (SELECT threshold))` read the same group are equal there. Timing is not part of a group, so a tumbling window built at ingestion time can merge with one built at query time. States over different tables never merge: a KLL over `m1` and one over `m2` read different groups. To combine tables, put a `UNION ALL` with a column that marks the source table below one `SummaryAgg`; that column can then be used in `selection` or in the grouping.
+
+##### The selection
+
+
+**Goal.** Decide which filter conditions under the `SummaryAgg` move into `selection`: those that only choose *which rows* go into the state. All other conditions stay in the `definition` (above).
+
+**Steps.**
+
+1. **Collect the conditions.** Go down the input groups from the `SummaryAgg` and collect every filter condition: from `Filter` groups, from the `Scan.predicates` where the walk stops, and from the `SummaryAgg`'s own `filter`. A condition `A AND B` counts as two conditions, `A` and `B`.
+2. **Ask two questions about each condition:**
+   - **Rule 1: would it pick the same rows if it were moved to just below the `SummaryAgg`?** `region = 'us'` below a `Project` that only renames columns: yes. `value > 5` below `rate`: no, because it filters the raw samples that `rate` reads, which changes the rate values.
+   - **Rule 2: is it a simple condition on one column?** That is, a value set such as `region IN ('us', 'eu')`, or a range such as `latency < 100`. `latency * 2 > 10` is not: it is on an expression.
+3. **Putting the two rules together.**
+   - If both answers are yes: take the condition out of the sub-DAG and put it into `selection`.
+   - If either answer is no: leave it in the sub-DAG, so it is part of `definition`. The paper calls such conditions *residuals*.
+   - One more case stays in `definition`: a condition on a column that already has a lifted condition it cannot be combined with (a forbidden-value set and a range, or values of different types). Conditions are taken in walk order: the `SummaryAgg.filter`, then the `Filter`s from top to bottom, then `Scan.predicates`.
+
+A SQL example, p99 latency per job over table `t` (columns `job`, `region`, `latency`), whose `WHERE` conditions the SQL front end folds into the `Scan`'s predicates and whose `region AS r` is a `Project`:
 
 ```sql
 SELECT job,
@@ -247,76 +365,6 @@ FROM (SELECT job, region AS r, latency
       WHERE region = 'us' AND latency * 2 > 10)
 GROUP BY job;
 ```
-
-The SQL frontend lowers it as follows: `FILTER (WHERE …)` becomes the aggregate's filter, `region AS r` becomes a `Project`, and the `WHERE` conditions are folded into the `Scan`'s predicates. With an error target, the planner answers the quantile from a KLL `SummaryAgg`, read out by a `SummaryEstimate`. The sub-DAG under that `SummaryEstimate`:
-
-```text
-                 ( SummaryEstimate p99 )
-                         ▲
-                         │
-              [[ SummaryAgg ]]     KLL(latency) by job,  filter: latency < 100
-                         ▲
-                         │
-                 [ Project ]       job, region AS r, latency
-                         ▲
-                         │
-                  [ Scan t ]       predicates: region = 'us' AND latency * 2 > 10
-```
-
-##### The definition
-
-
-The `definition` is the `SummaryAgg` together with its sub-DAG, with every condition that moves into `selection` (below) taken out. Everything else stays exactly as it is:
-
-| In the sub-DAG | In the `definition` |
-|---|---|
-| a `Filter` whose conditions all move into `selection` | removed |
-| a `Filter` with some conditions that stay | kept, with only the conditions that stay |
-| `Scan.predicates` and `SummaryAgg.filter` | trimmed the same way |
-| the one range `TimeRange`, and any `TimeShift`s, when they become relative time | removed |
-| a `TimeShift` with no range `TimeRange`, or two or more range `TimeRange`s | unchanged: no time is taken out |
-| any other operator | unchanged |
-
-So the `definition` holds what the state computes: the computation `C` with its remaining conditions, the summary family and its parameters, the input column, and the grouping `G`.
-
-In the worked example, `latency < 100` and `region = 'us'` move into `selection` (below), and `latency * 2 > 10` stays:
-
-```text
-                 ( SummaryEstimate p99 )
-                         ▲
-                         │
-              [[ SummaryAgg ]]     KLL(latency) by job            ← filter removed
-                         ▲
-                         │
-                 [ Project ]       job, region AS r, latency      ← unchanged
-                         ▲
-                         │
-                  [ Scan t ]       predicates: latency * 2 > 10   ← region = 'us' removed
-```
-
-**When two definitions are equal.** Merging (§5.6) requires equal definitions.
-
-- They must have the same structure. Planning details are ignored: `guarantee` and `coverage_cache`. Operator nodes carry no timing (#1200), so a tumbling window built at ingestion time can merge with one built at query time.
-- `SummaryUpdate.weight_domain` is compared too. It is computed from the rest, so it differs only if something is wrong.
-- States over different tables never merge: a KLL over `m1` and one over `m2` have different definitions. To combine tables, put a `UNION ALL` with a column that marks the source table below one `SummaryAgg`; that column can then be used in `selection` or in the grouping.
-
-##### The selection
-
-
-**Goal.** Decide which filter conditions under the `SummaryAgg` move into `selection`: those that only choose *which rows* go into the state. All other conditions stay in the `definition` (above).
-
-**Steps.**
-
-1. **Collect the conditions.** Go down the sub-DAG from the `SummaryAgg` and collect every filter condition: from `Filter` nodes, from `Scan.predicates`, and from the `SummaryAgg`'s own `filter`. A condition `A AND B` counts as two conditions, `A` and `B`.
-2. **Ask two questions about each condition:**
-   - **Rule 1: would it pick the same rows if it were moved to just below the `SummaryAgg`?** `region = 'us'` below a `Project` that only renames columns: yes. `value > 5` below `rate`: no, because it filters the raw samples that `rate` reads, which changes the rate values.
-   - **Rule 2: is it a simple condition on one column?** That is, a value set such as `region IN ('us', 'eu')`, or a range such as `latency < 100`. `latency * 2 > 10` is not: it is on an expression.
-3. **Putting the two rules together.**
-   - If both answers are yes: take the condition out of the sub-DAG and put it into `selection`.
-   - If either answer is no: leave it in the sub-DAG, so it is part of `definition`. The paper calls such conditions *residuals*.
-   - One more case stays in `definition`: a condition on a column that already has a lifted condition it cannot be combined with (a forbidden-value set and a range, or values of different types). Conditions are taken in walk order: the `SummaryAgg.filter`, then the `Filter`s from top to bottom, then `Scan.predicates`.
-
-In the worked example:
 
 | Condition | Found at | Rule 1: same rows at the `SummaryAgg`? | Rule 2: simple? | Result |
 |---|---|---|---|---|
@@ -403,7 +451,7 @@ Any other shape stays in `definition`:
 
 #### 4.2.3 Cost of deriving coverage
 
-**When it runs.** `coverage()` derives a node's coverage the first time it is called and caches it on the node, so each node pays once. Building a `SummaryMerge` (`OperatorNode::new`) derives its coverage to reject an invalid merge and caches the result, so `coverage()` and `validate_structure` do not derive it again. `validate_structure` derives it only for a merge that was not built through `new`.
+**When it runs.** `find_or_add_group` derives a summary-state group's coverage once, when it creates the group, and stores it in `GroupProperties::summary_coverage`; `add_candidate` derives a candidate's the same way. A `SummaryMerge` reads its inputs' stored coverage, so each state is derived once. Operator-node trees carry no coverage.
 
 **Sizes used below.**
 
@@ -886,9 +934,10 @@ OperatorNode                                         §6.1
 │     └── fields[i].dtype: FieldDataType ◀───────┘   §6.3  (the same type: the output
 │           └── Sketch(SketchKind, GroupingStrategy)        `state` field has type `family`)
 │                 └── algorithm, params              §6.4
-├── guarantee: AccuracyGuarantee                       §6.5  (accuracy of an evaluation)
-└── coverage() → SummaryCoverage                     §6.6
-      └── definition: OperatorNode   (again a node, so the same structure)
+└── guarantee: AccuracyGuarantee                       §6.5  (accuracy of an evaluation)
+
+MemoGroup.group_properties.summary_coverage: SummaryCoverage   §6.6
+      └── definition: SummaryStateDefinition { input_group, unlifted_operators }
 ```
 
 | Subsection | Defines | Used by |
@@ -898,7 +947,7 @@ OperatorNode                                         §6.1
 | §6.3 Schema and field types | `Schema`, `Field`, `FieldDataType` | every node's `schema`; `SummaryAgg.family` |
 | §6.4 Summary-family parameters | `SketchKind`, `SketchParams`, `GroupingStrategy`, exact/sample/wavelet/model params | the payload of each non-plain `FieldDataType` variant |
 | §6.5 Update input and evaluations | `SummaryUpdate`, `SketchStatistic`, `MaintainedPopulation`, `PopulationStatistic` | fields of the `ASAPOp` variants in §6.2 |
-| §6.6 Summary coverage | `SummaryCoverage`, `SelectionBox`, `Constraint` | `OperatorNode::coverage()` on summary nodes |
+| §6.6 Summary coverage | `SummaryCoverage`, `SummaryStateDefinition`, `SelectionBox`, `Constraint` | `GroupProperties::summary_coverage` of summary-state memo groups |
 
 **Example: the p99 latency state of §5.1.** The `SummaryAgg` node (§6.1) holds `ASAPOp::SummaryAgg` (§6.2) with `family = Sketch(SketchKind::new(Kll, Kll { k: 200 }), PerSubpopulationInstance)` (§6.3, §6.4) and `input = SummaryUpdate::column(latency)` (§6.5). Its `schema` (§6.3) is `(job Utf8, state Sketch(KLL k=200))`: the `state` field has the same type as `family`. A `SummaryEstimate` above it holds `query = Quantile { q: 0.99 }` (§6.5), and its node carries the `guarantee` of the evaluation. `coverage()` on the `SummaryAgg` node returns a `SummaryCoverage` (§6.6).
 
@@ -1342,16 +1391,16 @@ A finalized value's accuracy statement is `AccuracyGuarantee` (`ir/properties/gu
 
 ### 6.6 Summary coverage (`crates/types/src/ir/properties/summary_coverage.rs`)
 
-The code for §4, as of #646. On `main` today `SummaryCoverage` is still the older declared form (`source` plus `regions`).
+The code for §4. `SummaryStateDefinition` is shown in §4.2.2.
 
 ```rust
 pub struct SummaryCoverage {
-    /// What the state computes: the `SummaryAgg` and its sub-DAG, with the
-    /// conditions that went into `selection` taken out (§4.2.2).
-    pub definition: Rc<OperatorNode>,
+    /// What the state computes: its input group and the operators the walk
+    /// did not lift (§4.2.2).
+    pub(crate) definition: SummaryStateDefinition,
     /// Which rows went in: a union of boxes. A row is in the state if it is
     /// in at least one box.
-    pub selection: Vec<SelectionBox>,
+    pub(crate) selection: Vec<SelectionBox>,
 }
 
 /// One box: a row is in it when it meets every constraint.
@@ -1386,9 +1435,10 @@ pub enum Constraint {
 }
 
 impl SummaryCoverage {
-    /// Computes the coverage of a summary node from its sub-DAG (§4.2.2).
-    /// Errors: `NotSummary` for a node that is not a `SummaryAgg`,
-    /// `SummaryTumblingWindowChain` or `SummaryMerge`; `TumblingWindowChainExpansion` for a `SummaryTumblingWindowChain`
+    /// The coverage of a summary-state group computed by `operator` over its
+    /// input groups (§4.2.2). Errors: `NotSummary` for an operator that is
+    /// not a `SummaryAgg`, `SummaryTumblingWindowChain`, `SummaryMerge` or a
+    /// `Filter` keeping whole states; `TumblingWindowChainExpansion` for a `SummaryTumblingWindowChain`
     /// that does not expand to one build over its whole window; for a
     /// merge, an input's own error, `EmptyMerge` (no inputs),
     /// `DefinitionMismatch` (inputs compute different things) or
@@ -1398,9 +1448,12 @@ impl SummaryCoverage {
     /// not a group key of the inputs' build), `FamilyCannotRegroup` (counter
     /// states, a family without a merge, or a Hydra) or `RegroupedBuild`
     /// (the coarse build it stands for does not derive).
-    pub fn derive(node: &OperatorNode) -> Result<Self, CoverageError>;
+    pub(crate) fn derive_from_inputs(
+        operator: &Operator<MemoGroupAsInput<'_>>,
+    ) -> Result<Self, CoverageError>;
+    pub(crate) fn definition_id(&self) -> String;
 }
 ```
 
-- `OperatorNode::new` and `validate_structure` reject an invalid `SummaryMerge` (different definitions, or selections that may overlap; #592 relaxes the overlap check per family). The derived coverage is cached on the node.
+- `find_or_add_group` and `add_candidate` reject an invalid `SummaryMerge` (different definitions, or selections that may overlap, per the family's `MergeInputRule`). Operator-node trees have no coverage and no merge check.
 - A `SummaryAgg` always has coverage: what cannot go into `selection` stays in `definition`.
