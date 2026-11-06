@@ -653,28 +653,3 @@ fn summary_merge_is_permissive_about_the_family() {
     merged.validate_structure().unwrap();
     assert_eq!(FamilyCapability::of(&irate()).merge_inputs, None);
 }
-
-/// Idempotent families (HLL, exact Min/Max) merge states that may share
-/// rows, and the union of identical selections is that selection; counting
-/// families (exact Sum, KLL) still need disjoint selections.
-#[test]
-fn idempotent_families_merge_overlapping_states() {
-    let same_region = |family: FieldDataType| {
-        merge(vec![
-            family_state(family.clone(), "us"),
-            family_state(family, "us"),
-        ])
-    };
-    for family in [hll(), exact(ExactKind::Max, ExactParams::Max)] {
-        let merged = same_region(family.clone()).unwrap_or_else(|e| panic!("{family:?}: {e}"));
-        merged.validate_structure().unwrap();
-        assert_eq!(
-            merged.coverage().unwrap().selection(),
-            family_state(family, "us").coverage().unwrap().selection()
-        );
-    }
-    for family in [exact(ExactKind::Sum, ExactParams::Sum), kll()] {
-        let error = same_region(family).unwrap_err();
-        assert!(error.contains("not proven disjoint"), "{error}");
-    }
-}

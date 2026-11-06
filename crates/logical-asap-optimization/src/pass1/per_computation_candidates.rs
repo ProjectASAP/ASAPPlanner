@@ -659,6 +659,14 @@ fn placement(below: bool) -> HavingPlacement {
     }
 }
 
+/// Each memo group's expression as an operator-node tree, by group id: the
+/// trees target discovery still walks. `Memo::logical_node_trees` is
+/// deleted; discovery reads the groups in #1207 PR 3.
+fn logical_node_trees(memo: &Memo) -> Vec<Rc<OperatorNode>> {
+    let _ = memo;
+    todo!("#1207 PR 3: discover targets over the memo groups, not node trees")
+}
+
 /// Discover one target per measure of each eligible aggregate memo group of
 /// `dag`, including operator plans read by scalar roots: Pass 1 walks the
 /// groups, so an aggregate several queries read is one target per measure.
@@ -673,11 +681,7 @@ fn placement(below: bool) -> HavingPlacement {
 pub fn generate_per_computation_candidates(
     memo: &Memo,
 ) -> Result<PerComputationCandidates, PerComputationCandidateError> {
-    let logical_nodes: Rc<[Rc<OperatorNode>]> = memo
-        .groups()
-        .iter()
-        .map(|group| Rc::clone(&group.logical_node))
-        .collect();
+    let logical_nodes: Rc<[Rc<OperatorNode>]> = logical_node_trees(memo).into();
     let group_of: HashMap<*const OperatorNode, MemoGroupId> = logical_nodes
         .iter()
         .enumerate()
@@ -1975,7 +1979,7 @@ fn key_items(keys: usize) -> Vec<ProjectItem> {
 /// included, reads its input column (the sample value when it names none).
 fn measure_input(
     intent: &AggIntent,
-    input: &OperatorNode,
+    input: &Rc<OperatorNode>,
     filter: Option<&Predicate>,
 ) -> Result<SummaryInputExpr, PerComputationCandidateError> {
     let schema = &input.schema;

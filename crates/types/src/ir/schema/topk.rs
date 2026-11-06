@@ -1,9 +1,10 @@
 //! Ranked-row output contract shared by logical TopK and its implementations.
+use crate::ir::operator::input::OperatorInput;
 use crate::ir::operator::{Reduction, Source};
 use crate::ir::scalar::column_resolution::{resolve_column_ref, ResolveError};
 use crate::ir::scalar::{ColumnRef, ProjectItem};
 use crate::ir::schema::{ColumnId, DataType, FieldDataType, PROMQL_SERIES_IDENTITY};
-use crate::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
+use crate::ir::{ASAPOp, NonASAPOp, Operator, ScalarExpr};
 
 /// The column a top-k ranks `child` by. Over a one-measure grouped
 /// aggregate (the SQL heavy-hitter shape and PromQL `topk(k, sum by ..)`) it
@@ -12,17 +13,17 @@ use crate::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
 /// `FinalizeExactAccumulator` or `SummaryEstimate`, under the `Project`
 /// restoring its names (a renaming) and a value `HAVING`'s `Filter`. Over
 /// per-series rows (PromQL `topk by (..) (k, rows)`) it is the sample value.
-pub fn ranked_column(child: &OperatorNode) -> Result<ColumnId, ResolveError> {
-    let mut node = child;
+pub fn ranked_column<I: OperatorInput>(child: &I) -> Result<ColumnId, ResolveError> {
+    let mut node = child.clone();
     let reduction = loop {
-        match &node.operator {
+        match node.operator() {
             // Only a renaming keeps the measure last.
             Operator::NonASAP(NonASAPOp::Project { cols, child, .. })
-                if cols.len() == child.schema.fields.len()
+                if cols.len() == child.schema().fields.len()
                     && cols
                         .iter()
                         .enumerate()
-                        .all(|(i, item)| item.expr == ScalarExpr::Column(i)) =>
+                        .all(|(i, item)| matches!(item.expr, ScalarExpr::Column(c) if c == i)) =>
             {
                 node = child
             }
@@ -49,34 +50,34 @@ pub fn ranked_column(child: &OperatorNode) -> Result<ColumnId, ResolveError> {
         }
     };
     match reduction {
-        Some(Reduction::Reduce(_)) => Ok(child.schema.fields.len() - 1),
-        _ => resolve_column_ref(&ColumnRef::SampleValue, &child.schema),
+        Some(Reduction::Reduce(_)) => Ok(child.schema().fields.len() - 1),
+        _ => resolve_column_ref(&ColumnRef::SampleValue, child.schema()),
     }
 }
 
 /// Ordered projection of ranked rows: partition keys, ranked value, then
 /// item identity. TopK retains rows; partition keys alone are not unique.
-pub fn ranked_row_projection(
-    child: &OperatorNode,
+pub(crate) fn ranked_row_projection<I: OperatorInput>(
+    child: &I,
     reduction: &Reduction,
     output_name: &str,
-) -> Result<Vec<ProjectItem>, crate::ir::SchemaDerivationError> {
+) -> Result<Vec<ProjectItem<I>>, crate::ir::SchemaDerivationError> {
     use crate::ir::SchemaDerivationError;
     let value = ranked_column(child)
         .map_err(|error| SchemaDerivationError::InvalidScalarSignature(error.to_string()))?;
     let keys = reduction.group_keys().map_or(&[][..], |keys| keys.keys());
     for &index in keys {
-        if index >= child.schema.fields.len() {
+        if index >= child.schema().fields.len() {
             return Err(SchemaDerivationError::InvalidGroupByColumn(
                 index,
-                child.schema.fields.len(),
+                child.schema().fields.len(),
             ));
         }
     }
-    let mut columns: Vec<ProjectItem> = keys
+    let mut columns: Vec<ProjectItem<I>> = keys
         .iter()
         .map(|&index| ProjectItem {
-            alias: Some(child.schema.fields[index].name.clone()),
+            alias: Some(child.schema().fields[index].name.clone()),
             expr: ScalarExpr::Column(index),
         })
         .collect();
@@ -85,7 +86,7 @@ pub fn ranked_row_projection(
         expr: ScalarExpr::Column(value),
     });
     let promql = reads_only_time_series(child);
-    for (index, field) in child.schema.fields.iter().enumerate() {
+    for (index, field) in child.schema().fields.iter().enumerate() {
         let names_item = !promql || field.dtype == FieldDataType::Plain(DataType::Utf8);
         if names_item
             && index != value
@@ -102,7 +103,7 @@ pub fn ranked_row_projection(
     // so consumers' already-bound column positions remain valid.
     if let Ok(identity) = resolve_column_ref(
         &ColumnRef::Named(PROMQL_SERIES_IDENTITY.into()),
-        &child.schema,
+        child.schema(),
     ) {
         if !keys.contains(&identity) {
             columns.push(ProjectItem {
@@ -142,12 +143,11 @@ pub fn series_identity_item(
     }
 }
 
-fn reads_only_time_series(node: &OperatorNode) -> bool {
-    match node.non_asap() {
-        Some(NonASAPOp::Scan { source, .. }) => matches!(source, Source::TimeSeries { .. }),
-        _ => node
-            .children()
-            .iter()
-            .all(|child| reads_only_time_series(child)),
+fn reads_only_time_series<I: OperatorInput>(node: &I) -> bool {
+    match node.operator() {
+        Operator::NonASAP(NonASAPOp::Scan { source, .. }) => {
+            matches!(source, Source::TimeSeries { .. })
+        }
+        operator => operator.children().into_iter().all(reads_only_time_series),
     }
 }

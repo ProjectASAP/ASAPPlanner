@@ -3,47 +3,67 @@
 //! `docs/design_docs/proposals/asap-primitive-schema.md` §4.2, after
 //! Goldstein & Larson's view matching.
 //!
-//! Coverage is derived from the node, never declared. Walking down from a
-//! `SummaryAgg`, a predicate conjunct moves into `selection` when it can be
-//! lifted to the `SummaryAgg` (through `Filter`, a range `TimeRange`, a
-//! `TimeShift` without `@` and direct-column `Project` items) and it is a
-//! value set or an interval on one column. Everything else stays in
-//! `definition` as a residual, so two states are merged only when they
-//! compute the same thing over disjoint rows.
+//! Coverage is derived once for each summary-state memo group, from its
+//! input groups, never declared, and stored in its `GroupProperties`.
+//! Walking down from a `SummaryAgg` through the input groups' expressions, a
+//! predicate conjunct moves into `selection` when it can be lifted to the
+//! `SummaryAgg` (through `Filter`, a range `TimeRange`, a `TimeShift` without
+//! `@` and direct-column `Project` items) and it is a value set or an
+//! interval on one column. Everything else stays in `definition` as a
+//! residual, so two states are merged only when they compute the same thing
+//! over disjoint rows. Node trees carry no coverage.
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 use std::ops::Bound;
-use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::ir::operator::asap::ASAPOp;
-use crate::ir::operator::node::{Operator, OperatorNode};
+use crate::ir::operator::asap::{selected_from, summary_agg_schema, ASAPOp};
+use crate::ir::operator::input::{BuiltOrInput, OperatorInput};
+use crate::ir::operator::node::{Operator, OperatorResultKind};
 use crate::ir::operator::non_asap::{NonASAPOp, TimeRangeKind};
 use crate::ir::operator::operator_properties::Reduction;
+use crate::ir::operator::tumbling_window_chain::window_build;
 use crate::ir::scalar::expr_ir::{CompareOpKind, ScalarValue};
 use crate::ir::scalar::{Predicate, ScalarExpr};
 use crate::ir::schema::family_capability::{FamilyCapability, MergeInputRule};
 use crate::ir::schema::sketch::GroupingStrategy;
 use crate::ir::schema::{ColumnId, Schema};
+use crate::ir::SchemaDerivationError;
+use crate::stages::{MemoGroupAsInput, MemoGroupId};
+
+/// What a summary state computes, with every lifted selection removed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SummaryStateDefinition {
+    /// The group the unlifted operators read: the first input under the
+    /// SummaryAgg that is not Filter / range TimeRange / TimeShift without @
+    /// / direct-column Project. `None` when that input is a `Scan` with a
+    /// liftable predicate (a PromQL label matcher): it is lifted too, and the
+    /// `Scan` with the rest of its predicates is the last unlifted operator,
+    /// so states over one source with different matchers may merge.
+    pub input_group: Option<MemoGroupId>,
+    /// The operators not lifted into the selection, listed top down from the
+    /// SummaryAgg, each with only its residual arguments; `()` marks its
+    /// single input (the next one, or input_group). Two states may merge only
+    /// if input_group and these operators are equal.
+    pub unlifted_operators: Vec<Operator<()>>,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SummaryCoverage {
-    /// The `SummaryAgg` with the selection removed from its sub-DAG.
-    pub(crate) definition: Rc<OperatorNode>,
-    /// Union of boxes over the output rows of the definition's child.
+    pub(crate) definition: SummaryStateDefinition,
+    /// Union of boxes over the output rows of the unlifted operators' input.
     pub(crate) selection: Vec<SelectionBox>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
 impl SummaryCoverage {
-    /// The `SummaryAgg` with the selection removed from its sub-DAG.
-    pub fn definition(&self) -> &Rc<OperatorNode> {
+    pub fn definition(&self) -> &SummaryStateDefinition {
         &self.definition
     }
 
-    /// Union of boxes over the output rows of the definition's child.
+    /// Union of boxes over the output rows of the unlifted operators' input.
     pub fn selection(&self) -> &[SelectionBox] {
         &self.selection
     }
@@ -256,121 +276,134 @@ pub enum CoverageError {
     /// nothing, and a Hydra's groups share one state. Bad input.
     #[error("the inputs' family cannot merge different groups")]
     FamilyCannotRegroup,
+    /// A `SummaryAgg` whose filter reads a scalar subquery: its definition
+    /// cannot name the group the subquery reads, so it merges with nothing.
+    #[error("a summary filter with a scalar subquery has no comparable definition")]
+    SubqueryInDefinition,
     /// The build a regrouping `SummaryMerge` stands for does not derive:
     /// bad input.
     #[error("the regrouped build does not derive: {reason}")]
     RegroupedBuild { reason: String },
 }
 
-/// Coverage already derived during one validation, by node address. The
-/// nodes must stay alive while it is in use.
-pub(crate) type NodeToSummaryCoverageCache = HashMap<*const OperatorNode, SummaryCoverage>;
+/// A memo group read as an input, and the inputs a rule builds over such
+/// groups.
+type GroupInput<'m> = BuiltOrInput<MemoGroupAsInput<'m>>;
 
 impl SummaryCoverage {
-    /// Coverage of a `SummaryAgg`, `SummaryTumblingWindowChain` or `SummaryMerge`. A chain
-    /// covers what one build over its whole window does, and a merge of its
-    /// newest tumbling windows what one build over their window does. A merge fails unless
-    /// every input has the same definition and their selections are
+    /// Coverage of a summary state a memo group computes with `operator`
+    /// over its input groups: a `SummaryAgg`, a `SummaryTumblingWindowChain`,
+    /// a `SummaryMerge`, or a `Filter` that keeps whole states of a grouped
+    /// `SummaryAgg`. A chain covers what one build over its whole window
+    /// does, and a merge of its newest tumbling windows what one build over
+    /// their window does. A merge reads its inputs' stored coverage and fails
+    /// unless every input has the same definition and their selections are
     /// pairwise disjoint; a family whose merge is idempotent
-    /// ([`MergeInputRule::MayOverlap`] in the family-capability
-    /// table) may also merge overlapping selections, and a counter family
+    /// ([`MergeInputRule::MayOverlap`] in the family-capability table) may
+    /// also merge overlapping selections, and a counter family
     /// ([`MergeInputRule::DisjointInTime`]) needs disjoint time windows.
-    pub(crate) fn derive(node: &OperatorNode) -> Result<Self, CoverageError> {
-        Self::derive_cached(node, &mut NodeToSummaryCoverageCache::new())
-    }
-
-    /// A stable identity of `definition`: the 128-bit FNV-1a hash, in hex,
-    /// of its sub-DAG's operators, output kinds and schemas, children
-    /// first, without planning metadata (`timing`, `guarantee`,
-    /// `lifetime`). Two equal definitions (the equality a merge
-    /// requires) get equal ids on any node and in any process, so a summary
-    /// store can key states by this id and a concrete selection.
-    pub(crate) fn definition_id(&self) -> String {
-        format!(
-            "{:032x}",
-            definition_hash(&self.definition, &mut HashMap::new())
-        )
-    }
-
-    /// [`derive`](Self::derive), reusing and recording the coverage of
-    /// every summary state in `cache`, so validating a DAG derives each
-    /// state once.
-    pub(crate) fn derive_cached(
-        node: &OperatorNode,
-        cache: &mut NodeToSummaryCoverageCache,
+    pub(crate) fn derive_from_inputs<'m>(
+        operator: &Operator<MemoGroupAsInput<'m>>,
     ) -> Result<Self, CoverageError> {
-        let key = node as *const OperatorNode;
-        if let Some(coverage) = cache.get(&key) {
-            return Ok(coverage.clone());
-        }
-        if let Some(build) = selected_build(node)? {
-            let coverage = of_summary_agg(&build);
-            cache.insert(key, coverage.clone());
-            return Ok(coverage);
-        }
-        let coverage = match node.asap() {
-            Some(ASAPOp::SummaryAgg { .. }) => of_summary_agg(node),
-            // Back-to-back tumbling windows cover the whole window one build over it
-            // would.
-            Some(ASAPOp::SummaryTumblingWindowChain { .. }) => of_summary_agg(
-                &crate::ir::operator::tumbling_window_chain::whole_window_build(node).map_err(
-                    |error| CoverageError::TumblingWindowChainExpansion {
-                        reason: error.to_string(),
-                    },
-                )?,
-            ),
-            // The newest tumbling windows of one chain cover what one build over their
-            // window does.
-            Some(ASAPOp::SummaryMerge {
-                newest_tumbling_windows: Some(_),
+        let expansion =
+            |error: SchemaDerivationError| CoverageError::TumblingWindowChainExpansion {
+                reason: error.to_string(),
+            };
+        let as_built = |op: &ASAPOp<MemoGroupAsInput<'m>>| -> ASAPOp<GroupInput<'m>> {
+            op.map_children(|input| BuiltOrInput::Input(*input))
+        };
+        match operator {
+            Operator::NonASAP(_) => match selected_build(operator)? {
+                Some(build) => of_summary_agg(&build),
+                None => Err(CoverageError::NotSummary),
+            },
+            Operator::ASAP(op @ ASAPOp::SummaryAgg { .. }) => of_summary_agg(&as_built(op)),
+            // Back-to-back tumbling windows cover the whole window one build
+            // over it would.
+            Operator::ASAP(
+                op @ ASAPOp::SummaryTumblingWindowChain {
+                    tumbling_window_count,
+                    ..
+                },
+            ) => of_summary_agg(&window_build(op, *tumbling_window_count).map_err(expansion)?),
+            // The newest tumbling windows of one chain cover what one build
+            // over their window does.
+            Operator::ASAP(ASAPOp::SummaryMerge {
+                children,
+                newest_tumbling_windows: Some(newest),
                 group_by: None,
-                ..
-            }) => of_summary_agg(
-                &crate::ir::operator::tumbling_window_chain::merged_window_build(node).map_err(
-                    |error| CoverageError::TumblingWindowChainExpansion {
-                        reason: error.to_string(),
-                    },
-                )?,
-            ),
-            Some(ASAPOp::SummaryMerge {
+            }) => {
+                let [chain] = children.as_slice() else {
+                    return Err(CoverageError::NotSummary);
+                };
+                let Operator::ASAP(chain) = chain.operator() else {
+                    return Err(CoverageError::NotSummary);
+                };
+                of_summary_agg(&window_build(&chain, *newest).map_err(expansion)?)
+            }
+            Operator::ASAP(ASAPOp::SummaryMerge {
                 children, group_by, ..
             }) => {
                 let inputs = children
                     .iter()
-                    .map(|child| Self::derive_cached(child, cache))
+                    .map(|child| {
+                        child
+                            .summary_coverage()
+                            .cloned()
+                            .ok_or(CoverageError::NotSummary)
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 let merged = of_merge(&inputs)?;
                 match group_by {
-                    None => merged,
-                    Some(keys) => regrouped(merged, keys)?,
+                    None => Ok(merged),
+                    Some(keys) => regrouped(merged, &children[0], keys),
                 }
             }
-            _ => return Err(CoverageError::NotSummary),
-        };
-        cache.insert(key, coverage.clone());
-        Ok(coverage)
+            Operator::ASAP(_) => Err(CoverageError::NotSummary),
+        }
+    }
+
+    /// A stable identity of `definition`: the 128-bit FNV-1a hash, in hex,
+    /// of its input group and unlifted operators. Two equal definitions
+    /// (the equality a merge requires) of one memo get equal ids, so a
+    /// summary store can key states by this id and a concrete selection.
+    pub(crate) fn definition_id(&self) -> String {
+        const OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
+        const PRIME: u128 = 0x0000000001000000000000000000013b;
+        let mut hash = OFFSET;
+        for byte in format!("{:?}", self.definition).bytes() {
+            hash ^= u128::from(byte);
+            hash = hash.wrapping_mul(PRIME);
+        }
+        format!("{hash:032x}")
     }
 }
 
 /// For a `Filter` that keeps whole states of a grouped `SummaryAgg` by
 /// their key columns, the build that computes exactly the kept states: the
 /// same build over its input rows filtered by the same predicate on the
-/// input columns those keys name. `None` for any other node.
-fn selected_build(node: &OperatorNode) -> Result<Option<Rc<OperatorNode>>, CoverageError> {
-    let Some(states) = crate::ir::operator::asap::selected_from(node) else {
+/// input columns those keys name. `None` for any other operator.
+fn selected_build<'m>(
+    operator: &Operator<MemoGroupAsInput<'m>>,
+) -> Result<Option<ASAPOp<GroupInput<'m>>>, CoverageError> {
+    let Operator::NonASAP(NonASAPOp::Filter {
+        pred,
+        child: states,
+    }) = operator
+    else {
         return Ok(None);
     };
-    let Some(NonASAPOp::Filter { pred, .. }) = node.non_asap() else {
+    if operator.output_kind() != OperatorResultKind::State {
         return Ok(None);
-    };
-    let Some(ASAPOp::SummaryAgg {
+    }
+    let Operator::ASAP(ASAPOp::SummaryAgg {
         child,
         family,
         input,
         reduction: Reduction::Reduce(by),
         grouping,
         filter,
-    }) = states.asap()
+    }) = states.operator()
     else {
         return Err(CoverageError::NotSummary);
     };
@@ -381,7 +414,7 @@ fn selected_build(node: &OperatorNode) -> Result<Option<Rc<OperatorNode>>, Cover
     let mut unmapped = None;
     let rows_pred = pred.0.map_columns(&mut |column| {
         let mapped = by.keys().get(column).copied().filter(|&input_column| {
-            matches!((states.schema.fields.get(column), child.schema.fields.get(input_column)),
+            matches!((states.schema().fields.get(column), child.schema().fields.get(input_column)),
                 (Some(at_state), Some(at_input)) if at_state.name == at_input.name)
         });
         mapped.unwrap_or_else(|| {
@@ -392,41 +425,42 @@ fn selected_build(node: &OperatorNode) -> Result<Option<Rc<OperatorNode>>, Cover
     if let Some(key) = unmapped {
         return Err(CoverageError::NotAGroupKey { key });
     }
-    let rows = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Filter {
-        pred: crate::ir::scalar::Predicate(rows_pred),
-        child: Rc::clone(child),
-    }))
-    .map_err(|error| CoverageError::RegroupedBuild {
+    let mut built = |input: &MemoGroupAsInput<'m>| BuiltOrInput::Input(*input);
+    let regrouped_build = |error: SchemaDerivationError| CoverageError::RegroupedBuild {
         reason: error.to_string(),
-    })?;
-    OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
-        child: rows,
-        family: family.clone(),
-        input: input.clone(),
-        reduction: Reduction::Reduce(by.clone()),
-        grouping: grouping.clone(),
-        filter: filter.clone(),
-    }))
-    .map(Some)
-    .map_err(|error| CoverageError::RegroupedBuild {
-        reason: error.to_string(),
+    };
+    let rows = BuiltOrInput::build(NonASAPOp::Filter {
+        pred: Predicate(rows_pred.map_operator_refs(&mut built)),
+        child: BuiltOrInput::Input(child),
     })
+    .map_err(regrouped_build)?;
+    let reduction = Reduction::Reduce(by);
+    summary_agg_schema(rows.schema(), &family, &reduction).map_err(regrouped_build)?;
+    Ok(Some(ASAPOp::SummaryAgg {
+        child: rows,
+        family,
+        input,
+        reduction,
+        grouping,
+        filter: filter.map(|pred| Predicate(pred.0.map_operator_refs(&mut built))),
+    }))
 }
 
 /// The coverage of a merge of states covering `inputs`.
 fn of_merge(inputs: &[SummaryCoverage]) -> Result<SummaryCoverage, CoverageError> {
     let first = inputs.first().ok_or(CoverageError::EmptyMerge)?;
-    let mut proven = HashSet::new();
-    if !inputs
+    if inputs
         .iter()
-        .all(|input| same_definition(&first.definition, &input.definition, &mut proven))
+        .any(|input| input.definition != first.definition)
     {
         return Err(CoverageError::DefinitionMismatch);
     }
     // A family without a merge is checked as the strictest rule; the
     // executor rejects the merge itself.
-    let required = match first.definition.asap() {
-        Some(ASAPOp::SummaryAgg { family, .. }) => FamilyCapability::of(family).merge_inputs,
+    let required = match first.definition.unlifted_operators.first() {
+        Some(Operator::ASAP(ASAPOp::SummaryAgg { family, .. })) => {
+            FamilyCapability::of(family).merge_inputs
+        }
         _ => None,
     }
     .unwrap_or(MergeInputRule::Disjoint);
@@ -452,26 +486,30 @@ fn of_merge(inputs: &[SummaryCoverage]) -> Result<SummaryCoverage, CoverageError
         return Err(CoverageError::InputsOverlap { required });
     }
     Ok(SummaryCoverage {
-        definition: Rc::clone(&first.definition),
+        definition: first.definition.clone(),
         selection: union(inputs.iter().flat_map(|c| c.selection.clone()).collect()),
     })
 }
 
-/// The coverage of a regrouping merge `node`, keyed by `keys`, of states
-/// whose merge covers `merged`: the same rows (`selection`), computed by
-/// the input's build grouped by the columns `keys` name. The input states of
-/// one output group are different groups of one build, so their rows are
-/// disjoint. A counter family merges only time-disjoint windows, never
-/// different groups at one time.
-fn regrouped(merged: SummaryCoverage, keys: &[ColumnId]) -> Result<SummaryCoverage, CoverageError> {
-    let Some(ASAPOp::SummaryAgg {
-        child,
+/// The coverage of a regrouping merge, keyed by `keys`, of states whose
+/// merge covers `merged` (`first` is its first input): the same rows
+/// (`selection`), computed by the input's build grouped by the columns
+/// `keys` name. The input states of one output group are different groups
+/// of one build, so their rows are disjoint. A counter family merges only
+/// time-disjoint windows, never different groups at one time.
+fn regrouped(
+    merged: SummaryCoverage,
+    first: &MemoGroupAsInput<'_>,
+    keys: &[ColumnId],
+) -> Result<SummaryCoverage, CoverageError> {
+    let Some(Operator::ASAP(ASAPOp::SummaryAgg {
         family,
         input,
         reduction,
         grouping,
         filter,
-    }) = merged.definition.asap()
+        ..
+    })) = merged.definition.unlifted_operators.first()
     else {
         return Err(CoverageError::NotSummary);
     };
@@ -480,7 +518,8 @@ fn regrouped(merged: SummaryCoverage, keys: &[ColumnId]) -> Result<SummaryCovera
     {
         return Err(CoverageError::FamilyCannotRegroup);
     }
-    let state = &merged.definition.schema;
+    let state = first.schema();
+    let rows = build_input_schema(first).ok_or(CoverageError::NotSummary)?;
     // The build's input column each key of the state names.
     let mapped = keys
         .iter()
@@ -494,7 +533,7 @@ fn regrouped(merged: SummaryCoverage, keys: &[ColumnId]) -> Result<SummaryCovera
             column
                 .filter(|&column| {
                     let (Some(at_state), Some(at_input)) =
-                        (state.fields.get(key), child.schema.fields.get(column))
+                        (state.fields.get(key), rows.fields.get(column))
                     else {
                         return false;
                     };
@@ -505,22 +544,45 @@ fn regrouped(merged: SummaryCoverage, keys: &[ColumnId]) -> Result<SummaryCovera
                 .ok_or(CoverageError::NotAGroupKey { key })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    // Derived as a direct build's schema, so its definition id is the same.
-    let definition = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
-        child: Rc::clone(child),
+    let reduction = Reduction::by(mapped);
+    summary_agg_schema(&rows, family, &reduction).map_err(|error| {
+        CoverageError::RegroupedBuild {
+            reason: error.to_string(),
+        }
+    })?;
+    // A direct build's definition, so its definition id is the same.
+    let mut definition = merged.definition.clone();
+    definition.unlifted_operators[0] = Operator::ASAP(ASAPOp::SummaryAgg {
+        child: (),
         family: family.clone(),
         input: input.clone(),
-        reduction: Reduction::by(mapped),
+        reduction,
         grouping: grouping.clone(),
         filter: filter.clone(),
-    }))
-    .map_err(|error| CoverageError::RegroupedBuild {
-        reason: error.to_string(),
-    })?;
+    });
     Ok(SummaryCoverage {
         definition,
         selection: merged.selection,
     })
+}
+
+/// The schema of the rows the build of summary state `state` reads (its
+/// `SummaryAgg`'s input; one build over a chain's window reads its range of
+/// the chain's input, which has the input's schema). `None` when `state`
+/// is no summary state.
+fn build_input_schema<I: OperatorInput>(state: &I) -> Option<Schema> {
+    if let Some(states) = selected_from(state) {
+        return build_input_schema(&states);
+    }
+    match state.operator() {
+        Operator::ASAP(
+            ASAPOp::SummaryAgg { child, .. } | ASAPOp::SummaryTumblingWindowChain { child, .. },
+        ) => Some(child.schema().clone()),
+        Operator::ASAP(ASAPOp::SummaryMerge { children, .. }) => {
+            build_input_schema(children.first()?)
+        }
+        _ => None,
+    }
 }
 
 /// Whether the time windows of every box of `inputs` are pairwise apart:
@@ -548,216 +610,132 @@ fn windows_ordered_apart(inputs: &[SummaryCoverage]) -> bool {
     })
 }
 
-/// The hash [`SummaryCoverage::definition_id`] reports: each node's
-/// operator without its children, output kind and schema (in their `Debug`
-/// form, which every IR type derives and which is fixed for a given IR),
-/// then its children's hashes in order. `cache` hashes a shared node once.
-fn definition_hash(
-    node: &Rc<OperatorNode>,
-    cache: &mut HashMap<*const OperatorNode, u128>,
-) -> u128 {
-    if let Some(hash) = cache.get(&Rc::as_ptr(node)) {
-        return *hash;
-    }
-    const OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
-    const PRIME: u128 = 0x0000000001000000000000000000013b;
-    let mut hash = OFFSET;
-    let mut write = |bytes: &[u8]| {
-        for byte in bytes {
-            hash ^= u128::from(*byte);
-            hash = hash.wrapping_mul(PRIME);
-        }
-    };
-    let own = format!(
-        "{:?}|{:?}|{:?}",
-        node.operator.map_children(|_| ()),
-        node.result_kind,
-        node.schema
-    );
-    write(own.as_bytes());
-    for child in node.children() {
-        let child_hash = definition_hash(child, cache);
-        write(&child_hash.to_le_bytes());
-    }
-    cache.insert(Rc::as_ptr(node), hash);
-    hash
-}
-
-/// Structural equality ignoring planning metadata (`timing`, `guarantee`).
-/// `proven` memoizes node pairs already found equal.
-fn same_definition(
-    a: &Rc<OperatorNode>,
-    b: &Rc<OperatorNode>,
-    proven: &mut HashSet<(*const OperatorNode, *const OperatorNode)>,
-) -> bool {
-    let key = (Rc::as_ptr(a), Rc::as_ptr(b));
-    if Rc::ptr_eq(a, b) || proven.contains(&key) {
-        return true;
-    }
-    let (ac, bc) = (a.children(), b.children());
-    let equal = a.operator.map_children(|_| ()) == b.operator.map_children(|_| ())
-        && a.result_kind == b.result_kind
-        && a.schema == b.schema
-        && ac.len() == bc.len()
-        && ac
-            .iter()
-            .zip(&bc)
-            .all(|(x, y)| same_definition(x, y, proven));
-    if equal {
-        proven.insert(key);
-    }
-    equal
-}
-
-fn of_summary_agg(node: &OperatorNode) -> SummaryCoverage {
-    let Some(ASAPOp::SummaryAgg {
+/// The coverage of `build`, a `SummaryAgg` over memo groups (or over an
+/// input a rule built over them): its operators walked down through the
+/// liftable operators of its input groups' expressions.
+fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, CoverageError> {
+    let ASAPOp::SummaryAgg {
         child,
         family,
         input,
         reduction,
         grouping,
         filter,
-    }) = node.asap()
+    } = build
     else {
         unreachable!("called on a SummaryAgg");
     };
+    // Operator<()> cannot say which group a scalar subquery reads.
+    if build.children().len() > 1 {
+        return Err(CoverageError::SubqueryInDefinition);
+    }
 
-    // The chain a predicate can be lifted through, top to bottom, and the
-    // first node below it.
-    let mut chain: Vec<&Rc<OperatorNode>> = Vec::new();
-    let mut base = child;
-    while let Some(op) = base.non_asap() {
-        let passes = match op {
-            // A rename outside a `Project` would be dropped with the node
-            // when everything is lifted out of it, so such a node stays.
-            NonASAPOp::Project { .. } => true,
-            _ if base.operator.output_schema().ok().as_ref() != Some(&base.schema) => false,
-            NonASAPOp::Filter { .. } => true,
-            NonASAPOp::TimeRange { kind, .. } => *kind == TimeRangeKind::Range,
-            NonASAPOp::TimeShift { shift, .. } => shift.at.is_none(),
-            _ => false,
-        };
+    // The operators a predicate can be lifted through, top to bottom, and
+    // the first input below them. One with a scalar subquery stays below.
+    let mut chain: Vec<Operator<GroupInput<'_>>> = Vec::new();
+    let mut base = child.clone();
+    loop {
+        let operator = base.operator();
+        let passes = operator.children().len() == 1
+            && match &operator {
+                Operator::NonASAP(NonASAPOp::Project { .. } | NonASAPOp::Filter { .. }) => true,
+                Operator::NonASAP(NonASAPOp::TimeRange { kind, .. }) => {
+                    *kind == TimeRangeKind::Range
+                }
+                Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }) => shift.at.is_none(),
+                _ => false,
+            };
         if !passes {
             break;
         }
-        chain.push(base);
-        base = base.children()[0];
+        base = operator.children()[0].clone();
+        chain.push(operator);
     }
+    let BuiltOrInput::Input(input_group) = &base else {
+        unreachable!("a rule builds only liftable operators over memo groups");
+    };
     // Time is lifted only from exactly one range window.
     let lift_time = chain
         .iter()
-        .filter(|link| matches!(link.non_asap(), Some(NonASAPOp::TimeRange { .. })))
+        .filter(|link| matches!(link, Operator::NonASAP(NonASAPOp::TimeRange { .. })))
         .count()
         == 1;
 
-    let top = &child.schema;
+    let top = child.schema();
     // Top-down: decide which conjuncts are lifted. `kept[d]` is the residual
     // of `chain[d]` when it is a `Filter`.
     let mut lifted = BTreeMap::new();
     let agg_filter = filter
         .as_ref()
         .and_then(|pred| residual(pred, top, &[], &mut lifted));
-    let kept: Vec<Option<Predicate>> = chain
+    let kept: Vec<Option<Predicate<()>>> = chain
         .iter()
         .enumerate()
-        .map(|(depth, link)| match link.non_asap() {
-            Some(NonASAPOp::Filter { pred, .. }) => {
+        .map(|(depth, link)| match link {
+            Operator::NonASAP(NonASAPOp::Filter { pred, .. }) => {
                 residual(pred, top, &chain[..depth], &mut lifted)
             }
             _ => None,
         })
         .collect();
-    let scan_kept = match base.non_asap() {
-        Some(NonASAPOp::Scan { predicates, .. }) => Some(
-            predicates
-                .iter()
-                .filter_map(|pred| residual(pred, top, &chain, &mut lifted))
-                .collect::<Vec<_>>(),
-        ),
-        _ => None,
-    };
-
-    // Bottom-up: rebuild without what was lifted. A node whose input and
-    // operator are unchanged keeps its `Rc`.
-    let mut rebuilt = Rc::clone(base);
-    if let (
-        Some(kept),
-        Some(NonASAPOp::Scan {
+    // A `Scan`'s predicates (PromQL label matchers) are lifted too; when
+    // one is, the `Scan` with the rest of its predicates is the last
+    // unlifted operator, and there is no input group.
+    let scan = match base.operator() {
+        Operator::NonASAP(NonASAPOp::Scan {
             source,
             predicates,
             schema,
-        }),
-    ) = (scan_kept, base.non_asap())
-    {
-        if kept != *predicates {
-            rebuilt = rebuild(
-                base,
-                NonASAPOp::Scan {
-                    source: source.clone(),
-                    predicates: kept,
-                    schema: schema.clone(),
-                },
-            );
+        }) => {
+            let lifted_above = lifted.clone();
+            let kept = predicates
+                .iter()
+                .filter_map(|pred| residual(pred, top, &chain, &mut lifted))
+                .collect();
+            (lifted != lifted_above).then_some(NonASAPOp::Scan {
+                source,
+                predicates: kept,
+                schema,
+            })
+        }
+        _ => None,
+    };
+
+    let mut unlifted_operators = vec![Operator::ASAP(ASAPOp::SummaryAgg {
+        child: (),
+        family: family.clone(),
+        input: input.clone(),
+        reduction: reduction.clone(),
+        grouping: grouping.clone(),
+        filter: agg_filter,
+    })];
+    let (mut window_ms, mut shift_ms) = (0i64, 0i64);
+    for (depth, link) in chain.iter().enumerate() {
+        match link {
+            Operator::NonASAP(NonASAPOp::Filter { .. }) => {
+                if let Some(rest) = kept[depth].clone() {
+                    unlifted_operators.push(Operator::NonASAP(NonASAPOp::Filter {
+                        pred: rest,
+                        child: (),
+                    }));
+                }
+            }
+            Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) if lift_time => {
+                window_ms = range.as_millis() as i64;
+            }
+            Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }) if lift_time => {
+                shift_ms += shift.offset_ms;
+            }
+            other => unlifted_operators.push(other.map_children(|_| ())),
         }
     }
-    let (mut window_ms, mut shift_ms) = (0i64, 0i64);
-    for (depth, link) in chain.iter().enumerate().rev() {
-        let child = Rc::clone(&rebuilt);
-        let op = match link.non_asap().expect("chain nodes are non-ASAP") {
-            NonASAPOp::Filter { pred, .. } => match &kept[depth] {
-                None => continue,
-                Some(rest) if rest == pred && Rc::ptr_eq(&child, link.children()[0]) => {
-                    rebuilt = Rc::clone(link);
-                    continue;
-                }
-                Some(rest) => NonASAPOp::Filter {
-                    pred: rest.clone(),
-                    child,
-                },
-            },
-            NonASAPOp::TimeRange { range, .. } if lift_time => {
-                window_ms = range.as_millis() as i64;
-                continue;
-            }
-            NonASAPOp::TimeShift { shift, .. } if lift_time => {
-                shift_ms += shift.offset_ms;
-                continue;
-            }
-            _ if Rc::ptr_eq(&child, link.children()[0]) => {
-                rebuilt = Rc::clone(link);
-                continue;
-            }
-            NonASAPOp::TimeRange { range, kind, .. } => NonASAPOp::TimeRange {
-                range: *range,
-                kind: *kind,
-                child,
-            },
-            NonASAPOp::TimeShift { shift, .. } => NonASAPOp::TimeShift {
-                shift: *shift,
-                child,
-            },
-            NonASAPOp::Project {
-                cols, qualifier, ..
-            } => NonASAPOp::Project {
-                cols: cols.clone(),
-                qualifier: qualifier.clone(),
-                child,
-            },
-            _ => unreachable!("only liftable operators are on the chain"),
-        };
-        rebuilt = rebuild(link, op);
-    }
-    let definition = rebuild_asap(
-        node,
-        ASAPOp::SummaryAgg {
-            child: rebuilt,
-            family: family.clone(),
-            input: input.clone(),
-            reduction: reduction.clone(),
-            grouping: grouping.clone(),
-            filter: agg_filter,
-        },
-    );
+    let input_group = match scan {
+        Some(scan) => {
+            unlifted_operators.push(Operator::NonASAP(scan));
+            None
+        }
+        None => Some(input_group.group_id),
+    };
 
     let selection = SelectionBox {
         columns: lifted
@@ -776,40 +754,28 @@ fn of_summary_agg(node: &OperatorNode) -> SummaryCoverage {
             Bound::Included(-shift_ms),
         )),
     };
-    SummaryCoverage {
-        definition,
+    Ok(SummaryCoverage {
+        definition: SummaryStateDefinition {
+            input_group,
+            unlifted_operators,
+        },
         selection: vec![selection],
-    }
-}
-
-/// A node with the same output schema over a new operator. The definition
-/// describes what was computed; it is not re-validated as a plan.
-fn rebuild(original: &OperatorNode, op: NonASAPOp) -> Rc<OperatorNode> {
-    Rc::new(OperatorNode::with_schema(
-        Operator::NonASAP(op),
-        original.schema.clone(),
-    ))
-}
-
-fn rebuild_asap(original: &OperatorNode, op: ASAPOp) -> Rc<OperatorNode> {
-    Rc::new(OperatorNode::with_schema(
-        Operator::ASAP(op),
-        original.schema.clone(),
-    ))
+    })
 }
 
 /// Lift what `pred`'s conjuncts can into `lifted` (keyed by the column of
-/// `top`, the agg child's schema) and return the rest. `above` are the chain
-/// nodes between the predicate and the `SummaryAgg`, top to bottom. A column
-/// whose `(table, name)` is not unique in `top` cannot be named in a
-/// selection, so its conjuncts stay.
-fn residual(
-    pred: &Predicate,
+/// `top`, the agg child's schema) and return the rest, without input refs
+/// (the caller keeps only predicates without scalar subqueries). `above`
+/// are the operators between the predicate and the `SummaryAgg`, top to
+/// bottom. A column whose `(table, name)` is not unique in `top` cannot be
+/// named in a selection, so its conjuncts stay.
+fn residual<C>(
+    pred: &Predicate<C>,
     top: &Schema,
-    above: &[&Rc<OperatorNode>],
+    above: &[Operator<C>],
     lifted: &mut BTreeMap<ColumnId, Constraint>,
-) -> Option<Predicate> {
-    let mut rest: Vec<ScalarExpr> = Vec::new();
+) -> Option<Predicate<()>> {
+    let mut rest: Vec<ScalarExpr<()>> = Vec::new();
     for conjunct in pred.0.conjuncts() {
         let lift = constraint_of(conjunct).and_then(|(column, constraint)| {
             let column = column_at_top(column, above)?;
@@ -832,7 +798,7 @@ fn residual(
             Some((column, constraint)) => {
                 lifted.insert(column, constraint);
             }
-            None => rest.push(conjunct.clone()),
+            None => rest.push(conjunct.map_operator_refs(&mut |_| ())),
         }
     }
     match rest.len() {
@@ -844,12 +810,12 @@ fn residual(
 
 /// Map a column of the input of `above.last()` up to the agg child's output:
 /// a `Project` passes it only as a direct column item.
-fn column_at_top(mut column: ColumnId, above: &[&Rc<OperatorNode>]) -> Option<ColumnId> {
+fn column_at_top<C>(mut column: ColumnId, above: &[Operator<C>]) -> Option<ColumnId> {
     for link in above.iter().rev() {
-        if let Some(NonASAPOp::Project { cols, .. }) = link.non_asap() {
+        if let Operator::NonASAP(NonASAPOp::Project { cols, .. }) = link {
             column = cols
                 .iter()
-                .position(|item| item.expr == ScalarExpr::Column(column))?;
+                .position(|item| matches!(item.expr, ScalarExpr::Column(c) if c == column))?;
         }
     }
     Some(column)
@@ -857,8 +823,8 @@ fn column_at_top(mut column: ColumnId, above: &[&Rc<OperatorNode>]) -> Option<Co
 
 /// `column = v`, `!=`, `<`, `<=`, `>`, `>=`, `[NOT] IN (...)` and `OR` of
 /// equalities on one column, with non-null literals.
-fn constraint_of(expr: &ScalarExpr) -> Option<(ColumnId, Constraint)> {
-    let literal = |e: &ScalarExpr| match e {
+fn constraint_of<C>(expr: &ScalarExpr<C>) -> Option<(ColumnId, Constraint)> {
+    let literal = |e: &ScalarExpr<C>| match e {
         ScalarExpr::Literal(v) if *v != ScalarValue::Null => Some(v.clone()),
         _ => None,
     };

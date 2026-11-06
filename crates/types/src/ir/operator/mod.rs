@@ -4,6 +4,8 @@
 //! - [`node`] — [`OperatorNode`](node::OperatorNode): an operator plus the
 //!   planning properties every traversal needs.
 //! - [`non_asap`] / [`asap`] — ordinary query operators and ASAP operators.
+//! - [`input`] — how the derivation rules read an operator's inputs
+//!   ([`OperatorInput`](input::OperatorInput)).
 //! - [`operator_properties`] — operator parameter types ([`GroupKeys`],
 //!   [`Reduction`], [`Source`], …).
 //! - [`agg_intent`] — the aggregation-intent vocabulary ([`AggIntent`]).
@@ -12,6 +14,7 @@
 //! - [`query`] — a query root: an operator result or a standalone scalar.
 pub mod agg_intent;
 pub mod asap;
+pub mod input;
 pub mod maintained_population;
 pub mod node;
 pub mod non_asap;

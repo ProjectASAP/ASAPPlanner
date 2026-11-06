@@ -987,11 +987,11 @@ fn with_root_estimate(
 }
 
 /// The family of the build whose state `state` carries.
-fn state_family(state: &OperatorNode) -> Result<FieldDataType, String> {
+fn state_family(state: &Rc<OperatorNode>) -> Result<FieldDataType, String> {
     match state.summary_build() {
         Some(
             ASAPOp::SummaryAgg { family, .. } | ASAPOp::SummaryTumblingWindowChain { family, .. },
-        ) => Ok(family.clone()),
+        ) => Ok(family),
         _ => Err("q's estimate reads no single summary build".into()),
     }
 }
@@ -1226,7 +1226,7 @@ pub fn witness_root(
             })
         }
         Witness::OtherStatistic { statistic } => {
-            let answers = |state: &OperatorNode| -> Result<(), String> {
+            let answers = |state: &Rc<OperatorNode>| -> Result<(), String> {
                 let family = state_family(state)?;
                 if FamilyCapability::of(&family).answers(statistic) {
                     Ok(())

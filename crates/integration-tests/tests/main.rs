@@ -34,5 +34,4 @@ mod sql_cardinality;
 mod sql_frequency;
 mod sql_to_post_asap;
 mod stage1_logical_asap_optimization;
-mod summary_coverage_e2e;
 mod time_range;

@@ -5,8 +5,10 @@
 
 use std::collections::HashSet;
 
-use super::{MemoGroup, MemoGroupId};
+use super::{GroupProperties, MemoGroup, MemoGroupAsInput, MemoGroupId};
+use crate::ir::properties::summary_coverage::SummaryCoverage;
 use crate::ir::schema::{SketchAlgorithm, SketchParams};
+use crate::ir::ASAPOp;
 use crate::ir::Operator;
 use crate::ir::QueryRoot;
 use crate::ir::SchemaDerivationError;
@@ -45,25 +47,29 @@ impl Memo {
         todo!("#1207 PR 2")
     }
 
-    /// Hash-consing: the group with this expression, added if new. Fails
-    /// when the expression breaks the node rules (schema derivation, input
+    /// Hash-consing: the group with this expression, added if new, with the
+    /// `GroupProperties` [`derive_group_properties`] derives. Fails when the
+    /// expression breaks the node rules (schema derivation, input
     /// validation, merge check).
     pub fn find_or_add_group(
         &mut self,
         expression: Operator<MemoGroupId>,
     ) -> Result<MemoGroupId, SchemaDerivationError> {
-        let _ = expression;
+        let _group_properties = derive_group_properties(self, &expression)?;
         todo!("#1207 PR 2: hash-consing over groups")
     }
 
     /// Adds `candidate` to `group`'s candidates. Fails when its expression
-    /// breaks the node rules or its output differs from the group's.
+    /// breaks the node rules ([`derive_group_properties`]) or its output
+    /// schema or kind differs from the group's.
     pub fn add_candidate(
         &mut self,
         group: MemoGroupId,
         candidate: CandidateForMemoGroup,
     ) -> Result<CandidateForMemoGroupId, CandidateError> {
-        let _ = (group, candidate);
+        let _output = derive_group_properties(self, &candidate.expression.operator)
+            .map_err(CandidateError::Schema)?;
+        let _ = group;
         todo!("#1207 PR 2")
     }
 
@@ -81,7 +87,7 @@ impl Memo {
         let count = self.groups.len();
         let mut reads: Vec<HashSet<usize>> = vec![HashSet::new(); count];
         for (g, group) in self.groups.iter().enumerate() {
-            for child in group.child_groups.iter().chain(
+            for child in group.expression.children().into_iter().chain(
                 group
                     .candidates
                     .iter()
@@ -114,6 +120,34 @@ impl Memo {
         }
         (order.len() == count).then_some(order)
     }
+}
+
+/// The properties of a group, or a candidate, computing `expression` over
+/// its input groups: the rules that check operator nodes, reading each
+/// input group's `group_properties` and `expression`
+/// ([`MemoGroupAsInput`]), never a node tree. Fails when the expression
+/// breaks them (schema derivation, input validation, merge check).
+fn derive_group_properties(
+    memo: &Memo,
+    expression: &Operator<MemoGroupId>,
+) -> Result<GroupProperties, SchemaDerivationError> {
+    let operator = expression.map_children(|&group_id| MemoGroupAsInput { memo, group_id });
+    let schema = operator.output_schema()?;
+    operator.validate_inputs()?;
+    let summary_coverage = match SummaryCoverage::derive_from_inputs(&operator) {
+        Ok(coverage) => Some(coverage),
+        // A merge is valid only over states of one definition it may merge.
+        Err(error) if matches!(operator, Operator::ASAP(ASAPOp::SummaryMerge { .. })) => {
+            return Err(error.into())
+        }
+        Err(_) => None,
+    };
+    Ok(GroupProperties {
+        schema,
+        result_kind: operator.output_kind(),
+        summary_coverage,
+        shareable_when_equal: operator.is_shareable_when_equal(),
+    })
 }
 
 /// A candidate [`Memo::add_candidate`] rejects; the memo is unchanged.

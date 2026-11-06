@@ -117,7 +117,9 @@ fn state_evaluations_and_passthrough_keep_their_contracts() {
     .unwrap();
     pass.validate_structure().unwrap();
     assert_eq!(pass.result_kind, OperatorResultKind::State);
-    assert!(ScalarExpr::Column(0).scalar_type(&pass.schema).is_err());
+    assert!(ScalarExpr::<Rc<OperatorNode>>::Column(0)
+        .scalar_type(&pass.schema)
+        .is_err());
     assert!(validate_asap_inputs(&ASAPOp::SummaryEstimate {
         summary_input: state.clone(),
         query: SketchStatistic::Cardinality

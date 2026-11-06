@@ -208,7 +208,11 @@ fn declared_group_bound(node: &OperatorNode, data: &DataWorkload) -> Option<u64>
         ) => grouped(reduction, child),
         // A merge's children are states of one definition: its first
         // build's grouping stands for all of them.
-        Operator::ASAP(ASAPOp::SummaryMerge { .. }) => match node.summary_build() {
+        Operator::ASAP(ASAPOp::SummaryMerge {
+            children,
+            group_by: None,
+            ..
+        }) => match children.first().and_then(|first| first.summary_build()) {
             Some(
                 ASAPOp::SummaryAgg {
                     reduction, child, ..
@@ -216,7 +220,7 @@ fn declared_group_bound(node: &OperatorNode, data: &DataWorkload) -> Option<u64>
                 | ASAPOp::SummaryTumblingWindowChain {
                     reduction, child, ..
                 },
-            ) => grouped(reduction, child),
+            ) => grouped(&reduction, &child),
             _ => None,
         },
         Operator::ASAP(ASAPOp::SummaryEstimate {
@@ -365,11 +369,11 @@ fn at_most_one_row(node: &OperatorNode) -> bool {
             ..
         }) => keys.is_empty(),
         // A merge gives one state per group, whatever the tumbling windows it merges.
-        Operator::ASAP(ASAPOp::SummaryMerge { .. }) => matches!(
-            node.summary_build(),
+        Operator::ASAP(ASAPOp::SummaryMerge { children, .. }) => matches!(
+            children.first().and_then(|first| first.summary_build()),
             Some(
                 ASAPOp::SummaryAgg { reduction, .. } | ASAPOp::SummaryTumblingWindowChain { reduction, .. }
-            ) if global(reduction)
+            ) if global(&reduction)
         ),
         Operator::ASAP(ASAPOp::SummaryEstimate {
             summary_input,

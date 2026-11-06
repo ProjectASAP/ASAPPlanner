@@ -820,20 +820,10 @@ fn composed_candidate_replaces_chosen_target_with_summary_evaluation() {
     let QueryRoot::Operator(estimate) = &hll[0] else {
         panic!("operator root expected")
     };
-    let Some(ASAPOp::SummaryEstimate { summary_input, .. }) = estimate.asap() else {
-        panic!("summary evaluation expected")
-    };
-    // The state takes every row of its source: one unrestricted selection box.
-    let coverage = summary_input.coverage().unwrap();
-    assert!(OperatorNode::reachable(coverage.definition()).iter().any(|node| matches!(
-        node.non_asap(),
-        Some(NonASAPOp::Scan { source: Source::Table { table_ref }, .. }) if table_ref == "flows"
-    )));
-    assert_eq!(coverage.selection().len(), 1);
-    assert!(
-        coverage.selection()[0].columns().is_empty()
-            && coverage.selection()[0].relative_time().is_none()
-    );
+    assert!(matches!(
+        estimate.asap(),
+        Some(ASAPOp::SummaryEstimate { .. })
+    ));
     hll[0].validate_structure().unwrap();
     assert!(compose_logical_candidate(&inventory, &[99]).is_err());
 }

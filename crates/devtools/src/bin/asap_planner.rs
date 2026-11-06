@@ -97,8 +97,7 @@
 // A section of a stage after `--run-until` is null.
 
 use std::collections::btree_map::Entry;
-use std::collections::{BTreeSet, HashMap};
-use std::rc::Rc;
+use std::collections::BTreeSet;
 
 use asap_cost::{CostInputs, ResourceUsage};
 use asap_devtools::candidate_labels::node_label;
@@ -112,12 +111,11 @@ use asap_frontend_promql::{metric_type_warnings, promql_metric_names};
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_plan_selection::{large_peak_memory_warning, AcceptedAccuracy, Selection};
 use asap_planner::{installable_plan_of, PlanningModels, SelectionError};
-use asap_types::ir::flat::{flatten, FlatDag, FlatNode, NodeId};
-use asap_types::ir::operator::node::OperatorNode;
+use asap_types::ir::flat::{flatten, FlatDag, FlatNode};
 use asap_types::ir::properties::{default_metric_for_root, AccuracyTarget};
 use asap_types::ir::QueryRoot;
 use asap_types::stages::PhysicalASAPMemoCandidates;
-use asap_types::stages::{queries_rooted_at, MemoGroupId};
+use asap_types::stages::{queries_rooted_at, MemoGroup, MemoGroupId};
 use asap_types::stages::{Memo, OriginOfCandidateForMemoGroup};
 use asap_types::workload::{
     DataArrival, DataWorkload, PlanningWorkload, QueryLanguage, QueryRecurrence,
@@ -827,44 +825,10 @@ fn with_default_metrics(mut queries: Vec<Value>, roots: &[QueryRoot]) -> Vec<Val
 }
 
 /// The `memo` section's node table (`memo.nodes`): each distinct node once,
-/// children before parents, its children as indices into the table. Nodes
-/// are matched by their serialized JSON (children included), since the
-/// steps rebuild equal nodes as different `Rc`s.
+/// children before parents, its children as indices into the table.
 #[derive(Default)]
 struct MemoNodes {
     nodes: Vec<FlatNode>,
-    index_of: HashMap<String, NodeId>,
-}
-
-impl MemoNodes {
-    /// Adds `roots` and every node below them. Returns each root's index
-    /// and, for each node of that DAG, the original node and its index.
-    fn add(
-        &mut self,
-        roots: &[Rc<OperatorNode>],
-    ) -> (Vec<NodeId>, Vec<(Rc<OperatorNode>, NodeId)>) {
-        let roots: Vec<_> = roots.iter().cloned().map(QueryRoot::Operator).collect();
-        let (dag, originals) = flatten(&roots);
-        let mut index_in_table: Vec<NodeId> = Vec::with_capacity(dag.nodes.len());
-        for mut node in dag.nodes {
-            node.operator = node.operator.map_children(|&child| index_in_table[child]);
-            let key = serde_json::to_string(&node).expect("a flat node serializes");
-            let index = *self.index_of.entry(key).or_insert_with(|| {
-                self.nodes.push(node);
-                self.nodes.len() - 1
-            });
-            index_in_table.push(index);
-        }
-        let roots = dag
-            .roots
-            .iter()
-            .map(|root| match root {
-                QueryRoot::Operator(id) => index_in_table[*id],
-                QueryRoot::Scalar(_) => unreachable!("memo DAGs have operator roots"),
-            })
-            .collect();
-        (roots, originals.into_iter().zip(index_in_table).collect())
-    }
 }
 
 /// `memo`'s groups, each with its candidates, their nodes added to
@@ -877,7 +841,7 @@ fn memo_groups_json(table: &mut MemoNodes, memo: &Memo, previous: Option<&Memo>)
         .enumerate()
         .map(|(id, group)| {
             let candidates = &group.candidates;
-            let node = table.add(std::slice::from_ref(&group.logical_node)).0[0];
+            let node = group_node(table, group);
             let mut by_origin = serde_json::Map::new();
             for candidate in candidates {
                 let count = by_origin
@@ -896,7 +860,7 @@ fn memo_groups_json(table: &mut MemoNodes, memo: &Memo, previous: Option<&Memo>)
             json!({
                 "id": id,
                 "label": node_label(&table.nodes[node]),
-                "children": ids(&group.child_groups),
+                "children": group.expression.children().into_iter().map(|g| g.0).collect::<Vec<_>>(),
                 "parents": ids(group.parent_groups()),
                 "queries": group.reached_by_queries(),
                 "roots_of": queries_rooted_at(&memo.query_roots, MemoGroupId(id as u32)),
@@ -910,6 +874,12 @@ fn memo_groups_json(table: &mut MemoNodes, memo: &Memo, previous: Option<&Memo>)
         .collect()
 }
 
+/// The node of `group`'s own operator, added to `table`.
+fn group_node(table: &mut MemoNodes, group: &MemoGroup) -> usize {
+    let _ = (table, group);
+    todo!("#1207 PR 9: a group's node from its expression")
+}
+
 /// `OriginOfCandidateForMemoGroup` in snake case.
 fn origin_name(origin: &OriginOfCandidateForMemoGroup) -> String {
     match origin {
@@ -921,70 +891,4 @@ fn origin_name(origin: &OriginOfCandidateForMemoGroup) -> String {
         OriginOfCandidateForMemoGroup::WidenedScans => "widened_scans",
     }
     .into()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A node two DAGs share is stored once in the memo's node table, even
-    /// when each DAG built it as its own `Rc`, and each DAG rebuilt from the
-    /// table equals its own `FlatDag` export.
-    #[test]
-    fn memo_node_table_stores_a_shared_node_once() {
-        let root = |query: &str| {
-            let workload: PlanningWorkload = serde_json::from_value(json!({
-                "query_workload": {"language": "promql", "query_batch": [{
-                    "query": query, "invocations": 1,
-                    "requirements": {"accuracy": {"max_error": 0.0, "failure_probability": 0.0}},
-                    "predictability": {"predictable": {"known_at": null}},
-                }]},
-                "data_workload": {
-                    "arrival": {"ingesting": {"rows_per_second": 1.0}},
-                    "sources": {"m": {"series_count": 10, "sample_interval": 15000, "metric_type": "gauge"}},
-                },
-            }))
-            .unwrap();
-            match lower_promql_roots(&workload).unwrap().remove(0) {
-                QueryRoot::Operator(node) => node,
-                QueryRoot::Scalar(_) => unreachable!(),
-            }
-        };
-        let (sum, max) = (root("sum(m)"), root("max(m)"));
-        let mut table = MemoNodes::default();
-        let (sum_root, _) = table.add(std::slice::from_ref(&sum));
-        let after_sum = table.nodes.len();
-        let (max_root, _) = table.add(std::slice::from_ref(&max));
-        // `max(m)` adds only its own aggregate: the scan is already there.
-        assert_eq!(table.nodes.len(), after_sum + 1);
-        // The DAG below `root`, renumbered in table order.
-        let rebuilt = |root: NodeId| {
-            let mut reached = BTreeSet::new();
-            let mut pending = vec![root];
-            while let Some(id) = pending.pop() {
-                if reached.insert(id) {
-                    pending.extend(table.nodes[id].operator.children().into_iter().copied());
-                }
-            }
-            let local: HashMap<_, _> = reached.iter().enumerate().map(|(i, &id)| (id, i)).collect();
-            let nodes: Vec<_> = reached
-                .iter()
-                .map(|&id| {
-                    let mut node = table.nodes[id].clone();
-                    node.operator = node.operator.map_children(|child| local[child]);
-                    node
-                })
-                .collect();
-            FlatDag {
-                nodes,
-                roots: vec![QueryRoot::Operator(local[&root])],
-            }
-        };
-        for (node, root) in [(sum, sum_root[0]), (max, max_root[0])] {
-            assert_eq!(
-                serde_json::to_value(rebuilt(root)).unwrap(),
-                serde_json::to_value(export(&[QueryRoot::Operator(node)])).unwrap()
-            );
-        }
-    }
 }

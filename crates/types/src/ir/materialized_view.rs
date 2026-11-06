@@ -1087,79 +1087,15 @@ impl<'a> ViewIndex<'a> {
     }
 }
 
-/// The coverage of view `id` (IR `ir`), refreshed from `inputs`. A merge's
-/// is the union of its inputs' selections under their shared definition
-/// ([`SummaryCoverage::derive`]). A summary built from exactly one view and
-/// nothing else, with no selection of its own (a rollup to a coarser
-/// grouping, or across series), takes that input's selection: its
-/// definition is its own sub-DAG with the input replaced by the input's
-/// definition, so the rollups of equal inputs share one definition.
-/// Anything else keeps its own derived coverage.
+/// The coverage of view `id` (IR `ir`), refreshed from `inputs`: the
+/// coverage its memo group stores, which the realized plan will carry.
+/// Coverage is derived only in the memo, never on node trees.
 fn coverage_of(
     id: PhysicalASAPNodeId,
     inputs: &MaterializedViewInputs,
     ir: &HashMap<PhysicalASAPNodeId, Rc<OperatorNode>>,
     coverage_by_node: &HashMap<PhysicalASAPNodeId, SummaryCoverage>,
 ) -> Result<SummaryCoverage, CoverageError> {
-    let node = &ir[&id];
-    let own = SummaryCoverage::derive(node)?;
-    let [input] = inputs.materialized_views.as_slice() else {
-        return Ok(own);
-    };
-    if !inputs.raw_data_windows.is_empty()
-        || matches!(node.asap(), Some(ASAPOp::SummaryMerge { .. }))
-        || own.selection != [SelectionBox::default()]
-    {
-        return Ok(own);
-    }
-    let input_coverage = &coverage_by_node[input];
-    let over_definition = with_replaced(node, &ir[input], &input_coverage.definition);
-    Ok(SummaryCoverage {
-        definition: SummaryCoverage::derive(&over_definition)?.definition,
-        selection: input_coverage.selection.clone(),
-    })
-}
-
-/// `node` with every use of `old` (by address) replaced by `new`; nodes
-/// that do not reach `old` are shared, not copied.
-fn with_replaced(
-    node: &Rc<OperatorNode>,
-    old: &Rc<OperatorNode>,
-    new: &Rc<OperatorNode>,
-) -> Rc<OperatorNode> {
-    fn replace(
-        node: &Rc<OperatorNode>,
-        old: &Rc<OperatorNode>,
-        new: &Rc<OperatorNode>,
-        cache: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
-    ) -> Rc<OperatorNode> {
-        if Rc::ptr_eq(node, old) {
-            return Rc::clone(new);
-        }
-        if let Some(done) = cache.get(&Rc::as_ptr(node)) {
-            return Rc::clone(done);
-        }
-        let children = node.children();
-        let replaced: Vec<Rc<OperatorNode>> = children
-            .iter()
-            .map(|child| replace(child, old, new, cache))
-            .collect();
-        let result = if children
-            .iter()
-            .zip(&replaced)
-            .all(|(a, b)| Rc::ptr_eq(a, b))
-        {
-            Rc::clone(node)
-        } else {
-            let mut next = replaced.into_iter();
-            let mut copy = (**node).clone();
-            copy.operator = node
-                .operator
-                .map_children(|_| next.next().expect("one per child"));
-            Rc::new(copy)
-        };
-        cache.insert(Rc::as_ptr(node), Rc::clone(&result));
-        result
-    }
-    replace(node, old, new, &mut HashMap::new())
+    let _ = (id, inputs, ir, coverage_by_node);
+    todo!("#1207 PR 6: the view's coverage from its memo group's GroupProperties::summary_coverage")
 }

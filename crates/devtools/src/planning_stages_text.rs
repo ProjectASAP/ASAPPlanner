@@ -21,11 +21,10 @@
 //! ```
 
 use std::fmt::Write;
-use std::rc::Rc;
 
 use asap_types::ir::flat::flatten;
-use asap_types::ir::{OperatorNode, QueryRoot};
-use asap_types::stages::{Memo, PhysicalASAPMemoCandidates};
+use asap_types::ir::QueryRoot;
+use asap_types::stages::{Memo, MemoGroup, PhysicalASAPMemoCandidates};
 
 use crate::candidate_labels::node_label;
 use crate::planning_stages::{PlanningStagesRun, RunUntil};
@@ -191,15 +190,12 @@ fn write_memo(out: &mut String, memo: &Memo, previous: Option<&Memo>, with_candi
         .enumerate()
         .map(|(id, group)| {
             let children: Vec<String> = group
-                .child_groups
-                .iter()
+                .expression
+                .children()
+                .into_iter()
                 .map(|child| format!("G{}", child.0))
                 .collect();
-            vec![
-                format!("G{id}:"),
-                root_label(&group.logical_node),
-                reads(&children),
-            ]
+            vec![format!("G{id}:"), group_label(group), reads(&children)]
         })
         .collect();
     let mut group_lines = String::new();
@@ -237,10 +233,10 @@ fn write_selection(out: &mut String, stages: &PlanningStagesRun) {
     todo!("#1207 PR 9: print the selected DAG over the new physical candidates")
 }
 
-/// The label of `node`'s own operator, without its children.
-fn root_label(node: &Rc<OperatorNode>) -> String {
-    let (flat, _) = flatten(&[QueryRoot::Operator(node.clone())]);
-    flat.nodes.last().map(node_label).unwrap_or_default()
+/// The label of `group`'s own operator, without its input groups.
+fn group_label(group: &MemoGroup) -> String {
+    let _ = group;
+    todo!("#1207 PR 9: label a group by its expression")
 }
 
 #[cfg(test)]

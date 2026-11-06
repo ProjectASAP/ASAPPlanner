@@ -661,17 +661,15 @@ fn compile_internal(
 /// Whether every summary state `state` merges was built from a relation's
 /// rows (a SQL table's), where a global aggregate has a row over no input
 /// row; not from a PromQL vector's, where it has none.
-fn built_from_relation(state: &OperatorNode) -> bool {
+fn built_from_relation(state: &std::rc::Rc<OperatorNode>) -> bool {
     match state.asap() {
-        Some(ASAPOp::SummaryMerge { children, .. }) => {
-            children.iter().all(|child| built_from_relation(child))
-        }
+        Some(ASAPOp::SummaryMerge { children, .. }) => children.iter().all(built_from_relation),
         Some(
             ASAPOp::SummaryAgg { child, .. } | ASAPOp::SummaryTumblingWindowChain { child, .. },
         ) => child.result_kind == planner_types::ir::OperatorResultKind::Relation,
         // A filter keeping whole states reads them from their build.
         _ => planner_types::ir::operator::asap::selected_from(state)
-            .is_some_and(|states| built_from_relation(states)),
+            .is_some_and(|states| built_from_relation(&states)),
     }
 }
 

@@ -20,7 +20,7 @@ async fn promql_eval_time_and_sql_current_timestamp_remain_distinct() {
         "expected a bare evaluation-time scalar, got {promql:?}"
     );
     assert_eq!(
-        ScalarExpr::EvalTimestamp
+        ScalarExpr::<std::rc::Rc<asap_types::ir::OperatorNode>>::EvalTimestamp
             .scalar_type(&Schema::default())
             .unwrap()
             .0,
