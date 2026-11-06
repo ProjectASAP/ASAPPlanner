@@ -119,21 +119,24 @@ Physical requirements are derived from the consumer's timing and execution conte
 QT means QueryTime; IT means IngestionTime. Alignment, data coverage, and retention checks still apply to allowed combinations.
 
 **Alignment.** There is no physical schedule property. When a result can be read follows from its lifetime and window layout:
-- **None** and **OneEvaluation**: the result is computed inside one evaluation context κ (Section 5) and read there. A OneEvaluation result belongs to one context: queries with the same schedule are evaluated together, and that evaluation's consumers share the result. When it runs is the context's schedule, and Stage 3 chooses it through $x_{\kappa,v}$, just as for ℓ = None. Sharing across differently scheduled queries through a gcd schedule is not offered: it is rarely beneficial and wastes runs.
+- **None** and **OneEvaluation**: the result is computed inside one evaluation context κ (Section 5) and read there. A OneEvaluation result belongs to one context: queries with equal recurrence and range evaluation are evaluated together, and that evaluation's consumers share the result. When it runs is the context's schedule, and Stage 3 chooses it through $x_{\kappa,v}$, just as for ℓ = None. Sharing across differently scheduled queries through a gcd schedule is not offered: it is rarely beneficial and wastes runs.
 - **Windowed AcrossEvaluations**: the input is cut into tumbling windows [k·w, (k+1)·w), with w from the window layout ω and the grid anchored at phase 0 (the epoch). Each window is built when it ends and can be read from then on. A consumer can read a range that ends on a window boundary. With w = 10 s, a `[1m]` query evaluated every 30 s at phase 0 merges the newest 6 windows; one evaluated at phase 15 s cannot, because its range ends inside a window; with that query in the workload, the gcd closure also offers w = 5 s, which both can read.
 
 A grid phase is not needed: a phase is absorbed by the width, because width candidates come from the gcd closure of the queries' ranges, steps and phases. For example, phases 0 and 5 s with w = 10 s give w = 5 s. Alignment alone does not ensure sufficient retained history; that is $h_v$ (Section 5).
 
-Let a context κ have interval $I_\kappa$ and phase $\varphi_\kappa$, and let a windowed producer have tumbling width $w$. A consumer running in κ can read the producer when:
+An evaluation context κ is described by the workload's own recurrence and range evaluation (Section 5). Let a windowed producer have tumbling width $w$. A consumer running in κ can read the producer when $w$ divides every evaluation time of κ:
 
-| Producer lifetime | Required alignment |
+| Producer lifetime, or κ's recurrence for a windowed AcrossEvaluations producer | Required alignment |
 |---|---|
 | None | Always: runs in κ |
 | OneEvaluation | The result belongs to κ |
-| AcrossEvaluations, tumbling width $w$ | $w\mid I_\kappa$ and $w\mid\varphi_\kappa$ |
+| `FixedIntervalAt { interval, evaluation_phase }`, range step $s$ | $w \mid \gcd(\text{interval}, s, \text{phase})$, the evaluation grid; $s$ counts only for a range evaluation of more than one step |
+| `Scheduled(times)` | $w$ divides every time (and $s$) |
+| `OneTime { execute_at: Some(t) }` | $w \mid t$ (and $s$) |
+| `FixedInterval` without a phase, `OneTime { execute_at: None }`, `EstimatedRate`, `Unknown` | Never: the evaluation times are not known |
 | AcrossEvaluations, no window layout | Not offered yet: it needs its own delivery rule |
 
-The formulation also permits a single, non-periodic evaluation. The interval/phase interface below covers only periodic consumers. Rejecting non-periodic consumers is a current scope restriction of that proposed interface, not a mathematical impossibility; supporting them needs explicit evaluation-time membership checks.
+The evaluation grid is `QueryRecurrence::evaluation_grid_ms(range_evaluation)` in `crates/types/src/workload/mod.rs`, which the workload entries also use. One-off queries are supported: each is a context of its own recurrence, run `invocations` times.
 
 ### Invalid combinations
 
@@ -186,7 +189,7 @@ The tree does not decide which producer each consumer input reads ($y$), in whic
 
 **The order does not change the candidate set.** The leaves are the product of the dimensions' values minus invalid combinations and pruned values. Each prune rule reads only the value it removes and values decided above it, so any order that keeps each prune rule below the dimensions it reads yields the same leaves.
 
-**The order changes how many nodes enumeration visits:** $\sum_d \prod_{d' \le d} \lvert \text{values kept at } d' \rvert$. Dimensions that prune much go early; dimensions that multiply without pruning go late. The order above follows four rules:
+**The order changes how many nodes enumeration visits:** $\sum_d \prod_{d' \le d} \lvert \text{values left at } d' \rvert$. Dimensions that prune much go early; dimensions that multiply without pruning go late. The order above follows four rules:
 
 1. **Logical before physical.** Stage 1 hash-conses groups and computes $\alpha^{\log}$ once, before Stage 2 multiplies each logical candidate by its physical alternatives.
 2. **Strong prunes early.** Executor support and the pruning cap act before windows and physical properties multiply the tree.
@@ -399,17 +402,13 @@ impl PhysicalProperties {
     pub fn is_materialized(&self) -> bool;
 }
 
-/// When a context runs: φ + I·ℤ.
-pub struct EvaluationSchedule {
-    interval_ms: u64,
-    phase_ms: u64,
-}
 impl PhysicalCandidate {
-    /// Whether a consumer running on `times` can read this producer
-    /// (Section 2's alignment table): w | I and w | φ for a windowed
-    /// AcrossEvaluations producer, with w read from its window layout;
-    /// true for ℓ = None and OneEvaluation, which run in that context.
-    pub fn delivers_on(&self, memo: &Memo, times: &EvaluationSchedule) -> bool;
+    /// Whether a consumer running in `context` can read this producer
+    /// (Section 2's alignment table): for a windowed AcrossEvaluations
+    /// producer, w (read from its window layout) divides every evaluation
+    /// time of the context; true for ℓ = None, and for OneEvaluation in the
+    /// same context.
+    pub fn delivers_on(&self, memo: &Memo, context: &ExecutionContext) -> bool;
 }
 /// α^phys: timing and lifetime only (Section 2's table). Alignment is
 /// checked per context in Stage 3 with `delivers_on`.
@@ -658,25 +657,22 @@ These extensions go beyond constraints (A)–(I) and the formulation's fixed-cos
 
 An AcrossEvaluations candidate has its own computation: each window is built when it ends. A candidate with ℓ = None runs inside an execution that needs it. For example, a finalize candidate used by queries A (every 10 s) and C (every 15 s) may execute in both evaluation contexts even though Stage 2 enumerates it only once. A OneEvaluation candidate also runs inside one evaluation context κ, and that evaluation's consumers share the result.
 
-A **context** identifies a class of executions with a common owner and schedule across the accounting horizon. It is not necessarily one timestamp. There is one evaluation context per evaluation schedule (interval, phase): all queries with that schedule are evaluated together and share its OneEvaluation results. Queries A and B of the running example, both every 10 s at phase 0, form one context. A non-periodic (one-off) query has no evaluation context yet: it is out of scope, as in Section 2.
+A **context** identifies a class of executions with a common owner and schedule across the accounting horizon. It is not necessarily one timestamp. An evaluation context reuses the workload's own description of when queries run, their `QueryRecurrence` and `RangeEvaluation`: queries with equal ones are evaluated together and share its OneEvaluation results. Queries A and B of the running example, both every 10 s at phase 0, form one context; a one-off query forms the context of its `OneTime` recurrence. `QueryRecurrence` holds an `f64` (`EstimatedRate`) and cannot be hashed, so contexts are deduplicated by equality and `ExecutionContextId` indexes the list of distinct contexts.
 
 ```rust
 pub struct ExecutionContextId(pub usize);
 
 pub enum ExecutionContext {
-    Evaluation(EvaluationSchedule),
+    Evaluation {
+        recurrence: QueryRecurrence,
+        range_evaluation: Option<RangeEvaluation>,
+    },
     IngestionPipeline(RefreshWindowId),
     Materialized(PhysicalCandidateId),
 }
-
-impl ExecutionContext {
-    // An evaluation context's schedule; None for the other contexts, which
-    // is not an implicit compatibility pass.
-    pub fn evaluation_schedule(&self) -> Option<EvaluationSchedule>;
-}
 ```
 
-A chain of ℓ = None and OneEvaluation candidates inherits its consuming context. Encountering an AcrossEvaluations producer switches to that producer's own computation context when traversing its inputs. The context identifies where the operation runs; `delivers_on` with the context's schedule decides whether a windowed producer can supply it.
+A chain of ℓ = None and OneEvaluation candidates inherits its consuming context. Encountering an AcrossEvaluations producer switches to that producer's own computation context when traversing its inputs. The context identifies where the operation runs; `delivers_on` with the context decides whether a windowed producer can supply it.
 
 | Extended variable | Meaning |
 |---|---|
@@ -697,7 +693,7 @@ To avoid confusing per-execution costs with the baseline's horizon-wide cost, us
 |---|---|
 | $W_v^{\mathrm{mat}}$ | Fixed computation and access cost over the horizon for an AcrossEvaluations candidate, one build per window, excluding variable retention |
 | $c_{\kappa,v}$ | Cost of one execution in the specified context of a candidate with ℓ = None or OneEvaluation, including a OneEvaluation result's storage within that evaluation |
-| $\rho_\kappa$ | Fixed number or expected number of context executions over the common horizon |
+| $\rho_\kappa$ | Fixed number or expected number of context executions over the common horizon, from the existing evaluation counting in `crates/cost/src/execution_demand.rs` (a one-off query's is its `invocations`) |
 | $h_v$ | Retention amount in a declared unit, such as retained windows |
 | $\pi_v$ | Horizon-wide retention cost per unit of retained amount |
 | $\operatorname{need}_{\kappa,v,c,i}$ | Retention amount producer v needs to serve this consumer input in this context: the time horizon the queries served by that context read, e.g. a 5m range over 10 s tumbling windows needs 30 windows. Query latency is ignored for now (decided 2026-11-06) |
