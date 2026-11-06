@@ -1,5 +1,5 @@
 //! Costing a physical plan DAG node by node: each node's resource usage
-//! ([`node_usage`]), then the plan's usage, latency, retention, kept tumbling window
+//! ([`node_usage`]), then the plan's usage, latency, retention, retained tumbling window
 //! chains and cost ([`plan_cost`]). Moved from Stage 3 (`asap-plan-selection`,
 //! whose module doc, "Cost model", describes the model), so Stage 3 computes
 //! no cost of its own.
@@ -44,8 +44,8 @@ use asap_types::workload::bounds::{
 /// reached. A query-time node is measured per computation over the rows its
 /// time ranges keep, times how often it is computed per second
 /// ([`computations`]); an ingestion-time node over one second of arriving
-/// rows. A materialized node's kept state is counted in byte-seconds per
-/// second; a tumbling-window chain kept beyond one evaluation keeps the tumbling windows its
+/// rows. A materialized node's state is counted in byte-seconds per
+/// second; a tumbling-window chain materialized beyond one evaluation keeps the tumbling windows its
 /// retention covers ([`tumbling_window_retention_ms`]). `nodes` and `materialized_chains` are
 /// `dag`'s ([`node_map`], [`materialized_tumbling_window_chains`]); `recurrence[q]` and
 /// `range_evaluations[q]` say how often query `q` runs and how many steps
@@ -100,7 +100,7 @@ pub fn plan_cost(
     // counted once the evaluations' latencies are known, in node order so
     // the sum is the same in every run.
     let mut held: BTreeMap<PhysicalASAPNodeId, (u64, f64, bool)> = BTreeMap::new();
-    // The raw data query-time scans read, kept on disk: per source, the
+    // The raw data query-time scans read, retained on disk: per source, the
     // largest scan's (bytes, node).
     let mut raw_data: HashMap<&Source, (u64, PhysicalASAPNodeId)> = HashMap::new();
     // Each in-memory ingestion-time state's bytes per window (what it keeps
@@ -425,7 +425,7 @@ fn each_node_usage<'a>(
             (Payload::NonASAP(NonASAPOp::Scan { .. }), ExecutionTiming::QueryTime) => {
                 match dag.scan_window(node.id, materialized_chains) {
                     // Priced as before #955 decides `@` anchors and
-                    // unwindowed readers: the widest window read.
+                    // unwindowed queries: the widest window read.
                     ScanWindow::Unbounded => trailing_window(
                         widest_window_read_ms(dag, nodes, node.id, materialized_chains)
                             .or(root_scan_lookback_ms),
@@ -572,8 +572,8 @@ pub fn node_usage<'a>(
     let mut held = None;
     let mut maintained = None;
     let mut raw_scan = None;
-    // A query-time scan's raw rows kept ([`ScanWindow::lookback_ms`]).
-    let mut raw_kept_rows = None;
+    // A query-time scan's raw rows retained ([`ScanWindow::lookback_ms`]).
+    let mut raw_retained_rows = None;
     let ingestion = node.output_state.timing == ExecutionTiming::IngestionTime;
     let inputs: Vec<EdgeStatistics> = producers.iter().map(|p| p.output).collect();
     let sources: BTreeSet<&str> = match &node.payload {
@@ -722,15 +722,15 @@ pub fn node_usage<'a>(
                         (rows_per_ms * lookback as f64).round() as u64
                     })
                 };
-                // The raw rows kept for a query-time scan: back to the
+                // The raw rows retained for a query-time scan: back to the
                 // oldest row it reads, `end_offset + width` (an offset
                 // window keeps more than it reads), at most those held.
                 if !ingestion {
-                    let kept_rows = match (by_rate(scan_window.lookback_ms()), rows_held) {
+                    let retained_rows = match (by_rate(scan_window.lookback_ms()), rows_held) {
                         (Some(by_rate), Some(rows_held)) => Some(by_rate.min(rows_held)),
                         (by_rate, rows_held) => by_rate.or(rows_held),
                     };
-                    raw_kept_rows = kept_rows.map(|rows| rows.max(1));
+                    raw_retained_rows = retained_rows.map(|rows| rows.max(1));
                 }
                 let by_rate = by_rate(lookback);
                 let rows = match (ingestion, by_rate, rows_held) {
@@ -867,13 +867,13 @@ pub fn node_usage<'a>(
                 // A range keeps its window's samples; an instant
                 // selector the latest sample of each series.
                 // Unknown rate or series: no fewer than its input.
-                let kept = match kind {
+                let retained = match kind {
                     TimeRangeKind::Range => rows_per_ms.map_or(input.rows, |rows_per_ms| {
                         (rows_per_ms * range.as_millis() as f64).round() as u64
                     }),
                     TimeRangeKind::Instant => series.unwrap_or(input.rows),
                 };
-                let out = edge(input.rows.min(kept.max(1)))?;
+                let out = edge(input.rows.min(retained.max(1)))?;
                 let out = EdgeStatistics {
                     rows: out.rows,
                     bytes: out.bytes.min(input.bytes),
@@ -945,7 +945,7 @@ pub fn node_usage<'a>(
             tumbling_window_count,
             ..
         }) => {
-            // Each input row is kept by the one tumbling window its time falls in,
+            // Each input row is retained by the one tumbling window its time falls in,
             // as a time range keeps it (one operation), and updates
             // that tumbling window.
             let group_count = groups(reduction)?;
@@ -954,7 +954,7 @@ pub fn node_usage<'a>(
                 .ok_or(AnalyticalCostError::Overflow)?;
             // Each tumbling window's state sees its group's rows in one tumbling window: of
             // one second's rows at ingestion time, of the rows read at
-            // query time (all of them for a chain kept across
+            // query time (all of them for a chain materialized across
             // evaluations, whose scan Stage 2 bounds to its newest tumbling window,
             // the only one it builds).
             let rows_per_tumbling_window = match (ingestion, node.lifetime) {
@@ -1117,7 +1117,7 @@ pub fn node_usage<'a>(
     let mut peak_memory_bytes = 0u64;
     let mut disk_bytes = 0u64;
     let mut detail = format!("{detail}; x {per_second:.4}/s");
-    // State kept between computations: at ingestion time, the window
+    // State retained between computations: at ingestion time, the window
     // being built and the completed ones queries read (a chain of N
     // tumbling windows keeps N + 1), every second. At query time the output is
     // reused only within one evaluation, so it is held only while that
@@ -1127,7 +1127,7 @@ pub fn node_usage<'a>(
     // keeps nothing holds its working memory while it runs, once per
     // consumer that recomputes it; at query time, that is held for the
     // evaluation too (counted in [`plan_cost`], per consumer: a query's
-    // latency, or a materialized consumer's longest reader's, as a
+    // latency, or a materialized consumer's longest query's, as a
     // OneEvaluation state is).
     let state = out.bytes.max(estimate.peak_memory_bytes());
     let (materialized_bytes, medium) = match (ingestion, node.lifetime, &node.payload) {
@@ -1141,7 +1141,7 @@ pub fn node_usage<'a>(
         }
         // A tumbling-window chain materialized across evaluations holds the tumbling windows its
         // retention covers ([`tumbling_window_retention_ms`]: N, plus one per tumbling window
-        // width of the readers' range-evaluation span), all but the
+        // width of the queries' range-evaluation span), all but the
         // newest between evaluations and all while one runs.
         (
             false,
@@ -1221,15 +1221,15 @@ pub fn node_usage<'a>(
     }
     if let Payload::NonASAP(NonASAPOp::Scan { source, .. }) = &node.payload {
         if !ingestion {
-            let kept = match raw_kept_rows {
+            let retained = match raw_retained_rows {
                 Some(rows) => edge(rows)?.bytes,
                 None => out.bytes,
             };
-            raw_scan = Some((source, kept));
+            raw_scan = Some((source, retained));
         }
     }
     // One computation's CPU and scan price times its rate, then the
-    // kept state's.
+    // materialized state's.
     let cost = usage_prices.map(|prices| {
         (estimate.cpu_ops() * prices.cost_per_cpu_op
             + estimate.scan_bytes() as f64 * prices.cost_per_scanned_byte)
@@ -1387,9 +1387,9 @@ fn ingest_workers(
     (ingest_ms_per_s / 1_000.0).ceil().max(1.0) as u64
 }
 
-/// For each tumbling-window chain of `dag` kept beyond one evaluation (at
+/// For each tumbling-window chain of `dag` materialized beyond one evaluation (at
 /// ingestion time, or at query time across evaluations), how far back
-/// from the newest evaluation its completed tumbling windows must be kept, in
+/// from the newest evaluation its completed tumbling windows must be retained, in
 /// milliseconds: how long before the evaluation its newest tumbling window ends (the
 /// offset of its input, `chain_input_offset_ms`), plus its window
 /// `tumbling_window_count · tumbling_window_width_ms`, plus the longest
@@ -1457,7 +1457,7 @@ fn chain_input_offset_ms(
     u64::try_from(offset_ms).unwrap_or(0)
 }
 
-/// The tumbling-window retention of every kept tumbling-window chain of `dag`
+/// The tumbling-window retention of every materialized tumbling-window chain of `dag`
 /// ([`tumbling_window_retention_ms`] over [`query_reach`]), for a plan whose query
 /// `q` has range evaluation `range_evaluations[q]` (none when missing):
 /// what Stage 2's realizer records for a realized plan.
@@ -1601,9 +1601,9 @@ pub type NodeMap<'a> =
 
 /// The query-time tumbling-window chains of `dag` materialized across evaluations
 /// (lifetime `AcrossEvaluations` at query time, which Stage 2 offers only when the
-/// deployment keeps query-time results and every reader builds one new
+/// deployment keeps query-time results and every query builds one new
 /// tumbling window per evaluation). Each evaluation builds the newest tumbling window, and the
-/// older ones, which complete the readers' look-back, are kept from
+/// older ones, which complete the queries' look-back, are retained from
 /// earlier evaluations.
 pub fn materialized_tumbling_window_chains(dag: &PhysicalASAPDAG) -> HashSet<PhysicalASAPNodeId> {
     dag.nodes
@@ -1623,7 +1623,7 @@ pub fn materialized_tumbling_window_chains(dag: &PhysicalASAPDAG) -> HashSet<Phy
 }
 
 /// The widest window, in milliseconds, read above the scan `scan` at query
-/// time, ignoring readers that read it outside a window and the anchors of
+/// time, ignoring queries that read it outside a window and the anchors of
 /// shifts: each range `TimeRange` and `SummaryTumblingWindowChain` (its whole window, or
 /// one tumbling window for a chain in `materialized_chains`) reached through time shifts.
 /// Prices a scan whose [`PhysicalASAPDAG::scan_window`] is unbounded as

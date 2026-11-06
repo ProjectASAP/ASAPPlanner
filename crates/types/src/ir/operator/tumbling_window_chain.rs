@@ -8,7 +8,7 @@
 //! the family merges (the family-capability table), and the executor runs
 //! the chain as its tumbling windows (`expand_tumbling_window_chains`). A merge of only the
 //! newest `m < n` tumbling windows (`SummaryMerge::newest_tumbling_windows`) is the state of one
-//! build over `TimeRange(m·w)` ([`merged_window_build`]): one chain kept for
+//! build over `TimeRange(m·w)` ([`merged_window_build`]): one chain materialized for
 //! the longest window serves every query whose window, on the same tumbling windows,
 //! ends at the same time and is shorter.
 #[cfg(any(test, feature = "test-support"))]

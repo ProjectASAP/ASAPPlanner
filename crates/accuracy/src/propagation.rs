@@ -510,7 +510,7 @@ fn rolled_up_guarantee(node: &OperatorNode) -> Option<Option<AccuracyGuarantee>>
     ) {
         return Some(None);
     }
-    let reader = OperatorNode::with_schema(
+    let consumer = OperatorNode::with_schema(
         node.operator.map_children(|child| {
             if Rc::ptr_eq(child, state) {
                 Rc::clone(input)
@@ -520,7 +520,7 @@ fn rolled_up_guarantee(node: &OperatorNode) -> Option<Option<AccuracyGuarantee>>
         }),
         node.schema.clone(),
     );
-    Some(composed_guarantee(&reader))
+    Some(composed_guarantee(&consumer))
 }
 
 /// The guarantee of an estimate or finalized value read from merged
@@ -573,7 +573,7 @@ fn merged_tumbling_windows_guarantee(node: &OperatorNode) -> Option<Option<Accur
         *range = Rc::new(composed);
     }
     let window_build = Rc::new(window_build);
-    let reader = OperatorNode::with_schema(
+    let consumer = OperatorNode::with_schema(
         node.operator.map_children(|child| {
             if Rc::ptr_eq(child, state) {
                 Rc::clone(&window_build)
@@ -583,7 +583,7 @@ fn merged_tumbling_windows_guarantee(node: &OperatorNode) -> Option<Option<Accur
         }),
         node.schema.clone(),
     );
-    Some(composed_guarantee(&reader))
+    Some(composed_guarantee(&consumer))
 }
 
 /// The guarantee of a distinct count of one instance per group over a

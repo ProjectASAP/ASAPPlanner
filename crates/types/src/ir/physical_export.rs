@@ -171,7 +171,7 @@ pub struct PhysicalASAPDAG {
 pub enum PhysicalASAPDAGValidationError {
     /// A node whose timing and lifetime cannot go together: a planner bug.
     #[error("node {node:?}: {reason}")]
-    InvalidPhysicalProperties {
+    PhysicalProperties {
         node: PhysicalASAPNodeId,
         #[source]
         reason: PhysicalPropertiesError,
@@ -225,7 +225,7 @@ pub enum PhysicalASAPDAGValidationError {
     SummaryGroupingMismatch { node: PhysicalASAPNodeId },
 }
 
-/// Which rows of a `Scan` its readers read, back from an evaluation time `T`
+/// Which rows of a `Scan` its consumers read, back from an evaluation time `T`
 /// ([`PhysicalASAPDAG::scan_window`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ScanWindow {
@@ -377,8 +377,8 @@ impl PhysicalASAPDAG {
         Ok(rebuilt)
     }
 
-    /// The rows of the `Scan` `scan` its readers read, back from the
-    /// evaluation time `T`: the union of each reader's window. A reader
+    /// The rows of the `Scan` `scan` its consumers read, back from the
+    /// evaluation time `T`: the union of each consumer's window. A consumer
     /// reaches the `Scan` through `TimeShift`s without an `@` anchor
     /// (offsets summing to `s`) and is
     /// - a `TimeRange(w)`, range or instant: `(T - s - w, T - s]`;
@@ -387,7 +387,7 @@ impl PhysicalASAPDAG {
     ///   chain in `materialized_chains` (materialized across evaluations, so each
     ///   evaluation builds one tumbling window).
     ///
-    /// `Unbounded` when a root, any other reader, or a shift with an `@`
+    /// `Unbounded` when a root, any other consumer, or a shift with an `@`
     /// anchor reads the `Scan` or one of those shifts, or nothing reads it.
     pub fn scan_window(
         &self,
@@ -398,7 +398,7 @@ impl PhysicalASAPDAG {
     }
 
     /// [`Self::scan_window`] of each of `scans`, by id, with the DAG
-    /// indexed once for all of them: O(nodes + edges + the readers walked).
+    /// indexed once for all of them: O(nodes + edges + the consumers walked).
     pub fn scan_windows(
         &self,
         scans: impl IntoIterator<Item = PhysicalASAPNodeId>,
@@ -552,7 +552,7 @@ impl PhysicalASAPDAG {
             if node.output_state.timing == ExecutionTiming::IngestionTime
                 && matches!(node.lifetime, Lifetime::OneEvaluation(_))
             {
-                return Err(PhysicalASAPDAGValidationError::InvalidPhysicalProperties {
+                return Err(PhysicalASAPDAGValidationError::PhysicalProperties {
                     node: node.id,
                     reason: PhysicalPropertiesError::OneEvaluationAtIngestion,
                 });

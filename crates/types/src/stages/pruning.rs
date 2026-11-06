@@ -1,6 +1,6 @@
 //! What a stage removed, and why: one shape for every stage (#1047 P6).
 //! Each stage removes only what its own knowledge rules out (option C):
-//! Stage 2 what cannot be implemented, built or kept. Stage 0 fails with an
+//! Stage 2 what cannot be implemented, built or materialized. Stage 0 fails with an
 //! error, Pass 1 records nothing it leaves out (#1205 will show it), and
 //! Pass 2 only adds candidates. Stage 3 prunes before
 //! its selection MILP (dominated and uncostable candidates); its
@@ -21,7 +21,7 @@ pub struct PrunedCandidate<C> {
 }
 
 /// Why a stage removed a candidate: first Stage 2's (the physical candidate
-/// cannot be built, used or kept), then Stage 3's, before its selection
+/// cannot be built, used or materialized), then Stage 3's, before its selection
 /// MILP.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PruneReason {
@@ -40,14 +40,14 @@ pub enum PruneReason {
     /// cycle, on an input that cannot be built.
     InputHasNoBuildableProducer,
     /// Stage 2: no query output can read it, directly or through other
-    /// candidates, once each candidate's allowed readers are applied.
+    /// candidates, once each candidate's allowed consumers are applied.
     ReachesNoQueryOutput,
     /// Stage 2: it is shared within one query evaluation
     /// (`OneEvaluation`), which needs at least two reading queries, and fewer
     /// queries can reach it.
     TooFewQueryReaders,
     /// Stage 3: the candidate it names, in the same memo group with the
-    /// same producers and readers, is at least as good in every respect
+    /// same producers and consumers, is at least as good in every respect
     /// (guarantee, usage, latency, output, held state), so no optimal plan
     /// needs this one.
     DominatedBy(PhysicalCandidateId),

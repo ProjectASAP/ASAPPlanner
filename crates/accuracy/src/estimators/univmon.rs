@@ -370,14 +370,14 @@ pub(super) fn size_params(intent: &AggIntent, eps: f64, delta: f64) -> SketchPar
     }
 }
 
-/// The heap of one UnivMon shared by two readers with heaps `heap_size`
+/// The heap of one UnivMon shared by two consumers with heaps `heap_size`
 /// and `heap_size2`, sized for a distinct count at the failure
 /// probabilities they record (`None`: not sized for one): each distinct
-/// reader's heap grown to the smaller failure probability at no larger
+/// consumer's heap grown to the smaller failure probability at no larger
 /// relative error ([`with_failure_probability`]), then the larger. The
 /// shared build states its distinct guarantee at that smaller δ, where a
 /// heap sized for a larger δ has a larger error, so the larger heap alone
-/// could miss its reader's ε. A reader not sized for a distinct count keeps
+/// could miss its consumer's ε. A consumer not sized for a distinct count keeps
 /// its heap.
 pub(crate) fn shared_heap(
     heap_size: u32,

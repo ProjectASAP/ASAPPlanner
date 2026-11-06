@@ -91,8 +91,8 @@ fn connected_candidate_label(roots: &[QueryRoot]) -> String {
     }
     let mut shared: Vec<_> = producers
         .values()
-        .filter(|(_, readers)| readers.len() > 1)
-        .map(|(name, readers)| format!("shared {name} ({})", query_names(readers)))
+        .filter(|(_, queries)| queries.len() > 1)
+        .map(|(name, queries)| format!("shared {name} ({})", query_names(queries)))
         .collect();
     shared.sort();
     labels.extend(shared);
@@ -157,7 +157,7 @@ pub fn physical_label(logical: &str, candidate: &PhysicalWorkloadPlan) -> String
         };
         let label = match &node.payload {
             // Name the chain: chains of one family and tumbling-window count differ by
-            // their readers and tumbling-window width.
+            // their queries and tumbling-window width.
             Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                 tumbling_window_width_ms,
                 tumbling_window_count,

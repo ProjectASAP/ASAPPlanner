@@ -212,9 +212,9 @@ pub struct PlanOutput {
     /// How plan selection chose the plan, when the pass selects among priced
     /// candidates.
     pub selection: Option<Selection>,
-    /// For each tumbling-window chain of the selected plan kept beyond one
+    /// For each tumbling-window chain of the selected plan materialized beyond one
     /// evaluation, by node id in its physical DAG, how long its completed
-    /// tumbling windows are kept ([`RealizedPlan::tumbling_window_retention_ms`](asap_types::stages::RealizedPlan::tumbling_window_retention_ms));
+    /// tumbling windows are retained ([`RealizedPlan::tumbling_window_retention_ms`](asap_types::stages::RealizedPlan::tumbling_window_retention_ms));
     /// empty for a pass that does not set it.
     pub tumbling_window_retention_ms: BTreeMap<PhysicalASAPNodeId, u64>,
 }
