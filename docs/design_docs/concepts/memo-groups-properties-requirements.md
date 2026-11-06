@@ -85,19 +85,18 @@ This is the single reference table for property dimensions. Stage descriptions b
 | Dimension | Values and meaning | Code reference or target |
 |---|---|---|
 | Parameters | A predefined configuration list per family: KLL and KMV `k`; DDSketch `alpha`; HLL `precision`; CMS and CountSketch `width` and `depth`; heap variants also `heap_size`; UnivMon its sizing parameters. Exact operators have no sketch parameters. | `SketchParams` in `crates/types/src/ir/schema/sketch.rs`; predefined lists are the #1203 target |
-| Window layout — Extension | No layout, or tumbling windows with a positive width. Candidate widths come from supported divisors derived from workload ranges and steps. Sliding merge/subtraction layouts remain future work. Window count is derived from range and width; retention amount is selected later. | `WindowLayout`; `pass2/memo/window_candidates.rs`; #1160 |
+| Window layout — Extension | No layout, or tumbling windows with a positive width. Every grid is anchored at phase 0 (the epoch), so the width alone fixes it. Candidate widths come from the gcd closure of the queries' ranges, steps and phases. Sliding merge/subtraction layouts remain future work. Window count is derived from range and width; retention amount is selected later. | `WindowLayout`; `pass2/memo/window_candidates.rs`; #1160 |
 | Timing | `IngestionTime` or `QueryTime` | `ExecutionTiming` |
 | Lifetime | `None`: discard after the consuming execution; `OneEvaluation`: retain until consumers within that evaluation finish; `AcrossEvaluations`: retain across evaluations in the specified period. A non-`None` lifetime means materialized. | `Lifetime`; #1200 / #1214 |
 | Medium — Extension | `Memory` or `Disk`, carried by a materialized lifetime | `Medium`; #1214 |
-| Schedule — Extension | When a materialized result can be read. For `OneEvaluation`: the periodic times it is computed (interval and phase). For windowed `AcrossEvaluations`: the phase of its tumbling-window grid; the width is the window layout's, and each window is readable as soon as it ends. Unmaterialized candidates have no independent schedule. | `Schedule`; #1200 PR 2 |
 
 Error guarantees are derived from parameters and the statistic being read. They include an error metric, a bound, and a failure probability; exact computation introduces no approximation error. The same state may support different readouts, so its guarantee must be interpreted for the relevant statistic.
 
-The extended property tuples add window layout and schedule:
+The extended logical properties add the window layout; the physical properties stay the formulation's:
 
 $$
 p_v^{\mathrm{log}}=(\boldsymbol\theta_v,\omega_v),\qquad
-p_v^{\mathrm{phys}}=(\tau_v,\ell_v,\sigma_v).
+p_v^{\mathrm{phys}}=(\tau_v,\ell_v).
 $$
 
 ### Logical requirements
@@ -110,45 +109,41 @@ The required input group's identity already constrains the state family and data
 
 ### Physical requirements
 
-Physical requirements are derived from the consumer's timing and schedule, rather than stored redundantly. For an unmaterialized consumer, the schedule comes from its execution context during selection. Stage 2 checks the parts known from candidate properties; Stage 3 checks any remaining context-dependent delivery condition.
+Physical requirements are derived from the consumer's timing and execution context, rather than stored redundantly. Stage 2 checks timing against lifetime (the table below). Stage 3 checks alignment per context (below), with the schedule of the context the consumer runs in.
 
 | Consumer timing | QT, None | QT, OneEvaluation | QT, AcrossEvaluations | IT, None | IT, AcrossEvaluations |
 |---|---|---|---|---|---|
 | QueryTime | Allowed | Allowed | Allowed | Rejected | Allowed |
 | IngestionTime | Rejected | Rejected | Rejected | Allowed | Allowed |
 
-QT means QueryTime; IT means IngestionTime. Schedule, data coverage, and retention checks still apply to allowed combinations.
+QT means QueryTime; IT means IngestionTime. Alignment, data coverage, and retention checks still apply to allowed combinations.
 
-**Periodic versus grid.** The schedule σ says when a materialized result can be read.
-- **Periodic** (`OneEvaluation`): the result is computed at φ + I·ℤ and held until that evaluation's consumers finish. With interval 10 s and phase 2 s it exists at 2, 12, 22, … s.
-- **Tumbling-window grid** (windowed `AcrossEvaluations`): the input is cut into windows [φ + k·w, φ + (k+1)·w), with w from the window layout ω. Each window is built once, when it ends, and is readable from then on (decided 2026-11-06; there is no separate refresh interval). A consumer can read a range that ends on a window boundary. With w = 10 s and phase 0, a `[1m]` query evaluated every 30 s at phase 0 merges the newest 6 windows; one evaluated at phase 15 s cannot, because its range ends inside a window.
+**Alignment.** There is no physical schedule property. When a result can be read follows from its lifetime and window layout:
+- **None** and **OneEvaluation**: the result is computed inside one evaluation context κ (Section 5) and read there. A OneEvaluation result belongs to one context: queries with the same schedule are evaluated together, and that evaluation's consumers share the result. When it runs is the context's schedule, and Stage 3 chooses it through $x_{\kappa,v}$, just as for ℓ = None. Sharing across differently scheduled queries through a gcd schedule is not offered: it is rarely beneficial and wastes runs.
+- **Windowed AcrossEvaluations**: the input is cut into tumbling windows [k·w, (k+1)·w), with w from the window layout ω and the grid anchored at phase 0 (the epoch). Each window is built when it ends and can be read from then on. A consumer can read a range that ends on a window boundary. With w = 10 s, a `[1m]` query evaluated every 30 s at phase 0 merges the newest 6 windows; one evaluated at phase 15 s cannot, because its range ends inside a window; with that query in the workload, the gcd closure also offers w = 5 s, which both can read.
 
-The grid stores only its phase: the width is ω's, so nothing is stored twice. Building each window when it ends costs the same number of window builds as building several at once later. Grid alignment alone does not ensure sufficient retained history; that is $h_v$ (Section 5).
+A grid phase is not needed: a phase is absorbed by the width, because width candidates come from the gcd closure of the queries' ranges, steps and phases. For example, phases 0 and 5 s with w = 10 s give w = 5 s. Alignment alone does not ensure sufficient retained history; that is $h_v$ (Section 5).
 
-For the proposed periodic consumer path, let the consumer interval and phase be $I$ and $\varphi$. Let the producer interval and phase be $I_s$ and $\varphi_s$, and its tumbling width and grid phase be $w$ and $\varphi_g$.
+Let a context κ have interval $I_\kappa$ and phase $\varphi_\kappa$, and let a windowed producer have tumbling width $w$. A consumer running in κ can read the producer when:
 
-| Producer schedule | Required alignment |
+| Producer lifetime | Required alignment |
 |---|---|
-| Periodic | $I_s\mid I$ and $\varphi\equiv\varphi_s\pmod{I_s}$ |
-| Tumbling grid | $w\mid I$ and $\varphi\equiv\varphi_g\pmod w$ |
-| None | Runs in the consuming context; no independent delivery schedule |
+| None | Always: runs in κ |
+| OneEvaluation | The result belongs to κ |
+| AcrossEvaluations, tumbling width $w$ | $w\mid I_\kappa$ and $w\mid\varphi_\kappa$ |
+| AcrossEvaluations, no window layout | Not offered yet: it needs its own delivery rule |
 
 The formulation also permits a single, non-periodic evaluation. The interval/phase interface below covers only periodic consumers. Rejecting non-periodic consumers is a current scope restriction of that proposed interface, not a mathematical impossibility; supporting them needs explicit evaluation-time membership checks.
 
 ### Invalid combinations
 
-Checked constructors reject these combinations under the proposed schedule model:
+The checked constructor rejects one combination:
 
 | Combination | Reason |
 |---|---|
 | IngestionTime with OneEvaluation | No query evaluation lifetime at ingestion time |
-| None with an independent schedule | Execution follows the consuming context |
-| Materialized lifetime without its required schedule | Delivery times or window grid would be unspecified |
-| OneEvaluation with a grid, or windowed AcrossEvaluations with a periodic schedule | Schedule kind does not match this model's lifetime representation |
-| Zero interval/width, or phase outside the canonical interval/width | Invalid schedule representation |
-| Ingestion-time grid with nonzero phase | Ingestion-time grids are anchored at the epoch: the plan carries no origin |
 
-A tumbling grid's width is the candidate's logical window layout $\omega_v$; it is not repeated in the schedule. Building a `PhysicalCandidate` checks the pair: a grid schedule needs a tumbling layout, and its phase must be below the width. Non-windowed AcrossEvaluations schedules need their own representation before that alternative can be offered.
+A tumbling grid's width is the candidate's logical window layout $\omega_v$ and its phase is 0, so no physical field repeats or extends it.
 
 ### Decision tree and order of decisions
 
@@ -166,7 +161,7 @@ flowchart TD
     R2 --> T3["θ: k = …<br/>(prune: pruning cap)"]
 
     T2 --> W1["ω: no windows"]
-    T2 --> W2["ω: tumbling, width w<br/>(prune: w must divide<br/>the group's query range)"]
+    T2 --> W2["ω: tumbling, width w<br/>from the gcd closure of ranges,<br/>steps and phases (prune: w must<br/>divide the group's query range)"]
 
     W2 --> P1["τ = QueryTime"]
     W2 --> P2["τ = IngestionTime<br/>(prune: no ingestion pipeline)"]
@@ -177,22 +172,17 @@ flowchart TD
     P2 --> L4["ℓ = None"]
     P2 --> L5["ℓ = AcrossEvaluations"]
     P2 -. invalid .-> L6["ℓ = OneEvaluation"]
-
-    L2 --> S1["σ: Periodic (I, φ)<br/>from the gcd closure<br/>of the queries' schedules"]
-    L3 --> S2["σ: grid phase φ mod w"]
-    L5 --> S3["σ: grid phase 0"]
 ```
 
 | Level | Decides | Stage | Values offered | Pruned when |
 |---|---|---|---|---|
 | 1 | expression $e_v$ | Pass 1 and Pass 2 rules | each way to compute the group | the executor cannot build the family |
 | 2 | $\boldsymbol\theta_v$ | Pass 1 | the family's predefined list | the pruning cap (Section 4) |
-| 3 | $\omega_v$ — Extension | Pass 2 | tumbling widths from the gcd closure of the queries' ranges and steps | the width does not divide the group's query range |
+| 3 | $\omega_v$ — Extension | Pass 2 | tumbling widths from the gcd closure of the queries' ranges, steps and phases | the width does not divide the group's query range |
 | 4 | $\tau_v$ | Stage 2 | QueryTime, IngestionTime | the source has no ingestion pipeline |
 | 5 | $\ell_v$ | Stage 2 | None, OneEvaluation, AcrossEvaluations | invalid with $\tau_v$; the deployment keeps no query-time results |
-| 6 | $\sigma_v$ — Extension | Stage 2 | the gcd closure of the schedules of the queries reaching the group | only when $\ell_v \ne$ None |
 
-The tree does not decide which producer each consumer input reads ($y$), where an unmaterialized candidate runs (its context, Section 5), or how much a materialized candidate retains ($h_v$). Those are Stage 3 choices.
+The tree does not decide which producer each consumer input reads ($y$), in which context a candidate with ℓ = None or OneEvaluation runs (Section 5), or how much an AcrossEvaluations candidate retains ($h_v$). Those are Stage 3 choices.
 
 **The order does not change the candidate set.** The leaves are the product of the dimensions' values minus invalid combinations and pruned values. Each prune rule reads only the value it removes and values decided above it, so any order that keeps each prune rule below the dimensions it reads yields the same leaves.
 
@@ -200,7 +190,7 @@ The tree does not decide which producer each consumer input reads ($y$), where a
 
 1. **Logical before physical.** Stage 1 hash-conses groups and computes $\alpha^{\log}$ once, before Stage 2 multiplies each logical candidate by its physical alternatives.
 2. **Strong prunes early.** Executor support and the pruning cap act before windows and physical properties multiply the tree.
-3. **Dependent dimensions adjacent.** $\tau \to \ell \to \sigma$ rejects each invalid combination at the first level that can detect it.
+3. **Dependent dimensions adjacent.** $\tau \to \ell$ rejects the invalid combination at the first level that can detect it.
 4. **Deployment-wide prunes as early as possible.** Without an ingestion pipeline the IngestionTime subtree is pruned once per candidate; moving $\tau$ above $\omega$ would prune it once per group, with the same leaves.
 
 Alternative orders worth measuring: $\tau$ first, when most sources lack an ingestion pipeline; $\omega$ before $\boldsymbol\theta$, when queries' ranges prune many widths; and requirement-driven (top-down) enumeration, which visits fewer nodes but must take the union of all consumers' requirements so that sharing is not lost.
@@ -392,40 +382,35 @@ pub enum Lifetime {
     OneEvaluation(Medium),
     AcrossEvaluations(Medium),
 }
-pub enum Schedule {
-    Periodic { interval_ms: u64, phase_ms: u64 },
-    /// Phase of the window grid; the width is the window layout's (ω), and
-    /// each window is readable once it ends.
-    TumblingWindowGrid { phase_ms: u64 },
-}
 pub struct PhysicalProperties {
     timing: ExecutionTiming,
     lifetime: Lifetime,
-    schedule: Option<Schedule>,
 }
 impl PhysicalProperties {
+    /// Rejects only (IngestionTime, OneEvaluation).
     pub fn new(
         timing: ExecutionTiming,
         lifetime: Lifetime,
-        schedule: Option<Schedule>,
     ) -> Result<Self, InvalidPhysicalProperties>;
     pub fn timing(&self) -> ExecutionTiming;
     pub fn lifetime(&self) -> Lifetime;
-    pub fn schedule(&self) -> Option<&Schedule>;
     pub fn is_materialized(&self) -> bool;
 }
 
+/// When a context runs: φ + I·ℤ.
 pub struct EvaluationSchedule {
     interval_ms: u64,
     phase_ms: u64,
 }
 impl PhysicalCandidate {
-    /// Whether this producer delivers on `times` (Section 2's alignment table).
-    /// Reads the grid width from the candidate's logical window layout.
+    /// Whether a consumer running on `times` can read this producer
+    /// (Section 2's alignment table): w | I and w | φ for a windowed
+    /// AcrossEvaluations producer, with w read from its window layout;
+    /// true for ℓ = None and OneEvaluation, which run in that context.
     pub fn delivers_on(&self, memo: &Memo, times: &EvaluationSchedule) -> bool;
 }
-/// α^phys: timing and lifetime (Section 2's table), and, for a materialized
-/// consumer, that the producer delivers on the consumer's own schedule.
+/// α^phys: timing and lifetime only (Section 2's table). Alignment is
+/// checked per context in Stage 3 with `delivers_on`.
 pub fn satisfies_physical(
     memo: &Memo,
     producer: &PhysicalCandidate,
@@ -471,9 +456,9 @@ pub struct PhysicalCandidateKey {
 }
 ```
 
-`PhysicalCandidateId` indexes an emitted candidate. `PhysicalCandidateKey` describes an alternative rejected before it received an ID, allowing diagnostics to explain pruning. The admissible-edge accessor returns edge IDs, not the unfiltered producer set from Section 1. `delivers_on` and `satisfies_physical` take candidates rather than bare properties because a tumbling grid's width lives in the logical window layout.
+`PhysicalCandidateId` indexes an emitted candidate. `PhysicalCandidateKey` describes an alternative rejected before it received an ID, allowing diagnostics to explain pruning. The admissible-edge accessor returns edge IDs, not the unfiltered producer set from Section 1. `delivers_on` takes a candidate rather than bare properties because a tumbling grid's width lives in the logical window layout.
 
-Migration targets include replacing `Materialization` and duplicated physical fields with checked properties, and replacing `ReaderConstraint::{IncompatibleOutputs, AllowedOutputs}` with compatibility and schedule checks. `ReaderConstraint::{MinimumQueryReaders, HighestSharedQueryMaterialization}` are deleted too; see Section 5.
+Migration targets include replacing `Materialization` and duplicated physical fields with checked properties, and replacing `ReaderConstraint::{IncompatibleOutputs, AllowedOutputs}` with compatibility and alignment checks. `ReaderConstraint::{MinimumQueryReaders, HighestSharedQueryMaterialization}` are deleted too; see Section 5.
 
 ### Stage 3: baseline selection and realization
 
@@ -537,7 +522,7 @@ pub struct DagOfSelectedCandidates {
 }
 ```
 
-The realizer uses the selected dependencies to build the executable graph. Export carries each node's timing, lifetime, and supported schedule fields. Under the context extension, multiple selected execution nodes may refer to the same physical candidate; realization must preserve their contexts rather than merge them solely by candidate ID.
+The realizer uses the selected dependencies to build the executable graph. Export carries each node's timing and lifetime. Under the context extension, multiple selected execution nodes may refer to the same physical candidate; realization must preserve their contexts rather than merge them solely by candidate ID.
 
 ## 4. Accuracy and safe pruning — Extension (#1207)
 
@@ -670,7 +655,7 @@ These extensions go beyond constraints (A)–(I) and the formulation's fixed-cos
 
 ### Execution identity
 
-A materialized candidate has its own delivery schedule. An unmaterialized candidate runs inside an execution that needs it. For example, a finalize candidate used by queries A and B may execute in both query contexts even though Stage 2 enumerates it only once.
+An AcrossEvaluations candidate has its own computation: each window is built when it ends. A candidate with ℓ = None runs inside an execution that needs it. For example, a finalize candidate used by queries A and B may execute in both query contexts even though Stage 2 enumerates it only once. A OneEvaluation candidate also runs inside one evaluation context κ: queries with the same schedule are evaluated together, and that evaluation's consumers share the result.
 
 A **context** identifies a class of executions with a common owner and schedule across the accounting horizon. It is not necessarily one timestamp.
 
@@ -689,16 +674,16 @@ impl Context {
 }
 ```
 
-An unmaterialized chain inherits its consuming context. Encountering a materialized producer switches to that producer's own computation context when traversing its inputs. The context identifies where the operation runs; schedule compatibility decides whether a materialized input can supply it.
+A chain of ℓ = None and OneEvaluation candidates inherits its consuming context. Encountering an AcrossEvaluations producer switches to that producer's own computation context when traversing its inputs. The context identifies where the operation runs; `delivers_on` with the context's schedule decides whether a windowed producer can supply it.
 
 | Extended variable | Meaning |
 |---|---|
-| $x_v^{\mathrm{mat}}$ | Materialized candidate selected |
-| $x_{\kappa,v}$ | Unmaterialized candidate executes in context kappa |
+| $x_v^{\mathrm{mat}}$ | AcrossEvaluations candidate selected |
+| $x_{\kappa,v}$ | Candidate with ℓ = None or OneEvaluation executes in context kappa |
 | $y_{\kappa,u,c,i}$ | Input edge selected for a consumer execution in context kappa |
-| $h_v$ | Selected retention amount for a materialized producer |
+| $h_v$ | Selected retention amount for an AcrossEvaluations producer |
 
-The unindexed edge variable belongs to the baseline only. In the extension, every edge is indexed by its consumer's context, including the dedicated computation context of a materialized consumer. This avoids silently switching between two meanings of `y`.
+The unindexed edge variable belongs to the baseline only. In the extension, every edge is indexed by its consumer's context, including the dedicated computation context of an AcrossEvaluations consumer. This avoids silently switching between two meanings of `y`.
 
 Activation, input satisfaction, utilization, output selection, and acyclicity must be defined for these execution instances. One binary per context/candidate assumes at most one reusable execution of that candidate within that context. If two uses require independent computations, the context or execution identity must distinguish them.
 
@@ -708,8 +693,8 @@ To avoid confusing per-execution costs with the baseline's horizon-wide cost, us
 
 | Symbol | Definition |
 |---|---|
-| $W_v^{\mathrm{mat}}$ | Fixed computation and access cost over the horizon for a materialized candidate's own schedule, excluding variable retention |
-| $c_{\kappa,v}$ | Cost of one unmaterialized execution in the specified context |
+| $W_v^{\mathrm{mat}}$ | Fixed computation and access cost over the horizon for an AcrossEvaluations candidate, one build per window, excluding variable retention |
+| $c_{\kappa,v}$ | Cost of one execution in the specified context of a candidate with ℓ = None or OneEvaluation, including a OneEvaluation result's storage within that evaluation |
 | $\rho_\kappa$ | Fixed number or expected number of context executions over the common horizon |
 | $h_v$ | Retention amount in a declared unit, such as retained windows |
 | $\pi_v$ | Horizon-wide retention cost per unit of retained amount |
@@ -719,9 +704,9 @@ A proposed linear objective is:
 
 $$
 \min\left(
-\sum_{v\text{ materialized}}W_v^{\mathrm{mat}}x_v^{\mathrm{mat}}
-+\sum_{\kappa,v\text{ unmaterialized}}\rho_\kappa c_{\kappa,v}x_{\kappa,v}
-+\sum_{v\text{ materialized}}\pi_v h_v
+\sum_{v\text{ across evaluations}}W_v^{\mathrm{mat}}x_v^{\mathrm{mat}}
++\sum_{\kappa,\ v\text{ None or OneEvaluation}}\rho_\kappa c_{\kappa,v}x_{\kappa,v}
++\sum_{v\text{ across evaluations}}\pi_v h_v
 \right).
 $$
 
@@ -735,7 +720,7 @@ The need is fixed per edge from the time horizon of the queries it serves, so co
 
 ### No consumer-count policies
 
-Today's `ReaderConstraint` (`crates/types/src/stages/physical/graph.rs`) is deleted with all four variants (decided 2026-11-06). `IncompatibleOutputs` and `AllowedOutputs` are replaced by the schedule check of Section 2. `MinimumQueryReaders` (keep a candidate only if enough queries reach it) and `HighestSharedQueryMaterialization` (materialize where sharing stops) are left to the cost model: materializing for one query, or below the point where sharing stops, costs more and is not chosen. There is no constraint (J).
+Today's `ReaderConstraint` (`crates/types/src/stages/physical/graph.rs`) is deleted with all four variants (decided 2026-11-06). `IncompatibleOutputs` and `AllowedOutputs` are replaced by the alignment check of Section 2. `MinimumQueryReaders` (keep a candidate only if enough queries reach it) and `HighestSharedQueryMaterialization` (materialize where sharing stops) are left to the cost model: materializing for one query, or below the point where sharing stops, costs more and is not chosen. There is no constraint (J).
 
 ### Out of this design
 
@@ -870,4 +855,4 @@ $$
 
 Here, $P^{\mathrm{log,adm}}_{v,i}$ is the set of logically compatible producers for that input, and a leaf has count one. The bound overcounts shared subgraphs. For a cyclic memo, this recurrence is not well-founded; use cycle-aware enumeration or an explicitly bounded unfolding instead.
 
-For physical inspection, replace logical candidates and compatibility checks with physical candidates and admissible edges. Under the execution-context extension, candidate-level listing alone is not a list of executable plans: instantiate contexts and apply schedule, retention, root-accuracy, and other enabled constraints before comparing results with Stage 3.
+For physical inspection, replace logical candidates and compatibility checks with physical candidates and admissible edges. Under the execution-context extension, candidate-level listing alone is not a list of executable plans: instantiate contexts and apply alignment, retention, root-accuracy, and other enabled constraints before comparing results with Stage 3.
