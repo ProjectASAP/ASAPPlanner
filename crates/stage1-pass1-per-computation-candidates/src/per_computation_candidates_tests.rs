@@ -11,7 +11,7 @@ use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
 use asap_types::ir::scalar::{ColumnRef, CompareOpKind, ScalarValue};
 use asap_types::ir::schema::{
     DataType, ExactKind, Field, FieldDataType, Schema, SketchAlgorithm, SketchParams,
-    SketchStatistic, SummaryInputExpr, SummaryUpdate, WeightDomain,
+    SketchStatistic, SummaryInputExpr, SummaryUpdate, WeightDomain, PROMQL_SERIES_IDENTITY,
 };
 use asap_types::ir::{
     ASAPOp, BinaryOperator, ExprSemantics, NonASAPOp, Operator, Predicate, ScalarExpr,
@@ -24,7 +24,9 @@ use asap_types::stages::{
 use crate::per_computation_candidates::{
     computation_candidates_for_intent, computation_targets, PerComputationCandidateError,
 };
-use crate::test_fixtures::{aggregate_group, aggregate_group_with, group, query, scan_group};
+use crate::test_fixtures::{
+    aggregate_group, aggregate_group_with, group, metric_schema, query, scan_group, scan_operator,
+};
 use crate::{pass1_memo, Pass1Error};
 
 /// A compact printout of every group and its candidates: the expression's
@@ -288,6 +290,76 @@ fn running_example_gives_one_build_per_theta_and_separate_readouts() {
     }
     // The ratio's group keeps its one candidate, its own expression.
     assert_eq!(candidates(&memo, g6).len(), 1);
+}
+
+// ── Series identity ────────────────────────────────────────────────────────
+
+/// `quantile_over_time(0.9, latency[5m])` over series whose identity is
+/// realized as a column (as the planner does before Stage 0): each readout
+/// candidate outputs the per-series aggregate's exact schema, the
+/// `$promql_series_identity` column included, so every readout keeps the
+/// series it answers for.
+#[test]
+fn per_series_readouts_keep_the_series_identity() {
+    let mut memo = Memo::default();
+    let rows = range(&mut memo, "latency", &["job"]);
+    let per_series = aggregate_group(&mut memo, rows, Reduction::PerEntity, vec![quantile(0.9)]);
+    query(&mut memo, per_series);
+    let memo = pass1_memo(memo, None).unwrap();
+    let output = &memo.groups()[per_series.0 as usize].group_properties.schema;
+    assert!(output.closed && output.has_promql_series_identity());
+    let readouts = &candidates(&memo, per_series)[1..];
+    assert_eq!(readouts.len(), 2, "{}", memo_printout(&memo));
+    for readout in readouts {
+        let Operator::NonASAP(NonASAPOp::Project { child, cols, .. }) =
+            &readout.expression.operator
+        else {
+            panic!("a renaming Project: {:?}", readout.expression.operator)
+        };
+        let estimate = &memo.groups()[child.0 as usize].group_properties.schema;
+        assert!(estimate.has_promql_series_identity());
+        let identity = output
+            .fields
+            .iter()
+            .position(|field| field.name == PROMQL_SERIES_IDENTITY)
+            .unwrap();
+        let read = estimate
+            .fields
+            .iter()
+            .position(|field| field.name == PROMQL_SERIES_IDENTITY)
+            .unwrap();
+        assert_eq!(cols[identity].expr, ScalarExpr::Column(read));
+    }
+}
+
+/// Without a realized identity the per-series aggregate's schema is open:
+/// its rows carry labels it does not list. A renaming `Project` would drop
+/// them, so no readout is offered; the group keeps its own expression.
+#[test]
+fn an_open_per_series_aggregate_offers_no_renamed_readout() {
+    let mut memo = Memo::default();
+    let scan = group(
+        &mut memo,
+        scan_operator("latency", metric_schema(&["job"], vec![])),
+    );
+    let rows = group(
+        &mut memo,
+        Operator::NonASAP(NonASAPOp::TimeRange {
+            range: Duration::from_secs(300),
+            kind: TimeRangeKind::Range,
+            child: scan,
+        }),
+    );
+    let per_series = aggregate_group(&mut memo, rows, Reduction::PerEntity, vec![quantile(0.9)]);
+    query(&mut memo, per_series);
+    let memo = pass1_memo(memo, None).unwrap();
+    assert!(
+        !memo.groups()[per_series.0 as usize]
+            .group_properties
+            .schema
+            .closed
+    );
+    assert_eq!(candidates(&memo, per_series).len(), 1);
 }
 
 // ── Target discovery ───────────────────────────────────────────────────────
