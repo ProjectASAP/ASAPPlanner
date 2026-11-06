@@ -335,6 +335,81 @@ Everything that was computed on operator-node trees is computed on groups. `find
 
 Removing the one-field `CandidateExpression` wrapper is possible but not adopted.
 
+#### Column lineage
+
+Every output column of a group has a **lineage**: the source column its values are copied from, or none when the column is computed. It is a group property, derived once from the input groups' lineage (as optd's column-reference property is), and it replaces the table qualifier that schema fields carried. A schema field keeps only its name, type and nullability; a front end resolves a qualified name such as `f.src` with its own binding scope while it lowers the query, and the IR never needs the qualifier again.
+
+```rust
+pub struct GroupProperties {
+    pub schema: Schema,                          // fields: name, type, nullability; no table qualifier
+    pub result_kind: OperatorResultKind,
+    /// One entry per output column, in schema order.
+    pub column_lineage: Vec<ColumnLineage>,
+    pub summary_coverage: Option<SummaryCoverage>,
+    pub shareable_when_equal: bool,
+}
+
+/// Where an output column's values come from.
+pub enum ColumnLineage {
+    /// Copied unchanged from a column of a source (a Scan's table or metric).
+    SourceColumn { source: String, column: String },
+    /// Computed by an operator: a measure, an expression, a summary state or readout.
+    Computed,
+}
+```
+
+**Derivation, per operator** (from the input groups' `column_lineage`):
+
+| Operator | Output column lineage |
+|---|---|
+| `Scan` | each column: `SourceColumn { source, column }` |
+| `Filter`, `TimeRange`, `TimeShift`, `Sort`, `Limit`, `Dedup` | the input's, unchanged |
+| `Project` | a column item, renamed or not: that input column's lineage; an expression item: `Computed` |
+| `Aggregate`, `SummaryAgg`, readouts | group-by keys: the input's lineage of that key; measures, states and values: `Computed` |
+| `Join` | the left input's columns, then the right input's |
+| `SetOp`, `Concat` | per column: the inputs' lineage if they all agree, else `Computed` |
+| `BinaryOp` (vector match) | label columns: the matched side's lineage; the value: `Computed` |
+
+**What reads it:**
+- **Summary coverage.** A selection constrains columns identified by lineage (`ColumnIdentity` is a `SourceColumn`), not by (qualifier, name). A predicate on a `Computed` column is not lifted; it stays in `unlifted_operators`. A merge's group keys must have equal lineage.
+- **Candidate checks.** `add_candidate` compares a candidate's schema with its group's exactly: names, types, nullability, order. There is no qualifier to compare, so a readout renamed to the group's column name matches.
+
+**Example 1: a SQL aggregate and its summary candidate.**
+
+```sql
+SELECT f.src, approx_distinct(f.dst) FROM flows f WHERE f.proto = 'tcp' GROUP BY f.src
+```
+
+| Group | Expression | Output columns | `column_lineage` |
+|---|---|---|---|
+| G1 | `Scan flows` | `src, dst, proto, ts` | `flows.src, flows.dst, flows.proto, flows.ts` |
+| G2 | `Filter(proto = 'tcp')(G1)` | `src, dst, proto, ts` | same as G1 |
+| G3 | `Aggregate(by src; approx_distinct(dst))(G2)` | `src, approx_distinct(dst)` | `flows.src, Computed` |
+| G4 | `SummaryAgg[HLL](by src; dst)(G2)` | `src, state` | `flows.src, Computed` |
+| G5 | `SummaryEstimate[cardinality](G4)` | `src, cardinality` | `flows.src, Computed` |
+| — | candidate of G3: `Project(src, cardinality AS approx_distinct(dst))(G5)` | `src, approx_distinct(dst)` | `flows.src, Computed` |
+
+The candidate's schema equals G3's, so `add_candidate` accepts it. Before lineage, G3's key carried the qualifier `flows` and the renaming `Project` could not keep it on one column while renaming another, so this candidate was rejected.
+
+**Example 2: renames keep lineage.**
+
+```sql
+SELECT source, count(*) FROM (SELECT f.src AS source FROM flows f) GROUP BY source
+```
+
+The inner `Project` renames `src` to `source`; its lineage stays `flows.src`. Two summary states, one grouped by `source` here and one grouped by `src` in another query, have keys of equal lineage, so a merge of the two may pass the group-key check. Compared by (qualifier, name), `source` and `flows.src` looked like different columns.
+
+**Example 3: the same name from two sources.**
+
+```sql
+SELECT s.region, count(*) FROM sales s JOIN users u ON s.user = u.id GROUP BY s.region
+```
+
+After the join, `region` may exist on both sides. The front end resolves `s.region` to the left input's column while lowering; in the IR the two columns have lineage `sales.region` and `users.region`, so a selection on `sales.region` is never confused with one on `users.region`.
+
+**Example 4: PromQL label matchers.** `quantile_over_time(0.9, latency{job="api"}[1m])` and the same with `job="web"`. Each Scan's `job` column has lineage `latency.job`. The lifted matchers become selections `latency.job ∈ {api}` and `latency.job ∈ {web}`: disjoint selections on the same column, so the two KLL states may merge.
+
+
 ### Stage 1, Pass 1: initial candidates
 
 Implementation locations: `crates/logical-asap-optimization/src/pass1/per_computation_candidates.rs` and `memo_population.rs`. The #1203 target gives every intermediate result its own group; candidates contain one operator rather than private operator chains.
