@@ -47,7 +47,7 @@ impl DagOfSelectedCandidates {
     /// some output reference, each output reference comes from a candidate
     /// of its group. Costs and accuracy are Stage 3's to check.
     pub fn validate(&self, physical: &PhysicalASAPMemoCandidates) -> Result<(), String> {
-        let memo = &physical.logical.memo;
+        let memo = &physical.logical_candidates.memo;
         let output_groups: Vec<_> = super::output_references(&physical.query_roots)
             .into_iter()
             .map(|(_, group)| group)
@@ -55,9 +55,14 @@ impl DagOfSelectedCandidates {
         let query_output_candidates: Vec<Vec<PhysicalCandidateId>> = output_groups
             .iter()
             .map(|&group| {
-                (0..physical.candidates.len())
+                (0..physical.physical_candidates.len())
                     .map(PhysicalCandidateId)
-                    .filter(|id| physical.candidates[id.0].logical.group == group)
+                    .filter(|id| {
+                        physical.physical_candidates[id.0]
+                            .logical_candidate_id
+                            .group
+                            == group
+                    })
                     .collect()
             })
             .collect();
@@ -65,9 +70,9 @@ impl DagOfSelectedCandidates {
             query_output_candidates.iter().map(Vec::as_slice).collect();
         let edges: Vec<_> = physical.edges().collect();
         self.validate_against(
-            physical.candidates.len(),
+            physical.physical_candidates.len(),
             |candidate| {
-                memo.candidate(physical.candidates[candidate.0].logical)
+                memo.candidate(physical.physical_candidates[candidate.0].logical_candidate_id)
                     .expression
                     .operator
                     .children()
@@ -77,7 +82,7 @@ impl DagOfSelectedCandidates {
                 physical
                     .admissible_edges_into(candidate, input_index_of_consumer)
                     .iter()
-                    .any(|edge| edges[edge.0].1.producer == producer)
+                    .any(|edge| edges[edge.0].1.producer_candidate_id == producer)
             },
             &query_output_candidates,
         )

@@ -103,7 +103,7 @@ pub struct CandidateForMemoGroup {
     pub logical_properties: LogicalProperties,
     /// $r^{\log}_{c,i}$, one per input group: per child of
     /// `expression.operator`, in [`Operator::children`] order.
-    pub input_requirements: Vec<LogicalRequirement>,
+    pub input_requirements: Vec<LogicalRequirements>,
     /// The groups a fused computation also implements, beyond the group
     /// whose candidate it is; empty otherwise.
     pub fused_groups: Vec<MemoGroupId>,
@@ -157,7 +157,7 @@ impl LogicalProperties {
         expression: &CandidateExpression,
         parameters: Option<SketchParams>,
         window_layout: Option<WindowLayout>,
-    ) -> Result<Self, InvalidLogicalProperties> {
+    ) -> Result<Self, LogicalPropertiesError> {
         let _ = (expression, parameters, window_layout);
         todo!("#1207 PR 1: reject invalid parameters and invalid windows")
     }
@@ -183,7 +183,7 @@ pub enum WindowLayout {
 /// Logical properties whose dimensions cannot go together: bad input to
 /// [`LogicalProperties::new`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum InvalidLogicalProperties {
+pub enum LogicalPropertiesError {
     #[error("the parameters belong to another family than the operator's")]
     ParametersOfAnotherFamily,
     #[error("an exact operator has no summary parameters")]
@@ -208,23 +208,25 @@ pub fn parameter_list(family: SketchAlgorithm) -> &'static [SketchParams] {
 
 /// $r^{\log}_{c,i}$: only what $G_{c,i}$'s identity does not fix.
 #[derive(Debug, Clone)]
-pub struct LogicalRequirement {
+pub struct LogicalRequirements {
     /// $\boldsymbol\theta^{\min}_{c,i}$: the weakest parameters whose
     /// $\varepsilon$, for the statistic the consumer reads, is at most
     /// $\text{cap}_{c,i}$ = min(validity cap of $g_c$, pruning cap), or a
     /// direct need such as heap_size ≥ k. Any value of the family's parameter
     /// type; it need not be in the family's list.
-    parameter_floor: Option<SketchParams>,
+    parameter_floor_for_required_accuracy: Option<SketchParams>,
 }
 
-impl LogicalRequirement {
-    pub fn new(parameter_floor: Option<SketchParams>) -> Self {
-        Self { parameter_floor }
+impl LogicalRequirements {
+    pub fn new(parameter_floor_for_required_accuracy: Option<SketchParams>) -> Self {
+        Self {
+            parameter_floor_for_required_accuracy,
+        }
     }
 
     /// $\boldsymbol\theta^{\min}_{c,i}$.
-    pub fn parameter_floor(&self) -> Option<&SketchParams> {
-        self.parameter_floor.as_ref()
+    pub fn parameter_floor_for_required_accuracy(&self) -> Option<&SketchParams> {
+        self.parameter_floor_for_required_accuracy.as_ref()
     }
 
     /// $g_c$'s linear bound: $\beta_{c,i}$ and $b_{c,i}$ per input, read
@@ -252,7 +254,10 @@ pub struct ErrorPropagation {
 /// $\alpha^{\log}_{u,c,i}$: $\boldsymbol\theta_u \succeq
 /// \boldsymbol\theta^{\min}_{c,i}$, compared per family on the parameters
 /// that set $\varepsilon$. No floor, or an exact producer, always satisfies.
-pub fn satisfies_logical(producer: &LogicalProperties, requirement: &LogicalRequirement) -> bool {
+pub fn producer_satisfies_logical_requirements(
+    producer: &LogicalProperties,
+    requirement: &LogicalRequirements,
+) -> bool {
     let _ = (producer, requirement);
     todo!("#1207 PR 1: per-family dominance")
 }

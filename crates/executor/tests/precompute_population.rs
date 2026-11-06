@@ -59,7 +59,7 @@ fn view_over_samples(
     [
         PhysicalASAPDAGNode {
             lifetime: planner_types::physical::Lifetime::AcrossEvaluations(
-                planner_types::physical::Medium::Memory,
+                planner_types::physical::StorageMedium::Memory,
             ),
             ..node(
                 0,
@@ -139,7 +139,7 @@ fn try_state_dag(
             }),
             output_state: ExecutionDataState::INGESTION_SUMMARY,
             lifetime: planner_types::physical::Lifetime::AcrossEvaluations(
-                planner_types::physical::Medium::Memory,
+                planner_types::physical::StorageMedium::Memory,
             ),
             parameters: None,
             output_schema: logical_schema(family.clone()),
@@ -173,7 +173,7 @@ fn try_state_dag(
             }),
             output_state: ExecutionDataState::INGESTION_SUMMARY,
             lifetime: planner_types::physical::Lifetime::AcrossEvaluations(
-                planner_types::physical::Medium::Memory,
+                planner_types::physical::StorageMedium::Memory,
             ),
             parameters: None,
             output_schema: logical_schema(target),

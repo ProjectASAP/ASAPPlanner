@@ -16,13 +16,13 @@
 //!
 //! There is no stored physical requirement: $r^{\mathrm{phys}}_{c,i}$ is a
 //! function of the consumer's own properties
-//! ([`crate::stages::satisfies_physical`]).
+//! ([`crate::stages::producer_satisfies_physical_requirements`]).
 
 pub use crate::ir::properties::ExecutionTiming;
 
 /// Where a materialized output is stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub enum Medium {
+pub enum StorageMedium {
     Memory,
     Disk,
 }
@@ -37,15 +37,15 @@ pub enum Lifetime {
     #[default]
     None,
     /// Materialized until every consumer within one evaluation finishes.
-    OneEvaluation(Medium),
+    OneEvaluation(StorageMedium),
     /// Materialized across evaluations, so later evaluations reuse it.
-    AcrossEvaluations(Medium),
+    AcrossEvaluations(StorageMedium),
 }
 
 /// A timing and lifetime that cannot go together (the invalid combination
 /// of the concepts doc, section 2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum InvalidPhysicalProperties {
+pub enum PhysicalPropertiesError {
     #[error("an ingestion-time output cannot be materialized for one evaluation: there is no evaluation at ingestion time")]
     OneEvaluationAtIngestion,
 }
@@ -63,7 +63,7 @@ impl PhysicalProperties {
     pub fn new(
         timing: ExecutionTiming,
         lifetime: Lifetime,
-    ) -> Result<Self, InvalidPhysicalProperties> {
+    ) -> Result<Self, PhysicalPropertiesError> {
         let _ = (timing, lifetime);
         todo!("#1207 PR 1: reject the invalid combination of section 2")
     }
@@ -96,14 +96,14 @@ mod tests {
     use super::*;
     use ExecutionTiming::{IngestionTime, QueryTime};
 
-    const MEMORY: Medium = Medium::Memory;
+    const MEMORY: StorageMedium = StorageMedium::Memory;
 
     /// The one invalid combination of the concepts doc, section 2.
     #[test]
     fn new_rejects_one_evaluation_at_ingestion() {
         assert_eq!(
             PhysicalProperties::new(IngestionTime, Lifetime::OneEvaluation(MEMORY)),
-            Err(InvalidPhysicalProperties::OneEvaluationAtIngestion)
+            Err(PhysicalPropertiesError::OneEvaluationAtIngestion)
         );
     }
 
@@ -115,7 +115,10 @@ mod tests {
             (IngestionTime, Lifetime::None),
             (QueryTime, Lifetime::OneEvaluation(MEMORY)),
             (QueryTime, Lifetime::AcrossEvaluations(MEMORY)),
-            (IngestionTime, Lifetime::AcrossEvaluations(Medium::Disk)),
+            (
+                IngestionTime,
+                Lifetime::AcrossEvaluations(StorageMedium::Disk),
+            ),
         ] {
             let properties = PhysicalProperties::new(timing, lifetime).unwrap();
             assert_eq!(properties.is_materialized(), lifetime != Lifetime::None);

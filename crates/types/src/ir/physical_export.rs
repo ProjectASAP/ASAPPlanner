@@ -22,7 +22,7 @@ use crate::ir::operator::non_asap::NonASAPOp;
 use crate::ir::properties::execution_data_state::{ExecutionDataState, ExecutionTiming};
 use crate::ir::properties::guarantee::AccuracyGuarantee;
 use crate::ir::schema::{FieldDataType, Schema, SketchParams};
-use crate::physical::{InvalidPhysicalProperties, Lifetime};
+use crate::physical::{Lifetime, PhysicalPropertiesError};
 
 /// A node's operator, with each child replaced by its node id.
 pub type PhysicalASAPOperatorPayload = Operator<NodeId>;
@@ -174,7 +174,7 @@ pub enum PhysicalASAPDAGValidationError {
     InvalidPhysicalProperties {
         node: PhysicalASAPNodeId,
         #[source]
-        reason: InvalidPhysicalProperties,
+        reason: PhysicalPropertiesError,
     },
     /// A summary build (or maintained population) that is not materialized but does
     /// not run at query time: a planner bug.
@@ -554,7 +554,7 @@ impl PhysicalASAPDAG {
             {
                 return Err(PhysicalASAPDAGValidationError::InvalidPhysicalProperties {
                     node: node.id,
-                    reason: InvalidPhysicalProperties::OneEvaluationAtIngestion,
+                    reason: PhysicalPropertiesError::OneEvaluationAtIngestion,
                 });
             }
             if is_materializable_state_output(&node.payload)

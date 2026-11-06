@@ -192,7 +192,7 @@ pub fn run_planning(
         let physical = physical_asap_candidates.insert(
             physical.map_err(|error| SelectionError::PhysicalASAPCandidates(error.to_string()))?,
         );
-        report.physical_candidates = physical.candidates.len();
+        report.physical_candidates = physical.physical_candidates.len();
         report.stage2_pruned_candidates = physical.pruned_candidates.len();
         // Stage 3.
         let started = Instant::now();

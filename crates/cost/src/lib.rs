@@ -83,7 +83,7 @@ pub struct ResourceUsage {
     /// per consumer that recomputes it, with the consumers materialized at ingestion time
     /// of one refresh window counted once.
     pub peak_memory_bytes: u64,
-    /// Bytes kept on disk: state materialized on `Medium::Disk`, plus the
+    /// Bytes kept on disk: state materialized on `StorageMedium::Disk`, plus the
     /// raw data query-time scans read (the longest window of each source).
     pub disk_bytes: u64,
     /// CPU cores to provision for the peak: the ingestion work's cores plus

@@ -6,6 +6,6 @@ mod memo_candidates;
 
 pub use graph::{DagOfSelectedCandidates, PhysicalCandidateId, SelectedEdge, SelectedNodeId};
 pub use memo_candidates::{
-    output_references, satisfies_physical, PhysicalASAPMemoCandidates, PhysicalCandidate,
-    PhysicalCandidateKey, PhysicalEdge, PhysicalEdgeId,
+    output_references, producer_satisfies_physical_requirements, PhysicalASAPMemoCandidates,
+    PhysicalCandidate, PhysicalCandidateKey, PhysicalEdge, PhysicalEdgeId,
 };

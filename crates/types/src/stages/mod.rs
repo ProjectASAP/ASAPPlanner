@@ -16,9 +16,9 @@ mod pruning;
 mod realizer;
 
 pub use candidates::{
-    parameter_list, satisfies_logical, CandidateExpression, CandidateForMemoGroup,
-    CandidateForMemoGroupId, ErrorPropagation, InvalidLogicalProperties, LogicalProperties,
-    LogicalRequirement, Memo, OriginOfCandidateForMemoGroup, WindowLayout,
+    parameter_list, producer_satisfies_logical_requirements, CandidateExpression,
+    CandidateForMemoGroup, CandidateForMemoGroupId, ErrorPropagation, LogicalProperties,
+    LogicalPropertiesError, LogicalRequirements, Memo, OriginOfCandidateForMemoGroup, WindowLayout,
 };
 pub use logical_memo_candidates::{LogicalASAPMemoCandidates, LogicalEdge};
 pub use memo::{queries_rooted_at, root_groups, MemoGroup, MemoGroupId};
@@ -26,9 +26,9 @@ pub use per_computation_logical_memo_candidates::{
     ComputationTarget, FusedComputation, HavingEntry, HavingPlacement, HowToComputeAggregateMeasure,
 };
 pub use physical::{
-    output_references, satisfies_physical, DagOfSelectedCandidates, PhysicalASAPMemoCandidates,
-    PhysicalCandidate, PhysicalCandidateId, PhysicalCandidateKey, PhysicalEdge, PhysicalEdgeId,
-    SelectedEdge, SelectedNodeId,
+    output_references, producer_satisfies_physical_requirements, DagOfSelectedCandidates,
+    PhysicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateId, PhysicalCandidateKey,
+    PhysicalEdge, PhysicalEdgeId, SelectedEdge, SelectedNodeId,
 };
 pub use pruning::{PruneReason, PrunedCandidate};
 pub use realizer::{AssignmentRealizer, PhysicalCandidateError, RealizedPlan};
