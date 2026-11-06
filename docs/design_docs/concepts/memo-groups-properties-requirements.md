@@ -215,14 +215,18 @@ Rules add groups through `find_or_add_group` and candidates through `add_candida
 
 ### Stage 0: groups
 
-`hash_consed` in `crates/logical-asap-optimization/src/stage0.rs` identifies shared logical expressions and query roots. Stage 0 and Stage 1 share one type, `Memo`: Stage 0 returns it with every group's candidate list empty, and Stage 1 fills the lists.
+`memo_of_queries` in `crates/stage0-memo` builds the groups bottom-up from the queries' nodes: each node's operator, over its children's groups, goes through `Memo::find_or_add_group`, so identical sub-expressions are one group; each query's root is then added with `Memo::add_query`. Stage 0 and Stage 1 share one type, `Memo`: Stage 0 returns it with every group's candidate list empty, and Stage 1 fills the lists.
 
 ```rust
 pub struct MemoGroupId(pub u32);
 
 pub struct MemoGroup {
-    pub logical_node: Rc<OperatorNode>,
-    pub child_groups: Vec<MemoGroupId>,
+    /// What it computes; its children are the input groups.
+    pub expression: Operator<MemoGroupId>,
+    /// Derived once, when the group is added.
+    pub schema: Schema,
+    /// Derived once, when the group is added.
+    pub result_kind: OperatorResultKind,
     pub parents: Vec<MemoGroupId>,
     pub queries: Vec<usize>,
     // Empty after Stage 0; populated by Stage 1.
@@ -230,14 +234,26 @@ pub struct MemoGroup {
 }
 
 pub struct Memo {
-    pub groups: Vec<MemoGroup>,
+    // Private: groups are added only through `find_or_add_group`, so the
+    // hash-consing index covers every group.
+    groups: Vec<MemoGroup>,
     pub query_roots: Vec<QueryRoot<MemoGroupId>>,
+    // Private: the groups `find_or_add_group` may return, by expression hash.
+    groups_by_expression_hash: HashMap<u64, Vec<MemoGroupId>>,
+}
+
+impl Memo {
+    pub fn groups(&self) -> &[MemoGroup];
+    /// Adds a query with this root; its groups and those below list it.
+    pub fn add_query(&mut self, root: QueryRoot<MemoGroupId>) -> usize;
 }
 ```
 
-`OperatorNode` recursively contains chosen child nodes and therefore describes a fixed plan fragment. `Operator<MemoGroupId>` contains input group IDs and leaves their implementations open. A candidate needs its own expression because a group may offer several ways to compute the same result; it cannot reuse the group's representative `logical_node` as every candidate's expression.
+A group is its expression: one operator, with its arguments, over input groups. Hash-consing compares and hashes the expression directly, so two expressions are one group when their operators and arguments are equal and their input groups are the same. θ is not an operator argument, so builds that differ only in θ share one group. An expression whose copies may return different rows (an unordered `LIMIT`) always gets a new group.
 
-Two simplifications are possible but not adopted: storing the group as one `Operator<MemoGroupId>` instead of its node and child list, and removing the one-field `CandidateExpression` wrapper.
+The group's schema and result kind come from the node rules (schema derivation, input validation, merge check) applied to its expression over its input groups. A candidate's expression is checked by the same rules and must produce the group's schema and result kind. `OperatorNode` recursively contains chosen child nodes and therefore describes a fixed plan fragment; `Operator<MemoGroupId>` contains input group IDs and leaves their implementations open. A candidate needs its own expression because a group may offer several ways to compute the same result.
+
+Removing the one-field `CandidateExpression` wrapper is possible but not adopted.
 
 ### Stage 1, Pass 1: initial candidates
 
@@ -815,7 +831,7 @@ fn candidates_of(
     memo: &Memo,
     group: MemoGroupId,
 ) -> impl Iterator<Item = CandidateForMemoGroupId> + '_ {
-    (0..memo.groups[group.0 as usize].candidates.len())
+    (0..memo.groups()[group.0 as usize].candidates.len())
         .map(move |index_in_group| CandidateForMemoGroupId { group, index_in_group })
 }
 
