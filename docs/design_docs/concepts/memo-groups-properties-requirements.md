@@ -237,20 +237,38 @@ pub struct GroupProperties {
     pub schema: Schema,
     pub result_kind: OperatorResultKind,
     /// What a summary-state group covers; `None` for any other group.
-    pub summary_coverage: Option<SummaryCoverage<SummaryDefinition>>,
+    pub summary_coverage: Option<SummaryCoverage>,
     /// Whether two equal expressions return the same rows for the same
     /// input rows, so they may be one group (not an unordered `LIMIT`).
     pub shareable_when_equal: bool,
 }
 
-/// The `SummaryAgg` with its lifted selection removed, written over group
-/// ids: the residual links from `reads` up to the `SummaryAgg`.
-pub struct SummaryDefinition {
-    /// The group below the residual links; `None` when the bottom link is
-    /// the `Scan`, rebuilt without the lifted predicates.
-    pub reads: Option<MemoGroupId>,
-    /// Bottom-up, each link without its input; the last is the `SummaryAgg`.
-    pub links: Vec<Operator<()>>,
+/// What a summary state computes, with every lifted selection removed.
+pub struct SummaryStateDefinition {
+    /// The group the operators below read: the first input under the
+    /// SummaryAgg that is not Filter / range TimeRange / TimeShift without @
+    /// / direct-column Project.
+    pub input_group: MemoGroupId,
+    /// From the SummaryAgg down, each operator not lifted into the
+    /// selection, with only its residual arguments; `()` marks its single
+    /// input (the next one, or input_group). Two states may merge only if
+    /// input_group and these operators are equal.
+    pub operators_kept_in_definition: Vec<Operator<()>>,
+}
+
+pub struct SummaryCoverage {
+    pub(crate) definition: SummaryStateDefinition,
+    /// Union of boxes over the output rows of the operators' input.
+    pub(crate) selection: Vec<SelectionBox>,
+}
+
+impl SummaryCoverage {
+    pub(crate) fn derive_from_inputs(
+        operator: &Operator<MemoGroupAsInput<'_>>,
+    ) -> Result<Self, CoverageError>;
+    /// A hash of the `SummaryStateDefinition`; equal definitions in one
+    /// memo get equal ids.
+    pub(crate) fn definition_id(&self) -> String;
 }
 
 pub struct Memo {
@@ -269,18 +287,47 @@ impl Memo {
 }
 ```
 
-`SummaryCoverage<D>` is the coverage type of today's IR with its definition as a parameter: a group's coverage has a `SummaryDefinition`, an operator node's (executor, export) its residual node tree.
+The rules read an operator's inputs through one trait, so the same rules derive a front-end node's schema and a group's `GroupProperties`:
+
+```rust
+pub(crate) trait OperatorInput: Sized {
+    fn schema(&self) -> &Schema;
+    fn result_kind(&self) -> OperatorResultKind;
+    /// The input's own operator, its children as inputs again.
+    fn operator(&self) -> Operator<Self>;
+    fn summary_coverage(&self) -> Option<&SummaryCoverage>;
+}
+// Front-end node trees; summary_coverage is None.
+impl OperatorInput for Rc<OperatorNode> { … }
+/// A memo group read as an input: its group_properties and expression.
+pub(crate) struct MemoGroupAsInput<'m> { memo: &'m Memo, group_id: MemoGroupId }
+impl OperatorInput for MemoGroupAsInput<'_> { … }
+
+// The existing rules, generic over the input; existing names kept.
+impl<I: OperatorInput> Operator<I> {
+    pub(crate) fn output_schema(&self) -> Result<Schema, SchemaDerivationError>;
+    pub(crate) fn output_kind(&self) -> OperatorResultKind;
+    pub(crate) fn validate_inputs(&self) -> Result<(), SchemaDerivationError>;
+    pub(crate) fn is_shareable_when_equal(&self) -> bool;
+}
+fn derive_group_properties(
+    memo: &Memo,
+    expression: &Operator<MemoGroupId>,
+) -> Result<GroupProperties, SchemaDerivationError>;
+```
+
+Summary coverage exists only in the memo: a node tree has none, and `SummaryCoverage` has no type parameter. The executor reads only `definition_id` from the plan.
 
 A group is its expression: one operator, with its arguments, over input groups. Hash-consing compares and hashes the expression directly, so two expressions are one group when their operators and arguments are equal and their input groups are the same. θ is not an operator argument, so builds that differ only in θ share one group. An expression whose copies may return different rows (an unordered `LIMIT`) always gets a new group.
 
-Everything that was computed on operator-node trees is computed on groups. `GroupProperties` is derived once, when the group is created, by the same rules that check operator nodes (schema derivation, input validation, merge check), reading only the input groups' `expression` and `group_properties` from the memo, never a node tree:
+Everything that was computed on operator-node trees is computed on groups. `find_or_add_group` derives `GroupProperties` once, when the group is created, with `derive_group_properties`: the rules that check operator nodes (schema derivation, input validation, merge check), applied to the expression over `MemoGroupAsInput`s, which read only the input groups' `expression` and `group_properties`, never a node tree:
 
 - `schema` and `result_kind` from the operator and its input groups' schemas and result kinds; a scalar subquery reads the referenced group's schema.
-- `summary_coverage`, for a summary state: walking down through the input groups' expressions (Filter, Project, TimeRange, TimeShift, down to the Scan), lifting their predicates into the selection; the rest is the `SummaryDefinition`. A merge's coverage comes from its inputs' coverage; a merge is valid only over inputs with the same definition and disjoint selections.
+- `summary_coverage`, for a summary state: walking down from the SummaryAgg through the input groups' expressions while each is a Filter, a range TimeRange, a TimeShift without `@` or a direct-column Project, lifting their predicates into the selection. The group below them is the definition's `input_group`; a Scan is never lifted through, so its predicates stay in that group. The operators not lifted, each with its residual arguments, are `operators_kept_in_definition`. A tumbling-window chain covers what one build over its whole window does. A merge's coverage comes from its inputs' stored coverage; a merge is valid only over inputs with equal definitions and disjoint selections.
 - The checks that read an input's operator (a merge of the newest windows reads a window chain; a selected build) read the input group's `expression`.
 - `shareable_when_equal`: a `LIMIT` is shareable over a `Sort` with the same partitions (the input group's `expression`); a `Dedup` on every column (the input group's schema).
 
-A candidate's expression goes through the same derivation and must produce the group's schema and result kind. The executor and the export keep their node-tree summary coverage (`definition_id`) until Stage 3's export builds node trees from the memo. `OperatorNode` recursively contains chosen child nodes and therefore describes a fixed plan fragment; `Operator<MemoGroupId>` contains input group IDs and leaves their implementations open. A candidate needs its own expression because a group may offer several ways to compute the same result.
+`add_candidate` derives a candidate's properties with the same `derive_group_properties` and requires its schema and result kind to equal the group's. `OperatorNode` recursively contains chosen child nodes and therefore describes a fixed plan fragment; `Operator<MemoGroupId>` contains input group IDs and leaves their implementations open. A candidate needs its own expression because a group may offer several ways to compute the same result.
 
 Removing the one-field `CandidateExpression` wrapper is possible but not adopted.
 
