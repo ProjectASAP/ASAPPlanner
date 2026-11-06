@@ -19,8 +19,9 @@
 //! - **devtools** and **integration-tests** may depend on anything, and no
 //!   other crate may depend on them.
 //!
-//! The edges the rules forbid but the workspace has today are listed, each
-//! with its reason, in [`EXCEPTIONS`] and [`DEV_EXCEPTIONS`]. A new workspace crate fails the test
+//! The `[dependencies]` edges the rules forbid but the workspace has today are
+//! listed, each with its reason, in [`EXCEPTIONS`]; no `[dev-dependencies]`
+//! edge between stage crates is excepted. A new workspace crate fails the test
 //! until it gets a role.
 
 use serde_json::Value;
@@ -103,36 +104,6 @@ const EXCEPTIONS: &[Exception] = &[
     ("asap-planner", "asap-executor"),
 ];
 
-/// The `[dev-dependencies]` edges between stage crates the workspace keeps
-/// today: the query-language frontends' tests and Pass 1's tests.
-const DEV_EXCEPTIONS: &[Exception] = &[
-    // Pass 1's tests lower PromQL test queries (`test_fixtures::lower_promql`).
-    (
-        "asap-stage1-pass1-per-computation-candidates",
-        "asap-frontend-promql",
-    ),
-    // The frontends' tests compose Pass 1 candidates of the lowered queries
-    // (`tests/support.rs`'s `logical_candidates`, `frequency_l2.rs`).
-    ("asap-frontend-promql", "asap-stage0-memo"),
-    (
-        "asap-frontend-promql",
-        "asap-stage1-pass1-per-computation-candidates",
-    ),
-    ("asap-frontend-sql", "asap-stage0-memo"),
-    (
-        "asap-frontend-sql",
-        "asap-stage1-pass1-per-computation-candidates",
-    ),
-    ("asap-frontend-metricsql", "asap-stage0-memo"),
-    (
-        "asap-frontend-metricsql",
-        "asap-stage1-pass1-per-computation-candidates",
-    ),
-    // The MetricsQL tests share the PromQL tests' `support.rs` and compare
-    // with the PromQL frontend's lowering.
-    ("asap-frontend-metricsql", "asap-frontend-promql"),
-];
-
 /// One message per edge of `metadata` (the JSON of
 /// `cargo metadata --format-version 1 --no-deps`) that breaks a rule, naming
 /// the edge and the rule: a `[dependencies]` edge that [`rule_violated`]
@@ -175,7 +146,7 @@ fn crate_graph_violations(metadata: &Value) -> Vec<String> {
                     "[dev-dependencies]",
                     (from_role == Role::Stage && to_role == Role::Stage)
                         .then_some("a stage crate's tests never call another stage crate"),
-                    DEV_EXCEPTIONS,
+                    &[][..],
                 ),
                 Some(_) => continue,
             };

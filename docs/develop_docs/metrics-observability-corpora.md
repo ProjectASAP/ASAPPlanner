@@ -1,5 +1,10 @@
 # Metrics-observability corpus coverage
 
+> **Status.** The executable corpus test, `metrics_observability.rs`, was deleted
+> when each planning stage became its own crate: a frontend crate's tests may not
+> call Stage 0 or Stage 1. The fixtures stay, for the Pass 1 coverage tests that
+> replace it. The sections below describe the deleted test.
+
 This note describes the PromQL corpora derived from the metrics-observability
 benchmark dump and the commands used to reproduce their measurements. The
 audience is developers evaluating changes to the PromQL front end or ASAP

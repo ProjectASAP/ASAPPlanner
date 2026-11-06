@@ -12,4 +12,3 @@ mod promql_conformance;
 mod promql_equivalence;
 mod promql_lowering;
 mod scalar_design;
-mod univmon_candidates;
