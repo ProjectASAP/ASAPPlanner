@@ -26,7 +26,7 @@ This page defines the memo's data structures in the terms of the optimization pr
 | $P_{c,i}$ | physical candidates in the required input group, $G_{c,i} \cap \mathcal C$, before checking requirements |
 | $\mathcal E$ | potential dependencies $\{(u, c, i) \mid c \in \mathcal C,\ i \in \mathcal I(c),\ u \in P_{c,i}\}$ |
 | $x_v$, $y_{u,c,i}$, $z_{q,v}$, $t_v$ | MILP variables: candidate selected; producer $u$ supplies input $i$ of $c$; $v \in G_q$ supplies $q$'s result; topological rank |
-| (A)–(I) | MILP rows: input satisfaction, producer selection and sharing, query coverage, output selection, acyclicity, utilization, logical requirements ($y \le \alpha^{\log}$), physical requirements ($y \le \alpha^{\mathrm{phys}}$), domains |
+| (A)–(I) | MILP constraints: input satisfaction, producer selection and sharing, query coverage, output selection, acyclicity, utilization, logical requirements ($y \le \alpha^{\log}$), physical requirements ($y \le \alpha^{\mathrm{phys}}$), domains |
 | $w_v$ | fixed cost: $C_{\text{read}}(v) + C_{\text{compute}}(v)$ plus $C^{\text{one}}_{\text{retain}}(v)$ or $C^{\text{across}}_{\text{retain}}(v)$ by $\ell_v$ |
 | $\Pi$, $V_\Pi$ | selected physical ASAP DAG and its node set; $\operatorname{Cost}(\Pi) = \sum_{v \in \mathcal C} w_v x_v$ |
 | **(#1207)** $\kappa$ | execution context of a candidate with $\ell_v$ = None: a query evaluation $\kappa_q$, an ingestion pipeline $I_r$, or a materialized candidate's computation $\kappa_m$ |
@@ -95,7 +95,7 @@ Valid $(\tau, \ell)$: (QueryTime, None), (IngestionTime, None), (QueryTime, OneE
 
 Each input $i$ of consumer $c$ names a producer group $G_{c,i}$ and a property requirement $r_{c,i} = (r^{\log}_{c,i}, r^{\mathrm{phys}}_{c,i})$. A requirement holds only what neither $G_{c,i}$'s identity nor the consumer's own properties already fix (decided 2026-11-05): the family and the query window are in $G_{c,i}$'s identity, and $r^{\mathrm{phys}}_{c,i}$ is a function of the consumer's own $p^{\mathrm{phys}}_c$, not a stored value. Logical satisfaction checks configuration requirements; physical satisfaction checks whether the producer's timing and lifetime jointly support the required access. For a monotone size parameter, $\succeq$ reduces to numerical dominance, e.g. $k_u \ge k_{\text{required}}$ for KLL.
 
-The workload's accuracy target $A_q$ is not an input requirement **(#1207)**: a per-input bound would fix each input's share of the query's budget. Row (K) bounds each query's composed error at its root instead. What stays in $r^{\log}$ is what depends only on the consumer.
+The workload's accuracy target $A_q$ is not an input requirement **(#1207)**: a per-input bound would fix each input's share of the query's budget. Constraint (K) bounds each query's composed error at its root instead. What stays in $r^{\log}$ is what depends only on the consumer.
 
 #### Error propagation and the error cap
 
@@ -116,35 +116,35 @@ Each $g_c$ is a sum of its inputs' errors, each times a constant **propagation f
 
 $$\lambda_{q,c,i} = \sum_{\text{paths } c = c_0 \to c_1 \to \dots \to c_m = \text{root of } q} \lambda_{c_0,i}\,\lambda_{c_1,i_1} \cdots \lambda_{c_m,i_m}.$$
 
-Row (K) is $\sum \lambda_{q,c,i}\,\varepsilon_u\,y \le \varepsilon_q$ with these factors, so the weights sit on $(q, c, i)$. Two queries reading one group through different expressions have different factors. Failure probabilities add by a union bound and need no factor.
+Constraint (K) is $\sum \lambda_{q,c,i}\,\varepsilon_u\,y \le \varepsilon_q$ with these factors, so the weights sit on $(q, c, i)$. Two queries reading one group through different expressions have different factors. Failure probabilities add by a union bound and need no factor.
 
 From $g_c$ come two caps on an input's error, both checked per edge as part of $r^{\log}_{c,i}$:
 
-1. **Validity cap: correctness, non-linear consumers only.** A non-linear $g_c$ is bounded by its linear form only in a region, e.g. $\varepsilon_Y \le$ cap for a ratio, where $\frac{\varepsilon_X+\varepsilon_Y}{1-\varepsilon_Y} \le \frac{1}{1-\text{cap}}(\varepsilon_X+\varepsilon_Y)$, so both factors are $\frac{1}{1-\text{cap}}$ (1.11 for cap 0.1). Without the cap, row (K) could accept a plan whose true error is unbounded. A linear $g_c$ is exact everywhere and has no validity cap.
-2. **Pruning cap: efficiency only, every consumer, linear ones included.** An input whose error alone breaks every target it could serve is in no feasible plan: $\lambda_{q,c,i}\,\varepsilon_u > \varepsilon_q$ for every query $q$ that may reach $c$. Removing such edges removes no feasible plan, since row (K) rejects them anyway; it keeps them out of $\mathcal E$ and the MILP. It is the per-edge form of Pass 1's "drop a $\boldsymbol\theta$ whose $\varepsilon$ alone exceeds every reading query's target", and prunes more because it uses each consumer's own $\lambda$.
+1. **Validity cap: correctness, non-linear consumers only.** A non-linear $g_c$ is bounded by its linear form only in a region, e.g. $\varepsilon_Y \le$ cap for a ratio, where $\frac{\varepsilon_X+\varepsilon_Y}{1-\varepsilon_Y} \le \frac{1}{1-\text{cap}}(\varepsilon_X+\varepsilon_Y)$, so both factors are $\frac{1}{1-\text{cap}}$ (1.11 for cap 0.1). Without the cap, constraint (K) could accept a plan whose true error is unbounded. A linear $g_c$ is exact everywhere and has no validity cap.
+2. **Pruning cap: efficiency only, every consumer, linear ones included.** An input whose error alone breaks every target it could serve is in no feasible plan: $\lambda_{q,c,i}\,\varepsilon_u > \varepsilon_q$ for every query $q$ that may reach $c$. Removing such edges removes no feasible plan, since constraint (K) rejects them anyway; it keeps them out of $\mathcal E$ and the MILP. It is the per-edge form of Pass 1's "drop a $\boldsymbol\theta$ whose $\varepsilon$ alone exceeds every reading query's target", and prunes more because it uses each consumer's own $\lambda$.
 
 $$\text{cap}_{c,i} = \min\Bigl(\text{validity cap of } g_c,\ \max_{q \text{ that may reach } c} \frac{\varepsilon_q}{\lambda_{q,c,i}}\Bigr), \qquad \alpha^{\log}_{u,c,i} = 0 \text{ when } \varepsilon_u > \text{cap}_{c,i}.$$
 
 For a monotone size parameter, $\varepsilon_u \le \text{cap}_{c,i}$ is a minimum size, e.g. $k_u \ge k_{\text{required}}$ for KLL.
 
-**What stays at the root.** A per-input cap cannot replace row (K): with several inputs, $\varepsilon_X + \varepsilon_Y \le \varepsilon_q$ couples them, and one cap per input would fix each input's share in advance (the rejected budget shares). The caps only prune; row (K) decides.
+**What stays at the root.** A per-input cap cannot replace constraint (K): with several inputs, $\varepsilon_X + \varepsilon_Y \le \varepsilon_q$ couples them, and one cap per input would fix each input's share in advance (the rejected budget shares). The caps only prune; constraint (K) decides.
 
 
 | Requirement | Stated by | Values | Constrains | Checked by |
 |---|---|---|---|---|
-| Accuracy target $A_q$ | the workload, per query | metric: absolute (in the value's units, or times the stream's L1 or L2 norm), relative, rank; bound $\varepsilon_q$; failure probability $\delta_q$; scope: per value, whole result, or groups above a share of the records | $\boldsymbol\theta_u$ of every approximate candidate $q$ depends on, through $(\varepsilon_u, \delta_u)$ | row (K) **(#1207)** |
-| Parameter floor $\boldsymbol\theta^{\min}_{c,i}$, the only field of $r^{\log}_{c,i}$ | every consumer, per input, from $g_c$ and the targets of the queries that may reach it | the smallest $\boldsymbol\theta$ in the family's predefined list whose $\varepsilon$, for the statistic $c$ reads, is at most $\text{cap}_{c,i}$ = min(validity cap, pruning cap); e.g. $k_u \ge k_{\text{required}}$ | $\boldsymbol\theta_u$ | $\alpha^{\log}$, row (G): $\boldsymbol\theta_u \succeq \boldsymbol\theta^{\min}_{c,i}$ |
-| Consumer timing, $r^{\mathrm{phys}}_{c,i}$ from $\tau_c$ | the consumer's own $p^{\mathrm{phys}}_c$ | when $c$ runs: ingestion or query time | $\tau_u$, $\ell_u$ | $\alpha^{\mathrm{phys}}$, row (H) |
-| Consumer schedule, $r^{\mathrm{phys}}_{c,i}$ from $\sigma_c$ or $\kappa$ **(#1207)** | a materialized consumer's own $\sigma_c$; for $\ell_c$ = None, the times $T_\kappa$ of each context $\kappa$ it runs in (from its query's $\mathcal T_q$) | interval and phase | $\sigma_u$: the producer delivers on those times | $\alpha^{\mathrm{phys}}$, row (H): in Stage 2 for a materialized consumer; per context in Stage 3 for $\ell_c$ = None |
+| Accuracy target $A_q$ | the workload, per query | metric: absolute (in the value's units, or times the stream's L1 or L2 norm), relative, rank; bound $\varepsilon_q$; failure probability $\delta_q$; scope: per value, whole result, or groups above a share of the records | $\boldsymbol\theta_u$ of every approximate candidate $q$ depends on, through $(\varepsilon_u, \delta_u)$ | constraint (K) **(#1207)** |
+| Parameter floor $\boldsymbol\theta^{\min}_{c,i}$, the only field of $r^{\log}_{c,i}$ | every consumer, per input, from $g_c$ and the targets of the queries that may reach it | the smallest $\boldsymbol\theta$ in the family's predefined list whose $\varepsilon$, for the statistic $c$ reads, is at most $\text{cap}_{c,i}$ = min(validity cap, pruning cap); e.g. $k_u \ge k_{\text{required}}$ | $\boldsymbol\theta_u$ | $\alpha^{\log}$, constraint (G): $\boldsymbol\theta_u \succeq \boldsymbol\theta^{\min}_{c,i}$ |
+| Consumer timing, $r^{\mathrm{phys}}_{c,i}$ from $\tau_c$ | the consumer's own $p^{\mathrm{phys}}_c$ | when $c$ runs: ingestion or query time | $\tau_u$, $\ell_u$ | $\alpha^{\mathrm{phys}}$, constraint (H) |
+| Consumer schedule, $r^{\mathrm{phys}}_{c,i}$ from $\sigma_c$ or $\kappa$ **(#1207)** | a materialized consumer's own $\sigma_c$; for $\ell_c$ = None, the times $T_\kappa$ of each context $\kappa$ it runs in (from its query's $\mathcal T_q$) | interval and phase | $\sigma_u$: the producer delivers on those times | $\alpha^{\mathrm{phys}}$, constraint (H): in Stage 2 for a materialized consumer; per context in Stage 3 for $\ell_c$ = None |
 | Deployment capability | the deployment and data | the source has an ingestion pipeline; the executor supports the family; query-time results may be kept across evaluations | $\tau$, $\operatorname{op}$, (QueryTime, AcrossEvaluations) | candidate generation: such candidates are not in $\mathcal C$ |
-| Latency, resource budgets **(#1207)** | the workload | per-query latency bound; memory and CPU budgets | the whole plan | rows (L) and budgets |
+| Latency, resource budgets **(#1207)** | the workload | per-query latency bound; memory and CPU budgets | the whole plan | constraints (L) and budgets |
 
 Accuracy metrics that may be added later, when a primitive needs them: top-k recall or precision, and a false-positive rate for membership summaries.
 
 How requirements map to properties:
 
 ```
-A_q (workload)                  ──► θ_u of every approximate input   (through ε_u, δ_u; row (K))
+A_q (workload)                  ──► θ_u of every approximate input   (through ε_u, δ_u; constraint (K))
 parameter floor θ^min   r^log   ──► θ_u   (from cap = min(validity cap of g_c, pruning cap ε_q / λ_{q,c,i}))
 τ_c               r^phys = f(p^phys_c) ──► τ_u, ℓ_u
 σ_c or T_κ        r^phys = f(p^phys_c) ──► σ_u
@@ -240,7 +240,7 @@ The levels, top to bottom:
 What the tree does not decide, because it is a choice of the MILP over $\mathcal C$ and $\mathcal E$:
 - **Which producer each consumer input reads:** $y_{u,c,i}$. Two consumers of one group may read different leaves, e.g. one reads `k = 200` and another `k = 345`.
 - **Where an unmaterialized candidate runs (#1207):** a candidate with $\ell_v$ = None runs inside each reading context $\kappa$.
-- **How much a materialized candidate retains (#1207):** $h_v$, from the longest range among the queries its selected consumers serve, row (R).
+- **How much a materialized candidate retains (#1207):** $h_v$, from the longest range among the queries its selected consumers serve, constraint (R).
 
 ### Order of decisions
 
@@ -268,7 +268,7 @@ This section gives the target interface of each stage after the formulation refa
 | Stage 1, Pass 1 | `DagOfLogicalMemoGroups` | `Memo` | $v = (e_v, p^{\log}_v)$, $r^{\log}_{c,i}$, $\theta$ list | #1203 |
 | Stage 1, Pass 2 | `Memo` | `LogicalASAPMemoCandidates` | rule-added candidates; logical edges with $\alpha^{\log}$ | #1203, #1201 |
 | Stage 2 | `LogicalASAPMemoCandidates` | `PhysicalASAPMemoCandidates` | $p^{\mathrm{phys}}_v = (\tau, \ell, \sigma)$, $r^{\mathrm{phys}}_{c,i}$, physical edges $\mathcal E$ with $\alpha^{\mathrm{phys}}$ | #1200, #1201 |
-| Stage 3 | `PhysicalASAPMemoCandidates` | `DagOfSelectedCandidates` | contexts $\kappa$; cost $w_v$ (`asap-cost`); $x$, $y$, $z$, $t$, $h$; rows (A)–(K), (R), (L), budgets | #1204 |
+| Stage 3 | `PhysicalASAPMemoCandidates` | `DagOfSelectedCandidates` | contexts $\kappa$; cost $w_v$ (`asap-cost`); $x$, $y$, $z$, $t$, $h$; constraints (A)–(K), (R), (L), budgets | #1204 |
 | Realizer, export | `DagOfSelectedCandidates` | `PhysicalASAPDAG` | — | #1200 (export fields) |
 
 ### Stage 0: frontends and hash-consing
@@ -470,7 +470,7 @@ Deleted: `Materialization`, `PhysicalCandidate::{timing, materialization, operat
 
 ### Stage 3: the MILP
 
-Stage 3 reads the physical candidates and edges and selects the DAG. Variables and rows are named after the formulation.
+Stage 3 reads the physical candidates and edges and selects the DAG. Variables and constraints are named after the formulation.
 
 ```rust
 // crates/plan-selection/src/milp/model.rs
@@ -497,16 +497,16 @@ struct SelectionVariables {
     h: Vec<Variable>,                                                  // h_v, ℓ ≠ None
     latency: LatencyVariables,                                         // (L)
 }
-fn input_satisfaction_rows(..);   // (A) Σ_u y_{u,c,i} = x_c
-fn producer_selection_rows(..);   // (B) y_{u,c,i} ≤ x_u
-fn query_coverage_rows(..);       // (C), (D)
-fn acyclicity_rows(..);           // (E)
-fn utilization_rows(..);          // (F)
-fn consumer_constraint_rows(..);  // (J): MinimumQueryReaders, HighestSharedQueryMaterialization over reach
-fn accuracy_rows(..);             // (K) Σ λ_{q,u} ε_u a_{q,u} ≤ ε_q, Σ δ_u a_{q,u} ≤ δ_q
-fn retention_rows(..);            // (R) h_v ≥ need_{c,i} · y_{v,c,i}
-fn latency_rows(..);              // (L)
-fn resource_budget_rows(..);      // budgets (#1207)
+fn input_satisfaction_constraints(..);   // (A) Σ_u y_{u,c,i} = x_c
+fn producer_selection_constraints(..);   // (B) y_{u,c,i} ≤ x_u
+fn query_coverage_constraints(..);       // (C), (D)
+fn acyclicity_constraints(..);           // (E)
+fn utilization_constraints(..);          // (F)
+fn consumer_constraint_constraints(..);  // (J): MinimumQueryReaders, HighestSharedQueryMaterialization over reach
+fn accuracy_constraints(..);             // (K) Σ λ_{q,u} ε_u a_{q,u} ≤ ε_q, Σ δ_u a_{q,u} ≤ δ_q
+fn retention_constraints(..);            // (R) h_v ≥ need_{c,i} · y_{v,c,i}
+fn latency_constraints(..);              // (L)
+fn resource_budget_constraints(..);      // budgets (#1207)
 // Objective: min Σ w_v x_v + Σ ρ_κ w_v x_{κ,v} + Σ π_v h_v
 
 // crates/types/src/stages/physical/graph.rs (unchanged)
@@ -518,7 +518,7 @@ pub struct DagOfSelectedCandidates {
 }
 ```
 
-(G) $y \le \alpha^{\log}$ and (H) $y \le \alpha^{\mathrm{phys}}$ are not rows: $y$ exists only on admissible edges. Deleted: `ResultSlot`, `slot_of`, the `e` binaries, schedule groups `z[m, G]`, `N[q]`, `A[q, parts]`, and `p[ctx, c]` for materialized candidates.
+(G) $y \le \alpha^{\log}$ and (H) $y \le \alpha^{\mathrm{phys}}$ are not constraints in the model: $y$ exists only on admissible edges. Deleted: `ResultSlot`, `slot_of`, the `e` binaries, schedule groups `z[m, G]`, `N[q]`, `A[q, parts]`, and `p[ctx, c]` for materialized candidates.
 
 ### Realizer and export
 
@@ -594,9 +594,9 @@ A memo group stores its candidates and, through their expressions, the groups th
 
 A logical DAG rooted at group $G$ is a set of logical candidates and edges $(u, c, i)$ such that:
 1. exactly one candidate of $G$ is in it (the root);
-2. every candidate $c$ in it has, for each input $i$, exactly one edge $(u, c, i)$, with $u$ a candidate of $G_{c,i}$ and $\alpha^{\log}_{u,c,i} = 1$ (rows (A) and (G));
-3. every candidate in it is the root or the producer of some edge (row (F));
-4. the edges form no cycle (row (E)).
+2. every candidate $c$ in it has, for each input $i$, exactly one edge $(u, c, i)$, with $u$ a candidate of $G_{c,i}$ and $\alpha^{\log}_{u,c,i} = 1$ (constraints (A) and (G));
+3. every candidate in it is the root or the producer of some edge (constraint (F));
+4. the edges form no cycle (constraint (E)).
 
 A candidate is one node however many edges read it: two consumers that choose the same producer share it, which is what $x_u \in \{0, 1\}$ says. Two consumers of one group may choose different candidates of it. The listing is therefore a choice of one producer per consumer input $(c, i)$, not one candidate per group.
 
@@ -637,7 +637,7 @@ fn expand(memo: &Memo, dag: LogicalDag, mut pending: VecDeque<CandidateForMemoGr
                                    &candidate.input_requirements[i]))
             .collect::<Vec<_>>()
     })) {
-        // Row (E): a producer that already reaches `consumer` would close a cycle.
+        // Constraint (E): a producer that already reaches `consumer` would close a cycle.
         if choice.iter().any(|&u| reaches(&dag, u, consumer)) {
             continue;
         }
@@ -681,7 +681,7 @@ fn print(memo: &Memo, dag: &LogicalDag) {
 }
 ```
 
-For a workload, list from every query root at once: start `pending` with one root candidate per $G_q$ (rows (C) and (D)), taking the product over queries of their root candidates. A candidate two queries reach is one node, as above.
+For a workload, list from every query root at once: start `pending` with one root candidate per $G_q$ (constraints (C) and (D)), taking the product over queries of their root candidates. A candidate two queries reach is one node, as above.
 
 ### Example
 
@@ -698,7 +698,7 @@ G3[0] SummaryEstimate q=0.95                 G1[0] Scan
                                        … and (k=200, k=345), (k=345, k=200), (k=345, k=345)
 ```
 
-Listed from both roots at once there are $2 \times 4 = 8$ DAGs. In the one where all three estimates choose `k = 345`, `G2[1]` is a single node read by three consumers, so its cost is counted once. Row (K) later accepts only the DAGs that meet each query's target: for B, only (k=345, k=345). Error caps (section 1) remove edges before the listing, so a capped producer never appears.
+Listed from both roots at once there are $2 \times 4 = 8$ DAGs. In the one where all three estimates choose `k = 345`, `G2[1]` is a single node read by three consumers, so its cost is counted once. Constraint (K) later accepts only the DAGs that meet each query's target: for B, only (k=345, k=345). Error caps (section 1) remove edges before the listing, so a capped producer never appears.
 
 ### Size
 
