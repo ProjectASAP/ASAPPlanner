@@ -16,7 +16,7 @@ mod pruning;
 mod realizer;
 
 pub use candidates::{
-    parameter_list, producer_satisfies_logical_requirements, CandidateExpression,
+    parameter_list, producer_satisfies_logical_requirements, CandidateError, CandidateExpression,
     CandidateForMemoGroup, CandidateForMemoGroupId, ErrorPropagation, LogicalProperties,
     LogicalPropertiesError, LogicalRequirements, Memo, OriginOfCandidateForMemoGroup, WindowLayout,
 };
