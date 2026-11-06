@@ -635,7 +635,7 @@ $$
 
 - $E_c, F_{c,i}, D_c, H_{c,i} \ge 0$ are continuous. $\varepsilon^{\mathrm{loc}}_c$ and $\delta^{\mathrm{loc}}_c$ are the candidate's own guarantee (zero for an exact operator); $\beta_{c,i}$ and the metric rule come from `error_propagation`.
 - $M_{c,i}$ is any upper bound on $E_u$ over the producers of input $i$ (their largest feasible bound); $M_q$ likewise for the root. Exactly one $y_{u,c,i} = 1$ per selected input (constraint (A)), so $F_{c,i}$ equals the chosen producer's error bound.
-- A producer reached by two paths contributes on both, which is the worst-case sum. The failure probabilities add by a union bound; a failure event reached twice is counted twice, which is conservative.
+- A producer reached by two paths contributes on both, which is the worst-case sum. The failure probabilities add by a union bound; a failure event reached twice is counted twice, which is conservative. This affects only the error bounds, not cost: the objective counts each selected candidate once through $x_v$. Being conservative can only make the MILP pass over a cheaper plan that would in fact meet the target; it never accepts one that does not. Counting a shared failure event once needs failure-event identities, left for later.
 - Under the context extension (Section 5), the variables are indexed by context, $E_{\kappa,c}$, and the edges by $y_{\kappa,u,c,i}$.
 
 $\lambda_{q,c,i}$ is still used, but only for the pruning caps below, where a fixed lower bound suffices.
