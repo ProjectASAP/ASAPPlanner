@@ -77,29 +77,33 @@ asap-stage1-pass2-reuse-candidates -p asap-stage2-physical-optimization -p asap-
 
 ## 4. Stage 2
 
-- Only summary builds (`SummaryAgg`, `SummaryTumblingWindowChain`) get materialization
-  options, each a timing and a lifetime (`PhysicalProperties`): not materialized always;
-  materialized at ingestion time, `AcrossEvaluations(Memory)`, when the build is
-  eligible to run as data arrives; materialized at query time for `OneEvaluation(Memory)`
-  when two or more queries read it (reused within one evaluation); materialized at
-  query time `AcrossEvaluations(Memory)` for a tumbling-window chain that
-  builds one new tumbling window per evaluation, when the deployment declares
-  `query_time_results_retained`.
-- One `PhysicalCandidate` per assignment, the all-not-materialized one first
-  (`P<n>`, then `P<n>-m<k>`). An assignment that puts a build at ingestion
-  time over one that is not is not generated. A logical candidate Stage 2
-  cannot implement becomes a `PrunedCandidate` with its reason.
-- On the memo (`generate_physical_asap_memo_candidates`), every physical
-  candidate Stage 2 prunes is recorded in
-  `PhysicalASAPMemoCandidates::pruned_candidates` as
+- `generate_physical_asap_memo_candidates` expands every logical candidate
+  into one `PhysicalCandidate` per valid physical property
+  `PhysicalProperties { timing, lifetime }`: query time with `None`,
+  `OneEvaluation(Memory)` or `AcrossEvaluations(Memory)`, and ingestion time
+  with `None` or `AcrossEvaluations(Memory)`. `PhysicalProperties::new`
+  rejects ingestion time with `OneEvaluation`. Materialized results are kept
+  in memory only until the executor stores them on disk (#1217).
+- Stage 2 does not generate an alternative the data or the deployment cannot
+  run, and records it in `PhysicalASAPMemoCandidates::pruned_candidates` as
   `PrunedCandidate<PhysicalCandidateKey>` with a `PruneReason`: an exact
   per-entity `Aggregate` the executor cannot run
-  (`PerEntityAggregateNotExecutable`) and, without raw data retained, a
-  query-time scan of raw data (`RawDataNotRetained`) are not generated; a
-  candidate no buildable input, query output or reader count can use is
-  removed (`InputHasNoBuildableProducer`, `ReachesNoQueryOutput`,
-  `TooFewQueryReaders`). Stage 2 emits one candidate per operator node,
-  timing and lifetime; it makes no execution-scope copies.
+  (`PerEntityAggregateNotExecutable`), ingestion time when the data is at rest
+  or its arrival unknown (`NoIngestionPipeline`), a query-time scan of raw
+  data the deployment does not retain (`RawDataNotRetained`), materialization
+  across evaluations without a window layout
+  (`AcrossEvaluationsWithoutWindowLayout`) or, at query time, without
+  `query_time_results_retained` (`QueryTimeResultsNotRetained`).
+- Each logical edge becomes one `PhysicalEdge` per pair of the producer's and
+  the consumer's alternatives, with `satisfies_logical_requirement` copied
+  from the logical edge and `satisfies_physical_requirement` from
+  `producer_satisfies_physical_requirements` (timing and lifetime only).
+  Alignment with each execution context is Stage 3's check
+  (`PhysicalCandidate::delivers_on`).
+- An alternative with an input no buildable producer supplies over admissible
+  edges (`InputHasNoBuildableProducer`), or that no query output reads over
+  admissible edges (`ReachesNoQueryOutput`), is pruned too. A query reads its
+  output at query time. Stage 2 makes no execution-scope copies.
 
 ## 5. Stage 3
 
