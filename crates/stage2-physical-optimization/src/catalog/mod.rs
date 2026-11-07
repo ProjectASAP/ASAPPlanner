@@ -19,11 +19,11 @@ use std::collections::HashMap;
 use asap_types::stages::{
     producer_satisfies_physical_requirements, CandidateForMemoGroupId, LogicalASAPMemoCandidates,
     LogicalEdge, MemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateId,
-    PhysicalCandidateKey, PhysicalEdge, PrunedCandidate,
+    PhysicalCandidateKey, PhysicalEdge, PruneReason, PrunedCandidate,
 };
 use asap_types::workload::DataWorkload;
 
-use configurations::{physical_properties_of, Deployment};
+use configurations::{enumerate_candidate_configurations, Deployment};
 
 /// Stage 2: expand every logical candidate of `logical` into its physical
 /// alternatives (decision-tree levels 4–5: timing, then lifetime) that the
@@ -63,23 +63,21 @@ pub fn generate_physical_asap_memo_candidates(
             let ids = alternatives_of_logical_candidate
                 .entry(logical_candidate_id)
                 .or_default();
-            for alternative in physical_properties_of(candidate, &deployment) {
-                match alternative {
-                    Ok(physical_properties) => {
+            for configuration in enumerate_candidate_configurations(candidate, &deployment) {
+                let (physical_properties, prune_reason) = match configuration {
+                    Ok(physical_properties) => (physical_properties, None),
+                    Err((physical_properties, reason)) => (physical_properties, Some(reason)),
+                };
+                let alternative = PhysicalCandidate {
+                    logical_candidate_id,
+                    physical_properties,
+                };
+                match prune_reason {
+                    Some(reason) => pruned_candidates.push(pruned(alternative, reason)),
+                    None => {
                         ids.push(alternatives.len());
-                        alternatives.push(PhysicalCandidate {
-                            logical_candidate_id,
-                            physical_properties,
-                        });
+                        alternatives.push(alternative);
                     }
-                    Err((physical_properties, reason)) => pruned_candidates.push(PrunedCandidate {
-                        group: logical_candidate_id.group,
-                        candidate: PhysicalCandidateKey {
-                            logical_candidate_id,
-                            physical_properties,
-                        },
-                        reason,
-                    }),
                 }
             }
         }
@@ -136,14 +134,7 @@ pub fn generate_physical_asap_memo_candidates(
         .zip(&mut physical_candidate_id)
     {
         match reason {
-            Some(reason) => pruned_candidates.push(PrunedCandidate {
-                group: alternative.logical_candidate_id.group,
-                candidate: PhysicalCandidateKey {
-                    logical_candidate_id: alternative.logical_candidate_id,
-                    physical_properties: alternative.physical_properties,
-                },
-                reason,
-            }),
+            Some(reason) => pruned_candidates.push(pruned(*alternative, reason)),
             None => {
                 *id = Some(PhysicalCandidateId(physical_candidates.len()));
                 physical_candidates.push(*alternative);
@@ -170,6 +161,21 @@ pub fn generate_physical_asap_memo_candidates(
     );
     physical.pruned_candidates = pruned_candidates;
     physical
+}
+
+/// `alternative`, pruned for `reason`, named by its content.
+fn pruned(
+    alternative: PhysicalCandidate,
+    reason: PruneReason,
+) -> PrunedCandidate<PhysicalCandidateKey> {
+    PrunedCandidate {
+        group: alternative.logical_candidate_id.group,
+        candidate: PhysicalCandidateKey {
+            logical_candidate_id: alternative.logical_candidate_id,
+            physical_properties: alternative.physical_properties,
+        },
+        reason,
+    }
 }
 
 /// The logical edges into each (consumer, input), in `edges` order.

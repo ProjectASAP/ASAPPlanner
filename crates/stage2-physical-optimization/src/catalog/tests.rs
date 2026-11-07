@@ -4,14 +4,15 @@
 //! alternatives; no other stage crate is called.
 use std::collections::BTreeSet;
 
-use asap_types::ir::operator::operator_properties::{Reduction, Source};
+use asap_types::ir::operator::operator_properties::{BinaryOpKind, Reduction, Source};
 use asap_types::ir::operator::AggIntent;
+use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{
     DataType, Field, FieldDataType, GroupingStrategy, Schema, SketchAlgorithm, SketchParams,
     SketchStatistic, SummaryUpdate,
 };
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot};
+use asap_types::ir::{ASAPOp, BinaryOperator, NonASAPOp, Operator, QueryRoot, ScalarExpr};
 use asap_types::physical::{ExecutionTiming, Lifetime, PhysicalProperties, StorageMedium};
 use asap_types::stages::{
     parameter_list, CandidateExpression, CandidateForMemoGroup, CandidateForMemoGroupId,
@@ -99,6 +100,14 @@ struct Example {
 }
 
 fn example(unwindowed_state_satisfies_the_readout: bool) -> Example {
+    example_with_root(unwindowed_state_satisfies_the_readout, QueryRoot::Operator)
+}
+
+/// [`example`] with the query's root `root(readout group)`.
+fn example_with_root(
+    unwindowed_state_satisfies_the_readout: bool,
+    root: impl Fn(MemoGroupId) -> QueryRoot<MemoGroupId>,
+) -> Example {
     let mut memo = Memo::default();
     let scan = group(&mut memo, scan_operator());
     let build = Operator::ASAP(ASAPOp::SummaryAgg {
@@ -126,7 +135,7 @@ fn example(unwindowed_state_satisfies_the_readout: bool) -> Example {
             query: SketchStatistic::Quantile { q: 0.95 },
         }),
     );
-    memo.add_query(QueryRoot::Operator(readout.group));
+    memo.add_query(root(readout.group));
     let edge = |producer, consumer, satisfies_logical_requirement| LogicalEdge {
         producer_candidate_id: producer,
         consumer_candidate_id: consumer,
@@ -161,10 +170,54 @@ fn ingesting() -> DataWorkload {
     }
 }
 
+/// Stage 2 over `logical`, checking what Stage 3 relies on: every emitted
+/// candidate has an admissible edge into each input, and the edges are
+/// grouped by (consumer, input) over emitted candidates.
+fn generate(
+    logical: &LogicalASAPMemoCandidates,
+    data: &DataWorkload,
+    query_time_results_retained: bool,
+    raw_data_retained: bool,
+) -> PhysicalASAPMemoCandidates {
+    let physical = generate_physical_asap_memo_candidates(
+        logical,
+        data,
+        query_time_results_retained,
+        raw_data_retained,
+    );
+    let count = physical.physical_candidates.len();
+    let consumer_inputs: Vec<_> = physical
+        .edges()
+        .map(|(_, edge)| {
+            assert!(edge.producer_candidate_id.0 < count && edge.consumer_candidate_id.0 < count);
+            (edge.consumer_candidate_id, edge.input_index_of_consumer)
+        })
+        .collect();
+    assert!(consumer_inputs.is_sorted(), "grouped by (consumer, input)");
+    for (id, candidate) in physical.physical_candidates.iter().enumerate() {
+        let inputs = logical
+            .memo
+            .candidate(candidate.logical_candidate_id)
+            .expression
+            .operator
+            .children()
+            .len();
+        for input in 0..inputs {
+            assert!(
+                !physical
+                    .admissible_edges_into(PhysicalCandidateId(id), input)
+                    .is_empty(),
+                "{candidate:?} input {input}"
+            );
+        }
+    }
+    physical
+}
+
 /// The deployment of most tests: ingesting data, query-time results
 /// retained, raw data retained.
 fn stage2(logical: &LogicalASAPMemoCandidates) -> PhysicalASAPMemoCandidates {
-    generate_physical_asap_memo_candidates(logical, &ingesting(), true, true)
+    generate(logical, &ingesting(), true, true)
 }
 
 fn properties((timing, lifetime): (ExecutionTiming, Lifetime)) -> PhysicalProperties {
@@ -344,7 +397,7 @@ fn ingestion_time_needs_an_ingestion_pipeline() {
             arrival,
             ..DataWorkload::default()
         };
-        let physical = generate_physical_asap_memo_candidates(&example.logical, &data, true, true);
+        let physical = generate(&example.logical, &data, true, true);
         assert_eq!(
             physical
                 .physical_candidates
@@ -374,8 +427,7 @@ fn ingestion_time_needs_an_ingestion_pipeline() {
 #[test]
 fn query_time_across_evaluations_needs_retained_query_time_results() {
     let example = example(true);
-    let physical =
-        generate_physical_asap_memo_candidates(&example.logical, &ingesting(), false, true);
+    let physical = generate(&example.logical, &ingesting(), false, true);
     assert_eq!(
         offered(&physical, example.windowed_state),
         vec![
@@ -396,8 +448,7 @@ fn query_time_across_evaluations_needs_retained_query_time_results() {
 #[test]
 fn without_raw_data_only_ingestion_time_builds_read_the_scan() {
     let example = example(true);
-    let physical =
-        generate_physical_asap_memo_candidates(&example.logical, &ingesting(), true, false);
+    let physical = generate(&example.logical, &ingesting(), true, false);
     assert_eq!(offered(&physical, example.scan), vec![properties(IT_NONE)]);
     for state in [QT_NONE, QT_ONE] {
         assert!(pruned(&physical, example.scan)
@@ -473,13 +524,6 @@ fn physical_edges_carry_both_compatibilities() {
     // Scan (3 alternatives) → unwindowed state (2) and windowed state (4);
     // states (2 + 4) → readout (2).
     assert_eq!(edges.len(), 3 * 2 + 3 * 4 + (2 + 4) * 2);
-    let mut consumer_inputs: Vec<_> = edges
-        .iter()
-        .map(|(_, edge)| (edge.consumer_candidate_id, edge.input_index_of_consumer))
-        .collect();
-    let in_order = consumer_inputs.clone();
-    consumer_inputs.sort();
-    assert_eq!(in_order, consumer_inputs, "grouped by (consumer, input)");
     for (_, edge) in &edges {
         let producer = physical.physical_candidates[edge.producer_candidate_id.0];
         let consumer = physical.physical_candidates[edge.consumer_candidate_id.0];
@@ -575,4 +619,105 @@ fn alignment_is_checked_per_context_with_delivers_on() {
     let unmaterialized =
         physical.physical_candidates[id_of(&physical, example.windowed_state, QT_NONE).0];
     assert!(unmaterialized.delivers_on(memo, &every_10s_at(5_000)));
+}
+
+// ── Pruning ────────────────────────────────────────────────────────────────
+
+/// A query whose root group is also read at ingestion time: the scan
+/// group's unmaterialized ingestion-time alternative is not read by the
+/// query, but by the windowed state's ingestion-time build, so it is
+/// emitted.
+#[test]
+fn a_root_group_read_at_ingestion_time_keeps_its_ingestion_time_alternative() {
+    let mut example = example(true);
+    example
+        .logical
+        .memo
+        .add_query(QueryRoot::Operator(example.scan.group));
+    let physical = stage2(&example.logical);
+    assert_eq!(
+        offered(&physical, example.scan),
+        vec![properties(QT_NONE), properties(QT_ONE), properties(IT_NONE)]
+    );
+}
+
+/// A scalar root reaches the groups it reads: the readout under
+/// `scalar(…)` is offered as under an operator root.
+#[test]
+fn a_scalar_root_reaches_the_groups_it_reads() {
+    let example = example_with_root(true, |readout| {
+        QueryRoot::Scalar(ScalarExpr::PromqlScalarFromVector(readout))
+    });
+    let physical = stage2(&example.logical);
+    assert_eq!(
+        offered(&physical, example.readout),
+        vec![properties(QT_NONE), properties(QT_ONE)]
+    );
+}
+
+/// A two-input consumer whose second input group has no candidate cannot
+/// be built, nor can the readout of that empty group; the first input's
+/// producers stay, read by the first query.
+#[test]
+fn a_consumer_without_a_producer_for_one_input_cannot_be_built() {
+    let mut example = example(true);
+    let memo = &mut example.logical.memo;
+    let empty_states = memo
+        .find_or_add_group(Operator::ASAP(ASAPOp::SummaryAgg {
+            child: example.scan.group,
+            family: FieldDataType::Sketch(SketchAlgorithm::DDSketch, GroupingStrategy::default()),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::PerEntity,
+            grouping: GroupingStrategy::default(),
+            filter: None,
+        }))
+        .unwrap();
+    let median = group(
+        memo,
+        Operator::ASAP(ASAPOp::SummaryEstimate {
+            summary_input: empty_states,
+            query: SketchStatistic::Quantile { q: 0.5 },
+        }),
+    );
+    let ratio = group(
+        memo,
+        Operator::NonASAP(NonASAPOp::BinaryOp {
+            operator: BinaryOperator {
+                checked_relative_division: false,
+                checked_finite_division: false,
+                kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
+                vector_match: None,
+            },
+            return_bool: false,
+            lhs: example.readout.group,
+            rhs: median.group,
+        }),
+    );
+    memo.add_query(QueryRoot::Operator(ratio.group));
+    for (producer, input_index_of_consumer) in [(example.readout, 0), (median, 1)] {
+        example.logical.edges.push(LogicalEdge {
+            producer_candidate_id: producer,
+            consumer_candidate_id: ratio,
+            input_index_of_consumer,
+            satisfies_logical_requirement: true,
+        });
+    }
+    let physical = stage2(&example.logical);
+    assert!(offered(&physical, median).is_empty());
+    assert!(offered(&physical, ratio).is_empty());
+    for unbuildable in [median, ratio] {
+        assert_eq!(
+            pruned(&physical, unbuildable)
+                .into_iter()
+                .filter(|(_, reason)| *reason == PruneReason::InputHasNoBuildableProducer)
+                .map(|(state, _)| state)
+                .collect::<Vec<_>>(),
+            vec![properties(QT_NONE), properties(QT_ONE), properties(IT_NONE)],
+            "{unbuildable:?}"
+        );
+    }
+    assert_eq!(
+        offered(&physical, example.readout),
+        vec![properties(QT_NONE), properties(QT_ONE)]
+    );
 }

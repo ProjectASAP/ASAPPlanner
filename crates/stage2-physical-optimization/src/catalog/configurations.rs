@@ -34,7 +34,7 @@ const LIFETIMES: [Lifetime; 3] = [
 /// [`LIFETIMES`] order: `Ok` for an offered one, `Err` with the reason for
 /// a pruned one. The invalid (IngestionTime, OneEvaluation) is not a
 /// physical property, so it is neither.
-pub(super) fn physical_properties_of(
+pub(super) fn enumerate_candidate_configurations(
     candidate: &CandidateForMemoGroup,
     deployment: &Deployment,
 ) -> Vec<Result<PhysicalProperties, (PhysicalProperties, PruneReason)>> {
@@ -47,7 +47,7 @@ pub(super) fn physical_properties_of(
             };
             let prune = |reason| Err((properties, reason));
             alternatives.push(if !executor_can_run(operator) {
-                // Level 1, kept in Stage 2: Pass 1 and Pass 2 record no
+                // Level 1, checked in Stage 2: Pass 1 and Pass 2 record no
                 // pruned candidates.
                 prune(PruneReason::PerEntityAggregateNotExecutable)
             } else if timing == ExecutionTiming::IngestionTime && !deployment.has_ingestion_pipeline

@@ -82,7 +82,7 @@ asap-stage1-pass2-reuse-candidates -p asap-stage2-physical-optimization -p asap-
   `PhysicalProperties { timing, lifetime }`: query time with `None`,
   `OneEvaluation(Memory)` or `AcrossEvaluations(Memory)`, and ingestion time
   with `None` or `AcrossEvaluations(Memory)`. `PhysicalProperties::new`
-  rejects ingestion time with `OneEvaluation`. Materialized results are kept
+  rejects ingestion time with `OneEvaluation`. Materialized results are stored
   in memory only until the executor stores them on disk (#1217).
 - Stage 2 does not generate an alternative the data or the deployment cannot
   run, and records it in `PhysicalASAPMemoCandidates::pruned_candidates` as

@@ -570,13 +570,11 @@ The sections below describe each stage.
 | 2 | what cannot be built, run or read by a query output: `PerEntityAggregateNotExecutable` (an exact per-entity `Aggregate` the executor has no kernel for), `NoIngestionPipeline` (ingestion time over data at rest or of unknown arrival), `RawDataNotRetained` (a query-time scan of raw data the deployment does not keep), `QueryTimeResultsNotRetained` (query time, materialized across evaluations, when the deployment keeps no query-time results), `AcrossEvaluationsWithoutWindowLayout`, `InputHasNoBuildableProducer`, `ReachesNoQueryOutput` | `PhysicalASAPMemoCandidates::pruned_candidates`, each on its logical candidate's memo group | `PhysicalCandidateKey { logical_candidate_id, physical_properties }` |
 | 3 | valid candidates that lose, and the checks only a whole plan can make (accuracy, latency, cluster capacity) | its own `RejectionCause` | — |
 
-Stage 2's key names what a pruned candidate would have been, since kept
+Stage 2's key names what a pruned candidate would have been, since emitted
 candidates are renumbered after pruning and a pruned one has no
-`PhysicalCandidateId`. Stage 2 emits one candidate per operator node,
-timing and lifetime, and makes no copies of it, so (`operator_node`,
-`properties`) is unique. Operator
-nodes are kept whole, so `operator_node` indexes the output's
-`operator_nodes_of_candidates_for_memo_groups`. Pass 1's accuracy pruning
+`PhysicalCandidateId`. Stage 2 emits one candidate per logical candidate,
+timing and lifetime, and makes no copies of it, so (`logical_candidate_id`,
+`physical_properties`) is unique. Pass 1's accuracy pruning
 (`NoErrorBoundForQueryTarget`) runs inside Pass 1's entry, before the
 candidates are attached to the memo groups, and records a `PrunedCandidate`
 like every other Pass 1 prune.
