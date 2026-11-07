@@ -11,6 +11,7 @@ mod crate_graph;
 mod declared_group_counts;
 mod deployment_capabilities;
 mod exact_composition;
+mod exact_reduce_execution;
 mod filtered_aggregates;
 mod finer_aggregate_reuse;
 mod frequency_execution;

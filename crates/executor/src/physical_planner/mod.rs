@@ -257,6 +257,125 @@ fn compile_internal(
                 inputs = vec![auxiliary];
                 schemas.truncate(1);
             }
+            // A `without` grouping groups by the columns it keeps, after
+            // removing the excluded labels from a series identity.
+            let resolved;
+            let node = match resolve_without(node, &schemas)
+                .map_err(|error| invalid(format!("node {id}: {error}")))?
+            {
+                Some((rewritten, projection)) => {
+                    if let Some(projection) = projection {
+                        // Helper 3: the lowerings below use helpers 0 to 2.
+                        let helper = helper_id(id, 3)?;
+                        schemas = vec![projection.schema()];
+                        physical_dag.add(helper, inputs, projection)?;
+                        inputs = vec![helper];
+                    }
+                    resolved = rewritten;
+                    &resolved
+                }
+                None => node,
+            };
+            if let Payload::NonASAP(NonASAPOp::Aggregate {
+                reduction: PlannerReduction::Reduce(keys),
+                measures,
+                filters,
+                having: None,
+                ..
+            }) = &node.payload
+            {
+                let [input] = schemas.as_slice() else {
+                    return Err(invalid(format!("node {id}: an aggregate reads one input")));
+                };
+                // An exact top-k (PromQL `topk`, SQL's heavy hitter): the k
+                // largest rows of its child per partition, then its ranked
+                // rows' columns.
+                if let [AggIntent::TopK { k, .. }] = measures.as_slice() {
+                    if filters.iter().any(Option::is_some) {
+                        return Err(invalid(format!("node {id}: a filtered top-k")));
+                    }
+                    let Some(NonASAPOp::Aggregate { child, .. }) = restored[&id].non_asap() else {
+                        unreachable!("an aggregate restores as an aggregate")
+                    };
+                    let ranked = |error: String| invalid(format!("node {id}: top-k: {error}"));
+                    let value = planner_types::ir::schema::topk::ranked_column(child)
+                        .map_err(|error| ranked(error.to_string()))?;
+                    let columns = planner_types::ir::schema::topk::ranked_row_projection(
+                        child,
+                        &PlannerReduction::Reduce(keys.clone()),
+                        &output.fields[keys.len()].name,
+                    )
+                    .map_err(|error| ranked(error.to_string()))?
+                    .into_iter()
+                    .map(|item| match item.expr {
+                        ScalarExpr::Column(column) => {
+                            Ok((item.alias.unwrap_or_default(), Expression::Column(column)))
+                        }
+                        _ => Err(ranked("a ranked row projects columns".into())),
+                    })
+                    .collect::<Result<_, _>>()?;
+                    let partitions = groups(input, keys)?;
+                    physical_dag.add(
+                        auxiliary,
+                        inputs,
+                        Operator::sort(
+                            input.clone(),
+                            vec![SortKey {
+                                column: value,
+                                descending: true,
+                                nulls_first: false,
+                            }],
+                            partitions.clone(),
+                        )?,
+                    )?;
+                    physical_dag.add(
+                        helper_id(id, 1)?,
+                        vec![auxiliary],
+                        Operator::limit(input.clone(), *k as u64, 0, partitions)?,
+                    )?;
+                    physical_dag.add(
+                        id,
+                        vec![helper_id(id, 1)?],
+                        Operator::project(input.clone(), columns)?.with_output_schema(output)?,
+                    )?;
+                    continue;
+                }
+                // PromQL `count_values("l", v)`: a count per group and value,
+                // the value as text in the label `l`, which replaces a
+                // grouping label of that name.
+                if let [AggIntent::CountValues { label }] = measures.as_slice() {
+                    if filters.iter().any(Option::is_some) {
+                        return Err(invalid(format!("node {id}: a filtered count_values")));
+                    }
+                    let value = named_column(input, &ColumnRef::SampleValue)?;
+                    let mut columns: Vec<_> = input
+                        .fields
+                        .iter()
+                        .enumerate()
+                        .map(|(i, field)| (field.name.clone(), Expression::Column(i)))
+                        .collect();
+                    columns.push((label.clone(), Expression::FloatText(value)));
+                    let text = input.fields.len();
+                    let mut partitions = groups(input, keys)?;
+                    match partitions
+                        .iter()
+                        .position(|&key| input.fields[key].name == *label)
+                    {
+                        Some(key) => partitions[key] = text,
+                        None => partitions.push(text),
+                    }
+                    let project = Operator::project(input.clone(), columns)?;
+                    let aggregate = Operator::aggregate(
+                        project.schema(),
+                        partitions,
+                        vec![(String::new(), Reduction::Count)],
+                    )?
+                    .with_output_schema(output)?;
+                    physical_dag.add(auxiliary, inputs, project)?;
+                    physical_dag.add(id, vec![auxiliary], aggregate)?;
+                    continue;
+                }
+            }
             if let Payload::ASAP(ASAPOp::MaintainPopulation { population, .. }) = &node.payload {
                 use planner_types::ir::operator::maintained_population::PopulationInput;
                 let PopulationInput::CurrentSeries(spec) = &population.input else {
@@ -1163,6 +1282,19 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                             AggIntent::Avg { col } => Reduction::Avg(column(*col)?),
                             AggIntent::Min { col } => Reduction::Min(column(*col)?),
                             AggIntent::Max { col } => Reduction::Max(column(*col)?),
+                            AggIntent::StdDev { col, population } => Reduction::StdDev {
+                                column: column(*col)?,
+                                population: *population,
+                            },
+                            AggIntent::Variance { col, population } => Reduction::Variance {
+                                column: column(*col)?,
+                                population: *population,
+                            },
+                            AggIntent::PearsonCorr { left, right } => Reduction::PearsonCorr {
+                                left: *left,
+                                right: *right,
+                            },
+                            AggIntent::Group => Reduction::Group,
                             // PromQL `quantile by (G) (φ, v)` exactly: the
                             // group's values, interpolated as Prometheus does
                             // (NaN first). A filtered one has no kernel: the IR
@@ -1447,6 +1579,111 @@ fn named_column(input: &SchemaRef, column: &ColumnRef) -> Result<usize, Error> {
         [column] => Ok(*column),
         _ => Err(invalid("summary update column missing or ambiguous")),
     }
+}
+/// `node` with its `without` grouping (PromQL `sum without (instance) (m)`)
+/// over `inputs` resolved to the columns it keeps
+/// ([`without_kept_columns`](planner_types::ir::schema::aggregate_schema::without_kept_columns)),
+/// as a `by` grouping; `None` for a node without one. A kept series
+/// identity, or label map, keeps every label but the excluded ones and
+/// `__name__`: the returned projection rewrites it in place first, for an
+/// aggregation (an `Aggregate` or a `SummaryAgg`), whose output keeps that
+/// label set. A ranking (a top-k, `Sort` or `Limit`) keeps each row's
+/// labels, so it is refused one.
+fn resolve_without(
+    node: &PhysicalASAPDAGNode,
+    inputs: &[SchemaRef],
+) -> Result<Option<(PhysicalASAPDAGNode, Option<Operator>)>, Error> {
+    let (keys, aggregation) = match &node.payload {
+        // `histogram_quantile` reads its `without([le])` grouping itself.
+        Payload::NonASAP(NonASAPOp::Aggregate { measures, .. })
+            if matches!(measures.as_slice(), [AggIntent::HistogramQuantile { .. }]) =>
+        {
+            return Ok(None)
+        }
+        Payload::NonASAP(NonASAPOp::Aggregate {
+            reduction: PlannerReduction::Reduce(keys),
+            measures,
+            ..
+        }) => {
+            let ranking = matches!(measures.as_slice(), [AggIntent::TopK { .. }]);
+            (keys, !ranking)
+        }
+        Payload::ASAP(ASAPOp::SummaryAgg {
+            reduction: PlannerReduction::Reduce(keys),
+            ..
+        }) => (keys, true),
+        Payload::NonASAP(
+            NonASAPOp::Sort { partition_by, .. } | NonASAPOp::Limit { partition_by, .. },
+        ) => (partition_by, false),
+        _ => return Ok(None),
+    };
+    if !keys.is_without() {
+        return Ok(None);
+    }
+    let [input] = inputs else {
+        return Err(invalid("a without grouping reads one input"));
+    };
+    if keys.keys().iter().any(|&i| i >= input.fields.len()) {
+        return Err(invalid("grouping column out of range"));
+    }
+    let excluded: Vec<String> = keys
+        .keys()
+        .iter()
+        .map(|&i| input.fields[i].name.clone())
+        .collect();
+    let kept =
+        planner_types::ir::schema::aggregate_schema::without_kept_columns(input, keys.keys());
+    let mut rewrites = false;
+    let columns = (0..input.fields.len())
+        .map(|i| {
+            let field = &input.fields[i];
+            let label_map = matches!(field.dtype, FieldDataType::Plain(DataType::Map { .. }));
+            let expression = if !kept.contains(&i) {
+                Expression::Column(i)
+            } else if field.name == promql_rows::SERIES_IDENTITY_COLUMN {
+                rewrites = true;
+                Expression::LabelIdentity {
+                    column: i,
+                    excluding: excluded
+                        .iter()
+                        .cloned()
+                        .chain(["__name__".to_string()])
+                        .collect(),
+                }
+            } else if label_map {
+                rewrites = true;
+                Expression::LabelSet {
+                    column: i,
+                    labels: excluded.clone(),
+                    without: true,
+                }
+            } else {
+                Expression::Column(i)
+            };
+            (field.name.clone(), expression)
+        })
+        .collect();
+    if rewrites && !aggregation {
+        return Err(invalid(
+            "a without partition over series identity needs each row's labels kept",
+        ));
+    }
+    let mut node = node.clone();
+    let kept = GroupKeys::by(kept);
+    match &mut node.payload {
+        Payload::NonASAP(NonASAPOp::Aggregate { reduction, .. })
+        | Payload::ASAP(ASAPOp::SummaryAgg { reduction, .. }) => {
+            *reduction = PlannerReduction::Reduce(kept)
+        }
+        Payload::NonASAP(
+            NonASAPOp::Sort { partition_by, .. } | NonASAPOp::Limit { partition_by, .. },
+        ) => *partition_by = kept,
+        _ => unreachable!("matched above"),
+    }
+    let projection = rewrites
+        .then(|| Operator::project(input.clone(), columns))
+        .transpose()?;
+    Ok(Some((node, projection)))
 }
 fn groups(input: &SchemaRef, groups: &GroupKeys) -> Result<Vec<usize>, Error> {
     if groups.is_without() {
