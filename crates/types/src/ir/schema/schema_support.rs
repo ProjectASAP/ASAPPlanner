@@ -82,6 +82,7 @@ pub fn with_promql_series_identity(
                 | NonASAPOp::TimeShift { .. }
                 | NonASAPOp::PromqlSubquery { .. }
                 | NonASAPOp::PromqlRelabel { .. }
+                | NonASAPOp::PromqlSeriesSample { .. }
                 | NonASAPOp::PromqlVectorFromScalar(_)
                 | NonASAPOp::BinaryOp { .. }
                 | NonASAPOp::Concat { .. }

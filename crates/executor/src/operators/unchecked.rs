@@ -79,16 +79,33 @@ impl TryFrom<UncheckedOperator> for Operator {
             Kind::SeriesBinary { operator, scalars } => {
                 Operator::series_binary(input(0)?, input(1)?, operator, scalars)?
             }
-            Kind::SeriesRelabel {
-                destination,
-                replacement,
-                source_regex,
-            } => Operator::series_relabel(
+            Kind::SeriesRelabel { destination, value } => {
+                Operator::series_relabel(input(0)?, output.clone(), destination, value)?
+            }
+            Kind::SeriesSample { groups, kind } => {
+                Operator::series_sample(input(0)?, groups, kind)?
+            }
+            Kind::SetOperation { except, all } => {
+                Operator::set_operation(input(0)?, input(1)?, except, all)?
+            }
+            Kind::SqlWindow(spec) => Operator::sql_window(
                 input(0)?,
-                output.clone(),
-                destination,
-                replacement,
-                source_regex,
+                *spec,
+                &output
+                    .fields
+                    .last()
+                    .ok_or_else(|| invalid("window output"))?
+                    .name,
+            )?,
+            Kind::BindSubquery(read) => Operator::bind_subquery(
+                input(0)?,
+                input(1)?,
+                read,
+                &output
+                    .fields
+                    .last()
+                    .ok_or_else(|| invalid("bound output"))?
+                    .name,
             )?,
             Kind::SeriesHistogramQuantile { quantile, le } => {
                 Operator::series_histogram_quantile(input(0)?, f64::from_bits(quantile), le)?

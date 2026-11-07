@@ -22,6 +22,7 @@ mod precompute_population;
 mod promql_binary;
 mod promql_values;
 mod raw_scan;
+mod relational_scalar;
 mod state_column_updater;
 mod stored_tumbling_window_memory_limit;
 mod summary_projection;

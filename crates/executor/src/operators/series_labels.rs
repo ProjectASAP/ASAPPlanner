@@ -8,6 +8,28 @@ use planner_types::ir::schema::PROMQL_SERIES_IDENTITY;
 
 pub(super) type Labels = BTreeMap<String, String>;
 
+/// What a PromQL relabel ([`Operator::series_relabel`]) writes to its
+/// destination label.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum RelabelValue {
+    /// A constant (`histogram_quantiles`' quantile label).
+    Constant(String),
+    /// `label_replace`: `replacement` expanded (`$1`, `${name}`) with the
+    /// captures of the fully anchored `regex` over the `source` label (an
+    /// absent label reads as empty); a series it does not match is
+    /// unchanged.
+    Replace {
+        source: String,
+        regex: String,
+        replacement: String,
+    },
+    /// `label_join`: the `sources` labels' values joined by `separator`.
+    Join {
+        separator: String,
+        sources: Vec<String>,
+    },
+}
+
 /// Where a row's label set lives: the encoded series identity when present,
 /// otherwise the non-empty Utf8 label columns. The one Float64 column is the
 /// sample value, whatever an aggregate named it.
@@ -85,12 +107,15 @@ impl Layout {
 }
 
 impl Operator {
+    /// PromQL `label_replace` / `label_join`, or a constant label: each
+    /// series of `input` with its `destination` label set to `value`; an
+    /// empty value removes the label. Two series of different label sets
+    /// that end with one label set are an error, as in Prometheus.
     pub(crate) fn series_relabel(
         input: SchemaRef,
         output: SchemaRef,
         destination: String,
-        replacement: String,
-        source_regex: Option<(String, String)>,
+        value: RelabelValue,
     ) -> Result<Self, Error> {
         // Prometheus uses UTF-8 label validation; Rust strings are already UTF-8.
         if destination.is_empty() || destination == PROMQL_SERIES_IDENTITY {
@@ -117,16 +142,12 @@ impl Operator {
         {
             return Err(invalid("label rewrite destination missing from output"));
         }
-        if let Some((_, pattern)) = &source_regex {
-            crate::expressions::promql_anchored_regex(pattern)
+        if let RelabelValue::Replace { regex, .. } = &value {
+            crate::expressions::promql_anchored_regex(regex)
                 .map_err(|e| invalid(&e.to_string()))?;
         }
         Ok(Self {
-            kind: Kind::SeriesRelabel {
-                destination,
-                replacement,
-                source_regex,
-            },
+            kind: Kind::SeriesRelabel { destination, value },
             inputs: vec![input],
             output,
         })
@@ -356,7 +377,7 @@ impl SeriesRows {
 /// Each row's label source and each source's label set (`Layout::read`):
 /// the parsed series identity (empty values dropped), or the non-empty label
 /// columns.
-fn label_sources(
+pub(super) fn label_sources(
     batch: &Batch,
     layout: &Layout,
     schema: &SchemaRef,
@@ -563,35 +584,44 @@ pub(super) fn execute<'a>(
                 )
                 .await?
             }
-            (
-                Kind::SeriesRelabel {
-                    destination,
-                    replacement,
-                    source_regex,
-                },
-                None,
-            ) => {
+            (Kind::SeriesRelabel { destination, value }, None) => {
                 let rows = series_rows(&left.batch, &operator.inputs[0])?;
-                let regex = source_regex
-                    .as_ref()
-                    .map(|(_, pattern)| crate::expressions::promql_anchored_regex(pattern))
-                    .transpose()
-                    .map_err(|e| invalid(&e.to_string()))?;
+                let regex = match value {
+                    RelabelValue::Replace { regex, .. } => Some(
+                        crate::expressions::promql_anchored_regex(regex)
+                            .map_err(|e| invalid(&e.to_string()))?,
+                    ),
+                    _ => None,
+                };
                 // Each source's relabelled set, once.
                 let relabelled = rows
                     .sets
                     .iter()
                     .map(|labels| {
                         let mut labels = labels.clone();
-                        let rewritten = match (&source_regex, &regex) {
-                            (Some((source, _)), Some(regex)) => regex
-                                .captures(labels.get(source).map_or("", String::as_str))
-                                .map(|captures| {
-                                    let mut value = String::new();
-                                    captures.expand(replacement, &mut value);
-                                    value
-                                }),
-                            _ => Some(replacement.clone()),
+                        let label = |name: &String| labels.get(name).map_or("", String::as_str);
+                        let rewritten = match (value, &regex) {
+                            (RelabelValue::Constant(text), _) => Some(text.clone()),
+                            (
+                                RelabelValue::Replace {
+                                    source,
+                                    replacement,
+                                    ..
+                                },
+                                Some(regex),
+                            ) => regex.captures(label(source)).map(|captures| {
+                                let mut value = String::new();
+                                captures.expand(replacement, &mut value);
+                                value
+                            }),
+                            (RelabelValue::Join { separator, sources }, _) => Some(
+                                sources
+                                    .iter()
+                                    .map(label)
+                                    .collect::<Vec<_>>()
+                                    .join(separator),
+                            ),
+                            (RelabelValue::Replace { .. }, None) => unreachable!("compiled regex"),
                         };
                         if let Some(value) = rewritten {
                             if value.is_empty() {
@@ -603,11 +633,18 @@ pub(super) fn execute<'a>(
                         labels
                     })
                     .collect::<Vec<_>>();
-                let mut seen = std::collections::BTreeSet::new();
+                // The source of each (time, label set) output so far: rows of
+                // one source are samples of one series.
+                let mut source_of_output = BTreeMap::new();
                 let mut out = Vec::with_capacity(rows.len());
                 for row in 0..rows.len() {
-                    let labels = &relabelled[rows.source_of_row[row] as usize];
-                    if !seen.insert(labels) {
+                    let source = rows.source_of_row[row];
+                    let labels = &relabelled[source as usize];
+                    if *source_of_output
+                        .entry((rows.time(row), labels))
+                        .or_insert(source)
+                        != source
+                    {
                         return Err(invalid(
                             "vector cannot contain metrics with the same labelset",
                         ));

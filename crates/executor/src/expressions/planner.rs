@@ -72,21 +72,20 @@ pub(super) fn evaluate(
             ScalarValue::Boolean(value) => Value::Bool(*value),
             ScalarValue::Null => Value::Null,
         }),
-        ScalarExpr::Cast { expr, to, .. } => {
+        // PromQL `time()`: the evaluation time in seconds.
+        ScalarExpr::EvalTimestamp => evaluation_time_ms
+            .map(|at_ms| Value::Float64(at_ms as f64 / 1000.0))
+            .ok_or_else(|| {
+                Error::Invalid(
+                    "time() has a value only in a query run, at its evaluation time".into(),
+                )
+            }),
+        ScalarExpr::Cast { expr, to, try_cast } => {
             let value = evaluate(expr, row, schema, evaluation_time_ms, regexes)?;
-            match (value, to) {
-                (Value::Null, _) => Ok(Value::Null),
-                (Value::Int64(value), DataType::Float64) => Ok(Value::Float64(value as f64)),
-                (value, _)
-                    if expr
-                        .scalar_type(schema)
-                        .map_err(|e| Error::Invalid(e.to_string()))?
-                        .0
-                        == *to =>
-                {
-                    Ok(value)
-                }
-                _ => Err(Error::Invalid("unsupported cast".into())),
+            match cast(value, to) {
+                Ok(value) => Ok(value),
+                Err(_) if *try_cast => Ok(Value::Null),
+                Err(error) => Err(error),
             }
         }
         ScalarExpr::Negative { expr, .. } => {
@@ -123,6 +122,29 @@ pub(super) fn evaluate(
             }
         }
         ScalarExpr::Compare {
+            left,
+            op:
+                op @ (CompareOpKind::Like
+                | CompareOpKind::NotLike
+                | CompareOpKind::ILike
+                | CompareOpKind::NotILike),
+            right,
+            ..
+        } => {
+            let text = evaluate(left, row, schema, evaluation_time_ms, regexes)?;
+            let pattern = evaluate(right, row, schema, evaluation_time_ms, regexes)?;
+            let (Value::Utf8(text), Value::Utf8(pattern)) = (text, pattern) else {
+                return Ok(Value::Null);
+            };
+            let case_insensitive = matches!(op, CompareOpKind::ILike | CompareOpKind::NotILike);
+            let negated = matches!(op, CompareOpKind::NotLike | CompareOpKind::NotILike);
+            let matched = match regexes.get(&like_key(&pattern, case_insensitive)) {
+                Some(regex) => regex.is_match(&text),
+                None => like_regex(&pattern, case_insensitive)?.is_match(&text),
+            };
+            Ok(Value::Bool(matched != negated))
+        }
+        ScalarExpr::Compare {
             left, op, right, ..
         } => {
             let left = evaluate(left, row, schema, evaluation_time_ms, regexes)?;
@@ -147,6 +169,27 @@ pub(super) fn evaluate(
                     Value::Bool(true)
                 ) {
                     return evaluate(value, row, schema, evaluation_time_ms, regexes);
+                }
+            }
+            else_expr.as_ref().map_or(Ok(Value::Null), |e| {
+                evaluate(e, row, schema, evaluation_time_ms, regexes)
+            })
+        }
+        // `CASE x WHEN v THEN …` is `CASE WHEN x = v THEN …`, `x` evaluated
+        // once: a NULL `x` or `v` matches no branch.
+        ScalarExpr::Case {
+            operand: Some(operand),
+            branches,
+            else_expr,
+        } => {
+            let operand = evaluate(operand, row, schema, evaluation_time_ms, regexes)?;
+            for (value, result) in branches {
+                let value = evaluate(value, row, schema, evaluation_time_ms, regexes)?;
+                if matches!(
+                    compare(&CompareOpKind::Eq, operand.clone(), value)?,
+                    Value::Bool(true)
+                ) {
+                    return evaluate(result, row, schema, evaluation_time_ms, regexes);
                 }
             }
             else_expr.as_ref().map_or(Ok(Value::Null), |e| {
@@ -375,6 +418,82 @@ pub(super) fn evaluate(
     }
 }
 
+/// Whether `CAST(value AS to)` from `from` has a native evaluation:
+/// numbers to each other, an integer or a boolean to text, text to a
+/// number, and integers to booleans and back.
+fn castable(from: &DataType, to: &DataType) -> bool {
+    use DataType::*;
+    from == to
+        || *from == Null
+        || matches!(
+            (from, to),
+            (Int64, Float64 | Utf8 | Bool)
+                | (Float64, Int64)
+                | (Bool, Utf8 | Int64)
+                | (Utf8, Int64 | Float64)
+        )
+}
+
+/// `value` cast to `to` as DataFusion's `CAST` does, for the pairs
+/// [`castable`] accepts: a float truncates toward zero to an integer, an
+/// integer is true unless zero, text parses as a decimal number. Bad input
+/// when a value has no image (NaN or out of range to an integer, text that
+/// is no number); `TRY_CAST` gives NULL instead.
+fn cast(value: Value, to: &DataType) -> Result<Value, Error> {
+    let fail = |value: &Value| Error::Invalid(format!("cannot cast {value:?} to {to:?}"));
+    Ok(match (value, to) {
+        (value, _) if value.matches(to, true) => value,
+        (Value::Int64(v), DataType::Float64) => Value::Float64(v as f64),
+        // Every finite float in [-2^63, 2^63) truncates into Int64.
+        (Value::Float64(v), DataType::Int64)
+            if v.is_finite()
+                && (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&v) =>
+        {
+            Value::Int64(v.trunc() as i64)
+        }
+        (Value::Int64(v), DataType::Utf8) => Value::Utf8(v.to_string().into()),
+        (Value::Bool(v), DataType::Utf8) => Value::Utf8(v.to_string().into()),
+        (Value::Int64(v), DataType::Bool) => Value::Bool(v != 0),
+        (Value::Bool(v), DataType::Int64) => Value::Int64(v.into()),
+        (Value::Utf8(text), DataType::Int64) => match text.parse() {
+            Ok(v) => Value::Int64(v),
+            Err(_) => return Err(fail(&Value::Utf8(text))),
+        },
+        (Value::Utf8(text), DataType::Float64) => match text.parse() {
+            Ok(v) => Value::Float64(v),
+            Err(_) => return Err(fail(&Value::Utf8(text))),
+        },
+        (value, _) => return Err(fail(&value)),
+    })
+}
+
+/// The key of SQL `LIKE` pattern `pattern` among an expression's compiled
+/// patterns, apart from the PromQL label patterns.
+fn like_key(pattern: &str, case_insensitive: bool) -> String {
+    format!(
+        "\0{}like\0{pattern}",
+        if case_insensitive { "i" } else { "" }
+    )
+}
+
+/// SQL `LIKE` pattern `pattern` as an anchored regex, as Arrow's `like`
+/// kernel reads it: `%` is any text, `_` any one character, `\` makes the
+/// next character literal (a trailing `\` is itself); `ILIKE` ignores case.
+fn like_regex(pattern: &str, case_insensitive: bool) -> Result<regex::Regex, Error> {
+    let mut regex = String::from(if case_insensitive { "(?is)^" } else { "(?s)^" });
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '%' => regex.push_str(".*"),
+            '_' => regex.push('.'),
+            '\\' => regex.push_str(&regex::escape(&chars.next().unwrap_or('\\').to_string())),
+            c => regex.push_str(&regex::escape(&c.to_string())),
+        }
+    }
+    regex.push('$');
+    regex::Regex::new(&regex).map_err(|e| Error::Invalid(format!("LIKE pattern {pattern:?}: {e}")))
+}
+
 fn default_collection_element(dtype: &DataType, nullable: bool) -> Result<Value, Error> {
     if nullable {
         return Ok(Value::Null);
@@ -438,7 +557,7 @@ fn compare(op: &CompareOpKind, left: Value, right: Value) -> Result<Value, Error
 }
 
 /// The compiled pattern of each PromQL `=~` / `!~` in an expression, by
-/// pattern text.
+/// pattern text, and of each literal SQL `LIKE` pattern, by [`like_key`].
 pub(super) type LabelRegexes = std::collections::HashMap<String, regex::Regex>;
 
 /// Compiles every `=~` / `!~` pattern in `expr` ([`super::promql_anchored_regex`]).
@@ -446,6 +565,25 @@ fn label_regexes_of(expr: &ScalarExpr) -> Result<LabelRegexes, Error> {
     let mut regexes = LabelRegexes::new();
     let mut pending = vec![expr];
     while let Some(expr) = pending.pop() {
+        if let ScalarExpr::Compare {
+            op:
+                op @ (CompareOpKind::Like
+                | CompareOpKind::NotLike
+                | CompareOpKind::ILike
+                | CompareOpKind::NotILike),
+            right,
+            ..
+        } = expr
+        {
+            if let ScalarExpr::Literal(ScalarValue::Utf8(pattern)) = &**right {
+                let case_insensitive = matches!(op, CompareOpKind::ILike | CompareOpKind::NotILike);
+                if let std::collections::hash_map::Entry::Vacant(entry) =
+                    regexes.entry(like_key(pattern, case_insensitive))
+                {
+                    entry.insert(like_regex(pattern, case_insensitive)?);
+                }
+            }
+        }
         if let ScalarExpr::Compare {
             op: CompareOpKind::Regex | CompareOpKind::NotRegex,
             right,
@@ -698,10 +836,13 @@ impl CompiledExpression {
         self.evaluation_time_ms
     }
 
-    /// Whether this expression reads SQL `now()`.
+    /// Whether this expression reads SQL `now()` or PromQL `time()`.
     pub(crate) fn reads_current_timestamp(&self) -> bool {
         fn reads(expr: &ScalarExpr) -> bool {
-            matches!(expr, ScalarExpr::CurrentTimestamp) || expr.children().into_iter().any(reads)
+            matches!(
+                expr,
+                ScalarExpr::CurrentTimestamp | ScalarExpr::EvalTimestamp
+            ) || expr.children().into_iter().any(reads)
         }
         reads(&self.expression)
     }
@@ -845,16 +986,16 @@ fn validate(expr: &ScalarExpr, schema: &planner_types::ir::schema::Schema) -> Re
     expr.scalar_type(schema)
         .map_err(|e| Error::Invalid(e.to_string()))?;
     match expr {
-        ScalarExpr::Column(_) | ScalarExpr::Literal(_) | ScalarExpr::CurrentTimestamp => Ok(()),
+        ScalarExpr::Column(_)
+        | ScalarExpr::Literal(_)
+        | ScalarExpr::CurrentTimestamp
+        | ScalarExpr::EvalTimestamp => Ok(()),
         ScalarExpr::Cast { expr, to, .. } => {
             let source = expr
                 .scalar_type(schema)
                 .map_err(|e| Error::Invalid(e.to_string()))?
                 .0;
-            if source != *to
-                && source != DataType::Null
-                && !(source == DataType::Int64 && *to == DataType::Float64)
-            {
+            if !castable(&source, to) {
                 return Err(invalid());
             }
             validate(expr, schema)
@@ -922,6 +1063,37 @@ fn validate(expr: &ScalarExpr, schema: &planner_types::ir::schema::Schema) -> Re
                 }
                 _ => Err(invalid()),
             }
+        }
+        // SQL `LIKE` / `ILIKE`: text against a text pattern; a literal
+        // pattern compiles here, so a bad one fails before any row.
+        ScalarExpr::Compare {
+            left,
+            right,
+            op:
+                op @ (CompareOpKind::Like
+                | CompareOpKind::NotLike
+                | CompareOpKind::ILike
+                | CompareOpKind::NotILike),
+            ..
+        } => {
+            for side in [left, right] {
+                validate(side, schema)?;
+                if !matches!(
+                    side.scalar_type(schema)
+                        .map_err(|e| Error::Invalid(e.to_string()))?
+                        .0,
+                    DataType::Utf8 | DataType::Null
+                ) {
+                    return Err(invalid());
+                }
+            }
+            if let ScalarExpr::Literal(ScalarValue::Utf8(pattern)) = &**right {
+                like_regex(
+                    pattern,
+                    matches!(op, CompareOpKind::ILike | CompareOpKind::NotILike),
+                )?;
+            }
+            Ok(())
         }
         ScalarExpr::Compare {
             left, right, op, ..
@@ -1001,6 +1173,29 @@ fn validate(expr: &ScalarExpr, schema: &planner_types::ir::schema::Schema) -> Re
                     return Err(invalid());
                 }
                 validate(value, schema)?;
+            }
+            if let Some(value) = else_expr {
+                validate(value, schema)?;
+            }
+            Ok(())
+        }
+        // Each branch compares its value to the operand.
+        ScalarExpr::Case {
+            operand: Some(operand),
+            branches,
+            else_expr,
+        } => {
+            for (value, result) in branches {
+                validate(
+                    &ScalarExpr::Compare {
+                        left: operand.clone(),
+                        op: CompareOpKind::Eq,
+                        right: Box::new(value.clone()),
+                        semantics: planner_types::ir::scalar::ExprSemantics::Sql,
+                    },
+                    schema,
+                )?;
+                validate(result, schema)?;
             }
             if let Some(value) = else_expr {
                 validate(value, schema)?;
@@ -1235,6 +1430,176 @@ mod tests {
         );
         assert!(shifted_timestamp(0, &interval(0, 0, 1), false).is_err());
         assert!(shifted_timestamp(i64::MAX, &interval(0, 1, 0), false).is_err());
+    }
+
+    fn text(value: &str) -> ScalarExpr {
+        ScalarExpr::Literal(ScalarValue::Utf8(value.into()))
+    }
+
+    /// `expr` over the row `row` of `schema`, compiled as the executor
+    /// compiles it.
+    fn value_of(
+        expr: ScalarExpr,
+        schema: &[(DataType, bool)],
+        row: Vec<Value>,
+    ) -> Result<Value, Error> {
+        let schema = Arc::new(planner_types::ir::schema::Schema::new(
+            schema
+                .iter()
+                .enumerate()
+                .map(|(i, (dtype, nullable))| {
+                    planner_types::ir::schema::Field::plain(
+                        format!("c{i}"),
+                        dtype.clone(),
+                        *nullable,
+                    )
+                })
+                .collect(),
+        ));
+        CompiledExpression::bind(&expr, &schema)?.evaluate(&row)
+    }
+
+    // `LIKE`: `%` any text, `_` one character, `\` a literal next
+    // character, the whole text matched; `ILIKE` ignores case; NULL in,
+    // NULL out.
+    #[test]
+    fn like_follows_sql() {
+        let like = |value: Option<&str>, op: CompareOpKind, pattern: &str| match value_of(
+            ScalarExpr::Compare {
+                left: Box::new(ScalarExpr::Column(0)),
+                op,
+                right: Box::new(text(pattern)),
+                semantics: planner_types::ir::scalar::ExprSemantics::Sql,
+            },
+            &[(DataType::Utf8, true)],
+            vec![value.map_or(Value::Null, |v| Value::Utf8(v.into()))],
+        )
+        .unwrap()
+        {
+            Value::Bool(b) => Some(b),
+            Value::Null => None,
+            other => panic!("{other:?}"),
+        };
+        use CompareOpKind::*;
+        assert_eq!(like(Some("abc"), Like, "a%"), Some(true));
+        assert_eq!(like(Some("abc"), Like, "b%"), Some(false));
+        assert_eq!(like(Some("abc"), Like, "a_c"), Some(true));
+        assert_eq!(like(Some("abbc"), Like, "a_c"), Some(false));
+        assert_eq!(like(Some("a_c"), Like, "a\\_c"), Some(true));
+        assert_eq!(like(Some("abc"), Like, "a\\_c"), Some(false));
+        assert_eq!(like(Some("a.c"), Like, "a.c"), Some(true));
+        assert_eq!(like(Some("abc"), Like, "a.c"), Some(false));
+        assert_eq!(like(Some("a\nb"), Like, "a%b"), Some(true));
+        assert_eq!(like(Some("ABC"), Like, "a%"), Some(false));
+        assert_eq!(like(Some("ABC"), ILike, "a%"), Some(true));
+        assert_eq!(like(Some("ABC"), NotILike, "a%"), Some(false));
+        assert_eq!(like(Some("abc"), NotLike, "x%"), Some(true));
+        assert_eq!(like(None, Like, "%"), None);
+    }
+
+    // `CASE x WHEN v THEN …` matches the first branch with `x = v`; a NULL
+    // operand matches none.
+    #[test]
+    fn case_with_an_operand_compares_it() {
+        let case = |x: Value| {
+            value_of(
+                ScalarExpr::Case {
+                    operand: Some(Box::new(ScalarExpr::Column(0))),
+                    branches: vec![
+                        (ScalarExpr::Literal(ScalarValue::Int64(1)), text("one")),
+                        (ScalarExpr::Literal(ScalarValue::Int64(2)), text("two")),
+                    ],
+                    else_expr: Some(Box::new(text("other"))),
+                },
+                &[(DataType::Int64, true)],
+                vec![x],
+            )
+            .unwrap()
+        };
+        assert!(matches!(case(Value::Int64(2)), Value::Utf8(t) if &*t == "two"));
+        assert!(matches!(case(Value::Int64(3)), Value::Utf8(t) if &*t == "other"));
+        assert!(matches!(case(Value::Null), Value::Utf8(t) if &*t == "other"));
+    }
+
+    // Casts follow DataFusion: a float truncates toward zero to an integer;
+    // NaN, out-of-range and unparsable text fail, or are NULL under
+    // `TRY_CAST`.
+    #[test]
+    fn casts_follow_datafusion() {
+        let cast = |value: Value, from: DataType, to: DataType, try_cast: bool| {
+            value_of(
+                ScalarExpr::Cast {
+                    expr: Box::new(ScalarExpr::Column(0)),
+                    to,
+                    try_cast,
+                },
+                &[(from, true)],
+                vec![value],
+            )
+        };
+        let shown = |value: Result<Value, Error>| format!("{:?}", value.map_err(|_| ()));
+        use DataType::*;
+        assert_eq!(
+            shown(cast(Value::Float64(-2.7), Float64, Int64, false)),
+            shown(Ok(Value::Int64(-2)))
+        );
+        assert!(cast(Value::Float64(f64::NAN), Float64, Int64, false).is_err());
+        assert!(cast(Value::Float64(1e19), Float64, Int64, false).is_err());
+        assert_eq!(
+            shown(cast(Value::Float64(1e19), Float64, Int64, true)),
+            shown(Ok(Value::Null))
+        );
+        assert_eq!(
+            shown(cast(Value::Int64(-5), Int64, Utf8, false)),
+            shown(Ok(Value::Utf8("-5".into())))
+        );
+        assert_eq!(
+            shown(cast(Value::Bool(true), Bool, Utf8, false)),
+            shown(Ok(Value::Utf8("true".into())))
+        );
+        assert_eq!(
+            shown(cast(Value::Utf8("42".into()), Utf8, Int64, false)),
+            shown(Ok(Value::Int64(42)))
+        );
+        assert_eq!(
+            shown(cast(Value::Utf8("2.5".into()), Utf8, Float64, false)),
+            shown(Ok(Value::Float64(2.5)))
+        );
+        assert!(cast(Value::Utf8("x".into()), Utf8, Int64, false).is_err());
+        assert_eq!(
+            shown(cast(Value::Utf8("x".into()), Utf8, Int64, true)),
+            shown(Ok(Value::Null))
+        );
+        assert_eq!(
+            shown(cast(Value::Int64(0), Int64, Bool, false)),
+            shown(Ok(Value::Bool(false)))
+        );
+        assert_eq!(
+            shown(cast(Value::Bool(true), Bool, Int64, false)),
+            shown(Ok(Value::Int64(1)))
+        );
+        // A cast without a native evaluation fails at compile time.
+        assert!(cast(Value::Float64(1.5), Float64, Utf8, false).is_err());
+    }
+
+    // PromQL `time()` is the evaluation time in seconds, bound per query
+    // run; it has no value outside one.
+    #[test]
+    fn time_reads_the_evaluation_time_in_seconds() {
+        let schema = planner_types::ir::schema::Schema::new(vec![]);
+        validate(&ScalarExpr::EvalTimestamp, &schema).unwrap();
+        assert!(matches!(
+            evaluate(&ScalarExpr::EvalTimestamp, &[], &schema, Some(1_500), &Default::default()),
+            Ok(Value::Float64(v)) if v == 1.5
+        ));
+        assert!(evaluate(
+            &ScalarExpr::EvalTimestamp,
+            &[],
+            &schema,
+            None,
+            &Default::default()
+        )
+        .is_err());
     }
 
     // `now()` is the evaluation time the expression is bound to, and has no
