@@ -567,16 +567,14 @@ The sections below describe each stage.
 | 0. Frontends | nothing: a query that cannot be lowered fails planning with an error | — | — |
 | 1, Pass 1 | what the measure or the deployment cannot compute: `RequiresExact`, `NullableAvgInput`, `NoRelationalCountSketchRealization`, `UnsupportedByDeployment`, `QuantileOutsideUnitInterval`, `TopKHeapOverOneRowPerItem`; and, only when the deployment's accuracy model and evidence cannot accept an output without its guarantee, a summary no query reading it can use: `NoErrorBoundForQueryTarget` | `PerComputationLogicalMemoCandidates::pruned_candidates`, each on its aggregate's memo group | the way to compute the measure (`HowToComputeAggregateMeasure`) |
 | 1, Pass 2 | nothing: it only adds candidates | — | — |
-| 2 | what cannot be implemented, built or materialized: `PerEntityAggregateNotExecutable` (an exact per-entity `Aggregate` the executor has no kernel for), `RawDataNotRetained` (a query-time scan of raw data the deployment does not keep), `InputHasNoBuildableProducer`, `ReachesNoQueryOutput`, `TooFewQueryReaders` (shared within one evaluation with fewer than two reading queries) | `PhysicalASAPMemoCandidates::pruned_candidates`, each on its operator node's memo group | `PhysicalCandidateKey { operator_node, properties }` |
+| 2 | what cannot be built, run or read by a query output: `PerEntityAggregateNotExecutable` (an exact per-entity `Aggregate` the executor has no kernel for), `NoIngestionPipeline` (ingestion time over data at rest or of unknown arrival), `RawDataNotRetained` (a query-time scan of raw data the deployment does not keep), `QueryTimeResultsNotRetained` (query time, materialized across evaluations, when the deployment keeps no query-time results), `AcrossEvaluationsWithoutWindowLayout`, `InputHasNoBuildableProducer`, `ReachesNoQueryOutput` | `PhysicalASAPMemoCandidates::pruned_candidates`, each on its logical candidate's memo group | `PhysicalCandidateKey { logical_candidate_id, physical_properties }` |
 | 3 | valid candidates that lose, and the checks only a whole plan can make (accuracy, latency, cluster capacity) | its own `RejectionCause` | — |
 
-Stage 2's key names what a pruned candidate would have been, since kept
+Stage 2's key names what a pruned candidate would have been, since emitted
 candidates are renumbered after pruning and a pruned one has no
-`PhysicalCandidateId`. Stage 2 emits one candidate per operator node,
-timing and lifetime, and makes no copies of it, so (`operator_node`,
-`properties`) is unique. Operator
-nodes are kept whole, so `operator_node` indexes the output's
-`operator_nodes_of_candidates_for_memo_groups`. Pass 1's accuracy pruning
+`PhysicalCandidateId`. Stage 2 emits one candidate per logical candidate,
+timing and lifetime, and makes no copies of it, so (`logical_candidate_id`,
+`physical_properties`) is unique. Pass 1's accuracy pruning
 (`NoErrorBoundForQueryTarget`) runs inside Pass 1's entry, before the
 candidates are attached to the memo groups, and records a `PrunedCandidate`
 like every other Pass 1 prune.
@@ -1283,19 +1281,23 @@ Output: C3 — CandidatePhysicalASAPDAGs
 here; they determine the cost of each option, which stage 3 uses to pick the
 cheapest plan (the typical outcomes above).
 
-On the memo, Stage 2 prunes per operator node and records each pruned
-candidate in `PhysicalASAPMemoCandidates::pruned_candidates`
-([Pruning by stage](#pruning-by-stage)). It does not generate a
-configuration the deployment cannot run: an exact per-entity `Aggregate`
-(a per-series range reduction over raw data samples) with more than one
-measure, a measure without an exact per-entity kernel such as
+On the memo, Stage 2 expands each logical candidate into its physical
+properties (timing, then lifetime) and records each alternative it prunes in
+`PhysicalASAPMemoCandidates::pruned_candidates`
+([Pruning by stage](#pruning-by-stage)). It does not generate an
+alternative the deployment or the data cannot run: an exact per-entity
+`Aggregate` (a per-series range reduction over raw data samples) with more
+than one measure, a measure without an exact per-entity kernel such as
 `stddev_over_time`, a measure filter or a `HAVING`
-(`PerEntityAggregateNotExecutable`; the rule reads one node, so no whole
-plan is needed), and, without raw data retained, a query-time scan of raw
-data (`RawDataNotRetained`). It then removes the candidates no buildable
-input, query output or reader count can use (`InputHasNoBuildableProducer`,
-`ReachesNoQueryOutput`, `TooFewQueryReaders`),
-repeating until nothing more is removed. Stage 2 makes no execution-scope
+(`PerEntityAggregateNotExecutable`), ingestion time without an ingestion
+pipeline (`NoIngestionPipeline`), a query-time scan of raw data the
+deployment does not retain (`RawDataNotRetained`), and materialization
+across evaluations without a window layout or, at query time, without
+retained query-time results (`AcrossEvaluationsWithoutWindowLayout`,
+`QueryTimeResultsNotRetained`). It then removes the alternatives with an
+input no buildable producer can supply over admissible edges
+(`InputHasNoBuildableProducer`) and those no query output reads
+(`ReachesNoQueryOutput`). Stage 2 makes no execution-scope
 copies: how many times a candidate runs is Stage 3's choice, and a
 selection names each run as a node of its `DagOfSelectedCandidates`.
 Today's Stage 3 engine, whose MILP runs each candidate at most once, makes

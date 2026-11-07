@@ -4,7 +4,7 @@
 //! The planner facade calls [`generate_physical_asap_memo_candidates`] on
 //! Pass 2's output (`asap_types::stages::LogicalASAPMemoCandidates`): each
 //! logical candidate expanded into one physical candidate per valid
-//! $(\tau, \ell, \sigma)$, each logical edge into its physical edges with
+//! $(\tau, \ell)$, each logical edge into its physical edges with
 //! $\alpha^{\log}$ and $\alpha^{\mathrm{phys}}$, and the pruned alternatives
 //! (`asap_types::stages::PhysicalASAPMemoCandidates`). Stage 3 selects from
 //! that output, and [`Stage2AssignmentRealizer`] builds the selected DAG as a
@@ -12,7 +12,4 @@
 
 mod catalog;
 
-pub use catalog::{
-    generate_physical_asap_memo_candidates, ErrorGeneratingPhysicalASAPMemoCandidates,
-    Stage2AssignmentRealizer,
-};
+pub use catalog::{generate_physical_asap_memo_candidates, Stage2AssignmentRealizer};

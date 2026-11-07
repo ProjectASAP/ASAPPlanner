@@ -51,9 +51,6 @@ pub enum SelectionError {
     /// Pass 1's memo candidates or Pass 2 failed.
     #[error("logical ASAP-aware optimization: {0}")]
     LogicalASAPCandidates(String),
-    /// Stage 2 failed.
-    #[error("physical ASAP-aware optimization: {0}")]
-    PhysicalASAPCandidates(String),
     /// Stage 3 selected no plan.
     #[error("plan selection: {0}")]
     Selection(ErrorSelectingPlan),
@@ -175,15 +172,12 @@ pub fn run_planning(
         let started = Instant::now();
         let physical = generate_physical_asap_memo_candidates(
             logical,
-            entries,
             data,
             models.deployment_capabilities.query_time_results_retained,
             models.deployment_capabilities.raw_data_retained,
         );
         report.stage2_ms = elapsed_ms(started);
-        let physical = physical_asap_candidates.insert(
-            physical.map_err(|error| SelectionError::PhysicalASAPCandidates(error.to_string()))?,
-        );
+        let physical = physical_asap_candidates.insert(physical);
         report.physical_candidates = physical.physical_candidates.len();
         report.stage2_pruned_candidates = physical.pruned_candidates.len();
         // Stage 3.
