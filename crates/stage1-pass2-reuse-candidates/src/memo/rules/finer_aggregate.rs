@@ -29,7 +29,7 @@ pub(crate) fn add_finer_aggregate_candidates(memo: &mut Memo) -> Result<(), Pass
             let (Some(query), Some(fine)) = (aggregate(memo, owner), aggregate(memo, finer)) else {
                 continue;
             };
-            if format!("{:?}", query.measures) != format!("{:?}", fine.measures) {
+            if query.measures != fine.measures {
                 continue;
             }
             let Some(matched) = match_finer(memo, query.child, &query.keys, fine.child, &fine.keys)

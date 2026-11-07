@@ -19,8 +19,7 @@ use asap_types::stages::{Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
 /// exact; a sketch keeps its family's merged guarantee, which the readout's
 /// edge checks (`FamilyCapability::merged_error`). The finer group's
 /// windowed builds (rule 1) serve the coarse state through it, so a coarse
-/// and a finer query share one tumbling-window chain without a rule of
-/// their own.
+/// and a finer query over the same range share one tumbling-window chain.
 pub(crate) fn add_rollup_candidates(memo: &mut Memo) -> Result<(), Pass2RuleError> {
     let states: Vec<MemoGroupId> = (0..memo.groups().len())
         .map(|index| MemoGroupId(index as u32))
@@ -110,6 +109,9 @@ fn rollup_keys(memo: &Memo, coarse: MemoGroupId, fine: MemoGroupId) -> Option<Ve
         || input != fine_input
         || grouping != fine_grouping
         || filter != fine_filter
+        // A filter's columns are its own child's: over two children it
+        // compares only by position.
+        || (filter.is_some() && child != fine_child)
         || fine_keys.len() <= coarse_keys.len()
         || !coarse_keys.iter().all(|key| fine_keys.contains(key))
         || !same_rows(memo, *child, *fine_child)

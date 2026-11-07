@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::memo::rules::{add_candidate, expression, Pass2RuleError};
+use crate::memo::rules::{add_candidate, expression, produces_state, Pass2RuleError};
 use asap_types::ir::operator::operator_properties::Source;
 use asap_types::ir::schema::{Schema, PROMQL_SERIES_IDENTITY};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, ProjectItem, ScalarExpr};
@@ -204,19 +204,6 @@ fn passes_labels_on(operator: &Operator<MemoGroupId>) -> bool {
             _ => false,
         },
     }
-}
-
-/// Whether `operator`'s rows are summary states, which a `Project` cannot
-/// narrow.
-fn produces_state(operator: &Operator<MemoGroupId>) -> bool {
-    matches!(
-        operator,
-        Operator::ASAP(
-            ASAPOp::SummaryAgg { .. }
-                | ASAPOp::SummaryTumblingWindowChain { .. }
-                | ASAPOp::SummaryMerge { .. }
-        )
-    )
 }
 
 /// `Project(wide)` listing `group`'s columns, by name, in its order; `None`
