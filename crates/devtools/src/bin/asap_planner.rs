@@ -523,7 +523,7 @@ fn lowered(workload: &PlanningWorkload, catalog: &SqlCatalog) -> Result<Lowered,
 /// declared source, each metric a PromQL query reads and, when a file is
 /// SQL, each of `sql_tables` (the `--sql-catalog-table` names). Plan selection shares a
 /// workload's `rows_per_second` out over all its sources, so one file's
-/// rate would otherwise be priced on another file's sources.
+/// rate would otherwise be costed on another file's sources.
 fn lowered_together(
     workloads: &[(&str, PlanningWorkload)],
     catalog: &SqlCatalog,

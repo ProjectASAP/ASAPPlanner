@@ -596,7 +596,7 @@ function timingClass(timing) {
 // tumbling windows: per tumbling window `k`, newest first, a TimeShift by k tumbling windows (`n<id>p<k>s`,
 // none for the newest), a TimeRange of one tumbling window (`n<id>p<k>r`) and the
 // tumbling window's build (`n<id>p<k>`), each tumbling window fed by the chain's input and read by
-// the chain's readers). Display only: the document keeps the chain.
+// the chain's consumers). Display only: the document keeps the chain.
 function stageLaneElements(dag, options) {
   const { physical = false, costPerNode = null, queryIds = [], expandedChains = [] } = options || {};
   const group = typeof nodeGroup === 'function' ? nodeGroup : () => 'rel';
@@ -663,7 +663,7 @@ function stageLaneElements(dag, options) {
     const from = expanded.has(e.producer);
     if (!into && !from) { edge(`e${index}`, `n${e.producer}`, `n${e.consumer}`, e.raw); return; }
     // An expanded chain's input feeds each tumbling window's TimeRange; each tumbling window feeds
-    // the chain's readers.
+    // the chain's consumers.
     const tumblingWindowCount = (chain) => byId.get(chain).body.tumbling_window_count;
     if (into) {
       for (let k = 0; k < tumblingWindowCount(e.consumer); k += 1) {

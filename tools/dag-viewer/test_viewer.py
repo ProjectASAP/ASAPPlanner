@@ -677,15 +677,15 @@ class TumblingWindowsAndPathsTests(unittest.TestCase):
         self.assertIn("shift: 10 s", shift["data"]["label"])
         edges = [(e["data"]["source"], e["data"]["target"]) for e in lane_edges(elements)]
         child = f"n{self.body['child']}"
-        # The chain's input feeds every tumbling window's TimeRange; every tumbling window feeds the chain's readers.
+        # The chain's input feeds every tumbling window's TimeRange; every tumbling window feeds the chain's consumers.
         self.assertIn((child, f"n{chain_id}p0r"), edges)
         self.assertIn((child, f"n{chain_id}p1s"), edges)
         self.assertIn((f"n{chain_id}p1s", f"n{chain_id}p1r"), edges)
         self.assertIn((f"n{chain_id}p1r", f"n{chain_id}p1"), edges)
-        readers = {c for (p, c) in [(e["producer"], e["consumer"]) for e in self.dag["edges"]] if p == chain_id}
-        for reader in readers:
-            self.assertEqual(sum(1 for edge in edges if edge == (f"n{chain_id}p0", f"n{reader}")), 1)
-            self.assertEqual(sum(1 for (p, c) in edges if c == f"n{reader}" and p.startswith(f"n{chain_id}p") and not p.endswith(("r", "s"))), count)
+        consumers = {c for (p, c) in [(e["producer"], e["consumer"]) for e in self.dag["edges"]] if p == chain_id}
+        for consumer in consumers:
+            self.assertEqual(sum(1 for edge in edges if edge == (f"n{chain_id}p0", f"n{consumer}")), 1)
+            self.assertEqual(sum(1 for (p, c) in edges if c == f"n{consumer}" and p.startswith(f"n{chain_id}p") and not p.endswith(("r", "s"))), count)
 
     def test_each_node_lists_the_queries_reaching_it_and_shared_nodes_say_so(self):
         """Each node lists the queries reaching it; shared nodes say so."""
@@ -710,23 +710,23 @@ class TumblingWindowsAndPathsTests(unittest.TestCase):
     def test_a_query_reaches_its_nodes_and_edges_only(self):
         """Highlighting a query keeps exactly its nodes and edges."""
         elements = self.elements()
-        kept = set(self.js.call("stageQueryElementIds", elements, "q3"))
-        nodes = {e["data"]["id"] for e in lane_nodes(elements) if e["data"]["id"] in kept}
+        shown = set(self.js.call("stageQueryElementIds", elements, "q3"))
+        nodes = {e["data"]["id"] for e in lane_nodes(elements) if e["data"]["id"] in shown}
         self.assertEqual(nodes, {e["data"]["id"] for e in lane_nodes(elements) if "q3" in e["data"]["reachedBy"]})
         for edge in lane_edges(elements):
-            self.assertEqual(edge["data"]["id"] in kept, edge["data"]["source"] in nodes and edge["data"]["target"] in nodes)
-        self.assertNotIn(f"n{self.chain['id']}", kept)
+            self.assertEqual(edge["data"]["id"] in shown, edge["data"]["source"] in nodes and edge["data"]["target"] in nodes)
+        self.assertNotIn(f"n{self.chain['id']}", shown)
 
     def test_a_node_neighborhood_is_everything_upstream_and_downstream(self):
         """A node's neighborhood is everything upstream and downstream of it."""
         elements = self.elements()
         chain = f"n{self.chain['id']}"
-        kept = set(self.js.call("stageNeighborhoodIds", elements, chain))
-        self.assertIn(chain, kept)
-        self.assertIn(f"n{self.body['child']}", kept)  # upstream: the scan
+        shown = set(self.js.call("stageNeighborhoodIds", elements, chain))
+        self.assertIn(chain, shown)
+        self.assertIn(f"n{self.body['child']}", shown)  # upstream: the scan
         for root in (self.dag["roots"][0], self.dag["roots"][1]):  # downstream: q1's and q2's roots
-            self.assertIn(f"n{root}", kept)
-        self.assertNotIn(f"n{self.dag['roots'][2]}", kept)  # q3 reads another metric
+            self.assertIn(f"n{root}", shown)
+        self.assertNotIn(f"n{self.dag['roots'][2]}", shown)  # q3 reads another metric
 
     def test_materialized_views_group_by_tumbling_window_chain(self):
         """Materialized views are grouped by their tumbling-window chain."""
@@ -937,9 +937,9 @@ class AppTests(unittest.TestCase):
         """A per_node entry without a numeric `cost` does not break the details panel."""
         js = self.page("?doc=e1.json", {"e1.json": json.dumps(example1())})
         js.eval("""__taps['cy2 node']({ target: { data() { return {
-            kind: 'Scan', nodeId: 0, rootFor: [], timing: 'query_time', cost: { detail: 'not priced' },
+            kind: 'Scan', nodeId: 0, rootFor: [], timing: 'query_time', cost: { detail: 'not costed' },
             node: { payload: { NonASAP: { Scan: {} } }, guarantee: null } }; } } })""")
-        self.assertIn("not priced", self.text(js, "details"))
+        self.assertIn("not costed", self.text(js, "details"))
 
     def test_a_workload_document_fills_the_data_workload_and_materialized_views(self):
         """A planned workload fills the data workload, deployment and views panels."""

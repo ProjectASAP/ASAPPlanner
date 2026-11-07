@@ -210,7 +210,7 @@ def compare(args):
                 left_value, right_value = previous["search"].get(key), row["search"].get(key)
                 # Default preparation-time reports can omit these labels.
                 # Zero is not a valid calibration factor; treat it as missing,
-                # not as evidence that the selected plan was priced at zero.
+                # not as evidence that the selected plan was costed at zero.
                 if not left_value or not right_value:
                     missing_model_metadata.append(key)
                 else:

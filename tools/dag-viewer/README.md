@@ -155,7 +155,7 @@ with the workload. A new set is a directory of files and an index entry.
 The three ASAPQuery sets (seed-862, seed-862-x5, seed-862-long; 10
 workloads each, PromQL queries only) were converted from ASAPQuery's random
 workload manifests with ε = 1 − the accuracy SLA and δ = 0.3, and are
-planned as the MVP deployment: raw data not retained, Fargate prices,
+planned as the MVP deployment: raw data not retained, Fargate costs,
 accuracy guarantees enforced. Stage 3 searches exactly, so planning one of
 them can take several minutes.
 
