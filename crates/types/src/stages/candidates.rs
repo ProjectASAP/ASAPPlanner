@@ -6,12 +6,11 @@
 use std::collections::HashSet;
 
 use super::{GroupProperties, MemoGroup, MemoGroupAsInput, MemoGroupId};
+use crate::ir::operator::asap::family_of_operator;
 use crate::ir::properties::summary_coverage::SummaryCoverage;
 use crate::ir::properties::AccuracyMetric;
-use crate::ir::schema::{
-    FamilyCapability, FieldDataType, GroupingStrategy, HydraKind, HydraParams, SketchAlgorithm,
-    SketchParams,
-};
+use crate::ir::schema::family_capability::sketch_algorithm_of;
+use crate::ir::schema::{HydraParams, SketchAlgorithm, SketchParams};
 use crate::ir::ASAPOp;
 use crate::ir::Operator;
 use crate::ir::QueryRoot;
@@ -247,7 +246,8 @@ impl LogicalProperties {
         expression: &CandidateExpression,
         parameters: Option<SketchParams>,
     ) -> Result<Self, LogicalPropertiesError> {
-        match (family_of_operator(&expression.operator), &parameters) {
+        let family = family_of_operator(&expression.operator).and_then(sketch_algorithm_of);
+        match (family, &parameters) {
             (Some(_), None) => return Err(LogicalPropertiesError::SketchBuildWithoutParameters),
             (None, Some(_)) => return Err(LogicalPropertiesError::ParametersOnExactOperator),
             (Some(family), Some(parameters)) => {
@@ -527,35 +527,6 @@ const fn univmon_distinct(heap_size: u32) -> SketchParams {
     }
 }
 
-/// The sketch family an operator builds: a `SummaryAgg`'s or a
-/// `SummaryTumblingWindowChain`'s sketch family (a Hydra one's Hydra
-/// family); `None` for every other operator, an exact accumulator build
-/// included.
-fn family_of_operator(operator: &Operator<MemoGroupId>) -> Option<SketchAlgorithm> {
-    let (Operator::ASAP(ASAPOp::SummaryAgg { family, .. })
-    | Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { family, .. })) = operator
-    else {
-        return None;
-    };
-    match family {
-        FieldDataType::Sketch(algorithm, GroupingStrategy::PerSubpopulationInstance) => {
-            Some(*algorithm)
-        }
-        FieldDataType::Sketch(_, GroupingStrategy::SharedMultiSubpopulation { kind }) => {
-            Some(match kind {
-                HydraKind::HydraKll => SketchAlgorithm::HydraKll,
-                HydraKind::HydraCms => SketchAlgorithm::HydraCms,
-                HydraKind::HydraCountSketch => SketchAlgorithm::HydraCountSketch,
-            })
-        }
-        FieldDataType::Plain(_)
-        | FieldDataType::ExactAggregate(..)
-        | FieldDataType::SummarySample(..)
-        | FieldDataType::Wavelet(..)
-        | FieldDataType::StatModel(..) => None,
-    }
-}
-
 /// The family `parameters` size.
 fn family_of_parameters(parameters: &SketchParams) -> SketchAlgorithm {
     match parameters {
@@ -573,17 +544,6 @@ fn family_of_parameters(parameters: &SketchParams) -> SketchAlgorithm {
         SketchParams::Hydra(HydraParams::HydraCountSketch { .. }) => {
             SketchAlgorithm::HydraCountSketch
         }
-    }
-}
-
-/// Whether a tumbling window layout fits the operator: a `SummaryAgg` whose
-/// states merge, so that its windows' states make the whole range's.
-fn can_be_windowed(operator: &Operator<MemoGroupId>) -> bool {
-    match operator {
-        Operator::ASAP(ASAPOp::SummaryAgg { family, .. }) => {
-            FamilyCapability::of(family).merge_inputs.is_some()
-        }
-        Operator::ASAP(_) | Operator::NonASAP(_) => false,
     }
 }
 
@@ -653,28 +613,81 @@ pub fn producer_satisfies_logical_requirements(
     }
 }
 
-/// $\boldsymbol\theta \succeq \boldsymbol\theta^{\min}$: every parameter
-/// that sets $\varepsilon$ is at least the floor's (at most, for DDSketch's
-/// `alpha`). The recorded failure probabilities and relative errors are not
-/// compared: every listed configuration of a family records the same
-/// failure probability, 0.01. Parameters of different families never
-/// dominate.
+/// $\boldsymbol\theta \succeq \boldsymbol\theta^{\min}$: `parameters` is
+/// the [`strongest`] of itself and `floor`, so every parameter that sets
+/// $\varepsilon$ or holds items is at least the floor's (at most, for
+/// DDSketch's `alpha`). Parameters of different families never dominate.
 fn dominates(parameters: &SketchParams, floor: &SketchParams) -> bool {
+    strongest(parameters, floor).as_ref() == Some(parameters)
+}
+
+/// The per-parameter maximum of two configurations of one family (the
+/// smaller DDSketch `alpha`): what satisfies both. `None` for two
+/// families.
+pub fn strongest(left: &SketchParams, right: &SketchParams) -> Option<SketchParams> {
+    combine(left, right, true)
+}
+
+/// The per-parameter minimum of two configurations of one family (the
+/// larger DDSketch `alpha`): a floor both satisfy. `None` for two families.
+pub fn weakest(left: &SketchParams, right: &SketchParams) -> Option<SketchParams> {
+    combine(left, right, false)
+}
+
+/// [`strongest`] (`stronger`) or [`weakest`]: the one per-family table of
+/// the parameters that set $\varepsilon$ or hold items, each combined. The
+/// recorded error and failure probability are `left`'s: every listed
+/// configuration of a family records the same failure probability, 0.01.
+fn combine(left: &SketchParams, right: &SketchParams, stronger: bool) -> Option<SketchParams> {
     use SketchParams as P;
-    match (parameters, floor) {
-        (P::Kll { k, .. }, P::Kll { k: floor_k, .. })
-        | (P::Kmv { k, .. }, P::Kmv { k: floor_k, .. }) => k >= floor_k,
-        (P::DDSketch { alpha }, P::DDSketch { alpha: floor_alpha }) => alpha <= floor_alpha,
+    /// The larger of `a` and `b` when `larger`, else the smaller.
+    fn pick<T: PartialOrd>(larger: bool, a: T, b: T) -> T {
+        if (b > a) == larger {
+            b
+        } else {
+            a
+        }
+    }
+    Some(match (left, right) {
         (
-            P::Hll { precision, .. },
-            P::Hll {
-                precision: floor_precision,
-                ..
+            P::Kll {
+                k,
+                failure_probability,
             },
-        ) => precision >= floor_precision,
-        (P::Cms { width, depth }, P::Cms { width: w, depth: d })
-        | (P::CountSketch { width, depth }, P::CountSketch { width: w, depth: d }) => {
-            width >= w && depth >= d
+            P::Kll { k: other, .. },
+        ) => P::Kll {
+            k: pick(stronger, *k, *other),
+            failure_probability: *failure_probability,
+        },
+        (P::Kmv { k, relative_error }, P::Kmv { k: other, .. }) => P::Kmv {
+            k: pick(stronger, *k, *other),
+            relative_error: *relative_error,
+        },
+        // A smaller `alpha` is stronger.
+        (P::DDSketch { alpha }, P::DDSketch { alpha: other }) => P::DDSketch {
+            alpha: pick(!stronger, *alpha, *other),
+        },
+        (
+            P::Hll {
+                precision,
+                relative_error,
+            },
+            P::Hll {
+                precision: other, ..
+            },
+        ) => P::Hll {
+            precision: pick(stronger, *precision, *other),
+            relative_error: *relative_error,
+        },
+        (P::Cms { width, depth }, P::Cms { width: w, depth: d }) => P::Cms {
+            width: pick(stronger, *width, *w),
+            depth: pick(stronger, *depth, *d),
+        },
+        (P::CountSketch { width, depth }, P::CountSketch { width: w, depth: d }) => {
+            P::CountSketch {
+                width: pick(stronger, *width, *w),
+                depth: pick(stronger, *depth, *d),
+            }
         }
         (
             P::CmsWithHeap {
@@ -687,8 +700,12 @@ fn dominates(parameters: &SketchParams, floor: &SketchParams) -> bool {
                 depth: d,
                 heap_size: h,
             },
-        )
-        | (
+        ) => P::CmsWithHeap {
+            width: pick(stronger, *width, *w),
+            depth: pick(stronger, *depth, *d),
+            heap_size: pick(stronger, *heap_size, *h),
+        },
+        (
             P::CountSketchWithHeap {
                 width,
                 depth,
@@ -699,14 +716,18 @@ fn dominates(parameters: &SketchParams, floor: &SketchParams) -> bool {
                 depth: d,
                 heap_size: h,
             },
-        ) => width >= w && depth >= d && heap_size >= h,
+        ) => P::CountSketchWithHeap {
+            width: pick(stronger, *width, *w),
+            depth: pick(stronger, *depth, *d),
+            heap_size: pick(stronger, *heap_size, *h),
+        },
         (
             P::UnivMon {
                 heap_size,
                 sketch_rows,
                 sketch_cols,
                 layers,
-                ..
+                distinct_failure_probability,
             },
             P::UnivMon {
                 heap_size: h,
@@ -715,14 +736,23 @@ fn dominates(parameters: &SketchParams, floor: &SketchParams) -> bool {
                 layers: l,
                 ..
             },
-        ) => heap_size >= h && sketch_rows >= r && sketch_cols >= c && layers >= l,
+        ) => P::UnivMon {
+            heap_size: pick(stronger, *heap_size, *h),
+            sketch_rows: pick(stronger, *sketch_rows, *r),
+            sketch_cols: pick(stronger, *sketch_cols, *c),
+            layers: pick(stronger, *layers, *l),
+            distinct_failure_probability: *distinct_failure_probability,
+        },
         (
             P::Hydra(HydraParams::HydraKll { k, shared_buckets }),
             P::Hydra(HydraParams::HydraKll {
-                k: floor_k,
+                k: other,
                 shared_buckets: b,
             }),
-        ) => k >= floor_k && shared_buckets >= b,
+        ) => P::Hydra(HydraParams::HydraKll {
+            k: pick(stronger, *k, *other),
+            shared_buckets: pick(stronger, *shared_buckets, *b),
+        }),
         (
             P::Hydra(HydraParams::HydraCms {
                 width,
@@ -736,8 +766,13 @@ fn dominates(parameters: &SketchParams, floor: &SketchParams) -> bool {
                 shared_rows: r,
                 shared_columns: c,
             }),
-        )
-        | (
+        ) => P::Hydra(HydraParams::HydraCms {
+            width: pick(stronger, *width, *w),
+            depth: pick(stronger, *depth, *d),
+            shared_rows: pick(stronger, *shared_rows, *r),
+            shared_columns: pick(stronger, *shared_columns, *c),
+        }),
+        (
             P::Hydra(HydraParams::HydraCountSketch {
                 width,
                 depth,
@@ -750,9 +785,14 @@ fn dominates(parameters: &SketchParams, floor: &SketchParams) -> bool {
                 shared_rows: r,
                 shared_columns: c,
             }),
-        ) => width >= w && depth >= d && shared_rows >= r && shared_columns >= c,
-        // Different families. Listed by `parameters`' variant, not `_`, so a
-        // new variant fails to compile here until it is compared above.
+        ) => P::Hydra(HydraParams::HydraCountSketch {
+            width: pick(stronger, *width, *w),
+            depth: pick(stronger, *depth, *d),
+            shared_rows: pick(stronger, *shared_rows, *r),
+            shared_columns: pick(stronger, *shared_columns, *c),
+        }),
+        // Different families. Listed by `left`'s variant, not `_`, so a new
+        // variant fails to compile here until it is combined above.
         (P::Kll { .. }, _)
         | (P::Kmv { .. }, _)
         | (P::DDSketch { .. }, _)
@@ -762,8 +802,8 @@ fn dominates(parameters: &SketchParams, floor: &SketchParams) -> bool {
         | (P::CmsWithHeap { .. }, _)
         | (P::CountSketchWithHeap { .. }, _)
         | (P::UnivMon { .. }, _)
-        | (P::Hydra(_), _) => false,
-    }
+        | (P::Hydra(_), _) => return None,
+    })
 }
 
 #[cfg(test)]
@@ -771,7 +811,7 @@ mod tests {
     use super::*;
     use crate::ir::operator::operator_properties::Reduction;
     use crate::ir::scalar::expr_ir::ColumnRef;
-    use crate::ir::schema::{ExactKind, SummaryUpdate};
+    use crate::ir::schema::{ExactKind, FieldDataType, GroupingStrategy, HydraKind, SummaryUpdate};
 
     /// `SummaryAgg` over group 0 building a state of `family`.
     fn summary_agg(family: FieldDataType) -> CandidateExpression {
@@ -803,13 +843,12 @@ mod tests {
         shared_columns: 1_024,
     });
 
-    /// `LogicalProperties::new` over every operator kind, parameters and
-    /// window layout: a sketch build needs parameters of its family from its
-    /// list; parameters are rejected on an operator without a sketch family;
-    /// a window is rejected at width 0 or on an operator other than a
-    /// `SummaryAgg` whose states merge. Parameters are checked first.
+    /// `LogicalProperties::new` over every operator kind and parameters: a
+    /// sketch build (a chain included) needs parameters of its family from
+    /// its list; parameters are rejected on an operator without a sketch
+    /// family.
     #[test]
-    fn logical_properties_new_over_every_operator_parameters_and_window() {
+    fn logical_properties_new_over_every_operator_and_parameters() {
         use LogicalPropertiesError as Invalid;
         let per_instance = GroupingStrategy::PerSubpopulationInstance;
         let hydra = GroupingStrategy::SharedMultiSubpopulation {
@@ -824,7 +863,6 @@ mod tests {
                 grouping: per_instance.clone(),
                 filter: None,
                 tumbling_window_width_ms: 5_000,
-                tumbling_window_count: 12,
             }),
         };
         let readout = CandidateExpression {
@@ -833,7 +871,7 @@ mod tests {
                 query: crate::ir::schema::SketchStatistic::Quantile { q: 0.5 },
             }),
         };
-        // KLL_270 is of KLL's type but not in its list.
+        // kll(270) is of KLL's type but not in its list.
         let parameters = [
             None,
             Some(KLL_269),
@@ -841,33 +879,32 @@ mod tests {
             Some(HYDRA_CMS),
             Some(kll(270)),
         ];
-        let windows = [
-            None,
-            Some(WindowLayout::Tumbling { width_ms: 5_000 }),
-            Some(WindowLayout::Tumbling { width_ms: 0 }),
-        ];
         let no_parameters = Err(Invalid::ParametersOnExactOperator);
         let needs_parameters = Err(Invalid::SketchBuildWithoutParameters);
         let not_in_list = Err(Invalid::ParametersNotInList);
         let another_family = Err(Invalid::ParametersOfAnotherFamily);
-        let cannot_be_windowed = Err(Invalid::WindowOnOperatorThatCannotBeWindowed);
-        let zero_width = Err(Invalid::ZeroWindowWidth);
-        // Per operator: the result for each of `parameters`, then for each of
-        // `windows`; a combination fails with the parameters' error first.
+        let exact = [
+            Ok(()),
+            no_parameters,
+            no_parameters,
+            no_parameters,
+            no_parameters,
+        ];
+        let kll_build = [
+            needs_parameters,
+            Ok(()),
+            another_family,
+            another_family,
+            not_in_list,
+        ];
+        // Per operator: the result for each of `parameters`.
         let table = [
             (
                 summary_agg(sketch(SketchAlgorithm::Kll, per_instance.clone())),
-                [
-                    needs_parameters,
-                    Ok(()),
-                    another_family,
-                    another_family,
-                    not_in_list,
-                ],
-                [Ok(()), Ok(()), zero_width],
+                kll_build,
             ),
+            // No Hydra θ is listed yet, so no Hydra build is valid.
             (
-                // No Hydra θ is listed yet, so no Hydra build is valid.
                 summary_agg(sketch(SketchAlgorithm::Cms, hydra)),
                 [
                     needs_parameters,
@@ -876,73 +913,85 @@ mod tests {
                     not_in_list,
                     another_family,
                 ],
-                [Ok(()), Ok(()), zero_width],
             ),
-            (
-                summary_agg(FieldDataType::exact(ExactKind::Sum)),
-                [
-                    Ok(()),
-                    no_parameters,
-                    no_parameters,
-                    no_parameters,
-                    no_parameters,
-                ],
-                [Ok(()), Ok(()), zero_width],
-            ),
-            // IRate's states do not merge across a window boundary.
-            (
-                summary_agg(FieldDataType::exact(ExactKind::IRate)),
-                [
-                    Ok(()),
-                    no_parameters,
-                    no_parameters,
-                    no_parameters,
-                    no_parameters,
-                ],
-                [Ok(()), cannot_be_windowed, zero_width],
-            ),
-            (
-                kll_chain,
-                [
-                    needs_parameters,
-                    Ok(()),
-                    another_family,
-                    another_family,
-                    not_in_list,
-                ],
-                [Ok(()), cannot_be_windowed, zero_width],
-            ),
-            (
-                readout,
-                [
-                    Ok(()),
-                    no_parameters,
-                    no_parameters,
-                    no_parameters,
-                    no_parameters,
-                ],
-                [Ok(()), cannot_be_windowed, zero_width],
-            ),
+            (summary_agg(FieldDataType::exact(ExactKind::Sum)), exact),
+            (kll_chain, kll_build),
+            (readout, exact),
         ];
-        for (expression, by_parameters, by_window) in table {
-            for (parameters, parameters_result) in parameters.iter().zip(by_parameters) {
-                for (window, window_result) in windows.iter().zip(by_window) {
-                    let expected = parameters_result.and(window_result);
-                    let properties =
-                        LogicalProperties::new(&expression, parameters.clone(), *window);
-                    assert_eq!(
-                        properties.as_ref().map(|_| ()).map_err(|e| *e),
-                        expected,
-                        "{:?} {parameters:?} {window:?}",
-                        expression.operator.kind_name()
-                    );
-                    if let Ok(properties) = properties {
-                        assert_eq!(properties.parameters(), parameters.as_ref());
-                        assert_eq!(properties.window_layout(), window.as_ref());
-                    }
+        for (expression, by_parameters) in table {
+            for (parameters, expected) in parameters.iter().zip(by_parameters) {
+                let properties = LogicalProperties::new(&expression, parameters.clone());
+                assert_eq!(
+                    properties.as_ref().map(|_| ()).map_err(|e| *e),
+                    expected,
+                    "{:?} {parameters:?}",
+                    expression.operator.kind_name()
+                );
+                if let Ok(properties) = properties {
+                    assert_eq!(properties.parameters(), parameters.as_ref());
                 }
             }
         }
+    }
+
+    /// `family_of_operator` reads the family of a `SummaryAgg` and of a
+    /// chain, and of no other operator.
+    #[test]
+    fn family_of_operator_reads_the_builds_family() {
+        let kll = sketch(SketchAlgorithm::Kll, GroupingStrategy::default());
+        let chain = Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            child: MemoGroupId(0),
+            family: kll.clone(),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::PerEntity,
+            grouping: GroupingStrategy::default(),
+            filter: None,
+            tumbling_window_width_ms: 5_000,
+        });
+        let merge = Operator::ASAP(ASAPOp::SummaryMerge {
+            children: vec![MemoGroupId(0)],
+            group_by: None,
+        });
+        assert_eq!(
+            family_of_operator(&summary_agg(kll.clone()).operator),
+            Some(&kll)
+        );
+        assert_eq!(family_of_operator(&chain), Some(&kll));
+        assert_eq!(family_of_operator(&merge), None);
+    }
+
+    /// `strongest` and `weakest` take the per-parameter maximum and minimum
+    /// of two configurations of one family (DDSketch's smaller `alpha` is the
+    /// stronger), keep the left one's recorded fields, and give `None` for
+    /// two families.
+    #[test]
+    fn strongest_and_weakest_combine_one_family_per_parameter() {
+        let cms_heap = |width, depth, heap_size| SketchParams::CmsWithHeap {
+            width,
+            depth,
+            heap_size,
+        };
+        let dd = |alpha| SketchParams::DDSketch { alpha };
+        let hll = |precision, relative_error| SketchParams::Hll {
+            precision,
+            relative_error: Some(relative_error),
+        };
+        for (left, right, strong, weak) in [
+            (kll(52), KLL_269, kll(269), kll(52)),
+            (dd(0.05), dd(0.01), dd(0.01), dd(0.05)),
+            (hll(13, 0.1), hll(18, 0.01), hll(18, 0.1), hll(13, 0.1)),
+            (
+                cms_heap(272, 3, 50),
+                cms_heap(55, 5, 10),
+                cms_heap(272, 5, 50),
+                cms_heap(55, 3, 10),
+            ),
+        ] {
+            assert_eq!(strongest(&left, &right), Some(strong), "{left:?} {right:?}");
+            assert_eq!(weakest(&left, &right), Some(weak), "{left:?} {right:?}");
+        }
+        assert_eq!(strongest(&KLL_269, &CMS), None);
+        assert_eq!(weakest(&CMS, &HYDRA_CMS), None);
     }
 
     /// Each predefined list holds only its family's parameters, without
@@ -1040,17 +1089,13 @@ mod tests {
             LogicalProperties::new(
                 &summary_agg(sketch(family, GroupingStrategy::default())),
                 Some(parameters.clone()),
-                None,
             )
             .unwrap()
         };
         let floor = |parameters: &SketchParams| LogicalRequirements::new(Some(parameters.clone()));
-        let exact = LogicalProperties::new(
-            &summary_agg(FieldDataType::exact(ExactKind::Sum)),
-            None,
-            None,
-        )
-        .unwrap();
+        let exact =
+            LogicalProperties::new(&summary_agg(FieldDataType::exact(ExactKind::Sum)), None)
+                .unwrap();
         let no_floor = LogicalRequirements::new(None);
         assert!(producer_satisfies_logical_requirements(
             &build(kll_26),

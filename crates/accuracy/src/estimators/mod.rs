@@ -404,8 +404,7 @@ mod tests {
                 FamilyCapability::of(&FieldDataType::Sketch(family, GroupingStrategy::default()));
             let list = parameter_list(family);
             for producer in list {
-                let properties =
-                    LogicalProperties::new(&build, Some(producer.clone()), None).unwrap();
+                let properties = LogicalProperties::new(&build, Some(producer.clone())).unwrap();
                 for floor in list {
                     let requirement = LogicalRequirements::new(Some(floor.clone()));
                     if !producer_satisfies_logical_requirements(&properties, &requirement) {

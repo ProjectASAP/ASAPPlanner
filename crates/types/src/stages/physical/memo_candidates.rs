@@ -9,11 +9,9 @@ use std::collections::HashMap;
 use super::execution_context::ExecutionContext;
 use super::graph::PhysicalCandidateId;
 use crate::ir::QueryRoot;
+use crate::ir::{ASAPOp, Operator};
 use crate::physical::{ExecutionTiming, Lifetime, PhysicalProperties};
-use crate::stages::{
-    CandidateForMemoGroupId, LogicalASAPMemoCandidates, Memo, MemoGroupId, PrunedCandidate,
-};
-use crate::workload::{QueryRecurrence, RepeatedDemand};
+use crate::stages::{CandidateForMemoGroupId, LogicalASAPMemoCandidates, Memo, PrunedCandidate};
 
 /// Index into [`PhysicalASAPMemoCandidates::edges`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -31,40 +29,35 @@ pub struct PhysicalCandidate {
 impl PhysicalCandidate {
     /// Whether a consumer running in `context` can read this producer (the
     /// concepts doc's alignment table, section 2). True for $\ell$ = None,
-    /// and for `OneEvaluation` in the same context. A chain producer
-    /// (`SummaryTumblingWindowChain`) with $\ell$ = `AcrossEvaluations`, with
-    /// $w$ the chain operator's width in its expression in `memo`, needs every evaluation time of the context on its
-    /// grid: $w$ divides the context's evaluation grid (interval, range step
-    /// and phase), each scheduled time, or a one-off query's time; false
-    /// when the times are not known (an interval without a phase, an
-    /// estimated rate, an unknown recurrence).
-    ///
-    /// A `None` or `OneEvaluation` producer runs in the consumer's own
-    /// context ($x_{\kappa,v}$, Stage 3), so its result belongs to that
-    /// context. A non-windowed `AcrossEvaluations` producer is not offered
-    /// yet (it needs its own delivery rule), so this returns false for it.
+    /// and for `OneEvaluation` in the same context: such a producer runs in
+    /// the consumer's own context ($x_{\kappa,v}$, Stage 3). A chain producer
+    /// (`SummaryTumblingWindowChain`) with $\ell$ = `AcrossEvaluations`, $w$
+    /// its chain operator's width in `memo`, needs every evaluation time of
+    /// the context on its grid: $w$ divides the context's
+    /// [`evaluation_grid_ms`](crate::workload::QueryRecurrence::evaluation_grid_ms); false when that is `None`
+    /// (the times are not known). `AcrossEvaluations` is offered only to
+    /// chains, so this is false for any other `AcrossEvaluations` producer.
     pub fn delivers_on(&self, memo: &Memo, context: &ExecutionContext) -> bool {
         match self.physical_properties.lifetime() {
             Lifetime::None | Lifetime::OneEvaluation(_) => true,
             Lifetime::AcrossEvaluations(_) => {
-                let Some(WindowLayout::Tumbling { width_ms }) = memo
+                let Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                    tumbling_window_width_ms,
+                    ..
+                }) = memo
                     .candidate(self.logical_candidate_id)
-                    .logical_properties
-                    .window_layout()
+                    .expression
+                    .operator
                 else {
                     return false;
                 };
                 match context {
                     ExecutionContext::Evaluation {
-                        recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(_)),
-                        ..
-                    } => false,
-                    ExecutionContext::Evaluation {
                         recurrence,
                         range_evaluation,
                     } => recurrence
                         .evaluation_grid_ms(*range_evaluation)
-                        .is_some_and(|grid_ms| grid_ms.is_multiple_of(*width_ms)),
+                        .is_some_and(|grid_ms| grid_ms.is_multiple_of(tumbling_window_width_ms)),
                     ExecutionContext::IngestionPipeline(_) | ExecutionContext::Materialized(_) => {
                         todo!("#1207 PR 7: delivery into an ingestion or materialized context")
                     }
@@ -207,34 +200,38 @@ mod tests {
         DataType, Field, FieldDataType, GroupingStrategy, Schema, SketchAlgorithm, SketchParams,
         SummaryUpdate,
     };
-    use crate::ir::{ASAPOp, NonASAPOp, Operator};
+    use crate::ir::NonASAPOp;
     use crate::physical::StorageMedium;
     use crate::stages::{
         CandidateExpression, CandidateForMemoGroup, LogicalProperties, LogicalRequirements,
-        OriginOfCandidateForMemoGroup,
+        MemoGroupId, OriginOfCandidateForMemoGroup,
     };
-    use crate::workload::{DemandEstimate, RangeEvaluation, Rate, RepetitionInterval, TimestampMs};
+    use crate::workload::{
+        DemandEstimate, QueryRecurrence, RangeEvaluation, Rate, RepeatedDemand, RepetitionInterval,
+        TimestampMs,
+    };
     use ExecutionTiming::{IngestionTime, QueryTime};
 
-    /// Candidate 0 of the test memo has no window layout.
+    /// The KLL build over the scan: not a chain.
     const UNWINDOWED: CandidateForMemoGroupId = CandidateForMemoGroupId {
         group: MemoGroupId(1),
         index_in_group: 0,
     };
-    /// Candidate 1 has tumbling windows 5 s wide.
+    /// The chain of tumbling windows 5 s wide over the scan.
     const WINDOWS_5S: CandidateForMemoGroupId = CandidateForMemoGroupId {
-        group: MemoGroupId(1),
-        index_in_group: 1,
+        group: MemoGroupId(2),
+        index_in_group: 0,
     };
-    /// Candidate 2 has tumbling windows 10 s wide.
+    /// The chain of tumbling windows 10 s wide over the scan.
     const WINDOWS_10S: CandidateForMemoGroupId = CandidateForMemoGroupId {
-        group: MemoGroupId(1),
-        index_in_group: 2,
+        group: MemoGroupId(3),
+        index_in_group: 0,
     };
 
-    /// Group 1, KLL states over the scan group 0, with three candidates:
-    /// no window layout, 5 s tumbling windows and 10 s tumbling windows.
-    /// Built through `find_or_add_group` and `add_candidate` (#1207 PR 2).
+    /// Group 1, KLL states over the scan group 0, and groups 2 and 3, chains
+    /// of KLL states over it 5 s and 10 s wide, each with its own expression
+    /// as its one candidate. Built through `find_or_add_group` and
+    /// `add_candidate` (#1207 PR 2).
     fn memo() -> Memo {
         let mut memo = Memo::default();
         let scan = memo
@@ -253,22 +250,29 @@ mod tests {
                 ),
             }))
             .unwrap();
-        let expression = CandidateExpression {
-            operator: Operator::ASAP(ASAPOp::SummaryAgg {
+        let kll = FieldDataType::Sketch(SketchAlgorithm::Kll, GroupingStrategy::default());
+        let build = Operator::ASAP(ASAPOp::SummaryAgg {
+            child: scan,
+            family: kll.clone(),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::PerEntity,
+            grouping: GroupingStrategy::default(),
+            filter: None,
+        });
+        let chain = |tumbling_window_width_ms| {
+            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                 child: scan,
-                family: FieldDataType::Sketch(SketchAlgorithm::Kll, GroupingStrategy::default()),
+                family: kll.clone(),
                 input: SummaryUpdate::column(ColumnRef::SampleValue),
                 reduction: Reduction::PerEntity,
                 grouping: GroupingStrategy::default(),
                 filter: None,
-            }),
+                tumbling_window_width_ms,
+            })
         };
-        let states = memo.find_or_add_group(expression.operator.clone()).unwrap();
-        for window_layout in [
-            None,
-            Some(WindowLayout::Tumbling { width_ms: 5_000 }),
-            Some(WindowLayout::Tumbling { width_ms: 10_000 }),
-        ] {
+        for operator in [build, chain(5_000), chain(10_000)] {
+            let group = memo.find_or_add_group(operator.clone()).unwrap();
+            let expression = CandidateExpression { operator };
             let candidate = CandidateForMemoGroup {
                 logical_properties: LogicalProperties::new(
                     &expression,
@@ -276,15 +280,14 @@ mod tests {
                         k: 269,
                         failure_probability: None,
                     }),
-                    window_layout,
                 )
                 .unwrap(),
-                expression: expression.clone(),
+                expression,
                 input_requirements: vec![LogicalRequirements::new(None)],
                 fused_groups: vec![],
                 origin: OriginOfCandidateForMemoGroup::Pass1,
             };
-            memo.add_candidate(states, candidate).unwrap();
+            memo.add_candidate(group, candidate).unwrap();
         }
         memo
     }
@@ -320,13 +323,14 @@ mod tests {
     const MEMORY: StorageMedium = StorageMedium::Memory;
 
     /// `delivers_on` follows the alignment table, one case per recurrence: a
-    /// windowed `AcrossEvaluations` producer of width $w$ (the window
-    /// layout's, grid at phase 0) needs $w$ to divide the context's
+    /// chain producer with `AcrossEvaluations` of width $w$ (the chain
+    /// operator's, grid at phase 0) needs $w$ to divide the context's
     /// evaluation grid (interval, range step and phase), each scheduled time,
     /// or a one-off query's time, and is refused when the times are not
-    /// known; a `None` or `OneEvaluation` producer runs in the consumer's
-    /// context and delivers on any; a non-windowed `AcrossEvaluations`
-    /// producer is not offered.
+    /// known (a fixed interval without a phase included); a `None` or
+    /// `OneEvaluation` producer runs in the consumer's context and delivers
+    /// on any; an `AcrossEvaluations` producer that is not a chain is not
+    /// offered.
     #[test]
     fn delivers_on_follows_the_alignment_table() {
         let memo = memo();
@@ -429,7 +433,7 @@ mod tests {
     /// consumer state: a query-time producer serves only query-time
     /// consumers, an ingestion-time producer that is not materialized only
     /// ingestion-time consumers, and one materialized across evaluations
-    /// serves both. Window layouts do not matter: alignment is Stage 3's
+    /// serves both. Chain widths do not matter: alignment is Stage 3's
     /// per-context check.
     #[test]
     fn producer_satisfies_physical_requirements_over_every_valid_timing_and_lifetime() {

@@ -163,20 +163,15 @@ impl FamilyCapability {
                 E::IRate => (None, &[]),
             },
             // A Hydra answers per subpopulation from a shared grid of the
-            // inner family's cells. HydraKll merges as sketchlib's row says:
-            // `Hydra::merge` requires the same k and m and otherwise returns
-            // an error (asap_sketchlib #251). Nothing builds one yet: Pass 1
-            // offers no Hydra, and the executor builds only HydraCms
-            // (`create_hydra_cms`).
-            FieldDataType::Sketch(_, GroupingStrategy::SharedMultiSubpopulation { kind, .. }) => {
-                return Self::of_per_instance_sketch(&match kind {
-                    HydraKind::HydraCms => SketchAlgorithm::HydraCms,
-                    HydraKind::HydraCountSketch => SketchAlgorithm::HydraCountSketch,
-                    HydraKind::HydraKll => SketchAlgorithm::HydraKll,
-                })
-            }
-            FieldDataType::Sketch(algorithm, GroupingStrategy::PerSubpopulationInstance) => {
-                return Self::of_per_instance_sketch(algorithm)
+            // inner family's cells, so its row is its Hydra family's. HydraKll
+            // merges as sketchlib's row says: `Hydra::merge` requires the same
+            // k and m and otherwise returns an error (asap_sketchlib #251).
+            // Nothing builds one yet: Pass 1 offers no Hydra, and the executor
+            // builds only HydraCms (`create_hydra_cms`).
+            FieldDataType::Sketch(..) => {
+                return Self::of_per_instance_sketch(
+                    &sketch_algorithm_of(family).expect("a sketch family has an algorithm"),
+                )
             }
             FieldDataType::Plain(_)
             | FieldDataType::SummarySample(..)
@@ -187,6 +182,28 @@ impl FamilyCapability {
             merge_inputs,
             readouts,
         }
+    }
+}
+
+/// The sketch algorithm a summary family builds: a per-instance sketch's
+/// own, a Hydra's Hydra algorithm; `None` for a family that is not a sketch.
+pub(crate) fn sketch_algorithm_of(family: &FieldDataType) -> Option<SketchAlgorithm> {
+    match family {
+        FieldDataType::Sketch(algorithm, GroupingStrategy::PerSubpopulationInstance) => {
+            Some(*algorithm)
+        }
+        FieldDataType::Sketch(_, GroupingStrategy::SharedMultiSubpopulation { kind }) => {
+            Some(match kind {
+                HydraKind::HydraCms => SketchAlgorithm::HydraCms,
+                HydraKind::HydraCountSketch => SketchAlgorithm::HydraCountSketch,
+                HydraKind::HydraKll => SketchAlgorithm::HydraKll,
+            })
+        }
+        FieldDataType::Plain(_)
+        | FieldDataType::ExactAggregate(..)
+        | FieldDataType::SummarySample(..)
+        | FieldDataType::Wavelet(..)
+        | FieldDataType::StatModel(..) => None,
     }
 }
 

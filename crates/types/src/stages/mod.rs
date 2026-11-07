@@ -16,9 +16,10 @@ mod pruning;
 mod realizer;
 
 pub use candidates::{
-    parameter_list, producer_satisfies_logical_requirements, CandidateError, CandidateExpression,
-    CandidateForMemoGroup, CandidateForMemoGroupId, ErrorPropagation, LogicalProperties,
-    LogicalPropertiesError, LogicalRequirements, Memo, OriginOfCandidateForMemoGroup,
+    parameter_list, producer_satisfies_logical_requirements, strongest, weakest, CandidateError,
+    CandidateExpression, CandidateForMemoGroup, CandidateForMemoGroupId, ErrorPropagation,
+    LogicalProperties, LogicalPropertiesError, LogicalRequirements, Memo,
+    OriginOfCandidateForMemoGroup,
 };
 pub use logical_memo_candidates::{
     LogicalASAPMemoCandidates, LogicalEdge, PruneCause, PrunedLogicalCandidate, RootPruneReason,

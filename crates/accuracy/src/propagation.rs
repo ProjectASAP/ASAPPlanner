@@ -7,7 +7,6 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::ir::operator::operator_properties::{BinaryOpKind, JoinKind, Reduction, Source};
-use asap_types::ir::operator::tumbling_window_chain::merged_chain;
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::guarantee::{
     AccuracyGuarantee, AccuracyMetric, BoundExpr, CompositionOperator, GuaranteeSource,
@@ -524,10 +523,18 @@ fn rolled_up_guarantee(node: &OperatorNode) -> Option<Option<AccuracyGuarantee>>
     Some(composed_guarantee(&consumer))
 }
 
+/// The chain whose windows `state` merges (its
+/// [`OperatorNode::summary_build`] is a chain); `None` for any other state.
+fn merged_windows_chain(state: &Rc<OperatorNode>) -> Option<ASAPOp> {
+    state
+        .summary_build()
+        .filter(|build| matches!(build, ASAPOp::SummaryTumblingWindowChain { .. }))
+}
+
 /// The guarantee of an estimate or finalized value read from merged
-/// tumbling windows ([`merged_chain`]): the guarantee of the same read of one
-/// build over the merged tumbling windows' time range (the whole chain's, or
-/// its newest tumbling windows') when the
+/// tumbling windows (a state whose [`OperatorNode::summary_build`] is a
+/// chain): the guarantee of the same read of one build over the time range
+/// the merged windows cover when the
 /// family's merged error for that read is exact or the same as that build's
 /// (the family-capability table); none when it is approximate (evidence
 /// only, for plan selection to judge) or the family has no merge. `None` for
@@ -538,13 +545,13 @@ fn merged_tumbling_windows_guarantee(node: &OperatorNode) -> Option<Option<Accur
             summary_input,
             query,
         } => {
-            let chain = merged_chain(summary_input)?;
-            let family = chain.asap()?.produced_state()?;
+            let chain = merged_windows_chain(summary_input)?;
+            let family = chain.produced_state()?;
             FamilyCapability::of(family).merged_error(query)
         }
         ASAPOp::FinalizeExactAccumulator { child } => {
-            let chain = merged_chain(child)?;
-            let family = chain.asap()?.produced_state()?;
+            let chain = merged_windows_chain(child)?;
+            let family = chain.produced_state()?;
             // An exact accumulator's merged state is exact.
             let merged = FamilyCapability::of(family).merge_inputs;
             merged.map(|_| MergedError::Exact)
@@ -661,40 +668,39 @@ pub(crate) fn estimates_raw_data_samples_of(node: &OperatorNode) -> Option<Strin
         },
         // Only a φ in [0, 1] picks one of the values; outside it the answer
         // is -Inf or +Inf, whatever their sign. Merged tumbling windows of one
-        // definition ([`merged_chain`]) are read through their `SummaryTumblingWindowChain`:
+        // definition ([`merged_windows_chain`]) are read through their `SummaryTumblingWindowChain`:
         // a quantile of the merged state is still one of the tumbling windows'
         // samples, or between two of them.
         Operator::ASAP(ASAPOp::SummaryEstimate {
             summary_input,
             query: SketchStatistic::Quantile { q },
-        }) if (0.0..=1.0).contains(q) => match merged_chain(summary_input)
-            .unwrap_or_else(|| Rc::clone(summary_input))
-            .asap()?
-        {
-            ASAPOp::SummaryAgg {
-                input:
-                    SummaryUpdate {
-                        item: None,
-                        weight: SummaryInputExpr::Column(ColumnRef::SampleValue),
-                        ..
-                    },
-                filter: None,
-                child,
-                ..
+        }) if (0.0..=1.0).contains(q) => {
+            match &merged_windows_chain(summary_input).or_else(|| summary_input.asap().cloned())? {
+                ASAPOp::SummaryAgg {
+                    input:
+                        SummaryUpdate {
+                            item: None,
+                            weight: SummaryInputExpr::Column(ColumnRef::SampleValue),
+                            ..
+                        },
+                    filter: None,
+                    child,
+                    ..
+                }
+                | ASAPOp::SummaryTumblingWindowChain {
+                    input:
+                        SummaryUpdate {
+                            item: None,
+                            weight: SummaryInputExpr::Column(ColumnRef::SampleValue),
+                            ..
+                        },
+                    filter: None,
+                    child,
+                    ..
+                } => estimates_raw_data_samples_of(child),
+                _ => None,
             }
-            | ASAPOp::SummaryTumblingWindowChain {
-                input:
-                    SummaryUpdate {
-                        item: None,
-                        weight: SummaryInputExpr::Column(ColumnRef::SampleValue),
-                        ..
-                    },
-                filter: None,
-                child,
-                ..
-            } => estimates_raw_data_samples_of(child),
-            _ => None,
-        },
+        }
         Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) => {
             match summary_input.asap()? {
                 ASAPOp::SummaryAgg {
