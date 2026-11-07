@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use asap_cost::CostInputs;
 use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
-use asap_logical_asap_optimization::DeploymentCapabilities;
+use asap_types::deployment_capabilities::DeploymentCapabilities;
 use asap_types::ir::flat::{flatten, FlatDag, NodeId};
 use asap_types::ir::physical_export::PhysicalASAPDAG;
 use asap_types::ir::properties::ExecutionTiming;
@@ -437,51 +437,5 @@ pub fn window_form(dag: &impl ExportedDag, build: NodeId) -> WindowForm {
             length_ms: *tumbling_window_width_ms,
         },
         _ => WindowForm::None,
-    }
-}
-
-/// How far back from an evaluation a materialized node's materialized output
-/// reaches in event time, derived the way plan selection prices what it
-/// keeps: a tumbling-window chain keeps its `N`
-/// tumbling windows of width `w`, plus the one being built when maintained at
-/// ingestion time; a whole-window build keeps its window, and the next one
-/// being built at ingestion time; each plus the offset of the time shifts
-/// below it. `None` for any other node.
-pub fn retention_ms(p: &Physical, node: NodeId) -> Option<u64> {
-    let dag = p.dag();
-    let at_ingestion = runs_at_ingestion(p, node);
-    let below = |id: NodeId| dag.producers(id).into_iter().next();
-    let offset_below = |mut id: Option<NodeId>| {
-        let mut offset = 0u64;
-        while let Some(at) = id {
-            match dag.payload(at) {
-                Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }) => {
-                    offset += shift.offset_ms.unsigned_abs()
-                }
-                Operator::NonASAP(NonASAPOp::Scan { .. }) => break,
-                _ => {}
-            }
-            id = below(at);
-        }
-        offset
-    };
-    match dag.payload(node) {
-        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
-            tumbling_window_width_ms,
-            tumbling_window_count,
-            ..
-        }) => {
-            let tumbling_windows = u64::from(*tumbling_window_count) + u64::from(at_ingestion);
-            Some(tumbling_windows * tumbling_window_width_ms + offset_below(below(node)))
-        }
-        Operator::ASAP(ASAPOp::SummaryAgg { .. }) => {
-            let child = below(node)?;
-            let Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) = dag.payload(child) else {
-                return None;
-            };
-            let windows = 1 + u64::from(at_ingestion);
-            Some(windows * range.as_millis() as u64 + offset_below(below(child)))
-        }
-        _ => None,
     }
 }

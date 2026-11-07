@@ -1,18 +1,21 @@
-//! Rule 1, local window composition: tumbling-window layouts $\omega_v$ as
-//! candidates of a summary state group (#1160).
+//! Rule 1, chain groups (concepts doc, section 3, "Chain groups"): a
+//! `SummaryTumblingWindowChain[w](X)` group per width, and a `SummaryMerge`
+//! over the `TimeRange` (and `TimeShift`s) over it as a candidate of the
+//! summary state group.
 
 use crate::pass2::memo::rules::Pass2RuleError;
 use asap_types::stages::Memo;
 use asap_types::workload::QueryWorkloadEntry;
 
-/// Rule 1: for each summary state group, a candidate per tumbling width $w$
-/// from the gcd closure of the ranges and steps of the queries that reach it,
-/// offered only when $w$ divides the group's query range. `entries[i]` is
-/// query `i`'s workload entry.
+/// Rule 1: for each summary state group that survived dead-candidate
+/// elimination, a chain group and a merge candidate per tumbling width $w$
+/// from the gcd closure of the evaluation grids, ranges and offsets of the
+/// queries that reach it and repeat on a known grid. `entries[i]` is query
+/// `i`'s workload entry.
 pub(crate) fn add_local_window_composition(
     memo: &mut Memo,
     entries: &[QueryWorkloadEntry],
 ) -> Result<(), Pass2RuleError> {
     let _ = (memo, entries);
-    todo!("#1207 PR 4: rule 1, tumbling layouts as candidates of the state group")
+    todo!("#1207 PR 4: rule 1, chain groups and the merges over them")
 }

@@ -10,8 +10,8 @@ use crate::planner_layering_common;
 use asap_accuracy::{AccuracyModel, BuiltinAccuracyModel};
 use asap_cost::{ClusterLimits, ClusterObjective, CostInputs, CostModel};
 use asap_devtools::planning_stages::{lower_promql_roots, lower_sql_roots};
-use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_planner::{run_planning, PlanSearchSettings, PlanningModels, PlanningRun};
+use asap_types::deployment_capabilities::DeploymentCapabilities;
 use asap_types::ir::properties::{AccuracyGuarantee, AccuracyTarget};
 use asap_types::ir::QueryRoot;
 use asap_types::workload::{
@@ -44,6 +44,7 @@ fn workload_of(queries: &[(&str, u32)], accuracy: AccuracyTarget) -> PlanningWor
         data_workload: Some(DataWorkload {
             arrival: DataArrival::Ingesting {
                 rows_per_second: 24.0,
+                max_out_of_order_ms: None,
             },
             sources: ["m", "n", "c_total"]
                 .into_iter()

@@ -938,85 +938,24 @@ pub fn node_usage<'a>(
                 ),
             )
         }
-        Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
-            family,
-            reduction,
-            tumbling_window_width_ms,
-            tumbling_window_count,
-            ..
-        }) => {
-            // Each input row is retained by the one tumbling window its time falls in,
-            // as a time range keeps it (one operation), and updates
-            // that tumbling window.
-            let group_count = groups(reduction)?;
-            let states = group_count
-                .checked_mul(u64::from(*tumbling_window_count))
-                .ok_or(AnalyticalCostError::Overflow)?;
-            // Each tumbling window's state sees its group's rows in one tumbling window: of
-            // one second's rows at ingestion time, of the rows read at
-            // query time (all of them for a chain materialized across
-            // evaluations, whose scan Stage 2 bounds to its newest tumbling window,
-            // the only one it builds).
-            let rows_per_tumbling_window = match (ingestion, node.lifetime) {
-                (true, _) => u64::try_from(
-                    (u128::from(input.rows) * u128::from(*tumbling_window_width_ms))
-                        .div_ceil(1_000),
-                )
-                .map_err(|_| AnalyticalCostError::Overflow)?,
-                (false, Lifetime::AcrossEvaluations(_)) => input.rows,
-                (false, _) => input
-                    .rows
-                    .div_ceil(u64::from(*tumbling_window_count).max(1)),
-            };
-            let input_rows = StateInputRows {
-                rows_per_state: Some(rows_per_tumbling_window.div_ceil(group_count.max(1))),
-                non_negative: raw_data_samples_non_negative(),
-            };
-            let (depth, state_bytes) = summary_shape(family, input_rows);
-            let state_bytes = measured_state_bytes.unwrap_or(state_bytes);
-            let out = EdgeStatistics {
-                rows: states,
-                bytes: states
-                    .checked_mul(state_bytes)
-                    .ok_or(AnalyticalCostError::Overflow)?,
-            };
-            (
-                out,
-                Ok(ResourceEstimate::new(
-                    input.rows as f64 * (depth + 1.0),
-                    out.bytes,
-                    0,
-                )),
-                format!(
-                    "build {} in {tumbling_window_count} tumbling windows of {tumbling_window_width_ms} ms for \
-                     {group_count} groups: {} rows x (1 + depth {depth})",
-                    family_name(family),
-                    input.rows
-                ),
-            )
+        Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => {
+            todo!("#1207 PR 7: a chain's states and memory over the windows it retains (h_v)")
         }
-        Payload::ASAP(ASAPOp::SummaryMerge {
-            newest_tumbling_windows,
-            group_by,
-            ..
-        }) => {
+        Payload::ASAP(ASAPOp::SummaryMerge { group_by, .. }) => {
             // One operation per input state read; one state per group
-            // out, each tumbling window of a chain being a state of its group. A
-            // merge of a chain's newest `n` tumbling windows reads `n` per group. A
-            // rollup's groups are those of its keys, at most its input
-            // groups.
+            // out. A rollup's groups are those of its keys, at most its
+            // input groups.
             let mut group_count = 0;
             for producer in producers {
-                let tumbling_windows = match producer.payload {
-                    Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
-                        tumbling_window_count,
-                        ..
-                    }) => u64::from(*tumbling_window_count),
-                    _ => 1,
-                };
-                group_count = group_count.max(producer.output.rows / tumbling_windows.max(1));
+                if matches!(
+                    producer.payload,
+                    Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+                ) {
+                    todo!("#1207 PR 7: the states a merge reads from a chain's windows")
+                }
+                group_count = group_count.max(producer.output.rows);
             }
-            let states = merged_states(*newest_tumbling_windows, producers)?;
+            let states = merged_states(producers)?;
             if let Some(keys) = group_by {
                 group_count = group_count.min(groups(&Reduction::by(keys.clone()))?);
             }
@@ -1071,10 +1010,7 @@ pub fn node_usage<'a>(
     // reads, otherwise the rows of its (first) input.
     let units = match &node.payload {
         Payload::NonASAP(NonASAPOp::Scan { .. }) => out.rows,
-        Payload::ASAP(ASAPOp::SummaryMerge {
-            newest_tumbling_windows,
-            ..
-        }) => merged_states(*newest_tumbling_windows, producers)?,
+        Payload::ASAP(ASAPOp::SummaryMerge { .. }) => merged_states(producers)?,
         _ => input.rows,
     };
     let mut detail = detail;
@@ -1387,16 +1323,10 @@ fn ingest_workers(
     (ingest_ms_per_s / 1_000.0).ceil().max(1.0) as u64
 }
 
-/// For each tumbling-window chain of `dag` materialized beyond one evaluation (at
-/// ingestion time, or at query time across evaluations), how far back
-/// from the newest evaluation its completed tumbling windows must be retained, in
-/// milliseconds: how long before the evaluation its newest tumbling window ends (the
-/// offset of its input, `chain_input_offset_ms`), plus its window
-/// `tumbling_window_count · tumbling_window_width_ms`, plus the longest
-/// `span_ms` ([`RangeEvaluation`]) among the queries reaching it,
-/// whose earliest step reads that much further back. `reach` is
-/// [`query_reach`] of `dag`; `range_evaluations[q]` is query `q`'s (none
-/// when missing). Without range evaluations, each chain's window.
+/// For each tumbling-window chain of `dag` materialized across
+/// evaluations, how far back from the newest evaluation its completed
+/// windows must be retained, in milliseconds. `reach` is [`query_reach`] of
+/// `dag`; `range_evaluations[q]` is query `q`'s (none when missing).
 pub fn tumbling_window_retention_ms(
     dag: &PhysicalASAPDAG,
     reach: &[HashSet<PhysicalASAPNodeId>],
@@ -1407,54 +1337,15 @@ pub fn tumbling_window_retention_ms(
         .iter()
         .filter_map(|node| match (&node.payload, node.lifetime) {
             (
-                Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
-                    child,
-                    tumbling_window_width_ms,
-                    tumbling_window_count,
-                    ..
-                }),
+                Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }),
                 Lifetime::AcrossEvaluations(_),
             ) => {
-                let span_ms = reach
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, reached)| reached.contains(&node.id))
-                    .filter_map(|(q, _)| range_evaluations.get(q).copied().flatten())
-                    .map(|range| range.span_ms)
-                    .max()
-                    .unwrap_or(0);
-                let end_offset_ms = chain_input_offset_ms(*child, &nodes);
-                Some((
-                    node.id,
-                    end_offset_ms
-                        + tumbling_window_width_ms * u64::from(*tumbling_window_count)
-                        + span_ms,
-                ))
+                let _ = (&nodes, reach, range_evaluations);
+                todo!("#1207 PR 7: a chain's retention, max(offset + range) over the paths that read it")
             }
             _ => None,
         })
         .collect()
-}
-
-/// How long before the evaluation a chain's newest tumbling window ends: the offsets
-/// of the `TimeShift`s (without an `@` anchor) directly below the chain,
-/// added up; 0 for a negative total.
-fn chain_input_offset_ms(
-    input: PhysicalASAPNodeId,
-    nodes: &HashMap<PhysicalASAPNodeId, &asap_types::ir::physical_export::PhysicalASAPDAGNode>,
-) -> u64 {
-    let mut offset_ms: i64 = 0;
-    let mut current = input;
-    while let Some(Payload::NonASAP(NonASAPOp::TimeShift { shift, child })) =
-        nodes.get(&current).map(|node| &node.payload)
-    {
-        if shift.at.is_some() {
-            break;
-        }
-        offset_ms = offset_ms.saturating_add(shift.offset_ms);
-        current = *child;
-    }
-    u64::try_from(offset_ms).unwrap_or(0)
 }
 
 /// The tumbling-window retention of every materialized tumbling-window chain of `dag`
@@ -1469,26 +1360,12 @@ pub fn tumbling_window_retention_ms_of_plan(
 }
 
 /// The input states a `SummaryMerge` over `producers` reads: every row of
-/// each, or of the one tumbling-window chain whose newest `newest_tumbling_windows` it merges,
-/// that many tumbling windows' states per group.
-fn merged_states(
-    newest_tumbling_windows: Option<u32>,
-    producers: &[ProducerOutput<'_>],
-) -> Result<u64, AnalyticalCostError> {
+/// each.
+fn merged_states(producers: &[ProducerOutput<'_>]) -> Result<u64, AnalyticalCostError> {
     producers.iter().try_fold(0_u64, |total, producer| {
-        let rows = match (newest_tumbling_windows, producer.payload) {
-            (
-                Some(count),
-                Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
-                    tumbling_window_count,
-                    ..
-                }),
-            ) => (producer.output.rows / u64::from(*tumbling_window_count).max(1))
-                .checked_mul(u64::from(count))
-                .ok_or(AnalyticalCostError::Overflow)?,
-            _ => producer.output.rows,
-        };
-        total.checked_add(rows).ok_or(AnalyticalCostError::Overflow)
+        total
+            .checked_add(producer.output.rows)
+            .ok_or(AnalyticalCostError::Overflow)
     })
 }
 
@@ -1513,10 +1390,9 @@ pub fn retained_tumbling_windows(
 /// A node's tumbling windows: a tumbling-window chain's count, 1 for any other node.
 pub fn tumbling_windows_of(node: &asap_types::ir::physical_export::PhysicalASAPDAGNode) -> u64 {
     match &node.payload {
-        Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
-            tumbling_window_count,
-            ..
-        }) => u64::from(*tumbling_window_count).max(1),
+        Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => {
+            todo!("#1207 PR 7: the windows a chain retains (h_v)")
+        }
         _ => 1,
     }
 }
@@ -1557,12 +1433,8 @@ pub fn maintained_window_ms(
     producers_of: &HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
 ) -> Option<u64> {
     match &nodes[&node].payload {
-        Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
-            tumbling_window_width_ms,
-            tumbling_window_count,
-            ..
-        }) => {
-            return Some(tumbling_window_width_ms.saturating_mul(u64::from(*tumbling_window_count)))
+        Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => {
+            todo!("#1207 PR 7: the window a chain maintains, its retention (h_v)")
         }
         Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) => {
             return Some(range.as_millis() as u64)
@@ -1648,11 +1520,9 @@ fn widest_window_read_ms(
                     tumbling_window_width_ms,
                     ..
                 }) if materialized_chains.contains(&edge.consumer) => *tumbling_window_width_ms,
-                Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
-                    tumbling_window_width_ms,
-                    tumbling_window_count,
-                    ..
-                }) => tumbling_window_width_ms.saturating_mul(u64::from(*tumbling_window_count)),
+                Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => todo!(
+                    "#1207 PR 7: the window a chain that is not materialized reads, from the TimeRange over it"
+                ),
                 Payload::NonASAP(NonASAPOp::TimeShift { .. }) => {
                     stack.push(edge.consumer);
                     continue;

@@ -24,7 +24,6 @@ use crate::ir::operator::input::{InputOrTemporaryBuild, OperatorInput};
 use crate::ir::operator::node::{Operator, OperatorResultKind};
 use crate::ir::operator::non_asap::{NonASAPOp, TimeRangeKind};
 use crate::ir::operator::operator_properties::Reduction;
-use crate::ir::operator::tumbling_window_chain::window_build;
 use crate::ir::scalar::expr_ir::{CompareOpKind, ScalarValue};
 use crate::ir::scalar::{Predicate, ScalarExpr};
 use crate::ir::schema::family_capability::{FamilyCapability, MergeInputRule};
@@ -71,21 +70,26 @@ impl SummaryCoverage {
     }
 }
 
-/// A conjunction of per-column constraints and an optional time window.
-/// A column or time it does not mention is unrestricted. JSON: `columns` is
-/// a list of `{column, constraint}` (its keys are not strings), and a bound
-/// is `{"included": v}`, `{"excluded": v}` or `"unbounded"`.
+/// A conjunction of per-column constraints. The timestamp column is one of
+/// the columns; there is no separate time field. A column it does not
+/// mention is unrestricted. JSON: `columns` is a list of
+/// `{column, constraint}` (its keys are not strings), and a bound is
+/// `{"included": v}`, `{"excluded": v}` or `"unbounded"`.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SelectionBox {
     #[serde(with = "columns_as_list")]
     pub(crate) columns: BTreeMap<ColumnIdentity, Constraint>,
-    /// Offsets from the evaluation time in milliseconds: a PromQL range
-    /// `TimeRange(w)` over `TimeShift(s)` is `(-(s + w), -s]`. Absolute
-    /// time will be an ordinary interval on the timestamp column once the IR
-    /// has timestamp literals.
-    #[serde(with = "relative_time_bounds")]
-    pub(crate) relative_time: Option<(Bound<i64>, Bound<i64>)>,
+}
+
+/// An endpoint of an interval on a timestamp column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimeBound {
+    /// An absolute time, in ms since the epoch.
+    At(i64),
+    /// An offset, in ms, from the evaluation time t.
+    FromEvaluationTime(i64),
 }
 
 /// `SelectionBox::columns` as a list of `{column, constraint}`.
@@ -155,33 +159,6 @@ impl<T> From<WireBound<T>> for Bound<T> {
     }
 }
 
-/// `SelectionBox::relative_time` as `[lower, upper]` wire bounds.
-mod relative_time_bounds {
-    use super::WireBound;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use std::ops::Bound;
-
-    /// A relative time window, `(lower, upper)`.
-    type Window = (Bound<i64>, Bound<i64>);
-
-    pub(super) fn serialize<S: Serializer>(
-        window: &Option<Window>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        window
-            .as_ref()
-            .map(|(lower, upper)| (WireBound::from(lower), WireBound::from(upper)))
-            .serialize(serializer)
-    }
-
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Option<Window>, D::Error> {
-        let window = Option::<(WireBound<i64>, WireBound<i64>)>::deserialize(deserializer)?;
-        Ok(window.map(|(lower, upper)| (lower.into(), upper.into())))
-    }
-}
-
 /// A column of the definition child's output, by `(table, name)`. A
 /// `Project` below renames its columns and sets their table to its
 /// qualifier (none by default).
@@ -245,11 +222,6 @@ pub enum CoverageError {
         "coverage is derived only for SummaryAgg, SummaryTumblingWindowChain and SummaryMerge"
     )]
     NotSummary,
-    /// A `SummaryTumblingWindowChain` that does not expand to one build over its whole
-    /// window (its window overflows, or the build does not derive): bad
-    /// input.
-    #[error("tumbling-window chain does not expand to one build over its whole window: {reason}")]
-    TumblingWindowChainExpansion { reason: String },
     /// A `SummaryMerge` without inputs: bad input.
     #[error("summary merge requires at least one input")]
     EmptyMerge,
@@ -292,9 +264,7 @@ impl SummaryCoverage {
     /// Coverage of a summary state a memo group computes with `operator`
     /// over its input groups: a `SummaryAgg`, a `SummaryTumblingWindowChain`,
     /// a `SummaryMerge`, or a `Filter` that keeps whole states of a grouped
-    /// `SummaryAgg`. A chain covers what one build over its whole window
-    /// does, and a merge of its newest tumbling windows what one build over
-    /// their window does. A merge reads its inputs' stored coverage and fails
+    /// `SummaryAgg`. A merge reads its inputs' stored coverage and fails
     /// unless every input has the same definition and their selections are
     /// pairwise disjoint; a family whose merge is idempotent
     /// ([`MergeInputRule::MayOverlap`] in the family-capability table) may
@@ -303,10 +273,6 @@ impl SummaryCoverage {
     pub(crate) fn derive_from_inputs<'m>(
         operator: &Operator<MemoGroupAsInput<'m>>,
     ) -> Result<Self, CoverageError> {
-        let expansion =
-            |error: SchemaDerivationError| CoverageError::TumblingWindowChainExpansion {
-                reason: error.to_string(),
-            };
         let as_built = |op: &ASAPOp<MemoGroupAsInput<'m>>| -> ASAPOp<GroupInput<'m>> {
             op.map_children(|input| InputOrTemporaryBuild::Input(*input))
         };
@@ -316,29 +282,9 @@ impl SummaryCoverage {
                 None => Err(CoverageError::NotSummary),
             },
             Operator::ASAP(op @ ASAPOp::SummaryAgg { .. }) => of_summary_agg(&as_built(op)),
-            // Back-to-back tumbling windows cover the whole window one build
-            // over it would.
-            Operator::ASAP(
-                op @ ASAPOp::SummaryTumblingWindowChain {
-                    tumbling_window_count,
-                    ..
-                },
-            ) => of_summary_agg(&window_build(op, *tumbling_window_count).map_err(expansion)?),
-            // The newest tumbling windows of one chain cover what one build
-            // over their window does.
-            Operator::ASAP(ASAPOp::SummaryMerge {
-                children,
-                newest_tumbling_windows: Some(newest),
-                group_by: None,
-            }) => {
-                let [chain] = children.as_slice() else {
-                    return Err(CoverageError::NotSummary);
-                };
-                let Operator::ASAP(chain) = chain.operator() else {
-                    return Err(CoverageError::NotSummary);
-                };
-                of_summary_agg(&window_build(&chain, *newest).map_err(expansion)?)
-            }
+            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => todo!(
+                "#1207 PR 2: a chain's coverage is a build's over its input, with the timestamp column unconstrained"
+            ),
             Operator::ASAP(ASAPOp::SummaryMerge {
                 children, group_by, ..
             }) => {
@@ -346,7 +292,7 @@ impl SummaryCoverage {
                     .iter()
                     .map(|child| {
                         child
-                            .summary_coverage()
+                            .aggregate_coverage()
                             .cloned()
                             .ok_or(CoverageError::NotSummary)
                     })
@@ -464,14 +410,13 @@ fn of_merge(inputs: &[SummaryCoverage]) -> Result<SummaryCoverage, CoverageError
     .unwrap_or(MergeInputRule::Disjoint);
     let separated: fn(&SelectionBox, &SelectionBox) -> bool = match required {
         MergeInputRule::MayOverlap => |_, _| true,
-        MergeInputRule::DisjointInTime => SelectionBox::disjoint_in_time,
+        MergeInputRule::DisjointInTime => todo!(
+            "#1207 PR 2: disjoint intervals on the timestamp column, with TimeBound endpoints"
+        ),
         MergeInputRule::Disjoint => SelectionBox::disjoint,
     };
-    // Windows in time order, each ending before the next starts, are
-    // pairwise disjoint in time, and so pairwise disjoint: O(b log b) for
-    // b boxes. Otherwise, every pair of boxes of different inputs.
+    // Every pair of boxes of different inputs.
     if required != MergeInputRule::MayOverlap
-        && !windows_ordered_apart(inputs)
         && inputs.iter().enumerate().any(|(i, input)| {
             inputs[..i].iter().any(|other| {
                 input
@@ -583,31 +528,6 @@ fn build_input_schema<I: OperatorInput>(state: &I) -> Option<Schema> {
     }
 }
 
-/// Whether the time windows of every box of `inputs` are pairwise apart:
-/// sorted by start, each ends before the next starts. `false` when a box
-/// has no time window or two windows overlap, boxes of one input included.
-fn windows_ordered_apart(inputs: &[SummaryCoverage]) -> bool {
-    let mut windows = Vec::new();
-    for selection_box in inputs.iter().flat_map(|input| &input.selection) {
-        match &selection_box.relative_time {
-            Some(window) => windows.push(window),
-            None => return false,
-        }
-    }
-    // A lower bound's position: unbounded first, then by value, an
-    // included value before the excluded one.
-    let start = |(lower, _): &&(Bound<i64>, Bound<i64>)| match lower {
-        Bound::Unbounded => (false, 0, false),
-        Bound::Included(at) => (true, *at, false),
-        Bound::Excluded(at) => (true, *at, true),
-    };
-    windows.sort_by_key(start);
-    windows.windows(2).all(|pair| {
-        let ((_, upper), (lower, _)) = (pair[0], pair[1]);
-        ends_before(upper, lower, |a: &i64, b: &i64| Some(a.cmp(b)))
-    })
-}
-
 /// The coverage of `build`, a `SummaryAgg` over memo groups (or over an
 /// input a rule built over them): its operators walked down through the
 /// liftable operators of its input groups' expressions.
@@ -646,13 +566,6 @@ fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, Cov
     let InputOrTemporaryBuild::Input(input_group) = &base else {
         unreachable!("a rule builds only liftable operators over memo groups");
     };
-    // Time is lifted only from exactly one range window.
-    let lift_time = chain
-        .iter()
-        .filter(|link| matches!(link, Operator::NonASAP(NonASAPOp::TimeRange { .. })))
-        .count()
-        == 1;
-
     let top = child.schema();
     // Top-down: decide which conjuncts are lifted. `kept[d]` is the residual
     // of `chain[d]` when it is a `Filter`.
@@ -701,7 +614,6 @@ fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, Cov
         grouping: grouping.clone(),
         filter: agg_filter,
     })];
-    let (mut window_ms, mut shift_ms) = (0i64, 0i64);
     for (depth, link) in chain.iter().enumerate() {
         match link {
             Operator::NonASAP(NonASAPOp::Filter { .. }) => {
@@ -712,12 +624,9 @@ fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, Cov
                     }));
                 }
             }
-            Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) if lift_time => {
-                window_ms = range.as_millis() as i64;
-            }
-            Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }) if lift_time => {
-                shift_ms += shift.offset_ms;
-            }
+            Operator::NonASAP(NonASAPOp::TimeRange { .. } | NonASAPOp::TimeShift { .. }) => todo!(
+                "#1207 PR 2: lift the range and the offset into an interval on the timestamp column, with TimeBound endpoints"
+            ),
             other => unlifted_operators.push(unlifted(other)),
         }
     }
@@ -741,10 +650,6 @@ fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, Cov
                 (identity, constraint)
             })
             .collect(),
-        relative_time: lift_time.then_some((
-            Bound::Excluded(-(shift_ms + window_ms)),
-            Bound::Included(-shift_ms),
-        )),
     };
     Ok(SummaryCoverage {
         definition: SummaryStateDefinition {
@@ -1086,57 +991,30 @@ impl Constraint {
 
 #[cfg(any(test, feature = "test-support"))]
 impl SelectionBox {
-    pub fn new(
-        columns: BTreeMap<ColumnIdentity, Constraint>,
-        relative_time: Option<(Bound<i64>, Bound<i64>)>,
-    ) -> Self {
-        Self {
-            columns,
-            relative_time,
-        }
+    pub fn new(columns: BTreeMap<ColumnIdentity, Constraint>) -> Self {
+        Self { columns }
     }
 
     /// The per-column constraints.
     pub fn columns(&self) -> &BTreeMap<ColumnIdentity, Constraint> {
         &self.columns
     }
-
-    /// The time window, as offsets from the evaluation time in milliseconds.
-    pub fn relative_time(&self) -> Option<(Bound<i64>, Bound<i64>)> {
-        self.relative_time
-    }
 }
 
 impl SelectionBox {
-    /// Whether no row lies in both boxes: some column, or the time window,
-    /// is restricted by both and the restrictions are disjoint.
+    /// Whether no row lies in both boxes: some column is restricted by both
+    /// and the restrictions are disjoint.
     fn disjoint(&self, other: &Self) -> bool {
-        self.disjoint_in_time(other)
-            || self
-                .columns
-                .iter()
-                .any(|(column, a)| other.columns.get(column).is_some_and(|b| a.disjoint(b)))
-    }
-
-    /// Whether the boxes' time windows do not overlap.
-    fn disjoint_in_time(&self, other: &Self) -> bool {
-        match (&self.relative_time, &other.relative_time) {
-            (Some((al, au)), Some((bl, bu))) => {
-                intervals_disjoint((al, au), (bl, bu), |a: &i64, b: &i64| Some(a.cmp(b)))
-            }
-            _ => false,
-        }
+        self.columns
+            .iter()
+            .any(|(column, a)| other.columns.get(column).is_some_and(|b| a.disjoint(b)))
     }
 }
 
-/// Join boxes that differ only in one dimension whose union is again one
-/// constraint: touching time windows or value ranges, or the values of one
-/// `In` column. Gaps stay separate boxes.
-fn union(boxes: Vec<SelectionBox>) -> Vec<SelectionBox> {
-    union_ordered_time_boxes(&boxes).unwrap_or_else(|| union_general(boxes))
-}
-
-fn union_general(mut boxes: Vec<SelectionBox>) -> Vec<SelectionBox> {
+/// Join boxes that differ only in one column whose union is again one
+/// constraint: touching value ranges, or the values of one `In` column.
+/// Gaps stay separate boxes.
+fn union(mut boxes: Vec<SelectionBox>) -> Vec<SelectionBox> {
     let mut i = 0;
     while i < boxes.len() {
         let joined = (i + 1..boxes.len()).find_map(|j| join(&boxes[i], &boxes[j]).map(|b| (j, b)));
@@ -1152,75 +1030,11 @@ fn union_general(mut boxes: Vec<SelectionBox>) -> Vec<SelectionBox> {
     boxes
 }
 
-/// Tumbling-window coverage has identical column predicates and pairwise disjoint time
-/// intervals. Sort once and join adjacent intervals, rather than removing one
-/// element from a large vector for every tumbling window. General multidimensional or
-/// overlapping coverage continues through the existing exact union algorithm.
-fn union_ordered_time_boxes(boxes: &[SelectionBox]) -> Option<Vec<SelectionBox>> {
-    let first = boxes.first()?;
-    if !boxes
-        .iter()
-        .all(|b| b.columns == first.columns && b.relative_time.is_some())
-    {
-        return None;
-    }
-    if !boxes
-        .iter()
-        .all(|b| match b.relative_time.as_ref().unwrap() {
-            (Bound::Unbounded, _) | (_, Bound::Unbounded) => true,
-            (Bound::Included(lower), Bound::Included(upper)) => lower <= upper,
-            (
-                Bound::Included(lower) | Bound::Excluded(lower),
-                Bound::Included(upper) | Bound::Excluded(upper),
-            ) => lower < upper,
-        })
-    {
-        return None;
-    }
-    let mut order: Vec<_> = (0..boxes.len()).collect();
-    order.sort_by_key(
-        |&index| match boxes[index].relative_time.as_ref().unwrap().0 {
-            Bound::Unbounded => (false, 0, false),
-            Bound::Included(at) => (true, at, false),
-            Bound::Excluded(at) => (true, at, true),
-        },
-    );
-    if !order.windows(2).all(|pair| {
-        let (_, upper) = boxes[pair[0]].relative_time.as_ref().unwrap();
-        let (lower, _) = boxes[pair[1]].relative_time.as_ref().unwrap();
-        ends_before(upper, lower, |a: &i64, b: &i64| Some(a.cmp(b)))
-    }) {
-        return None;
-    }
-    let mut merged: Vec<(usize, SelectionBox)> = Vec::new();
-    for index in order {
-        if let Some((first_index, previous)) = merged.last_mut() {
-            if let Some(joined) = join(previous, &boxes[index]) {
-                *first_index = (*first_index).min(index);
-                *previous = joined;
-                continue;
-            }
-        }
-        merged.push((index, boxes[index].clone()));
-    }
-    // The general union retains the earliest occurrence of each joined box.
-    merged.sort_by_key(|(index, _)| *index);
-    Some(merged.into_iter().map(|(_, selection)| selection).collect())
-}
-
 fn join(a: &SelectionBox, b: &SelectionBox) -> Option<SelectionBox> {
     if a == b {
         return Some(a.clone());
     }
-    if a.columns == b.columns {
-        let ((al, au), (bl, bu)) = (a.relative_time.as_ref()?, b.relative_time.as_ref()?);
-        let time = touching((al, au), (bl, bu), |x: &i64, y: &i64| Some(x.cmp(y)))?;
-        return Some(SelectionBox {
-            columns: a.columns.clone(),
-            relative_time: Some(time),
-        });
-    }
-    if a.relative_time != b.relative_time || a.columns.len() != b.columns.len() {
+    if a.columns.len() != b.columns.len() {
         return None;
     }
     let mut differing = a
@@ -1252,10 +1066,7 @@ fn join(a: &SelectionBox, b: &SelectionBox) -> Option<SelectionBox> {
     };
     let mut columns = a.columns.clone();
     columns.insert(column.clone(), joined);
-    Some(SelectionBox {
-        columns,
-        relative_time: a.relative_time,
-    })
+    Some(SelectionBox { columns })
 }
 
 /// The union of two intervals when one ends exactly where the other starts,
@@ -1277,98 +1088,5 @@ fn touching<T: Clone>(
         Some((bl.clone(), au.clone()))
     } else {
         None
-    }
-}
-
-#[cfg(test)]
-mod tumbling_window_union_tests {
-    use super::*;
-
-    fn tumbling_window(start: i64, end: i64) -> SelectionBox {
-        SelectionBox {
-            relative_time: Some((Bound::Excluded(start), Bound::Included(end))),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn large_reverse_ordered_tumbling_window_union_is_one_exact_interval() {
-        let tumbling_windows: Vec<_> = (0..75_000)
-            .rev()
-            .map(|i| tumbling_window(i, i + 1))
-            .collect();
-        assert_eq!(union(tumbling_windows), vec![tumbling_window(0, 75_000)]);
-    }
-
-    #[test]
-    fn interval_fast_path_matches_general_union_for_permutations() {
-        use Bound::{Excluded as E, Included as I, Unbounded as U};
-        for intervals in [
-            [(U, I(0)), (E(0), I(1)), (E(1), I(2)), (E(2), U)],
-            [(E(0), E(1)), (I(1), I(1)), (E(1), I(2)), (E(4), I(5))],
-            [(E(0), I(1)), (E(3), E(4)), (I(4), I(5)), (E(5), I(6))],
-        ] {
-            let boxes: Vec<_> = intervals
-                .into_iter()
-                .map(|relative_time| SelectionBox {
-                    relative_time: Some(relative_time),
-                    ..Default::default()
-                })
-                .collect();
-            for a in 0..4 {
-                for b in 0..4 {
-                    for c in 0..4 {
-                        for d in 0..4 {
-                            let order = [a, b, c, d];
-                            if (0..4).any(|i| order[..i].contains(&order[i])) {
-                                continue;
-                            }
-                            let shuffled: Vec<_> =
-                                order.into_iter().map(|i| boxes[i].clone()).collect();
-                            assert_eq!(union(shuffled.clone()), union_general(shuffled));
-                        }
-                    }
-                }
-            }
-        }
-        let empty = SelectionBox {
-            relative_time: Some((E(0), E(0))),
-            ..Default::default()
-        };
-        let singleton = SelectionBox {
-            relative_time: Some((I(0), I(0))),
-            ..Default::default()
-        };
-        let unusual = vec![empty.clone(), empty, singleton];
-        assert!(union_ordered_time_boxes(&unusual).is_none());
-        assert_eq!(union(unusual.clone()), union_general(unusual));
-    }
-
-    #[test]
-    fn sorted_union_preserves_gaps_boundaries_and_original_group_order() {
-        assert_eq!(
-            union(vec![
-                tumbling_window(10, 11),
-                tumbling_window(1, 2),
-                tumbling_window(0, 1),
-                tumbling_window(11, 12)
-            ]),
-            vec![tumbling_window(10, 12), tumbling_window(0, 2)]
-        );
-        let missing_endpoint = SelectionBox {
-            relative_time: Some((Bound::Excluded(0), Bound::Excluded(1))),
-            ..Default::default()
-        };
-        assert_eq!(
-            union(vec![missing_endpoint.clone(), tumbling_window(1, 2)]),
-            vec![missing_endpoint, tumbling_window(1, 2)]
-        );
-        let overlaps = vec![tumbling_window(0, 2), tumbling_window(1, 3)];
-        assert!(union_ordered_time_boxes(&overlaps).is_none());
-        assert_eq!(union(overlaps.clone()), overlaps);
-        assert_eq!(
-            union(vec![tumbling_window(0, 1), tumbling_window(0, 1)]),
-            vec![tumbling_window(0, 1)]
-        );
     }
 }

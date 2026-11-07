@@ -61,6 +61,7 @@ fn run_all_stages(
     let data = DataWorkload {
         arrival: DataArrival::Ingesting {
             rows_per_second: 1_000.0,
+            max_out_of_order_ms: None,
         },
         ..Default::default()
     };

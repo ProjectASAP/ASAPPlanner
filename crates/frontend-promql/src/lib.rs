@@ -252,6 +252,7 @@ mod tests {
             Some(DataArrival::Unknown),
             Some(DataArrival::Ingesting {
                 rows_per_second: 1.0,
+                max_out_of_order_ms: None,
             }),
             None,
         ];

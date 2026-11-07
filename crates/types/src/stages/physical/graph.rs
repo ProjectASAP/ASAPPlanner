@@ -48,7 +48,7 @@ impl DagOfSelectedCandidates {
     /// of its group. Costs and accuracy are Stage 3's to check.
     pub fn validate(&self, physical: &PhysicalASAPMemoCandidates) -> Result<(), String> {
         let memo = &physical.logical_candidates.memo;
-        let output_groups: Vec<_> = super::output_references(&physical.query_roots)
+        let output_groups: Vec<_> = super::output_references(&memo.query_roots)
             .into_iter()
             .map(|(_, group)| group)
             .collect();

@@ -9,5 +9,5 @@ pub use execution_context::{ExecutionContext, ExecutionContextId, RefreshWindowI
 pub use graph::{DagOfSelectedCandidates, PhysicalCandidateId, SelectedEdge, SelectedNodeId};
 pub use memo_candidates::{
     output_references, producer_satisfies_physical_requirements, PhysicalASAPMemoCandidates,
-    PhysicalCandidate, PhysicalCandidateKey, PhysicalEdge, PhysicalEdgeId,
+    PhysicalCandidate, PhysicalEdge, PhysicalEdgeId,
 };

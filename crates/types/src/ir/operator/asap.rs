@@ -56,21 +56,12 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
         evaluation: PopulationStatistic,
     },
     /// Merge compatible partial states of one family: every input state of
-    /// a group, including each tumbling window of a [`SummaryTumblingWindowChain`](ASAPOp::SummaryTumblingWindowChain),
-    /// into one state per group.
+    /// a group into one state per group, or, with `group_by`, regrouped.
+    /// Over a time-indexed state (a `TimeRange` over a
+    /// [`SummaryTumblingWindowChain`](ASAPOp::SummaryTumblingWindowChain)), the windows it
+    /// selects; there is no window-selection field.
     SummaryMerge {
         children: Vec<C>,
-        /// Merge only the newest `n` tumbling windows of the one `SummaryTumblingWindowChain` this
-        /// merge reads, `1 ≤ n <` its `tumbling_window_count`: the state of one build
-        /// over the newest `n · tumbling_window_width_ms` of the chain's window, so a
-        /// query over a shorter window reads a chain kept for a longer one.
-        /// `None` merges every input state.
-        #[serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            alias = "newest_panes"
-        )]
-        newest_tumbling_windows: Option<u32>,
         /// A rollup (regrouping merge): the input's plain columns the
         /// merged states are keyed by, in output order. Every input state
         /// whose values in these columns match goes into one output state,
@@ -79,19 +70,15 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         group_by: Option<Vec<ColumnId>>,
     },
-    /// A tumbling-window summary (#509 Pass 2, window-composition
-    /// rule): the `SummaryAgg` with these `family`, `input`, `reduction`,
-    /// `grouping` and `filter`, built over each of `tumbling_window_count` back-to-back
-    /// range windows of `tumbling_window_width_ms` that end at `child`'s evaluation
-    /// time, newest first. `child` is the input a range selector would
-    /// read, so tumbling window `i` covers `(-(i+1)·w, -i·w]` relative to it. Output:
-    /// the `SummaryAgg` schema, one state per group and tumbling window; a
-    /// `SummaryMerge` over the chain gives the state of one build over the
-    /// whole `tumbling_window_count · tumbling_window_width_ms` window
-    /// (`whole_window_build`).
-    /// One compact node whatever the tumbling-window count: costs and guarantees come
-    /// from formulas, and the executor expands the tumbling windows
-    /// (`expand_tumbling_window_chains`).
+    /// A chain of tumbling windows (concepts doc, section 3, "Chain
+    /// groups"): the `SummaryAgg` with these `family`, `input`, `reduction`,
+    /// `grouping` and `filter`, built over each window
+    /// `[k·w, (k+1)·w)` of `child`, `w` = `tumbling_window_width_ms`, on a
+    /// grid anchored at the epoch. Each window is built when it ends. Output:
+    /// one row per window, (window end, keys, state), a state with a time
+    /// index. It has no range and no window count: a `TimeRange` (and
+    /// `TimeShift`) over it selects the windows a query reads, and how many
+    /// windows it retains is $h_v$, a Stage 3 choice.
     // Written as `PaneChain` before #1163; the aliases read those documents.
     #[serde(alias = "PaneChain")]
     SummaryTumblingWindowChain {
@@ -104,8 +91,6 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
         filter: Option<crate::ir::scalar::Predicate<C>>,
         #[serde(alias = "pane_width_ms")]
         tumbling_window_width_ms: u64,
-        #[serde(alias = "pane_count")]
-        tumbling_window_count: u32,
     },
     // ── Reserved: migrated but unimplemented ──
     SummarySubtract {
@@ -182,7 +167,6 @@ impl<C> ASAPOp<C> {
                 grouping,
                 filter,
                 tumbling_window_width_ms,
-                tumbling_window_count,
             } => SummaryTumblingWindowChain {
                 child: f(child),
                 family: family.clone(),
@@ -193,7 +177,6 @@ impl<C> ASAPOp<C> {
                     .as_ref()
                     .map(|p| crate::ir::scalar::Predicate(p.0.map_operator_refs(&mut f))),
                 tumbling_window_width_ms: *tumbling_window_width_ms,
-                tumbling_window_count: *tumbling_window_count,
             },
             SummaryEstimate {
                 summary_input,
@@ -211,13 +194,8 @@ impl<C> ASAPOp<C> {
                 child: f(child),
                 evaluation: evaluation.clone(),
             },
-            SummaryMerge {
-                children,
-                newest_tumbling_windows,
-                group_by,
-            } => SummaryMerge {
+            SummaryMerge { children, group_by } => SummaryMerge {
                 children: children.iter().map(&mut f).collect(),
-                newest_tumbling_windows: *newest_tumbling_windows,
                 group_by: group_by.clone(),
             },
             SummarySubtract { left, right } => SummarySubtract {
@@ -354,10 +332,8 @@ impl<I: OperatorInput> ASAPOp<I> {
                 if let Some((build, schema)) = rolled_up_build(child) {
                     return finalized_schema(Some(&build), &schema);
                 }
-                // Merged tumbling windows finalize as one build over their window.
                 if super::tumbling_window_chain::merged_chain(child).is_some() {
-                    let (build, schema) = super::tumbling_window_chain::merged_window_build(child)?;
-                    return finalized_schema(Some(&build), &schema);
+                    todo!("#1207 PR 1: finalize the windows a TimeRange over a chain selects as one build over that TimeRange")
                 }
                 finalized_schema(summary_build(child).as_ref(), child.schema())?
             }
@@ -477,35 +453,7 @@ impl<I: OperatorInput> ASAPOp<I> {
             }
         };
         match self {
-            SummaryMerge {
-                children,
-                newest_tumbling_windows,
-                group_by,
-            } => {
-                if newest_tumbling_windows.is_some() && group_by.is_some() {
-                    return Err(SchemaDerivationError::InvalidScalarSignature(
-                        "a rollup merges every input state, not the newest tumbling windows".into(),
-                    ));
-                }
-                if let Some(n) = newest_tumbling_windows {
-                    let tumbling_window_count = match children.as_slice() {
-                        [chain] => match chain.operator() {
-                            Operator::ASAP(SummaryTumblingWindowChain {
-                                tumbling_window_count,
-                                ..
-                            }) => Some(tumbling_window_count),
-                            _ => None,
-                        },
-                        _ => None,
-                    };
-                    if !tumbling_window_count.is_some_and(|count| (1..count).contains(n)) {
-                        return Err(SchemaDerivationError::InvalidScalarSignature(
-                            "a merge of the newest tumbling windows reads one tumbling-window chain, and fewer \
-                             tumbling windows than it has"
-                                .into(),
-                        ));
-                    }
-                }
+            SummaryMerge { children, .. } => {
                 let Some(first) = children.first() else {
                     return Err(SchemaDerivationError::InvalidScalarSignature(
                         "summary merge requires at least one state input".into(),
@@ -595,12 +543,11 @@ impl<I: OperatorInput> ASAPOp<I> {
             SummaryTumblingWindowChain {
                 child,
                 tumbling_window_width_ms,
-                tumbling_window_count,
                 ..
             } => {
-                if *tumbling_window_width_ms == 0 || *tumbling_window_count == 0 {
+                if *tumbling_window_width_ms == 0 {
                     return Err(SchemaDerivationError::InvalidScalarSignature(
-                        "a tumbling-window chain needs a positive tumbling-window width and tumbling-window count".into(),
+                        "a tumbling-window chain needs a positive tumbling-window width".into(),
                     ));
                 }
                 // The chain is the range selector: it reads the series the
@@ -712,9 +659,7 @@ fn rolled_up_build<I: OperatorInput>(
             op.map_children(|child| InputOrTemporaryBuild::Input(child.clone()))
         }
         _ if super::tumbling_window_chain::merged_chain(&input).is_some() => {
-            super::tumbling_window_chain::merged_window_build(&input)
-                .ok()?
-                .0
+            todo!("#1207 PR 1: roll up the windows a TimeRange over a chain selects as one build over that TimeRange")
         }
         _ => return None,
     };

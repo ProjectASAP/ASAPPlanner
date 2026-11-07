@@ -340,7 +340,6 @@ fn merge_over_a_stored_tumbling_window(
             1,
             Payload::ASAP(ASAPOp::SummaryMerge {
                 children: vec![0],
-                newest_tumbling_windows: None,
                 group_by: None,
             }),
             schema,

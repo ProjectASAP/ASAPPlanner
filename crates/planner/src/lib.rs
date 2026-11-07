@@ -51,16 +51,18 @@ pub use asap_cost::{
     ResourceSpeed, ResourceUnitCost, SummaryOperation,
 };
 pub use asap_frontend_sql::SqlCatalog;
-pub use asap_logical_asap_optimization::{DeploymentCapabilities, SupportedSummary};
 pub use asap_plan_selection::{
     AcceptedAccuracy, ErrorSelectingPlan, RejectionCause, SearchReport, SearchStatus, Selection,
 };
+pub use asap_types::deployment_capabilities::{DeploymentCapabilities, SupportedSummary};
 pub use asap_types::ir::materialized_view::{
     IngestionRefreshGroup, InstallableDagError, MaterializedView, MaterializedViewInputs,
     MaterializedViewRefresh, RawDataRetention, RawDataWindow, RefreshWindow, ViewCoverage,
 };
 pub use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
-pub use asap_types::ir::properties::summary_coverage::{ColumnIdentity, Constraint, SelectionBox};
+pub use asap_types::ir::properties::summary_coverage::{
+    ColumnIdentity, Constraint, SelectionBox, TimeBound,
+};
 pub use asap_types::ir::properties::ExecutionTiming;
 pub use asap_types::ir::schema::{SketchAlgorithm, SketchParams, StatisticKind};
 pub use asap_types::workload::PlanningWorkload;

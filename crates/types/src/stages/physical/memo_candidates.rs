@@ -10,9 +10,7 @@ use super::execution_context::ExecutionContext;
 use super::graph::PhysicalCandidateId;
 use crate::ir::QueryRoot;
 use crate::physical::PhysicalProperties;
-use crate::stages::{
-    CandidateForMemoGroupId, LogicalASAPMemoCandidates, Memo, MemoGroupId, PrunedCandidate,
-};
+use crate::stages::{CandidateForMemoGroupId, LogicalASAPMemoCandidates, Memo, PrunedCandidate};
 
 /// Index into [`PhysicalASAPMemoCandidates::edges`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -30,9 +28,9 @@ pub struct PhysicalCandidate {
 impl PhysicalCandidate {
     /// Whether a consumer running in `context` can read this producer (the
     /// concepts doc's alignment table, section 2). True for $\ell$ = None,
-    /// and for `OneEvaluation` in the same context. A windowed
-    /// `AcrossEvaluations` producer, with $w$ read from its logical window
-    /// layout in `memo`, needs every evaluation time of the context on its
+    /// and for `OneEvaluation` in the same context. A chain producer
+    /// (`SummaryTumblingWindowChain`) with $\ell$ = `AcrossEvaluations`, with
+    /// $w$ the chain operator's width in its expression in `memo`, needs every evaluation time of the context on its
     /// grid: $w$ divides the context's evaluation grid (interval, range step
     /// and phase), each scheduled time, or a one-off query's time; false
     /// when the times are not known (an interval without a phase, an
@@ -66,15 +64,6 @@ pub struct PhysicalEdge {
     pub satisfies_physical_requirement: bool,
 }
 
-/// A physical candidate Stage 2 pruned, named by what it would have been:
-/// candidates are renumbered after pruning, so a pruned one has no
-/// [`PhysicalCandidateId`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PhysicalCandidateKey {
-    pub logical_candidate_id: CandidateForMemoGroupId,
-    pub physical_properties: PhysicalProperties,
-}
-
 /// Stage 2's output, which Stage 3 selects from.
 #[derive(Debug, Clone)]
 pub struct PhysicalASAPMemoCandidates {
@@ -83,11 +72,10 @@ pub struct PhysicalASAPMemoCandidates {
     pub logical_candidates: LogicalASAPMemoCandidates,
     /// $\mathcal C$, indexed by [`PhysicalCandidateId`].
     pub physical_candidates: Vec<PhysicalCandidate>,
-    /// Each query's root over groups, by index in the workload, passed
-    /// through from Pass 2.
-    pub query_roots: Vec<QueryRoot<MemoGroupId>>,
-    /// The candidates Stage 2 pruned, in pruning order.
-    pub pruned_candidates: Vec<PrunedCandidate<PhysicalCandidateKey>>,
+    /// The alternatives Stage 2 pruned, in pruning order, each as the
+    /// [`PhysicalCandidate`] it would have been: candidates are numbered
+    /// after pruning, so a pruned one has no [`PhysicalCandidateId`].
+    pub pruned_candidates: Vec<PrunedCandidate<PhysicalCandidate>>,
     /// $\mathcal E$, grouped by (consumer, input); indexed by
     /// [`PhysicalEdgeId`].
     edges: Vec<PhysicalEdge>,
@@ -100,13 +88,19 @@ pub struct PhysicalASAPMemoCandidates {
 impl PhysicalASAPMemoCandidates {
     /// Stage 2's output over `physical_candidates` and `edges` (grouped by
     /// (consumer, input)), with the admissible-edge indexes built once.
+    /// Query roots are read from `logical_candidates`, not copied.
     pub fn new(
         logical_candidates: LogicalASAPMemoCandidates,
         physical_candidates: Vec<PhysicalCandidate>,
-        query_roots: Vec<QueryRoot<MemoGroupId>>,
         edges: Vec<PhysicalEdge>,
+        pruned_candidates: Vec<PrunedCandidate<PhysicalCandidate>>,
     ) -> Self {
-        let _ = (logical_candidates, physical_candidates, query_roots, edges);
+        let _ = (
+            logical_candidates,
+            physical_candidates,
+            edges,
+            pruned_candidates,
+        );
         todo!("#1207 PR 5: index the admissible edges")
     }
 

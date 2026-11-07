@@ -131,6 +131,7 @@ fn workload_lowering_uses_the_declared_sample_interval() {
     let mut other_metric = workload(QueryLanguage::MetricsQL, "sum(up) + sum(down)");
     other_metric.data_workload.as_mut().unwrap().arrival = DataArrival::Ingesting {
         rows_per_second: 1.0,
+        max_out_of_order_ms: None,
     };
     for workload in [missing, other_metric] {
         assert!(matches!(

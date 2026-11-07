@@ -87,19 +87,13 @@ fn compile_internal(
     roots: &[NodeId],
 ) -> Result<CompiledPhysicalDAG, Error> {
     preflight_depth(dag)?;
-    // A tumbling-window chain stands for its tumbling windows; the deployment binds each tumbling window's
-    // raw input, so it runs only once expanded.
-    if let Some(node) = dag.nodes.iter().find(|n| {
+    if dag.nodes.iter().any(|n| {
         matches!(
             n.payload,
             Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
         )
     }) {
-        return Err(invalid(format!(
-            "node {}: a SummaryTumblingWindowChain runs as its tumbling windows; expand it with \
-             `asap_types::ir::operator::tumbling_window_chain::expand_tumbling_window_chains` before compiling",
-            node.id
-        )));
+        todo!("#1207 PR 6: run a chain, and a TimeRange or TimeShift over it by window index")
     }
     // Helper IDs lie above the u32 range; a larger Planner ID could collide.
     if let Some(node) = dag.nodes.iter().find(|n| n.id as u64 > u64::from(u32::MAX)) {

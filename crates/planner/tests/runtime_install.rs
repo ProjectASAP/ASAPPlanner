@@ -19,12 +19,11 @@ use asap_executor::Error as ExecutorError;
 use asap_planner::{
     plan_installable, CostInputs, DeploymentCapabilities, FrontendInput, InstallablePlan,
     MaterializedView, OperatorKind, PhysicalASAPDAG, PlanningModels, PlanningWorkload,
-    SelectedPlanReport, SelectionBox, UserInput,
+    SelectedPlanReport, UserInput,
 };
 use asap_types::ir::operator::Source;
 
 use futures::{executor::block_on, StreamExt};
-use std::ops::Bound;
 
 use time_series::{series_labels, time_series_tables, RawDataSample};
 
@@ -169,29 +168,9 @@ fn answers(batches: &[Batch]) -> Vec<Answer> {
     answers
 }
 
-/// The control plane: plan `queries` for a deployment that keeps no raw
-/// samples, with its cost model read from JSON, and write the plan file.
-async fn plan_json(queries: &[&str]) -> String {
-    // What the deployment keeps: no raw data samples, no query-time results
-    // across evaluations. Supported summaries are left unrestricted, so the
-    // Planner offers only what its own executor runs.
-    let capabilities = DeploymentCapabilities {
-        raw_data_retained: false,
-        ..DeploymentCapabilities::default()
-    };
-    plan_json_for(workload(queries), &capabilities).await
-}
-
-/// [`plan_json`] for `workload` on a deployment with `capabilities`.
-async fn plan_json_for(
-    workload: PlanningWorkload,
-    capabilities: &DeploymentCapabilities,
-) -> String {
-    serde_json::to_string(&plan_with_report_for(workload, capabilities).await.0).unwrap()
-}
-
-/// The plan [`plan_json`] writes for `queries`, and Stage 3's report of the
-/// selection it made (which the plan file does not carry).
+/// The plan for `queries` on a deployment that keeps no raw samples, and
+/// Stage 3's report of the selection it made (which the plan file does not
+/// carry).
 async fn planned_with_report(queries: &[&str]) -> (InstallablePlan, Option<SelectedPlanReport>) {
     let capabilities = DeploymentCapabilities {
         raw_data_retained: false,
@@ -338,54 +317,6 @@ async fn an_instant_selector_reads_the_latest_sample_per_series() {
 // ── A ratio of two relative-error quantiles (issue #852) ────────────────────
 
 // ── Materialized views refreshed from materialized views (issue #781) ──────────────────
-
-/// The time selection `(from_ms, to_ms]` relative to the evaluation.
-fn relative_time(from_ms: i64, to_ms: i64) -> Vec<SelectionBox> {
-    vec![SelectionBox::new(
-        Default::default(),
-        Some((Bound::Excluded(from_ms), Bound::Included(to_ms))),
-    )]
-}
-
-/// Example 4b's selected tumbling windows cover the hour and share one definition id,
-/// each with its own time selection; each reads its tumbling window of
-/// raw data samples and nothing stored.
-#[tokio::test]
-async fn tumbling_windows_of_an_hour_share_one_definition_with_distinct_times() {
-    let plan: InstallablePlan =
-        serde_json::from_str(&plan_json(&["quantile_over_time(0.99, latency_ms[60m])"]).await)
-            .unwrap();
-    let views = plan.materialized_views().unwrap();
-    assert!(!views.is_empty());
-    let mut tumbling_windows: Vec<&MaterializedView> = views.iter().collect();
-    tumbling_windows.sort_by_key(|o| o.inputs.raw_data_windows()[0].end_offset_ms());
-    let width_ms = tumbling_windows[0].inputs.raw_data_windows()[0].width_ms();
-    assert!(width_ms > 0);
-    assert_eq!(
-        width_ms * tumbling_windows.len() as i64,
-        3_600_000,
-        "complete hour coverage"
-    );
-    for (i, tumbling_window) in tumbling_windows.iter().enumerate() {
-        let i = i as i64;
-        let [window] = tumbling_window.inputs.raw_data_windows() else {
-            panic!("{tumbling_window:?}");
-        };
-        assert_eq!(
-            (window.width_ms(), window.end_offset_ms()),
-            (width_ms, i * width_ms)
-        );
-        assert!(tumbling_window.inputs.materialized_views.is_empty());
-        assert_eq!(
-            tumbling_window.coverage().definition_id(),
-            tumbling_windows[0].coverage().definition_id()
-        );
-        assert_eq!(
-            tumbling_window.coverage().selection(),
-            relative_time(-(i + 1) * width_ms, -i * width_ms)
-        );
-    }
-}
 
 /// The MVP benchmark's p99 query: the per-series p99 of a gauge over 100 s,
 /// averaged per (region, service, job), every second, within 0.05 at

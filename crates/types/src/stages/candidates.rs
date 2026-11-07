@@ -7,6 +7,7 @@ use std::collections::HashSet;
 
 use super::{GroupProperties, MemoGroup, MemoGroupAsInput, MemoGroupId};
 use crate::ir::properties::summary_coverage::SummaryCoverage;
+use crate::ir::properties::AccuracyMetric;
 use crate::ir::schema::{SketchAlgorithm, SketchParams};
 use crate::ir::ASAPOp;
 use crate::ir::Operator;
@@ -79,6 +80,25 @@ impl Memo {
         todo!("#1207 PR 2")
     }
 
+    /// Replaces candidate `id`'s input requirements $r^{\log}_{c,i}$, one
+    /// per input group. The only way to change a candidate's
+    /// $r^{\log}$: Pass 2 sets each parameter floor from the input's caps
+    /// and direct needs after the rules have run. Panics when the vector
+    /// does not have one entry per input group.
+    pub fn set_input_requirements(
+        &mut self,
+        id: CandidateForMemoGroupId,
+        input_requirements: Vec<LogicalRequirements>,
+    ) {
+        let candidate = &mut self.groups[id.group.0 as usize].candidates[id.index_in_group];
+        assert_eq!(
+            input_requirements.len(),
+            candidate.expression.operator.children().len(),
+            "one input requirement per input group of candidate {id:?}"
+        );
+        candidate.input_requirements = input_requirements;
+    }
+
     /// The groups, each after every group it or one of its candidates
     /// reads, the lower index first among those ready: a dependency order for
     /// candidate traversal, whatever order rules appended groups in. `None`
@@ -134,7 +154,7 @@ fn derive_group_properties(
     let operator = expression.map_children(|&group_id| MemoGroupAsInput { memo, group_id });
     let schema = operator.output_schema()?;
     operator.validate_inputs()?;
-    let summary_coverage = match SummaryCoverage::derive_from_inputs(&operator) {
+    let aggregate_coverage = match SummaryCoverage::derive_from_inputs(&operator) {
         Ok(coverage) => Some(coverage),
         // A merge is valid only over states of one definition it may merge.
         Err(error) if matches!(operator, Operator::ASAP(ASAPOp::SummaryMerge { .. })) => {
@@ -145,7 +165,7 @@ fn derive_group_properties(
     Ok(GroupProperties {
         schema,
         result_kind: operator.output_kind(),
-        summary_coverage,
+        aggregate_coverage,
         shareable_when_equal: operator.is_shareable_when_equal(),
     })
 }
@@ -171,7 +191,8 @@ pub struct CandidateForMemoGroup {
     /// $p^{\log}_v$.
     pub logical_properties: LogicalProperties,
     /// $r^{\log}_{c,i}$, one per input group: per child of
-    /// `expression.operator`, in [`Operator::children`] order.
+    /// `expression.operator`, in [`Operator::children`] order. Changed only
+    /// through [`Memo::set_input_requirements`].
     pub input_requirements: Vec<LogicalRequirements>,
     /// The groups a fused computation also implements, beyond the group
     /// whose candidate it is; empty otherwise.
@@ -188,7 +209,7 @@ pub enum OriginOfCandidateForMemoGroup {
     Pass1,
     /// Canonical value preprocessing feeding a summary build.
     SummaryInput,
-    /// A tumbling-window layout of a summary state group.
+    /// A tumbling-window chain, or a merge reading one, of a summary state group.
     TumblingWindows,
     /// A coarse group regrouping a finer group.
     Rollup,
@@ -207,49 +228,34 @@ pub struct CandidateExpression {
     pub operator: Operator<MemoGroupId>,
 }
 
-/// $p^{\log}_v = (\boldsymbol\theta_v, \omega_v)$. The family is the
-/// operator's argument, not a property. [`Self::new`] rejects parameters of
-/// another family, not in the family's list, missing on a sketch build or
-/// present on an exact operator, and a window on an operator that cannot be
-/// windowed.
+/// $p^{\log}_v = \boldsymbol\theta_v$. The family is the operator's
+/// argument, not a property, and a tumbling-window chain's width is the
+/// chain operator's argument. [`Self::new`] rejects parameters of another
+/// family, not in the family's list, missing on a sketch build (a chain
+/// included) or present on an exact operator.
 #[derive(Debug, Clone)]
 pub struct LogicalProperties {
     /// $\boldsymbol\theta_v$, from the family's predefined list; `None` for
     /// an exact operator.
     parameters: Option<SketchParams>,
-    /// $\omega_v$.
-    window_layout: Option<WindowLayout>,
 }
 
 impl LogicalProperties {
     pub fn new(
         expression: &CandidateExpression,
         parameters: Option<SketchParams>,
-        window_layout: Option<WindowLayout>,
     ) -> Result<Self, LogicalPropertiesError> {
-        let _ = (expression, parameters, window_layout);
-        todo!("#1207 PR 1: reject invalid parameters and invalid windows")
+        let _ = (expression, parameters);
+        todo!("#1207 PR 1: reject invalid parameters")
     }
 
     /// $\boldsymbol\theta_v$.
     pub fn parameters(&self) -> Option<&SketchParams> {
         self.parameters.as_ref()
     }
-
-    /// $\omega_v$.
-    pub fn window_layout(&self) -> Option<&WindowLayout> {
-        self.window_layout.as_ref()
-    }
 }
 
-/// $\omega_v$. The window count is the group's query range ÷ width;
-/// retention is $h_v$ (Stage 3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum WindowLayout {
-    Tumbling { width_ms: u64 },
-}
-
-/// Logical properties whose dimensions cannot go together: bad input to
+/// Logical properties that do not fit their operator: bad input to
 /// [`LogicalProperties::new`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum LogicalPropertiesError {
@@ -257,10 +263,6 @@ pub enum LogicalPropertiesError {
     ParametersOfAnotherFamily,
     #[error("an exact operator has no summary parameters")]
     ParametersOnExactOperator,
-    #[error("the operator cannot be windowed")]
-    WindowOnOperatorThatCannotBeWindowed,
-    #[error("a tumbling window has a positive width")]
-    ZeroWindowWidth,
     #[error("a sketch build needs parameters from its family's list")]
     SketchBuildWithoutParameters,
     #[error("the parameters are not in their family's predefined list")]
@@ -298,12 +300,17 @@ impl LogicalRequirements {
         self.parameter_floor_for_required_accuracy.as_ref()
     }
 
-    /// $g_c$'s linear bound: $\beta_{c,i}$ and $b_{c,i}$ per input, read
-    /// from the operator and its arguments. An operator without an error
-    /// contract is reported as unsupported; no factor is guessed.
-    pub fn error_propagation(consumer: &Operator<MemoGroupId>) -> ErrorPropagation {
-        let _ = consumer;
-        todo!("#1207 PR 4: the error contract of each operator")
+    /// $g_c$'s linear bound for errors in `metric`, each input's and the
+    /// output's: $\beta_{c,i}$ and $b_{c,i}$ per input, read from the
+    /// operator and its arguments. `None` when the consumer has no error
+    /// contract for `metric`: an input whose error is in `metric` then gives
+    /// no edge (the metric rule). No factor is guessed.
+    pub fn error_propagation(
+        consumer: &Operator<MemoGroupId>,
+        metric: AccuracyMetric,
+    ) -> Option<ErrorPropagation> {
+        let _ = (consumer, metric);
+        todo!("#1207 PR 4: the error contract of each operator, per metric")
     }
 }
 

@@ -97,7 +97,6 @@ fn fixture() -> Fixture {
         .collect();
     let merge = new(asap_types::ir::Operator::ASAP(ASAPOp::SummaryMerge {
         children: tumbling_windows.clone(),
-        newest_tumbling_windows: None,
         group_by: None,
     }));
     let estimate = |q| {

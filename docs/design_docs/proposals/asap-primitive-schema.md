@@ -665,11 +665,11 @@ With an exact target, the planner can keep all latencies per job in one maintain
 
 - **Implemented.** All children must be state with exactly one state field and identical schemas.
 - **Coverage.** It also requires equal `definition`s and selections that do not overlap, and computes the merged coverage.
-- **Newest tumbling windows:** an optional `newest_tumbling_windows: n` merges only the newest `n` tumbling windows of the one `SummaryTumblingWindowChain` the merge reads (`1 ≤ n <` its tumbling-window count). Its coverage is one build over the time range those tumbling windows cover, so one chain kept for the longest window serves every query whose window, on the same tumbling windows, ends at the same time and is shorter.
-- **Rollup:** an optional `group_by` field, so one operator does both merge and rollup. It lists the input's group columns the output is keyed by; `None` keeps the input's groups. A rollup merges every input state, so it does not take `newest_tumbling_windows`; it reads a merge of the newest tumbling windows instead:
+- **Chain windows:** a merge over a `TimeRange` (and `TimeShift`s) over a `SummaryTumblingWindowChain` merges the windows that range selects; there is no window-selection field. Its coverage is that of one build over the same `TimeRange` and `TimeShift`s, so one chain serves every query over the same input whose range and offset lie on its windows.
+- **Rollup:** an optional `group_by` field, so one operator does both merge and rollup. It lists the input's group columns the output is keyed by; `None` keeps the input's groups. A rollup merges every input state:
 
 ```rust
-SummaryMerge { children: Vec<C>, newest_tumbling_windows: Option<u32>, group_by: Option<Vec<ColumnId>> }
+SummaryMerge { children: Vec<C>, group_by: Option<Vec<ColumnId>> }
 ```
 
 **Example A: time tumbling windows.** p99 of each series of metric `m` over the last 2 minutes:
@@ -822,7 +822,7 @@ input groups                       output groups
 | Question | Answer |
 |---|---|
 | What comes out? | the children's schema; with `group_by`, its columns in order, then the state column. A `group_by` of no columns over a SQL relation's states stands for a global SQL aggregate, which has one row over no input rows: it outputs one state, empty when there is no input state |
-| When is it rejected? | no children; a child is not state; the schemas differ (e.g. different sketch parameters); the definitions differ (different column, filters or source); the selections may overlap (#646; with #592, only where the family does not allow it); the family cannot merge at all (#592); a `group_by` column is not a group key of the children's build, appears twice, or is the state or time column; `group_by` over a family that cannot merge different groups (counter states, `IRate`, Theta, Hydra); `group_by` together with `newest_tumbling_windows` |
+| When is it rejected? | no children; a child is not state; the schemas differ (e.g. different sketch parameters); the definitions differ (different column, filters or source); the selections may overlap (#646; with #592, only where the family does not allow it); the family cannot merge at all (#592); a `group_by` column is not a group key of the children's build, appears twice, or is the state or time column; `group_by` over a family that cannot merge different groups (counter states, `IRate`, Theta, Hydra) |
 | What is its coverage? | the shared `definition` (with `group_by`, the same build grouped by the columns `group_by` names), and the union of the children's selections. Two boxes join when they differ in only one dimension and their union is again one constraint, as in the paper's one range per column: touching time windows (`(−2m, −1m]` and `(−1m, 0]` give `(−2m, 0]`), touching value ranges (`latency < 100` and `latency >= 100` give `latency ∈ (−∞, ∞)`, which still excludes NULL), or value sets of one column (`{us}` and `{eu}` give `{us, eu}`). Gaps stay as separate boxes |
 | State or value? | state in, state out |
 
@@ -985,9 +985,6 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
     SummaryMerge {
         /// The states to merge; all have the same schema.
         children: Vec<C>,
-        /// Merge only the newest `n` tumbling windows of the one `SummaryTumblingWindowChain` read;
-        /// `None` merges every input state. Not with `group_by`.
-        newest_tumbling_windows: Option<u32>,
         /// A rollup: the input's group columns the merged states are keyed
         /// by, in output order; every input state whose values in them match
         /// goes into one output state. `None` keeps the input's groups.
@@ -1358,11 +1355,17 @@ pub struct SummaryCoverage {
 pub struct SelectionBox {
     /// One constraint per restricted column. A column not in the map is
     /// unrestricted.
+    /// The timestamp column is one of them; there is no separate time
+    /// field.
     pub columns: BTreeMap<ColumnIdentity, Constraint>,
-    /// The time window relative to the evaluation time, in ms, e.g.
-    /// `(Excluded(-120000), Included(-60000))` for `(−2m, −1m]`.
-    /// `None`: no time restriction.
-    pub relative_time: Option<(Bound<i64>, Bound<i64>)>,
+}
+
+/// An endpoint of an interval on a timestamp column.
+pub enum TimeBound {
+    /// An absolute time, in ms since the epoch.
+    At(i64),
+    /// An offset, in ms, from the evaluation time t.
+    FromEvaluationTime(i64),
 }
 
 /// Names a column across nodes, independent of its position.

@@ -26,9 +26,9 @@ use asap_accuracy::{
     NoAccuracyEvidence,
 };
 use asap_cost::CostInputs;
-use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_logical_asap_optimization::PerComputationCandidateError;
 use asap_plan_selection::{AccuracyCheckInputs, Selection};
+use asap_types::deployment_capabilities::DeploymentCapabilities;
 use asap_types::ir::physical_export::PhysicalASAPNodeId;
 
 static BUILTIN_ACCURACY_MODEL: BuiltinAccuracyModel = BuiltinAccuracyModel;

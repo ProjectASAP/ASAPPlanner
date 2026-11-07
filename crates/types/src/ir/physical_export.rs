@@ -437,14 +437,9 @@ impl PhysicalASAPDAG {
                         })) if materialized_chains.contains(&consumer) => {
                             u128::from(*tumbling_window_width_ms)
                         }
-                        Some(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
-                            tumbling_window_width_ms,
-                            tumbling_window_count,
-                            ..
-                        })) => {
-                            u128::from(*tumbling_window_width_ms)
-                                * u128::from(*tumbling_window_count)
-                        }
+                        Some(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })) => todo!(
+                            "#1207 PR 6: the scan window of a chain read through a TimeRange over it"
+                        ),
                         _ => return ScanWindow::Unbounded,
                     };
                     let read = ScanWindow::Within {
@@ -495,25 +490,9 @@ impl PhysicalASAPDAG {
                     Some(Operator::NonASAP(NonASAPOp::TimeRange { .. })) => {
                         time_range_window(id, |id| payloads.get(&id).copied())
                     }
-                    Some(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
-                        child,
-                        tumbling_window_width_ms,
-                        tumbling_window_count,
-                        ..
-                    })) => {
-                        let width_ms =
-                            tumbling_window_width_ms.checked_mul(u64::from(*tumbling_window_count));
-                        match (
-                            offset_below(*child, |id| payloads.get(&id).copied()),
-                            width_ms,
-                        ) {
-                            (Some(end_offset_ms), Some(width_ms)) => ScanWindow::Within {
-                                end_offset_ms,
-                                width_ms: i64::try_from(width_ms).unwrap_or(i64::MAX),
-                            },
-                            _ => ScanWindow::Unbounded,
-                        }
-                    }
+                    Some(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })) => todo!(
+                        "#1207 PR 6: the window a chain read through a TimeRange over it summarizes"
+                    ),
                     Some(payload) => {
                         pending.extend(payload.children().into_iter().copied());
                         continue;

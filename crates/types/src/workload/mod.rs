@@ -445,12 +445,21 @@ pub enum DataArrival {
         /// it, when the source does not declare both its `series_count` and
         /// its `sample_interval` ([`SourceFacts`]).
         rows_per_second: f64,
+        /// How late a row may arrive relative to the newest row of its
+        /// series, in milliseconds. `None`: a PromQL source is taken to
+        /// arrive in order, and a SQL source gets no ingestion-time counter
+        /// build.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_out_of_order_ms: Option<u64>,
     },
     /// Older rows are stored and new rows keep arriving.
     Mixed {
         /// Rows (PromQL samples) arriving per second over all sources, as
         /// for [`DataArrival::Ingesting`].
         rows_per_second: f64,
+        /// As for [`DataArrival::Ingesting`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_out_of_order_ms: Option<u64>,
     },
     /// Not declared: no summary is built at ingestion time.
     #[default]
@@ -461,9 +470,12 @@ impl DataArrival {
     /// Rows arriving per second, when the data is ingesting or mixed.
     pub fn rows_per_second(&self) -> Option<f64> {
         match self {
-            Self::Ingesting { rows_per_second } | Self::Mixed { rows_per_second } => {
-                Some(*rows_per_second)
+            Self::Ingesting {
+                rows_per_second, ..
             }
+            | Self::Mixed {
+                rows_per_second, ..
+            } => Some(*rows_per_second),
             Self::AtRest | Self::Unknown => None,
         }
     }
@@ -1378,7 +1390,10 @@ mod tests {
     #[test]
     fn arrival_rate_and_sample_interval_are_validated() {
         let with = |rows_per_second: f64, sample_interval: Option<u64>| DataWorkload {
-            arrival: DataArrival::Mixed { rows_per_second },
+            arrival: DataArrival::Mixed {
+                rows_per_second,
+                max_out_of_order_ms: None,
+            },
             sources: BTreeMap::from([(
                 "m".to_string(),
                 SourceFacts {
@@ -1611,6 +1626,7 @@ mod tests {
             data_workload: Some(DataWorkload {
                 arrival: DataArrival::Ingesting {
                     rows_per_second: 1_000.0,
+                    max_out_of_order_ms: None,
                 },
                 sources: BTreeMap::from([(
                     "requests_total".to_string(),

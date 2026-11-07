@@ -344,19 +344,8 @@ pub fn run_stages_until(
         return Ok(stages);
     }
     let logical = run.logical_asap_candidates.as_ref().expect("set above");
-    let physical = match generate_physical_asap_memo_candidates(
-        logical,
-        entries,
-        data,
-        models.deployment_capabilities.query_time_results_retained,
-        models.deployment_capabilities.raw_data_retained,
-    ) {
-        Ok(physical) => physical,
-        Err(error) => {
-            run.selection = Err(SelectionError::PhysicalASAPCandidates(error.to_string()));
-            return Ok(stages);
-        }
-    };
+    let physical =
+        generate_physical_asap_memo_candidates(logical, data, models.deployment_capabilities);
     if until == RunUntil::Stage2 {
         run.physical_asap_candidates = Some(physical);
         return Ok(stages);

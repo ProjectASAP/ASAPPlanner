@@ -17,7 +17,7 @@
 //! G1:  TimeRange 60s     <- G0
 //! G2:  Aggregate rate()  <- G1
 //!     [0]  Pass1       FinalizeExactAccumulator ← SummaryAgg                                       inputs=[G1]
-//!     [1]  TumblingWindows  new  FinalizeExactAccumulator ← SummaryMerge ← SummaryTumblingWindowChain tumbling_window_count=6 tumbling_window_width_ms=10000  inputs=[G0]
+//!     [1]  TumblingWindows  new  FinalizeExactAccumulator ← SummaryMerge ← SummaryTumblingWindowChain tumbling_window_width_ms=10000  inputs=[G0]
 //! ```
 
 use std::fmt::Write;
