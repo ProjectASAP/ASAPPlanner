@@ -43,10 +43,10 @@ asap_planner (--workload <file>)... --run-until stage0|stage1_pass1|stage1_pass2
 | --- | --- |
 | `--workload <file>` | A `PlanningWorkload` JSON file: the queries, their requirements and recurrence, and the data-source facts. Repeat it to plan several files together, including PromQL and SQL files; sources they share must have the same facts. Required. |
 | `--run-until <stage>` | The last stage to run. Every stage up to and including it is printed. Required. |
-| `--format text\|json` | `text` (the default) for reading; `json` for an `asap-stage-pipeline/v1` document. |
+| `--format text\|json` | `text` (the default) for reading; `json` for an `asap-stage-pipeline/v2` document. |
 | `--out <file>` | Write to this file instead of standard output. |
 | `--sql-catalog-table <json>` | One SQL table a SQL workload reads, as `{"name", "columns": [{"name", "type", "nullable"}], "time_index"}`. Repeat it per table. |
-| `--cost-inputs <file>` | The cost model and its prices (`CostInputs` JSON). The files in `tools/dag-viewer/cost-inputs/` are ready to use. Without it, the built-in usage-over-time model is used. Stage 3 prices only usage-over-time models (`aws-fargate-us-east-1.json` is one); a provisioned- or cluster-capacity model ends Stage 3 with an `UnsupportedCostModel` error. |
+| `--cost-inputs <file>` | The cost model and its costs (`CostInputs` JSON). The files in `tools/dag-viewer/cost-inputs/` are ready to use. Without it, the built-in usage-over-time model is used. Stage 3 costs only usage-over-time models (`aws-fargate-us-east-1.json` is one); a provisioned- or cluster-capacity model ends Stage 3 with an `UnsupportedCostModel` error. |
 | `--deployment-capabilities <file>` | What the deployment can do, e.g. `{"raw_data_retained": true, "query_time_results_retained": false}`. Set it to match your deployment. |
 | `--ignore-accuracy-guarantees` | Accept candidates without an accuracy guarantee. By default each query's accuracy requirement is enforced. |
 
@@ -61,7 +61,7 @@ under the stage that failed.
 | `--run-until` | Prints, after the stages before it |
 | --- | --- |
 | `stage0` | The frontends' query DAGs and their memo groups. |
-| `stage1_pass1` | Stage 1 Pass 1: each computation's candidates, and the candidates pruned with their reason. |
+| `stage1_pass1` | Stage 1 Pass 1: each computation's candidates. |
 | `stage1_pass2` | Stage 1 Pass 2: the memo after local window composition (a candidate for every legal tumbling-window width), then the memo after the sharing rules, which Stage 2 implements. |
 | `stage2` | Stage 2: the physical candidates and the ones pruned. |
 | `stage3` | Stage 3: the selected plan, its cost per node, each query's accepted accuracy and the search status. |
@@ -73,7 +73,7 @@ plan is the best over all of them.
 
 The example below plans the checked-in
 [range-heavy workload](../../tools/dag-viewer/memo-examples/promql/rangeheavy-t8-t5-1h.json)
-with raw data retained and AWS Fargate prices:
+with raw data retained and AWS Fargate costs:
 
 ```sh
 echo '{"raw_data_retained": true, "query_time_results_retained": false}' > capabilities.json

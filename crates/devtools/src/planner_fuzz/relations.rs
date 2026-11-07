@@ -29,7 +29,7 @@ use super::generate::{
     label_value, looser, tighter, OuterAggregation, OuterOp, PromqlSpec, QuerySpec, RangeFunction,
     SqlAggregate,
 };
-use super::{FuzzQuery, FuzzWorkload, Language, Planned, Planner, Priced};
+use super::{Costed, FuzzQuery, FuzzWorkload, Language, Planned, Planner};
 
 /// A metamorphic relation the tester checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -257,7 +257,7 @@ pub enum Witness {
     /// `q`'s root estimate over a `SummaryMerge` of its state and the state
     /// of `W`'s last query (the other selection, added to `W`).
     UnionWithLast,
-    /// `q`'s tumbling-window chain lengthened to cover `window_ms`: every reader of
+    /// `q`'s tumbling-window chain lengthened to cover `window_ms`: every consumer of
     /// the chain in `W`'s plan merges its old newest tumbling windows of the longer
     /// chain, and `q'` merges all of them, then applies `rollup` when set.
     LongerWindow {
@@ -270,7 +270,7 @@ pub enum Witness {
     GraftWithOperand { text: String, operand: String },
     /// `W ∪ {q'}` planned with UnivMon as the only sketch family, so the
     /// planner sizes one UnivMon for both statistics (its summary-capability
-    /// rule), priced with every family.
+    /// rule), costed with every family.
     UnivMonOnly,
 }
 
@@ -304,7 +304,7 @@ pub struct Measurement {
     /// The derived or added query's text, for a relation that adds one.
     pub related_query: Option<String>,
     /// The witness (marginal relations) or the confirming plan (a violated
-    /// monotonicity relation: the other side's logical plan priced for this
+    /// monotonicity relation: the other side's logical plan costed for this
     /// side).
     pub witness: Option<WitnessReport>,
     /// The bound `related_cost_per_second` was checked against, tolerance
@@ -321,7 +321,7 @@ pub struct WitnessReport {
     pub derivation: Option<Witness>,
     pub cost_per_second: f64,
     pub plan: String,
-    /// Marginal relations: `W`'s selected logical plan priced the same way.
+    /// Marginal relations: `W`'s selected logical plan costed the same way.
     pub base_reference_cost_per_second: Option<f64>,
     /// `cost_per_second − base_reference_cost_per_second`.
     pub derive_cost_per_second: Option<f64>,
@@ -329,9 +329,9 @@ pub struct WitnessReport {
     /// operators alone) and their operators.
     pub derived_node_cost_per_second: Option<f64>,
     pub derived_operators: Vec<String>,
-    /// Whether the witness's `Filter` on a group key kept its input's
-    /// guarantee, which Stage 1's guarantee composition does not give it
-    /// (so the witness passes Stage 3 only under that rule).
+    /// Whether the witness derives `q'` by a `Filter` on a group key, which
+    /// keeps its input's guarantee only by that rule (the witness's
+    /// accuracy is not checked; the draft notes it).
     pub key_filter_keeps_input_guarantee: bool,
 }
 
@@ -341,7 +341,7 @@ pub enum Outcome {
     Holds(Measurement),
     Violated(Measurement),
     /// Not applicable to this workload, a side failed to plan, or no
-    /// witness could be built or priced.
+    /// witness could be built or costed.
     Inconclusive {
         reason: String,
     },
@@ -852,7 +852,7 @@ fn alternate_value(value: &str) -> String {
 /// a node `replace` maps is replaced (its inputs are not visited), and
 /// every node above a replaced one is rebuilt over its new inputs with its
 /// schema derived again. Unchanged sub-DAGs keep their `Rc`, so sharing is
-/// kept.
+/// retained.
 pub fn rewrite(
     node: &Rc<OperatorNode>,
     replace: &mut dyn FnMut(&Rc<OperatorNode>) -> Option<Rc<OperatorNode>>,
@@ -957,14 +957,14 @@ fn with_root_estimate(
     let Some(NonASAPOp::Project { cols, child }) = root.non_asap() else {
         return Ok(estimate);
     };
-    let mut kept = Vec::new();
+    let mut remaining = Vec::new();
     for item in cols {
         let ScalarExpr::Column(index) = item.expr else {
             return Err("q's root projection is not of plain columns".into());
         };
         let name = &child.schema.fields[index].name;
         match estimate.schema.fields.iter().position(|f| f.name == *name) {
-            Some(new) => kept.push(ProjectItem {
+            Some(new) => remaining.push(ProjectItem {
                 alias: item.alias.clone(),
                 expr: ScalarExpr::Column(new),
             }),
@@ -972,7 +972,7 @@ fn with_root_estimate(
             None => return Err(format!("the new estimate has no column {name}")),
         }
     }
-    let cols = kept;
+    let cols = remaining;
     OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
         cols,
         child: estimate,
@@ -1623,7 +1623,7 @@ pub fn related_workloads(
     Ok((w.clone(), related, None))
 }
 
-/// The other side's logical plan priced for `workload` (its first
+/// The other side's logical plan costed for `workload` (its first
 /// `keep` roots): a plan for `workload` the search could have selected.
 fn confirming(
     planner: &Planner,
@@ -1631,11 +1631,11 @@ fn confirming(
     roots: Option<&Vec<QueryRoot>>,
     keep: usize,
 ) -> Option<WitnessReport> {
-    let priced = planner.price(workload, &roots?[..keep], false).ok()?;
+    let costed = planner.cost(workload, &roots?[..keep], false).ok()?;
     Some(WitnessReport {
         derivation: None,
-        cost_per_second: priced.cost_per_second,
-        plan: priced.selected,
+        cost_per_second: costed.cost_per_second,
+        plan: costed.selected,
         base_reference_cost_per_second: None,
         derive_cost_per_second: None,
         derived_node_cost_per_second: None,
@@ -1711,11 +1711,11 @@ fn evaluate_inner(planner: &mut Planner, check: &Check) -> Result<Outcome, Strin
     })
 }
 
-/// The marginal relation: the cheapest witness that builds and prices,
+/// The marginal relation: the cheapest witness that builds and costs,
 /// against the planner's marginal cost. Violated only when both the
 /// relation (`Δ > derive_cost + tolerance`) and its plain reading (the
 /// witness is cheaper than the planner's `W ∪ {q'}` by more than the
-/// tolerance) fail, so a search that prices `W` below Stage 3's price of
+/// tolerance) fail, so a search that costs `W` below Stage 3's cost of
 /// the same plan cannot make a false violation.
 fn evaluate_marginal(
     planner: &mut Planner,
@@ -1730,12 +1730,12 @@ fn evaluate_marginal(
         return inconclusive("the search keeps no logical plan for W");
     };
     let base_reference = planner
-        .reference_price(base_workload, &base_roots)
-        .or_else(|e| inconclusive(format!("W's plan does not price: {e}")))?;
-    let mut best: Option<(Witness, Priced)> = None;
+        .reference_cost(base_workload, &base_roots)
+        .or_else(|e| inconclusive(format!("W's plan does not cost: {e}")))?;
+    let mut best: Option<(Witness, Costed)> = None;
     let mut failures = Vec::new();
     for witness in &derived.witnesses {
-        let priced = witness_roots(
+        let costed = witness_roots(
             planner,
             witness,
             base_workload,
@@ -1744,35 +1744,33 @@ fn evaluate_marginal(
             &base_roots,
             check.target,
         )
-        .and_then(|roots| {
-            planner.price(related, &roots, matches!(witness, Witness::Filter { .. }))
-        });
-        match priced {
-            Ok(priced)
+        .and_then(|roots| planner.cost(related, &roots, true));
+        match costed {
+            Ok(costed)
                 if best
                     .as_ref()
-                    .is_none_or(|(_, b)| priced.cost_per_second < b.cost_per_second) =>
+                    .is_none_or(|(_, b)| costed.cost_per_second < b.cost_per_second) =>
             {
-                best = Some((witness.clone(), priced))
+                best = Some((witness.clone(), costed))
             }
             Ok(_) => {}
             Err(e) => failures.push(e),
         }
     }
-    let Some((witness, priced)) = best else {
+    let Some((witness, costed)) = best else {
         return inconclusive(format!("no witness: {}", failures.join("; ")));
     };
-    let derive_cost = priced.cost_per_second - base_reference.cost_per_second;
+    let derive_cost = costed.cost_per_second - base_reference.cost_per_second;
     let delta = with.cost_per_second - base.cost_per_second;
     let tolerance = planner.settings.tolerance(with.cost_per_second);
     let violated = delta > derive_cost + tolerance
-        && with.cost_per_second > priced.cost_per_second + tolerance;
+        && with.cost_per_second > costed.cost_per_second + tolerance;
     let summary = format!(
         "cost(W ∪ {{q'}}) − cost(W) = {:.6} − {:.6} = {delta:.6}; derive_cost = {:.6} (witness {:.6} − W's plan {:.6}); tolerance {tolerance:.6}",
         with.cost_per_second,
         base.cost_per_second,
         derive_cost,
-        priced.cost_per_second,
+        costed.cost_per_second,
         base_reference.cost_per_second,
     );
     let key_filter = matches!(witness, Witness::Filter { .. });
@@ -1784,15 +1782,15 @@ fn evaluate_marginal(
         related_query: Some(derived.query.text().to_string()),
         witness: Some(WitnessReport {
             derivation: Some(witness),
-            cost_per_second: priced.cost_per_second,
-            plan: priced.selected.clone(),
+            cost_per_second: costed.cost_per_second,
+            plan: costed.selected.clone(),
             base_reference_cost_per_second: Some(base_reference.cost_per_second),
             derive_cost_per_second: Some(derive_cost),
-            derived_node_cost_per_second: Some(priced.derived_root.cost_per_second),
-            derived_operators: priced.derived_root.operators.clone(),
+            derived_node_cost_per_second: Some(costed.derived_root.cost_per_second),
+            derived_operators: costed.derived_root.operators.clone(),
             key_filter_keeps_input_guarantee: key_filter,
         }),
-        bound_per_second: (base.cost_per_second + derive_cost).max(priced.cost_per_second)
+        bound_per_second: (base.cost_per_second + derive_cost).max(costed.cost_per_second)
             + tolerance,
         tolerance_per_second: tolerance,
         summary,

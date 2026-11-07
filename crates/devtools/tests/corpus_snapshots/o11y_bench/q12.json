@@ -71,32 +71,28 @@
                   "Plain": "timestamp"
                 },
                 "name": "ts",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "float64"
                 },
                 "name": "value",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "job",
-                "nullable": true,
-                "table": null
+                "nullable": true
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "$promql_series_identity",
-                "nullable": false,
-                "table": null
+                "nullable": false
               }
             ],
             "time_index": 0,
@@ -114,24 +110,7 @@
       ],
       "nodes": [
         {
-          "guarantee": {
-            "provenance": [
-              {
-                "kind": "exact",
-                "reason": "exact over exact inputs"
-              }
-            ],
-            "spec": {
-              "accuracy_metric": "absolute",
-              "accuracy_scope": "per_value",
-              "error": {
-                "op": "zero"
-              },
-              "failure_probability": {
-                "op": "zero"
-              }
-            }
-          },
+          "guarantee": null,
           "id": 0,
           "lifetime": "None",
           "output_schema": {
@@ -142,32 +121,28 @@
                   "Plain": "timestamp"
                 },
                 "name": "ts",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "float64"
                 },
                 "name": "value",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "job",
-                "nullable": true,
-                "table": null
+                "nullable": true
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "$promql_series_identity",
-                "nullable": false,
-                "table": null
+                "nullable": false
               }
             ],
             "time_index": 0,
@@ -209,32 +184,28 @@
                         "Plain": "timestamp"
                       },
                       "name": "ts",
-                      "nullable": false,
-                      "table": null
+                      "nullable": false
                     },
                     {
                       "dtype": {
                         "Plain": "float64"
                       },
                       "name": "value",
-                      "nullable": false,
-                      "table": null
+                      "nullable": false
                     },
                     {
                       "dtype": {
                         "Plain": "utf8"
                       },
                       "name": "job",
-                      "nullable": true,
-                      "table": null
+                      "nullable": true
                     },
                     {
                       "dtype": {
                         "Plain": "utf8"
                       },
                       "name": "$promql_series_identity",
-                      "nullable": false,
-                      "table": null
+                      "nullable": false
                     }
                   ],
                   "time_index": 0,
@@ -255,24 +226,7 @@
           }
         },
         {
-          "guarantee": {
-            "provenance": [
-              {
-                "kind": "exact",
-                "reason": "exact over exact inputs"
-              }
-            ],
-            "spec": {
-              "accuracy_metric": "absolute",
-              "accuracy_scope": "per_value",
-              "error": {
-                "op": "zero"
-              },
-              "failure_probability": {
-                "op": "zero"
-              }
-            }
-          },
+          "guarantee": null,
           "id": 1,
           "lifetime": "None",
           "output_schema": {
@@ -283,32 +237,28 @@
                   "Plain": "timestamp"
                 },
                 "name": "ts",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "float64"
                 },
                 "name": "value",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "job",
-                "nullable": true,
-                "table": null
+                "nullable": true
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "$promql_series_identity",
-                "nullable": false,
-                "table": null
+                "nullable": false
               }
             ],
             "time_index": 0,

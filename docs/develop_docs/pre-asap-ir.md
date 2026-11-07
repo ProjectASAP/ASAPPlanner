@@ -658,7 +658,7 @@ SELECT srcip FROM packets UNION ALL SELECT dstip FROM packets
 
 **Fields:**
 - `kind` — which set operation (union/intersect/except).
-- `all` — whether duplicates are kept (`ALL`) or removed.
+- `all` — whether duplicates are retained (`ALL`) or removed.
 - `left` — the left branch.
 - `right` — the right branch.
 

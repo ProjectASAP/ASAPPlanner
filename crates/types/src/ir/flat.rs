@@ -39,7 +39,7 @@ pub struct FlatDag {
 }
 
 /// Flatten the DAG reachable from `roots`. Each distinct `Rc` (by pointer)
-/// becomes one node, so sharing is kept. Also returns the original node for
+/// becomes one node, so sharing is retained. Also returns the original node for
 /// each id.
 pub fn flatten(roots: &[QueryRoot]) -> (FlatDag, Vec<Rc<OperatorNode>>) {
     let mut ids = HashMap::new();

@@ -182,7 +182,7 @@ async fn production_sql_distinct_region_service_rollup() {
 }
 
 // Exercise multi-input operators through the production route under more than
-// three heterogeneous query schedules, not just the local pricing kernel.
+// three heterogeneous query schedules, not just the local costing kernel.
 #[test]
 fn production_binary_queries_use_joint_prices_with_mixed_schedules() {
     use asap_types::workload::{DemandEstimate, Rate};

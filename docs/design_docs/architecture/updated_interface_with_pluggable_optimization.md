@@ -91,7 +91,7 @@ pub struct PlanOutput {
     pub scalar_roots: Vec<(usize, ScalarExpr)>,  // standalone scalar entries
     pub scalar_plans: Vec<QueryPlan>,            // the operator sub-DAGs they read
     pub selection: Option<Selection>,            // how plan selection chose, if the pass selects
-    pub tumbling_window_retention_ms: BTreeMap<PhysicalASAPNodeId, u64>, // kept tumbling-window chains' retention
+    pub tumbling_window_retention_ms: BTreeMap<PhysicalASAPNodeId, u64>, // materialized tumbling-window chains' retention
 }
 
 pub struct QueryPlan {
@@ -127,7 +127,7 @@ tracked in #580.
 | Prepare roots | Entries in `entries()` order, the accuracy target from each entry's `requirements`; PromQL operator roots carry the series identity (`with_promql_series_identity`) where it has a realization |
 | Stage 1: logical ASAP-aware optimization | `pass1_memo` (Pass 1), then `generate_logical_asap_memo_candidates` (Pass 2) over every tumbling-window width |
 | Stage 2: physical ASAP-aware optimization | `generate_physical_asap_memo_candidates` |
-| Stage 3: plan selection | `select_plan`: check accuracy and latency, price under the cost model, select one plan; the facade builds it with Stage 2's `AssignmentRealizer::realize` |
+| Stage 3: plan selection | `select_plan`: check accuracy and latency, cost under the cost model, select one plan; the facade builds it with Stage 2's `AssignmentRealizer::realize` |
 
 `run_planning` runs these steps over the query-language frontends' roots
 (Stage 0) and returns `PlanningRun`: Pass 1's candidates, the Pass 2 and

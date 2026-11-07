@@ -3,7 +3,7 @@ name = "asap-stage3-plan-selection"
 version = "0.1.0"
 edition = "2021"
 
-# #509 Stage 3, plan selection: the only stage that prices plans, with the
+# #509 Stage 3, plan selection: the only stage that costs plans, with the
 # planning models (accuracy from `asap-accuracy`; cost from `asap-cost`)
 # Reads only Stage 2's output (`asap_types::stages`) and calls Stage 2 through
 # the facade's `AssignmentRealizer`: no dependency on Stages 1 or 2, nor on

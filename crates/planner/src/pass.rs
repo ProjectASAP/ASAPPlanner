@@ -213,7 +213,7 @@ pub struct PlanOutput {
     /// One plan per distinct operator sub-DAG a scalar root reads, keyed by
     /// that scalar's entry, in `scalar_roots` order.
     pub scalar_plans: Vec<QueryPlan>,
-    /// How plan selection chose the plan, when the pass selects among priced
+    /// How plan selection chose the plan, when the pass selects among costed
     /// candidates.
     pub selection: Option<Selection>,
     /// The selected plan as the realizer built it (its physical DAG, each

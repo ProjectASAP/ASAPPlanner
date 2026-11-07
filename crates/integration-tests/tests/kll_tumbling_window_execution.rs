@@ -16,8 +16,8 @@ use asap_types::ir::operator::{GroupKeys, Reduction, Source};
 use asap_types::ir::physical_export::PhysicalASAPDAG;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{
-    DataType, Field, FieldDataType, GroupingStrategy, Schema, SketchAlgorithm, SketchStatistic,
-    SummaryUpdate,
+    DataType, Field, FieldDataType, GroupingStrategy, Schema, SketchAlgorithm, SketchParams,
+    SketchStatistic, SummaryUpdate,
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot, TimeRangeKind};
 use futures::{executor::block_on, StreamExt};
@@ -31,7 +31,8 @@ use std::{
 
 const TUMBLING_WINDOW_WIDTH_MS: i64 = 60_000;
 
-fn family(_k: u32) -> FieldDataType {
+/// A KLL state's field type: the family only; its `k` is the node's θ.
+fn family() -> FieldDataType {
     FieldDataType::Sketch(SketchAlgorithm::Kll, Default::default())
 }
 /// `t(ts, value)`, time index `ts`.
@@ -87,7 +88,7 @@ fn fixture() -> Fixture {
             }));
             new(asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
                 child: range,
-                family: family(200),
+                family: family(),
                 input: SummaryUpdate::column(ColumnRef::Named("value".into())),
                 reduction: Reduction::Reduce(GroupKeys::default()),
                 grouping: GroupingStrategy::PerSubpopulationInstance,
@@ -136,6 +137,13 @@ fn fixture() -> Fixture {
         }
     }
     let mut dag = dag;
+    // θ of each tumbling window's KLL build (k = 200).
+    for &id in &tumbling_window_ids {
+        dag.nodes[id as usize].parameters = Some(SketchParams::Kll {
+            k: 200,
+            failure_probability: None,
+        });
+    }
     let views = views_at(&mut dag, &tumbling_window_ids).unwrap();
     Fixture {
         dag,
@@ -225,7 +233,7 @@ fn restore(schema: SchemaRef, states: &[Arc<dyn AggregateCore>]) -> Batch {
             .iter()
             .map(|state| {
                 vec![Value::Summary {
-                    family: family(200),
+                    family: family(),
                     state: state.clone(),
                 }]
             })
@@ -379,17 +387,10 @@ fn five_tumbling_windows_roundtrip_and_shared_merge_runs_once() {
     }
 }
 
-/// Relabelled KLL parameters, a view bound in another schema and a missing
-/// view fail explicitly.
+/// A view bound in another schema and a missing view fail explicitly.
 #[test]
-fn tumbling_windows_reject_parameters_schema_and_missing_binding() {
+fn tumbling_windows_reject_schema_and_missing_binding() {
     let fixture = fixture();
-    let schema = schema_of(&fixture.dag, fixture.tumbling_windows[0]);
-    let wrong = Value::Summary {
-        family: family(200),
-        state: Arc::new(DatasketchesKLLAccumulator::new(128)),
-    };
-    assert!(Batch::try_new(schema, vec![vec![wrong]]).is_err());
     let compiled = compile(&fixture.dag, &fixture.views, &[fixture.merge]).unwrap();
     let missing = try_execute(&compiled, InMemoryDataStore::default(), query_scope())
         .err()

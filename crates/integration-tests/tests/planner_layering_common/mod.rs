@@ -41,7 +41,7 @@ pub fn needs_merge(form: WindowForm, query_window_ms: u64) -> bool {
 }
 
 /// `roots` with no node shared between queries: each query reads its own
-/// copy of every node it reaches (sharing within one query is kept). Pass 1
+/// copy of every node it reaches (sharing within one query is retained). Pass 1
 /// composes a candidate from memo groups, so queries that read an identical
 /// sub-DAG share its group's node; this is the fixtures' independent
 /// variant of such a candidate.
@@ -441,7 +441,7 @@ pub fn window_form(dag: &impl ExportedDag, build: NodeId) -> WindowForm {
 }
 
 /// How far back from an evaluation a materialized node's materialized output
-/// reaches in event time, derived the way plan selection prices what it
+/// reaches in event time, derived the way plan selection costs what it
 /// keeps: a tumbling-window chain keeps its `N`
 /// tumbling windows of width `w`, plus the one being built when maintained at
 /// ingestion time; a whole-window build keeps its window, and the next one

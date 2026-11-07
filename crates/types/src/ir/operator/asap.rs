@@ -63,7 +63,7 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
         /// Merge only the newest `n` tumbling windows of the one `SummaryTumblingWindowChain` this
         /// merge reads, `1 ≤ n <` its `tumbling_window_count`: the state of one build
         /// over the newest `n · tumbling_window_width_ms` of the chain's window, so a
-        /// query over a shorter window reads a chain kept for a longer one.
+        /// query over a shorter window reads a chain retained for a longer one.
         /// `None` merges every input state.
         #[serde(
             default,

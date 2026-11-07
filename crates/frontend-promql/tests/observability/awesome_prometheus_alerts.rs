@@ -301,7 +301,7 @@ fn without_grouping_lowers_to_the_exclusion_form() {
     // `(min without (cpu) (rate(node_cpu_seconds_total{mode="idle"}[1h]))) > 0.8`
     // — `without(...)` groups by every label except the listed ones. The
     // complement isn't enumerated (open usage-derived schema); the excluded
-    // labels are stored and the kept set is runtime-resolved (issue #39).
+    // labels are stored and the retained set is runtime-resolved (issue #39).
     let qe = ok(r#"(min without (cpu) (rate(node_cpu_seconds_total{mode="idle"}[1h]))) > 0.8"#);
     // Top level is the `> 0.8` comparison; the `min without (cpu)` is its LHS.
     let NonASAPOp::Filter { child: lhs, .. } = qe.expect_non_asap() else {

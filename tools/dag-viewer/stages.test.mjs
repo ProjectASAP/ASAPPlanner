@@ -128,26 +128,16 @@ test('the physical candidate list is in plan-number order', () => {
   assert.deepEqual(ids.sort((a, b) => call('byPlanNumber', a, b)), ['P1', 'P2', 'P2-m1', 'P3', 'P10']);
 });
 
-test('the search header says why the search ran as one and which queries were interchangeable', () => {
+test('the search header names the search and its report', () => {
   const searched = {
-    search: 'default',
-    workload: { queries: [{ id: 'p50' }, { id: 'p90' }, { id: 'p99' }, { id: 'total' }] },
-    stage3_plan_selection: {
-      search: {
-        candidates_checked: 12, queries: [], components: [], raw_scan_candidates_skipped: 0, raw_scan_assignments_skipped: 0,
-        searched_as_one: 'not_in_joint_space',
-        interchangeable_queries: [[0, 1, 2]],
-      },
-    },
+    search: 'candidate-connections',
+    stage3_plan_selection: { search_report: { status: 'time_limit', cost_lower_bound_per_second: null, milp_variables: 9, milp_constraints: 4,
+      model_construction_ms: 1, solver_ms: 2, validation_ms: 3 } },
   };
-  assert.equal(
-    call('searchText', searched),
-    'default search · 12 physical candidates checked · searched as one: not in joint space · interchangeable queries: (p50, p90, p99)',
-  );
-  // Components searched separately carry no reason; no classes, no text.
-  searched.stage3_plan_selection.search.searched_as_one = null;
-  searched.stage3_plan_selection.search.interchangeable_queries = undefined;
-  assert.equal(call('searchText', searched), 'default search · 12 physical candidates checked');
+  assert.equal(call('searchText', searched),
+    'candidate-connection search · search time limit · MILP 9 variables, 4 constraints · model 1 ms, solve 2 ms, validation 3 ms');
+  assert.equal(call('searchText', { search: 'candidate-connections', stage3_plan_selection: {} }), 'candidate-connection search');
+  assert.equal(call('searchText', {}), '');
 });
 
 test('the validator accepts a document with and without its memo section', { skip }, () => {
@@ -156,10 +146,6 @@ test('the validator accepts a document with and without its memo section', { ski
   assert.deepEqual([...call('validateStagePipeline', memo)], []);
   delete memo.memo;
   assert.deepEqual([...call('validateStagePipeline', memo)], []);
-});
-
-test('a document of another search has no memo-MILP view', { skip }, () => {
-  assert.equal(call('memoSearchView', doc), null);
 });
 
 test('Stage 2 nodes carry their timing as a class the lane colors', { skip }, () => {
@@ -173,91 +159,24 @@ test('Stage 2 nodes carry their timing as a class the lane colors', { skip }, ()
   assert.ok(nodesOf(elements).filter((n) => n.classes === 'queryTime').every((n) => n.data.label.includes('⏱ query time')));
 });
 
-// Current reports retain nullable bounds and cannot certify a timeout incumbent.
-test('candidate search report exposes objective and partial status', () => {
-  const document = { search: 'candidate-connections', workload: { queries: [] },
-    stage3_plan_selection: { search: { candidates_checked: 3, incumbent_cost: 2,
-      candidate_connections: { status: 'time_limit', objective: 'cluster_capacity',
-        calibration_scope: 'frozen', lower_bound: null, relative_gap: null,
-        refinements: 3, solver_ms: 4 } } } };
-  const view = call('memoSearchView', document);
-  assert.equal(view.summary.certified, false);
-  assert.equal(view.summary.lowerBound, null);
-  assert.equal(view.summary.objective, 'cluster_capacity');
-  assert.match(call('searchText', document), /candidate-connection search/);
-});
-
-test('a document written before the tumbling-window rename (#1163) upgrades to today\'s names', { skip }, () => {
-  // Today's document, written back with the old names.
-  const old = JSON.parse(JSON.stringify(doc)
-    .replaceAll('"SummaryTumblingWindowChain"', '"PaneChain"')
-    .replaceAll('"tumbling_window_width_ms"', '"pane_width_ms"')
-    .replaceAll('"tumbling_window_count"', '"pane_count"')
-    .replaceAll('"newest_tumbling_windows"', '"newest_panes"')
-    .replaceAll('"tumbling_window_retention_ms"', '"pane_retention_ms"')
-    .replaceAll('"tumbling_window_width_domain"', '"pane_width_domain"')
-    .replaceAll('"tumbling_window_widths_pending"', '"pane_widths_pending"'));
-  assert.ok(JSON.stringify(old).includes('"PaneChain"'));
-  assert.deepEqual(call('upgradeTumblingWindowNames', old), doc);
-});
-
-// A document written before `MemoSteps` was dropped opens with today's
-// steps: the window-composition step is gone and Pass 2's output is `pass2`.
-test('a memo written with the window-composition step upgrades to stage0, pass1, pass2', () => {
-  const old = {
-    stage1_logical_asap_optimization: { pass1_pruned: [{ group: 1 }] },
-    memo: {
-      steps: [{ step: 'stage0', title: 'S0' }, { step: 'pass1', title: 'P1' }, { step: 'pass2', title: 'windows' }, { step: 'concrete_states', title: 'rules' }],
-      enumeration: { step: 'concrete_states', per_step: { stage0: 1, pass1: 2, pass2: 3, concrete_states: 4 }, choices: [] },
-    },
-  };
-  const doc = JSON.parse(JSON.stringify(call('upgradeMemoSteps', old)));
-  assert.deepEqual(doc.memo.steps.map((s) => [s.step, s.title]), [['stage0', 'S0'], ['pass1', 'P1'], ['pass2', 'Stage 1, Pass 2']]);
-  assert.deepEqual(doc.memo.enumeration.per_step, { stage0: 1, pass1: 2, pass2: 4 });
-  assert.equal(doc.memo.enumeration.step, 'pass2');
-  assert.deepEqual(doc.stage1_logical_asap_optimization, { pruned_candidates: [{ group: 1 }] });
-  // A candidate the dropped step added stays marked new in `pass2`.
-  const marked = JSON.parse(JSON.stringify(call('upgradeMemoSteps', {
-    memo: {
-      steps: [
-        { step: 'stage0', groups: [] },
-        { step: 'pass2', groups: [{ id: 2, candidates: [{ node: 5, children: [1], added: true }] }] },
-        { step: 'concrete_states', groups: [{ id: 2, candidates: [{ node: 5, children: [1], added: false }, { node: 6, children: [], added: false }] }] },
-      ],
-    },
-  })));
-  assert.deepEqual(marked.memo.steps[1].groups[0].candidates.map((c) => c.added), [true, false]);
-  // An old listing of the dropped step lists nothing; the document stays valid.
-  const listedDropped = {
-    memo: {
-      steps: [{ step: 'stage0' }, { step: 'pass1' }, { step: 'pass2' }, { step: 'concrete_states' }],
-      enumeration: { step: 'pass2', limit: 10, per_step: { stage0: { count: 1, complete: true }, pass2: { count: 2, complete: true }, concrete_states: { count: 9, complete: false } }, choices: [{ id: 'E1' }], priced: { count: 1 } },
-    },
-  };
-  const enumeration = JSON.parse(JSON.stringify(call('upgradeMemoSteps', listedDropped))).memo.enumeration;
-  assert.equal(enumeration.step, 'pass2');
-  assert.deepEqual(enumeration.choices, []);
-  assert.equal(enumeration.priced, null);
-  assert.deepEqual(enumeration.per_step, { stage0: { count: 1, complete: true }, pass2: { count: 9, complete: false } });
-  // A current document is left as it is.
-  const current = { memo: { steps: [{ step: 'stage0' }, { step: 'pass1' }, { step: 'pass2' }] } };
-  assert.deepEqual(JSON.parse(JSON.stringify(call('upgradeMemoSteps', JSON.parse(JSON.stringify(current))))), current);
-});
-
-test('a memo written before the rename upgrades its pane origin', () => {
-  const group = { candidate_count_by_origin: { pass1: 1, panes: 2 }, candidates: [{ origin: 'pass1' }, { origin: 'panes' }] };
-  assert.deepEqual(call('upgradeTumblingWindowNames', group),
-    { candidate_count_by_origin: { pass1: 1, tumbling_windows: 2 }, candidates: [{ origin: 'pass1' }, { origin: 'tumbling_windows' }] });
-});
-
-test('the upgrade keeps key order, never lets an old key overwrite a new one, and renames old MILP report origins', () => {
-  const body = { family: 'f', pane_width_ms: 1, pane_count: 2, child: 0 };
-  call('upgradeTumblingWindowNames', body);
-  assert.deepEqual(Object.keys(body), ['family', 'tumbling_window_width_ms', 'tumbling_window_count', 'child']);
-  const both = { pane_count: 1, tumbling_window_count: 2 };
-  call('upgradeTumblingWindowNames', both);
-  assert.equal(both.tumbling_window_count, 2);
-  const report = { candidates_by_origin: { Pass1: 1, Panes: 3 }, chosen: { origin: 'Panes' } };
-  assert.deepEqual(call('upgradeTumblingWindowNames', report),
-    { candidates_by_origin: { Pass1: 1, TumblingWindows: 3 }, chosen: { origin: 'TumblingWindows' } });
+// Stage 2's physical and pruned candidates and Stage 3's pruned candidates
+// are checked: ids in range, the fields the memo view reads present.
+test('physical and pruned candidate violations are reported', () => {
+  const edge = { producer: 0, satisfies_logical_requirement: true, satisfies_physical_requirement: true, rejection: null, selected: true };
+  const stage2 = () => ({
+    physical_candidates: [
+      { id: 0, group: 0, index_in_group: 0, properties: { timing: 'ingestion_time', lifetime: 'None' }, inputs: [] },
+      { id: 1, group: 1, index_in_group: 0, properties: { timing: 'query_time', lifetime: { OneEvaluation: 'Memory' } },
+        inputs: [{ group: 0, requirement: { parameter_floor_for_required_accuracy: null }, edges: [edge] }] },
+    ],
+    pruned_candidates: [{ group: 1, index_in_group: 0, properties: { timing: 'ingestion_time', lifetime: 'None' }, reason: 'no_ingestion_pipeline' }],
+  });
+  const stage3 = () => ({ pruned_candidates: [{ group: 1, candidate: 1, reason: 'dominated_by', dominated_by: 0 }] });
+  const check = (edit) => { const s2 = stage2(); const s3 = stage3(); edit(s2, s3); return [...call('validatePrunedAndPhysical', s2, s3)].join('\n'); };
+  assert.equal(check(() => {}), '');
+  assert.match(check((s2) => { s2.physical_candidates[1].id = 5; }), /physical_candidates\[1\]: needs id 1/);
+  assert.match(check((s2) => { s2.physical_candidates[1].inputs[0].edges[0].producer = 7; }), /inputs\[0\]: needs group, requirement and edges/);
+  assert.match(check((s2) => { delete s2.pruned_candidates[0].properties; }), /pruned_candidates\[0\]: needs group, index_in_group, properties and reason/);
+  assert.match(check((s2, s3) => { s3.pruned_candidates[0].dominated_by = 9; }), /stage3_plan_selection.pruned_candidates\[0\]/);
+  assert.match(check((s2) => { delete s2.physical_candidates; }), /must be arrays/);
 });

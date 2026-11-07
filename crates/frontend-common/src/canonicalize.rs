@@ -68,7 +68,7 @@ pub(crate) fn canonicalize(
 /// itself read so (a branch gives the whole output of a `Concat` that is
 /// the answer). A rewrite that changes a node's columns, as heavy-hitter
 /// promotion does, applies only to a node outside this set, whose columns
-/// are the query's answer: rewritten under a positional reader, a column
+/// are the query's answer: rewritten under a positional lookup, a column
 /// index would name another column.
 fn read_by_position(root: &Rc<OperatorNode>) -> HashSet<*const OperatorNode> {
     let nodes = OperatorNode::reachable(root);
@@ -388,13 +388,13 @@ fn try_rewrite_row_number_top_k(
     }
     // Each SELECT item as a column of the window's input, under its output
     // name; `rn` itself is not one.
-    let mut kept = Vec::with_capacity(select_list.len());
+    let mut remaining = Vec::with_capacity(select_list.len());
     for (item, field) in select_list.iter().zip(&node.schema.fields) {
         let ScalarExpr::Column(column) = item.expr else {
             return Ok(None);
         };
         match window_column(column) {
-            Some(underlying) if underlying < row_number => kept.push(ProjectItem {
+            Some(underlying) if underlying < row_number => remaining.push(ProjectItem {
                 alias: Some(field.name.clone()),
                 expr: ScalarExpr::Column(underlying),
             }),
@@ -415,33 +415,36 @@ fn try_rewrite_row_number_top_k(
             child: sorted,
         })
     };
-    // A column of `X` as a column of `Project{P}{X}`, if `P` keeps it.
-    let position_in_kept = |column: usize| {
-        kept.iter()
+    // A column of `X` as a column of `Project{P}{X}`, if `P` passes it through.
+    let position_in_projection = |column: usize| {
+        remaining
+            .iter()
             .position(|item| item.expr == ScalarExpr::Column(column))
     };
-    let partition_in_kept: Option<Vec<usize>> =
-        partition_by.iter().map(|&c| position_in_kept(c)).collect();
-    let order_in_kept: Option<Vec<SortKey>> = order_by
+    let partition_in_projection: Option<Vec<usize>> = partition_by
+        .iter()
+        .map(|&c| position_in_projection(c))
+        .collect();
+    let order_in_projection: Option<Vec<SortKey>> = order_by
         .iter()
         .map(|key| match key.expr {
-            ScalarExpr::Column(column) => position_in_kept(column).map(|position| SortKey {
+            ScalarExpr::Column(column) => position_in_projection(column).map(|position| SortKey {
                 expr: ScalarExpr::Column(position),
                 ..key.clone()
             }),
             _ => None,
         })
         .collect();
-    let rewritten = match (partition_in_kept, order_in_kept) {
+    let rewritten = match (partition_in_projection, order_in_projection) {
         (Some(partition), Some(order)) if !partition_by.is_without() => {
             let selected = new(NonASAPOp::Project {
-                cols: kept,
+                cols: remaining,
                 child: Rc::clone(ranked),
             })?;
             limit(GroupKeys::by(partition), order, selected)?
         }
         _ => new(NonASAPOp::Project {
-            cols: kept,
+            cols: remaining,
             child: limit(partition_by.clone(), order_by.clone(), Rc::clone(ranked))?,
         })?,
     };
@@ -978,7 +981,7 @@ mod tests {
         filter_cmp(col, CompareOpKind::Le, 5, child)
     }
 
-    /// `Project{ cols }` naming each kept column as SQL does (`c` for the
+    /// `Project{ cols }` naming each retained column as SQL does (`c` for the
     /// aggregate output).
     fn select(cols: &[usize], child: Rc<OperatorNode>) -> Rc<OperatorNode> {
         node(NonASAPOp::Project {
@@ -1080,7 +1083,7 @@ mod tests {
         assert_idempotent(&out);
     }
 
-    /// A tie-breaking second ORDER BY key is kept: the generic
+    /// A tie-breaking second ORDER BY key is retained: the generic
     /// per-partition `Limit{Sort}` sorts by both keys.
     #[test]
     fn rownumber_with_a_tie_breaking_key_keeps_both_sort_keys() {

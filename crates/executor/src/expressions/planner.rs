@@ -1106,11 +1106,11 @@ mod tests {
         .unwrap();
         let restored: CompiledExpression =
             serde_json::from_str(&serde_json::to_string(&compiled).unwrap()).unwrap();
-        for (job, kept) in [("api", false), ("db", false), ("web", true), ("api2", true)] {
+        for (job, remaining) in [("api", false), ("db", false), ("web", true), ("api2", true)] {
             let row = [Value::Utf8(job.into())];
             for expression in [&compiled, &restored] {
                 assert!(
-                    matches!(expression.evaluate(&row), Ok(Value::Bool(b)) if b == kept),
+                    matches!(expression.evaluate(&row), Ok(Value::Bool(b)) if b == remaining),
                     "{job}"
                 );
             }

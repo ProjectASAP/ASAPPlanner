@@ -484,7 +484,7 @@ impl<I: OperatorInput> NonASAPOp<I> {
     /// Whether two structurally equal copies of this node may be one shared
     /// node: every execution over the same input rows returns the same
     /// output rows, so one copy over their one input can be computed (or
-    /// stored) once and read by both readers.
+    /// stored) once and read by both consumers.
     ///
     /// Ties are the one place the input order decides: a `Sort` keeps tied
     /// rows in input order (a stable sort), and an exact top-k ranks with that
@@ -1637,10 +1637,17 @@ mod tests {
         };
         let s = agg.output_schema().unwrap();
         let names: Vec<_> = s.fields.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, vec!["job", "sum"], "kept `job`, dropped `instance`");
+        assert_eq!(
+            names,
+            vec!["job", "sum"],
+            "retained `job`, dropped `instance`"
+        );
         assert!(!s.closed, "a `without` result stays open");
         assert!(s.time_index.is_none());
-        assert!(s.unique_keys.is_empty(), "kept set unknown → no unique key");
+        assert!(
+            s.unique_keys.is_empty(),
+            "retained set unknown → no unique key"
+        );
     }
 
     #[test]
@@ -1665,7 +1672,7 @@ mod tests {
     }
 
     /// `rate` and `*_over_time` are per-series: every label survives and only
-    /// the sample value is replaced (kept named `value`).
+    /// the sample value is replaced (retained named `value`).
     #[test]
     fn per_series_reductions_preserve_labels() {
         for measure in [AggIntent::Rate, AggIntent::Avg { col: None }] {
@@ -1867,7 +1874,7 @@ mod tests {
     }
 
     /// `<vector> op <scalar>` takes the vector side's schema; the vector
-    /// match modifier is kept on the operator.
+    /// match modifier is retained on the operator.
     #[test]
     fn binary_op_schema_follows_the_vector_side_over_a_scalar_bridge() {
         let vector = node(scan(

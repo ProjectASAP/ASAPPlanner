@@ -19,7 +19,7 @@ pub(super) fn execute<'a>(
     let input = inputs.pop().ok_or_else(|| invalid("input missing"))?;
     match &operator.kind {
         // The predicate is one column per batch; Arrow's filter kernel then
-        // copies the kept cells of each plain column. State columns are
+        // copies the retained cells of each plain column. State columns are
         // shared, not copied.
         Kind::Filter(predicate) => {
             let predicate = predicate.at_evaluation_time(&context);

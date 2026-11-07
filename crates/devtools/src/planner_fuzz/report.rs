@@ -105,7 +105,7 @@ pub fn documented_patterns() -> Vec<DocumentedPattern> {
             note: "the merge operator is implemented; the docs name no Pass 2 rule that creates it",
         },
         DocumentedPattern {
-            pattern: "Tumbling windows kept across evaluations when the deployment retains query-time results",
+            pattern: "Tumbling windows materialized across evaluations when the deployment retains query-time results",
             doc_reference: "planner-layering.md Materialization L889–893",
             relation: Some(Relation::ResultsRetained),
             note: "a capability never raises cost",
@@ -192,7 +192,7 @@ pub struct Finding {
     pub shrink_attempts: Option<usize>,
     pub check: Check,
     pub measurement: Measurement,
-    /// The open issue a reader should compare it with, when the relation
+    /// The open issue to compare it with, when the relation
     /// matches one (a guess from the relation, not a proof).
     pub possibly_known_issue: Option<&'static str>,
     pub draft: PathBuf,
@@ -743,7 +743,7 @@ fn derivation_text(witness: &Witness) -> String {
              plan, planned with `W`"
         ),
         Witness::UnivMonOnly => {
-            "`W ∪ {q'}` planned with UnivMon as the only sketch family, priced with every family"
+            "`W ∪ {q'}` planned with UnivMon as the only sketch family, costed with every family"
                 .into()
         }
         Witness::LongerWindow { window_ms, rollup } => {
@@ -907,7 +907,7 @@ fn write_draft(
                 "Witness: `W`'s plan with `q'` derived by {}",
                 derivation_text(d)
             ),
-            None => "The other side's plan, priced for this workload".into(),
+            None => "The other side's plan, costed for this workload".into(),
         };
         text.push_str(&format!(
             "| {label} | `{}` | {:.6} |\n",
@@ -923,7 +923,7 @@ fn write_draft(
     match witness.and_then(|w| w.derive_cost_per_second.map(|d| (w, d))) {
         Some((w, derive_cost)) => text.push_str(&format!(
             "**Expected:** a candidate for `{related_name}` costing at most about {:.6} per second \
-             (the witness): `W`'s plan ({:.6} as Stage 3 prices it) plus `q'` derived for \
+             (the witness): `W`'s plan ({:.6} as `asap_cost::plan_cost` costs it) plus `q'` derived for \
              {derive_cost:.6}. Of that, the nodes only `q'` reads cost {:.6} ({}).\n\n",
             w.cost_per_second,
             w.base_reference_cost_per_second.unwrap_or_default(),
@@ -939,7 +939,7 @@ fn write_draft(
             check.relation.statement(),
             witness
                 .map(|w| format!(
-                    " The other side's plan prices at {:.6} per second for this workload.",
+                    " The other side's plan costs at {:.6} per second for this workload.",
                     w.cost_per_second
                 ))
                 .unwrap_or_default()
@@ -948,9 +948,10 @@ fn write_draft(
     text.push_str("## Why it happens\n\nNot diagnosed yet. ");
     if marginal {
         text.push_str(
-            "The witness is priced by Stage 2 and Stage 3 (`optimize_physical_asap`, \
-             `select_plan`) with the same models as the search, so the cheaper plan passes \
-             Stage 3's checks, but the search did not select it.",
+            "The witness is costed by `asap_cost::plan_cost` with the same cost inputs as \
+             the search, its nodes from `W`'s plan with the timing, lifetime and parameters \
+             that plan gave them, but the search did not select it. Its accuracy is not \
+             checked: `q'` is derived at `q`'s target or a looser one.",
         );
         if witness.is_some_and(|w| w.key_filter_keeps_input_guarantee) {
             text.push_str(
@@ -967,8 +968,8 @@ fn write_draft(
         );
         if witness.is_some() {
             text.push_str(
-                " The other side's logical plan, priced for this workload by Stage 2 and \
-                 Stage 3, is that plan.",
+                " The other side's plan, costed for this workload by \
+                 `asap_cost::plan_cost`, is that plan.",
             );
         }
     }

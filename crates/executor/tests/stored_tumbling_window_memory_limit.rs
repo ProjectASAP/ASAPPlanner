@@ -141,7 +141,7 @@ fn a_merge_that_allocates_past_the_limit_still_fails() {
 // pointers, not the sketches. Keeping 51% (no compaction) fits too.
 #[test]
 fn compacting_a_stored_tumbling_window_does_not_charge_its_shared_sketches() {
-    for kept in [980, 1_020] {
+    for remaining in [980, 1_020] {
         let (schema, tumbling_window) = tumbling_window_of(2_000);
         let mut dag = PhysicalDAG::default();
         dag.add(
@@ -153,7 +153,7 @@ fn compacting_a_stored_tumbling_window_does_not_charge_its_shared_sketches() {
         dag.add(
             1,
             vec![0],
-            Operator::limit(schema, kept, 0, vec![]).unwrap(),
+            Operator::limit(schema, remaining, 0, vec![]).unwrap(),
         )
         .unwrap();
         let context = RunContext::new(
@@ -174,7 +174,11 @@ fn compacting_a_stored_tumbling_window_does_not_charge_its_shared_sketches() {
             }
             Ok::<_, Error>(rows)
         });
-        assert_eq!(rows.unwrap(), kept as usize, "keeping {kept} rows");
+        assert_eq!(
+            rows.unwrap(),
+            remaining as usize,
+            "keeping {remaining} rows"
+        );
     }
 }
 

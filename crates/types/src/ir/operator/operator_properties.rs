@@ -32,11 +32,11 @@ impl ColState for ColumnRef {}
 ///
 /// ## `by` vs `without` (issue #39)
 ///
-/// The stored [`keys`](Self::keys) are **kept** labels for `by(...)` and
+/// The stored [`keys`](Self::keys) are **retained** labels for `by(...)` and
 /// **excluded** labels for `without(...)`. PromQL's `without(labels)` groups by
 /// every label *except* those listed; the complement can't be enumerated at
 /// lowering time under an open (usage-derived) schema, so it is deferred to the
-/// runtime — the excluded positions are stored, the kept set stays open. Only
+/// runtime — the excluded positions are stored, the retained set stays open. Only
 /// `Aggregate` ever produces the `without` form; `Sort` / `SQLWindowFunc` /
 /// `PromqlSeriesSample` groupings are always `by`.
 ///
@@ -74,7 +74,7 @@ impl<C> GroupKeys<C> {
         }
     }
     /// `without(keys)` — group by every label *except* these (issue #39). The
-    /// kept set is runtime-resolved; only the excluded positions are stored.
+    /// retained set is runtime-resolved; only the excluded positions are stored.
     pub fn without(keys: Vec<C>) -> Self {
         Self {
             keys,
@@ -85,7 +85,7 @@ impl<C> GroupKeys<C> {
     pub fn is_without(&self) -> bool {
         self.without
     }
-    /// The named keys — kept labels for `by`, excluded labels for `without`.
+    /// The named keys — retained labels for `by`, excluded labels for `without`.
     pub fn keys(&self) -> &[C] {
         &self.keys
     }
@@ -481,7 +481,7 @@ impl Reduction {
 
 impl<C> Reduction<C> {
     /// Shorthand for the common case — group by these (possibly empty)
-    /// keys, kept rather than excluded.
+    /// keys, retained rather than excluded.
     pub fn by(keys: Vec<C>) -> Self {
         Self::Reduce(GroupKeys::by(keys))
     }

@@ -90,7 +90,7 @@ pub fn physical_asap_dag_at_query_time(
 }
 
 /// The maintained-population sub-DAG for executor tests: `root` (below its
-/// projections, which are kept) replaced by `EvaluatePopulation(statistic)`
+/// projections, which are retained) replaced by `EvaluatePopulation(statistic)`
 /// over a current-series population of the single selector under it,
 /// grouped by `grouping`, with no matchers. The caller states the statistic
 /// and grouping; nothing is recognized. No planner pass offers this sub-DAG

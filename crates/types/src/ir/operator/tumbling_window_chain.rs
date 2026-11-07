@@ -267,8 +267,8 @@ fn named_as_chain<I: OperatorInput>(
         return Err(invalid("expected a summary build"));
     };
     let mut schema = summary_agg_schema(child.schema(), family, reduction)?;
-    for (field, kept) in schema.fields.iter_mut().zip(&chain.fields) {
-        field.name = kept.name.clone();
+    for (field, remaining) in schema.fields.iter_mut().zip(&chain.fields) {
+        field.name = remaining.name.clone();
     }
     Ok((build, schema))
 }

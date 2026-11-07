@@ -246,15 +246,15 @@ class WriteExamplesTests(unittest.TestCase):
         return calls
 
     def test_missing_documents_are_written_and_existing_ones_kept(self):
-        """Only the missing document is planned; an existing one is kept."""
+        """Only the missing document is planned; an existing one is left as it is."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "out").mkdir()
-            (root / "out" / "a.json").write_text("kept")
+            (root / "out" / "a.json").write_text("existing")
             calls = self.run_write(root, force=False)
             self.assertEqual(calls, [[str(server.BINARY), "--workload", str(root / "workloads" / "b.json"), *STAGE3_JSON,
                                       "--ignore-accuracy-guarantees", "--out", str(root / "out" / "b.json")]])
-            self.assertEqual((root / "out" / "a.json").read_text(), "kept")
+            self.assertEqual((root / "out" / "a.json").read_text(), "existing")
 
     def test_regenerate_rewrites_every_document(self):
         """--regenerate plans every entry again."""
@@ -320,7 +320,7 @@ class PlanEndpointTests(unittest.TestCase):
         }
         document = post_plan({"workload": workload, "deployment_capabilities": {"raw_data_retained": False},
                               "cost_model": "usage-over-time"}, "/api/plan-workload")
-        self.assertEqual(document["format"], "asap-stage-pipeline/v1")
+        self.assertEqual(document["format"], "asap-stage-pipeline/v2")
         self.assertEqual(document["run_until"], "stage3")
         self.assertEqual(document["accuracy_guarantees"], "ignored")
         self.assertEqual(document["workload"]["data_workload"]["sources"]["m"]["series_count"], 100)

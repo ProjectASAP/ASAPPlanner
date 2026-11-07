@@ -44,7 +44,7 @@ enum ScanInput {
         predicates: Vec<CompiledExpression>,
         /// `predicates` as the store receives them.
         predicate_hints: Vec<ScalarExpr<()>>,
-        /// The rows its readers read.
+        /// The rows its consumers read.
         window: ScanWindow,
     },
     /// A materialized view slot: exact, never re-filtered; its states are
@@ -305,7 +305,7 @@ impl Scan {
                     batch = keep_rows(batch, &keep)?;
                 }
                 // Each predicate is one column over the rows the earlier ones
-                // kept; over dictionary-encoded labels it is evaluated once
+                // retained; over dictionary-encoded labels it is evaluated once
                 // per distinct label value, not once per row.
                 for predicate in &predicates {
                     if batch.num_rows() == 0 {

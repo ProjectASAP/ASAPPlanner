@@ -64,8 +64,9 @@ fn plan(workload: &Value, args: &[String], scratch: &Path) -> Value {
 }
 
 /// Runs `asap_planner --run-until stage3 --format json` with `args`, which
-/// name its input (paths relative to the repository root); panics (a
-/// planner crash) on failure.
+/// name its input (paths relative to the repository root). A run whose plan
+/// selection failed still writes its document, with Stage 3's `error`,
+/// which is returned; any other failure (a planner crash) panics.
 fn asap_planner(args: &[String], scratch: &Path) -> Value {
     let output = scratch.join("document.json");
     let mut command = Command::new(env!("CARGO_BIN_EXE_asap_planner"));
@@ -76,12 +77,21 @@ fn asap_planner(args: &[String], scratch: &Path) -> Value {
         .arg("--out")
         .arg(&output);
     let result = command.output().unwrap();
-    assert!(
-        result.status.success(),
-        "{command:?} failed: {}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    serde_json::from_str(&std::fs::read_to_string(output).unwrap()).unwrap()
+    let document: Option<Value> = std::fs::read_to_string(&output)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok());
+    match document {
+        Some(document)
+            if result.status.success()
+                || document["stage3_plan_selection"]["error"].is_string() =>
+        {
+            document
+        }
+        _ => panic!(
+            "{command:?} failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        ),
+    }
 }
 
 /// The selected plan's search status (`optimal`), or null without a plan.

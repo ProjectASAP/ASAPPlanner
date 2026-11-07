@@ -49,9 +49,9 @@ pub struct RawDataRequest<'a> {
     /// `(start, end]` in milliseconds, on the slot's time column.
     ///
     /// - Query run at evaluation time `T`: the smallest range covering
-    ///   every window the `Scan`'s readers read
+    ///   every window the `Scan`'s consumers read
     ///   ([`PhysicalASAPDAG::scan_window`](planner_types::ir::physical_export::PhysicalASAPDAG::scan_window));
-    ///   `None` when a reader reads the `Scan` outside a window.
+    ///   `None` when a consumer reads the `Scan` outside a window.
     /// - Ingestion run: the run's `(window_start_ms, window_end_ms]` when
     ///   the `Scan` is read through windows, else `None`. Each
     ///   `TimeRange(w)` then keeps `(window_end_ms - w, window_end_ms]`,

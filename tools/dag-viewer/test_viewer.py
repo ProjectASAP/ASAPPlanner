@@ -25,10 +25,9 @@ HERE = Path(__file__).resolve().parent
 WORKLOADS = HERE / "workloads"
 # #509 Example 1: two PromQL panels over one metric, accuracy guarantees enforced.
 EXAMPLE1 = WORKLOADS / "planner-layering" / "example1.json"
-# A hand-written priced `memo` section for Example 1: four enumerated
-# Pass 1 DAGs, E2 selected, E3 cheaper than it, E4 invalid.
-MEMO_ENUMERATION = HERE / "test-fixtures" / "memo-enumeration-small.json"
-# A hand-written `memo` section over example1's two queries (memo.js tests).
+# A hand-written `memo` section over example1's two queries, with Stage 2's
+# physical and pruned candidates and Stage 3's pruned candidates (memo.js
+# tests).
 MEMO_SMALL = HERE / "test-fixtures" / "memo-small.json"
 # #1005's ratio-of-quantiles query.
 RATIO_OF_QUANTILES = HERE / "memo-examples" / "promql" / "ratio-of-quantiles-5m.json"
@@ -207,7 +206,7 @@ class ValidationTests(unittest.TestCase):
     def test_pass1_failure_is_valid(self):
         """A run whose Pass 1 failed has Stage 0, the error and no plan."""
         self.doc["stage1_logical_asap_optimization"] = {"combinations": 0, "capped": False, "candidates": [], "error": "Pass 1: bad"}
-        self.doc["stage2_physical_asap_optimization"] = {"candidates": [], "pruned": []}
+        self.doc["stage2_physical_asap_optimization"] = {"candidates": [], "physical_candidates": [], "pruned_candidates": []}
         self.doc["stage3_plan_selection"] = {"error": "Pass 1: bad"}
         self.assertEqual(self.validate(self.doc), [])
 
@@ -236,9 +235,12 @@ class ValidationTests(unittest.TestCase):
             "physical root shape": lambda d: physical(d)[0]["dag"]["roots"].__setitem__(0, {"Operator": 3}),
             "physical roots per query": lambda d: physical(d)[0]["dag"]["roots"].pop(),
             "edge endpoint": lambda d: physical(d)[0]["dag"]["edges"][0].update(producer=42),
-            "pruned from_logical": lambda d: d["stage2_physical_asap_optimization"]["pruned"].append({"from_logical": "L99", "display_name": "x", "reason": "r"}),
+            "edge producer names no physical candidate": lambda d: next(
+                c for c in d["stage2_physical_asap_optimization"]["physical_candidates"] if c["inputs"])["inputs"][0]["edges"][0].update(producer=99999),
+            "stage 2 pruned without reason": lambda d: d["stage2_physical_asap_optimization"]["pruned_candidates"][0].pop("reason"),
+            "stage 3 pruned dominated by no physical candidate": lambda d: selection(d)["pruned_candidates"].append(
+                {"group": 0, "candidate": 0, "reason": "dominated_by", "dominated_by": 99999}),
             "selected plan missing": lambda d: physical(d)[0].update(id="P9"),
-            "unaccounted candidate": lambda d: physical(d).append(dict(physical(d)[0], id="P2")),
             "per_node": lambda d: selection(d)["cost"]["per_node"].update({"99": {"cost_per_second": 1, "multiplier": 1}}),
             "cost per second": lambda d: selection(d)["cost"].pop("cost_per_second"),
             "missing stage": lambda d: d.pop("stage2_physical_asap_optimization"),
@@ -279,18 +281,15 @@ class CandidateRowTests(unittest.TestCase):
         self.js = stages_js()
         self.doc = example1()
 
-    def test_pruned_and_composition_errors_come_last_with_their_reasons(self):
-        """A Stage 2 pruned candidate and a Stage 1 candidate that did not
-        compose are rows too, after the Stage 3 ones."""
-        self.doc["stage2_physical_asap_optimization"]["pruned"].append({"from_logical": "L2", "display_name": "Q1 exact", "reason": "no implementation"})
+    def test_composition_errors_come_last_with_their_reasons(self):
+        """A Stage 1 candidate that did not compose is a row too, after the
+        selected one."""
         self.doc["stage1_logical_asap_optimization"]["candidates"].append({"id": "L99", "display_name": "Q1 exact", "error": "cannot substitute"})
         rows = self.js.call("stageCandidateRows", self.doc)
+        self.assertEqual(rows[0]["status"], "selected")
         self.assertEqual(
-            rows[-2:],
-            [
-                {"id": "L2", "logical": "L2", "display_name": "Q1 exact", "total": None, "rank": None, "status": "pruned", "reason": "no implementation"},
-                {"id": "L99", "logical": "L99", "display_name": "Q1 exact", "total": None, "rank": None, "status": "composition error", "reason": "cannot substitute"},
-            ],
+            rows[-1],
+            {"id": "L99", "logical": "L99", "display_name": "Q1 exact", "total": None, "status": "composition error", "reason": "cannot substitute"},
         )
 
     def test_failed_selection_leaves_candidates_not_judged(self):
@@ -306,7 +305,7 @@ class CandidateRowTests(unittest.TestCase):
         accepted and whether the target set one; invalid rows say nothing."""
         rows = self.js.call("stageCandidateRows", self.doc)
         for row in rows:
-            if row["status"] in ("selected", "costlier"):
+            if row["status"] == "selected":
                 self.assertEqual(row["accepted"], "q1: metric not set; accepted exact; q2: metric not set; accepted exact")
             else:
                 self.assertIsNone(row["accepted"])
@@ -497,7 +496,7 @@ class SearchTests(unittest.TestCase):
 
     def test_header_names_the_search_and_its_report(self):
         """The header names the candidate-connection search and its MILP
-        report; an archived document's search still renders."""
+        report."""
         text = self.js.call("searchText", self.doc)
         self.assertTrue(text.startswith("candidate-connection search · "), text)
         report = self.doc["stage3_plan_selection"]["search_report"]
@@ -506,21 +505,6 @@ class SearchTests(unittest.TestCase):
         self.assertNotIn("round", text)
         outputs = self.doc["stage3_plan_selection"]["selected_dag"]["node_of_output_reference"]
         self.assertEqual(len(outputs), 2)
-        # Archived documents (before Stage 3's `Selection`) still render
-        # their search's checked candidates and component list.
-        archived = json.loads(json.dumps(self.doc))
-        search = {"candidates_checked": 3, "candidate_connections": {"independent_components": 2}}
-        archived["stage3_plan_selection"]["search"] = search
-        self.assertIn("3 physical candidates checked", self.js.call("searchText", archived))
-        self.assertIn("2 independent components searched separately",
-                      self.js.call("searchText", archived))
-        search["candidate_connections"]["independent_components"] = 1
-        search["components"] = [{}, {}]
-        self.assertNotIn("components searched separately",
-                         self.js.call("searchText", archived))
-        del search["candidate_connections"]
-        self.assertIn("2 independent components searched separately",
-                      self.js.call("searchText", archived))
 
 @unittest.skipIf(py_mini_racer is None, "viewer tests require py_mini_racer")
 @needs_planner
@@ -693,15 +677,15 @@ class TumblingWindowsAndPathsTests(unittest.TestCase):
         self.assertIn("shift: 10 s", shift["data"]["label"])
         edges = [(e["data"]["source"], e["data"]["target"]) for e in lane_edges(elements)]
         child = f"n{self.body['child']}"
-        # The chain's input feeds every tumbling window's TimeRange; every tumbling window feeds the chain's readers.
+        # The chain's input feeds every tumbling window's TimeRange; every tumbling window feeds the chain's consumers.
         self.assertIn((child, f"n{chain_id}p0r"), edges)
         self.assertIn((child, f"n{chain_id}p1s"), edges)
         self.assertIn((f"n{chain_id}p1s", f"n{chain_id}p1r"), edges)
         self.assertIn((f"n{chain_id}p1r", f"n{chain_id}p1"), edges)
-        readers = {c for (p, c) in [(e["producer"], e["consumer"]) for e in self.dag["edges"]] if p == chain_id}
-        for reader in readers:
-            self.assertEqual(sum(1 for edge in edges if edge == (f"n{chain_id}p0", f"n{reader}")), 1)
-            self.assertEqual(sum(1 for (p, c) in edges if c == f"n{reader}" and p.startswith(f"n{chain_id}p") and not p.endswith(("r", "s"))), count)
+        consumers = {c for (p, c) in [(e["producer"], e["consumer"]) for e in self.dag["edges"]] if p == chain_id}
+        for consumer in consumers:
+            self.assertEqual(sum(1 for edge in edges if edge == (f"n{chain_id}p0", f"n{consumer}")), 1)
+            self.assertEqual(sum(1 for (p, c) in edges if c == f"n{consumer}" and p.startswith(f"n{chain_id}p") and not p.endswith(("r", "s"))), count)
 
     def test_each_node_lists_the_queries_reaching_it_and_shared_nodes_say_so(self):
         """Each node lists the queries reaching it; shared nodes say so."""
@@ -726,23 +710,23 @@ class TumblingWindowsAndPathsTests(unittest.TestCase):
     def test_a_query_reaches_its_nodes_and_edges_only(self):
         """Highlighting a query keeps exactly its nodes and edges."""
         elements = self.elements()
-        kept = set(self.js.call("stageQueryElementIds", elements, "q3"))
-        nodes = {e["data"]["id"] for e in lane_nodes(elements) if e["data"]["id"] in kept}
+        shown = set(self.js.call("stageQueryElementIds", elements, "q3"))
+        nodes = {e["data"]["id"] for e in lane_nodes(elements) if e["data"]["id"] in shown}
         self.assertEqual(nodes, {e["data"]["id"] for e in lane_nodes(elements) if "q3" in e["data"]["reachedBy"]})
         for edge in lane_edges(elements):
-            self.assertEqual(edge["data"]["id"] in kept, edge["data"]["source"] in nodes and edge["data"]["target"] in nodes)
-        self.assertNotIn(f"n{self.chain['id']}", kept)
+            self.assertEqual(edge["data"]["id"] in shown, edge["data"]["source"] in nodes and edge["data"]["target"] in nodes)
+        self.assertNotIn(f"n{self.chain['id']}", shown)
 
     def test_a_node_neighborhood_is_everything_upstream_and_downstream(self):
         """A node's neighborhood is everything upstream and downstream of it."""
         elements = self.elements()
         chain = f"n{self.chain['id']}"
-        kept = set(self.js.call("stageNeighborhoodIds", elements, chain))
-        self.assertIn(chain, kept)
-        self.assertIn(f"n{self.body['child']}", kept)  # upstream: the scan
+        shown = set(self.js.call("stageNeighborhoodIds", elements, chain))
+        self.assertIn(chain, shown)
+        self.assertIn(f"n{self.body['child']}", shown)  # upstream: the scan
         for root in (self.dag["roots"][0], self.dag["roots"][1]):  # downstream: q1's and q2's roots
-            self.assertIn(f"n{root}", kept)
-        self.assertNotIn(f"n{self.dag['roots'][2]}", kept)  # q3 reads another metric
+            self.assertIn(f"n{root}", shown)
+        self.assertNotIn(f"n{self.dag['roots'][2]}", shown)  # q3 reads another metric
 
     def test_materialized_views_group_by_tumbling_window_chain(self):
         """Materialized views are grouped by their tumbling-window chain."""
@@ -796,7 +780,7 @@ class PageTests(unittest.TestCase):
         """Every element id the scripts look up is on the page."""
         page = (HERE / "index.html").read_text()
         ids = set(re.findall(r'id="([^"]+)"', page))
-        for script in ("app.js", "workload-sets.js", "enumeration.js", "memo.js"):
+        for script in ("app.js", "workload-sets.js", "memo.js"):
             used = set(re.findall(r"\$\('([^']+)'\)", (HERE / script).read_text()))
             with self.subTest(script):
                 self.assertLessEqual(used, ids)
@@ -878,7 +862,7 @@ class AppTests(unittest.TestCase):
     def page(self, search="", files=None, hash_=""):
         js = py_mini_racer.MiniRacer()
         js.eval(STUB_DOM)
-        for name in ("node-style.js", "stages.js", "enumeration.js", "memo.js"):
+        for name in ("node-style.js", "stages.js", "memo.js"):
             js.eval((HERE / name).read_text())
         for url, text in (files or {}).items():
             js.eval(f"__files[{json.dumps(url)}] = {json.dumps(text)};")
@@ -924,7 +908,7 @@ class AppTests(unittest.TestCase):
         """A Stage 1 failure still draws Stage 0 and shows the error."""
         doc = example1()
         doc["stage1_logical_asap_optimization"] = {"combinations": 0, "capped": False, "candidates": [], "error": "Pass 1: bad accuracy"}
-        doc["stage2_physical_asap_optimization"] = {"candidates": [], "pruned": []}
+        doc["stage2_physical_asap_optimization"] = {"candidates": [], "physical_candidates": [], "pruned_candidates": []}
         doc["stage3_plan_selection"] = {"error": "Pass 1: bad"}
         js = self.page("?doc=d.json", {"d.json": json.dumps(doc)})
         self.assertIn("Stage 1 failed: Pass 1: bad accuracy", js.eval("__els['rank-meta'].textContent"))
@@ -953,9 +937,9 @@ class AppTests(unittest.TestCase):
         """A per_node entry without a numeric `cost` does not break the details panel."""
         js = self.page("?doc=e1.json", {"e1.json": json.dumps(example1())})
         js.eval("""__taps['cy2 node']({ target: { data() { return {
-            kind: 'Scan', nodeId: 0, rootFor: [], timing: 'query_time', cost: { detail: 'not priced' },
+            kind: 'Scan', nodeId: 0, rootFor: [], timing: 'query_time', cost: { detail: 'not costed' },
             node: { payload: { NonASAP: { Scan: {} } }, guarantee: null } }; } } })""")
-        self.assertIn("not priced", self.text(js, "details"))
+        self.assertIn("not costed", self.text(js, "details"))
 
     def test_a_workload_document_fills_the_data_workload_and_materialized_views(self):
         """A planned workload fills the data workload, deployment and views panels."""
@@ -1025,8 +1009,6 @@ class AppTests(unittest.TestCase):
         copy = json.loads(json.dumps(physical["candidates"][0]))
         selected, copy["id"] = copy["id"], "P-copy"
         physical["candidates"].append(copy)
-        # Only the reference pricer's table (`--exhaustive`) lists pruned Stage 2 candidates.
-        doc["reference_pricing"] = {"pruned_candidates": [{"candidate": "P-copy", "cause": "costlier", "reason": "a copy of the selected plan"}]}
         js = self.page("?doc=s.json", {"s.json": json.dumps(doc)})
         chain = next(e for e in self.ev(js, "__rendered.cy2") if e["data"].get("kind") == "SummaryTumblingWindowChain")["data"]["id"]
         tap = lambda id_: js.eval(f"__taps['cy2 node']({{ target: {{ data() {{ return __rendered.cy2.find((e) => e.data.id === {json.dumps(id_)}).data; }}, id() {{ return {json.dumps(id_)}; }} }} }})")
@@ -1051,101 +1033,19 @@ class AppTests(unittest.TestCase):
         js.eval("__taps['cy2 background']({ target: { isNode: false } })")
         self.assertEqual(js.eval("__dimmed.cy2.length"), 0)
 
-    def test_a_document_without_memo_hides_the_enumerated_dags(self):
-        """A memo without an enumeration hides the Enumerated DAGs panel."""
-        js = self.page("?doc=e1.json", {"e1.json": json.dumps(example1())})
-        self.assertTrue(js.eval("__els.enumPanel.hidden"))
-        self.assertEqual(js.eval("__els.enumRows.innerHTML"), "")
-
-    def test_clicking_an_enumerated_dag_draws_it_in_the_stage1_lane(self):
-        """The panel lists the enumerated choices; a click draws the
-        choice's composed DAG in lane 1 and clears lane 2."""
-        doc = {**example1(), **json.loads(MEMO_ENUMERATION.read_text())}
-        js = self.page("?doc=d.json", {"d.json": json.dumps(doc)})
-        self.assertFalse(js.eval("__els.enumPanel.hidden"))
-        meta = js.eval("__els['enum-meta'].textContent")
-        self.assertIn("Pass 1: 4", meta)
-        self.assertIn("1 cheaper than the selected plan", meta)
-        rows = js.eval("__els.enumRows.innerHTML")
-        self.assertEqual(rows.count("<li>"), 4)
-        self.assertIn('data-id="E3" aria-pressed="false" class="cheaper"', rows)
-        e3 = doc["memo"]["enumeration"]["choices"][2]
-        js.eval("__els.enumRows.__on.click({ target: { closest() { return { dataset: { id: 'E3' } }; } } })")
-        drawn = [e for e in self.ev(js, "__rendered.cy1") if "source" not in e["data"]]
-        self.assertEqual(len(drawn), len(self.memo_node_dag(js, doc, e3["roots"])["nodes"]))
-        self.assertIn("enumerated DAG E3", self.text(js, "lane1-meta"))
-        self.assertIn("no physical plan for an enumerated DAG", js.eval("__els['lane2-meta'].textContent"))
-        self.assertIn('data-id="E3" aria-pressed="true"', js.eval("__els.enumRows.innerHTML"))
-        # Choosing a Stage 1 candidate again releases the row.
-        js.eval("__els.pick1.__on.change({ target: { value: 'L1' } })")
-        self.assertNotIn('aria-pressed="true"', js.eval("__els.enumRows.innerHTML"))
-
-    def memo_node_dag(self, js, doc, roots):
-        """The page's `memoNodeDag` over the document's node table."""
-        return json.loads(js.eval(f"JSON.stringify(memoNodeDag({json.dumps(doc['memo']['nodes'])}, {json.dumps(roots)}))"))
-
-    def enumerated_roots(self, doc, choice_id):
-        js = self.page("?doc=d.json", {"d.json": json.dumps(doc)})
-        js.eval(f"__els.enumRows.__on.click({{ target: {{ closest() {{ return {{ dataset: {{ id: {json.dumps(choice_id)} }} }}; }} }} }})")
-        roots = {e["data"]["nodeId"]: e["data"]["rootFor"] for e in self.ev(js, "__rendered.cy1") if e["data"].get("rootFor")}
-        return roots, self.text(js, "lane1-meta")
-
-    def test_enumerated_roots_are_named_by_their_root_groups_queries(self):
-        """Roots come in increasing root-group id, not query order: with G3
-        the root of q2 and G7 the root of q1, the first root is q2's."""
-        doc = {**example1(), **json.loads(MEMO_ENUMERATION.read_text())}
-        groups = {g["id"]: g for g in doc["memo"]["steps"][1]["groups"]}
-        groups[3]["roots_of"], groups[7]["roots_of"] = [1], [0]
-        roots, _ = self.enumerated_roots(doc, "E1")
-        js = self.page("?doc=d.json", {"d.json": json.dumps(doc)})
-        dag = self.memo_node_dag(js, doc, doc["memo"]["enumeration"]["choices"][0]["roots"])
-        first, second = (r["Operator"] for r in dag["roots"])
-        self.assertEqual(roots, {first: ["q2"], second: ["q1"]})
-
-    def test_a_root_group_shared_by_two_queries_is_both_queries_root(self):
-        """One root group answering q1 and q2: its root is the root of both,
-        and highlighting q2 keeps it bright."""
-        doc = {**example1(), **json.loads(MEMO_ENUMERATION.read_text())}
-        groups = {g["id"]: g for g in doc["memo"]["steps"][1]["groups"]}
-        groups[3]["roots_of"], groups[7]["roots_of"] = [0, 1], []
-        choice = doc["memo"]["enumeration"]["choices"][0]
-        choice["roots"] = choice["roots"][:1]
-        js = self.page("?doc=d.json", {"d.json": json.dumps(doc)})
-        root = self.memo_node_dag(js, doc, choice["roots"])["roots"][0]["Operator"]
-        js.eval("__els.enumRows.__on.click({ target: { closest() { return { dataset: { id: 'E1' } }; } } })")
-        roots = {e["data"]["nodeId"]: e["data"]["rootFor"] for e in self.ev(js, "__rendered.cy1") if e["data"].get("rootFor")}
-        self.assertEqual(roots, {root: ["q1", "q2"]})
-        js.eval("__els.queryPick.__on.change({ target: { value: 'q2' } })")
-        self.assertNotIn(f"n{root}", self.ev(js, "__dimmed.cy1"))
-        self.assertNotIn("not matched", self.text(js, "lane1-meta"))
-
-    def test_enumerated_roots_without_the_steps_memo_name_no_query(self):
-        """Without the steps' memo, enumerated roots name no query."""
-        doc = {**example1(), **json.loads(MEMO_ENUMERATION.read_text())}
-        doc["memo"]["steps"] = doc["memo"]["steps"][:1]
-        # The selected choice names groups of the dropped steps, which the
-        # Memo view's checks reject.
-        doc["memo"]["selected_choice"] = None
-        doc["memo"]["selected_choice_unavailable"] = "steps dropped by the test"
-        roots, meta = self.enumerated_roots(doc, "E1")
-        self.assertEqual(sorted(roots.values()), [["root group #1"], ["root group #2"]])
-        self.assertIn("roots not matched to queries", meta)
-
-    def test_a_broken_enumeration_refuses_the_document(self):
-        """A malformed enumeration refuses the document."""
-        doc = {**example1(), **json.loads(MEMO_ENUMERATION.read_text())}
-        doc["memo"]["enumeration"]["limit"] = 0
-        js = self.page("?doc=d.json", {"d.json": json.dumps(doc)})
-        self.assertIn("limit must be a positive integer", js.eval("__els.queries.innerHTML"))
-
     def test_an_invalid_document_shows_an_error(self):
         """An invalid document shows an error."""
         js = self.page("?doc=bad.json", {"bad.json": json.dumps({"format": "nope"})})
         self.assertIn("Could not load", js.eval("__els.queries.innerHTML"))
 
     def memo_page(self):
+        """Example 1 with the fixture's memo, Stage 2 physical and pruned
+        candidates and Stage 3 pruned candidates."""
         doc = example1()
-        doc.update(json.loads(MEMO_SMALL.read_text()))
+        fixture = json.loads(MEMO_SMALL.read_text())
+        doc["memo"] = fixture["memo"]
+        doc["stage2_physical_asap_optimization"].update(fixture["stage2_physical_asap_optimization"])
+        doc["stage3_plan_selection"].update(fixture["stage3_plan_selection"])
         return self.page("?doc=m.json", {"m.json": json.dumps(doc)})
 
     def tap_memo(self, js, element_id):
@@ -1174,7 +1074,7 @@ class AppTests(unittest.TestCase):
         self.assertIn("7 groups (+1) · 30 candidates (+20)", meta)
         self.assertIn("selected plan's candidates highlighted (7 groups)", meta)
         # G2 is collapsed to its origin counts; the rest list their candidates.
-        self.assertEqual(self.memo_ids(js, "g2"), ["g2opass1", "g2otumbling_windows", "g2oshared_build"])
+        self.assertEqual(self.memo_ids(js, "g2"), ["g2opass1", "g2otumbling_windows", "g2osummary_input"])
         js.eval("window.MemoView.selectStep(0)")
         self.assertEqual(len(self.memo_ids(js)), 6)
         self.assertIn("6 groups · 0 candidates", self.text(js, "memoView-meta"))
@@ -1186,26 +1086,41 @@ class AppTests(unittest.TestCase):
         self.tap_memo(js, "g2otumbling_windows")
         self.assertEqual(len(self.memo_ids(js, "g2")), 13)
         self.assertIn("Memo group G2", self.text(js, "details"))
-        self.assertIn("20 (13 listed): 2 Pass1, 9 TumblingWindows, 9 SharedBuild", self.text(js, "details"))
-        self.assertIn("selected plan#2 rate accumulator over G6's panes, variant 1 (TumblingWindows)", self.text(js, "details"))
+        self.assertIn("20 (13 listed): 2 Pass1, 9 TumblingWindows, 9 SummaryInput", self.text(js, "details"))
+        # Two candidates of G2 are used, one per execution context.
+        self.assertIn("selected plan#2 rate accumulator over G6's panes, variant 1 (TumblingWindows); "
+                      "#8 rate accumulator over a summary input, variant 1 (SummaryInput)", self.text(js, "details"))
         self.tap_memo(js, "g2")
         self.assertEqual(len(self.memo_ids(js, "g2")), 3)
 
-    def test_tapping_a_candidate_lists_its_own_nodes(self):
-        """Tapping a memo candidate lists its own nodes and the groups it reads."""
+    def test_tapping_a_candidate_lists_its_properties_and_physical_candidates(self):
+        """Tapping a memo candidate shows its θ, ω and input floors and its
+        physical candidates, each input's producer edges admissible (✓) or
+        rejected (✗ with the reason), the selected edge marked."""
         js = self.memo_page()
         self.tap_memo(js, "g5c1")
         details = self.text(js, "details")
         self.assertIn("Candidate #1 of G5", details)
-        self.assertIn("chosen for this group", details)
-        self.assertIn("Project", details)
-        self.assertIn("SummaryEstimate", details)
-        memo = json.loads(MEMO_SMALL.read_text())["memo"]
-        g5 = next(g for g in memo["steps"][-1]["groups"] if g["id"] == 5)
-        boundary = next(c for c in g5["candidates"] if c["index"] == 1)["group_of_node"]
-        self.assertEqual(list(boundary.values()), [1])
-        self.assertIn(f"Reads G1 (node {next(iter(boundary))}).", details)
-        self.assertNotIn("node 0</code>", js.eval("__els.details.innerHTML"))
+        self.assertIn("used by the selected plan", details)
+        self.assertIn("θ CmsWithHeap(depth=7, heap_size=10, width=272)", details)
+        self.assertIn("window layout ωnone", details)
+        self.assertIn("input parameter floorsG1: none", details)
+        self.assertIn("fusesG4", details)
+        self.assertIn("C2 (query_time, OneEvaluation(Memory)) · pruned by Stage 3: dominated_by (dominated by C3)", details)
+        self.assertIn("✗ C1: α^phys = 0", details)
+        self.assertIn("C3 (ingestion_time, AcrossEvaluations(Memory))", details)
+        self.assertIn("✓ C1 · selected", details)
+
+    def test_tapping_a_group_lists_its_candidates_and_pruned_candidates(self):
+        """A group's panel lists each candidate's θ and ω, and the
+        candidates Stage 2 and Stage 3 pruned there; Pass 1 records none."""
+        js = self.memo_page()
+        self.tap_memo(js, "g5")
+        details = self.text(js, "details")
+        self.assertIn("#1 CMS+heap depth 7 width 272 · θ CmsWithHeap(depth=7, heap_size=10, width=272) · floors G1: none", details)
+        self.assertIn("Pass 1 records no pruned candidates", details)
+        self.assertIn("G5[2] (ingestion_time, None): no_ingestion_pipeline", details)
+        self.assertIn("C2: dominated_by (dominated by C3)", details)
 
     def test_highlighting_a_query_dims_the_memo_groups_it_does_not_reach(self):
         """Highlighting a query dims the memo groups it does not reach."""

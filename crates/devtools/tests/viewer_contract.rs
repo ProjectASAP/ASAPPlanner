@@ -320,13 +320,10 @@ fn wire_name<T: serde::Serialize>(value: T) -> String {
 }
 
 /// The viewer knows every `MaterializedViewRefresh`
-/// (`materialized_views[].refresh`) and every Stage 3 `RejectionCause`, and
-/// splits the causes into failed checks and losses as
-/// `RejectionCause::failed_a_check` does.
+/// (`materialized_views[].refresh`).
 #[test]
-fn viewer_knows_every_view_refresh_and_rejection_cause() {
+fn viewer_knows_every_view_refresh() {
     use asap_planner::MaterializedViewRefresh as R;
-    use asap_stage3_plan_selection::RejectionCause as C;
     let refreshes = [R::AtIngestion, R::OnFirstRead];
     for refresh in refreshes {
         // A new variant fails to compile here until it is listed above.
@@ -340,51 +337,5 @@ fn viewer_knows_every_view_refresh_and_rejection_cause() {
             .into_iter()
             .map(wire_name)
             .collect::<BTreeSet<_>>()
-    );
-
-    let causes = [
-        C::AccuracyTargetMissed,
-        C::CountMinWeightsNotProvenNonNegative,
-        C::NoAccuracyGuarantee,
-        C::LatencyBoundExceeded,
-        C::LatencyOverRepeatInterval,
-        C::OverClusterCapacity,
-        C::Infeasible,
-        C::CostNotRepresentable,
-        C::Costlier,
-        C::Slower,
-        C::MoreMemory,
-        C::TiedLostOnEnumerationOrder,
-    ];
-    for cause in causes {
-        match cause {
-            C::AccuracyTargetMissed
-            | C::CountMinWeightsNotProvenNonNegative
-            | C::NoAccuracyGuarantee
-            | C::LatencyBoundExceeded
-            | C::LatencyOverRepeatInterval
-            | C::OverClusterCapacity
-            | C::Infeasible
-            | C::CostNotRepresentable
-            | C::Costlier
-            | C::Slower
-            | C::MoreMemory
-            | C::TiedLostOnEnumerationOrder => {}
-        }
-    }
-    let failed: BTreeSet<String> = causes
-        .into_iter()
-        .filter(|c| c.failed_a_check())
-        .map(wire_name)
-        .collect();
-    let lost: BTreeSet<String> = causes
-        .into_iter()
-        .filter(|c| !c.failed_a_check())
-        .map(wire_name)
-        .collect();
-    assert_eq!(stages_js_strings("const FAILED_CHECK_CAUSES = ["), failed);
-    assert_eq!(
-        stages_js_strings("const REJECTION_CAUSES = FAILED_CHECK_CAUSES.concat(["),
-        lost
     );
 }

@@ -20,8 +20,9 @@
 //! `UPDATE_SNAPSHOTS=1 cargo test --release -p asap-devtools --test corpus_snapshots -- --ignored sketch_plans_match_snapshots`.
 //!
 //! Each workload is planned by `asap_planner --run-until stage3`. Planning
-//! has no time limit, so every workload must end with status `optimal`; any
-//! other ending fails instead of being recorded.
+//! has no time limit, so every selected plan must end with status
+//! `optimal`; any other ending fails instead of being recorded. A workload
+//! whose selection fails records its error, as a corpus query does.
 
 use std::path::PathBuf;
 
@@ -124,7 +125,8 @@ fn sketch_plans_match_snapshots() {
     for entry in entries {
         let id = entry["id"].as_str().unwrap();
         let document = asap_planner(&arguments(&manifest, entry), &scratch);
-        if !proven_optimal(&document) {
+        let selected = document["stage3_plan_selection"]["cost"].is_object();
+        if selected && !proven_optimal(&document) {
             failures.push(format!(
                 "{id}: the plan is not proven optimal (status {})",
                 search_status(&document)

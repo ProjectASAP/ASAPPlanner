@@ -1,6 +1,6 @@
 //! Filtered aggregates (`FILTER (WHERE …)`, a per-measure filter, or a
 //! filtered `SummaryAgg`) execute with SQL semantics: a row that fails the
-//! filter contributes nothing, but its group is kept.
+//! filter contributes nothing, but its group is retained.
 
 use std::rc::Rc;
 use std::sync::Arc;
