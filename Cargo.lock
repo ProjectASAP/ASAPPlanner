@@ -466,6 +466,7 @@ dependencies = [
 name = "asap-stage2-physical-optimization"
 version = "0.1.0"
 dependencies = [
+ "asap-cost",
  "asap-types",
 ]
 
