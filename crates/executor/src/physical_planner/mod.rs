@@ -52,6 +52,7 @@ pub mod promql_values;
 mod compiled;
 pub use compiled::CompiledPhysicalDAG;
 
+mod relational;
 mod time_window;
 use time_window::{
     below_time_shifts, counter_window, first_input, node_below_shifts, time_range_window,
@@ -132,11 +133,17 @@ fn compile_internal(
             },
         )
     });
+    // Per consumer, how many of its inputs (the last ones) its scalar
+    // expressions read.
+    let mut scalar_reads = BTreeMap::<NodeId, usize>::new();
     for edge in edges {
         dependencies
             .entry(edge.consumer as u64)
             .or_default()
             .push(edge.producer as u64);
+        if edge.role == planner_types::plan::physical_asap_dag::EdgeRole::ScalarRef {
+            *scalar_reads.entry(edge.consumer as u64).or_default() += 1;
+        }
     }
     let mut views_by_node = BTreeMap::new();
     for view in views {
@@ -257,6 +264,19 @@ fn compile_internal(
                 .iter()
                 .map(|id| Arc::new(nodes[id].output_schema.clone()))
                 .collect::<Vec<_>>();
+            if relational::lower(
+                id,
+                node,
+                &inputs,
+                &schemas,
+                scalar_reads.get(&id).copied().unwrap_or(0),
+                &output,
+                &mut physical_dag,
+            )
+            .map_err(|error| invalid(format!("node {id}: {error}")))?
+            {
+                continue;
+            }
             // Whether an aggregate, summary build or merge reads a SQL
             // relation's rows (or states built from them), which gives it
             // SQL's rules for an empty input and a quantile; no other

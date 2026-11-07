@@ -29,6 +29,7 @@ mod per_series_exact_execution;
 mod plan_sharing;
 mod production_rollup_workloads;
 mod promql_to_post_asap;
+mod relational_scalar_execution;
 mod rollup_controlled;
 mod scan;
 mod schema;
