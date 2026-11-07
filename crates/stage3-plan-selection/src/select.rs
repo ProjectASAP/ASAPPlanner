@@ -130,9 +130,10 @@ pub fn select_plan(
         &root_limits,
     ))
     .map_err(|error| match error {
-        SelectionMilpError::Infeasible => {
-            ErrorSelectingPlan::NoValidCandidate(vec![infeasible(&costs)])
-        }
+        SelectionMilpError::Infeasible => ErrorSelectingPlan::NoValidCandidate(vec![infeasible(
+            &costs,
+            root_limits.iter().any(Option::is_some),
+        )]),
         SelectionMilpError::Solver(reason) => ErrorSelectingPlan::Solver(reason),
     })?;
     let validation_started = std::time::Instant::now();
@@ -236,20 +237,26 @@ pub fn select_plan(
 }
 
 /// The rejection of an infeasible selection: no plan meets (A)–(I), (R)
-/// and (K), with the reasons `asap-cost` could not cost the executions the
-/// model left out, each once in execution order: those executions may be
-/// why no plan is left.
-fn infeasible(costs: &ExecutionCosts) -> Rejection {
+/// and, when `accuracy_checked` (it applies to some query), (K), with the
+/// reasons `asap-cost` could not cost the executions the model left out,
+/// each once in execution order: those executions may be why no plan is
+/// left.
+fn infeasible(costs: &ExecutionCosts, accuracy_checked: bool) -> Rejection {
     let mut reasons: Vec<&str> = Vec::new();
     for reason in costs.uncostable.values() {
         if !reasons.contains(&reason.as_str()) {
             reasons.push(reason);
         }
     }
-    let mut reason = "no plan gives every query output a candidate whose every input has an \
-                      admissible producer and meets its accuracy target at the root, \
-                      constraint (K) (the selection MILP is infeasible)"
-        .to_string();
+    let mut reason = format!(
+        "no plan gives every query output a candidate whose every input has an admissible \
+         producer{} (the selection MILP is infeasible)",
+        if accuracy_checked {
+            " and meets its query's accuracy target at the root, constraint (K)"
+        } else {
+            ""
+        }
+    );
     if !reasons.is_empty() {
         reason += &format!(
             "; executions left out because they could not be costed: {}",
