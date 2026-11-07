@@ -28,7 +28,7 @@ use crate::ir::schema::*;
 ///
 /// Errors:
 /// - [`SeriesIdentityError::NotApplicable`]: the root holds an operator
-///   this realization does not cover, such as `limitk` or `info()`; a
+///   this realization does not cover, such as `info()`; a
 ///   caller plans the root over its label columns instead.
 /// - [`SeriesIdentityError::DroppedColumn`]: a reference to a column
 ///   realization does not keep. Reading another column would give a wrong
@@ -125,6 +125,7 @@ pub fn with_promql_series_identity(
                 | NonASAPOp::TimeShift { .. }
                 | NonASAPOp::PromqlSubquery { .. }
                 | NonASAPOp::PromqlRelabel { .. }
+                | NonASAPOp::PromqlSeriesSample { .. }
                 | NonASAPOp::PromqlVectorFromScalar(_)
                 | NonASAPOp::BinaryOp { .. }
                 | NonASAPOp::Concat { .. }
@@ -182,10 +183,9 @@ pub fn with_promql_series_identity(
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum SeriesIdentityError {
     /// The root holds an operator this realization does not cover, or a
-    /// source that is not an open PromQL source: `limitk(2, m)` lowers to
-    /// a `PromqlSeriesSample`, `info(m)` to a `PromqlInfoEnrich`, and a
-    /// closed scan has no dynamic labels to carry. The root is planned
-    /// over its label columns instead.
+    /// source that is not an open PromQL source: `info(m)` lowers to a
+    /// `PromqlInfoEnrich`, and a closed scan has no dynamic labels to
+    /// carry. The root is planned over its label columns instead.
     #[error("{0}")]
     NotApplicable(String),
     /// `operator` reads input column `column`, which realization does not
