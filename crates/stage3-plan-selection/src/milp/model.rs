@@ -5,7 +5,7 @@
 //! |---|---|---|
 //! | baseline (section 3) | $z_{q,v}$, $t_v$ ([`SelectionVariables`]) | (A) [`input_satisfaction_constraints`], (B) [`producer_selection_constraints`], (C)/(D) [`query_coverage_constraints`], (E) [`acyclicity_constraints`], (F) [`utilization_constraints`]; (G), (H): $y$ exists only on admissible edges |
 //! | execution contexts (section 5) | $x^{\mathrm{mat}}_v$, $x_{\kappa,v}$, $y_{\kappa,u,c,i}$, $h_v$ ([`ExecutionContextVariables`]) | (R) [`retention_constraints`] |
-//! | accuracy (section 4) | $E_c$, $F_{c,i}$, $D_c$, $H_{c,i}$ ([`AccuracyVariables`]) | (K) [`accuracy_constraints`] |
+//! | accuracy (section 4) | $E_{\kappa,c,m}$, $F_{\kappa,c,i,m}$, $D_{\kappa,c}$, $H_{\kappa,c,i}$, $U_{\kappa,c}$ ([`AccuracyVariables`]) | (K) [`accuracy_constraints`] |
 //!
 //! The execution-context variables replace the baseline's $x_v$ and
 //! unindexed $y_{u,c,i}$: a candidate with $\ell$ = None or `OneEvaluation`
@@ -23,8 +23,8 @@
 //! $$\min \sum_v W^{\mathrm{mat}}_v x^{\mathrm{mat}}_v + \sum_{\kappa,v}
 //! \rho_\kappa c_{\kappa,v} x_{\kappa,v} + \sum_v \pi_v h_v$$
 //! with the costs from [`crate::execution_cost`]. The accuracy family is
-//! `todo!()` until #1207 PR 8; nothing calls it yet, hence its `dead_code`
-//! allowances.
+//! built only when (K) applies to some query
+//! ([`crate::milp::error_bounds::root_accuracy_limits`]).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Instant;
@@ -41,6 +41,9 @@ use asap_types::stages::{
 };
 
 use crate::execution_cost::ExecutionCosts;
+use crate::milp::error_bounds::{
+    returns_its_output_unchanged, CandidateErrorModel, RootAccuracyLimits, METRIC_COUNT,
+};
 use crate::milp::execution_contexts::{Execution, ExecutionContexts, TumblingWindowChainGeometry};
 
 /// A query, by index in the workload.
@@ -85,11 +88,16 @@ impl ExecutionContextVariables {
 /// What the MILP is built over: Stage 2's candidates and admissible edges,
 /// the workload's execution contexts with each execution and edge they
 /// allow, the objective's costs (an execution without one is left out),
-/// and indexes built once ([`Self::new`]).
+/// the candidates' error model and each query's root limits for (K), and
+/// indexes built once ([`Self::new`]).
 pub(crate) struct SelectionInputs<'a> {
     pub(crate) physical: &'a PhysicalASAPMemoCandidates,
     pub(crate) contexts: &'a ExecutionContexts,
     pub(crate) costs: &'a ExecutionCosts,
+    pub(crate) errors: &'a CandidateErrorModel,
+    /// Each query's limits at its root, by query; `None` where (K) does not
+    /// apply.
+    pub(crate) root_limits: &'a [Option<RootAccuracyLimits>],
     /// $\mathcal E$, by [`PhysicalEdgeId`].
     edges: Vec<PhysicalEdge>,
     /// The physical candidates of each memo group, ascending.
@@ -104,6 +112,8 @@ impl<'a> SelectionInputs<'a> {
         physical: &'a PhysicalASAPMemoCandidates,
         contexts: &'a ExecutionContexts,
         costs: &'a ExecutionCosts,
+        errors: &'a CandidateErrorModel,
+        root_limits: &'a [Option<RootAccuracyLimits>],
     ) -> Self {
         let mut candidates_of_group: HashMap<MemoGroupId, Vec<PhysicalCandidateId>> =
             HashMap::new();
@@ -123,6 +133,8 @@ impl<'a> SelectionInputs<'a> {
             physical,
             contexts,
             costs,
+            errors,
+            root_limits,
             edges: physical.edges().map(|(_, edge)| edge).collect(),
             candidates_of_group,
             query_output_groups,
@@ -196,6 +208,21 @@ impl<'a> SelectionInputs<'a> {
     /// order: a scalar query reads one per operator reference.
     fn query_output_groups(&self) -> &[(QueryId, MemoGroupId)] {
         &self.query_output_groups
+    }
+
+    /// The limits (K) puts on output reference `(query, group)`'s output:
+    /// its query's ([`RootAccuracyLimits`]), or none at all
+    /// ([`RootAccuracyLimits::EXACT`]) when its scalar root combines
+    /// outputs with no error contract; `None` when (K) does not apply.
+    fn root_limits_of(&self, query: QueryId) -> Option<&RootAccuracyLimits> {
+        let limits = self.root_limits.get(query.0)?.as_ref()?;
+        Some(
+            if returns_its_output_unchanged(&self.physical.query_roots[query.0]) {
+                limits
+            } else {
+                &RootAccuracyLimits::EXACT
+            },
+        )
     }
 
     /// The execution of `v` that gives query `query`'s output, when it can
@@ -540,13 +567,14 @@ pub(crate) struct SolvedSelection {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum SelectionMilpError {
     /// No assignment meets the constraints: some query output has no
-    /// execution whose inputs all have costable producers it can read.
+    /// execution whose inputs all have costable producers it can read, or
+    /// none meets its query's accuracy target (K).
     Infeasible,
     /// HiGHS failed.
     Solver(String),
 }
 
-/// Build the MILP over `inputs` ((A)–(F) and (R) per execution, the
+/// Build the MILP over `inputs` ((A)–(F), (R) and (K) per execution, the
 /// objective of section 5), solve it to proven optimality with HiGHS, and
 /// decode $\{x = 1\}$, $\{y = 1\}$ and $\{z = 1\}$ into a
 /// [`DagOfSelectedCandidates`]: one node per selected execution, in
@@ -569,6 +597,12 @@ pub(crate) fn solve_selection(
     let started = Instant::now();
     let mut problem = ProblemVariables::new();
     let (selection, variables) = selection_variables(inputs, &mut problem);
+    // (K) only when it applies to some query.
+    let accuracy = inputs
+        .root_limits
+        .iter()
+        .any(Option::is_some)
+        .then(|| accuracy_variables(inputs, &variables, &mut problem));
     let constraints: Vec<Constraint> = [
         input_satisfaction_constraints(inputs, &variables),
         producer_selection_constraints(inputs, &variables),
@@ -576,6 +610,9 @@ pub(crate) fn solve_selection(
         acyclicity_constraints(inputs, &selection, &variables),
         utilization_constraints(inputs, &selection, &variables),
         retention_constraints(inputs, &selection, &variables),
+        accuracy.as_ref().map_or_else(Vec::new, |accuracy| {
+            accuracy_constraints(inputs, &selection, &variables, accuracy)
+        }),
     ]
     .into_iter()
     .flatten()
@@ -803,30 +840,231 @@ fn decode(
     (selected_dag, execution_of_node)
 }
 
-#[allow(dead_code)] // #1207 PR 8.
-/// The accuracy variables of constraint (K) (section 4), all continuous.
-struct AccuracyVariables {
-    /// $E_c$, by [`PhysicalCandidateId`].
-    error_bound: Vec<Variable>,
-    /// $F_{c,i}$: the chosen producer's error bound on input $i$ of $c$.
-    error_bound_of_input: HashMap<(PhysicalCandidateId, usize), Variable>,
-    /// $D_c$, by [`PhysicalCandidateId`].
-    failure_probability: Vec<Variable>,
-    /// $H_{c,i}$: the chosen producer's failure probability on input $i$ of $c$.
-    failure_probability_of_input: HashMap<(PhysicalCandidateId, usize), Variable>,
+/// The accuracy variables of constraint (K) (section 4), all continuous
+/// and non-negative, per execution (section 5: $E_{\kappa,c}$) and per
+/// error metric $m$ (index into
+/// [`METRICS`](crate::milp::error_bounds::METRICS)), each only where the
+/// error model says the execution may carry it.
+pub(crate) struct AccuracyVariables {
+    /// $E_{\kappa,c,m}$: the error bound of the execution's output in
+    /// metric $m$.
+    error_bound: HashMap<(Execution, usize), Variable>,
+    /// $F_{\kappa,c,i,m}$: the chosen producer's $E$ on input $i$.
+    error_bound_of_input: HashMap<(Execution, usize, usize), Variable>,
+    /// $D_{\kappa,c}$: the failure probability of its output.
+    failure_probability: HashMap<Execution, Variable>,
+    /// $H_{\kappa,c,i}$: the chosen producer's $D$ on input $i$.
+    failure_probability_of_input: HashMap<(Execution, usize), Variable>,
+    /// $U_{\kappa,c} \in [0, 1]$: 1 when part of its output is an
+    /// approximation without a guarantee the planner can state.
+    without_guarantee: HashMap<Execution, Variable>,
 }
 
-#[allow(dead_code)] // #1207 PR 8.
-/// (K): $E_c$ and $D_c$ per candidate, big-M on selected edges, and the
-/// root checks $E_v \le \varepsilon_q + M_q(1 - z_{q,v})$,
-/// $D_v \le \delta_q + (1 - z_{q,v})$.
+/// The accuracy variables over `inputs`' costed executions and the $y$
+/// edges into them: $E$, $D$, $U$ per execution that may carry them;
+/// $F$ per (execution, input, metric) whose producer's error the
+/// consumer's contract carries with a positive factor; $H$ per
+/// (execution, input) a producer's failure can fail.
+fn accuracy_variables(
+    inputs: &SelectionInputs<'_>,
+    variables: &ExecutionContextVariables,
+    problem: &mut ProblemVariables,
+) -> AccuracyVariables {
+    let errors = inputs.errors;
+    let mut accuracy = AccuracyVariables {
+        error_bound: HashMap::new(),
+        error_bound_of_input: HashMap::new(),
+        failure_probability: HashMap::new(),
+        failure_probability_of_input: HashMap::new(),
+        without_guarantee: HashMap::new(),
+    };
+    for &execution in inputs.contexts.executions() {
+        if variables.x(execution).is_none() {
+            continue;
+        }
+        let c = execution.candidate().0;
+        for m in 0..METRIC_COUNT {
+            if errors.error_bound_ceiling(c, m) > 0.0 {
+                accuracy
+                    .error_bound
+                    .insert((execution, m), problem.add(variable().min(0)));
+            }
+        }
+        if errors.failure_probability_ceiling(c) > 0.0 {
+            accuracy
+                .failure_probability
+                .insert(execution, problem.add(variable().min(0)));
+        }
+        if errors.may_lack_guarantee(c) {
+            accuracy
+                .without_guarantee
+                .insert(execution, problem.add(variable().min(0).max(1)));
+        }
+    }
+    for (&(context, edge), _) in sorted(&variables.y_in_execution_context) {
+        let (producer, consumer) = inputs.executions_of_edge(context, edge);
+        let (u, c) = (producer.candidate().0, consumer.candidate().0);
+        let input = inputs.edges()[edge.0].input_index_of_consumer;
+        for m in 0..METRIC_COUNT {
+            if accuracy.error_bound.contains_key(&(producer, m))
+                && errors
+                    .factor(c, input, m)
+                    .is_some_and(|factor| factor > 0.0)
+            {
+                accuracy
+                    .error_bound_of_input
+                    .entry((consumer, input, m))
+                    .or_insert_with(|| problem.add(variable().min(0)));
+            }
+        }
+        if errors.failure_probability_ceiling(u) > 0.0 && errors.propagates_failure(c, input) {
+            accuracy
+                .failure_probability_of_input
+                .entry((consumer, input))
+                .or_insert_with(|| problem.add(variable().min(0)));
+        }
+    }
+    accuracy
+}
+
+/// (K) over `inputs` (section 4), per execution and metric, big-M on the
+/// selected edges with $M$ the producer's ceiling
+/// ([`CandidateErrorModel`]):
+/// - $E_{c,m} \ge \varepsilon^{\mathrm{loc}}_{c,m} + \sum_i
+///   \beta_{c,i,m} F_{c,i,m}$, $F_{c,i,m} \ge E_{u,m} - M(1 - y)$;
+/// - the metric rule: an input error in a metric $c$'s contract does not
+///   carry is zero on a selected edge, $E_{u,m} \le M(1 - y)$; the validity
+///   cap: $E_{u,m} \le b_{c,i} + M(1 - y)$;
+/// - $D_c \ge \delta^{\mathrm{loc}}_c + \sum_i H_{c,i}$, $H_{c,i} \ge D_u -
+///   M(1 - y)$ (an unknown $\delta^{\mathrm{loc}}$ counts as 1);
+/// - $U_c \ge 1$ for an own approximation without a guarantee,
+///   $U_c \ge U_u - (1 - y)$ through a value-preserving consumer, and
+///   $U_u \le 1 - y$ into any other;
+/// - the root checks, per query $q$ (K) applies to and $v \in G_q$:
+///   $E_{v,m} \le \varepsilon_{q,m} + M(1 - z_{q,v})$ ($\varepsilon_{q,m}$
+///   is 0 in a metric the target does not accept),
+///   $D_v \le \delta_q / n + M(1 - z_{q,v})$ ($n$ the values the target's
+///   scope covers), $U_v \le 1 - z_{q,v}$.
+///
+/// A constraint whose big-M side already holds at its ceiling is left out.
 fn accuracy_constraints(
-    physical: &PhysicalASAPMemoCandidates,
+    inputs: &SelectionInputs<'_>,
     selection: &SelectionVariables,
+    variables: &ExecutionContextVariables,
     accuracy: &AccuracyVariables,
 ) -> Vec<Constraint> {
-    let _ = (physical, selection, accuracy);
-    todo!("#1207 PR 8: constraint (K)")
+    let errors = inputs.errors;
+    let mut constraints = Vec::new();
+    for (&(context, edge), &y) in sorted(&variables.y_in_execution_context) {
+        let (producer, consumer) = inputs.executions_of_edge(context, edge);
+        let (u, c) = (producer.candidate().0, consumer.candidate().0);
+        let input = inputs.edges()[edge.0].input_index_of_consumer;
+        for m in 0..METRIC_COUNT {
+            let Some(&e_u) = accuracy.error_bound.get(&(producer, m)) else {
+                continue;
+            };
+            let ceiling = errors.error_bound_ceiling(u, m);
+            match errors.factor(c, input, m) {
+                Some(factor) if factor > 0.0 => {
+                    let f = accuracy.error_bound_of_input[&(consumer, input, m)];
+                    constraints.push(constraint!(f >= e_u - ceiling * (1 - y)));
+                }
+                Some(_) => {}
+                None => constraints.push(constraint!(e_u <= ceiling * (1 - y))),
+            }
+            if let Some(cap) = errors.validity_cap(c, input, m) {
+                if ceiling > cap {
+                    constraints.push(constraint!(e_u <= cap + (ceiling - cap) * (1 - y)));
+                }
+            }
+        }
+        if let Some(&u_u) = accuracy.without_guarantee.get(&producer) {
+            if errors.value_preserving(c) {
+                let u_c = accuracy.without_guarantee[&consumer];
+                constraints.push(constraint!(u_c >= u_u - (1 - y)));
+            } else {
+                constraints.push(constraint!(u_u <= 1 - y));
+            }
+        }
+        if let (Some(&d_u), Some(&h)) = (
+            accuracy.failure_probability.get(&producer),
+            accuracy
+                .failure_probability_of_input
+                .get(&(consumer, input)),
+        ) {
+            let ceiling = errors.failure_probability_ceiling(u);
+            constraints.push(constraint!(h >= d_u - ceiling * (1 - y)));
+        }
+    }
+    // Each execution's own bound plus its inputs'.
+    let mut inputs_error: BTreeMap<(Execution, usize), Expression> = BTreeMap::new();
+    for (&(consumer, input, m), &f) in sorted(&accuracy.error_bound_of_input) {
+        let factor = errors
+            .factor(consumer.candidate().0, input, m)
+            .expect("F only where a contract carries the metric");
+        *inputs_error.entry((consumer, m)).or_default() += factor * f;
+    }
+    for (&(execution, m), &e) in sorted(&accuracy.error_bound) {
+        let own = errors.own(execution.candidate().0).error_bound[m];
+        let carried = inputs_error.remove(&(execution, m)).unwrap_or_default();
+        constraints.push(constraint!(e >= own + carried));
+    }
+    let mut inputs_failure: BTreeMap<Execution, Expression> = BTreeMap::new();
+    for (&(consumer, _), &h) in sorted(&accuracy.failure_probability_of_input) {
+        *inputs_failure.entry(consumer).or_default() += h;
+    }
+    for (&execution, &d) in sorted(&accuracy.failure_probability) {
+        let own = errors
+            .own(execution.candidate().0)
+            .failure_probability
+            .unwrap_or(1.0);
+        let carried = inputs_failure.remove(&execution).unwrap_or_default();
+        constraints.push(constraint!(d >= own + carried));
+    }
+    for (&execution, &u) in sorted(&accuracy.without_guarantee) {
+        if errors.own(execution.candidate().0).without_guarantee {
+            constraints.push(constraint!(u >= 1));
+        }
+    }
+    // The root checks.
+    for &(query, group) in inputs.query_output_groups() {
+        let Some(limits) = inputs.root_limits_of(query) else {
+            continue;
+        };
+        for &v in inputs.candidates_of_group(group) {
+            let (Some(&z), Some(execution)) = (
+                selection.z.get(&(query, v)),
+                inputs.output_execution(query, v),
+            ) else {
+                continue;
+            };
+            for m in 0..METRIC_COUNT {
+                let Some(&e) = accuracy.error_bound.get(&(execution, m)) else {
+                    continue;
+                };
+                let (limit, ceiling) = (
+                    limits.error_bound_limit[m],
+                    errors.error_bound_ceiling(v.0, m),
+                );
+                if ceiling > limit {
+                    constraints.push(constraint!(e <= limit + (ceiling - limit) * (1 - z)));
+                }
+            }
+            if let (Some(limit), Some(&d)) = (
+                limits.failure_probability_limit,
+                accuracy.failure_probability.get(&execution),
+            ) {
+                let ceiling = errors.failure_probability_ceiling(v.0);
+                if ceiling > limit {
+                    constraints.push(constraint!(d <= limit + (ceiling - limit) * (1 - z)));
+                }
+            }
+            if let Some(&u) = accuracy.without_guarantee.get(&execution) {
+                constraints.push(constraint!(u <= 1 - z));
+            }
+        }
+    }
+    constraints
 }
 
 #[cfg(test)]

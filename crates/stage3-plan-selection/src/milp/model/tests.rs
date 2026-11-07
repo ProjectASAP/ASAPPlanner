@@ -6,13 +6,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+use asap_accuracy::estimators::local_guarantee;
+use asap_types::ir::operator::operator_properties::BinaryOpKind;
 use asap_types::ir::operator::operator_properties::{Reduction, Source};
+use asap_types::ir::properties::{AccuracyMetric, AccuracyScope, AccuracyTarget};
+use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{
     DataType, Field, FieldDataType, GroupingStrategy, Schema, SketchAlgorithm, SketchParams,
     SketchStatistic, SummaryUpdate,
 };
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot, TimeRangeKind};
+use asap_types::ir::{ASAPOp, BinaryOperator, NonASAPOp, Operator, QueryRoot, TimeRangeKind};
 use asap_types::physical::{ExecutionTiming, Lifetime, PhysicalProperties, StorageMedium};
 use asap_types::stages::{
     parameter_list, producer_satisfies_physical_requirements, CandidateExpression,
@@ -21,11 +25,12 @@ use asap_types::stages::{
     PhysicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateId, PhysicalEdge, WindowLayout,
 };
 use asap_types::workload::{
-    QueryRecurrence, QueryRequirements, QueryWorkloadEntry, RangeEvaluation, RepeatedDemand,
-    RepetitionInterval, TimestampMs,
+    DataWorkload, QueryRecurrence, QueryRequirements, QueryWorkloadEntry, RangeEvaluation,
+    RepeatedDemand, RepetitionInterval, SourceFacts, TimestampMs,
 };
 
 use crate::execution_cost::ExecutionCosts;
+use crate::milp::error_bounds::{CandidateErrorModel, RootAccuracyLimits, METRIC_COUNT};
 
 use super::*;
 
@@ -212,15 +217,49 @@ fn uniform_costs(
     execution_costs
 }
 
+/// (K)'s inputs: the data workload the guarantees read, and each query's
+/// root limits (`None`: (K) does not apply to it).
+struct Accuracy<'a> {
+    data: &'a DataWorkload,
+    root_limits: &'a [Option<RootAccuracyLimits>],
+}
+
+static NO_DATA: std::sync::LazyLock<DataWorkload> = std::sync::LazyLock::new(DataWorkload::default);
+
+/// No query under (K): the tests of (A)–(I) and (R).
+fn no_accuracy() -> Accuracy<'static> {
+    Accuracy {
+        data: &NO_DATA,
+        root_limits: &[],
+    }
+}
+
+fn solve_under(
+    physical: &PhysicalASAPMemoCandidates,
+    costs: &[Option<f64>],
+    retention: &[(usize, f64)],
+    entries: &[QueryWorkloadEntry],
+    accuracy: &Accuracy<'_>,
+) -> Result<SolvedSelection, SelectionMilpError> {
+    let contexts = ExecutionContexts::new(physical, entries);
+    let costs = uniform_costs(&contexts, costs, retention);
+    let errors = CandidateErrorModel::new(physical, accuracy.data);
+    solve_selection(&SelectionInputs::new(
+        physical,
+        &contexts,
+        &costs,
+        &errors,
+        accuracy.root_limits,
+    ))
+}
+
 fn solve_with_retention(
     physical: &PhysicalASAPMemoCandidates,
     costs: &[Option<f64>],
     retention: &[(usize, f64)],
     entries: &[QueryWorkloadEntry],
 ) -> Result<SolvedSelection, SelectionMilpError> {
-    let contexts = ExecutionContexts::new(physical, entries);
-    let costs = uniform_costs(&contexts, costs, retention);
-    solve_selection(&SelectionInputs::new(physical, &contexts, &costs))
+    solve_under(physical, costs, retention, entries, &no_accuracy())
 }
 
 fn solve(
@@ -394,16 +433,26 @@ fn strongly_connected_components_group_cycles_only() {
 /// of every reached execution (the edges the contexts allow), without
 /// cycles; each DAG's cost the sum of its distinct executions' costs plus,
 /// per `AcrossEvaluations` candidate, its retention cost per window times
-/// the largest need of its edges. Returns the cheapest cost.
+/// the largest need of its edges. Under (K), a DAG counts only when each
+/// query's output meets its root limits by its composed error
+/// (`CandidateErrorModel::composed_errors`). Returns the cheapest cost.
 fn reference_minimum(
     physical: &PhysicalASAPMemoCandidates,
     costs: &[Option<f64>],
     retention: &[(usize, f64)],
     entries: &[QueryWorkloadEntry],
+    accuracy: &Accuracy<'_>,
 ) -> Option<f64> {
     let contexts = ExecutionContexts::new(physical, entries);
     let execution_costs = uniform_costs(&contexts, costs, retention);
-    let inputs = SelectionInputs::new(physical, &contexts, &execution_costs);
+    let errors = CandidateErrorModel::new(physical, accuracy.data);
+    let inputs = SelectionInputs::new(
+        physical,
+        &contexts,
+        &execution_costs,
+        &errors,
+        accuracy.root_limits,
+    );
     let costed = |execution: Execution| inputs.cost_per_second(execution).is_some();
     // Per (consumer execution, input), its producer executions, each with
     // the edge's context.
@@ -433,8 +482,55 @@ fn reference_minimum(
         best: Option<f64>,
     }
     impl Search<'_, '_> {
-        fn expand(&mut self, dag: Dag, roots: &BTreeSet<Execution>, mut pending: Vec<Execution>) {
+        /// Whether every output of `outputs` meets its query's root limits
+        /// in `dag`.
+        fn meets_root_limits(&self, dag: &Dag, outputs: &[(QueryId, Execution)]) -> bool {
+            let nodes: Vec<Execution> = dag.keys().copied().collect();
+            let node = |execution: Execution| nodes.iter().position(|&n| n == execution).unwrap();
+            let selected = DagOfSelectedCandidates {
+                candidate_of_node: nodes.iter().map(|e| e.candidate()).collect(),
+                edges: dag
+                    .iter()
+                    .flat_map(|(&consumer, choice)| {
+                        choice
+                            .iter()
+                            .enumerate()
+                            .map(move |(input, &(producer, _))| (consumer, input, producer))
+                    })
+                    .map(|(consumer, input, producer)| SelectedEdge {
+                        producer: SelectedNodeId(node(producer)),
+                        consumer: SelectedNodeId(node(consumer)),
+                        input_index_of_consumer: input,
+                    })
+                    .collect(),
+                node_of_output_reference: Vec::new(),
+            };
+            let composed = self.inputs.errors.composed_errors(&selected);
+            outputs.iter().all(|&(query, execution)| {
+                let Some(limits) = self.inputs.root_limits_of(query) else {
+                    return true;
+                };
+                let error = &composed[node(execution)];
+                !error.without_guarantee
+                    && (0..METRIC_COUNT)
+                        .all(|m| error.error_bound[m] <= limits.error_bound_limit[m])
+                    && limits
+                        .failure_probability_limit
+                        .is_none_or(|limit| error.failure_probability.unwrap_or(1.0) <= limit)
+            })
+        }
+
+        fn expand(
+            &mut self,
+            dag: Dag,
+            roots: &BTreeSet<Execution>,
+            outputs: &[(QueryId, Execution)],
+            mut pending: Vec<Execution>,
+        ) {
             let Some(consumer) = pending.pop() else {
+                if !self.meets_root_limits(&dag, outputs) {
+                    return;
+                }
                 let mut retained: BTreeMap<PhysicalCandidateId, u64> = BTreeMap::new();
                 for choices in dag.values() {
                     for &(producer, context) in choices {
@@ -492,12 +588,12 @@ fn reference_minimum(
                         next_pending.push(u);
                     }
                 }
-                self.expand(next, roots, next_pending);
+                self.expand(next, roots, outputs, next_pending);
             }
         }
     }
     // Every choice of one output execution per query output.
-    let mut root_choices: Vec<BTreeSet<Execution>> = vec![BTreeSet::new()];
+    let mut root_choices: Vec<Vec<(QueryId, Execution)>> = vec![Vec::new()];
     for &(query, group) in inputs.query_output_groups() {
         let options: Vec<Execution> = inputs
             .candidates_of_group(group)
@@ -509,7 +605,7 @@ fn reference_minimum(
             .flat_map(|prefix| {
                 options.iter().map(move |&option| {
                     let mut next = prefix.clone();
-                    next.insert(option);
+                    next.push((query, option));
                     next
                 })
             })
@@ -520,8 +616,14 @@ fn reference_minimum(
         producers: &producers,
         best: None,
     };
-    for roots in root_choices {
-        search.expand(BTreeMap::new(), &roots, roots.iter().copied().collect());
+    for outputs in root_choices {
+        let roots: BTreeSet<Execution> = outputs.iter().map(|&(_, execution)| execution).collect();
+        search.expand(
+            BTreeMap::new(),
+            &roots,
+            &outputs,
+            roots.iter().copied().collect(),
+        );
     }
     search.best
 }
@@ -545,10 +647,20 @@ fn agrees_with_the_reference(
     retention: &[(usize, f64)],
     entries: &[QueryWorkloadEntry],
 ) {
-    let reference = reference_minimum(physical, costs, retention, entries);
+    agrees_with_the_reference_under(physical, costs, retention, entries, &no_accuracy());
+}
+
+fn agrees_with_the_reference_under(
+    physical: &PhysicalASAPMemoCandidates,
+    costs: &[Option<f64>],
+    retention: &[(usize, f64)],
+    entries: &[QueryWorkloadEntry],
+    accuracy: &Accuracy<'_>,
+) {
+    let reference = reference_minimum(physical, costs, retention, entries, accuracy);
     match (
         reference,
-        solve_with_retention(physical, costs, retention, entries),
+        solve_under(physical, costs, retention, entries, accuracy),
     ) {
         (Some(reference), Ok(solved)) => {
             assert!(
@@ -1031,5 +1143,491 @@ fn execution_costs_follow_the_context_of_each_execution() {
     for chain in [CHAIN_10S, CHAIN_5S] {
         let retention = costs.retention_cost_per_window_per_second[&PhysicalCandidateId(chain)];
         assert!(retention > 0.0 && retention.is_finite());
+    }
+}
+
+// ── Constraint (K) ──────────────────────────────────────────────────────
+
+/// `memo`'s candidates, each at query time and not materialized, with
+/// every edge from a candidate of an input group admissible.
+fn all_at_query_time(memo: Memo) -> PhysicalASAPMemoCandidates {
+    let mut logical = Vec::new();
+    for (g, group) in memo.groups().iter().enumerate() {
+        for index_in_group in 0..group.candidates.len() {
+            logical.push(CandidateForMemoGroupId {
+                group: MemoGroupId(g as u32),
+                index_in_group,
+            });
+        }
+    }
+    let id_of = |candidate: CandidateForMemoGroupId| {
+        PhysicalCandidateId(logical.iter().position(|&c| c == candidate).unwrap())
+    };
+    let mut edges = Vec::new();
+    for (c, &consumer) in logical.iter().enumerate() {
+        let children = memo.candidate(consumer).expression.operator.children();
+        for (input, &child) in children.into_iter().enumerate() {
+            for index_in_group in 0..memo.groups()[child.0 as usize].candidates.len() {
+                edges.push(PhysicalEdge {
+                    producer_candidate_id: id_of(CandidateForMemoGroupId {
+                        group: child,
+                        index_in_group,
+                    }),
+                    consumer_candidate_id: PhysicalCandidateId(c),
+                    input_index_of_consumer: input,
+                    satisfies_logical_requirement: true,
+                    satisfies_physical_requirement: true,
+                });
+            }
+        }
+    }
+    let physical_candidates = logical
+        .iter()
+        .map(|&logical_candidate_id| PhysicalCandidate {
+            logical_candidate_id,
+            physical_properties: PhysicalProperties::new(QT_NONE.0, QT_NONE.1).unwrap(),
+        })
+        .collect();
+    let query_roots = memo.query_roots.clone();
+    PhysicalASAPMemoCandidates::new(
+        LogicalASAPMemoCandidates {
+            memo,
+            edges: Vec::new(),
+        },
+        physical_candidates,
+        query_roots,
+        edges,
+    )
+}
+
+/// A sketch build of `algorithm` over the scan `rows`, per series.
+fn sketch_build(rows: MemoGroupId, algorithm: SketchAlgorithm) -> Operator<MemoGroupId> {
+    Operator::ASAP(ASAPOp::SummaryAgg {
+        child: rows,
+        family: FieldDataType::Sketch(algorithm, GroupingStrategy::default()),
+        input: SummaryUpdate::column(ColumnRef::SampleValue),
+        reduction: Reduction::PerEntity,
+        grouping: GroupingStrategy::default(),
+        filter: None,
+    })
+}
+
+fn quantile(state: MemoGroupId, q: f64) -> Operator<MemoGroupId> {
+    Operator::ASAP(ASAPOp::SummaryEstimate {
+        summary_input: state,
+        query: SketchStatistic::Quantile { q },
+    })
+}
+
+/// The scan group of `latency` (one candidate).
+fn latency_scan(memo: &mut Memo) -> MemoGroupId {
+    let scan = Operator::NonASAP(NonASAPOp::Scan {
+        source: Source::TimeSeries {
+            metric: "latency".into(),
+        },
+        predicates: vec![],
+        schema: Schema::with_time_index(
+            vec![
+                Field::plain("ts", DataType::Timestamp, false),
+                Field::plain("value", DataType::Float64, false),
+            ],
+            0,
+            vec![],
+        ),
+    });
+    let group = memo.find_or_add_group(scan.clone()).unwrap();
+    add(memo, group, scan, None, None);
+    group
+}
+
+/// The state group of `algorithm` over `rows`, one candidate per
+/// `parameters`, in order.
+fn state_group(
+    memo: &mut Memo,
+    rows: MemoGroupId,
+    algorithm: SketchAlgorithm,
+    parameters: &[SketchParams],
+) -> MemoGroupId {
+    let build = sketch_build(rows, algorithm);
+    let group = memo.find_or_add_group(build.clone()).unwrap();
+    for parameters in parameters {
+        add(memo, group, build.clone(), Some(parameters.clone()), None);
+    }
+    group
+}
+
+/// The quantile `q` group, read from the KLL state `kll` (candidate 0)
+/// or the DDSketch state `ddsketch` (candidate 1).
+fn quantile_group(memo: &mut Memo, kll: MemoGroupId, ddsketch: MemoGroupId, q: f64) -> MemoGroupId {
+    let group = memo.find_or_add_group(quantile(kll, q)).unwrap();
+    add(memo, group, quantile(kll, q), None, None);
+    add(memo, group, quantile(ddsketch, q), None, None);
+    group
+}
+
+const KLL_SIZES: usize = 4;
+const DDSKETCH_ALPHAS: [f64; 4] = [0.1, 0.05, 0.02, 0.01];
+
+/// #1207's problem example: query A, `quantile_over_time(0.95,
+/// latency[1m])`, and query B, the ratio of the 0.99 and 0.50 quantiles of
+/// `latency[1m]`. Candidates: 0 the scan; 1–4 the KLL state, `k` from the
+/// first four listed sizes; 5–8 the DDSketch state, `alpha` from
+/// [`DDSKETCH_ALPHAS`]; A's p95 read from KLL (9) or DDSketch (10); B's
+/// p99 (11, 12) and p50 (13, 14) likewise; 15 B's ratio.
+fn problem_example() -> PhysicalASAPMemoCandidates {
+    let mut memo = Memo::default();
+    let scan = latency_scan(&mut memo);
+    let kll = state_group(
+        &mut memo,
+        scan,
+        SketchAlgorithm::Kll,
+        &parameter_list(SketchAlgorithm::Kll)[..KLL_SIZES],
+    );
+    let ddsketch_parameters: Vec<SketchParams> = DDSKETCH_ALPHAS
+        .iter()
+        .map(|&alpha| SketchParams::DDSketch { alpha })
+        .collect();
+    let ddsketch = state_group(
+        &mut memo,
+        scan,
+        SketchAlgorithm::DDSketch,
+        &ddsketch_parameters,
+    );
+    let p95 = quantile_group(&mut memo, kll, ddsketch, 0.95);
+    let p99 = quantile_group(&mut memo, kll, ddsketch, 0.99);
+    let p50 = quantile_group(&mut memo, kll, ddsketch, 0.50);
+    let ratio = Operator::NonASAP(NonASAPOp::BinaryOp {
+        operator: BinaryOperator {
+            checked_relative_division: false,
+            checked_finite_division: false,
+            kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
+            vector_match: None,
+        },
+        return_bool: false,
+        lhs: p99,
+        rhs: p50,
+    });
+    let ratio_group = memo.find_or_add_group(ratio.clone()).unwrap();
+    add(&mut memo, ratio_group, ratio, None, None);
+    memo.add_query(QueryRoot::Operator(p95));
+    memo.add_query(QueryRoot::Operator(ratio_group));
+    all_at_query_time(memo)
+}
+
+const P95_FROM_KLL: usize = 9;
+const P95_FROM_DDSKETCH: usize = 10;
+const RATIO: usize = 15;
+
+/// Costs of the problem example: a larger sketch costs more, and a
+/// DDSketch less than a KLL of the same rank.
+fn problem_example_costs() -> Vec<Option<f64>> {
+    let mut costs = vec![Some(1.0)];
+    costs.extend((0..KLL_SIZES).map(|size| Some(10.0 + 10.0 * size as f64)));
+    costs.extend((0..DDSKETCH_ALPHAS.len()).map(|size| Some(5.0 + 10.0 * size as f64)));
+    costs.extend(std::iter::repeat_n(Some(1.0), 7));
+    costs
+}
+
+/// A query every 10 s at phase 0 with `accuracy`.
+fn entry_with(accuracy: AccuracyTarget) -> QueryWorkloadEntry {
+    QueryWorkloadEntry {
+        requirements: QueryRequirements {
+            accuracy,
+            max_latency_ms: None,
+        },
+        ..entry(0)
+    }
+}
+
+/// `latency`'s values declared non-negative: a DDSketch interior quantile
+/// keeps its relative error.
+fn non_negative_latency() -> DataWorkload {
+    let mut data = DataWorkload::default();
+    data.sources.insert(
+        "latency".into(),
+        SourceFacts {
+            values_non_negative: true,
+            ..Default::default()
+        },
+    );
+    data
+}
+
+/// The `parameters` the selected candidates of `states` (candidate ids)
+/// have, in candidate order.
+fn selected_parameters(
+    physical: &PhysicalASAPMemoCandidates,
+    solved: &SolvedSelection,
+    states: std::ops::RangeInclusive<usize>,
+) -> Vec<SketchParams> {
+    selected(solved)
+        .into_iter()
+        .filter(|candidate| states.contains(candidate))
+        .map(|candidate| {
+            physical
+                .logical_candidates
+                .memo
+                .candidate(physical.physical_candidates[candidate].logical_candidate_id)
+                .logical_properties
+                .parameters()
+                .unwrap()
+                .clone()
+        })
+        .collect()
+}
+
+/// The cheapest of `list` whose rank error for a quantile is at most
+/// `limit`.
+fn smallest_kll_within(limit: f64) -> SketchParams {
+    parameter_list(SketchAlgorithm::Kll)
+        .iter()
+        .find(|parameters| {
+            local_guarantee(
+                &FieldDataType::Sketch(SketchAlgorithm::Kll, GroupingStrategy::default()),
+                Some(parameters),
+                &SketchStatistic::Quantile { q: 0.95 },
+            )
+            .and_then(|g| g.spec.error.evaluate())
+            .is_some_and(|error| error <= limit)
+        })
+        .unwrap()
+        .clone()
+}
+
+/// #1207's problem example under (K): A's rank target 0.01 is met by a
+/// KLL state (its DDSketch readout, cheaper, is relative error, which a
+/// rank target does not accept: the metric rule at the root), and B's
+/// ratio within relative error 0.03 reads one DDSketch state through both
+/// operands, its cost paid once. B's per-operand bound is
+/// $(\alpha + \alpha) / (1 - 0.1) \le 0.03$, so `alpha` 0.02 (each operand
+/// alone well within 0.03) is too weak: (K) picks 0.01. Without (K) the
+/// weakest sizes win.
+#[test]
+fn the_problem_example_meets_each_query_target_at_its_root() {
+    let physical = problem_example();
+    let entries = [
+        entry_with(AccuracyTarget::max_error(0.01).accuracy_metric(AccuracyMetric::Rank)),
+        entry_with(AccuracyTarget::max_error(0.03).accuracy_metric(AccuracyMetric::Relative)),
+    ];
+    let data = non_negative_latency();
+    let root_limits: Vec<_> = entries
+        .iter()
+        .map(|entry| {
+            Some(RootAccuracyLimits::of(
+                &entry.requirements.accuracy,
+                Some(1),
+            ))
+        })
+        .collect();
+    let accuracy = Accuracy {
+        data: &data,
+        root_limits: &root_limits,
+    };
+    let costs = problem_example_costs();
+    let solved = solve_under(&physical, &costs, &[], &entries, &accuracy).unwrap();
+    let chosen = selected(&solved);
+    assert!(chosen.contains(&P95_FROM_KLL) && !chosen.contains(&P95_FROM_DDSKETCH));
+    assert!(chosen.contains(&RATIO));
+    assert_eq!(
+        selected_parameters(&physical, &solved, 1..=KLL_SIZES),
+        vec![smallest_kll_within(0.01)]
+    );
+    // One DDSketch state, alpha 0.01, read by both of B's operands.
+    assert_eq!(
+        selected_parameters(&physical, &solved, 5..=8),
+        vec![SketchParams::DDSketch { alpha: 0.01 }]
+    );
+    let ddsketch_node = solved
+        .selected_dag
+        .candidate_of_node
+        .iter()
+        .position(|&c| (5..=8).contains(&c.0))
+        .unwrap();
+    assert_eq!(
+        solved
+            .selected_dag
+            .edges
+            .iter()
+            .filter(|edge| edge.producer.0 == ddsketch_node)
+            .count(),
+        2
+    );
+    // Without (K): the cheapest sizes, A from DDSketch.
+    let unchecked = solve_under(&physical, &costs, &[], &entries, &no_accuracy()).unwrap();
+    assert!(selected(&unchecked).contains(&P95_FROM_DDSKETCH));
+    assert_eq!(
+        selected_parameters(&physical, &unchecked, 5..=8),
+        vec![SketchParams::DDSketch { alpha: 0.1 }]
+    );
+}
+
+/// A DDSketch interior quantile keeps its relative error only over values
+/// proven non-negative: without the declaration B has no guarantee and,
+/// its ratio reading no KLL (rank error into a relative-error contract),
+/// no plan meets (K).
+#[test]
+fn a_ddsketch_interior_quantile_needs_non_negative_values() {
+    let physical = problem_example();
+    let entries = [
+        entry_with(AccuracyTarget::max_error(0.01).accuracy_metric(AccuracyMetric::Rank)),
+        entry_with(AccuracyTarget::max_error(0.03).accuracy_metric(AccuracyMetric::Relative)),
+    ];
+    let root_limits: Vec<_> = entries
+        .iter()
+        .map(|entry| {
+            Some(RootAccuracyLimits::of(
+                &entry.requirements.accuracy,
+                Some(1),
+            ))
+        })
+        .collect();
+    let accuracy = Accuracy {
+        data: &NO_DATA,
+        root_limits: &root_limits,
+    };
+    assert_eq!(
+        solve_under(
+            &physical,
+            &problem_example_costs(),
+            &[],
+            &entries,
+            &accuracy
+        )
+        .unwrap_err(),
+        SelectionMilpError::Infeasible
+    );
+}
+
+/// Failure probabilities add along the selected edges (a union bound),
+/// a producer reached twice counted twice: a `Concat` of p95 and p50 read
+/// from one KLL state fails with twice its δ. A per-value target of 1.5δ
+/// is infeasible, 2δ is met; the error limit is loose in both.
+#[test]
+fn failure_probabilities_add_along_the_selected_edges() {
+    let mut memo = Memo::default();
+    let scan = latency_scan(&mut memo);
+    let kll_parameters = parameter_list(SketchAlgorithm::Kll)[KLL_SIZES - 1].clone();
+    let kll = state_group(
+        &mut memo,
+        scan,
+        SketchAlgorithm::Kll,
+        std::slice::from_ref(&kll_parameters),
+    );
+    let readouts: Vec<MemoGroupId> = [0.95, 0.5]
+        .into_iter()
+        .map(|q| {
+            let group = memo.find_or_add_group(quantile(kll, q)).unwrap();
+            add(&mut memo, group, quantile(kll, q), None, None);
+            group
+        })
+        .collect();
+    let both = Operator::NonASAP(NonASAPOp::Concat { children: readouts });
+    let both_group = memo.find_or_add_group(both.clone()).unwrap();
+    add(&mut memo, both_group, both, None, None);
+    memo.add_query(QueryRoot::Operator(both_group));
+    let physical = all_at_query_time(memo);
+    let delta = local_guarantee(
+        &FieldDataType::Sketch(SketchAlgorithm::Kll, GroupingStrategy::default()),
+        Some(&kll_parameters),
+        &SketchStatistic::Quantile { q: 0.95 },
+    )
+    .unwrap()
+    .spec
+    .failure_probability
+    .evaluate()
+    .unwrap();
+    assert!(delta > 0.0);
+    let costs = vec![Some(1.0); physical.physical_candidates.len()];
+    for (failure_probability, feasible) in [(1.5 * delta, false), (2.0 * delta, true)] {
+        let target = AccuracyTarget::max_error(0.5)
+            .failure_probability(failure_probability)
+            .accuracy_scope(AccuracyScope::PerValue);
+        let entries = [entry_with(target.clone())];
+        let root_limits = [Some(RootAccuracyLimits::of(&target, None))];
+        let accuracy = Accuracy {
+            data: &NO_DATA,
+            root_limits: &root_limits,
+        };
+        assert_eq!(
+            solve_under(&physical, &costs, &[], &entries, &accuracy).is_ok(),
+            feasible,
+            "δ target {failure_probability}"
+        );
+        agrees_with_the_reference_under(&physical, &costs, &[], &entries, &accuracy);
+    }
+}
+
+/// Big-M on the selected edge only: an input with an exact producer and
+/// a cheap approximate one whose error is over the target. The
+/// approximate producer's bound binds only when its edge is selected, so
+/// the exact one is chosen under a tight target and the cheap one under a
+/// loose target.
+#[test]
+fn a_producer_s_error_counts_only_on_its_selected_edge() {
+    let physical = problem_example();
+    let data = non_negative_latency();
+    let costs = problem_example_costs();
+    // Only A; B is exact by every target here except through DDSketch, so
+    // it is left without (K).
+    for (target, expected_kll) in [
+        (0.01, smallest_kll_within(0.01)),
+        (0.5, parameter_list(SketchAlgorithm::Kll)[0].clone()),
+    ] {
+        let entries = [
+            entry_with(AccuracyTarget::max_error(target).accuracy_metric(AccuracyMetric::Rank)),
+            entry(0),
+        ];
+        let root_limits = [
+            Some(RootAccuracyLimits::of(
+                &entries[0].requirements.accuracy,
+                Some(1),
+            )),
+            None,
+        ];
+        let accuracy = Accuracy {
+            data: &data,
+            root_limits: &root_limits,
+        };
+        let solved = solve_under(&physical, &costs, &[], &entries, &accuracy).unwrap();
+        assert_eq!(
+            selected_parameters(&physical, &solved, 1..=KLL_SIZES),
+            vec![expected_kll],
+            "target {target}"
+        );
+    }
+}
+
+/// On the problem example under (K), with many cost assignments and
+/// targets, the MILP's optimum equals the cheapest DAG of the reference
+/// enumeration whose composed errors meet every root limit.
+#[test]
+fn the_milp_agrees_with_the_reference_enumeration_under_accuracy() {
+    let physical = problem_example();
+    let data = non_negative_latency();
+    let mut next = pseudo_random_costs();
+    for round in 0..12 {
+        let costs: Vec<Option<f64>> = (0..physical.physical_candidates.len())
+            .map(|_| Some(next()))
+            .collect();
+        let a = [0.005, 0.01, 0.05][round % 3];
+        let b = [0.03, 0.05, 0.25, 0.01][round % 4];
+        let entries = [
+            entry_with(AccuracyTarget::max_error(a).accuracy_metric(AccuracyMetric::Rank)),
+            entry_with(AccuracyTarget::max_error(b)),
+        ];
+        let root_limits: Vec<_> = entries
+            .iter()
+            .map(|entry| {
+                Some(RootAccuracyLimits::of(
+                    &entry.requirements.accuracy,
+                    Some(1),
+                ))
+            })
+            .collect();
+        let accuracy = Accuracy {
+            data: &data,
+            root_limits: &root_limits,
+        };
+        agrees_with_the_reference_under(&physical, &costs, &[], &entries, &accuracy);
     }
 }

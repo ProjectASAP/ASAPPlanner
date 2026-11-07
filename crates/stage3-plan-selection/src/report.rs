@@ -86,9 +86,8 @@ pub enum RejectionCause {
     /// It ties with the selected candidate and comes later in enumeration
     /// order.
     TiedLostOnEnumerationOrder,
-    /// No plan meets every query's accuracy target, latency bound and the
-    /// catalog's consumer constraints together: the selection MILP is
-    /// infeasible. The reason names a query when it has no plan even alone.
+    /// No plan meets constraints (A)–(I), (R) and every query's accuracy
+    /// target (K) together: the selection MILP is infeasible.
     Infeasible,
 }
 
@@ -302,10 +301,12 @@ pub enum ErrorSelectingPlan {
         objective_per_second: f64,
         plan_cost_per_second: f64,
     },
-    /// The selected plan fails a check the selection MILP encodes
-    /// (accuracy through the budget shares, latency): a bug in the
-    /// accuracy weights, the sizing rule or a latency term, never a reason
-    /// to re-solve.
+    /// The selected plan's composed guarantee for a query misses its
+    /// target by the deployment's accuracy model, its evidence does not
+    /// meet it either, and the model does not accept the output regardless
+    /// of its guarantee: a bug in constraint (K)'s error model, or a model
+    /// stricter than the built-in rule (K) encodes; never a reason to
+    /// re-solve.
     #[error("the selected plan fails a check the MILP encodes ({cause:?}): {reason}")]
     SelectedPlanFailedCheck {
         cause: RejectionCause,

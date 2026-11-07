@@ -458,8 +458,8 @@ impl Planner {
     /// summary at the θ its consumers' parameter floors allow. The cost is
     /// that plan's, and `derived_root` the nodes of the realized plan only
     /// the last root reads. `last_root_is_key_filter` is accepted for the
-    /// relations' interface; accuracy is not composed again here (constraint
-    /// (K), #1207 PR 8).
+    /// relations' interface; Stage 3 checks accuracy at the roots
+    /// (constraint (K)).
     pub fn price(
         &self,
         workload: &FuzzWorkload,

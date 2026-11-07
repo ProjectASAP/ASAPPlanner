@@ -179,7 +179,7 @@ pub fn run_planning(
             physical,
             entries,
             data,
-            &models.accuracy_check_inputs(),
+            &models.accuracy_check_inputs(&roots),
             models.cost_inputs,
             &realizer,
         );
