@@ -7,3 +7,4 @@ These pages introduce the vocabulary and representations used throughout the rep
 - [Mapping concepts](asap-aware-mapping.md)
 - [Pre-ASAP IR](pre-asap-ir.md)
 - [Post-ASAP IR](post-asap-ir.md)
+- [Memo groups, properties and requirements](memo-groups-properties-requirements.md)
