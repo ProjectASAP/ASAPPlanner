@@ -642,14 +642,30 @@ impl NonASAPOp {
                 }
                 if child.result_kind == OperatorResultKind::Relation {
                     for (index, measure) in measures.iter().enumerate() {
+                        // SQL's sample `STDDEV`/`VAR_SAMP` is NULL for a group
+                        // of fewer than two values; the others, and the
+                        // population forms, for a group of no value.
+                        let sample = matches!(
+                            measure,
+                            AggIntent::StdDev {
+                                population: false,
+                                ..
+                            } | AggIntent::Variance {
+                                population: false,
+                                ..
+                            }
+                        );
                         if matches!(
                             measure,
                             AggIntent::Sum { .. }
                                 | AggIntent::Avg { .. }
                                 | AggIntent::Min { .. }
                                 | AggIntent::Max { .. }
+                                | AggIntent::StdDev { .. }
+                                | AggIntent::Variance { .. }
                         ) {
-                            let nullable = offset == 0
+                            let nullable = sample
+                                || offset == 0
                                 || filters.get(index).is_some_and(Option::is_some)
                                 || measure
                                     .input_cols()

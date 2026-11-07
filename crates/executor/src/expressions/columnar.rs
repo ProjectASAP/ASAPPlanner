@@ -739,7 +739,7 @@ fn evaluate_per_key_combination(
 fn expression_columns(expression: &Expression, columns: &mut Vec<usize>) {
     use Expression as E;
     match expression {
-        E::Column(c) | E::ExactFloat64(c) => columns.push(*c),
+        E::Column(c) | E::ExactFloat64(c) | E::FloatText(c) => columns.push(*c),
         E::LabelSet { column, .. } | E::Label { column, .. } | E::LabelIdentity { column, .. } => {
             columns.push(*column)
         }

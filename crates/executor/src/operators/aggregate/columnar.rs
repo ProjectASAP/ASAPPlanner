@@ -68,6 +68,76 @@ impl RunningAvg {
     }
 }
 
+/// Welford's running count, mean and sum of squared deviations from the
+/// mean, as Prometheus `stddev`/`stdvar` and DataFusion's variance update
+/// them: the same operations, so the same rounding.
+#[derive(Clone, Copy, Default)]
+struct Moments {
+    count: u64,
+    mean: f64,
+    squared_deviations: f64,
+}
+
+impl Moments {
+    fn add(&mut self, value: f64) {
+        self.count += 1;
+        let delta = value - self.mean;
+        self.mean += delta / self.count as f64;
+        self.squared_deviations += delta * (value - self.mean);
+    }
+
+    /// The variance over n (`population`) or n - 1; `None` with no value,
+    /// or one value of a sample.
+    fn variance(&self, population: bool) -> Option<f64> {
+        let divisor = if population {
+            self.count
+        } else {
+            self.count.saturating_sub(1)
+        };
+        (divisor > 0).then(|| self.squared_deviations / divisor as f64)
+    }
+}
+
+/// DataFusion's `corr` state: Welford's running means of both inputs, the
+/// co-moment and each input's squared deviations.
+#[derive(Clone, Copy, Default)]
+struct CoMoments {
+    count: u64,
+    mean_left: f64,
+    mean_right: f64,
+    co_moment: f64,
+    left: Moments,
+    right: Moments,
+}
+
+impl CoMoments {
+    fn add(&mut self, left: f64, right: f64) {
+        self.count += 1;
+        let count = self.count as f64;
+        let delta_left = left - self.mean_left;
+        self.mean_left += delta_left / count;
+        self.mean_right += (right - self.mean_right) / count;
+        self.co_moment += delta_left * (right - self.mean_right);
+        self.left.add(left);
+        self.right.add(right);
+    }
+
+    /// The population covariance over both population standard
+    /// deviations, as DataFusion divides them.
+    fn correlation(&self) -> Option<f64> {
+        if self.mean_left.is_nan() && self.mean_right.is_nan() {
+            return Some(f64::NAN);
+        }
+        if self.mean_left.is_nan() || self.mean_right.is_nan() || self.count < 2 {
+            return None;
+        }
+        let covariance = self.co_moment / self.count as f64;
+        let left = self.left.variance(true)?.sqrt();
+        let right = self.right.variance(true)?.sqrt();
+        (left != 0. && right != 0.).then(|| covariance / left / right)
+    }
+}
+
 /// One measure's running state per group.
 enum MeasureStates {
     /// Rows selected per group.
@@ -99,6 +169,12 @@ enum MeasureStates {
     },
     /// The non-NULL values per group (a quantile or percentile).
     CollectedValues(Vec<Vec<f64>>),
+    /// A standard deviation's or variance's moments.
+    Moments(Vec<Moments>),
+    /// A correlation's moments.
+    CoMoments(Vec<CoMoments>),
+    /// No state: every group's value is the same (`group`).
+    Constant,
 }
 
 impl MeasureStates {
@@ -138,6 +214,9 @@ impl MeasureStates {
             Reduction::Quantile { .. } | Reduction::Percentile { .. } => {
                 Self::CollectedValues(Vec::new())
             }
+            Reduction::StdDev { .. } | Reduction::Variance { .. } => Self::Moments(Vec::new()),
+            Reduction::PearsonCorr { .. } => Self::CoMoments(Vec::new()),
+            Reduction::Group => Self::Constant,
         })
     }
 
@@ -159,6 +238,9 @@ impl MeasureStates {
             Self::Cardinality { distinct, .. } => grow(distinct, groups, 0),
             Self::Frequency { totals, .. } => grow(totals, groups, 0),
             Self::CollectedValues(v) => grow(v, groups, Vec::new()),
+            Self::Moments(v) => grow(v, groups, Moments::default()),
+            Self::CoMoments(v) => grow(v, groups, CoMoments::default()),
+            Self::Constant => 0,
         }
     }
 }
@@ -359,9 +441,43 @@ fn update_measure(
                 }
             }
         }
+        (
+            MeasureStates::Moments(moments),
+            Reduction::StdDev { column, .. } | Reduction::Variance { column, .. },
+        ) => {
+            let values = numbers(batch, *column)?;
+            for (row, &group) in groups.iter().enumerate() {
+                if let Some(value) = values[row].filter(|_| selected(row)) {
+                    moments[group as usize].add(value);
+                }
+            }
+        }
+        (MeasureStates::CoMoments(moments), Reduction::PearsonCorr { left, right }) => {
+            let (lefts, rights) = (numbers(batch, *left)?, numbers(batch, *right)?);
+            for (row, &group) in groups.iter().enumerate() {
+                if let (Some(left), Some(right), true) = (lefts[row], rights[row], selected(row)) {
+                    moments[group as usize].add(left, right);
+                }
+            }
+        }
+        (MeasureStates::Constant, _) => {}
         _ => unreachable!("a measure's states match its reduction"),
     }
     Ok(())
+}
+
+/// The values of the numeric column `column` of `batch` as Float64, NULL
+/// as `None`.
+fn numbers(batch: &Batch, column: usize) -> Result<Vec<Option<f64>>, Error> {
+    let array = batch.column(column);
+    if let Some(floats) = array.as_any().downcast_ref::<Float64Array>() {
+        return Ok(floats.iter().collect());
+    }
+    let integers = array
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .ok_or_else(|| invalid("numeric aggregate value required"))?;
+    Ok(integers.iter().map(|v| v.map(|v| v as f64)).collect())
 }
 
 /// Each group's value of one measure, in `order`.
@@ -477,6 +593,38 @@ fn finish_measure(
                 .collect(),
             _ => unreachable!("quantile states answer a quantile or percentile"),
         },
+        MeasureStates::Moments(moments) => {
+            let (Reduction::StdDev { population, .. } | Reduction::Variance { population, .. }) =
+                measure
+            else {
+                unreachable!("moments answer a standard deviation or variance")
+            };
+            order
+                .iter()
+                .map(|&g| {
+                    let variance = moments[g as usize].variance(*population);
+                    let value = if matches!(measure, Reduction::StdDev { .. }) {
+                        variance.map(f64::sqrt)
+                    } else {
+                        variance
+                    };
+                    match value {
+                        Some(value) => Value::Float64(value),
+                        None if promql => Value::Float64(f64::NAN),
+                        None => Value::Null,
+                    }
+                })
+                .collect()
+        }
+        MeasureStates::CoMoments(moments) => order
+            .iter()
+            .map(|&g| {
+                moments[g as usize]
+                    .correlation()
+                    .map_or(Value::Null, Value::Float64)
+            })
+            .collect(),
+        MeasureStates::Constant => order.iter().map(|_| Value::Float64(1.)).collect(),
     };
     arrow_columns::encode(
         dtype,

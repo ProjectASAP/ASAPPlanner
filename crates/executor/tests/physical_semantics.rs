@@ -1409,3 +1409,272 @@ fn exact_cardinality_grouping_normalizes_float_identities() {
         [Value::Int64(2), Value::Int64(0)]
     ));
 }
+
+/// The value of row `row`'s column `column`: `Some` float, `None` for NULL.
+fn float_at(rows: &[Vec<Value>], row: usize, column: usize) -> Option<f64> {
+    match rows[row][column] {
+        Value::Float64(value) => Some(value),
+        Value::Null => None,
+        ref other => panic!("a DOUBLE: {other:?}"),
+    }
+}
+
+fn floats(values: &[Option<f64>]) -> Vec<Vec<Value>> {
+    values
+        .iter()
+        .map(|v| vec![v.map_or(Value::Null, Value::Float64)])
+        .collect()
+}
+
+/// SQL `STDDEV`/`VAR_SAMP` and `STDDEV_POP`/`VAR_POP` as DataFusion and
+/// Postgres define them: NULLs ignored; the sample forms NULL for fewer
+/// than two values, the population forms for none; NaN once a value is
+/// NaN or infinite.
+#[test]
+fn sql_variance_and_stddev_follow_their_definitions() {
+    let input = schema(&[("v", DataType::Float64, true)]);
+    let measures = || {
+        vec![
+            (
+                "var_pop".into(),
+                Reduction::Variance {
+                    column: 0,
+                    population: true,
+                },
+            ),
+            (
+                "var_samp".into(),
+                Reduction::Variance {
+                    column: 0,
+                    population: false,
+                },
+            ),
+            (
+                "stddev_pop".into(),
+                Reduction::StdDev {
+                    column: 0,
+                    population: true,
+                },
+            ),
+            (
+                "stddev_samp".into(),
+                Reduction::StdDev {
+                    column: 0,
+                    population: false,
+                },
+            ),
+        ]
+    };
+    let run = |values: &[Option<f64>]| {
+        let op = Operator::aggregate(input.clone(), vec![], measures()).unwrap();
+        let rows = unary(input.clone(), vec![floats(values)], op);
+        (0..4).map(|c| float_at(&rows, 0, c)).collect::<Vec<_>>()
+    };
+    let close = |got: Vec<Option<f64>>, expected: [Option<f64>; 4]| {
+        for (got, expected) in got.iter().zip(expected) {
+            match (got, expected) {
+                (Some(a), Some(b)) => assert!((a - b).abs() < 1e-12, "{got:?} vs {expected:?}"),
+                _ => assert_eq!(*got, expected),
+            }
+        }
+    };
+    // 1, 2, 4 and a NULL: mean 7/3, squared deviations 14/3.
+    close(
+        run(&[Some(1.), None, Some(2.), Some(4.)]),
+        [
+            Some(14. / 9.),
+            Some(7. / 3.),
+            Some((14f64 / 9.).sqrt()),
+            Some((7f64 / 3.).sqrt()),
+        ],
+    );
+    close(run(&[Some(5.)]), [Some(0.), None, Some(0.), None]);
+    close(run(&[None]), [None, None, None, None]);
+    close(run(&[]), [None, None, None, None]);
+    for poison in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        for values in [[Some(poison), Some(1.)], [Some(1.), Some(poison)]] {
+            assert!(run(&values).iter().all(|v| v.unwrap().is_nan()));
+        }
+    }
+    // An Int64 column reads as Float64.
+    let integers = schema(&[("v", DataType::Int64, false)]);
+    let op = Operator::aggregate(
+        integers.clone(),
+        vec![],
+        vec![(
+            "var_samp".into(),
+            Reduction::Variance {
+                column: 0,
+                population: false,
+            },
+        )],
+    )
+    .unwrap();
+    let rows = unary(
+        integers,
+        vec![vec![vec![Value::Int64(1)], vec![Value::Int64(3)]]],
+        op,
+    );
+    assert_eq!(float_at(&rows, 0, 0), Some(2.));
+}
+
+/// Over PromQL series, `stddev` and `stdvar` are population statistics
+/// (Welford's update, as Prometheus computes them): a single value has
+/// deviation 0, a single infinite one NaN.
+#[test]
+fn promql_stddev_of_one_series() {
+    let mut input = (*schema(&[
+        (
+            planner_types::ir::schema::PROMQL_SERIES_IDENTITY,
+            DataType::Utf8,
+            false,
+        ),
+        ("value", DataType::Float64, false),
+    ]))
+    .clone();
+    input.closed = true;
+    let input = Arc::new(input);
+    for (value, expected) in [(3., 0.), (f64::INFINITY, f64::NAN)] {
+        let op = Operator::aggregate(
+            input.clone(),
+            vec![],
+            vec![(
+                "stddev".into(),
+                Reduction::StdDev {
+                    column: 1,
+                    population: true,
+                },
+            )],
+        )
+        .unwrap();
+        let rows = unary(
+            input.clone(),
+            vec![vec![vec![Value::Utf8("{}".into()), Value::Float64(value)]]],
+            op,
+        );
+        let got = float_at(&rows, 0, 0).unwrap();
+        assert!(
+            got == expected || (got.is_nan() && expected.is_nan()),
+            "{got}"
+        );
+    }
+}
+
+/// SQL `corr` as DataFusion computes it: over the rows where both inputs
+/// are non-NULL, NULL for fewer than two, a constant input, or one input's
+/// NaN; NaN when both have one.
+#[test]
+fn correlation_follows_datafusion() {
+    let input = schema(&[
+        ("a", DataType::Float64, true),
+        ("b", DataType::Float64, true),
+    ]);
+    let run = |pairs: &[(Option<f64>, Option<f64>)]| {
+        let op = Operator::aggregate(
+            input.clone(),
+            vec![],
+            vec![("corr".into(), Reduction::PearsonCorr { left: 0, right: 1 })],
+        )
+        .unwrap();
+        let rows = pairs
+            .iter()
+            .map(|(a, b)| {
+                vec![
+                    a.map_or(Value::Null, Value::Float64),
+                    b.map_or(Value::Null, Value::Float64),
+                ]
+            })
+            .collect();
+        float_at(&unary(input.clone(), vec![rows], op), 0, 0)
+    };
+    let line = [
+        (Some(1.), Some(3.)),
+        (Some(2.), Some(5.)),
+        (Some(3.), Some(7.)),
+    ];
+    assert!((run(&line).unwrap() - 1.).abs() < 1e-12);
+    let falling = [(Some(1.), Some(3.)), (Some(2.), Some(1.)), (None, Some(9.))];
+    assert!((run(&falling).unwrap() + 1.).abs() < 1e-12);
+    // (1, 1), (2, 3), (3, 2): covariance 1/3, both variances 2/3.
+    let scattered = [
+        (Some(1.), Some(1.)),
+        (Some(2.), Some(3.)),
+        (Some(3.), Some(2.)),
+    ];
+    assert!((run(&scattered).unwrap() - 0.5).abs() < 1e-12);
+    assert_eq!(run(&[(Some(1.), Some(2.))]), None);
+    assert_eq!(run(&[]), None);
+    assert_eq!(run(&[(Some(1.), Some(2.)), (Some(1.), Some(5.))]), None);
+    assert_eq!(
+        run(&[(Some(1.), Some(2.)), (Some(f64::NAN), Some(5.))]),
+        None
+    );
+    assert!(
+        run(&[(Some(1.), Some(2.)), (Some(f64::NAN), Some(f64::NAN))])
+            .unwrap()
+            .is_nan()
+    );
+}
+
+/// PromQL `group` is 1 for every group, whatever its values.
+#[test]
+fn group_is_one_per_group() {
+    let input = schema(&[
+        ("job", DataType::Utf8, false),
+        ("v", DataType::Float64, false),
+    ]);
+    let op = Operator::aggregate(
+        input.clone(),
+        vec![0],
+        vec![("group".into(), Reduction::Group)],
+    )
+    .unwrap();
+    let rows = unary(
+        input,
+        vec![vec![
+            vec![Value::Utf8("a".into()), Value::Float64(f64::NAN)],
+            vec![Value::Utf8("a".into()), Value::Float64(-3.)],
+            vec![Value::Utf8("b".into()), Value::Float64(0.)],
+        ]],
+        op,
+    );
+    assert_eq!(rows.len(), 2);
+    assert!((0..2).all(|row| float_at(&rows, row, 1) == Some(1.)));
+}
+
+/// `count_values` labels a value as Go's `FormatFloat(v, 'f', -1, 64)`
+/// writes it: the shortest round-tripping decimal, never an exponent.
+#[test]
+fn float_text_matches_go_format_float() {
+    let input = schema(&[("v", DataType::Float64, false)]);
+    let cases = [
+        (1., "1"),
+        (2.5, "2.5"),
+        (0.1, "0.1"),
+        (-0., "-0"),
+        (1e21, "1000000000000000000000"),
+        (1e-7, "0.0000001"),
+        (f64::NAN, "NaN"),
+        (f64::INFINITY, "+Inf"),
+        (f64::NEG_INFINITY, "-Inf"),
+    ];
+    let op = Operator::project(
+        input.clone(),
+        vec![("text".into(), Expression::FloatText(0))],
+    )
+    .unwrap();
+    let rows = unary(
+        input,
+        vec![cases
+            .iter()
+            .map(|(v, _)| vec![Value::Float64(*v)])
+            .collect()],
+        op,
+    );
+    for (row, (_, text)) in rows.iter().zip(cases) {
+        assert!(
+            matches!(&row[0], Value::Utf8(got) if got.as_ref() == text),
+            "{row:?} vs {text}"
+        );
+    }
+}
