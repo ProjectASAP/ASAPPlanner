@@ -12,10 +12,11 @@ use crate::{
 };
 use planner_types::ir::materialized_view::MaterializedView;
 use planner_types::ir::operator::{
-    agg_has_exact_per_entity_kernel, AggIntent, GroupKeys, Reduction as PlannerReduction,
+    agg_has_exact_per_entity_kernel, AggIntent, AtModifier, GroupKeys,
+    Reduction as PlannerReduction,
 };
 use planner_types::ir::physical_export::{
-    time_range_window, PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
+    PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
     PhysicalASAPOperatorPayload as Payload, ScanWindow,
 };
 use planner_types::ir::scalar::{ColumnRef, CompareOpKind};
@@ -143,6 +144,7 @@ fn compile_internal(
         }
     }
     let mut ordered = Vec::new();
+    let mut subqueries = BTreeMap::new();
     let mut seen = BTreeSet::new();
     let mut pending = roots.iter().map(|&id| (id, false)).collect::<Vec<_>>();
     while let Some((id, expanded)) = pending.pop() {
@@ -158,6 +160,11 @@ fn compile_internal(
         }
         pending.push((id, true));
         if !views_by_node.contains_key(&id) {
+            // A subquery reads its selector's `Scan` directly.
+            if let Some(subquery) = subquery(id, &nodes, &dependencies)? {
+                dependencies.insert(id, vec![subquery.scan]);
+                subqueries.insert(id, subquery);
+            }
             for &input in dependencies.get(&id).into_iter().flatten() {
                 pending.push((input, false));
             }
@@ -221,9 +228,13 @@ fn compile_internal(
                 .map_err(|error| invalid(format!("scan {id}: {error}")))?;
             // The rows its readers read; a compile root reads them all.
             let window = match output.time_index {
-                Some(_) if !compile_roots.contains(&id) => {
-                    scan_windows[&(id as PhysicalASAPNodeId)]
-                }
+                Some(_) if !compile_roots.contains(&id) => subqueries
+                    .values()
+                    .filter(|subquery: &&Subquery| subquery.scan == id)
+                    .fold(
+                        scan_windows[&(id as PhysicalASAPNodeId)],
+                        |window, subquery| window_hull(window, subquery.scan_window()),
+                    ),
                 _ => ScanWindow::Unbounded,
             };
             physical_dag.add_raw_data(
@@ -465,15 +476,23 @@ fn compile_internal(
                 let [input_id] = inputs.as_slice() else {
                     return Err(invalid("per-entity summary requires one input"));
                 };
-                let Some(NonASAPOp::TimeRange { child, .. }) = restored[input_id].non_asap() else {
-                    return Err(invalid(
-                        "per-entity summary requires a resolved raw time range",
-                    ));
+                // The schema of the source whose series it summarizes: a
+                // subquery's, or the one a raw time range reads (a tumbling
+                // window reads its window through `TimeShift`s; the
+                // deployment supplies the shifted raw rows).
+                let schema = match (subqueries.get(input_id), restored[input_id].non_asap()) {
+                    (Some(subquery), _) => match &nodes[&subquery.scan].payload {
+                        Payload::NonASAP(NonASAPOp::Scan { schema, .. }) => Some(schema),
+                        _ => None,
+                    },
+                    (None, Some(NonASAPOp::TimeRange { child, .. })) => scan_schema_below(child),
+                    _ => {
+                        return Err(invalid(
+                            "per-entity summary requires a resolved raw time range",
+                        ))
+                    }
                 };
-                // A tumbling window reads its window through `TimeShift`s; the
-                // deployment supplies the shifted raw rows.
-                let source = below_time_shifts(child, |node| node.non_asap(), Ok)?;
-                let Some(NonASAPOp::Scan { schema, .. }) = source.non_asap() else {
+                let Some(schema) = schema else {
                     return Err(invalid("per-entity summary requires a resolved source"));
                 };
                 // An unkeyed frequency family (UnivMon) counts each value of
@@ -631,6 +650,18 @@ fn compile_internal(
                     continue;
                 }
             }
+            if let Some(subquery) = subqueries.get(&id) {
+                let mut operators = subquery
+                    .operators(schemas[0].clone(), output)
+                    .map_err(|error| invalid(format!("node {id}: {error}")))?;
+                let last = operators.pop().expect("a subquery runs a series window");
+                if let Some(window) = operators.pop() {
+                    physical_dag.add(auxiliary, inputs, window)?;
+                    inputs = vec![auxiliary];
+                }
+                physical_dag.add(id, inputs, last)?;
+                continue;
+            }
             // A window over a table or a time series (and a tumbling window's
             // shift under it) runs natively on the time column.
             if let Some(operator) = time_window_operator(id, &nodes, &dependencies, &schemas)
@@ -642,8 +673,10 @@ fn compile_internal(
             let mut operator = compile_node(node, &schemas)
                 .map_err(|error| invalid(format!("node {id}: {error}")))?;
             if operator.is_counter_evaluation() {
-                if let Some((offset, lookback)) = counter_window(id, &nodes, &dependencies)? {
-                    operator = operator.with_counter_window(offset, lookback)?;
+                if let Some((at, offset, lookback)) =
+                    counter_window(id, &nodes, &dependencies, &subqueries)?
+                {
+                    operator = operator.with_counter_window(at, offset, lookback)?;
                 }
             }
             if temporal_evaluation_drops_name(node) {
@@ -675,70 +708,74 @@ fn built_from_relation(state: &OperatorNode) -> bool {
     }
 }
 
-/// The native operator of `id` when it is a `TimeRange` or a `TimeShift`
-/// over a `Scan` (below any stacked `TimeShift`s), of a SQL table or a time
-/// series; `None` for any other node.
+/// The native operator of `id` when it is a `TimeRange` over any
+/// time-indexed input (a `Scan` of a SQL table or a time series, or rows
+/// computed from one, below any stacked `TimeShift`s), or a `TimeShift`
+/// that is not a subquery's ([`Subquery`]); `None` for any other node.
 ///
-/// A `TimeRange(w)` over shifts summing to `s` keeps the rows whose time
-/// column lies in `(T - s - w, T - s]` at evaluation time `T`
-/// ([`time_range_window`]), the window a PromQL selector
-/// and a SQL filter against `now()` read; an ingestion run builds the
-/// window ending at its `window_end_ms` ([`Operator::time_range`]). Over a
-/// time series a stale marker is not a row, and an instant window keeps
-/// each series' (each label set's) latest row. A `TimeShift` only moves
-/// the window its `TimeRange` reads (the range above applies its offset),
-/// so it passes the rows through; a shift is meaningful only under a
-/// range, the shape the frontends and Pass 2's tumbling windows build. An
-/// `@` anchor has no lowering, so a range or shift over one gets `None` and
-/// the node fails compilation; an instant window over a table is refused.
+/// A `TimeRange(w)` keeps the rows whose time column lies in `(e - w, e]`,
+/// with `e` the end its shifts give ([`shifted_end`]): `T - s` at
+/// evaluation time `T` for offsets summing to `s`, the window a PromQL
+/// selector and a SQL filter against `now()` read; an `@` anchor's time
+/// minus the offsets from the anchored shift down; an ingestion run builds
+/// the window ending at its `window_end_ms` ([`Operator::time_range`]).
+/// Over a time series a stale marker is not a row, and an instant window
+/// keeps each series' (each label set's) latest row. A `TimeShift` only
+/// moves the window its `TimeRange` reads (the range above applies it), so
+/// over a `Scan`'s rows it passes them through: a shift is meaningful only
+/// under a range, the shape the frontends and Pass 2's tumbling windows
+/// build; over rows evaluated at a time (a range's, an aggregate's) it is
+/// refused. An instant window over a table is refused.
 fn time_window_operator(
     id: NodeId,
     nodes: &BTreeMap<NodeId, &PhysicalASAPDAGNode>,
     dependencies: &BTreeMap<NodeId, Vec<NodeId>>,
     input_schemas: &[SchemaRef],
 ) -> Result<Option<Operator>, Error> {
-    let below = match &nodes[&id].payload {
-        Payload::NonASAP(NonASAPOp::TimeRange { .. }) => first_input(id, dependencies),
-        Payload::NonASAP(NonASAPOp::TimeShift { .. }) => Some(id),
+    let (range, kind) = match &nodes[&id].payload {
+        Payload::NonASAP(NonASAPOp::TimeRange { range, kind, .. }) => (range, kind),
+        Payload::NonASAP(NonASAPOp::TimeShift { .. }) => {
+            let [input] = input_schemas else {
+                return Err(invalid("a time shift reads one input"));
+            };
+            // Rows evaluated at another time (a range's, an aggregate's)
+            // cannot be moved by passing them through.
+            let (_, _, below) = shifted_end(Some(id), nodes, dependencies)?;
+            if !reads_scan_rows(below, nodes, dependencies) {
+                return Err(invalid(
+                    "a time shift over an evaluated input has no native implementation",
+                ));
+            }
+            let columns = input
+                .fields
+                .iter()
+                .enumerate()
+                .map(|(i, field)| (field.name.clone(), Expression::Column(i)))
+                .collect();
+            return Operator::project(input.clone(), columns).map(Some);
+        }
         _ => return Ok(None),
     };
-    let Some(below) = node_below_shifts(below, nodes, dependencies) else {
-        return Ok(None);
-    };
-    let Payload::NonASAP(NonASAPOp::Scan { source, .. }) = &nodes[&below].payload else {
-        return Ok(None);
-    };
     let [input] = input_schemas else {
-        return Err(invalid("a time range or shift over a Scan reads one input"));
+        return Err(invalid("a time range reads one input"));
     };
-    let Payload::NonASAP(NonASAPOp::TimeRange { kind, .. }) = &nodes[&id].payload else {
-        // A shift passes its rows through.
-        let columns = input
-            .fields
-            .iter()
-            .enumerate()
-            .map(|(i, field)| (field.name.clone(), Expression::Column(i)))
-            .collect();
-        return Operator::project(input.clone(), columns).map(Some);
-    };
-    let ScanWindow::Within {
-        end_offset_ms,
-        width_ms,
-    } = time_range_window(id as PhysicalASAPNodeId, |id| {
-        nodes.get(&(id as NodeId)).map(|node| &node.payload)
-    })
-    else {
-        return Ok(None);
-    };
+    let (at, end_offset_ms, below) =
+        shifted_end(first_input(id, dependencies), nodes, dependencies)?;
+    let width_ms =
+        i64::try_from(range.as_millis()).map_err(|_| invalid("time range exceeds Int64"))?;
     let time = input
         .time_index
-        .ok_or_else(|| invalid("a time range needs its source's time column"))?;
-    let (sample_value, latest_per_series) = match (source, kind) {
-        (planner_types::ir::operator::Source::Table { .. }, TimeRangeKind::Range) => (None, None),
-        (planner_types::ir::operator::Source::Table { .. }, TimeRangeKind::Instant) => {
+        .ok_or_else(|| invalid("a time range needs its input's time column"))?;
+    let time_series = matches!(
+        source_below(below, nodes, dependencies),
+        Some(planner_types::ir::operator::Source::TimeSeries { .. })
+    );
+    let (sample_value, latest_per_series) = match (time_series, kind) {
+        (false, TimeRangeKind::Range) => (None, None),
+        (false, TimeRangeKind::Instant) => {
             return Err(invalid("an instant window over a SQL table is unsupported"))
         }
-        (planner_types::ir::operator::Source::TimeSeries { .. }, kind) => {
+        (true, kind) => {
             let value = named_column(input, &ColumnRef::SampleValue)?;
             // A series is its label set: every column but its time and value.
             let series = (*kind == TimeRangeKind::Instant).then(|| {
@@ -752,6 +789,7 @@ fn time_window_operator(
     Operator::time_range(
         input.clone(),
         time,
+        at,
         end_offset_ms,
         width_ms,
         sample_value,
@@ -760,90 +798,393 @@ fn time_window_operator(
     .map(Some)
 }
 
+/// The smallest window holding both.
+fn window_hull(a: ScanWindow, b: ScanWindow) -> ScanWindow {
+    let (
+        ScanWindow::Within {
+            end_offset_ms: a_end,
+            width_ms: a_width,
+        },
+        ScanWindow::Within {
+            end_offset_ms: b_end,
+            width_ms: b_width,
+        },
+    ) = (a, b)
+    else {
+        return ScanWindow::Unbounded;
+    };
+    let end_offset_ms = a_end.min(b_end);
+    let start_back_ms = a_end
+        .saturating_add(a_width)
+        .max(b_end.saturating_add(b_width));
+    ScanWindow::Within {
+        end_offset_ms,
+        width_ms: start_back_ms.saturating_sub(end_offset_ms),
+    }
+}
+
 fn first_input(id: NodeId, dependencies: &BTreeMap<NodeId, Vec<NodeId>>) -> Option<NodeId> {
     dependencies.get(&id).and_then(|d| d.first()).copied()
 }
 
-/// The first node at or below `start` that is not a `TimeShift`; `None`
-/// when `start` is `None`, a shift has an `@` anchor, or a shift lacks its
-/// child.
-fn node_below_shifts(
+/// The end of the window read through the `TimeShift`s from `start` down,
+/// as `(at, end_offset_ms)`: `end_offset_ms` before the time of the `@`
+/// anchor `at`, or before the evaluation time without one; and the first
+/// node below them. A shift evaluates its input at its anchor's time (or
+/// the time it is evaluated at) minus its offset, so the deepest anchor
+/// wins and only the offsets from it down count, as in Prometheus. An
+/// error when `start` is `None` or a shift lacks its input.
+fn shifted_end(
     start: Option<NodeId>,
     nodes: &BTreeMap<NodeId, &PhysicalASAPDAGNode>,
     dependencies: &BTreeMap<NodeId, Vec<NodeId>>,
-) -> Option<NodeId> {
+) -> Result<(Option<AtModifier>, i64, NodeId), Error> {
+    let (mut at, mut end_offset_ms) = (None, 0i64);
     let mut below = start;
     while let Some(node) = below {
         let Payload::NonASAP(NonASAPOp::TimeShift { shift, .. }) = &nodes[&node].payload else {
-            return Some(node);
+            return Ok((at, end_offset_ms, node));
         };
         if shift.at.is_some() {
-            return None;
+            (at, end_offset_ms) = (shift.at, shift.offset_ms);
+        } else {
+            end_offset_ms = end_offset_ms
+                .checked_add(shift.offset_ms)
+                .ok_or_else(|| invalid("time shift overflows Int64"))?;
+        }
+        below = first_input(node, dependencies);
+    }
+    Err(invalid("a time range or shift lacks its input"))
+}
+
+/// Whether `node`'s rows are a `Scan`'s, through row-wise `Project`s and
+/// `Filter`s.
+fn reads_scan_rows(
+    node: NodeId,
+    nodes: &BTreeMap<NodeId, &PhysicalASAPDAGNode>,
+    dependencies: &BTreeMap<NodeId, Vec<NodeId>>,
+) -> bool {
+    let mut below = Some(node);
+    while let Some(node) = below {
+        match &nodes[&node].payload {
+            Payload::NonASAP(NonASAPOp::Scan { .. }) => return true,
+            Payload::NonASAP(NonASAPOp::Project { .. } | NonASAPOp::Filter { .. }) => {
+                below = first_input(node, dependencies)
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// The source of the `Scan` reached from `node` down its first inputs.
+fn source_below<'a>(
+    node: NodeId,
+    nodes: &BTreeMap<NodeId, &'a PhysicalASAPDAGNode>,
+    dependencies: &BTreeMap<NodeId, Vec<NodeId>>,
+) -> Option<&'a planner_types::ir::operator::Source> {
+    let mut below = Some(node);
+    while let Some(node) = below {
+        if let Payload::NonASAP(NonASAPOp::Scan { source, .. }) = &nodes[&node].payload {
+            return Some(source);
         }
         below = first_input(node, dependencies);
     }
     None
 }
 
-/// The first node at or below `node` that is not a `TimeShift`, following
-/// each shift's child: a range reads its raw source through any number of
-/// stacked shifts. `operator` gives a node's non-ASAP operator (`None` for an
-/// ASAP one) and `resolve` a child's node; an error when a child is missing.
-pub(crate) fn below_time_shifts<'a, N, C: 'a>(
-    mut node: &'a N,
-    operator: impl Fn(&'a N) -> Option<&'a NonASAPOp<C>>,
-    resolve: impl Fn(&'a C) -> Result<&'a N, Error>,
-) -> Result<&'a N, Error> {
-    while let Some(NonASAPOp::TimeShift { child, .. }) = operator(node) {
-        node = resolve(child)?;
-    }
-    Ok(node)
+/// The default step of a subquery written without one (`<expr>[10m:]`):
+/// Prometheus' default global evaluation interval, one minute.
+const DEFAULT_SUBQUERY_STEP_MS: i64 = 60_000;
+
+/// A PromQL subquery the executor runs natively: `<inner>[R:s]`, under
+/// the `TimeShift`s of its node (none when the node is the
+/// `PromqlSubquery` itself), evaluates `inner` at every multiple of `s` in
+/// `(e - R, e]`, with `e` the end those shifts give ([`shifted_end`]).
+/// `inner` is an instant selector (`m`) or a per-series range function
+/// (`f(m[r])`, an exact per-entity `Aggregate` over a range), over the
+/// `Scan` `scan` below its own shifts; it runs as one
+/// [`Operator::series_window`] over that `Scan`'s rows.
+struct Subquery {
+    scan: NodeId,
+    /// `None` for an instant selector.
+    function: Option<AggIntent<ColumnRef>>,
+    /// The selector's range, or an instant selector's lookback.
+    range_ms: i64,
+    at: Option<AtModifier>,
+    offset_ms: i64,
+    /// The step grid, without its anchor.
+    steps: crate::operators::SubquerySteps,
+    /// The anchor of the step grid's end.
+    steps_at: Option<AtModifier>,
 }
 
-/// The logical window of the counter evaluation `id`, as `(offset,
-/// lookback)`: it ends `offset` ms before the evaluation time and spans
-/// `lookback` ms. It is the union of the range windows the evaluation
-/// reads, each moved back by the time shifts below its range: one range for
-/// a single build, back-to-back tumbling windows for merged tumbling windows. `None`
+/// The [`Subquery`] node `id` is: a `PromqlSubquery`, or a `TimeShift`
+/// over one; `None` for any other node. An error for a subquery over an
+/// expression other than a selector or a per-series range function of one.
+fn subquery(
+    id: NodeId,
+    nodes: &BTreeMap<NodeId, &PhysicalASAPDAGNode>,
+    dependencies: &BTreeMap<NodeId, Vec<NodeId>>,
+) -> Result<Option<Subquery>, Error> {
+    if !matches!(
+        nodes[&id].payload,
+        Payload::NonASAP(NonASAPOp::TimeShift { .. } | NonASAPOp::PromqlSubquery { .. })
+    ) {
+        return Ok(None);
+    }
+    let (steps_at, steps_offset_ms, below) = shifted_end(Some(id), nodes, dependencies)?;
+    let Payload::NonASAP(NonASAPOp::PromqlSubquery {
+        range: subquery_range,
+        resolution,
+        ..
+    }) = &nodes[&below].payload
+    else {
+        return Ok(None);
+    };
+    let millis = |duration: &std::time::Duration| {
+        i64::try_from(duration.as_millis()).map_err(|_| invalid("subquery range exceeds Int64"))
+    };
+    let unsupported = || {
+        invalid(format!(
+            "node {id}: a subquery over an expression other than a selector or a per-series \
+             range function of one has no native implementation"
+        ))
+    };
+    let inner = first_input(below, dependencies).ok_or_else(unsupported)?;
+    let (function, range) = match &nodes[&inner].payload {
+        Payload::NonASAP(NonASAPOp::TimeRange {
+            range,
+            kind: TimeRangeKind::Instant,
+            ..
+        }) => (None, (inner, range)),
+        Payload::NonASAP(NonASAPOp::Aggregate {
+            reduction: PlannerReduction::PerEntity,
+            measures,
+            filters,
+            having: None,
+            ..
+        }) if filters.iter().all(Option::is_none) => {
+            let [measure] = measures.as_slice() else {
+                return Err(unsupported());
+            };
+            let window = first_input(inner, dependencies).ok_or_else(unsupported)?;
+            let Payload::NonASAP(NonASAPOp::TimeRange {
+                range,
+                kind: TimeRangeKind::Range,
+                ..
+            }) = &nodes[&window].payload
+            else {
+                return Err(unsupported());
+            };
+            // A range function of one series' samples names no column, so
+            // its intent carries over to the series window's column type.
+            let function = serde_json::to_value(measure)
+                .and_then(serde_json::from_value)
+                .map_err(|_| unsupported())?;
+            (Some(function), (window, range))
+        }
+        // The exact accumulator of a range function, finalized.
+        Payload::ASAP(ASAPOp::FinalizeExactAccumulator { .. }) => {
+            let build = first_input(inner, dependencies).ok_or_else(unsupported)?;
+            let window = first_input(build, dependencies).ok_or_else(unsupported)?;
+            let (
+                Payload::ASAP(ASAPOp::SummaryAgg {
+                    family: FieldDataType::ExactAggregate(kind, _),
+                    reduction: PlannerReduction::PerEntity,
+                    filter: None,
+                    ..
+                }),
+                Payload::NonASAP(NonASAPOp::TimeRange {
+                    range,
+                    kind: TimeRangeKind::Range,
+                    ..
+                }),
+            ) = (&nodes[&build].payload, &nodes[&window].payload)
+            else {
+                return Err(unsupported());
+            };
+            use planner_types::ir::schema::ExactKind;
+            let function = match kind {
+                ExactKind::Sum => AggIntent::Sum { col: None },
+                ExactKind::Count => AggIntent::Count {
+                    accuracy: planner_types::ir::properties::AccuracyTarget::exact(),
+                },
+                ExactKind::Min => AggIntent::Min { col: None },
+                ExactKind::Max => AggIntent::Max { col: None },
+                ExactKind::Increase => AggIntent::Increase,
+                ExactKind::Rate => AggIntent::Rate,
+                ExactKind::IRate => AggIntent::IRate,
+            };
+            (Some(function), (window, range))
+        }
+        _ => return Err(unsupported()),
+    };
+    let (at, offset_ms, scan) =
+        shifted_end(first_input(range.0, dependencies), nodes, dependencies)?;
+    if !matches!(
+        nodes[&scan].payload,
+        Payload::NonASAP(NonASAPOp::Scan { .. })
+    ) {
+        return Err(unsupported());
+    }
+    let steps = crate::operators::SubquerySteps {
+        range_ms: millis(subquery_range)?,
+        step_ms: resolution
+            .as_ref()
+            .map(millis)
+            .transpose()?
+            .unwrap_or(DEFAULT_SUBQUERY_STEP_MS),
+        offset_ms: steps_offset_ms,
+        at_ms: None,
+    };
+    Ok(Some(Subquery {
+        scan,
+        function,
+        range_ms: millis(range.1)?,
+        at,
+        offset_ms,
+        steps,
+        steps_at,
+    }))
+}
+
+impl Subquery {
+    /// `(start, end]` back from the evaluation time of the rows it reads;
+    /// `Unbounded` with an `@` anchor.
+    fn scan_window(&self) -> ScanWindow {
+        if self.at.is_some() || self.steps_at.is_some() {
+            return ScanWindow::Unbounded;
+        }
+        ScanWindow::Within {
+            end_offset_ms: self.steps.offset_ms.saturating_add(self.offset_ms),
+            width_ms: self.steps.range_ms.saturating_add(self.range_ms),
+        }
+    }
+
+    /// The operators that run it over the `Scan`'s rows `input`, giving
+    /// `output`: the series window, then, for a range function that drops
+    /// the metric name (all but `last_over_time`), the name dropped from
+    /// each series identity.
+    fn operators(&self, input: SchemaRef, output: SchemaRef) -> Result<Vec<Operator>, Error> {
+        // An `@ <t>` is a literal; `@ start()` and `@ end()` are resolved
+        // at run time.
+        let pinned = |at: Option<AtModifier>| match at {
+            Some(AtModifier::Timestamp(ms)) => (Some(ms), None),
+            bound => (None, bound),
+        };
+        let ((at_ms, range_at), (steps_at_ms, steps_range_at)) =
+            (pinned(self.at), pinned(self.steps_at));
+        let window = Operator::series_window(
+            input,
+            self.function.clone(),
+            self.range_ms,
+            self.offset_ms,
+            at_ms,
+            Some(crate::operators::SubquerySteps {
+                at_ms: steps_at_ms,
+                ..self.steps
+            }),
+        )?
+        .with_series_range_bounds(range_at, steps_range_at)?;
+        let drops_name = self
+            .function
+            .as_ref()
+            .is_some_and(|function| !matches!(function, AggIntent::LastOverTime))
+            && output
+                .fields
+                .iter()
+                .any(|field| field.name == promql_rows::SERIES_IDENTITY_COLUMN);
+        Ok(if drops_name {
+            let windowed = window.schema();
+            vec![
+                window,
+                Operator::series_without_name(windowed)?.with_output_schema(output)?,
+            ]
+        } else {
+            vec![window.with_output_schema(output)?]
+        })
+    }
+}
+
+/// The schema of the `Scan` a range over `node` reads: `node`, or the
+/// first node below it past `TimeShift`s and row-wise `Project`s and
+/// `Filter`s (a SQL `asap_rate` projects its series' rows); `None` when
+/// that is no `Scan`.
+fn scan_schema_below(mut node: &OperatorNode) -> Option<&planner_types::ir::schema::Schema> {
+    loop {
+        match node.non_asap()? {
+            NonASAPOp::Scan { schema, .. } => return Some(schema),
+            NonASAPOp::TimeShift { child, .. }
+            | NonASAPOp::Project { child, .. }
+            | NonASAPOp::Filter { child, .. } => node = child,
+            _ => return None,
+        }
+    }
+}
+
+/// The logical window of the counter evaluation `id`, as `(at, offset,
+/// lookback)`: it ends `offset` ms before the evaluation time, or before
+/// the time of the `@` anchor `at`, and spans `lookback` ms. It is the
+/// union of the range windows the evaluation reads, each moved by the time
+/// shifts below its range ([`shifted_end`]), a subquery's its step grid's
+/// (`rate(x[10m:1m])`): one range for a single build,
+/// back-to-back tumbling windows for merged tumbling windows. `None`
 /// without a range; an error when the ranges do not form one window.
 fn counter_window(
     id: NodeId,
     nodes: &BTreeMap<NodeId, &PhysicalASAPDAGNode>,
     dependencies: &BTreeMap<NodeId, Vec<NodeId>>,
-) -> Result<Option<(i64, i64)>, Error> {
+    subqueries: &BTreeMap<NodeId, Subquery>,
+) -> Result<Option<(Option<AtModifier>, i64, i64)>, Error> {
     let millis =
         |ms: u128| i64::try_from(ms).map_err(|_| invalid("counter lookback exceeds Int64"));
     let mut pending = vec![id];
     let mut visited = BTreeSet::new();
-    // (offset, end of the window back from the evaluation time) per range.
+    // (offset, end of the window back from its reference time) per range,
+    // and the ranges' one anchor.
     let mut windows = BTreeSet::new();
+    let mut anchors = Vec::new();
     while let Some(ancestor) = pending.pop() {
         if !visited.insert(ancestor) {
             continue;
         }
-        if let Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) = &nodes[&ancestor].payload {
-            let mut offset = 0i64;
-            let mut below = dependencies.get(&ancestor).and_then(|d| d.first()).copied();
-            while let Some(input) = below {
-                let Payload::NonASAP(NonASAPOp::TimeShift { shift, .. }) = &nodes[&input].payload
-                else {
-                    break;
-                };
-                if shift.at.is_none() {
-                    offset = offset
-                        .checked_add(shift.offset_ms)
-                        .ok_or_else(|| invalid("counter window overflows Int64"))?;
-                }
-                below = dependencies.get(&input).and_then(|d| d.first()).copied();
+        // A subquery is the range its outer function reads.
+        if let Some(subquery) = subqueries.get(&ancestor) {
+            let steps = subquery.steps;
+            let back = steps
+                .offset_ms
+                .checked_add(steps.range_ms)
+                .ok_or_else(|| invalid("counter window overflows Int64"))?;
+            windows.insert((steps.offset_ms, back));
+            if !anchors.contains(&subquery.steps_at) {
+                anchors.push(subquery.steps_at);
             }
+            continue;
+        }
+        if let Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) = &nodes[&ancestor].payload {
+            let (at, offset, _) =
+                shifted_end(first_input(ancestor, dependencies), nodes, dependencies)?;
             let back = offset
                 .checked_add(millis(range.as_millis())?)
                 .ok_or_else(|| invalid("counter window overflows Int64"))?;
             windows.insert((offset, back));
+            if !anchors.contains(&at) {
+                anchors.push(at);
+            }
             continue;
         }
         pending.extend(dependencies.get(&ancestor).into_iter().flatten().copied());
     }
+    let at = match anchors.as_slice() {
+        [] => return Ok(None),
+        [at] => *at,
+        _ => {
+            return Err(invalid(
+                "counter evaluation reads windows of different anchors",
+            ))
+        }
+    };
     let mut windows = windows.into_iter();
     let Some((offset, mut back)) = windows.next() else {
         return Ok(None);
@@ -855,7 +1196,7 @@ fn counter_window(
         }
         back = end;
     }
-    Ok(Some((offset, back - offset)))
+    Ok(Some((at, offset, back - offset)))
 }
 
 // Temporal summary evaluations produce PromQL vectors, whose range functions drop
@@ -1024,6 +1365,7 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                     statistic,
                     lookback_ms: None,
                     offset_ms: 0,
+                    at: None,
                 }),
             )
         }

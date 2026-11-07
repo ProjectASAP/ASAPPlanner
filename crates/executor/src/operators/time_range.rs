@@ -1,22 +1,26 @@
-//! A `TimeRange` over a `Scan`: the rows of one window on the time column,
-//! for a SQL table and a time series alike. A time series' stale markers
-//! (the Prometheus end-of-series NaN) are never rows; an ordinary NaN is.
+//! A `TimeRange` over a time-indexed input (a `Scan`, or rows computed
+//! from one): the rows of one window on the time column, for a SQL table
+//! and a time series alike. A time series' stale markers (the Prometheus
+//! end-of-series NaN) are never rows; an ordinary NaN is.
 use super::*;
 use arrow::array::Array;
+use planner_types::ir::operator::AtModifier;
 
 impl Operator {
     /// The rows of `input` whose `time` lies in the window of a
-    /// `TimeRange(width_ms)` over shifts summing to `end_offset_ms`: `(T -
-    /// end_offset_ms - width_ms, T - end_offset_ms]` in a query run at `T`,
-    /// `(window_end_ms - width_ms, window_end_ms]` in an ingestion run.
-    /// With `sample_value`, a time series' value column, a stale marker is
-    /// not a row. With `latest_per_series` (an instant window), only each
-    /// series' latest row in the window is kept (of rows at one time, the
-    /// last), and none when that row is a stale marker; a series is the
-    /// values of those columns (its labels).
+    /// `TimeRange(width_ms)` over shifts: `(e - width_ms, e]`, with `e` the
+    /// window end [`window_end`] gives for the shifts' `@` anchor `at` and
+    /// offsets summing to `end_offset_ms` (`T - end_offset_ms` in a query
+    /// run at `T` without an anchor, the run's `window_end_ms` in an
+    /// ingestion run). With `sample_value`, a time series' value column, a
+    /// stale marker is not a row. With `latest_per_series` (an instant
+    /// window), only each series' latest row in the window is kept (of rows
+    /// at one time, the last), and none when that row is a stale marker; a
+    /// series is the values of those columns (its labels).
     pub fn time_range(
         input: SchemaRef,
         time: usize,
+        at: Option<AtModifier>,
         end_offset_ms: i64,
         width_ms: i64,
         sample_value: Option<usize>,
@@ -39,6 +43,7 @@ impl Operator {
         Ok(Self {
             kind: Kind::TimeRange {
                 time,
+                at,
                 end_offset_ms,
                 width_ms,
                 sample_value,
@@ -50,24 +55,55 @@ impl Operator {
     }
 }
 
-/// `(start, end]` of a window `width_ms` wide in this run: ending
-/// `end_offset_ms` before the evaluation time `T` in a query run; ending at
-/// the run's `window_end_ms` in an ingestion run, which builds the window
-/// the shifts select (the shifts say which window a query reads, the
-/// ingestion run's window which one it builds).
+/// The time an `@` anchor pins: `@ <t>` its instant, `@ start()` and
+/// `@ end()` the query range's bounds, which an instant query (a run
+/// without them) has both at its evaluation time, as in Prometheus. An
+/// ingestion run has no anchor time: an anchored window is read at query
+/// time.
+pub(super) fn anchor_time(at: AtModifier, context: &RunContext) -> Result<i64, Error> {
+    let crate::runtime::Scope::Query { evaluation_time_ms } = context.scope else {
+        return Err(invalid("an @-anchored window is read only at query time"));
+    };
+    let (start, end) = context
+        .query_range()
+        .unwrap_or((evaluation_time_ms, evaluation_time_ms));
+    Ok(match at {
+        AtModifier::Timestamp(ms) => ms,
+        AtModifier::Start => start,
+        AtModifier::End => end,
+    })
+}
+
+/// The end of a window `end_offset_ms` before its reference time: the time
+/// of the `@` anchor `at` ([`anchor_time`]) or, without one, the evaluation
+/// time `T` in a query run; in an ingestion run, the run's `window_end_ms`,
+/// which builds the window the shifts select (the shifts say which window
+/// a query reads, the ingestion run's window which one it builds).
+pub(super) fn window_end(
+    at: Option<AtModifier>,
+    end_offset_ms: i64,
+    context: &RunContext,
+) -> Result<i64, Error> {
+    let reference = match (at, &context.scope) {
+        (Some(at), _) => anchor_time(at, context)?,
+        (None, crate::runtime::Scope::Query { evaluation_time_ms }) => *evaluation_time_ms,
+        (None, crate::runtime::Scope::Ingestion { window_end_ms, .. }) => {
+            return Ok(*window_end_ms)
+        }
+    };
+    reference
+        .checked_sub(end_offset_ms)
+        .ok_or_else(|| invalid("time range overflows Int64"))
+}
+
+/// `(start, end]` of a window `width_ms` wide ending at [`window_end`].
 pub(super) fn window(
+    at: Option<AtModifier>,
     end_offset_ms: i64,
     width_ms: i64,
     context: &RunContext,
 ) -> Result<(i64, i64), Error> {
-    let end = match context.scope {
-        crate::runtime::Scope::Query {
-            evaluation_time_ms, ..
-        } => evaluation_time_ms
-            .checked_sub(end_offset_ms)
-            .ok_or_else(|| invalid("time range overflows Int64"))?,
-        crate::runtime::Scope::Ingestion { window_end_ms, .. } => window_end_ms,
-    };
+    let end = window_end(at, end_offset_ms, context)?;
     let start = end
         .checked_sub(width_ms)
         .ok_or_else(|| invalid("time range overflows Int64"))?;
@@ -81,6 +117,7 @@ pub(super) fn execute<'a>(
 ) -> Result<OutputStream<'a, Batch>, Error> {
     let Kind::TimeRange {
         time,
+        at,
         end_offset_ms,
         width_ms,
         sample_value,
@@ -92,7 +129,7 @@ pub(super) fn execute<'a>(
     let input = inputs
         .pop()
         .ok_or_else(|| invalid("time range input missing"))?;
-    let (start, end) = window(end_offset_ms, width_ms, &context)?;
+    let (start, end) = window(at, end_offset_ms, width_ms, &context)?;
     // Whether each row is in the window and, for a range window, not a
     // stale marker.
     let kept =

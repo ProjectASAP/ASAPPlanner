@@ -865,6 +865,7 @@ fn empty_exact_summary_extrema_agree_with_ordinary_aggregation() {
                         statistic: kind,
                         lookback_ms: None,
                         offset_ms: 0,
+                        at: None,
                     },
                 ),
             )

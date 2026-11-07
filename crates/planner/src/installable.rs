@@ -859,19 +859,24 @@ mod tests {
         );
     }
 
-    /// `TimeShift(10 min) <- TimeRange(5 min) <- Scan`, all at query time:
-    /// the shift above the range moves its window, which a window of a
-    /// fixed offset below the range cannot say, so it is refused; without
-    /// the shift the window is listed.
+    /// `TimeShift(10 min) <- TimeRange(5 min) <- Scan`: the shift above the
+    /// range moves its window, which a window of a fixed offset below the
+    /// range cannot say, so a view refreshed from it is refused (a query
+    /// run checks no raw-data window shape); without the shift the window
+    /// is listed.
     #[test]
-    fn a_time_shift_above_the_range_is_refused() {
+    fn a_time_shift_above_the_range_is_refused_in_a_view() {
         use asap_types::ir::operator::operator_properties::TimeShift;
-        use asap_types::ir::operator::Source;
+        use asap_types::ir::operator::{Reduction, Source};
         use asap_types::ir::physical_export::compile_physical_asap_dag;
-        use asap_types::ir::schema::{DataType, Field, Schema};
+        use asap_types::ir::scalar::ColumnRef;
+        use asap_types::ir::schema::{
+            DataType, ExactKind, ExactParams, Field, FieldDataType, Schema, SummaryUpdate,
+        };
         use asap_types::ir::{
             apply_materialization_timings, NodeToTimedNodeCache, OperatorNode, TimeRangeKind,
         };
+        use asap_types::physical::Medium;
         use std::time::Duration;
         let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
             source: Source::TimeSeries {
@@ -914,7 +919,21 @@ mod tests {
         let install = |dag| {
             InstallablePlan::of_dag(dag, vec![String::new()], &HashMap::new(), &HashMap::new())
         };
-        match install(export(shifted)) {
+        let summed = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
+            child: shifted,
+            family: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            input: SummaryUpdate::column(ColumnRef::Named("value".into())),
+            reduction: Reduction::by(vec![]),
+            grouping: Default::default(),
+            filter: None,
+        }))
+        .unwrap();
+        let mut assignment = MaterializationAssignment::default();
+        assignment.set(&summed, Materialization::MatAtIngestion(Medium::Memory));
+        let timed =
+            apply_materialization_timings(&summed, &assignment, &mut NodeToTimedNodeCache::new())
+                .unwrap();
+        match install(compile_physical_asap_dag(&timed).unwrap()) {
             Err(InstallablePlanError::Uninstallable(
                 InstallableDagError::UnsupportedRawDataWindow { reason, .. },
             )) => {

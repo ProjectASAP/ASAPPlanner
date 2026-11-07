@@ -138,16 +138,8 @@ pub(super) fn anchor(
 ) -> Result<Option<i64>, Error> {
     match bound {
         None => Ok(literal),
-        Some(bound) => {
-            let (start, end) = context
-                .query_range()
-                .ok_or_else(|| invalid("@ start() and @ end() require query range bounds"))?;
-            match bound {
-                AtModifier::Start => Ok(Some(start)),
-                AtModifier::End => Ok(Some(end)),
-                AtModifier::Timestamp(_) => Err(invalid("invalid range-bound anchor")),
-            }
-        }
+        Some(AtModifier::Timestamp(_)) => Err(invalid("invalid range-bound anchor")),
+        Some(bound) => super::time_range::anchor_time(bound, context).map(Some),
     }
 }
 

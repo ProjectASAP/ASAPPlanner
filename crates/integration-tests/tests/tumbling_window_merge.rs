@@ -502,10 +502,8 @@ fn offset_counter_window_ends_at_the_offset() {
 
 /// A counter over `[5m] @ 300` reads the window ending at 300 s whatever the
 /// evaluation time, and `@ 300 offset 1m` the one ending at 240 s: the same
-/// values as the unanchored counter evaluated at 300 s and at 240 s. Today
-/// it reads the window ending at the evaluation time (#748).
+/// values as the unanchored counter evaluated at 300 s and at 240 s.
 #[test]
-#[ignore = "the counter window drops an @ anchor and its offset: #748"]
 fn anchored_counter_window_ends_at_the_anchor() {
     let samples = samples(7_000);
     for function in ["rate", "increase"] {

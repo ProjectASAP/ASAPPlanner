@@ -189,6 +189,7 @@ fn summary_construction_merge_and_evaluation_at_both_phases() {
                     statistic: ExactKind::Sum,
                     lookback_ms: None,
                     offset_ms: 0,
+                    at: None,
                 },
             ),
         )
@@ -507,6 +508,7 @@ fn exact_state_and_family_validation() {
                     statistic: ExactKind::Sum,
                     lookback_ms: None,
                     offset_ms: 0,
+                    at: None,
                 },
             ),
         )
@@ -631,6 +633,7 @@ fn empty_exact_count_is_an_integer_state_evaluation() {
                 statistic: ExactKind::Count,
                 lookback_ms: None,
                 offset_ms: 0,
+                at: None,
             },
         ),
     )

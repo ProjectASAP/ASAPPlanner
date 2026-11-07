@@ -332,8 +332,8 @@ pub enum InstallableDagError {
     /// Bad input: the DAG is not a valid physical ASAP DAG.
     #[error("invalid physical ASAP DAG: {0}")]
     InvalidDag(#[from] PhysicalASAPDAGValidationError),
-    /// Unsatisfiable request: the DAG reads raw data through `TimeRange`
-    /// `time_range_node_id` in a shape whose window is not a fixed offset
+    /// Unsatisfiable request: a materialized view's refresh reads raw data
+    /// through `TimeRange` `time_range_node_id` in a shape whose window is not a fixed offset
     /// from the evaluation time (`reason`: a subquery or a `TimeShift`
     /// above it, or an `@` anchor below it), or that ends after the
     /// evaluation (a negative offset below it), which no ingestion run can
@@ -701,19 +701,45 @@ impl PhysicalASAPDAG {
     }
 
     /// [`Self::scan_window`] of each query-time `Scan`, with no chain kept,
-    /// by id.
+    /// by id; `Unbounded` for a `Scan` read through a `TimeRange` that a
+    /// subquery or a `TimeShift` above it evaluates at other times than the
+    /// evaluation time (`max_over_time(rate(m[1m])[10m:1m])` reads `m` 11
+    /// minutes back, not 1).
     fn query_time_scan_windows(&self) -> HashMap<PhysicalASAPNodeId, ScanWindow> {
         let scans = self
             .nodes
             .iter()
             .filter(|node| is_query_time_scan(node))
             .map(|node| node.id);
-        self.scan_windows(scans, &HashSet::new())
+        let mut windows = self.scan_windows(scans, &HashSet::new());
+        let index = ViewIndex::new(self);
+        for node in &self.nodes {
+            if !matches!(node.payload, Operator::NonASAP(NonASAPOp::TimeRange { .. }))
+                || !index.re_timed_from_above.contains(&node.id)
+            {
+                continue;
+            }
+            let mut below = index.only_input(node.id);
+            while let Some(id) = below {
+                match index.relational(id) {
+                    Some(NonASAPOp::TimeShift { .. }) => below = index.only_input(id),
+                    Some(NonASAPOp::Scan { .. }) => {
+                        if let Some(window) = windows.get_mut(&id) {
+                            *window = ScanWindow::Unbounded;
+                        }
+                        break;
+                    }
+                    _ => break,
+                }
+            }
+        }
+        windows
     }
 
-    /// Checks that every raw-data window the DAG reads (each `TimeRange`,
-    /// and each `SummaryTumblingWindowChain`'s tumbling window, reading a `Scan` without passing another
-    /// `TimeRange`) has a supported shape
+    /// Checks that every raw-data window a materialized view's refresh
+    /// reads (each `TimeRange`, and each `SummaryTumblingWindowChain`'s
+    /// tumbling window, reading a `Scan` without passing another
+    /// `TimeRange`, below a view) has a supported shape
     /// ([`InstallableDagError::UnsupportedRawDataWindow`]). O(nodes + edges)
     /// plus the depth below each window.
     pub fn check_raw_data_windows(&self) -> Result<(), InstallableDagError> {
@@ -854,6 +880,8 @@ struct ViewIndex<'a> {
     /// The nodes with a `TimeShift`, `TimeRange` or `PromqlSubquery` above
     /// them, which evaluates them at other times than the evaluation time.
     re_timed_from_above: HashSet<PhysicalASAPNodeId>,
+    /// The nodes below a materialized view, which its refresh computes.
+    refreshed_by_a_view: HashSet<PhysicalASAPNodeId>,
 }
 
 /// Whether `operator` evaluates its input at other times than its own.
@@ -911,9 +939,18 @@ impl<'a> ViewIndex<'a> {
             }
         }
         let mut re_timed_from_above = HashSet::new();
+        let mut refreshed_by_a_view = HashSet::new();
         for id in children_first.iter().rev() {
+            let below = inputs.get(id).into_iter().flatten().copied();
             if re_timed_from_above.contains(id) || payload(id).is_some_and(re_times_its_input) {
-                re_timed_from_above.extend(inputs.get(id).into_iter().flatten().copied());
+                re_timed_from_above.extend(below.clone());
+            }
+            if refreshed_by_a_view.contains(id)
+                || nodes
+                    .get(id)
+                    .is_some_and(|node| node.materialization.is_materialized_view())
+            {
+                refreshed_by_a_view.extend(below);
             }
         }
         ViewIndex {
@@ -923,6 +960,7 @@ impl<'a> ViewIndex<'a> {
             children_first,
             reading_raw_data,
             re_timed_from_above,
+            refreshed_by_a_view,
         }
     }
 
@@ -943,7 +981,11 @@ impl<'a> ViewIndex<'a> {
     /// See [`PhysicalASAPDAG::check_raw_data_windows`].
     fn check_raw_data_windows(&self) -> Result<(), InstallableDagError> {
         for node in &self.dag.nodes {
-            if !self.reading_raw_data.contains(&node.id) {
+            // A query run reads any window shape: the executor reads the
+            // `Scan` through its `scan_window`.
+            if !self.reading_raw_data.contains(&node.id)
+                || !self.refreshed_by_a_view.contains(&node.id)
+            {
                 continue;
             }
             match &node.payload {

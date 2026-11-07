@@ -339,12 +339,12 @@ fn scalar_root_choices_are_composed_and_priced() {
     assert!(priced.iter().any(|p| p.valid));
 }
 
-/// A choice whose selected plan installation refuses for a reason other
-/// than the executor (here a raw-data window under a subquery, which no
-/// runtime can place) is `not_installable`, never valid, so it is never
-/// flagged cheaper than the selected plan.
+/// A subquery's choices install: the executor reads a subquery's raw
+/// samples at query time, so every choice of
+/// `max_over_time(rate(data[5m])[1h:1m])` is valid, none cheaper than the
+/// selected plan.
 #[test]
-fn a_choice_installation_refuses_is_not_installable() {
+fn subquery_choices_install() {
     let mut workload = ratio_of_quantiles();
     workload.query_workload.repeating_queries.as_mut().unwrap()[0].query =
         Query("max_over_time(rate(data[5m])[1h:1m])".into());
@@ -368,18 +368,6 @@ fn a_choice_installation_refuses_is_not_installable() {
     );
     assert!(!priced.is_empty());
     for p in &priced {
-        assert!(!p.valid && !p.cheaper_than_selected, "{p:?}");
-    }
-    let refused: Vec<_> = priced
-        .iter()
-        .filter(|p| p.rejection.as_deref() == Some("not_installable"))
-        .collect();
-    assert!(!refused.is_empty(), "{priced:?}");
-    for p in refused {
-        let reason = p.rejection_reason.as_deref().unwrap();
-        assert!(
-            reason.contains("a subquery or a TimeShift above the range"),
-            "{reason}"
-        );
+        assert!(p.valid && !p.cheaper_than_selected, "{p:?}");
     }
 }

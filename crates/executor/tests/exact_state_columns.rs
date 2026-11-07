@@ -120,6 +120,7 @@ fn exact_records_merge_and_evaluate_as_kernel_objects_do() {
                     statistic: kind,
                     lookback_ms: None,
                     offset_ms: 0,
+                    at: None,
                 }),
             )
             .unwrap();
