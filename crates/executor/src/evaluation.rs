@@ -30,11 +30,13 @@ pub fn insufficient_counter_raw_data_samples(
     state: &dyn AggregateCore,
     statistic: ExactKind,
 ) -> bool {
-    matches!(statistic, ExactKind::Rate | ExactKind::Increase)
-        && state
-            .as_any()
-            .downcast_ref::<ExactAccumulator>()
-            .is_some_and(|state| state.insufficient_counter_raw_data_samples(statistic, None))
+    matches!(
+        statistic,
+        ExactKind::Rate | ExactKind::Increase | ExactKind::IRate
+    ) && state
+        .as_any()
+        .downcast_ref::<ExactAccumulator>()
+        .is_some_and(|state| state.insufficient_counter_raw_data_samples(statistic, None))
 }
 
 /// Merge already selected exact tumbling windows and read one population. `None` means
@@ -70,6 +72,7 @@ mod counter_tests {
         for (kind, params) in [
             (ExactKind::Rate, ExactParams::Rate),
             (ExactKind::Increase, ExactParams::Increase),
+            (ExactKind::IRate, ExactParams::IRate),
         ] {
             for keyed in [false, true] {
                 let mut state = counter(kind, params.clone(), keyed);
@@ -107,5 +110,37 @@ mod counter_tests {
             .is_some());
         assert!(exact_evaluation(two(), rate, Some((60_000, 0)), None).is_err());
         assert!(exact_evaluation([], rate, Some((0, 60_000)), None).is_err());
+    }
+
+    // An irate state reads PromQL `irate` from its last two samples: a
+    // repeated time is ignored, a reset makes the newer value the increase,
+    // and two states do not merge (the family has no sound merge).
+    #[test]
+    fn irate_reads_the_last_two_samples() {
+        let irate = |samples: &[(i64, f64)]| {
+            let mut state = counter(ExactKind::IRate, ExactParams::IRate, false);
+            for &(time, value) in samples {
+                state.update(None, value, time);
+            }
+            exact_evaluation(
+                [Arc::new(state) as Arc<dyn AggregateCore>],
+                ExactKind::IRate,
+                None,
+                None,
+            )
+        };
+        // (8 - 5) over the last 10 s.
+        assert_eq!(irate(&[(0, 1.), (10_000, 5.), (20_000, 8.)]), Ok(Some(0.3)));
+        assert_eq!(
+            irate(&[(10_000, 5.), (20_000, 8.), (20_000, 100.)]),
+            Ok(Some(0.3))
+        );
+        assert_eq!(irate(&[(10_000, 8.), (20_000, 3.)]), Ok(Some(0.3)));
+        let state = || {
+            let mut state = counter(ExactKind::IRate, ExactParams::IRate, false);
+            state.update(None, 1., 0);
+            Arc::new(state) as Arc<dyn AggregateCore>
+        };
+        assert!(exact_evaluation([state(), state()], ExactKind::IRate, None, None).is_err());
     }
 }

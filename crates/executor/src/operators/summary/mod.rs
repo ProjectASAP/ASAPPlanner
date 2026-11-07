@@ -227,7 +227,8 @@ impl Operator {
                 family,
                 SummaryFamilyType::ExactAggregate(
                     planner_types::ir::schema::ExactKind::Rate
-                        | planner_types::ir::schema::ExactKind::Increase,
+                        | planner_types::ir::schema::ExactKind::Increase
+                        | planner_types::ir::schema::ExactKind::IRate,
                     _
                 )
             )
@@ -1155,6 +1156,7 @@ fn evaluate_states(
             evaluation.statistic,
             planner_types::ir::schema::ExactKind::Rate
                 | planner_types::ir::schema::ExactKind::Increase
+                | planner_types::ir::schema::ExactKind::IRate
         ) {
             return false;
         }

@@ -1011,7 +1011,9 @@ fn assert_weighted_rate_topk(count_sketch: bool) {
         3,
         4,
         vec![0, 1, 2],
-        Some((0, 60_000)),
+        // The window (0 s, 60 s]: ending 59 s after the query's
+        // evaluation time (1 s), and at the ingestion run's window end.
+        Some((-59_000, 60_000)),
     )
     .unwrap();
     let family = FieldDataType::Sketch(

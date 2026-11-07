@@ -50,6 +50,20 @@ impl Operator {
                             && (groups.is_empty() || plain(&input, *i)?.1),
                     )
                 }
+                Reduction::StdDev { column, population }
+                | Reduction::Variance { column, population } => {
+                    let (t, nullable) = plain(&input, *column)?;
+                    if !matches!(t, DataType::Int64 | DataType::Float64) {
+                        return Err(invalid("numeric aggregate input required"));
+                    }
+                    // NULL for a SQL group with too few values: none, or
+                    // one for the sample form. A PromQL group has a sample.
+                    (
+                        DataType::Float64,
+                        !input.has_promql_series_identity()
+                            && (groups.is_empty() || nullable || !population),
+                    )
+                }
                 Reduction::Quantile { column, .. } => {
                     // A NaN q is allowed: Prometheus answers it with NaN.
                     if plain(&input, *column)?.0 != &DataType::Float64 {
@@ -138,9 +152,15 @@ impl Operator {
         self.output = Arc::new(output);
         Ok(self)
     }
+    /// Each group's `intent` over its samples. `window` is the samples'
+    /// range window as `(end_offset_ms, width_ms)`: in a run, the window
+    /// `width_ms` wide ending `end_offset_ms` before the evaluation time (at
+    /// an ingestion run's window end), as `Operator::time_range` keeps it;
+    /// `None` only for a histogram quantile, whose coordinate is a bucket
+    /// bound.
     pub fn window(
         input: SchemaRef,
-        intent: planner_types::ir::operator::AggIntent<ColumnRef>,
+        intent: planner_types::ir::operator::AggIntent,
         coordinate: usize,
         value: usize,
         groups: Vec<usize>,
@@ -149,19 +169,7 @@ impl Operator {
         use planner_types::ir::operator::AggIntent;
         validate_groups(&input, &groups)?;
         let histogram = matches!(intent, AggIntent::HistogramQuantile { .. });
-        if !matches!(
-            intent,
-            AggIntent::Rate
-                | AggIntent::Deriv
-                | AggIntent::PredictLinear { .. }
-                | AggIntent::Increase
-                | AggIntent::Count { .. }
-                | AggIntent::Sum { col: None }
-                | AggIntent::Avg { col: None }
-                | AggIntent::Min { col: None }
-                | AggIntent::Max { col: None }
-                | AggIntent::HistogramQuantile { .. }
-        ) {
+        if !histogram && !temporal::has_window_kernel(&intent) {
             return Err(invalid(
                 "unsupported temporal intent or unresolved value column",
             ));
@@ -176,7 +184,7 @@ impl Operator {
         {
             return Err(invalid("window coordinate/value schema mismatch"));
         }
-        if (!histogram && !matches!(window, Some((start, end)) if start < end))
+        if (!histogram && !matches!(window, Some((_, width_ms)) if width_ms > 0))
             || (histogram && window.is_some())
         {
             return Err(invalid("invalid temporal window"));
@@ -222,6 +230,19 @@ pub enum Reduction {
     Avg(usize),
     Min(usize),
     Max(usize),
+    /// Standard deviation of a numeric column's non-NULL values: population
+    /// (PromQL `stddev`, `stddev_over_time`; SQL `STDDEV_POP`) or sample
+    /// (SQL `STDDEV`). NULL for a SQL group with too few values.
+    StdDev {
+        column: usize,
+        population: bool,
+    },
+    /// Variance, as [`Reduction::StdDev`] without the square root (PromQL
+    /// `stdvar`, `stdvar_over_time`; SQL `VAR_POP`, `VARIANCE`).
+    Variance {
+        column: usize,
+        population: bool,
+    },
     /// PromQL `quantile`: linear interpolation between closest ranks.
     Quantile {
         column: usize,
@@ -255,13 +276,18 @@ pub(super) fn execute<'a>(
                 window,
             } => {
                 let input = collect_batch(input, &operator.inputs[0], &context).await?;
-                let (mut arrays, results) = crate::operators::aggregate::temporal::reduce_batch(
+                let window = window
+                    .map(|(end_offset_ms, width_ms)| {
+                        crate::operators::time_range::window(end_offset_ms, width_ms, &context)
+                    })
+                    .transpose()?;
+                let (mut arrays, results) = temporal::reduce_batch(
                     &input.batch,
                     intent,
                     groups,
                     *coordinate,
                     *value,
-                    *window,
+                    window,
                     &context,
                 )
                 .await?;

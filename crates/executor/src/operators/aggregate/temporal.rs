@@ -4,8 +4,7 @@ use crate::{
     runtime::{Cooperative, RunContext},
 };
 use crate::{values::Value, Error};
-use planner_types::ir::operator::AggIntent;
-use planner_types::ir::scalar::ColumnRef;
+use planner_types::ir::operator::{AggIntent, TimeFunc};
 
 /// Each group's temporal value over `batch`: the groups of `groups` in key
 /// order, labelled as their first rows, each with its `intent` over its
@@ -13,9 +12,9 @@ use planner_types::ir::scalar::ColumnRef;
 /// histogram quantile; `value` Float64). A group whose value PromQL omits
 /// has no row. The result is the label columns and the value column of
 /// `output_value` type.
-pub(in crate::operators) async fn reduce_batch(
+pub(in crate::operators) async fn reduce_batch<C>(
     batch: &crate::values::Batch,
-    intent: &AggIntent<ColumnRef>,
+    intent: &AggIntent<C>,
     groups: &[usize],
     coordinate: usize,
     value: usize,
@@ -103,10 +102,42 @@ pub(in crate::operators) async fn reduce_batch(
     Ok((labels, results))
 }
 
+/// Whether [`window_value`] reduces a series' samples for `intent`.
+pub(in crate::operators) fn has_window_kernel<C>(intent: &AggIntent<C>) -> bool {
+    matches!(
+        intent,
+        AggIntent::Rate
+            | AggIntent::Deriv
+            | AggIntent::PredictLinear { .. }
+            | AggIntent::Increase
+            | AggIntent::Delta
+            | AggIntent::Count { .. }
+            | AggIntent::Sum { col: None }
+            | AggIntent::Avg { col: None }
+            | AggIntent::Min { col: None }
+            | AggIntent::Max { col: None }
+            | AggIntent::IRate
+            | AggIntent::IDelta
+            | AggIntent::Changes
+            | AggIntent::Resets
+            | AggIntent::LastOverTime
+            | AggIntent::FirstOverTime
+            | AggIntent::TsOfFirstOverTime
+            | AggIntent::TsOfLastOverTime
+            | AggIntent::TsOfMinOverTime
+            | AggIntent::TsOfMaxOverTime
+            | AggIntent::MadOverTime
+            | AggIntent::DoubleExpSmoothing { .. }
+            | AggIntent::PresentOverTime
+            | AggIntent::TimeFn(TimeFunc::Timestamp)
+            | AggIntent::Quantile { col: None, .. }
+    )
+}
+
 /// One series' value over its sorted samples in the window `(start, end]`.
 /// `None` means PromQL emits no sample for this series.
-pub(in crate::operators) fn window_value(
-    intent: &AggIntent<ColumnRef>,
+pub(in crate::operators) fn window_value<C>(
+    intent: &AggIntent<C>,
     points: &[(i64, f64)],
     start: i64,
     end: i64,
@@ -172,12 +203,84 @@ pub(in crate::operators) fn window_value(
             Some(Value::Float64(count as f64))
         }
         AggIntent::LastOverTime => points.last().map(|p| Value::Float64(p.1)),
+        AggIntent::FirstOverTime => points.first().map(|p| Value::Float64(p.1)),
+        AggIntent::TsOfFirstOverTime => points.first().map(|p| seconds(p.0)),
+        AggIntent::TsOfLastOverTime | AggIntent::TimeFn(TimeFunc::Timestamp) => {
+            points.last().map(|p| seconds(p.0))
+        }
+        // Prometheus keeps the latest of tied extremes, and a NaN only
+        // until a number follows.
+        AggIntent::TsOfMinOverTime | AggIntent::TsOfMaxOverTime => {
+            let min = matches!(intent, AggIntent::TsOfMinOverTime);
+            points
+                .iter()
+                .copied()
+                .reduce(|best, p| {
+                    let better = if min { p.1 <= best.1 } else { p.1 >= best.1 };
+                    if better || best.1.is_nan() {
+                        p
+                    } else {
+                        best
+                    }
+                })
+                .map(|p| seconds(p.0))
+        }
+        // A NaN sample makes the median, and the deviation, undefined.
+        AggIntent::MadOverTime if points.iter().any(|p| p.1.is_nan()) => {
+            Some(Value::Float64(f64::NAN))
+        }
+        AggIntent::MadOverTime => (!points.is_empty()).then(|| {
+            let median = super::quantile(0.5, points.iter().map(|p| p.1).collect());
+            Value::Float64(super::quantile(
+                0.5,
+                points.iter().map(|p| (p.1 - median).abs()).collect(),
+            ))
+        }),
+        AggIntent::DoubleExpSmoothing { smoothing, trend } => {
+            double_exponential_smoothing(points, *smoothing, *trend)?.map(Value::Float64)
+        }
+        AggIntent::PresentOverTime => (!points.is_empty()).then_some(Value::Float64(1.)),
         AggIntent::Quantile { col: None, q, .. } => Some(Value::Float64(super::quantile(
             *q,
             points.iter().map(|p| p.1).collect(),
         ))),
         _ => return Err(Error::Invalid("unsupported temporal intent".into())),
     })
+}
+
+/// A sample time in milliseconds as PromQL's float seconds.
+fn seconds(timestamp_ms: i64) -> Value {
+    Value::Float64(timestamp_ms as f64 / 1000.)
+}
+
+/// Prometheus `double_exponential_smoothing`: no value under two samples,
+/// and an error unless both factors lie in (0, 1).
+fn double_exponential_smoothing(
+    points: &[(i64, f64)],
+    smoothing: f64,
+    trend: f64,
+) -> Result<Option<f64>, Error> {
+    for (name, factor) in [("smoothing", smoothing), ("trend", trend)] {
+        if !(factor > 0. && factor < 1.) {
+            return Err(Error::Invalid(format!(
+                "invalid {name} factor: expected 0 < {name} < 1, got {factor}"
+            )));
+        }
+    }
+    let [(_, first), (_, second), ..] = points else {
+        return Ok(None);
+    };
+    let (mut previous, mut level, mut slope) = (0., *first, second - first);
+    for (i, &(_, value)) in points.iter().enumerate().skip(1) {
+        if i > 1 {
+            slope = trend * (level - previous) + (1. - trend) * slope;
+        }
+        (previous, level) = (
+            level,
+            smoothing * value + (1. - smoothing) * (level + slope),
+        );
+    }
+    Ok(Some(level))
 }
 
 /// Prometheus `extrapolatedRate`; `counter` enables reset correction and the zero bound.
@@ -402,7 +505,80 @@ mod tests {
                 );
             }
         }
-        assert!(Operator::window(schema, AggIntent::Rate, 0, 1, vec![], Some((1, 1))).is_err());
+        assert!(Operator::window(schema, AggIntent::Rate, 0, 1, vec![], Some((0, 0))).is_err());
+    }
+
+    // Each range function gives the value of its PromQL definition. Samples
+    // 1, 4, 2, 4 at 10 s to 40 s; their two maxima tie.
+    #[test]
+    fn range_functions_match_prometheus() {
+        let points = [(10_000, 1.), (20_000, 4.), (30_000, 2.), (40_000, 4.)];
+        let value = |intent: AggIntent, points: &[(i64, f64)]| match window_value(
+            &intent, points, 0, 40_000, 40_000,
+        )
+        .unwrap()
+        {
+            Some(Value::Float64(v)) => Some(v),
+            None => None,
+            other => panic!("{other:?}"),
+        };
+        for (intent, expected) in [
+            (AggIntent::FirstOverTime, 1.),
+            (AggIntent::LastOverTime, 4.),
+            (AggIntent::TsOfFirstOverTime, 10.),
+            (AggIntent::TsOfLastOverTime, 40.),
+            (AggIntent::TimeFn(TimeFunc::Timestamp), 40.),
+            (AggIntent::TsOfMinOverTime, 10.),
+            // The later of the tied maxima.
+            (AggIntent::TsOfMaxOverTime, 40.),
+            // Median 3; deviations 2, 1, 1, 1 have median 1.
+            (AggIntent::MadOverTime, 1.),
+            (AggIntent::PresentOverTime, 1.),
+            // Value changes 1→4, 4→2, 2→4; one decrease 4→2.
+            (AggIntent::Changes, 3.),
+            (AggIntent::Resets, 1.),
+            // Levels 1, 4, 4.5, 5.125 with trends 3, 3, 1.75 (by hand from
+            // Prometheus `funcDoubleExponentialSmoothing`).
+            (
+                AggIntent::DoubleExpSmoothing {
+                    smoothing: 0.5,
+                    trend: 0.5,
+                },
+                5.125,
+            ),
+            // The last two samples 2, 4 over 10 s.
+            (AggIntent::IDelta, 2.),
+            (AggIntent::IRate, 0.2),
+        ] {
+            assert_eq!(value(intent.clone(), &points), Some(expected), "{intent:?}");
+        }
+        // A reset between the last two samples: the newer value is the increase.
+        assert_eq!(
+            value(AggIntent::IRate, &[(10_000, 8.), (20_000, 3.)]),
+            Some(0.3)
+        );
+        // One sample: no instant rate, no smoothing; one value has no change.
+        let single = [(10_000, 5.)];
+        assert_eq!(value(AggIntent::IRate, &single), None);
+        assert_eq!(value(AggIntent::IDelta, &single), None);
+        assert_eq!(value(AggIntent::Changes, &single), Some(0.));
+        assert_eq!(value(AggIntent::MadOverTime, &single), Some(0.));
+        let smoothing = AggIntent::DoubleExpSmoothing {
+            smoothing: 0.5,
+            trend: 0.5,
+        };
+        assert_eq!(value(smoothing, &single), None);
+        // A factor outside (0, 1) is an error, as Prometheus panics on it.
+        for (smoothing, trend) in [(1., 0.5), (0.5, 0.), (f64::NAN, 0.5)] {
+            let intent: AggIntent = AggIntent::DoubleExpSmoothing { smoothing, trend };
+            assert!(window_value(&intent, &points, 0, 40_000, 40_000).is_err());
+        }
+        // A NaN extreme gives way to the next number; a later NaN does not
+        // replace it.
+        let nan = [(1_000, f64::NAN), (2_000, 3.), (3_000, f64::NAN)];
+        assert_eq!(value(AggIntent::TsOfMaxOverTime, &nan), Some(2.));
+        assert_eq!(value(AggIntent::TsOfMinOverTime, &nan), Some(2.));
+        assert!(value(AggIntent::MadOverTime, &nan).unwrap().is_nan());
     }
 
     // Histogram interpolation requires an infinite terminal bucket and coalesces duplicates.

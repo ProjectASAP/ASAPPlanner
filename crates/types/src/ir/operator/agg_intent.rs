@@ -626,10 +626,11 @@ pub mod topk {
 }
 
 /// Whether the executor reduces each series' raw data samples exactly for an
-/// `Aggregate` of `op` with `Reduction::PerEntity` (a PromQL
-/// `quantile/sum/avg/min/max/count/distinct/l2/entropy_over_time` over raw
-/// samples). The executor compiles only these, and Stage 3 rejects a plan
-/// holding any other exact per-entity aggregate, so both read this one list.
+/// `Aggregate` of `op` with `Reduction::PerEntity`: a PromQL range function
+/// over raw samples (`rate`, `changes`, `stddev_over_time`, …,
+/// `present_over_time`) or `timestamp(v)` over an instant selector. The
+/// executor compiles only these, and Stage 2 prunes any other exact
+/// per-entity aggregate, so both read this one list.
 pub fn agg_has_exact_per_entity_kernel(op: &AggIntent) -> bool {
     matches!(
         op,
@@ -638,10 +639,31 @@ pub fn agg_has_exact_per_entity_kernel(op: &AggIntent) -> bool {
             | AggIntent::Avg { .. }
             | AggIntent::Min { .. }
             | AggIntent::Max { .. }
+            | AggIntent::StdDev { .. }
+            | AggIntent::Variance { .. }
             | AggIntent::Quantile { .. }
             | AggIntent::Cardinality { .. }
             | AggIntent::FrequencyL2 { .. }
             | AggIntent::FrequencyEntropy { .. }
+            | AggIntent::Rate
+            | AggIntent::Increase
+            | AggIntent::IRate
+            | AggIntent::Delta
+            | AggIntent::IDelta
+            | AggIntent::Deriv
+            | AggIntent::Changes
+            | AggIntent::Resets
+            | AggIntent::PredictLinear { .. }
+            | AggIntent::DoubleExpSmoothing { .. }
+            | AggIntent::LastOverTime
+            | AggIntent::FirstOverTime
+            | AggIntent::MadOverTime
+            | AggIntent::TsOfMinOverTime
+            | AggIntent::TsOfMaxOverTime
+            | AggIntent::TsOfFirstOverTime
+            | AggIntent::TsOfLastOverTime
+            | AggIntent::PresentOverTime
+            | AggIntent::TimeFn(TimeFunc::Timestamp)
     )
 }
 

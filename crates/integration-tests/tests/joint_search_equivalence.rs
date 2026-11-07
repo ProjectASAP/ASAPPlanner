@@ -314,10 +314,12 @@ fn rootless_request_overhead_respects_capacity_and_latency() {
 
 // Unsupported exact operators cannot become accepted merely because no summary
 // candidate exists; failure must leave the exported physical plan absent.
+// `absent_over_time` is lowered as a per-entity aggregate without an exact
+// per-entity kernel, which Stage 2 prunes.
 #[test]
 fn unsupported_exact_operation_never_returns_an_unvalidated_plan() {
     let workload = workload_of(
-        &[("stddev_over_time(m[5m])", 60_000)],
+        &[("absent_over_time(m[5m])", 60_000)],
         AccuracyTarget::exact(),
     );
     let roots = lower_promql_roots(&workload).unwrap();
