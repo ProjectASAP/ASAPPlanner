@@ -6,15 +6,15 @@
 //! 1. **Caps, top down.** Query $q$'s root group may be off by its target
 //!    $\varepsilon_q$. A consumer $c$ passes a cap to input $i$ through its
 //!    error contract (`LogicalRequirements::error_propagation`):
-//!    $\min(b_{c,i},\ \text{cap}/\beta_{c,i})$. A group keeps, per query
-//!    (and per statistic read, for a summary state), the largest cap any
-//!    consumer passes it: the bottleneck over paths, a lower bound on
-//!    $\lambda_{q,c,i}$ along any path, so the cap removes only what no
-//!    plan can use.
-//! 2. **Floors.** A consumer reading a sketch state (a readout, or a merge
-//!    of states) gets, per input, the floor of its cap for the statistic
-//!    read ([`floor_for_cap`]), tightened with the floor it already has
-//!    (a top-k's heap size).
+//!    $\min(b_{c,i},\ \text{cap}/\beta_{c,i})$. A group keeps, per query,
+//!    the largest cap any consumer passes it: the bottleneck over paths,
+//!    with $\lambda_{q,c,i}$ bounded below along any path, so the cap
+//!    removes only what no plan can use.
+//! 2. **Floors, top down.** A readout of a sketch state gets the floor of
+//!    its group's cap for the statistic it reads ([`floor_for_cap`]),
+//!    tightened with the floor it already has (a top-k's heap size). A
+//!    merge of sketch states gets the weakest floor of the consumers
+//!    reading its group: the merged state has its inputs' $\boldsymbol\theta$.
 //! 3. **Output errors, bottom up, and edges.** Each candidate's possible
 //!    output errors ([`OutputError`]): exact, a bound in one metric, or no
 //!    guarantee. The metric rule: an input whose error is in a metric the
@@ -26,8 +26,10 @@ use crate::memo::rules::{expression, Pass2RuleError};
 use crate::parameter_floors::{floor_for_cap, strongest, weakest};
 use asap_accuracy::estimators::local_guarantee;
 use asap_types::ir::properties::AccuracyMetric;
-use asap_types::ir::schema::{FamilyCapability, FieldDataType, MergedError, SketchStatistic};
-use asap_types::ir::{ASAPOp, Operator};
+use asap_types::ir::schema::{
+    FamilyCapability, FieldDataType, MergedError, SketchAlgorithm, SketchParams, SketchStatistic,
+};
+use asap_types::ir::{ASAPOp, Operator, QueryRoot};
 use asap_types::stages::{
     producer_satisfies_logical_requirements, CandidateForMemoGroupId, LogicalEdge,
     LogicalRequirements, Memo, MemoGroupId,
@@ -57,12 +59,10 @@ pub(crate) enum OutputError {
 }
 
 /// One cap of a group: query `query` may use this group's output with an
-/// error of at most `cap` (infinite: any), read as `statistic` when the
-/// group is a summary state.
+/// error of at most `cap` (infinite: any).
 #[derive(Debug, Clone)]
 struct ErrorCap {
     query: usize,
-    statistic: Option<SketchStatistic>,
     cap: f64,
 }
 
@@ -78,7 +78,7 @@ pub(crate) fn logical_edges_with_capped_floors(
         .topological_order()
         .ok_or(Pass2RuleError::CyclicDependencies)?;
     let caps = error_caps(memo, entries, &order);
-    set_floors(memo, entries, &caps);
+    set_floors(memo, entries, &caps, &order);
     let errors = output_errors(memo, &order);
     let mut edges = Vec::new();
     for (g, group) in memo.groups().iter().enumerate() {
@@ -162,28 +162,26 @@ fn value_preserving(consumer: &Operator<MemoGroupId>) -> bool {
     })
 }
 
-/// Each group's caps ([`ErrorCap`]), by group id: the roots' targets,
-/// then every consumer's caps passed down through its contract.
+/// Each group's caps ([`ErrorCap`]), by group id: each query root group's
+/// target, then every consumer's caps passed down through its contract.
 fn error_caps(
     memo: &Memo,
     entries: &[QueryWorkloadEntry],
     order: &[MemoGroupId],
 ) -> Vec<Vec<ErrorCap>> {
     let mut caps: Vec<Vec<ErrorCap>> = vec![Vec::new(); memo.groups().len()];
+    // A scalar root's expression is not read here: its operands get no cap.
     for (query, root) in memo.query_roots.iter().enumerate() {
-        let Some(entry) = entries.get(query) else {
+        let (Some(entry), QueryRoot::Operator(group)) = (entries.get(query), root) else {
             continue;
         };
-        for &group in root.operator_refs() {
-            add_cap(
-                &mut caps[group.0 as usize],
-                ErrorCap {
-                    query,
-                    statistic: None,
-                    cap: entry.requirements.accuracy.max_error,
-                },
-            );
-        }
+        add_cap(
+            &mut caps[group.0 as usize],
+            ErrorCap {
+                query,
+                cap: entry.requirements.accuracy.max_error,
+            },
+        );
     }
     for &group in order.iter().rev() {
         let group_caps = caps[group.0 as usize].clone();
@@ -197,9 +195,7 @@ fn error_caps(
                     let target_metric = entries
                         .get(cap.query)
                         .and_then(|entry| entry.requirements.accuracy.accuracy_metric);
-                    if let Some(passed) =
-                        passed_cap(memo, operator, input, child, cap, target_metric)
-                    {
+                    if let Some(passed) = passed_cap(operator, input, cap, target_metric) {
                         add_cap(&mut caps[child.0 as usize], passed);
                     }
                 }
@@ -209,32 +205,16 @@ fn error_caps(
     caps
 }
 
-/// The cap `consumer` passes to its input `input` (group `child`) from its
-/// own group's `cap`; `None` when it passes none (no contract, or a merge
-/// whose merged state loses the statistic's guarantee).
+/// The cap `consumer` passes to its input `input` from its own group's
+/// `cap`, through its contract in the query's target metric (in every
+/// metric when the target names none, the largest); `None` when it has no
+/// contract for it.
 fn passed_cap(
-    memo: &Memo,
     consumer: &Operator<MemoGroupId>,
     input: usize,
-    child: MemoGroupId,
     cap: &ErrorCap,
     target_metric: Option<AccuracyMetric>,
 ) -> Option<ErrorCap> {
-    let statistic = match (consumer, &cap.statistic) {
-        // A readout reads its statistic from the state.
-        (Operator::ASAP(ASAPOp::SummaryEstimate { query, .. }), None) => Some(query.clone()),
-        // A merge passes the statistic read on, when the merged state keeps
-        // its guarantee.
-        (Operator::ASAP(ASAPOp::SummaryMerge { .. }), Some(statistic)) => {
-            if !keeps_guarantee(memo, child, statistic) {
-                return None;
-            }
-            Some(statistic.clone())
-        }
-        (Operator::ASAP(ASAPOp::SummaryMerge { .. }), None) => return None,
-        // A summary build (or finalize) reads rows: their values.
-        _ => None,
-    };
     let metrics: &[AccuracyMetric] = match &target_metric {
         Some(metric) => std::slice::from_ref(metric),
         None => &METRICS,
@@ -254,7 +234,6 @@ fn passed_cap(
         .reduce(f64::max)?;
     Some(ErrorCap {
         query: cap.query,
-        statistic,
         cap: passed,
     })
 }
@@ -281,57 +260,49 @@ fn family(operator: &Operator<MemoGroupId>) -> Option<&FieldDataType> {
     }
 }
 
-/// Adds `cap` to `caps`, keeping the larger cap of one query and
-/// statistic.
+/// Adds `cap` to `caps`, keeping the larger cap of one query.
 fn add_cap(caps: &mut Vec<ErrorCap>, cap: ErrorCap) {
-    match caps
-        .iter_mut()
-        .find(|known| known.query == cap.query && known.statistic == cap.statistic)
-    {
+    match caps.iter_mut().find(|known| known.query == cap.query) {
         Some(known) => known.cap = known.cap.max(cap.cap),
         None => caps.push(cap),
     }
 }
 
-/// Tightens the floor of every input that reads a sketch state, through a
-/// readout or a merge: the weakest floor over the statistics read of the
-/// largest applicable cap over the queries, with the floor the input
-/// already has. A query's cap applies only when its target names no
-/// metric or the statistic's metric.
-fn set_floors(memo: &mut Memo, entries: &[QueryWorkloadEntry], caps: &[Vec<ErrorCap>]) {
-    let mut updates = Vec::new();
-    for (g, group) in memo.groups().iter().enumerate() {
-        for (index_in_group, consumer) in group.candidates.iter().enumerate() {
-            let operator = &consumer.expression.operator;
-            let reads: Vec<(SketchStatistic, f64, usize)> = match operator {
-                Operator::ASAP(ASAPOp::SummaryEstimate { query, .. }) => caps[g]
-                    .iter()
-                    .filter(|cap| cap.statistic.is_none())
-                    .map(|cap| (query.clone(), cap.cap, cap.query))
-                    .collect(),
-                Operator::ASAP(ASAPOp::SummaryMerge { .. }) => caps[g]
-                    .iter()
-                    .filter_map(|cap| Some((cap.statistic.clone()?, cap.cap, cap.query)))
-                    .collect(),
-                _ => continue,
+/// Tightens the floor of every input that reads a sketch state, consumers
+/// before producers (`order` reversed): a readout's, by the cap of its
+/// group ([`readout_floor`]) with the floor it already has; a merge's, the
+/// weakest floor of the consumers reading its group (any of them may read
+/// the merged state, which has its inputs' $\boldsymbol\theta$).
+fn set_floors(
+    memo: &mut Memo,
+    entries: &[QueryWorkloadEntry],
+    caps: &[Vec<ErrorCap>],
+    order: &[MemoGroupId],
+) {
+    for &group in order.iter().rev() {
+        for index_in_group in 0..memo.groups()[group.0 as usize].candidates.len() {
+            let id = CandidateForMemoGroupId {
+                group,
+                index_in_group,
             };
+            let consumer = memo.candidate(id);
+            let operator = &consumer.expression.operator;
             let mut requirements = consumer.input_requirements.clone();
             let mut changed = false;
             for (input, &child) in operator.children().into_iter().enumerate() {
-                let Some(Operator::ASAP(
-                    ASAPOp::SummaryAgg {
-                        family: family @ FieldDataType::Sketch(algorithm, _),
-                        ..
-                    }
-                    | ASAPOp::SummaryTumblingWindowChain {
-                        family: family @ FieldDataType::Sketch(algorithm, _),
-                        ..
-                    },
-                )) = Some(expression(memo, child))
-                else {
+                let Some((family, algorithm)) = sketch_family(expression(memo, child)) else {
                     continue;
                 };
-                let Some(floor) = floor_of_reads(family, *algorithm, &reads, entries) else {
+                let floor = match operator {
+                    Operator::ASAP(ASAPOp::SummaryEstimate { query, .. }) => {
+                        readout_floor(family, algorithm, query, &caps[group.0 as usize], entries)
+                    }
+                    Operator::ASAP(ASAPOp::SummaryMerge { .. }) => {
+                        weakest_floor_of_consumers(memo, group)
+                    }
+                    _ => None,
+                };
+                let Some(floor) = floor else {
                     continue;
                 };
                 let tightened = match requirements[input].parameter_floor_for_required_accuracy() {
@@ -342,51 +313,75 @@ fn set_floors(memo: &mut Memo, entries: &[QueryWorkloadEntry], caps: &[Vec<Error
                 changed = true;
             }
             if changed {
-                updates.push((
-                    CandidateForMemoGroupId {
-                        group: MemoGroupId(g as u32),
-                        index_in_group,
-                    },
-                    requirements,
-                ));
+                memo.set_input_requirements(id, requirements);
             }
         }
     }
-    for (id, requirements) in updates {
-        memo.set_input_requirements(id, requirements);
+}
+
+/// The sketch family a state group's expression builds.
+fn sketch_family(operator: &Operator<MemoGroupId>) -> Option<(&FieldDataType, SketchAlgorithm)> {
+    match family(operator)? {
+        family @ FieldDataType::Sketch(algorithm, _) => Some((family, *algorithm)),
+        _ => None,
     }
 }
 
-/// The floor of reading a state of `family` as `reads` (statistic, cap,
-/// query): per statistic, the largest cap over the queries whose target
-/// metric is the statistic's (or unnamed), infinite when another query's
-/// is not; then the weakest of the statistics' floors. `None` when some
-/// statistic needs none.
-fn floor_of_reads(
+/// The floor of reading `statistic` from a state of `family` within the
+/// largest of `caps` (its group's, per query) that applies: a query's cap
+/// applies when its target names no metric or the statistic's; one that
+/// does not leaves the input unbounded. `None` without caps.
+fn readout_floor(
     family: &FieldDataType,
-    algorithm: asap_types::ir::schema::SketchAlgorithm,
-    reads: &[(SketchStatistic, f64, usize)],
+    algorithm: SketchAlgorithm,
+    statistic: &SketchStatistic,
+    caps: &[ErrorCap],
     entries: &[QueryWorkloadEntry],
-) -> Option<asap_types::ir::schema::SketchParams> {
-    let mut statistics: Vec<(&SketchStatistic, f64)> = Vec::new();
-    for (statistic, cap, query) in reads {
-        let metric = parameter_list_metric(family, algorithm, statistic);
-        let target = entries
-            .get(*query)
-            .and_then(|entry| entry.requirements.accuracy.accuracy_metric);
-        let applicable = match (target, metric) {
-            (None, _) => *cap,
-            (Some(target), Some(metric)) if target == metric => *cap,
-            _ => f64::INFINITY,
-        };
-        match statistics.iter_mut().find(|(known, _)| *known == statistic) {
-            Some((_, known)) => *known = known.max(applicable),
-            None => statistics.push((statistic, applicable)),
+) -> Option<SketchParams> {
+    let metric = parameter_list_metric(family, algorithm, statistic);
+    let cap = caps
+        .iter()
+        .map(|cap| {
+            let target = entries
+                .get(cap.query)
+                .and_then(|entry| entry.requirements.accuracy.accuracy_metric);
+            match (target, metric) {
+                (None, _) => cap.cap,
+                (Some(target), Some(metric)) if target == metric => cap.cap,
+                _ => f64::INFINITY,
+            }
+        })
+        .reduce(f64::max)?;
+    floor_for_cap(family, algorithm, statistic, cap)
+}
+
+/// The weakest of the floors the consumers of `group` (the candidates of
+/// its parent groups) set on their inputs reading it; `None` when one of
+/// them sets none.
+fn weakest_floor_of_consumers(memo: &Memo, group: MemoGroupId) -> Option<SketchParams> {
+    let mut floors = Vec::new();
+    for &parent in memo.groups()[group.0 as usize].parent_groups() {
+        for consumer in &memo.groups()[parent.0 as usize].candidates {
+            for (input, &child) in consumer
+                .expression
+                .operator
+                .children()
+                .into_iter()
+                .enumerate()
+            {
+                if child == group {
+                    floors.push(
+                        consumer.input_requirements[input]
+                            .parameter_floor_for_required_accuracy()?
+                            .clone(),
+                    );
+                }
+            }
         }
     }
-    statistics
+    floors
         .into_iter()
-        .map(|(statistic, cap)| floor_for_cap(family, algorithm, statistic, cap))
+        .map(Some)
         .reduce(|left, right| weakest(left.as_ref()?, right.as_ref()?))
         .flatten()
 }
@@ -395,7 +390,7 @@ fn floor_of_reads(
 /// first listed configuration.
 fn parameter_list_metric(
     family: &FieldDataType,
-    algorithm: asap_types::ir::schema::SketchAlgorithm,
+    algorithm: SketchAlgorithm,
     statistic: &SketchStatistic,
 ) -> Option<AccuracyMetric> {
     let parameters = asap_types::stages::parameter_list(algorithm).first()?;
@@ -550,7 +545,7 @@ fn read_errors(
 /// build over the window when the family's merged error for the read is
 /// exact or as if built over the union (the family-capability table), no
 /// guarantee otherwise.
-fn merged_tumbling_windows_guarantee(
+pub(crate) fn merged_tumbling_windows_guarantee(
     family: &FieldDataType,
     parameters: Option<&asap_types::ir::schema::SketchParams>,
     windowed: bool,
