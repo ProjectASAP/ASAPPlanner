@@ -61,6 +61,7 @@ fn rank_target_workload(query: &str) -> PlanningWorkload {
         data_workload: Some(DataWorkload {
             arrival: DataArrival::Ingesting {
                 rows_per_second: 1.0,
+                max_out_of_order_ms: None,
             },
             ..DataWorkload::sampled_every(promql_metric_names(query).unwrap(), DurationMs(15_000))
         }),

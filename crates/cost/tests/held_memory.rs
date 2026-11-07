@@ -22,6 +22,7 @@ fn data() -> DataWorkload {
     DataWorkload {
         arrival: DataArrival::Ingesting {
             rows_per_second: 10_000.0,
+            max_out_of_order_ms: None,
         },
         sources: [(
             "m".to_string(),
@@ -165,4 +166,112 @@ fn working_memory_read_by_a_materialized_node_is_held_for_the_longest_reader() {
         let expected = bytes * materialized_rate * outer_ms / 1_000.0;
         assert!(close(term, expected), "node {id}: {term} vs {expected}");
     }
+}
+
+/// A counter state built at ingestion keeps a reorder buffer when the data
+/// declares how late a sample may arrive: the arriving rows of
+/// `max_out_of_order_ms`, at its input's bytes per row, held in memory
+/// as long as the state is maintained. Undeclared, PromQL samples arrive in
+/// order and nothing is held.
+#[test]
+fn a_counter_built_at_ingestion_holds_late_samples_in_a_reorder_buffer() {
+    use asap_types::ir::physical_export::PhysicalASAPOperatorPayload as Payload;
+    use asap_types::ir::schema::{ExactKind, FieldDataType};
+    use asap_types::ir::ASAPOp;
+    use asap_types::workload::{Predictability, QueryWorkloadEntry};
+    let arriving = |max_out_of_order_ms| DataWorkload {
+        arrival: DataArrival::Ingesting {
+            rows_per_second: 10_000.0,
+            max_out_of_order_ms,
+        },
+        ..data()
+    };
+    let every_5m =
+        QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(300_000)));
+    let entry = QueryWorkloadEntry {
+        predictability: Predictability::Predictable { known_at: None },
+        ..asap_logical_asap_optimization::test_support::entry(every_5m.clone())
+    };
+    // The candidate building the rate's exact counter state.
+    use asap_logical_asap_optimization::test_support::{
+        compose_logical_candidate, generate_per_computation_candidates,
+    };
+    let root = lower_promql("rate(m[5m])", AccuracyTarget::exact());
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
+            QueryRoot::Operator(root),
+        ]),
+    )
+    .unwrap();
+    let summary_choice: Vec<_> = inventory
+        .targets
+        .iter()
+        .map(|target| target.choice_count() - 1)
+        .collect();
+    let plans = optimize_physical_asap(
+        "L",
+        &compose_logical_candidate(&inventory, &summary_choice).unwrap(),
+        &[entry],
+        &arriving(None),
+        false,
+    )
+    .unwrap();
+    let (dag, build) = plans
+        .iter()
+        .find_map(|plan| {
+            let build = plan.dag.nodes.iter().find(|node| {
+                node.materialization == Materialization::MatAtIngestion(Medium::Memory)
+                    && matches!(
+                        node.payload,
+                        Payload::ASAP(ASAPOp::SummaryAgg {
+                            family: FieldDataType::ExactAggregate(ExactKind::Rate, _),
+                            ..
+                        })
+                    )
+            })?;
+            Some((&plan.dag, build.id))
+        })
+        .expect("a rate state built at ingestion");
+    let build_cost = |max_out_of_order_ms| {
+        let settings = CostInputs {
+            cost_model: CostModel::UsageOverTime(ResourceUnitCost::illustrative()),
+            ..CostInputs::default()
+        };
+        plan_cost(
+            dag,
+            &node_map(dag),
+            &kept_tumbling_window_chains(dag),
+            std::slice::from_ref(&every_5m),
+            &[],
+            &arriving(max_out_of_order_ms),
+            &settings,
+            1.0,
+        )
+        .unwrap()
+        .0
+        .per_node[&build]
+            .clone()
+    };
+    let (in_order, late) = (build_cost(None), build_cost(Some(5_000)));
+    assert!(
+        !in_order.detail.contains("reorder buffer"),
+        "{}",
+        in_order.detail
+    );
+    let held_bytes: f64 = late
+        .detail
+        .split("; reorder buffer ")
+        .nth(1)
+        .and_then(|rest| rest.split(' ').next())
+        .unwrap()
+        .parse()
+        .unwrap();
+    // 10 rows per ms for 5 s, each a whole number of bytes.
+    assert!(
+        held_bytes > 0.0 && held_bytes % 50_000.0 == 0.0,
+        "{held_bytes}"
+    );
+    let memory_cost = held_bytes * ResourceUnitCost::illustrative().cost_per_memory_byte_second;
+    let added = late.cost_per_second.unwrap() - in_order.cost_per_second.unwrap();
+    assert!(close(added, memory_cost), "{added} vs {memory_cost}");
 }

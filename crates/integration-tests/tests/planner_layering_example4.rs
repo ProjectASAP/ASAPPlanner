@@ -23,6 +23,7 @@ fn once() -> PlanningWorkload {
         PatternARecurrence::OnceAdHoc,
         DataArrival::Mixed {
             rows_per_second: SHARED_ROWS_PER_SECOND,
+            max_out_of_order_ms: None,
         },
     )
 }
@@ -32,6 +33,7 @@ fn monthly() -> PlanningWorkload {
         PatternARecurrence::MonthlyPredictable,
         DataArrival::Mixed {
             rows_per_second: SHARED_ROWS_PER_SECOND,
+            max_out_of_order_ms: None,
         },
     )
 }

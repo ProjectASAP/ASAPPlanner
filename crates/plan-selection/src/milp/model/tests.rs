@@ -127,6 +127,7 @@ fn through_stages_over(
     if ingesting {
         data.arrival = asap_types::workload::DataArrival::Ingesting {
             rows_per_second: 100.0,
+            max_out_of_order_ms: None,
         };
     }
     let targets: Vec<AccuracyTarget> = queries.iter().map(target).collect();

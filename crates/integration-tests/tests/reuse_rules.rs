@@ -74,6 +74,7 @@ fn data() -> DataWorkload {
     let mut data = shared_data_workload(
         DataArrival::Ingesting {
             rows_per_second: SHARED_ROWS_PER_SECOND,
+            max_out_of_order_ms: None,
         },
         "m",
     );

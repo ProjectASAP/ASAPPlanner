@@ -133,6 +133,7 @@ fn exact_panel(query: &str, interval_ms: u32, range: Option<RangeEvaluation>) ->
         data_workload: Some(DataWorkload {
             arrival: DataArrival::Ingesting {
                 rows_per_second: SHARED_ROWS_PER_SECOND,
+                max_out_of_order_ms: None,
             },
             sources: [(
                 "m".to_string(),

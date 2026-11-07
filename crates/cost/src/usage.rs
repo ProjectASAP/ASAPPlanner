@@ -27,7 +27,7 @@ use asap_types::ir::physical_export::{
 };
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::{
-    FieldDataType, GroupingStrategy, Schema, SketchParams, SketchStatistic,
+    ExactKind, FieldDataType, GroupingStrategy, Schema, SketchParams, SketchStatistic,
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, TimeRangeKind};
 use asap_types::physical::{Materialization, Medium};
@@ -1199,6 +1199,41 @@ pub fn node_usage<'a>(
             state.checked_mul(2).ok_or(AnalyticalCostError::Overflow)?,
             medium,
         ),
+    };
+    // A counter built at ingestion over data that may arrive out of order
+    // holds each series' samples in a reorder buffer until they are
+    // `max_out_of_order_ms` old: the input rows of that long.
+    let kept = match (
+        node.materialization,
+        &node.payload,
+        data.arrival.max_out_of_order_ms(),
+    ) {
+        (
+            Materialization::MatAtIngestion(_),
+            Payload::ASAP(
+                ASAPOp::SummaryAgg { family, .. }
+                | ASAPOp::SummaryTumblingWindowChain { family, .. },
+            ),
+            Some(max_out_of_order_ms),
+        ) if matches!(
+            family,
+            FieldDataType::ExactAggregate(
+                ExactKind::Rate | ExactKind::Increase | ExactKind::IRate,
+                _
+            )
+        ) =>
+        {
+            let rows_per_ms = rows_per_ms
+                .ok_or_else(|| missing_rate(sources.first().copied().unwrap_or("(none)")))?;
+            let held_rows = (rows_per_ms * max_out_of_order_ms as f64).ceil() as u64;
+            let reorder_bytes = held_rows
+                .checked_mul(input.bytes.div_ceil(input.rows.max(1)))
+                .ok_or(AnalyticalCostError::Overflow)?;
+            detail += &format!("; reorder buffer {reorder_bytes} bytes");
+            kept.checked_add(reorder_bytes)
+                .ok_or(AnalyticalCostError::Overflow)?
+        }
+        _ => kept,
     };
     if node.materialization == Materialization::MatAtIngestion(Medium::Memory) {
         maintained = Some(state / tumbling_windows_of(node));

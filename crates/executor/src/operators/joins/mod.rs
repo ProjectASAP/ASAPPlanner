@@ -125,7 +125,6 @@ pub(super) fn execute<'a>(
         let right = inputs.pop().ok_or_else(|| invalid("right input missing"))?;
         let left = inputs.pop().ok_or_else(|| invalid("left input missing"))?;
         return Ok(futures::stream::once(async move {
-            use super::aligned_binary::{key_batch, matchable_rows};
             // Poll both branches together: either may depend on a common producer.
             let (left, right) = futures::try_join!(
                 collect_batch(left, &operator.inputs[0], &context),
@@ -332,4 +331,31 @@ fn joined(
         .collect::<Vec<_>>();
     states.extend((0..right.schema().fields.len()).map(|c| right.state_column(c).cloned()));
     Batch::from_parts(joined_schema.clone(), arrays, states, rows)
+}
+
+/// The key columns of `batch` (in `schema`) as a batch of their own, so
+/// both sides of a match share one group table.
+fn key_batch(batch: &Batch, columns: &[usize]) -> Result<Batch, Error> {
+    let fields = columns
+        .iter()
+        .map(|&c| batch.schema().fields[c].clone())
+        .collect();
+    batch.project(schema(fields), columns)
+}
+
+/// Whether row `row` of a key batch can match: no NULL and no NaN key.
+fn matchable_rows(keys: &Batch) -> Vec<bool> {
+    let mut matchable = vec![true; keys.num_rows()];
+    for column in keys.record_batch().columns() {
+        let nulls = column.logical_nulls();
+        let floats = column.as_any().downcast_ref::<arrow::array::Float64Array>();
+        for (row, slot) in matchable.iter_mut().enumerate() {
+            if nulls.as_ref().is_some_and(|nulls| nulls.is_null(row))
+                || floats.is_some_and(|floats| floats.value(row).is_nan())
+            {
+                *slot = false;
+            }
+        }
+    }
+    matchable
 }

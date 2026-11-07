@@ -760,6 +760,7 @@ mod tests {
         let data = DataWorkload {
             arrival: DataArrival::Ingesting {
                 rows_per_second: 4_000.0,
+                max_out_of_order_ms: None,
             },
             sources: [("a", Some(100)), ("b", Some(300)), ("c", None)]
                 .into_iter()

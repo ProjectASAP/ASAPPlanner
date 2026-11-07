@@ -403,3 +403,108 @@ async fn tumbling_windows_installed_from_per_sample_states_answer_the_query() {
     assert_eq!(from_tumbling_windows[0].len(), 3);
     assert_eq!(from_tumbling_windows, expected);
 }
+
+/// Counter samples that arrive out of order within the data's declared
+/// bound (`max_out_of_order_ms`) build, through the updater's reorder
+/// buffer, the tumbling window's state that in-order samples build. A
+/// sample further behind than the bound that does not follow its series'
+/// last applied sample is refused, and the state is the one without it.
+#[tokio::test]
+async fn counter_samples_reordered_within_the_declared_bound_build_the_in_order_state() {
+    // What the user writes: the 5-minute rate of a counter every minute,
+    // over samples that may arrive up to 30 s late.
+    let workload: PlanningWorkload = serde_json::from_str(
+        r#"{"query_workload": {"language": "promql", "repeating_queries": [{
+              "query": "rate(http_requests_total[5m])",
+              "demand": {"fixed_interval": 60000},
+              "requirements": {},
+              "predictability": {"predictable": {"known_at": null}}}]},
+            "data_workload": {"arrival": {"ingesting": {"rows_per_second": 66.7,
+                "max_out_of_order_ms": 30000}},
+              "sources": {"http_requests_total": {"series_count": 1000, "sample_interval": 15000}}}}"#,
+    )
+    .unwrap();
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: false,
+        ..DeploymentCapabilities::default()
+    };
+    let plan = plan_installable(UserInput::new(
+        &workload,
+        FrontendInput::Promql,
+        PlanningModels::builtin().with_deployment_capabilities(&capabilities),
+    ))
+    .await
+    .unwrap()
+    .0;
+    // The counter state the plan builds at ingestion.
+    let family = plan
+        .dag
+        .nodes
+        .iter()
+        .find_map(|node| match &node.payload {
+            Payload::ASAP(ASAPOp::SummaryAgg { family, .. })
+                if node.output_state.timing
+                    == asap_executor::planner::ir::properties::ExecutionTiming::IngestionTime =>
+            {
+                Some(family.clone())
+            }
+            _ => None,
+        })
+        .expect("a counter state built at ingestion");
+    // Two series sampled every 15 s over 90 s, `b` with a reset.
+    let in_order: Vec<(u32, i64, f64)> = (1..=6)
+        .flat_map(|step| {
+            let b = if step == 3 { 1.0 } else { 7.0 * step as f64 };
+            [
+                (0, step * 15_000, 10.0 * step as f64),
+                (1, step * 15_000, b),
+            ]
+        })
+        .collect();
+    // The runtime's build: a group per series, sealed once the bound has
+    // passed after the tumbling window's end.
+    let build = |samples: &[(u32, i64, f64)], bound: Option<u64>| {
+        let mut updater = StateColumnUpdater::new(&family).unwrap();
+        if let Some(bound) = bound {
+            updater = updater.with_max_out_of_order_ms(bound).unwrap();
+        }
+        updater.ensure_groups(2).unwrap();
+        let refused: Vec<bool> = samples
+            .iter()
+            .map(|&(group, time, value)| updater.update(group, value, time).is_err())
+            .collect();
+        let states = updater.seal();
+        let states: Vec<String> = (0..2)
+            .map(|group| {
+                let state = states.state(group);
+                let exact = state.as_any().downcast_ref::<ExactAccumulator>().unwrap();
+                serde_json::to_string(exact).unwrap()
+            })
+            .collect();
+        (states, refused)
+    };
+    let (expected, _) = build(&in_order, None);
+    // Up to 15 s late: every two steps arrive newest first.
+    let late: Vec<(u32, i64, f64)> = in_order
+        .chunks(4)
+        .flat_map(|steps| steps.iter().rev().copied())
+        .collect();
+    assert!(late.windows(2).any(|w| w[1].1 < w[0].1), "out of order");
+    let (reordered, refused) = build(&late, Some(30_000));
+    assert_eq!(reordered, expected);
+    assert!(refused.iter().all(|r| !r));
+    // Without the buffer, the same arrival order is refused.
+    assert!(build(&late, None).1.iter().any(|r| *r));
+
+    // Beyond the bound: series `a`'s sample at 15 s arrives last, 75 s
+    // late, after its 30 s and 45 s samples were applied (more than 30 s
+    // behind the newest, 90 s): refused, and the state is the one without
+    // it.
+    let mut beyond: Vec<_> = in_order[1..].to_vec();
+    beyond.push(in_order[0]);
+    let (states, refused) = build(&beyond, Some(30_000));
+    assert_eq!(refused.iter().filter(|r| **r).count(), 1);
+    assert!(refused[refused.len() - 1]);
+    let without: Vec<_> = in_order[1..].to_vec();
+    assert_eq!(states, build(&without, None).0);
+}

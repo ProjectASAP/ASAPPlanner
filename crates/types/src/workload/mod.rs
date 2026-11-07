@@ -430,7 +430,8 @@ impl From<&RepeatingEntry> for QueryWorkloadEntry {
 /// This is independent of whether queries repeat.
 ///
 /// JSON: `"at_rest"`, `{"ingesting": {"rows_per_second": 1000.0}}`,
-/// `{"mixed": {"rows_per_second": 1000.0}}` or `"unknown"` (the default).
+/// `{"mixed": {"rows_per_second": 1000.0, "max_out_of_order_ms": 5000}}` or
+/// `"unknown"` (the default).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum DataArrival {
@@ -445,12 +446,24 @@ pub enum DataArrival {
         /// it, when the source does not declare both its `series_count` and
         /// its `sample_interval` ([`SourceFacts`]).
         rows_per_second: f64,
+        /// How late a row may arrive after a later row of the same series
+        /// (or table) has arrived, in milliseconds; `None` when not
+        /// declared (the default). A summary of a counter (`rate`,
+        /// `increase`, `irate`) needs each series' samples in time order,
+        /// so a build at ingestion holds them in a reorder buffer for this
+        /// long. Undeclared, PromQL samples are taken to arrive in order
+        /// (as Prometheus assumes) and SQL rows in no known order.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_out_of_order_ms: Option<u64>,
     },
     /// Older rows are stored and new rows keep arriving.
     Mixed {
         /// Rows (PromQL samples) arriving per second over all sources, as
         /// for [`DataArrival::Ingesting`].
         rows_per_second: f64,
+        /// As for [`DataArrival::Ingesting`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_out_of_order_ms: Option<u64>,
     },
     /// Not declared: no summary is built at ingestion time.
     #[default]
@@ -461,9 +474,28 @@ impl DataArrival {
     /// Rows arriving per second, when the data is ingesting or mixed.
     pub fn rows_per_second(&self) -> Option<f64> {
         match self {
-            Self::Ingesting { rows_per_second } | Self::Mixed { rows_per_second } => {
-                Some(*rows_per_second)
+            Self::Ingesting {
+                rows_per_second, ..
             }
+            | Self::Mixed {
+                rows_per_second, ..
+            } => Some(*rows_per_second),
+            Self::AtRest | Self::Unknown => None,
+        }
+    }
+
+    /// How late a row may arrive after a later row of its series, when the
+    /// data is ingesting or mixed and declares it.
+    pub fn max_out_of_order_ms(&self) -> Option<u64> {
+        match self {
+            Self::Ingesting {
+                max_out_of_order_ms,
+                ..
+            }
+            | Self::Mixed {
+                max_out_of_order_ms,
+                ..
+            } => *max_out_of_order_ms,
             Self::AtRest | Self::Unknown => None,
         }
     }
@@ -1378,7 +1410,10 @@ mod tests {
     #[test]
     fn arrival_rate_and_sample_interval_are_validated() {
         let with = |rows_per_second: f64, sample_interval: Option<u64>| DataWorkload {
-            arrival: DataArrival::Mixed { rows_per_second },
+            arrival: DataArrival::Mixed {
+                rows_per_second,
+                max_out_of_order_ms: None,
+            },
             sources: BTreeMap::from([(
                 "m".to_string(),
                 SourceFacts {
@@ -1611,6 +1646,7 @@ mod tests {
             data_workload: Some(DataWorkload {
                 arrival: DataArrival::Ingesting {
                     rows_per_second: 1_000.0,
+                    max_out_of_order_ms: None,
                 },
                 sources: BTreeMap::from([(
                     "requests_total".to_string(),
@@ -1678,6 +1714,13 @@ mod tests {
                 ..SourceFacts::default()
             }
         );
+        assert_eq!(minimal.arrival.max_out_of_order_ms(), None);
+        // A declared out-of-order bound.
+        let late: DataArrival = serde_json::from_str(
+            r#"{"mixed": {"rows_per_second": 5.0, "max_out_of_order_ms": 5000}}"#,
+        )
+        .unwrap();
+        assert_eq!(late.max_out_of_order_ms(), Some(5_000));
     }
 
     /// The former flat shape (per-field evidence, one global cardinality,

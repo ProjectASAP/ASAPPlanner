@@ -172,7 +172,10 @@ impl FuzzWorkload {
             }
         }
         if rows_per_second > 0.0 {
-            self.data.arrival = DataArrival::Ingesting { rows_per_second };
+            self.data.arrival = DataArrival::Ingesting {
+                rows_per_second,
+                max_out_of_order_ms: None,
+            };
         }
     }
 

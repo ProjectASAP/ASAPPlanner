@@ -998,6 +998,7 @@ mod tests {
             data_workload: Some(DataWorkload {
                 arrival: DataArrival::Ingesting {
                     rows_per_second: 2_000.0 / 15.0,
+                    max_out_of_order_ms: None,
                 },
                 sources: gauges
                     .iter()

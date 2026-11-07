@@ -52,15 +52,15 @@
 //! * the data workload is continuously ingesting or mixed (unknown arrival
 //!   counts as not ingesting);
 //! * every query reading it repeats and is predictable;
-//! * it has no filter: an ingestion-time build reads raw data samples, which
-//!   carry none of the columns a filter reads;
 //! * if it is a counter state (`Rate`, `Increase`, `IRate`), whose update
-//!   needs each series' samples in time order, the data is continuously
-//!   ingesting and every source below it is a time series. Assumption:
-//!   continuously ingesting PromQL data arrives in time order per series,
-//!   as Prometheus assumes (it rejects out-of-order samples). Table (SQL)
-//!   sources and mixed data, whose at-rest part may load in any order, are
-//!   not taken to be ordered;
+//!   needs each series' samples in time order, the data declares how late a
+//!   row may arrive (`DataArrival`'s `max_out_of_order_ms`: the build
+//!   reorders each series' samples within that bound), or the data is
+//!   continuously ingesting and every source below it is a time series.
+//!   Assumption: continuously ingesting PromQL data with no declared bound
+//!   arrives in time order per series, as Prometheus assumes (it rejects
+//!   out-of-order samples). Table (SQL) sources and mixed data, whose
+//!   at-rest part may load in any order, are not taken to be ordered;
 //! * it is a tumbling-window chain whose readers all evaluate on its tumbling window
 //!   boundaries, anchored at the epoch (each fixed interval a multiple of the
 //!   tumbling-window width, and each known phase on that grid), or a whole-window build whose readers
@@ -128,9 +128,8 @@ use asap_types::ir::physical_export::compile_physical_asap_workload_with_node_id
 use asap_types::ir::properties::{ExecutionDataStateError, ExecutionTiming};
 use asap_types::ir::schema::{ExactKind, FieldDataType};
 use asap_types::ir::{
-    apply_materialization_timings, is_filtered_build, ASAPOp, MaterializationAssignment,
-    NodeToTimedNodeCache, NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr,
-    SchemaDerivationError, SortKey,
+    apply_materialization_timings, ASAPOp, MaterializationAssignment, NodeToTimedNodeCache,
+    NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr, SchemaDerivationError, SortKey,
 };
 use asap_types::physical::Materialization;
 use asap_types::physical::Medium;
@@ -176,11 +175,10 @@ pub(crate) enum IngestionPruneReason {
     NotRepeated,
     /// A query reading it is not predictable.
     NotPredictable,
-    /// It has a filter, which only a query-time build can apply.
-    Filtered,
     /// It is a counter state, whose update needs each series' samples in
-    /// time order, over data not taken to arrive in that order: only
-    /// continuously ingesting time-series (PromQL) sources are.
+    /// time order, over data not taken to arrive in that order and with no
+    /// declared out-of-order bound: only continuously ingesting
+    /// time-series (PromQL) sources are taken to be ordered.
     CounterNeedsTimeOrder,
     /// A whole-window build whose readers do not all run at one fixed
     /// interval and one phase, or whose window is shifted or not a range.
@@ -800,9 +798,6 @@ fn ingestion_eligibility(
     {
         return Err(Why::NotPredictable);
     }
-    if is_filtered_build(node) {
-        return Err(Why::Filtered);
-    }
     let (family, chain_tumbling_window_width_ms) = match node.asap() {
         Some(ASAPOp::SummaryAgg { family, .. }) => (family, None),
         Some(ASAPOp::SummaryTumblingWindowChain {
@@ -817,10 +812,11 @@ fn ingestion_eligibility(
         FieldDataType::ExactAggregate(ExactKind::Rate | ExactKind::Increase | ExactKind::IRate, _)
     ) {
         // Assumption (module doc): continuously ingesting PromQL data
-        // arrives in time order per series, as Prometheus assumes.
+        // arrives in time order per series, as Prometheus assumes; with a
+        // declared bound the build reorders the samples itself.
         let ordered =
             matches!(data.arrival, DataArrival::Ingesting { .. }) && reads_only_time_series(node);
-        if !ordered {
+        if !ordered && data.arrival.max_out_of_order_ms().is_none() {
             return Err(Why::CounterNeedsTimeOrder);
         }
     }
@@ -1740,6 +1736,7 @@ mod tests {
         DataWorkload {
             arrival: DataArrival::Ingesting {
                 rows_per_second: 1_000.0,
+                max_out_of_order_ms: None,
             },
             ..Default::default()
         }
@@ -1956,7 +1953,9 @@ mod tests {
 
     /// Only continuously ingesting time-series data is taken to arrive in
     /// time order: a counter over a table source, or over mixed data (whose
-    /// at-rest part may be loaded in any order), stays at query time.
+    /// at-rest part may be loaded in any order), stays at query time unless
+    /// the data declares an out-of-order bound, within which the build
+    /// reorders each series' samples.
     #[test]
     fn counter_tumbling_windows_over_other_sources_stay_at_query_time() {
         use IngestionPruneReason as Why;
@@ -1968,6 +1967,25 @@ mod tests {
         let mixed = DataWorkload {
             arrival: DataArrival::Mixed {
                 rows_per_second: 1_000.0,
+                max_out_of_order_ms: None,
+            },
+            ..Default::default()
+        };
+        let bounded = |arrival: DataArrival| DataWorkload {
+            arrival: match arrival {
+                DataArrival::Ingesting {
+                    rows_per_second, ..
+                } => DataArrival::Ingesting {
+                    rows_per_second,
+                    max_out_of_order_ms: Some(5_000),
+                },
+                DataArrival::Mixed {
+                    rows_per_second, ..
+                } => DataArrival::Mixed {
+                    rows_per_second,
+                    max_out_of_order_ms: Some(5_000),
+                },
+                other => other,
             },
             ..Default::default()
         };
@@ -1975,12 +1993,13 @@ mod tests {
             let roots = [root];
             let mut cache = HashMap::new();
             let implemented = map_roots(&roots, &mut |n| implement(n, &mut cache)).unwrap();
-            let mat_candidates =
-                materialization_candidates(&implemented, &[every_minute()], &data, false);
-            assert_eq!(
-                mat_candidates[0].at_ingestion,
-                Err(Why::CounterNeedsTimeOrder)
-            );
+            let at_ingestion = |data: &DataWorkload| {
+                materialization_candidates(&implemented, &[every_minute()], data, false)[0]
+                    .at_ingestion
+                    .clone()
+            };
+            assert_eq!(at_ingestion(&data), Err(Why::CounterNeedsTimeOrder));
+            assert_eq!(at_ingestion(&bounded(data.arrival)), Ok(()));
         }
     }
 
@@ -2085,7 +2104,8 @@ mod tests {
         .unwrap();
         assert_eq!(materialized(&candidates[1]), [AT_INGESTION]);
 
-        // The same build with a filter.
+        // The same build with a filter is eligible too: its input rows,
+        // every column the filter reads, run at ingestion with it.
         let QueryRoot::Operator(node) = &root else {
             unreachable!()
         };
@@ -2122,7 +2142,7 @@ mod tests {
         );
         assert_eq!(
             mat_candidates(&QueryRoot::Operator(filtered), at(MINUTE as u32)),
-            Err(Why::Filtered)
+            Ok(())
         );
     }
 

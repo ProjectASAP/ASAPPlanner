@@ -530,8 +530,6 @@ fn compile_internal(
                     operator,
                     *return_bool,
                 );
-                let query_time = node.output_state.timing
-                    == planner_types::ir::properties::ExecutionTiming::QueryTime;
                 let label_map = |schema: &SchemaRef| {
                     schema
                         .fields
@@ -539,8 +537,9 @@ fn compile_internal(
                         .any(|f| matches!(f.dtype, FieldDataType::Plain(DataType::Map { .. })))
                 };
                 // Grouped rows carry their labels as columns; per-series rows
-                // carry the series identity.
-                if let (true, [left, right]) = (query_time, schemas.as_slice()) {
+                // carry the series identity. Either runs alike at ingestion
+                // time and at query time.
+                if let [left, right] = schemas.as_slice() {
                     if !label_map(left) && !label_map(right) {
                         let binary = Operator::series_binary(
                             left.clone(),
@@ -916,47 +915,6 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
         let [left, right] = inputs else {
             return Err(invalid("binary requires two inputs"));
         };
-        if node.output_state.timing == planner_types::ir::properties::ExecutionTiming::IngestionTime
-        {
-            let value = |schema: &SchemaRef| -> Result<usize, Error> {
-                let columns = schema
-                    .fields
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, field)| {
-                        field.dtype
-                            == FieldDataType::Plain(planner_types::ir::schema::DataType::Float64)
-                    })
-                    .map(|(i, _)| i)
-                    .collect::<Vec<_>>();
-                match columns.as_slice() {
-                    [value] => Ok(*value),
-                    _ => Err(invalid("aligned binary requires one value column")),
-                }
-            };
-            let (l, r) = (value(left)?, value(right)?);
-            let keys = left
-                .fields
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| *i != l)
-                .map(|(i, field)| {
-                    right
-                        .fields
-                        .iter()
-                        .position(|other| other.name == field.name && other.dtype == field.dtype)
-                        .map(|j| (i, j))
-                        .ok_or_else(|| invalid("aligned input identities differ"))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            return Operator::aligned_binary(
-                left.clone(),
-                right.clone(),
-                keys,
-                (l, r),
-                operator.clone(),
-            );
-        }
         return Operator::vector_binary(left.clone(), right.clone(), operator.clone(), false);
     }
     if let Payload::NonASAP(NonASAPOp::Join {
@@ -1215,12 +1173,6 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
             filter,
             ..
         }) => {
-            if node.output_state.timing
-                == planner_types::ir::properties::ExecutionTiming::IngestionTime
-            {
-                crate::capability::validate_ingestion_time_summary(filter.as_ref())
-                    .map_err(Error::Invalid)?;
-            }
             let build = summary_agg_build(input, family, update, reduction, grouping)?;
             match filter {
                 Some(filter) => build.with_row_filter(expression(&filter.0, input)?),

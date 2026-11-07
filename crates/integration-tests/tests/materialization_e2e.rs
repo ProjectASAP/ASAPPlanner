@@ -288,7 +288,7 @@ const INGESTION_WINDOW: Scope = Scope::Ingestion {
 
 /// Prometheus drops series without a match: arithmetic over different
 /// selectors keeps only label sets present on both sides (none when
-/// disjoint), at either placement, and never becomes aligned maintenance.
+/// disjoint), at either placement.
 #[test]
 fn arithmetic_over_different_selectors_matches_prometheus() {
     // The selected root reads the outer `sum`'s exact state through its
@@ -312,22 +312,16 @@ fn arithmetic_over_different_selectors_matches_prometheus() {
     ];
     for assignment in placements() {
         let dag = timed_dag(&root, &assignment);
-        assert!(!ingestion_binary(&dag));
         let (values, _) = execute(&dag, &job_samples(&disjoint), INGESTION_WINDOW, 300_000);
         assert!(values.is_empty(), "{values:?}");
         let (values, _) = execute(&dag, &job_samples(&overlapping), INGESTION_WINDOW, 300_000);
         assert_eq!(values, [10.0]);
     }
-    let root = selected_quantile(
-        "quantile(0.9, sum_over_time(m[1m]) + sum_over_time(n[1m]))",
-        true,
-    );
-    assert!(!ingestion_binary(&timed_dag(&root, &placements()[1])));
 }
 
-/// Arithmetic over one selector is aligned maintenance when stored at
-/// ingestion time, and adds each series' two evaluations before the
-/// quantile at either placement.
+/// Arithmetic over one selector runs at ingestion time when its quantile is
+/// stored there, and adds each series' two evaluations before the quantile
+/// at either placement.
 #[test]
 #[ignore = "the two identical selectors stay separate until Pass 2 merges identical sub-DAGs (#580)"]
 fn arithmetic_over_one_selector_executes() {
@@ -353,4 +347,118 @@ fn arithmetic_over_one_selector_executes() {
         // of two values only the larger is.
         assert_eq!(values, [10.0]);
     }
+}
+
+/// The candidate for `query` that estimates its quantile with KLL and
+/// keeps each counter (`rate`) in an exact accumulator, with a PromQL series
+/// identity.
+fn kll_over_counters(query: &str) -> Rc<OperatorNode> {
+    use asap_logical_asap_optimization::test_support::{
+        compose_logical_candidate, generate_per_computation_candidates,
+    };
+    use asap_types::stages::HowToComputeAggregateMeasure as How;
+    let root = lower_promql(
+        query,
+        AccuracyTarget::max_error(0.01).accuracy_metric(AccuracyMetric::Rank),
+    )
+    .unwrap();
+    let root = promql_rows::with_series_identity(&root).unwrap();
+    let local = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
+            asap_types::ir::QueryRoot::Operator(root),
+        ]),
+    )
+    .unwrap();
+    let choices: Vec<usize> = local
+        .targets
+        .iter()
+        .map(|target| {
+            let ways = &target.ways_to_compute;
+            ways.iter()
+                .position(|how| {
+                    matches!(
+                        how,
+                        How::Summary(asap_types::ir::schema::SketchAlgorithm::Kll)
+                    )
+                })
+                .or_else(|| {
+                    ways.iter()
+                        .position(|how| matches!(how, How::ExactAccumulator(_)))
+                })
+                .unwrap()
+        })
+        .collect();
+    match compose_logical_candidate(&local, &choices)
+        .unwrap()
+        .remove(0)
+    {
+        asap_types::ir::QueryRoot::Operator(node) => node,
+        root => panic!("an operator root: {root:?}"),
+    }
+}
+
+/// `(metric, job, instance, seconds, value)` samples as one batch per metric.
+fn instance_samples<'a>(
+    samples: &'a [(&'a str, &'a str, &'a str, i64, f64)],
+) -> impl Fn(&SchemaRef, &str) -> Batch + 'a {
+    move |schema, name| {
+        let rows = samples
+            .iter()
+            .filter(|sample| sample.0 == name)
+            .map(|(metric, job, instance, seconds, value)| {
+                let labels = BTreeMap::from([
+                    ("__name__".to_string(), metric.to_string()),
+                    ("job".to_string(), job.to_string()),
+                    ("instance".to_string(), instance.to_string()),
+                ]);
+                promql_rows::series_row(schema, &labels, seconds * 1000, *value).unwrap()
+            })
+            .collect();
+        Batch::try_new(schema.clone(), rows).unwrap()
+    }
+}
+
+/// Many-to-one matching (`on(job) group_left`) between counters of
+/// different lookbacks runs at ingestion time as at query time: the KLL
+/// built at ingestion over each `a` series' rate divided by its job's `b`
+/// rate answers like the query-time plan. The ingestion run refreshes the
+/// 5-minute window, so `rate(b[1m])` reads only its last minute of it.
+#[test]
+fn group_left_over_counters_of_two_lookbacks_runs_at_ingestion_like_query_time() {
+    let root = kll_over_counters("quantile(0.5, rate(a[5m]) / on(job) group_left rate(b[1m]))");
+    // `a`: two instances of job x, one of job y, each +60 per minute;
+    // `b`: one series per job, x +6 and y +3 per 15 s in the last minute
+    // (y reset once).
+    let mut samples = Vec::new();
+    for (job, instance, per_minute) in [("x", "1", 60.0), ("x", "2", 120.0), ("y", "3", 30.0)] {
+        for minute in 0..=5 {
+            samples.push(("a", job, instance, minute * 60, per_minute * minute as f64));
+        }
+    }
+    for step in 0..=4 {
+        let y = if step == 2 { 1.0 } else { 3.0 * step as f64 };
+        samples.push(("b", "x", "0", 240 + step * 15, 6.0 * step as f64));
+        samples.push(("b", "y", "0", 240 + step * 15, y));
+    }
+    let ingestion = Scope::Ingestion {
+        window_start_ms: 0,
+        window_end_ms: 300_000,
+    };
+    let [not_materialized, at_ingestion] = placements().map(|a| timed_dag(&root, &a));
+    assert!(!ingestion_binary(&not_materialized));
+    assert!(
+        ingestion_binary(&at_ingestion),
+        "the division runs at ingestion"
+    );
+    let answers = [not_materialized, at_ingestion].map(|dag| {
+        execute(
+            &dag,
+            &instance_samples(&samples),
+            ingestion.clone(),
+            300_000,
+        )
+        .0
+    });
+    assert_eq!(answers[0].len(), 1);
+    assert_eq!(answers[0], answers[1]);
 }

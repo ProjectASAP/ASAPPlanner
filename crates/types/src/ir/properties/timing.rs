@@ -20,8 +20,6 @@
 //!   at ingestion time, so `MatAtIngestion` (or an ingestion timing fixed by
 //!   a candidate builder) over something that can only exist at query time
 //!   is an error ([`ExecutionDataStateError::UpstreamNotAtIngestion`]);
-//! - a PromQL `BinaryOp` over per-series inputs that are not the same series
-//!   rows runs at query time, since maintenance cannot align them;
 //! - every other node is `NotMaterialized` and runs when its consumer runs:
 //!   everything that feeds an ingestion-time node runs at ingestion time,
 //!   everything above an evaluation at query time.
@@ -64,7 +62,7 @@ use crate::ir::operator::query::QueryRoot;
 use crate::ir::properties::execution_data_state::{
     DataPrimitive, ExecutionDataState, ExecutionDataStateError, ExecutionTiming,
 };
-use crate::ir::schema::{DataType, FieldDataType, Schema};
+use crate::ir::schema::{FieldDataType, Schema};
 use crate::physical::materialization::Materialization;
 #[cfg(any(test, feature = "test-support"))]
 use crate::physical::materialization::Medium;
@@ -140,20 +138,13 @@ impl MaterializationAssignment {
     ) -> Result<Materialization, ExecutionDataStateError> {
         let at_ingestion = |m: Materialization| m.timing() == ExecutionTiming::IngestionTime;
         match self.get(node) {
-            Some(m) if at_ingestion(m) && is_filtered_build(node) => {
-                Err(ExecutionDataStateError::FilteredSummaryAtIngestion {
-                    operator: node.operator.kind_name(),
-                })
-            }
             Some(m) if at_ingestion(m) && upstream_at_query_time => {
                 Err(ExecutionDataStateError::UpstreamNotAtIngestion {
                     operator: node.operator.kind_name(),
                 })
             }
             Some(m) => Ok(m),
-            None if at_ingestion(self.unassigned)
-                && (upstream_at_query_time || is_filtered_build(node)) =>
-            {
+            None if at_ingestion(self.unassigned) && upstream_at_query_time => {
                 Ok(Materialization::NotMaterialized)
             }
             None => Ok(self.unassigned),
@@ -170,24 +161,6 @@ pub(crate) fn is_materialization_point<C>(operator: &Operator<C>) -> bool {
             ASAPOp::SummaryAgg { .. }
                 | ASAPOp::SummaryTumblingWindowChain { .. }
                 | ASAPOp::MaintainPopulation { .. }
-        )
-    )
-}
-
-/// Whether `node` is a summary build (`SummaryAgg` or `SummaryTumblingWindowChain`) with a
-/// filter, which never runs at ingestion time
-/// ([`ExecutionDataStateError::FilteredSummaryAtIngestion`]).
-pub fn is_filtered_build(node: &OperatorNode) -> bool {
-    matches!(
-        node.asap(),
-        Some(
-            ASAPOp::SummaryAgg {
-                filter: Some(_),
-                ..
-            } | ASAPOp::SummaryTumblingWindowChain {
-                filter: Some(_),
-                ..
-            }
         )
     )
 }
@@ -236,8 +209,6 @@ pub fn data_state(node: &OperatorNode) -> Option<ExecutionDataState> {
 /// Whether the sub-DAG below `node` contains a node that can only run at
 /// query time (an evaluation, or a sub-DAG `assignment` does not put at
 /// ingestion time), which forces every consumer above it to query time as well.
-/// A PromQL `BinaryOp` whose inputs are not the same per-series rows also runs
-/// at query time.
 fn forces_query_time(
     node: &OperatorNode,
     assignment: &MaterializationAssignment,
@@ -269,16 +240,6 @@ fn forces_query_time(
                 Ok(m) => m.timing() == ExecutionTiming::QueryTime,
                 Err(_) => true,
             }
-        }
-        Operator::NonASAP(NonASAPOp::BinaryOp { lhs, rhs, .. })
-            if node
-                .schema
-                .fields
-                .iter()
-                .any(|f| f.name == crate::ir::schema::PROMQL_SERIES_IDENTITY)
-                && per_series_rows(lhs).is_none_or(|rows| per_series_rows(rhs) != Some(rows)) =>
-        {
-            true
         }
         _ => upstream(seen),
     };
@@ -404,11 +365,6 @@ fn placement(
             .any(|child| forces_query_time(child, assignment, forced))
     };
     if let Some(placed) = node.timing {
-        if placed == ExecutionTiming::IngestionTime && is_filtered_build(node) {
-            return Err(ExecutionDataStateError::FilteredSummaryAtIngestion {
-                operator: node.operator.kind_name(),
-            });
-        }
         if placed == ExecutionTiming::IngestionTime && upstream_at_query_time(forced) {
             return Err(ExecutionDataStateError::UpstreamNotAtIngestion {
                 operator: node.operator.kind_name(),
@@ -780,9 +736,7 @@ fn validate_non_asap(
                 }
             }
         }
-        NonASAPOp::BinaryOp {
-            operator, lhs, rhs, ..
-        } => {
+        NonASAPOp::BinaryOp { operator, .. } => {
             let is_div = matches!(
                 operator.kind,
                 BinaryOpKind::Arithmetic(crate::ir::scalar::ArithmeticOpKind::Div)
@@ -793,52 +747,6 @@ fn validate_non_asap(
             {
                 return Err(ExecutionDataStateError::InvalidCheckedDivision);
             }
-            if timing == ExecutionTiming::IngestionTime {
-                // The opaque series identity is a non-null Utf8 key; every
-                // other column is a non-null Float64 value or timestamp.
-                let plain_float_or_ts = |schema: &Schema| {
-                    schema.fields.iter().all(|field| {
-                        !field.nullable
-                            && if field.name == crate::ir::schema::PROMQL_SERIES_IDENTITY {
-                                field.dtype == FieldDataType::Plain(DataType::Utf8)
-                            } else {
-                                matches!(
-                                    field.dtype,
-                                    FieldDataType::Plain(DataType::Float64 | DataType::Timestamp)
-                                )
-                            }
-                    })
-                };
-                let float_count = node
-                    .schema
-                    .fields
-                    .iter()
-                    .filter(|f| matches!(f.dtype, FieldDataType::Plain(DataType::Float64)))
-                    .count();
-                if operator.vector_match.is_some()
-                    || !matches!(operator.kind, BinaryOpKind::Arithmetic(_))
-                    || lhs.schema != rhs.schema
-                    || lhs.schema != node.schema
-                    || node
-                        .schema
-                        .fields
-                        .iter()
-                        .filter(|f| f.name == crate::ir::schema::PROMQL_SERIES_IDENTITY)
-                        .count()
-                        > 1
-                    || (node
-                        .schema
-                        .fields
-                        .iter()
-                        .any(|f| f.name == crate::ir::schema::PROMQL_SERIES_IDENTITY)
-                        && per_series_rows(lhs)
-                            .is_none_or(|rows| per_series_rows(rhs) != Some(rows)))
-                    || !plain_float_or_ts(&node.schema)
-                    || float_count != 1
-                {
-                    return Err(ExecutionDataStateError::InvalidIngestionTimeBinary);
-                }
-            }
         }
         _ => {
             for child in op.children() {
@@ -847,28 +755,6 @@ fn validate_non_asap(
         }
     }
     Ok(())
-}
-
-/// Ingestion-time arithmetic needs the same per-series population on both sides.
-fn per_series_rows(node: &OperatorNode) -> Option<&OperatorNode> {
-    use crate::ir::schema::ExactKind;
-    match &node.operator {
-        Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child }) => match &child.operator {
-            Operator::ASAP(ASAPOp::SummaryAgg {
-                child,
-                family: FieldDataType::ExactAggregate(ExactKind::Sum | ExactKind::Count, _),
-                reduction: crate::ir::operator::Reduction::PerEntity,
-                filter: None,
-                ..
-            }) => Some(child),
-            _ => None,
-        },
-        Operator::NonASAP(NonASAPOp::BinaryOp { lhs, rhs, .. }) => {
-            let rows = per_series_rows(lhs)?;
-            (per_series_rows(rhs) == Some(rows)).then_some(rows)
-        }
-        _ => None,
-    }
 }
 
 #[cfg(test)]
@@ -882,6 +768,7 @@ mod tests {
         ExactKind, ExactParams, GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams,
         SketchStatistic, SummaryUpdate,
     };
+    use crate::ir::schema::DataType;
     use crate::ir::schema::Field;
 
     fn scan_with(fields: Vec<Field>) -> Rc<OperatorNode> {
@@ -1253,12 +1140,12 @@ mod tests {
         );
     }
 
-    /// A summary build with a filter never runs at ingestion time: an
-    /// ingestion-time build reads raw data samples, which carry none of the
-    /// query's columns the filter reads. An explicit `MatAtIngestion` is an
-    /// error; the all-at-ingestion default leaves it at query time.
+    /// A summary build with a filter runs at ingestion time like any other:
+    /// its input rows, every column the filter reads, run at ingestion with
+    /// it. An explicit `MatAtIngestion` and the all-at-ingestion default
+    /// both place it there.
     #[test]
-    fn a_filtered_summary_build_never_runs_at_ingestion_time() {
+    fn a_filtered_summary_build_runs_at_ingestion_time() {
         use crate::ir::scalar::expr_ir::ScalarValue;
         use crate::ir::{Predicate, ScalarExpr};
         let plain = agg(scan(), kll());
@@ -1289,24 +1176,17 @@ mod tests {
         );
         let mut assignment = MaterializationAssignment::default();
         assignment.set(&filtered, AT_INGESTION);
-        assert_eq!(
-            apply_materialization_timings(
-                &estimate(Rc::clone(&filtered)),
-                &assignment,
-                &mut NodeToTimedNodeCache::new()
-            )
-            .err(),
-            Some(ExecutionDataStateError::FilteredSummaryAtIngestion {
-                operator: "SummaryAgg"
-            })
-        );
+        let timed = apply_materialization_timings(
+            &estimate(Rc::clone(&filtered)),
+            &assignment,
+            &mut NodeToTimedNodeCache::new(),
+        )
+        .unwrap();
+        assert_eq!(child(&timed).timing, Some(ExecutionTiming::IngestionTime));
+        assert_eq!(child(&timed).materialization, AT_INGESTION);
         let timed = apply(&estimate(filtered)).unwrap();
-        assert_eq!(child(&timed).timing, Some(ExecutionTiming::QueryTime));
-        assert_eq!(
-            child(&timed).materialization,
-            Materialization::NotMaterialized
-        );
-        assert!(validate_at_ingestion(&child(&timed), ExecutionTiming::QueryTime).is_ok());
+        assert_eq!(child(&timed).timing, Some(ExecutionTiming::IngestionTime));
+        assert_eq!(child(&timed).materialization, AT_INGESTION);
     }
 
     fn finalize(child: Rc<OperatorNode>) -> Rc<OperatorNode> {
@@ -1541,10 +1421,10 @@ mod tests {
         }
         validate_at_ingestion(&corr_over(3), ExecutionTiming::QueryTime).unwrap();
     }
-    // Typed derived updates retain one opaque series identity only when both
-    // operands cover the same series; arbitrary labels are never admitted.
+    // An ingestion-time binary runs as at query time: over one selector or
+    // two, with or without series identity.
     #[test]
-    fn ingestion_time_binary_accepts_only_well_typed_series_identity() {
+    fn ingestion_time_binary_matches_series_like_query_time() {
         use crate::ir::operator::non_asap::BinaryOperator;
         use crate::ir::operator::BinaryOpKind;
         use crate::ir::scalar::ArithmeticOpKind;
@@ -1610,31 +1490,11 @@ mod tests {
         );
         schema.time_index = Some(1);
         assert!(validate(schema.clone(), "m").is_ok());
-        assert!(
-            validate(schema.clone(), "n").is_ok(),
-            "no identity to align"
-        );
+        assert!(validate(schema.clone(), "n").is_ok());
         schema
             .fields
             .push(Field::plain(identity, DataType::Utf8, false));
         assert!(validate(schema.clone(), "m").is_ok());
-        assert_eq!(
-            validate(schema.clone(), "n"),
-            Err(ExecutionDataStateError::InvalidIngestionTimeBinary),
-            "different selectors may cover different series"
-        );
-        for mutation in 0..4 {
-            let mut invalid = schema.clone();
-            match mutation {
-                0 => invalid.fields[2].nullable = true,
-                1 => invalid.fields[2].dtype = FieldDataType::Plain(DataType::Timestamp),
-                2 => invalid.fields.push(invalid.fields[2].clone()),
-                _ => invalid.fields[2].name = "label".into(),
-            }
-            assert_eq!(
-                validate(invalid, "m"),
-                Err(ExecutionDataStateError::InvalidIngestionTimeBinary)
-            );
-        }
+        assert!(validate(schema, "n").is_ok());
     }
 }

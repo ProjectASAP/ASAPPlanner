@@ -44,6 +44,7 @@ fn workload_of(queries: &[(&str, u32)], accuracy: AccuracyTarget) -> PlanningWor
         data_workload: Some(DataWorkload {
             arrival: DataArrival::Ingesting {
                 rows_per_second: 24.0,
+                max_out_of_order_ms: None,
             },
             sources: ["m", "n", "c_total"]
                 .into_iter()
