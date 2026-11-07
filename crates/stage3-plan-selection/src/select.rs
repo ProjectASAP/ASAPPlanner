@@ -1,7 +1,8 @@
-//! Stage 3, plan selection: [`select_plan`] costs every physical candidate
-//! ($w_v$, [`crate::candidate_cost`]), builds and solves the baseline
-//! selection MILP over Stage 2's candidates and admissible edges
-//! ([`crate::milp::model`]), decodes $\{x = 1\}$, $\{y = 1\}$ and
+//! Stage 3, plan selection: [`select_plan`] lists the workload's execution
+//! contexts with each execution and edge they allow
+//! ([`crate::milp::execution_contexts`]), costs every execution
+//! ([`crate::execution_cost`]), builds and solves the selection MILP over
+//! them ([`crate::milp::model`]), decodes $\{x = 1\}$, $\{y = 1\}$ and
 //! $\{z = 1\}$ into a
 //! [`DagOfSelectedCandidates`](asap_types::stages::DagOfSelectedCandidates),
 //! and realizes it once through the injected realizer.
@@ -9,16 +10,20 @@
 use std::collections::BTreeMap;
 
 use asap_accuracy::AccuracyModel;
+use asap_cost::analytical::AnalyticalCostError;
+use asap_cost::execution_demand::evaluation_rate;
 use asap_cost::{materialized_tumbling_window_chains, node_map, plan_cost, CostInputs, CostModel};
 use asap_types::ir::schema::FieldDataType;
-use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot};
+use asap_types::physical::{ExecutionTiming, Lifetime, StorageMedium};
 use asap_types::stages::{
-    AssignmentRealizer, PhysicalASAPMemoCandidates, PhysicalCandidateError, PhysicalCandidateId,
-    PruneReason, PrunedCandidate, RealizedPlan,
+    AssignmentRealizer, ExecutionContextId, PhysicalASAPMemoCandidates, PhysicalCandidateError,
+    PhysicalCandidateId, PruneReason, PrunedCandidate, RealizedPlan,
 };
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
-use crate::candidate_cost::candidate_costs;
+use crate::execution_cost::{execution_costs, ExecutionCosts};
+use crate::milp::execution_contexts::{Execution, ExecutionContexts};
 use crate::milp::model::{solve_selection, SelectionInputs, SelectionMilpError};
 use crate::models::AccuracyCheckInputs;
 use crate::report::{
@@ -30,10 +35,22 @@ use crate::report::{
 /// of the selected plan count as equal.
 const COST_EQUALITY_TOLERANCE: f64 = 1e-6;
 
-/// The name of the inexact term of the baseline objective, with the
-/// number of selected candidates it covers in [`InexactObjective`].
-const FIXED_COST_PER_CANDIDATE: &str =
-    "fixed cost per candidate, whichever consumers select it (execution contexts: #1207 PR 7)";
+/// The terms of `asap_cost::plan_cost` the formulation's objective (concepts
+/// doc, section 5) does not encode, named in [`InexactObjective`] with the
+/// number of selected executions each may concern.
+const HELD_MEMORY: &str = "memory a query-time result holds while its evaluation runs: \
+     plan_cost holds it for the latency of the queries reading it; the objective ignores query \
+     latency (out of scope)";
+const RUNS_PER_QUERY: &str = "a not-materialized execution in a context of several queries: \
+     plan_cost computes it once per query reaching it, the objective once per context";
+const CHAIN_BUILDS_PER_REQUEST: &str = "a tumbling-window chain materialized at query time: \
+     plan_cost builds it once per request of the queries reaching it, the objective once per \
+     window";
+const CHAIN_MERGE: &str = "the merge the realizer reads each tumbling-window chain through, \
+     which is not a candidate";
+const QUERY_TIME_SCAN: &str = "a query-time scan: plan_cost reads the windows of its selected \
+     consumers and retains the raw data of the largest scan of each source; the objective reads \
+     the windows of every consumer that may read it in its context and retains each scan's";
 
 /// Stage 3, plan selection: select one plan among `physical`'s candidates
 /// (module documentation). The selection is realized through `realizer`
@@ -82,25 +99,17 @@ pub fn select_plan(
         });
     }
     let formula_scale = cost_inputs.frozen_calibration_factor.unwrap_or(1.0);
-    let costs = candidate_costs(physical, entries, data, cost_inputs, formula_scale);
-    let pruned_candidates: Vec<PrunedCandidate<PhysicalCandidateId>> = costs
-        .iter()
-        .enumerate()
-        .filter(|(_, cost)| cost.is_err())
-        .map(|(id, _)| PrunedCandidate {
-            group: physical.physical_candidates[id].logical_candidate_id.group,
-            candidate: PhysicalCandidateId(id),
-            reason: PruneReason::UsageNotCostable,
-        })
-        .collect();
-    let cost_per_second: Vec<Option<f64>> = costs.iter().map(|cost| cost.clone().ok()).collect();
-
-    let solved = solve_selection(&SelectionInputs::new(physical, &cost_per_second, entries))
-        .map_err(|error| match error {
-            SelectionMilpError::Infeasible => {
-                ErrorSelectingPlan::NoValidCandidate(vec![infeasible(&costs)])
+    let contexts = ExecutionContexts::new(physical, entries);
+    let costs = execution_costs(physical, &contexts, data, cost_inputs, formula_scale);
+    let pruned_candidates = uncostable_candidates(physical, &contexts, &costs);
+    let solved =
+        solve_selection(&SelectionInputs::new(physical, &contexts, &costs)).map_err(|error| {
+            match error {
+                SelectionMilpError::Infeasible => {
+                    ErrorSelectingPlan::NoValidCandidate(vec![infeasible(&costs)])
+                }
+                SelectionMilpError::Solver(reason) => ErrorSelectingPlan::Solver(reason),
             }
-            SelectionMilpError::Solver(reason) => ErrorSelectingPlan::Solver(reason),
         })?;
     let validation_started = std::time::Instant::now();
     solved.selected_dag.validate(physical).map_err(|reason| {
@@ -136,16 +145,22 @@ pub fn select_plan(
     let plan_cost_per_second = cost.cost_per_second.ok_or_else(|| {
         ErrorSelectingPlan::UnsupportedCostModel("a cost model without a cost per second".into())
     })?;
-    let objective_per_second = solved.objective_per_second;
+    // The runtime's fee per query request: the same for every plan, so a
+    // constant of the objective.
+    let objective_per_second = solved.objective_per_second
+        + request_cost_per_second(entries, cost_inputs).map_err(|error| {
+            ErrorSelectingPlan::Cost {
+                candidate: plan.id.clone(),
+                node: plan.dag.nodes.first().map_or(0, |node| node.id),
+                error,
+            }
+        })?;
     let difference = (objective_per_second - plan_cost_per_second).abs();
     let tolerance = COST_EQUALITY_TOLERANCE * plan_cost_per_second.abs().max(f64::MIN_POSITIVE);
     let inexact_objective = (difference > tolerance).then(|| InexactObjective {
         objective_per_second,
         plan_cost_per_second,
-        inexact_terms: BTreeMap::from([(
-            FIXED_COST_PER_CANDIDATE.to_string(),
-            solved.selected_dag.candidate_of_node.len(),
-        )]),
+        inexact_terms: inexact_terms(physical, &contexts, &solved.execution_of_node),
     });
     let accepted_accuracy_per_query = accepted_accuracy(&realized, entries, accuracy_checks.model);
     let validation_ms = validation_started.elapsed().as_millis() as u64;
@@ -160,7 +175,10 @@ pub fn select_plan(
             // plan's cost only when the objective equals it.
             cost_lower_bound_per_second: (inexact_objective.is_none()
                 && solved.lower_bound_per_second.is_finite())
-            .then_some(solved.lower_bound_per_second),
+            .then_some(
+                solved.lower_bound_per_second
+                    + (objective_per_second - solved.objective_per_second),
+            ),
             milp_variables: solved.variable_count,
             milp_constraints: solved.constraint_count,
             model_construction_ms: solved.construction_ms,
@@ -171,13 +189,13 @@ pub fn select_plan(
     })
 }
 
-/// The rejection of an infeasible selection: no plan meets (A)–(I), with
-/// the reasons `asap-cost` could not cost the candidates the model left
-/// out, each once in candidate order: those candidates may be why no plan
-/// is left.
-fn infeasible(costs: &[Result<f64, String>]) -> Rejection {
+/// The rejection of an infeasible selection: no plan meets (A)–(I) and
+/// (R), with the reasons `asap-cost` could not cost the executions the
+/// model left out, each once in execution order: those executions may be
+/// why no plan is left.
+fn infeasible(costs: &ExecutionCosts) -> Rejection {
     let mut reasons: Vec<&str> = Vec::new();
-    for reason in costs.iter().filter_map(|cost| cost.as_ref().err()) {
+    for reason in costs.uncostable.values() {
         if !reasons.contains(&reason.as_str()) {
             reasons.push(reason);
         }
@@ -187,7 +205,7 @@ fn infeasible(costs: &[Result<f64, String>]) -> Rejection {
         .to_string();
     if !reasons.is_empty() {
         reason += &format!(
-            "; candidates left out because they could not be costed: {}",
+            "; executions left out because they could not be costed: {}",
             reasons.join("; ")
         );
     }
@@ -196,6 +214,112 @@ fn infeasible(costs: &[Result<f64, String>]) -> Rejection {
         cause: RejectionCause::Infeasible,
         reason,
     }
+}
+
+/// The candidates Stage 3 rules out before the search: those with an
+/// execution none of which `asap-cost` could cost, in candidate order.
+fn uncostable_candidates(
+    physical: &PhysicalASAPMemoCandidates,
+    contexts: &ExecutionContexts,
+    costs: &ExecutionCosts,
+) -> Vec<PrunedCandidate<PhysicalCandidateId>> {
+    let mut costed: BTreeMap<PhysicalCandidateId, bool> = BTreeMap::new();
+    for &execution in contexts.executions() {
+        *costed.entry(execution.candidate()).or_default() |=
+            costs.cost_per_second.contains_key(&execution);
+    }
+    costed
+        .into_iter()
+        .filter(|&(_, costed)| !costed)
+        .map(|(candidate, _)| PrunedCandidate {
+            group: physical.physical_candidates[candidate.0]
+                .logical_candidate_id
+                .group,
+            candidate,
+            reason: PruneReason::UsageNotCostable,
+        })
+        .collect()
+}
+
+/// The runtime's fee per query request under cost model 1, per second, as
+/// `asap_cost::plan_cost` charges it: `ns_per_evaluation` of the measured
+/// table, once per request of each query.
+fn request_cost_per_second(
+    entries: &[QueryWorkloadEntry],
+    cost_inputs: &CostInputs,
+) -> Result<f64, AnalyticalCostError> {
+    let evaluation_ms = cost_inputs.measured_operation_costs.ns_per_evaluation * 1e-6;
+    let CostModel::UsageOverTime(unit_cost) = &cost_inputs.cost_model else {
+        return Ok(0.0);
+    };
+    if evaluation_ms <= 0.0 {
+        return Ok(0.0);
+    }
+    let mut cost = 0.0;
+    for entry in entries {
+        let requests_per_second = evaluation_rate(
+            [(&entry.recurrence, None)],
+            cost_inputs.non_repeating_query_horizon_seconds,
+        )?;
+        cost += unit_cost.cost_per_cpu_op * evaluation_ms
+            / cost_inputs.resource_speed.ms_per_cpu_op
+            * requests_per_second;
+    }
+    Ok(cost)
+}
+
+/// The terms of `plan_cost` the objective does not encode that the
+/// selected executions `execution_of_node` may meet, each with how many of
+/// them: query-time results holding memory, not-materialized executions in
+/// a context of several queries, query-time materialized chains, chains
+/// read through the realizer's merge, query-time scans.
+fn inexact_terms(
+    physical: &PhysicalASAPMemoCandidates,
+    contexts: &ExecutionContexts,
+    execution_of_node: &[Execution],
+) -> BTreeMap<String, usize> {
+    let memo = &physical.logical_candidates.memo;
+    let queries_of_context = |context: ExecutionContextId| {
+        (0..physical.query_roots.len())
+            .filter(|&query| contexts.context_of_query(query) == Some(context))
+            .count()
+    };
+    let mut terms: BTreeMap<String, usize> = BTreeMap::new();
+    for &execution in execution_of_node {
+        let candidate = &physical.physical_candidates[execution.candidate().0];
+        let properties = candidate.physical_properties;
+        let logical = memo.candidate(candidate.logical_candidate_id);
+        let query_time = properties.timing() == ExecutionTiming::QueryTime;
+        let mut add = |term: &str| *terms.entry(term.to_string()).or_default() += 1;
+        if query_time
+            && matches!(
+                properties.lifetime(),
+                Lifetime::None | Lifetime::OneEvaluation(StorageMedium::Memory)
+            )
+        {
+            add(HELD_MEMORY);
+        }
+        if let Execution::InContext(context, _) = execution {
+            if properties.lifetime() == Lifetime::None && queries_of_context(context) > 1 {
+                add(RUNS_PER_QUERY);
+            }
+        }
+        if query_time && matches!(properties.lifetime(), Lifetime::AcrossEvaluations(_)) {
+            add(CHAIN_BUILDS_PER_REQUEST);
+        }
+        if logical.logical_properties.window_layout().is_some() {
+            add(CHAIN_MERGE);
+        }
+        if query_time
+            && matches!(
+                logical.expression.operator,
+                Operator::NonASAP(NonASAPOp::Scan { .. })
+            )
+        {
+            add(QUERY_TIME_SCAN);
+        }
+    }
+    terms
 }
 
 /// Per query, the accuracy accepted for the selected plan. An output that

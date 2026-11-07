@@ -3,18 +3,19 @@
 //! selection and realization", and sections 4 and 5).
 //!
 //! [`select_plan`] reads Stage 2's physical candidates $\mathcal C$ and the
-//! admissible part of the physical edges $\mathcal E$, selects with a MILP
-//! over $x_v$, $y_{u,c,i}$, $z_{q,v}$ and $t_v$ (constraints (A)–(I);
-//! (G) and (H) hold because $y$ exists only on admissible edges), and
-//! decodes $\{x = 1\}$ and $\{y = 1\}$ into a
-//! `DagOfSelectedCandidates`, which the injected realizer builds. The
-//! extensions add execution contexts $\kappa$ with $x^{\mathrm{mat}}_v$,
-//! $x_{\kappa,v}$, $y_{\kappa,u,c,i}$ and the retention amount $h_v$
-//! (section 5), and accuracy at each query root, constraint (K), with
-//! per-candidate error bounds $E_c$ and $D_c$ (section 4). Costs come from
-//! `asap-cost`.
+//! admissible part of the physical edges $\mathcal E$, and selects with a
+//! MILP over execution contexts $\kappa$ (section 5): $x^{\mathrm{mat}}_v$
+//! per `AcrossEvaluations` candidate, $x_{\kappa,v}$ per candidate with
+//! $\ell$ = None or `OneEvaluation` and context, $y_{\kappa,u,c,i}$ per
+//! edge and context of its consumer, $z_{q,v}$, $t$, and the retention
+//! amount $h_v$; constraints (A)–(I) per execution ((G) and (H) hold because
+//! $y$ exists only on admissible edges) and (R). It decodes $\{x = 1\}$ and
+//! $\{y = 1\}$ into a `DagOfSelectedCandidates` (one node per selected
+//! execution), which the injected realizer builds. Accuracy at each query
+//! root, constraint (K), with per-candidate error bounds $E_c$ and $D_c$
+//! (section 4), is #1207 PR 8. Costs come from `asap-cost`.
 
-mod candidate_cost;
+mod execution_cost;
 mod milp;
 mod models;
 mod report;
