@@ -31,7 +31,7 @@ pub enum Pass1Error {
 /// expression, exact accumulators, one summary build per configuration of
 /// the family's predefined list with separate readouts, and fused builds.
 /// Pruning by the queries' accuracy targets is decided per edge, after
-/// Pass 2 (#1207 PR 4).
+/// Pass 2's rules (its logical edges).
 pub fn pass1_memo(
     mut memo: Memo,
     supported_summaries: Option<&[SupportedSummary]>,

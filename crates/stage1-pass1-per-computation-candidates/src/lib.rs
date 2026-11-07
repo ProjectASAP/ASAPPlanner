@@ -16,8 +16,8 @@
 //! Pass 1 reads no accuracy target beyond each measure's own (an exact one
 //! offers no summary): the error of each build follows from its parameters
 //! (`parameter_list`), and the metric rule, the parameter floors from
-//! validity caps and the pruning caps are decided per edge after Pass 2
-//! (#1207 PR 4); plan selection (Stage 3) checks each query's composed
+//! validity caps and the pruning caps are decided per edge after Pass 2's rules
+//! (Pass 2's logical edges); plan selection (Stage 3) checks each query's composed
 //! accuracy at its root.
 
 /// Stage 1, Pass 1's entry: the initial candidates of the memo groups.
