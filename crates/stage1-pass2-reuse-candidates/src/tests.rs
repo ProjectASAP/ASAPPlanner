@@ -29,6 +29,7 @@ use asap_types::workload::{
 };
 
 use crate::generate_logical_asap_memo_candidates;
+use crate::logical_edges::{merged_tumbling_windows_guarantee, OutputError};
 use crate::memo::window_candidates::tumbling_window_widths;
 use crate::parameter_floors::{strongest, weakest};
 
@@ -396,6 +397,61 @@ fn scans_of_one_metric_with_other_labels_read_one_widened_scan() {
     assert!(reads_widened(job_window).is_some());
 }
 
+/// Two queries whose quantile builds differ only in the labels their scans
+/// list read one widened build: each readout gets a projection of the one
+/// widened readout.
+#[test]
+fn builds_over_scans_listing_other_labels_share_one_widened_build() {
+    let mut memo = Memo::default();
+    let mut readouts = Vec::new();
+    for labels in [&["job"][..], &["host", "job"][..]] {
+        let input = scan(&mut memo, "m", labels);
+        let window = range(&mut memo, input, 60);
+        let state = sketch_state(
+            &mut memo,
+            window,
+            SketchAlgorithm::Kll,
+            Reduction::PerEntity,
+        );
+        let readout = estimate(&mut memo, state, SketchStatistic::Quantile { q: 0.9 });
+        memo.add_query(QueryRoot::Operator(readout));
+        readouts.push(readout);
+    }
+    let target = AccuracyTarget::max_error(0.1);
+    let logical = pass2(
+        memo,
+        &[entry(60_000, target.clone()), entry(60_000, target)],
+    );
+    let widened: Vec<MemoGroupId> = readouts
+        .iter()
+        .map(|&readout| {
+            candidates_of(&logical.memo, readout)
+                .iter()
+                .find_map(|c| match &c.expression.operator {
+                    Operator::NonASAP(NonASAPOp::Project { child, .. })
+                        if c.origin == OriginOfCandidateForMemoGroup::WidenedScans =>
+                    {
+                        Some(*child)
+                    }
+                    _ => None,
+                })
+                .expect("a projection of the widened readout")
+        })
+        .collect();
+    assert_eq!(widened[0], widened[1]);
+    let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) =
+        &logical.memo.groups()[widened[0].0 as usize].expression
+    else {
+        panic!("the widened readout");
+    };
+    // The widened state has the original builds' θ and layouts: every
+    // listed θ, without and with rule 1's 60 s tumbling windows.
+    assert_eq!(
+        candidates_of(&logical.memo, *summary_input).len(),
+        2 * parameter_list(SketchAlgorithm::Kll).len()
+    );
+}
+
 // ── Rule 4: top-k reuse ───────────────────────────────────────────────────
 
 /// An exact top-3 reads the top-5 of the same input and partition; the
@@ -607,6 +663,132 @@ fn a_coarse_sketch_state_merges_a_finer_state() {
     assert!(candidates_of(&logical.memo, fine)
         .iter()
         .all(|c| c.origin != OriginOfCandidateForMemoGroup::Rollup));
+}
+
+/// The finer state's windowed builds (rule 1) serve the coarse state
+/// through its rollup: one tumbling-window chain for both queries, without
+/// a window rollup rule.
+#[test]
+fn a_coarse_state_reads_the_finer_states_windowed_builds() {
+    let mut memo = Memo::default();
+    let input = scan(&mut memo, "m", &["host", "job"]);
+    let window = range(&mut memo, input, 300);
+    let coarse = sketch_state(
+        &mut memo,
+        window,
+        SketchAlgorithm::Kll,
+        Reduction::by(vec![3]),
+    );
+    let fine = sketch_state(
+        &mut memo,
+        window,
+        SketchAlgorithm::Kll,
+        Reduction::by(vec![2, 3]),
+    );
+    for state in [coarse, fine] {
+        let readout = estimate(&mut memo, state, SketchStatistic::Quantile { q: 0.9 });
+        memo.add_query(QueryRoot::Operator(readout));
+    }
+    let target = AccuracyTarget::max_error(0.1);
+    let logical = pass2(
+        memo,
+        &[entry(60_000, target.clone()), entry(60_000, target)],
+    );
+    let merge = candidates_of(&logical.memo, coarse)
+        .iter()
+        .position(|c| c.origin == OriginOfCandidateForMemoGroup::Rollup)
+        .expect("the rollup");
+    let windowed = edges_into(
+        &logical,
+        CandidateForMemoGroupId {
+            group: coarse,
+            index_in_group: merge,
+        },
+        0,
+    )
+    .into_iter()
+    .filter(|&(producer, _)| {
+        logical
+            .memo
+            .candidate(producer)
+            .logical_properties
+            .window_layout()
+            .is_some()
+    })
+    .count();
+    assert_eq!(windowed, parameter_list(SketchAlgorithm::Kll).len());
+}
+
+/// A merge of finer states takes the floor of the readouts of the coarse
+/// state: the merged state has the finer build's θ.
+#[test]
+fn a_rollup_merge_takes_its_readouts_floor() {
+    let mut memo = Memo::default();
+    let input = scan(&mut memo, "m", &["host", "job"]);
+    let window = range(&mut memo, input, 60);
+    let coarse = sketch_state(
+        &mut memo,
+        window,
+        SketchAlgorithm::Kll,
+        Reduction::by(vec![3]),
+    );
+    let fine = sketch_state(
+        &mut memo,
+        window,
+        SketchAlgorithm::Kll,
+        Reduction::by(vec![2, 3]),
+    );
+    let readout = estimate(&mut memo, coarse, SketchStatistic::Quantile { q: 0.9 });
+    let fine_readout = estimate(&mut memo, fine, SketchStatistic::Quantile { q: 0.9 });
+    memo.add_query(QueryRoot::Operator(readout));
+    memo.add_query(QueryRoot::Operator(fine_readout));
+    let target = AccuracyTarget::max_error(0.01).accuracy_metric(AccuracyMetric::Rank);
+    let logical = pass2(
+        memo,
+        &[entry(60_000, target.clone()), entry(60_000, target)],
+    );
+    let readout_floor = candidates_of(&logical.memo, readout)[0].input_requirements[0]
+        .parameter_floor_for_required_accuracy()
+        .cloned();
+    assert!(readout_floor.is_some());
+    let merge = candidates_of(&logical.memo, coarse)
+        .iter()
+        .find(|c| c.origin == OriginOfCandidateForMemoGroup::Rollup)
+        .expect("the rollup");
+    assert_eq!(
+        merge.input_requirements[0]
+            .parameter_floor_for_required_accuracy()
+            .cloned(),
+        readout_floor
+    );
+}
+
+/// Reading merged tumbling windows keeps one build's guarantee when the
+/// family's merged readout does (a KLL quantile), and has none when it
+/// does not (a heap's top-k).
+#[test]
+fn merged_windows_keep_a_guarantee_only_where_the_family_merges_it() {
+    let kll = sketch(SketchAlgorithm::Kll);
+    let quantile = SketchStatistic::Quantile { q: 0.9 };
+    let k = parameter_list(SketchAlgorithm::Kll).first();
+    assert_eq!(
+        merged_tumbling_windows_guarantee(&kll, k, true, &quantile),
+        OutputError::Bound(AccuracyMetric::Rank)
+    );
+    assert_eq!(
+        merged_tumbling_windows_guarantee(&kll, k, false, &quantile),
+        OutputError::Bound(AccuracyMetric::Rank)
+    );
+    let heap = sketch(SketchAlgorithm::CmsWithHeap);
+    assert_eq!(
+        merged_tumbling_windows_guarantee(
+            &heap,
+            parameter_list(SketchAlgorithm::CmsWithHeap).first(),
+            true,
+            &SketchStatistic::TopK { k: 3 }
+        ),
+        OutputError::WithoutGuarantee
+    );
 }
 
 // ── Edges, metric rule, caps ──────────────────────────────────────────────

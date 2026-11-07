@@ -14,7 +14,7 @@ use asap_types::stages::{Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
 /// labels), and above it the widened image of every group that passes the
 /// labels on ([`passes_labels_on`]): the same operator over the widened
 /// input, with the original group's own-expression candidates
-/// ($\boldsymbol\theta$ and $\omega$ included). Each original group whose
+/// ($\boldsymbol\theta$, $\omega$ and input requirements included). Each original group whose
 /// rows are not a summary state gets the candidate `Project(widened image)`
 /// that lists its own columns, by name, in its order; the memo rejects it
 /// when the projection does not compute the group's result (an open schema
@@ -78,22 +78,25 @@ pub(crate) fn add_scan_label_candidates(memo: &mut Memo) -> Result<(), Pass2Rule
         let candidates: Vec<_> = memo.groups()[index]
             .candidates
             .iter()
-            .filter(|candidate| candidate.expression.operator == own)
+            .filter(|candidate| {
+                candidate.expression.operator == own && candidate.fused_groups.is_empty()
+            })
             .map(|candidate| {
                 (
                     candidate.logical_properties.parameters().cloned(),
                     candidate.logical_properties.window_layout().copied(),
+                    candidate.input_requirements.clone(),
                 )
             })
             .collect();
-        for (parameters, window_layout) in candidates {
+        for (parameters, window_layout, input_requirements) in candidates {
             add_candidate(
                 memo,
                 wide,
                 image.clone(),
                 parameters,
                 window_layout,
-                None,
+                Some(input_requirements),
                 OriginOfCandidateForMemoGroup::WidenedScans,
             )?;
         }
