@@ -23,7 +23,7 @@ pub struct StateColumnUpdater {
     family: FieldDataType,
     /// The states, by group.
     states: GroupStates,
-    /// For a counter (rate, increase), each group's latest sample time:
+    /// For a counter (rate, increase, irate), each group's latest sample time:
     /// samples must arrive in strictly increasing time within a group.
     latest_sample_ms: Option<Vec<Option<i64>>>,
     /// Memory the open states hold, kept up to date on every change.
@@ -108,7 +108,10 @@ impl StateColumnUpdater {
         };
         let counter = matches!(
             family,
-            FieldDataType::ExactAggregate(ExactKind::Rate | ExactKind::Increase, _)
+            FieldDataType::ExactAggregate(
+                ExactKind::Rate | ExactKind::Increase | ExactKind::IRate,
+                _
+            )
         );
         // A Hydra grid is allocated up front, shared by all groups.
         let memory_bytes = match &states {

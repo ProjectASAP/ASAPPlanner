@@ -38,6 +38,7 @@ pub fn validate_summary_kernel(
                     | (K::Max, P::Max)
                     | (K::Rate, P::Rate)
                     | (K::Increase, P::Increase)
+                    | (K::IRate, P::IRate)
             ) {
                 return Err(format!("unsupported exact kernel {family:?}"));
             }
@@ -426,7 +427,7 @@ pub fn validate_exact_evaluation(
     let supported = matches!(
         family,
         SummaryFamilyType::ExactAggregate(
-            kind @ (E::Sum | E::Count | E::Min | E::Max | E::Rate | E::Increase),
+            kind @ (E::Sum | E::Count | E::Min | E::Max | E::Rate | E::Increase | E::IRate),
             _,
         ) if *kind == evaluation.statistic
     );

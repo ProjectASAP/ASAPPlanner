@@ -90,27 +90,10 @@ impl Operator {
         if steps.is_some_and(|s| s.range_ms / s.step_ms > MAX_SUBQUERY_STEPS) {
             return Err(invalid("subquery exceeds 100000 steps"));
         }
-        if !matches!(
-            function,
-            None | Some(
-                AggIntent::Rate
-                    | AggIntent::Deriv
-                    | AggIntent::PredictLinear { .. }
-                    | AggIntent::Increase
-                    | AggIntent::Delta
-                    | AggIntent::Count { .. }
-                    | AggIntent::Sum { col: None }
-                    | AggIntent::Avg { col: None }
-                    | AggIntent::Min { col: None }
-                    | AggIntent::Max { col: None }
-                    | AggIntent::IRate
-                    | AggIntent::IDelta
-                    | AggIntent::Changes
-                    | AggIntent::Resets
-                    | AggIntent::LastOverTime
-                    | AggIntent::Quantile { col: None, .. }
-            )
-        ) {
+        if function
+            .as_ref()
+            .is_some_and(|function| !aggregate::temporal::has_window_kernel(function))
+        {
             return Err(invalid("unsupported PromQL range function"));
         }
         Ok(Self {

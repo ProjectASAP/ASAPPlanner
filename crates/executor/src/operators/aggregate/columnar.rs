@@ -68,6 +68,45 @@ impl RunningAvg {
     }
 }
 
+/// A running standard deviation or variance, as Prometheus
+/// `stddev_over_time` computes it: Welford's update with compensated sums.
+#[derive(Clone, Copy, Default)]
+struct RunningDeviation {
+    count: u64,
+    mean: f64,
+    mean_compensation: f64,
+    squared_deviations: f64,
+    squared_deviations_compensation: f64,
+}
+
+impl RunningDeviation {
+    fn add(&mut self, value: f64) {
+        self.count += 1;
+        let delta = value - (self.mean + self.mean_compensation);
+        (self.mean, self.mean_compensation) =
+            kahan_inc(delta / self.count as f64, self.mean, self.mean_compensation);
+        (
+            self.squared_deviations,
+            self.squared_deviations_compensation,
+        ) = kahan_inc(
+            delta * (value - (self.mean + self.mean_compensation)),
+            self.squared_deviations,
+            self.squared_deviations_compensation,
+        );
+    }
+    /// The population or sample variance; `None` with too few values.
+    fn variance(&self, population: bool) -> Option<f64> {
+        let divisor = if population {
+            self.count
+        } else {
+            self.count.checked_sub(1)?
+        };
+        (divisor > 0).then(|| {
+            (self.squared_deviations + self.squared_deviations_compensation) / divisor as f64
+        })
+    }
+}
+
 /// One measure's running state per group.
 enum MeasureStates {
     /// Rows selected per group.
@@ -78,6 +117,8 @@ enum MeasureStates {
     FloatAvg(Vec<RunningAvg>),
     /// An Int64 sum (or average): the exact sum and the value count.
     IntSum(Vec<(i128, u64)>),
+    /// A standard deviation or variance.
+    Deviation(Vec<RunningDeviation>),
     /// A Float64 MIN/MAX, NaN ignored when a number exists.
     FloatExtremum(Vec<Option<f64>>),
     /// MIN/MAX of another ordered type.
@@ -123,6 +164,7 @@ impl MeasureStates {
                     Self::ValueExtremum(Vec::new())
                 }
             }
+            Reduction::StdDev { .. } | Reduction::Variance { .. } => Self::Deviation(Vec::new()),
             Reduction::Cardinality(columns) => Self::Cardinality {
                 tuples: GroupTable::new(columns.clone()),
                 seen: HashSet::new(),
@@ -154,6 +196,7 @@ impl MeasureStates {
             Self::FloatSum(v) => grow(v, groups, (0., 0., false)),
             Self::FloatAvg(v) => grow(v, groups, RunningAvg::default()),
             Self::IntSum(v) => grow(v, groups, (0, 0)),
+            Self::Deviation(v) => grow(v, groups, RunningDeviation::default()),
             Self::FloatExtremum(v) => grow(v, groups, None),
             Self::ValueExtremum(v) => grow(v, groups, None),
             Self::Cardinality { distinct, .. } => grow(distinct, groups, 0),
@@ -232,6 +275,29 @@ fn update_measure(
                         .checked_add(i128::from(values.value(row)))
                         .ok_or_else(|| invalid("integer aggregate overflow"))?;
                     *count += 1;
+                }
+            }
+        }
+        (
+            MeasureStates::Deviation(deviations),
+            Reduction::StdDev { column, .. } | Reduction::Variance { column, .. },
+        ) => {
+            let array = batch.column(*column).as_any();
+            let value_at: Box<dyn Fn(usize) -> Option<f64>> = match (
+                array.downcast_ref::<Float64Array>(),
+                array.downcast_ref::<Int64Array>(),
+            ) {
+                (Some(values), _) => {
+                    Box::new(|row| values.is_valid(row).then(|| values.value(row)))
+                }
+                (_, Some(values)) => {
+                    Box::new(|row| values.is_valid(row).then(|| values.value(row) as f64))
+                }
+                _ => return Err(invalid("numeric aggregate value required")),
+            };
+            for (row, &group) in groups.iter().enumerate() {
+                if let Some(value) = value_at(row).filter(|_| selected(row)) {
+                    deviations[group as usize].add(value);
                 }
             }
         }
@@ -416,6 +482,27 @@ fn finish_measure(
                 }
             })
             .collect::<Result<_, _>>()?,
+        MeasureStates::Deviation(deviations) => {
+            let (population, square_root) = match measure {
+                Reduction::StdDev { population, .. } => (*population, true),
+                Reduction::Variance { population, .. } => (*population, false),
+                _ => unreachable!("deviation states answer a deviation"),
+            };
+            order
+                .iter()
+                .map(|&g| {
+                    deviations[g as usize]
+                        .variance(population)
+                        .map_or(Value::Null, |variance| {
+                            Value::Float64(if square_root {
+                                variance.sqrt()
+                            } else {
+                                variance
+                            })
+                        })
+                })
+                .collect()
+        }
         MeasureStates::FloatExtremum(best) => order
             .iter()
             .map(|&g| best[g as usize].map_or(Value::Null, Value::Float64))
@@ -586,4 +673,29 @@ pub(super) async fn aggregate(
         vec![None; output.fields.len()],
         order.len(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RunningDeviation;
+
+    fn deviation(values: &[f64]) -> RunningDeviation {
+        let mut running = RunningDeviation::default();
+        values.iter().for_each(|&value| running.add(value));
+        running
+    }
+
+    // Population variance divides the squared deviations by n (PromQL
+    // `stdvar`, SQL `VAR_POP`), sample variance by n - 1 (SQL `VARIANCE`);
+    // too few values have none. 1, 4, 2, 7: mean 3.5, squared deviations 21.
+    #[test]
+    fn population_and_sample_variance() {
+        let values = deviation(&[1., 4., 2., 7.]);
+        assert_eq!(values.variance(true), Some(5.25));
+        assert_eq!(values.variance(false), Some(7.));
+        assert_eq!(deviation(&[3.]).variance(true), Some(0.));
+        assert_eq!(deviation(&[3.]).variance(false), None);
+        assert_eq!(deviation(&[]).variance(true), None);
+        assert!(deviation(&[1., f64::NAN]).variance(true).unwrap().is_nan());
+    }
 }

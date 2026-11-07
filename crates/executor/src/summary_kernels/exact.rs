@@ -20,6 +20,9 @@ pub(crate) enum ScalarState {
     Min(Option<f64>),
     Max(Option<f64>),
     Counter(Option<IncreaseAccumulator>),
+    /// PromQL `irate`: the last two samples, `(time, value)`, the newer
+    /// second. Samples arrive in increasing time.
+    LastTwoSamples([Option<(i64, f64)>; 2]),
 }
 
 /// Both the family and population layout survive persistence. Sharing counter
@@ -159,6 +162,9 @@ impl ExactAccumulator {
             | SummaryFamilyType::ExactAggregate(K::Increase, P::Increase) => {
                 ScalarState::Counter(None)
             }
+            SummaryFamilyType::ExactAggregate(K::IRate, P::IRate) => {
+                ScalarState::LastTwoSamples([None; 2])
+            }
             _ => return Err(format!("unsupported exact Planner family: {family:?}")),
         };
         Ok(Self {
@@ -266,6 +272,11 @@ impl ScalarState {
                     ))
                 }
             },
+            ScalarState::LastTwoSamples([older, newer]) => {
+                if newer.is_none_or(|(newest, _)| timestamp_ms > newest) {
+                    *older = newer.replace((timestamp_ms, value));
+                }
+            }
         }
     }
 
@@ -286,6 +297,12 @@ impl ScalarState {
                 .extrapolated_value(range_ms, statistic == ExactKind::Rate)
                 .map(Some),
             ScalarState::Counter(None) => Err("empty counter population".into()),
+            // A counter reset makes the newer value the increase.
+            ScalarState::LastTwoSamples([Some((t0, v0)), Some((t1, v1))]) => {
+                let increase = if v1 < v0 { *v1 } else { v1 - v0 };
+                Ok(Some(increase / ((t1 - t0) as f64 / 1000.)))
+            }
+            ScalarState::LastTwoSamples(_) => Err("irate population lacks two samples".into()),
         }
     }
 
@@ -293,6 +310,7 @@ impl ScalarState {
     pub(crate) fn insufficient_counter_raw_data_samples(&self) -> bool {
         match self {
             ScalarState::Counter(None) => true,
+            ScalarState::LastTwoSamples([older, _]) => older.is_none(),
             ScalarState::Counter(Some(counter)) => {
                 counter.sample_count < 2
                     || counter.last_seen_timestamp == counter.starting_timestamp
@@ -390,6 +408,11 @@ fn merge_scalar(left: &ScalarState, right: &ScalarState) -> Result<ScalarState, 
             (Some(a), Some(b)) => Some(IncreaseAccumulator::merge_pair(a, b)),
             (a, b) => a.clone().or_else(|| b.clone()),
         }),
+        // The family has no sound merge (`FamilyCapability`): a tumbling
+        // window does not keep the last two samples across its boundary.
+        (ScalarState::LastTwoSamples(_), ScalarState::LastTwoSamples(_)) => {
+            return Err("irate states do not merge".into())
+        }
         _ => return Err("exact scalar state families differ".into()),
     })
 }

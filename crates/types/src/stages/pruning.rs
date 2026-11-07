@@ -71,7 +71,7 @@ pub enum PruneReason {
     /// Stage 2: the executor cannot run its operator node, an exact
     /// per-entity `Aggregate` (a per-series range reduction over raw data
     /// samples) with more than one measure, a measure without an exact
-    /// per-entity kernel (e.g. `stddev_over_time`), a measure filter or a
+    /// per-entity kernel, a measure filter or a
     /// `HAVING` (`agg_has_exact_per_entity_kernel`). Every timing and
     /// materialization of the node is pruned.
     PerEntityAggregateNotExecutable,
