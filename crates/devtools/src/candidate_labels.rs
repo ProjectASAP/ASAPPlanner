@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
 use asap_types::ir::properties::ExecutionTiming;
-use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
+use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams};
 use asap_types::ir::NonASAPOp;
 use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
 use asap_types::physical::Lifetime;
@@ -263,11 +263,11 @@ fn sketch_name(algorithm: &SketchAlgorithm) -> String {
     }
 }
 
-/// One node's operator kind with its sketch family and parameters, its
-/// summary query, its time range and its tumbling-window layout, when it has them: e.g.
-/// `SummaryAgg Kll(k=200)`, `SummaryEstimate Quantile(q=0.5)`.
-pub fn node_label(node: &asap_types::ir::flat::FlatNode) -> String {
-    let operator = serde_json::to_value(&node.operator).unwrap_or_default();
+/// An operator's kind with its sketch family, its summary query, its time
+/// range and its tumbling-window layout, when it has them, without its
+/// inputs: e.g. `SummaryAgg Kll`, `SummaryEstimate Quantile(q=0.5)`.
+pub fn operator_label<C>(operator: &Operator<C>) -> String {
+    let operator = serde_json::to_value(operator.map_children(|_| ())).unwrap_or_default();
     // `{"ASAP": {"SummaryAgg": {...}}}` (or a unit variant's string).
     let (kind, fields) = match operator.as_object().and_then(|o| o.values().next()) {
         Some(Value::Object(inner)) => match inner.iter().next() {
@@ -285,6 +285,21 @@ pub fn node_label(node: &asap_types::ir::flat::FlatNode) -> String {
         label.push_str(&detail);
     }
     label
+}
+
+/// A sketch's parameters θ: e.g. `Kll(k=269)`, `Cms(width=2719, depth=5)`.
+pub fn parameters_label(parameters: &SketchParams) -> String {
+    let value = serde_json::to_value(parameters).unwrap_or_default();
+    let Some((family, fields)) = value.as_object().and_then(|o| o.iter().next()) else {
+        return value.to_string();
+    };
+    let fields: Vec<String> = fields
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect();
+    format!("{family}({})", fields.join(", "))
 }
 
 /// Sketch algorithms with parameters, summary queries and time ranges found
@@ -353,6 +368,8 @@ fn find_details(value: &Value, details: &mut Vec<String>, depth: usize) {
                             details.push(format!("{kind}({})", params.join(", ")));
                         }
                     }
+                    // A summary's family, e.g. `Kll` or `ExactAggregate(Rate)`.
+                    "family" => details.push(family_text(field)),
                     // A time range's length, e.g. `60s`.
                     "range" => details.push(duration_text(field)),
                     // A window, and a tumbling-window chain's layout.
@@ -369,6 +386,33 @@ fn find_details(value: &Value, details: &mut Vec<String>, depth: usize) {
             }
         }
         _ => {}
+    }
+}
+
+/// A serialized summary family: `Kll` (`{"Sketch": "Kll"}`),
+/// `ExactAggregate(Rate)` (`{"ExactAggregate": ["Rate", "Rate"]}`, the
+/// distinct names), or the JSON of any other value.
+fn family_text(value: &Value) -> String {
+    match value {
+        Value::String(name) => name.clone(),
+        Value::Object(fields) if fields.len() == 1 => {
+            let (kind, inner) = fields.iter().next().expect("one field");
+            let mut names: Vec<String> = match inner {
+                Value::String(name) => vec![name.clone()],
+                Value::Array(items) => items
+                    .iter()
+                    .map(|item| item.as_str().map_or(item.to_string(), str::to_owned))
+                    .collect(),
+                other => vec![other.to_string()],
+            };
+            names.dedup();
+            if kind == "Sketch" {
+                names.join(", ")
+            } else {
+                format!("{kind}({})", names.join(", "))
+            }
+        }
+        other => other.to_string(),
     }
 }
 
