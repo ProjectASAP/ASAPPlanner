@@ -314,7 +314,7 @@ pub fn run_stages_until(
         }
     };
     stages.pass2_local_window_composition = Some(composed.clone());
-    let logical = match pass2_after_local_window_composition(composed) {
+    let logical = match pass2_after_local_window_composition(composed, entries) {
         Ok(logical) => logical,
         Err(error) => {
             run.selection = Err(SelectionError::LogicalASAPCandidates(error.to_string()));

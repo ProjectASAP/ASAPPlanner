@@ -9,13 +9,20 @@
 //! depends on no other stage crate, and the planner facade calls it after
 //! Pass 1.
 
+/// The error caps, parameter floors and logical edges after the rules.
+mod logical_edges;
 /// Stage 1, Pass 2's entry, producing [`asap_types::stages::LogicalASAPMemoCandidates`].
 mod logical_memo_candidates;
 /// The rules over groups.
 mod memo;
+/// Parameter floors from error caps.
+mod parameter_floors;
 
 pub use logical_memo_candidates::{
     generate_logical_asap_memo_candidates, pass2_after_local_window_composition,
     pass2_local_window_composition,
 };
 pub use memo::rules::Pass2RuleError;
+/// Pass 2's tests over memos built through the `Memo` methods.
+#[cfg(test)]
+mod tests;
