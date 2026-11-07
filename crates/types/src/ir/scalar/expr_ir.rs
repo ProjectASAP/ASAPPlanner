@@ -39,6 +39,9 @@ pub enum ScalarValue {
     Utf8(String),
     Boolean(bool),
     Null,
+    /// A point in time, in ms since the Unix epoch: PromQL `@ 1700000000`
+    /// is `Timestamp(1_700_000_000_000)`.
+    Timestamp(i64),
     /// A calendar duration, in Arrow's three independent fields. Not collapsed
     /// into one nanosecond count: a month is not a fixed number of nanoseconds,
     /// so `INTERVAL '1' MONTH` has no faithful scalar form. DataFusion's three

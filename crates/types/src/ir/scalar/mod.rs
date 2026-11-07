@@ -382,6 +382,7 @@ impl<C: OperatorInput> ScalarExpr<C> {
                 ScalarValue::Boolean(_) => (DataType::Bool, false),
                 ScalarValue::Null => (DataType::Null, true),
                 ScalarValue::Interval { .. } => (DataType::Interval, false),
+                ScalarValue::Timestamp(_) => (DataType::Timestamp, false),
             },
             ScalarExpr::Compare {
                 left, right, op, ..

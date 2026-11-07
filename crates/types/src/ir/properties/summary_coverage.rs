@@ -82,16 +82,6 @@ pub struct SelectionBox {
     pub(crate) columns: BTreeMap<ColumnIdentity, Constraint>,
 }
 
-/// An endpoint of an interval on a timestamp column.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TimeBound {
-    /// An absolute time, in ms since the epoch.
-    At(i64),
-    /// An offset, in ms, from the evaluation time t.
-    FromEvaluationTime(i64),
-}
-
 /// `SelectionBox::columns` as a list of `{column, constraint}`.
 mod columns_as_list {
     use super::{ColumnIdentity, Constraint};
@@ -179,28 +169,57 @@ impl ColumnIdentity {
     }
 }
 
+/// A constraint on one column of a selection.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Constraint {
+    /// The value is one of these.
     In(Vec<ScalarValue>),
+    /// The value is none of these.
     NotIn(Vec<ScalarValue>),
+    /// The value lies between `lower` and `upper`; each end is `Included`,
+    /// `Excluded` or `Unbounded`. Examples, on the timestamp column `ts`
+    /// (ms) unless stated:
+    ///
+    /// | Query fragment | `lower` | `upper` |
+    /// |---|---|---|
+    /// | PromQL `m[5m]` | `Included(EvaluationTimePlusMs(-300_000))` | `Excluded(EvaluationTimePlusMs(0))` |
+    /// | PromQL `m[5m] offset 1h` | `Included(EvaluationTimePlusMs(-3_900_000))` | `Excluded(EvaluationTimePlusMs(-3_600_000))` |
+    /// | PromQL `m[5m] @ 1700000000` | `Included(FixedValue(Timestamp(1_699_999_700_000)))` | `Excluded(FixedValue(Timestamp(1_700_000_000_000)))` |
+    /// | SQL `WHERE ts >= '2026-11-01'` | `Included(FixedValue(Timestamp(..)))` | `Unbounded` |
+    /// | SQL `WHERE price > 10` (column `price`) | `Excluded(FixedValue(Float64(10.0)))` | `Unbounded` |
     Interval {
-        #[serde(with = "value_bound")]
-        lower: Bound<ScalarValue>,
-        #[serde(with = "value_bound")]
-        upper: Bound<ScalarValue>,
+        #[serde(with = "limit_bound")]
+        lower: Bound<IntervalConstraintLimit>,
+        #[serde(with = "limit_bound")]
+        upper: Bound<IntervalConstraintLimit>,
     },
 }
 
+/// An end of a [`Constraint::Interval`]. Two limits compare only when they
+/// are of the same variant: a fixed value against a fixed value of the same
+/// type, an offset from the evaluation time against another such offset.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntervalConstraintLimit {
+    /// A constant: `Float64(10.0)` for SQL `price > 10`;
+    /// `Timestamp(1_700_000_000_000)` for PromQL `@ 1700000000` or a SQL
+    /// timestamp literal.
+    FixedValue(ScalarValue),
+    /// The evaluation time t of a repeatedly evaluated query plus this many
+    /// ms (negative: before t); only on the timestamp column. `m[5m]` is
+    /// `[EvaluationTimePlusMs(-300_000), EvaluationTimePlusMs(0))`.
+    EvaluationTimePlusMs(i64),
+}
+
 /// A `Constraint::Interval` bound as a [`WireBound`].
-mod value_bound {
-    use super::WireBound;
-    use crate::ir::scalar::expr_ir::ScalarValue;
+mod limit_bound {
+    use super::{IntervalConstraintLimit, WireBound};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::ops::Bound;
 
     pub(super) fn serialize<S: Serializer>(
-        bound: &Bound<ScalarValue>,
+        bound: &Bound<IntervalConstraintLimit>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         WireBound::from(bound).serialize(serializer)
@@ -208,7 +227,7 @@ mod value_bound {
 
     pub(super) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
-    ) -> Result<Bound<ScalarValue>, D::Error> {
+    ) -> Result<Bound<IntervalConstraintLimit>, D::Error> {
         Ok(WireBound::deserialize(deserializer)?.into())
     }
 }
@@ -411,7 +430,7 @@ fn of_merge(inputs: &[SummaryCoverage]) -> Result<SummaryCoverage, CoverageError
     let separated: fn(&SelectionBox, &SelectionBox) -> bool = match required {
         MergeInputRule::MayOverlap => |_, _| true,
         MergeInputRule::DisjointInTime => todo!(
-            "#1207 PR 2: disjoint intervals on the timestamp column, with TimeBound endpoints"
+            "#1207 PR 2: disjoint intervals on the timestamp column, with IntervalConstraintLimit ends"
         ),
         MergeInputRule::Disjoint => SelectionBox::disjoint,
     };
@@ -625,7 +644,7 @@ fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, Cov
                 }
             }
             Operator::NonASAP(NonASAPOp::TimeRange { .. } | NonASAPOp::TimeShift { .. }) => todo!(
-                "#1207 PR 2: lift the range and the offset into an interval on the timestamp column, with TimeBound endpoints"
+                "#1207 PR 2: lift the range and the offset into an interval on the timestamp column, with IntervalConstraintLimit ends"
             ),
             other => unlifted_operators.push(unlifted(other)),
         }
@@ -818,8 +837,12 @@ fn flip(op: &CompareOpKind) -> Option<CompareOpKind> {
     })
 }
 
+/// An interval between two fixed values.
 fn interval(lower: Bound<ScalarValue>, upper: Bound<ScalarValue>) -> Constraint {
-    Constraint::Interval { lower, upper }
+    Constraint::Interval {
+        lower: lower.map(IntervalConstraintLimit::FixedValue),
+        upper: upper.map(IntervalConstraintLimit::FixedValue),
+    }
 }
 
 fn dedup(values: Vec<ScalarValue>) -> Vec<ScalarValue> {
@@ -862,8 +885,35 @@ fn compare(a: &ScalarValue, b: &ScalarValue) -> Option<Ordering> {
         (ScalarValue::Float64(a), ScalarValue::Float64(b)) => a.partial_cmp(b),
         (ScalarValue::Utf8(a), ScalarValue::Utf8(b)) => Some(a.cmp(b)),
         (ScalarValue::Boolean(a), ScalarValue::Boolean(b)) => Some(a.cmp(b)),
+        (ScalarValue::Timestamp(a), ScalarValue::Timestamp(b)) => Some(a.cmp(b)),
         _ => None,
     }
+}
+
+/// Order of two interval limits; `None` across variants or when the fixed
+/// values do not compare.
+fn compare_limits(a: &IntervalConstraintLimit, b: &IntervalConstraintLimit) -> Option<Ordering> {
+    use IntervalConstraintLimit::*;
+    match (a, b) {
+        (FixedValue(a), FixedValue(b)) => compare(a, b),
+        (EvaluationTimePlusMs(a), EvaluationTimePlusMs(b)) => Some(a.cmp(b)),
+        _ => None,
+    }
+}
+
+/// Whether value `v` lies inside the interval; `None` when unsure.
+fn value_inside(
+    v: &ScalarValue,
+    bounds: (
+        &Bound<IntervalConstraintLimit>,
+        &Bound<IntervalConstraintLimit>,
+    ),
+) -> Option<bool> {
+    inside(
+        &IntervalConstraintLimit::FixedValue(v.clone()),
+        bounds,
+        compare_limits,
+    )
 }
 
 /// Whether `v` lies inside the interval; `None` when it cannot be compared.
@@ -910,18 +960,18 @@ fn intervals_disjoint<T>(
 
 /// The tighter of two lower (`want = Greater`) or upper (`Less`) bounds.
 fn tighter(
-    a: &Bound<ScalarValue>,
-    b: &Bound<ScalarValue>,
+    a: &Bound<IntervalConstraintLimit>,
+    b: &Bound<IntervalConstraintLimit>,
     want: Ordering,
-) -> Option<Bound<ScalarValue>> {
-    let value = |bound: &Bound<ScalarValue>| match bound {
+) -> Option<Bound<IntervalConstraintLimit>> {
+    let value = |bound: &Bound<IntervalConstraintLimit>| match bound {
         Bound::Included(v) | Bound::Excluded(v) => Some(v.clone()),
         Bound::Unbounded => None,
     };
     Some(match (value(a), value(b)) {
         (None, _) => b.clone(),
         (_, None) => a.clone(),
-        (Some(x), Some(y)) => match compare(&x, &y)? {
+        (Some(x), Some(y)) => match compare_limits(&x, &y)? {
             Ordering::Equal if matches!(a, Bound::Excluded(_)) => a.clone(),
             Ordering::Equal => b.clone(),
             order if order == want => a.clone(),
@@ -942,7 +992,7 @@ impl Constraint {
             (In(a), Interval { lower, upper }) | (Interval { lower, upper }, In(a)) => {
                 let mut kept = Vec::new();
                 for v in a {
-                    if inside(v, (lower, upper), compare)? {
+                    if value_inside(v, (lower, upper))? {
                         kept.push(v.clone());
                     }
                 }
@@ -973,7 +1023,7 @@ impl Constraint {
             (In(a), NotIn(b)) | (NotIn(b), In(a)) => a.iter().all(|v| among(v, b) == Some(true)),
             (In(a), Interval { lower, upper }) | (Interval { lower, upper }, In(a)) => a
                 .iter()
-                .all(|v| inside(v, (lower, upper), compare) == Some(false)),
+                .all(|v| value_inside(v, (lower, upper)) == Some(false)),
             (
                 Interval {
                     lower: al,
@@ -983,7 +1033,7 @@ impl Constraint {
                     lower: bl,
                     upper: bu,
                 },
-            ) => intervals_disjoint((al, au), (bl, bu), compare),
+            ) => intervals_disjoint((al, au), (bl, bu), compare_limits),
             (NotIn(_), _) | (_, NotIn(_)) => false,
         }
     }
@@ -1059,7 +1109,7 @@ fn join(a: &SelectionBox, b: &SelectionBox) -> Option<SelectionBox> {
                 upper: bu,
             },
         ) => {
-            let (lower, upper) = touching((al, au), (bl, bu), compare)?;
+            let (lower, upper) = touching((al, au), (bl, bu), compare_limits)?;
             Constraint::Interval { lower, upper }
         }
         _ => return None,
@@ -1088,5 +1138,80 @@ fn touching<T: Clone>(
         Some((bl.clone(), au.clone()))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::scalar::ExprSemantics;
+    use IntervalConstraintLimit::{EvaluationTimePlusMs, FixedValue};
+
+    fn relative(lower_ms: i64, upper_ms: i64) -> Constraint {
+        Constraint::Interval {
+            lower: Bound::Included(EvaluationTimePlusMs(lower_ms)),
+            upper: Bound::Excluded(EvaluationTimePlusMs(upper_ms)),
+        }
+    }
+
+    /// SQL `price > 10` lifts to `(FixedValue(10), ∞)`.
+    #[test]
+    fn a_value_comparison_is_an_interval_between_fixed_values() {
+        let price_gt_10: ScalarExpr<()> = ScalarExpr::Compare {
+            left: Box::new(ScalarExpr::Column(0)),
+            op: CompareOpKind::Gt,
+            right: Box::new(ScalarExpr::Literal(ScalarValue::Float64(10.0))),
+            semantics: ExprSemantics::Sql,
+        };
+        assert_eq!(
+            constraint_of(&price_gt_10),
+            Some((
+                0,
+                Constraint::Interval {
+                    lower: Bound::Excluded(FixedValue(ScalarValue::Float64(10.0))),
+                    upper: Bound::Unbounded,
+                }
+            ))
+        );
+    }
+
+    /// `m[5m]` and `m[5m] offset 5m` are disjoint and touch; neither
+    /// compares with an `@ T` interval.
+    #[test]
+    fn limits_compare_only_within_one_variant() {
+        let last_5m = relative(-300_000, 0);
+        let offset_5m = relative(-600_000, -300_000);
+        assert!(last_5m.disjoint(&offset_5m));
+        let at = Constraint::Interval {
+            lower: Bound::Included(FixedValue(ScalarValue::Timestamp(1_699_999_700_000))),
+            upper: Bound::Excluded(FixedValue(ScalarValue::Timestamp(1_700_000_000_000))),
+        };
+        assert!(!last_5m.disjoint(&at));
+        assert_eq!(last_5m.intersect(&at), None);
+        let column = ColumnIdentity::new(None, "ts");
+        let one = |constraint: Constraint| SelectionBox {
+            columns: BTreeMap::from([(column.clone(), constraint)]),
+        };
+        assert_eq!(
+            union(vec![one(last_5m), one(offset_5m)]),
+            vec![one(relative(-600_000, 0))]
+        );
+    }
+
+    #[test]
+    fn an_interval_round_trips_through_json() {
+        let constraint = relative(-3_900_000, -3_600_000);
+        let json = serde_json::to_value(&constraint).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"interval": {
+                "lower": {"included": {"evaluation_time_plus_ms": -3_900_000}},
+                "upper": {"excluded": {"evaluation_time_plus_ms": -3_600_000}},
+            }})
+        );
+        assert_eq!(
+            serde_json::from_value::<Constraint>(json).unwrap(),
+            constraint
+        );
     }
 }
