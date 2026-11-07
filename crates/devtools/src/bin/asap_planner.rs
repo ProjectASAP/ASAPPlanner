@@ -734,8 +734,6 @@ fn selection_json(selection: &Result<Selection, SelectionError>) -> Value {
                 .collect::<Vec<_>>(),
             "node_of_output_reference": nodes(&dag.node_of_output_reference),
         },
-        "nodes_with_proven_non_negative_weights":
-            nodes(&selection.nodes_with_proven_non_negative_weights),
         "cost": cost_json(&selection.cost),
         "accepted_accuracy_per_query": accepted_json(&selection.accepted_accuracy_per_query),
         "pruned_candidates": selection

@@ -321,14 +321,22 @@ fn execute(root: &Rc<OperatorNode>, rows: &[Vec<(&str, Value)>]) -> Vec<Vec<Stri
 }
 
 /// SQL `avg` from its `sum` and `count` states: the exact plan and the
-/// plan computing `avg` as `sum` and `count`, to execute. Realizing the
-/// second from Pass 1's memo is #1207 PR 6.
+/// plan computing `avg` as `sum` and `count` (a `BinaryOp` quotient), as
+/// Stage 2's realizer builds it from the memo, to execute.
 async fn avg_as_sum_and_count(
     catalog: &SqlCatalog,
     query: &str,
 ) -> (Rc<OperatorNode>, Rc<OperatorNode>) {
-    let _ = (catalog, query);
-    todo!("#1207 PR 6: realize the sum-and-count plan of `avg` from Pass 1's memo")
+    let exact = lower_sql(query, catalog, accuracy()).await.unwrap();
+    let quotient = asap_integration_tests::planning::explicit_local_candidates(Rc::clone(&exact))
+        .into_iter()
+        .find(|plan| {
+            OperatorNode::reachable(plan)
+                .iter()
+                .any(|node| matches!(node.non_asap(), Some(NonASAPOp::BinaryOp { .. })))
+        })
+        .expect("a plan computing avg as sum over count");
+    (exact, quotient)
 }
 
 /// The candidate of `memo`'s root group that is not its own expression

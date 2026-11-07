@@ -24,6 +24,7 @@
 //! has every chain expanded into the tumbling windows the executor runs.
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use asap_cost::{NodePriceSource, OperatorKind};
 use asap_stage3_plan_selection::{SearchReport, Selection};
@@ -32,12 +33,17 @@ use asap_types::ir::materialized_view::{
     IngestionRefreshGroup, InstallableDagError, MaterializedView, RawDataRetention,
 };
 
+use asap_types::ir::flat::flatten;
+use asap_types::ir::operator::tumbling_window_chain::expand_tumbling_window_chains_in_workload;
+use asap_types::ir::physical_export::{physical_asap_dag_with_assignments, ExportedNodeAssignment};
 use asap_types::ir::physical_export::{
     PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode, PhysicalASAPDAGValidationError,
     PhysicalASAPNodeId,
 };
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::SchemaDerivationError;
+use asap_types::ir::{ASAPOp, OperatorNode};
+use asap_types::physical::{Lifetime, PhysicalProperties};
 
 use asap_types::stages::RealizedPlan;
 use asap_types::workload::QueryWorkloadEntry;
@@ -47,7 +53,7 @@ use crate::{e2e_plan, PlanError, UserInput};
 
 /// The version of the plan-file format [`InstallablePlan`] serializes to:
 /// the DAG, its nodes' fields and the query texts.
-pub const INSTALLABLE_PLAN_WIRE_VERSION: u32 = 13;
+pub const INSTALLABLE_PLAN_WIRE_VERSION: u32 = 14;
 
 /// The selected plan, ready to install and execute: what
 /// [`plan_installable`] returns and a runtime writes as its plan file.
@@ -153,6 +159,11 @@ pub struct PredictedQueryUsage {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum InstallablePlanError {
+    /// Unsupported request: the optimization pass selected no plan the
+    /// realizer built (`PlanOutput::realized_plan` is `None`), so there is no
+    /// physical plan to install.
+    #[error("the optimization pass returned no realized plan to install")]
+    NoRealizedPlan,
     /// Internal bug: a tumbling-window chain of the selected plan does not expand.
     #[error("tumbling-window chain expansion: {0}")]
     TumblingWindowChainExpansion(#[from] SchemaDerivationError),
@@ -233,8 +244,12 @@ pub async fn plan_installable(
         pass: input.pass,
     };
     let output = e2e_plan(input).await?;
-    let _ = (output, entries);
-    todo!("#1207 PR 6: install the plan the realizer built from the selected DAG")
+    let realized = output
+        .realized_plan
+        .as_ref()
+        .ok_or(PlanError::Installable(InstallablePlanError::NoRealizedPlan))?;
+    installable_plan_of(realized, output.selection.as_ref(), &entries)
+        .map_err(PlanError::Installable)
 }
 
 /// The installable plan of `realized`, the plan the realizer
@@ -616,14 +631,142 @@ struct ExpandedWithRetention {
     installed_node_ids: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
 }
 
-/// The realized plan's DAG with its tumbling-window chains expanded; each
-/// tumbling window takes the retention Stage 2 gives its chain
-/// (`RealizedPlan::tumbling_window_retention_ms`).
+/// The realized plan's DAG with its tumbling-window chains expanded into
+/// the tumbling windows the executor runs. Each tumbling window takes its
+/// chain's timing, lifetime and θ, the coverage of its own time slice
+/// (`ViewCoverage::of_tumbling_window`) and the retention Stage 2 gives its
+/// chain (`RealizedPlan::tumbling_window_retention_ms`); the range and time
+/// shift below it run with the chain, not materialized. Every other node
+/// keeps what the realizer assigned it.
 fn tumbling_window_retention_of_expanded_tumbling_windows(
     realized: &RealizedPlan,
 ) -> Result<ExpandedWithRetention, InstallablePlanError> {
-    let _ = realized;
-    todo!("#1207 PR 6: expand the realized DAG's tumbling-window chains")
+    let selected = &realized.plan.dag;
+    // Reject unsupported raw-source shapes before expanding possibly thousands
+    // of tumbling windows. The complete expanded-plan validation remains authoritative.
+    selected.check_raw_data_windows()?;
+    // The realizer exported `roots` with `flatten`'s node ids, so node `i`
+    // of the selected DAG is `nodes_by_id[i]`.
+    let (_, nodes_by_id) = flatten(&realized.plan.roots);
+    let assignment_of_node = |id: PhysicalASAPNodeId| {
+        let node = &selected.nodes[id];
+        ExportedNodeAssignment {
+            physical_properties: PhysicalProperties::new(node.output_state.timing, node.lifetime)
+                .expect("a validated plan's nodes have valid physical properties"),
+            parameters: node.parameters.clone(),
+            summary_coverage: node.summary_coverage.clone(),
+        }
+    };
+    let id_of: HashMap<*const OperatorNode, PhysicalASAPNodeId> = nodes_by_id
+        .iter()
+        .enumerate()
+        .map(|(id, node)| (Rc::as_ptr(node), id))
+        .collect();
+    let mut chain_retention: HashMap<*const OperatorNode, u64> = HashMap::new();
+    for (&node_id, &retention_ms) in &realized.tumbling_window_retention_ms {
+        let chain = nodes_by_id
+            .get(node_id)
+            .filter(|node| matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. })))
+            .ok_or(InstallablePlanError::TumblingWindowRetentionOfUnknownChain { node_id })?;
+        chain_retention.insert(Rc::as_ptr(chain), retention_ms);
+    }
+    let expansion = expand_tumbling_window_chains_in_workload(&realized.plan.roots)
+        .map_err(InstallablePlanError::TumblingWindowChainExpansion)?;
+    let mut assignments: HashMap<*const OperatorNode, ExportedNodeAssignment> = HashMap::new();
+    for (original, replacement) in &expansion.expanded_nodes {
+        if let Some(&id) = id_of.get(&Rc::as_ptr(original)) {
+            assignments.insert(Rc::as_ptr(replacement), assignment_of_node(id));
+        }
+    }
+    // Each tumbling window as its chain; the new nodes below it (its range
+    // and time shift) at the chain's timing, not materialized.
+    let mut tumbling_windows_of_chain: Vec<(PhysicalASAPNodeId, &[Rc<OperatorNode>])> = Vec::new();
+    for expanded in &expansion.chains {
+        let chain_id = id_of[&Rc::as_ptr(&expanded.chain)];
+        let chain = assignment_of_node(chain_id);
+        let width_ms = match expanded.chain.asap() {
+            Some(ASAPOp::SummaryTumblingWindowChain {
+                tumbling_window_width_ms,
+                ..
+            }) => *tumbling_window_width_ms,
+            _ => unreachable!("only chains are expanded"),
+        };
+        let below = ExportedNodeAssignment {
+            physical_properties: PhysicalProperties::new(
+                chain.physical_properties.timing(),
+                Lifetime::None,
+            )
+            .expect("a result that is not materialized is valid at either time"),
+            parameters: None,
+            summary_coverage: None,
+        };
+        for (index, tumbling_window) in expanded.tumbling_windows.iter().enumerate() {
+            assignments.insert(
+                Rc::as_ptr(tumbling_window),
+                ExportedNodeAssignment {
+                    summary_coverage: chain
+                        .summary_coverage
+                        .as_ref()
+                        .map(|coverage| coverage.of_tumbling_window(index as u32, width_ms)),
+                    ..chain.clone()
+                },
+            );
+            let mut pending: Vec<Rc<OperatorNode>> =
+                tumbling_window.children().into_iter().cloned().collect();
+            while let Some(node) = pending.pop() {
+                if assignments.contains_key(&Rc::as_ptr(&node)) {
+                    continue;
+                }
+                assignments.insert(Rc::as_ptr(&node), below.clone());
+                pending.extend(node.children().into_iter().cloned());
+            }
+        }
+        tumbling_windows_of_chain.push((chain_id, &expanded.tumbling_windows));
+    }
+    let (dag, expanded_nodes_by_id) =
+        physical_asap_dag_with_assignments(&expansion.roots, &|node| {
+            assignments
+                .get(&Rc::as_ptr(node))
+                .cloned()
+                .expect("every node of the expanded plan has an assignment")
+        })?;
+    let installed_id_of: HashMap<*const OperatorNode, PhysicalASAPNodeId> = expanded_nodes_by_id
+        .iter()
+        .enumerate()
+        .map(|(id, node)| (Rc::as_ptr(node), id))
+        .collect();
+    let mut retention_ms_by_node = HashMap::new();
+    let mut installed_node_ids: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> =
+        HashMap::new();
+    for (chain_id, tumbling_windows) in tumbling_windows_of_chain {
+        let retention_ms = chain_retention.get(&Rc::as_ptr(&nodes_by_id[chain_id]));
+        let ids: Vec<PhysicalASAPNodeId> = tumbling_windows
+            .iter()
+            .filter_map(|window| installed_id_of.get(&Rc::as_ptr(window)).copied())
+            .collect();
+        if let Some(&retention_ms) = retention_ms {
+            for &id in &ids {
+                retention_ms_by_node.insert(id, retention_ms);
+            }
+        }
+        installed_node_ids.insert(chain_id, ids);
+    }
+    // Every other node runs as the node replacing it.
+    for (original, replacement) in &expansion.expanded_nodes {
+        if let (Some(&id), Some(&installed)) = (
+            id_of.get(&Rc::as_ptr(original)),
+            installed_id_of.get(&Rc::as_ptr(replacement)),
+        ) {
+            installed_node_ids
+                .entry(id)
+                .or_insert_with(|| vec![installed]);
+        }
+    }
+    Ok(ExpandedWithRetention {
+        dag,
+        retention_ms_by_node,
+        installed_node_ids,
+    })
 }
 
 /// Stage 3's record of its selected plan.
@@ -706,7 +849,7 @@ mod tests {
         let workload: crate::PlanningWorkload = serde_json::from_str(
             r#"{"query_workload": {"language": "promql", "repeating_queries": [{
                   "query": "avg by (job) (quantile_over_time(0.99, data[300s]))",
-                  "demand": {"fixed_interval": 1000},
+                  "demand": {"fixed_interval_at": {"interval": 1000, "evaluation_phase": 0}},
                   "requirements": {"accuracy": {"max_error": 0.05, "failure_probability": 0.3,
                       "accuracy_scope": "whole_result"}},
                   "predictability": {"predictable": {"known_at": null}}}]},

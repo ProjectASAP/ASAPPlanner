@@ -39,7 +39,7 @@ fn workload(queries: &[&str]) -> PlanningWorkload {
         .iter()
         .map(|query| {
             format!(
-                r#"{{"query": {query:?}, "demand": {{"fixed_interval": 600000}},
+                r#"{{"query": {query:?}, "demand": {{"fixed_interval_at": {{"interval": 600000, "evaluation_phase": 0}}}},
                   "requirements": {{"accuracy": {{"accuracy_metric": "rank", "max_error": 0.01,
                       "failure_probability": 0.01, "accuracy_scope": "whole_result"}},
                       "max_latency_ms": 200.0}},
@@ -395,7 +395,7 @@ fn p99_avg_workload(values_non_negative: bool) -> PlanningWorkload {
     serde_json::from_str(&format!(
         r#"{{"query_workload": {{"language": "promql", "repeating_queries": [{{
               "query": "avg by (region, service, job) (quantile_over_time(0.99, data[100s]))",
-              "demand": {{"fixed_interval": 1000}},
+              "demand": {{"fixed_interval_at": {{"interval": 1000, "evaluation_phase": 0}}}},
               "requirements": {{"accuracy": {{"max_error": 0.05, "failure_probability": 0.3,
                   "accuracy_scope": "whole_result"}}}},
               "predictability": {{"predictable": {{"known_at": null}}}}}}]}},
@@ -444,7 +444,7 @@ fn counter_topk_workload(function: &str) -> PlanningWorkload {
     serde_json::from_str(&format!(
         r#"{{"query_workload": {{"language": "promql", "repeating_queries": [{{
               "query": {query:?},
-              "demand": {{"fixed_interval": 60000}},
+              "demand": {{"fixed_interval_at": {{"interval": 60000, "evaluation_phase": 0}}}},
               "requirements": {{"accuracy": {{"max_error": 0.05, "failure_probability": 0.3}}}},
               "predictability": {{"predictable": {{"known_at": null}}}}}}]}},
             "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 100000.0}}}},
@@ -497,3 +497,42 @@ async fn check_compiles_reports_the_executors_error() {
 // ── Classic-histogram `histogram_quantile` (issue #890) ─────────────────────
 
 // ── PromQL absent() (issue #895) ─────────────────────────────────────────────
+
+/// The plan file round trip of #1207 PR 6: Stage 3 selects, Stage 2's
+/// realizer exports each node with its timing, lifetime, θ and coverage,
+/// installation expands the tumbling-window chains, and a runtime reads the
+/// file back unchanged and its executor compiles it. Every summary build
+/// carries its θ, every materialized view a coverage.
+#[tokio::test]
+async fn the_plan_file_carries_theta_and_coverage_and_reads_back() {
+    let json = plan_json(&["quantile_over_time(0.99, latency_ms[60m])"]).await;
+    let plan = InstallablePlan::from_json(&json).unwrap();
+    assert_eq!(serde_json::to_string(&plan).unwrap(), json);
+    plan.check_compiles().unwrap();
+    let builds: Vec<_> = plan
+        .dag
+        .nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.payload,
+                asap_types::ir::Operator::ASAP(asap_types::ir::ASAPOp::SummaryAgg { .. })
+            )
+        })
+        .collect();
+    assert!(!builds.is_empty());
+    for build in &builds {
+        assert!(build.parameters.is_some(), "{:?}", build.payload);
+    }
+    let views = plan.materialized_views().unwrap();
+    assert!(!views.is_empty());
+    for view in &views {
+        let node = plan
+            .dag
+            .nodes
+            .iter()
+            .find(|n| n.id == view.node_id)
+            .unwrap();
+        assert!(node.summary_coverage.is_some());
+    }
+}

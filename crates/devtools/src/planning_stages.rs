@@ -17,14 +17,11 @@ use asap_stage2_physical_optimization::{
 use asap_stage3_plan_selection::select_plan;
 use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::schema::{DataType, Field, Schema};
-use asap_types::ir::{OperatorNode, QueryRoot};
+use asap_types::ir::QueryRoot;
 use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::stages::{AssignmentRealizer, Memo};
-use asap_types::workload::bounds::with_confirmed_weights_at;
 use asap_types::workload::{DataWorkload, PlanningWorkload, QueryWorkloadEntry};
 use serde_json::Value;
-use std::collections::HashSet;
-use std::rc::Rc;
 
 /// The last stage a run runs (`asap_planner --run-until`); the run's
 /// fields for later stages are left empty.
@@ -346,12 +343,7 @@ pub fn run_stages_until(
         run.physical_asap_candidates = Some(physical);
         return Ok(stages);
     }
-    let realizer = Stage2AssignmentRealizer {
-        original_roots: &roots,
-        entries,
-        data,
-        query_time_results_retained: models.deployment_capabilities.query_time_results_retained,
-    };
+    let realizer = Stage2AssignmentRealizer { entries, data };
     match select_plan(
         &physical,
         entries,
@@ -363,17 +355,9 @@ pub fn run_stages_until(
         Ok(selection) => {
             match realizer.realize(&physical, &selection.selected_dag) {
                 Ok(realized) => {
-                    // As the facade does: the plan to run carries the weight
-                    // proofs Stage 3 made.
-                    let proven: HashSet<*const OperatorNode> = selection
-                        .nodes_with_proven_non_negative_weights
-                        .iter()
-                        .filter_map(|node| realized.operator_node_of_selected_node.get(node.0))
-                        .map(Rc::as_ptr)
-                        .collect();
-                    let plan = with_confirmed_weights_at(&realized.plan.roots, data, &|node| {
-                        proven.contains(&Rc::as_ptr(node))
-                    });
+                    // As the facade does: the plan to run is the realized
+                    // plan's roots.
+                    let plan = realized.plan.roots.clone();
                     validate(&plan)?;
                     run.selected_plan = Some(plan);
                     run.selected_physical_plan = Some(realized);

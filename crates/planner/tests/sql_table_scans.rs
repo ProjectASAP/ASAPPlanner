@@ -51,7 +51,7 @@ fn workload(queries: &[&str], accuracy: &str, interval_ms: u64) -> PlanningWorkl
         .iter()
         .map(|query| {
             format!(
-                r#"{{"query": {query:?}, "demand": {{"fixed_interval": {interval_ms}}},
+                r#"{{"query": {query:?}, "demand": {{"fixed_interval_at": {{"interval": {interval_ms}, "evaluation_phase": 0}}}},
                 "requirements": {{"accuracy": {accuracy}}},
                 "predictability": {{"predictable": {{"known_at": null}}}}}}"#
             )

@@ -29,7 +29,6 @@ use asap_cost::CostInputs;
 use asap_stage1_pass1_per_computation_candidates::PerComputationCandidateError;
 use asap_stage3_plan_selection::{AccuracyCheckInputs, Selection};
 use asap_types::deployment_capabilities::DeploymentCapabilities;
-use asap_types::ir::physical_export::PhysicalASAPNodeId;
 
 static BUILTIN_ACCURACY_MODEL: BuiltinAccuracyModel = BuiltinAccuracyModel;
 static IGNORE_ACCURACY_GUARANTEES: IgnoreAccuracyGuarantees = IgnoreAccuracyGuarantees;
@@ -212,11 +211,11 @@ pub struct PlanOutput {
     /// How plan selection chose the plan, when the pass selects among priced
     /// candidates.
     pub selection: Option<Selection>,
-    /// For each tumbling-window chain of the selected plan materialized beyond one
-    /// evaluation, by node id in its physical DAG, how long its completed
-    /// tumbling windows are retained ([`RealizedPlan::tumbling_window_retention_ms`](asap_types::stages::RealizedPlan::tumbling_window_retention_ms));
-    /// empty for a pass that does not set it.
-    pub tumbling_window_retention_ms: BTreeMap<PhysicalASAPNodeId, u64>,
+    /// The selected plan as the realizer built it (its physical DAG, each
+    /// node with its timing, lifetime, θ and coverage, and its tumbling-window
+    /// retention): what [`plan_installable`](crate::plan_installable)
+    /// installs. `None` for a pass that does not realize one.
+    pub realized_plan: Option<asap_types::stages::RealizedPlan>,
 }
 
 impl PlanOutput {
@@ -226,7 +225,7 @@ impl PlanOutput {
             scalar_roots: Vec::new(),
             scalar_plans: Vec::new(),
             selection: None,
-            tumbling_window_retention_ms: BTreeMap::new(),
+            realized_plan: None,
         }
     }
 
