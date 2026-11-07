@@ -240,12 +240,50 @@ impl<C> ScalarExpr<C> {
         column: &mut impl FnMut(ColumnId) -> ColumnId,
         f: &mut impl FnMut(&C) -> D,
     ) -> ScalarExpr<D> {
+        self.rewrite_parts(column, f, &mut |_| None)
+    }
+
+    /// This expression with each operator read (`PromqlScalarFromVector`,
+    /// `ScalarSubquery`, `Exists`, `InSubquery`) replaced by `read(it)`. An
+    /// executor binds the value a read gives, e.g. as an input column.
+    pub fn replace_operator_reads<D>(
+        &self,
+        read: &mut impl FnMut(&ScalarExpr<C>) -> ScalarExpr<D>,
+    ) -> ScalarExpr<D> {
+        self.rewrite_parts(
+            &mut |column| column,
+            &mut |_| unreachable!("every operator read is replaced"),
+            &mut |expr| {
+                matches!(
+                    expr,
+                    ScalarExpr::PromqlScalarFromVector(_)
+                        | ScalarExpr::ScalarSubquery(_)
+                        | ScalarExpr::Exists { .. }
+                        | ScalarExpr::InSubquery { .. }
+                )
+                .then(|| read(expr))
+            },
+        )
+    }
+
+    /// [`Self::map_parts`], with each sub-expression for which `read`
+    /// gives a replacement replaced whole.
+    fn rewrite_parts<D>(
+        &self,
+        column: &mut impl FnMut(ColumnId) -> ColumnId,
+        f: &mut impl FnMut(&C) -> D,
+        read: &mut impl FnMut(&ScalarExpr<C>) -> Option<ScalarExpr<D>>,
+    ) -> ScalarExpr<D> {
         fn map_box<C, D>(
             e: &ScalarExpr<C>,
             column: &mut impl FnMut(ColumnId) -> ColumnId,
             f: &mut impl FnMut(&C) -> D,
+            read: &mut impl FnMut(&ScalarExpr<C>) -> Option<ScalarExpr<D>>,
         ) -> Box<ScalarExpr<D>> {
-            Box::new(e.map_parts(column, f))
+            Box::new(e.rewrite_parts(column, f, read))
+        }
+        if let Some(replaced) = read(self) {
+            return replaced;
         }
         match self {
             ScalarExpr::Column(c) => ScalarExpr::Column(column(*c)),
@@ -263,12 +301,12 @@ impl<C> ScalarExpr<C> {
                 subquery,
                 negated,
             } => ScalarExpr::InSubquery {
-                expr: map_box(expr, column, f),
+                expr: map_box(expr, column, f, read),
                 subquery: f(subquery),
                 negated: *negated,
             },
             ScalarExpr::Negative { expr, semantics } => ScalarExpr::Negative {
-                expr: map_box(expr, column, f),
+                expr: map_box(expr, column, f, read),
                 semantics: *semantics,
             },
             ScalarExpr::Compare {
@@ -277,22 +315,28 @@ impl<C> ScalarExpr<C> {
                 right,
                 semantics,
             } => ScalarExpr::Compare {
-                left: map_box(left, column, f),
+                left: map_box(left, column, f, read),
                 op: op.clone(),
-                right: map_box(right, column, f),
+                right: map_box(right, column, f, read),
                 semantics: *semantics,
             },
-            ScalarExpr::BoolAnd(parts) => {
-                ScalarExpr::BoolAnd(parts.iter().map(|p| p.map_parts(column, f)).collect())
-            }
-            ScalarExpr::BoolOr(parts) => {
-                ScalarExpr::BoolOr(parts.iter().map(|p| p.map_parts(column, f)).collect())
-            }
-            ScalarExpr::Not(e) => ScalarExpr::Not(map_box(e, column, f)),
-            ScalarExpr::IsNull(e) => ScalarExpr::IsNull(map_box(e, column, f)),
-            ScalarExpr::IsNotNull(e) => ScalarExpr::IsNotNull(map_box(e, column, f)),
+            ScalarExpr::BoolAnd(parts) => ScalarExpr::BoolAnd(
+                parts
+                    .iter()
+                    .map(|p| p.rewrite_parts(column, f, read))
+                    .collect(),
+            ),
+            ScalarExpr::BoolOr(parts) => ScalarExpr::BoolOr(
+                parts
+                    .iter()
+                    .map(|p| p.rewrite_parts(column, f, read))
+                    .collect(),
+            ),
+            ScalarExpr::Not(e) => ScalarExpr::Not(map_box(e, column, f, read)),
+            ScalarExpr::IsNull(e) => ScalarExpr::IsNull(map_box(e, column, f, read)),
+            ScalarExpr::IsNotNull(e) => ScalarExpr::IsNotNull(map_box(e, column, f, read)),
             ScalarExpr::Cast { expr, to, try_cast } => ScalarExpr::Cast {
-                expr: map_box(expr, column, f),
+                expr: map_box(expr, column, f, read),
                 to: to.clone(),
                 try_cast: *try_cast,
             },
@@ -301,13 +345,19 @@ impl<C> ScalarExpr<C> {
                 list,
                 negated,
             } => ScalarExpr::InList {
-                expr: map_box(expr, column, f),
-                list: list.iter().map(|p| p.map_parts(column, f)).collect(),
+                expr: map_box(expr, column, f, read),
+                list: list
+                    .iter()
+                    .map(|p| p.rewrite_parts(column, f, read))
+                    .collect(),
                 negated: *negated,
             },
             ScalarExpr::FunctionCall { name, args } => ScalarExpr::FunctionCall {
                 name: name.clone(),
-                args: args.iter().map(|p| p.map_parts(column, f)).collect(),
+                args: args
+                    .iter()
+                    .map(|p| p.rewrite_parts(column, f, read))
+                    .collect(),
             },
             ScalarExpr::Arithmetic {
                 op,
@@ -316,8 +366,8 @@ impl<C> ScalarExpr<C> {
                 semantics,
             } => ScalarExpr::Arithmetic {
                 op: op.clone(),
-                left: map_box(left, column, f),
-                right: map_box(right, column, f),
+                left: map_box(left, column, f, read),
+                right: map_box(right, column, f, read),
                 semantics: *semantics,
             },
             ScalarExpr::Case {
@@ -325,12 +375,17 @@ impl<C> ScalarExpr<C> {
                 branches,
                 else_expr,
             } => ScalarExpr::Case {
-                operand: operand.as_ref().map(|e| map_box(e, column, f)),
+                operand: operand.as_ref().map(|e| map_box(e, column, f, read)),
                 branches: branches
                     .iter()
-                    .map(|(w, t)| (w.map_parts(column, f), t.map_parts(column, f)))
+                    .map(|(w, t)| {
+                        (
+                            w.rewrite_parts(column, f, read),
+                            t.rewrite_parts(column, f, read),
+                        )
+                    })
                     .collect(),
-                else_expr: else_expr.as_ref().map(|e| map_box(e, column, f)),
+                else_expr: else_expr.as_ref().map(|e| map_box(e, column, f, read)),
             },
         }
     }

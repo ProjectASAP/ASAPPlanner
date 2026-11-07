@@ -48,6 +48,7 @@ pub mod promql_values;
 mod compiled;
 pub use compiled::CompiledPhysicalDAG;
 
+mod relational;
 mod row_values;
 
 /// Compile computation without opening or retaining deployment readers.
@@ -126,11 +127,17 @@ fn compile_internal(
             },
         )
     });
+    // Per consumer, how many of its inputs (the last ones) its scalar
+    // expressions read.
+    let mut scalar_reads = BTreeMap::<NodeId, usize>::new();
     for edge in edges {
         dependencies
             .entry(edge.consumer as u64)
             .or_default()
             .push(edge.producer as u64);
+        if edge.role == planner_types::ir::physical_export::EdgeRole::ScalarRef {
+            *scalar_reads.entry(edge.consumer as u64).or_default() += 1;
+        }
     }
     let mut views_by_node = BTreeMap::new();
     for view in views {
@@ -243,6 +250,19 @@ fn compile_internal(
                 .iter()
                 .map(|id| Arc::new(nodes[id].output_schema.clone()))
                 .collect::<Vec<_>>();
+            if relational::lower(
+                id,
+                node,
+                &inputs,
+                &schemas,
+                scalar_reads.get(&id).copied().unwrap_or(0),
+                &output,
+                &mut physical_dag,
+            )
+            .map_err(|error| invalid(format!("node {id}: {error}")))?
+            {
+                continue;
+            }
             if matches!(node.payload, Payload::ASAP(ASAPOp::SummaryMerge { .. }))
                 && inputs.len() > 1
             {

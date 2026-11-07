@@ -85,7 +85,7 @@ pub(super) fn execute<'a>(
 
 /// The order of two values of one sort key: NULLs first or last, NaN after
 /// every number, then the key's direction.
-fn compare_key(a: &Value, b: &Value, key: &SortKey) -> std::cmp::Ordering {
+pub(super) fn compare_key(a: &Value, b: &Value, key: &SortKey) -> std::cmp::Ordering {
     use std::cmp::Ordering::*;
     {
         match (a, b) {

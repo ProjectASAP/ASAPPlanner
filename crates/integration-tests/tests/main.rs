@@ -37,6 +37,7 @@ mod production_rollup_workloads;
 mod promql_numeric_regressions;
 mod promql_to_post_asap;
 mod range_evaluation;
+mod relational_scalar_execution;
 mod reuse_rules;
 mod rollup_controlled;
 mod runtime_handoff;
