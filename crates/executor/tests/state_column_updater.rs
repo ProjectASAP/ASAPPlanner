@@ -27,7 +27,6 @@ fn plain(name: &str, dtype: DataType) -> Field {
         name: name.into(),
         dtype: FieldDataType::Plain(dtype),
         nullable: false,
-        table: None,
     }
 }
 

@@ -264,9 +264,13 @@ fn derive_group_properties(
         }
         Err(_) => None,
     };
+    let column_lineage = operator.output_column_lineage(&schema, &|input: &MemoGroupAsInput| {
+        input.column_lineage().to_vec()
+    });
     Ok(GroupProperties {
         schema,
         result_kind: operator.output_kind(),
+        column_lineage,
         summary_coverage,
         shareable_when_equal: operator.is_shareable_when_equal(),
     })
@@ -1370,7 +1374,6 @@ mod memo_tests {
                 alias: None,
                 expr: crate::ir::ScalarExpr::Column(0),
             }],
-            qualifier: None,
             child: input,
         })
     }

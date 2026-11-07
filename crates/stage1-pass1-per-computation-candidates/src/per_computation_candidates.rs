@@ -1469,7 +1469,7 @@ fn with_names_of(
     // A top-k's ranked rows may carry their item columns after the
     // aggregate's ([`ranked_as_topk`]).
     if names(&output).starts_with(&names(target)) {
-        return Ok(with_aggregate_qualifiers(target, output));
+        return Ok(output);
     }
     if output.schema.fields.len() != target.schema.fields.len() {
         return Err(PerComputationCandidateError::Unsupported(
@@ -1484,34 +1484,12 @@ fn with_names_of(
             expr: ScalarExpr::Column(column),
         })
         .collect();
-    Ok(with_aggregate_qualifiers(
-        target,
-        OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
+    Ok(OperatorNode::new_shared(Operator::NonASAP(
+        NonASAPOp::Project {
             cols,
-            qualifier: None,
             child: output,
-        }))?,
-    ))
-}
-
-/// An equivalent aggregate replacement must retain SQL field identity. These
-/// explicit qualifiers survive child rebinding; types and keys remain derived
-/// from executable operators rather than copied from the requested output.
-fn with_aggregate_qualifiers(target: &OperatorNode, output: Rc<OperatorNode>) -> Rc<OperatorNode> {
-    if output
-        .schema
-        .fields
-        .iter()
-        .zip(&target.schema.fields)
-        .all(|(field, expected)| field.table == expected.table)
-    {
-        return output;
-    }
-    let mut output = output.as_ref().clone();
-    for (field, expected) in output.schema.fields.iter_mut().zip(&target.schema.fields) {
-        field.table = expected.table.clone();
-    }
-    Rc::new(output)
+        },
+    ))?)
 }
 
 /// A whole-expression top-k for `target` ([`whole_expression_input`]): one
@@ -1589,7 +1567,6 @@ fn ranked_as_topk(
     Ok(OperatorNode::new_shared(Operator::NonASAP(
         NonASAPOp::Project {
             cols,
-            qualifier: None,
             child: estimate,
         },
     ))?)
@@ -1799,11 +1776,7 @@ fn last_as_float64(
         },
     });
     Ok(OperatorNode::new_shared(Operator::NonASAP(
-        NonASAPOp::Project {
-            cols,
-            qualifier: None,
-            child: node,
-        },
+        NonASAPOp::Project { cols, child: node },
     ))?)
 }
 
@@ -1865,7 +1838,6 @@ fn sql_avg(
     Ok(OperatorNode::new_shared(Operator::NonASAP(
         NonASAPOp::Project {
             cols,
-            qualifier: None,
             child: join_on_keys(keys, sum, count)?,
         },
     ))?)
@@ -1960,7 +1932,6 @@ fn join_measures(
     Ok(OperatorNode::new_shared(Operator::NonASAP(
         NonASAPOp::Project {
             cols,
-            qualifier: None,
             child: joined,
         },
     ))?)

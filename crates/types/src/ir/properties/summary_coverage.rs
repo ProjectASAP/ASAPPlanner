@@ -9,7 +9,8 @@
 //! predicate conjunct moves into `selection` when it can be lifted to the
 //! `SummaryAgg` (through `Filter`, a range `TimeRange`, a `TimeShift` without
 //! `@` and direct-column `Project` items) and it is a value set or an
-//! interval on one column. Everything else stays in `definition` as a
+//! interval on one column with a source column's lineage (a selection names
+//! the column by its lineage). Everything else stays in `definition` as a
 //! residual, so two states are merged only when they compute the same thing
 //! over disjoint rows. Node trees carry no coverage.
 use std::cmp::Ordering;
@@ -25,11 +26,12 @@ use crate::ir::operator::node::{Operator, OperatorResultKind};
 use crate::ir::operator::non_asap::{NonASAPOp, TimeRangeKind};
 use crate::ir::operator::operator_properties::Reduction;
 use crate::ir::operator::tumbling_window_chain::window_build;
+use crate::ir::properties::column_lineage::{ColumnLineage, SourceColumn};
 use crate::ir::scalar::expr_ir::{CompareOpKind, ScalarValue};
 use crate::ir::scalar::{Predicate, ScalarExpr};
 use crate::ir::schema::family_capability::{FamilyCapability, MergeInputRule};
 use crate::ir::schema::sketch::GroupingStrategy;
-use crate::ir::schema::{ColumnId, Schema};
+use crate::ir::schema::ColumnId;
 use crate::ir::SchemaDerivationError;
 use crate::stages::{MemoGroupAsInput, MemoGroupId};
 
@@ -79,7 +81,7 @@ impl SummaryCoverage {
 #[serde(deny_unknown_fields)]
 pub struct SelectionBox {
     #[serde(with = "columns_as_list")]
-    pub(crate) columns: BTreeMap<ColumnIdentity, Constraint>,
+    pub(crate) columns: BTreeMap<SourceColumn, Constraint>,
     /// Offsets from the evaluation time in milliseconds: a PromQL range
     /// `TimeRange(w)` over `TimeShift(s)` is `(-(s + w), -s]`. Absolute
     /// time will be an ordinary interval on the timestamp column once the IR
@@ -90,19 +92,19 @@ pub struct SelectionBox {
 
 /// `SelectionBox::columns` as a list of `{column, constraint}`.
 mod columns_as_list {
-    use super::{ColumnIdentity, Constraint};
+    use super::{Constraint, SourceColumn};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::collections::BTreeMap;
 
     #[derive(Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Entry {
-        column: ColumnIdentity,
+        column: SourceColumn,
         constraint: Constraint,
     }
 
     pub(super) fn serialize<S: Serializer>(
-        columns: &BTreeMap<ColumnIdentity, Constraint>,
+        columns: &BTreeMap<SourceColumn, Constraint>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         let entries: Vec<Entry> = columns
@@ -117,7 +119,7 @@ mod columns_as_list {
 
     pub(super) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
-    ) -> Result<BTreeMap<ColumnIdentity, Constraint>, D::Error> {
+    ) -> Result<BTreeMap<SourceColumn, Constraint>, D::Error> {
         let entries = Vec::<Entry>::deserialize(deserializer)?;
         Ok(entries
             .into_iter()
@@ -179,26 +181,6 @@ mod relative_time_bounds {
     ) -> Result<Option<Window>, D::Error> {
         let window = Option::<(WireBound<i64>, WireBound<i64>)>::deserialize(deserializer)?;
         Ok(window.map(|(lower, upper)| (lower.into(), upper.into())))
-    }
-}
-
-/// A column of the definition child's output, by `(table, name)`. A
-/// `Project` below renames its columns and sets their table to its
-/// qualifier (none by default).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ColumnIdentity {
-    pub(crate) table: Option<String>,
-    pub(crate) name: String,
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl ColumnIdentity {
-    pub fn new(table: Option<String>, name: impl Into<String>) -> Self {
-        Self {
-            table,
-            name: name.into(),
-        }
     }
 }
 
@@ -517,8 +499,11 @@ fn regrouped(
         return Err(CoverageError::FamilyCannotRegroup);
     }
     let state = first.schema();
-    let rows = build_input_schema(first).ok_or(CoverageError::NotSummary)?;
-    // The build's input column each key of the state names.
+    let state_lineage = first.column_lineage();
+    let rows = build_input(first).ok_or(CoverageError::NotSummary)?;
+    let rows_lineage = rows.column_lineage();
+    // The build's input column each key of the state names: the column of
+    // the key's lineage.
     let mapped = keys
         .iter()
         .map(|&key| {
@@ -530,20 +515,15 @@ fn regrouped(
             };
             column
                 .filter(|&column| {
-                    let (Some(at_state), Some(at_input)) =
-                        (state.fields.get(key), rows.fields.get(column))
-                    else {
-                        return false;
-                    };
-                    at_state.is_plain()
-                        && at_state.name == at_input.name
-                        && at_state.table == at_input.table
+                    state.fields.get(key).is_some_and(|field| field.is_plain())
+                        && state_lineage.get(key).is_some()
+                        && state_lineage.get(key) == rows_lineage.get(column)
                 })
                 .ok_or(CoverageError::NotAGroupKey { key })
         })
         .collect::<Result<Vec<_>, _>>()?;
     let reduction = Reduction::by(mapped);
-    summary_agg_schema(&rows, family, &reduction).map_err(|error| {
+    summary_agg_schema(rows.schema(), family, &reduction).map_err(|error| {
         CoverageError::RegroupedBuild {
             reason: error.to_string(),
         }
@@ -564,21 +544,19 @@ fn regrouped(
     })
 }
 
-/// The schema of the rows the build of summary state `state` reads (its
+/// The input group of the rows the build of summary state `state` reads (its
 /// `SummaryAgg`'s input; one build over a chain's window reads its range of
-/// the chain's input, which has the input's schema). `None` when `state`
-/// is no summary state.
-fn build_input_schema<I: OperatorInput>(state: &I) -> Option<Schema> {
+/// the chain's input, which has the input's schema and lineage). `None` when
+/// `state` is no summary state.
+fn build_input<'m>(state: &MemoGroupAsInput<'m>) -> Option<MemoGroupAsInput<'m>> {
     if let Some(states) = selected_from(state) {
-        return build_input_schema(&states);
+        return build_input(&states);
     }
     match state.operator() {
         Operator::ASAP(
             ASAPOp::SummaryAgg { child, .. } | ASAPOp::SummaryTumblingWindowChain { child, .. },
-        ) => Some(child.schema().clone()),
-        Operator::ASAP(ASAPOp::SummaryMerge { children, .. }) => {
-            build_input_schema(children.first()?)
-        }
+        ) => Some(child),
+        Operator::ASAP(ASAPOp::SummaryMerge { children, .. }) => build_input(children.first()?),
         _ => None,
     }
 }
@@ -653,19 +631,19 @@ fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, Cov
         .count()
         == 1;
 
-    let top = child.schema();
+    let top = column_lineage(child);
     // Top-down: decide which conjuncts are lifted. `kept[d]` is the residual
     // of `chain[d]` when it is a `Filter`.
     let mut lifted = BTreeMap::new();
     let agg_filter = filter
         .as_ref()
-        .and_then(|pred| residual(pred, top, &[], &mut lifted));
+        .and_then(|pred| residual(pred, &top, &[], &mut lifted));
     let kept: Vec<Option<Predicate<Option<MemoGroupId>>>> = chain
         .iter()
         .enumerate()
         .map(|(depth, link)| match link {
             Operator::NonASAP(NonASAPOp::Filter { pred, .. }) => {
-                residual(pred, top, &chain[..depth], &mut lifted)
+                residual(pred, &top, &chain[..depth], &mut lifted)
             }
             _ => None,
         })
@@ -682,7 +660,7 @@ fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, Cov
             let lifted_above = lifted.clone();
             let kept = predicates
                 .iter()
-                .filter_map(|pred| residual(pred, top, &chain, &mut lifted))
+                .filter_map(|pred| residual(pred, &top, &chain, &mut lifted))
                 .collect();
             (lifted != lifted_above).then_some(NonASAPOp::Scan {
                 source,
@@ -733,12 +711,10 @@ fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, Cov
         columns: lifted
             .into_iter()
             .map(|(column, constraint)| {
-                let field = &top.fields[column];
-                let identity = ColumnIdentity {
-                    table: field.table.clone(),
-                    name: field.name.clone(),
+                let ColumnLineage::SourceColumn(source_column) = &top[column] else {
+                    unreachable!("only a source column's conjuncts are lifted");
                 };
-                (identity, constraint)
+                (source_column.clone(), constraint)
             })
             .collect(),
         relative_time: lift_time.then_some((
@@ -756,14 +732,14 @@ fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, Cov
 }
 
 /// Lift what `pred`'s conjuncts can into `lifted` (keyed by the column of
-/// `top`, the agg child's schema) and return the rest, each scalar subquery
-/// naming the group it reads. `above`
-/// are the operators between the predicate and the `SummaryAgg`, top to
-/// bottom. A column whose `(table, name)` is not unique in `top` cannot be
-/// named in a selection, so its conjuncts stay.
+/// the agg child, whose lineage is `top`) and return the rest, each scalar
+/// subquery naming the group it reads. `above` are the operators between
+/// the predicate and the `SummaryAgg`, top to bottom. A selection names a
+/// column by its lineage, so the conjuncts on a `Computed` column, or on a
+/// column whose lineage another column of `top` shares, stay.
 fn residual(
     pred: &Predicate<GroupInput<'_>>,
-    top: &Schema,
+    top: &[ColumnLineage],
     above: &[Operator<GroupInput<'_>>],
     lifted: &mut BTreeMap<ColumnId, Constraint>,
 ) -> Option<Predicate<Option<MemoGroupId>>> {
@@ -771,13 +747,10 @@ fn residual(
     for conjunct in pred.0.conjuncts() {
         let lift = constraint_of(conjunct).and_then(|(column, constraint)| {
             let column = column_at_top(column, above)?;
-            let field = &top.fields[column];
-            let namesakes = top
-                .fields
-                .iter()
-                .filter(|f| f.name == field.name && f.table == field.table)
-                .count();
-            if namesakes != 1 {
+            let lineage = &top[column];
+            if *lineage == ColumnLineage::Computed
+                || top.iter().filter(|other| *other == lineage).count() != 1
+            {
                 return None;
             }
             let combined = match lifted.get(&column) {
@@ -797,6 +770,17 @@ fn residual(
         0 => None,
         1 => rest.pop().map(Predicate),
         _ => Some(Predicate(ScalarExpr::BoolAnd(rest))),
+    }
+}
+
+/// The column lineage of `input`: a memo group's stored lineage, or a
+/// rule's temporary build's, derived from its inputs'.
+fn column_lineage(input: &GroupInput<'_>) -> Vec<ColumnLineage> {
+    match input {
+        InputOrTemporaryBuild::Input(group) => group.column_lineage().to_vec(),
+        InputOrTemporaryBuild::TemporaryBuild(_) => input
+            .operator()
+            .output_column_lineage(input.schema(), &column_lineage),
     }
 }
 
@@ -1087,7 +1071,7 @@ impl Constraint {
 #[cfg(any(test, feature = "test-support"))]
 impl SelectionBox {
     pub fn new(
-        columns: BTreeMap<ColumnIdentity, Constraint>,
+        columns: BTreeMap<SourceColumn, Constraint>,
         relative_time: Option<(Bound<i64>, Bound<i64>)>,
     ) -> Self {
         Self {
@@ -1097,7 +1081,7 @@ impl SelectionBox {
     }
 
     /// The per-column constraints.
-    pub fn columns(&self) -> &BTreeMap<ColumnIdentity, Constraint> {
+    pub fn columns(&self) -> &BTreeMap<SourceColumn, Constraint> {
         &self.columns
     }
 

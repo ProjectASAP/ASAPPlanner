@@ -32,13 +32,11 @@ fn tumbling_window_of(series_count: u32) -> (Arc<Schema>, Batch) {
                 name: "series".into(),
                 dtype: FieldDataType::Plain(DataType::Utf8),
                 nullable: false,
-                table: None,
             },
             Field {
                 name: "state".into(),
                 dtype: family.clone(),
                 nullable: false,
-                table: None,
             },
         ],
         time_index: None,

@@ -82,13 +82,11 @@ fn summary_projection_survives_recovery() {
         closed: false,
         fields: vec![
             Field {
-                table: None,
                 name: "state".into(),
                 dtype: family.clone(),
                 nullable: false,
             },
             Field {
-                table: None,
                 name: "service".into(),
                 dtype: FieldDataType::Plain(DataType::Utf8),
                 nullable: false,
@@ -148,7 +146,6 @@ fn summary_projection_survives_recovery() {
                             expr: planner_types::ir::ScalarExpr::Column(index),
                         })
                         .collect(),
-                    qualifier: None,
                     child: 0,
                 }),
                 output_schema: output.clone(),
@@ -246,7 +243,6 @@ fn summary_merge_without_inputs_is_rejected() {
         unique_keys: vec![],
         closed: false,
         fields: vec![Field {
-            table: None,
             name: "state".into(),
             dtype: family,
             nullable: false,

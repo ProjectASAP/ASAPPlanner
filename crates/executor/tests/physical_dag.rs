@@ -25,7 +25,6 @@ fn schema(fields: &[(&str, DataType, bool)]) -> SchemaRef {
         fields: fields
             .iter()
             .map(|(name, dtype, nullable)| Field {
-                table: None,
                 name: (*name).into(),
                 dtype: FieldDataType::Plain(dtype.clone()),
                 nullable: *nullable,
@@ -468,7 +467,6 @@ fn exact_state_and_family_validation() {
         unique_keys: vec![],
         closed: false,
         fields: vec![Field {
-            table: None,
             name: "state".into(),
             dtype: family.clone(),
             nullable: false,
@@ -564,7 +562,6 @@ fn bind_physical_asap_dag_before_execution() {
                             )),
                         },
                     }],
-                    qualifier: None,
                     child: 0,
                 }),
             ),

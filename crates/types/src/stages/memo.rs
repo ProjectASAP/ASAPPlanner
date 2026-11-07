@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 
 use super::{CandidateForMemoGroup, Memo};
 use crate::ir::operator::input::OperatorInput;
+use crate::ir::properties::column_lineage::ColumnLineage;
 use crate::ir::properties::summary_coverage::SummaryCoverage;
 use crate::ir::schema::Schema;
 use crate::ir::{Operator, OperatorResultKind, QueryRoot};
@@ -43,8 +44,11 @@ pub struct MemoGroup {
 /// operator nodes.
 #[derive(Debug, Clone)]
 pub struct GroupProperties {
+    /// Fields: name, type, nullability; no table qualifier.
     pub schema: Schema,
     pub result_kind: OperatorResultKind,
+    /// One entry per output column, in schema order.
+    pub column_lineage: Vec<ColumnLineage>,
     /// What a summary-state group covers; `None` for any other group.
     pub summary_coverage: Option<SummaryCoverage>,
     /// Whether two equal expressions return the same rows for the same
@@ -63,6 +67,11 @@ pub(crate) struct MemoGroupAsInput<'m> {
 impl<'m> MemoGroupAsInput<'m> {
     fn group(&self) -> &'m MemoGroup {
         &self.memo.groups()[self.group_id.0 as usize]
+    }
+
+    /// The group's `column_lineage`.
+    pub(crate) fn column_lineage(&self) -> &'m [ColumnLineage] {
+        &self.group().group_properties.column_lineage
     }
 }
 

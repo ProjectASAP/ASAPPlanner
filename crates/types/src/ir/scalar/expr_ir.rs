@@ -18,9 +18,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ColumnRef {
     Named(String),
-    /// Table-qualified reference (`t.col` / `alias.col`). Resolved by
-    /// `(table, name)` so a column name shared across a join (`a.k` vs `b.k`)
-    /// binds to the correct side.
+    /// Table-qualified reference (`t.col` / `alias.col`), as a front end
+    /// emits it. The front end binds it by `(table, name)` with its own
+    /// scope while it lowers, so a column name shared across a join (`a.k`
+    /// vs `b.k`) binds to the correct side; a schema carries no qualifier.
     Qualified {
         table: String,
         name: String,

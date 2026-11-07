@@ -341,13 +341,11 @@ mod tests {
                     name: "time".into(),
                     dtype: SummaryFamilyType::Plain(DataType::Timestamp),
                     nullable: false,
-                    table: None,
                 },
                 SummaryField {
                     name: "value".into(),
                     dtype: SummaryFamilyType::Plain(DataType::Float64),
                     nullable: false,
-                    table: None,
                 },
             ],
             time_index: Some(0),

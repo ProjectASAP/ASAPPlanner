@@ -324,7 +324,6 @@ fn try_rewrite_row_number_top_k(
 ) -> Result<Option<Rc<OperatorNode>>, SchemaDerivationError> {
     let Some(NonASAPOp::Project {
         cols: select_list,
-        qualifier,
         child: filter,
     }) = node.non_asap()
     else {
@@ -437,14 +436,12 @@ fn try_rewrite_row_number_top_k(
         (Some(partition), Some(order)) if !partition_by.is_without() => {
             let selected = new(NonASAPOp::Project {
                 cols: kept,
-                qualifier: qualifier.clone(),
                 child: Rc::clone(ranked),
             })?;
             limit(GroupKeys::by(partition), order, selected)?
         }
         _ => new(NonASAPOp::Project {
             cols: kept,
-            qualifier: qualifier.clone(),
             child: limit(partition_by.clone(), order_by.clone(), Rc::clone(ranked))?,
         })?,
     };
@@ -648,7 +645,6 @@ mod tests {
                     expr: ScalarExpr::Column(1),
                 },
             ],
-            qualifier: None,
             child,
         })
     }
@@ -766,7 +762,6 @@ mod tests {
                 alias: None,
                 expr: ScalarExpr::Column(0),
             }],
-            qualifier: None,
             child: Rc::clone(&ranking),
         });
         let out = canonicalize(Rc::clone(&q)).unwrap();
@@ -994,7 +989,6 @@ mod tests {
                     expr: ScalarExpr::Column(col),
                 })
                 .collect(),
-            qualifier: None,
             child,
         })
     }
@@ -1232,7 +1226,6 @@ mod tests {
         let sub = one_column_subquery();
         let root = node(NonASAPOp::Project {
             child: scan(),
-            qualifier: None,
             cols: vec![
                 ProjectItem {
                     alias: Some("a".into()),

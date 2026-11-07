@@ -268,23 +268,16 @@ async fn sql_full_query_retains_project_and_binds_inner_aggregate() {
     .await;
     let Some(NonASAPOp::Project {
         cols: expected_cols,
-        qualifier: expected_qualifier,
         ..
     }) = pre_asap.non_asap()
     else {
         panic!("sanity: a SQL root is a Project, unlike lower_promql's bare Aggregate");
     };
     let root = realize(&pre_asap, AccuracyTarget::max_error(0.01));
-    let Some(NonASAPOp::Project {
-        child,
-        cols,
-        qualifier,
-    }) = root.non_asap()
-    else {
+    let Some(NonASAPOp::Project { child, cols }) = root.non_asap() else {
         panic!("expected retained Project root, got {:?}", root.operator);
     };
     assert_eq!(cols, expected_cols, "projection expressions and aliases");
-    assert_eq!(qualifier, expected_qualifier, "projection qualifier");
     assert_eq!(root.schema.fields[0].name, "p99", "project output schema");
     assert_eq!(
         root.schema.fields[0].dtype,

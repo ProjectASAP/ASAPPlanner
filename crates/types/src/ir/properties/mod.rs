@@ -8,7 +8,9 @@
 //! - [`execution_data_state`] — when a node's value is produced
 //!   ([`ExecutionTiming`]) and what its edge carries ([`ExecutionDataState`]).
 //! - [`summary_coverage`] — what a summary state covers.
+//! - [`column_lineage`] — where each output column of a memo group comes from.
 pub mod accuracy;
+pub mod column_lineage;
 pub mod execution_data_state;
 pub mod guarantee;
 pub mod summary_coverage;

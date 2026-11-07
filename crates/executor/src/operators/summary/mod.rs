@@ -92,7 +92,6 @@ impl Operator {
             name: "state".into(),
             dtype: family.clone(),
             nullable: false,
-            table: None,
         });
         Ok(Self {
             kind: Kind::AllGroupsSummaryBuild {
@@ -177,7 +176,6 @@ impl Operator {
             name: "state".into(),
             dtype: family.clone(),
             nullable: false,
-            table: None,
         });
         Ok(Self {
             kind: Kind::PerGroupSummaryBuild {
