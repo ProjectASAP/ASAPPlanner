@@ -379,25 +379,39 @@ pub struct SelectionBox {
     pub columns: BTreeMap<SourceColumn, Constraint>,
 }
 
-/// An endpoint of an interval on a timestamp column.
-pub enum TimeBound {
-    /// An absolute time, in ms since the epoch.
-    At(i64),
-    /// An offset, in ms, from the evaluation time t.
-    FromEvaluationTime(i64),
+/// A constraint on one column of a selection.
+pub enum Constraint {
+    In(Vec<ScalarValue>),
+    NotIn(Vec<ScalarValue>),
+    /// Each end is `Included`, `Excluded` or `Unbounded`.
+    Interval {
+        lower: Bound<IntervalConstraintLimit>,
+        upper: Bound<IntervalConstraintLimit>,
+    },
+}
+
+/// An end of an interval. Two limits compare only within one variant.
+pub enum IntervalConstraintLimit {
+    /// A constant: `Float64(10.0)` for `price > 10`; `Timestamp(ms since the
+    /// epoch)` for `@ T` or a SQL timestamp literal.
+    FixedValue(ScalarValue),
+    /// The evaluation time t plus this many ms (negative: before t); only on
+    /// the timestamp column.
+    EvaluationTimePlusMs(i64),
 }
 ```
 
-A repeatedly evaluated query covers different absolute times at every evaluation, so its group's coverage is written relative to the evaluation time t; an `@ T` modifier or a SQL timestamp filter is absolute. Both are intervals on the timestamp column, compared and lifted like any other column constraint. For a range evaluation over [t − D, t] (D is the query range's duration):
+A repeatedly evaluated query covers different absolute times at every evaluation, so its group's coverage is written relative to the evaluation time t (`EvaluationTimePlusMs`); an `@ T` modifier or a SQL timestamp filter is absolute (`FixedValue(Timestamp)`). Both are intervals on the timestamp column, compared and lifted like any other column constraint; a value column such as `price` uses `FixedValue` ends. For a range evaluation over [t − D, t] (D is the query range's duration):
 
-| Query fragment | Constraint on `m.ts` |
-|---|---|
-| `m[5m]` | [t − 5m, t): both ends `FromEvaluationTime` |
-| `m[5m] offset 1h` | [t − 1h − 5m, t − 1h) |
-| `m[5m] @ end()` | [t − 5m, t): the same as no `@` in an instant query |
-| `m[5m] @ start()` | [t − D − 5m, t − D): an offset of D |
-| `m[5m] @ 1700000000` | [T − 5m, T) with T = 1700000000 s: both ends `At` |
-| SQL `WHERE ts >= '2026-11-01'` | [2026-11-01, ∞): `At` |
+| Query fragment | `lower` | `upper` |
+|---|---|---|
+| `m[5m]` | `Included(EvaluationTimePlusMs(-300_000))` | `Excluded(EvaluationTimePlusMs(0))` |
+| `m[5m] offset 1h` | `Included(EvaluationTimePlusMs(-3_900_000))` | `Excluded(EvaluationTimePlusMs(-3_600_000))` |
+| `m[5m] @ end()` | as `m[5m]`: the same as no `@` in an instant query | |
+| `m[5m] @ start()` | `Included(EvaluationTimePlusMs(-D - 300_000))` | `Excluded(EvaluationTimePlusMs(-D))`: an offset of D |
+| `m[5m] @ 1700000000` | `Included(FixedValue(Timestamp(1_699_999_700_000)))` | `Excluded(FixedValue(Timestamp(1_700_000_000_000)))` |
+| SQL `WHERE ts >= '2026-11-01'` | `Included(FixedValue(Timestamp(..)))` | `Unbounded` |
+| SQL `WHERE price > 10` (column `price`) | `Excluded(FixedValue(Float64(10.0)))` | `Unbounded` |
 
 **Derivation, per operator** (from the input groups' `column_lineage`):
 
