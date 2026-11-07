@@ -2237,7 +2237,9 @@ async fn lead_in_frame_lowers_to_its_own_kind_not_lead() {
 /// PromQL's Float64 Unix-seconds `EvalTimestamp`.
 #[tokio::test]
 async fn now_in_predicate_lowers_to_current_timestamp() {
-    // WHERE folds onto Scan.predicates (no explicit Filter node).
+    // WHERE folds onto Scan.predicates (no explicit Filter node). The
+    // coercion cast of `now()` to the column's timestamp type is dropped:
+    // `now()` is already a Timestamp.
     let qe = lower("SELECT * FROM metrics WHERE ts < NOW()").await;
     let NonASAPOp::Project { child, .. } = op(&qe) else {
         panic!("expected Project at root, got {qe:?}");
@@ -2248,7 +2250,7 @@ async fn now_in_predicate_lowers_to_current_timestamp() {
     assert_eq!(predicates.len(), 1);
     assert!(
         matches!(&predicates[0].0, ScalarExpr::Compare { right, .. }
-            if matches!(right.as_ref(), ScalarExpr::Cast { expr, to: DataType::Timestamp, .. } if matches!(expr.as_ref(), ScalarExpr::CurrentTimestamp))),
+            if matches!(right.as_ref(), ScalarExpr::CurrentTimestamp)),
         "NOW() must lower to CurrentTimestamp, got {:?}",
         predicates[0].0
     );
@@ -2286,7 +2288,7 @@ async fn clickhouse_now_in_predicate_lowers_to_current_timestamp() {
     assert_eq!(predicates.len(), 1);
     assert!(
         matches!(&predicates[0].0, ScalarExpr::Compare { right, .. }
-            if matches!(right.as_ref(), ScalarExpr::Cast { expr, to: DataType::Timestamp, .. } if matches!(expr.as_ref(), ScalarExpr::CurrentTimestamp))),
+            if matches!(right.as_ref(), ScalarExpr::CurrentTimestamp)),
         "now() must lower to CurrentTimestamp, got {:?}",
         predicates[0].0
     );
