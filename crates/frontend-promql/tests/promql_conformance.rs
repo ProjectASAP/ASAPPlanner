@@ -1074,7 +1074,9 @@ fn at_modifier_lowers_to_a_time_shift() {
     let NonASAPOp::TimeShift { shift, .. } = child.expect_non_asap() else {
         panic!("expected a TimeShift for `@ start()`");
     };
-    assert_eq!(shift.at, Some(AtModifier::Start));
+    // An instant query's range starts where it ends: `@ end()`.
+    assert_eq!(shift.at, Some(AtModifier::End));
+    assert_eq!(shift.offset_ms, 0);
 
     // Offset and `@` compose: `@ end() offset 5m` carries both.
     let qe = ok("http_requests_total @ end() offset 5m");

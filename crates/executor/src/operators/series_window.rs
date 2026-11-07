@@ -139,11 +139,10 @@ pub(super) fn anchor(
     match bound {
         None => Ok(literal),
         Some(bound) => {
-            let (start, end) = context
+            let (_, end) = context
                 .query_range()
-                .ok_or_else(|| invalid("@ start() and @ end() require query range bounds"))?;
+                .ok_or_else(|| invalid("@ end() requires query range bounds"))?;
             match bound {
-                AtModifier::Start => Ok(Some(start)),
                 AtModifier::End => Ok(Some(end)),
                 AtModifier::Timestamp(_) => Err(invalid("invalid range-bound anchor")),
             }

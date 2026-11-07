@@ -313,7 +313,7 @@ fn add_parent(group: &mut MemoGroup, parent: MemoGroupId) {
 
 /// Whether `left` and `right` are one candidate of a group: the same
 /// expression ([`same_expression`]) and logical properties (parameters by
-/// [`same_value`], window layout).
+/// [`same_value`]).
 fn same_expression_and_logical_properties(
     left: &CandidateForMemoGroup,
     right: &CandidateForMemoGroup,
@@ -323,7 +323,6 @@ fn same_expression_and_logical_properties(
             &left.logical_properties.parameters,
             &right.logical_properties.parameters,
         )
-        && left.logical_properties.window_layout == right.logical_properties.window_layout
 }
 
 /// $v = (e_v, p^{\log}_v)$: one candidate of a memo group.
@@ -1352,7 +1351,9 @@ mod memo_tests {
     use super::*;
     use crate::ir::operator::operator_properties::{GroupKeys, Reduction, Source};
     use crate::ir::scalar::expr_ir::ColumnRef;
-    use crate::ir::schema::{DataType, Field, Schema, SketchStatistic, SummaryUpdate};
+    use crate::ir::schema::{
+        DataType, Field, FieldDataType, GroupingStrategy, Schema, SketchStatistic, SummaryUpdate,
+    };
     use crate::ir::NonASAPOp;
 
     /// `Scan metric[1m]`: `[ts, value]`.
@@ -1416,7 +1417,7 @@ mod memo_tests {
         })
     }
 
-    /// A candidate computing `operator` with `parameters` and no window.
+    /// A candidate computing `operator` with `parameters`.
     fn candidate(
         operator: Operator<MemoGroupId>,
         parameters: Option<SketchParams>,
@@ -1425,10 +1426,7 @@ mod memo_tests {
         CandidateForMemoGroup {
             // Built directly: the doc example's k = 200 and k = 345 are not
             // in today's KLL list, which `LogicalProperties::new` checks.
-            logical_properties: LogicalProperties {
-                parameters,
-                window_layout: None,
-            },
+            logical_properties: LogicalProperties { parameters },
             expression: CandidateExpression { operator },
             input_requirements,
             fused_groups: vec![],
@@ -1539,10 +1537,8 @@ mod memo_tests {
                 index_in_group: 0
             }
         );
-        let mut windowed = candidate(kll_state(g1), kll_k(200));
-        windowed.logical_properties.window_layout =
-            Some(WindowLayout::Tumbling { width_ms: 10_000 });
-        assert_ne!(memo.add_candidate(g2, windowed).unwrap(), first);
+        let other_size = candidate(kll_state(g1), kll_k(345));
+        assert_ne!(memo.add_candidate(g2, other_size).unwrap(), first);
         assert_eq!(memo.groups()[g2.0 as usize].candidates.len(), 2);
     }
 

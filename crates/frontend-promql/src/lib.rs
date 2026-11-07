@@ -107,6 +107,9 @@ pub fn lower_promql_query_workload(
                 &entry.requirements.accuracy.clone(),
                 &sample_interval_of,
                 &metric_type_of,
+                entry
+                    .range_evaluation
+                    .map_or(0, |range| range.span_ms as i64),
             )?;
             Ok(root)
         })
@@ -118,11 +121,12 @@ mod tests {
     use std::rc::Rc;
     use std::time::Duration;
 
+    use asap_types::ir::operator::operator_properties::{AtModifier, TimeShift};
     use asap_types::ir::operator::Source;
-    use asap_types::ir::{NonASAPOp, OperatorNode, TimeRangeKind};
+    use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot, TimeRangeKind};
     use asap_types::workload::{
         BatchEntry, DataArrival, DataWorkload, PlanningWorkload, Query, QueryRequirements,
-        QueryWorkload, SourceFacts, WorkloadError,
+        QueryWorkload, RangeEvaluation, SourceFacts, WorkloadError,
     };
 
     use super::*;
@@ -366,5 +370,36 @@ mod tests {
             r#"max(s{quantile="0.99"}) + s{quantile="0.5"} + avg(g) + sum(s_count) + rate(s_sum[5m])"#
         )
         .is_empty());
+    }
+
+    /// `@ start()` of a range query that spans 1 h is `@ end() offset 1h`:
+    /// the range starts 1 h before it ends.
+    #[test]
+    fn at_start_is_at_end_offset_by_the_query_range() {
+        let mut workload = workload("sum_over_time(data[5m] @ start() offset 1m)");
+        if let Some(batch) = workload.query_workload.query_batch.as_mut() {
+            batch[0].range_evaluation = Some(RangeEvaluation {
+                step_ms: 60_000,
+                span_ms: 3_600_000,
+            });
+        }
+        let roots = lower_promql_query_workload(&workload).unwrap();
+        let [QueryRoot::Operator(root)] = &roots[..] else {
+            panic!("one operator root");
+        };
+        let shifts: Vec<TimeShift> = OperatorNode::reachable(root)
+            .iter()
+            .filter_map(|node| match node.non_asap()? {
+                NonASAPOp::TimeShift { shift, .. } => Some(*shift),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            shifts,
+            [TimeShift {
+                offset_ms: 3_660_000,
+                at: Some(AtModifier::End),
+            }]
+        );
     }
 }

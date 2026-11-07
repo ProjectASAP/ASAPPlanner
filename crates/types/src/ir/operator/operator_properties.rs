@@ -372,8 +372,6 @@ pub struct VectorMatch {
 /// of the query evaluation time (issue #40).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AtModifier {
-    /// `@ start()` — the query range's start instant.
-    Start,
     /// `@ end()` — the query range's end instant.
     End,
     /// `@ <ts>` — an absolute instant, milliseconds since the Unix epoch (may be

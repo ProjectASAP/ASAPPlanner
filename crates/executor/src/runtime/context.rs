@@ -62,7 +62,7 @@ impl RunContext {
             }),
         })
     }
-    /// Supply the outer range query bounds for PromQL `@ start()` / `@ end()`
+    /// Supply the outer range query bounds for PromQL `@ end()`
     /// and for `@`-pinned calls, which are evaluated once at the query start.
     /// A range query run step by step must always supply them; without bounds
     /// each step is treated as its own instant query. For an instant query,

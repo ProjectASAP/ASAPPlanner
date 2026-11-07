@@ -3284,3 +3284,35 @@ async fn trailing_window_on_an_aliased_table_and_under_asap_rate() {
     let (window, _) = trailing_window(below).expect("the WHERE window below it");
     assert_eq!(window.as_millis(), 300_000);
 }
+
+// An absolute timestamp filter compares the time column with a `Timestamp`
+// literal (ms since the epoch), so summary coverage lifts it into an
+// interval on the timestamp column: the cast of the string folds, and the
+// cast of the Timestamp column to DataFusion's nanosecond unit is dropped.
+#[tokio::test]
+async fn an_absolute_timestamp_filter_compares_the_column_with_a_timestamp_literal() {
+    const NOV_1_2026_MS: i64 = 1_793_491_200_000;
+    for sql in [
+        "SELECT COUNT(*) FROM metrics WHERE ts >= '2026-11-01'",
+        "SELECT COUNT(*) FROM metrics WHERE ts >= TIMESTAMP '2026-11-01 00:00:00'",
+    ] {
+        let qe = lower(sql).await;
+        let scan = OperatorNode::reachable(&qe)
+            .into_iter()
+            .find(|node| matches!(node.non_asap(), Some(NonASAPOp::Scan { .. })))
+            .unwrap_or_else(|| panic!("no Scan for {sql}"));
+        let NonASAPOp::Scan { predicates, .. } = op(&scan) else {
+            unreachable!()
+        };
+        assert_eq!(
+            predicates.iter().map(|pred| &pred.0).collect::<Vec<_>>(),
+            [&ScalarExpr::Compare {
+                left: Box::new(ScalarExpr::Column(0)),
+                op: CompareOpKind::Ge,
+                right: Box::new(ScalarExpr::Literal(ScalarValue::Timestamp(NOV_1_2026_MS))),
+                semantics: ExprSemantics::Sql,
+            }],
+            "{sql}"
+        );
+    }
+}
