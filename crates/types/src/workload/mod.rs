@@ -212,22 +212,20 @@ impl QueryRecurrence {
 
     /// The grid every evaluation with this recurrence and `range_evaluation`
     /// falls on, in milliseconds, anchored at the epoch (every evaluation
-    /// time is a multiple of it). The times' grid is the fixed interval
-    /// ([`Self::fixed_interval_ms`]; with a declared
-    /// [`RepeatedDemand::FixedIntervalAt`] phase, the greatest common divisor
-    /// with that phase: every 20 s at phase 5 s is on a 5 s grid), the
-    /// greatest common divisor of the scheduled times, or a one-off query's
-    /// time. A range evaluation of more than one step also takes the greatest
-    /// common divisor with its step, since each run evaluates at every step
-    /// up to its end. `None` when the times are not known: an estimated
+    /// time is a multiple of it). The times' grid is the greatest common
+    /// divisor of a [`RepeatedDemand::FixedIntervalAt`]'s interval and phase
+    /// (every 20 s at phase 5 s is on a 5 s grid), of the scheduled times, or
+    /// a one-off query's time. A range evaluation of more than one step also
+    /// takes the greatest common divisor with its step, since each run
+    /// evaluates at every step up to its end. `None` when the times are not
+    /// known: a fixed interval without a declared phase (Prometheus staggers
+    /// rule groups by a hash, so it does not mean phase 0), an estimated
     /// rate, a one-off query without a time, an unknown recurrence, or a
-    /// zero interval. A fixed interval without a declared phase is taken at
-    /// phase 0.
+    /// zero interval. Pass 2's chain widths and
+    /// [`PhysicalCandidate::delivers_on`](crate::stages::PhysicalCandidate::delivers_on)
+    /// both read it.
     pub fn evaluation_grid_ms(&self, range_evaluation: Option<RangeEvaluation>) -> Option<u64> {
         let times_grid_ms = match self {
-            QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(_)) => {
-                self.fixed_interval_ms()?
-            }
             QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
                 evaluation_phase, ..
             }) => greatest_common_divisor(self.fixed_interval_ms()?, evaluation_phase.0),
@@ -238,7 +236,9 @@ impl QueryRecurrence {
                 execute_at: Some(time),
                 ..
             } => time.0,
-            QueryRecurrence::Repeated(RepeatedDemand::EstimatedRate(_))
+            QueryRecurrence::Repeated(
+                RepeatedDemand::FixedInterval(_) | RepeatedDemand::EstimatedRate(_),
+            )
             | QueryRecurrence::OneTime {
                 execute_at: None, ..
             }
@@ -1497,19 +1497,27 @@ mod tests {
         assert_eq!(range.evaluations_per_request(), 61);
         let entry = QueryWorkloadEntry::from(&hour);
         assert_eq!(entry.range_evaluation, Some(range));
-        // Refreshes every 30 s and steps every 60 s: evaluations on a 30 s grid.
-        assert_eq!(entry.evaluation_grid_ms(), Some(30_000));
-        assert_eq!(
-            QueryWorkloadEntry::from(&plain).evaluation_grid_ms(),
-            Some(30_000)
-        );
+        // A fixed interval without a declared phase: the evaluation times
+        // are not known, so there is no grid.
+        assert_eq!(entry.evaluation_grid_ms(), None);
+        assert_eq!(QueryWorkloadEntry::from(&plain).evaluation_grid_ms(), None);
+        let every = |interval_ms, phase_ms| {
+            QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+                interval: RepetitionInterval(interval_ms),
+                evaluation_phase: TimestampMs(phase_ms),
+            })
+        };
+        // Refreshes every 30 s at phase 0 and steps every 60 s: evaluations
+        // on a 30 s grid.
+        let stepped = QueryWorkloadEntry {
+            recurrence: every(30_000, 0),
+            ..entry.clone()
+        };
+        assert_eq!(stepped.evaluation_grid_ms(), Some(30_000));
         // At a declared phase, also on that phase from the epoch: every
         // minute at phase 125 s is on a 5 s grid; at phase 120 s, on 60 s.
         let at_phase = |phase_ms| QueryWorkloadEntry {
-            recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
-                interval: RepetitionInterval(60_000),
-                evaluation_phase: TimestampMs(phase_ms),
-            }),
+            recurrence: every(60_000, phase_ms),
             range_evaluation: None,
             ..entry.clone()
         };
@@ -1523,9 +1531,7 @@ mod tests {
                 step_ms: 45_000,
                 span_ms: 0,
             }),
-            recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(
-                RepetitionInterval(60_000),
-            )),
+            recurrence: every(60_000, 0),
             ..entry.clone()
         };
         assert_eq!(one_step.evaluation_grid_ms(), Some(60_000));

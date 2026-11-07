@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::input::OperatorInput;
 use super::node::{Operator, OperatorNode, OperatorResultKind};
+use super::tumbling_window_chain::is_time_indexed_state;
 use crate::ir::operator::agg_intent::AggIntent;
 use crate::ir::operator::operator_properties::{
     BinaryOpKind, GroupKeys, InfoMatcher, JoinKind, Reduction, RelationalSetOpKind, SampleKind,
@@ -921,6 +922,12 @@ impl<I: OperatorInput> NonASAPOp<I> {
             TimeRange { child, .. } if child.result_kind() == OperatorResultKind::Relation => {
                 OperatorResultKind::Relation
             }
+            // Over a time-indexed state (a chain): the windows it selects.
+            TimeRange { child, .. } | TimeShift { child, .. }
+                if child.result_kind() == OperatorResultKind::State =>
+            {
+                OperatorResultKind::State
+            }
             TimeRange { kind, .. } => match kind {
                 TimeRangeKind::Instant => OperatorResultKind::InstantVector,
                 TimeRangeKind::Range => OperatorResultKind::RangeVector,
@@ -1160,6 +1167,15 @@ impl<I: OperatorInput> NonASAPOp<I> {
                 instant(child)?;
                 if value.scalar_type(child.schema())?.0 != DataType::Utf8 {
                     return Err(invalid("label expression requires a string"));
+                }
+            }
+            TimeRange { child, .. } | TimeShift { child, .. }
+                if child.result_kind() == OperatorResultKind::State =>
+            {
+                if !is_time_indexed_state(child) {
+                    return Err(invalid(
+                        "a time selection over state requires a time-indexed state",
+                    ));
                 }
             }
             TimeRange { child, .. } => {
