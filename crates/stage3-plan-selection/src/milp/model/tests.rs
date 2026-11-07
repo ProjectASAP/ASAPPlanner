@@ -886,7 +886,7 @@ fn two_queries_at_phases_0_and_5_s_read_one_5_s_chain() {
 /// (R): a chain of 10 s windows over a 1m range retains as many windows as
 /// its most demanding selected consumer reads: 6 for queries evaluated
 /// once per request, 11 when one evaluates 50 s back from each request's
-/// end; the objective prices them at $\pi_v$ each.
+/// end; the objective costs them at $\pi_v$ each.
 #[test]
 fn a_chain_retains_what_its_most_demanding_consumer_reads() {
     let physical = windowed_example();

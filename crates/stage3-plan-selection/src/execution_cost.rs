@@ -314,7 +314,7 @@ struct UsageOutput {
 /// `AcrossEvaluations` candidate $\pi_v$ (its cost retaining one window
 /// more than its range holds, less its cost retaining those). Its cost
 /// retaining as many windows as its range holds is
-/// $W^{\mathrm{mat}}_v + \pi_v \cdot$ that count: the objective prices
+/// $W^{\mathrm{mat}}_v + \pi_v \cdot$ that count: the objective costs
 /// $h_v$ windows at $\pi_v$ each over a fixed cost
 /// $W^{\mathrm{mat}}_v$ = that cost less $\pi_v$ times the count.
 #[allow(clippy::too_many_arguments)]
@@ -397,7 +397,7 @@ fn cost_execution(
         Lifetime::None | Lifetime::OneEvaluation(_) => None,
     };
     // W^mat_v: its cost retaining its range's windows, less those windows'
-    // retention, which pi_v h_v prices.
+    // retention, which pi_v h_v costs.
     let cost = cost - retention.unwrap_or(0.0) * windows as f64;
     let owned = |usage: &NodeUsage<'_>, cost_per_second| UsageOutput {
         output: usage.output,

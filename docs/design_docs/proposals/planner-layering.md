@@ -512,7 +512,7 @@ evaluation, an ingestion pipeline's refresh window, or a materialized
 candidate's computation), every edge per context of its consumer
 ($y_{\kappa,u,c,i}$, only where `delivers_on` holds), and a tumbling-window
 chain retains the windows its most demanding selected consumer reads ($h_v$,
-constraint (R)). It is solved once and prices cost model 1 only (cost
+constraint (R)). It is solved once and costs under cost model 1 only (cost
 models 2 and 3 are an `UnsupportedCostModel` error, #888). Stage 3 realizes
 the chosen plan through Stage 2's `AssignmentRealizer`, which the facade
 builds and passes in, so Stage 3 does not depend on the Stage 2 crate. The

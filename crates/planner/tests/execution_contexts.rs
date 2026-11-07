@@ -58,7 +58,7 @@ async fn plan(queries: &[(&str, u32, u64)], cost_inputs: &CostInputs) -> PlanOut
     e2e_plan(input).await.expect("workload plans")
 }
 
-/// Cost model 1 with the illustrative prices, memory free: the memory a
+/// Cost model 1 with the illustrative unit costs, memory free: the memory a
 /// query-time result holds while its evaluation runs, which needs query
 /// latency (out of scope), costs nothing.
 fn memory_free() -> CostInputs {
@@ -96,7 +96,7 @@ async fn the_objective_equals_plan_cost_on_small_workloads() {
     }
 }
 
-/// With memory priced, the memory a query-time result holds while its
+/// With memory costed, the memory a query-time result holds while its
 /// evaluation runs is in `plan_cost` but not in the objective: the
 /// selection reports the objective as inexact and names that term.
 #[tokio::test]
@@ -110,7 +110,7 @@ async fn held_memory_is_reported_as_an_inexact_term() {
     let inexact = selection
         .search_report
         .inexact_objective
-        .expect("held memory is priced");
+        .expect("held memory is costed");
     assert!(inexact.objective_per_second < inexact.plan_cost_per_second);
     assert!(
         inexact
