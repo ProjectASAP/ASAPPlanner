@@ -164,7 +164,7 @@ flowchart TD
     G --> R2["e_v: readout of KLL state"]
     G --> R3["e_v: readout of DDSketch state"]
     G --> R5["e_v: SummaryMerge over TimeRange<br/>of a chain of width w<br/>(state groups; widths from the<br/>gcd closure of grids, ranges, offsets)"]
-    G --> R4["e_v: other operators<br/>(prune: executor support)"]
+    G --> R4["e_v: other operators"]
 
     R2 --> T1["θ: k = 200"]
     R2 --> T2["θ: k = 345"]
@@ -175,7 +175,7 @@ flowchart TD
 
     P1 --> L1["ℓ = None"]
     P1 --> L2["ℓ = OneEvaluation"]
-    P1 --> L3["ℓ = AcrossEvaluations<br/>(prune: not a chain; deployment<br/>materializes no query-time results)"]
+    P1 --> L3["ℓ = AcrossEvaluations<br/>(offered only to chains; prune: deployment<br/>retains no query-time results)"]
     P2 --> L4["ℓ = None"]
     P2 --> L5["ℓ = AcrossEvaluations"]
     P2 -. invalid .-> L6["ℓ = OneEvaluation"]
@@ -183,10 +183,12 @@ flowchart TD
 
 | Level | Decides | Stage | Values offered | Pruned when |
 |---|---|---|---|---|
-| 1 | expression $e_v$, including a merge over a chain of width $w$ | Pass 1 and Pass 2 rules | each way to compute the group; chain widths from the gcd closure of the reaching queries' grids, ranges and offsets | the executor cannot build the family; no reaching query has a known grid |
+| 1 | expression $e_v$, including a merge over a chain of width $w$ | Pass 1 and Pass 2 rules | each way to compute the group; chain widths from the gcd closure of the reaching queries' grids, ranges and offsets | no reaching query has a known grid (no chain is offered) |
 | 2 | $\boldsymbol\theta_v$ | Pass 1 | the family's predefined list | the pruning cap (Section 4); dead-candidate elimination (Section 3) |
-| 3 | $\tau_v$ | Stage 2 | QueryTime, IngestionTime | the source has no ingestion pipeline |
-| 4 | $\ell_v$ | Stage 2 | None, OneEvaluation, AcrossEvaluations | invalid with $\tau_v$; AcrossEvaluations on a candidate that is not a chain; the deployment materializes no query-time results |
+| 3 | $\tau_v$ | Stage 2 | QueryTime, IngestionTime; IngestionTime for a counter state only when the source's out-of-order bound is known (Stage 2) | the source has no ingestion pipeline; QueryTime over raw rows the deployment does not retain |
+| 4 | $\ell_v$ | Stage 2 | None, OneEvaluation, AcrossEvaluations; AcrossEvaluations only for chain candidates, and Disk only where the deployment offers it | invalid with $\tau_v$; the deployment retains no query-time results |
+
+The planner does not check whether an executor implements an operator or family: every candidate the rules produce is offered, and an executor that lacks one is extended. A value outside a dimension's declared value set (AcrossEvaluations on a candidate that is not a chain, Disk where the deployment has no disk storage) is not offered, so it is not recorded as pruned.
 
 The tree does not decide which producer each consumer input reads ($y$), in which context a candidate with ℓ = None or OneEvaluation runs (Section 5), or how much an AcrossEvaluations candidate retains ($h_v$). Those are Stage 3 choices.
 
@@ -195,7 +197,7 @@ The tree does not decide which producer each consumer input reads ($y$), in whic
 **The order changes how many nodes enumeration visits:** $\sum_d \prod_{d' \le d} \lvert \text{values left at } d' \rvert$. Dimensions that prune much go early; dimensions that multiply without pruning go late. The order above follows four rules:
 
 1. **Logical before physical.** Stage 1 hash-conses groups and computes $\alpha^{\log}$ once, before Stage 2 multiplies each logical candidate by its physical alternatives.
-2. **Strong prunes early.** Executor support and the pruning cap act before physical properties multiply the tree.
+2. **Strong prunes early.** The pruning cap and dead-candidate elimination act before physical properties multiply the tree.
 3. **Dependent dimensions adjacent.** $\tau \to \ell$ rejects the invalid combination at the first level that can detect it.
 4. **Deployment-wide prunes as early as possible.** Without an ingestion pipeline the IngestionTime subtree is pruned once per candidate; moving $\tau$ above $\boldsymbol\theta$ would prune it once per group, with the same leaves.
 
@@ -811,7 +813,54 @@ An edge satisfies the logical requirement when the producer meets the input's fl
 
 ### Stage 2: physical alternatives
 
-`enumerate_candidate_configurations` in `crates/physical-asap-optimization/src/catalog/configurations.rs` expands each logical candidate that survived Pass 2 using the dimensions and checks in Section 2; it offers ℓ = AcrossEvaluations only to chain candidates, and records every other AcrossEvaluations alternative as pruned with `PruneReason::AcrossEvaluationsOnlyForChains`. It creates no new logical candidates. Each logical edge is expanded between the relevant physical alternatives.
+`enumerate_candidate_configurations` in `crates/physical-asap-optimization/src/catalog/configurations.rs` expands each logical candidate that survived Pass 2 using the dimensions and checks in Section 2. It offers ℓ = AcrossEvaluations only to chain candidates; the other candidates never get that value, and nothing is recorded for them. It creates no new logical candidates. Each logical edge is expanded between the relevant physical alternatives.
+
+Stage 2 reads the logical candidates, the data workload (per-source arrival, below) and the deployment's capabilities:
+
+```rust
+// crates/physical-asap-optimization/src/catalog/mod.rs
+pub fn generate_physical_asap_memo_candidates(
+    logical: &LogicalASAPMemoCandidates,
+    data: &DataWorkload,
+    capabilities: &DeploymentCapabilities,
+) -> Result<PhysicalASAPMemoCandidates, ErrorGeneratingPhysicalASAPMemoCandidates>;
+```
+
+#### Data arrival
+
+```rust
+// crates/types/src/workload/mod.rs
+pub enum DataArrival {
+    /// Every row is already stored; no build runs at ingestion time.
+    AtRest,
+    /// Rows keep arriving while the queries run.
+    Ingesting { rows_per_second: f64, max_out_of_order_ms: Option<u64> },
+    /// Older rows are stored and new rows keep arriving.
+    Mixed { rows_per_second: f64, max_out_of_order_ms: Option<u64> },
+    /// Not declared: no build runs at ingestion time.
+    Unknown,
+}
+```
+
+`max_out_of_order_ms` bounds how late a row may arrive relative to the newest row of its series.
+
+**Counter states at ingestion time.** A counter state (`rate`, `increase`, `irate`) needs each series' samples in timestamp order to detect resets. It may still run at ingestion time: the ingestion data plane keeps a per-series reorder buffer that holds `max_out_of_order_ms` of rows and releases them in order. The buffer's memory, about rows per second × out-of-order bound × bytes per row, is part of that build's cost. For `rate(c_total[5m])` with 100,000 samples/s, a 2 s bound and 16 B per row, the buffer is about 100,000 × 2 × 16 B ≈ 3.2 MB. When `max_out_of_order_ms` is `None`, a PromQL source is taken to arrive in order (bound 0, no buffer); a SQL source gets no ingestion-time counter build, because SQL rows have no ordering guarantee.
+
+**Filtered builds at ingestion time.** A filtered build needs no extra rule. α^phys already requires an ingestion-time build's input to be produced at ingestion time; the build reads each input row with all its columns and evaluates the filter before updating the state. For SQL `sum(x) FILTER (WHERE region = 'eu')` over `Join(events, hosts)`, the build runs at ingestion time only when the join does; it then reads each joined row, checks `region`, and adds `x` for the rows that pass.
+
+#### Prune reasons
+
+Stage 2 records every alternative it rejects, with one of these reasons; Stage 3 adds its own.
+
+| Reason | Rejects |
+|---|---|
+| `NoIngestionPipeline` | IngestionTime when the source has no ingestion pipeline |
+| `RawDataNotRetained` | QueryTime over raw rows the deployment does not retain |
+| `QueryTimeResultsNotRetained` | QueryTime with ℓ = OneEvaluation or AcrossEvaluations when the deployment retains no query-time results |
+| `InputHasNoBuildableProducer` | a candidate for which some input has no surviving producer that satisfies α^phys |
+| `ReachesNoQueryOutput` | a candidate from which no admissible path leads to a query root |
+
+The planner does not check executor support, so no reason names it.
 
 ```rust
 // crates/types/src/physical/properties.rs
@@ -876,10 +925,22 @@ pub struct PhysicalEdge {
 pub struct PhysicalASAPMemoCandidates {
     pub logical_candidates: LogicalASAPMemoCandidates,
     pub physical_candidates: Vec<PhysicalCandidate>,
-    pub query_roots: Vec<QueryRoot<MemoGroupId>>,
-    pub pruned_candidates: Vec<PrunedCandidate<PhysicalCandidateKey>>,
+    pub pruned_candidates: Vec<PrunedCandidate<PhysicalCandidate>>,
+}
+/// A rejected alternative and why; the candidate names its group
+/// through its logical candidate, so no separate group field.
+pub struct PrunedCandidate<C> {
+    pub candidate: C,
+    pub reason: PruneReason,
 }
 impl PhysicalASAPMemoCandidates {
+    /// Query roots are read from `logical_candidates`, not copied.
+    pub fn new(
+        logical_candidates: LogicalASAPMemoCandidates,
+        physical_candidates: Vec<PhysicalCandidate>,
+        edges: Vec<PhysicalEdge>,
+        pruned_candidates: Vec<PrunedCandidate<PhysicalCandidate>>,
+    ) -> Self;
     pub fn edges(&self) -> impl Iterator<Item = (PhysicalEdgeId, PhysicalEdge)>;
     pub fn admissible_edges_into(
         &self,
@@ -891,15 +952,9 @@ impl PhysicalASAPMemoCandidates {
         producer: PhysicalCandidateId,
     ) -> &[PhysicalEdgeId];
 }
-
-// Identifies a rejected alternative by content: it has no allocated candidate ID.
-pub struct PhysicalCandidateKey {
-    pub logical_candidate_id: CandidateForMemoGroupId,
-    pub physical_properties: PhysicalProperties,
-}
 ```
 
-`PhysicalCandidateId` indexes an emitted candidate. `PhysicalCandidateKey` describes an alternative rejected before it received an ID, allowing diagnostics to explain pruning. The admissible-edge accessor returns edge IDs, not the unfiltered producer set from Section 1. `delivers_on` takes a candidate and the memo rather than bare properties because a tumbling grid's width is an argument of the chain operator in the candidate's expression.
+`PhysicalCandidateId` indexes an emitted candidate. A pruned alternative is stored as its `PhysicalCandidate` value, which has no ID, so diagnostics can explain each prune. The admissible-edge accessor returns edge IDs, not the unfiltered producer set from Section 1. `delivers_on` takes a candidate and the memo rather than bare properties because a tumbling grid's width is an argument of the chain operator in the candidate's expression.
 
 Migration targets include replacing `Materialization` and duplicated physical fields with checked properties, and replacing `ReaderConstraint::{IncompatibleOutputs, AllowedOutputs}` with compatibility and alignment checks. `ReaderConstraint::{MinimumQueryReaders, HighestSharedQueryMaterialization}` are deleted too; see Section 5.
 
