@@ -351,12 +351,24 @@ pub struct GroupProperties {
     pub shareable_when_equal: bool,
 }
 
+/// A column of a source (a Scan's table or metric), by name.
+pub struct SourceColumn {
+    pub source: String,
+    pub column: String,
+}
+
 /// Where an output column's values come from.
 pub enum ColumnLineage {
-    /// Copied unchanged from a column of a source (a Scan's table or metric).
-    SourceColumn { source: String, column: String },
+    /// Copied unchanged from a column of a source.
+    SourceColumn(SourceColumn),
     /// Computed by an operator: a measure, an expression, a summary state or readout.
     Computed,
+}
+
+/// Summary coverage keys its selections by the same type.
+pub struct SelectionBox {
+    pub columns: BTreeMap<SourceColumn, Constraint>,
+    pub relative_time: Option<(Bound<i64>, Bound<i64>)>,
 }
 ```
 
@@ -364,7 +376,7 @@ pub enum ColumnLineage {
 
 | Operator | Output column lineage |
 |---|---|
-| `Scan` | each column: `SourceColumn { source, column }` |
+| `Scan` | each column: `SourceColumn(SourceColumn { source, column })` |
 | `Filter`, `TimeRange`, `TimeShift`, `Sort`, `Limit`, `Dedup` | the input's, unchanged |
 | `Project` | a column item, renamed or not: that input column's lineage; an expression item: `Computed` |
 | `Aggregate`, `SummaryAgg`, readouts | group-by keys: the input's lineage of that key; measures, states and values: `Computed` |
@@ -373,7 +385,7 @@ pub enum ColumnLineage {
 | `BinaryOp` (vector match) | label columns: the matched side's lineage; the value: `Computed` |
 
 **What reads it:**
-- **Summary coverage.** A selection constrains columns identified by lineage (`ColumnIdentity` is a `SourceColumn`), not by (qualifier, name). A predicate on a `Computed` column is not lifted; it stays in `unlifted_operators`. A merge's group keys must have equal lineage.
+- **Summary coverage.** A selection constrains columns keyed by their `SourceColumn` lineage, not by (qualifier, name). A predicate on a `Computed` column is not lifted; it stays in `unlifted_operators`. A merge's group keys must have equal lineage.
 - **Candidate checks.** `add_candidate` compares a candidate's schema with its group's exactly: names, types, nullability, order. There is no qualifier to compare, so a readout renamed to the group's column name matches.
 
 **Example 1: a SQL aggregate and its summary candidate.**
