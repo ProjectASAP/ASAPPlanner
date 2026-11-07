@@ -318,7 +318,7 @@ rule's origin, and gives each reader a candidate that reads that group.
 
 Pass 1 gives every input of a summary build its own group, so no rule
 factors summary inputs, and a coarse state's rollup reads the finer state
-group with its windowed builds, so no separate window rollup rule exists.
+group with its windowed builds, which covers a window rollup over the same range; a longer range read from a shorter range's tumbling windows is not offered (it needs a window requirement on the input, #1221).
 After the rules, Pass 2 passes each query's accuracy target down through
 each consumer's error contract (`LogicalRequirements::error_propagation`),
 capped by its validity caps, sets the parameter floor of every consumer

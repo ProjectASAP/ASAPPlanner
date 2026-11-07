@@ -20,7 +20,7 @@ pub use candidates::{
     parameter_list, producer_satisfies_logical_requirements, CandidateError, CandidateExpression,
     CandidateForMemoGroup, CandidateForMemoGroupId, ErrorPropagation, LogicalProperties,
     LogicalPropertiesError, LogicalRequirements, Memo, OriginOfCandidateForMemoGroup, WindowLayout,
-    RATIO_DENOMINATOR_VALIDITY_CAP,
+    RELATIVE_OPERAND_VALIDITY_CAP,
 };
 pub use logical_memo_candidates::{LogicalASAPMemoCandidates, LogicalEdge};
 pub(crate) use memo::MemoGroupAsInput;

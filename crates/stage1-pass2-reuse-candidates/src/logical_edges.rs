@@ -22,8 +22,8 @@
 //!    0$); an exact producer always may. $\alpha^{\log}$ also needs the
 //!    producer's $\boldsymbol\theta$ to meet the floor.
 
-use crate::memo::rules::{expression, Pass2RuleError};
-use crate::parameter_floors::{floor_for_cap, strongest, weakest};
+use crate::memo::rules::{expression, produces_state, Pass2RuleError};
+use crate::parameter_floors::{floor_for_cap, strongest, weakest_of};
 use asap_accuracy::estimators::local_guarantee;
 use asap_types::ir::properties::AccuracyMetric;
 use asap_types::ir::schema::{
@@ -102,7 +102,7 @@ pub(crate) fn logical_edges_with_capped_floors(
                     let satisfies = producer_satisfies_logical_requirements(
                         &producer.logical_properties,
                         &consumer.input_requirements[input],
-                    ) && (reads_state(memo, child)
+                    ) && (produces_state(expression(memo, child))
                         || errors[child.0 as usize][u]
                             .iter()
                             .any(|error| carries(&consumer.expression.operator, *error)));
@@ -120,19 +120,6 @@ pub(crate) fn logical_edges_with_capped_floors(
         }
     }
     Ok(edges)
-}
-
-/// Whether `group`'s rows are summary states: its consumers read a state,
-/// whose error the readout above states.
-fn reads_state(memo: &Memo, group: MemoGroupId) -> bool {
-    matches!(
-        expression(memo, group),
-        Operator::ASAP(
-            ASAPOp::SummaryAgg { .. }
-                | ASAPOp::SummaryTumblingWindowChain { .. }
-                | ASAPOp::SummaryMerge { .. }
-        )
-    )
 }
 
 /// The metric rule: whether `consumer`'s error contract carries an input
@@ -241,12 +228,17 @@ fn passed_cap(
 /// Whether a merged state of `state`'s family keeps the guarantee of
 /// `statistic` (exact, or as if built over the union).
 fn keeps_guarantee(memo: &Memo, state: MemoGroupId, statistic: &SketchStatistic) -> bool {
-    family(expression(memo, state)).is_some_and(|family| {
-        matches!(
-            FamilyCapability::of(family).merged_error(statistic),
-            Some(MergedError::Exact | MergedError::AsIfBuiltOverUnion)
-        )
-    })
+    family(expression(memo, state)).is_some_and(|family| merge_keeps_guarantee(family, statistic))
+}
+
+/// Whether a merged state of `family` keeps one build's guarantee of
+/// `statistic`: its merged error is exact or as if built over the union
+/// (the family-capability table).
+fn merge_keeps_guarantee(family: &FieldDataType, statistic: &SketchStatistic) -> bool {
+    matches!(
+        FamilyCapability::of(family).merged_error(statistic),
+        Some(MergedError::Exact | MergedError::AsIfBuiltOverUnion)
+    )
 }
 
 /// The family a state operator builds or merges; `None` for a merge (its
@@ -379,11 +371,7 @@ fn weakest_floor_of_consumers(memo: &Memo, group: MemoGroupId) -> Option<SketchP
             }
         }
     }
-    floors
-        .into_iter()
-        .map(Some)
-        .reduce(|left, right| weakest(left.as_ref()?, right.as_ref()?))
-        .flatten()
+    weakest_of(floors)
 }
 
 /// The metric of reading `statistic` from a state of `family`, by its
@@ -457,21 +445,24 @@ fn candidate_errors(
                 if admitted.is_empty() {
                     return Vec::new();
                 }
-                all_exact &= admitted.contains(&OutputError::Exact);
-                for error in admitted {
-                    let leaves = match error {
-                        OutputError::Bound(metric) => {
-                            match LogicalRequirements::error_propagation(operator, metric) {
-                                Some(propagation) if propagation.factor_per_input[input] == 0.0 => {
-                                    OutputError::Exact
-                                }
-                                _ => error,
-                            }
+                // Each admitted error as it leaves the contract: a factor 0
+                // (a count reads no value) makes it exact.
+                let leaving: Vec<OutputError> = admitted
+                    .into_iter()
+                    .map(|error| match error {
+                        OutputError::Bound(metric)
+                            if LogicalRequirements::error_propagation(operator, metric)
+                                .is_some_and(|p| p.factor_per_input[input] == 0.0) =>
+                        {
+                            OutputError::Exact
                         }
                         other => other,
-                    };
-                    if leaves != OutputError::Exact {
-                        push(&mut out, leaves);
+                    })
+                    .collect();
+                all_exact &= leaving.contains(&OutputError::Exact);
+                for error in leaving {
+                    if error != OutputError::Exact {
+                        push(&mut out, error);
                     }
                 }
             }
@@ -528,11 +519,13 @@ fn read_errors(
                         statistic,
                     ),
                 ),
-                _ => {
+                Some(FieldDataType::ExactAggregate(..)) => {
                     for error in rows {
                         push(&mut out, *error);
                     }
                 }
+                // A sample, wavelet or model state has no error model.
+                _ => push(&mut out, OutputError::WithoutGuarantee),
             },
         }
     }
@@ -551,12 +544,7 @@ pub(crate) fn merged_tumbling_windows_guarantee(
     windowed: bool,
     statistic: &SketchStatistic,
 ) -> OutputError {
-    if windowed
-        && !matches!(
-            FamilyCapability::of(family).merged_error(statistic),
-            Some(MergedError::Exact | MergedError::AsIfBuiltOverUnion)
-        )
-    {
+    if windowed && !merge_keeps_guarantee(family, statistic) {
         return OutputError::WithoutGuarantee;
     }
     match local_guarantee(family, parameters, statistic) {

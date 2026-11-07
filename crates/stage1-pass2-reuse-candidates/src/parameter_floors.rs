@@ -36,9 +36,14 @@ pub(crate) fn floor_for_cap(
     if meets.is_empty() || meets.len() == list.len() {
         return None;
     }
-    meets
+    weakest_of(meets.into_iter().cloned())
+}
+
+/// The [`weakest`] of `floors`; `None` when there is none or two do not
+/// combine.
+pub(crate) fn weakest_of(floors: impl IntoIterator<Item = SketchParams>) -> Option<SketchParams> {
+    floors
         .into_iter()
-        .cloned()
         .map(Some)
         .reduce(|left, right| weakest(left.as_ref()?, right.as_ref()?))
         .flatten()

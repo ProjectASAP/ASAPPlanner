@@ -8,7 +8,7 @@ pub(crate) mod scan_labels;
 pub(crate) mod topk;
 
 use asap_types::ir::schema::SketchParams;
-use asap_types::ir::Operator;
+use asap_types::ir::{ASAPOp, Operator};
 use asap_types::stages::{
     CandidateExpression, CandidateForMemoGroup, CandidateForMemoGroupId, LogicalProperties,
     LogicalPropertiesError, LogicalRequirements, Memo, MemoGroupId, OriginOfCandidateForMemoGroup,
@@ -31,9 +31,10 @@ pub enum Pass2RuleError {
 /// $\omega$ `window_layout` to `group`, reading each input group without a
 /// parameter floor unless `input_requirements` gives one per input (Pass 2
 /// sets every floor after the rules). `None` when the memo rejects it: its
-/// expression breaks the node rules or its output is not the group's, which
-/// is how a rule's shape check ends (the candidate does not compute the
-/// group's result).
+/// expression breaks the node rules (a merge whose inputs' coverage does not
+/// merge) or its output is not the group's. Rules 2, 4, 5 and 6 build a
+/// candidate from a shape match and let the memo's checks decide whether it
+/// computes the group's result, so a rejection ends the match, not Pass 2.
 pub(crate) fn add_candidate(
     memo: &mut Memo,
     group: MemoGroupId,
@@ -65,4 +66,18 @@ pub(crate) fn add_candidate(
 /// The group `group`'s expression.
 pub(crate) fn expression(memo: &Memo, group: MemoGroupId) -> &Operator<MemoGroupId> {
     &memo.groups()[group.0 as usize].expression
+}
+
+/// Whether `operator`'s rows are summary states (a build, a tumbling-window
+/// chain or a merge): their consumers read a state, whose error the readout
+/// above states, and a `Project` cannot narrow them.
+pub(crate) fn produces_state(operator: &Operator<MemoGroupId>) -> bool {
+    matches!(
+        operator,
+        Operator::ASAP(
+            ASAPOp::SummaryAgg { .. }
+                | ASAPOp::SummaryTumblingWindowChain { .. }
+                | ASAPOp::SummaryMerge { .. }
+        )
+    )
 }

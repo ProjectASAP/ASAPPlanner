@@ -36,9 +36,12 @@ pub fn pass2_local_window_composition(
 /// workload entry (its accuracy target).
 ///
 /// Pass 1 already gives every input of a summary build its own group, so
-/// the old rule 3 (summary inputs as groups) has nothing left to do; a
+/// the old rule 3 (summary inputs as groups) has nothing left to do. A
 /// coarse state's rollup (rule 6) reads the finer state group, windowed
-/// builds included, so the old rule 7 (window rollup) is that candidate.
+/// builds included, which covers the old rule 7 (window rollup) over the
+/// same range. A longer range read from a shorter range's tumbling windows
+/// needs a window requirement on the input, which `LogicalRequirements`
+/// does not have: not offered (#1221).
 pub fn pass2_after_local_window_composition(
     mut memo: Memo,
     entries: &[QueryWorkloadEntry],

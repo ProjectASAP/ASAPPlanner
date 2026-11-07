@@ -867,6 +867,36 @@ fn a_ratio_reads_no_rank_error() {
     );
 }
 
+/// A count reads no value: over readouts only (approximate), its result
+/// is exact, so a ratio may read it.
+#[test]
+fn a_count_of_approximate_values_is_exact() {
+    let mut memo = Memo::default();
+    let (_, _, readout) = quantile_over_time(&mut memo, SketchAlgorithm::Kll, 0.9, 60);
+    let count = group(
+        &mut memo,
+        Operator::NonASAP(NonASAPOp::Aggregate {
+            child: readout,
+            reduction: Reduction::by(vec![]),
+            measures: vec![AggIntent::Count {
+                accuracy: AccuracyTarget::exact(),
+            }],
+            output_names: vec!["count".into()],
+            filters: vec![None],
+            having: None,
+        }),
+    );
+    let (_, _, ddsketch) = quantile_over_time(&mut memo, SketchAlgorithm::DDSketch, 0.5, 60);
+    let ratio = arithmetic(&mut memo, ArithmeticOpKind::Div, ddsketch, count);
+    memo.add_query(QueryRoot::Operator(ratio));
+    let target = AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative);
+    let logical = pass2(memo, &[entry(60_000, target)]);
+    assert_eq!(
+        edges_into(&logical, own_candidate(ratio), 1),
+        vec![(own_candidate(count), true)]
+    );
+}
+
 /// A ratio passes its target down through `1 / (1 - b)` (and caps its
 /// denominator at `b`): with a relative target 0.05 both readouts' inputs
 /// need `alpha ≤ 0.045`, so the weakest listed alpha within it.

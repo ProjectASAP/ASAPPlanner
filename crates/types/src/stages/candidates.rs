@@ -811,7 +811,7 @@ impl LogicalRequirements {
     ///   and `max`); `count` reads no value: $\beta = 0$ in any metric;
     /// - `+` and `-`: $\beta = 1$ per operand, absolute error;
     /// - `/`: relative error, $\beta = 1 / (1 - b)$ per operand with the
-    ///   denominator capped at $b$ = [`RATIO_DENOMINATOR_VALIDITY_CAP`]; `*`:
+    ///   denominator capped at $b$ = [`RELATIVE_OPERAND_VALIDITY_CAP`]; `*`:
     ///   relative error, $(1 + b, 1)$ with the right operand capped at $b$
     ///   ($(1+x)(1+y) - 1 \le (1+b)\,x + y$ for $y \le b$);
     /// - an operator without inputs: no factors.
@@ -877,7 +877,7 @@ impl LogicalRequirements {
                     return_bool: false,
                     ..
                 } => {
-                    let b = RATIO_DENOMINATOR_VALIDITY_CAP;
+                    let b = RELATIVE_OPERAND_VALIDITY_CAP;
                     match (kind, metric) {
                         (
                             ArithmeticOpKind::Add | ArithmeticOpKind::Sub,
@@ -928,7 +928,7 @@ impl LogicalRequirements {
 /// relative error under which [`LogicalRequirements::error_propagation`]'s
 /// linear bound holds, $\varepsilon_{X/Y} \le (\varepsilon_X +
 /// \varepsilon_Y) / (1 - b)$ (concepts doc, section 4).
-pub const RATIO_DENOMINATOR_VALIDITY_CAP: f64 = 0.1;
+pub const RELATIVE_OPERAND_VALIDITY_CAP: f64 = 0.1;
 
 /// The local error propagation of one consumer: its output error is at
 /// most $\sum_i \beta_{c,i}\varepsilon_{c,i}$ while each input's error stays
@@ -1788,7 +1788,7 @@ mod memo_tests {
     /// count reads no value; a filter and a top-k have none.
     #[test]
     fn error_propagation_follows_each_operators_error_contract() {
-        let b = RATIO_DENOMINATOR_VALIDITY_CAP;
+        let b = RELATIVE_OPERAND_VALIDITY_CAP;
         let ratio = arithmetic(ArithmeticOpKind::Div);
         assert_eq!(
             LogicalRequirements::error_propagation(&ratio, AccuracyMetric::Relative),
