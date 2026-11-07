@@ -7,18 +7,22 @@
 //! from `q`'s result or state (the same query with a looser accuracy
 //! target, a filter on a group key, a coarser grouping, ...), it builds a
 //! *witness*: `W`'s selected logical plan plus `q'` derived from `q`'s
-//! node by one operator. Stage 2 and Stage 3 implement and price the
-//! witness exactly as they price any candidate, and the relation
+//! node by one operator. The witness is costed by `asap_cost::plan_cost`,
+//! as Stage 3 costs a selected plan: each node of `W`'s plan with the
+//! timing, lifetime and θ its selection gave it, each derived node at query
+//! time, not materialized (the witness holds ASAP operators, which Pass 1
+//! does not take as input, so it is not planned again). The relation
 //!
 //! ```text
 //! cost(W ∪ {q'}) − cost(W) ≤ derive_cost + tolerance,
-//! derive_cost = cost(witness) − cost(W's plan priced the same way)
+//! derive_cost = cost(witness) − cost(W's plan costed the same way)
 //! ```
 //!
-//! must hold. `derive_cost` is what Stage 3 charges for the derived
-//! operator alone (its per-node price, plus any change it causes in the
-//! shared nodes' prices, such as a shared node now materialized); it is
-//! never a guess. A violation means a cheaper plan for `W ∪ {q'}` exists
+//! must hold. `derive_cost` is what the cost model charges for the derived
+//! operator alone (its per-node cost, plus any change it causes in the
+//! shared nodes' costs, such as a shared node read once more); it is never
+//! a guess. The witness's accuracy is not checked: each relation derives
+//! `q'` at `q`'s accuracy target or a looser one. A violation means a cheaper plan for `W ∪ {q'}` exists
 //! that the planner did not select. Monotonicity and invariance relations
 //! (tightening accuracy, adding a query or dropping raw retention never
 //! lowers cost; relaxing a latency bound never raises it; renaming,
@@ -40,12 +44,15 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use asap_cost::CostInputs;
+use asap_cost::{materialized_tumbling_window_chains, node_map, plan_cost, CostInputs};
 use asap_planner::{PlanSearchSettings, PlanningModels};
 use asap_types::deployment_capabilities::DeploymentCapabilities;
-use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::flat::flatten;
+use asap_types::ir::physical_export::{physical_asap_dag_with_assignments, ExportedNodeAssignment};
+use asap_types::ir::properties::{AccuracyTarget, ExecutionTiming};
 use asap_types::ir::schema::sketch::SketchAlgorithm;
-use asap_types::ir::QueryRoot;
+use asap_types::ir::{OperatorNode, QueryRoot};
+use asap_types::physical::{Lifetime, PhysicalProperties, StorageMedium};
 use asap_types::workload::{
     DataArrival, DataWorkload, PlanningWorkload, QueryLanguage, QueryWorkload, RepeatingEntry,
     SqlDialect,
@@ -340,19 +347,22 @@ impl FuzzSettings {
 pub struct Planned {
     /// The selected physical plan's stable archive ID.
     pub selected: String,
-    /// Its price per second under cost model 1.
+    /// Its cost per second under cost model 1.
     pub cost_per_second: f64,
     /// The frontends' roots, one per query.
     pub stage0_roots: Vec<QueryRoot>,
-    /// The selected Stage 1 (logical) candidate's roots, the plan a witness
-    /// extends; absent only when the selected logical plan is unavailable.
+    /// The selected plan's roots, as the realizer built them: the plan a
+    /// witness extends; absent only when no plan is realized.
     pub logical_roots: Option<Vec<QueryRoot>>,
+    /// What the realizer assigned each node of `logical_roots` (timing,
+    /// lifetime, θ, coverage), read back from the realized plan's DAG.
+    assignments: Vec<(Rc<OperatorNode>, ExportedNodeAssignment)>,
 }
 
-/// A plan priced by Stage 2 and Stage 3 outside the search: the cheapest
-/// physical properties assignment of given logical roots.
+/// A plan costed outside the search ([`Planner::cost`]): given roots with
+/// the assignments their plannings gave their nodes.
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct Priced {
+pub struct Costed {
     pub selected: String,
     pub cost_per_second: f64,
     /// The nodes only the last root reads: in a witness, the operators
@@ -369,12 +379,31 @@ pub struct PrivateNodes {
     pub operators: Vec<String>,
 }
 
-/// Plans and prices workloads, caching each workload's plan and the
-/// reference price of its selected logical plan.
+/// The nodes the last of `roots` reads that another root reads too.
+fn shared_with_last_root(roots: &[QueryRoot]) -> BTreeSet<*const OperatorNode> {
+    let reached = |root: &QueryRoot| -> BTreeSet<*const OperatorNode> {
+        root.operator_refs()
+            .into_iter()
+            .flat_map(|node| OperatorNode::reachable(node))
+            .map(|node| Rc::as_ptr(&node))
+            .collect()
+    };
+    let Some((last, others)) = roots.split_last() else {
+        return BTreeSet::new();
+    };
+    let others: BTreeSet<_> = others.iter().flat_map(reached).collect();
+    reached(last).intersection(&others).copied().collect()
+}
+
+/// Plans and costs workloads, caching each workload's plan and the
+/// reference cost of its selected plan.
 pub struct Planner {
     pub settings: FuzzSettings,
     cache: HashMap<String, Result<Rc<Planned>, String>>,
-    reference_prices: HashMap<String, Result<Priced, String>>,
+    reference_costs: HashMap<String, Result<Costed, String>>,
+    /// Every planned node's assignment, by the node's address; the cached
+    /// [`Planned`]s hold the nodes, so no address is reused.
+    assignment_of_node: HashMap<*const OperatorNode, ExportedNodeAssignment>,
 }
 
 impl Planner {
@@ -382,7 +411,8 @@ impl Planner {
         Self {
             settings,
             cache: HashMap::new(),
-            reference_prices: HashMap::new(),
+            reference_costs: HashMap::new(),
+            assignment_of_node: HashMap::new(),
         }
     }
 
@@ -409,6 +439,12 @@ impl Planner {
             return planned.clone();
         }
         let planned = self.plan_uncached(workload).map(Rc::new);
+        if let Ok(planned) = &planned {
+            for (node, assignment) in &planned.assignments {
+                self.assignment_of_node
+                    .insert(Rc::as_ptr(node), assignment.clone());
+            }
+        }
         self.cache.insert(key, planned.clone());
         planned
     }
@@ -443,62 +479,98 @@ impl Planner {
             .cost
             .cost_per_second
             .ok_or("no cost per second (cost model 3)")?;
+        // The realizer exported its roots in flattened order: node `i` of
+        // the flattened roots is node `i` of the realized DAG.
+        let assignments = match &run.run.selected_physical_plan {
+            Some(realized) => {
+                let (_, nodes) = flatten(&realized.plan.roots);
+                nodes
+                    .into_iter()
+                    .zip(&realized.plan.dag.nodes)
+                    .map(|(node, exported)| {
+                        let physical_properties = PhysicalProperties::new(
+                            exported.output_state.timing,
+                            exported.lifetime,
+                        )
+                        .map_err(|e| format!("realized node {}: {e}", exported.id))?;
+                        Ok((
+                            node,
+                            ExportedNodeAssignment {
+                                physical_properties,
+                                parameters: exported.parameters.clone(),
+                                summary_coverage: exported.summary_coverage.clone(),
+                            },
+                        ))
+                    })
+                    .collect::<Result<_, String>>()?
+            }
+            None => Vec::new(),
+        };
         Ok(Planned {
             selected: "selected".into(),
             cost_per_second,
             stage0_roots: roots,
             logical_roots: run.run.selected_plan.as_ref().cloned(),
+            assignments,
         })
     }
 
-    /// Stages 0–3 over the witness plan `roots` of `workload`'s queries
-    /// (one root per query, in order), with the same models as
-    /// [`plan`](Self::plan): the witness's own operators are hash-consed
-    /// into the memo and Stage 3 selects the cheapest plan of them, each
-    /// summary at the θ its consumers' parameter floors allow. The cost is
-    /// that plan's, and `derived_root` the nodes of the realized plan only
-    /// the last root reads. `last_root_is_key_filter` is accepted for the
-    /// relations' interface; Stage 3 checks accuracy at the roots
-    /// (constraint (K)).
-    pub fn price(
-        &self,
-        workload: &FuzzWorkload,
-        roots: &[QueryRoot],
-        last_root_is_key_filter: bool,
-    ) -> Result<Priced, String> {
-        let _ = last_root_is_key_filter;
+    /// The cost of the plan `roots` of `workload`'s queries (one root per
+    /// query, in order) under the same cost inputs as [`plan`](Self::plan),
+    /// by `asap_cost::plan_cost` as Stage 3 costs a selected plan: each node
+    /// a planning of this planner realized keeps the timing, lifetime, θ and
+    /// coverage it was given; every other node (a witness's derived
+    /// operators) runs at query time, not materialized. A query-time node
+    /// that is not materialized and is read by the last root and another
+    /// is materialized for one evaluation instead (`OneEvaluation(Memory)`):
+    /// built once per evaluation and read by both, as the planner may
+    /// select (the derived query runs with the query it derives from).
+    /// `derived_root` is the nodes only the last root reads.
+    pub fn cost(&self, workload: &FuzzWorkload, roots: &[QueryRoot]) -> Result<Costed, String> {
         let planning = workload.planning_workload();
         let entries: Vec<_> = planning.query_workload.entries().collect();
         let cost_inputs = self.cost_inputs();
-        let deployment = workload.deployment();
-        let models = PlanningModels::builtin()
-            .with_cost_inputs(&cost_inputs)
-            .with_deployment_capabilities(&deployment)
-            .with_ignore_accuracy_guarantees(!self.settings.enforce_accuracy_guarantees);
-        let run = run_search_over(
-            roots.to_vec(),
-            &entries,
-            &workload.data,
-            models,
-            PlanSearchSettings::default(),
-        )
+        let at_query_time = |lifetime| {
+            PhysicalProperties::new(ExecutionTiming::QueryTime, lifetime)
+                .expect("query time is valid with every lifetime")
+        };
+        let derived = ExportedNodeAssignment {
+            physical_properties: at_query_time(Lifetime::None),
+            parameters: None,
+            summary_coverage: None,
+        };
+        let shared = shared_with_last_root(roots);
+        let (dag, _) = physical_asap_dag_with_assignments(roots, &|node| {
+            let mut assignment = self
+                .assignment_of_node
+                .get(&Rc::as_ptr(node))
+                .cloned()
+                .unwrap_or_else(|| derived.clone());
+            if assignment.physical_properties == at_query_time(Lifetime::None)
+                && shared.contains(&Rc::as_ptr(node))
+            {
+                assignment.physical_properties =
+                    at_query_time(Lifetime::OneEvaluation(StorageMedium::Memory));
+            }
+            assignment
+        })
         .map_err(|e| format!("witness: {e}"))?;
-        let selection = run
-            .run
-            .selection
-            .as_ref()
-            .map_err(|e| format!("witness selection: {e}"))?;
-        let cost = &selection.cost;
+        let recurrence: Vec<_> = entries.iter().map(|e| e.recurrence.clone()).collect();
+        let ranges: Vec<_> = entries.iter().map(|e| e.range_evaluation).collect();
+        let (cost, _) = plan_cost(
+            &dag,
+            &node_map(&dag),
+            &materialized_tumbling_window_chains(&dag),
+            &recurrence,
+            &ranges,
+            &workload.data,
+            &cost_inputs,
+            cost_inputs.frozen_calibration_factor.unwrap_or(1.0),
+        )
+        .map_err(|(node, e)| format!("witness: node {node}: {e}"))?;
         let cost_per_second = cost
             .cost_per_second
             .ok_or("no cost per second (cost model 3)")?;
-        let dag = &run
-            .run
-            .selected_physical_plan
-            .as_ref()
-            .ok_or("a selection has a realized plan")?
-            .plan
-            .dag;
         let mut inputs: BTreeMap<_, Vec<_>> = BTreeMap::new();
         for edge in &dag.edges {
             inputs.entry(edge.consumer).or_default().push(edge.producer);
@@ -520,7 +592,7 @@ impl Planner {
             .filter(|node| others.iter().all(|set| !set.contains(node)))
             .filter_map(|node| cost.per_node.get(node))
             .collect();
-        Ok(Priced {
+        Ok(Costed {
             selected: "selected".into(),
             cost_per_second,
             derived_root: PrivateNodes {
@@ -533,20 +605,19 @@ impl Planner {
         })
     }
 
-    /// [`price`](Self::price) of `workload`'s selected logical plan
-    /// `roots`, cached per workload: every marginal check of a case prices
-    /// the same `W`.
-    pub fn reference_price(
+    /// [`cost`](Self::cost) of `workload`'s selected plan `roots`, cached
+    /// per workload: every marginal check of a case costs the same `W`.
+    pub fn reference_cost(
         &mut self,
         workload: &FuzzWorkload,
         roots: &[QueryRoot],
-    ) -> Result<Priced, String> {
+    ) -> Result<Costed, String> {
         let key = serde_json::to_string(workload).expect("a workload serializes");
-        if let Some(priced) = self.reference_prices.get(&key) {
-            return priced.clone();
+        if let Some(costed) = self.reference_costs.get(&key) {
+            return costed.clone();
         }
-        let priced = self.price(workload, roots, false);
-        self.reference_prices.insert(key, priced.clone());
-        priced
+        let costed = self.cost(workload, roots);
+        self.reference_costs.insert(key, costed.clone());
+        costed
     }
 }

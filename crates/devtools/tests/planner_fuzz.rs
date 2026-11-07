@@ -219,7 +219,7 @@ fn promql(
 }
 
 /// The witness `relation` builds for `workload`'s query, which must build
-/// and price (the check is conclusive).
+/// and cost (the check is conclusive).
 fn witness_of(relation: Relation, workload: FuzzWorkload) -> Witness {
     match check(relation, workload, 0) {
         Outcome::Holds(m) | Outcome::Violated(m) => m
@@ -230,10 +230,10 @@ fn witness_of(relation: Relation, workload: FuzzWorkload) -> Witness {
     }
 }
 
-/// The sketch rollup witness builds and prices for a grouped quantile:
+/// The sketch rollup witness builds and costs for a grouped quantile:
 /// a `SummaryMerge` with `group_by` over the finer per-group KLL.
 #[test]
-fn sketch_rollup_witness_prices_for_a_grouped_quantile() {
+fn sketch_rollup_witness_costs_for_a_grouped_quantile() {
     let q = promql(
         "m_gauge",
         None,
@@ -247,10 +247,10 @@ fn sketch_rollup_witness_prices_for_a_grouped_quantile() {
     );
 }
 
-/// The exact rollup witness builds and prices for a grouped count (a sum
+/// The exact rollup witness builds and costs for a grouped count (a sum
 /// of the finer counts).
 #[test]
-fn exact_rollup_witness_prices_for_a_grouped_count() {
+fn exact_rollup_witness_costs_for_a_grouped_count() {
     let q = promql(
         "m_gauge",
         None,
@@ -262,9 +262,9 @@ fn exact_rollup_witness_prices_for_a_grouped_count() {
     ));
 }
 
-/// The quantile-rank witness builds and prices from the same KLL.
+/// The quantile-rank witness builds and costs from the same KLL.
 #[test]
-fn quantile_rank_witness_prices_from_the_same_sketch() {
+fn quantile_rank_witness_costs_from_the_same_sketch() {
     let q = promql("m_gauge", Some(RangeFunction::QuantileOverTime(0.9)), None);
     assert_eq!(
         witness_of(Relation::OtherQuantileRank, generated(q, true)),
@@ -272,9 +272,9 @@ fn quantile_rank_witness_prices_from_the_same_sketch() {
     );
 }
 
-/// The smaller top-k witness builds and prices over the same input.
+/// The smaller top-k witness builds and costs over the same input.
 #[test]
-fn smaller_topk_witness_prices_over_the_same_input() {
+fn smaller_topk_witness_costs_over_the_same_input() {
     let q = promql(
         "m_counter",
         Some(RangeFunction::Rate),
@@ -287,10 +287,10 @@ fn smaller_topk_witness_prices_over_the_same_input() {
 }
 
 /// (l): a filtered share of a grouped rate reads the rate from q's result
-/// (ASAPWorkloads #12); the plain graft cannot price (its numerator is an
+/// (ASAPWorkloads #12); the plain graft cannot cost (its numerator is an
 /// unplanned raw rate), so the witness planned with the operand must.
 #[test]
-fn ratio_witness_prices_over_the_shared_rate() {
+fn ratio_witness_costs_over_the_shared_rate() {
     let q = promql(
         "m_counter",
         Some(RangeFunction::Rate),
@@ -304,7 +304,7 @@ fn ratio_witness_prices_over_the_shared_rate() {
 
 /// (l), avg as sum / count: the sum is read from q's result.
 #[test]
-fn sum_over_count_witness_prices_over_the_shared_sum() {
+fn sum_over_count_witness_costs_over_the_shared_sum() {
     let q = promql(
         "m_gauge",
         Some(RangeFunction::SumOverTime),
@@ -318,7 +318,7 @@ fn sum_over_count_witness_prices_over_the_shared_sum() {
 
 /// (o): `increase` is q's `rate` times the window.
 #[test]
-fn increase_witness_prices_as_the_scaled_rate() {
+fn increase_witness_costs_as_the_scaled_rate() {
     let q = promql(
         "m_counter",
         Some(RangeFunction::Rate),
@@ -332,7 +332,7 @@ fn increase_witness_prices_as_the_scaled_rate() {
 
 /// (g): a threshold over a grouped minimum reads q's result.
 #[test]
-fn threshold_witness_prices_over_the_result() {
+fn threshold_witness_costs_over_the_result() {
     let q = promql(
         "m_gauge",
         Some(RangeFunction::MaxOverTime),
@@ -346,7 +346,7 @@ fn threshold_witness_prices_over_the_result() {
 
 /// (m): a longer window lengthens q's tumbling-window chain of exact sums.
 #[test]
-fn longer_window_witness_prices_over_a_lengthened_chain() {
+fn longer_window_witness_costs_over_a_lengthened_chain() {
     let q = promql(
         "m_gauge",
         Some(RangeFunction::SumOverTime),
@@ -360,7 +360,7 @@ fn longer_window_witness_prices_over_a_lengthened_chain() {
 
 /// (n): the lengthened chain rolled up to one key fewer.
 #[test]
-fn longer_window_rollup_witness_prices() {
+fn longer_window_rollup_witness_costs() {
     let q = promql(
         "m_gauge",
         Some(RangeFunction::SumOverTime),
@@ -379,7 +379,7 @@ fn longer_window_rollup_witness_prices() {
 /// frequency L2 reads one UnivMon, from q's own state or from `W ∪ {q'}`
 /// planned with UnivMon only (planner-layering Example 2).
 #[test]
-fn other_frequency_statistic_witness_prices_from_one_univmon() {
+fn other_frequency_statistic_witness_costs_from_one_univmon() {
     use asap_devtools::planner_fuzz::generate::generated_workload;
     use asap_devtools::planner_fuzz::{FuzzQuery, Language};
     use asap_types::ir::properties::AccuracyTarget;
