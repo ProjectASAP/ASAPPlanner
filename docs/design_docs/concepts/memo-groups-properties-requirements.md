@@ -85,19 +85,15 @@ This is the single reference table for property dimensions. Stage descriptions b
 | Dimension | Values and meaning | Code reference or target |
 |---|---|---|
 | Parameters | A predefined configuration list per family: KLL and KMV `k`; DDSketch `alpha`; HLL `precision`; CMS and CountSketch `width` and `depth`; heap variants also `heap_size`; UnivMon its sizing parameters. The lists are today's sizing over ε = 0.1 down to 0.001; KMV's and UnivMon's distinct-count entries stop at ε = 0.01. A heap variant combines each width × depth with heap sizes from the 1-2-5 series 10, 20, 50, …, 10 000: a top-k consumer's floor is heap_size ≥ k, and the smallest listed heap that meets it is the next step up, at most 2.5× too large. A sketch build's parameters must be in its family's list; exact operators have no sketch parameters. Hydra and the other families Pass 1 does not size have empty `parameter_list`s, so no build of theirs is a valid candidate until their error models exist (#1228). | `SketchParams` in `crates/types/src/ir/schema/sketch.rs`; predefined lists are the #1203 target |
-| Window layout — Extension | No layout, or tumbling windows with a positive width. Every grid is anchored at phase 0 (the epoch), so the width alone fixes it. Candidate widths come from the gcd closure of the queries' ranges, steps and phases. Sliding merge/subtraction layouts remain future work. Window count is derived from range and width; retention amount is selected later. | `WindowLayout`; `pass2/memo/window_candidates.rs`; #1160 |
 | Timing | `IngestionTime` or `QueryTime` | `ExecutionTiming` |
-| Lifetime | `None`: discard after the consuming execution; `OneEvaluation`: retain until consumers within that evaluation finish; `AcrossEvaluations`: retain across evaluations in the specified period. A non-`None` lifetime means materialized. | `Lifetime`; #1200 / #1214 |
-| Storage medium — Extension | `Memory` or `Disk`, carried by a materialized lifetime | `StorageMedium`; #1214 |
+| Lifetime | `None`: discard after the consuming execution; `OneEvaluation`: retain until consumers within that evaluation finish; `AcrossEvaluations`: retain across evaluations in the specified period. A non-`None` lifetime means materialized. | `Lifetime`; #1200 |
+| Storage medium — Extension | `Memory` or `Disk`, carried by a materialized lifetime | `StorageMedium` |
 
 Error guarantees are derived from parameters and the statistic being read. They include an error metric, a bound, and a failure probability; exact computation introduces no approximation error. The same state may support different readouts, so its guarantee must be interpreted for the relevant statistic.
 
-The extended logical properties add the window layout; the physical properties stay the formulation's:
+The properties are the formulation's, $p_v^{\mathrm{log}}=\boldsymbol\theta_v$ and $p_v^{\mathrm{phys}}=(\tau_v,\ell_v)$; in code, `LogicalProperties { parameters }` and `PhysicalProperties { timing, lifetime }`.
 
-$$
-p_v^{\mathrm{log}}=(\boldsymbol\theta_v,\omega_v),\qquad
-p_v^{\mathrm{phys}}=(\tau_v,\ell_v).
-$$
+**Tumbling windows are expressions, not properties.** A tumbling-window chain is its own memo group, `SummaryTumblingWindowChain[w](X)`, with the window width $w$ as an operator argument (Section 3, "Chain groups"). Every grid is anchored at phase 0 (the epoch), so the width alone fixes it. A query over a range reads the chain through `TimeRange` and `TimeShift` groups and merges the selected windows with `SummaryMerge`. No property carries the width, and two queries with different ranges or offsets share one chain group. Sliding merge/subtraction layouts remain future work; how many windows a chain retains is $h_v$ (Section 5).
 
 ### Logical requirements
 
@@ -118,25 +114,35 @@ Physical requirements are derived from the consumer's timing and execution conte
 
 QT means QueryTime; IT means IngestionTime. Alignment, data coverage, and retention checks still apply to allowed combinations.
 
-**Alignment.** There is no physical schedule property. When a result can be read follows from its lifetime and window layout:
+**Alignment.** There is no physical schedule property. When a result can be read follows from its lifetime and, for a chain, its window width:
 - **None** and **OneEvaluation**: the result is computed inside one evaluation context κ (Section 5) and read there. A OneEvaluation result belongs to one context: queries with equal recurrence and range evaluation are evaluated together, and that evaluation's consumers share the result. When it runs is the context's schedule, and Stage 3 chooses it through $x_{\kappa,v}$, just as for ℓ = None. Sharing across differently scheduled queries through a gcd schedule is not offered: it is rarely beneficial and wastes runs.
-- **Windowed AcrossEvaluations**: the input is cut into tumbling windows [k·w, (k+1)·w), with w from the window layout ω and the grid anchored at phase 0 (the epoch). Each window is built when it ends and can be read from then on. A consumer can read a range that ends on a window boundary. With w = 10 s, a `[1m]` query evaluated every 30 s at phase 0 merges the newest 6 windows; one evaluated at phase 15 s cannot, because its range ends inside a window; with that query in the workload, the gcd closure also offers w = 5 s, which both can read.
+- **AcrossEvaluations** is offered only to chain candidates, `SummaryTumblingWindowChain[w](X)`: the input is cut into tumbling windows [k·w, (k+1)·w), with the grid anchored at phase 0 (the epoch). Each window is built when it ends and can be read from then on. A `TimeRange` over the chain selects the windows that lie fully inside [t − range, t), so a consumer can read a range whose ends lie on window boundaries. With w = 10 s, a `[1m]` query evaluated every 30 s at phase 0 merges 6 windows; one evaluated at phase 15 s cannot, because its range ends inside a window; with that query in the workload, the gcd closure also offers w = 5 s, which both can read. Every other candidate, including the `TimeRange` and `TimeShift` groups over a chain, is computed within one evaluation.
 
-A grid phase is not needed: a phase is absorbed by the width, because width candidates come from the gcd closure of the queries' ranges, steps and phases. For example, phases 0 and 5 s with w = 10 s give w = 5 s. Alignment alone does not ensure sufficient retained history; that is $h_v$ (Section 5).
+A grid phase is not needed: a phase is absorbed by the width, because width candidates come from the gcd closure of the queries' grids, ranges and offsets (Section 3). For example, phases 0 and 5 s with w = 10 s give w = 5 s. Alignment alone does not ensure sufficient retained history; that is $h_v$ (Section 5).
 
-An evaluation context κ is described by the workload's own recurrence and range evaluation (Section 5). Let a windowed producer have tumbling width $w$. A consumer running in κ can read the producer when $w$ divides every evaluation time of κ:
+**Why a chain needs a declared phase.** Take `sum_over_time(m[5m])` evaluated every 60 s, and a 60 s chain with windows [12:00:00, 12:01:00), [12:01:00, 12:02:00), …
 
-| Producer lifetime, or κ's recurrence for a windowed AcrossEvaluations producer | Required alignment |
+| Case | Evaluation at | Data needed | Windows |
+|---|---|---|---|
+| Phase 0 declared | 12:05:00 | [12:00:00, 12:05:00) | exactly the 5 windows [12:00, 12:01) … [12:04, 12:05): the merge is correct |
+| No phase declared; the engine actually evaluates at second 17 | 12:05:17 | [12:00:17, 12:05:17) | [12:00, 12:01) holds only 43 s of the range and [12:05, 12:06) only 17 s: merging only full windows misses [12:00:17, 12:01:00) and [12:05:00, 12:05:17); adding the partial windows counts [12:00:00, 12:00:17) and [12:05:17, 12:06:00) too. Both answers are wrong |
+| Phase 15 s declared | 12:05:15 | [12:00:15, 12:05:15) | the widths divide gcd(60 s, 5 m, 15 s) = 15 s; with w = 15 s the range is exactly 20 windows |
+
+Prometheus staggers rule-group evaluations by a hash of the group, so a fixed interval without a declared phase does not mean phase 0. One rule decides both sides: `QueryRecurrence::evaluation_grid_ms` returns `None` for a `FixedInterval` without a phase. Pass 2 then offers that query no chain width, and `delivers_on` lets it read no chain. Workloads declare the phase with `FixedIntervalAt { interval, evaluation_phase }` to use chains.
+
+An evaluation context κ is described by the workload's own recurrence and range evaluation (Section 5). Let a chain producer have tumbling width $w$. A consumer running in κ can read the producer when $w$ divides every evaluation time of κ:
+
+| Producer lifetime, or κ's recurrence for a chain producer with ℓ = AcrossEvaluations | Required alignment |
 |---|---|
 | None | Always: runs in κ |
 | OneEvaluation | The result belongs to κ |
 | `FixedIntervalAt { interval, evaluation_phase }`, range step $s$ | $w \mid \gcd(\text{interval}, s, \text{phase})$, the evaluation grid; $s$ counts only for a range evaluation of more than one step |
 | `Scheduled(times)` | $w$ divides every time (and $s$) |
 | `OneTime { execute_at: Some(t) }` | $w \mid t$ (and $s$) |
-| `FixedInterval` without a phase, `OneTime { execute_at: None }`, `EstimatedRate`, `Unknown` | Never: the evaluation times are not known |
-| AcrossEvaluations, no window layout | Not offered yet: it needs its own delivery rule |
+| `FixedInterval` without a phase, `OneTime { execute_at: None }`, `EstimatedRate`, `Unknown` | Never: the evaluation times are not known, and `evaluation_grid_ms` is `None` |
+| AcrossEvaluations on a candidate that is not a chain | Not offered: only chain candidates are materialized across evaluations |
 
-The evaluation grid is `QueryRecurrence::evaluation_grid_ms(range_evaluation)` in `crates/types/src/workload/mod.rs`, which the workload entries also use. One-off queries are supported: each is a context of its own recurrence, run `invocations` times.
+The evaluation grid is `QueryRecurrence::evaluation_grid_ms(range_evaluation)` in `crates/types/src/workload/mod.rs`, which the workload entries, Pass 2's chain widths and `delivers_on` all use. One-off queries are supported: each is a context of its own recurrence, run `invocations` times.
 
 ### Invalid combinations
 
@@ -146,7 +152,7 @@ The checked constructor rejects one combination:
 |---|---|
 | IngestionTime with OneEvaluation | No query evaluation lifetime at ingestion time |
 
-A tumbling grid's width is the candidate's logical window layout $\omega_v$ and its phase is 0, so no physical field repeats or extends it.
+A tumbling grid's width is an argument of the chain operator, part of the expression, and its phase is 0, so no property repeats or extends it.
 
 ### Decision tree and order of decisions
 
@@ -157,21 +163,19 @@ flowchart TD
     G["Memo group G<br/>(logical result)"] --> R1["e_v: exact operator"]
     G --> R2["e_v: readout of KLL state"]
     G --> R3["e_v: readout of DDSketch state"]
+    G --> R5["e_v: SummaryMerge over TimeRange<br/>of a chain of width w<br/>(state groups; widths from the<br/>gcd closure of grids, ranges, offsets)"]
     G --> R4["e_v: other operators<br/>(prune: executor support)"]
 
     R2 --> T1["θ: k = 200"]
     R2 --> T2["θ: k = 345"]
     R2 --> T3["θ: k = …<br/>(prune: pruning cap)"]
 
-    T2 --> W1["ω: no windows"]
-    T2 --> W2["ω: tumbling, width w<br/>from the gcd closure of ranges,<br/>steps and phases (prune: w must<br/>divide the group's query range)"]
-
-    W2 --> P1["τ = QueryTime"]
-    W2 --> P2["τ = IngestionTime<br/>(prune: no ingestion pipeline)"]
+    T2 --> P1["τ = QueryTime"]
+    T2 --> P2["τ = IngestionTime<br/>(prune: no ingestion pipeline)"]
 
     P1 --> L1["ℓ = None"]
     P1 --> L2["ℓ = OneEvaluation"]
-    P1 --> L3["ℓ = AcrossEvaluations<br/>(prune: deployment keeps<br/>no query-time results)"]
+    P1 --> L3["ℓ = AcrossEvaluations<br/>(prune: not a chain; deployment<br/>materializes no query-time results)"]
     P2 --> L4["ℓ = None"]
     P2 --> L5["ℓ = AcrossEvaluations"]
     P2 -. invalid .-> L6["ℓ = OneEvaluation"]
@@ -179,11 +183,10 @@ flowchart TD
 
 | Level | Decides | Stage | Values offered | Pruned when |
 |---|---|---|---|---|
-| 1 | expression $e_v$ | Pass 1 and Pass 2 rules | each way to compute the group | the executor cannot build the family |
-| 2 | $\boldsymbol\theta_v$ | Pass 1 | the family's predefined list | the pruning cap (Section 4) |
-| 3 | $\omega_v$ — Extension | Pass 2 | tumbling widths from the gcd closure of the queries' ranges, steps and phases | the width does not divide the group's query range |
-| 4 | $\tau_v$ | Stage 2 | QueryTime, IngestionTime | the source has no ingestion pipeline |
-| 5 | $\ell_v$ | Stage 2 | None, OneEvaluation, AcrossEvaluations | invalid with $\tau_v$; the deployment keeps no query-time results |
+| 1 | expression $e_v$, including a merge over a chain of width $w$ | Pass 1 and Pass 2 rules | each way to compute the group; chain widths from the gcd closure of the reaching queries' grids, ranges and offsets | the executor cannot build the family; no reaching query has a known grid |
+| 2 | $\boldsymbol\theta_v$ | Pass 1 | the family's predefined list | the pruning cap (Section 4); dead-candidate elimination (Section 3) |
+| 3 | $\tau_v$ | Stage 2 | QueryTime, IngestionTime | the source has no ingestion pipeline |
+| 4 | $\ell_v$ | Stage 2 | None, OneEvaluation, AcrossEvaluations | invalid with $\tau_v$; AcrossEvaluations on a candidate that is not a chain; the deployment materializes no query-time results |
 
 The tree does not decide which producer each consumer input reads ($y$), in which context a candidate with ℓ = None or OneEvaluation runs (Section 5), or how much an AcrossEvaluations candidate retains ($h_v$). Those are Stage 3 choices.
 
@@ -192,11 +195,11 @@ The tree does not decide which producer each consumer input reads ($y$), in whic
 **The order changes how many nodes enumeration visits:** $\sum_d \prod_{d' \le d} \lvert \text{values left at } d' \rvert$. Dimensions that prune much go early; dimensions that multiply without pruning go late. The order above follows four rules:
 
 1. **Logical before physical.** Stage 1 hash-conses groups and computes $\alpha^{\log}$ once, before Stage 2 multiplies each logical candidate by its physical alternatives.
-2. **Strong prunes early.** Executor support and the pruning cap act before windows and physical properties multiply the tree.
+2. **Strong prunes early.** Executor support and the pruning cap act before physical properties multiply the tree.
 3. **Dependent dimensions adjacent.** $\tau \to \ell$ rejects the invalid combination at the first level that can detect it.
-4. **Deployment-wide prunes as early as possible.** Without an ingestion pipeline the IngestionTime subtree is pruned once per candidate; moving $\tau$ above $\omega$ would prune it once per group, with the same leaves.
+4. **Deployment-wide prunes as early as possible.** Without an ingestion pipeline the IngestionTime subtree is pruned once per candidate; moving $\tau$ above $\boldsymbol\theta$ would prune it once per group, with the same leaves.
 
-Alternative orders worth measuring: $\tau$ first, when most sources lack an ingestion pipeline; $\omega$ before $\boldsymbol\theta$, when queries' ranges prune many widths; and requirement-driven (top-down) enumeration, which visits fewer nodes but must take the union of all consumers' requirements so that sharing is not lost.
+Alternative orders worth measuring: $\tau$ first, when most sources lack an ingestion pipeline; and requirement-driven (top-down) enumeration, which visits fewer nodes but must take the union of all consumers' requirements so that sharing is not lost.
 
 ## 3. Pipeline: interfaces and rules
 
@@ -204,7 +207,7 @@ Alternative orders worth measuring: $\tau$ first, when most sources lack an inge
 |---|---|---|---|
 | Stage 0 | Query IR | `Memo` (groups without candidates) | Hash-cons logical expressions |
 | Stage 1, Pass 1 | Group DAG | `Memo` | Add initial logical candidates and intermediate groups |
-| Stage 1, Pass 2 | Memo | `LogicalASAPMemoCandidates` | Add reuse alternatives and compute logical edges |
+| Stage 1, Pass 2 | Memo | `LogicalASAPMemoCandidates` | Add rollup, top-k and chain alternatives, set parameter floors, eliminate dead candidates, and compute logical edges |
 | Stage 2 | Logical memo candidates | `PhysicalASAPMemoCandidates` | Expand physical alternatives and compute compatibility |
 | Stage 3 | Physical memo candidates | `DagOfSelectedCandidates` | Select implementations, dependencies, and executions |
 | Realizer/export | Selected DAG | `PhysicalASAPDAG` | Build and export the executable graph |
@@ -236,23 +239,26 @@ pub struct MemoGroup {
 pub struct GroupProperties {
     pub schema: Schema,
     pub result_kind: OperatorResultKind,
-    /// What a summary-state group covers; `None` for any other group.
-    pub summary_coverage: Option<SummaryCoverage>,
+    /// What an aggregate group covers: a summary state, a chain, a merge
+    /// over a chain's windows, or an exact `Aggregate` result; `None` for
+    /// any other group.
+    pub aggregate_coverage: Option<SummaryCoverage>,
     /// Whether two equal expressions return the same rows for the same
     /// input rows, so they may be one group (not an unordered `LIMIT`).
     pub shareable_when_equal: bool,
 }
 
-/// What a summary state computes, with every lifted selection removed.
+/// What a summary state or exact aggregate computes, with every lifted
+/// selection removed.
 pub struct SummaryStateDefinition {
     /// The group the operators below read: the first input under the
-    /// SummaryAgg that is not Filter / range TimeRange / TimeShift without @
+    /// SummaryAgg (or Aggregate) that is not Filter / TimeRange / TimeShift
     /// / direct-column Project. `None` only when a Scan's predicates are
     /// lifted; the Scan, with its residual predicates, is then the last
     /// unlifted operator.
     pub input_group: Option<MemoGroupId>,
     /// The operators not lifted into the selection, listed top down from
-    /// the SummaryAgg, each with only its residual arguments. `None` marks
+    /// the SummaryAgg (or Aggregate), each with only its residual arguments. `None` marks
     /// an operator's main input (the next unlifted operator, or input_group);
     /// `Some(g)` is another input group it reads, such as the group a scalar
     /// subquery in a Filter reads. Two states may merge only if input_group
@@ -301,9 +307,9 @@ pub(crate) trait OperatorInput: Sized {
     fn result_kind(&self) -> OperatorResultKind;
     /// The input's own operator, its children as inputs again.
     fn operator(&self) -> Operator<Self>;
-    fn summary_coverage(&self) -> Option<&SummaryCoverage>;
+    fn aggregate_coverage(&self) -> Option<&SummaryCoverage>;
 }
-// Front-end node trees; summary_coverage is None.
+// Front-end node trees; aggregate_coverage is None.
 impl OperatorInput for Rc<OperatorNode> { … }
 /// A memo group read as an input: its group_properties and expression.
 pub(crate) struct MemoGroupAsInput<'m> { memo: &'m Memo, group_id: MemoGroupId }
@@ -322,15 +328,15 @@ fn derive_group_properties(
 ) -> Result<GroupProperties, SchemaDerivationError>;
 ```
 
-Summary coverage exists only in the memo: a node tree has none, and `SummaryCoverage` has no type parameter. The executor reads only `definition_id` from the plan.
+Aggregate coverage exists only in the memo: a node tree has none, and `SummaryCoverage` has no type parameter. The executor reads only `definition_id` from the plan.
 
 A group is its expression: one operator, with its arguments, over input groups. Hash-consing compares and hashes the expression directly, so two expressions are one group when their operators and arguments are equal and their input groups are the same. θ is not an operator argument, so builds that differ only in θ share one group. An expression whose copies may return different rows (an unordered `LIMIT`) always gets a new group.
 
 Everything that was computed on operator-node trees is computed on groups. `find_or_add_group` derives `GroupProperties` once, when the group is created, with `derive_group_properties`: the rules that check operator nodes (schema derivation, input validation, merge check), applied to the expression over `MemoGroupAsInput`s, which read only the input groups' `expression` and `group_properties`, never a node tree:
 
 - `schema` and `result_kind` from the operator and its input groups' schemas and result kinds; a scalar subquery reads the referenced group's schema.
-- `summary_coverage`, for a summary state: walking down from the SummaryAgg through the input groups' expressions while each is a Filter, a range TimeRange, a TimeShift without `@` or a direct-column Project, lifting their predicates into the selection. The group below them is the definition's `input_group`. A Scan's predicates (PromQL label matchers) are lifted too; the Scan with its residual predicates is then the last unlifted operator and `input_group` is `None`. The operators not lifted, each with its residual arguments, are `unlifted_operators`. A tumbling-window chain covers what one build over its whole window does. A merge's coverage comes from its inputs' stored coverage; a merge is valid only over inputs with equal definitions and disjoint selections.
-- The checks that read an input's operator (a merge of the newest windows reads a window chain; a selected build) read the input group's `expression`.
+- `aggregate_coverage`, for a summary state or an exact `Aggregate` result: walking down from the SummaryAgg or Aggregate through the input groups' expressions while each is a Filter, a TimeRange, a TimeShift (with or without `@`) or a direct-column Project, lifting their predicates into the selection; a TimeRange or TimeShift becomes an interval on the timestamp column (below). The group below them is the definition's `input_group`. A Scan's predicates (PromQL label matchers, SQL filters, including absolute timestamp filters) are lifted too; the Scan with its residual predicates is then the last unlifted operator and `input_group` is `None`. The operators not lifted, each with its residual arguments, are `unlifted_operators`. A chain `SummaryTumblingWindowChain[w](X)` has the definition of a build over X and leaves the timestamp column unconstrained; a `TimeRange` or `TimeShift` over a chain constrains it as over raw rows. A merge's coverage comes from its inputs' stored coverage; a merge is valid only over inputs with equal definitions and disjoint selections, or over one time-indexed state. So the coverage of `SummaryMerge(TimeRange(TimeShift(Chain[w](X))))` equals that of `SummaryAgg(TimeRange(TimeShift(X)))`, and `add_candidate` accepts the merge in the original state group.
+- The checks that read an input's operator (a merge over a time-indexed state reads a `TimeRange` over a chain; a selected build) read the input group's `expression`.
 - `shareable_when_equal`: a `LIMIT` is shareable over a `Sort` with the same partitions (the input group's `expression`); a `Dedup` on every column (the input group's schema).
 
 `add_candidate` derives a candidate's properties with the same `derive_group_properties` and requires its schema and result kind to equal the group's. `OperatorNode` recursively contains chosen child nodes and therefore describes a fixed plan fragment; `Operator<MemoGroupId>` contains input group IDs and leaves their implementations open. A candidate needs its own expression because a group may offer several ways to compute the same result.
@@ -347,7 +353,7 @@ pub struct GroupProperties {
     pub result_kind: OperatorResultKind,
     /// One entry per output column, in schema order.
     pub column_lineage: Vec<ColumnLineage>,
-    pub summary_coverage: Option<SummaryCoverage>,
+    pub aggregate_coverage: Option<SummaryCoverage>,
     pub shareable_when_equal: bool,
 }
 
@@ -365,12 +371,31 @@ pub enum ColumnLineage {
     Computed,
 }
 
-/// Summary coverage keys its selections by the same type.
+/// Aggregate coverage keys its selections by the same type. The timestamp
+/// column is one of the columns; there is no separate time field.
 pub struct SelectionBox {
     pub columns: BTreeMap<SourceColumn, Constraint>,
-    pub relative_time: Option<(Bound<i64>, Bound<i64>)>,
+}
+
+/// An endpoint of an interval on a timestamp column.
+pub enum TimeBound {
+    /// An absolute time, in ms since the epoch.
+    At(i64),
+    /// An offset, in ms, from the evaluation time t.
+    FromEvaluationTime(i64),
 }
 ```
+
+A repeatedly evaluated query covers different absolute times at every evaluation, so its group's coverage is written relative to the evaluation time t; an `@ T` modifier or a SQL timestamp filter is absolute. Both are intervals on the timestamp column, compared and lifted like any other column constraint. For a range evaluation over [t − D, t] (D is the query range's duration):
+
+| Query fragment | Constraint on `m.ts` |
+|---|---|
+| `m[5m]` | [t − 5m, t): both ends `FromEvaluationTime` |
+| `m[5m] offset 1h` | [t − 1h − 5m, t − 1h) |
+| `m[5m] @ end()` | [t − 5m, t): the same as no `@` in an instant query |
+| `m[5m] @ start()` | [t − D − 5m, t − D): an offset of D |
+| `m[5m] @ 1700000000` | [T − 5m, T) with T = 1700000000 s: both ends `At` |
+| SQL `WHERE ts >= '2026-11-01'` | [2026-11-01, ∞): `At` |
 
 **Derivation, per operator** (from the input groups' `column_lineage`):
 
@@ -433,7 +458,9 @@ Implementation locations: `crates/logical-asap-optimization/src/pass1/per_comput
 | Exact | Exact candidate in the result group |
 | Exact accumulator | Accumulator-state group plus a finalize candidate in the result group |
 | Summary | One state group per supported family; one build candidate per listed parameter configuration; separate readout candidates |
-| Fused build (#1203 2c) | Several operators of one sub-DAG pattern, in one appearance of the sub-expression, fused into one candidate operator; `fused_groups` lists the groups of the operators it replaces |
+
+Pass 1 candidates carry no parameter floors, not even a top-k's heap_size ≥ k: Pass 2 sets every floor once all candidates exist.
+| Fused build | Several operators of one sub-DAG pattern, in one appearance of the sub-expression, fused into one candidate operator; `fused_groups` lists the groups of the operators it replaces |
 
 ```rust
 pub struct CandidateForMemoGroupId {
@@ -463,6 +490,17 @@ impl Memo {
     ) -> Result<CandidateForMemoGroupId, CandidateError>;
 
     pub fn candidate(&self, id: CandidateForMemoGroupId) -> &CandidateForMemoGroup;
+
+    /// Replaces candidate `id`'s input requirements r^log_{c,i}, one per
+    /// input group. The only way to change a candidate's r^log: Pass 2 sets
+    /// each parameter floor from the input's caps and direct needs after the
+    /// rules have run. Panics when the vector does not have one entry per
+    /// input group.
+    pub fn set_input_requirements(
+        &mut self,
+        id: CandidateForMemoGroupId,
+        input_requirements: Vec<LogicalRequirements>,
+    );
 }
 
 pub enum CandidateError {
@@ -481,6 +519,8 @@ pub struct CandidateExpression {
 pub struct CandidateForMemoGroup {
     pub expression: CandidateExpression,
     pub logical_properties: LogicalProperties,
+    /// r^log_{c,i}, one per input group; changed only through
+    /// `Memo::set_input_requirements`.
     pub input_requirements: Vec<LogicalRequirements>,
     /// The groups of the operators this candidate fuses: a sub-DAG pattern
     /// of several operators, in one appearance of the sub-expression,
@@ -493,25 +533,18 @@ pub struct CandidateForMemoGroup {
 
 pub struct LogicalProperties {
     parameters: Option<SketchParams>,
-    window_layout: Option<WindowLayout>,
-}
-
-pub enum WindowLayout {
-    Tumbling { width_ms: u64 },
 }
 
 impl LogicalProperties {
-    /// Rejects parameters missing on a sketch build, present on an exact
-    /// operator, of another family or not in the family's list, and a window
-    /// of width 0 or on an operator that cannot be windowed.
+    /// Rejects parameters missing on a sketch build (a chain included),
+    /// present on an exact operator, of another family or not in the
+    /// family's list.
     pub fn new(
         expression: &CandidateExpression,
         parameters: Option<SketchParams>,
-        window_layout: Option<WindowLayout>,
     ) -> Result<Self, LogicalPropertiesError>;
 
     pub fn parameters(&self) -> Option<&SketchParams>;
-    pub fn window_layout(&self) -> Option<&WindowLayout>;
 }
 
 pub fn parameter_list(family: SketchAlgorithm) -> &'static [SketchParams];
@@ -546,22 +579,222 @@ Migration targets: remove private `root_node` chains, duplicate `input_groups`, 
 
 ### Stage 1, Pass 2: reuse rules and logical edges
 
-Paths are relative to `crates/logical-asap-optimization/src/pass2/memo/`.
+Pass 2 (`crates/stage1-pass2-reuse-candidates`) runs these steps in order:
 
-| Rule / function | File | Result or migration target |
+| Step | What it does | Why it is here |
 |---|---|---|
-| Local windows: `add_local_window_composition` | `window_candidates.rs` | Add layouts to the state group; #1160 removes copied window consumers |
-| Scan widening: `add_scan_label_candidates` | `rules/scan_labels.rs` | Add a widened scan group and projections in the original groups; #1222 |
-| Summary inputs: `factor_summary_inputs` | `rules/summary_inputs.rs` | Expose projections/filters as input groups; #1218 moves this into initial population |
-| Top-k reuse: `add_topk_candidates` | `rules/topk.rs` | Read a compatible larger top-k result with an exact-input requirement; #1220 |
-| Finer aggregate: `add_finer_aggregate_candidates` | `rules/finer_aggregate.rs` | Filter and roll up finer groups, using separate intermediate groups; #1220 |
-| Rollup: `add_rollup_candidates` | `rules/rollup.rs` | Add compatible finer-state merges; #1221 |
-| Window rollup: `add_window_rollup_candidates` | `rules/rollup.rs` | Merge shorter windows into longer-range results; #1221 |
-| Summary results: `factor_summary_results` | `rules/summary_results.rs` | Removed once Pass 1 exposes readouts; #1218 |
-| Shared configurations: `add_state_configuration_candidates` | `rules/shared_configuration_readers.rs` | Remove copied consumers once producer variants are selectable; #1203 2b |
-| Shared state groups: `add_shared_summary_state_groups` | `state_groups.rs` | Remove per-size groups; #1203 2b / #1160 |
+| 1. Rollup from the finest common group | Adds candidates that compute a coarser group from a finer one, and synthesizes one finest common group per cluster of equal definitions | Its candidates are new consumers that later steps must see |
+| 2. Top-k reuse | Reads a compatible larger top-k result with an exact-input requirement | Same reason |
+| 3. Reach, caps and floors | Computes which queries reach each candidate along candidate edges, the validity and pruning caps (Section 4), and each input's parameter floor, written with `Memo::set_input_requirements` | Needs every consumer added by steps 1 and 2 |
+| 4. Dead-candidate elimination | Removes candidates no query can use, transitively, and records the root cause of each | Needs the floors; keeps step 5 from building windows for dead candidates |
+| 5. Chain groups | Adds tumbling-window chain groups and the merges that read them, with widths from the queries that reach each state group | Needs the reach of step 3, including rollup consumers, and only the survivors of step 4 |
+| 6. Logical edges | Records every (producer, consumer, input) and whether it satisfies the input's logical requirement | Runs on the final memo |
 
-After the rules, Pass 2 builds the logical edges and applies the pruning caps of Section 4. Edges name the consumer input `input_index_of_consumer`.
+Rules match group expressions, add groups with `find_or_add_group` and candidates with `add_candidate`, and never copy consumers to make a new producer visible.
+
+#### Rollup from the finest common group
+
+One rule computes a coarse group $G_c$ from a finer group $G_f$. It covers coarser SQL aggregates, coarser summary states, filtered sketch rollups, rollups of finalized values, and scan widening. $G_c$ can be computed from $G_f$ when all of these hold:
+
+1. **Equal definition.** Both have an `aggregate_coverage` and equal `definition`s: the same computation over the same input rows, apart from the selection.
+2. **Rows are a subset.** $G_c$'s selection is inside $G_f$'s. Where it is narrower, the narrowing constrains only columns that are group-by keys of $G_f$ (matched by column lineage), so a compensating `Filter` over $G_f$'s output can select those rows. A `Filter` over state rows keeps them states.
+3. **Keys are coarser.** $G_c$'s keys are a subset of $G_f$'s keys, by lineage.
+4. **A rollup exists.** States roll up with `SummaryMerge(group_by)`. Finalized values roll up as follows; anything else rolls up only from states:
+
+   | Finer measure | Coarser measure |
+   |---|---|
+   | sum | sum |
+   | count | sum |
+   | min / max | min / max |
+   | avg, quantile, top-k, distinct count | only from states |
+5. **Equal time constraints.** The constraints on the timestamp column are equal. A longer range is read from a shorter one's windows through a shared chain (below), not by this rule.
+
+The candidate added to $G_c$ is `Rollup(by keys of Gc)(Filter(compensation, Gf))`, without the `Filter` when the selections are equal. The compensation must use only key columns because each output row of $G_f$ has already combined all raw rows of its key: a predicate on any other column, or on a computed value, cannot separate them.
+
+**Finest common group.** For every cluster of at least two groups with equal definitions and equal time constraints, the rule synthesizes one group $G^*$ that every member can roll up from:
+- its selection is, per column, the union of the members' constraints;
+- its keys are the union of the members' keys, plus every column on which some member's selection is narrower than $G^*$'s, so each member's compensation uses only $G^*$'s keys.
+
+$G^*$ is added with `find_or_add_group`, so it is an existing group when one matches, and each member gets a rollup candidate from it. Only this finest group is synthesized; intermediate groupings are not enumerated. $G^*$ is no query's output: Stage 3 selects it only when it is cheaper, and it is eliminated in step 4 when nothing reads it.
+
+A Scan has no aggregation, so for scans every column is a key and the rollup step is empty: the finest common Scan reads the union of the members' label or column selections, and each member reads it through a compensating `Filter`/`Project`.
+
+**Example 1: filtered sketch rollup.** F = `quantile by (job, host)(…latency[5m])`, C = `quantile by (host)(…latency{job="api"}[5m])`.
+
+| Group | Expression | Coverage (definition, selection) | Keys | Candidates |
+|---|---|---|---|---|
+| G1 | `Scan latency` | | | |
+| G2 | `TimeRange(5m, G1)` | | | |
+| G3 | `SummaryAgg[KLL, by job, host](G2)` | D, `ts` ∈ [t − 5m, t) | job, host | builds |
+| G4 | `Scan latency{job="api"}` | | | |
+| G5 | `TimeRange(5m, G4)` | | | |
+| G6 | `SummaryAgg[KLL, by host](G5)` | D, `ts` ∈ [t − 5m, t), `job` ∈ {api} | host | builds; **`SummaryMerge(by host)(G7)`** |
+| G7 | `Filter(job = "api", G3)` | | | its own expression; output is states |
+
+The definitions are equal, the narrowing `job ∈ {api}` is on a key of G3, {host} ⊆ {job, host}, and KLL states merge. G3 is already the finest group of the cluster {G3, G6}, so $G^*$ = G3. A query `quantile by (host)(…latency{status="500"}[5m])` gets no such candidate: `status` is not a key of G3, and every state already mixes status 200 and 500 samples.
+
+**Example 2: rollup of a finer finalized sum.** F = `sum by (job, instance)(rate(x[1m]))`, C = `sum by (job)(rate(x[1m]))`.
+
+| Group | Expression | Keys | Candidates |
+|---|---|---|---|
+| G3 | `rate(x[1m])` per series | | |
+| G4 | `Aggregate(by job, instance; sum)(G3)` | job, instance | exact; finalize of an exact accumulator state |
+| G5 | `Aggregate(by job; sum)(G3)` | job | exact; finalize of an exact accumulator state; **`Aggregate(by job; sum)(G4)`** |
+
+Both are exact `Aggregate` groups with equal definitions and selections, so they have `aggregate_coverage` too. Stage 3 chooses by cost between reading F's finalized result (cheap when it is materialized) and merging accumulator states.
+
+**Example 3: finest common group that no query asks for.** Q1 = `quantile by (host)(latency[5m])`, Q2 = `quantile by (job)(latency{host="xxx"}[5m])`.
+
+| Group | Expression | Coverage (definition, selection) | Keys | Candidates |
+|---|---|---|---|---|
+| G1 | `SummaryAgg[KLL, by host](TimeRange 5m, Scan latency)` | D, all | host | builds; **`SummaryMerge(by host)(G*)`** |
+| G2 | `SummaryAgg[KLL, by job](TimeRange 5m, Scan latency{host="xxx"})` | D, `host` ∈ {xxx} | job | builds; **`SummaryMerge(by job)(G3)`** |
+| **G\*** | `SummaryAgg[KLL, by job, host](TimeRange 5m, Scan latency)` | D, all | job, host | builds |
+| G3 | `Filter(host = "xxx", G*)` | | | its own expression |
+
+The hull of {all, host ∈ {xxx}} is all; the keys are {host} ∪ {job} ∪ {host}, where the last `host` is the column on which G2 is narrower. Stage 3 chooses between two KLL builds and one build of G\* with job × host states.
+
+#### Reach, caps and floors
+
+A query reaches a candidate when a path of candidate edges leads from the query's output group to it; this is the reach $a_{q,v}$, computed top down after steps 1 and 2 so that rollup consumers count. Section 4 defines the caps from it. Each input's floor is the strongest of the floor for its cap (`floor_for_cap` in `asap-accuracy`) and any direct need such as heap_size ≥ k under a top-k. `Memo::set_input_requirements` writes it; nothing else changes a candidate's r^log.
+
+#### Dead-candidate elimination
+
+A candidate that is not a query output is **dead** when it never had a consumer, or when every edge to a consumer fails: the producer is below the input's floor, the metric rule forbids the edge (Section 4), or the consumer is dead. Elimination repeats until nothing changes. Dead candidates get no logical edges and Stage 2 does not expand them; each is recorded with its root causes:
+
+```rust
+pub struct LogicalASAPMemoCandidates {
+    pub memo: Memo,
+    pub edges: Vec<LogicalEdge>,
+    pub pruned: Vec<PrunedLogicalCandidate>,
+}
+
+/// A candidate eliminated by Pass 2.
+pub struct PrunedLogicalCandidate {
+    pub candidate: CandidateForMemoGroupId,
+    /// Every cause: one per failing edge it is cut off by, so mixed causes
+    /// (a floor on one edge, the metric rule on another) are all listed.
+    pub causes: Vec<PruneCause>,
+}
+
+/// One path from the candidate, through consumers that are themselves
+/// eliminated, to the edge that fails. One shortest path per failing edge.
+pub struct PruneCause {
+    /// The eliminated consumers on the path, nearest first.
+    pub through_pruned_consumers: Vec<CandidateForMemoGroupId>,
+    pub root: RootPruneReason,
+}
+
+pub enum RootPruneReason {
+    /// The producer's parameters are weaker than the consumer input's floor.
+    BelowAccuracyFloorRequirement {
+        consumer: CandidateForMemoGroupId,
+        input: usize,
+        floor: SketchParams,
+    },
+    /// The consumer's error contract carries none of the producer's metrics.
+    MetricRule {
+        consumer: CandidateForMemoGroupId,
+        input: usize,
+        producer_metric: AccuracyMetric,
+        consumer_carries: Vec<AccuracyMetric>,
+    },
+    /// The candidate never had a consumer and is not a query output. A
+    /// candidate whose consumers were eliminated is traced to their causes.
+    NoConsumer,
+}
+```
+
+**Example: ratio of quantiles.** `quantile_over_time(0.99, m[5m]) / quantile_over_time(0.5, m[5m])` with relative error 0.05.
+
+| Group | Expression | Candidates |
+|---|---|---|
+| G1 | `Scan m` | |
+| G2 | `TimeRange(5m, G1)` | |
+| G3 | `SummaryAgg[KLL](G2)` | #0 … #6: k = 132 … 2863 |
+| G3′ | `SummaryAgg[DDSketch](G2)` | #0 … #6: alpha = 0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001 |
+| G4 | p99 | #0 exact; #1 `SummaryEstimate[q=0.99](G3)`; #2 `SummaryEstimate[q=0.99](G3′)` |
+| G5 | p50 | #0 exact; #1 `SummaryEstimate[q=0.5](G3)`; #2 `SummaryEstimate[q=0.5](G3′)` |
+| G6 | `Divide(G4, G5)` | #0, the query output |
+
+The Divide carries only relative error. Its inputs' cap is 0.05 / 1.111 = 0.045 (Section 4), so the DDSketch readouts' floor is alpha ≤ 0.02. Pass 2 records:
+
+```
+G4#1 SummaryEstimate[q=0.99](G3)
+  G4#1 → G6#0 input 0: MetricRule { producer_metric: Rank, consumer_carries: [Relative] }
+G5#1 SummaryEstimate[q=0.5](G3)
+  G5#1 → G6#0 input 1: MetricRule { producer_metric: Rank, consumer_carries: [Relative] }
+G3#0 SummaryAgg[KLL] k=132          (and likewise G3#1 … G3#6)
+  G3#0 → G4#1 → G6#0 input 0: MetricRule { producer_metric: Rank, consumer_carries: [Relative] }
+  G3#0 → G5#1 → G6#0 input 1: MetricRule { producer_metric: Rank, consumer_carries: [Relative] }
+G3′#0 SummaryAgg[DDSketch] alpha=0.1  (and likewise G3′#1, alpha=0.05)
+  G3′#0 → G4#2 input 0: BelowAccuracyFloorRequirement { floor: alpha 0.02 }
+  G3′#0 → G5#2 input 0: BelowAccuracyFloorRequirement { floor: alpha 0.02 }
+```
+
+The KLL builds' own edges satisfy their consumers; they are dead because their only consumers are, and the trace leads through those consumers to the metric rule. The exact candidates and the DDSketch builds with alpha ≤ 0.02 survive.
+
+#### Chain groups
+
+A state group whose expression is `SummaryAgg(TimeRange(W, TimeShift*(X)))` can be computed from a chain of tumbling windows over X:
+
+```rust
+// The chain: one row per window, (window end, keys, state): a State with a
+// time index. No range and no window count: how much it retains is h_v.
+SummaryTumblingWindowChain { child: X, family, input, reduction, grouping, filter,
+                             tumbling_window_width_ms: u64 }
+// Merges every input state, or regroups them; no window-selection field.
+SummaryMerge { children, group_by }
+```
+
+`TimeRange` and `TimeShift` accept a time-indexed state: over a chain, `TimeRange(W)` at evaluation time t selects the windows lying fully inside [t − W, t), and `TimeShift(o)` moves that interval to [t − o − W, t − o). This needs w to divide W and o, and t to lie on the grid; the widths below and `delivers_on` (Section 2) ensure both. The `TimeRange` and `TimeShift` groups over a chain have only their own expression as a candidate and are computed within one evaluation; only the chain is materialized across evaluations.
+
+**The rule, for each width w of a state group S:**
+1. Walk down from S: `SummaryAgg` → `TimeRange(W)` → zero or more `TimeShift`s → X.
+2. `find_or_add_group(SummaryTumblingWindowChain[w](X))` → $G_w$. The shifts are stripped, so queries with different ranges and offsets over the same X get the same $G_w$.
+3. Re-wrap the stripped shifts and then the `TimeRange` around $G_w$, in their original order, each with `find_or_add_group`.
+4. `add_candidate(S, SummaryMerge(…))` over the outermost re-wrapped group. Its coverage equals S's (Section 3, Stage 0), so the candidate is accepted.
+
+There is one chain per width, shared by every state group over the same X and family.
+
+**Widths.** Each query q that reaches S (step 3) and repeats with a known evaluation grid $g_q$ (`evaluation_grid_ms` is `Some`) gives the width $\gcd(g_q, W, o_1, \ldots)$, with the offsets $o_j$ on its path; S's widths are the gcd closure of these. Queries without a known grid give none, so a group read only by such queries gets no chain. `@` modifiers:
+- `@ end()` reads [t − W, t) relative to the end of the query range, as no `@` does: it is stripped and re-wrapped like a shift and adds no offset.
+- `@ start()` is an offset of the query range's duration D and enters the gcd as one.
+- `@ T` (absolute) contributes no widths: S gets a merge only over chains that other queries' widths created, and only for widths that divide T. Whether reusing the chain is cheaper than computing the result once and materializing it is Stage 3's choice; its retention need is in Section 5.
+
+**Example: three queries share one chain.** A = `sum_over_time(m[5m])`, B = `sum_over_time(m[5m] offset 1h)`, C = `sum_over_time(m[1h])`, each `FixedIntervalAt { 60 s, phase 0 }`. The widths are gcd(60 s, 5m) = gcd(60 s, 5m, 1h) = gcd(60 s, 1h) = 60 s.
+
+| Group | Expression | Candidates |
+|---|---|---|
+| G1 | `Scan m` | |
+| G3a | `SummaryAgg[Sum](TimeRange(5m, G1))` | build; **`SummaryMerge(Ga)`** |
+| G3b | `SummaryAgg[Sum](TimeRange(5m, TimeShift(1h, G1)))` | build; **`SummaryMerge(Gb)`** |
+| G3c | `SummaryAgg[Sum](TimeRange(1h, G1))` | build; **`SummaryMerge(Gc)`** |
+| **Gw** | `SummaryTumblingWindowChain[Sum, w = 60 s](G1)` | one build per θ |
+| Ga | `TimeRange(5m, Gw)` | its own expression |
+| Gs | `TimeShift(1h, Gw)` | its own expression |
+| Gb | `TimeRange(5m, Gs)` | its own expression |
+| Gc | `TimeRange(1h, Gw)` | its own expression |
+
+At t = 12:00, Ga selects the 5 windows [11:55, 11:56) … [11:59, 12:00), Gb the 5 windows [10:55, 10:56) … [10:59, 11:00), and Gc 60 windows. Each sample updates one chain instead of three, and the chain retains max(5m, 1h + 5m, 1h) = 65m, 65 windows (Section 5).
+
+**Example: the rule step by step, for B.** Before the rule:
+
+| Group | Expression |
+|---|---|
+| G1 | `Scan m` |
+| G2 | `TimeShift(1h, G1)` |
+| G3 | `TimeRange(5m, G2)` |
+| G4 | `SummaryAgg[Sum](G3)`: B's state group, one build candidate |
+
+1. Walk down from G4: `SummaryAgg` reads G3; G3 is `TimeRange(W = 5m)` over G2; G2 is `TimeShift(1h)` over G1; G1 is not a shift. So W = 5m, the shifts are [`TimeShift(1h)`], X = G1.
+2. `find_or_add_group(SummaryTumblingWindowChain[Sum, w = 60 s](G1))` → Gw. A and C get the same Gw.
+3. `find_or_add_group(TimeShift(1h, Gw))` → Gs; `find_or_add_group(TimeRange(5m, Gs))` → Gb.
+4. `add_candidate(G4, SummaryMerge(Gb))`.
+
+After the rule, G4 has two candidates, the build and `SummaryMerge(Gb)`; G2 and G3 stay. With widths {30 s, 60 s}, steps 2–4 run once per width, giving two chains and two merge candidates in G4; Stage 3 chooses.
+
+#### Logical edges
 
 ```rust
 fn apply(memo: &mut Memo) -> Result<(), Pass2RuleError>;
@@ -572,16 +805,13 @@ pub struct LogicalEdge {
     pub input_index_of_consumer: usize,
     pub satisfies_logical_requirement: bool,
 }
-
-pub struct LogicalASAPMemoCandidates {
-    pub memo: Memo,
-    pub edges: Vec<LogicalEdge>,
-}
 ```
+
+An edge satisfies the logical requirement when the producer meets the input's floor and the consumer's error contract carries the producer's metric (Section 4).
 
 ### Stage 2: physical alternatives
 
-`enumerate_candidate_configurations` in `crates/physical-asap-optimization/src/catalog/configurations.rs` expands each logical candidate using the dimensions and checks in Section 2. It creates no new logical candidates. Each logical edge is expanded between the relevant physical alternatives.
+`enumerate_candidate_configurations` in `crates/physical-asap-optimization/src/catalog/configurations.rs` expands each logical candidate that survived Pass 2 using the dimensions and checks in Section 2; it offers ℓ = AcrossEvaluations only to chain candidates, and records every other AcrossEvaluations alternative as pruned with `PruneReason::AcrossEvaluationsOnlyForChains`. It creates no new logical candidates. Each logical edge is expanded between the relevant physical alternatives.
 
 ```rust
 // crates/types/src/physical/properties.rs
@@ -617,9 +847,9 @@ impl PhysicalProperties {
 
 impl PhysicalCandidate {
     /// Whether a consumer running in `context` can read this producer
-    /// (Section 2's alignment table): for a windowed AcrossEvaluations
-    /// producer, w (read from its window layout) divides every evaluation
-    /// time of the context; true for ℓ = None, and for OneEvaluation in the
+    /// (Section 2's alignment table): for a chain producer with
+    /// ℓ = AcrossEvaluations, w (the chain operator's width) divides every
+    /// evaluation time of the context (`evaluation_grid_ms`); true for ℓ = None, and for OneEvaluation in the
     /// same context.
     pub fn delivers_on(&self, memo: &Memo, context: &ExecutionContext) -> bool;
 }
@@ -669,7 +899,7 @@ pub struct PhysicalCandidateKey {
 }
 ```
 
-`PhysicalCandidateId` indexes an emitted candidate. `PhysicalCandidateKey` describes an alternative rejected before it received an ID, allowing diagnostics to explain pruning. The admissible-edge accessor returns edge IDs, not the unfiltered producer set from Section 1. `delivers_on` takes a candidate rather than bare properties because a tumbling grid's width lives in the logical window layout.
+`PhysicalCandidateId` indexes an emitted candidate. `PhysicalCandidateKey` describes an alternative rejected before it received an ID, allowing diagnostics to explain pruning. The admissible-edge accessor returns edge IDs, not the unfiltered producer set from Section 1. `delivers_on` takes a candidate and the memo rather than bare properties because a tumbling grid's width is an argument of the chain operator in the candidate's expression.
 
 Migration targets include replacing `Materialization` and duplicated physical fields with checked properties, and replacing `ReaderConstraint::{IncompatibleOutputs, AllowedOutputs}` with compatibility and alignment checks. `ReaderConstraint::{MinimumQueryReaders, HighestSharedQueryMaterialization}` are deleted too; see Section 5.
 
@@ -758,12 +988,18 @@ $$
 
 | Operation and metric | Applicable bound or condition |
 |---|---|
-| Exact pass-through | Preserves the input guarantee only when it preserves the metric's semantics |
+| Exact pass-through (column `Project`, `Sort`, `TimeRange`, `TimeShift`, `Concat`, readouts, finalize, `SummaryMerge`) | Preserves the input guarantee only when it preserves the metric's semantics; β = 1 in any metric |
+| `Filter` whose predicate reads only columns copied from a source (lineage `SourceColumn`: labels and keys, which are exact) | β = 1 in any metric: it selects whole rows and never compares an approximate value |
+| abs, clamp, clamp_min, clamp_max, negation | Absolute error, β = 1 (1-Lipschitz) |
 | Sum/difference, absolute error | Sum of the operands' absolute error bounds |
 | Sum over a known number of values | Sum of their bounds; a common per-value bound can be multiplied by that count |
+| min / max aggregate | Absolute or relative error, β = 1 |
+| avg aggregate, absolute error | β = 1 |
 | Ratio, relative error | Requires nonzero true denominator and denominator relative error below one; bound given below |
+| Product, relative error | (1 + b) for the left operand and 1 for the right, whose relative error is capped at b: $(1+x)(1+y)-1\le(1+b)x+y$ when $y\le b$ |
+| sum / avg, relative error | Holds when the values are known to be nonnegative; not offered until that sign information is an input of the error model |
 
-A filter does not automatically preserve every accuracy guarantee. Group counts may need metadata beyond the expression syntax. Each factor must follow from the operator's error contract.
+A constant contract is unconditional: it needs no row count or sign. A filter does not automatically preserve every accuracy guarantee; a `Filter` that compares an approximate value (an alert threshold such as `quantile_over_time(…) > 0.5`) has no contract. Group counts may need metadata beyond the expression syntax. Each factor must follow from the operator's error contract.
 
 **Metric rule.** Every local guarantee states its metric: absolute (in value units, or a multiple of a stream norm), relative, or rank. A factor $\beta_{c,i}$ is defined for one input metric and one output metric. An input whose metric the consumer's error contract cannot convert gives no edge ($\alpha^{\log} = 0$); the conversion is never assumed. For example, a relative-error ratio cannot read a KLL quantile (rank error) unless a declared distribution assumption supplies the conversion.
 
@@ -774,7 +1010,7 @@ $$
 \frac{\varepsilon_X+\varepsilon_Y}{1-\varepsilon_Y}.
 $$
 
-Choosing a fixed validity cap $b<1$ for the denominator gives a linear upper bound within that region:
+Choosing a fixed validity cap $b<1$ for the denominator gives a linear upper bound within that region. The design fixes $b = 0.1$, for a ratio's denominator and a product's right operand alike: 0.1 is the weakest ε in every family's list, so the cap itself never excludes a listed configuration and only raises β by about 11%:
 
 $$
 \varepsilon_Y\le b
@@ -782,9 +1018,9 @@ $$
 \varepsilon_{X/Y}\le\frac{1}{1-b}(\varepsilon_X+\varepsilon_Y).
 $$
 
-Both local factors are then `1 / (1 - b)`. This is a sufficient bound, not an exact equality or a claim that all feasible nonlinear plans remain represented.
+Both local factors are then `1 / (1 - b)` = 1.111. This is a sufficient bound, not an exact equality or a claim that all feasible nonlinear plans remain represented.
 
-Interface (approved 2026-11-05):
+Interface:
 
 ```rust
 pub struct ErrorPropagation {
@@ -796,13 +1032,17 @@ pub struct ErrorPropagation {
 }
 
 impl LogicalRequirements {
+    /// g_c's linear bound for errors in `metric`, each input's and the
+    /// output's. `None` when the consumer has no error contract for `metric`:
+    /// an input whose error is in `metric` then gives no edge (metric rule).
     pub fn error_propagation(
         consumer: &Operator<MemoGroupId>,
-    ) -> ErrorPropagation;
+        metric: AccuracyMetric,
+    ) -> Option<ErrorPropagation>;
 }
 ```
 
-`factor_per_input` holds the local β factors and `validity_cap_per_input` the per-input caps, aligned by input index. An operator without an error contract is reported as unsupported; no factor is guessed.
+`factor_per_input` holds the local β factors and `validity_cap_per_input` the per-input caps, aligned by input index. An operator without an error contract for a metric returns `None`; no factor is guessed. Every contract keeps the metric: the input's and the output's are the same. For the ratio query of Section 3, `error_propagation(Divide, Relative)` is `Some { factor_per_input: [1.111, 1.111], validity_cap_per_input: [None, Some(0.1)] }`, and the absolute and rank calls return `None`. The key-only `Filter` contract reads the input group's column lineage.
 
 ### Query composition and root checks
 
@@ -860,7 +1100,7 @@ $$
 
 A zero factor gives no pruning restriction for that query. If a factor depends on the eventual plan, use a proven lower bound over all feasible downstream alternatives for this pruning test, or defer pruning. Using an arbitrary path's larger factor could discard a feasible plan. The maximum over queries protects alternatives that can serve at least one query.
 
-Compute the parameter floor from this cap only under the ordering condition in Section 2. Validity information is available when the consumer's error model is established; query-sensitive pruning follows logical generation and reachability analysis. Root checks still couple all contributing errors and determine feasibility.
+Compute the parameter floor from this cap only under the ordering condition in Section 2. `floor_for_cap` in `asap-accuracy` maps a cap to the weakest listed configuration whose ε meets it, for a family and statistic; Pass 2 takes the strongest of it and any direct need such as heap_size ≥ k. For example, with relative error 0.05 at a ratio, each operand's cap is 0.05 / 1.111 = 0.045 and the denominator's is min(0.1, 0.045) = 0.045, so DDSketch's floor is alpha ≤ 0.02. Validity information is available when the consumer's error model is established; query-sensitive pruning follows logical generation and reachability analysis. Root checks still couple all contributing errors and determine feasibility.
 
 ## 5. Execution contexts and other selection extensions — #1207
 
@@ -868,7 +1108,7 @@ These extensions go beyond constraints (A)–(I) and the formulation's fixed-cos
 
 ### Execution identity
 
-An AcrossEvaluations candidate has its own computation: each window is built when it ends. A candidate with ℓ = None runs inside an execution that needs it. For example, a finalize candidate used by queries A (every 10 s) and C (every 15 s) may execute in both evaluation contexts even though Stage 2 enumerates it only once. A OneEvaluation candidate also runs inside one evaluation context κ, and that evaluation's consumers share the result.
+An AcrossEvaluations candidate, always a chain, has its own computation: each window is built when it ends. A candidate with ℓ = None runs inside an execution that needs it. For example, a finalize candidate used by queries A (every 10 s) and C (every 15 s) may execute in both evaluation contexts even though Stage 2 enumerates it only once. A OneEvaluation candidate also runs inside one evaluation context κ, and that evaluation's consumers share the result.
 
 A **context** identifies a class of executions with a common owner and schedule across the accounting horizon. It is not necessarily one timestamp. An evaluation context reuses the workload's own description of when queries run, their `QueryRecurrence` and `RangeEvaluation`: queries with equal ones are evaluated together and share its OneEvaluation results. Queries A and B of the running example, both every 10 s at phase 0, form one context; a one-off query forms the context of its `OneTime` recurrence. `QueryRecurrence` holds an `f64` (`EstimatedRate`) and cannot be hashed, so contexts are deduplicated by equality and `ExecutionContextId` indexes the list of distinct contexts.
 
@@ -885,7 +1125,7 @@ pub enum ExecutionContext {
 }
 ```
 
-A chain of ℓ = None and OneEvaluation candidates inherits its consuming context. Encountering an AcrossEvaluations producer switches to that producer's own computation context when traversing its inputs. The context identifies where the operation runs; `delivers_on` with the context decides whether a windowed producer can supply it.
+A chain of ℓ = None and OneEvaluation candidates inherits its consuming context. Encountering an AcrossEvaluations producer switches to that producer's own computation context when traversing its inputs. The context identifies where the operation runs; `delivers_on` with the context decides whether a chain producer can supply it.
 
 | Extended variable | Meaning |
 |---|---|
@@ -904,12 +1144,12 @@ To avoid confusing per-execution costs with the baseline's horizon-wide cost, us
 
 | Symbol | Definition |
 |---|---|
-| $W_v^{\mathrm{mat}}$ | Fixed computation and access cost over the horizon for an AcrossEvaluations candidate, one build per window, excluding variable retention |
+| $W_v^{\mathrm{mat}}$ | Fixed computation and access cost over the horizon for an AcrossEvaluations candidate (a chain), one build per window, excluding variable retention |
 | $c_{\kappa,v}$ | Cost of one execution in the specified context of a candidate with ℓ = None or OneEvaluation, including a OneEvaluation result's storage within that evaluation |
 | $\rho_\kappa$ | Fixed number or expected number of context executions over the common horizon, from the existing evaluation counting in `crates/cost/src/execution_demand.rs` (a one-off query's is its `invocations`) |
 | $h_v$ | Retention amount in a declared unit, such as retained windows |
 | $\pi_v$ | Horizon-wide retention cost per unit of retained amount |
-| $\operatorname{need}_{\kappa,v,c,i}$ | Retention amount producer v needs to serve this consumer input in this context: the time horizon the queries served by that context read, e.g. a 5m range over 10 s tumbling windows needs 30 windows. Query latency is ignored for now (decided 2026-11-06) |
+| $\operatorname{need}_{\kappa,v,c,i}$ | Retention amount producer v needs to serve this consumer input in this context: the time horizon the queries served by that context read, e.g. a 5m range over 10 s tumbling windows needs 30 windows. Query latency is ignored for now |
 
 A proposed linear objective is:
 
@@ -927,7 +1167,7 @@ $$
 h_v\ge\operatorname{need}_{\kappa,v,c,i}\,y_{\kappa,v,c,i}.
 $$
 
-The need is fixed per edge from the time horizon of the queries it serves, so constraint (R) is linear. It ignores query latency: a result is assumed read as soon as its evaluation starts, so a slow consumer that reads later does not extend the horizon. Modeling that needs the latency design, which is out of scope (Section 5). The retention unit (windows, or seconds of data) and an upper bound on $h_v$ are fixed per candidate when Stage 2 builds it.
+The need is fixed per edge from the time horizon of the queries it serves, so constraint (R) is linear. For a chain it is the reading path's offset plus range: in the example of Section 3, the edge to A's path needs 5m, B's 1h + 5m and C's 1h, so $h_v$ for the shared 60 s chain is at least 65m, 65 windows. `@ end()` needs the range; `@ start()` needs the query range's duration plus the range. An `@ T` path needs the end of the horizon − T + range; when the horizon is unbounded the need is too, and that merge candidate is not offered. It ignores query latency: a result is assumed read as soon as its evaluation starts, so a slow consumer that reads later does not extend the horizon. Modeling that needs the latency design, which is out of scope (Section 5). The retention unit (windows, or seconds of data) and an upper bound on $h_v$ are fixed per candidate when Stage 2 builds it.
 
 ### No consumer-count policies
 
