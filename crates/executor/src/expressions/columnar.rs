@@ -180,6 +180,7 @@ fn literal(value: &ScalarValue) -> (Value, DataType) {
         ScalarValue::Float64(v) => (Value::Float64(*v), DataType::Float64),
         ScalarValue::Utf8(v) => (Value::Utf8(v.as_str().into()), DataType::Utf8),
         ScalarValue::Boolean(v) => (Value::Bool(*v), DataType::Bool),
+        ScalarValue::Timestamp(ms) => (Value::Timestamp(*ms), DataType::Timestamp),
         ScalarValue::Interval {
             months,
             days,

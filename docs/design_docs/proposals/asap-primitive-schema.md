@@ -1360,14 +1360,6 @@ pub struct SelectionBox {
     pub columns: BTreeMap<ColumnIdentity, Constraint>,
 }
 
-/// An endpoint of an interval on a timestamp column.
-pub enum TimeBound {
-    /// An absolute time, in ms since the epoch.
-    At(i64),
-    /// An offset, in ms, from the evaluation time t.
-    FromEvaluationTime(i64),
-}
-
 /// Names a column across nodes, independent of its position.
 pub struct ColumnIdentity {
     /// The table or alias the column comes from; `None` if unqualified.
@@ -1384,10 +1376,29 @@ pub enum Constraint {
     NotIn(Vec<ScalarValue>),
     /// The value lies between `lower` and `upper`. Each end is `Included`,
     /// `Excluded` or `Unbounded`.
-    Interval { lower: Bound<ScalarValue>, upper: Bound<ScalarValue> },
+    Interval { lower: Bound<IntervalConstraintLimit>, upper: Bound<IntervalConstraintLimit> },
     // HashPartition { columns, of, index }: added with its first producer.
 }
 
+/// An end of an interval. Limits compare only within one variant.
+pub enum IntervalConstraintLimit {
+    /// A constant, e.g. `Float64(10.0)` or `Timestamp(ms since the epoch)`.
+    FixedValue(ScalarValue),
+    /// The evaluation time t of a repeatedly evaluated query plus this
+    /// many ms; only on the timestamp column.
+    EvaluationTimePlusMs(i64),
+}
+```
+
+| Query fragment | `lower` | `upper` |
+|---|---|---|
+| PromQL `m[5m]` | `Included(EvaluationTimePlusMs(-300_000))` | `Excluded(EvaluationTimePlusMs(0))` |
+| PromQL `m[5m] offset 1h` | `Included(EvaluationTimePlusMs(-3_900_000))` | `Excluded(EvaluationTimePlusMs(-3_600_000))` |
+| PromQL `m[5m] @ 1700000000` | `Included(FixedValue(Timestamp(1_699_999_700_000)))` | `Excluded(FixedValue(Timestamp(1_700_000_000_000)))` |
+| SQL `WHERE ts >= '2026-11-01'` | `Included(FixedValue(Timestamp(..)))` | `Unbounded` |
+| SQL `WHERE price > 10` | `Excluded(FixedValue(Float64(10.0)))` | `Unbounded` |
+
+```rust
 impl SummaryCoverage {
     /// Computes the coverage of a summary node from its sub-DAG (§4.2.2).
     /// Errors: `NotSummary` for a node that is not a `SummaryAgg`,
