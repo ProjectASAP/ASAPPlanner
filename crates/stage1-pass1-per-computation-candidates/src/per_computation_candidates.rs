@@ -39,7 +39,7 @@
 //! read a state group are readouts, finalizers and merges, whose error
 //! propagation is linear, so no validity cap applies to a state group's
 //! input (concepts doc, section 4). The metric rule and the pruning caps are
-//! decided per edge, after the last Pass 2 rule (#1207 PR 4).
+//! decided per edge, after the last Pass 2 rule (Pass 2's logical edges).
 //!
 //! A measure filter or `HAVING` prunes nothing. The measure filter is
 //! applied as `SummaryAgg.filter`. A `HAVING` is the aggregate's own

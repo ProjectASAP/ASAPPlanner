@@ -81,7 +81,7 @@ pub fn parse_classic_failure_statistic(statistic: &str) -> Option<(u8, f64, &str
 /// distinct bound ([`classic_failure_statistic`]). The failure probability
 /// is per output row: each group's estimate fails with at most it. `None`
 /// for a precision outside the contract's.
-#[allow(dead_code)] // Read again in #1207 PR 4, with θ from `LogicalProperties::parameters`.
+#[allow(dead_code)] // Read again in #1207 PR 8: δ of a distinct count over a source's own rows, with θ.
 pub(crate) fn classic_guarantee(
     precision: u8,
     relative_error: Option<f64>,
