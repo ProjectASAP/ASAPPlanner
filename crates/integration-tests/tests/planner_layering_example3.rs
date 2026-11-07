@@ -27,6 +27,7 @@ fn run_a() -> Run {
         PatternARecurrence::OnceAdHoc,
         DataArrival::Mixed {
             rows_per_second: SHARED_ROWS_PER_SECOND,
+            max_out_of_order_ms: None,
         },
     );
     let roots = lower_promql(&workload);
@@ -148,6 +149,7 @@ fn workload_encodes_example3() {
         PatternARecurrence::OnceAdHoc,
         DataArrival::Mixed {
             rows_per_second: SHARED_ROWS_PER_SECOND,
+            max_out_of_order_ms: None,
         },
     );
     a.validate().expect("valid Pattern A");
@@ -167,6 +169,7 @@ fn stage0_query_language_frontends_a_lowers_each_query_to_its_interval() {
         PatternARecurrence::OnceAdHoc,
         DataArrival::Mixed {
             rows_per_second: SHARED_ROWS_PER_SECOND,
+            max_out_of_order_ms: None,
         },
     ));
     let ops: Vec<_> = roots.iter().map(frontend_operations).collect();

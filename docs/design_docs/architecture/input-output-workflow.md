@@ -189,8 +189,8 @@ struct DataWorkload {
 }
 enum DataArrival {
     AtRest,
-    Ingesting { rows_per_second: f64 },
-    Mixed { rows_per_second: f64 },
+    Ingesting { rows_per_second: f64, max_out_of_order_ms: Option<u64> },
+    Mixed { rows_per_second: f64, max_out_of_order_ms: Option<u64> },
     Unknown,
 }
 struct SourceFacts {
@@ -214,6 +214,7 @@ struct LabelSetDistinctValues {
 |---|---:|---|
 | `arrival` | Present; may be `Unknown` | Distinguishes data at rest, ingesting data, and mixed data. Ingestion-time builds are possible only for ingesting or mixed data. |
 | `rows_per_second` | With `Ingesting`/`Mixed` | Rows arriving per second over all sources, used to price scans and continuous maintenance. It must be finite and non-negative. A source with no `series_count` + `sample_interval` of its own is priced at its series share of it when every source declares `series_count`, else at all of it. |
+| `max_out_of_order_ms` | Optional, with `Ingesting`/`Mixed` | How late a row may arrive after a later row of its series (or table). A counter state (`rate`, `increase`, `irate`) built at ingestion holds each series' samples this long in a reorder buffer, applies them in time order, and is priced with that buffer's memory (`rows_per_second` × `max_out_of_order_ms` × bytes per row). Unknown, continuously ingesting PromQL samples are taken to arrive in order (no buffer), and a counter over SQL rows or mixed data is not built at ingestion. |
 | `series_count` | Optional | Series in the source. Plan selection bounds a query's number of values `G`, and its input row count, by the series counts of the sources it reads (each branch of an `or` counted); unknown, they stay unbound. |
 | `metric_type` | Optional | Declared Prometheus type (`PrometheusMetricType`): `counter`, `gauge`, `histogram`, `native_histogram` or `summary`; a counter proves samples non-negative. Never inferred from a name. A `histogram` or `summary` is keyed by its family name `foo` and supplies its series (`DataWorkload::series_facts`): `foo_bucket` (histogram) or `foo` (summary, per-series quantiles read as values), and the counters `foo_sum` and `foo_count`; any other name is looked up as is. The family entry's `metric_type`, `values_non_negative` and `sample_interval` apply to its series; counts, norms and bounds are read per series name. `histogram_quantile` reads float input as classic buckets, declared `histogram` or undeclared, and rejects a `native_histogram` or `summary`; any query reading a `native_histogram` is rejected. `rate`, `increase` or `irate` over a metric declared a gauge, and `sum`, `avg`, `quantile`, `stddev` or `stdvar` across a summary's quantile series, still plan, with a warning from the PromQL frontend (`metric_type_warnings`), which `asap_planner` reports. |
 | `values_non_negative` | Optional; default `false` | Declares every sample non-negative, for a gauge as well as a counter. It is the sign a relative-error bound needs to carry through `sum` and `avg` (a per-series DDSketch quantile under `avg by`, say); without it, and for a gauge, that bound is unknown. |

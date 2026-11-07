@@ -615,21 +615,37 @@ fn lowered_together(
 }
 
 /// The arrival of two files' data planned together: ingesting (or mixed)
-/// at the sum of their rates; the same arrival when both are at rest or
-/// unknown; `None` when they differ.
+/// at the sum of their rates, with the larger declared out-of-order bound;
+/// the same arrival when both are at rest or unknown; `None` when they
+/// differ.
 fn arrival_together(earlier: DataArrival, later: DataArrival) -> Option<DataArrival> {
     match (earlier, later) {
         (
-            DataArrival::Ingesting { rows_per_second: a },
-            DataArrival::Ingesting { rows_per_second: b },
+            DataArrival::Ingesting {
+                rows_per_second: a,
+                max_out_of_order_ms: late_a,
+            },
+            DataArrival::Ingesting {
+                rows_per_second: b,
+                max_out_of_order_ms: late_b,
+            },
         ) => Some(DataArrival::Ingesting {
             rows_per_second: a + b,
+            max_out_of_order_ms: late_a.max(late_b),
         }),
-        (DataArrival::Mixed { rows_per_second: a }, DataArrival::Mixed { rows_per_second: b }) => {
-            Some(DataArrival::Mixed {
-                rows_per_second: a + b,
-            })
-        }
+        (
+            DataArrival::Mixed {
+                rows_per_second: a,
+                max_out_of_order_ms: late_a,
+            },
+            DataArrival::Mixed {
+                rows_per_second: b,
+                max_out_of_order_ms: late_b,
+            },
+        ) => Some(DataArrival::Mixed {
+            rows_per_second: a + b,
+            max_out_of_order_ms: late_a.max(late_b),
+        }),
         (DataArrival::AtRest, DataArrival::AtRest) => Some(DataArrival::AtRest),
         (DataArrival::Unknown, DataArrival::Unknown) => Some(DataArrival::Unknown),
         _ => None,

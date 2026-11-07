@@ -78,6 +78,7 @@ fn data_workload() -> DataWorkload {
     DataWorkload {
         arrival: DataArrival::Ingesting {
             rows_per_second: 1_000_000.0 / 15.0,
+            max_out_of_order_ms: None,
         },
         sources: [
             ("flows".to_string(), ten_million),

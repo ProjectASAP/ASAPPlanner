@@ -642,6 +642,39 @@ async fn a_window_equal_to_its_interval_is_built_at_ingestion_time_from_table_ro
     assert_eq!(by_key(run_data_plane(&plan).remove(0)), expected);
 }
 
+/// A filtered row count over 5 minutes, for a deployment that keeps no
+/// raw data: its `COUNT(*) FILTER (WHERE …)` state is built at ingestion
+/// from the table rows, every column the filter reads included, and
+/// answers as the query-time reference does.
+#[tokio::test]
+async fn a_filtered_row_count_is_built_at_ingestion_time_from_table_rows() {
+    let slow = "SELECT service, COUNT(*) FILTER (WHERE latency >= 1000) AS value FROM http \
+                WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY service";
+    let plan = plan_without_raw_data(&[slow], EXACT).await;
+    assert!(
+        plan.dag.nodes.iter().any(|node| matches!(
+            &node.payload,
+            PhysicalASAPOperatorPayload::ASAP(asap_types::ir::ASAPOp::SummaryAgg {
+                filter: Some(_),
+                ..
+            })
+        ) && node.output_state.timing
+            == asap_types::ir::properties::ExecutionTiming::IngestionTime),
+        "the filtered build runs at ingestion time"
+    );
+    assert!(
+        plan.raw_data_retention().unwrap().is_empty(),
+        "no raw data at query time"
+    );
+    // Rows 1000..1199 (latency = row) of the last 5 minutes, by service.
+    let expected: BTreeMap<String, String> = [("s0", 66), ("s1", 67), ("s2", 67)]
+        .into_iter()
+        .map(|(service, count)| (service.to_string(), shown(&Value::Int64(count))))
+        .collect();
+    assert_eq!(by_key(run_data_plane(&plan).remove(0)), expected);
+    assert_eq!(by_key(run(&plan).1), expected);
+}
+
 /// Each run's requested `(start, end]` time range, in order.
 type RequestedTimeRanges = std::sync::Mutex<Vec<Option<(i64, i64)>>>;
 

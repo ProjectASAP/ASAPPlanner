@@ -14,7 +14,6 @@ use planner_types::ir::physical_export::{
 };
 use planner_types::ir::schema::{DataType, ExactKind, ExactParams, Field, FieldDataType};
 use planner_types::ir::ASAPOp;
-use planner_types::ir::BinaryOperator;
 use planner_types::ir::NonASAPOp;
 use planner_types::ir::ScalarExpr;
 use std::sync::Arc;
@@ -1309,98 +1308,6 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
                 assert_eq!(rows.len(), 1);
                 assert!(matches!(&rows[0][0], Value::Utf8(key) if key.as_ref() == "a"));
             }
-        }
-    }
-}
-
-// Precompute arithmetic must match population/window identities, never zip arrival order.
-#[test]
-fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
-    use asap_executor::physical_planner::{compile_node, CompiledPhysicalDAG};
-    use planner_types::ir::properties::*;
-    use planner_types::ir::schema::*;
-
-    use planner_types::ir::operator::BinaryOpKind;
-    use planner_types::ir::scalar::ArithmeticOpKind;
-    let input = schema(&[
-        ("population", DataType::Utf8, false),
-        ("time", DataType::Timestamp, false),
-        ("value", DataType::Float64, false),
-    ]);
-    let node = PhysicalASAPDAGNode {
-        id: 2,
-        output_schema: (*input).clone(),
-        output_state: ExecutionDataState::INGESTION_ROWS,
-        materialization: Default::default(),
-        guarantee: None,
-        retention_ms: None,
-        payload: PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::BinaryOp {
-            operator: BinaryOperator {
-                kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Sub),
-                vector_match: None,
-                checked_relative_division: false,
-                checked_finite_division: false,
-            },
-            return_bool: false,
-            lhs: 0,
-            rhs: 1,
-        }),
-    };
-    let binary = compile_node(&node, &[input.clone(), input.clone()]).unwrap();
-    for (right, expected) in [
-        (vec![("b", 2, 3.), ("a", 1, 2.)], Some(vec![8., 17.])),
-        (vec![("b", 2, 3.)], None),
-        (vec![("a", 1, 2.), ("a", 1, 2.)], None),
-        (vec![("a", 2, 2.), ("b", 1, 3.)], None),
-        (vec![("a", 1, f64::NAN), ("b", 2, 3.)], None),
-    ] {
-        // Each side is a leaf holding its `(population, time, value)` rows.
-        let mut operators = [vec![("a", 1, 10.), ("b", 2, 20.)], right]
-            .into_iter()
-            .enumerate()
-            .map(|(i, rows)| {
-                let rows = rows
-                    .into_iter()
-                    .map(|(group, time, value)| {
-                        vec![
-                            Value::Utf8(group.into()),
-                            Value::Timestamp(time),
-                            Value::Float64(value),
-                        ]
-                    })
-                    .collect();
-                let batch = Batch::try_new(input.clone(), rows).unwrap();
-                (
-                    i as u64,
-                    (
-                        vec![],
-                        Operator::source(input.clone(), vec![batch]).unwrap(),
-                    ),
-                )
-            })
-            .collect::<std::collections::BTreeMap<_, _>>();
-        operators.insert(2, (vec![0, 1], binary.clone()));
-        let program = CompiledPhysicalDAG::from_operators(operators, vec![2]).unwrap();
-        let dag = program
-            .instantiate(Arc::new(InMemoryDataStore::default()))
-            .unwrap();
-        let result = block_on(async {
-            let mut stream = dag
-                .execute(
-                    program.roots(),
-                    RunContext::new(query(), Limits::default()).unwrap(),
-                )
-                .unwrap()
-                .remove(0);
-            let mut rows = Vec::new();
-            while let Some(batch) = stream.next().await {
-                rows.extend(batch?.to_rows().iter().cloned());
-            }
-            Ok::<_, asap_executor::Error>(rows)
-        });
-        match expected {
-            Some(values) => assert_eq!(floats(&result.unwrap(), 2), values),
-            None => assert!(result.is_err()),
         }
     }
 }

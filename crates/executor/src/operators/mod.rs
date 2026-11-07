@@ -1,5 +1,4 @@
 //! Native physical operators. Each module owns its constructors and execution.
-mod aligned_binary;
 use crate::plan::{Boundedness, Emission, PhysicalOperator, PlanProperties};
 use crate::{
     runtime::{Cooperative, Input, OutputStream, Reservation, RunContext},
@@ -67,11 +66,6 @@ enum Kind {
     VectorBinary {
         operator: crate::expressions::binary::BinaryOperator,
         return_bool: bool,
-    },
-    AlignedBinary {
-        keys: Vec<(usize, usize)>,
-        values: (usize, usize),
-        operator: crate::expressions::binary::BinaryOperator,
     },
     RangeWindow {
         intent: Box<planner_types::ir::operator::AggIntent<ColumnRef>>,
@@ -254,7 +248,14 @@ impl Operator {
         Ok(self)
     }
 
-    /// Resolve a counter evaluation's logical lookback to this run's evaluation range.
+    /// Resolve a counter evaluation's logical lookback to this run's
+    /// evaluation range: `lookback` ending `offset` before the evaluation
+    /// time in a query run. An ingestion run builds every window its views
+    /// read ending at its `window_end_ms` (as `TimeRange` does), so the
+    /// range ends there; it must lie within the run's window, which holds
+    /// every row the counter reads (a run window wider than the lookback,
+    /// e.g. `rate(a[5m]) / rate(b[1m])` refreshed over 5 minutes, keeps
+    /// only the last minute for `b`).
     pub(super) fn evaluation_range(
         &self,
         context: &RunContext,
@@ -274,11 +275,11 @@ impl Operator {
         let end = match context.scope {
             crate::runtime::Scope::Query {
                 evaluation_time_ms, ..
-            } => evaluation_time_ms,
+            } => evaluation_time_ms
+                .checked_sub(*offset_ms)
+                .ok_or_else(|| invalid("counter window overflows Int64"))?,
             crate::runtime::Scope::Ingestion { window_end_ms, .. } => window_end_ms,
-        }
-        .checked_sub(*offset_ms)
-        .ok_or_else(|| invalid("counter window overflows Int64"))?;
+        };
         let start = end
             .checked_sub(*lookback)
             .ok_or_else(|| invalid("counter window overflows Int64"))?;
@@ -286,9 +287,10 @@ impl Operator {
             window_start_ms, ..
         } = context.scope
         {
-            if window_start_ms != start {
+            if start < window_start_ms {
                 return Err(invalid(
-                    "maintenance window differs from logical counter window",
+                    "counter lookback exceeds the ingestion run's window: build it from \
+                     tumbling windows merged at the evaluation",
                 ));
             }
         }
@@ -326,7 +328,6 @@ impl PhysicalOperator<Batch, SchemaRef> for Operator {
         matches!(
             self.kind,
             Kind::Sort { .. }
-                | Kind::AlignedBinary { .. }
                 | Kind::VectorBinary { .. }
                 | Kind::RangeWindow { .. }
                 | Kind::HistogramQuantile
@@ -383,7 +384,6 @@ impl PhysicalOperator<Batch, SchemaRef> for Operator {
             Kind::VectorToScalar { .. } => "VectorToScalar",
             Kind::Absent { .. } => "Absent",
             Kind::VectorBinary { .. } => "VectorBinary",
-            Kind::AlignedBinary { .. } => "AlignedBinary",
             Kind::RangeWindow { .. } => "RangeWindow",
             Kind::HistogramQuantile => "HistogramQuantile",
             Kind::SeriesWindow { .. } => "SeriesWindow",
@@ -435,7 +435,6 @@ impl PhysicalOperator<Batch, SchemaRef> for Operator {
             | Kind::VectorToScalar { .. }
             | Kind::Absent { .. } => source::execute(self, inputs, context),
             Kind::VectorBinary { .. } => vector_binary::execute(self, inputs, context),
-            Kind::AlignedBinary { .. } => aligned_binary::execute(self, inputs, context),
             Kind::RangeWindow { .. } | Kind::HistogramQuantile => {
                 vector_window::execute(self, inputs, context)
             }

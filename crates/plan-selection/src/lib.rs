@@ -458,6 +458,7 @@ mod tests {
         DataWorkload {
             arrival: DataArrival::Ingesting {
                 rows_per_second: 10_000.0,
+                max_out_of_order_ms: None,
             },
             sources: TEST_SOURCES
                 .iter()
@@ -1722,6 +1723,7 @@ mod tests {
         let data = DataWorkload {
             arrival: DataArrival::Ingesting {
                 rows_per_second: 1_000.0,
+                max_out_of_order_ms: None,
             },
             sources: [("m".to_string(), SourceFacts::default())].into(),
         };
@@ -1751,7 +1753,10 @@ mod tests {
     fn a_query_on_another_metric_leaves_a_metrics_node_prices_unchanged() {
         // `a` and `b`: 10 000 series sampled every 100 ms, 100 000 rows/s each.
         let ingesting = |rows_per_second| DataWorkload {
-            arrival: DataArrival::Ingesting { rows_per_second },
+            arrival: DataArrival::Ingesting {
+                rows_per_second,
+                max_out_of_order_ms: None,
+            },
             sources: ["a", "b"]
                 .into_iter()
                 .map(|metric| {
@@ -3944,6 +3949,7 @@ mod tests {
         DataWorkload {
             arrival: DataArrival::Ingesting {
                 rows_per_second: rows_per_s * TEST_SOURCES.len() as f64,
+                max_out_of_order_ms: None,
             },
             ..data()
         }

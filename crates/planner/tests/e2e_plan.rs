@@ -329,6 +329,7 @@ async fn each_plan_carries_its_selected_root() {
         data_workload: Some(DataWorkload {
             arrival: DataArrival::Ingesting {
                 rows_per_second: 1_000.0,
+                max_out_of_order_ms: None,
             },
             ..Default::default()
         }),

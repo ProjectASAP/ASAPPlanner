@@ -69,6 +69,7 @@ fn workload() -> PlanningWorkload {
         data_workload: Some(DataWorkload {
             arrival: DataArrival::Ingesting {
                 rows_per_second: 1_000.0,
+                max_out_of_order_ms: None,
             },
             sources: [(
                 "flows".to_string(),

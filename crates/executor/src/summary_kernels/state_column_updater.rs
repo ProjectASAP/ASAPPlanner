@@ -9,6 +9,7 @@ use crate::values::{StateColumn, Value};
 use crate::{AggregateCore, Error};
 use planner_types::ir::scalar::ColumnRef;
 use planner_types::ir::schema::{ExactKind, FieldDataType, GroupingStrategy, SummaryUpdate};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// The open summary states of one family, one per group, updated one sample
@@ -26,6 +27,9 @@ pub struct StateColumnUpdater {
     /// For a counter (rate, increase), each group's latest sample time:
     /// samples must arrive in strictly increasing time within a group.
     latest_sample_ms: Option<Vec<Option<i64>>>,
+    /// For a counter fed out of order within a bound
+    /// ([`Self::with_max_out_of_order_ms`]): the samples not applied yet.
+    reorder: Option<ReorderBuffer>,
     /// Memory the open states hold, kept up to date on every change.
     memory_bytes: usize,
     /// The shape of the keys [`Self::add_group_with_key`] has taken, from
@@ -33,6 +37,20 @@ pub struct StateColumnUpdater {
     /// has been). `None` before the first key.
     key_types: Option<Vec<Option<std::mem::Discriminant<Value>>>>,
 }
+
+/// A counter's samples held until they are `max_out_of_order_ms` older
+/// than the newest sample seen, then applied in time order.
+struct ReorderBuffer {
+    max_out_of_order_ms: i64,
+    /// The newest sample time seen in any group.
+    newest_sample_ms: Option<i64>,
+    /// The held samples' values, by time then group: popped in time order,
+    /// each group's are in time order.
+    held: BTreeMap<(i64, u32), f64>,
+}
+
+/// Memory one held sample takes in a [`ReorderBuffer`] (its key and value).
+const HELD_SAMPLE_BYTES: usize = std::mem::size_of::<((i64, u32), f64)>();
 
 /// The open states of a [`StateColumnUpdater`], by kind of family.
 enum GroupStates {
@@ -119,9 +137,38 @@ impl StateColumnUpdater {
             family: family.clone(),
             states,
             latest_sample_ms: counter.then(Vec::new),
+            reorder: None,
             memory_bytes,
             key_types: None,
         })
+    }
+
+    /// This counter updater (rate, increase) taking each group's samples in
+    /// any order within `max_out_of_order_ms`: the data's declared bound on
+    /// how late a sample arrives after a later sample of its series
+    /// (`DataArrival`'s `max_out_of_order_ms`). Samples are held until the
+    /// newest sample seen (in any group) is more than `max_out_of_order_ms`
+    /// past them, then applied in time order, so samples that arrive within
+    /// the bound build the state in-order samples build. A sample further
+    /// behind is still applied when it follows its group's last applied
+    /// sample; otherwise it is refused ([`Self::update`]), as Prometheus
+    /// refuses a sample outside its out-of-order window. [`Self::seal`]
+    /// applies every held sample: a runtime seals a tumbling window once
+    /// `max_out_of_order_ms` has passed after its end. Bad input for a
+    /// family that is not a counter.
+    pub fn with_max_out_of_order_ms(mut self, max_out_of_order_ms: u64) -> Result<Self, Error> {
+        if self.latest_sample_ms.is_none() {
+            return Err(Error::Invalid(
+                "only a counter's samples are reordered".into(),
+            ));
+        }
+        self.reorder = Some(ReorderBuffer {
+            max_out_of_order_ms: i64::try_from(max_out_of_order_ms)
+                .map_err(|_| Error::Invalid("max_out_of_order_ms exceeds Int64".into()))?,
+            newest_sample_ms: None,
+            held: BTreeMap::new(),
+        });
+        Ok(self)
     }
 
     fn sketch_updater(family: &FieldDataType) -> Result<Box<dyn AccumulatorUpdater>, Error> {
@@ -265,8 +312,8 @@ impl StateColumnUpdater {
     /// `timestamp_ms` (read only by counters). Bad input for a group never
     /// added; an operator error when the state cannot take the value (not
     /// finite, outside a DDSketch's domain, a counter sample not after the
-    /// group's previous one) or the family is keyed. The state is then
-    /// unchanged.
+    /// group's last applied one, or one at the time of a held sample of the
+    /// group) or the family is keyed. The state is then unchanged.
     pub fn update(&mut self, group: u32, value: f64, timestamp_ms: i64) -> Result<(), Error> {
         self.update_value(group, &Value::Float64(value), timestamp_ms)
     }
@@ -281,6 +328,54 @@ impl StateColumnUpdater {
         timestamp_ms: i64,
     ) -> Result<(), Error> {
         let index = self.index(group)?;
+        if self.reorder.is_none() {
+            return self.apply(index, value, timestamp_ms);
+        }
+        let Value::Float64(value) = value else {
+            return Err(operator_error("summary update requires Float64"));
+        };
+        super::factory::finite_input(*value).map_err(operator_error)?;
+        if self.latest_sample_ms.as_ref().expect("a counter")[index]
+            .is_some_and(|prior| timestamp_ms <= prior)
+        {
+            return Err(operator_error(
+                "counter sample is not after its group's last applied sample",
+            ));
+        }
+        let buffer = self.reorder.as_mut().expect("a reordering updater");
+        if buffer.held.contains_key(&(timestamp_ms, group)) {
+            return Err(operator_error(
+                "counter samples must have distinct timestamps within each group",
+            ));
+        }
+        buffer.held.insert((timestamp_ms, group), *value);
+        self.memory_bytes += HELD_SAMPLE_BYTES;
+        let newest = buffer
+            .newest_sample_ms
+            .map_or(timestamp_ms, |newest| newest.max(timestamp_ms));
+        buffer.newest_sample_ms = Some(newest);
+        let release_before = newest.saturating_sub(buffer.max_out_of_order_ms);
+        self.release_held(release_before)
+    }
+
+    /// Apply, in time order, every held sample older than `before_ms`.
+    fn release_held(&mut self, before_ms: i64) -> Result<(), Error> {
+        while let Some(buffer) = self.reorder.as_mut() {
+            let Some(entry) = buffer.held.first_entry() else {
+                break;
+            };
+            if entry.key().0 >= before_ms {
+                break;
+            }
+            let ((timestamp_ms, group), value) = entry.remove_entry();
+            self.memory_bytes -= HELD_SAMPLE_BYTES;
+            self.apply(group as usize, &Value::Float64(value), timestamp_ms)?;
+        }
+        Ok(())
+    }
+
+    /// Update state `index` with one sample, in its group's time order.
+    fn apply(&mut self, index: usize, value: &Value, timestamp_ms: i64) -> Result<(), Error> {
         if let Some(latest) = &mut self.latest_sample_ms {
             if latest[index].is_some_and(|prior| timestamp_ms <= prior) {
                 return Err(operator_error(
@@ -359,12 +454,15 @@ impl StateColumnUpdater {
     /// overlap twice, so they are refused as bad input, as are different
     /// families. An operator error when a kernel refuses the merge. On an
     /// error this updater may hold some groups already merged.
-    pub fn merge(&mut self, other: Self) -> Result<(), Error> {
+    pub fn merge(&mut self, mut other: Self) -> Result<(), Error> {
         if self.family != other.family {
             return Err(Error::Invalid(
                 "cannot merge different summary families".into(),
             ));
         }
+        // Held samples are part of each shard's window.
+        self.release_held(i64::MAX)?;
+        other.release_held(i64::MAX)?;
         if let (
             GroupStates::Hydra { grid, names },
             GroupStates::Hydra {
@@ -443,8 +541,13 @@ impl StateColumnUpdater {
         self.memory_bytes
     }
 
-    /// The states as an immutable column, state `g` being group `g`'s.
-    pub fn seal(self) -> StateColumn {
+    /// The states as an immutable column, state `g` being group `g`'s,
+    /// after applying every held sample.
+    pub fn seal(mut self) -> StateColumn {
+        // A held sample is finite and after its group's applied samples, so
+        // its state takes it.
+        self.release_held(i64::MAX)
+            .expect("held counter samples apply in time order");
         match self.states {
             GroupStates::Exact { states, .. } => StateColumn::from_exact(self.family, states),
             GroupStates::Sketches(states) => StateColumn::from_objects(
@@ -507,5 +610,34 @@ mod tests {
                 "{groups} groups"
             );
         }
+    }
+
+    // A reordering counter charges each held sample until it is applied;
+    // only a counter reorders.
+    #[test]
+    fn held_counter_samples_are_charged_until_applied() {
+        let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+        assert!(StateColumnUpdater::new(&family)
+            .unwrap()
+            .with_max_out_of_order_ms(1_000)
+            .is_err());
+        let family = FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate);
+        let mut updater = StateColumnUpdater::new(&family)
+            .unwrap()
+            .with_max_out_of_order_ms(1_000)
+            .unwrap();
+        updater.ensure_groups(1).unwrap();
+        let states = updater.memory_bytes();
+        updater.update(0, 2.0, 2_000).unwrap();
+        updater.update(0, 1.0, 1_500).unwrap();
+        assert_eq!(updater.memory_bytes(), states + 2 * HELD_SAMPLE_BYTES);
+        // 1.5 s is now more than 1 s behind the newest, 3 s: applied.
+        updater.update(0, 3.0, 3_000).unwrap();
+        assert_eq!(updater.memory_bytes(), states + 2 * HELD_SAMPLE_BYTES);
+        // A duplicate of a held sample, and a sample before an applied one.
+        assert!(updater.update(0, 9.0, 2_000).is_err());
+        assert!(updater.update(0, 9.0, 1_000).is_err());
+        updater.release_held(i64::MAX).unwrap();
+        assert_eq!(updater.memory_bytes(), states);
     }
 }

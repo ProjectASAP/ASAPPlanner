@@ -68,6 +68,7 @@ fn promql_workload(queries: &[(&str, f64)]) -> PlanningWorkload {
         data_workload: Some(DataWorkload {
             arrival: DataArrival::Ingesting {
                 rows_per_second: 1.0,
+                max_out_of_order_ms: None,
             },
             ..DataWorkload::sampled_every(
                 queries
@@ -365,6 +366,7 @@ async fn quantiles_with_equal_params_deploy_one_producer() {
     let data = workload.data_workload.as_mut().unwrap();
     data.arrival = DataArrival::Ingesting {
         rows_per_second: 666_666.67,
+        max_out_of_order_ms: None,
     };
     let lat = data.sources.get_mut("lat").unwrap();
     lat.series_count = Some(1_000_000);

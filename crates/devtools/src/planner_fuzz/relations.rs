@@ -1908,16 +1908,20 @@ pub fn disjoint_copy(workload: &FuzzWorkload) -> Option<FuzzWorkload> {
     both.data.sources.extend(copy.data.sources);
     both.tables.extend(copy.tables);
     both.data.arrival = match workload.data.arrival {
-        asap_types::workload::DataArrival::Ingesting { rows_per_second } => {
-            asap_types::workload::DataArrival::Ingesting {
-                rows_per_second: 2.0 * rows_per_second,
-            }
-        }
-        asap_types::workload::DataArrival::Mixed { rows_per_second } => {
-            asap_types::workload::DataArrival::Mixed {
-                rows_per_second: 2.0 * rows_per_second,
-            }
-        }
+        asap_types::workload::DataArrival::Ingesting {
+            rows_per_second,
+            max_out_of_order_ms,
+        } => asap_types::workload::DataArrival::Ingesting {
+            rows_per_second: 2.0 * rows_per_second,
+            max_out_of_order_ms,
+        },
+        asap_types::workload::DataArrival::Mixed {
+            rows_per_second,
+            max_out_of_order_ms,
+        } => asap_types::workload::DataArrival::Mixed {
+            rows_per_second: 2.0 * rows_per_second,
+            max_out_of_order_ms,
+        },
         other => other,
     };
     Some(both)

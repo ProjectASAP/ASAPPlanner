@@ -225,24 +225,6 @@ pub(crate) fn hydra_cms_shape(
     ))
 }
 
-/// A filtered `SummaryAgg` never runs at ingestion time. An ingestion-time
-/// build reads raw data samples (`$population`, `$timestamp`, `value`), which carry
-/// none of the query's columns for the filter predicate to read, so only a
-/// query-time build can apply it. The ingestion-time compiler and the
-/// binding of any ingestion-timed `SummaryAgg` apply this check. The planner
-/// applies the same rule: Stage 2 never offers `MatAtIngestion` for a
-/// filtered build (`IngestionPruneReason::Filtered`), and materialization
-/// timing rejects an explicit one (`FilteredSummaryAtIngestion`). This check
-/// guards plans that did not come from the planner.
-pub fn validate_ingestion_time_summary<C>(
-    filter: Option<&planner_types::ir::Predicate<C>>,
-) -> Result<(), String> {
-    match filter {
-        Some(_) => Err("a filtered summary update runs only at query time".into()),
-        None => Ok(()),
-    }
-}
-
 fn valid_matrix(width: u32, depth: u32) -> bool {
     // Construction uses the kernel's native row hashing, so no encoded-size
     // limit applies here.
@@ -441,19 +423,4 @@ pub fn validate_exact_evaluation(
         return Err(Error::Invalid("invalid exact counter lookback".into()));
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Only a query-time build applies a summary filter.
-    #[test]
-    fn filtered_summary_runs_only_at_query_time() {
-        let filter = planner_types::ir::Predicate::<usize>(planner_types::ir::ScalarExpr::Literal(
-            planner_types::ir::scalar::ScalarValue::Boolean(true),
-        ));
-        assert!(validate_ingestion_time_summary(Some(&filter)).is_err());
-        assert!(validate_ingestion_time_summary::<usize>(None).is_ok());
-    }
 }

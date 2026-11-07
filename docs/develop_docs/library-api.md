@@ -308,7 +308,8 @@ inputs. `QueryWorkload` contains the language and optional batch/repeating
 entries. Entries carry requirements, predictability and recurrence; a
 query's window comes from its text (range and offset). These facts are separate: repeated queries can read data at rest.
 `DataWorkload` holds `arrival` (`DataArrival`: `AtRest`, `Ingesting` or
-`Mixed` with `rows_per_second`, or `Unknown`) and `sources`, a map from
+`Mixed` with `rows_per_second` and an optional `max_out_of_order_ms`, or
+`Unknown`) and `sources`, a map from
 PromQL metric or SQL table name to `SourceFacts`: `series_count`,
 `metric_type`, `values_non_negative`, `sample_interval` (PromQL and
 MetricsQL), `stream_norms`, `max_distinct_per_evaluation` and
