@@ -44,6 +44,13 @@ impl PhysicalCandidate {
     /// context ($x_{\kappa,v}$, Stage 3), so its result belongs to that
     /// context. A non-windowed `AcrossEvaluations` producer is not offered
     /// yet (it needs its own delivery rule), so this returns false for it.
+    /// So does a windowed one read inside an ingestion pipeline or another
+    /// `AcrossEvaluations` candidate's computation: when those run is not
+    /// known from the memo (a refresh window is an index into Stage 3's
+    /// list; a candidate's tumbling width is in its own window layout), so,
+    /// as for an unknown recurrence, its windows are never known to be
+    /// complete. Stage 2 offers `AcrossEvaluations` only to tumbling-window
+    /// builds, whose consumers read them at query time.
     pub fn delivers_on(&self, memo: &Memo, context: &ExecutionContext) -> bool {
         match self.physical_properties.lifetime() {
             Lifetime::None | Lifetime::OneEvaluation(_) => true,
@@ -67,7 +74,7 @@ impl PhysicalCandidate {
                         .evaluation_grid_ms(*range_evaluation)
                         .is_some_and(|grid_ms| grid_ms.is_multiple_of(*width_ms)),
                     ExecutionContext::IngestionPipeline(_) | ExecutionContext::Materialized(_) => {
-                        todo!("#1207 PR 7: delivery into an ingestion or materialized context")
+                        false
                     }
                 }
             }
@@ -435,6 +442,24 @@ mod tests {
                 true,
             ),
             (one_evaluation, evaluation(estimated.clone(), None), true),
+            // Inside an ingestion pipeline or another candidate's
+            // computation the times are not in the memo: never, for a
+            // windowed producer; always for one that runs there.
+            (
+                ingestion_10s,
+                ExecutionContext::IngestionPipeline(crate::stages::RefreshWindowId(0)),
+                false,
+            ),
+            (
+                across_5s,
+                ExecutionContext::Materialized(PhysicalCandidateId(0)),
+                false,
+            ),
+            (
+                unmaterialized,
+                ExecutionContext::Materialized(PhysicalCandidateId(0)),
+                true,
+            ),
         ] {
             assert_eq!(
                 producer.delivers_on(&memo, &context),
