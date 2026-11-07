@@ -1,13 +1,14 @@
 //! The deployment's accuracy model, read only by plan selection (#509
 //! Stage 3).
 //!
-//! Stage 1 composes each candidate's guarantee with the planner's built-in
-//! analytical rules (this crate's [`composition`](crate::composition)) and
-//! keeps a candidate it has no rule for with `guarantee = None`. Stage 3 decides,
-//! with the model here, whether a guarantee meets its query's target (after
-//! the data workload and the deployment's evidence,
-//! [`AccuracyEvidenceProvider`], bind the statistics Stage 1 left unknown),
-//! and whether the deployment accepts an output directly, whatever its
+//! Each candidate's local guarantee comes from its parameters
+//! ([`local_guarantee`](crate::estimators::local_guarantee)) and travels
+//! per edge through each consumer's error contract
+//! (`LogicalRequirements::error_propagation`). Stage 3 decides, with the
+//! model here, whether a guarantee meets its query's target (after the
+//! data workload and the deployment's evidence,
+//! [`AccuracyEvidenceProvider`], bind the statistics left unknown), and
+//! whether the deployment accepts an output directly, whatever its
 //! guarantee says.
 
 use crate::OperandDomain;
@@ -21,8 +22,6 @@ use asap_types::ir::{OperatorNode, QueryRoot};
 /// registered cross-metric conversion, say) or its own measurements
 /// implements this trait and passes it in
 /// `asap_planner::PlanningModels::accuracy`.
-/// Guarantees are composed with the built-in rules only
-/// (`propagate`).
 pub trait AccuracyModel {
     /// Whether `guarantee` meets `target`: a bound within its ε, and within
     /// its δ when it states one, over the values the target's scope covers

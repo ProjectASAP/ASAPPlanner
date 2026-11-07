@@ -1,35 +1,30 @@
 //! `asap-accuracy` — the accuracy model the planning stages share (Pass 1,
 //! Pass 2 and Stage 3): the planner's built-in analytical accuracy rules
-//! (estimators, composition, guarantee propagation through a DAG, sizing,
-//! budget split and target check) and the deployment's accuracy model and
-//! evidence traits.
+//! (estimators, sizing and the target check) and the deployment's accuracy
+//! model and evidence traits.
 //!
-//! Estimator models derive local guarantees, composition propagates them,
-//! `propagation` composes them through every node of a DAG, `sizing` sizes
-//! a summary for its target, the budget split sizes each approximate input
-//! of a composition for an equal share of its target, and `evidence` holds
-//! the scoped contracts and statistics the rules consult. The deployment's accuracy model
-//! ([`AccuracyModel`]) and evidence provider ([`AccuracyEvidenceProvider`])
-//! are read only by plan selection (Stage 3).
+//! Estimator models derive the local guarantee of reading a statistic from
+//! a summary with given parameters ([`estimators::local_guarantee`]),
+//! `sizing` names the statistic an intent reads and its target, and
+//! `evidence` holds the scoped contracts the rules consult. How a
+//! guarantee propagates through an operator is its error contract
+//! (`LogicalRequirements::error_propagation` in `asap-types`), applied per
+//! edge. The deployment's accuracy model ([`AccuracyModel`]) and evidence
+//! provider ([`AccuracyEvidenceProvider`]) are read only by plan selection
+//! (Stage 3).
 //! See `docs/design_docs/concepts/accuracy-models.md` for the design.
 //!
 //! It depends only on `asap-types`, never on a stage crate, so every stage
 //! can use it.
 
-mod budget;
-pub mod composition;
 pub mod estimators;
 mod evidence;
-mod function_rules;
 mod model;
-pub mod propagation;
 pub mod sizing;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 
-pub use budget::per_input_target;
 pub use evidence::OperandDomain;
-pub(crate) use evidence::PropagationStats;
 pub use model::{
     AccuracyEvidenceProvider, AccuracyModel, BuiltinAccuracyModel, IgnoreAccuracyGuarantees,
     NoAccuracyEvidence,
@@ -39,8 +34,7 @@ pub use model::{
 use asap_types::ir::properties::AccuracyScope;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::properties::{
-    AccuracyError, AccuracyGuarantee, AccuracyMetric, BoundExpr, CompositionOperator,
-    GuaranteeSource, ProbabilityExpr,
+    AccuracyGuarantee, AccuracyMetric, BoundExpr, GuaranteeSource, ProbabilityExpr,
 };
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic};
 

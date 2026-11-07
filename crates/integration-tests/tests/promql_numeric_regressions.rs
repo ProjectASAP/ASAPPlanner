@@ -128,21 +128,6 @@ fn checked_ratio_must_not_certify_cross_zero_interpolation() {
         "direct quantile ratio should remain an available candidate"
     );
     assert!(node.guarantee.is_none(), "{:?}", node.guarantee);
-    use asap_accuracy::propagation::bind_guarantees;
-    use asap_accuracy::test_support::raw_data_samples_sign_statistic;
-    let root = asap_types::ir::QueryRoot::Operator(node.clone());
-    assert!(bind_guarantees(&root, &Clone::clone).is_none());
-    let proven = bind_guarantees(&root, &|guarantee| {
-        guarantee.bind(&|statistic| {
-            (statistic == raw_data_samples_sign_statistic("data")).then_some(1.0)
-        })
-    })
-    .expect("a declared nonnegative source recovers the ratio contract");
-    assert!(proven.spec.error.evaluate().unwrap() <= 0.01, "{proven:?}");
-    assert!(
-        node.guarantee.is_none(),
-        "conditional sizing must not attach a hypothetical sign proof"
-    );
     physical_asap_dag(&node);
     // Keep the actual signed-sketch counterexample: division guards alone pass
     // even though the quantile interpolation does not preserve relative error.
@@ -174,41 +159,6 @@ fn checked_ratio_must_not_certify_cross_zero_interpolation() {
         error > 0.01,
         "fixture must expose cancellation beyond the requested budget"
     );
-}
-
-/// Interpolated DDS quantiles require a source-domain proof; extrema do not
-/// interpolate, and a computed value must not inherit its source's sign.
-#[test]
-fn ddsketch_interpolation_requires_a_nonnegative_domain() {
-    use asap_accuracy::propagation::bind_guarantees;
-    use asap_accuracy::test_support::raw_data_samples_sign_statistic;
-    use asap_types::ir::{schema::SketchAlgorithm, QueryRoot};
-    for (query, endpoint, raw_samples) in [
-        ("quantile_over_time(0, data[5m])", true, true),
-        ("quantile_over_time(1, data[5m])", true, true),
-        ("quantile_over_time(0.5, data[5m])", false, true),
-        ("quantile(0.5, data - 100)", false, false),
-    ] {
-        let node = explicit_summary_candidate(
-            lower_promql(query, AccuracyTarget::max_error(0.01)).unwrap(),
-            SketchAlgorithm::DDSketch,
-        );
-        let bound = node
-            .guarantee
-            .as_ref()
-            .and_then(|g| g.spec.error.evaluate());
-        assert_eq!(bound.is_some(), endpoint, "{query}");
-        let proven = bind_guarantees(&QueryRoot::Operator(node), &|guarantee| {
-            guarantee.bind(&|statistic| {
-                (statistic == raw_data_samples_sign_statistic("data")).then_some(1.0)
-            })
-        });
-        assert_eq!(
-            proven.and_then(|g| g.spec.error.evaluate()).is_some(),
-            raw_samples,
-            "{query}"
-        );
-    }
 }
 
 /// Rewriting the inner average (its own target, as sum and count
