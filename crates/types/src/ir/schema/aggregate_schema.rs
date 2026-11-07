@@ -250,6 +250,20 @@ fn measure_input_column(in_schema: &Schema, intent: &AggIntent) -> Option<Column
         .filter(|&id| id < in_schema.fields.len())
 }
 
+/// The columns of `in_schema` a `without(excluded)` grouping keeps, in
+/// order: every column but the time axis, the sample value and the
+/// `excluded` positions. The executor groups by these.
+pub fn without_kept_columns(in_schema: &Schema, excluded: &[ColumnId]) -> Vec<ColumnId> {
+    let value = crate::ir::scalar::column_resolution::resolve_column_ref(
+        &ColumnRef::SampleValue,
+        in_schema,
+    )
+    .ok();
+    (0..in_schema.fields.len())
+        .filter(|&i| in_schema.time_index != Some(i) && value != Some(i) && !excluded.contains(&i))
+        .collect()
+}
+
 /// Output schema of a `without(excluded)` aggregate: the kept labels (every
 /// input label column except the `excluded` positions, the time axis, and the
 /// sample-value column) followed by the aggregate output column(s). Unlike the
@@ -270,21 +284,12 @@ fn without_output_schema(
             ));
         }
     }
-    let mut out_cols: Vec<Field> = Vec::new();
-    let mut sources: Vec<OutputColumnSource> = Vec::new();
-    for (i, col) in in_schema.fields.iter().enumerate() {
-        let is_time = in_schema.time_index == Some(i);
-        let is_value = crate::ir::scalar::column_resolution::resolve_column_ref(
-            &ColumnRef::SampleValue,
-            in_schema,
-        )
-        .ok()
-            == Some(i);
-        if !is_time && !is_value && !excluded.contains(&i) {
-            out_cols.push(col.clone());
-            sources.push(OutputColumnSource::InputColumn(i));
-        }
-    }
+    let kept = without_kept_columns(in_schema, excluded);
+    let mut out_cols: Vec<Field> = kept.iter().map(|&i| in_schema.fields[i].clone()).collect();
+    let mut sources: Vec<OutputColumnSource> = kept
+        .into_iter()
+        .map(OutputColumnSource::InputColumn)
+        .collect();
     let probe = in_schema
         .column_id("value")
         .and_then(|i| in_schema.fields.get(i))

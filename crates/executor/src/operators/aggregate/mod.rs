@@ -77,6 +77,32 @@ impl Operator {
                     }
                     (t.clone(), nullable || groups.is_empty())
                 }
+                Reduction::StdDev { column, population }
+                | Reduction::Variance { column, population } => {
+                    let (t, nullable) = plain(&input, *column)?;
+                    if !matches!(t, DataType::Int64 | DataType::Float64) {
+                        return Err(invalid("numeric aggregate input required"));
+                    }
+                    // SQL: NULL for fewer than two values (sample) or none
+                    // (population); a PromQL group always has a value.
+                    (
+                        DataType::Float64,
+                        !input.has_promql_series_identity()
+                            && (!population || groups.is_empty() || nullable),
+                    )
+                }
+                Reduction::PearsonCorr { left, right } => {
+                    for column in [left, right] {
+                        if !matches!(
+                            plain(&input, *column)?.0,
+                            DataType::Int64 | DataType::Float64
+                        ) {
+                            return Err(invalid("correlation requires numeric inputs"));
+                        }
+                    }
+                    (DataType::Float64, true)
+                }
+                Reduction::Group => (DataType::Float64, false),
             };
             fields.push(result_field(name, t, n));
         }
@@ -130,6 +156,8 @@ impl Operator {
                     | Reduction::Min(_)
                     | Reduction::Max(_)
                     | Reduction::Percentile { .. }
+                    | Reduction::StdDev { .. }
+                    | Reduction::Variance { .. }
             ) {
                 output.fields[groups.len() + index].nullable = true;
             }
@@ -237,6 +265,30 @@ pub enum Reduction {
         /// The fraction, in [0, 1].
         q: f64,
     },
+    /// Standard deviation of a numeric column's non-NULL values: the
+    /// square root of [`Reduction::Variance`].
+    StdDev {
+        column: usize,
+        population: bool,
+    },
+    /// Variance of a numeric column's non-NULL values, by Welford's
+    /// update as Prometheus `stdvar` and DataFusion `var_pop`/`var_samp`
+    /// compute it: the squared deviations' sum over n (population) or
+    /// n - 1 (sample); NaN once a value is NaN or infinite. SQL gives NULL
+    /// for no value, or one value of a sample; PromQL NaN.
+    Variance {
+        column: usize,
+        population: bool,
+    },
+    /// SQL `corr(left, right)`, DataFusion's: Pearson's correlation over
+    /// the rows where both are non-NULL; NULL for fewer than two rows, a
+    /// constant input or one input's mean NaN, NaN when both are.
+    PearsonCorr {
+        left: usize,
+        right: usize,
+    },
+    /// PromQL `group`: 1 for every group.
+    Group,
 }
 pub(super) fn execute<'a>(
     operator: &'a Operator,

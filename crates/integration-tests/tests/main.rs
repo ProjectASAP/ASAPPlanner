@@ -9,6 +9,7 @@ mod planning_common;
 mod aggregate;
 mod binary_op;
 mod crate_graph;
+mod exact_reduce_execution;
 mod filtered_aggregates;
 mod finer_aggregate_reuse;
 mod frontend_timestamps;
