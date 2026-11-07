@@ -590,10 +590,7 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
     );
     assert_eq!(
         input,
-        &SummaryUpdate::column(ColumnRef::Qualified {
-            table: "metrics".into(),
-            name: "latency".into(),
-        }),
+        &SummaryUpdate::column(ColumnRef::Named("latency".into())),
         "SQL binds the intent's own named input column, not a synthetic sample value"
     );
     assert_eq!(
@@ -669,10 +666,7 @@ async fn sql_count_distinct_with_epsilon_binds_hll_over_named_column() {
     );
     assert_eq!(
         input,
-        &SummaryUpdate::column(ColumnRef::Qualified {
-            table: "metrics".into(),
-            name: "service".into(),
-        })
+        &SummaryUpdate::column(ColumnRef::Named("service".into()))
     );
     assert_eq!(reduction, &Reduction::by(vec![]));
 }
