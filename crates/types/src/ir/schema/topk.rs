@@ -5,6 +5,7 @@ use crate::ir::scalar::column_resolution::{resolve_column_ref, ResolveError};
 use crate::ir::scalar::{ColumnRef, ProjectItem};
 use crate::ir::schema::{ColumnId, DataType, FieldDataType, PROMQL_SERIES_IDENTITY};
 use crate::ir::{ASAPOp, NonASAPOp, Operator, ScalarExpr};
+use crate::stages::{Memo, MemoGroupAsInput, MemoGroupId};
 
 /// The column a top-k ranks `child` by. Over a one-measure grouped
 /// aggregate (the SQL heavy-hitter shape and PromQL `topk(k, sum by ..)`) it
@@ -13,7 +14,7 @@ use crate::ir::{ASAPOp, NonASAPOp, Operator, ScalarExpr};
 /// `FinalizeExactAccumulator` or `SummaryEstimate`, under the `Project`
 /// restoring its names (a renaming) and a value `HAVING`'s `Filter`. Over
 /// per-series rows (PromQL `topk by (..) (k, rows)`) it is the sample value.
-pub fn ranked_column<I: OperatorInput>(child: &I) -> Result<ColumnId, ResolveError> {
+pub(crate) fn ranked_column<I: OperatorInput>(child: &I) -> Result<ColumnId, ResolveError> {
     match ranked_source(child) {
         RankedSource::TopK(reduction) => Ok(reduction.group_keys().map_or(0, |keys| keys.len())),
         RankedSource::OneRowPerItem(Reduction::Reduce(_)) => Ok(child.schema().fields.len() - 1),
@@ -21,6 +22,15 @@ pub fn ranked_column<I: OperatorInput>(child: &I) -> Result<ColumnId, ResolveErr
             resolve_column_ref(&ColumnRef::SampleValue, child.schema())
         }
     }
+}
+
+/// [`ranked_column`] of memo group `group`: the column a top-k reading the
+/// group ranks it by.
+pub fn ranked_column_of_group(memo: &Memo, group: MemoGroupId) -> Result<ColumnId, ResolveError> {
+    ranked_column(&MemoGroupAsInput {
+        memo,
+        group_id: group,
+    })
 }
 
 /// What a top-k's input rows are, seen through a renaming `Project`, a

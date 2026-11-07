@@ -4,16 +4,18 @@
 //! keyed-additive rule for a heap sketch that reads a larger sub-DAG.
 
 use asap_types::ir::operator::agg_intent::AggIntent;
+use asap_types::ir::operator::non_asap::any_measure_filtered;
 use asap_types::ir::operator::operator_properties::Source;
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::scalar::column_resolution::{resolve_column_ref, ResolveError};
 use asap_types::ir::scalar::expr_ir::ColumnRef;
+use asap_types::ir::schema::topk::ranked_column_of_group;
 use asap_types::ir::schema::ColumnId;
 use asap_types::ir::schema::{
     EntityIdentity, FamilyCapability, Field, FieldDataType, NonNegativeWeightProof, Schema,
     SketchAlgorithm, SummaryInputExpr, SummaryUpdate, WeightDomain,
 };
-use asap_types::ir::{NonASAPOp, Operator, ScalarExpr};
+use asap_types::ir::{NonASAPOp, Operator};
 use asap_types::stages::{Memo, MemoGroupId};
 
 use asap_accuracy::sizing::sketch_statistic;
@@ -79,57 +81,19 @@ pub(crate) fn summarised_column(intent: &AggIntent, child_schema: &Schema) -> Co
     }
 }
 
-/// [`ranked_column`] as a reference: the sample value when it is that
-/// column, else the column by name.
+/// The column a top-k ranks group `child` by ([`ranked_column_of_group`]),
+/// also as a reference: the sample value when it is that column, else the
+/// column by name.
 pub(crate) fn ranked_value(
     memo: &Memo,
     child: MemoGroupId,
 ) -> Result<(ColumnId, ColumnRef), ResolveError> {
-    let ranked = ranked_column(memo, child)?;
+    let ranked = ranked_column_of_group(memo, child)?;
     let column = match resolve_column_ref(&ColumnRef::SampleValue, schema(memo, child)) {
         Ok(value) if value == ranked => ColumnRef::SampleValue,
         _ => schema(memo, child).fields[ranked].column_ref(),
     };
     Ok((ranked, column))
-}
-
-/// The column a top-k ranks group `child` by: over a one-measure grouped
-/// aggregate (under a renaming `Project` or a value `HAVING`'s `Filter`),
-/// that measure, the last column after its group keys; over per-series
-/// rows, the sample value. The rule of `asap_types`' `ranked_column`, over
-/// the operators a Stage 0 group holds.
-fn ranked_column(memo: &Memo, child: MemoGroupId) -> Result<ColumnId, ResolveError> {
-    let mut group = child;
-    let reduction = loop {
-        match non_asap(memo, group) {
-            // Only a renaming keeps the measure last.
-            Some(NonASAPOp::Project { cols, child: input })
-                if cols.len() == schema(memo, input).fields.len()
-                    && cols
-                        .iter()
-                        .enumerate()
-                        .all(|(i, item)| matches!(item.expr, ScalarExpr::Column(c) if c == i)) =>
-            {
-                group = input
-            }
-            Some(NonASAPOp::Filter { child: input, .. }) => group = input,
-            Some(NonASAPOp::Aggregate {
-                reduction,
-                measures,
-                ..
-            }) if measures.len() == 1 => {
-                if matches!(measures[0], AggIntent::TopK { .. }) {
-                    return Ok(reduction.group_keys().map_or(0, |keys| keys.len()));
-                }
-                break Some(reduction);
-            }
-            _ => break None,
-        }
-    };
-    match reduction {
-        Some(Reduction::Reduce(_)) => Ok(schema(memo, child).fields.len() - 1),
-        _ => resolve_column_ref(&ColumnRef::SampleValue, schema(memo, child)),
-    }
 }
 
 /// What the summary consumes per input row. An intent that reads one column (or
@@ -194,28 +158,29 @@ pub(crate) fn realize_keyed_additive_summary_input(
     ) {
         return None;
     }
-    let Some(NonASAPOp::Aggregate {
+    let Operator::NonASAP(NonASAPOp::Aggregate {
         reduction,
         measures,
         filters,
         having: None,
         child: raw_child,
         ..
-    }) = non_asap(memo, child)
+    }) = expression(memo, child)
     else {
         return None;
     };
+    let raw_child = *raw_child;
     // The heap sketch consumes every raw row; a filtered measure counts only
     // some of them (#466).
-    if asap_types::ir::operator::non_asap::any_measure_filtered(&filters) {
+    if any_measure_filtered(filters) {
         return None;
     }
     // A grouped sum of per-series `rate`/`increase`/`irate` values: the
     // metric they derive from, whose declared type decides their sign.
-    let derivative_of = match (measures.as_slice(), non_asap(memo, raw_child)) {
+    let derivative_of = match (measures.as_slice(), expression(memo, raw_child)) {
         (
             [AggIntent::Sum { .. }],
-            Some(NonASAPOp::Aggregate {
+            Operator::NonASAP(NonASAPOp::Aggregate {
                 measures: derivative,
                 child: samples,
                 ..
@@ -225,7 +190,7 @@ pub(crate) fn realize_keyed_additive_summary_input(
             [AggIntent::Rate | AggIntent::Increase | AggIntent::IRate]
         ) =>
         {
-            Some(raw_data_samples_of_metric(memo, samples))
+            Some(raw_data_samples_of_metric(memo, *samples))
         }
         _ => None,
     };
@@ -349,29 +314,28 @@ fn summed_per_series_samples(
     memo: &Memo,
     grouped: MemoGroupId,
 ) -> Option<(MemoGroupId, AggIntent)> {
-    use asap_types::ir::operator::non_asap::any_measure_filtered;
-    let Some(NonASAPOp::Aggregate {
+    let Operator::NonASAP(NonASAPOp::Aggregate {
         reduction: Reduction::Reduce(by),
         measures,
         filters,
         having: None,
         child: per_series,
         ..
-    }) = non_asap(memo, grouped)
+    }) = expression(memo, grouped)
     else {
         return None;
     };
     let [AggIntent::Sum { col }] = measures.as_slice() else {
         return None;
     };
-    let Some(NonASAPOp::Aggregate {
+    let Operator::NonASAP(NonASAPOp::Aggregate {
         reduction: Reduction::PerEntity,
         measures: inner,
         filters: inner_filters,
         having: None,
         child: rows,
         ..
-    }) = non_asap(memo, per_series)
+    }) = expression(memo, *per_series)
     else {
         return None;
     };
@@ -380,35 +344,34 @@ fn summed_per_series_samples(
         return None;
     };
     if by.is_without()
-        || any_measure_filtered(&filters)
-        || any_measure_filtered(&inner_filters)
-        || matches!(non_asap(memo, rows), Some(NonASAPOp::Aggregate { .. }))
+        || any_measure_filtered(filters)
+        || any_measure_filtered(inner_filters)
+        || matches!(
+            expression(memo, *rows),
+            Operator::NonASAP(NonASAPOp::Aggregate { .. })
+        )
     {
         return None;
     }
     // The grouped sum reads the per-series value.
-    let value = resolve_column_ref(&ColumnRef::SampleValue, schema(memo, per_series)).ok()?;
+    let value = resolve_column_ref(&ColumnRef::SampleValue, schema(memo, *per_series)).ok()?;
     if col.is_some_and(|col| col != value) || by.keys().contains(&value) {
         return None;
     }
     if by.keys().iter().any(|&key| {
-        schema(memo, per_series)
+        schema(memo, *per_series)
             .fields
             .get(key)
             .is_none_or(|field| field.name == "__name__")
     }) {
         return None;
     }
-    Some((rows, inner.clone()))
+    Some((*rows, inner.clone()))
 }
 
-/// `input`'s operator when it is not an ASAP one.
-/// Group `group`'s expression when it is not an ASAP operator.
-pub(crate) fn non_asap(memo: &Memo, group: MemoGroupId) -> Option<NonASAPOp<MemoGroupId>> {
-    match &memo.groups()[group.0 as usize].expression {
-        Operator::NonASAP(operator) => Some(operator.clone()),
-        Operator::ASAP(_) => None,
-    }
+/// The expression of group `group`.
+pub(crate) fn expression(memo: &Memo, group: MemoGroupId) -> &Operator<MemoGroupId> {
+    &memo.groups()[group.0 as usize].expression
 }
 
 /// The output schema of group `group`.
@@ -424,19 +387,22 @@ pub(crate) fn schema(memo: &Memo, group: MemoGroupId) -> &Schema {
 /// samples are non-negative is plan selection's question
 /// ([`WeightDomain::RawDataSamplesOfMetric`]).
 pub(crate) fn raw_data_samples_of_metric(memo: &Memo, group: MemoGroupId) -> Option<String> {
-    match non_asap(memo, group)? {
+    let Operator::NonASAP(operator) = expression(memo, group) else {
+        return None;
+    };
+    match operator {
         NonASAPOp::Scan {
             source: Source::TimeSeries { metric },
             ..
-        } => Some(metric),
-        NonASAPOp::TimeRange { child, .. } => raw_data_samples_of_metric(memo, child),
+        } => Some(metric.clone()),
+        NonASAPOp::TimeRange { child, .. } => raw_data_samples_of_metric(memo, *child),
         NonASAPOp::TimeShift { shift, child } if shift.at.is_none() => {
-            raw_data_samples_of_metric(memo, child)
+            raw_data_samples_of_metric(memo, *child)
         }
         NonASAPOp::Aggregate {
             measures, child, ..
         } if matches!(measures.as_slice(), [AggIntent::Sum { col: None }]) => {
-            raw_data_samples_of_metric(memo, child)
+            raw_data_samples_of_metric(memo, *child)
         }
         _ => None,
     }
@@ -449,7 +415,7 @@ mod tests {
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::scalar::{CompareOpKind, ScalarValue};
     use asap_types::ir::schema::GroupingStrategy;
-    use asap_types::ir::{ExprSemantics, Predicate};
+    use asap_types::ir::{ExprSemantics, Predicate, ScalarExpr};
 
     /// A heap sketch consumes every raw row, so the keyed input rule refuses
     /// a TopK over a filtered count.

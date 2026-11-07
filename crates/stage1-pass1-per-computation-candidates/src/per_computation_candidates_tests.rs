@@ -25,7 +25,7 @@ use crate::per_computation_candidates::{
     computation_candidates_for_intent, computation_targets, PerComputationCandidateError,
 };
 use crate::test_fixtures::{
-    aggregate_group, aggregate_group_with, group, metric_schema, query, scan_group, scan_operator,
+    aggregate_group, group, metric_schema, query, scan_group, scan_operator,
 };
 use crate::{pass1_memo, Pass1Error};
 
@@ -152,46 +152,16 @@ fn topk(k: usize) -> AggIntent {
     }
 }
 
-/// `metric[5m]`: a range selector over `metric{labels}`.
-fn range(memo: &mut Memo, metric: &str, labels: &[&str]) -> MemoGroupId {
+/// `metric[5m]` (`Range`) or `metric` (`Instant`, which a cross-series
+/// aggregate reads): a selector over `metric{labels}`.
+fn selector(memo: &mut Memo, kind: TimeRangeKind, metric: &str, labels: &[&str]) -> MemoGroupId {
     let scan = scan_group(memo, metric, labels);
     group(
         memo,
         Operator::NonASAP(NonASAPOp::TimeRange {
             range: Duration::from_secs(300),
-            kind: TimeRangeKind::Range,
+            kind,
             child: scan,
-        }),
-    )
-}
-
-/// `metric`: an instant selector over `metric{labels}`, which a
-/// cross-series aggregate reads.
-fn instant(memo: &mut Memo, metric: &str, labels: &[&str]) -> MemoGroupId {
-    let scan = scan_group(memo, metric, labels);
-    group(
-        memo,
-        Operator::NonASAP(NonASAPOp::TimeRange {
-            range: Duration::from_secs(300),
-            kind: TimeRangeKind::Instant,
-            child: scan,
-        }),
-    )
-}
-
-/// A SQL table `flows(src Utf8, bytes Float64)`.
-fn table_group(memo: &mut Memo) -> MemoGroupId {
-    group(
-        memo,
-        Operator::NonASAP(NonASAPOp::Scan {
-            source: Source::Table {
-                table_ref: "flows".into(),
-            },
-            predicates: vec![],
-            schema: Schema::new(vec![
-                Field::plain("src", DataType::Utf8, false),
-                Field::plain("bytes", DataType::Float64, false),
-            ]),
         }),
     )
 }
@@ -211,24 +181,6 @@ fn filter(memo: &mut Memo, child: MemoGroupId, pred: Predicate<MemoGroupId>) -> 
     group(memo, Operator::NonASAP(NonASAPOp::Filter { pred, child }))
 }
 
-/// `lhs / rhs` as a PromQL binary operator.
-fn divide(memo: &mut Memo, lhs: MemoGroupId, rhs: MemoGroupId) -> MemoGroupId {
-    group(
-        memo,
-        Operator::NonASAP(NonASAPOp::BinaryOp {
-            operator: BinaryOperator {
-                checked_relative_division: false,
-                checked_finite_division: false,
-                kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
-                vector_match: None,
-            },
-            return_bool: false,
-            lhs,
-            rhs,
-        }),
-    )
-}
-
 // ── Running example (concepts doc, section 1) ──────────────────────────────
 
 /// The doc's running example: query A reads p95 of `latency`, query B
@@ -240,11 +192,42 @@ fn divide(memo: &mut Memo, lhs: MemoGroupId, rhs: MemoGroupId) -> MemoGroupId {
 #[test]
 fn running_example_gives_one_build_per_theta_and_separate_readouts() {
     let mut memo = Memo::default();
-    let g1 = instant(&mut memo, "latency", &[]);
-    let g3 = aggregate_group(&mut memo, g1, Reduction::by(vec![]), vec![quantile(0.95)]);
-    let g4 = aggregate_group(&mut memo, g1, Reduction::by(vec![]), vec![quantile(0.99)]);
-    let g5 = aggregate_group(&mut memo, g1, Reduction::by(vec![]), vec![quantile(0.5)]);
-    let g6 = divide(&mut memo, g4, g5);
+    let g1 = selector(&mut memo, TimeRangeKind::Instant, "latency", &[]);
+    let g3 = aggregate_group(
+        &mut memo,
+        g1,
+        Reduction::by(vec![]),
+        vec![quantile(0.95)],
+        None,
+    );
+    let g4 = aggregate_group(
+        &mut memo,
+        g1,
+        Reduction::by(vec![]),
+        vec![quantile(0.99)],
+        None,
+    );
+    let g5 = aggregate_group(
+        &mut memo,
+        g1,
+        Reduction::by(vec![]),
+        vec![quantile(0.5)],
+        None,
+    );
+    let g6 = group(
+        &mut memo,
+        Operator::NonASAP(NonASAPOp::BinaryOp {
+            operator: BinaryOperator {
+                checked_relative_division: false,
+                checked_finite_division: false,
+                kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
+                vector_match: None,
+            },
+            return_bool: false,
+            lhs: g4,
+            rhs: g5,
+        }),
+    );
     query(&mut memo, g3);
     query(&mut memo, g6);
     let memo = pass1_memo(memo, None).unwrap();
@@ -302,8 +285,14 @@ fn running_example_gives_one_build_per_theta_and_separate_readouts() {
 #[test]
 fn per_series_readouts_keep_the_series_identity() {
     let mut memo = Memo::default();
-    let rows = range(&mut memo, "latency", &["job"]);
-    let per_series = aggregate_group(&mut memo, rows, Reduction::PerEntity, vec![quantile(0.9)]);
+    let rows = selector(&mut memo, TimeRangeKind::Range, "latency", &["job"]);
+    let per_series = aggregate_group(
+        &mut memo,
+        rows,
+        Reduction::PerEntity,
+        vec![quantile(0.9)],
+        None,
+    );
     query(&mut memo, per_series);
     let memo = pass1_memo(memo, None).unwrap();
     let output = &memo.groups()[per_series.0 as usize].group_properties.schema;
@@ -350,7 +339,13 @@ fn an_open_per_series_aggregate_offers_no_renamed_readout() {
             child: scan,
         }),
     );
-    let per_series = aggregate_group(&mut memo, rows, Reduction::PerEntity, vec![quantile(0.9)]);
+    let per_series = aggregate_group(
+        &mut memo,
+        rows,
+        Reduction::PerEntity,
+        vec![quantile(0.9)],
+        None,
+    );
     query(&mut memo, per_series);
     let memo = pass1_memo(memo, None).unwrap();
     assert!(
@@ -369,12 +364,13 @@ fn an_open_per_series_aggregate_offers_no_renamed_readout() {
 #[test]
 fn multi_measure_aggregate_has_one_target_per_measure() {
     let mut memo = Memo::default();
-    let rows = instant(&mut memo, "m", &["job"]);
+    let rows = selector(&mut memo, TimeRangeKind::Instant, "m", &["job"]);
     let both = aggregate_group(
         &mut memo,
         rows,
         Reduction::by(vec![2]),
         vec![sum(), quantile(0.9)],
+        None,
     );
     query(&mut memo, both);
     let targets = computation_targets(&memo, None).unwrap();
@@ -389,7 +385,7 @@ fn multi_measure_aggregate_has_one_target_per_measure() {
 #[test]
 fn aggregate_without_realization_is_not_a_target() {
     let mut memo = Memo::default();
-    let rows = instant(&mut memo, "m", &[]);
+    let rows = selector(&mut memo, TimeRangeKind::Instant, "m", &[]);
     let quantile_exact = aggregate_group(
         &mut memo,
         rows,
@@ -399,6 +395,7 @@ fn aggregate_without_realization_is_not_a_target() {
             q: 0.5,
             accuracy: AccuracyTarget::exact(),
         }],
+        None,
     );
     query(&mut memo, quantile_exact);
     let memo = pass1_memo(memo, None).unwrap();
@@ -410,8 +407,14 @@ fn aggregate_without_realization_is_not_a_target() {
 #[test]
 fn an_aggregate_read_by_several_roots_is_one_target() {
     let mut memo = Memo::default();
-    let rows = instant(&mut memo, "m", &[]);
-    let p = aggregate_group(&mut memo, rows, Reduction::by(vec![]), vec![quantile(0.9)]);
+    let rows = selector(&mut memo, TimeRangeKind::Instant, "m", &[]);
+    let p = aggregate_group(
+        &mut memo,
+        rows,
+        Reduction::by(vec![]),
+        vec![quantile(0.9)],
+        None,
+    );
     query(&mut memo, p);
     query(&mut memo, p);
     assert_eq!(computation_targets(&memo, None).unwrap().len(), 1);
@@ -422,7 +425,7 @@ fn an_aggregate_read_by_several_roots_is_one_target() {
 #[test]
 fn asap_input_and_invalid_accuracy_are_rejected() {
     let mut memo = Memo::default();
-    let rows = instant(&mut memo, "m", &[]);
+    let rows = selector(&mut memo, TimeRangeKind::Instant, "m", &[]);
     let state = group(
         &mut memo,
         Operator::ASAP(ASAPOp::SummaryAgg {
@@ -442,7 +445,7 @@ fn asap_input_and_invalid_accuracy_are_rejected() {
         ))
     ));
     let mut memo = Memo::default();
-    let rows = instant(&mut memo, "m", &[]);
+    let rows = selector(&mut memo, TimeRangeKind::Instant, "m", &[]);
     let invalid = aggregate_group(
         &mut memo,
         rows,
@@ -452,6 +455,7 @@ fn asap_input_and_invalid_accuracy_are_rejected() {
             q: 0.5,
             accuracy: AccuracyTarget::max_error(1.5),
         }],
+        None,
     );
     query(&mut memo, invalid);
     assert!(matches!(
@@ -466,8 +470,14 @@ fn asap_input_and_invalid_accuracy_are_rejected() {
 #[test]
 fn unsupported_summaries_are_not_offered() {
     let mut memo = Memo::default();
-    let rows = range(&mut memo, "m", &[]);
-    let p = aggregate_group(&mut memo, rows, Reduction::by(vec![]), vec![quantile(0.9)]);
+    let rows = selector(&mut memo, TimeRangeKind::Range, "m", &[]);
+    let p = aggregate_group(
+        &mut memo,
+        rows,
+        Reduction::by(vec![]),
+        vec![quantile(0.9)],
+        None,
+    );
     query(&mut memo, p);
     let memo = pass1_memo(memo, Some(&[])).unwrap();
     assert_eq!(candidates(&memo, p).len(), 1);
@@ -481,8 +491,8 @@ fn unsupported_summaries_are_not_offered() {
 #[test]
 fn every_group_offers_its_own_expression() {
     let mut memo = Memo::default();
-    let rows = instant(&mut memo, "m", &["job"]);
-    let s = aggregate_group(&mut memo, rows, Reduction::by(vec![2]), vec![sum()]);
+    let rows = selector(&mut memo, TimeRangeKind::Instant, "m", &["job"]);
+    let s = aggregate_group(&mut memo, rows, Reduction::by(vec![2]), vec![sum()], None);
     query(&mut memo, s);
     let stage0 = memo.groups().len();
     let memo = pass1_memo(memo, None).unwrap();
@@ -504,8 +514,8 @@ fn every_group_offers_its_own_expression() {
 #[test]
 fn exact_accumulator_is_a_state_group_and_a_finalize() {
     let mut memo = Memo::default();
-    let rows = instant(&mut memo, "m", &["job"]);
-    let s = aggregate_group(&mut memo, rows, Reduction::by(vec![2]), vec![sum()]);
+    let rows = selector(&mut memo, TimeRangeKind::Instant, "m", &["job"]);
+    let s = aggregate_group(&mut memo, rows, Reduction::by(vec![2]), vec![sum()], None);
     query(&mut memo, s);
     let memo = pass1_memo(memo, None).unwrap();
     let states = groups_where(&memo, |e| {
@@ -545,7 +555,20 @@ fn exact_accumulator_is_a_state_group_and_a_finalize() {
 #[test]
 fn multi_measure_candidate_joins_single_measure_groups() {
     let mut memo = Memo::default();
-    let rows = table_group(&mut memo);
+    // A SQL table `flows(src Utf8, bytes Float64)`.
+    let rows = group(
+        &mut memo,
+        Operator::NonASAP(NonASAPOp::Scan {
+            source: Source::Table {
+                table_ref: "flows".into(),
+            },
+            predicates: vec![],
+            schema: Schema::new(vec![
+                Field::plain("src", DataType::Utf8, false),
+                Field::plain("bytes", DataType::Float64, false),
+            ]),
+        }),
+    );
     let both = aggregate_group(
         &mut memo,
         rows,
@@ -558,6 +581,7 @@ fn multi_measure_candidate_joins_single_measure_groups() {
                 accuracy: approximate(),
             },
         ],
+        None,
     );
     query(&mut memo, both);
     let memo = pass1_memo(memo, None).unwrap();
@@ -581,16 +605,29 @@ fn multi_measure_candidate_joins_single_measure_groups() {
 #[test]
 fn only_a_topk_readout_has_a_parameter_floor() {
     let mut memo = Memo::default();
-    let rows = range(&mut memo, "m", &["job"]);
-    let per_series = aggregate_group(&mut memo, rows, Reduction::PerEntity, vec![sum()]);
-    let by_job = aggregate_group(&mut memo, per_series, Reduction::by(vec![2]), vec![sum()]);
-    let ranked = aggregate_group(&mut memo, by_job, Reduction::by(vec![]), vec![topk(15)]);
-    let samples = instant(&mut memo, "m", &["job"]);
+    let rows = selector(&mut memo, TimeRangeKind::Range, "m", &["job"]);
+    let per_series = aggregate_group(&mut memo, rows, Reduction::PerEntity, vec![sum()], None);
+    let by_job = aggregate_group(
+        &mut memo,
+        per_series,
+        Reduction::by(vec![2]),
+        vec![sum()],
+        None,
+    );
+    let ranked = aggregate_group(
+        &mut memo,
+        by_job,
+        Reduction::by(vec![]),
+        vec![topk(15)],
+        None,
+    );
+    let samples = selector(&mut memo, TimeRangeKind::Instant, "m", &["job"]);
     let p = aggregate_group(
         &mut memo,
         samples,
         Reduction::by(vec![]),
         vec![quantile(0.9)],
+        None,
     );
     query(&mut memo, ranked);
     query(&mut memo, p);
@@ -640,8 +677,14 @@ fn pushed_below(memo: &Memo, rows: MemoGroupId) -> Vec<MemoGroupId> {
 #[test]
 fn key_only_having_is_pushed_below_into_the_filter_group() {
     let mut memo = Memo::default();
-    let rows = instant(&mut memo, "m", &["job"]);
-    let by_job = aggregate_group(&mut memo, rows, Reduction::by(vec![2]), vec![quantile(0.9)]);
+    let rows = selector(&mut memo, TimeRangeKind::Instant, "m", &["job"]);
+    let by_job = aggregate_group(
+        &mut memo,
+        rows,
+        Reduction::by(vec![2]),
+        vec![quantile(0.9)],
+        None,
+    );
     let having = filter(
         &mut memo,
         by_job,
@@ -663,8 +706,14 @@ fn key_only_having_is_pushed_below_into_the_filter_group() {
 #[test]
 fn value_having_stays_above() {
     let mut memo = Memo::default();
-    let rows = instant(&mut memo, "m", &["job"]);
-    let by_job = aggregate_group(&mut memo, rows, Reduction::by(vec![2]), vec![quantile(0.9)]);
+    let rows = selector(&mut memo, TimeRangeKind::Instant, "m", &["job"]);
+    let by_job = aggregate_group(
+        &mut memo,
+        rows,
+        Reduction::by(vec![2]),
+        vec![quantile(0.9)],
+        None,
+    );
     let having = filter(
         &mut memo,
         by_job,
@@ -681,8 +730,14 @@ fn value_having_stays_above() {
 #[test]
 fn global_aggregate_having_stays_above() {
     let mut memo = Memo::default();
-    let rows = instant(&mut memo, "m", &[]);
-    let p = aggregate_group(&mut memo, rows, Reduction::by(vec![]), vec![quantile(0.9)]);
+    let rows = selector(&mut memo, TimeRangeKind::Instant, "m", &[]);
+    let p = aggregate_group(
+        &mut memo,
+        rows,
+        Reduction::by(vec![]),
+        vec![quantile(0.9)],
+        None,
+    );
     let having = filter(
         &mut memo,
         p,
@@ -698,8 +753,8 @@ fn global_aggregate_having_stays_above() {
 #[test]
 fn own_value_having_filters_each_readout() {
     let mut memo = Memo::default();
-    let rows = instant(&mut memo, "m", &["job"]);
-    let by_job = aggregate_group_with(
+    let rows = selector(&mut memo, TimeRangeKind::Instant, "m", &["job"]);
+    let by_job = aggregate_group(
         &mut memo,
         rows,
         Reduction::by(vec![2]),
@@ -726,10 +781,22 @@ fn own_value_having_filters_each_readout() {
 #[test]
 fn whole_expression_topk_heaps_read_the_raw_samples() {
     let mut memo = Memo::default();
-    let rows = range(&mut memo, "m", &["job"]);
-    let per_series = aggregate_group(&mut memo, rows, Reduction::PerEntity, vec![sum()]);
-    let by_job = aggregate_group(&mut memo, per_series, Reduction::by(vec![2]), vec![sum()]);
-    let ranked = aggregate_group(&mut memo, by_job, Reduction::by(vec![]), vec![topk(5)]);
+    let rows = selector(&mut memo, TimeRangeKind::Range, "m", &["job"]);
+    let per_series = aggregate_group(&mut memo, rows, Reduction::PerEntity, vec![sum()], None);
+    let by_job = aggregate_group(
+        &mut memo,
+        per_series,
+        Reduction::by(vec![2]),
+        vec![sum()],
+        None,
+    );
+    let ranked = aggregate_group(
+        &mut memo,
+        by_job,
+        Reduction::by(vec![]),
+        vec![topk(5)],
+        None,
+    );
     query(&mut memo, ranked);
     let memo = pass1_memo(memo, None).unwrap();
     for family in [
@@ -763,9 +830,15 @@ fn whole_expression_topk_heaps_read_the_raw_samples() {
 #[test]
 fn count_ranked_topk_counts_with_unit_weight() {
     let mut memo = Memo::default();
-    let rows = instant(&mut memo, "m", &["job"]);
-    let counts = aggregate_group(&mut memo, rows, Reduction::by(vec![2]), vec![count()]);
-    let ranked = aggregate_group(&mut memo, counts, Reduction::by(vec![]), vec![topk(5)]);
+    let rows = selector(&mut memo, TimeRangeKind::Instant, "m", &["job"]);
+    let counts = aggregate_group(&mut memo, rows, Reduction::by(vec![2]), vec![count()], None);
+    let ranked = aggregate_group(
+        &mut memo,
+        counts,
+        Reduction::by(vec![]),
+        vec![topk(5)],
+        None,
+    );
     query(&mut memo, ranked);
     let memo = pass1_memo(memo, None).unwrap();
     let (_, update) = state_group(&memo, SketchAlgorithm::CmsWithHeap);
@@ -781,15 +854,22 @@ fn count_ranked_topk_counts_with_unit_weight() {
 #[test]
 fn ranked_item_is_the_keys_outside_the_partition() {
     let mut memo = Memo::default();
-    let rows = range(&mut memo, "m", &["job", "host"]);
-    let per_series = aggregate_group(&mut memo, rows, Reduction::PerEntity, vec![sum()]);
+    let rows = selector(&mut memo, TimeRangeKind::Range, "m", &["job", "host"]);
+    let per_series = aggregate_group(&mut memo, rows, Reduction::PerEntity, vec![sum()], None);
     let by_both = aggregate_group(
         &mut memo,
         per_series,
         Reduction::by(vec![2, 3]),
         vec![sum()],
+        None,
     );
-    let ranked = aggregate_group(&mut memo, by_both, Reduction::by(vec![0]), vec![topk(5)]);
+    let ranked = aggregate_group(
+        &mut memo,
+        by_both,
+        Reduction::by(vec![0]),
+        vec![topk(5)],
+        None,
+    );
     query(&mut memo, ranked);
     let memo = pass1_memo(memo, None).unwrap();
     let (_, update) = state_group(&memo, SketchAlgorithm::CountSketchWithHeap);
@@ -799,54 +879,82 @@ fn ranked_item_is_the_keys_outside_the_partition() {
     );
 }
 
-// ── Nested-sum merges ──────────────────────────────────────────────────────
+// ── Nested distributive merges ─────────────────────────────────────────────
 
-/// `sum by (job) (sum_over_time(m[5m]))` gets a merged build: one exact
-/// `Sum` build over the raw samples grouped by `job`, a candidate of the
-/// outer sum's own accumulator state group, listing the inner sum's group
-/// in `fused_groups`.
+/// `sum by (job) (sum_over_time(m[5m]))`, and likewise `min` of `min` and
+/// `max` of `max`, gets a merged build: one exact accumulator of that kind
+/// over the raw samples grouped by `job`, a candidate of the outer
+/// aggregate's own accumulator state group, listing the inner aggregate's
+/// group in `fused_groups`.
 #[test]
-fn nested_sum_merges_into_the_outer_state_group() {
-    let mut memo = Memo::default();
-    let rows = range(&mut memo, "m", &["job"]);
-    let per_series = aggregate_group(&mut memo, rows, Reduction::PerEntity, vec![sum()]);
-    let by_job = aggregate_group(&mut memo, per_series, Reduction::by(vec![2]), vec![sum()]);
-    query(&mut memo, by_job);
-    let memo = pass1_memo(memo, None).unwrap();
-    let outer_state = groups_where(
-        &memo,
-        |e| matches!(e, Operator::ASAP(ASAPOp::SummaryAgg { child, family: FieldDataType::ExactAggregate(ExactKind::Sum, _), .. }) if *child == per_series),
-    );
-    let [outer_state] = outer_state[..] else {
-        panic!("{}", memo_printout(&memo))
-    };
-    let builds = candidates(&memo, outer_state);
-    assert_eq!(builds.len(), 2, "{}", memo_printout(&memo));
-    let merged = &builds[1];
-    assert_eq!(merged.expression.operator.children(), vec![&rows]);
-    assert_eq!(merged.fused_groups, vec![per_series]);
+fn nested_distributive_aggregate_merges_into_the_outer_state_group() {
+    for (intent, kind) in [
+        (sum(), ExactKind::Sum),
+        (AggIntent::Min { col: None }, ExactKind::Min),
+        (AggIntent::Max { col: None }, ExactKind::Max),
+    ] {
+        let mut memo = Memo::default();
+        let rows = selector(&mut memo, TimeRangeKind::Range, "m", &["job"]);
+        let per_series = aggregate_group(
+            &mut memo,
+            rows,
+            Reduction::PerEntity,
+            vec![intent.clone()],
+            None,
+        );
+        let by_job = aggregate_group(
+            &mut memo,
+            per_series,
+            Reduction::by(vec![2]),
+            vec![intent],
+            None,
+        );
+        query(&mut memo, by_job);
+        let memo = pass1_memo(memo, None).unwrap();
+        let outer_state = groups_where(
+            &memo,
+            |e| matches!(e, Operator::ASAP(ASAPOp::SummaryAgg { child, family: FieldDataType::ExactAggregate(state, _), .. }) if *child == per_series && *state == kind),
+        );
+        let [outer_state] = outer_state[..] else {
+            panic!("{kind:?}: {}", memo_printout(&memo))
+        };
+        let builds = candidates(&memo, outer_state);
+        assert_eq!(builds.len(), 2, "{kind:?}: {}", memo_printout(&memo));
+        let merged = &builds[1];
+        assert_eq!(merged.expression.operator.children(), vec![&rows]);
+        assert_eq!(merged.fused_groups, vec![per_series]);
+    }
 }
 
-/// The merge needs a sum over a sum's value: an outer sum over an inner
-/// `max` gets none.
+/// The merge needs the same distributive aggregate twice: a `sum` over a
+/// `max`, or a `min` over a `max`, gets none.
 #[test]
-fn nested_sum_merge_needs_a_sum_of_sums() {
-    let mut memo = Memo::default();
-    let rows = range(&mut memo, "m", &["job"]);
-    let per_series = aggregate_group(
-        &mut memo,
-        rows,
-        Reduction::PerEntity,
-        vec![AggIntent::Max { col: None }],
-    );
-    let by_job = aggregate_group(&mut memo, per_series, Reduction::by(vec![2]), vec![sum()]);
-    query(&mut memo, by_job);
-    let memo = pass1_memo(memo, None).unwrap();
-    assert!(memo
-        .groups()
-        .iter()
-        .flat_map(|g| &g.candidates)
-        .all(|c| c.fused_groups.is_empty()));
+fn nested_merge_needs_the_same_distributive_aggregate() {
+    for outer in [sum(), AggIntent::Min { col: None }] {
+        let mut memo = Memo::default();
+        let rows = selector(&mut memo, TimeRangeKind::Range, "m", &["job"]);
+        let per_series = aggregate_group(
+            &mut memo,
+            rows,
+            Reduction::PerEntity,
+            vec![AggIntent::Max { col: None }],
+            None,
+        );
+        let by_job = aggregate_group(
+            &mut memo,
+            per_series,
+            Reduction::by(vec![2]),
+            vec![outer],
+            None,
+        );
+        query(&mut memo, by_job);
+        let memo = pass1_memo(memo, None).unwrap();
+        assert!(memo
+            .groups()
+            .iter()
+            .flat_map(|g| &g.candidates)
+            .all(|c| c.fused_groups.is_empty()));
+    }
 }
 
 // ── Stream norms (update weights) ──────────────────────────────────────────
@@ -856,15 +964,15 @@ fn nested_sum_merge_needs_a_sum_of_sums() {
 #[test]
 fn update_weights_follow_the_measure() {
     let mut memo = Memo::default();
-    let rows = instant(&mut memo, "m", &["job"]);
-    let counts = aggregate_group(&mut memo, rows, Reduction::by(vec![2]), vec![count()]);
+    let rows = selector(&mut memo, TimeRangeKind::Instant, "m", &["job"]);
+    let counts = aggregate_group(&mut memo, rows, Reduction::by(vec![2]), vec![count()], None);
     query(&mut memo, counts);
     let memo = pass1_memo(memo, None).unwrap();
     let (_, update) = state_group(&memo, SketchAlgorithm::Cms);
     assert_eq!(update.weight, SummaryInputExpr::Constant(1.0));
     let mut memo = Memo::default();
-    let rows = instant(&mut memo, "m", &["job"]);
-    let sums = aggregate_group(&mut memo, rows, Reduction::by(vec![2]), vec![sum()]);
+    let rows = selector(&mut memo, TimeRangeKind::Instant, "m", &["job"]);
+    let sums = aggregate_group(&mut memo, rows, Reduction::by(vec![2]), vec![sum()], None);
     query(&mut memo, sums);
     let memo = pass1_memo(memo, None).unwrap();
     let state = groups_where(

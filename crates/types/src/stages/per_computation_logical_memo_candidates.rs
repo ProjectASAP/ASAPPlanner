@@ -2,7 +2,6 @@
 
 use super::MemoGroupId;
 use crate::ir::schema::{ExactKind, SketchAlgorithm};
-use crate::ir::Predicate;
 
 /// How one Pass 1 target is computed: exact or a summary.
 ///
@@ -27,33 +26,6 @@ pub enum HowToComputeAggregateMeasure {
     Summary(SketchAlgorithm),
 }
 
-/// Where a target's `HAVING` is applied by the candidates Pass 1 adds.
-///
-/// Only the adjacent form is recorded for push-down: the aggregate's own
-/// `having`, or a `Filter` group directly above the aggregate group (the
-/// form the SQL frontend lowers `HAVING` to). Multi-level push-down is
-/// tracked in #664.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HavingPlacement {
-    /// The predicate reads only group keys, so the candidates that compute
-    /// the filtered result push it below the aggregate as a row predicate (a
-    /// `Filter` on its input, which drops the group).
-    BelowAggregate,
-    /// The predicate reads aggregate values (or the aggregate is global), so
-    /// it stays a `Filter` above the finalize or readout output.
-    AboveOutput,
-}
-
-/// One `HAVING` over a target's aggregate output.
-#[derive(Debug, Clone, PartialEq)]
-pub struct HavingEntry {
-    /// The consumer `Filter` group that applies it; `None` for the
-    /// aggregate's own `having`, which every consumer reads.
-    pub filter: Option<MemoGroupId>,
-    pub predicate: Predicate<MemoGroupId>,
-    pub placement: HavingPlacement,
-}
-
 /// One measure of an aggregate with at least one realization besides exact
 /// execution. The target retains source, grouping, filters, input
 /// expressions and evaluation context.
@@ -65,12 +37,6 @@ pub struct ComputationTarget {
     pub measure_index: usize,
     /// The measure's unranked ways to compute it, the exact option first.
     pub ways_to_compute: Vec<HowToComputeAggregateMeasure>,
-    /// The measure's own filter; only rows that pass it update the state
-    /// (`SummaryAgg.filter`).
-    pub measure_filter: Option<Predicate<MemoGroupId>>,
-    /// The aggregate's own `having`, then one entry per consumer `Filter`
-    /// directly above the aggregate.
-    pub having_filters: Vec<HavingEntry>,
     /// The fused computation of this measure together with the target
     /// directly beneath it, offered beside this target's own candidates;
     /// `None` when no fusion applies.
@@ -81,7 +47,8 @@ pub struct ComputationTarget {
 /// one operator that replaces their operators in this appearance of the
 /// sub-expression (concepts doc §3, "Fused groups"): the whole-expression
 /// top-k over a per-item `sum` or `count` (`Summary` of a heap family), or
-/// the nested sum, a grouped `sum` over a `sum` (`ExactAccumulator([Sum])`).
+/// a nested distributive aggregate, a grouped `sum`, `min` or `max` over the
+/// same reduction (`ExactAccumulator([Sum])`, `[Min]` or `[Max]`).
 /// Its build candidates list the replaced targets' groups in
 /// `fused_groups`. It has the outer target's aggregate, measure, filter and
 /// `HAVING`.

@@ -51,18 +51,8 @@ pub fn scan_group(memo: &mut Memo, metric: &str, labels: &[&str]) -> MemoGroupId
 }
 
 /// The group of an `Aggregate` of `measures` (named by their intents) over
-/// `child`, grouped by `reduction`, unfiltered and without `HAVING`.
+/// `child`, grouped by `reduction`, unfiltered, with `having`.
 pub fn aggregate_group(
-    memo: &mut Memo,
-    child: MemoGroupId,
-    reduction: Reduction,
-    measures: Vec<AggIntent>,
-) -> MemoGroupId {
-    aggregate_group_with(memo, child, reduction, measures, None)
-}
-
-/// [`aggregate_group`] with the aggregate's own `having`.
-pub fn aggregate_group_with(
     memo: &mut Memo,
     child: MemoGroupId,
     reduction: Reduction,

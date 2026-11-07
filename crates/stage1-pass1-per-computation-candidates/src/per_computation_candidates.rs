@@ -19,8 +19,9 @@
 //!   list (`parameter_list`), and a readout (`SummaryEstimate`) group over
 //!   it, read by the result group.
 //! - **Fused builds.** A whole-expression top-k (a heap over the rows below
-//!   a per-item `sum` or `count`) and a nested sum (one exact `Sum` state
-//!   over the rows below a `sum` of a `sum`): each computes several
+//!   a per-item `sum` or `count`) and a nested distributive aggregate (one
+//!   exact `Sum`, `Min` or `Max` state over the rows below a `sum` of a
+//!   `sum`, a `min` of a `min` or a `max` of a `max`): each computes several
 //!   operators of one appearance as one operator, and its builds list the
 //!   groups of the operators it replaces in `fused_groups` (concepts doc
 //!   §3, "Fused groups").
@@ -40,12 +41,13 @@
 //! input (concepts doc, section 4). The metric rule and the pruning caps are
 //! decided per edge, after the last Pass 2 rule (#1207 PR 4).
 //!
-//! A measure filter or `HAVING` prunes nothing. The target records the
-//! measure filter (applied as `SummaryAgg.filter`) and one [`HavingEntry`]
-//! per `HAVING`: the aggregate's own, and each consumer `Filter` group
-//! directly above the aggregate group. A key-only predicate is pushed below
-//! the aggregate by the candidates that compute the filtered result; any
-//! other stays a `Filter` above the output.
+//! A measure filter or `HAVING` prunes nothing. The measure filter is
+//! applied as `SummaryAgg.filter`. A `HAVING` is the aggregate's own
+//! `having` or a consumer `Filter` group directly above the aggregate group,
+//! read from the memo: a key-only predicate ([`key_only_having`]) is pushed
+//! below the aggregate by the candidates that compute the filtered result
+//! (the aggregate group, or that `Filter` group); any other stays a `Filter`
+//! above the output.
 //!
 //! The input must be a logical memo: a group whose expression is an ASAP
 //! operator is rejected. No cost model and no accuracy target is read.
@@ -68,9 +70,8 @@ use asap_types::ir::{
 };
 use asap_types::stages::{
     parameter_list, CandidateError, CandidateExpression, CandidateForMemoGroup, ComputationTarget,
-    FusedComputation, HavingEntry, HavingPlacement, HowToComputeAggregateMeasure,
-    LogicalProperties, LogicalPropertiesError, LogicalRequirements, Memo, MemoGroupId,
-    OriginOfCandidateForMemoGroup,
+    FusedComputation, HowToComputeAggregateMeasure, LogicalProperties, LogicalPropertiesError,
+    LogicalRequirements, Memo, MemoGroupId, OriginOfCandidateForMemoGroup,
 };
 use thiserror::Error;
 
@@ -78,7 +79,7 @@ use asap_accuracy::sizing::{accuracy_budget, sizing_target, sketch_statistic};
 use asap_types::deployment_capabilities::summary_supported;
 
 use crate::realization::{
-    non_asap, raw_data_samples_of_metric, realize_keyed_additive_summary_input, schema,
+    expression, raw_data_samples_of_metric, realize_keyed_additive_summary_input, schema,
     summary_candidates,
 };
 
@@ -229,17 +230,35 @@ fn key_only_having(reduction: &Reduction, having: &Predicate<MemoGroupId>) -> bo
         && having.0.columns_referenced().iter().all(|id| *id < keys)
 }
 
-fn placement(below: bool) -> HavingPlacement {
-    if below {
-        HavingPlacement::BelowAggregate
-    } else {
-        HavingPlacement::AboveOutput
-    }
+/// The consumer `Filter` groups directly above `aggregate_group` (its
+/// `HAVING` as the SQL frontend lowers it), with their predicates. A
+/// `Filter` that reads the aggregate from a scalar expression stays a plain
+/// consumer.
+fn having_filter_groups(
+    memo: &Memo,
+    aggregate_group: MemoGroupId,
+) -> impl Iterator<Item = (MemoGroupId, &Predicate<MemoGroupId>)> {
+    memo.groups()[aggregate_group.0 as usize]
+        .parent_groups()
+        .iter()
+        .filter_map(move |&parent| match expression(memo, parent) {
+            Operator::NonASAP(NonASAPOp::Filter { child, pred }) if *child == aggregate_group => {
+                Some((parent, pred))
+            }
+            _ => None,
+        })
 }
 
-/// The expression of group `group`.
-fn expression(memo: &Memo, group: MemoGroupId) -> &Operator<MemoGroupId> {
-    &memo.groups()[group.0 as usize].expression
+/// Whether `aggregate_group` has a `HAVING`: its own `having` or a consumer
+/// `Filter` group directly above it ([`having_filter_groups`]).
+fn has_having(memo: &Memo, aggregate_group: MemoGroupId) -> bool {
+    matches!(
+        expression(memo, aggregate_group),
+        Operator::NonASAP(NonASAPOp::Aggregate {
+            having: Some(_),
+            ..
+        })
+    ) || having_filter_groups(memo, aggregate_group).next().is_some()
 }
 
 /// Discover one target per measure of each eligible aggregate group of
@@ -252,9 +271,7 @@ fn expression(memo: &Memo, group: MemoGroupId) -> &Operator<MemoGroupId> {
 /// `DeploymentCapabilities::supported_summaries`; `None` supports every
 /// one) are dropped: a target's own, and a fused computation's (with all
 /// of them dropped, the fusion is not offered). Measure filters and
-/// `HAVING` keep every candidate; the target records how they are applied:
-/// the aggregate's own `having`, then each consumer `Filter` group whose
-/// input is the aggregate group, key-only predicates below the aggregate.
+/// `HAVING` keep every candidate.
 pub(crate) fn computation_targets(
     memo: &Memo,
     supported_summaries: Option<&[SupportedSummary]>,
@@ -269,38 +286,12 @@ pub(crate) fn computation_targets(
     let mut targets = Vec::new();
     for (index, group) in memo.groups().iter().enumerate() {
         let Operator::NonASAP(NonASAPOp::Aggregate {
-            child,
-            reduction,
-            measures,
-            filters,
-            having,
-            ..
+            child, measures, ..
         }) = &group.expression
         else {
             continue;
         };
         let aggregate_group = MemoGroupId(index as u32);
-        let mut entries: Vec<HavingEntry> = having
-            .iter()
-            .map(|having| HavingEntry {
-                filter: None,
-                predicate: having.clone(),
-                placement: placement(key_only_having(reduction, having)),
-            })
-            .collect();
-        // Only a `Filter` whose input is this aggregate is its `HAVING`; one
-        // that reads it from a scalar expression stays a plain consumer.
-        for &parent in group.parent_groups() {
-            if let Operator::NonASAP(NonASAPOp::Filter { child, pred }) = expression(memo, parent) {
-                if *child == aggregate_group {
-                    entries.push(HavingEntry {
-                        filter: Some(parent),
-                        predicate: pred.clone(),
-                        placement: placement(key_only_having(reduction, pred)),
-                    });
-                }
-            }
-        }
         for (measure, intent) in measures.iter().enumerate() {
             let mut choices =
                 computation_candidates_for_intent(intent).map_err(|error| match error {
@@ -334,15 +325,13 @@ pub(crate) fn computation_targets(
                 aggregate_group,
                 measure_index: measure,
                 ways_to_compute: choices.candidates,
-                measure_filter: filters.get(measure).cloned().flatten(),
-                having_filters: entries.clone(),
                 fused_computation: None,
             });
         }
     }
     add_whole_expression_targets(memo, &mut targets);
     prune_topk_heaps_over_one_row_per_item(memo, &mut targets);
-    add_nested_sum_targets(memo, &mut targets);
+    add_nested_distributive_targets(memo, &mut targets);
     close_absorptions(&mut targets);
     without_unsupported_summaries(memo, &mut targets, supported_summaries);
     Ok(targets)
@@ -415,26 +404,28 @@ fn close_absorptions(targets: &mut [ComputationTarget]) {
     }
 }
 
-/// Nested-sum merge: a grouped `sum` over the value of a `sum` target
-/// beneath it gets a fused computation ([`ComputationTarget::fused_computation`])
-/// with the one candidate `ExactAccumulator([Sum])`: one exact `Sum`
-/// accumulator over the inner sum's input, grouped by the outer keys (the
-/// sum of the inner groups' sums is the sum of their rows), absorbing the
-/// inner target. Offered whatever else reads the inner sum: the inner sum's
-/// group keeps its own candidates for its other consumers. Applied when
-/// neither has a filter or `HAVING` ([`nested_sum_input`]), and when the
-/// outer sum is not itself absorbed by a merge and has no fused computation
-/// yet, and the inner sum has none, so merges do not stack. An outer sum a
+/// Nested distributive merge: a grouped `sum`, `min` or `max` over the
+/// value of a target of the same reduction beneath it (`sum` of `sum`,
+/// `min` of `min`, `max` of `max`) gets a fused computation
+/// ([`ComputationTarget::fused_computation`]) with the one candidate
+/// `ExactAccumulator([kind])`: one exact accumulator of that kind over the
+/// inner aggregate's input, grouped by the outer keys (the sum, min or max
+/// of the inner groups' values is that of their rows), absorbing the inner
+/// target. Offered whatever else reads the inner aggregate: its group keeps
+/// its own candidates for its other consumers. Applied when neither has a
+/// filter or `HAVING` ([`nested_distributive_input`]), and when the outer
+/// aggregate is not itself absorbed by a merge and has no fused computation
+/// yet, and the inner one has none, so merges do not stack. An outer sum a
 /// whole-expression top-k absorbs (`topk(k, sum by (G)
 /// (sum_over_time(m[W])))`) keeps its merge for the top-k's own candidates.
-fn add_nested_sum_targets(memo: &Memo, targets: &mut [ComputationTarget]) {
+fn add_nested_distributive_targets(memo: &Memo, targets: &mut [ComputationTarget]) {
     // The targets a merge absorbs.
     let mut absorbed: Vec<usize> = Vec::new();
     for t in 0..targets.len() {
         let target = &targets[t];
         if absorbed.contains(&t)
             || target.fused_computation.is_some()
-            || !target.having_filters.is_empty()
+            || has_having(memo, target.aggregate_group)
         {
             continue;
         }
@@ -449,88 +440,104 @@ fn add_nested_sum_targets(memo: &Memo, targets: &mut [ComputationTarget]) {
         else {
             continue;
         };
-        // Merges do not stack: the inner sum must not have a fused
+        // Merges do not stack: the inner aggregate must not have a fused
         // computation of its own.
-        if !targets[inner].having_filters.is_empty()
-            || targets[inner].fused_computation.is_some()
-            || nested_sum_input(memo, target.aggregate_group).is_none()
-        {
+        if has_having(memo, *child) || targets[inner].fused_computation.is_some() {
             continue;
         }
+        let Some((_, _, _, kind)) = nested_distributive_input(memo, target.aggregate_group) else {
+            continue;
+        };
         absorbed.push(inner);
-        let merge = HowToComputeAggregateMeasure::ExactAccumulator(vec![ExactKind::Sum]);
         targets[t].fused_computation = Some(FusedComputation {
             absorbed_targets: vec![inner],
-            ways_to_compute: vec![merge],
+            ways_to_compute: vec![HowToComputeAggregateMeasure::ExactAccumulator(vec![kind])],
         });
     }
 }
 
-/// The input rows, the inner sum and the outer grouping (moved onto the
-/// input rows by column, [`Reduction::partitions_over`]) of a nested-sum
-/// merge of `target`, or `None` when it does not apply: `target` is a
-/// grouped `sum` (not by `without`) of the value column of a per-series or
-/// grouped `sum` directly beneath it, neither filtered nor with `HAVING`,
-/// and not grouped by the metric name a per-series inner sum drops.
-fn nested_sum_input(
+/// The accumulator kind and input column of a distributive measure, one
+/// whose value over a union of groups is that of their values: `sum`, `min`
+/// and `max`.
+fn distributive(intent: &AggIntent) -> Option<(ExactKind, Option<usize>)> {
+    match intent {
+        AggIntent::Sum { col } => Some((ExactKind::Sum, *col)),
+        AggIntent::Min { col } => Some((ExactKind::Min, *col)),
+        AggIntent::Max { col } => Some((ExactKind::Max, *col)),
+        _ => None,
+    }
+}
+
+/// The input rows, the inner measure, the outer grouping (moved onto the
+/// input rows by column, [`Reduction::partitions_over`]) and the
+/// accumulator kind of a nested distributive merge of `target`, or `None`
+/// when it does not apply: `target` is a grouped `sum`, `min` or `max` (not
+/// by `without`) of the value column of a per-series or grouped aggregate of
+/// the same reduction directly beneath it ([`distributive`]), neither
+/// filtered nor with its own `having`, and not grouped by the metric name a
+/// per-series inner aggregate drops.
+fn nested_distributive_input(
     memo: &Memo,
     target: MemoGroupId,
-) -> Option<(MemoGroupId, AggIntent, Reduction)> {
-    let Some(NonASAPOp::Aggregate {
+) -> Option<(MemoGroupId, AggIntent, Reduction, ExactKind)> {
+    let Operator::NonASAP(NonASAPOp::Aggregate {
         child: inner,
-        reduction: reduction @ Reduction::Reduce(_),
+        reduction: reduction @ Reduction::Reduce(by),
         measures,
         filters,
         having: None,
         ..
-    }) = non_asap(memo, target)
+    }) = expression(memo, target)
     else {
         return None;
     };
-    let Reduction::Reduce(by) = &reduction else {
+    let [outer] = measures.as_slice() else {
         return None;
     };
-    let [AggIntent::Sum { col }] = measures.as_slice() else {
-        return None;
-    };
-    let Some(NonASAPOp::Aggregate {
+    let (kind, col) = distributive(outer)?;
+    let Operator::NonASAP(NonASAPOp::Aggregate {
         child: rows,
         reduction: inner_reduction,
         measures: inner_measures,
         filters: inner_filters,
         having: None,
         ..
-    }) = non_asap(memo, inner)
+    }) = expression(memo, *inner)
     else {
         return None;
     };
-    let [inner_sum @ AggIntent::Sum { .. }] = inner_measures.as_slice() else {
+    let [inner_measure] = inner_measures.as_slice() else {
         return None;
     };
-    if by.is_without() || any_measure_filtered(&filters) || any_measure_filtered(&inner_filters) {
+    if distributive(inner_measure).map(|(inner_kind, _)| inner_kind) != Some(kind)
+        || by.is_without()
+        || any_measure_filtered(filters)
+        || any_measure_filtered(inner_filters)
+    {
         return None;
     }
-    // The inner sum's value column: a per-series sum keeps its labels and
-    // carries the value as the sample value; a grouped one ends with it.
-    let value = match &inner_reduction {
+    // The inner aggregate's value column: a per-series one keeps its labels
+    // and carries the value as the sample value; a grouped one ends with it.
+    let value = match inner_reduction {
         Reduction::PerEntity => {
-            resolve_column_ref(&ColumnRef::SampleValue, schema(memo, inner)).ok()?
+            resolve_column_ref(&ColumnRef::SampleValue, schema(memo, *inner)).ok()?
         }
         Reduction::Reduce(keys) if !keys.is_without() => keys.len(),
         Reduction::Reduce(_) => return None,
     };
-    let summed = match col {
-        None => resolve_column_ref(&ColumnRef::SampleValue, schema(memo, inner)).ok()?,
-        Some(column) => *column,
+    let reduced = match col {
+        None => resolve_column_ref(&ColumnRef::SampleValue, schema(memo, *inner)).ok()?,
+        Some(column) => column,
     };
-    if summed != value || by.keys().contains(&value) {
+    if reduced != value || by.keys().contains(&value) {
         return None;
     }
-    // A per-series sum drops the metric name, which the raw rows keep:
-    // grouping them by it would name groups the nested sums leave unnamed.
+    // A per-series aggregate drops the metric name, which the raw rows
+    // keep: grouping them by it would name groups the nested aggregates
+    // leave unnamed.
     if matches!(inner_reduction, Reduction::PerEntity)
         && by.keys().iter().any(|&key| {
-            schema(memo, inner)
+            schema(memo, *inner)
                 .fields
                 .get(key)
                 .is_some_and(|f| f.name == "__name__")
@@ -538,8 +545,8 @@ fn nested_sum_input(
     {
         return None;
     }
-    let partitions = reduction.partitions_over(schema(memo, inner), schema(memo, rows))?;
-    Some((rows, inner_sum.clone(), partitions))
+    let partitions = reduction.partitions_over(schema(memo, *inner), schema(memo, *rows))?;
+    Some((*rows, inner_measure.clone(), partitions, kind))
 }
 
 /// Whole-expression top-k (Example 1's Q2): a top-k over a per-item `sum`
@@ -569,11 +576,8 @@ fn add_whole_expression_targets(memo: &Memo, targets: &mut [ComputationTarget]) 
         else {
             continue;
         };
-        if target.measure_filter.is_some()
-            || !target.having_filters.is_empty()
-            || targets[inner].measure_filter.is_some()
-            || !targets[inner].having_filters.is_empty()
-        {
+        // Measure filters: `whole_expression_input` refuses them.
+        if has_having(memo, target.aggregate_group) || has_having(memo, *child) {
             continue;
         }
         let Some((input, ..)) = whole_expression_input(memo, target.aggregate_group) else {
@@ -667,21 +671,22 @@ fn whole_expression_input(
     memo: &Memo,
     target: MemoGroupId,
 ) -> Option<(MemoGroupId, SummaryUpdate, Reduction)> {
-    let Some(NonASAPOp::Aggregate {
+    let Operator::NonASAP(NonASAPOp::Aggregate {
         child,
         reduction,
         measures,
         filters,
         having: None,
         ..
-    }) = non_asap(memo, target)
+    }) = expression(memo, target)
     else {
         return None;
     };
+    let child = *child;
     let [intent @ AggIntent::TopK { .. }] = measures.as_slice() else {
         return None;
     };
-    if any_measure_filtered(&filters) {
+    if any_measure_filtered(filters) {
         return None;
     }
     // The rule reads only the family's algorithm, and rejects Count-Min over
@@ -692,11 +697,11 @@ fn whole_expression_input(
         SketchAlgorithm::CountSketchWithHeap,
         GroupingStrategy::default(),
     );
-    let realized = realize_keyed_additive_summary_input(memo, intent, &family, &reduction, child)?;
+    let realized = realize_keyed_additive_summary_input(memo, intent, &family, reduction, child)?;
     let mut input = realized.input;
     let per_series = matches!(
-        non_asap(memo, child),
-        Some(NonASAPOp::Aggregate {
+        expression(memo, child),
+        Operator::NonASAP(NonASAPOp::Aggregate {
             reduction: Reduction::PerEntity,
             ..
         })
@@ -747,7 +752,10 @@ pub(crate) fn add_pass1_candidates(
     memo: &mut Memo,
     targets: &[ComputationTarget],
 ) -> Result<(), PerComputationCandidateError> {
-    for index in 0..memo.groups().len() {
+    // Stage 0's groups: a consumer `Filter` among them is a query's
+    // `HAVING`; the `Filter` groups Pass 1 adds are parts of its candidates.
+    let stage0_groups = memo.groups().len();
+    for index in 0..stage0_groups {
         let group = MemoGroupId(index as u32);
         let own = expression(memo, group).clone();
         add_candidate(memo, group, own, None, Vec::new())?;
@@ -760,18 +768,25 @@ pub(crate) fn add_pass1_candidates(
             .push(target);
     }
     for (&aggregate_group, group_targets) in &targets_of {
-        let entries = &group_targets[0].having_filters;
-        let own = |placement: HavingPlacement| -> Vec<Predicate<MemoGroupId>> {
-            entries
-                .iter()
-                .filter(|entry| entry.filter.is_none() && entry.placement == placement)
-                .map(|entry| entry.predicate.clone())
-                .collect()
+        let Operator::NonASAP(NonASAPOp::Aggregate {
+            reduction, having, ..
+        }) = expression(memo, aggregate_group)
+        else {
+            continue;
         };
-        let (below, above) = (
-            own(HavingPlacement::BelowAggregate),
-            own(HavingPlacement::AboveOutput),
-        );
+        let (below, above): (Vec<_>, Vec<_>) = having
+            .iter()
+            .cloned()
+            .partition(|having| key_only_having(reduction, having));
+        // Each consumer `Filter` group whose `HAVING` is key-only gets the
+        // candidates that compute its rows with the predicate pushed below.
+        let pushed_down: Vec<(MemoGroupId, Predicate<MemoGroupId>)> =
+            having_filter_groups(memo, aggregate_group)
+                .filter(|&(filter, pred)| {
+                    (filter.0 as usize) < stage0_groups && key_only_having(reduction, pred)
+                })
+                .map(|(filter, pred)| (filter, pred.clone()))
+                .collect();
         let ways = AggregateWays {
             aggregate_group,
             result_group: aggregate_group,
@@ -781,18 +796,15 @@ pub(crate) fn add_pass1_candidates(
             all_targets: targets,
         };
         add_aggregate_candidates(memo, &ways)?;
-        for entry in entries {
-            if let (Some(filter), HavingPlacement::BelowAggregate) = (entry.filter, entry.placement)
-            {
-                let mut with_consumer = below.clone();
-                with_consumer.push(entry.predicate.clone());
-                let filtered = AggregateWays {
-                    result_group: filter,
-                    below: &with_consumer,
-                    ..ways
-                };
-                add_aggregate_candidates(memo, &filtered)?;
-            }
+        for (filter, pred) in pushed_down {
+            let mut with_consumer = below.clone();
+            with_consumer.push(pred);
+            let filtered = AggregateWays {
+                result_group: filter,
+                below: &with_consumer,
+                ..ways
+            };
+            add_aggregate_candidates(memo, &filtered)?;
         }
     }
     Ok(())
@@ -959,8 +971,8 @@ fn unless_unsupported(
 }
 
 /// Adds the fused computation `way` of `ways`' single measure: a whole-
-/// expression heap (a summary way) or a nested-sum merge (an exact
-/// accumulator way). Its builds list `absorbed_groups`, the groups of the
+/// expression heap (a summary way) or a nested distributive merge (an
+/// exact accumulator way). Its builds list `absorbed_groups`, the groups of the
 /// operators it replaces, in `fused_groups`.
 fn add_fused_candidate(
     memo: &mut Memo,
@@ -1001,16 +1013,24 @@ fn add_fused_candidate(
             add_candidate(memo, ways.result_group, output, None, Vec::new())?;
         }
         HowToComputeAggregateMeasure::ExactAccumulator(_) => {
-            // The merged build computes the outer sum's own accumulator
-            // state, from the rows below the inner sum: a candidate of that
-            // state group (#1203, fused builds).
-            let (rows, inner_sum, partitions) = nested_sum_input(memo, ways.aggregate_group)
-                .ok_or(PerComputationCandidateError::Unsupported(
-                    "nested-sum merge input",
-                ))?;
-            let outer_state = accumulator_state(memo, ExactKind::Sum, measure)?;
-            let merged =
-                exact_accumulator_build(memo, ExactKind::Sum, &inner_sum, rows, partitions)?;
+            // The merged build computes the outer aggregate's own
+            // accumulator state, from the rows below the inner aggregate: a
+            // candidate of that state group (#1203, fused builds).
+            let (rows, inner, partitions, kind) =
+                nested_distributive_input(memo, ways.aggregate_group).ok_or(
+                    PerComputationCandidateError::Unsupported("nested distributive merge input"),
+                )?;
+            let read = measure_input(measure.intent, memo, measure.input, measure.filter)?;
+            let outer_state = accumulator_state(memo, kind, measure.intent, measure, read)?;
+            let below_inner = SingleMeasure {
+                input: rows,
+                reduction: &partitions,
+                intent: &inner,
+                filter: None,
+                raw_data_samples_of: None,
+            };
+            let read = measure_input(&inner, memo, rows, None)?;
+            let merged = accumulator_build(memo, kind, &inner, &below_inner, read)?;
             add_candidate(memo, outer_state, merged, None, absorbed_groups.to_vec())?;
         }
         HowToComputeAggregateMeasure::Exact => {
@@ -1032,12 +1052,6 @@ fn measure_output(
     way: &HowToComputeAggregateMeasure,
     result_group: MemoGroupId,
 ) -> Result<Operator<MemoGroupId>, PerComputationCandidateError> {
-    let finalized = |memo: &mut Memo, kind: ExactKind, measure: &SingleMeasure<'_>| {
-        let state = accumulator_state(memo, kind, measure)?;
-        Ok::<_, PerComputationCandidateError>(Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
-            child: state,
-        }))
-    };
     Ok(match way {
         HowToComputeAggregateMeasure::Exact => {
             return Err(PerComputationCandidateError::Unsupported(
@@ -1045,7 +1059,10 @@ fn measure_output(
             ))
         }
         HowToComputeAggregateMeasure::ExactAccumulator(kinds) if kinds.len() == 1 => {
-            finalized(memo, kinds[0], measure)?
+            let read = measure_input(measure.intent, memo, measure.input, measure.filter)?;
+            Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
+                child: accumulator_state(memo, kinds[0], measure.intent, measure, read)?,
+            })
         }
         HowToComputeAggregateMeasure::Summary(algorithm) => {
             let query = sketch_statistic(measure.intent).ok_or(
@@ -1103,10 +1120,16 @@ fn measure_output(
                 accuracy: AccuracyTarget::exact(),
             };
             let read = measure_input(&sum_intent, memo, measure.input, measure.filter)?;
-            let sum = finalized_with(memo, ExactKind::Sum, &sum_intent, measure, read.clone())?;
-            let count = finalized_with(memo, ExactKind::Count, &count_intent, measure, read)?;
-            let sum = add_group(memo, sum)?;
-            let count = add_group(memo, count)?;
+            let sum = accumulator_state(memo, ExactKind::Sum, &sum_intent, measure, read.clone())?;
+            let count = accumulator_state(memo, ExactKind::Count, &count_intent, measure, read)?;
+            let sum = add_group(
+                memo,
+                Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child: sum }),
+            )?;
+            let count = add_group(
+                memo,
+                Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child: count }),
+            )?;
             if memo.groups()[measure.input.0 as usize]
                 .group_properties
                 .result_kind
@@ -1162,33 +1185,18 @@ fn measure_output(
     })
 }
 
-/// The accumulator-state group of `kind` for `measure` (its own intent and
-/// input), with its build candidate.
+/// The accumulator-state group of `kind` for `intent` (`measure`'s own, or
+/// one of its states, such as `avg`'s `sum`), reading `read` from
+/// `measure`'s input, with its build candidate.
 fn accumulator_state(
-    memo: &mut Memo,
-    kind: ExactKind,
-    measure: &SingleMeasure<'_>,
-) -> Result<MemoGroupId, PerComputationCandidateError> {
-    let read = measure_input(measure.intent, memo, measure.input, measure.filter)?;
-    let build = accumulator_build(memo, kind, measure.intent, measure, read)?;
-    add_state_group(memo, build, &[])
-}
-
-/// `FinalizeExactAccumulator` over the accumulator state of `kind` for
-/// `intent` (one of `measure`'s states, such as `avg`'s `sum`), reading
-/// `read` from `measure`'s input.
-fn finalized_with(
     memo: &mut Memo,
     kind: ExactKind,
     intent: &AggIntent,
     measure: &SingleMeasure<'_>,
     read: SummaryInputExpr,
-) -> Result<Operator<MemoGroupId>, PerComputationCandidateError> {
+) -> Result<MemoGroupId, PerComputationCandidateError> {
     let build = accumulator_build(memo, kind, intent, measure, read)?;
-    let state = add_state_group(memo, build, &[])?;
-    Ok(Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
-        child: state,
-    }))
+    add_state_group(memo, build, &[])
 }
 
 /// The accumulator build of `kind` for `intent` over `measure`'s input,
@@ -1214,27 +1222,6 @@ fn accumulator_build(
         reduction: measure.reduction.clone(),
         grouping: GroupingStrategy::default(),
         filter: measure.filter.cloned(),
-    }))
-}
-
-/// An unfiltered exact accumulator build of `kind` for `intent` over
-/// `input`, grouped by `reduction`.
-fn exact_accumulator_build(
-    memo: &Memo,
-    kind: ExactKind,
-    intent: &AggIntent,
-    input: MemoGroupId,
-    reduction: Reduction,
-) -> Result<Operator<MemoGroupId>, PerComputationCandidateError> {
-    let family = FieldDataType::exact(kind);
-    let read = measure_input(intent, memo, input, None)?;
-    Ok(Operator::ASAP(ASAPOp::SummaryAgg {
-        input: summary_update(intent, &family, &reduction, schema(memo, input), read)?,
-        child: input,
-        family,
-        reduction,
-        grouping: GroupingStrategy::default(),
-        filter: None,
     }))
 }
 
