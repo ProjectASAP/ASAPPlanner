@@ -17,14 +17,14 @@ use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot};
 use asap_types::physical::{ExecutionTiming, Lifetime, StorageMedium};
 use asap_types::stages::{
-    AssignmentRealizer, ExecutionContextId, PhysicalASAPMemoCandidates, PhysicalCandidateError,
-    PhysicalCandidateId, PruneReason, PrunedCandidate, RealizedPlan,
+    AssignmentRealizer, ExecutionContext, ExecutionContextId, PhysicalASAPMemoCandidates,
+    PhysicalCandidateError, PhysicalCandidateId, PruneReason, PrunedCandidate, RealizedPlan,
 };
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use crate::execution_cost::{execution_costs, ExecutionCosts};
 use crate::milp::execution_contexts::{Execution, ExecutionContexts};
-use crate::milp::model::{solve_selection, SelectionInputs, SelectionMilpError};
+use crate::milp::model::{solve_selection, SelectionInputs, SelectionMilpError, SolvedSelection};
 use crate::models::AccuracyCheckInputs;
 use crate::report::{
     AcceptedAccuracy, ErrorSelectingPlan, InexactObjective, Rejection, RejectionCause,
@@ -46,8 +46,13 @@ const RUNS_PER_QUERY: &str = "a not-materialized execution in a context of sever
 const CHAIN_BUILDS_PER_REQUEST: &str = "a tumbling-window chain materialized at query time: \
      plan_cost builds it once per request of the queries reaching it, the objective once per \
      window";
-const CHAIN_MERGE: &str = "the merge the realizer reads each tumbling-window chain through, \
-     which is not a candidate";
+const CHAIN_MERGE: &str = "the merge the realizer reads a tumbling-window chain materialized \
+     across evaluations through: plan_cost runs it per query reading it; it is not a candidate";
+const REPRESENTATIVE_PRODUCER: &str = "a consumer costed over the output of another logical \
+     candidate of its input than the selected one: the objective costs each execution over one \
+     representative producer per input";
+const RANGE_UNDER_CHAIN: &str = "a range read only by tumbling-window chains run in its \
+     context: the realizer builds each chain over the range's input, so plan_cost has no range";
 const QUERY_TIME_SCAN: &str = "a query-time scan: plan_cost reads the windows of its selected \
      consumers and retains the raw data of the largest scan of each source; the objective reads \
      the windows of every consumer that may read it in its context and retains each scan's";
@@ -160,7 +165,7 @@ pub fn select_plan(
     let inexact_objective = (difference > tolerance).then(|| InexactObjective {
         objective_per_second,
         plan_cost_per_second,
-        inexact_terms: inexact_terms(physical, &contexts, &solved.execution_of_node),
+        inexact_terms: inexact_terms(physical, &contexts, &costs, &solved),
     });
     let accepted_accuracy_per_query = accepted_accuracy(&realized, entries, accuracy_checks.model);
     let validation_ms = validation_started.elapsed().as_millis() as u64;
@@ -269,22 +274,78 @@ fn request_cost_per_second(
 }
 
 /// The terms of `plan_cost` the objective does not encode that the
-/// selected executions `execution_of_node` may meet, each with how many of
-/// them: query-time results holding memory, not-materialized executions in
-/// a context of several queries, query-time materialized chains, chains
-/// read through the realizer's merge, query-time scans.
+/// selected executions may meet, each with how many of them: query-time
+/// results holding memory, not-materialized executions in a context of
+/// several queries, query-time materialized chains, chains materialized
+/// across evaluations read through the realizer's merge, consumers costed
+/// over another producer than the selected one, ranges read only by
+/// chains, query-time scans.
 fn inexact_terms(
     physical: &PhysicalASAPMemoCandidates,
     contexts: &ExecutionContexts,
-    execution_of_node: &[Execution],
+    costs: &ExecutionCosts,
+    solved: &SolvedSelection,
 ) -> BTreeMap<String, usize> {
     let memo = &physical.logical_candidates.memo;
+    let execution_of_node = &solved.execution_of_node;
+    let windowed = |node: usize| {
+        memo.candidate(
+            physical.physical_candidates[execution_of_node[node].candidate().0]
+                .logical_candidate_id,
+        )
+        .logical_properties
+        .window_layout()
+        .is_some()
+    };
+    let mut terms: BTreeMap<String, usize> = BTreeMap::new();
+    // Per node, whether every consumer selected for it is a chain.
+    let mut read_only_by_chains: BTreeMap<usize, bool> = BTreeMap::new();
+    for edge in &solved.selected_dag.edges {
+        let (producer, consumer) = (edge.producer.0, edge.consumer.0);
+        *read_only_by_chains.entry(producer).or_insert(true) &= windowed(consumer);
+        let representative = costs
+            .representative_producers
+            .get(&execution_of_node[consumer])
+            .and_then(|producers| producers.get(edge.input_index_of_consumer));
+        // Another run of the same logical candidate at the same timing has
+        // the same output.
+        let same_output = |a: Execution, b: Execution| {
+            let (a, b) = (
+                &physical.physical_candidates[a.candidate().0],
+                &physical.physical_candidates[b.candidate().0],
+            );
+            a.logical_candidate_id == b.logical_candidate_id
+                && a.physical_properties.timing() == b.physical_properties.timing()
+        };
+        if !representative.is_some_and(|&r| same_output(r, execution_of_node[producer])) {
+            *terms
+                .entry(REPRESENTATIVE_PRODUCER.to_string())
+                .or_default() += 1;
+        }
+    }
+    for (node, only_chains) in read_only_by_chains {
+        let candidate = &physical.physical_candidates[execution_of_node[node].candidate().0];
+        if only_chains
+            && matches!(
+                memo.candidate(candidate.logical_candidate_id)
+                    .expression
+                    .operator,
+                Operator::NonASAP(NonASAPOp::TimeRange { .. })
+            )
+            && matches!(
+                execution_of_node[node],
+                Execution::InContext(context, _)
+                    if matches!(contexts.contexts()[context.0], ExecutionContext::Evaluation { .. })
+            )
+        {
+            *terms.entry(RANGE_UNDER_CHAIN.to_string()).or_default() += 1;
+        }
+    }
     let queries_of_context = |context: ExecutionContextId| {
         (0..physical.query_roots.len())
             .filter(|&query| contexts.context_of_query(query) == Some(context))
             .count()
     };
-    let mut terms: BTreeMap<String, usize> = BTreeMap::new();
     for &execution in execution_of_node {
         let candidate = &physical.physical_candidates[execution.candidate().0];
         let properties = candidate.physical_properties;
@@ -307,7 +368,7 @@ fn inexact_terms(
         if query_time && matches!(properties.lifetime(), Lifetime::AcrossEvaluations(_)) {
             add(CHAIN_BUILDS_PER_REQUEST);
         }
-        if logical.logical_properties.window_layout().is_some() {
+        if matches!(properties.lifetime(), Lifetime::AcrossEvaluations(_)) {
             add(CHAIN_MERGE);
         }
         if query_time

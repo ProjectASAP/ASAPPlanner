@@ -211,19 +211,21 @@ pub struct SearchReport {
     pub solver_ms: u64,
     pub validation_ms: u64,
     /// Set when `asap_cost::plan_cost` of the selected plan differs from
-    /// the selection MILP's objective and the model encoded some cost terms
-    /// inexactly (open questions on #1095, e.g. the working-memory term), so
-    /// the plan is returned with its cost equality unproven. `None` when
-    /// the two are equal (within a relative 10⁻⁶). A
-    /// difference with no inexact term is an error
-    /// ([`ErrorSelectingPlan::ObjectiveDiffersFromPlanCost`]).
+    /// the selection MILP's objective (by more than a relative 10⁻⁶), with
+    /// the terms of `plan_cost` the formulation's objective does not encode
+    /// that the selection may meet (e.g. the memory a query-time result
+    /// holds while its evaluation runs, which needs query latency); the
+    /// plan is returned with its cost equality unproven. `None` when the
+    /// two are equal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inexact_objective: Option<InexactObjective>,
 }
 
 /// The selected plan's cost per second as the selection MILP's objective
-/// and as `asap_cost::plan_cost` computes it (both without request fees),
-/// and the cost terms the model encoded inexactly, with how many times.
+/// and as `asap_cost::plan_cost` computes it (both with the runtime's
+/// request fees), and the terms of `plan_cost` the objective does not
+/// encode that the selection may meet, each with how many selected
+/// executions it may concern.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InexactObjective {
     pub objective_per_second: f64,
@@ -287,17 +289,6 @@ pub enum ErrorSelectingPlan {
     /// The selection MILP implements cost model 1 only (#1095 §3).
     #[error("the selection MILP does not support {0}")]
     UnsupportedCostModel(String),
-    /// `asap_cost::plan_cost` of the selected plan differs from the
-    /// selection MILP's objective (both without request fees) and the model
-    /// encoded every cost term exactly: a bug in a cost term.
-    #[error(
-        "the selection MILP's objective {objective_per_second:e} differs from plan_cost \
-         {plan_cost_per_second:e} (per second, without request fees)"
-    )]
-    ObjectiveDiffersFromPlanCost {
-        objective_per_second: f64,
-        plan_cost_per_second: f64,
-    },
     /// The selected plan fails a check the selection MILP encodes
     /// (accuracy through the budget shares, latency): a bug in the
     /// accuracy weights, the sizing rule or a latency term, never a reason

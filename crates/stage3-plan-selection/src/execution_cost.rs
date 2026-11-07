@@ -56,6 +56,9 @@ pub(crate) struct ExecutionCosts {
     pub(crate) retention_cost_per_window_per_second: HashMap<PhysicalCandidateId, f64>,
     /// Why `asap-cost` could not cost an execution (the MILP leaves it out).
     pub(crate) uncostable: BTreeMap<Execution, String>,
+    /// The producer execution each costed execution was costed over, per
+    /// input: its cost assumes that producer's output.
+    pub(crate) representative_producers: HashMap<Execution, Vec<Execution>>,
 }
 
 /// $\rho_\kappa$: the executions per second of `context`. An evaluation
@@ -265,6 +268,10 @@ pub(crate) fn execution_costs(
         costs
             .cost_per_second
             .insert(execution, output.cost_per_second);
+        costs.representative_producers.insert(
+            execution,
+            representative[at].iter().map(|&p| executions[p]).collect(),
+        );
         if let Some(retention) = retention {
             costs
                 .retention_cost_per_window_per_second
@@ -392,7 +399,7 @@ fn cost_execution(
     // W^mat_v: its cost retaining its range's windows, less those windows'
     // retention, which pi_v h_v prices.
     let cost = cost - retention.unwrap_or(0.0) * windows as f64;
-    let output = UsageOutput {
+    let owned = |usage: &NodeUsage<'_>, cost_per_second| UsageOutput {
         output: usage.output,
         sources: usage.sources.iter().map(|s| s.to_string()).collect(),
         family: match usage.family {
@@ -405,9 +412,66 @@ fn cost_execution(
             .iter()
             .map(|s| s.to_string())
             .collect(),
-        cost_per_second: cost,
+        cost_per_second,
     };
-    Ok((node, output, retention))
+    if !matches!(
+        node.payload,
+        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+    ) {
+        let output = owned(&usage, cost);
+        return Ok((node, output, retention));
+    }
+    // The realizer reads a chain through a merge of all its windows, at
+    // query time: its consumers read the merge. A chain run in its
+    // consumers' context (None or `OneEvaluation`) runs the merge there
+    // too; the merge over a chain materialized across evaluations runs
+    // once per context reading it, which no execution's cost can hold (an
+    // inexact term of the objective).
+    let merge = PhysicalASAPDAGNode {
+        id: at,
+        payload: Operator::ASAP(ASAPOp::SummaryMerge {
+            children: vec![at],
+            newest_tumbling_windows: None,
+            group_by: None,
+        }),
+        output_state: ExecutionDataState {
+            timing: ExecutionTiming::QueryTime,
+            primitive: DataPrimitive::SummaryState,
+        },
+        lifetime: Lifetime::None,
+        parameters: None,
+        output_schema: node.output_schema.clone(),
+        guarantee: None,
+        retention_ms: None,
+        summary_coverage: None,
+    };
+    let chain_output = owned(&usage, cost);
+    let chain = ProducerOutput {
+        payload: &node.payload,
+        output_schema: &node.output_schema,
+        output: usage.output,
+        sources: usage.sources.clone(),
+        family: usage.family,
+        unchanged_columns: usage.unchanged_columns.clone(),
+    };
+    let merge_usage = node_usage(
+        &merge,
+        &[chain],
+        (1, rate),
+        ScanWindow::Unbounded,
+        1,
+        None,
+        data,
+        cost_inputs,
+        formula_scale,
+    )
+    .map_err(|error| error.to_string())?;
+    let merge_cost = match retention {
+        Some(_) => 0.0,
+        None => cost_per_second(&merge_usage, cost_inputs)?,
+    };
+    let output = owned(&merge_usage, chain_output.cost_per_second + merge_cost);
+    Ok((merge, output, retention))
 }
 
 /// The rows a query-time `Scan` of `group` reads in a context, back from
