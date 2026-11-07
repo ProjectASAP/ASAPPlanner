@@ -3,7 +3,9 @@
 //! adds them, a bounded number of rows at a time.
 use asap_executor::operators::Operator;
 use asap_executor::plan::PhysicalDAG;
-use asap_executor::planner::ir::schema::{DataType, Field, FieldDataType, Schema, SketchAlgorithm};
+use asap_executor::planner::ir::schema::{
+    DataType, Field, FieldDataType, Schema, SketchAlgorithm, SketchParams,
+};
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::values::{Batch, Value};
 use asap_executor::Error;
@@ -65,7 +67,18 @@ fn one_large_batch_fails_near_the_memory_limit() {
     dag.add(
         1,
         vec![0],
-        Operator::per_group_summary_build(input, family, 1, None, vec![0]).unwrap(),
+        Operator::per_group_summary_build(
+            input,
+            family,
+            Some(SketchParams::Kll {
+                k: 200,
+                failure_probability: None,
+            }),
+            1,
+            None,
+            vec![0],
+        )
+        .unwrap(),
     )
     .unwrap();
     let context = RunContext::new(

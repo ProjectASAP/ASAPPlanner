@@ -67,6 +67,7 @@ fn scan_plan(predicates: Vec<Predicate<usize>>) -> PhysicalASAPDAG {
             output_state: ExecutionDataState::QUERY_ROWS,
             lifetime: Default::default(),
             parameters: None,
+            summary_coverage: None,
             output_schema: schema(),
             guarantee: None,
             retention_ms: None,

@@ -101,10 +101,34 @@ pub mod physical_export {
     use asap_types::ir::OperatorNode;
     use std::rc::Rc;
 
-    /// Export the physical DAG of `root`.
+    /// Export the physical DAG of `root`, every node at query time and not
+    /// materialized. An operator tree carries no θ, so each sketch build
+    /// gets the first θ of its family's predefined list
+    /// (`asap_types::stages::parameter_list`), none for a family without a
+    /// list; a plan the realizer exported carries its selected θ instead.
     pub fn physical_asap_dag(root: &Rc<OperatorNode>) -> PhysicalASAPDAG {
-        asap_types::test_support::physical_asap_dag_at_query_time(root)
-            .expect("physical ASAP DAG export failed")
+        use asap_types::ir::schema::FieldDataType;
+        use asap_types::ir::{ASAPOp, Operator};
+        let mut dag = asap_types::test_support::physical_asap_dag_at_query_time(root)
+            .expect("physical ASAP DAG export failed");
+        for node in &mut dag.nodes {
+            if let Operator::ASAP(
+                ASAPOp::SummaryAgg {
+                    family: FieldDataType::Sketch(algorithm, _),
+                    ..
+                }
+                | ASAPOp::SummaryTumblingWindowChain {
+                    family: FieldDataType::Sketch(algorithm, _),
+                    ..
+                },
+            ) = &node.payload
+            {
+                node.parameters = asap_types::stages::parameter_list(*algorithm)
+                    .first()
+                    .cloned();
+            }
+        }
+        dag
     }
 }
 
@@ -193,23 +217,223 @@ pub mod planning {
         }
     }
 
-    /// Exact computation and each explicit single-target rule application,
-    /// each as one plan for `root`. Pass 1 now adds these ways as memo
-    /// candidates; realizing one plan per way from the memo is #1207 PR 6.
+    /// Exact computation and each way Pass 1 and Pass 2 offer for the
+    /// root group of `root`, each realized as one plan: for each root
+    /// candidate run at query time and not materialized, each input reads
+    /// its first admissible producer of the same kind
+    /// ([`realize_from_root_candidates`]). Accuracy guarantees are ignored,
+    /// so every summary Pass 1 offers stays in the memo.
     pub fn explicit_local_candidates(root: Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
-        let _ = root;
-        todo!("#1207 PR 6: realize one plan per way to compute from Pass 1's memo")
+        realize_from_root_candidates(root, |_| false)
+            .into_iter()
+            .map(|plan| plan_root(&plan))
+            .collect()
     }
 
-    /// One explicit plan using `family` wherever a local target supports it,
-    /// keeping all other computations exact. Realizing it from Pass 1's
-    /// memo is #1207 PR 6.
+    /// One plan of `root` that reads `family` wherever an input can: each
+    /// input prefers a producer whose plan builds a `family` sketch
+    /// ([`realize_from_root_candidates`]); the first such plan.
     pub fn explicit_summary_candidate(
         root: Rc<OperatorNode>,
         family: asap_types::ir::schema::SketchAlgorithm,
     ) -> Rc<OperatorNode> {
-        let _ = (root, family);
-        todo!("#1207 PR 6: realize the plan of one summary family from Pass 1's memo")
+        let builds_family =
+            move |operator: &asap_types::ir::Operator<asap_types::stages::MemoGroupId>| {
+                matches!(
+                    operator,
+                    asap_types::ir::Operator::ASAP(asap_types::ir::ASAPOp::SummaryAgg {
+                        family: asap_types::ir::schema::FieldDataType::Sketch(algorithm, _),
+                        ..
+                    }) if *algorithm == family
+                )
+            };
+        realize_from_root_candidates(root, builds_family)
+            .iter()
+            .map(plan_root)
+            .find(|plan| {
+                asap_types::ir::OperatorNode::reachable(plan)
+                    .iter()
+                    .any(|node| {
+                        matches!(
+                            node.asap(),
+                            Some(asap_types::ir::ASAPOp::SummaryAgg {
+                                family: asap_types::ir::schema::FieldDataType::Sketch(algorithm, _),
+                                ..
+                            }) if *algorithm == family
+                        )
+                    })
+            })
+            .unwrap_or_else(|| panic!("no plan builds a {family:?} sketch"))
+    }
+
+    /// The single operator root of a realized plan.
+    fn plan_root(plan: &asap_types::stages::RealizedPlan) -> Rc<OperatorNode> {
+        match plan.plan.roots.as_slice() {
+            [QueryRoot::Operator(node)] => Rc::clone(node),
+            other => panic!("one operator root: {other:?}"),
+        }
+    }
+
+    /// For each candidate of `root`'s output group run at query time and
+    /// not materialized, the plan Stage 2's realizer builds when each input
+    /// reads, among its admissible producers run at query time and not
+    /// materialized, the first whose own plan contains an operator
+    /// `preferred` accepts, else the first; each a distinct plan, in
+    /// candidate order. Stages run with accuracy guarantees ignored and a
+    /// target of 0.05, so every summary Pass 1 offers stays.
+    pub fn realize_from_root_candidates(
+        root: Rc<OperatorNode>,
+        preferred: impl Fn(&asap_types::ir::Operator<asap_types::stages::MemoGroupId>) -> bool,
+    ) -> Vec<asap_types::stages::RealizedPlan> {
+        use asap_types::physical::{ExecutionTiming, Lifetime};
+        use asap_types::stages::{
+            AssignmentRealizer, DagOfSelectedCandidates, PhysicalASAPMemoCandidates,
+            PhysicalCandidateId, SelectedEdge, SelectedNodeId,
+        };
+        let models = asap_planner::PlanningModels::builtin().with_ignore_accuracy_guarantees(true);
+        let data = declared_data(&root);
+        let entries = [asap_types::workload::QueryWorkloadEntry {
+            query: Default::default(),
+            requirements: asap_types::workload::QueryRequirements {
+                accuracy: AccuracyTarget::max_error(0.05),
+                max_latency_ms: None,
+            },
+            predictability: Default::default(),
+            recurrence: Default::default(),
+            range_evaluation: None,
+        }];
+        let stages = run_all_stages_with(root, entries[0].requirements.accuracy.clone(), models);
+        let Some(physical) = stages.run.physical_asap_candidates.as_ref() else {
+            return Vec::new();
+        };
+        let memo = &physical.logical_candidates.memo;
+        let edges: Vec<_> = physical.edges().map(|(_, edge)| edge).collect();
+        let unmaterialized_at_query_time = |id: PhysicalCandidateId| {
+            let properties = physical.physical_candidates[id.0].physical_properties;
+            properties.timing() == ExecutionTiming::QueryTime
+                && properties.lifetime() == Lifetime::None
+        };
+        let inputs_of = |id: PhysicalCandidateId| {
+            memo.candidate(physical.physical_candidates[id.0].logical_candidate_id)
+                .expression
+                .operator
+                .children()
+                .len()
+        };
+        // Whether the plan below `id`, choosing first producers, contains a
+        // preferred operator (depth-bounded: the memo may have cycles).
+        fn contains_preferred(
+            physical: &PhysicalASAPMemoCandidates,
+            edges: &[asap_types::stages::PhysicalEdge],
+            id: PhysicalCandidateId,
+            preferred: &dyn Fn(&asap_types::ir::Operator<asap_types::stages::MemoGroupId>) -> bool,
+            depth: usize,
+        ) -> bool {
+            let memo = &physical.logical_candidates.memo;
+            let operator = &memo
+                .candidate(physical.physical_candidates[id.0].logical_candidate_id)
+                .expression
+                .operator;
+            if preferred(operator) {
+                return true;
+            }
+            depth > 0
+                && (0..operator.children().len()).any(|input| {
+                    physical
+                        .admissible_edges_into(id, input)
+                        .iter()
+                        .any(|edge| {
+                            contains_preferred(
+                                physical,
+                                edges,
+                                edges[edge.0].producer_candidate_id,
+                                preferred,
+                                depth - 1,
+                            )
+                        })
+                })
+        }
+        let mut plans: Vec<asap_types::stages::RealizedPlan> = Vec::new();
+        let realizer = asap_stage2_physical_optimization::Stage2AssignmentRealizer {
+            entries: &entries,
+            data: &data,
+        };
+        let output_group = match &physical.query_roots[0] {
+            QueryRoot::Operator(group) => *group,
+            QueryRoot::Scalar(_) => return Vec::new(),
+        };
+        for root_candidate in (0..physical.physical_candidates.len())
+            .map(PhysicalCandidateId)
+            .filter(|&id| {
+                physical.physical_candidates[id.0]
+                    .logical_candidate_id
+                    .group
+                    == output_group
+                    && unmaterialized_at_query_time(id)
+            })
+        {
+            let mut selected = DagOfSelectedCandidates {
+                candidate_of_node: vec![root_candidate],
+                edges: Vec::new(),
+                node_of_output_reference: vec![SelectedNodeId(0)],
+            };
+            let mut pending = vec![(root_candidate, SelectedNodeId(0), 0usize)];
+            let mut feasible = true;
+            while let Some((candidate, node, depth)) = pending.pop() {
+                for input in 0..inputs_of(candidate) {
+                    let producers: Vec<PhysicalCandidateId> = physical
+                        .admissible_edges_into(candidate, input)
+                        .iter()
+                        .map(|edge| edges[edge.0].producer_candidate_id)
+                        .filter(|&producer| unmaterialized_at_query_time(producer))
+                        .collect();
+                    let producer = producers
+                        .iter()
+                        .copied()
+                        .find(|&producer| {
+                            contains_preferred(physical, &edges, producer, &preferred, 8)
+                        })
+                        .or_else(|| producers.first().copied());
+                    let (Some(producer), true) = (producer, depth < 64) else {
+                        feasible = false;
+                        break;
+                    };
+                    let producer_node = match selected
+                        .candidate_of_node
+                        .iter()
+                        .position(|&known| known == producer)
+                    {
+                        Some(known) => SelectedNodeId(known),
+                        None => {
+                            selected.candidate_of_node.push(producer);
+                            let new = SelectedNodeId(selected.candidate_of_node.len() - 1);
+                            pending.push((producer, new, depth + 1));
+                            new
+                        }
+                    };
+                    selected.edges.push(SelectedEdge {
+                        producer: producer_node,
+                        consumer: node,
+                        input_index_of_consumer: input,
+                    });
+                }
+                if !feasible {
+                    break;
+                }
+            }
+            if !feasible {
+                continue;
+            }
+            if let Ok(plan) = realizer.realize(physical, &selected) {
+                if !plans
+                    .iter()
+                    .any(|known| known.plan.roots == plan.plan.roots)
+                {
+                    plans.push(plan);
+                }
+            }
+        }
+        plans
     }
 
     /// Logical plans visited by the bounded search for `root`, in archive order.
@@ -219,7 +443,8 @@ pub mod planning {
         root: Rc<OperatorNode>,
         accuracy: AccuracyTarget,
     ) -> Vec<Rc<OperatorNode>> {
-        require_composed_operator_candidates(run_all_stages(root, accuracy).logical_candidates())
+        let stages = run_all_stages(root, accuracy);
+        require_composed_operator_candidates(stages.logical_candidates())
     }
 
     /// [`logical_candidates`] with every output accepted whatever its

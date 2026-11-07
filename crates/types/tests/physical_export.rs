@@ -437,6 +437,7 @@ fn high_fan_in_edges_preserve_multiplicity_without_order_dependence() {
             output_schema: schema.clone(),
             guarantee: None,
             retention_ms: None,
+            summary_coverage: None,
         })
         .collect();
     let inputs: Vec<_> = (0..count).chain([0, 0]).collect();
@@ -451,6 +452,7 @@ fn high_fan_in_edges_preserve_multiplicity_without_order_dependence() {
         output_schema: schema.clone(),
         guarantee: None,
         retention_ms: None,
+        summary_coverage: None,
     });
     let mut dag = PhysicalASAPDAG {
         nodes,

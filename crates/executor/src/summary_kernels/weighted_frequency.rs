@@ -95,11 +95,14 @@ impl std::fmt::Debug for WeightedFrequency {
 }
 
 impl WeightedFrequency {
+    /// The algorithm and `(width, depth, capacity)` of a keyed frequency
+    /// sketch with a heap of `algorithm` whose θ is `parameters`.
     pub(crate) fn configuration(
-        kind: &planner_types::ir::schema::SketchKind,
+        algorithm: &planner_types::ir::schema::SketchAlgorithm,
+        parameters: &planner_types::ir::schema::SketchParams,
     ) -> Result<(FrequencyAlgorithm, usize, usize, usize), Error> {
         use planner_types::ir::schema::{SketchAlgorithm as A, SketchParams as P};
-        let (algorithm, width, depth, capacity) = match (kind.algorithm(), kind.params()) {
+        let (algorithm, width, depth, capacity) = match (algorithm, parameters) {
             (
                 A::CmsWithHeap,
                 P::CmsWithHeap {

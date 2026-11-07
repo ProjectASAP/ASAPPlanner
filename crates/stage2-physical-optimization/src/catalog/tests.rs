@@ -721,3 +721,228 @@ fn a_consumer_without_a_producer_for_one_input_cannot_be_built() {
         vec![properties(QT_NONE), properties(QT_ONE)]
     );
 }
+
+// ── The realizer ─────────────────────────────────────────────────────────
+
+/// A KLL state group over a one-minute range of the scan, with an
+/// unwindowed build and one of 10 s tumbling windows, read by the p95
+/// readout, the query's root: the physical candidates and the readout's
+/// logical candidate.
+fn ranged_example() -> (PhysicalASAPMemoCandidates, Vec<CandidateForMemoGroupId>) {
+    use asap_types::ir::TimeRangeKind;
+    let mut memo = Memo::default();
+    let scan = group(&mut memo, scan_operator());
+    let range = group(
+        &mut memo,
+        Operator::NonASAP(NonASAPOp::TimeRange {
+            range: std::time::Duration::from_secs(60),
+            kind: TimeRangeKind::Range,
+            child: scan.group,
+        }),
+    );
+    let build = Operator::ASAP(ASAPOp::SummaryAgg {
+        child: range.group,
+        family: FieldDataType::Sketch(SketchAlgorithm::Kll, GroupingStrategy::default()),
+        input: SummaryUpdate::column(ColumnRef::SampleValue),
+        reduction: Reduction::PerEntity,
+        grouping: GroupingStrategy::default(),
+        filter: None,
+    });
+    let states = memo.find_or_add_group(build.clone()).unwrap();
+    let parameters = Some(parameter_list(SketchAlgorithm::Kll)[1].clone());
+    let unwindowed = candidate(&mut memo, states, build.clone(), parameters.clone(), None);
+    let windowed = candidate(
+        &mut memo,
+        states,
+        build,
+        parameters,
+        Some(WindowLayout::Tumbling { width_ms: 10_000 }),
+    );
+    let readout = group(
+        &mut memo,
+        Operator::ASAP(ASAPOp::SummaryEstimate {
+            summary_input: states,
+            query: SketchStatistic::Quantile { q: 0.95 },
+        }),
+    );
+    memo.add_query(QueryRoot::Operator(readout.group));
+    let edge = |producer, consumer| LogicalEdge {
+        producer_candidate_id: producer,
+        consumer_candidate_id: consumer,
+        input_index_of_consumer: 0,
+        satisfies_logical_requirement: true,
+    };
+    let edges = vec![
+        edge(scan, range),
+        edge(range, unwindowed),
+        edge(range, windowed),
+        edge(unwindowed, readout),
+        edge(windowed, readout),
+    ];
+    let physical = stage2(&LogicalASAPMemoCandidates { memo, edges });
+    (physical, vec![scan, range, unwindowed, windowed, readout])
+}
+
+/// The selected DAG running `chosen` (each a logical candidate with its
+/// physical properties), each reading the next as its one input; the first
+/// is the query's output.
+fn chain_of(
+    physical: &PhysicalASAPMemoCandidates,
+    chosen: &[(CandidateForMemoGroupId, (ExecutionTiming, Lifetime))],
+) -> asap_types::stages::DagOfSelectedCandidates {
+    use asap_types::stages::{DagOfSelectedCandidates, SelectedEdge, SelectedNodeId};
+    let candidate_of_node: Vec<PhysicalCandidateId> = chosen
+        .iter()
+        .map(|&(logical, state)| {
+            let id = physical
+                .physical_candidates
+                .iter()
+                .position(|candidate| {
+                    candidate.logical_candidate_id == logical
+                        && candidate.physical_properties == properties(state)
+                })
+                .unwrap_or_else(|| panic!("{logical:?} {state:?} is offered"));
+            PhysicalCandidateId(id)
+        })
+        .collect();
+    DagOfSelectedCandidates {
+        edges: (1..chosen.len())
+            .map(|node| SelectedEdge {
+                producer: SelectedNodeId(node),
+                consumer: SelectedNodeId(node - 1),
+                input_index_of_consumer: 0,
+            })
+            .collect(),
+        candidate_of_node,
+        node_of_output_reference: vec![SelectedNodeId(0)],
+    }
+}
+
+fn realize(
+    physical: &PhysicalASAPMemoCandidates,
+    selected: &asap_types::stages::DagOfSelectedCandidates,
+) -> Result<asap_types::stages::RealizedPlan, asap_types::stages::PhysicalCandidateError> {
+    use asap_types::stages::AssignmentRealizer;
+    let entries = [asap_types::workload::QueryWorkloadEntry {
+        query: Default::default(),
+        requirements: Default::default(),
+        predictability: Default::default(),
+        recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+            interval: RepetitionInterval(10_000),
+            evaluation_phase: TimestampMs(0),
+        }),
+        range_evaluation: None,
+    }];
+    let data = ingesting();
+    super::Stage2AssignmentRealizer {
+        entries: &entries,
+        data: &data,
+    }
+    .realize(physical, selected)
+}
+
+/// An unwindowed selection exports one node per selected node, each with
+/// its candidate's timing and lifetime; the build carries its θ and its
+/// group's summary coverage, the scan and the readout neither.
+#[test]
+fn the_realizer_exports_each_node_with_its_candidates_properties_and_theta() {
+    let (physical, ids) = ranged_example();
+    let selected = chain_of(
+        &physical,
+        &[
+            (ids[4], QT_NONE),
+            (ids[2], QT_ONE),
+            (ids[1], QT_NONE),
+            (ids[0], QT_NONE),
+        ],
+    );
+    let realized = realize(&physical, &selected).unwrap();
+    let dag = &realized.plan.dag;
+    assert_eq!(dag.nodes.len(), 4);
+    let build = dag
+        .nodes
+        .iter()
+        .find(|node| matches!(node.payload, Operator::ASAP(ASAPOp::SummaryAgg { .. })))
+        .unwrap();
+    assert_eq!(build.lifetime, Lifetime::OneEvaluation(MEMORY));
+    assert_eq!(build.output_state.timing, QueryTime);
+    assert_eq!(
+        build.parameters.as_ref(),
+        Some(&parameter_list(SketchAlgorithm::Kll)[1])
+    );
+    assert!(build.summary_coverage.is_some());
+    for node in dag.nodes.iter().filter(|node| node.id != build.id) {
+        assert_eq!(node.parameters, None, "{:?}", node.payload);
+        assert_eq!(node.lifetime, Lifetime::None);
+    }
+    assert!(realized.tumbling_window_retention_ms.is_empty());
+}
+
+/// A windowed build materialized across evaluations at ingestion time
+/// becomes a tumbling-window chain of 6 windows of 10 s over the range's
+/// input, with the candidate's properties, θ and coverage, read by the
+/// readout through a query-time merge of the whole chain; the chain's
+/// retention is its one-minute window.
+#[test]
+fn a_windowed_build_is_realized_as_a_chain_read_through_a_merge() {
+    let (physical, ids) = ranged_example();
+    let selected = chain_of(
+        &physical,
+        &[
+            (ids[4], QT_NONE),
+            (ids[3], IT_ACROSS),
+            (ids[1], IT_NONE),
+            (ids[0], IT_NONE),
+        ],
+    );
+    let realized = realize(&physical, &selected).unwrap();
+    let dag = &realized.plan.dag;
+    let chain = dag
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                node.payload,
+                Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                    tumbling_window_width_ms: 10_000,
+                    tumbling_window_count: 6,
+                    ..
+                })
+            )
+        })
+        .expect("a chain of six 10 s windows");
+    assert_eq!(chain.lifetime, Lifetime::AcrossEvaluations(MEMORY));
+    assert_eq!(chain.output_state.timing, IngestionTime);
+    assert!(chain.parameters.is_some() && chain.summary_coverage.is_some());
+    let merge = dag
+        .nodes
+        .iter()
+        .find(|node| matches!(node.payload, Operator::ASAP(ASAPOp::SummaryMerge { .. })))
+        .unwrap();
+    assert_eq!(merge.output_state.timing, QueryTime);
+    assert_eq!(merge.lifetime, Lifetime::None);
+    assert!(dag
+        .edges
+        .iter()
+        .any(|e| e.producer == chain.id && e.consumer == merge.id));
+    // The range the build read is not part of the plan: the chain reads
+    // the scan below it.
+    assert!(!dag
+        .nodes
+        .iter()
+        .any(|node| matches!(node.payload, Operator::NonASAP(NonASAPOp::TimeRange { .. }))));
+    assert_eq!(realized.tumbling_window_retention_ms[&chain.id], 60_000);
+}
+
+/// A selection that is not valid over the candidates (an input without a
+/// producer) is rejected, not realized.
+#[test]
+fn the_realizer_rejects_an_invalid_selection() {
+    let (physical, ids) = ranged_example();
+    let mut selected = chain_of(&physical, &[(ids[4], QT_NONE), (ids[2], QT_NONE)]);
+    selected.edges.clear();
+    assert!(matches!(
+        realize(&physical, &selected),
+        Err(asap_types::stages::PhysicalCandidateError::RejectedAssignment(_))
+    ));
+}

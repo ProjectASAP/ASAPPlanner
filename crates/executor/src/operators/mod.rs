@@ -9,7 +9,8 @@ use crate::{
 use futures::StreamExt;
 use planner_types::ir::scalar::ColumnRef;
 use planner_types::ir::schema::{
-    DataType, Field as SummaryField, FieldDataType as SummaryFamilyType, Schema, SummaryUpdate,
+    DataType, Field as SummaryField, FieldDataType as SummaryFamilyType, Schema, SketchParams,
+    SummaryUpdate,
 };
 use std::{collections::BTreeMap, sync::Arc};
 pub(crate) mod common;
@@ -156,6 +157,10 @@ enum Kind {
     /// (built by [`Operator::per_group_summary_build`]).
     PerGroupSummaryBuild {
         family: SummaryFamilyType,
+        /// θ of the states: the exported build node's `parameters`; `None`
+        /// for an exact family.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parameters: Option<SketchParams>,
         value: usize,
         time: Option<usize>,
         groups: Vec<usize>,
@@ -167,6 +172,10 @@ enum Kind {
     /// with heap (built by [`Operator::per_group_keyed_summary_build`]).
     PerGroupKeyedSummaryBuild {
         family: SummaryFamilyType,
+        /// θ of the states: the exported build node's `parameters`; `None`
+        /// for an exact family.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parameters: Option<SketchParams>,
         items: Vec<usize>,
         /// What each row adds to its item's count.
         row_weight: RowWeight,
@@ -179,6 +188,10 @@ enum Kind {
     /// HydraCms grid (built by [`Operator::all_groups_summary_build`]).
     AllGroupsSummaryBuild {
         family: SummaryFamilyType,
+        /// θ of the states: the exported build node's `parameters`; `None`
+        /// for an exact family.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parameters: Option<SketchParams>,
         item: usize,
         /// What each row adds to its item's count.
         row_weight: RowWeight,
@@ -199,6 +212,11 @@ enum Kind {
         /// with no groups; `false` (no output row) by default.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         emit_empty_global: bool,
+        /// θ of the merged states, which the empty global state takes: the
+        /// `parameters` of the build node that produced them. `None` for an
+        /// exact family, and without `emit_empty_global`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parameters: Option<SketchParams>,
     },
     Evaluation {
         state: usize,

@@ -5,7 +5,9 @@ use asap_executor::arrow::array::{DictionaryArray, UInt32Array};
 use asap_executor::arrow::datatypes::UInt32Type;
 use asap_executor::operators::{Operator, SortKey};
 use asap_executor::plan::PhysicalDAG;
-use asap_executor::planner::ir::schema::{DataType, Field, FieldDataType, Schema, SketchAlgorithm};
+use asap_executor::planner::ir::schema::{
+    DataType, Field, FieldDataType, Schema, SketchAlgorithm, SketchParams,
+};
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::values::{Batch, BatchColumn};
 use asap_executor::{Error, StateColumnUpdater};
@@ -43,7 +45,14 @@ fn tumbling_window_of(series_count: u32) -> (Arc<Schema>, Batch) {
         unique_keys: vec![],
         closed: false,
     });
-    let mut updater = StateColumnUpdater::new(&family).unwrap();
+    let mut updater = StateColumnUpdater::new(
+        &family,
+        Some(&SketchParams::Kll {
+            k: 200,
+            failure_probability: None,
+        }),
+    )
+    .unwrap();
     updater.ensure_groups(series_count as usize).unwrap();
     for series in 0..series_count {
         for sample in 0..SAMPLES {
@@ -317,6 +326,7 @@ fn merge_over_a_stored_tumbling_window(
         output_state,
         lifetime: Default::default(),
         parameters: None,
+        summary_coverage: None,
         guarantee: None,
         retention_ms: None,
     };

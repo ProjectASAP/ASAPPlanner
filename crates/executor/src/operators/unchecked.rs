@@ -168,16 +168,25 @@ impl TryFrom<UncheckedOperator> for Operator {
             )?,
             Kind::PerGroupSummaryBuild {
                 family,
+                parameters,
                 value,
                 time,
                 groups,
                 filter,
             } => with_filter(
-                Operator::per_group_summary_build(input(0)?, family, value, time, groups)?,
+                Operator::per_group_summary_build(
+                    input(0)?,
+                    family,
+                    parameters,
+                    value,
+                    time,
+                    groups,
+                )?,
                 filter,
             )?,
             Kind::PerGroupKeyedSummaryBuild {
                 family,
+                parameters,
                 items,
                 row_weight,
                 groups,
@@ -186,6 +195,7 @@ impl TryFrom<UncheckedOperator> for Operator {
                 Operator::per_group_keyed_summary_build(
                     input(0)?,
                     family,
+                    parameters,
                     items,
                     row_weight,
                     groups,
@@ -194,12 +204,20 @@ impl TryFrom<UncheckedOperator> for Operator {
             )?,
             Kind::AllGroupsSummaryBuild {
                 family,
+                parameters,
                 item,
                 row_weight,
                 groups,
                 filter,
             } => with_filter(
-                Operator::all_groups_summary_build(input(0)?, family, item, row_weight, groups)?,
+                Operator::all_groups_summary_build(
+                    input(0)?,
+                    family,
+                    parameters,
+                    item,
+                    row_weight,
+                    groups,
+                )?,
                 filter,
             )?,
             Kind::KeyedEvaluation { state, k } => {
@@ -209,10 +227,15 @@ impl TryFrom<UncheckedOperator> for Operator {
                 state,
                 groups,
                 emit_empty_global,
+                parameters,
             } => {
                 let merge = Operator::summary_merge(input(0)?, state, groups)?;
                 if emit_empty_global {
-                    merge.with_emit_empty_global()?
+                    merge.with_emit_empty_global(parameters)?
+                } else if parameters.is_some() {
+                    return Err(invalid(
+                        "only a merge that outputs an empty global state takes parameters θ",
+                    ));
                 } else {
                     merge
                 }

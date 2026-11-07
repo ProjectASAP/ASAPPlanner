@@ -63,7 +63,7 @@
 //     `P1`, the selected plan as Stage 2 built it;
 //   - stage3_plan_selection (from `stage3`): Stage 3's `Selection`:
 //     `selected_dag` (`candidate_of_node`, `edges`,
-//     `node_of_output_reference`), `nodes_with_proven_non_negative_weights`,
+//     `node_of_output_reference`),
 //     the plan's `cost` (its `usage`, `cost_per_second` and per-node
 //     charges), `accepted_accuracy_per_query`, `pruned_candidates` and
 //     `search_report`; `error` when no plan was selected.
@@ -734,8 +734,6 @@ fn selection_json(selection: &Result<Selection, SelectionError>) -> Value {
                 .collect::<Vec<_>>(),
             "node_of_output_reference": nodes(&dag.node_of_output_reference),
         },
-        "nodes_with_proven_non_negative_weights":
-            nodes(&selection.nodes_with_proven_non_negative_weights),
         "cost": cost_json(&selection.cost),
         "accepted_accuracy_per_query": accepted_json(&selection.accepted_accuracy_per_query),
         "pruned_candidates": selection

@@ -19,10 +19,11 @@ use crate::ir::operator::asap::ASAPOp;
 use crate::ir::operator::node::{Operator, OperatorNode};
 use crate::ir::operator::non_asap::NonASAPOp;
 
+use super::materialized_view::ViewCoverage;
 use crate::ir::properties::execution_data_state::{ExecutionDataState, ExecutionTiming};
 use crate::ir::properties::guarantee::AccuracyGuarantee;
 use crate::ir::schema::{FieldDataType, Schema, SketchParams};
-use crate::physical::{Lifetime, PhysicalPropertiesError};
+use crate::physical::{Lifetime, PhysicalProperties, PhysicalPropertiesError};
 
 /// A node's operator, with each child replaced by its node id.
 pub type PhysicalASAPOperatorPayload = Operator<NodeId>;
@@ -87,6 +88,13 @@ pub struct PhysicalASAPDAGNode {
     /// enumerates lifetimes before Stage 3 knows retention.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention_ms: Option<u64>,
+    /// For a summary state, the summary coverage of its memo group
+    /// (`GroupProperties::summary_coverage`) as the plan carries it: what
+    /// a materialized view of it stores ([`PhysicalASAPDAG::materialized_views`]).
+    /// Coverage is derived only in the memo, so the realizer sets it; `None`
+    /// on every other node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_coverage: Option<ViewCoverage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -238,7 +246,7 @@ pub enum ScanWindow {
 
 impl ScanWindow {
     /// The smallest window holding both.
-    pub(crate) fn union(self, other: Self) -> Self {
+    pub fn union(self, other: Self) -> Self {
         let (
             Self::Within {
                 end_offset_ms: a_end,
@@ -341,42 +349,6 @@ pub(crate) fn offset_below<'a>(
 }
 
 impl PhysicalASAPDAG {
-    /// Every node of this DAG as IR, by node id, with its exported
-    /// guarantee (an operator node has no physical properties): what a caller derives
-    /// IR properties of a plan file's node from, such as its
-    /// [`SummaryCoverage`](crate::ir::properties::summary_coverage::SummaryCoverage).
-    /// Shared inputs stay shared. Validates the DAG first.
-    pub(crate) fn operator_nodes(
-        &self,
-    ) -> Result<HashMap<PhysicalASAPNodeId, Rc<OperatorNode>>, PhysicalASAPDAGValidationError> {
-        self.validate()?;
-        let by_id: HashMap<PhysicalASAPNodeId, &PhysicalASAPDAGNode> =
-            self.nodes.iter().map(|node| (node.id, node)).collect();
-        let mut rebuilt: HashMap<PhysicalASAPNodeId, Rc<OperatorNode>> = HashMap::new();
-        // Children first, without recursion: `validate` rejected cycles.
-        for node in &self.nodes {
-            let mut pending = vec![(node.id, false)];
-            while let Some((id, children_done)) = pending.pop() {
-                if rebuilt.contains_key(&id) {
-                    continue;
-                }
-                let node = by_id[&id];
-                if !children_done {
-                    pending.push((id, true));
-                    pending.extend(node.payload.children().into_iter().map(|c| (*c, false)));
-                    continue;
-                }
-                let operator = node
-                    .payload
-                    .map_children(|child| Rc::clone(&rebuilt[child]));
-                let restored = OperatorNode::with_schema(operator, node.output_schema.clone())
-                    .with_guarantee(node.guarantee.clone());
-                rebuilt.insert(id, Rc::new(restored));
-            }
-        }
-        Ok(rebuilt)
-    }
-
     /// The rows of the `Scan` `scan` its consumers read, back from the
     /// evaluation time `T`: the union of each consumer's window. A consumer
     /// reaches the `Scan` through `TimeShift`s without an `@` anchor
@@ -802,14 +774,28 @@ pub(crate) fn is_materializable_state_output<C>(operator: &Operator<C>) -> bool 
     )
 }
 
-/// Test-only: `roots` exported as one DAG with every node at query time and
-/// not materialized, and no θ (every `parameters` is `None`), with each
-/// exported node's operator node by node id. Executor tests hand-build DAGs
-/// this way; planning exports only through the realizer
-/// (`AssignmentRealizer::realize`).
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) fn physical_asap_dag_at_query_time_with_node_ids(
+/// What the realizer assigns one node of a plan it exports
+/// ([`physical_asap_dag_with_assignments`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportedNodeAssignment {
+    /// The node's timing and lifetime.
+    pub physical_properties: PhysicalProperties,
+    /// θ of a summary build; `None` otherwise.
+    pub parameters: Option<SketchParams>,
+    /// Its memo group's summary coverage, for a summary state.
+    pub summary_coverage: Option<ViewCoverage>,
+}
+
+/// `roots` exported as one DAG, each node with what `assignment_of` gives
+/// its operator node (timing, lifetime, θ and coverage), with each exported
+/// node's operator node by node id. Nodes shared by pointer are one node;
+/// operator queries become `roots` and standalone scalar queries
+/// `scalar_roots`, keyed by their position. The realizer
+/// (`AssignmentRealizer::realize`) exports the selected plan this way.
+/// Validated before it is returned.
+pub fn physical_asap_dag_with_assignments(
     roots: &[crate::ir::QueryRoot],
+    assignment_of: &dyn Fn(&Rc<OperatorNode>) -> ExportedNodeAssignment,
 ) -> Result<(PhysicalASAPDAG, Vec<Rc<OperatorNode>>), PhysicalASAPDAGValidationError> {
     use crate::ir::properties::execution_data_state::DataPrimitive;
     use crate::ir::QueryRoot;
@@ -839,8 +825,9 @@ pub(crate) fn physical_asap_dag_at_query_time_with_node_ids(
             }
             _ => DataPrimitive::Raw,
         };
+        let assignment = assignment_of(node);
         let output_state = ExecutionDataState {
-            timing: ExecutionTiming::QueryTime,
+            timing: assignment.physical_properties.timing(),
             primitive,
         };
         // Children come before their parents, so every producer is already in `nodes`.
@@ -859,11 +846,12 @@ pub(crate) fn physical_asap_dag_at_query_time_with_node_ids(
             id,
             payload: flat_node.operator,
             output_state,
-            lifetime: Lifetime::None,
-            parameters: None,
+            lifetime: assignment.physical_properties.lifetime(),
+            parameters: assignment.parameters,
             output_schema: flat_node.schema,
             guarantee: flat_node.guarantee,
             retention_ms: None,
+            summary_coverage: assignment.summary_coverage,
         });
     }
     let dag = PhysicalASAPDAG {
@@ -876,7 +864,23 @@ pub(crate) fn physical_asap_dag_at_query_time_with_node_ids(
     Ok((dag, nodes_by_id))
 }
 
+/// Test-only: `roots` exported as one DAG with every node at query time and
+/// not materialized, with no θ and no coverage
+/// ([`physical_asap_dag_with_assignments`]). Executor tests hand-build DAGs
+/// this way; planning exports only through the realizer
+/// (`AssignmentRealizer::realize`).
 #[cfg(any(test, feature = "test-support"))]
+pub(crate) fn physical_asap_dag_at_query_time_with_node_ids(
+    roots: &[crate::ir::QueryRoot],
+) -> Result<(PhysicalASAPDAG, Vec<Rc<OperatorNode>>), PhysicalASAPDAGValidationError> {
+    physical_asap_dag_with_assignments(roots, &|_| ExportedNodeAssignment {
+        physical_properties: PhysicalProperties::new(ExecutionTiming::QueryTime, Lifetime::None)
+            .expect("query time, not materialized, is valid"),
+        parameters: None,
+        summary_coverage: None,
+    })
+}
+
 fn grouping_compatibility<C>(
     producer: &Operator<C>,
     consumer: &Operator<C>,

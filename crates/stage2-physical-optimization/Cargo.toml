@@ -5,7 +5,10 @@ edition = "2021"
 
 # #509 Stage 2, physical ASAP-aware optimization: the physical properties
 # (timing, lifetime) of each Stage 1 candidate, the physical edges, and the
-# PhysicalASAPMemoCandidates Stage 3 selects from (`catalog`). Depends only on
-# asap-types, never on Stage 1's crate, plan selection or the executor.
+# PhysicalASAPMemoCandidates Stage 3 selects from (`catalog`), and the realizer
+# of a selected DAG (`catalog::realize`). Depends only on asap-types and the
+# shared cost model, never on Stage 1's crate, plan selection or the executor.
 [dependencies]
 asap-types = { path = "../types" }
+# The tumbling-window retention of a realized plan (`AssignmentRealizer::realize`).
+asap-cost = { path = "../cost" }

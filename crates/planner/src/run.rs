@@ -5,7 +5,6 @@
 
 use asap_stage0_memo::memo_of_queries;
 
-use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -24,7 +23,6 @@ use asap_types::stages::{
     AssignmentRealizer, LogicalASAPMemoCandidates, Memo, PhysicalASAPMemoCandidates,
     PhysicalCandidateError, RealizedPlan,
 };
-use asap_types::workload::bounds::with_confirmed_weights_at;
 use asap_types::workload::{DataWorkload, QueryLanguage, QueryWorkloadEntry};
 
 use crate::pass::{
@@ -96,8 +94,8 @@ pub struct PlanningRun {
     pub selection: Result<Selection, SelectionError>,
     /// The selected plan as Stage 2 built it, with its tumbling-window retention.
     pub selected_physical_plan: Option<RealizedPlan>,
-    /// The plan to run: the selected plan's roots with the weight proofs
-    /// Stage 3 made applied.
+    /// The plan to run: the selected plan's roots, as the realizer built
+    /// them (with the update-weight proofs the data gives applied).
     pub selected_plan: Option<Vec<QueryRoot>>,
     pub report: PlanningReport,
 }
@@ -136,12 +134,7 @@ pub fn run_planning(
         ..PlanningReport::default()
     };
     let pass1_memo = pass1.as_ref().ok().filter(|_| settings.inspect).cloned();
-    let realizer = Stage2AssignmentRealizer {
-        original_roots: &roots,
-        entries,
-        data,
-        query_time_results_retained: models.deployment_capabilities.query_time_results_retained,
-    };
+    let realizer = Stage2AssignmentRealizer { entries, data };
     let mut logical_asap_candidates = None;
     let mut physical_asap_candidates = None;
     let mut selected_physical_plan = None;
@@ -197,17 +190,7 @@ pub fn run_planning(
         let realized = realizer
             .realize(physical, &selection.selected_dag)
             .map_err(SelectionError::Realization)?;
-        let proven: HashSet<*const OperatorNode> = selection
-            .nodes_with_proven_non_negative_weights
-            .iter()
-            .filter_map(|node| realized.operator_node_of_selected_node.get(node.0))
-            .map(Rc::as_ptr)
-            .collect();
-        selected_plan = Some(with_confirmed_weights_at(
-            &realized.plan.roots,
-            data,
-            &|node| proven.contains(&Rc::as_ptr(node)),
-        ));
+        selected_plan = Some(realized.plan.roots.clone());
         selected_physical_plan = Some(realized);
         Ok(selection)
     })();
@@ -300,9 +283,7 @@ impl OptimizationPass for Stage1ToStage3Pass {
                 }
             }
         }
-        if let Some(realized) = run.selected_physical_plan {
-            output.tumbling_window_retention_ms = realized.tumbling_window_retention_ms;
-        }
+        output.realized_plan = run.selected_physical_plan;
         output.selection = Some(selection);
         Ok(output)
     }

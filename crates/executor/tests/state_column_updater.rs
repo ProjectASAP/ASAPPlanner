@@ -1,13 +1,13 @@
 //! The per-sample `StateColumnUpdater` builds the same states as the
 //! batch `SummaryAgg` build and as each family's kernel updated row by row,
 //! for every family a per-group build supports.
-
+use asap_executor::factory::create_planner_accumulator;
 use asap_executor::operators::{Operator, RowWeight};
 use asap_executor::plan::PhysicalDAG;
 use asap_executor::planner::ir::scalar::ColumnRef;
 use asap_executor::planner::ir::schema::{
-    DataType, ExactKind, ExactParams, Field, FieldDataType, GroupingStrategy, HydraKind, Schema,
-    SketchAlgorithm, SketchParams, SketchStatistic,
+    DataType, ExactKind, ExactParams, Field, FieldDataType, GroupingStrategy, HydraKind,
+    HydraParams, Schema, SketchAlgorithm, SketchParams, SketchStatistic, SummaryUpdate,
 };
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::summary_kernels::weighted_frequency::WeightedFrequency;
@@ -90,16 +90,77 @@ fn input_batch() -> Batch {
     .unwrap()
 }
 
-fn sketch(algorithm: SketchAlgorithm, _params: SketchParams) -> FieldDataType {
-    FieldDataType::Sketch(algorithm, Default::default())
+/// A family and its θ (`None` for an exact family), as a build node
+/// carries them.
+type Family = (FieldDataType, Option<SketchParams>);
+
+fn sketch(algorithm: SketchAlgorithm, params: SketchParams) -> Family {
+    (
+        FieldDataType::Sketch(algorithm, Default::default()),
+        Some(params),
+    )
 }
 
-fn exact(kind: ExactKind, params: ExactParams) -> FieldDataType {
-    FieldDataType::ExactAggregate(kind, params)
+fn exact(kind: ExactKind, params: ExactParams) -> Family {
+    (FieldDataType::ExactAggregate(kind, params), None)
+}
+
+/// An updater of `family` with no group.
+fn updater(family: &Family) -> StateColumnUpdater {
+    StateColumnUpdater::new(&family.0, family.1.as_ref()).unwrap()
+}
+
+/// Every family a per-group value build supports.
+fn value_families() -> Vec<Family> {
+    vec![
+        exact(ExactKind::Sum, ExactParams::Sum),
+        exact(ExactKind::Count, ExactParams::Count),
+        exact(ExactKind::Min, ExactParams::Min),
+        exact(ExactKind::Max, ExactParams::Max),
+        exact(ExactKind::Rate, ExactParams::Rate),
+        exact(ExactKind::Increase, ExactParams::Increase),
+        sketch(
+            SketchAlgorithm::Kll,
+            SketchParams::Kll {
+                // Above any group's sample count (at most 600): no
+                // compaction, so the random compaction coin never flips.
+                k: 1024,
+                failure_probability: None,
+            },
+        ),
+        sketch(
+            SketchAlgorithm::DDSketch,
+            SketchParams::DDSketch { alpha: 0.01 },
+        ),
+        sketch(
+            SketchAlgorithm::Hll,
+            SketchParams::Hll {
+                precision: 10,
+                relative_error: None,
+            },
+        ),
+        sketch(
+            SketchAlgorithm::Kmv,
+            SketchParams::Kmv {
+                k: 32,
+                relative_error: None,
+            },
+        ),
+        sketch(
+            SketchAlgorithm::UnivMon,
+            SketchParams::UnivMon {
+                heap_size: 64,
+                sketch_rows: 5,
+                sketch_cols: 128,
+                layers: 4,
+                distinct_failure_probability: None,
+            },
+        ),
+    ]
 }
 
 /// Every keyed family a per-group keyed build supports.
-fn keyed_families() -> Vec<FieldDataType> {
+fn keyed_families() -> Vec<Family> {
     vec![
         sketch(
             SketchAlgorithm::CmsWithHeap,
@@ -231,22 +292,248 @@ fn batch_build(build: Operator) -> BTreeMap<String, String> {
 
 /// One test sample: series, timestamp, value, item.
 type TestSample = (String, i64, f64, String);
+/// How a test feeds one sample to an updater.
+type FeedSample<'a> = dyn FnMut(&mut StateColumnUpdater, u32, &TestSample) + 'a;
+
+/// The per-sample build: one updater, groups numbered as series appear.
+/// With `sharded`, the first half of the samples go to one updater and the
+/// rest to another, merged at the end as a runtime's shards are.
+fn per_sample_build(
+    family: &Family,
+    sharded: bool,
+    mut update: impl FnMut(&mut StateColumnUpdater, u32, &(String, i64, f64, String)),
+) -> BTreeMap<String, String> {
+    let samples = samples();
+    let mut groups: BTreeMap<String, u32> = BTreeMap::new();
+    for sample in &samples {
+        let next = groups.len() as u32;
+        groups.entry(sample.0.clone()).or_insert(next);
+    }
+    let shard = |part: &[(String, i64, f64, String)], update: &mut FeedSample<'_>| {
+        let mut updater = updater(family);
+        updater.ensure_groups(groups.len()).unwrap();
+        for sample in part {
+            update(&mut updater, groups[&sample.0], sample);
+        }
+        updater
+    };
+    let split = if sharded {
+        samples.len() / 2
+    } else {
+        samples.len()
+    };
+    let (first, second) = samples.split_at(split);
+    let mut updater = shard(first, &mut update);
+    if sharded {
+        updater.merge(shard(second, &mut update)).unwrap();
+    }
+    assert_eq!(updater.group_count(), groups.len());
+    let states = updater.seal();
+    groups
+        .into_iter()
+        .map(|(series, group)| (series, fingerprint(states.state(group as usize).as_ref())))
+        .collect()
+}
+
+/// The pre-columnar reference: each family's kernel, one per series,
+/// updated row by row. With `sharded`, two halves merged through the
+/// kernel's own merge.
+fn kernel_build(family: &Family, keyed: bool, sharded: bool) -> BTreeMap<String, String> {
+    let update = if keyed {
+        SummaryUpdate {
+            item: Some(
+                asap_executor::planner::ir::schema::SummaryInputExpr::Column(ColumnRef::Named(
+                    "item".into(),
+                )),
+            ),
+            weight: asap_executor::planner::ir::schema::SummaryInputExpr::Constant(1.0),
+            weight_domain: Default::default(),
+        }
+    } else {
+        SummaryUpdate::column(ColumnRef::SampleValue)
+    };
+    let samples = samples();
+    let split = if sharded {
+        samples.len() / 2
+    } else {
+        samples.len()
+    };
+    let (first, second) = samples.split_at(split);
+    let half = |part: &[(String, i64, f64, String)]| {
+        let mut states = BTreeMap::new();
+        for (series, ts, value, item) in part {
+            let state = states.entry(series.clone()).or_insert_with(|| {
+                if keyed {
+                    let (algorithm, width, depth, capacity) = match family.1.as_ref().unwrap() {
+                        SketchParams::CmsWithHeap {
+                            width,
+                            depth,
+                            heap_size,
+                        } => (
+                            asap_executor::summary_kernels::weighted_frequency::FrequencyAlgorithm::Cms,
+                            width,
+                            depth,
+                            heap_size,
+                        ),
+                        SketchParams::CountSketchWithHeap {
+                            width,
+                            depth,
+                            heap_size,
+                        } => (
+                            asap_executor::summary_kernels::weighted_frequency::FrequencyAlgorithm::CountSketch,
+                            width,
+                            depth,
+                            heap_size,
+                        ),
+                        _ => unreachable!(),
+                    };
+                    Err(Box::new(
+                        WeightedFrequency::new(
+                            algorithm,
+                            *width as usize,
+                            *depth as usize,
+                            *capacity as usize,
+                        )
+                        .unwrap(),
+                    ))
+                } else {
+                    Ok(create_planner_accumulator(
+                        &family.0,
+                        family.1.as_ref(),
+                        &update,
+                        &Default::default(),
+                    ).unwrap())
+                }
+            });
+            match state {
+                Ok(updater) => updater.update_value(&Value::Float64(*value), *ts).unwrap(),
+                Err(keyed) => keyed
+                    .update(&[Value::Utf8(item.as_str().into())], 1.0)
+                    .unwrap(),
+            }
+        }
+        states
+            .into_iter()
+            .map(|(series, state)| {
+                (
+                    series,
+                    match state {
+                        Ok(updater) => Arc::<dyn AggregateCore>::from(updater.into_accumulator()),
+                        Err(keyed) => Arc::new(*keyed) as Arc<dyn AggregateCore>,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let (mut merged, second) = (half(first), half(second));
+    for (series, state) in second {
+        let combined = match merged.get(&series) {
+            Some(existing) => Arc::from(existing.merge_with(state.as_ref()).unwrap()),
+            None => state,
+        };
+        merged.insert(series, combined);
+    }
+    merged
+        .into_iter()
+        .map(|(series, state)| (series, fingerprint(state.as_ref())))
+        .collect()
+}
+
+// For every value family: the per-sample updater, the batch `SummaryAgg`
+// build and the family's own kernel build the same state for every group,
+// byte for byte; two updater shards merged equal the kernel's merge of the
+// same two halves.
+#[test]
+fn per_sample_updates_build_the_batch_states_for_every_value_family() {
+    for family in value_families() {
+        let batch = batch_build(
+            Operator::per_group_summary_build(
+                input_schema(),
+                family.0.clone(),
+                family.1.clone(),
+                2,
+                Some(1),
+                vec![0],
+            )
+            .unwrap(),
+        );
+        let update =
+            |updater: &mut StateColumnUpdater, group, sample: &(String, i64, f64, String)| {
+                updater.update(group, sample.2, sample.1).unwrap()
+            };
+        assert_eq!(batch.len(), 7, "{family:?}");
+        assert_eq!(
+            per_sample_build(&family, false, update),
+            batch,
+            "{family:?}: updater vs batch build"
+        );
+        assert_eq!(
+            kernel_build(&family, false, false),
+            batch,
+            "{family:?}: kernel vs batch build"
+        );
+        assert_eq!(
+            per_sample_build(&family, true, update),
+            kernel_build(&family, false, true),
+            "{family:?}: merged shards vs kernel merge"
+        );
+    }
+}
+
+// The same for the keyed families (an item and a weight per sample).
+#[test]
+fn per_sample_updates_build_the_batch_states_for_every_keyed_family() {
+    for family in keyed_families() {
+        let batch = batch_build(
+            Operator::per_group_keyed_summary_build(
+                input_schema(),
+                family.0.clone(),
+                family.1.clone(),
+                vec![3],
+                RowWeight::Constant(NonZeroU32::new(1).unwrap()),
+                vec![0],
+            )
+            .unwrap(),
+        );
+        let update =
+            |updater: &mut StateColumnUpdater, group, sample: &(String, i64, f64, String)| {
+                updater
+                    .update_item(group, &[Value::Utf8(sample.3.as_str().into())], 1.0)
+                    .unwrap()
+            };
+        assert_eq!(batch.len(), 7, "{family:?}");
+        assert_eq!(
+            per_sample_build(&family, false, update),
+            batch,
+            "{family:?}: updater vs batch build"
+        );
+        assert_eq!(
+            kernel_build(&family, true, false),
+            batch,
+            "{family:?}: kernel vs batch build"
+        );
+        assert_eq!(
+            per_sample_build(&family, true, update),
+            kernel_build(&family, true, true),
+            "{family:?}: merged shards vs kernel merge"
+        );
+    }
+}
 
 // A counter refuses a sample that is not after its group's previous one,
 // and a value outside the kernel's domain, leaving the state unchanged.
 #[test]
 fn per_sample_updates_keep_each_kernels_input_contract() {
-    let mut rate = StateColumnUpdater::new(&exact(ExactKind::Rate, ExactParams::Rate)).unwrap();
+    let mut rate = updater(&exact(ExactKind::Rate, ExactParams::Rate));
     let group = rate.add_group().unwrap();
     rate.update(group, 1.0, 100).unwrap();
     assert!(rate.update(group, 2.0, 100).is_err());
     assert!(rate.update(group, f64::INFINITY, 200).is_err());
     rate.update(group, 3.0, 200).unwrap();
-    let mut dd = StateColumnUpdater::new(&sketch(
+    let mut dd = updater(&sketch(
         SketchAlgorithm::DDSketch,
         SketchParams::DDSketch { alpha: 0.01 },
-    ))
-    .unwrap();
+    ));
     let group = dd.add_group().unwrap();
     // A DDSketch takes zero and negative values, not NaN or ±Inf.
     dd.update(group, -1.0, 0).unwrap();
@@ -254,7 +541,7 @@ fn per_sample_updates_keep_each_kernels_input_contract() {
     assert!(dd.update(group, f64::NAN, 0).is_err());
     assert!(dd.update(group, f64::INFINITY, 0).is_err());
     // A keyed family takes items, a value family takes values.
-    let mut cms = StateColumnUpdater::new(&keyed_families()[0]).unwrap();
+    let mut cms = updater(&keyed_families()[0]);
     let group = cms.add_group().unwrap();
     assert!(cms.update(group, 1.0, 0).is_err());
     assert!(dd
@@ -272,7 +559,7 @@ fn merging_counter_shards_that_overlap_in_time_is_refused() {
         exact(ExactKind::Increase, ExactParams::Increase),
     ] {
         let shard = |samples: &[(i64, f64)]| {
-            let mut updater = StateColumnUpdater::new(&family).unwrap();
+            let mut updater = updater(&family);
             let group = updater.add_group().unwrap();
             for &(ts, value) in samples {
                 updater.update(group, value, ts).unwrap();
@@ -308,13 +595,13 @@ fn merging_counter_shards_that_overlap_in_time_is_refused() {
 // A group number the updater never added is bad input, not a panic.
 #[test]
 fn an_unknown_group_is_bad_input() {
-    let mut sum = StateColumnUpdater::new(&exact(ExactKind::Sum, ExactParams::Sum)).unwrap();
+    let mut sum = updater(&exact(ExactKind::Sum, ExactParams::Sum));
     sum.add_group().unwrap();
     assert!(matches!(
         sum.update(1, 1.0, 0),
         Err(asap_executor::Error::Invalid(_))
     ));
-    let mut cms = StateColumnUpdater::new(&keyed_families()[0]).unwrap();
+    let mut cms = updater(&keyed_families()[0]);
     assert!(matches!(
         cms.update_item(0, &[Value::Utf8("a".into())], 1.0),
         Err(asap_executor::Error::Invalid(_))
@@ -325,12 +612,20 @@ fn an_unknown_group_is_bad_input() {
 }
 
 /// A HydraCms family: one shared grid for all groups.
-fn hydra_family() -> FieldDataType {
-    FieldDataType::Sketch(
-        SketchAlgorithm::Cms,
-        GroupingStrategy::SharedMultiSubpopulation {
-            kind: HydraKind::HydraCms,
-        },
+fn hydra_family() -> Family {
+    (
+        FieldDataType::Sketch(
+            SketchAlgorithm::Cms,
+            GroupingStrategy::SharedMultiSubpopulation {
+                kind: HydraKind::HydraCms,
+            },
+        ),
+        Some(SketchParams::Hydra(HydraParams::HydraCms {
+            width: 64,
+            depth: 3,
+            shared_rows: 3,
+            shared_columns: 16,
+        })),
     )
 }
 
@@ -340,7 +635,7 @@ fn hydra_per_sample_build(sharded: bool) -> BTreeMap<String, String> {
     let family = hydra_family();
     let samples = samples();
     let shard = |part: &[TestSample]| {
-        let mut updater = StateColumnUpdater::new(&family).unwrap();
+        let mut updater = updater(&family);
         let mut groups = BTreeMap::<String, u32>::new();
         for sample in part {
             let group = match groups.get(&sample.0) {
@@ -363,7 +658,7 @@ fn hydra_per_sample_build(sharded: bool) -> BTreeMap<String, String> {
     if sharded {
         // The second shard numbers groups as the first does: the runtime's
         // shared map from labels to group numbers.
-        let mut other = StateColumnUpdater::new(&family).unwrap();
+        let mut other = self::updater(&family);
         let mut by_number = groups
             .iter()
             .map(|(series, &group)| (group, series.clone()))
@@ -407,7 +702,8 @@ fn per_sample_updates_build_the_batch_hydra_grid() {
     let batch = batch_build(
         Operator::all_groups_summary_build(
             input_schema(),
-            hydra_family(),
+            hydra_family().0,
+            hydra_family().1,
             3,
             RowWeight::Constant(NonZeroU32::new(1).unwrap()),
             vec![0],
@@ -433,7 +729,7 @@ fn per_sample_updates_build_the_batch_hydra_grid() {
 #[test]
 fn hydra_updates_keep_the_kernel_input_contract() {
     let family = hydra_family();
-    let mut updater = StateColumnUpdater::new(&family).unwrap();
+    let mut updater = updater(&family);
     assert!(matches!(
         updater.add_group(),
         Err(asap_executor::Error::Invalid(_))
@@ -470,7 +766,7 @@ fn hydra_updates_keep_the_kernel_input_contract() {
     assert_eq!(updater.group_count(), 1);
     updater.add_group_with_key(&[Value::Null]).unwrap();
     assert_eq!(updater.group_count(), 2);
-    let mut other = StateColumnUpdater::new(&family).unwrap();
+    let mut other = self::updater(&family);
     other
         .add_group_with_key(&[Value::Utf8("web".into())])
         .unwrap();

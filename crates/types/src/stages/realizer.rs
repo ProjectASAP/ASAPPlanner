@@ -2,10 +2,8 @@
 //! selected candidates, and Stage 2 realizes it. Stage 3 receives a `&dyn AssignmentRealizer` from the facade,
 //! so it never depends on the Stage 2 crate.
 use std::collections::BTreeMap;
-use std::rc::Rc;
 
 use crate::ir::physical_export::PhysicalASAPNodeId;
-use crate::ir::OperatorNode;
 use crate::physical::PhysicalWorkloadPlan;
 
 use super::{DagOfSelectedCandidates, PhysicalASAPMemoCandidates};
@@ -34,11 +32,13 @@ impl From<&str> for PhysicalCandidateError {
 
 /// A realized selection (was `SelectedPhysicalCandidate`): the physical
 /// plan Stage 2 built for it, how long each materialized tumbling-window chain of that plan
-/// keeps its tumbling windows, and the operator node each selected node became.
+/// retains its tumbling windows.
 #[derive(Debug, Clone)]
 pub struct RealizedPlan {
-    /// The selection rebuilt as one physical plan, one operator node per
-    /// selected node, each with its candidate's timing and lifetime.
+    /// The selection rebuilt as one physical plan: one operator node per
+    /// selected node (a tumbling-window layout as its chain read through a
+    /// merge), each exported with its candidate's timing, lifetime, θ and
+    /// its group's summary coverage.
     pub plan: PhysicalWorkloadPlan,
     /// For each tumbling-window chain of `plan` materialized beyond one evaluation
     /// (maintained at ingestion time, or built at query time and materialized
@@ -51,24 +51,17 @@ pub struct RealizedPlan {
     /// its tumbling windows; without an offset or range evaluations, just the window.
     /// Empty when the plan keeps no tumbling windows.
     pub tumbling_window_retention_ms: BTreeMap<PhysicalASAPNodeId, u64>,
-    /// The operator node of `plan` each selected node became, indexed by
-    /// [`SelectedNodeId`](super::SelectedNodeId).
-    pub operator_node_of_selected_node: Vec<Rc<OperatorNode>>,
 }
 
 /// Realizes a [`DagOfSelectedCandidates`] through Stage 2, one plan node
 /// per selected node. Implemented by the
-/// Stage 2 crate, which holds the planning context (the workload's
-/// original query roots, its entries and data, and whether query-time
-/// results are retained); the facade builds it, passes it to Stage 3, and
-/// calls the same method to build the selected plan.
+/// Stage 2 crate, which holds the planning context (the workload's entries
+/// and data); the facade builds it, passes it to Stage 3, and calls the
+/// same method to build the selected plan.
 ///
-/// Guarantees: a returned result has one operator node per selected node, each
-/// rebuilt over its selected producers with its identity kept, guarantees
-/// recomposed, and every output contract (result kind and schema) met; a
-/// realized assignment also passes Stage 2's timing and dependency rules
-/// and the physical DAG validator, with every node keeping its
-/// candidate's timing and lifetime.
+/// Guarantees: a returned plan has one operator node per selected node,
+/// each rebuilt over its selected producers, and passes the physical DAG
+/// validator, with every node keeping its candidate's timing and lifetime.
 ///
 /// It checks structure and execution legality only. It does not check cost,
 /// and it does not check accuracy targets: Stage 3 does both.

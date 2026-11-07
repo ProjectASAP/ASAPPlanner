@@ -8,46 +8,47 @@
 //!
 //! Stored-state encodings belong to deployments. Full plan acceptance is
 //! owned by `binding`, which also validates schemas, expressions and inputs.
-
+use crate::summary_kernels::hll_sketch::HLL_PRECISIONS;
+use crate::summary_kernels::weighted_frequency::{self, FrequencyAlgorithm};
 use crate::Error;
 use planner_types::ir::schema::{
     ExactKind, ExactParams, FamilyCapability, FieldDataType as SummaryFamilyType, GroupingStrategy,
-    SketchAlgorithm, SketchStatistic, StatisticKind, SummaryUpdate,
+    SketchAlgorithm, SketchParams, SketchStatistic, StatisticKind, SummaryUpdate,
 };
 
 /// Check the same contract used by `create_planner_accumulator` before a plan
 /// is accepted. Execution timing is deliberately not a kernel property.
+///
+/// `parameters` is θ, which the exported build node carries
+/// (`PhysicalASAPDAGNode::parameters`): required for a sketch family,
+/// `None` for an exact one.
 pub fn validate_summary_kernel(
     family: &SummaryFamilyType,
+    parameters: Option<&SketchParams>,
     input: &SummaryUpdate,
     grouping: &GroupingStrategy,
 ) -> Result<(), String> {
     if grouping != &GroupingStrategy::PerSubpopulationInstance {
-        return validate_hydra_cms(family, input, grouping);
+        return validate_hydra_cms(family, parameters, input, grouping);
     }
     let keyed = match family {
-        SummaryFamilyType::ExactAggregate(kind, params) => {
-            use ExactKind as K;
-            use ExactParams as P;
-            if !matches!(
-                (kind, params),
-                (K::Sum, P::Sum)
-                    | (K::Count, P::Count)
-                    | (K::Min, P::Min)
-                    | (K::Max, P::Max)
-                    | (K::Rate, P::Rate)
-                    | (K::Increase, P::Increase)
-            ) {
+        SummaryFamilyType::ExactAggregate(..) => {
+            if !exact_kernel(family) {
                 return Err(format!("unsupported exact kernel {family:?}"));
+            }
+            if parameters.is_some() {
+                return Err("an exact summary has no parameters θ".into());
             }
             input.item.is_some()
         }
-        SummaryFamilyType::Sketch(kind, layout) => {
+        SummaryFamilyType::Sketch(algorithm, layout) => {
             if layout != grouping {
                 return Err("Planner family and operator grouping disagree".into());
             }
-            let _ = kind;
-            todo!("#1207 PR 6: check θ, which the exported node carries")
+            let Some(parameters) = parameters else {
+                return Err(format!("a {algorithm:?} summary needs its parameters θ"));
+            };
+            validate_sketch_parameters(algorithm, parameters)?
         }
         _ => return Err(format!("unsupported summary kernel {family:?}")),
     };
@@ -57,6 +58,90 @@ pub fn validate_summary_kernel(
     Ok(())
 }
 
+/// Whether an exact family has a kernel.
+fn exact_kernel(family: &SummaryFamilyType) -> bool {
+    use ExactKind as K;
+    use ExactParams as P;
+    matches!(
+        family,
+        SummaryFamilyType::ExactAggregate(K::Sum, P::Sum)
+            | SummaryFamilyType::ExactAggregate(K::Count, P::Count)
+            | SummaryFamilyType::ExactAggregate(K::Min, P::Min)
+            | SummaryFamilyType::ExactAggregate(K::Max, P::Max)
+            | SummaryFamilyType::ExactAggregate(K::Rate, P::Rate)
+            | SummaryFamilyType::ExactAggregate(K::Increase, P::Increase)
+    )
+}
+
+/// Check θ of a per-instance sketch of `algorithm` against what its kernel
+/// builds; whether the kernel is keyed (its updates name an item).
+fn validate_sketch_parameters(
+    algorithm: &SketchAlgorithm,
+    parameters: &SketchParams,
+) -> Result<bool, String> {
+    use SketchAlgorithm as A;
+    use SketchParams as P;
+    let keyed = match (algorithm, parameters) {
+        // `asap_sketchlib` silently caps a larger `k`.
+        (A::Kll, P::Kll { k, .. })
+            if (8..=planner_types::ir::schema::sketch::KLL_MAX_K).contains(k) =>
+        {
+            false
+        }
+        (A::DDSketch, P::DDSketch { alpha })
+            if alpha.is_finite() && *alpha > 0.0 && *alpha < 1.0 =>
+        {
+            false
+        }
+        (A::Hll, P::Hll { precision, .. }) if HLL_PRECISIONS.contains(precision) => false,
+        (A::Kmv, P::Kmv { k, .. }) if *k >= crate::summary_kernels::kmv::KMV_MIN_K => false,
+        (A::Cms, P::Cms { width, depth }) if valid_matrix(*width, *depth) => true,
+        // The kernel's shape rules (an odd depth, for the median).
+        (A::CountSketch, P::CountSketch { width, depth })
+            if valid_matrix(*width, *depth)
+                && weighted_frequency::check_shape(
+                    FrequencyAlgorithm::CountSketch,
+                    *width as usize,
+                    *depth as usize,
+                )
+                .is_ok() =>
+        {
+            true
+        }
+        (A::CmsWithHeap | A::CountSketchWithHeap, _)
+            if weighted_frequency::WeightedFrequency::configuration(algorithm, parameters)
+                .is_ok_and(|(_, width, depth, _)| valid_matrix(width as u32, depth as u32)) =>
+        {
+            true
+        }
+        (
+            A::UnivMon,
+            P::UnivMon {
+                heap_size,
+                sketch_rows,
+                sketch_cols,
+                layers,
+                ..
+            },
+        ) if crate::summary_kernels::univmon::check_shape(
+            *heap_size as usize,
+            *sketch_rows as usize,
+            *sketch_cols as usize,
+            usize::from(*layers),
+        )
+        .is_ok() =>
+        {
+            false
+        }
+        _ => {
+            return Err(format!(
+                "unsupported kernel or invalid parameters: {algorithm:?} {parameters:?}"
+            ))
+        }
+    };
+    Ok(keyed)
+}
+
 /// The only shared grouping with a kernel: Hydra over Count-Min. Each update
 /// adds one item column's value to its group, with weight 1 (a row count,
 /// `UnitCount`), a positive integer constant (`PositiveConstant`) or a weight
@@ -64,6 +149,7 @@ pub fn validate_summary_kernel(
 /// when no weight is negative).
 fn validate_hydra_cms(
     family: &SummaryFamilyType,
+    parameters: Option<&SketchParams>,
     input: &SummaryUpdate,
     grouping: &GroupingStrategy,
 ) -> Result<(), String> {
@@ -71,7 +157,7 @@ fn validate_hydra_cms(
     if !matches!(family, SummaryFamilyType::Sketch(_, layout) if layout == grouping) {
         return Err("Planner family and operator grouping disagree".into());
     }
-    hydra_cms_shape(family)?;
+    hydra_cms_shape(family, parameters)?;
     if !matches!(input.item, Some(SummaryInputExpr::Column(_))) {
         return Err("HydraCms requires one item column".into());
     }
@@ -113,26 +199,57 @@ pub(crate) fn constant_row_weight(weight: f64) -> Result<std::num::NonZeroU32, S
     }
 }
 
-/// `(shared_rows, shared_columns, width, depth)` of a HydraCms family. The
-/// family is the per-group Count-Min it emulates, with the Hydra's own width
-/// and depth.
+/// A HydraCms family: the per-group Count-Min it emulates, shared by all
+/// groups. The only shared-grouping family with a kernel.
+pub(crate) fn validate_hydra_cms_family(family: &SummaryFamilyType) -> Result<(), String> {
+    use planner_types::ir::schema::HydraKind;
+    match family {
+        SummaryFamilyType::Sketch(
+            SketchAlgorithm::Cms,
+            GroupingStrategy::SharedMultiSubpopulation {
+                kind: HydraKind::HydraCms,
+            },
+        ) => Ok(()),
+        SummaryFamilyType::Sketch(
+            _,
+            GroupingStrategy::SharedMultiSubpopulation {
+                kind: HydraKind::HydraCms,
+            },
+        ) => Err("HydraCms family must be Count-Min".into()),
+        _ => Err("a shared-grouping (Hydra) family has no registered kernel".into()),
+    }
+}
+
+/// `(shared_rows, shared_columns, width, depth)` of a HydraCms family whose
+/// θ is `parameters` (`SketchParams::Hydra(HydraParams::HydraCms { .. })`):
+/// the grid's own rows and columns, and the width and depth of the per-group
+/// Count-Min it emulates.
 pub(crate) fn hydra_cms_shape(
     family: &SummaryFamilyType,
+    parameters: Option<&SketchParams>,
 ) -> Result<(usize, usize, usize, usize), String> {
-    use planner_types::ir::schema::HydraKind;
-    let SummaryFamilyType::Sketch(
-        kind,
-        GroupingStrategy::SharedMultiSubpopulation {
-            kind: HydraKind::HydraCms,
-        },
-    ) = family
+    use planner_types::ir::schema::HydraParams;
+    validate_hydra_cms_family(family)?;
+    let Some(SketchParams::Hydra(HydraParams::HydraCms {
+        width,
+        depth,
+        shared_rows,
+        shared_columns,
+    })) = parameters
     else {
-        return Err("a shared-grouping (Hydra) family has no registered kernel".into());
+        return Err(format!(
+            "a HydraCms summary needs HydraCms parameters θ, got {parameters:?}"
+        ));
     };
-    if kind != &SketchAlgorithm::Cms {
-        return Err("HydraCms family must be Count-Min with the Hydra width and depth".into());
+    if !valid_matrix(*width, *depth) || !valid_matrix(*shared_columns, *shared_rows) {
+        return Err("invalid HydraCms dimensions".into());
     }
-    todo!("#1207 PR 6: the Hydra grid's sizes are θ, which the exported node carries")
+    Ok((
+        *shared_rows as usize,
+        *shared_columns as usize,
+        *width as usize,
+        *depth as usize,
+    ))
 }
 
 /// A filtered `SummaryAgg` never runs at ingestion time. An ingestion-time
@@ -153,7 +270,6 @@ pub fn validate_ingestion_time_summary<C>(
     }
 }
 
-#[allow(dead_code)] // Used again in #1207 PR 6, with θ from the exported node.
 fn valid_matrix(width: u32, depth: u32) -> bool {
     // Construction uses the kernel's native row hashing, so no encoded-size
     // limit applies here.
@@ -184,39 +300,39 @@ pub(crate) fn unit_frequency_column(
     }
 }
 
+/// Whether the executor holds, merges and reads states of `family` natively.
+/// θ is not part of a family: each kernel checks it when building a state,
+/// and merges check that their states have one shape.
 pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
     use planner_types::ir::schema::SketchAlgorithm as A;
-    if let SummaryFamilyType::Sketch(kind, grouping) = family {
+    let native = match family {
+        SummaryFamilyType::ExactAggregate(..) => exact_kernel(family),
+        // HydraCms is built by the all-groups summary build.
+        SummaryFamilyType::Sketch(_, GroupingStrategy::SharedMultiSubpopulation { .. }) => {
+            return validate_hydra_cms_family(family).map_err(Error::Invalid)
+        }
         // Plain Count-Min is native as stored state only: it merges and reads
-        // its bare count, but the DAG does not build it from rows. HydraCms
-        // is built by the all-groups summary build.
-        if let A::Cms = kind {
-            if grouping != &GroupingStrategy::PerSubpopulationInstance {
-                return hydra_cms_shape(family).map(|_| ()).map_err(Error::Invalid);
-            }
-            todo!("#1207 PR 6: check the Count-Min θ, which the exported node carries")
-        }
-        if matches!(kind, A::CmsWithHeap | A::CountSketchWithHeap) {
-            todo!("#1207 PR 6: check the weighted-frequency θ, which the exported node carries")
-        }
+        // its bare count, but the DAG does not build it from rows.
+        SummaryFamilyType::Sketch(
+            A::Cms
+            | A::CmsWithHeap
+            | A::CountSketchWithHeap
+            | A::Kll
+            | A::DDSketch
+            | A::Hll
+            | A::Kmv
+            | A::UnivMon,
+            GroupingStrategy::PerSubpopulationInstance,
+        ) => true,
+        _ => false,
+    };
+    if native {
+        Ok(())
+    } else {
+        Err(Error::Invalid(format!(
+            "summary family {family:?} has no native DAG state implementation"
+        )))
     }
-    match family {
-        SummaryFamilyType::ExactAggregate(..) => {}
-        SummaryFamilyType::Sketch(A::Kll | A::DDSketch | A::Hll | A::Kmv | A::UnivMon, _) => {}
-        _ => {
-            return Err(Error::Invalid(
-                "summary family has no native DAG state implementation".into(),
-            ))
-        }
-    }
-    crate::capability::validate_summary_kernel(
-        family,
-        &planner_types::ir::schema::SummaryUpdate::column(
-            planner_types::ir::scalar::ColumnRef::SampleValue,
-        ),
-        &Default::default(),
-    )
-    .map_err(Error::Invalid)
 }
 
 /// What the executor evaluates from a per-instance state of each family it
@@ -349,5 +465,36 @@ mod tests {
         ));
         assert!(validate_ingestion_time_summary(Some(&filter)).is_err());
         assert!(validate_ingestion_time_summary::<usize>(None).is_ok());
+    }
+
+    // θ is checked with the kernel, not with the family: a Count Sketch with
+    // heap of even depth is refused (its estimate is a median of rows),
+    // while its family stays native.
+    #[test]
+    fn weighted_frequency_parameters_are_checked_with_the_kernel() {
+        let family = SummaryFamilyType::Sketch(
+            SketchAlgorithm::CountSketchWithHeap,
+            GroupingStrategy::PerSubpopulationInstance,
+        );
+        let mut update = SummaryUpdate::column(planner_types::ir::scalar::ColumnRef::SampleValue);
+        update.item = Some(planner_types::ir::schema::SummaryInputExpr::Column(
+            planner_types::ir::scalar::ColumnRef::Named("host".into()),
+        ));
+        let theta = |depth| SketchParams::CountSketchWithHeap {
+            width: 32,
+            depth,
+            heap_size: 8,
+        };
+        let grouping = GroupingStrategy::PerSubpopulationInstance;
+        assert!(validate_native_family(&family).is_ok());
+        assert!(validate_summary_kernel(&family, Some(&theta(5)), &update, &grouping).is_ok());
+        assert!(validate_summary_kernel(&family, Some(&theta(4)), &update, &grouping).is_err());
+        assert!(validate_summary_kernel(&family, None, &update, &grouping).is_err());
+        let heapless = SketchParams::CountSketchWithHeap {
+            width: 32,
+            depth: 5,
+            heap_size: 0,
+        };
+        assert!(validate_summary_kernel(&family, Some(&heapless), &update, &grouping).is_err());
     }
 }

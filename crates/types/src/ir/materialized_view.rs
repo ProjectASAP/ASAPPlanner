@@ -64,7 +64,7 @@
 //! it once.
 
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
+use std::ops::Bound;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -74,11 +74,11 @@ use super::physical_export::{
     PhysicalASAPNodeId, ScanWindow,
 };
 use crate::ir::operator::asap::ASAPOp;
-use crate::ir::operator::node::{Operator, OperatorNode};
+use crate::ir::operator::node::Operator;
 use crate::ir::operator::non_asap::NonASAPOp;
 use crate::ir::operator::operator_properties::Source;
 use crate::ir::properties::execution_data_state::ExecutionTiming;
-use crate::ir::properties::summary_coverage::{CoverageError, SelectionBox, SummaryCoverage};
+use crate::ir::properties::summary_coverage::{SelectionBox, SummaryCoverage};
 use crate::physical::Lifetime;
 
 /// One materialized view of a DAG: what its stored state is, what it is
@@ -135,6 +135,49 @@ pub struct ViewCoverage {
     /// and time relative to the evaluation time. A merge's is the union of
     /// its inputs'.
     pub(crate) selection: Vec<SelectionBox>,
+}
+
+impl ViewCoverage {
+    /// The coverage a plan node carries for the summary coverage of its
+    /// memo group: the definition's id and the selection.
+    pub fn of(coverage: &SummaryCoverage) -> Self {
+        Self {
+            definition_id: coverage.definition_id(),
+            selection: coverage.selection.clone(),
+        }
+    }
+
+    /// The coverage of tumbling window `index` (0 = newest) of a chain of
+    /// tumbling windows `width_ms` wide whose coverage is `self`: the same
+    /// definition, each box's time window narrowed to the tumbling window's,
+    /// `(u - (index + 1)·w, u - index·w]` for the box's upper time bound `u`
+    /// (0 when the box has none: the chain ends at the evaluation time).
+    pub fn of_tumbling_window(&self, index: u32, width_ms: u64) -> Self {
+        let width_ms = i64::try_from(width_ms).unwrap_or(i64::MAX);
+        let back_ms = width_ms.saturating_mul(i64::from(index));
+        let selection = self
+            .selection
+            .iter()
+            .map(|selection_box| {
+                let upper_ms = match selection_box.relative_time {
+                    Some((_, Bound::Included(upper) | Bound::Excluded(upper))) => upper,
+                    _ => 0,
+                };
+                let end_ms = upper_ms.saturating_sub(back_ms);
+                SelectionBox {
+                    columns: selection_box.columns.clone(),
+                    relative_time: Some((
+                        Bound::Excluded(end_ms.saturating_sub(width_ms)),
+                        Bound::Included(end_ms),
+                    )),
+                }
+            })
+            .collect();
+        Self {
+            definition_id: self.definition_id.clone(),
+            selection,
+        }
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -735,14 +778,7 @@ impl PhysicalASAPDAG {
             .filter(|node| matches!(node.lifetime, Lifetime::AcrossEvaluations(_)))
             .map(|node| node.id)
             .collect();
-        // The IR of each node, which coverage is derived from.
-        let ir = if views.is_empty() {
-            HashMap::new()
-        } else {
-            self.operator_nodes()?
-        };
         let mut derived = Vec::new();
-        let mut coverage_by_node: HashMap<PhysicalASAPNodeId, SummaryCoverage> = HashMap::new();
         // The window each view summarizes ([`PhysicalASAPDAG::view_window`]):
         // its raw-data windows and those of the views it reads, unioned.
         let mut window_by_view: HashMap<PhysicalASAPNodeId, ScanWindow> = HashMap::new();
@@ -790,13 +826,14 @@ impl PhysicalASAPDAG {
                     );
                 }
             }
-            let coverage = coverage_of(id, &inputs, &ir, &coverage_by_node).map_err(|error| {
+            // The coverage its memo group stores, which the realizer put
+            // on the node: coverage is derived only in the memo.
+            let coverage = node.summary_coverage.clone().ok_or_else(|| {
                 InstallableDagError::ViewWithoutCoverage {
                     node_id: id,
-                    reason: error.to_string(),
+                    reason: "its plan node carries no summary coverage".into(),
                 }
             })?;
-            coverage_by_node.insert(id, coverage.clone());
             let view = MaterializedView {
                 node_id: id,
                 refresh: if refreshed_at_ingestion {
@@ -804,10 +841,7 @@ impl PhysicalASAPDAG {
                 } else {
                     MaterializedViewRefresh::OnFirstRead
                 },
-                coverage: ViewCoverage {
-                    definition_id: coverage.definition_id(),
-                    selection: coverage.selection,
-                },
+                coverage,
                 inputs,
                 retention_ms: node.retention_ms.unwrap_or(0),
             };
@@ -1085,17 +1119,4 @@ impl<'a> ViewIndex<'a> {
         };
         Ok((inputs, scans))
     }
-}
-
-/// The coverage of view `id` (IR `ir`), refreshed from `inputs`: the
-/// coverage its memo group stores, which the realized plan will carry.
-/// Coverage is derived only in the memo, never on node trees.
-fn coverage_of(
-    id: PhysicalASAPNodeId,
-    inputs: &MaterializedViewInputs,
-    ir: &HashMap<PhysicalASAPNodeId, Rc<OperatorNode>>,
-    coverage_by_node: &HashMap<PhysicalASAPNodeId, SummaryCoverage>,
-) -> Result<SummaryCoverage, CoverageError> {
-    let _ = (id, inputs, ir, coverage_by_node);
-    todo!("#1207 PR 6: the view's coverage from its memo group's GroupProperties::summary_coverage")
 }
