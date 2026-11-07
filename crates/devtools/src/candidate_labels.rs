@@ -390,39 +390,6 @@ mod tests {
     use super::*;
     use crate::planner_layering_examples::example1;
     use crate::planning_stages::lower_promql_roots;
-    use asap_stage1_pass1_per_computation_candidates::test_support::{
-        compose_logical_candidate, generate_per_computation_candidates,
-    };
-
-    /// Selected DAG labels expose accumulator state without a legacy choice ID.
-    #[test]
-    fn connected_labels_describe_selected_states() {
-        let workload = example1();
-        let inventory = generate_per_computation_candidates(
-            &asap_stage0_memo::memo_of_queries(&lower_promql_roots(&workload).unwrap()).unwrap(),
-        )
-        .unwrap();
-        let choice = vec![0; inventory.targets.len()];
-        let roots: Vec<_> = compose_logical_candidate(&inventory, &choice).unwrap();
-        let label = connected_candidate_label(&roots);
-        assert!(label.contains("Q1 ") && label.contains("Q2 "));
-        assert!(label.contains("acc"), "{label}");
-    }
-
-    /// A state reused by two query outputs is named once in the sharing suffix.
-    #[test]
-    fn connected_labels_name_actual_shared_state() {
-        let workload = example1();
-        let inventory = generate_per_computation_candidates(
-            &asap_stage0_memo::memo_of_queries(&lower_promql_roots(&workload).unwrap()).unwrap(),
-        )
-        .unwrap();
-        let roots =
-            compose_logical_candidate(&inventory, &vec![0; inventory.targets.len()]).unwrap();
-        let label = connected_candidate_label(&[roots[1].clone(), roots[1].clone()]);
-        assert!(label.contains("shared Sum acc (Q1, Q2)"), "{label}");
-        assert_eq!(label.matches("shared Sum acc").count(), 1);
-    }
 
     /// Raw logical operators have an exact label, rather than an empty choice label.
     #[test]

@@ -1605,3 +1605,77 @@ pub fn pinned_column(conjunct: &ScalarExpr) -> Option<usize> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::composition::raw_data_samples_sign_statistic;
+    use asap_types::ir::schema::{
+        GroupingStrategy, NonNegativeWeightProof, SketchAlgorithm, SummaryInputExpr,
+    };
+
+    /// A Count-Min estimate has a bound only over weights proven
+    /// non-negative: an open requirement (`RawDataSamplesOfMetric`) is not a proof.
+    #[test]
+    fn count_min_estimate_has_no_bound_over_an_open_requirement() {
+        let family = FieldDataType::Sketch(SketchAlgorithm::Cms, GroupingStrategy::default());
+        let query = SketchStatistic::PointCount {
+            key: ColumnRef::SampleValue,
+            value: None,
+        };
+        let with = |weight_domain| SummaryUpdate {
+            item: Some(SummaryInputExpr::Column(ColumnRef::SampleValue)),
+            weight: SummaryInputExpr::Column(ColumnRef::SampleValue),
+            weight_domain,
+        };
+        assert!(!estimate_has_bound(
+            &family,
+            &with(WeightDomain::RawDataSamplesOfMetric { metric: "m".into() }),
+            &query
+        ));
+        assert!(!estimate_has_bound(
+            &family,
+            &with(WeightDomain::UnknownOrSigned),
+            &query
+        ));
+        assert!(estimate_has_bound(
+            &family,
+            &with(WeightDomain::NonNegative {
+                proof: NonNegativeWeightProof::CounterRawDataSamples
+            }),
+            &query
+        ));
+    }
+
+    /// A Count-Min estimate over samples of `m` gets its bound gated on
+    /// `m`'s sign: unknown until plan selection binds it, the local bound
+    /// once bound to 1.
+    #[test]
+    fn count_min_estimate_over_raw_data_samples_is_gated_on_the_metric() {
+        let family = FieldDataType::Sketch(SketchAlgorithm::Cms, GroupingStrategy::default());
+        let query = SketchStatistic::PointCount {
+            key: ColumnRef::SampleValue,
+            value: None,
+        };
+        let update = SummaryUpdate {
+            item: Some(SummaryInputExpr::Column(ColumnRef::SampleValue)),
+            weight: SummaryInputExpr::Column(ColumnRef::SampleValue),
+            weight_domain: WeightDomain::RawDataSamplesOfMetric { metric: "m".into() },
+        };
+        let gated = estimate_bound_over_raw_data_samples(&family, &update, &query).expect("gated");
+        assert_eq!(gated.spec.error.evaluate(), None);
+        let local = local_guarantee(&family, &query).unwrap();
+        let statistic = raw_data_samples_sign_statistic("m");
+        // Every other statistic (a stream norm) bound alike.
+        let others = |s: &str| Some(if s == statistic { 1.0 } else { 1_000.0 });
+        let bound = gated.bind(&others).spec.error.evaluate();
+        assert!(bound.is_some());
+        assert_eq!(bound, local.bind(&others).spec.error.evaluate());
+        let unconfirmed = gated
+            .bind(&|s| (s != statistic).then_some(1_000.0))
+            .spec
+            .error
+            .evaluate();
+        assert_eq!(unconfirmed, None);
+    }
+}

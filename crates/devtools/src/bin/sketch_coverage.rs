@@ -4,7 +4,7 @@
 // corpus list exactly, so the two reports are directly comparable) with an
 // *approximate* `AccuracyTarget`, runs Pass 1 of logical ASAP-aware
 // optimization (`pass1_memo`, every
-// summary supported, no accuracy pruning) over each query, and
+// summary supported) over each query, and
 // reports which summary candidates Pass 1 offers for it, plus the fraction of
 // lowered queries with at least one.
 //
@@ -14,7 +14,6 @@
 // every corpus lowers with. Without an approximate target, Pass 1 offers no
 // summary candidate.
 
-use asap_accuracy::{IgnoreAccuracyGuarantees, NoAccuracyEvidence};
 use asap_devtools::corpora::{
     bgp_catalog, dqc_catalog, netflow_catalog, parse_sample_interval, promql_lines, sql_statements,
 };
@@ -25,7 +24,7 @@ use asap_stage1_pass1_per_computation_candidates::pass1_memo;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
-use asap_types::workload::{DataWorkload, SqlDialect};
+use asap_types::workload::SqlDialect;
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
@@ -54,7 +53,6 @@ fn analyze_corpus(
     name: &'static str,
     roots: Vec<(String, Rc<OperatorNode>)>,
     failed: usize,
-    accuracy: &AccuracyTarget,
 ) -> CorpusCoverage {
     let lowered = roots.len();
     let mut rejected = 0;
@@ -64,14 +62,7 @@ fn analyze_corpus(
             rejected += 1;
             continue;
         };
-        let Ok(pass1) = pass1_memo(
-            memo,
-            std::slice::from_ref(accuracy),
-            &IgnoreAccuracyGuarantees,
-            &NoAccuracyEvidence,
-            &DataWorkload::default(),
-            None,
-        ) else {
+        let Ok(pass1) = pass1_memo(memo, None) else {
             rejected += 1;
             continue;
         };
@@ -187,7 +178,7 @@ async fn main() {
                 Err(_) => failed += 1,
             }
         }
-        results.push(analyze_corpus(name, roots, failed, &accuracy));
+        results.push(analyze_corpus(name, roots, failed));
     }
 
     // ── SQL corpora ──
@@ -222,7 +213,7 @@ async fn main() {
                 Err(_) => failed += 1,
             }
         }
-        results.push(analyze_corpus(name, roots, failed, &accuracy));
+        results.push(analyze_corpus(name, roots, failed));
     }
 
     for r in &results {

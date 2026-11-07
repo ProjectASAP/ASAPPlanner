@@ -21,38 +21,6 @@ pub fn selected_dag(
     Rc::clone(selected)
 }
 
-/// Exercise each local implementation rule directly, keeping the other
-/// computations at their default choice. A bounded solver archive need not
-/// contain every algorithm that executor binding tests need to exercise.
-pub fn computation_candidates(root: Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
-    use asap_stage1_pass1_per_computation_candidates::test_support::{
-        compose_logical_candidate, generate_per_computation_candidates,
-    };
-    let inventory = generate_per_computation_candidates(
-        &asap_stage0_memo::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
-    )
-    .expect("Pass 1 accepts the query");
-    let mut choices = vec![vec![0; inventory.targets.len()]];
-    for (index, target) in inventory.targets.iter().enumerate() {
-        for choice in 1..target.choice_count() {
-            let mut selected = vec![0; inventory.targets.len()];
-            selected[index] = choice;
-            choices.push(selected);
-        }
-    }
-    choices
-        .into_iter()
-        .map(|choice| {
-            let mut roots = compose_logical_candidate(&inventory, &choice)
-                .expect("a generated computation candidate composes");
-            match roots.remove(0) {
-                QueryRoot::Operator(root) => root,
-                QueryRoot::Scalar(_) => panic!("one operator root"),
-            }
-        })
-        .collect()
-}
-
 fn run_all_stages(
     root: Rc<OperatorNode>,
     accuracy: planner_types::ir::properties::AccuracyTarget,

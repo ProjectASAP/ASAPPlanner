@@ -7,7 +7,7 @@ use asap_planner::{
     run_planning, PlanSearchSettings, PlanningModels, PlanningReport, PlanningRun, SelectionError,
 };
 use asap_stage0_memo::memo_of_queries;
-use asap_stage1_pass1_per_computation_candidates::{pass1_memo, Pass1Error};
+use asap_stage1_pass1_per_computation_candidates::pass1_memo;
 use asap_stage1_pass2_reuse_candidates::{
     pass2_after_local_window_composition, pass2_local_window_composition,
 };
@@ -288,38 +288,20 @@ pub fn run_stages_until(
         return Ok(stages);
     }
     let run = &mut stages.run;
-    let accuracy_targets: Vec<_> = entries
-        .iter()
-        .map(|entry| entry.requirements.accuracy.clone())
-        .collect();
-    let accuracy = models.accuracy_check_inputs();
     let pass1 = pass1_memo(
         stage0_dag,
-        &accuracy_targets,
-        accuracy.model,
-        accuracy.evidence,
-        data,
         models
             .deployment_capabilities
             .supported_summaries
             .as_deref(),
-    );
+    )
     // As `run_planning`: a query Pass 1 cannot plan is reported before
     // contradictory deployment capabilities.
-    if let Err(Pass1Error::PerComputation(error)) = &pass1 {
-        return Err(PlanningStagesError::Pass1(error.to_string()));
-    }
+    .map_err(|error| PlanningStagesError::Pass1(error.to_string()))?;
     if let Err(error) = models.deployment_capabilities.validate(data) {
         run.selection = Err(SelectionError::InvalidDeploymentCapabilities(error));
         return Ok(stages);
     }
-    let pass1 = match pass1 {
-        Ok(pass1) => pass1,
-        Err(error) => {
-            run.selection = Err(SelectionError::LogicalASAPCandidates(error.to_string()));
-            return Ok(stages);
-        }
-    };
     run.pass1_memo = Some(pass1.clone());
     if until == RunUntil::Pass1 {
         return Ok(stages);
@@ -372,7 +354,7 @@ pub fn run_stages_until(
         &physical,
         entries,
         data,
-        &accuracy,
+        &models.accuracy_check_inputs(),
         models.cost_inputs,
         &realizer,
     ) {
