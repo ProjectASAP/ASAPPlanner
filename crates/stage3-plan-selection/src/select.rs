@@ -156,10 +156,11 @@ pub fn select_plan(
         pruned_candidates,
         search_report: SearchReport {
             status: SearchStatus::Optimal,
-            cost_lower_bound_per_second: solved
-                .lower_bound_per_second
-                .is_finite()
-                .then_some(solved.lower_bound_per_second),
+            // The solver's bound is on the MILP's objective; it bounds the
+            // plan's cost only when the objective equals it.
+            cost_lower_bound_per_second: (inexact_objective.is_none()
+                && solved.lower_bound_per_second.is_finite())
+            .then_some(solved.lower_bound_per_second),
             milp_variables: solved.variable_count,
             milp_constraints: solved.constraint_count,
             model_construction_ms: solved.construction_ms,

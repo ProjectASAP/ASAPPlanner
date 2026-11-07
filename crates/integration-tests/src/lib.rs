@@ -101,10 +101,34 @@ pub mod physical_export {
     use asap_types::ir::OperatorNode;
     use std::rc::Rc;
 
-    /// Export the physical DAG of `root`.
+    /// Export the physical DAG of `root`, every node at query time and not
+    /// materialized. An operator tree carries no θ, so each sketch build
+    /// gets the first θ of its family's predefined list
+    /// (`asap_types::stages::parameter_list`), none for a family without a
+    /// list; a plan the realizer exported carries its selected θ instead.
     pub fn physical_asap_dag(root: &Rc<OperatorNode>) -> PhysicalASAPDAG {
-        asap_types::test_support::physical_asap_dag_at_query_time(root)
-            .expect("physical ASAP DAG export failed")
+        use asap_types::ir::schema::FieldDataType;
+        use asap_types::ir::{ASAPOp, Operator};
+        let mut dag = asap_types::test_support::physical_asap_dag_at_query_time(root)
+            .expect("physical ASAP DAG export failed");
+        for node in &mut dag.nodes {
+            if let Operator::ASAP(
+                ASAPOp::SummaryAgg {
+                    family: FieldDataType::Sketch(algorithm, _),
+                    ..
+                }
+                | ASAPOp::SummaryTumblingWindowChain {
+                    family: FieldDataType::Sketch(algorithm, _),
+                    ..
+                },
+            ) = &node.payload
+            {
+                node.parameters = asap_types::stages::parameter_list(*algorithm)
+                    .first()
+                    .cloned();
+            }
+        }
+        dag
     }
 }
 
@@ -419,7 +443,8 @@ pub mod planning {
         root: Rc<OperatorNode>,
         accuracy: AccuracyTarget,
     ) -> Vec<Rc<OperatorNode>> {
-        require_composed_operator_candidates(run_all_stages(root, accuracy).logical_candidates())
+        let stages = run_all_stages(root, accuracy);
+        require_composed_operator_candidates(stages.logical_candidates())
     }
 
     /// [`logical_candidates`] with every output accepted whatever its
