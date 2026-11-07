@@ -520,13 +520,20 @@ impl Planner {
     /// by `asap_cost::plan_cost` as Stage 3 costs a selected plan: each node
     /// a planning of this planner realized keeps the timing, lifetime, θ and
     /// coverage it was given; every other node (a witness's derived
-    /// operators) runs at query time, not materialized. A query-time node
-    /// that is not materialized and is read by the last root and another
-    /// is materialized for one evaluation instead (`OneEvaluation(Memory)`):
-    /// built once per evaluation and read by both, as the planner may
-    /// select (the derived query runs with the query it derives from).
-    /// `derived_root` is the nodes only the last root reads.
-    pub fn cost(&self, workload: &FuzzWorkload, roots: &[QueryRoot]) -> Result<Costed, String> {
+    /// operators) runs at query time, not materialized. With
+    /// `last_root_is_derived` (a witness, whose last root is `q'`), a
+    /// query-time node that is not materialized and is read by the last root
+    /// and another is materialized for one evaluation instead
+    /// (`OneEvaluation(Memory)`): built once per evaluation and read by
+    /// both, as the planner may select (the derived query runs with the
+    /// query it derives from). A plan the planner selected is costed as
+    /// selected. `derived_root` is the nodes only the last root reads.
+    pub fn cost(
+        &self,
+        workload: &FuzzWorkload,
+        roots: &[QueryRoot],
+        last_root_is_derived: bool,
+    ) -> Result<Costed, String> {
         let planning = workload.planning_workload();
         let entries: Vec<_> = planning.query_workload.entries().collect();
         let cost_inputs = self.cost_inputs();
@@ -539,7 +546,10 @@ impl Planner {
             parameters: None,
             summary_coverage: None,
         };
-        let shared = shared_with_last_root(roots);
+        let shared = match last_root_is_derived {
+            true => shared_with_last_root(roots),
+            false => BTreeSet::new(),
+        };
         let (dag, _) = physical_asap_dag_with_assignments(roots, &|node| {
             let mut assignment = self
                 .assignment_of_node
@@ -616,7 +626,7 @@ impl Planner {
         if let Some(costed) = self.reference_costs.get(&key) {
             return costed.clone();
         }
-        let costed = self.cost(workload, roots);
+        let costed = self.cost(workload, roots, false);
         self.reference_costs.insert(key, costed.clone());
         costed
     }

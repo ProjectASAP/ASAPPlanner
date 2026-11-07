@@ -44,7 +44,7 @@ pub struct Rejection {
 }
 
 /// Why Stage 3 did not select a candidate. The first six mean the
-/// candidate failed a check and is invalid ([`Self::failed_a_check`]); the
+/// candidate failed a check and is invalid; the
 /// rest mean it was valid and lost under the cost model. JSON: the
 /// snake_case variant name, e.g. `"costlier"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -89,25 +89,6 @@ pub enum RejectionCause {
     /// No plan meets constraints (A)–(I), (R) and every query's accuracy
     /// target (K) together: the selection MILP is infeasible.
     Infeasible,
-}
-
-impl RejectionCause {
-    /// Whether the candidate failed a check (accuracy, latency bound,
-    /// repeat interval, cluster capacity or a representable cost) rather
-    /// than losing under the cost model.
-    pub fn failed_a_check(self) -> bool {
-        matches!(
-            self,
-            Self::AccuracyTargetMissed
-                | Self::CountMinWeightsNotProvenNonNegative
-                | Self::NoAccuracyGuarantee
-                | Self::LatencyBoundExceeded
-                | Self::LatencyOverRepeatInterval
-                | Self::OverClusterCapacity
-                | Self::Infeasible
-                | Self::CostNotRepresentable
-        )
-    }
 }
 
 /// The accuracy Stage 3 accepted for one query of a valid candidate: the

@@ -217,7 +217,7 @@ pub enum StateFamily<'a> {
 
 /// A node's unit cost, from its entry or interpolated between two.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct UnitPrice {
+pub struct UnitCost {
     pub ns_per_unit: f64,
     pub ns_per_invocation: f64,
     pub memory_bytes_per_state: Option<f64>,
@@ -236,7 +236,7 @@ pub fn lookup(
     phase: ExecutionTiming,
     family: StateFamily<'_>,
     size_of: impl Fn(&SketchParams) -> f64,
-) -> Option<UnitPrice> {
+) -> Option<UnitCost> {
     let matching = |for_phase: Option<ExecutionTiming>| {
         table
             .operators
@@ -266,10 +266,10 @@ pub fn lookup(
         entries = matching(None);
     }
     let StateFamily::Sketch(params) = family else {
-        return entries.first().map(|entry| price_of(entry));
+        return entries.first().map(|entry| cost_of(entry));
     };
     if let Some(entry) = entries.iter().find(|e| e.sketch.as_ref() == Some(params)) {
-        return Some(price_of(entry));
+        return Some(cost_of(entry));
     }
     let size = |entry: &OperatorCost| size_of(entry.sketch.as_ref().expect("a sketch entry"));
     let target = size_of(params);
@@ -284,9 +284,9 @@ pub fn lookup(
     match (below, above) {
         (Some(low), Some(high)) if size(high) > size(low) => {
             let at = (target.ln() - size(low).ln()) / (size(high).ln() - size(low).ln());
-            let (low, high) = (price_of(low), price_of(high));
+            let (low, high) = (cost_of(low), cost_of(high));
             let mix = |a: f64, b: f64| a + (b - a) * at;
-            Some(UnitPrice {
+            Some(UnitCost {
                 ns_per_unit: mix(low.ns_per_unit, high.ns_per_unit),
                 ns_per_invocation: mix(low.ns_per_invocation, high.ns_per_invocation),
                 memory_bytes_per_state: low
@@ -295,7 +295,7 @@ pub fn lookup(
                     .map(|(a, b)| mix(a, b)),
             })
         }
-        (Some(nearest), _) | (None, Some(nearest)) => Some(price_of(nearest)),
+        (Some(nearest), _) | (None, Some(nearest)) => Some(cost_of(nearest)),
         (None, None) => None,
     }
 }
@@ -307,8 +307,8 @@ pub(crate) fn aggregate_lookup(
     table: &MeasuredOperationCosts,
     phase: ExecutionTiming,
     measures: &[AggIntent],
-) -> Option<UnitPrice> {
-    let mut total = UnitPrice {
+) -> Option<UnitCost> {
+    let mut total = UnitCost {
         ns_per_unit: 0.0,
         ns_per_invocation: 0.0,
         memory_bytes_per_state: None,
@@ -337,8 +337,8 @@ fn measure_name(measure: &AggIntent) -> String {
         .unwrap_or_else(|| format!("{measure:?}"))
 }
 
-fn price_of(entry: &OperatorCost) -> UnitPrice {
-    UnitPrice {
+fn cost_of(entry: &OperatorCost) -> UnitCost {
+    UnitCost {
         ns_per_unit: entry.ns_per_unit,
         ns_per_invocation: entry.ns_per_invocation,
         memory_bytes_per_state: entry.memory_bytes_per_state,

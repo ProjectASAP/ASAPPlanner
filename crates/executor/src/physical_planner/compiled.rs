@@ -146,11 +146,11 @@ impl CompiledPhysicalDAG {
             Node::Operator { operator, .. } => Ok(operator.output_schema()),
         }
     }
-    /// Validate using schema-only sources. No deployment source is available.
+    /// Validate using schema-only stand-ins: no deployment source cursor is opened.
     pub fn validate(&self) -> Result<(), Error> {
         self.unbound().map(|_| ())
     }
-    /// The DAG with a source-free bounded stand-in for every input slot.
+    /// The DAG with a bounded stand-in (no source cursor) for every input slot.
     fn unbound(&self) -> Result<PhysicalDAG<'_, Batch, SchemaRef>, Error> {
         let mut dag = PhysicalDAG::default();
         for (&id, node) in &self.nodes {

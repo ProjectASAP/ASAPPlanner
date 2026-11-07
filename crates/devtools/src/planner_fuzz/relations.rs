@@ -329,9 +329,9 @@ pub struct WitnessReport {
     /// operators alone) and their operators.
     pub derived_node_cost_per_second: Option<f64>,
     pub derived_operators: Vec<String>,
-    /// Whether the witness's `Filter` on a group key retained its input's
-    /// guarantee, which Stage 1's guarantee composition does not give it
-    /// (so the witness passes Stage 3 only under that rule).
+    /// Whether the witness derives `q'` by a `Filter` on a group key, which
+    /// keeps its input's guarantee only by that rule (the witness's
+    /// accuracy is not checked; the draft notes it).
     pub key_filter_keeps_input_guarantee: bool,
 }
 
@@ -1631,7 +1631,7 @@ fn confirming(
     roots: Option<&Vec<QueryRoot>>,
     keep: usize,
 ) -> Option<WitnessReport> {
-    let costed = planner.cost(workload, &roots?[..keep]).ok()?;
+    let costed = planner.cost(workload, &roots?[..keep], false).ok()?;
     Some(WitnessReport {
         derivation: None,
         cost_per_second: costed.cost_per_second,
@@ -1744,7 +1744,7 @@ fn evaluate_marginal(
             &base_roots,
             check.target,
         )
-        .and_then(|roots| planner.cost(related, &roots));
+        .and_then(|roots| planner.cost(related, &roots, true));
         match costed {
             Ok(costed)
                 if best

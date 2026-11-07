@@ -415,25 +415,27 @@ fn try_rewrite_row_number_top_k(
             child: sorted,
         })
     };
-    // A column of `X` as a column of `Project{P}{X}`, if `P` keeps it.
-    let position_in_kept = |column: usize| {
+    // A column of `X` as a column of `Project{P}{X}`, if `P` passes it through.
+    let position_in_projection = |column: usize| {
         remaining
             .iter()
             .position(|item| item.expr == ScalarExpr::Column(column))
     };
-    let partition_in_kept: Option<Vec<usize>> =
-        partition_by.iter().map(|&c| position_in_kept(c)).collect();
-    let order_in_kept: Option<Vec<SortKey>> = order_by
+    let partition_in_projection: Option<Vec<usize>> = partition_by
+        .iter()
+        .map(|&c| position_in_projection(c))
+        .collect();
+    let order_in_projection: Option<Vec<SortKey>> = order_by
         .iter()
         .map(|key| match key.expr {
-            ScalarExpr::Column(column) => position_in_kept(column).map(|position| SortKey {
+            ScalarExpr::Column(column) => position_in_projection(column).map(|position| SortKey {
                 expr: ScalarExpr::Column(position),
                 ..key.clone()
             }),
             _ => None,
         })
         .collect();
-    let rewritten = match (partition_in_kept, order_in_kept) {
+    let rewritten = match (partition_in_projection, order_in_projection) {
         (Some(partition), Some(order)) if !partition_by.is_without() => {
             let selected = new(NonASAPOp::Project {
                 cols: remaining,

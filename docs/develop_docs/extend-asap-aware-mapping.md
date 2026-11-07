@@ -95,7 +95,7 @@ tests in `planner_layering_example4.rs`.
 
 - A new validity check goes in `select_plan` and rejects a candidate with a
   `Rejection { cause, reason }` whose `cause` is a new failed-check
-  `RejectionCause` variant (listed in `RejectionCause::failed_a_check`); it never fails the whole selection
+  `RejectionCause` variant; it never fails the whole selection
   unless the input itself is bad (a new `ErrorSelectingPlan` variant, documented
   as bad input).
 - A new costing input goes in `CostInputs` (validated in its

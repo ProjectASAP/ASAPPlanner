@@ -398,8 +398,7 @@ physical candidates with 160 physical edges, and prunes 201 (timing,
 lifetime) alternatives, each with its reason. Stage 3's MILP has 184
 variables and 243 constraints. It selects the exact plan: the whole-result
 failure probability 0.001 over 10,000 series is below what any listed size
-gives per value (0.01), so no sketch meets constraint (K) (#1207 PR 8, spec
-question 1).
+gives per value (0.01), so no sketch meets constraint (K).
 
 These numbers are the production planner's, read from `asap_planner
 --format text` over `tools/dag-viewer/memo-examples/promql/ratio-of-quantiles-5m.json`
@@ -1898,7 +1897,7 @@ Which candidate wins depends on the workload:
 |---|---|---|---|
 | B1 | 1-min tumbling KLLs, retained 5 min | Build one tumbling KLL per minute | Merge the latest 5, read p99 |
 | B2 | Nothing | Nothing | Read 5 min of raw samples, rebuild all 5 tumbling KLLs, merge them, read p99 |
-| B3 | 1-min tumbling KLLs, at query time, retained 5 min | Nothing | Build only the newest tumbling KLL from raw samples, merge it with the 4 retained ones, read p99 |
+| B3 | 1-min tumbling KLLs, at query time, materialized 5 min | Nothing | Build only the newest tumbling KLL from raw samples, merge it with the 4 retained ones, read p99 |
 
 ```mermaid
 flowchart LR

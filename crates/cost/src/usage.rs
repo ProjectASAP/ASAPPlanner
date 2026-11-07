@@ -66,7 +66,7 @@ pub fn plan_cost(
     let mut fit = CalibrationFit::default();
     let speed = settings.resource_speed;
     // Cost model 1 costs each node as it is measured.
-    let usage_prices = match &settings.cost_model {
+    let unit_costs = match &settings.cost_model {
         CostModel::UsageOverTime(costs) => Some(costs),
         _ => None,
     };
@@ -171,7 +171,7 @@ pub fn plan_cost(
         evaluation_ms_per_query[query] = evaluation_ms;
         let Some(&first_read) = start.first() else {
             has_unattached_request_overhead = true;
-            if let Some(costs) = usage_prices {
+            if let Some(costs) = unit_costs {
                 unattached_request_cost += costs.cost_per_cpu_op * ops_per_second;
                 if !unattached_request_cost.is_finite() {
                     return Err((diagnostic_node, AnalyticalCostError::Overflow));
@@ -191,7 +191,7 @@ pub fn plan_cost(
             query + 1,
             table.ns_per_evaluation
         );
-        if let (Some(cost), Some(costs)) = (&mut node.cost_per_second, usage_prices) {
+        if let (Some(cost), Some(costs)) = (&mut node.cost_per_second, unit_costs) {
             *cost += costs.cost_per_cpu_op * ops_per_second;
             if !cost.is_finite() {
                 return Err((first_read, AnalyticalCostError::Overflow));
@@ -202,7 +202,7 @@ pub fn plan_cost(
         let node = per_node.get_mut(&id).expect("every node is measured");
         usage.disk_bytes = usage.disk_bytes.saturating_add(bytes);
         node.detail += &format!("; keeps {bytes} bytes of raw data on disk");
-        if let (Some(cost), Some(costs)) = (&mut node.cost_per_second, usage_prices) {
+        if let (Some(cost), Some(costs)) = (&mut node.cost_per_second, unit_costs) {
             *cost += costs.cost_per_disk_byte_second * bytes as f64;
         }
     }
@@ -298,7 +298,7 @@ pub fn plan_cost(
         let node = per_node.get_mut(&id).expect("every node is measured");
         usage.average_memory_bytes += byte_seconds;
         node.detail += &format!("; holds {state} bytes for {evaluation_ms:.1} ms");
-        if let (Some(cost), Some(costs)) = (&mut node.cost_per_second, usage_prices) {
+        if let (Some(cost), Some(costs)) = (&mut node.cost_per_second, unit_costs) {
             *cost += costs.cost_per_memory_byte_second * byte_seconds;
             if !cost.is_finite() {
                 return Err((id, AnalyticalCostError::Overflow));
@@ -564,7 +564,7 @@ pub fn node_usage<'a>(
 ) -> Result<NodeUsage<'a>, AnalyticalCostError> {
     let table = &settings.measured_operation_costs;
     let speed = settings.resource_speed;
-    let usage_prices = match &settings.cost_model {
+    let unit_costs = match &settings.cost_model {
         CostModel::UsageOverTime(costs) => Some(costs),
         _ => None,
     };
@@ -1232,7 +1232,7 @@ pub fn node_usage<'a>(
     }
     // One computation's CPU and scan cost times its rate, then the
     // materialized state's.
-    let cost = usage_prices.map(|costs| {
+    let cost = unit_costs.map(|costs| {
         (estimate.cpu_ops() * costs.cost_per_cpu_op
             + estimate.scan_bytes() as f64 * costs.cost_per_scanned_byte)
             * per_second

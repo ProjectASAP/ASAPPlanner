@@ -51,9 +51,9 @@ pub(super) fn execute<'a>(
                     .iter()
                     .map(|&group| {
                         let count = &mut seen[group as usize];
-                        let remaining = *count >= offset && count.saturating_sub(offset) < n;
+                        let in_output = *count >= offset && count.saturating_sub(offset) < n;
                         *count = count.saturating_add(1);
-                        Some(remaining)
+                        Some(in_output)
                     })
                     .collect::<arrow::array::BooleanArray>();
                 let done = groups.is_empty()

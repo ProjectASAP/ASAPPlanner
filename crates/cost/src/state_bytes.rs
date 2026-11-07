@@ -592,7 +592,7 @@ mod tests {
         use std::mem::{align_of, size_of};
         use SketchAlgorithm as A;
         /// How the costed bytes relate to the sketch's.
-        enum Priced {
+        enum Costed {
             Exact,
             /// Exact up to `k` rows; past them at most the formula's
             /// missing compaction scratch space over it.
@@ -632,7 +632,7 @@ mod tests {
                     failure_probability: None,
                 },
                 Rows::Values,
-                Priced::Kll { k: 200 },
+                Costed::Kll { k: 200 },
                 0,
                 10_000,
             ),
@@ -640,7 +640,7 @@ mod tests {
                 A::DDSketch,
                 SketchParams::DDSketch { alpha: 0.01 },
                 Rows::Values,
-                Priced::Bound,
+                Costed::Bound,
                 0,
                 10_000,
             ),
@@ -651,7 +651,7 @@ mod tests {
                     depth: 5,
                 },
                 Rows::Keyed,
-                Priced::Exact,
+                Costed::Exact,
                 0,
                 10_000,
             ),
@@ -662,7 +662,7 @@ mod tests {
                     depth: 5,
                 },
                 Rows::Keyed,
-                Priced::Exact,
+                Costed::Exact,
                 weighted_frequency_shape,
                 10_000,
             ),
@@ -674,7 +674,7 @@ mod tests {
                     heap_size: 256,
                 },
                 Rows::Keyed,
-                Priced::Bound,
+                Costed::Bound,
                 weighted_frequency_shape,
                 1_024,
             ),
@@ -686,7 +686,7 @@ mod tests {
                     heap_size: 256,
                 },
                 Rows::Keyed,
-                Priced::Bound,
+                Costed::Bound,
                 weighted_frequency_shape,
                 1_024,
             ),
@@ -697,7 +697,7 @@ mod tests {
                     relative_error: None,
                 },
                 Rows::Values,
-                Priced::Exact,
+                Costed::Exact,
                 hll_precision_tag,
                 10_000,
             ),
@@ -708,7 +708,7 @@ mod tests {
                     relative_error: None,
                 },
                 Rows::Values,
-                Priced::Exact,
+                Costed::Exact,
                 0,
                 10_000,
             ),
@@ -724,7 +724,7 @@ mod tests {
                     distinct_failure_probability: None,
                 },
                 Rows::Labels,
-                Priced::Bound,
+                Costed::Bound,
                 univmon_key_bounds,
                 4_096,
             ),
@@ -807,15 +807,15 @@ mod tests {
                     .1 as usize;
                 let context = format!("{algorithm:?} after {n} rows: {costed} costed");
                 match priced_as {
-                    Priced::Exact => assert_eq!(charged, costed, "{context}"),
-                    Priced::Kll { k } if n <= *k => assert_eq!(charged, costed, "{context}"),
+                    Costed::Exact => assert_eq!(charged, costed, "{context}"),
+                    Costed::Kll { k } if n <= *k => assert_eq!(charged, costed, "{context}"),
                     // sketchlib bounds KLL's compaction scratch space at
                     // 2 (k - 1) items.
-                    Priced::Kll { k } => assert!(
+                    Costed::Kll { k } => assert!(
                         charged <= costed + 8 * 2 * (*k as usize - 1),
                         "{context}, {charged} charged"
                     ),
-                    Priced::Bound => {
+                    Costed::Bound => {
                         assert!(charged <= costed, "{context}, {charged} charged");
                         if n == *full {
                             assert!(

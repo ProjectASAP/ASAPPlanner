@@ -406,3 +406,24 @@ fn other_frequency_statistic_witness_costs_from_one_univmon() {
         Witness::OtherStatistic { .. } | Witness::UnivMonOnly
     ));
 }
+
+/// `W`'s selected plan, costed outside the search, costs what the search
+/// selected it for: the witness's reference point is on the same footing.
+#[test]
+fn the_selected_plan_costs_what_the_search_selected_it_for() {
+    let mut workload = seed("issue903.workload.json");
+    workload.queries.truncate(1);
+    let mut planner = Planner::new(FuzzSettings::default());
+    let planned = planner.plan(&workload).expect("W plans");
+    let roots = planned.logical_roots.clone().expect("a realized plan");
+    let costed = planner
+        .reference_cost(&workload, &roots)
+        .expect("W's plan costs");
+    assert!(
+        (costed.cost_per_second - planned.cost_per_second).abs()
+            <= 1e-9 * planned.cost_per_second.abs(),
+        "{} vs {}",
+        costed.cost_per_second,
+        planned.cost_per_second
+    );
+}

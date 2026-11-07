@@ -556,7 +556,9 @@ fn write_selection(out: &mut String, stages: &PlanningStagesRun) {
         cost.cost_per_second
             .map_or("none".to_owned(), |cost| format!("{cost:.6}"))
     );
-    // Keyed by the realized plan's node ids.
+    // Keyed by the realized plan's node ids (`#n`), not the selected DAG's
+    // (`node<n>`): the realizer expands a windowed build into a chain and
+    // its merge.
     let rows = cost
         .per_node
         .iter()
