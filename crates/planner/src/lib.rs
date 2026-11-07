@@ -60,7 +60,8 @@ pub use asap_types::ir::materialized_view::{
     MaterializedViewRefresh, RawDataRetention, RawDataWindow, RefreshWindow, ViewCoverage,
 };
 pub use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
-pub use asap_types::ir::properties::summary_coverage::{ColumnIdentity, Constraint, SelectionBox};
+pub use asap_types::ir::properties::column_lineage::SourceColumn;
+pub use asap_types::ir::properties::summary_coverage::{Constraint, SelectionBox};
 pub use asap_types::ir::properties::ExecutionTiming;
 pub use asap_types::ir::schema::{SketchAlgorithm, SketchParams, StatisticKind};
 pub use asap_types::workload::PlanningWorkload;

@@ -1402,7 +1402,7 @@ pub struct SummaryCoverage {
 pub struct SelectionBox {
     /// One constraint per restricted column. A column not in the map is
     /// unrestricted.
-    pub columns: BTreeMap<ColumnIdentity, Constraint>,
+    pub columns: BTreeMap<SourceColumn, Constraint>,
     /// The time window relative to the evaluation time, in ms, e.g.
     /// `(Excluded(-120000), Included(-60000))` for `(−2m, −1m]`.
     /// `None`: no time restriction.
@@ -1410,8 +1410,9 @@ pub struct SelectionBox {
 }
 
 /// Names a column across nodes, independent of its position and name: the
-/// source column of its lineage (`ColumnLineage::SourceColumn`).
-pub struct ColumnIdentity {
+/// source column of its lineage (`ColumnLineage::SourceColumn`), the same
+/// type the lineage holds.
+pub struct SourceColumn {
     /// The table or metric a `Scan` reads.
     pub source: String,
     /// The column's name in that source.

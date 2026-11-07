@@ -26,7 +26,7 @@ use crate::ir::operator::node::{Operator, OperatorResultKind};
 use crate::ir::operator::non_asap::{NonASAPOp, TimeRangeKind};
 use crate::ir::operator::operator_properties::Reduction;
 use crate::ir::operator::tumbling_window_chain::window_build;
-use crate::ir::properties::column_lineage::ColumnLineage;
+use crate::ir::properties::column_lineage::{ColumnLineage, SourceColumn};
 use crate::ir::scalar::expr_ir::{CompareOpKind, ScalarValue};
 use crate::ir::scalar::{Predicate, ScalarExpr};
 use crate::ir::schema::family_capability::{FamilyCapability, MergeInputRule};
@@ -81,7 +81,7 @@ impl SummaryCoverage {
 #[serde(deny_unknown_fields)]
 pub struct SelectionBox {
     #[serde(with = "columns_as_list")]
-    pub(crate) columns: BTreeMap<ColumnIdentity, Constraint>,
+    pub(crate) columns: BTreeMap<SourceColumn, Constraint>,
     /// Offsets from the evaluation time in milliseconds: a PromQL range
     /// `TimeRange(w)` over `TimeShift(s)` is `(-(s + w), -s]`. Absolute
     /// time will be an ordinary interval on the timestamp column once the IR
@@ -92,19 +92,19 @@ pub struct SelectionBox {
 
 /// `SelectionBox::columns` as a list of `{column, constraint}`.
 mod columns_as_list {
-    use super::{ColumnIdentity, Constraint};
+    use super::{Constraint, SourceColumn};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::collections::BTreeMap;
 
     #[derive(Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Entry {
-        column: ColumnIdentity,
+        column: SourceColumn,
         constraint: Constraint,
     }
 
     pub(super) fn serialize<S: Serializer>(
-        columns: &BTreeMap<ColumnIdentity, Constraint>,
+        columns: &BTreeMap<SourceColumn, Constraint>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         let entries: Vec<Entry> = columns
@@ -119,7 +119,7 @@ mod columns_as_list {
 
     pub(super) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
-    ) -> Result<BTreeMap<ColumnIdentity, Constraint>, D::Error> {
+    ) -> Result<BTreeMap<SourceColumn, Constraint>, D::Error> {
         let entries = Vec::<Entry>::deserialize(deserializer)?;
         Ok(entries
             .into_iter()
@@ -181,26 +181,6 @@ mod relative_time_bounds {
     ) -> Result<Option<Window>, D::Error> {
         let window = Option::<(WireBound<i64>, WireBound<i64>)>::deserialize(deserializer)?;
         Ok(window.map(|(lower, upper)| (lower.into(), upper.into())))
-    }
-}
-
-/// A column of the definition child's output, by its lineage: the source
-/// column ([`ColumnLineage::SourceColumn`]) its values are copied from,
-/// however a `Project` below renames it.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ColumnIdentity {
-    pub(crate) source: String,
-    pub(crate) column: String,
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl ColumnIdentity {
-    pub fn new(source: impl Into<String>, column: impl Into<String>) -> Self {
-        Self {
-            source: source.into(),
-            column: column.into(),
-        }
     }
 }
 
@@ -731,14 +711,10 @@ fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, Cov
         columns: lifted
             .into_iter()
             .map(|(column, constraint)| {
-                let ColumnLineage::SourceColumn { source, column } = &top[column] else {
+                let ColumnLineage::SourceColumn(source_column) = &top[column] else {
                     unreachable!("only a source column's conjuncts are lifted");
                 };
-                let identity = ColumnIdentity {
-                    source: source.clone(),
-                    column: column.clone(),
-                };
-                (identity, constraint)
+                (source_column.clone(), constraint)
             })
             .collect(),
         relative_time: lift_time.then_some((
@@ -1095,7 +1071,7 @@ impl Constraint {
 #[cfg(any(test, feature = "test-support"))]
 impl SelectionBox {
     pub fn new(
-        columns: BTreeMap<ColumnIdentity, Constraint>,
+        columns: BTreeMap<SourceColumn, Constraint>,
         relative_time: Option<(Bound<i64>, Bound<i64>)>,
     ) -> Self {
         Self {
@@ -1105,7 +1081,7 @@ impl SelectionBox {
     }
 
     /// The per-column constraints.
-    pub fn columns(&self) -> &BTreeMap<ColumnIdentity, Constraint> {
+    pub fn columns(&self) -> &BTreeMap<SourceColumn, Constraint> {
         &self.columns
     }
 

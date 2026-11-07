@@ -5,8 +5,8 @@
 //! `memo_summary_coverage.rs`.
 use asap_types::ir::operator::operator_properties::{JoinKind, Reduction, Source};
 use asap_types::ir::operator::AggIntent;
-use asap_types::ir::properties::column_lineage::ColumnLineage;
-use asap_types::ir::properties::summary_coverage::{ColumnIdentity, Constraint};
+use asap_types::ir::properties::column_lineage::{ColumnLineage, SourceColumn};
+use asap_types::ir::properties::summary_coverage::Constraint;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::expr_ir::{CompareOpKind, ScalarValue};
 use asap_types::ir::scalar::ColumnRef;
@@ -65,10 +65,7 @@ fn hll(child: MemoGroupId, keys: Vec<usize>, column: &str) -> Operator<MemoGroup
 }
 
 fn source_column(source: &str, column: &str) -> ColumnLineage {
-    ColumnLineage::SourceColumn {
-        source: source.into(),
-        column: column.into(),
-    }
+    ColumnLineage::SourceColumn(SourceColumn::new(source, column))
 }
 
 fn lineage(memo: &Memo, group: MemoGroupId) -> &[ColumnLineage] {
@@ -125,7 +122,7 @@ fn an_hll_readout_renamed_to_the_aggregate_column_is_its_candidate() {
         .as_ref()
         .expect("a summary state");
     assert_eq!(
-        coverage.selection()[0].columns()[&ColumnIdentity::new("flows", "proto")],
+        coverage.selection()[0].columns()[&SourceColumn::new("flows", "proto")],
         Constraint::In(vec![ScalarValue::Utf8("tcp".into())])
     );
 
@@ -203,7 +200,7 @@ fn a_rename_keeps_lineage_and_the_rollup_key_check_compares_it() {
         .as_ref()
         .expect("a summary state");
     assert_eq!(
-        coverage.selection()[0].columns()[&ColumnIdentity::new("flows", "region")],
+        coverage.selection()[0].columns()[&SourceColumn::new("flows", "region")],
         Constraint::In(vec![ScalarValue::Utf8("us".into())])
     );
 
@@ -275,11 +272,11 @@ fn join_columns_of_one_name_have_distinct_lineage() {
     };
     assert_eq!(
         selected_column(&mut memo, 1),
-        [ColumnIdentity::new("sales", "region")]
+        [SourceColumn::new("sales", "region")]
     );
     assert_eq!(
         selected_column(&mut memo, 3),
-        [ColumnIdentity::new("users", "region")]
+        [SourceColumn::new("users", "region")]
     );
 }
 

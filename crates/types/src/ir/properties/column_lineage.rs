@@ -20,20 +20,38 @@ use crate::ir::operator::operator_properties::{
 use crate::ir::operator::AggIntent;
 use crate::ir::scalar::{resolve_column_ref, ColumnRef, ProjectItem, ScalarExpr};
 use crate::ir::schema::Schema;
+use serde::{Deserialize, Serialize};
+
+/// A column of a source (a `Scan`'s table or metric), by name.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceColumn {
+    pub(crate) source: String,
+    pub(crate) column: String,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl SourceColumn {
+    pub fn new(source: impl Into<String>, column: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+            column: column.into(),
+        }
+    }
+}
 
 /// Where an output column's values come from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ColumnLineage {
-    /// Copied unchanged from a column of a source (a Scan's table or metric).
-    SourceColumn { source: String, column: String },
+    /// Copied unchanged from a column of a source.
+    SourceColumn(SourceColumn),
     /// Computed by an operator: a measure, an expression, a summary state or readout.
     Computed,
 }
 
 impl<I: OperatorInput> Operator<I> {
     /// The lineage of each column of `output`, this operator's output
-    /// schema, from its inputs' lineage (`lineage_of`). A rule whose result
-    /// does not have one entry per output column gives `Computed` for all.
+    /// schema, from its inputs' lineage (`lineage_of`).
     pub(crate) fn output_column_lineage(
         &self,
         output: &Schema,
@@ -43,11 +61,13 @@ impl<I: OperatorInput> Operator<I> {
             Operator::NonASAP(op) => non_asap_lineage(op, output, lineage_of),
             Operator::ASAP(op) => asap_lineage(op, output, lineage_of),
         };
-        if lineage.len() == output.fields.len() {
-            lineage
-        } else {
-            vec![ColumnLineage::Computed; output.fields.len()]
-        }
+        debug_assert_eq!(
+            lineage.len(),
+            output.fields.len(),
+            "one lineage entry per output column of {}",
+            self.kind_name()
+        );
+        lineage
     }
 }
 
@@ -67,9 +87,11 @@ fn non_asap_lineage<I: OperatorInput>(
             schema
                 .fields
                 .iter()
-                .map(|field| ColumnLineage::SourceColumn {
-                    source: source.clone(),
-                    column: field.name.clone(),
+                .map(|field| {
+                    ColumnLineage::SourceColumn(SourceColumn {
+                        source: source.clone(),
+                        column: field.name.clone(),
+                    })
                 })
                 .collect()
         }
@@ -101,11 +123,7 @@ fn non_asap_lineage<I: OperatorInput>(
             ..
         } => {
             if let [AggIntent::TopK { k, .. }] = measures.as_slice() {
-                let name = output_names
-                    .first()
-                    .filter(|name| !name.is_empty())
-                    .cloned()
-                    .unwrap_or_else(|| format!("topk_{k}"));
+                let name = crate::ir::schema::topk::topk_output_name(*k, output_names);
                 return match crate::ir::schema::topk::ranked_row_projection(child, reduction, &name)
                 {
                     Ok(cols) => project_lineage(&cols, &lineage_of(child)),

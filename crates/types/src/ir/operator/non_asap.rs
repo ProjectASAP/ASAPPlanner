@@ -584,11 +584,7 @@ impl<I: OperatorInput> NonASAPOp<I> {
                 ..
             } => {
                 if let [AggIntent::TopK { k, .. }] = measures.as_slice() {
-                    let name = output_names
-                        .first()
-                        .filter(|name| !name.is_empty())
-                        .cloned()
-                        .unwrap_or_else(|| format!("topk_{k}"));
+                    let name = crate::ir::schema::topk::topk_output_name(*k, output_names);
                     let cols =
                         crate::ir::schema::topk::ranked_row_projection(child, reduction, &name)?;
                     return NonASAPOp::Project {
