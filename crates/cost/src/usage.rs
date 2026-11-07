@@ -424,8 +424,8 @@ fn each_node_usage<'a>(
         let scan_window = match (&node.payload, node.output_state.timing) {
             (Payload::NonASAP(NonASAPOp::Scan { .. }), ExecutionTiming::QueryTime) => {
                 match dag.scan_window(node.id, kept_chains) {
-                    // Priced as before #955 decides `@` anchors and
-                    // unwindowed readers: the widest window read.
+                    // An `@` anchor or an unwindowed reader: priced at
+                    // the widest window read.
                     ScanWindow::Unbounded => trailing_window(
                         widest_window_read_ms(dag, nodes, node.id, kept_chains)
                             .or(root_scan_lookback_ms),
@@ -1617,11 +1617,12 @@ pub fn kept_tumbling_window_chains(dag: &PhysicalASAPDAG) -> HashSet<PhysicalASA
 }
 
 /// The widest window, in milliseconds, read above the scan `scan` at query
-/// time, ignoring readers that read it outside a window and the anchors of
-/// shifts: each range `TimeRange` and `SummaryTumblingWindowChain` (its whole window, or
-/// one tumbling window for a chain in `kept_chains`) reached through time shifts.
-/// Prices a scan whose [`PhysicalASAPDAG::scan_window`] is unbounded as
-/// Stage 3 did before; #955 decides `@` anchors.
+/// time, ignoring readers that read it outside a window: each range
+/// `TimeRange` and `SummaryTumblingWindowChain` (its whole window, or one
+/// tumbling window for a chain in `kept_chains`) reached through time
+/// shifts without an `@` anchor. A read through an `@` anchor is outside a
+/// window, as Stage 3's selection MILP prices it. Prices a scan whose
+/// [`PhysicalASAPDAG::scan_window`] is unbounded as Stage 3 did before.
 fn widest_window_read_ms(
     dag: &PhysicalASAPDAG,
     nodes: &NodeMap<'_>,
@@ -1647,7 +1648,7 @@ fn widest_window_read_ms(
                     tumbling_window_count,
                     ..
                 }) => tumbling_window_width_ms.saturating_mul(u64::from(*tumbling_window_count)),
-                Payload::NonASAP(NonASAPOp::TimeShift { .. }) => {
+                Payload::NonASAP(NonASAPOp::TimeShift { shift, .. }) if shift.at.is_none() => {
                     stack.push(edge.consumer);
                     continue;
                 }

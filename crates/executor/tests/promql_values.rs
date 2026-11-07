@@ -219,6 +219,7 @@ fn compile_exact_evaluation(
             statistic,
             lookback_ms: is_counter.then_some(lookback_ms),
             offset_ms: 0,
+            at: None,
         }),
     )?;
     let project = Operator::project(

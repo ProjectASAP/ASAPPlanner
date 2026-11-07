@@ -275,53 +275,28 @@ async fn installable_at_query_time(query: &str) -> Result<InstallablePlan, PlanE
     .map(|(plan, _)| plan)
 }
 
-/// A raw-data window whose position is not a fixed offset from the
-/// evaluation time (a subquery or an offset above the range, an `@`
-/// anchor below it), or that ends after the evaluation (a negative offset,
-/// which no ingestion run can build in time), is refused with its reason,
-/// not passed on with a wrong window or dropped; a plain range is listed.
+/// A raw-data window read at query time installs whatever its position:
+/// under a subquery (not a fixed offset from the evaluation time) the
+/// source is kept unbounded; ending after the
+/// evaluation (a negative offset) it is kept as far back as the window
+/// reaches. A plain range is kept for its window.
 #[tokio::test]
-#[ignore = "fails on main too: the `@` query's selection MILP is infeasible (its scan has no rows_held to price); not a wall-clock issue; #1015"]
-async fn raw_data_windows_of_unsupported_shapes_are_refused() {
-    for (query, reason) in [
-        (
-            "max_over_time(rate(latency_ms[5m])[1h:1m])",
-            "a subquery or a TimeShift above the range",
-        ),
-        (
-            "max_over_time(latency_ms[10m] @ 1000)",
-            "an @ anchor below the range",
-        ),
+async fn raw_data_windows_read_at_query_time_install() {
+    for (query, lookback_ms) in [
+        ("max_over_time(rate(latency_ms[5m])[1h:1m])", None),
         (
             "max_over_time(latency_ms[60m] offset -10m)",
-            "a negative offset below the range",
+            Some(3_000_000),
         ),
+        // 10 minutes of data ending 5 minutes back reaches 15 minutes back.
+        ("max_over_time(latency_ms[10m] offset 5m)", Some(900_000)),
     ] {
-        match installable_at_query_time(query).await {
-            Err(PlanError::Installable(InstallablePlanError::Uninstallable(
-                InstallableDagError::UnsupportedRawDataWindow {
-                    reason: refused, ..
-                },
-            ))) => assert_eq!(refused, reason, "{query}"),
-            Err(error) => {
-                // When planning fails before installation, its no-plan
-                // diagnostic must keep the concrete refusal reason.
-                let diagnostic = error.to_string();
-                assert!(diagnostic.contains(reason), "{query}: {diagnostic}");
-                assert!(diagnostic.contains("raw-data window"), "{diagnostic}");
-            }
-            Ok(plan) => panic!(
-                "{query}: unexpectedly installed {:?}",
-                plan.raw_data_retention().unwrap()
-            ),
-        }
+        let plan = installable_at_query_time(query)
+            .await
+            .unwrap_or_else(|error| panic!("{query}: {error}"));
+        let [retention] = plan.raw_data_retention().unwrap().try_into().unwrap();
+        assert_eq!(retention.lookback_ms(), lookback_ms, "{query}");
     }
-    let plain = installable_at_query_time("max_over_time(latency_ms[10m] offset 5m)")
-        .await
-        .unwrap();
-    // 10 minutes of data ending 5 minutes back reaches 15 minutes back.
-    let [retention] = plain.raw_data_retention().unwrap().try_into().unwrap();
-    assert_eq!(retention.lookback_ms(), Some(900_000));
 }
 
 /// Example 4b answered as the last hour at 10-minute steps (a range

@@ -110,6 +110,7 @@ impl TryFrom<UncheckedOperator> for Operator {
             Kind::Filter(expression) => Operator::filter(input(0)?, expression)?,
             Kind::TimeRange {
                 time,
+                at,
                 end_offset_ms,
                 width_ms,
                 sample_value,
@@ -117,6 +118,7 @@ impl TryFrom<UncheckedOperator> for Operator {
             } => Operator::time_range(
                 input(0)?,
                 time,
+                at,
                 end_offset_ms,
                 width_ms,
                 sample_value,

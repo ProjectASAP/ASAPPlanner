@@ -111,9 +111,11 @@ enum Kind {
     },
     Project(Vec<Expression>),
     Filter(Expression),
-    /// A `TimeRange` over a `Scan` ([`Operator::time_range`]).
+    /// A `TimeRange` over a time-indexed input ([`Operator::time_range`]).
     TimeRange {
         time: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<planner_types::ir::operator::AtModifier>,
         end_offset_ms: i64,
         width_ms: i64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -238,8 +240,14 @@ impl Operator {
     }
 
     /// Set a counter evaluation's logical window: `lookback` long, ending
-    /// `offset` before the evaluation time.
-    pub(crate) fn with_counter_window(mut self, offset: i64, lookback: i64) -> Result<Self, Error> {
+    /// `offset` before the evaluation time, or before the time of the `@`
+    /// anchor `at`.
+    pub(crate) fn with_counter_window(
+        mut self,
+        at: Option<planner_types::ir::operator::AtModifier>,
+        offset: i64,
+        lookback: i64,
+    ) -> Result<Self, Error> {
         if lookback <= 0 {
             return Err(invalid("counter lookback must be positive"));
         }
@@ -250,6 +258,7 @@ impl Operator {
         {
             evaluation.lookback_ms = Some(lookback);
             evaluation.offset_ms = offset;
+            evaluation.at = at;
         }
         Ok(self)
     }
@@ -264,6 +273,7 @@ impl Operator {
                 SummaryEvaluation::Exact(crate::summary_kernels::exact::ExactEvaluation {
                     lookback_ms: Some(lookback),
                     offset_ms,
+                    at,
                     ..
                 }),
             ..
@@ -271,11 +281,15 @@ impl Operator {
         else {
             return Ok(None);
         };
-        let end = match context.scope {
-            crate::runtime::Scope::Query {
-                evaluation_time_ms, ..
-            } => evaluation_time_ms,
-            crate::runtime::Scope::Ingestion { window_end_ms, .. } => window_end_ms,
+        let end = match (at, &context.scope) {
+            (Some(at), _) => time_range::anchor_time(*at, context)?,
+            (
+                None,
+                crate::runtime::Scope::Query {
+                    evaluation_time_ms, ..
+                },
+            ) => *evaluation_time_ms,
+            (None, crate::runtime::Scope::Ingestion { window_end_ms, .. }) => *window_end_ms,
         }
         .checked_sub(*offset_ms)
         .ok_or_else(|| invalid("counter window overflows Int64"))?;

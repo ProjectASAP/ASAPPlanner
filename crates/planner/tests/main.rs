@@ -12,3 +12,4 @@ mod runtime_install;
 mod sql_per_group_topk;
 mod sql_table_scans;
 mod summary_sharing;
+mod time_operators;
