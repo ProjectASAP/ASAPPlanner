@@ -1,5 +1,5 @@
 //! Compile logical computation to native operators with typed external inputs.
-//! Compilation needs no readers; deployment resolves inputs after selection.
+//! Compilation needs no source cursors; deployment resolves inputs after selection.
 //! A node without a native lowering fails compilation; the deployment runtime
 //! must execute it.
 use crate::operators::{RowWeight, SummaryEvaluation};
@@ -50,7 +50,7 @@ pub use compiled::CompiledPhysicalDAG;
 
 mod row_values;
 
-/// Compile computation without opening or retaining deployment readers.
+/// Compile computation without opening or retaining deployment source cursors.
 /// Every reachable `Scan` leaf is a raw data slot, read by its `Source`; its
 /// predicates must compile over its schema. Each of `views`
 /// ([`PhysicalASAPDAG::materialized_views`]) is a materialized view slot,
@@ -219,7 +219,7 @@ fn compile_internal(
                 })
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|error| invalid(format!("scan {id}: {error}")))?;
-            // The rows its readers read; a compile root reads them all.
+            // The rows its consumers read; a compile root reads them all.
             let window = match output.time_index {
                 Some(_) if !compile_roots.contains(&id) => {
                     scan_windows[&(id as PhysicalASAPNodeId)]

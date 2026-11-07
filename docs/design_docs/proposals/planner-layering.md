@@ -356,12 +356,12 @@ avg by (job) (quantile_over_time(0.5, data[5m]) / quantile_over_time(0.5, data[5
 | G5 | `G3 + G4` | G3, G4 |
 | G6 | `avg by (job)` | G5 |
 
-G1 is one group for its two readers, because a window directly over a scan
+G1 is one group for its two consumers, because a window directly over a scan
 may be shared. The two `quantile_over_time(0.5, data[5m])` are one group, G2:
 both compute the same rows from the same input, so one copy serves both
 operands. A unique key is not needed (the PromQL planning path happens to
 give this output one, series identity and timestamp); an unordered `LIMIT`
-would stay one group per reader.
+would stay one group per consumer.
 
 **Step 2, Stage 1 Pass 1.** `pass1_memo` adds the groups the summaries
 need and the initial candidates: 19 groups, 36 candidates.
@@ -463,7 +463,7 @@ candidates is in `crates/stage3-plan-selection/src/` (`select.rs`, `execution_co
 ## ASAPPlanner Detailed Design: Planning Stages and their decisions/Strategies
 
 Stages 0 to 2 (logical and physical planning stages) each output a candidate set holding every semantically equivalent and legal candidate DAG of that stage; stage 3 is the only step that chooses one candidate DAG as output currently (TODO: early selection for valid and more efficient candidates of stage 0-2 can be designed later). Candidate sets are internal to ASAPPlanner and may
-be shared or enumerated lazily. Two kinds of removal are kept apart:
+be shared or enumerated lazily. Two kinds of removal are distinguished:
 
 * **Pruning** removes an **invalid** candidate. Each stage prunes only what
   its own knowledge proves invalid (for example, a summary family that
@@ -533,7 +533,7 @@ the memo path's entry points.
 | 4. Execution | The selected `PhysicalASAPDAG` → query results | Same: an `InstallablePlan` (`{dag, query_texts}`) → query results | The deployment runtime installs the `InstallablePlan` |
 
 What changed with the memo:
-- Candidates are kept per distinct sub-expression, not per workload, so their
+- Candidates are retained per distinct sub-expression, not per workload, so their
   number is the sum of each group's choices instead of their product. Only
   choices several groups depend on, such as a shared state's size, are made
   jointly.
@@ -827,7 +827,7 @@ their overlapping windows.
 | Identical-expression rule | The input and computation semantics are identical. | One common computation node serving multiple consumers. |
 | Summary-capability rule | The computations have the same summary input data and the same window, and one summary supports all requested computations and their accuracy requirements. | One summary build node feeding several estimation nodes, e.g. UnivMon → distinct count, entropy, L2 norm. |
 | Window-composition rule | The computations have the same summary input data, and one window summary can answer the requested windows within their accuracy requirements. | One window summary feeding per-query merge (where needed) and estimation nodes, e.g. a sliding-window or tumbling-window KLL, or an Exponential Histogram with a KLL per EH bucket. |
-| Rollup rule | A coarse exact accumulator (`sum`, `min`, `max`) or per-group sketch reads the same rows as a finer build of the same family (a sketch at any size) the workload already computes, grouped by a superset of its keys. | Exact: the finer accumulator's finalized values feeding an exact accumulator grouped by the coarse keys, e.g. `sum by (job)` from `sum by (job, instance)`. Sketch: a rollup (a `SummaryMerge` with `group_by`) of the finest build's states by the coarse keys, e.g. a KLL per `job` merged from the KLLs per `(host, job)`. Every coarse grouping of one finest build rolls up together, and that build is sized for its strictest reader. Every coarse reader must be an estimate whose merged readout keeps a guarantee (not a heap's top-k or UnivMon's entropy). The rolled-up state keeps the family's merged guarantee: KMV, HLL, DDSketch, Count-Min and Count Sketch give the direct coarse build's state, UnivMon its total, distinct count and L2, and KLL keeps its rank bound. Stage 3 prices one merge per input state and the coarse groups' states. |
+| Rollup rule | A coarse exact accumulator (`sum`, `min`, `max`) or per-group sketch reads the same rows as a finer build of the same family (a sketch at any size) the workload already computes, grouped by a superset of its keys. | Exact: the finer accumulator's finalized values feeding an exact accumulator grouped by the coarse keys, e.g. `sum by (job)` from `sum by (job, instance)`. Sketch: a rollup (a `SummaryMerge` with `group_by`) of the finest build's states by the coarse keys, e.g. a KLL per `job` merged from the KLLs per `(host, job)`. Every coarse grouping of one finest build rolls up together, and that build is sized for its strictest consumer. Every coarse consumer must be an estimate whose merged readout keeps a guarantee (not a heap's top-k or UnivMon's entropy). The rolled-up state keeps the family's merged guarantee: KMV, HLL, DDSketch, Count-Min and Count Sketch give the direct coarse build's state, UnivMon its total, distinct count and L2, and KLL keeps its rank bound. Stage 3 costs one merge per input state and the coarse groups' states. |
 | Exact top-k reuse rule | Exact top-k computations read the same input and partition with different `k`. | One ranking (`Limit(k_max)` over `Sort`) that each top-k reads its first `k` rows from. |
 
 The rules compare computations by their **summary input data**: what a summary for
@@ -843,10 +843,10 @@ as one input: the implementation widens every scan of the metric without label
 matchers to the union of those labels. Time ranges, time shifts, and per-series
 summaries without a filter (with the nodes that read their state) keep the
 wider rows; every other consumer reads its own columns through a projection.
-These candidates are kept only when they share a scan. A SQL table scan reads
+These candidates are retained only when they share a scan. A SQL table scan reads
 every column of the table, so two queries over one table already have equal
 scans; a scan is shared even though a table's rows have no unique key, since
-each reader reads every row the scan outputs.
+each consumer reads every row the scan outputs.
 
 The examples behind these rules:
 
@@ -890,7 +890,7 @@ Input:  C1 — CandidateLogicalASAPDAGs from Pass 1
         F  — summary-family capabilities (estimates, sizing, error bound, mergeable)
 Output: C2 — CandidateLogicalASAPDAGs with sharing
 
-1:  C2 ← C1                                    // independent candidates are kept
+1:  C2 ← C1                                    // independent candidates are retained
 2:  for each candidate d in C1 do
 3:      Opts ← ∅                               // sharing options found in d
 4:
@@ -1036,7 +1036,7 @@ finest of their own tumbling-window widths, for the queries whose widths it divi
 their widths, even when it is finer than every query's own tumbling windows (1-min and
 90-s tumbling windows share 30-s tumbling windows). Queries that repeat at different intervals
 read the same tumbling windows, each at its own cadence. Finer tumbling windows mean more states
-kept and more tumbling windows merged, so Stage 3's pricing decides which grid, if
+retained and more tumbling windows merged, so Stage 3's costing decides which grid, if
 any, pays; no tumbling-window-count limit is imposed beyond the tumbling-window count fitting in
 32 bits. The chain covers the longest window and is sized
 for all of them, each parameter at its largest value among them, as the
@@ -1057,14 +1057,14 @@ percentile_cont(0.9) … INTERVAL '20' MINUTE GROUP BY city` and the global
 p50 and p90 over the last 5 minutes, both every 10 s, read one chain of 120
 per-city 10-s KLL tumbling windows: the 5-minute query merges each city's newest 30,
 then all cities into one state that answers both its percentiles. The chain
-is sized for every reader, here both queries' ε. A rollup to no keys over
+is sized for every consumer, here both queries' ε. A rollup to no keys over
 a SQL table's states stands for a global SQL aggregate, so it has one
 state, empty over no rows. A family that merges exactly keeps each query's
 guarantee, since a merge of fewer tumbling windows is one build over the shorter
 window, and each query fails with at most the shared state's failure
-probability. Stage 3 prices each merge by the tumbling windows it reads, at its
-query's rate. The per-query chains stay candidates too. A chain read at different intervals is not kept across
-evaluations from query time: that option needs every reader to build one
+probability. Stage 3 costs each merge by the tumbling windows it reads, at its
+query's rate. The per-query chains stay candidates too. A chain read at different intervals is not materialized across
+evaluations from query time: that option needs every consumer to build one
 new tumbling window per evaluation. Long-window segments, sliding windows and
 Exponential Histograms are not implemented yet.
 
@@ -1083,7 +1083,7 @@ or in memory, across (batch) query executions. Stage 2 makes this decision in th
    query time and keeps nothing.
 2. **If materialized, ingestion time or query time.** This is when the output
    is computed. A sub-DAG that runs at ingestion time is therefore always
-   materialized, because its output must be kept until a query reads it.
+   materialized, because its output must be retained until a query reads it.
 3. **Where and how long to store it:** on disk or in memory, and for how long.
    The deployment's cost model estimates the cost of each choice.
 
@@ -1141,14 +1141,14 @@ time are materialized for the next evaluations. Nothing is placed on disk yet.
 
 A runtime builds every ingestion-time state on the grid of its width anchored
 at the epoch, so an ingestion-time build must end on that grid at every
-evaluation of its readers. For a tumbling-window chain, the tumbling-window width divides each
+evaluation of its consumers. For a tumbling-window chain, the tumbling-window width divides each
 known evaluation phase. For a whole-window build (one window per evaluation,
-no tumbling-window chain), the readers share one fixed interval, their declared phases
+no tumbling-window chain), the consumers share one fixed interval, their declared phases
 agree, and the interval and a declared phase are multiples of the window:
 `m[5m]` every 5 minutes is one tumbling 5-minute window maintained at
 ingestion time and read at each evaluation, as a one-tumbling-window chain would be, while `m[20s]` every 20 s at phase
-5 s, or every 30 s, is not kept whole (Pass 2 offers 5 s or 10 s tumbling windows). A
-reader whose phase is not declared is taken to evaluate at multiples of its
+5 s, or every 30 s, is not preserved whole (Pass 2 offers 5 s or 10 s tumbling windows). A
+consumer whose phase is not declared is taken to evaluate at multiples of its
 interval, as for a tumbling-window chain.
 
 #### Physical operator implementation
@@ -1238,15 +1238,15 @@ valid, and stage 3 chooses between them by cost.
 
 ```mermaid
 flowchart TB
-  subgraph M1["m₁ · ✓ kept"]
+  subgraph M1["m₁ · ✓ retained"]
     direction LR
-    a0[("latency_ms")]:::data --> a1["<b>KLL build node</b><br/>1-min tumbling<br/>ingestion · memory<br/>kept 5 min"]:::ingest --> a2["<b>KLL merge node</b><br/>latest 5<br/>query time · not stored"]:::notmat --> a3["<b>p99 estimation node</b><br/>query time · not stored"]:::notmat
+    a0[("latency_ms")]:::data --> a1["<b>KLL build node</b><br/>1-min tumbling<br/>ingestion · memory<br/>retained 5 min"]:::ingest --> a2["<b>KLL merge node</b><br/>latest 5<br/>query time · not stored"]:::notmat --> a3["<b>p99 estimation node</b><br/>query time · not stored"]:::notmat
   end
   subgraph M2["m₂ · ✗ pruned (line 13)"]
     direction LR
     b0[("latency_ms")]:::data --> b1["<b>KLL build node</b><br/>1-min tumbling<br/>query time · stored"]:::qtime -->|"✗ KLLs not built yet<br/>when data arrives"| b2["<b>KLL merge node</b><br/>latest 5<br/>ingestion"]:::ingest --> b3["<b>p99 estimation node</b><br/>query time · not stored"]:::notmat
   end
-  subgraph M3["m₃ · ✓ kept"]
+  subgraph M3["m₃ · ✓ retained"]
     direction LR
     c0[("latency_ms")]:::data --> c1["<b>KLL build node</b><br/>1-min tumbling<br/>query time · not stored"]:::notmat --> c2["<b>KLL merge node</b><br/>latest 5<br/>query time · not stored"]:::notmat --> c3["<b>p99 estimation node</b><br/>query time · not stored"]:::notmat
   end
@@ -1293,7 +1293,7 @@ the cost of a shared summary is estimated once, with the demand of all its
 consumers.
 
 Selection first measures each valid candidate's resource usage, with no
-prices (`ResourceUsage`: CPU operations and scanned bytes per second, average
+costs (`ResourceUsage`: CPU operations and scanned bytes per second, average
 and peak memory, disk, peak CPU cores and each query's latency). The
 deployment's cost model (`CostModel`, in `CostInputs`) then turns
 usage into a choice:
@@ -1302,7 +1302,7 @@ usage into a choice:
 |---|---|---|
 | Cost model 1, `UsageOverTime(ResourceUnitCost)` (default) | Pay-as-you-go | Unit cost × usage per second; the cheapest wins |
 | Cost model 2, `ProvisionedCapacity(ResourceUnitCost)` | Pays for provisioned capacity | Unit cost × peak memory, peak CPU cores and disk; the cheapest wins |
-| Cost model 3, `ClusterCapacity(ClusterLimits)` | Its own cluster | No prices: a candidate over the cluster's memory, disk or (optionally) cores is invalid; the objective `LowestLatency` or `LeastMemory` chooses among the rest |
+| Cost model 3, `ClusterCapacity(ClusterLimits)` | Its own cluster | No costs: a candidate over the cluster's memory, disk or (optionally) cores is invalid; the objective `LowestLatency` or `LeastMemory` chooses among the rest |
 
 ### 4. Execution
 
@@ -1394,7 +1394,7 @@ flowchart TB
   within each `job`, which is costly at one million Zipf-distributed series.
   The approximate (ε, δ) target also admits a **Count-Min Sketch with a top-*k*
   heap per `job`**, and **Hydra over the whole `job` column**, where one sketch
-  covers every (`job`, series) key and a top-*k* heap is still kept per `job`.
+  covers every (`job`, series) key and a top-*k* heap is still retained per `job`.
 
 ```mermaid
 flowchart LR
@@ -1447,7 +1447,7 @@ to each of the 3 candidates, and keeps every original:
   leaves them out.)
   Tumbling windows need a mergeable summary. Q1's rates and sums, Q2's exact
   sums and Hydra merge exactly; Count-Min sketches do too, but their top-10
-  heaps merge only approximately, so that candidate is kept and the accuracy
+  heaps merge only approximately, so that candidate is retained and the accuracy
   model judges it in stage 3.
 
 Each Pass 1 candidate therefore has 2 input choices (separate or shared) ×
@@ -1477,14 +1477,14 @@ flowchart LR
 ```
 
 **Stage 2: 156 candidates.** Stage 2 picks, for each query, when its state is
-computed and whether it is kept. What it can choose depends on the query's
+computed and whether it is materialized. What it can choose depends on the query's
 window form from Pass 2:
 
 | Window form | Physical options |
 |---|---|
 | None | **Raw:** rebuild the state from the last 1 min of raw samples at every refresh. It cannot be materialized: the window slides every 10 s, and most summaries cannot drop old data. |
-| Sliding window | **Sliding, ingestion time:** insert each sample into the 6 active windows as it arrives (materialized at ingestion time). **Sliding, query time:** at each refresh, insert the last 10 s of raw samples into the 6 kept active windows (materialized at query time). Building the window from raw samples at query time without keeping it is the same plan as Raw. |
-| 10-s tumbling windows | **Tumbling, ingestion time:** build each tumbling window as samples arrive and keep the last 6. **Tumbling, query time:** at each refresh, build only the newest tumbling window from the last 10 s of raw samples and reuse the 5 kept ones. **Tumbling, rebuilt:** at each refresh, build all 6 tumbling windows from the last 1 min of raw samples, merge them, and discard them (not materialized). |
+| Sliding window | **Sliding, ingestion time:** insert each sample into the 6 active windows as it arrives (materialized at ingestion time). **Sliding, query time:** at each refresh, insert the last 10 s of raw samples into the 6 retained active windows (materialized at query time). Building the window from raw samples at query time without keeping it is the same plan as Raw. |
+| 10-s tumbling windows | **Tumbling, ingestion time:** build each tumbling window as samples arrive and keep the last 6. **Tumbling, query time:** at each refresh, build only the newest tumbling window from the last 10 s of raw samples and reuse the 5 retained ones. **Tumbling, rebuilt:** at each refresh, build all 6 tumbling windows from the last 1 min of raw samples, merge them, and discard them (not materialized). |
 
 ```mermaid
 flowchart LR
@@ -1511,7 +1511,7 @@ flowchart LR
   subgraph SQ["Sliding, query time"]
     direction LR
     subgraph SQQ["Query time, every 10 s"]
-      t1["last 10 s"]:::exact --> t2["update 6 kept<br/>active windows"]:::summary --> t3(["answer from the<br/>completed window"]):::estimate
+      t1["last 10 s"]:::exact --> t2["update 6 retained<br/>active windows"]:::summary --> t3(["answer from the<br/>completed window"]):::estimate
     end
   end
 
@@ -1529,7 +1529,7 @@ flowchart LR
   subgraph TQ["Tumbling, query time"]
     direction LR
     subgraph TQQ["Query time, every 10 s"]
-      v1["last 10 s"]:::exact --> v2["build newest<br/>10-s window"]:::summary --> v3["merge with<br/>5 kept"]:::exact --> v4(["answer"]):::estimate
+      v1["last 10 s"]:::exact --> v2["build newest<br/>10-s window"]:::summary --> v3["merge with<br/>5 retained"]:::exact --> v4(["answer"]):::estimate
     end
   end
 
@@ -1639,7 +1639,7 @@ UnivMon. Combined, that is 3 × 3 × 3 = 27 workload candidates.
 from `flows`, no other filter) and the same 1-min window. UnivMon supports all three
 estimates, so the summary-capability rule adds a shared candidate: **one
 UnivMon build node feeding three estimation nodes**. It must be sized for the strictest
-requirement, ε = 0.01. The independent candidates are kept as well. Pass 2
+requirement, ε = 0.01. The independent candidates are retained as well. Pass 2
 also adds candidates where only two of the three share a UnivMon and the third
 keeps any of its own 3 options (3 pairs × 3 = 9), so stage 1 outputs
 27 + 1 + 9 = 37 candidates. The figure shows the all-three case. The
@@ -1706,12 +1706,12 @@ flowchart LR
 ```
 
 The three UnivMon options from Pass 1 (dashed arrows) are merged by Pass 2 into
-one shared UnivMon. The independent candidates are kept, so stage 1 outputs
+one shared UnivMon. The independent candidates are retained, so stage 1 outputs
 both kinds.
 
 **Stage 2.** The same options as in Example 1 apply: a summary without a
 window summary is rebuilt from raw samples at every refresh, while a
-sliding-window or tumbling-window UnivMon can be kept from ingestion time or
+sliding-window or tumbling-window UnivMon can be retained from ingestion time or
 from query time (and tumbling windows can also be rebuilt). Because the
 dashboard repeats over arriving data, ingestion-time window summaries are
 usually cheapest. UnivMon merges exactly, so tumbling windows suit it.
@@ -1753,7 +1753,7 @@ of data at rest, plus data still arriving.
   mergeable. The window-composition rule adds a shared candidate: **one
   Exponential Histogram over [T − 5 y, T], with a KLL per EH bucket**, with one
   merge and estimation node per query that merges the EH buckets covering
-  its interval. The independent candidates are kept.
+  its interval. The independent candidates are retained.
 
 Yearly tumbling windows would also work here, since every interval is a whole
 number of years; the Exponential Histogram is shown because it also handles
@@ -1896,16 +1896,16 @@ Which candidate wins depends on the workload:
 
 | Candidate | Materialized | At ingestion time | At query time |
 |---|---|---|---|
-| B1 | 1-min tumbling KLLs, kept 5 min | Build one tumbling KLL per minute | Merge the latest 5, read p99 |
+| B1 | 1-min tumbling KLLs, retained 5 min | Build one tumbling KLL per minute | Merge the latest 5, read p99 |
 | B2 | Nothing | Nothing | Read 5 min of raw samples, rebuild all 5 tumbling KLLs, merge them, read p99 |
-| B3 | 1-min tumbling KLLs, at query time, kept 5 min | Nothing | Build only the newest tumbling KLL from raw samples, merge it with the 4 kept ones, read p99 |
+| B3 | 1-min tumbling KLLs, at query time, retained 5 min | Nothing | Build only the newest tumbling KLL from raw samples, merge it with the 4 retained ones, read p99 |
 
 ```mermaid
 flowchart LR
   subgraph B1["B1 · tumbling KLLs materialized at ingestion time"]
     direction LR
     subgraph B1I["Ingestion time"]
-      s1[("samples")]:::data --> p1["1-min tumbling KLL<br/>kept 5 min"]:::summary
+      s1[("samples")]:::data --> p1["1-min tumbling KLL<br/>retained 5 min"]:::summary
     end
     subgraph B1Q["Query time, every 1 min"]
       g1["merge latest 5"]:::exact --> r1(["p99"]):::estimate
@@ -1921,8 +1921,8 @@ flowchart LR
   subgraph B3["B3 · tumbling KLLs materialized at query time"]
     direction LR
     subgraph B3Q["Query time, every 1 min"]
-      s5[("last 1 min of<br/>raw samples")]:::data --> k5["build newest<br/>1-min tumbling KLL"]:::summary --> g5["merge with<br/>4 kept"]:::exact --> r5(["p99"]):::estimate
-      kp["4 kept tumbling KLLs<br/>from earlier evaluations"]:::summary --> g5
+      s5[("last 1 min of<br/>raw samples")]:::data --> k5["build newest<br/>1-min tumbling KLL"]:::summary --> g5["merge with<br/>4 retained"]:::exact --> r5(["p99"]):::estimate
+      kp["4 retained tumbling KLLs<br/>from earlier evaluations"]:::summary --> g5
     end
   end
   classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
@@ -1940,9 +1940,9 @@ Selection usually picks B1. B3 can win when ingestion-time work is expensive,
 and B2 only when storage is expensive and raw data is available at query time.
 
 The sliding-window candidate from Example 3 gets its own physical candidates
-the same way: kept from ingestion time (each sample updates the 5 active
+the same way: retained from ingestion time (each sample updates the 5 active
 windows) or from query time (each evaluation inserts the last minute of raw
-samples into the 5 kept windows). It does more ingestion work than B1 but
+samples into the 5 retained windows). It does more ingestion work than B1 but
 needs no merge, so it wins only for a summary that merges poorly.
 
 **What this shows.** The same logical candidate (one shared Exponential

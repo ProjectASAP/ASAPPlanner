@@ -79,8 +79,8 @@ membership needs its own evidence under every scope.
 Pass 1 sizes each approximate input of a candidate with `n` accuracy-budget
 parts for `δ / (n · V)`, so the union bound gives δ over the covered values.
 A candidate several queries reach is sized for the smallest `δ / (n · V)`
-among them, and a build Pass 2 shares among several readers takes the
-strictest reader's size. Stage 3 only checks the composed guarantee; it never
+among them, and a build Pass 2 shares among several consumers takes the
+strictest consumer's size. Stage 3 only checks the composed guarantee; it never
 resizes. At equal δ and `n`, the scope covering the most values is the
 strictest: every group (`G`, when `G` is above 100), then a 1% share (100),
 then a 5% share (20), then a single value (1). A whole-result target with an unbound `G`
@@ -189,11 +189,11 @@ empirical calibration is different from an arbitrary benchmark's maximum
 observed error; both its confidence and applicability must remain explicit.
 
 Default sizing is `asap_accuracy::sizing::default_size_params`, which dispatches to the
-estimator modules; a summary shared by several readers is sized with each
+estimator modules; a summary shared by several consumers is sized with each
 parameter's largest value among them. Where an error bound grows as the failure
 probability shrinks (a KLL's `k`, a distinct-count UnivMon's heap), each
-reader's parameter is first resized to the readers' smallest failure
-probability at no larger error, so the shared summary meets every reader at
+consumer's parameter is first resized to the consumers' smallest failure
+probability at no larger error, so the shared summary meets every consumer at
 the one failure probability it states. Accuracy validation is independent of
 sizing: Stage 3 checks the guarantee derived from the committed parameters.
 The design boundary is that sizing never grants accuracy authority to the
@@ -360,7 +360,7 @@ rule or a different estimator configuration would be needed in those cases.
 When the consumers' failure targets differ, the summary-capability rule offers
 such a configuration. A shared summary states one accuracy bound at one failure
 probability, so it is sized at the smallest one. Each consumer's parameters are
-resized to it at no larger error, and the largest is kept. Suppose A asks
+resized to it at no larger error, and the largest is retained. Suppose A asks
 for 1% rank error at a 1% failure probability (`k = 269` alone) and B for
 5% at 0.01% (`k = 79` alone). At 0.01% the Gaussian scale is 1.51, so A's
 `k = 269` would give 1.5% rank error there, which misses A's target. A's

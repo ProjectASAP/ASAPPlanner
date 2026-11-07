@@ -54,7 +54,7 @@
 //! tumbling-window chain and a DDSketch tumbling-window chain of equal tumbling-window width reads each
 //! tumbling window's raw data once. Stage 3's cost assumes this grouping; a runtime
 //! that splits a group computes the same states at a higher cost than
-//! priced.
+//! costed.
 //!
 //! Each view's `coverage` says what its stored state is: a stable id of its
 //! definition (what it computes) and its selection (which rows went in,
@@ -630,7 +630,7 @@ impl PhysicalASAPDAG {
     /// DAG a chain materialized across evaluations is its expanded tumbling windows, so its
     /// scan keeps the reach of all of them: reusing a tumbling window refreshed at an
     /// earlier evaluation is optional, and a restart or an older range step
-    /// refreshes older tumbling windows from raw data. (Stage 3 prices a materialized chain on
+    /// refreshes older tumbling windows from raw data. (Stage 3 costs a materialized chain on
     /// the unexpanded DAG as reading its newest tumbling window.)
     pub fn set_retention(
         &mut self,
@@ -879,7 +879,7 @@ fn reach_ms_of(
 /// The nodes of a DAG by id, each node's inputs in edge order, and two
 /// facts every raw-data window check reads, computed in one pass each over
 /// the DAG (O(nodes + edges)). `scan_window` counts the windows of a `Scan`
-/// for pricing; this walks down from each window to check its shape.
+/// for costing; this walks down from each window to check its shape.
 struct ViewIndex<'a> {
     dag: &'a PhysicalASAPDAG,
     nodes: HashMap<PhysicalASAPNodeId, &'a PhysicalASAPDAGNode>,

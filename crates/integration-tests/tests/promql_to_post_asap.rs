@@ -269,7 +269,7 @@ fn execute_topk_reference(plan: &OperatorNode) -> Vec<(String, f64)> {
         panic!("expected summary updates")
     };
     assert_eq!(reduction, &Reduction::by(vec![]));
-    // The fused raw input is the kept non-ASAP sub-DAG itself.
+    // The fused raw input is the retained non-ASAP sub-DAG itself.
     assert!(!child.contains_asap(), "expected fused raw input");
     let Some(NonASAPOp::TimeRange { range, child, .. }) = child.non_asap() else {
         panic!("expected temporal input")
@@ -491,10 +491,10 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     );
 
     // The leaf: unrewritten pass-through — TimeRange marker over the Scan.
-    // The kept leaf is the non-ASAP sub-DAG itself.
+    // The retained leaf is the non-ASAP sub-DAG itself.
     assert!(
         !leaf.contains_asap(),
-        "expected kept leaf, got {:?}",
+        "expected remaining leaf, got {:?}",
         leaf.operator
     );
     let Some(NonASAPOp::TimeRange {

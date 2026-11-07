@@ -384,7 +384,7 @@ fn shared_with_last_root(roots: &[QueryRoot]) -> BTreeSet<*const OperatorNode> {
     let reached = |root: &QueryRoot| -> BTreeSet<*const OperatorNode> {
         root.operator_refs()
             .into_iter()
-            .flat_map(|node| OperatorNode::reachable(node))
+            .flat_map(OperatorNode::reachable)
             .map(|node| Rc::as_ptr(&node))
             .collect()
     };

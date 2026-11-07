@@ -879,7 +879,7 @@ fn empty_exact_summary_extrema_agree_with_ordinary_aggregation() {
     }
 }
 
-/// Rows of `g`, `x` and a nullable Boolean `keep`; `b` has no kept row,
+/// Rows of `g`, `x` and a nullable Boolean `keep`; `b` has no retained row,
 /// and a NULL `keep` drops its row as SQL FILTER does.
 fn filtered_input() -> (SchemaRef, Vec<Vec<Value>>) {
     let input = schema(&[
@@ -976,7 +976,7 @@ fn round_trip(operator: Operator) -> Operator {
 }
 
 /// Per-measure filters keep every group: a filtered COUNT reads 0 and a
-/// filtered SUM reads NULL for a group with no kept row, and an unfiltered
+/// filtered SUM reads NULL for a group with no retained row, and an unfiltered
 /// measure beside them still sees every row. The filters survive
 /// serialization.
 #[test]
@@ -1017,7 +1017,7 @@ fn measure_filters_keep_groups_without_matching_rows() {
     );
 }
 
-/// A filtered SUM is NULL for a group without a kept row, so a plan that
+/// A filtered SUM is NULL for a group without a retained row, so a plan that
 /// declares it non-null does not bind.
 #[test]
 fn filtered_sum_declared_non_null_is_rejected() {
@@ -1041,9 +1041,9 @@ fn filtered_sum_declared_non_null_is_rejected() {
     assert!(compile_node(&node, &[input]).is_err());
 }
 
-/// A filtered `SummaryAgg` updates its state only from kept rows but keeps
+/// A filtered `SummaryAgg` updates its state only from retained rows but keeps
 /// a state for every group: an exact count reads 0 and a KLL quantile,
-/// declared nullable, reads NULL for the group with no kept row. The
+/// declared nullable, reads NULL for the group with no retained row. The
 /// filter survives serialization.
 #[test]
 fn filtered_summary_build_keeps_empty_groups() {

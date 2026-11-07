@@ -209,7 +209,7 @@ status column, "conclusive" means the check either held or was violated.
 | gcd tumbling-window grid across repeat intervals | planner-layering.md L791–809 | `i-other-repeat-interval` | VIOLATED (49 of 2,717): new draft; compare #731 |
 | Exact top-k reuse (smaller k) | planner-layering.md rule table L589; joint-planning-search.md L325 | `j-smaller-topk` | holds (62 conclusive checks) |
 | Merge of disjoint selections | asap-primitive-schema.md §4.2 L194–232, §5.6 Example B L721–752 | `k-union-of-selections` | never conclusive: Stage 1 composes no guarantee for the merged estimate |
-| Tumbling windows kept across evaluations when query-time results are retained | planner-layering.md Materialization L889–893 | `results-retained` | holds (1,442 conclusive checks) |
+| Tumbling windows materialized across evaluations when query-time results are retained | planner-layering.md Materialization L889–893 | `results-retained` | holds (1,442 conclusive checks) |
 | Window = interval: the whole window as a one-tumbling-window chain | planner-layering.md Materialization L895–905 | — | not checked: a Stage 2 choice within one query |
 | Rollup over newest tumbling windows (windowed rollup) | planner-layering.md L809–823 | — | not checked: a composition of c and d |
 | avg as sum/count: shared exact accumulators | planner-layering.md L372–383, L502–503; ASAPWorkloads #8 | `l-binary-over-result` | holds (15 conclusive checks, with the ratio row below); checks that the sum is shared, not one accumulator for both |

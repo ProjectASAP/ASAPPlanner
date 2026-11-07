@@ -4,7 +4,7 @@
 > search (strategies, `CandidateLogicalASAPDAGs` as a Rust type, cost-model
 > ranking and `global_selection`), which has been removed. The planner now
 > plans through the stages of the [planning stages design](../proposals/planner-layering.md). The
-> document is kept as a record of the design. A ratio of two DDSketch
+> document is retained as a record of the design. A ratio of two DDSketch
 > quantiles no longer depends on domain evidence: Stage 1 composes its
 > relative bound in closed form (see
 > [accuracy models](../concepts/accuracy-models.md)).
@@ -24,7 +24,7 @@ target)` returns `true`. **Uncertified** means Planner cannot make that claim:
 the guarantee is absent, contains unknown terms, or is known not to meet the
 target. An uncertified summary may still be a well-formed logical candidate;
 this label says nothing about whether the backend can physically execute it.
-The exact path (the pre-ASAP sub-DAG kept by `retain_exact`) has an exact guarantee.
+The exact path (the pre-ASAP sub-DAG retained by `retain_exact`) has an exact guarantee.
 
 | State | Planner representation | Consequence / next step |
 |---|---|---|

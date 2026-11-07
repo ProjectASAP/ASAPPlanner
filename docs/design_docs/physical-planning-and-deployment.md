@@ -30,7 +30,7 @@ associated with the logical DAG, not a separate computation IR.
 
 > **Status:** Stage 2 (physical ASAP-aware optimization) decides, per summary
 > build, whether it is not materialized, materialized at ingestion time, or
-> materialized at query time (shared within one evaluation, or kept across
+> materialized at query time (shared within one evaluation, or materialized across
 > evaluations), and Stage 3 selects among the results. Sections 2 and 3
 > describe the intended contract, which is wider than what Stage 2 offers
 > today.
@@ -55,7 +55,7 @@ decided by a `PhysicalPropertiesAssignment`, as the layer contract below states.
    all of its inputs run at ingestion time; readouts, other consumers, and the
    other states run at query time. The default assignment materializes nothing; `PlanOutput::physical_asap_dag` applies it
    only to nodes the optimization pass left untimed (a pass's own timing, such
-   as Stage 3's ingestion-time tumbling windows, is kept).
+   as Stage 3's ingestion-time tumbling windows, is retained).
 3. **Physical compile** (executor) reads the plan's materialized views: each
    view's refresh is one compiled DAG (the precompute DAG) and the query run
    another, joined by the views. It does not see raw ingestion, tumbling windows,
@@ -156,7 +156,7 @@ claim that the entire deployment integration is implemented.
 The data source identifies where samples come from. Filters, grouping and the
 window determine which samples enter each summary. Here `tumbling_window_duration: 1m`
 means each stored tumbling window covers one minute; the query range is five minutes.
-Neither duration specifies how often maintenance runs or how long state is kept.
+Neither duration specifies how often maintenance runs or how long state is retained.
 
 The example evolves through the architecture as follows:
 
@@ -402,7 +402,7 @@ else: inputs are read only at `Scan`s and at materialized views.
 
 Every `Scan` leaf is a raw data slot, which the deployment's store reads at
 run time (§4). A compile check (the one `plan_installable` runs) therefore compiles the
-plan without a reader. That check compiles each materialized view's refresh
+plan without a source cursor. That check compiles each materialized view's refresh
 as well as the query run. A plan the executor cannot refresh a view of fails
 the check, whether the view is refreshed at ingestion or on first read, so
 `plan_installable` refuses it rather than returning it to install. SQL `now()` is the
@@ -421,7 +421,7 @@ This section defines the interface between the Planner's output, the
 executor, and a deployment runtime.
 
 > **Status:** implemented on `main`. Known limit: Stage 3 costs raw data by
-> each scan's window lookback. It does not add the readers' range-evaluation
+> each scan's window lookback. It does not add the consumers' range-evaluation
 > span. The plan file's raw retention does.
 
 ### Layers and ownership
@@ -446,12 +446,12 @@ impl InstallablePlan {
     /// Reads `wire_version` before the rest, so an older file is refused by version.
     pub fn from_json(text: &str) -> Result<Self, InstallablePlanError>;
     /// Every materialized view, in dependency order: its node, refresh mode
-    /// (at ingestion, or on first read and kept), coverage, inputs and retention.
+    /// (at ingestion, or on first read and retained), coverage, inputs and retention.
     pub fn materialized_views(&self) -> Result<Vec<MaterializedView>, InstallablePlanError>;
     /// The views refreshed at ingestion, by refresh group (one refresh window
     /// each), each group after the groups it reads.
     pub fn ingestion_refresh_groups(&self) -> Result<Vec<IngestionRefreshGroup>, InstallablePlanError>;
-    /// Per raw-data `Source` read at query time: how far back raw data must be kept.
+    /// Per raw-data `Source` read at query time: how far back raw data must be retained.
     pub fn raw_data_retention(&self) -> Result<Vec<RawDataRetention>, InstallablePlanError>;
 }
 pub struct RawDataRetention {
@@ -471,7 +471,7 @@ pub struct RefreshWindow {
 These derivations are methods on `PhysicalASAPDAG` in `asap-types`, so a
 runtime needs no dependency on the planner crate.
 
-A **materialized view** is a node whose output is kept across evaluations
+A **materialized view** is a node whose output is materialized across evaluations
 (lifetime `AcrossEvaluations`, at ingestion or at query time). A node materialized for
 `OneEvaluation` is not a view: its output is discarded after one evaluation. Everything a runtime
 needs that the DAG determines is derived from the DAG, so the plan file has no
@@ -482,15 +482,15 @@ the plan, not inside it.
 
 - **Materialized view:** how long the view's output must stay available after
   it is built.
-- **Query-time `Scan`:** how far back raw data must be kept. This is the
+- **Query-time `Scan`:** how far back raw data must be retained. This is the
   scan's window lookback (`end_offset + width`, from `scan_window`) plus the
   longest range-evaluation span of the queries reading it. It is never less
   than the retention of a view refreshed on first read from that scan.
 
 `raw_data_retention()` is the per-source maximum over these scans. Example: for
-`max_over_time(m[5m])` evaluated over the last hour, raw `m` is kept 65
+`max_over_time(m[5m])` evaluated over the last hour, raw `m` is retained 65
 minutes, because refreshing the tumbling window for the oldest step reads that far back.
-A tumbling-window chain kept across evaluations counts as all its tumbling windows. Reusing a tumbling window is
+A tumbling-window chain materialized across evaluations counts as all its tumbling windows. Reusing a tumbling window is
 optional for a runtime, and a restart or an older step rebuilds older tumbling windows
 from raw data.
 
@@ -502,7 +502,7 @@ time, together with that position's schema, which is the DAG node's
 
 | Slot | Where | Holds | Read by |
 | --- | --- | --- | --- |
-| **Raw data slot** | every `Scan` leaf | the `Scan`'s `Source`, schema, compiled predicates, and window (the union of its readers' windows, `scan_window`) | `Source` |
+| **Raw data slot** | every `Scan` leaf | the `Scan`'s `Source`, schema, compiled predicates, and window (the union of its consumers' windows, `scan_window`) | `Source` |
 | **Materialized view slot** | each view the DAG reads | the `MaterializedView`, its schema, and the window its state summarizes (`view_window`: the union of the windows of every `TimeRange` below it) | `MaterializedView` |
 
 ```rust
@@ -510,7 +510,7 @@ pub fn compile(dag: &PhysicalASAPDAG, views: &[MaterializedView], roots: &[NodeI
     -> Result<CompiledPhysicalDAG, Error>;
 ```
 
-`compile` opens no readers. The DAG that refreshes a view has the view as a
+`compile` opens no source cursors. The DAG that refreshes a view has the view as a
 root; a DAG that reads it has the view in `views`. A runtime compiles each
 DAG once, at install time. `CompiledPhysicalDAG` is derived inside the
 executor and is not persisted: the plan file is the only handoff.
@@ -568,7 +568,7 @@ A deployment passes one store handle per run. The handle presents one
 consistent state to every read of that run: a refresh that publishes or
 replaces a state during the run is seen by the next run. How the store keeps
 that snapshot is the deployment's choice. `instantiate` constructs the
-runnable DAG without lowering again and opens no reader; a missing source or
+runnable DAG without lowering again and opens no source cursor; a missing source or
 view, or a batch in another schema, fails the read. Each run executes with
 independent per-run state, and its `RunContext` carries the run's scope: an
 ingestion window, or a query evaluation time `T`.
@@ -581,7 +581,7 @@ ingestion window, or a query evaluation time `T`.
 - `TimeRange` is a native operator for both sources:
   - a range window `TimeRange(w)` over shifts summing to `s` keeps rows with time in `(T - s - w, T - s]`;
   - an instant window keeps each series' latest row in its lookback, and a series whose latest sample is a Prometheus stale marker has no row;
-  - an ordinary `NaN` sample is kept.
+  - an ordinary `NaN` sample is retained.
 - In an ingestion run over `(window_start, window_end]`, each `TimeRange(w)` keeps `(window_end - w, window_end]`. A windowed raw data slot asks for `(window_start, window_end]`, and a materialized view slot for `(window_end - w, window_end]`. A view refreshed at ingestion whose raw windows, or the windows of the views it reads, end at different offsets cannot be built in one run, so installation refuses it.
 - A store never implements PromQL or SQL semantics. The compile check compiles these operators, so a plan whose window the executor cannot run is rejected before it is installed.
 
@@ -593,7 +593,7 @@ run's interval equal to each one's window, exactly when they have the same
 (`0 ≤ p < W`), relative to the evaluation time. A view whose `view_window` is
 `(T - o - W, T - o]` has the refresh window `(W, o mod W)`. All tumbling windows of a
 tumbling-window chain have their newest tumbling window's refresh window. The source, the summary
-family and where the state is kept do not enter. A view with an unbounded
+family and where the state is retained do not enter. A view with an unbounded
 window is a group of its own.
 
 A **refresh group** is the set of views refreshed at ingestion that have one
@@ -624,9 +624,9 @@ Stage 3's cost assumes this grouping (`asap_cost::execution_demand::computations
 a stateless ingestion-time node is charged once per refresh window of the
 views above it, not once per view. A runtime that splits a group (for
 example, because its sources seal at different times) computes the same
-states at a higher cost than priced, the same status tumbling window reuse has. A
+states at a higher cost than costed, the same status tumbling window reuse has. A
 runtime that updates states sample by sample passes each sample once
-whatever the windows, so it runs cheaper than priced.
+whatever the windows, so it runs cheaper than costed.
 
 ### Running example
 

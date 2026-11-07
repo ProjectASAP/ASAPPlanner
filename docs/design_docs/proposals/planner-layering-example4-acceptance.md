@@ -1,7 +1,7 @@
 # Planner layering, Example 4: acceptance spec
 
 Audience: planner designers and the implementers of materialization in
-physical ASAP-aware optimization and its pricing in plan selection.
+physical ASAP-aware optimization and its costing in plan selection.
 Source: [planner-layering.md](planner-layering.md), "Example 4: Materialization
 of window summaries in physical planning" and the Materialization section.
 Tests: `crates/integration-tests/tests/planner_layering_example4.rs` (helpers
@@ -33,7 +33,7 @@ every other logical candidate gets its own the same way (not counted).
 
 | Candidate | Materialization of the EH | Expected |
 |---|---|---|
-| A1 | query time, kept for the batch | generated; selected as given |
+| A1 | query time, retained for the batch | generated; selected as given |
 | A2 | ingestion time, old data backfilled once | generated unless `at_rest`; gains with monthly recurrence |
 | A3 | not materialized: each query rebuilds it | generated; costs more than A1 |
 
@@ -41,24 +41,24 @@ every other logical candidate gets its own the same way (not counted).
 
 | Candidate | Materialization of the tumbling KLLs | Expected |
 |---|---|---|
-| B1 | ingestion time, kept 5 min; merge 5 + p99 at query time | generated; usually selected |
+| B1 | ingestion time, retained 5 min; merge 5 + p99 at query time | generated; usually selected |
 | B2 | not materialized: rebuild all 5 from 5 min of raw samples | generated; costs at least B1 and B3 |
-| B3 | query time, kept 5 min: build only the newest | generated; no ingestion-time node |
+| B3 | query time, retained 5 min: build only the newest | generated; no ingestion-time node |
 
 **Pattern B, sliding window (L = 5 min, s = 1 min).** Ingestion time or query
-time, both kept. Not materializing it is the no-window plan, so it is not a
+time, both retained. Not materializing it is the no-window plan, so it is not a
 separate option.
 
 **Today:** Pass 2 builds tumbling windows (`SummaryTumblingWindowChain`), and physical
 ASAP-aware optimization enumerates `Lifetime::None`, ingestion-time `AcrossEvaluations` and
 `OneEvaluation` (state reused within one evaluation) for every summary build.
-B1 and B2 exist. B3 (tumbling windows built at query time and kept across
+B1 and B2 exist. B3 (tumbling windows built at query time and materialized across
 evaluations) is offered when the deployment declares
 `query_time_results_retained` in its `deployment_capabilities`: Stage 2 then
 adds query-time `AcrossEvaluations` for a tumbling-window chain that builds
 one new tumbling window per evaluation. Pattern A's shared EH needs window segments shared across
 queries (#628, #634), so A1–A3 do not exist yet. B3's
-4 kept tumbling windows plus the newest cost 436.59 per second under cost model 1,
+4 retained tumbling windows plus the newest cost 436.59 per second under cost model 1,
 between B2 (3.611) and B1 (654.54).
 
 ## Invariants and tests
@@ -68,7 +68,7 @@ timing and `Lifetime` (#667, #1200). Tests read them through
 `planner_layering_common::materializing(p, node)` without the lifetime length or
 storage medium (`MaterializedAtIngestion`, `MaterializedAtQueryTime`, `NotMaterialized`), and the materialized
 event-time span through `retention_ms(p, node)`. The IR does not record
-retention, so the adapter derives it the way plan selection prices materialized
+retention, so the adapter derives it the way plan selection costs materialized
 state: a chain of `N` tumbling windows of width `w` keeps `N·w`, plus one tumbling window while
 maintained at ingestion time; a whole-window build keeps its window, plus
 the next one at ingestion time; each plus the offset of the shifts below
@@ -80,7 +80,7 @@ it.
 |---|---|---|
 | Every node upstream of an ingestion-time node also runs at ingestion time (all variants) | `stage2_physical_asap_optimization_ingestion_time_upstream_is_ingestion_time`; the monthly variant in `stage2_physical_asap_optimization_monthly_ingestion_time_upstream_is_ingestion_time` | passes: B1 and the monthly variant's maintained tumbling windows; the monthly test is ignored as slow (run in release by hand) |
 | With data at rest, no node runs at ingestion time | `stage2_physical_asap_optimization_at_rest_runs_nothing_at_ingestion_time` | passes |
-| A materialized output covers its consumers: retention ≥ max over its readers of `lookback` + offset | `stage2_physical_asap_optimization_materialized_output_covers_its_consumers`; the monthly variant in `stage2_physical_asap_optimization_monthly_materialized_output_covers_its_consumers` | passes: B1 keeps 6 min ≥ 5 min; the monthly test is ignored as slow (run in release by hand) |
+| A materialized output covers its consumers: retention ≥ max over its consumers of `lookback` + offset | `stage2_physical_asap_optimization_materialized_output_covers_its_consumers`; the monthly variant in `stage2_physical_asap_optimization_monthly_materialized_output_covers_its_consumers` | passes: B1 keeps 6 min ≥ 5 min; the monthly test is ignored as slow (run in release by hand) |
 
 ### Pattern A
 
@@ -88,7 +88,7 @@ it.
 |---|---|---|
 | The shared EH yields exactly A1, A2, A3 | `stage2_physical_asap_optimization_a_shared_eh_has_three_materialization_options` | ignored: the shared EH (#628, #634) |
 | At rest, A2 is not generated; A1 and A3 remain | `stage2_physical_asap_optimization_a_at_rest_drops_the_ingestion_time_option` | ignored: the shared EH (#628, #634) |
-| A materialized EH is one build node read by all five queries, priced once | `stage2_physical_asap_optimization_a_materialized_eh_is_built_once_for_all_consumers` | ignored: the shared EH (#628, #634) |
+| A materialized EH is one build node read by all five queries, costed once | `stage2_physical_asap_optimization_a_materialized_eh_is_built_once_for_all_consumers` | ignored: the shared EH (#628, #634) |
 | A3 costs strictly more than A1 (five builds instead of one: a `Lifetime::None` node is charged per consuming query) | `stage3_plan_selection_a_rebuilding_per_query_costs_more_than_building_once` | ignored: the shared EH (#628, #634) |
 | As given, A1 is the cheapest of the three | `stage3_plan_selection_a_once_adhoc_prefers_the_query_time_eh` | ignored: the shared EH (#628, #634) |
 | Monthly, A2's cost relative to A1 drops: cost(A2)/cost(A1) monthly < as given | `stage3_plan_selection_a_monthly_amortizes_ingestion_time_maintenance` | ignored: the shared EH (#628, #634) |
@@ -98,10 +98,10 @@ it.
 | Invariant | Test | Status |
 |---|---|---|
 | The tumbling KLL candidate yields exactly B1, B2, B3 | `stage2_physical_asap_optimization_b_tumbling_kll_has_three_materialization_options` | passes (with `query_time_results_retained`) |
-| Until B3: the tumbling KLL candidate yields B1 and B2, both priced within the 200 ms latency bound (implementer test) | `stage2_physical_asap_optimization_b_tumbling_kll_has_b1_and_b2` | passes |
+| Until B3: the tumbling KLL candidate yields B1 and B2, both costed within the 200 ms latency bound (implementer test) | `stage2_physical_asap_optimization_b_tumbling_kll_has_b1_and_b2` | passes |
 | B1 builds at ingestion time; its merge and estimate run at query time | `stage2_physical_asap_optimization_b_b1_builds_at_ingestion_and_merges_at_query_time` | passes |
 | B3 runs nothing at ingestion time | `stage2_physical_asap_optimization_b_b3_keeps_query_time_windows` | passes |
-| The sliding KLL yields exactly ingestion time and query time, kept | `stage2_physical_asap_optimization_b_sliding_kll_has_two_materialization_options` | ignored: sliding windows (#522) |
+| The sliding KLL yields exactly ingestion time and query time, retained | `stage2_physical_asap_optimization_b_sliding_kll_has_two_materialization_options` | ignored: sliding windows (#522) |
 | Each cost model chooses what its deployment pays for: cost model 1 the whole-window KLL; cost model 2 the exact plan (smallest peak memory); cost model 3 with lowest latency B1 in 256 GB, and the whole-window KLL in 4 GB, where B1 is invalid on peak memory | `stage3_plan_selection_b_cost_models_choose_differently` | passes |
 | Under cost model 3, the Pareto front over peak memory, disk and latency is {exact, whole-window KLL, B1} and B1 is selected; B2 is dominated by the whole-window KLL; least memory selects the exact plan | `stage3_plan_selection_b_pareto_front_over_memory_disk_and_latency` | removed: cost model 3 no longer has a Pareto-front objective |
 
@@ -110,7 +110,7 @@ it.
 * A3 > A1 holds under any model that charges each build: A3 does strictly
   more of the same work. B2 also rebuilds more per evaluation than B1 and B3,
   but it keeps nothing between evaluations, so B2 ≥ B1, B3 holds only under a
-  model that charges rebuilds more than kept state. Cost model 1 does not:
+  model that charges rebuilds more than retained state. Cost model 1 does not:
   B2 costs 3.611 per second, B3 436.6 and B1 654.5 (see the table
   above).
 * A1 ≤ A2 as given, and B1 ≤ B3, depend on the cost model (cost model 1, 2
@@ -118,7 +118,7 @@ it.
   that A2 maintains years of history for one batch, and that B3 adds the
   newest build to every evaluation and needs raw data at query time. The
   tests assert the doc's direction under the built-in models; if the model
-  prices an ingestion-time update above a query-time one, B3 may win and the
+  costs an ingestion-time update above a query-time one, B3 may win and the
   doc allows it ("B3 can win when ingestion-time work is expensive").
 * Monthly recurrence is tested as a ratio, so it does not depend on whether A2
   wins outright ("A2 can win").
@@ -142,7 +142,7 @@ it.
    repeating entry whose window ends at each run, known at T.
 4. **Retention unit.** "Kept 5 min" is read as the event-time span the stored
    state covers. For A1, which lives only for the batch, that is 5 y of
-   history. The test requires retention ≥ each reader's `lookback` + offset.
+   history. The test requires retention ≥ each consumer's `lookback` + offset.
 5. **Backfill.** A2 backfills old data once. Whether that one-time cost is
    charged to the plan, and how it is amortized, is not stated; not tested.
 6. **Pruning A2 at rest.** "A2 is not generated" is read as physical
@@ -154,7 +154,7 @@ it.
 8. **Other logical candidates.** "Every other logical candidate gets its own
    physical candidates the same way" gives no counts; tests count only the
    shared candidate's options.
-9. **B3 retention.** The doc says B3 keeps 5 min but uses "4 kept" windows
+9. **B3 retention.** The doc says B3 keeps 5 min but uses "4 retained" windows
    plus the newest. The test asks for 5 min (the query window).
 
 ## Devtool

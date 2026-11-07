@@ -31,7 +31,7 @@ pub struct StateColumnUpdater {
     /// For a counter (rate, increase), each group's latest sample time:
     /// samples must arrive in strictly increasing time within a group.
     latest_sample_ms: Option<Vec<Option<i64>>>,
-    /// Memory the open states hold, kept up to date on every change.
+    /// Memory the open states hold, updated on every change.
     memory_bytes: usize,
     /// The shape of the keys [`Self::add_group_with_key`] has taken, from
     /// the first: per position, the value type seen (`None` while only NULL

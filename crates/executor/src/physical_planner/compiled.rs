@@ -37,7 +37,7 @@ pub(super) struct RawDataSlot {
     pub(super) schema: SchemaRef,
     /// The `Scan`'s predicates, compiled over `schema`.
     pub(super) predicates: Vec<crate::expressions::CompiledExpression>,
-    /// The rows its readers read ([`PhysicalASAPDAG::scan_window`]).
+    /// The rows its consumers read ([`PhysicalASAPDAG::scan_window`]).
     pub(super) window: ScanWindow,
 }
 
@@ -134,7 +134,7 @@ impl CompiledPhysicalDAG {
             Node::Operator { .. } => None,
         })
     }
-    /// The schema of a node's output, without opening deployment readers.
+    /// The schema of a node's output, without opening deployment source cursors.
     pub fn output_schema(&self, id: NodeId) -> Result<SchemaRef, Error> {
         match self
             .nodes
@@ -146,11 +146,11 @@ impl CompiledPhysicalDAG {
             Node::Operator { operator, .. } => Ok(operator.output_schema()),
         }
     }
-    /// Validate using schema-only sources. No deployment reader is available.
+    /// Validate using schema-only sources. No deployment source is available.
     pub fn validate(&self) -> Result<(), Error> {
         self.unbound().map(|_| ())
     }
-    /// The DAG with a reader-free bounded stand-in for every input slot.
+    /// The DAG with a source-free bounded stand-in for every input slot.
     fn unbound(&self) -> Result<PhysicalDAG<'_, Batch, SchemaRef>, Error> {
         let mut dag = PhysicalDAG::default();
         for (&id, node) in &self.nodes {
@@ -167,7 +167,7 @@ impl CompiledPhysicalDAG {
         dag.validate(&self.roots)?;
         Ok(dag)
     }
-    /// Bind every input slot to `store` and validate. Opens no reader:
+    /// Bind every input slot to `store` and validate. Opens no source cursor:
     /// each slot becomes a `Scan` that reads `store` when the run starts, a
     /// raw data slot by its `Source` and a materialized view slot by its
     /// `MaterializedView`.

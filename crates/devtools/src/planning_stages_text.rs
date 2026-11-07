@@ -1,23 +1,30 @@
 //! The planner stages' output as plain text: `asap_planner --format text`.
 //! It prints, up to the run's last stage, the frontends' roots and their
-//! memo groups (Stage 0), Pass 1's `Memo`,
-//! the memo after Pass 2's local window composition and Pass 2's
-//! `LogicalASAPMemoCandidates` (Stage 2's input), Stage 2's
-//! `PhysicalASAPMemoCandidates` (Stage 3's input), and Stage 3's
-//! `Selection` with the selected memo choice, each node's cost and each
-//! query's accepted accuracy. Planning never reads it.
+//! memo groups (Stage 0), Pass 1's `Memo`, the memo after Pass 2's local
+//! window composition and Pass 2's `LogicalASAPMemoCandidates` (Stage 2's
+//! input), Stage 2's `PhysicalASAPMemoCandidates` (Stage 3's input: each
+//! physical candidate with every edge into each of its inputs and
+//! $\alpha$, then the candidates Stage 2 pruned), and Stage 3's `Selection`
+//! (the selected DAG, each node's cost, each query's accepted accuracy and
+//! the candidates Stage 3 pruned). Planning never reads it.
 //!
 //! Notation: `G<n>` is memo group `n` and `G<n>[<i>]` its candidate `i`;
-//! `O<n>` is Stage 2's operator node `n` and `C<n>` physical candidate `n`;
-//! `<- ...` lists what a line reads; `new` marks a candidate the step
-//! added. A candidate's chain lists its own nodes root first, down to its
-//! input groups:
+//! `C<n>` is physical candidate `n`; `<- ...` lists what a line reads;
+//! `new` marks a candidate the step added; `θ` and `ω` are a candidate's
+//! parameters and window layout, `floors` its parameter floor per input;
+//! an edge is `✓` when admissible, else `✗` with why:
 //!
 //! ```text
-//! G1:  TimeRange 60s     <- G0
-//! G2:  Aggregate rate()  <- G1
-//!     [0]  Pass1       FinalizeExactAccumulator ← SummaryAgg                                       inputs=[G1]
-//!     [1]  TumblingWindows  new  FinalizeExactAccumulator ← SummaryMerge ← SummaryTumblingWindowChain tumbling_window_count=6 tumbling_window_width_ms=10000  inputs=[G0]
+//! G4:  SummaryEstimate Quantile(q=0.99)  <- G3
+//!     [0]  Pass1    SummaryEstimate Quantile(q=0.99) <- G3  exact  floors=[Kll(k=269)]
+//!
+//!     C32 = G4[0] (QueryTime, None)  SummaryEstimate Quantile(q=0.99)
+//!         input 0 <- G3, requires θ ⪰ Kll(k=269):
+//!             C14 = G3[4] (QueryTime, None)  ✓
+//!     C6 = G2[0] (QueryTime, None)  Aggregate quantile(q=0.99)
+//!         input 0 <- G1:
+//!             C3 = G1[0] (QueryTime, None)       ✓
+//!             C5 = G1[0] (IngestionTime, None)   ✗ α^phys = 0: consumer (QueryTime, None) cannot read producer (IngestionTime, None)
 //! ```
 
 use std::fmt::Write;

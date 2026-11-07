@@ -47,7 +47,7 @@ pub fn keeps_every_value(measure: &AggIntent) -> bool {
 ///   `DDSKETCH_ASSUMED_VALUE_RANGE` and fill its negative store too
 ///   unless proven non-negative.
 ///
-/// KLL is priced without the library's estimate: its fixed bytes
+/// KLL is costed without the library's estimate: its fixed bytes
 /// (`kll_fixed_bytes`: the struct and its level array) plus the 8-byte
 /// item array as `asap_sketchlib` grows it for the rows the state folds, at
 /// most its full capacity (`kll_buffer_items`).
@@ -157,7 +157,7 @@ pub fn sketch_shape(params: &SketchParams, input_rows: StateInputRows) -> (f64, 
             kll_fixed_bytes() + 8 * kll_buffer_items(*k, input_rows),
         ),
         // The executor builds no DDSketch outside α in (0, 1), where
-        // sketchlib's estimate panics: priced as an empty one.
+        // sketchlib's estimate panics: costed as an empty one.
         SketchParams::DDSketch { alpha } if !(*alpha > 0.0 && *alpha < 1.0) => {
             (1.0, std::mem::size_of::<DdSketch>() as u64)
         }
@@ -272,7 +272,7 @@ fn univmon_expected_layers(layers: u8) -> f64 {
 }
 
 /// Ratio of the largest to the smallest value magnitude a DDSketch is
-/// assumed to see: nine decades, e.g. latencies from 1 ns to 1 s, priced as
+/// assumed to see: nine decades, e.g. latencies from 1 ns to 1 s, costed as
 /// magnitudes in `[1, 1e9]` (its bins depend on the ratio alone). An
 /// assumption, not workload evidence: the data workload declares no value
 /// range.
@@ -283,7 +283,7 @@ mod tests {
     use super::*;
     use asap_types::ir::schema::{GroupingStrategy, SketchAlgorithm};
 
-    /// An exact accumulator's state is priced at the executor's per-group
+    /// An exact accumulator's state is costed at the executor's per-group
     /// state, 56 bytes for every kind (a counter's state alone is 48), so a
     /// tumbling-window chain of exact sums keeps 56 bytes per tumbling window and group.
     #[test]
@@ -315,14 +315,14 @@ mod tests {
         sketch.memory_bytes() as u64
     }
 
-    /// A DDSketch is priced for what `asap_sketchlib` can hold after its
+    /// A DDSketch is costed for what `asap_sketchlib` can hold after its
     /// rows: at least what it holds for a few samples, for samples of either
     /// sign, and for many samples over nine decades; a store less for values
-    /// declared non-negative. Many rows are priced as unknown ones.
+    /// declared non-negative. Many rows are costed as unknown ones.
     #[test]
     fn ddsketch_state_bytes_bound_the_library() {
         let alpha = 0.05;
-        let priced = |rows_per_state, non_negative| {
+        let costed = |rows_per_state, non_negative| {
             sketch_shape(
                 &SketchParams::DDSketch { alpha },
                 StateInputRows {
@@ -356,13 +356,13 @@ mod tests {
         ] {
             let rows = Some(values.len() as u64);
             assert!(
-                library_ddsketch_bytes(alpha, values) <= priced(rows, non_negative),
+                library_ddsketch_bytes(alpha, values) <= costed(rows, non_negative),
                 "{} values, non-negative: {non_negative}",
                 values.len()
             );
         }
-        assert!(priced(Some(10_000), true) < priced(Some(10_000), false));
-        assert_eq!(priced(Some(10_000), false), priced(None, false));
+        assert!(costed(Some(10_000), true) < costed(Some(10_000), false));
+        assert_eq!(costed(Some(10_000), false), costed(None, false));
     }
 
     /// The state shape of a sketch of `algorithm` with θ `params`, its
@@ -558,24 +558,24 @@ mod tests {
         assert_eq!(model_bytes(None), 744 + 8 * 1_206);
     }
 
-    /// Plan selection prices each state the executor builds per group at
+    /// Plan selection costs each state the executor builds per group at
     /// what the executor charges for it (#947). Each family is built
     /// through the executor's factory and fed `n` rows shaped as the
-    /// pricing assumes: signed values over [`DDSKETCH_ASSUMED_VALUE_RANGE`],
+    /// costing assumes: signed values over [`DDSKETCH_ASSUMED_VALUE_RANGE`],
     /// label values of [`ASSUMED_VALUE_KEY_BYTES`] keys for UnivMon, or
     /// keyed rows whose tuple keys are [`ASSUMED_HEAP_KEY_BYTES`] long. The
     /// heap families' shapes are dominated by their heaps. The charge is
     /// the sketch's bytes plus the accumulator's own fields, named per
-    /// family. It equals the priced bytes where `asap_sketchlib`'s estimate
+    /// family. It equals the costed bytes where `asap_sketchlib`'s estimate
     /// is exact (Count-Min, Count Sketch, HLL, KMV at `n` distinct items) and
     /// for KLL up to `k` rows. For DDSketch, the heap sketches and UnivMon
-    /// the price bounds it, by at most 1.5 times once the state is full;
-    /// UnivMon's price also bounds the bytes its sketch holds.
+    /// the cost bounds it, by at most 1.5 times once the state is full;
+    /// UnivMon's cost also bounds the bytes its sketch holds.
     /// KLL past `k` rows is checked only loosely: the planner's formula
     /// leaves out the compaction scratch space, a known gap until a
-    /// sketchlib estimate without the CDF cache can price KLL.
+    /// sketchlib estimate without the CDF cache can cost KLL.
     ///
-    /// HydraCms is left out: plan selection prices an independent Count-Min
+    /// HydraCms is left out: plan selection costs an independent Count-Min
     /// per group, the executor one shared grid, so the two agree only at
     /// about 79 groups for a 5 × 32 grid of 64 × 3 cells (a follow-up).
     #[test]
@@ -591,7 +591,7 @@ mod tests {
         };
         use std::mem::{align_of, size_of};
         use SketchAlgorithm as A;
-        /// How the priced bytes relate to the sketch's.
+        /// How the costed bytes relate to the sketch's.
         enum Priced {
             Exact,
             /// Exact up to `k` rows; past them at most the formula's
@@ -611,7 +611,7 @@ mod tests {
             /// A label set and a weight a row.
             Keyed,
         }
-        // (family, parameters, rows fed, how it is priced, the
+        // (family, parameters, rows fed, how it is costed, the
         // accumulator's own fields, rows at which the state is full: four
         // times the heap for the heap sketches, so each heap churns).
         //
@@ -796,7 +796,7 @@ mod tests {
                 }
                 let state = updater.into_accumulator();
                 let charged = state.approx_memory_bytes();
-                let priced = fields
+                let costed = fields
                     + sketch_shape(
                         params,
                         StateInputRows {
@@ -805,21 +805,21 @@ mod tests {
                         },
                     )
                     .1 as usize;
-                let context = format!("{algorithm:?} after {n} rows: {priced} priced");
+                let context = format!("{algorithm:?} after {n} rows: {costed} costed");
                 match priced_as {
-                    Priced::Exact => assert_eq!(charged, priced, "{context}"),
-                    Priced::Kll { k } if n <= *k => assert_eq!(charged, priced, "{context}"),
+                    Priced::Exact => assert_eq!(charged, costed, "{context}"),
+                    Priced::Kll { k } if n <= *k => assert_eq!(charged, costed, "{context}"),
                     // sketchlib bounds KLL's compaction scratch space at
                     // 2 (k - 1) items.
                     Priced::Kll { k } => assert!(
-                        charged <= priced + 8 * 2 * (*k as usize - 1),
+                        charged <= costed + 8 * 2 * (*k as usize - 1),
                         "{context}, {charged} charged"
                     ),
                     Priced::Bound => {
-                        assert!(charged <= priced, "{context}, {charged} charged");
+                        assert!(charged <= costed, "{context}, {charged} charged");
                         if n == *full {
                             assert!(
-                                priced as f64 <= 1.5 * charged as f64,
+                                costed as f64 <= 1.5 * charged as f64,
                                 "{context}, {charged} charged"
                             );
                         }
@@ -835,7 +835,7 @@ mod tests {
                     let held = fields + univmon.sketch().memory_bytes();
                     assert!(held <= charged, "{context}, {held} held");
                     if n == *full {
-                        assert!(priced as f64 <= 1.6 * held as f64, "{context}, {held} held");
+                        assert!(costed as f64 <= 1.6 * held as f64, "{context}, {held} held");
                     }
                 }
             }

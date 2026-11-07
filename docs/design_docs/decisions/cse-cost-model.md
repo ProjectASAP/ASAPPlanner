@@ -4,7 +4,7 @@
 > search (strategies, `CandidateLogicalASAPDAGs` as a Rust type, cost-model
 > ranking and `global_selection`), which has been removed. The planner now
 > plans through the stages of the [planning stages design](../proposals/planner-layering.md). The
-> document is kept as a record of the design.
+> document is retained as a record of the design.
 
 > Status: accepted decision for the implementation described here.
 
@@ -50,7 +50,7 @@ cost comparison, not a fixed "always share when legal" rule.
 Why cost-based and not pure System R: a shared summary here is not a free win
 the way sharing a relational scan is in a textbook OLTP optimizer — it is a
 sketch/accumulator that (per this crate's stated purpose: *workload*-level
-planning, not single-query) is typically kept **continuously updated** as new
+planning, not single-query) is typically **continuously updated** as new
 data arrives, for as long as the workload runs, regardless of how often it's
 actually read. A structurally-shareable sub-DAG that is cheap to recompute on
 demand, or rarely queried, can cost more to keep alive as a standing shared

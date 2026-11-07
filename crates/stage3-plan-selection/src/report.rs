@@ -72,9 +72,9 @@ pub enum RejectionCause {
     /// Under cost model 3, its usage is over one of the cluster's limits.
     OverClusterCapacity,
     /// Its cost overflows the cost model's arithmetic, so it cannot be
-    /// priced.
+    /// costed.
     CostNotRepresentable,
-    /// Under cost models 1 and 2, its price is higher than the selected
+    /// Under cost models 1 and 2, its cost is higher than the selected
     /// candidate's.
     Costlier,
     /// Under cost model 3's `lowest-latency`, it is slower than the

@@ -19,7 +19,7 @@ asap-stage1-pass2-reuse-candidates -p asap-stage2-physical-optimization -p asap-
 
 - Structurally equal sub-DAGs are interned before Stage 1
   (`cse.rs` in `asap_stage0_memo`), so Stage 1 compares nodes by structure and Pass 2
-  matches readers structurally, never by pointer.
+  matches consumers structurally, never by pointer.
 - Timing is applied with `apply_physical_properties`, which validates
   every data-state edge. A violation is an `ExecutionDataStateError`:
   for example `QueryTimeValueUnderIngestionSummary` (a query-time value
@@ -55,7 +55,7 @@ asap-stage1-pass2-reuse-candidates -p asap-stage2-physical-optimization -p asap-
 - **Pass 2.** Each rule adds candidates; none removes a Pass 1 candidate, adds
   a summary family, or adds a readout. So a deployment that does not support a
   family never sees it again after Pass 1.
-- **Sizing.** A summary shared by several readers is sized with each
+- **Sizing.** A summary shared by several consumers is sized with each
   parameter's largest value among them. A summary is sized for ε in Stage 1;
   a δ that depends on data facts (a distinct-count bound, series counts) is
   left symbolic in its guarantee for Stage 3 to bind.
@@ -121,7 +121,7 @@ asap-stage1-pass2-reuse-candidates -p asap-stage2-physical-optimization -p asap-
   cost model 3, or `CostNotRepresentable` (its cost overflows)) or a loss under the cost model (`Costlier`, `Slower`,
   `MoreMemory`, `TiedLostOnEnumerationOrder`). Stage 3 never resizes a summary: a candidate
   whose Stage 1 sizes miss its composed accuracy target is rejected alone.
-- Usage (`ResourceUsage`) is measured without prices; the `CostModel` in
+- Usage (`ResourceUsage`) is measured without costs; the `CostModel` in
   `CostInputs` turns it into a choice. Ties keep enumeration order
   under every cost model.
 - `Selection.plan` is the selected candidate's roots with the weight
@@ -134,7 +134,7 @@ asap-stage1-pass2-reuse-candidates -p asap-stage2-physical-optimization -p asap-
 | What a query means | the frontend (Stage 0) |
 | Which computations exist and how each may be computed | Pass 1 |
 | What is shared, split into tumbling windows or reused | Pass 2 |
-| When each build runs and whether it is kept | Stage 2 |
+| When each build runs and whether it is materialized | Stage 2 |
 | Which plan is valid and which is chosen | Stage 3 |
-| What the executor can build, retain and how it is priced | the deployment, through `PlanningModels` (`DeploymentCapabilities`, `CostInputs`, `AccuracyModel`) |
+| What the executor can build, retain and how it is costed | the deployment, through `PlanningModels` (`DeploymentCapabilities`, `CostInputs`, `AccuracyModel`) |
 | Running the plan | the executor (`asap-executor`), outside the planner |

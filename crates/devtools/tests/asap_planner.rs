@@ -168,7 +168,7 @@ fn cost_inputs(inputs: &asap_cost::CostInputs) -> TempFile {
     TempFile::new(&serde_json::to_string(inputs).unwrap())
 }
 
-/// Cost model 1 at AWS Fargate's us-east-1 prices.
+/// Cost model 1 at AWS Fargate's us-east-1 costs.
 fn aws_fargate() -> asap_cost::CostInputs {
     let defaults = asap_cost::CostInputs::default();
     asap_cost::CostInputs {
@@ -464,7 +464,7 @@ const NINE_QUERY_WORKLOAD: &str =
     "../../tools/dag-viewer/workloads/random-mixed-seed-862/workload-01.json";
 
 /// The nine-query workload's document up to `run_until`, planned as a
-/// deployment that keeps no raw data at AWS Fargate prices.
+/// deployment that keeps no raw data at AWS Fargate costs.
 fn nine_query_document(run_until: &str) -> Value {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(NINE_QUERY_WORKLOAD);
     let capabilities = TempFile::new(NO_RAW);
@@ -482,7 +482,7 @@ fn nine_query_document(run_until: &str) -> Value {
 }
 
 /// The nine-query workload, planned as a deployment that keeps no raw data
-/// at AWS Fargate prices with guarantees enforced: `asap_planner` lowers it
+/// at AWS Fargate costs with guarantees enforced: `asap_planner` lowers it
 /// to one root per query, and installation returns a validated plan that
 /// accepts no query without its guarantee.
 #[test]
@@ -520,7 +520,7 @@ fn the_nine_query_workload_lowers_and_installs() {
 }
 
 /// `asap_planner` selects a validated plan for the nine-query workload
-/// (no raw data, AWS Fargate prices, guarantees enforced), with an
+/// (no raw data, AWS Fargate costs, guarantees enforced), with an
 /// accepted accuracy per query and a MILP search report.
 #[test]
 fn the_nine_query_workload_selects_a_valid_plan() {
@@ -831,7 +831,7 @@ fn the_cost_model_chooses_how_candidates_are_compared() {
     }
 }
 
-/// AWS Fargate's us-east-1 prices Example 4 under cost model 1 in US
+/// AWS Fargate's us-east-1 costs Example 4 under cost model 1 in US
 /// dollars per second: the selected plan costs no more than the
 /// whole-window KLL, $2.60278e-8/s (its 2.1 CPU-ms/s at $1.1244e-8 per
 /// CPU-ms, and its states held while the query runs).
@@ -1585,7 +1585,7 @@ fn several_workload_files_in_different_languages_are_planned_together() {
 /// source they both declare: a run is refused rather than picking one.
 /// While data arrives, each source must also declare its own rate: plan
 /// selection shares a workload's `rows_per_second` out over all its
-/// sources, so `flows` (10 groups, no sample interval) would be priced at
+/// sources, so `flows` (10 groups, no sample interval) would be costed at
 /// 1500 × 10 / 15010 ≈ 1 row/s instead of its file's 500.
 #[test]
 fn workload_files_that_disagree_on_the_data_are_refused() {
@@ -1820,7 +1820,7 @@ fn memo_example(path: &str) -> String {
 }
 
 /// The arguments for raw data retained, query-time results not retained,
-/// AWS Fargate prices and enforced guarantees, with `capabilities` the
+/// AWS Fargate costs and enforced guarantees, with `capabilities` the
 /// temporary deployment capabilities file they name.
 fn milp_args(capabilities: &TempFile) -> Vec<String> {
     let aws = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1938,7 +1938,7 @@ fn milp_search_selects_a_checked_ddsketch_plan_for_a_ratio_and_its_operands() {
     }
 }
 
-/// The viewer's cost-input files carry the prices of the presets they are
+/// The viewer's cost-input files carry the costs of the presets they are
 /// named after, so a change to `crates/cost`'s constants fails here instead
 /// of leaving the viewer and the snapshots on the old numbers.
 #[test]

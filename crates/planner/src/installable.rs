@@ -77,7 +77,7 @@ pub struct InstallablePlan {
 #[serde(deny_unknown_fields)]
 pub struct SelectedPlanReport {
     /// Its cost per second; `None` under cost model 3, which has no
-    /// prices.
+    /// costs.
     pub cost_per_second: Option<f64>,
     /// The resources Stage 3 predicts it uses, for a runtime to report
     /// against what it measures.
@@ -111,14 +111,14 @@ pub struct PredictedUsage {
     pub disk_bytes: u64,
     /// CPU cores to provision for the peak.
     pub peak_cpu_cores: u32,
-    /// One per operator node of the plan Stage 3 priced, in node order.
+    /// One per operator node of the plan Stage 3 costed, in node order.
     pub per_node: Vec<PredictedNodeUsage>,
     /// One per workload query, in workload order.
     pub per_query: Vec<PredictedQueryUsage>,
 }
 
 /// One operator node's predicted usage. The node is one of the physical
-/// DAG Stage 3 priced, where a tumbling-window chain is one node; `dag` has
+/// DAG Stage 3 costed, where a tumbling-window chain is one node; `dag` has
 /// it expanded into its tumbling windows, so `installed_node_ids` says which of
 /// `dag`'s nodes run it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -137,7 +137,7 @@ pub struct PredictedNodeUsage {
     pub timing: ExecutionTiming,
     /// Core-seconds of CPU per second.
     pub cpu_core_seconds_per_second: f64,
-    /// Its price per second under cost model 1; `None` under cost models
+    /// Its cost per second under cost model 1; `None` under cost models
     /// 2 and 3.
     pub cost_per_second: Option<f64>,
     /// Whether its CPU came from the measured cost table or the formulas.
@@ -222,7 +222,7 @@ impl From<InstallableDagError> for InstallablePlanError {
 /// Plan `input` for a deployment runtime: the query-language frontends and
 /// Stages 1-3 as [`e2e_plan`] runs them, returning the single selected DAG
 /// ready to install, and beside it Stage 3's report of the selection
-/// (`None` for a pass that selects without pricing), which is not part of
+/// (`None` for a pass that selects without costing), which is not part of
 /// the plan file. Supported summaries the caller leaves unrestricted
 /// (`DeploymentCapabilities::supported_summaries` `None`) default to the
 /// families the Planner's executor runs; raw-data and query-time-result
@@ -903,7 +903,7 @@ mod tests {
     }
 
     /// Unrestricted summaries become the executor's families; a caller's
-    /// own list and its retention flags are kept.
+    /// own list and its retention flags are retained.
     #[test]
     fn unrestricted_summaries_default_to_the_executors_families() {
         let unrestricted = DeploymentCapabilities {

@@ -199,17 +199,17 @@ asap_stage3_plan_selection::select_plan(
 | `PlanningModels::new(accuracy, evidence)` | Your `&dyn AccuracyModel` and `&dyn AccuracyEvidenceProvider`, with default cost inputs and deployment capabilities; `with_accuracy` and `with_evidence` replace one of them |
 | `PlanningModels::builtin()` | Built-in accuracy model (`BuiltinAccuracyModel`) and no extra evidence (`NoAccuracyEvidence`). `with_cost_inputs(&settings)` sets the deployment's `CostInputs`; `with_deployment_capabilities(&capabilities)` sets its `DeploymentCapabilities` (field `deployment_capabilities`) |
 | `DeploymentCapabilities` (`asap_types::deployment_capabilities`, re-exported as `asap_planner::DeploymentCapabilities`) | What the executor supports: `supported_summaries` (`None`, the default, supports every summary the planner builds; otherwise `SupportedSummary { family: SketchAlgorithm, readouts: Vec<StatisticKind> }` entries; Pass 1 prunes others with `PruneReason::UnsupportedByDeployment`), `raw_data_retained` (default `true`; when `false`, a candidate that scans raw data at query time is pruned by Stage 2, and stored data is refused with `asap_planner::SelectionError::InvalidDeploymentCapabilities`) and `query_time_results_retained` (default `false`; when `true`, Stage 2 offers query-time `AcrossEvaluations` for tumbling-window chains) |
-| `CostInputs` (`asap_cost`) | `cost_model`, `resource_speed` (`ms_per_cpu_op`, `ms_per_scanned_byte`), `non_repeating_query_horizon_seconds` (default 3,600) and `measured_operation_costs` (`MeasuredOperationCosts`, default empty: `operators`, one `OperatorCost { operator, phase, sketch / exact / measure, ns_per_unit, ns_per_invocation, memory_bytes_per_state }` per measured operator kind, phase and family; `ns_per_evaluation` per query request; `provenance` (executor version, machine). A node with an entry is priced from it, a sketch between the two nearest measured sizes; every other node from the formulas times one calibration factor fitted from the measured nodes; each node's `NodeCost::price_source` says which. The earlier JSON array of `MeasuredOperationCost { sketch, operation, cpu_ns_per_operation }` still loads) |
+| `CostInputs` (`asap_cost`) | `cost_model`, `resource_speed` (`ms_per_cpu_op`, `ms_per_scanned_byte`), `non_repeating_query_horizon_seconds` (default 3,600) and `measured_operation_costs` (`MeasuredOperationCosts`, default empty: `operators`, one `OperatorCost { operator, phase, sketch / exact / measure, ns_per_unit, ns_per_invocation, memory_bytes_per_state }` per measured operator kind, phase and family; `ns_per_evaluation` per query request; `provenance` (executor version, machine). A node with an entry is costed from it, a sketch between the two nearest measured sizes; every other node from the formulas times one calibration factor fitted from the measured nodes; each node's `NodeCost::price_source` says which. The earlier JSON array of `MeasuredOperationCost { sketch, operation, cpu_ns_per_operation }` still loads) |
 | `CostModel::UsageOverTime(ResourceUnitCost)` | Cost model 1 (default, `ResourceUnitCost::illustrative()`): unit cost × usage per second; the cheapest valid candidate wins |
 | `CostModel::ProvisionedCapacity(ResourceUnitCost)` | Cost model 2: unit cost × peak memory, peak CPU cores and disk; the cheapest valid candidate wins |
 | `CostModel::ClusterCapacity(ClusterLimits)` | Cost model 3: memory, disk and optional CPU cores are hard limits; `ClusterObjective::{LowestLatency, LeastMemory}` chooses among the candidates that fit |
 | `PlanOutput.plans` | One `QueryPlan { entry_index, root }` per query, in `QueryWorkload::entries()` order |
 | `PlanOutput.selection` | `Some` with Stage 3's `Selection` under the default pass: `selected_dag`, `nodes_with_proven_non_negative_weights`, `cost` (the selected plan's `PlanCost` with its `ResourceUsage` and `cost_per_second`, `None` under cost model 3), `accepted_accuracy_per_query`, `pruned_candidates` and `search_report` |
-| `PlanOutput.tumbling_window_retention_ms` | For each tumbling-window chain the selected plan keeps beyond one evaluation, by node id, how long its tumbling windows are kept (`RealizedPlan::tumbling_window_retention_ms`) |
-| `PlanningRun` | `per_computation_candidates`, `logical_asap_candidates`, `physical_asap_candidates`, `selection`, `selected_physical_plan` (`RealizedPlan`), `selected_plan` (the roots to run) and `report` (Pass 2's and Stage 2's counts and each stage's time); `per_computation_candidates` is kept only with `PlanSearchSettings::inspect`; `asap_planner::selected_chosen_candidates` reads the selected plan as one candidate per group of `logical_asap_candidates.memo` |
+| `PlanOutput.tumbling_window_retention_ms` | For each tumbling-window chain the selected plan keeps beyond one evaluation, by node id, how long its tumbling windows are retained (`RealizedPlan::tumbling_window_retention_ms`) |
+| `PlanningRun` | `per_computation_candidates`, `logical_asap_candidates`, `physical_asap_candidates`, `selection`, `selected_physical_plan` (`RealizedPlan`), `selected_plan` (the roots to run) and `report` (Pass 2's and Stage 2's counts and each stage's time); `per_computation_candidates` is retained only with `PlanSearchSettings::inspect`; `asap_planner::selected_chosen_candidates` reads the selected plan as one candidate per group of `logical_asap_candidates.memo` |
 | `PlanOutput::physical_asap_dag()` | The planned queries as one `PhysicalASAPDAG`, timed with the default `PhysicalPropertiesAssignment` (see [Export](#export)) |
 
-Each candidate's `ResourceUsage` holds its usage without prices:
+Each candidate's `ResourceUsage` holds its usage without costs:
 `cpu_ops_per_second`, `scanned_bytes_per_second`, `average_memory_bytes`,
 `peak_memory_bytes`, `disk_bytes`, `peak_cpu_cores` and `latency_per_query`.
 The deployment's choice of cost model reads it.
@@ -314,19 +314,19 @@ PromQL metric or SQL table name to `SourceFacts`: `series_count`,
 `metric_type`, `values_non_negative`, `sample_interval` (PromQL and
 MetricsQL), `stream_norms`, `max_distinct_per_evaluation` and
 `distinct_values_per_label` (distinct values per label or column, which
-plan selection prices a `by (...)` grouping's groups at: the product of its
+plan selection costs a `by (...)` grouping's groups at: the product of its
 keys' counts, at most the declared `series_count` (series or groups of
 rows) and the rows it reads; with a key undeclared, no count is assumed and
-the grouping is priced at the smaller of those two; over several sources a
+the grouping is costed at the smaller of those two; over several sources a
 key's counts add), `distinct_values_per_label_set` (distinct combinations
 a set of dependent labels takes together, e.g.
 `[{"labels": ["service", "endpoint"], "distinct_values": 625}]` when each
-endpoint is in one service: a grouping over one source is priced at the
+endpoint is in one service: a grouping over one source is costed at the
 smallest product of declared set and label counts covering its keys, so
 `by (service, endpoint)` is 625 groups rather than 25 x 625), and `rows_held` (the rows the source holds at rest,
 which bound a scan with no window and data at rest). Every fact is declared: the planner has no
 clock, so a caller drops facts that no longer hold before planning, and
-pricing assumes no default: a scan whose source declares no arrival rate
+costing assumes no default: a scan whose source declares no arrival rate
 (`rows_per_second`, or `series_count` with `sample_interval`) and no
 `rows_held` fails with `AnalyticalCostError::MissingSourceFact`, naming the
 source and the missing fact. Plan
@@ -351,7 +351,7 @@ distinct-value counts positive.
 | `DataWorkload::default()` | Unknown arrival, no source facts | Supply facts needed for the requested comparisons |
 | `SourceFacts::default()` | Every fact unknown | Unknown facts are not zero; drop facts that no longer hold before planning |
 | `CostInputs::default()` | Cost model 1 with the illustrative `ResourceUnitCost`, no measured operation costs | Supply the deployment's unit costs, speed and measurements for calibrated comparisons |
-| `DeploymentCapabilities::default()` | Every summary supported, raw data retained, query-time results not kept | Declare what the executor supports |
+| `DeploymentCapabilities::default()` | Every summary supported, raw data retained, query-time results not retained | Declare what the executor supports |
 
 `Default` is a Rust constructor contract, not a general serde omission rule.
 Several workload fields require explicit serialized values. A struct field being
@@ -363,7 +363,7 @@ optional also does not guarantee every planning operation can succeed without it
 | --- | --- |
 | `asap_types::ir::apply_physical_properties(&root, &assignment)` | Complete a `PhysicalPropertiesAssignment` (default: all query time) into the physical properties of every node and validate the data-state edges; `apply_physical_properties_to_roots` does it for a workload; `PlanOutput::physical_asap_dag()` applies the pass's `physical_properties` to a planned workload |
 | `asap_types::ir::physical_export::compile_physical_asap_dag(&root, &timed)` | Export a DAG as a `PhysicalASAPDAG`, each node with its properties from the completed assignment `timed`; rejects a node it does not list; `compile_physical_asap_workload(&roots, &timed)` exports a batch with one root per query; `.validate()` checks it explicitly |
-| `PhysicalASAPDAG::materialized_views()` and `.raw_data_retention()` (`asap_types::ir::materialized_view`) | What a runtime keeps for an installed DAG, derived from the DAG and the `retention_ms` installation sets: each materialized view (refresh mode, coverage, inputs, the node's `retention_ms`) and how far back each raw-data source is kept for query-time scans (each query-time `Scan`'s `retention_ms`) |
+| `PhysicalASAPDAG::materialized_views()` and `.raw_data_retention()` (`asap_types::ir::materialized_view`) | What a runtime keeps for an installed DAG, derived from the DAG and the `retention_ms` installation sets: each materialized view (refresh mode, coverage, inputs, the node's `retention_ms`) and how far back each raw-data source is retained for query-time scans (each query-time `Scan`'s `retention_ms`) |
 
 Choose the export matching your intended handoff: an untimed semantic DAG is not
 interchangeable with a versioned execution contract. Preserve

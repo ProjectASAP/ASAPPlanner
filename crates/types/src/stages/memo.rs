@@ -26,12 +26,12 @@ pub struct MemoGroup {
     /// changes.
     pub group_properties: GroupProperties,
     /// The groups that read it ([`Self::parent_groups`]) through their
-    /// expression or a candidate's: kept up to date by
+    /// expression or a candidate's: updated by
     /// [`Memo::find_or_add_group`](super::Memo::find_or_add_group) and
     /// [`Memo::add_candidate`](super::Memo::add_candidate).
     pub parents: Vec<MemoGroupId>,
     /// The queries whose roots reach it ([`Self::reached_by_queries`]),
-    /// ascending: kept up to date by
+    /// ascending: updated by
     /// [`Memo::add_query`](super::Memo::add_query) and
     /// [`Memo::add_candidate`](super::Memo::add_candidate).
     pub queries: Vec<usize>,

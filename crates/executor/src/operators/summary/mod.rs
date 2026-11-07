@@ -589,7 +589,7 @@ fn filter_mask(filter: Option<&Expression>, batch: &Batch) -> Result<Option<Bool
         .transpose()
 }
 
-fn kept(mask: &Option<BooleanArray>, row: usize) -> bool {
+fn row_selected(mask: &Option<BooleanArray>, row: usize) -> bool {
     mask.as_ref()
         .is_none_or(|mask| mask.is_valid(row) && mask.value(row))
 }
@@ -669,7 +669,7 @@ async fn build_per_group_summary(
             if let Some(values) = values.as_any().downcast_ref::<Float64Array>() {
                 for (row, &group) in groups.iter().enumerate() {
                     // SQL aggregates ignore NULL samples while retaining the group.
-                    if !kept(&mask, row) || values.is_null(row) {
+                    if !row_selected(&mask, row) || values.is_null(row) {
                         continue;
                     }
                     updater.update(group, values.value(row), time_at(row))?;
@@ -678,7 +678,7 @@ async fn build_per_group_summary(
             {
                 // Int64 ids or numbers, without decoding the column.
                 for (row, &group) in groups.iter().enumerate() {
-                    if !kept(&mask, row) || values.is_null(row) {
+                    if !row_selected(&mask, row) || values.is_null(row) {
                         continue;
                     }
                     updater.update_value(group, &Value::Int64(values.value(row)), time_at(row))?;
@@ -696,7 +696,7 @@ async fn build_per_group_summary(
                     ColumnDepth::BatchColumn,
                 );
                 for (row, &group) in groups.iter().enumerate() {
-                    if !kept(&mask, row) || matches!(values[row], Value::Null) {
+                    if !row_selected(&mask, row) || matches!(values[row], Value::Null) {
                         continue;
                     }
                     updater.update_value(group, &values[row], time_at(row))?;
@@ -763,7 +763,7 @@ fn decoded_columns(batch: &Batch, columns: &[usize]) -> Vec<Vec<Value>> {
         .collect()
 }
 
-/// One keyed state per group: each kept row adds its weight to the tuple of
+/// One keyed state per group: each retained row adds its weight to the tuple of
 /// its item values in its group's state.
 async fn build_per_group_keyed_summary(
     mut input: Input<'_, Batch>,
@@ -791,7 +791,7 @@ async fn build_per_group_keyed_summary(
             let weights = RowWeights::of(&batch, build.row_weight);
             let columns = decoded_columns(&batch, build.items);
             for (row, &group) in groups.iter().enumerate() {
-                if !kept(&mask, row) {
+                if !row_selected(&mask, row) {
                     continue;
                 }
                 let weight = match &weights {
@@ -869,7 +869,7 @@ async fn build_all_groups_summary(
             let weights = RowWeights::of(&batch, build.row_weight);
             let items = decoded_columns(&batch, &[build.item]).remove(0);
             for (row, &group) in groups.iter().enumerate() {
-                if !kept(&mask, row) {
+                if !row_selected(&mask, row) {
                     continue;
                 }
                 let weight = match &weights {
@@ -1057,7 +1057,7 @@ async fn merge_objects<'b>(
     let mut retained = table_memory_bytes;
     // States shared by several groups (Hydra grids) are reserved once each.
     let mut shared = BTreeMap::<usize, usize>::new();
-    // The inputs are kept so their addresses stay unique while they key the memo.
+    // The inputs are retained so their addresses stay unique while they key the memo.
     type GridPair = (Arc<HydraCms>, Arc<HydraCms>, Arc<HydraCms>);
     let mut grids = BTreeMap::<(usize, usize), GridPair>::new();
     for &entry in entries {
@@ -1286,14 +1286,14 @@ fn evaluate_states(
             }
         });
     }
-    let kept = if keep.iter().all(|&k| k) {
+    let remaining = if keep.iter().all(|&k| k) {
         batch.clone()
     } else {
         batch.filter(&BooleanArray::from(keep))?
     };
-    let mut arrays = kept.record_batch().columns().to_vec();
+    let mut arrays = remaining.record_batch().columns().to_vec();
     let mut columns = (0..arrays.len())
-        .map(|column| kept.state_column(column).cloned())
+        .map(|column| remaining.state_column(column).cloned())
         .collect::<Vec<_>>();
     let SummaryFamilyType::Plain(dtype) = &field.dtype else {
         unreachable!("an evaluation outputs a plain value")
@@ -1304,7 +1304,7 @@ fn evaluate_states(
         .collect::<Vec<_>>();
     arrays[state] = crate::values::arrow_columns::encode(dtype, ColumnDepth::BatchColumn, &cells)?;
     columns[state] = None;
-    Batch::from_parts(output.clone(), arrays, columns, kept.num_rows())
+    Batch::from_parts(output.clone(), arrays, columns, remaining.num_rows())
 }
 
 /// `SummaryEstimate` of a top-k: each input row's `k` heaviest items, one

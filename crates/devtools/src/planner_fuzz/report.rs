@@ -105,7 +105,7 @@ pub fn documented_patterns() -> Vec<DocumentedPattern> {
             note: "the merge operator is implemented; the docs name no Pass 2 rule that creates it",
         },
         DocumentedPattern {
-            pattern: "Tumbling windows kept across evaluations when the deployment retains query-time results",
+            pattern: "Tumbling windows materialized across evaluations when the deployment retains query-time results",
             doc_reference: "planner-layering.md Materialization L889–893",
             relation: Some(Relation::ResultsRetained),
             note: "a capability never raises cost",
@@ -192,7 +192,7 @@ pub struct Finding {
     pub shrink_attempts: Option<usize>,
     pub check: Check,
     pub measurement: Measurement,
-    /// The open issue a reader should compare it with, when the relation
+    /// The open issue to compare it with, when the relation
     /// matches one (a guess from the relation, not a proof).
     pub possibly_known_issue: Option<&'static str>,
     pub draft: PathBuf,

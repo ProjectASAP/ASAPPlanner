@@ -1,7 +1,7 @@
 //! Physical-operator statistics contracts.
 //!
 //! This module does not lower logical query nodes. It defines the per-operator
-//! statistics the analytical resource model prices an operator from.
+//! statistics the analytical resource model costs an operator from.
 
 use serde::{Deserialize, Serialize};
 

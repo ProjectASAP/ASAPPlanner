@@ -25,7 +25,7 @@ in `asap-integration-tests` (`crate_graph`) checks these edges with
 | `asap-accuracy` (`crates/accuracy`) | The accuracy model the stages share: the analytical rules (per-family estimators, composition, budget split, target check) and the deployment's `AccuracyModel` and `AccuracyEvidenceProvider`; depends only on `asap-types` |
 | `asap-stage2-physical-optimization` (`crates/stage2-physical-optimization`) | Stage 2: materialization and physical operator implementation |
 | `asap-cost` (`crates/cost`) | The cost model the stages share: resource-usage estimation (the analytical per-operator model, measured operation costs, state byte sizes) and the cost models (`ResourceUsage`, `CostModel`, `CostInputs`); depends only on `asap-types` |
-| `asap-stage3-plan-selection` (`crates/stage3-plan-selection`) | Stage 3: `select_plan` over Stage 2's output; accuracy and latency checks, pricing candidates with `asap-cost` |
+| `asap-stage3-plan-selection` (`crates/stage3-plan-selection`) | Stage 3: `select_plan` over Stage 2's output; accuracy and latency checks, costing candidates with `asap-cost` |
 | `asap-planner` (`crates/planner`) | The facade: `e2e_plan` runs Stage 0, then the optimization pass (`Stage1ToStage3Pass` by default), which orchestrates Stages 1–3 (`run_planning`); the planning models (`PlanningModels`) and the `OptimizationPass` trait |
 | `asap-executor` (`crates/executor`) | Stage 4, the reference executor: operators and summary kernels over `asap_sketchlib`; it runs a `PhysicalASAPDAG` |
 | `asap-devtools` | `asap_planner` and the other inspection tools, the design-doc example workloads (`planner_layering_examples`) and the candidate labels |

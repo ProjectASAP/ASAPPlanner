@@ -329,7 +329,7 @@ The `definition` is what remains of the operators the walk passed, with every co
 | On the walk | In `unlifted_operators` |
 |---|---|
 | a `Filter` whose conditions all move into `selection` | removed |
-| a `Filter` with some conditions that stay | kept, with only the conditions that stay; a scalar subquery among them names its group |
+| a `Filter` with some conditions that stay | retained, with only the conditions that stay; a scalar subquery among them names its group |
 | `SummaryAgg.filter` | trimmed the same way |
 | the one range `TimeRange`, and any `TimeShift`s, when they become relative time | removed |
 | a `TimeShift` with no range `TimeRange`, or two or more range `TimeRange`s | unchanged: no time is taken out |
@@ -550,7 +550,7 @@ coverage() of the SummaryAgg
 
 | Question | Answer |
 |---|---|
-| What comes out? | the group columns (`job`), then one field `state` whose type is the summary type, here `Sketch(KLL k=200)`. Each `job` appears once. With `PerEntity` (one state per series), the input columns are kept and `state` replaces the value column |
+| What comes out? | the group columns (`job`), then one field `state` whose type is the summary type, here `Sketch(KLL k=200)`. Each `job` appears once. With `PerEntity` (one state per series), the input columns are retained and `state` replaces the value column |
 | When is it rejected? | the summary type is a plain value type; the input is already state; the input or item column (`latency`) is not in the child's schema; `filter` is not a boolean |
 | What is its coverage? | always present. Both `Filter` conditions are simple, so they move into `selection`, and the `definition` is the `SummaryAgg` over the bare `Scan t`. A condition like `latency * 2 > 10` would stay in the `definition` (§4.2.2) |
 | State or value? | state. This is where values become state, so the result has no error bound yet |
@@ -715,7 +715,7 @@ With an exact target, the planner can keep all latencies per job in one maintain
 
 - **Implemented.** All children must be state with exactly one state field and identical schemas.
 - **Coverage.** It also requires equal `definition`s and selections that do not overlap, and computes the merged coverage.
-- **Newest tumbling windows:** an optional `newest_tumbling_windows: n` merges only the newest `n` tumbling windows of the one `SummaryTumblingWindowChain` the merge reads (`1 ≤ n <` its tumbling-window count). Its coverage is one build over the time range those tumbling windows cover, so one chain kept for the longest window serves every query whose window, on the same tumbling windows, ends at the same time and is shorter.
+- **Newest tumbling windows:** an optional `newest_tumbling_windows: n` merges only the newest `n` tumbling windows of the one `SummaryTumblingWindowChain` the merge reads (`1 ≤ n <` its tumbling-window count). Its coverage is one build over the time range those tumbling windows cover, so one chain retained for the longest window serves every query whose window, on the same tumbling windows, ends at the same time and is shorter.
 - **Rollup:** an optional `group_by` field, so one operator does both merge and rollup. It lists the input's group columns the output is keyed by; `None` keeps the input's groups. A rollup merges every input state, so it does not take `newest_tumbling_windows`; it reads a merge of the newest tumbling windows instead:
 
 ```rust
@@ -1235,9 +1235,9 @@ pub enum SketchParams {
     DDSketch { alpha: f64 },
     /// Count-Min `width` × `depth`, plus a heap of the `heap_size` heaviest items.
     CmsWithHeap { width: u32, depth: u32, heap_size: u32 },
-    /// `k`: number of smallest hash values kept.
+    /// `k`: number of smallest hash values retained.
     Kmv { k: u32 },
-    /// `k`: number of hash values kept (nominal entries).
+    /// `k`: number of hash values retained (nominal entries).
     Theta { k: u32 },
     /// `width`: counters per row. `depth`: number of hash rows.
     CountSketch { width: u32, depth: u32 },
@@ -1270,9 +1270,9 @@ pub enum HydraParams {
 /// `None` for all others.
 pub fn hydra_kind_for(a: &SketchAlgorithm) -> Option<HydraKind>;
 
-/// `size`: number of rows kept in the reservoir.
+/// `size`: number of rows retained in the reservoir.
 pub enum SamplingKind  { Reservoir }    pub enum SamplingParams  { Reservoir { size: u32 } }
-/// `coefficients`: number of wavelet coefficients kept.
+/// `coefficients`: number of wavelet coefficients retained.
 pub enum WaveletKind   { Haar }         pub enum WaveletParams   { Haar { coefficients: u32 } }
 /// `family`: name of the parametric distribution, e.g. a normal distribution.
 pub enum StatModelKind { Parametric }   pub enum StatModelParams { Parametric { family: String } }
@@ -1357,7 +1357,7 @@ pub enum PopulationStatistic {
     TopK { k: usize },     // `k`: how many top rows to return
     Sum, Count, Average,
 }
-/// A population kept in full (§5.4).
+/// A population retained in full (§5.4).
 pub struct MaintainedPopulation<N = OperatorNode> {
     /// Which rows or series the population contains.
     pub input: PopulationInput<N>,
@@ -1370,7 +1370,7 @@ pub enum PopulationInput<N = OperatorNode> {
     /// The current value of each PromQL series (see `CurrentSeriesInput`).
     CurrentSeries(CurrentSeriesInput),
     /// Rows of a table. `input`: the table `Scan` node. `value_column`: the
-    /// column whose values are kept. `grouping`: the `by` columns.
+    /// column whose values are retained. `grouping`: the `by` columns.
     Rows { input: Rc<N>, value_column: usize, grouping: GroupKeys },
 }
 pub struct CurrentSeriesInput {

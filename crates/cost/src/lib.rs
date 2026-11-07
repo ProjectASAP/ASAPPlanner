@@ -1,6 +1,6 @@
 //! `asap-cost` — the cost model the planning stages share: how much of each
 //! resource a plan uses and what that usage costs. It depends only on
-//! `asap-types`, so any stage can price with it.
+//! `asap-types`, so any stage can cost with it.
 //!
 //! - Resource-usage estimation: [`analytical`] and `operator_statistics`
 //!   (the analytical per-operator resource model), `measured` (measured
@@ -16,7 +16,7 @@
 //!   [`NodeUsage`]; [`plan_cost`] the whole plan's [`PlanCost`]. Stage 3
 //!   computes no cost of its own.
 //!
-//! Plan selection (Stage 3, `asap-stage3-plan-selection`) documents how it prices
+//! Plan selection (Stage 3, `asap-stage3-plan-selection`) documents how it costs
 //! a candidate with these.
 use std::collections::BTreeMap;
 
@@ -50,12 +50,12 @@ pub use usage::{
 /// Cost per second of wall time; one unit is one CPU-millisecond under
 /// [`ResourceUnitCost::illustrative`].
 pub const COST_UNIT: &str = "cost_per_second";
-/// [`PlanCost::source`] when every node is priced from the formulas.
+/// [`PlanCost::source`] when every node is costed from the formulas.
 pub const COST_SOURCE: &str = "analytical-cost-v2 (illustrative statistics)";
-/// [`PlanCost::source`] when every node is priced from the measured
+/// [`PlanCost::source`] when every node is costed from the measured
 /// table.
 pub const MEASURED_COST_SOURCE: &str = "measured operation costs (illustrative statistics)";
-/// [`PlanCost::source`] when some nodes are priced from the measured
+/// [`PlanCost::source`] when some nodes are costed from the measured
 /// table and the others from the formulas.
 pub const MIXED_COST_SOURCE: &str =
     "measured operation costs and analytical-cost-v2 (illustrative statistics)";
@@ -65,7 +65,7 @@ pub const MIXED_COST_SOURCE: &str =
 pub(crate) const DEFAULT_NON_REPEATING_QUERY_HORIZON_SECONDS: f64 = 3_600.0;
 
 /// What one candidate uses, per second of wall time unless the name says
-/// otherwise, without prices: its nodes' CPU, scans, retained memory and disk
+/// otherwise, without costs: its nodes' CPU, scans, retained memory and disk
 /// added up, with the candidate's peak cores and per-query latency. Every [`CostModel`] reads
 /// it.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -93,9 +93,9 @@ pub struct ResourceUsage {
     pub latency_per_query: Vec<QueryLatency>,
 }
 
-/// The price of one unit of each resource, per second of wall time. Cost
-/// model 1 reads the usage prices (CPU, scan, memory byte-seconds, disk);
-/// cost model 2 the provisioned prices (memory, CPU cores) and disk.
+/// The cost of one unit of each resource, per second of wall time. Cost
+/// model 1 reads the usage costs (CPU, scan, memory byte-seconds, disk);
+/// cost model 2 the provisioned costs (memory, CPU cores) and disk.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceUnitCost {
@@ -114,10 +114,10 @@ pub struct ResourceUnitCost {
 }
 
 impl ResourceUnitCost {
-    /// The prices plan selection uses until a deployment is calibrated:
+    /// The costs plan selection uses until a deployment is calibrated:
     /// 1 ns of CPU per operation, 0.1 ns per scanned byte, 1 GB retained for a
     /// second costs 1/8 vCPU (125 CPU-ms), held or provisioned alike; one
-    /// provisioned core-second is 1,000 CPU-ms. Disk is not priced (0).
+    /// provisioned core-second is 1,000 CPU-ms. Disk is not costed (0).
     pub fn illustrative() -> Self {
         Self {
             cost_per_cpu_op: 1e-6,
@@ -129,7 +129,7 @@ impl ResourceUnitCost {
         }
     }
 
-    /// AWS Fargate on-demand prices, US East (N. Virginia), Linux/x86, for
+    /// AWS Fargate on-demand costs, US East (N. Virginia), Linux/x86, for
     /// cost model 1 ([`CostModel::UsageOverTime`]); one cost unit is one
     /// US dollar. Source: <https://aws.amazon.com/fargate/pricing/>, checked
     /// 2026-10-18 (Pricing Example 1 there: $0.000011244 per vCPU-second,
@@ -138,7 +138,7 @@ impl ResourceUnitCost {
     /// the page before relying on them.
     ///
     /// `speed` is the deployment's [`CostInputs::resource_speed`],
-    /// the speed Stage 3 uses for latency, so the CPU prices charge the core
+    /// the speed Stage 3 uses for latency, so the CPU costs charge the core
     /// time latency counts. At `ResourceSpeed::illustrative` (1e-6 ms per
     /// CPU operation, i.e. 1e9 operations per core-second; 1e-7 ms per
     /// scanned byte):
@@ -147,23 +147,23 @@ impl ResourceUnitCost {
     ///   `ms_per_cpu_op` / 1,000 (1e-9 s per operation) = $1.1244e-14.
     /// * `cost_per_scanned_byte` = $0.000011244 per vCPU-second ×
     ///   `ms_per_scanned_byte` / 1,000 (1e-10 s per byte) = $1.1244e-15:
-    ///   Fargate has no scan price, but a scan occupies the vCPU-seconds it
+    ///   Fargate has no scan cost, but a scan occupies the vCPU-seconds it
     ///   bills, for the time latency charges.
     /// * `cost_per_memory_byte_second` = $0.000001235 per GB-second ÷ 2^30
     ///   bytes per GB ≈ $1.1502e-15: the page says "on this page GB =
     ///   1024^3 bytes".
     /// * `cost_per_disk_byte_second` = 0: Fargate bills only ephemeral
     ///   storage configured beyond the 20 GB every task gets, which a
-    ///   per-byte price cannot express, and the disk bytes plan selection
+    ///   per-byte cost cannot express, and the disk bytes plan selection
     ///   counts (the raw data query-time scans read) are held by the data
     ///   source, not by the task.
     /// * `cost_per_provisioned_memory_byte_second` and
     ///   `cost_per_provisioned_cpu_core_second` = 0: they belong to cost
     ///   model 2, and Fargate's per-task billing is cost model 1. Under
-    ///   [`CostModel::ProvisionedCapacity`] every price this preset gives
+    ///   [`CostModel::ProvisionedCapacity`] every cost this preset gives
     ///   is 0, which [`CostInputs::validate`] refuses.
     ///
-    /// Not expressed by these per-second prices: the 1-minute billing
+    /// Not expressed by these per-second costs: the 1-minute billing
     /// minimum per task ("Pricing is calculated per second with a 1-minute
     /// minimum"), and the fixed task sizes a task is billed for (from 0.25
     /// vCPU with 0.5 GB up), which round usage up to the next size.
@@ -196,7 +196,7 @@ pub struct ResourceSpeed {
 
 impl ResourceSpeed {
     /// 1 ns per operation and 0.1 ns per scanned byte, the times
-    /// [`ResourceUnitCost::illustrative`] prices: one cost unit is one
+    /// [`ResourceUnitCost::illustrative`] costs: one cost unit is one
     /// millisecond of one core.
     pub(crate) fn illustrative() -> Self {
         Self {
@@ -220,7 +220,7 @@ pub enum CostModel {
     /// Cost model 2, provisioned: unit cost × peak memory, peak CPU cores
     /// and disk, per second; the cheapest valid candidate wins.
     ProvisionedCapacity(ResourceUnitCost),
-    /// Cost model 3, the deployment's own cluster: no prices; memory, disk
+    /// Cost model 3, the deployment's own cluster: no costs; memory, disk
     /// and (when set) CPU cores are hard limits, and the objective chooses
     /// among the candidates that fit.
     ClusterCapacity(ClusterLimits),
@@ -267,14 +267,14 @@ pub struct CostInputs {
     /// (`invocations / horizon` per second); default 3,600.
     pub non_repeating_query_horizon_seconds: f64,
     /// The deployment's measured CPU time per unit of each operator; a node
-    /// with an entry is priced from it, every other node from the formulas
+    /// with an entry is costed from it, every other node from the formulas
     /// scaled by the calibration factor (module doc, "Measured operation
     /// costs"). Also loads the earlier array of [`MeasuredOperationCost`].
-    /// Default empty: every node is priced from the formulas.
+    /// Default empty: every node is costed from the formulas.
     pub measured_operation_costs: MeasuredOperationCosts,
     /// Externally established formula-to-measurement scale, held constant across
     /// candidates. Must be finite and positive. None fits the complete generated
-    /// candidate catalog before pricing, preserving the default calibration policy.
+    /// candidate catalog before costing, preserving the default calibration policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frozen_calibration_factor: Option<f64>,
 }
@@ -295,8 +295,8 @@ impl CostInputs {
     /// Bad input: a negative or non-finite speed, a horizon that is not
     /// positive, a bad measured table ([`MeasuredOperationCosts`]: a
     /// negative or non-finite time or size, an entry naming two families,
-    /// a duplicate entry, or `ms_per_cpu_op` 0), or a price the chosen cost model reads that is negative or
-    /// not finite, or every such price 0 (cost model 3 reads none).
+    /// a duplicate entry, or `ms_per_cpu_op` 0), or a cost the chosen cost model reads that is negative or
+    /// not finite, or every such cost 0 (cost model 3 reads none).
     pub fn validate(&self) -> Result<(), AnalyticalCostError> {
         if let Some(factor) = self.frozen_calibration_factor {
             CalibrationFit::from_factor(factor)?;
@@ -355,7 +355,7 @@ impl CostInputs {
     }
 }
 
-/// One node's price per second of wall time, with how it was measured. A
+/// One node's cost per second of wall time, with how it was measured. A
 /// node is one operator node of the candidate's physical plan DAG
 /// (`PhysicalASAPDAG`), keyed by its [`PhysicalASAPNodeId`] in
 /// [`PlanCost::per_node`]; not a machine.
@@ -365,8 +365,8 @@ pub struct NodeCost {
     pub operator: OperatorKind,
     /// When it runs: ingestion or query time.
     pub timing: ExecutionTiming,
-    /// Its price per second under cost model 1; `None` under cost models 2
-    /// and 3, which price (or limit) the whole candidate's peaks.
+    /// Its cost per second under cost model 1; `None` under cost models 2
+    /// and 3, which cost (or limit) the whole candidate's peaks.
     pub cost_per_second: Option<f64>,
     /// Core-seconds of CPU it takes per second of wall time: its CPU
     /// operations and scanned bytes timed by [`ResourceSpeed`], what a
@@ -382,29 +382,29 @@ pub struct NodeCost {
     /// ... bytes": one computation's work, the times it is computed per
     /// second and what it keeps.
     pub detail: String,
-    /// Whether its CPU operations were priced from the measured table or
+    /// Whether its CPU operations were costed from the measured table or
     /// from the formulas.
     pub price_source: NodePriceSource,
 }
 
-/// One candidate's usage and price over the whole workload: `usage` is
-/// the whole candidate's, `per_node` one price per operator node of its
+/// One candidate's usage and cost over the whole workload: `usage` is
+/// the whole candidate's, `per_node` one cost per operator node of its
 /// physical plan DAG.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlanCost {
     pub usage: ResourceUsage,
-    /// Its price per second under cost model 1 or 2 (under cost model 1, the
+    /// Its cost per second under cost model 1 or 2 (under cost model 1, the
     /// sum of its nodes' charges plus request overhead for queries without
     /// operator nodes); `None` under cost model 3.
     pub cost_per_second: Option<f64>,
     /// The unit of `cost_per_second`: always [`COST_UNIT`].
     pub cost_unit: &'static str,
-    /// Where its prices came from, from its nodes' [`NodeCost::price_source`]:
+    /// Where its costs came from, from its nodes' [`NodeCost::price_source`]:
     /// [`COST_SOURCE`] (all formulas), [`MEASURED_COST_SOURCE`] (all
     /// measured) or [`MIXED_COST_SOURCE`].
     pub source: &'static str,
     /// Each operator node of the candidate's physical plan DAG, by its id
-    /// in that DAG, with its price.
+    /// in that DAG, with its cost.
     pub per_node: BTreeMap<PhysicalASAPNodeId, NodeCost>,
 }
 
@@ -430,8 +430,8 @@ impl QueryLatency {
     }
 }
 
-/// The CPU time of the nodes priced from the measured table, per second of
-/// wall time: as measured, and as the formulas would price them. Their
+/// The CPU time of the nodes costed from the measured table, per second of
+/// wall time: as measured, and as the formulas would cost them. Their
 /// ratio is the calibration factor for the nodes without an entry.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct CalibrationFit {
@@ -468,7 +468,7 @@ impl CalibrationFit {
     }
 
     /// Measured ÷ formula time, 1 without measured nodes (or with only
-    /// nodes the formulas price free).
+    /// nodes the formulas cost free).
     pub fn factor(self) -> f64 {
         match self.formula_ms_per_second > 0.0 && self.measured_ms_per_second > 0.0 {
             true => self.measured_ms_per_second / self.formula_ms_per_second,
@@ -481,12 +481,12 @@ impl CalibrationFit {
 mod tests {
     use super::*;
 
-    /// The AWS Fargate preset holds the page's prices converted as its doc
+    /// The AWS Fargate preset holds the page's costs converted as its doc
     /// says at the given speed: per vCPU-second × seconds per operation or
     /// per scanned byte (1e-9 and 1e-10 at the illustrative speed; twice
     /// that at half the speed), per GB-second ÷ 2^30; disk and the
-    /// provisioned prices 0. It validates under cost model 1 and is
-    /// refused under cost model 2, where every price it gives is 0.
+    /// provisioned costs 0. It validates under cost model 1 and is
+    /// refused under cost model 2, where every cost it gives is 0.
     #[test]
     fn aws_fargate_us_east_1_converts_the_page_prices() {
         let preset = ResourceUnitCost::aws_fargate_us_east_1(ResourceSpeed::illustrative());

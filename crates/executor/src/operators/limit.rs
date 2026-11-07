@@ -51,17 +51,17 @@ pub(super) fn execute<'a>(
                     .iter()
                     .map(|&group| {
                         let count = &mut seen[group as usize];
-                        let kept = *count >= offset && count.saturating_sub(offset) < n;
+                        let remaining = *count >= offset && count.saturating_sub(offset) < n;
                         *count = count.saturating_add(1);
-                        Some(kept)
+                        Some(remaining)
                     })
                     .collect::<arrow::array::BooleanArray>();
                 let done = groups.is_empty()
                     && seen
                         .first()
                         .is_some_and(|count| count.saturating_sub(offset) >= n);
-                let kept = batch.filter(&keep)?;
-                Ok(Some((kept, (input, table, seen, workspace, done))))
+                let remaining = batch.filter(&keep)?;
+                Ok(Some((remaining, (input, table, seen, workspace, done))))
             }
         },
     )

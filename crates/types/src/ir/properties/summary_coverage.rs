@@ -380,7 +380,7 @@ impl SummaryCoverage {
 }
 
 /// For a `Filter` that keeps whole states of a grouped `SummaryAgg` by
-/// their key columns, the build that computes exactly the kept states: the
+/// their key columns, the build that computes exactly the retained states: the
 /// same build over its input rows filtered by the same predicate on the
 /// input columns those keys name. `None` for any other operator.
 fn selected_build<'m>(
@@ -652,13 +652,13 @@ fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, Cov
         == 1;
 
     let top = column_lineage(child);
-    // Top-down: decide which conjuncts are lifted. `kept[d]` is the residual
+    // Top-down: decide which conjuncts are lifted. `retained[d]` is the residual
     // of `chain[d]` when it is a `Filter`.
     let mut lifted = BTreeMap::new();
     let agg_filter = filter
         .as_ref()
         .and_then(|pred| residual(pred, &top, &[], &mut lifted));
-    let kept: Vec<Option<Predicate<Option<MemoGroupId>>>> = chain
+    let remaining: Vec<Option<Predicate<Option<MemoGroupId>>>> = chain
         .iter()
         .enumerate()
         .map(|(depth, link)| match link {
@@ -678,13 +678,13 @@ fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, Cov
             schema,
         }) => {
             let lifted_above = lifted.clone();
-            let kept = predicates
+            let remaining = predicates
                 .iter()
                 .filter_map(|pred| residual(pred, &top, &chain, &mut lifted))
                 .collect();
             (lifted != lifted_above).then_some(NonASAPOp::Scan {
                 source,
-                predicates: kept,
+                predicates: remaining,
                 schema,
             })
         }
@@ -703,7 +703,7 @@ fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, Cov
     for (depth, link) in chain.iter().enumerate() {
         match link {
             Operator::NonASAP(NonASAPOp::Filter { .. }) => {
-                if let Some(rest) = kept[depth].clone() {
+                if let Some(rest) = remaining[depth].clone() {
                     unlifted_operators.push(Operator::NonASAP(NonASAPOp::Filter {
                         pred: rest,
                         child: None,
@@ -816,7 +816,7 @@ fn group_id(input: &GroupInput<'_>) -> Option<MemoGroupId> {
     }
 }
 
-/// `link`, a liftable operator kept whole in a definition: its main input
+/// `link`, a liftable operator retained whole in a definition: its main input
 /// `None`, every other input the group it is.
 fn unlifted(link: &Operator<GroupInput<'_>>) -> Operator<Option<MemoGroupId>> {
     let mut operator = link.map_children(group_id);
@@ -1043,13 +1043,13 @@ impl Constraint {
             (In(a), NotIn(b)) | (NotIn(b), In(a)) => In(filter_values(a, b, false)?),
             (NotIn(a), NotIn(b)) => NotIn(dedup(a.iter().chain(b).cloned().collect())),
             (In(a), Interval { lower, upper }) | (Interval { lower, upper }, In(a)) => {
-                let mut kept = Vec::new();
+                let mut remaining = Vec::new();
                 for v in a {
                     if inside(v, (lower, upper), compare)? {
-                        kept.push(v.clone());
+                        remaining.push(v.clone());
                     }
                 }
-                In(kept)
+                In(remaining)
             }
             (
                 Interval {

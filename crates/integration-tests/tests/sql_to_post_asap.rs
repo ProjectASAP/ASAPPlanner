@@ -106,7 +106,7 @@ fn unary_child(node: &OperatorNode) -> Option<&Rc<OperatorNode>> {
     }
 }
 
-/// A sub-DAG kept as plain (non-ASAP) work: no ASAP operator anywhere below.
+/// A sub-DAG retained as plain (non-ASAP) work: no ASAP operator anywhere below.
 fn is_kept_non_asap(node: &OperatorNode) -> bool {
     node.non_asap().is_some() && !node.contains_asap()
 }
@@ -605,7 +605,7 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
 
     assert!(
         is_kept_non_asap(child),
-        "expected a kept non-ASAP leaf, got {:?}",
+        "expected a remaining non-ASAP leaf, got {:?}",
         child.operator
     );
     assert!(matches!(child.non_asap(), Some(NonASAPOp::Scan { .. })));

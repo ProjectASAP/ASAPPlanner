@@ -257,7 +257,7 @@ pub enum Witness {
     /// `q`'s root estimate over a `SummaryMerge` of its state and the state
     /// of `W`'s last query (the other selection, added to `W`).
     UnionWithLast,
-    /// `q`'s tumbling-window chain lengthened to cover `window_ms`: every reader of
+    /// `q`'s tumbling-window chain lengthened to cover `window_ms`: every consumer of
     /// the chain in `W`'s plan merges its old newest tumbling windows of the longer
     /// chain, and `q'` merges all of them, then applies `rollup` when set.
     LongerWindow {
@@ -329,7 +329,7 @@ pub struct WitnessReport {
     /// operators alone) and their operators.
     pub derived_node_cost_per_second: Option<f64>,
     pub derived_operators: Vec<String>,
-    /// Whether the witness's `Filter` on a group key kept its input's
+    /// Whether the witness's `Filter` on a group key retained its input's
     /// guarantee, which Stage 1's guarantee composition does not give it
     /// (so the witness passes Stage 3 only under that rule).
     pub key_filter_keeps_input_guarantee: bool,
@@ -852,7 +852,7 @@ fn alternate_value(value: &str) -> String {
 /// a node `replace` maps is replaced (its inputs are not visited), and
 /// every node above a replaced one is rebuilt over its new inputs with its
 /// schema derived again. Unchanged sub-DAGs keep their `Rc`, so sharing is
-/// kept.
+/// retained.
 pub fn rewrite(
     node: &Rc<OperatorNode>,
     replace: &mut dyn FnMut(&Rc<OperatorNode>) -> Option<Rc<OperatorNode>>,
@@ -957,14 +957,14 @@ fn with_root_estimate(
     let Some(NonASAPOp::Project { cols, child }) = root.non_asap() else {
         return Ok(estimate);
     };
-    let mut kept = Vec::new();
+    let mut remaining = Vec::new();
     for item in cols {
         let ScalarExpr::Column(index) = item.expr else {
             return Err("q's root projection is not of plain columns".into());
         };
         let name = &child.schema.fields[index].name;
         match estimate.schema.fields.iter().position(|f| f.name == *name) {
-            Some(new) => kept.push(ProjectItem {
+            Some(new) => remaining.push(ProjectItem {
                 alias: item.alias.clone(),
                 expr: ScalarExpr::Column(new),
             }),
@@ -972,7 +972,7 @@ fn with_root_estimate(
             None => return Err(format!("the new estimate has no column {name}")),
         }
     }
-    let cols = kept;
+    let cols = remaining;
     OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
         cols,
         child: estimate,

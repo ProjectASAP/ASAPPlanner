@@ -7,7 +7,7 @@ use crate::ir::scalar::ColumnRef;
 /// Bytes the executor holds per group for an exact accumulator of any
 /// [`ExactKind`]: one element of its column of fixed-size states (the
 /// executor's `ScalarState`, whose largest variant, a counter's, is 48
-/// bytes). Plan selection prices exact state with it; an executor test
+/// bytes). Plan selection costs exact state with it; an executor test
 /// asserts it equals that state's size.
 pub const EXACT_ACCUMULATOR_STATE_BYTES: u64 = 56;
 
@@ -34,7 +34,7 @@ pub enum ExactKind {
 
 /// Parameters for an [`ExactKind`] accumulator. All exact accumulators have
 /// fixed semantics — no tuning parameters — so each variant carries none;
-/// kept as a per-kind enum (mirroring [`SketchParams`]) so a mismatched
+/// retained as a per-kind enum (mirroring [`SketchParams`]) so a mismatched
 /// `(kind, params)` pair is still a type error, not a runtime check.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ExactParams {
@@ -449,7 +449,7 @@ pub enum HydraKind {
 /// set general enough to cover every inner sketch type.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum HydraParams {
-    /// See [`HydraKind::HydraKll`]: kept for legality, **no accuracy bound
+    /// See [`HydraKind::HydraKll`]: retained for legality, **no accuracy bound
     /// is modeled for this variant**. `k`/`shared_buckets` give a bound
     /// sketch a concrete size to build against; unlike `HydraCms`/
     /// `HydraCountSketch`'s fields, they are not backed by the paper's

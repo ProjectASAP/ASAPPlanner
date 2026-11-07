@@ -332,7 +332,7 @@ impl AccumulatorUpdater for CmsAccumulatorUpdater {
 /// the key is one `Utf8` identity, as in the DAG's keyed build.
 ///
 /// Each raw Prometheus sample contributes its `value` as a Float64 weight,
-/// kept exactly (no rounding). CountSketch accepts signed weights; Count-Min
+/// retained exactly (no rounding). CountSketch accepts signed weights; Count-Min
 /// accepts nonnegative ones and rejects a negative input at validation.
 pub struct WeightedFrequencyUpdater {
     acc: WeightedFrequency,
