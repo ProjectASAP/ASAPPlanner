@@ -640,6 +640,9 @@ impl RootAccuracyLimits {
     /// built-in check accepts it (`AccuracyModel::metric_can_meet`); an
     /// exact target accepts no error.
     pub(crate) fn of(target: &AccuracyTarget, values_per_result: Option<u64>) -> Self {
+        if target.is_exact() {
+            return Self::EXACT;
+        }
         let error_bound_limit = std::array::from_fn(|m| {
             if BuiltinAccuracyModel.metric_can_meet(METRICS[m], target) {
                 target.max_error * (1.0 + TARGET_TOLERANCE) + f64::EPSILON
@@ -647,12 +650,7 @@ impl RootAccuracyLimits {
                 0.0
             }
         });
-        let failure_probability = if target.is_exact() {
-            Some(0.0)
-        } else {
-            target.failure_probability
-        };
-        let failure_probability_limit = failure_probability.map(|delta| {
+        let failure_probability_limit = target.failure_probability.map(|delta| {
             match target.accuracy_scope.max_values_covered(values_per_result) {
                 Some(values) if values > 0 => {
                     delta * (1.0 + TARGET_TOLERANCE) / values as f64 + f64::EPSILON
@@ -712,5 +710,189 @@ pub(crate) fn returns_its_output_unchanged<C>(root: &QueryRoot<C>) -> bool {
             expression,
             ScalarExpr::PromqlScalarFromVector(_) | ScalarExpr::ScalarSubquery(_)
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use asap_types::ir::operator::operator_properties::{Reduction, Source};
+    use asap_types::ir::properties::AccuracyScope;
+    use asap_types::ir::schema::{DataType, Field, GroupingStrategy, Schema};
+    use asap_types::stages::{
+        parameter_list, CandidateExpression, CandidateForMemoGroup, LogicalProperties,
+        OriginOfCandidateForMemoGroup,
+    };
+    use asap_types::workload::SourceFacts;
+
+    /// A rank target accepts only rank errors; a whole-result δ over `G`
+    /// values allows δ / G per value, none when `G` is not bound; a
+    /// per-value target allows δ; no δ target sets no limit; an exact
+    /// target allows nothing.
+    #[test]
+    fn root_limits_accept_the_target_s_metric_and_divide_delta_over_its_scope() {
+        let rank = AccuracyTarget::max_error(0.01)
+            .accuracy_metric(AccuracyMetric::Rank)
+            .failure_probability(0.01);
+        let limits = RootAccuracyLimits::of(&rank, Some(1_000));
+        for (m, &metric) in METRICS.iter().enumerate() {
+            let expected = if metric == AccuracyMetric::Rank {
+                0.01
+            } else {
+                0.0
+            };
+            assert!(
+                (limits.error_bound_limit[m] - expected).abs() < 1e-9,
+                "{metric:?}"
+            );
+        }
+        let per_value_delta = limits.failure_probability_limit.unwrap();
+        assert!((per_value_delta - 1e-5).abs() < 1e-9);
+        assert_eq!(
+            RootAccuracyLimits::of(&rank, None).failure_probability_limit,
+            Some(0.0)
+        );
+        let per_value = rank.clone().accuracy_scope(AccuracyScope::PerValue);
+        assert!(
+            (RootAccuracyLimits::of(&per_value, None)
+                .failure_probability_limit
+                .unwrap()
+                - 0.01)
+                .abs()
+                < 1e-9
+        );
+        let any_metric = AccuracyTarget::max_error(0.05);
+        let limits = RootAccuracyLimits::of(&any_metric, None);
+        assert!(limits.error_bound_limit.iter().all(|&limit| limit >= 0.05));
+        assert_eq!(limits.failure_probability_limit, None);
+        assert_eq!(
+            RootAccuracyLimits::of(&AccuracyTarget::exact(), Some(10)),
+            RootAccuracyLimits::EXACT
+        );
+    }
+
+    fn add(
+        memo: &mut Memo,
+        group: MemoGroupId,
+        operator: Operator<MemoGroupId>,
+        parameters: Option<SketchParams>,
+    ) {
+        let expression = CandidateExpression { operator };
+        let logical_properties = LogicalProperties::new(&expression, parameters, None).unwrap();
+        let input_requirements =
+            vec![LogicalRequirements::new(None); expression.operator.children().len()];
+        memo.add_candidate(
+            group,
+            CandidateForMemoGroup {
+                expression,
+                logical_properties,
+                input_requirements,
+                fused_groups: Vec::new(),
+                origin: OriginOfCandidateForMemoGroup::Pass1,
+            },
+        )
+        .unwrap();
+    }
+
+    /// The memo of `latency` scanned, one `algorithm` state with
+    /// `parameters` over it, and a readout group per quantile of
+    /// `quantiles`; returns it with the state group.
+    fn state_read_at(
+        algorithm: SketchAlgorithm,
+        parameters: &SketchParams,
+        quantiles: &[f64],
+    ) -> (Memo, MemoGroupId) {
+        let mut memo = Memo::default();
+        let scan = Operator::NonASAP(NonASAPOp::Scan {
+            source: Source::TimeSeries {
+                metric: "latency".into(),
+            },
+            predicates: vec![],
+            schema: Schema::with_time_index(
+                vec![
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("value", DataType::Float64, false),
+                ],
+                0,
+                vec![],
+            ),
+        });
+        let rows = memo.find_or_add_group(scan.clone()).unwrap();
+        add(&mut memo, rows, scan, None);
+        let build = Operator::ASAP(ASAPOp::SummaryAgg {
+            child: rows,
+            family: FieldDataType::Sketch(algorithm, GroupingStrategy::default()),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::PerEntity,
+            grouping: GroupingStrategy::default(),
+            filter: None,
+        });
+        let state = memo.find_or_add_group(build.clone()).unwrap();
+        add(&mut memo, state, build, Some(parameters.clone()));
+        for &q in quantiles {
+            let readout = Operator::ASAP(ASAPOp::SummaryEstimate {
+                summary_input: state,
+                query: SketchStatistic::Quantile { q },
+            });
+            let group = memo.find_or_add_group(readout.clone()).unwrap();
+            add(&mut memo, group, readout, None);
+        }
+        (memo, state)
+    }
+
+    fn own_of_state(memo: &Memo, state: MemoGroupId, data: &DataWorkload) -> OwnGuarantee {
+        let candidate = &memo.groups()[state.0 as usize].candidates[0];
+        own_guarantee(
+            memo,
+            state,
+            &candidate.expression.operator,
+            candidate.logical_properties.parameters(),
+            false,
+            data,
+        )
+    }
+
+    /// A KLL state read at p50 and p99 has its rank error once; a DDSketch
+    /// state read at an interior quantile has a relative error only over
+    /// values declared non-negative, at the maximum (an extremum) always.
+    #[test]
+    fn a_state_s_own_guarantee_is_its_reads_largest_error_per_metric() {
+        let kll = parameter_list(SketchAlgorithm::Kll)[2].clone();
+        let (memo, state) = state_read_at(SketchAlgorithm::Kll, &kll, &[0.5, 0.99]);
+        let own = own_of_state(&memo, state, &DataWorkload::default());
+        let expected = local_guarantee(
+            &FieldDataType::Sketch(SketchAlgorithm::Kll, GroupingStrategy::default()),
+            Some(&kll),
+            &SketchStatistic::Quantile { q: 0.5 },
+        )
+        .unwrap();
+        assert!(!own.without_guarantee);
+        assert_eq!(
+            own.error_bound[metric_index(AccuracyMetric::Rank)],
+            expected.spec.error.evaluate().unwrap()
+        );
+        assert_eq!(
+            own.failure_probability,
+            expected.spec.failure_probability.evaluate()
+        );
+        let ddsketch = SketchParams::DDSketch { alpha: 0.01 };
+        let (memo, state) = state_read_at(SketchAlgorithm::DDSketch, &ddsketch, &[0.5]);
+        assert!(own_of_state(&memo, state, &DataWorkload::default()).without_guarantee);
+        let mut declared = DataWorkload::default();
+        declared.sources.insert(
+            "latency".into(),
+            SourceFacts {
+                values_non_negative: true,
+                ..Default::default()
+            },
+        );
+        let own = own_of_state(&memo, state, &declared);
+        assert!(!own.without_guarantee);
+        assert_eq!(
+            own.error_bound[metric_index(AccuracyMetric::Relative)],
+            0.01
+        );
+        let (memo, state) = state_read_at(SketchAlgorithm::DDSketch, &ddsketch, &[1.0]);
+        assert!(!own_of_state(&memo, state, &DataWorkload::default()).without_guarantee);
     }
 }
