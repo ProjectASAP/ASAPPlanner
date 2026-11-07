@@ -1356,8 +1356,10 @@ Selection picks the cheapest plan that meets every query's accuracy target
 (constraint (K): each selected candidate's error bound per metric and
 failure probability, composed over the selected edges through each
 consumer's error contract, within the target at the query's root) unless the
-deployment's accuracy model accepts the query's output regardless of its
-guarantee (`IgnoreAccuracyGuarantees`). After the solve it checks each
+deployment's accuracy model may accept an output regardless of its guarantee
+or its evidence may meet a target (`IgnoreAccuracyGuarantees`, or a custom
+model or evidence provider): then (K) applies to no query and the check
+after the solve decides. After the solve it checks each
 query's composed guarantee again with the deployment's accuracy model and
 evidence; an output none accepts is an error
 (`ErrorSelectingPlan::SelectedPlanFailedCheck`). Latency bounds and cluster
