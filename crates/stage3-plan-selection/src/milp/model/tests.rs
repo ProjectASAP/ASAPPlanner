@@ -243,7 +243,7 @@ fn solve_under(
 ) -> Result<SolvedSelection, SelectionMilpError> {
     let contexts = ExecutionContexts::new(physical, entries);
     let costs = uniform_costs(&contexts, costs, retention);
-    let errors = CandidateErrorModel::new(physical, accuracy.data);
+    let errors = CandidateErrorModel::new(physical, accuracy.data, contexts.executions().len());
     solve_selection(&SelectionInputs::new(
         physical,
         &contexts,
@@ -445,7 +445,7 @@ fn reference_minimum(
 ) -> Option<f64> {
     let contexts = ExecutionContexts::new(physical, entries);
     let execution_costs = uniform_costs(&contexts, costs, retention);
-    let errors = CandidateErrorModel::new(physical, accuracy.data);
+    let errors = CandidateErrorModel::new(physical, accuracy.data, contexts.executions().len());
     let inputs = SelectionInputs::new(
         physical,
         &contexts,
@@ -1496,6 +1496,22 @@ fn a_ddsketch_interior_quantile_needs_non_negative_values() {
         .unwrap_err(),
         SelectionMilpError::Infeasible
     );
+    // Declared non-negative: B reads one DDSketch.
+    let data = non_negative_latency();
+    let declared = Accuracy {
+        data: &data,
+        root_limits: &root_limits,
+    };
+    let solved = solve_under(
+        &physical,
+        &problem_example_costs(),
+        &[],
+        &entries,
+        &declared,
+    )
+    .unwrap();
+    assert!(selected(&solved).contains(&RATIO));
+    assert_eq!(selected_parameters(&physical, &solved, 5..=8).len(), 1);
 }
 
 /// Failure probabilities add along the selected edges (a union bound),
@@ -1557,33 +1573,33 @@ fn failure_probabilities_add_along_the_selected_edges() {
     }
 }
 
-/// Big-M on the selected edge only: an input with an exact producer and
-/// a cheap approximate one whose error is over the target. The
-/// approximate producer's bound binds only when its edge is selected, so
-/// the exact one is chosen under a tight target and the cheap one under a
-/// loose target.
+/// Big-M on the selected edge only: A's p95 may read any of four KLL
+/// sizes, the smaller ones with a rank error over a tight target. Their
+/// bounds bind only on a selected edge, so a tight target is met by the
+/// cheapest size within it and a loose one by the cheapest of all; B's
+/// target is loose.
 #[test]
 fn a_producer_s_error_counts_only_on_its_selected_edge() {
     let physical = problem_example();
     let data = non_negative_latency();
     let costs = problem_example_costs();
-    // Only A; B is exact by every target here except through DDSketch, so
-    // it is left without (K).
     for (target, expected_kll) in [
         (0.01, smallest_kll_within(0.01)),
         (0.5, parameter_list(SketchAlgorithm::Kll)[0].clone()),
     ] {
         let entries = [
             entry_with(AccuracyTarget::max_error(target).accuracy_metric(AccuracyMetric::Rank)),
-            entry(0),
+            entry_with(AccuracyTarget::max_error(0.5).accuracy_metric(AccuracyMetric::Relative)),
         ];
-        let root_limits = [
-            Some(RootAccuracyLimits::of(
-                &entries[0].requirements.accuracy,
-                Some(1),
-            )),
-            None,
-        ];
+        let root_limits: Vec<_> = entries
+            .iter()
+            .map(|entry| {
+                Some(RootAccuracyLimits::of(
+                    &entry.requirements.accuracy,
+                    Some(1),
+                ))
+            })
+            .collect();
         let accuracy = Accuracy {
             data: &data,
             root_limits: &root_limits,
@@ -1630,4 +1646,60 @@ fn the_milp_agrees_with_the_reference_enumeration_under_accuracy() {
         };
         agrees_with_the_reference_under(&physical, &costs, &[], &entries, &accuracy);
     }
+}
+
+/// A read is judged on its own statistic: one DDSketch state read at the
+/// p50 (no relative guarantee over values not declared non-negative) and
+/// at the maximum (always one). The p50 query reads a KLL instead; the
+/// maximum's query still reads the DDSketch, whose other read lacks a
+/// guarantee.
+#[test]
+fn a_read_without_a_guarantee_does_not_affect_another_read_of_the_same_state() {
+    let mut memo = Memo::default();
+    let scan = latency_scan(&mut memo);
+    let kll = state_group(
+        &mut memo,
+        scan,
+        SketchAlgorithm::Kll,
+        &parameter_list(SketchAlgorithm::Kll)[..KLL_SIZES],
+    );
+    let ddsketch = state_group(
+        &mut memo,
+        scan,
+        SketchAlgorithm::DDSketch,
+        &[SketchParams::DDSketch { alpha: 0.01 }],
+    );
+    let p50 = quantile_group(&mut memo, kll, ddsketch, 0.5);
+    let maximum = memo.find_or_add_group(quantile(ddsketch, 1.0)).unwrap();
+    add(&mut memo, maximum, quantile(ddsketch, 1.0), None, None);
+    memo.add_query(QueryRoot::Operator(p50));
+    memo.add_query(QueryRoot::Operator(maximum));
+    let physical = all_at_query_time(memo);
+    let entries = [
+        entry_with(AccuracyTarget::max_error(0.05)),
+        entry_with(AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative)),
+    ];
+    let root_limits: Vec<_> = entries
+        .iter()
+        .map(|entry| {
+            Some(RootAccuracyLimits::of(
+                &entry.requirements.accuracy,
+                Some(1),
+            ))
+        })
+        .collect();
+    let accuracy = Accuracy {
+        data: &NO_DATA,
+        root_limits: &root_limits,
+    };
+    let costs = vec![Some(1.0); physical.physical_candidates.len()];
+    let solved = solve_under(&physical, &costs, &[], &entries, &accuracy).unwrap();
+    // The DDSketch (candidate 5) is read for the maximum (candidate 8);
+    // the p50 reads a KLL (candidate 6).
+    let chosen = selected(&solved);
+    assert!(
+        chosen.contains(&5) && chosen.contains(&8) && chosen.contains(&6),
+        "{chosen:?}"
+    );
+    agrees_with_the_reference_under(&physical, &costs, &[], &entries, &accuracy);
 }

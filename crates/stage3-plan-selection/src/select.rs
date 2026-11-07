@@ -21,13 +21,12 @@ use asap_types::stages::{
     ExecutionContextId, PhysicalASAPMemoCandidates, PhysicalCandidateError, PhysicalCandidateId,
     PruneReason, PrunedCandidate, RealizedPlan,
 };
-use asap_types::workload::bounds::{series_read, values_per_result};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use crate::execution_cost::{execution_costs, ExecutionCosts};
 use crate::milp::error_bounds::{
-    returns_its_output_unchanged, root_accuracy_limits, CandidateErrorModel, OwnGuarantee, METRICS,
-    METRIC_COUNT,
+    returns_its_output_unchanged, root_accuracy_limits, values_per_result_per_query,
+    CandidateErrorModel, ErrorBounds, METRICS, METRIC_COUNT,
 };
 use crate::milp::execution_contexts::{Execution, ExecutionContexts};
 use crate::milp::model::{solve_selection, SelectionInputs, SelectionMilpError, SolvedSelection};
@@ -111,16 +110,25 @@ pub fn select_plan(
             entries: entries.len(),
         });
     }
+    if entries.len() != accuracy_checks.query_roots.len() {
+        return Err(ErrorSelectingPlan::EntryCount {
+            candidate: "the accuracy check's query roots".into(),
+            roots: accuracy_checks.query_roots.len(),
+            entries: entries.len(),
+        });
+    }
     let formula_scale = cost_inputs.frozen_calibration_factor.unwrap_or(1.0);
     let contexts = ExecutionContexts::new(physical, entries);
     let costs = execution_costs(physical, &contexts, data, cost_inputs, formula_scale);
     let pruned_candidates = uncostable_candidates(physical, &contexts, &costs);
-    let errors = CandidateErrorModel::new(physical, data);
+    let errors = CandidateErrorModel::new(physical, data, contexts.executions().len());
+    // G_q, read by (K) and by the check after the solve.
+    let values_per_result = values_per_result_per_query(accuracy_checks.query_roots, data);
     let root_limits = root_accuracy_limits(
         entries,
-        accuracy_checks.query_roots,
-        data,
+        &values_per_result,
         accuracy_checks.model,
+        accuracy_checks.evidence,
     );
     let solved = solve_selection(&SelectionInputs::new(
         physical,
@@ -207,7 +215,7 @@ pub fn select_plan(
         &solved.selected_dag,
         &realized,
         entries,
-        data,
+        &values_per_result,
         accuracy_checks,
     )?;
     let validation_ms = validation_started.elapsed().as_millis() as u64;
@@ -440,20 +448,23 @@ fn inexact_terms(
 
 /// Per query, the accuracy accepted for the selected plan: its composed
 /// guarantee in `selected` ([`composed_guarantees`]), stated over the
-/// values its target's scope covers, checked with the deployment's model
-/// (`AccuracyModel::satisfies`), then its evidence for the realized output
+/// values its target's scope covers (`values_per_result[q]`, as (K)),
+/// checked with the deployment's model (`AccuracyModel::satisfies`), then
+/// its evidence for the realized output
 /// (`AccuracyEvidenceProvider::output_guarantee`). An output the model
 /// accepts regardless of its guarantee is accepted, recording the check's
 /// result. Err ([`ErrorSelectingPlan::SelectedPlanFailedCheck`]) for an
-/// output none accepts: a bug in the error model of (K), or a model
-/// stricter than the built-in rule (K) encodes.
+/// output none accepts: a bug in the error model of (K), a model stricter
+/// than the built-in rule (K) encodes, or, when (K) did not apply (a model
+/// or evidence that may accept outputs regardless), an output they did not
+/// accept.
 fn accepted_accuracy(
     physical: &PhysicalASAPMemoCandidates,
     errors: &CandidateErrorModel,
     selected: &DagOfSelectedCandidates,
     realized: &RealizedPlan,
     entries: &[QueryWorkloadEntry],
-    data: &asap_types::workload::DataWorkload,
+    values_per_result: &[Option<u64>],
     accuracy_checks: &AccuracyCheckInputs<'_>,
 ) -> Result<Vec<AcceptedAccuracy>, ErrorSelectingPlan> {
     let composed = errors.composed_errors(selected);
@@ -463,13 +474,13 @@ fn accepted_accuracy(
     for (query, (root, entry)) in realized.plan.roots.iter().zip(entries).enumerate() {
         let target = &entry.requirements.accuracy;
         let sketches = sketches_read(root);
-        let outputs: Vec<&OwnGuarantee> = references
+        let outputs: Vec<&ErrorBounds> = references
             .iter()
             .zip(&selected.node_of_output_reference)
             .filter(|((reference_query, _), _)| *reference_query == query)
             .map(|(_, node)| &composed[node.0])
             .collect();
-        let values = values_per_result(root, series_read(root, data), data);
+        let values = values_per_result[query];
         let guarantees = composed_guarantees(
             &outputs,
             returns_its_output_unchanged(&physical.query_roots[query]),
@@ -550,10 +561,10 @@ fn accepted_accuracy(
 /// guarantee, or when `unchanged` is false (a scalar root combining
 /// outputs, which has no error contract) and an output is not exact.
 fn composed_guarantees(
-    outputs: &[&OwnGuarantee],
+    outputs: &[&ErrorBounds],
     unchanged: bool,
 ) -> Option<Vec<AccuracyGuarantee>> {
-    let exact = |output: &OwnGuarantee| {
+    let exact = |output: &ErrorBounds| {
         !output.without_guarantee && output.error_bound.iter().all(|&e| e == 0.0)
     };
     if outputs.iter().all(|output| exact(output)) {

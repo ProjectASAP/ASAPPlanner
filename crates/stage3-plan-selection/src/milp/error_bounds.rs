@@ -1,26 +1,32 @@
-//! What constraint (K) reads (concepts doc, section 4): each physical
-//! candidate's own guarantee $\varepsilon^{\mathrm{loc}}_c$,
-//! $\delta^{\mathrm{loc}}_c$, its error contract $\beta_{c,i}$, $b_{c,i}$
-//! per metric (`LogicalRequirements::error_propagation`), the largest
-//! error bound it can carry (the big-M constants $M$), and each query's
-//! limits at its root ($\varepsilon_q$, $\delta_q$).
+//! What constraint (K) reads (concepts doc, section 4): the error of
+//! reading a summary state through each edge ($\varepsilon^{\mathrm{loc}}$,
+//! $\delta^{\mathrm{loc}}$), each candidate's error contract
+//! $\beta_{c,i}$, $b_{c,i}$ per metric
+//! (`LogicalRequirements::error_propagation`), the largest error bound it
+//! can carry (the big-M constants $M$), and each query's limits at its
+//! root ($\varepsilon_q$, $\delta_q$).
 //!
-//! Errors are tracked per metric (absolute, absolute in either stream norm,
-//! relative, rank): $E_{c,m}$. A consumer's contract in one metric says
-//! nothing about another, so an input error in a metric its contract does
-//! not carry must be zero when the edge is selected (the metric rule), and
-//! a root accepts only the metrics its target accepts.
+//! Errors are tracked per metric (absolute, absolute in either stream
+//! norm, relative, rank): $E_{c,m}$. A consumer's contract in one metric
+//! says nothing about another, so an input error in a metric its contract
+//! does not carry must be zero when the edge is selected (the metric rule),
+//! and a root accepts only the metrics its target accepts.
 //!
-//! A sketch state's own guarantee is the error of reading it: the
-//! statistics read from its group, directly or through merges
-//! ([`statistics_read`]), each through `asap_accuracy`'s local guarantee
-//! of its $\boldsymbol\theta$; per metric the largest of them, and the
-//! largest failure probability. A read whose guarantee needs a fact the
-//! data workload does not declare (non-negative values for a Count-Min
-//! count or a DDSketch interior quantile) has no guarantee.
+//! An approximation enters where a state is read: a readout of a statistic,
+//! or a merge, over a summary build with parameters $\boldsymbol\theta$.
+//! Its bound depends on both the producer's $\boldsymbol\theta$ and the
+//! statistic the consumer reads, so it is a constant per edge $(u, c)$
+//! ([`CandidateErrorModel::read_error_on_edge`]): $E_c \ge \sum_u
+//! \varepsilon^{\mathrm{loc}}_{u,c}\, y_{u,c,i} + \sum_i \beta_{c,i}
+//! F_{c,i}$, linear since one $y$ per input is 1. A read whose guarantee
+//! needs a fact the data workload does not declare (non-negative values
+//! for a Count-Min count or a DDSketch interior quantile) has none.
+
+use std::collections::HashMap;
 
 use asap_accuracy::estimators::{distinct_count_guarantee_over_source, local_guarantee};
-use asap_accuracy::{AccuracyModel, BuiltinAccuracyModel};
+use asap_accuracy::BuiltinAccuracyModel;
+use asap_accuracy::{AccuracyEvidenceProvider, AccuracyModel};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
 use asap_types::ir::scalar::ColumnRef;
@@ -53,11 +59,6 @@ pub(crate) const METRIC_COUNT: usize = 5;
 /// $\varepsilon$ exactly is not rejected by floating-point noise.
 const TARGET_TOLERANCE: f64 = 1e-9;
 
-/// The largest error bound or failure probability a ceiling is carried
-/// to: a larger one only rejects more plans (concepts doc: $M$ is any
-/// upper bound; a smaller one can only make (K) stricter).
-const CEILING_CAP: f64 = 1e6;
-
 /// The index of `metric` in [`METRICS`].
 fn metric_index(metric: AccuracyMetric) -> usize {
     METRICS
@@ -66,32 +67,44 @@ fn metric_index(metric: AccuracyMetric) -> usize {
         .expect("every metric a guarantee states is in METRICS")
 }
 
-/// One candidate's own guarantee.
+/// An error bound per metric and a failure probability, or no guarantee:
+/// the error of reading a state through one edge, or a selected node's
+/// composed error.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct OwnGuarantee {
-    /// $\varepsilon^{\mathrm{loc}}_{c,m}$, by metric index.
+pub(crate) struct ErrorBounds {
+    /// The error bound in each metric, by index into [`METRICS`].
     pub(crate) error_bound: [f64; METRIC_COUNT],
-    /// $\delta^{\mathrm{loc}}_c$; `None` when its guarantee leaves it
-    /// unknown (counted as 1 by (K)).
+    /// The failure probability; `None` when the guarantee leaves it
+    /// unknown ((K) counts it as 1).
     pub(crate) failure_probability: Option<f64>,
-    /// Its output carries an approximation without a guarantee the
-    /// planner can state (a read whose family has no error model, a merge
-    /// that does not keep the guarantee, an unproven sign).
+    /// Part of the output is an approximation without a guarantee the
+    /// planner can state (a family without an error model, a merge or
+    /// tumbling windows that do not keep the guarantee, an unproven sign).
     pub(crate) without_guarantee: bool,
 }
 
-impl OwnGuarantee {
-    const EXACT: Self = Self {
+impl ErrorBounds {
+    pub(crate) const EXACT: Self = Self {
         error_bound: [0.0; METRIC_COUNT],
         failure_probability: Some(0.0),
         without_guarantee: false,
     };
+
+    const WITHOUT_GUARANTEE: Self = Self {
+        without_guarantee: true,
+        ..Self::EXACT
+    };
+
+    /// Adds `other`'s failure probability (a union bound; unknown stays
+    /// unknown).
+    fn add_failure_probability(&mut self, other: Option<f64>) {
+        self.failure_probability = self.failure_probability.zip(other).map(|(a, b)| a + b);
+    }
 }
 
 /// Each physical candidate's error model, by [`PhysicalCandidateId`]
 /// ([`Self::new`]).
 pub(crate) struct CandidateErrorModel {
-    own: Vec<OwnGuarantee>,
     /// `error_propagation(c, m)` by metric index: $\beta_{c,i}$ and
     /// $b_{c,i}$, `None` without a contract in that metric.
     propagation: Vec<[Option<ErrorPropagation>; METRIC_COUNT]>,
@@ -100,10 +113,15 @@ pub(crate) struct CandidateErrorModel {
     value_preserving: Vec<bool>,
     /// $|\mathcal I(c)|$.
     input_count: Vec<usize>,
-    /// The largest $E_{c,m}$ any selection gives (capped at
-    /// [`CEILING_CAP`]); 0 when `c` never carries an `m` error.
+    /// $\varepsilon^{\mathrm{loc}}_{u,c}$, $\delta^{\mathrm{loc}}_{u,c}$
+    /// of each admissible edge on which consumer `c` reads a state that
+    /// summary build `u` builds, by (producer, consumer) id; absent when
+    /// the read is exact.
+    read_error_on_edge: HashMap<(usize, usize), ErrorBounds>,
+    /// The largest $E_{c,m}$ any selection gives; 0 when `c` never
+    /// carries an `m` error.
     error_bound_ceiling: Vec<[f64; METRIC_COUNT]>,
-    /// The largest $D_c$ any selection gives (capped).
+    /// The largest $D_c$ any selection gives.
     failure_probability_ceiling: Vec<f64>,
     /// Whether some selection gives `c`'s output a part without a
     /// guarantee.
@@ -112,33 +130,25 @@ pub(crate) struct CandidateErrorModel {
 
 impl CandidateErrorModel {
     /// The error model of `physical`'s candidates, the data workload
-    /// `data` answering the facts their guarantees need (values' signs,
-    /// a source's distinct bound).
-    pub(crate) fn new(physical: &PhysicalASAPMemoCandidates, data: &DataWorkload) -> Self {
+    /// `data` answering the facts the guarantees need (values' signs, a
+    /// source's distinct bound). `longest_path` bounds the edges of a
+    /// selected path (the executions), for the ceilings.
+    pub(crate) fn new(
+        physical: &PhysicalASAPMemoCandidates,
+        data: &DataWorkload,
+        longest_path: usize,
+    ) -> Self {
         let memo = &physical.logical_candidates.memo;
-        let operator = |c: usize| {
-            &memo
-                .candidate(physical.physical_candidates[c].logical_candidate_id)
-                .expression
-                .operator
-        };
+        let logical =
+            |c: usize| memo.candidate(physical.physical_candidates[c].logical_candidate_id);
         let count = physical.physical_candidates.len();
-        let mut own = Vec::with_capacity(count);
         let mut propagation = Vec::with_capacity(count);
         let mut value_preserving = Vec::with_capacity(count);
         let mut input_count = Vec::with_capacity(count);
-        for (c, candidate) in physical.physical_candidates.iter().enumerate() {
-            let logical = memo.candidate(candidate.logical_candidate_id);
-            own.push(own_guarantee(
-                memo,
-                candidate.logical_candidate_id.group,
-                operator(c),
-                logical.logical_properties.parameters(),
-                logical.logical_properties.window_layout().is_some(),
-                data,
-            ));
+        for c in 0..count {
+            let operator = &logical(c).expression.operator;
             let contracts: [Option<ErrorPropagation>; METRIC_COUNT] = std::array::from_fn(|m| {
-                LogicalRequirements::error_propagation(operator(c), METRICS[m])
+                LogicalRequirements::error_propagation(operator, METRICS[m])
             });
             value_preserving.push(contracts.iter().all(|contract| {
                 contract
@@ -146,72 +156,110 @@ impl CandidateErrorModel {
                     .is_some_and(|p| p.factor_per_input.iter().all(|&factor| factor == 1.0))
             }));
             propagation.push(contracts);
-            input_count.push(operator(c).children().len());
+            input_count.push(operator.children().len());
+        }
+        // The reads, once per (producer, consumer) and statistics read.
+        let mut statistics_of_group: HashMap<MemoGroupId, Vec<SketchStatistic>> = HashMap::new();
+        let mut read_error_on_edge = HashMap::new();
+        for (_, edge) in physical.edges() {
+            if !(edge.satisfies_logical_requirement && edge.satisfies_physical_requirement) {
+                continue;
+            }
+            let (u, c) = (edge.producer_candidate_id.0, edge.consumer_candidate_id.0);
+            let statistics = match &logical(c).expression.operator {
+                Operator::ASAP(ASAPOp::SummaryEstimate { query, .. }) => vec![query.clone()],
+                Operator::ASAP(ASAPOp::SummaryMerge { .. }) => {
+                    let group = physical.physical_candidates[c].logical_candidate_id.group;
+                    statistics_of_group
+                        .entry(group)
+                        .or_insert_with(|| statistics_read(memo, group))
+                        .clone()
+                }
+                _ => continue,
+            };
+            let producer = logical(u);
+            let read = read_bounds(
+                memo,
+                &producer.expression.operator,
+                producer.logical_properties.parameters(),
+                producer.logical_properties.window_layout().is_some(),
+                &statistics,
+                matches!(
+                    logical(c).expression.operator,
+                    Operator::ASAP(ASAPOp::SummaryMerge { .. })
+                ),
+                data,
+            );
+            if read != ErrorBounds::EXACT {
+                read_error_on_edge.insert((u, c), read);
+            }
         }
         let mut model = Self {
-            own,
             propagation,
             value_preserving,
             input_count,
+            read_error_on_edge,
             error_bound_ceiling: Vec::new(),
             failure_probability_ceiling: Vec::new(),
             may_lack_guarantee: Vec::new(),
         };
-        model.set_ceilings(physical);
+        model.set_ceilings(physical, longest_path);
         model
     }
 
     /// The ceilings over `physical`'s admissible edges: rounds of
-    /// $\bar E_{c,m} = \varepsilon^{\mathrm{loc}}_{c,m} + \sum_i
-    /// \beta_{c,i,m} \max_{u \in P_{c,i}} \bar E_{u,m}$ (an input whose
-    /// contract does not carry $m$ adds nothing: (K) makes it zero), and
-    /// likewise for $D$ and the lack of a guarantee, until nothing changes.
-    /// A selection is acyclic, so its error is reached within as many
-    /// rounds as there are candidates; the rounds stop there.
-    fn set_ceilings(&mut self, physical: &PhysicalASAPMemoCandidates) {
-        let count = self.own.len();
+    /// $\bar E_{c,m} = \sum_i \max_{u \in P_{c,i}} (\beta_{c,i,m} \bar
+    /// E_{u,m} + \varepsilon^{\mathrm{loc}}_{u,c,m})$ (an input whose
+    /// contract does not carry $m$ passes nothing on: (K) makes it zero),
+    /// likewise for $D$ (an unknown failure probability as 1) and the lack
+    /// of a guarantee, until nothing changes. After $k$ rounds a ceiling
+    /// bounds every selected path of at most $k$ edges, so stopping after
+    /// `longest_path` rounds bounds every acyclic selection: each is a valid
+    /// $M$. (On a cycle that carries error the ceilings grow with the
+    /// rounds; none occurs in the workloads tested.)
+    fn set_ceilings(&mut self, physical: &PhysicalASAPMemoCandidates, longest_path: usize) {
+        let count = self.input_count.len();
         let edges: Vec<_> = physical.edges().map(|(_, edge)| edge).collect();
         let mut error = vec![[0.0; METRIC_COUNT]; count];
         let mut failure = vec![0.0; count];
         let mut lacks = vec![false; count];
-        for _ in 0..count.max(1) {
+        for _ in 0..longest_path.max(1) {
             let mut changed = false;
             for c in 0..count {
-                let own = &self.own[c];
-                let mut next_error = own.error_bound;
-                let mut next_failure = own.failure_probability.unwrap_or(1.0);
-                let mut next_lacks = own.without_guarantee;
+                let mut next_error = [0.0; METRIC_COUNT];
+                let mut next_failure = 0.0;
+                let mut next_lacks = false;
                 for input in 0..self.input_count[c] {
-                    let producers = physical
-                        .admissible_edges_into(PhysicalCandidateId(c), input)
-                        .iter()
-                        .map(|edge| edges[edge.0].producer_candidate_id.0);
                     let mut largest_error = [0.0_f64; METRIC_COUNT];
                     let mut largest_failure = 0.0_f64;
-                    let mut any_lacks = false;
-                    for u in producers {
+                    for edge in physical.admissible_edges_into(PhysicalCandidateId(c), input) {
+                        let u = edges[edge.0].producer_candidate_id.0;
+                        let read = self.read_error_on_edge(u, c);
                         for m in 0..METRIC_COUNT {
-                            largest_error[m] = largest_error[m].max(error[u][m]);
+                            let carried = self.factor(c, input, m).unwrap_or(0.0) * error[u][m];
+                            largest_error[m] = largest_error[m].max(carried + read.error_bound[m]);
                         }
-                        largest_failure = largest_failure.max(failure[u]);
-                        any_lacks |= lacks[u];
+                        let carried = if self.propagates_failure(c, input) {
+                            failure[u]
+                        } else {
+                            0.0
+                        };
+                        largest_failure =
+                            largest_failure.max(carried + read.failure_probability.unwrap_or(1.0));
+                        next_lacks |=
+                            read.without_guarantee || (lacks[u] && self.value_preserving[c]);
                     }
-                    for (m, largest) in largest_error.iter().enumerate() {
-                        next_error[m] += self.factor(c, input, m).unwrap_or(0.0) * largest;
+                    for m in 0..METRIC_COUNT {
+                        next_error[m] += largest_error[m];
                     }
-                    if self.propagates_failure(c, input) {
-                        next_failure += largest_failure;
-                    }
-                    next_lacks |= any_lacks && self.value_preserving[c];
+                    next_failure += largest_failure;
                 }
                 for m in 0..METRIC_COUNT {
-                    let next = next_error[m].min(CEILING_CAP);
-                    if next > error[c][m] {
-                        error[c][m] = next;
+                    if next_error[m] > error[c][m] {
+                        error[c][m] = next_error[m];
                         changed = true;
                     }
                 }
-                let next_failure = next_failure.min(CEILING_CAP);
                 if next_failure > failure[c] {
                     failure[c] = next_failure;
                     changed = true;
@@ -228,6 +276,15 @@ impl CandidateErrorModel {
         self.error_bound_ceiling = error;
         self.failure_probability_ceiling = failure;
         self.may_lack_guarantee = lacks;
+    }
+
+    /// $\varepsilon^{\mathrm{loc}}_{u,c}$, $\delta^{\mathrm{loc}}_{u,c}$ of
+    /// consumer `c` reading producer `u`: exact unless `c` reads a state
+    /// `u` builds.
+    pub(crate) fn read_error_on_edge(&self, u: usize, c: usize) -> &ErrorBounds {
+        self.read_error_on_edge
+            .get(&(u, c))
+            .unwrap_or(&ErrorBounds::EXACT)
     }
 
     /// $\beta_{c,i}$ in metric `m`, `None` without a contract in it.
@@ -253,10 +310,6 @@ impl CandidateErrorModel {
             || (0..METRIC_COUNT).any(|m| self.factor(c, input, m).is_some_and(|f| f > 0.0))
     }
 
-    pub(crate) fn own(&self, c: usize) -> &OwnGuarantee {
-        &self.own[c]
-    }
-
     pub(crate) fn value_preserving(&self, c: usize) -> bool {
         self.value_preserving[c]
     }
@@ -274,22 +327,20 @@ impl CandidateErrorModel {
     pub(crate) fn may_lack_guarantee(&self, c: usize) -> bool {
         self.may_lack_guarantee[c]
     }
-}
 
-impl CandidateErrorModel {
     /// The composed error of every node of `selected` (section 4: the
     /// root conditions over the selected edges, with no big-M), by
-    /// `SelectedNodeId`: its own guarantee plus $\beta$ times each input's,
-    /// failure probabilities by a union bound. An input error the
-    /// consumer's contract does not carry (the metric rule), or one over its
-    /// validity cap, leaves the output without a guarantee.
-    pub(crate) fn composed_errors(&self, selected: &DagOfSelectedCandidates) -> Vec<OwnGuarantee> {
+    /// `SelectedNodeId`: per input, its read error plus $\beta$ times the
+    /// producer's error, failure probabilities by a union bound. An input
+    /// error the consumer's contract does not carry (the metric rule), or
+    /// one over its validity cap, leaves the output without a guarantee.
+    pub(crate) fn composed_errors(&self, selected: &DagOfSelectedCandidates) -> Vec<ErrorBounds> {
         let nodes = selected.candidate_of_node.len();
         let mut producers: Vec<Vec<(usize, usize)>> = vec![Vec::new(); nodes];
         for edge in &selected.edges {
             producers[edge.consumer.0].push((edge.input_index_of_consumer, edge.producer.0));
         }
-        let mut composed: Vec<Option<OwnGuarantee>> = vec![None; nodes];
+        let mut composed: Vec<Option<ErrorBounds>> = vec![None; nodes];
         // Depth first, inputs before their consumer; the selection is acyclic.
         for start in 0..nodes {
             let mut stack = vec![(start, false)];
@@ -308,35 +359,36 @@ impl CandidateErrorModel {
                     continue;
                 }
                 let c = selected.candidate_of_node[node].0;
-                let mut error = self.own[c].clone();
+                let mut error = ErrorBounds::EXACT;
                 for &(input, producer) in &producers[node] {
-                    let read = composed[producer]
+                    let u = selected.candidate_of_node[producer].0;
+                    let produced = composed[producer]
                         .as_ref()
                         .expect("an acyclic selection composes inputs first");
+                    let read = self.read_error_on_edge(u, c);
                     for m in 0..METRIC_COUNT {
-                        if read.error_bound[m] == 0.0 {
+                        error.error_bound[m] += read.error_bound[m];
+                        if produced.error_bound[m] == 0.0 {
                             continue;
                         }
                         match self.factor(c, input, m) {
-                            Some(factor) => error.error_bound[m] += factor * read.error_bound[m],
+                            Some(factor) => {
+                                error.error_bound[m] += factor * produced.error_bound[m]
+                            }
                             None => error.without_guarantee = true,
                         }
                         if self
                             .validity_cap(c, input, m)
-                            .is_some_and(|cap| read.error_bound[m] > cap)
+                            .is_some_and(|cap| produced.error_bound[m] > cap)
                         {
                             error.without_guarantee = true;
                         }
                     }
+                    error.add_failure_probability(read.failure_probability);
                     if self.propagates_failure(c, input) {
-                        error.failure_probability = error
-                            .failure_probability
-                            .zip(read.failure_probability)
-                            .map(|(own, read)| own + read);
+                        error.add_failure_probability(produced.failure_probability);
                     }
-                    if read.without_guarantee {
-                        error.without_guarantee = true;
-                    }
+                    error.without_guarantee |= read.without_guarantee || produced.without_guarantee;
                 }
                 composed[node] = Some(error);
             }
@@ -348,105 +400,78 @@ impl CandidateErrorModel {
     }
 }
 
-/// The own guarantee of the candidate `operator` of group `group`, with
-/// $\boldsymbol\theta$ `parameters`, built over tumbling windows when
-/// `windowed`:
-/// - a sketch build: for each statistic read from its group
-///   ([`statistics_read`]), the guarantee of reading it
-///   ([`read_guarantee`]); per metric the largest error, the largest
-///   failure probability; no guarantee when one read has none;
-/// - a build of a sample, wavelet or model state: no guarantee (no error
-///   model);
-/// - a merge of sketch states whose family's merged state does not keep
-///   the guarantee of a statistic read from it: no guarantee;
-/// - every other candidate: exact (its error comes from its inputs).
-fn own_guarantee(
+/// The error of consumer reads of `statistics` (a readout's one, or every
+/// statistic read from a merge's group, when `merge`) from producer
+/// `operator` with $\boldsymbol\theta$ `parameters`, built over tumbling
+/// windows when `windowed`: exact unless `operator` builds a summary state;
+/// for a sketch build, per metric the largest error and the largest
+/// failure probability of the reads ([`read_guarantee`]); no guarantee
+/// when one read has none, when a merge's family does not keep a
+/// statistic's guarantee, or for a sample, wavelet or model state (no
+/// error model).
+fn read_bounds(
     memo: &Memo,
-    group: MemoGroupId,
     operator: &Operator<MemoGroupId>,
     parameters: Option<&SketchParams>,
     windowed: bool,
+    statistics: &[SketchStatistic],
+    merge: bool,
     data: &DataWorkload,
-) -> OwnGuarantee {
-    let without_guarantee = OwnGuarantee {
-        without_guarantee: true,
-        ..OwnGuarantee::EXACT
-    };
-    match operator {
-        Operator::ASAP(
-            ASAPOp::SummaryAgg {
-                family,
-                input,
-                child,
-                ..
-            }
-            | ASAPOp::SummaryTumblingWindowChain {
-                family,
-                input,
-                child,
-                ..
-            },
-        ) => match family {
-            FieldDataType::Sketch(..) => {
-                let windowed = windowed
-                    || matches!(
-                        operator,
-                        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
-                    );
-                let mut own = OwnGuarantee::EXACT;
-                for statistic in statistics_read(memo, group) {
-                    let Some(read) = read_guarantee(
-                        memo, family, parameters, windowed, input, *child, &statistic, data,
-                    ) else {
-                        return without_guarantee;
-                    };
-                    let m = metric_index(read.metric);
-                    own.error_bound[m] = own.error_bound[m].max(read.error_bound);
-                    own.failure_probability =
-                        match (own.failure_probability, read.failure_probability) {
-                            (Some(a), Some(b)) => Some(a.max(b)),
-                            _ => None,
-                        };
-                }
-                own
-            }
-            FieldDataType::ExactAggregate(..) | FieldDataType::Plain(_) => OwnGuarantee::EXACT,
-            FieldDataType::SummarySample(..)
-            | FieldDataType::Wavelet(..)
-            | FieldDataType::StatModel(..) => without_guarantee,
-        },
-        Operator::ASAP(ASAPOp::SummaryMerge { children, .. }) => {
-            let statistics = statistics_read(memo, group);
-            let keeps = children.iter().all(|&child| {
-                match state_family(&memo.groups()[child.0 as usize].expression) {
-                    Some(family @ FieldDataType::Sketch(..)) => statistics.iter().all(|s| {
-                        matches!(
-                            FamilyCapability::of(family).merged_error(s),
-                            Some(MergedError::Exact | MergedError::AsIfBuiltOverUnion)
-                        )
-                    }),
-                    // An exact state merges exactly; a merge over a merge
-                    // or another state is judged at its own level.
-                    _ => true,
-                }
-            });
-            if keeps {
-                OwnGuarantee::EXACT
-            } else {
-                without_guarantee
-            }
+) -> ErrorBounds {
+    let Operator::ASAP(
+        ASAPOp::SummaryAgg {
+            family,
+            input,
+            child,
+            ..
         }
-        _ => OwnGuarantee::EXACT,
-    }
-}
-
-/// The family a state build's expression builds; `None` for any other.
-fn state_family(operator: &Operator<MemoGroupId>) -> Option<&FieldDataType> {
-    match operator {
-        Operator::ASAP(
-            ASAPOp::SummaryAgg { family, .. } | ASAPOp::SummaryTumblingWindowChain { family, .. },
-        ) => Some(family),
-        _ => None,
+        | ASAPOp::SummaryTumblingWindowChain {
+            family,
+            input,
+            child,
+            ..
+        },
+    ) = operator
+    else {
+        return ErrorBounds::EXACT;
+    };
+    match family {
+        FieldDataType::ExactAggregate(..) | FieldDataType::Plain(_) => ErrorBounds::EXACT,
+        FieldDataType::SummarySample(..)
+        | FieldDataType::Wavelet(..)
+        | FieldDataType::StatModel(..) => ErrorBounds::WITHOUT_GUARANTEE,
+        FieldDataType::Sketch(..) => {
+            let windowed = windowed
+                || matches!(
+                    operator,
+                    Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+                );
+            let mut bounds = ErrorBounds {
+                failure_probability: Some(0.0),
+                ..ErrorBounds::EXACT
+            };
+            for statistic in statistics {
+                let Some(read) = read_guarantee(
+                    memo,
+                    family,
+                    parameters,
+                    windowed || merge,
+                    input,
+                    *child,
+                    statistic,
+                    data,
+                ) else {
+                    return ErrorBounds::WITHOUT_GUARANTEE;
+                };
+                let m = metric_index(read.metric);
+                bounds.error_bound[m] = bounds.error_bound[m].max(read.error_bound);
+                bounds.failure_probability = bounds
+                    .failure_probability
+                    .zip(read.failure_probability)
+                    .map(|(a, b)| a.max(b));
+            }
+            bounds
+        }
     }
 }
 
@@ -491,10 +516,10 @@ struct ReadGuarantee {
 
 /// The guarantee of reading `statistic` from a sketch build of `family`
 /// with $\boldsymbol\theta$ `parameters` over `update`s of group `rows`
-/// (merged from its tumbling windows when `windowed`); `None` when it has
-/// none:
-/// - a windowed build whose family's merged state does not keep the
-///   statistic's guarantee (the family-capability table);
+/// (merged, from its tumbling windows or by a merge, when `merged`);
+/// `None` when it has none:
+/// - a merged state whose family does not keep the statistic's guarantee
+///   (the family-capability table);
 /// - no local guarantee (`asap_accuracy::estimators::local_guarantee`), or
 ///   an error bound it leaves unknown;
 /// - a Count-Min count, or a DDSketch interior quantile, over values not
@@ -508,7 +533,7 @@ fn read_guarantee(
     memo: &Memo,
     family: &FieldDataType,
     parameters: Option<&SketchParams>,
-    windowed: bool,
+    merged: bool,
     update: &SummaryUpdate,
     rows: MemoGroupId,
     statistic: &SketchStatistic,
@@ -517,7 +542,7 @@ fn read_guarantee(
     let FieldDataType::Sketch(algorithm, _) = family else {
         return None;
     };
-    if windowed
+    if merged
         && !matches!(
             FamilyCapability::of(family).merged_error(statistic),
             Some(MergedError::Exact | MergedError::AsIfBuiltOverUnion)
@@ -672,28 +697,38 @@ impl RootAccuracyLimits {
     };
 }
 
-/// Each query's root limits, by query: `None` when (K) does not apply to
-/// it, because the deployment's accuracy model accepts its output
-/// whatever its guarantee (`AccuracyModel::accepts_output_regardless_of_guarantee`
-/// on the root the front ends lowered, `query_roots[q]`; e.g.
-/// `IgnoreAccuracyGuarantees`). $G_q$ is `values_per_result` of that root.
-pub(crate) fn root_accuracy_limits(
-    entries: &[QueryWorkloadEntry],
+/// How many values one evaluation of each query returns ($G_q$), by
+/// query: `values_per_result` of the root the front ends lowered.
+pub(crate) fn values_per_result_per_query(
     query_roots: &[QueryRoot],
     data: &DataWorkload,
+) -> Vec<Option<u64>> {
+    query_roots
+        .iter()
+        .map(|root| values_per_result(root, series_read(root, data), data))
+        .collect()
+}
+
+/// Each query's root limits, by query, `values_per_result[q]` its $G_q$;
+/// every one `None` ((K) applies to no query) when the deployment's model
+/// may accept an output regardless of its guarantee or its evidence may
+/// meet a target (`AccuracyModel::may_accept_regardless_of_guarantee`,
+/// `AccuracyEvidenceProvider::may_provide_evidence`, e.g.
+/// `IgnoreAccuracyGuarantees`): their contract is that plan selection then
+/// keeps every candidate a guarantee would rule out, and the check after
+/// the solve decides.
+pub(crate) fn root_accuracy_limits(
+    entries: &[QueryWorkloadEntry],
+    values_per_result: &[Option<u64>],
     model: &dyn AccuracyModel,
+    evidence: &dyn AccuracyEvidenceProvider,
 ) -> Vec<Option<RootAccuracyLimits>> {
+    let applies = !model.may_accept_regardless_of_guarantee() && !evidence.may_provide_evidence();
     entries
         .iter()
-        .enumerate()
-        .map(|(query, entry)| {
-            let target = &entry.requirements.accuracy;
-            let root = query_roots.get(query)?;
-            if model.accepts_output_regardless_of_guarantee(root, target) {
-                return None;
-            }
-            let values = values_per_result(root, series_read(root, data), data);
-            Some(RootAccuracyLimits::of(target, values))
+        .zip(values_per_result)
+        .map(|(entry, &values)| {
+            applies.then(|| RootAccuracyLimits::of(&entry.requirements.accuracy, values))
         })
         .collect()
 }
@@ -840,44 +875,75 @@ mod tests {
         (memo, state)
     }
 
-    fn own_of_state(memo: &Memo, state: MemoGroupId, data: &DataWorkload) -> OwnGuarantee {
+    /// The error of reading `statistics` from `state`'s first candidate,
+    /// by a readout (`merge` false) or a merge.
+    fn read(
+        memo: &Memo,
+        state: MemoGroupId,
+        statistics: &[SketchStatistic],
+        merge: bool,
+        data: &DataWorkload,
+    ) -> ErrorBounds {
         let candidate = &memo.groups()[state.0 as usize].candidates[0];
-        own_guarantee(
+        read_bounds(
             memo,
-            state,
             &candidate.expression.operator,
             candidate.logical_properties.parameters(),
             false,
+            statistics,
+            merge,
             data,
         )
     }
 
-    /// A KLL state read at p50 and p99 has its rank error once; a DDSketch
-    /// state read at an interior quantile has a relative error only over
-    /// values declared non-negative, at the maximum (an extremum) always.
+    fn quantile(q: f64) -> SketchStatistic {
+        SketchStatistic::Quantile { q }
+    }
+
+    /// A read's error is its own statistic's on the producer's θ: a KLL
+    /// read has its rank error; a DDSketch read at an interior quantile has
+    /// a relative error only over values declared non-negative, while a
+    /// read of the same state at the maximum (an extremum) always has one.
+    /// A merge reading several statistics takes the largest per metric and
+    /// has no guarantee when one of them has none.
     #[test]
-    fn a_state_s_own_guarantee_is_its_reads_largest_error_per_metric() {
+    fn a_read_s_error_is_its_statistic_s_on_the_producer_s_parameters() {
         let kll = parameter_list(SketchAlgorithm::Kll)[2].clone();
         let (memo, state) = state_read_at(SketchAlgorithm::Kll, &kll, &[0.5, 0.99]);
-        let own = own_of_state(&memo, state, &DataWorkload::default());
         let expected = local_guarantee(
             &FieldDataType::Sketch(SketchAlgorithm::Kll, GroupingStrategy::default()),
             Some(&kll),
-            &SketchStatistic::Quantile { q: 0.5 },
+            &quantile(0.5),
         )
         .unwrap();
-        assert!(!own.without_guarantee);
+        let bounds = read(
+            &memo,
+            state,
+            &[quantile(0.5)],
+            false,
+            &DataWorkload::default(),
+        );
+        assert!(!bounds.without_guarantee);
         assert_eq!(
-            own.error_bound[metric_index(AccuracyMetric::Rank)],
+            bounds.error_bound[metric_index(AccuracyMetric::Rank)],
             expected.spec.error.evaluate().unwrap()
         );
         assert_eq!(
-            own.failure_probability,
+            bounds.failure_probability,
             expected.spec.failure_probability.evaluate()
         );
         let ddsketch = SketchParams::DDSketch { alpha: 0.01 };
-        let (memo, state) = state_read_at(SketchAlgorithm::DDSketch, &ddsketch, &[0.5]);
-        assert!(own_of_state(&memo, state, &DataWorkload::default()).without_guarantee);
+        let (memo, state) = state_read_at(SketchAlgorithm::DDSketch, &ddsketch, &[0.5, 1.0]);
+        let undeclared = DataWorkload::default();
+        assert!(read(&memo, state, &[quantile(0.5)], false, &undeclared).without_guarantee);
+        let at_the_maximum = read(&memo, state, &[quantile(1.0)], false, &undeclared);
+        assert!(!at_the_maximum.without_guarantee);
+        assert_eq!(
+            at_the_maximum.error_bound[metric_index(AccuracyMetric::Relative)],
+            0.01
+        );
+        let both = [quantile(0.5), quantile(1.0)];
+        assert!(read(&memo, state, &both, true, &undeclared).without_guarantee);
         let mut declared = DataWorkload::default();
         declared.sources.insert(
             "latency".into(),
@@ -886,13 +952,11 @@ mod tests {
                 ..Default::default()
             },
         );
-        let own = own_of_state(&memo, state, &declared);
-        assert!(!own.without_guarantee);
+        let merged = read(&memo, state, &both, true, &declared);
+        assert!(!merged.without_guarantee);
         assert_eq!(
-            own.error_bound[metric_index(AccuracyMetric::Relative)],
+            merged.error_bound[metric_index(AccuracyMetric::Relative)],
             0.01
         );
-        let (memo, state) = state_read_at(SketchAlgorithm::DDSketch, &ddsketch, &[1.0]);
-        assert!(!own_of_state(&memo, state, &DataWorkload::default()).without_guarantee);
     }
 }

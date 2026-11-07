@@ -661,6 +661,12 @@ pub(crate) fn solve_selection(
     model.set_option("mip_abs_gap", 0.0);
     model.set_option("output_flag", false);
     model.set_option("threads", 1);
+    if accuracy.is_some() {
+        // (K)'s big-M rows: an integrality slack of 1e-6 on y would relax
+        // a bound by 1e-6 M; the check after the solve compares exactly.
+        model.set_option("mip_feasibility_tolerance", 1e-9);
+        model.set_option("primal_feasibility_tolerance", 1e-9);
+    }
     let construction_ms = started.elapsed().as_millis() as u64;
     let started = Instant::now();
     let solved = model
@@ -930,16 +936,19 @@ fn accuracy_variables(
 /// (K) over `inputs` (section 4), per execution and metric, big-M on the
 /// selected edges with $M$ the producer's ceiling
 /// ([`CandidateErrorModel`]):
-/// - $E_{c,m} \ge \varepsilon^{\mathrm{loc}}_{c,m} + \sum_i
-///   \beta_{c,i,m} F_{c,i,m}$, $F_{c,i,m} \ge E_{u,m} - M(1 - y)$;
+/// - $E_{c,m} \ge \sum_{u} \varepsilon^{\mathrm{loc}}_{u,c,m}\, y_{u,c,i} +
+///   \sum_i \beta_{c,i,m} F_{c,i,m}$ (the read error of each producer a
+///   consumer may read a state from, on its edge; one $y$ per input is 1),
+///   $F_{c,i,m} \ge E_{u,m} - M(1 - y)$;
 /// - the metric rule: an input error in a metric $c$'s contract does not
 ///   carry is zero on a selected edge, $E_{u,m} \le M(1 - y)$; the validity
 ///   cap: $E_{u,m} \le b_{c,i} + M(1 - y)$;
-/// - $D_c \ge \delta^{\mathrm{loc}}_c + \sum_i H_{c,i}$, $H_{c,i} \ge D_u -
-///   M(1 - y)$ (an unknown $\delta^{\mathrm{loc}}$ counts as 1);
-/// - $U_c \ge 1$ for an own approximation without a guarantee,
-///   $U_c \ge U_u - (1 - y)$ through a value-preserving consumer, and
-///   $U_u \le 1 - y$ into any other;
+/// - $D_c \ge \sum_u \delta^{\mathrm{loc}}_{u,c}\, y_{u,c,i} + \sum_i
+///   H_{c,i}$, $H_{c,i} \ge D_u - M(1 - y)$ (an unknown
+///   $\delta^{\mathrm{loc}}$ counts as 1);
+/// - $U_c \ge y$ for a read without a guarantee, $U_c \ge U_u - (1 - y)$
+///   through a value-preserving consumer, and $U_u \le 1 - y$ into any
+///   other;
 /// - the root checks, per query $q$ (K) applies to and $v \in G_q$:
 ///   $E_{v,m} \le \varepsilon_{q,m} + M(1 - z_{q,v})$ ($\varepsilon_{q,m}$
 ///   is 0 in a metric the target does not accept),
@@ -955,10 +964,27 @@ fn accuracy_constraints(
 ) -> Vec<Constraint> {
     let errors = inputs.errors;
     let mut constraints = Vec::new();
+    // Each execution's read errors and its inputs' carried errors.
+    let mut error_terms: BTreeMap<(Execution, usize), Expression> = BTreeMap::new();
+    let mut failure_terms: BTreeMap<Execution, Expression> = BTreeMap::new();
     for (&(context, edge), &y) in sorted(&variables.y_in_execution_context) {
         let (producer, consumer) = inputs.executions_of_edge(context, edge);
         let (u, c) = (producer.candidate().0, consumer.candidate().0);
         let input = inputs.edges()[edge.0].input_index_of_consumer;
+        let read = errors.read_error_on_edge(u, c);
+        for (m, &error) in read.error_bound.iter().enumerate() {
+            if error > 0.0 {
+                *error_terms.entry((consumer, m)).or_default() += error * y;
+            }
+        }
+        let read_failure = read.failure_probability.unwrap_or(1.0);
+        if read_failure > 0.0 {
+            *failure_terms.entry(consumer).or_default() += read_failure * y;
+        }
+        if read.without_guarantee {
+            let u_c = accuracy.without_guarantee[&consumer];
+            constraints.push(constraint!(u_c >= y));
+        }
         for m in 0..METRIC_COUNT {
             let Some(&e_u) = accuracy.error_bound.get(&(producer, m)) else {
                 continue;
@@ -996,36 +1022,31 @@ fn accuracy_constraints(
             constraints.push(constraint!(h >= d_u - ceiling * (1 - y)));
         }
     }
-    // Each execution's own bound plus its inputs'.
-    let mut inputs_error: BTreeMap<(Execution, usize), Expression> = BTreeMap::new();
     for (&(consumer, input, m), &f) in sorted(&accuracy.error_bound_of_input) {
         let factor = errors
             .factor(consumer.candidate().0, input, m)
             .expect("F only where a contract carries the metric");
-        *inputs_error.entry((consumer, m)).or_default() += factor * f;
+        *error_terms.entry((consumer, m)).or_default() += factor * f;
     }
     for (&(execution, m), &e) in sorted(&accuracy.error_bound) {
-        let own = errors.own(execution.candidate().0).error_bound[m];
-        let carried = inputs_error.remove(&(execution, m)).unwrap_or_default();
-        constraints.push(constraint!(e >= own + carried));
+        let terms = error_terms.remove(&(execution, m)).unwrap_or_default();
+        constraints.push(constraint!(e >= terms));
     }
-    let mut inputs_failure: BTreeMap<Execution, Expression> = BTreeMap::new();
+    debug_assert!(
+        error_terms.is_empty(),
+        "E exists wherever an error may arrive"
+    );
     for (&(consumer, _), &h) in sorted(&accuracy.failure_probability_of_input) {
-        *inputs_failure.entry(consumer).or_default() += h;
+        *failure_terms.entry(consumer).or_default() += h;
     }
     for (&execution, &d) in sorted(&accuracy.failure_probability) {
-        let own = errors
-            .own(execution.candidate().0)
-            .failure_probability
-            .unwrap_or(1.0);
-        let carried = inputs_failure.remove(&execution).unwrap_or_default();
-        constraints.push(constraint!(d >= own + carried));
+        let terms = failure_terms.remove(&execution).unwrap_or_default();
+        constraints.push(constraint!(d >= terms));
     }
-    for (&execution, &u) in sorted(&accuracy.without_guarantee) {
-        if errors.own(execution.candidate().0).without_guarantee {
-            constraints.push(constraint!(u >= 1));
-        }
-    }
+    debug_assert!(
+        failure_terms.is_empty(),
+        "D exists wherever a failure may arrive"
+    );
     // The root checks.
     for &(query, group) in inputs.query_output_groups() {
         let Some(limits) = inputs.root_limits_of(query) else {
