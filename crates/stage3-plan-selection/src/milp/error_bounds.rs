@@ -5,7 +5,7 @@
 //! error bound it can carry (the big-M constants $M$), and each query's
 //! limits at its root ($\varepsilon_q$, $\delta_q$).
 //!
-//! Errors are kept per metric (absolute, absolute in either stream norm,
+//! Errors are tracked per metric (absolute, absolute in either stream norm,
 //! relative, rank): $E_{c,m}$. A consumer's contract in one metric says
 //! nothing about another, so an input error in a metric its contract does
 //! not carry must be zero when the edge is selected (the metric rule), and
@@ -38,7 +38,7 @@ use asap_types::workload::bounds::{
 };
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
-/// The metrics errors are kept in, indexed by position.
+/// The metrics errors are tracked in, indexed by position.
 pub(crate) const METRICS: [AccuracyMetric; METRIC_COUNT] = [
     AccuracyMetric::ABSOLUTE,
     AccuracyMetric::ABSOLUTE_STREAM_L1,
