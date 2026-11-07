@@ -214,7 +214,6 @@ fn rolled_up(coarse: &OperatorNode) -> Rc<OperatorNode> {
     OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
         children: vec![finer],
         group_by: Some(vec![1]),
-        newest_tumbling_windows: None,
     }))
     .unwrap()
 }
@@ -349,7 +348,6 @@ async fn invalid_rollups_are_rejected() {
         OperatorNode::new(Operator::ASAP(ASAPOp::SummaryMerge {
             children: vec![Rc::clone(&finer)],
             group_by: Some(keys),
-            newest_tumbling_windows: None,
         }))
         .map_err(|error| error.to_string())
     };
@@ -384,7 +382,6 @@ async fn invalid_rollups_are_rejected() {
     let merged_rates = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryMerge {
         children: vec![rates],
         group_by: Some(vec![1]),
-        newest_tumbling_windows: None,
     }));
     assert!(merged_rates
         .unwrap_err()

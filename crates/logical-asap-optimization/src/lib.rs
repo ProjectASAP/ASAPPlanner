@@ -41,8 +41,6 @@
 //! - `pass1::realization` — the summary families that can serve an aggregate
 //!   intent, the intent's accuracy target and `(ε, δ)` budget, and default
 //!   sketch sizing, shared by Pass 1 and Pass 2.
-//! - `deployment_capabilities` — the deployment's supported summaries
-//!   ([`DeploymentCapabilities`]).
 //!
 //! Accuracy guarantees come from the built-in analytical accuracy rules in
 //! `asap-accuracy` (per-family estimators, composition and budget
@@ -58,8 +56,6 @@
 //! consumers; plan selection (Stage 3) checks each selected candidate's
 //! guarantee against its query's `AccuracyTarget` and never resizes.
 
-/// The deployment's capabilities: supported summaries and what it retains.
-mod deployment_capabilities;
 mod pass1;
 mod pass2;
 /// Stage 0: the memo groups of the workload's query roots.
@@ -73,9 +69,6 @@ pub mod test_support;
 // developer tools. Every other item is crate-private; the ones other crates'
 // tests call are re-exported by `test_support`.
 
-pub use deployment_capabilities::{
-    DeploymentCapabilities, DeploymentCapabilitiesError, SupportedSummary,
-};
 // Stage 0: the memo groups of the workload's query roots, without
 // candidates (`asap_types::stages::Memo`).
 pub use stage0::memo_of_queries;

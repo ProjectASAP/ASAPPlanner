@@ -131,6 +131,7 @@ pub fn declared_data(root: &Rc<OperatorNode>) -> DataWorkload {
     DataWorkload {
         arrival: asap_types::workload::DataArrival::Ingesting {
             rows_per_second: 1_000.0,
+            max_out_of_order_ms: None,
         },
         sources,
     }

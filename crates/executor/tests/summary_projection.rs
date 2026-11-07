@@ -258,7 +258,6 @@ fn summary_merge_without_inputs_is_rejected() {
             id: 0,
             payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge {
                 children: vec![],
-                newest_tumbling_windows: None,
                 group_by: None,
             }),
             output_schema: schema,

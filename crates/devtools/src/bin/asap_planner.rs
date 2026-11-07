@@ -108,9 +108,9 @@ use asap_devtools::planning_stages::{
 use asap_devtools::planning_stages_text::planning_stages_text;
 use asap_devtools::SqlCatalog;
 use asap_frontend_promql::{metric_type_warnings, promql_metric_names};
-use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_plan_selection::{large_peak_memory_warning, AcceptedAccuracy, Selection};
 use asap_planner::{installable_plan_of, PlanningModels, SelectionError};
+use asap_types::deployment_capabilities::DeploymentCapabilities;
 use asap_types::ir::flat::{flatten, FlatDag, FlatNode};
 use asap_types::ir::properties::{default_metric_for_root, AccuracyTarget};
 use asap_types::ir::QueryRoot;
@@ -577,21 +577,37 @@ fn lowered_together(
 }
 
 /// The arrival of two files' data planned together: ingesting (or mixed)
-/// at the sum of their rates; the same arrival when both are at rest or
-/// unknown; `None` when they differ.
+/// at the sum of their rates, as late as the later of their out-of-order
+/// bounds; the same arrival when both are at rest or unknown; `None` when
+/// they differ.
 fn arrival_together(earlier: DataArrival, later: DataArrival) -> Option<DataArrival> {
     match (earlier, later) {
         (
-            DataArrival::Ingesting { rows_per_second: a },
-            DataArrival::Ingesting { rows_per_second: b },
+            DataArrival::Ingesting {
+                rows_per_second: a,
+                max_out_of_order_ms: late_a,
+            },
+            DataArrival::Ingesting {
+                rows_per_second: b,
+                max_out_of_order_ms: late_b,
+            },
         ) => Some(DataArrival::Ingesting {
             rows_per_second: a + b,
+            max_out_of_order_ms: late_a.max(late_b),
         }),
-        (DataArrival::Mixed { rows_per_second: a }, DataArrival::Mixed { rows_per_second: b }) => {
-            Some(DataArrival::Mixed {
-                rows_per_second: a + b,
-            })
-        }
+        (
+            DataArrival::Mixed {
+                rows_per_second: a,
+                max_out_of_order_ms: late_a,
+            },
+            DataArrival::Mixed {
+                rows_per_second: b,
+                max_out_of_order_ms: late_b,
+            },
+        ) => Some(DataArrival::Mixed {
+            rows_per_second: a + b,
+            max_out_of_order_ms: late_a.max(late_b),
+        }),
         (DataArrival::AtRest, DataArrival::AtRest) => Some(DataArrival::AtRest),
         (DataArrival::Unknown, DataArrival::Unknown) => Some(DataArrival::Unknown),
         _ => None,
@@ -650,7 +666,7 @@ fn stage2_pruned_candidates_json(stage2: Option<&PhysicalASAPMemoCandidates>) ->
         return Vec::new();
     };
     let _ = &stage2.pruned_candidates;
-    todo!("#1207 PR 9 (#1205): each pruned PhysicalCandidateKey with its reason")
+    todo!("#1207 PR 9 (#1205): each pruned PhysicalCandidate with its reason")
 }
 
 /// One plan's cost: per second, its predicted CPU, unit and source, its
@@ -741,7 +757,7 @@ fn selection_json(selection: &Result<Selection, SelectionError>) -> Value {
         "pruned_candidates": selection
             .pruned_candidates
             .iter()
-            .map(|p| json!({ "group": p.group.0, "candidate": p.candidate.0, "reason": format!("{:?}", p.reason) }))
+            .map(|p| json!({ "candidate": p.candidate.0, "reason": format!("{:?}", p.reason) }))
             .collect::<Vec<_>>(),
         "search_report": selection.search_report,
     })

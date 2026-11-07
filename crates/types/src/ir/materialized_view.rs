@@ -1097,5 +1097,7 @@ fn coverage_of(
     coverage_by_node: &HashMap<PhysicalASAPNodeId, SummaryCoverage>,
 ) -> Result<SummaryCoverage, CoverageError> {
     let _ = (id, inputs, ir, coverage_by_node);
-    todo!("#1207 PR 6: the view's coverage from its memo group's GroupProperties::summary_coverage")
+    todo!(
+        "#1207 PR 6: the view's coverage from its memo group's GroupProperties::aggregate_coverage"
+    )
 }

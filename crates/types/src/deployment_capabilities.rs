@@ -33,9 +33,9 @@
 
 // The executor lists the families it builds as `SupportedSummary`s, so the
 // type lives with the readout vocabulary in `asap-types`.
-pub use asap_types::ir::schema::SupportedSummary;
-use asap_types::ir::schema::{SketchAlgorithm, StatisticKind};
-use asap_types::workload::{DataArrival, DataWorkload};
+pub use crate::ir::schema::SupportedSummary;
+use crate::ir::schema::{SketchAlgorithm, StatisticKind};
+use crate::workload::{DataArrival, DataWorkload};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -93,7 +93,7 @@ impl DeploymentCapabilities {
 /// family and readout the planner can build) can build `family` and answer
 /// `readout` from it. Pass 1 reads only this field of
 /// [`DeploymentCapabilities`].
-pub(crate) fn summary_supported(
+pub fn summary_supported(
     supported_summaries: Option<&[SupportedSummary]>,
     family: &SketchAlgorithm,
     readout: StatisticKind,

@@ -156,14 +156,13 @@ pub fn physical_label(logical: &str, candidate: &PhysicalWorkloadPlan) -> String
             }
         };
         let label = match &node.payload {
-            // Name the chain: chains of one family and tumbling-window count differ by
-            // their queries and tumbling-window width.
+            // Name the chain: chains of one family differ by their queries
+            // and tumbling-window width.
             Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                 tumbling_window_width_ms,
-                tumbling_window_count,
                 ..
             }) => format!(
-                "{}, {tumbling_window_count} × {} tumbling windows",
+                "{}, {} tumbling windows",
                 for_queries(
                     state_label(&node.payload),
                     &dag_readers(&candidate.dag, *id)
@@ -187,17 +186,11 @@ pub fn physical_label(logical: &str, candidate: &PhysicalWorkloadPlan) -> String
         .join(" · ")
 }
 
-/// A summary build, e.g. "Kll ×5 tumbling windows" or "Sum acc".
+/// A summary build, e.g. "Kll tumbling windows" or "Sum acc".
 fn build_label<C>(payload: &Operator<C>) -> String {
     match payload {
-        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
-            tumbling_window_count,
-            ..
-        }) => {
-            format!(
-                "{} ×{tumbling_window_count} tumbling windows",
-                state_label(payload)
-            )
+        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => {
+            format!("{} tumbling windows", state_label(payload))
         }
         _ => state_label(payload),
     }
@@ -356,9 +349,7 @@ fn find_details(value: &Value, details: &mut Vec<String>, depth: usize) {
                     // A time range's length, e.g. `60s`.
                     "range" => details.push(duration_text(field)),
                     // A window, and a tumbling-window chain's layout.
-                    "window" | "tumbling_window_width_ms" | "tumbling_window_count" => {
-                        details.push(format!("{key}={field}"))
-                    }
+                    "window" | "tumbling_window_width_ms" => details.push(format!("{key}={field}")),
                     _ => find_details(field, details, depth + 1),
                 }
             }

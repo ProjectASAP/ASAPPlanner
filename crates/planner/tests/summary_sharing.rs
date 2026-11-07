@@ -66,6 +66,7 @@ fn promql_workload(queries: &[(&str, f64)]) -> PlanningWorkload {
         data_workload: Some(DataWorkload {
             arrival: DataArrival::Ingesting {
                 rows_per_second: 1.0,
+                max_out_of_order_ms: None,
             },
             ..DataWorkload::sampled_every(
                 queries

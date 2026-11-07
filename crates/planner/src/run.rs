@@ -10,12 +10,12 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use asap_logical_asap_optimization::generate_logical_asap_memo_candidates;
-use asap_logical_asap_optimization::DeploymentCapabilitiesError;
 use asap_logical_asap_optimization::{pass1_memo, Pass1Error, PerComputationCandidateError};
 use asap_physical_asap_optimization::{
     generate_physical_asap_memo_candidates, Stage2AssignmentRealizer,
 };
 use asap_plan_selection::{select_plan, ErrorSelectingPlan, SearchReport, Selection};
+use asap_types::deployment_capabilities::DeploymentCapabilitiesError;
 use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::stages::{
@@ -49,9 +49,6 @@ pub enum SelectionError {
     /// Pass 1's memo candidates or Pass 2 failed.
     #[error("logical ASAP-aware optimization: {0}")]
     LogicalASAPCandidates(String),
-    /// Stage 2 failed.
-    #[error("physical ASAP-aware optimization: {0}")]
-    PhysicalASAPCandidates(String),
     /// Stage 3 selected no plan.
     #[error("plan selection: {0}")]
     Selection(ErrorSelectingPlan),
@@ -181,17 +178,10 @@ pub fn run_planning(
             .sum();
         // Stage 2.
         let started = Instant::now();
-        let physical = generate_physical_asap_memo_candidates(
-            logical,
-            entries,
-            data,
-            models.deployment_capabilities.query_time_results_retained,
-            models.deployment_capabilities.raw_data_retained,
-        );
+        let physical =
+            generate_physical_asap_memo_candidates(logical, data, models.deployment_capabilities);
         report.stage2_ms = elapsed_ms(started);
-        let physical = physical_asap_candidates.insert(
-            physical.map_err(|error| SelectionError::PhysicalASAPCandidates(error.to_string()))?,
-        );
+        let physical = physical_asap_candidates.insert(physical);
         report.physical_candidates = physical.physical_candidates.len();
         report.stage2_pruned_candidates = physical.pruned_candidates.len();
         // Stage 3.

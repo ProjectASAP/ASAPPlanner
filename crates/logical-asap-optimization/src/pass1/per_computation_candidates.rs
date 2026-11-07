@@ -129,8 +129,8 @@ use asap_types::ir::properties::AccuracyGuarantee;
 use asap_types::workload::bounds::{declared_non_negative, series_read, values_per_result};
 use asap_types::workload::DataWorkload;
 
-use crate::deployment_capabilities::{summary_supported, SupportedSummary};
 use crate::pass1::realization::summary_candidates;
+use asap_types::deployment_capabilities::{summary_supported, SupportedSummary};
 use asap_types::stages::{
     ComputationTarget, FusedComputation, HavingEntry, HavingPlacement,
     HowToComputeAggregateMeasure, Memo, MemoGroupId,
@@ -3570,14 +3570,12 @@ mod tests {
                 grouping: grouping.clone(),
                 filter: filter.clone(),
                 tumbling_window_width_ms: 10_000,
-                tumbling_window_count: 10,
             }))
             .unwrap(),
         );
         let merged = Rc::new(
             OperatorNode::new(Operator::ASAP(ASAPOp::SummaryMerge {
                 children: vec![chain],
-                newest_tumbling_windows: None,
                 group_by: None,
             }))
             .unwrap(),

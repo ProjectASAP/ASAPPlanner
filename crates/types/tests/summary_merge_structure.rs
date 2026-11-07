@@ -58,7 +58,6 @@ fn family_state(family: FieldDataType, region: &str) -> Rc<OperatorNode> {
 fn compatible_tumbling_windows_merge_structurally() {
     let root = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
         children: vec![state(200, "us"), state(200, "eu")],
-        newest_tumbling_windows: None,
         group_by: None,
     }))
     .unwrap();
@@ -74,7 +73,6 @@ fn incompatible_merge_inputs_fail() {
         assert!(
             OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
                 children,
-                newest_tumbling_windows: None,
                 group_by: None,
             }))
             .is_err()
@@ -130,7 +128,6 @@ fn cms_with_heap() -> FieldDataType {
 fn merge(children: Vec<Rc<OperatorNode>>) -> Result<Rc<OperatorNode>, String> {
     OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
         children,
-        newest_tumbling_windows: None,
         group_by: None,
     }))
     .map_err(|e| e.to_string())

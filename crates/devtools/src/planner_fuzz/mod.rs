@@ -41,8 +41,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use asap_cost::CostInputs;
-use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_planner::{PlanSearchSettings, PlanningModels};
+use asap_types::deployment_capabilities::DeploymentCapabilities;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::sketch::SketchAlgorithm;
 use asap_types::ir::QueryRoot;
@@ -168,7 +168,10 @@ impl FuzzWorkload {
             }
         }
         if rows_per_second > 0.0 {
-            self.data.arrival = DataArrival::Ingesting { rows_per_second };
+            self.data.arrival = DataArrival::Ingesting {
+                rows_per_second,
+                max_out_of_order_ms: None,
+            };
         }
     }
 

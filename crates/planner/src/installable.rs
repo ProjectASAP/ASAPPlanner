@@ -26,8 +26,8 @@
 use std::collections::{HashMap, HashSet};
 
 use asap_cost::{NodePriceSource, OperatorKind};
-use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_plan_selection::{SearchReport, Selection};
+use asap_types::deployment_capabilities::DeploymentCapabilities;
 use asap_types::ir::materialized_view::{
     IngestionRefreshGroup, InstallableDagError, MaterializedView, RawDataRetention,
 };
@@ -37,7 +37,6 @@ use asap_types::ir::physical_export::{
     PhysicalASAPNodeId,
 };
 use asap_types::ir::properties::ExecutionTiming;
-use asap_types::ir::SchemaDerivationError;
 
 use asap_types::stages::RealizedPlan;
 use asap_types::workload::QueryWorkloadEntry;
@@ -153,9 +152,6 @@ pub struct PredictedQueryUsage {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum InstallablePlanError {
-    /// Internal bug: a tumbling-window chain of the selected plan does not expand.
-    #[error("tumbling-window chain expansion: {0}")]
-    TumblingWindowChainExpansion(#[from] SchemaDerivationError),
     /// Bad input (a plan file): written for another plan-file format; `None`
     /// for a file without `wire_version`, written before version 11.
     #[error("unsupported installable plan wire version {0:?}")]

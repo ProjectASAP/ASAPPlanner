@@ -18,9 +18,9 @@ pub trait OperatorInput: Sized + Clone {
     fn result_kind(&self) -> OperatorResultKind;
     /// The input's own operator, its children as inputs again.
     fn operator(&self) -> Operator<Self>;
-    /// What the input covers when it is summary state in the memo; `None`
-    /// for any other input.
-    fn summary_coverage(&self) -> Option<&SummaryCoverage>;
+    /// What the input covers when it is an aggregate group in the memo;
+    /// `None` for any other input.
+    fn aggregate_coverage(&self) -> Option<&SummaryCoverage>;
 }
 
 /// A front-end node tree. Node trees carry no summary coverage.
@@ -37,7 +37,7 @@ impl OperatorInput for Rc<OperatorNode> {
         self.operator.clone()
     }
 
-    fn summary_coverage(&self) -> Option<&SummaryCoverage> {
+    fn aggregate_coverage(&self) -> Option<&SummaryCoverage> {
         None
     }
 }
@@ -109,37 +109,10 @@ impl<I: OperatorInput> OperatorInput for InputOrTemporaryBuild<I> {
         }
     }
 
-    fn summary_coverage(&self) -> Option<&SummaryCoverage> {
+    fn aggregate_coverage(&self) -> Option<&SummaryCoverage> {
         match self {
-            Self::Input(input) => input.summary_coverage(),
+            Self::Input(input) => input.aggregate_coverage(),
             Self::TemporaryBuild(_) => None,
         }
     }
-}
-
-impl InputOrTemporaryBuild<Rc<OperatorNode>> {
-    /// The node tree of this input: a temporary build as a new node over
-    /// its inputs' trees.
-    pub(crate) fn to_node(&self) -> Rc<OperatorNode> {
-        match self {
-            Self::Input(node) => Rc::clone(node),
-            Self::TemporaryBuild(build) => Rc::new(OperatorNode::with_schema(
-                build.operator.map_children(Self::to_node),
-                build.schema.clone(),
-            )),
-        }
-    }
-}
-
-/// A build over node trees (`tumbling_window_chain`'s builds) as a node.
-pub(crate) fn node_of_build(
-    (build, schema): (
-        super::asap::ASAPOp<InputOrTemporaryBuild<Rc<OperatorNode>>>,
-        Schema,
-    ),
-) -> OperatorNode {
-    OperatorNode::with_schema(
-        Operator::ASAP(build.map_children(InputOrTemporaryBuild::to_node)),
-        schema,
-    )
 }

@@ -92,13 +92,14 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
 - On the memo (`generate_physical_asap_memo_candidates`), every physical
   candidate Stage 2 prunes is recorded in
   `PhysicalASAPMemoCandidates::pruned_candidates` as
-  `PrunedCandidate<PhysicalCandidateKey>` with a `PruneReason`: an exact
-  per-entity `Aggregate` the executor cannot run
-  (`PerEntityAggregateNotExecutable`) and, without raw data retained, a
-  query-time scan of raw data (`RawDataNotRetained`) are not generated; a
-  candidate no buildable input, query output or reader count can use is
-  removed (`InputHasNoBuildableProducer`, `ReachesNoQueryOutput`,
-  `TooFewQueryReaders`). Stage 2 emits one candidate per operator node,
+  `PrunedCandidate<PhysicalCandidate>` with a `PruneReason`: an
+  ingestion-time alternative without an ingestion pipeline
+  (`NoIngestionPipeline`), a query-time scan of raw data the deployment does
+  not retain (`RawDataNotRetained`) and a materialized query-time result the
+  deployment does not retain (`QueryTimeResultsNotRetained`) are not
+  generated; a candidate no buildable input or query output can use is
+  removed (`InputHasNoBuildableProducer`, `ReachesNoQueryOutput`). The
+  planner does not check executor support. Stage 2 emits one candidate per operator node,
   timing and lifetime; it makes no execution-scope copies.
 
 ## 5. Stage 3

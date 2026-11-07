@@ -200,7 +200,6 @@ fn asap_samples() -> Vec<ASAPOp<()>> {
         },
         ASAPOp::SummaryMerge {
             children: vec![],
-            newest_tumbling_windows: None,
             group_by: None,
         },
         ASAPOp::SummaryTumblingWindowChain {
@@ -211,7 +210,6 @@ fn asap_samples() -> Vec<ASAPOp<()>> {
             grouping: GroupingStrategy::default(),
             filter: None,
             tumbling_window_width_ms: 60_000,
-            tumbling_window_count: 5,
         },
         ASAPOp::SummarySubtract {
             left: (),
