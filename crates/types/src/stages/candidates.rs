@@ -7,15 +7,20 @@ use std::collections::{HashMap, HashSet};
 
 use super::hash_consing::{expression_hash, same_expression, same_value};
 use super::{GroupProperties, MemoGroup, MemoGroupAsInput, MemoGroupId};
+use crate::ir::operator::{AggIntent, BinaryOpKind};
 use crate::ir::properties::summary_coverage::SummaryCoverage;
+use crate::ir::properties::AccuracyMetric;
+use crate::ir::scalar::expr_ir::ArithmeticOpKind;
+use crate::ir::schema::ExactKind;
 use crate::ir::schema::{
     FamilyCapability, FieldDataType, GroupingStrategy, HydraKind, HydraParams, SketchAlgorithm,
     SketchParams,
 };
-use crate::ir::ASAPOp;
+use crate::ir::BinaryOperator;
 use crate::ir::Operator;
 use crate::ir::QueryRoot;
 use crate::ir::SchemaDerivationError;
+use crate::ir::{ASAPOp, NonASAPOp, ScalarExpr};
 
 /// One candidate: position `index_in_group` in group `group`'s candidates
 /// ([`MemoGroup::candidates`]).
@@ -194,6 +199,27 @@ impl Memo {
                 );
             }
         }
+    }
+
+    /// Replaces candidate `id`'s input requirements $r^{\log}_{c,i}$, one
+    /// per input group: Pass 2 tightens each parameter floor by the input's
+    /// validity and pruning caps once the rules are done.
+    ///
+    /// # Panics
+    ///
+    /// When `input_requirements` does not have one entry per input group.
+    pub fn set_input_requirements(
+        &mut self,
+        id: CandidateForMemoGroupId,
+        input_requirements: Vec<LogicalRequirements>,
+    ) {
+        let candidate = &mut self.groups[id.group.0 as usize].candidates[id.index_in_group];
+        assert_eq!(
+            input_requirements.len(),
+            candidate.expression.operator.children().len(),
+            "one requirement per input group"
+        );
+        candidate.input_requirements = input_requirements;
     }
 
     /// The candidate `id`.
@@ -769,14 +795,140 @@ impl LogicalRequirements {
         self.parameter_floor_for_required_accuracy.as_ref()
     }
 
-    /// $g_c$'s linear bound: $\beta_{c,i}$ and $b_{c,i}$ per input, read
-    /// from the operator and its arguments. An operator without an error
-    /// contract is reported as unsupported; no factor is guessed.
-    pub fn error_propagation(consumer: &Operator<MemoGroupId>) -> ErrorPropagation {
-        let _ = consumer;
-        todo!("#1207 PR 4: the error contract of each operator")
+    /// $g_c$'s linear bound for errors in `metric`, each input's and the
+    /// output's: $\beta_{c,i}$ and $b_{c,i}$ per input, read from the
+    /// operator and its arguments. `None` when the consumer has no error
+    /// contract for `metric` (concepts doc, section 4, metric rule): an input
+    /// whose error is in `metric` then gives no edge, and no factor is
+    /// guessed. Every contract here keeps the metric (its output error is
+    /// in the inputs' metric):
+    /// - a value-preserving operator (a `Project` of columns, `Sort`,
+    ///   `TimeRange`, an `offset` `TimeShift`, `Concat`) and a summary read
+    ///   or merge (`SummaryEstimate`, `FinalizeExactAccumulator`,
+    ///   `SummaryMerge`, whose input is a state): $\beta = 1$ in any metric;
+    /// - an aggregate of `min`, `max` or `avg` measures and an exact
+    ///   `min`/`max` accumulator: $\beta = 1$ (absolute; relative for `min`
+    ///   and `max`); `count` reads no value: $\beta = 0$ in any metric;
+    /// - `+` and `-`: $\beta = 1$ per operand, absolute error;
+    /// - `/`: relative error, $\beta = 1 / (1 - b)$ per operand with the
+    ///   denominator capped at $b$ = [`RATIO_DENOMINATOR_VALIDITY_CAP`]; `*`:
+    ///   relative error, $(1 + b, 1)$ with the right operand capped at $b$
+    ///   ($(1+x)(1+y) - 1 \le (1+b)\,x + y$ for $y \le b$);
+    /// - an operator without inputs: no factors.
+    ///
+    /// Every other operator (a filter, a ranking, a `sum`, a comparison, a
+    /// function, a summary build over approximate rows) has none.
+    pub fn error_propagation(
+        consumer: &Operator<MemoGroupId>,
+        metric: AccuracyMetric,
+    ) -> Option<ErrorPropagation> {
+        let inputs = consumer.children().len();
+        let uniform = |factor: f64| ErrorPropagation {
+            factor_per_input: vec![factor; inputs],
+            validity_cap_per_input: vec![None; inputs],
+        };
+        let extremum_metric = matches!(
+            metric,
+            AccuracyMetric::Absolute { .. } | AccuracyMetric::Relative
+        );
+        match consumer {
+            Operator::NonASAP(op) => match op {
+                NonASAPOp::Scan { .. } | NonASAPOp::Values { .. } => Some(uniform(1.0)),
+                NonASAPOp::Project { cols, .. }
+                    if cols
+                        .iter()
+                        .all(|item| matches!(item.expr, ScalarExpr::Column(_))) =>
+                {
+                    Some(uniform(1.0))
+                }
+                NonASAPOp::Sort { .. } | NonASAPOp::TimeRange { .. } | NonASAPOp::Concat { .. } => {
+                    Some(uniform(1.0))
+                }
+                NonASAPOp::TimeShift { shift, .. } if shift.at.is_none() => Some(uniform(1.0)),
+                NonASAPOp::Aggregate {
+                    measures,
+                    filters,
+                    having: None,
+                    ..
+                } if filters.iter().all(Option::is_none) && !measures.is_empty() => {
+                    let mut factor: f64 = 0.0;
+                    for measure in measures {
+                        match measure {
+                            AggIntent::Count { .. } => {}
+                            AggIntent::Min { .. } | AggIntent::Max { .. } if extremum_metric => {
+                                factor = factor.max(1.0)
+                            }
+                            AggIntent::Avg { .. }
+                                if matches!(metric, AccuracyMetric::Absolute { .. }) =>
+                            {
+                                factor = factor.max(1.0)
+                            }
+                            _ => return None,
+                        }
+                    }
+                    Some(uniform(factor))
+                }
+                NonASAPOp::BinaryOp {
+                    operator:
+                        BinaryOperator {
+                            kind: BinaryOpKind::Arithmetic(kind),
+                            ..
+                        },
+                    return_bool: false,
+                    ..
+                } => {
+                    let b = RATIO_DENOMINATOR_VALIDITY_CAP;
+                    match (kind, metric) {
+                        (
+                            ArithmeticOpKind::Add | ArithmeticOpKind::Sub,
+                            AccuracyMetric::Absolute { .. },
+                        ) => Some(uniform(1.0)),
+                        (ArithmeticOpKind::Div, AccuracyMetric::Relative) => {
+                            Some(ErrorPropagation {
+                                factor_per_input: vec![1.0 / (1.0 - b); 2],
+                                validity_cap_per_input: vec![None, Some(b)],
+                            })
+                        }
+                        (ArithmeticOpKind::Mul, AccuracyMetric::Relative) => {
+                            Some(ErrorPropagation {
+                                factor_per_input: vec![1.0 + b, 1.0],
+                                validity_cap_per_input: vec![None, Some(b)],
+                            })
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            },
+            Operator::ASAP(op) => match op {
+                ASAPOp::SummaryEstimate { .. }
+                | ASAPOp::FinalizeExactAccumulator { .. }
+                | ASAPOp::SummaryMerge { .. } => Some(uniform(1.0)),
+                ASAPOp::SummaryAgg {
+                    family: FieldDataType::ExactAggregate(kind, _),
+                    filter: None,
+                    ..
+                }
+                | ASAPOp::SummaryTumblingWindowChain {
+                    family: FieldDataType::ExactAggregate(kind, _),
+                    filter: None,
+                    ..
+                } => match kind {
+                    ExactKind::Count => Some(uniform(0.0)),
+                    ExactKind::Min | ExactKind::Max if extremum_metric => Some(uniform(1.0)),
+                    _ => None,
+                },
+                _ => None,
+            },
+        }
     }
 }
+
+/// $b$ of a ratio's denominator (and a product's right operand): the
+/// relative error under which [`LogicalRequirements::error_propagation`]'s
+/// linear bound holds, $\varepsilon_{X/Y} \le (\varepsilon_X +
+/// \varepsilon_Y) / (1 - b)$ (concepts doc, section 4).
+pub const RATIO_DENOMINATOR_VALIDITY_CAP: f64 = 0.1;
 
 /// The local error propagation of one consumer: its output error is at
 /// most $\sum_i \beta_{c,i}\varepsilon_{c,i}$ while each input's error stays
@@ -1612,5 +1764,122 @@ mod memo_tests {
         assert!(memo.find_or_add_group(out_of_range).is_err());
         assert_eq!(memo.groups().len(), 1);
         assert!(memo.groups()[g1.0 as usize].parent_groups().is_empty());
+    }
+
+    /// `lhs ⊕ rhs` over groups 0 and 1.
+    fn arithmetic(kind: ArithmeticOpKind) -> Operator<MemoGroupId> {
+        Operator::NonASAP(NonASAPOp::BinaryOp {
+            operator: BinaryOperator {
+                checked_relative_division: false,
+                checked_finite_division: false,
+                kind: BinaryOpKind::Arithmetic(kind),
+                vector_match: None,
+            },
+            return_bool: false,
+            lhs: MemoGroupId(0),
+            rhs: MemoGroupId(1),
+        })
+    }
+
+    /// The error contracts: a ratio's relative error passes through
+    /// `1 / (1 - b)` with its denominator capped at `b`, and has no
+    /// absolute contract; a sum of two operands adds absolute errors; a
+    /// projection of columns, a readout and a merge keep every metric; a
+    /// count reads no value; a filter and a top-k have none.
+    #[test]
+    fn error_propagation_follows_each_operators_error_contract() {
+        let b = RATIO_DENOMINATOR_VALIDITY_CAP;
+        let ratio = arithmetic(ArithmeticOpKind::Div);
+        assert_eq!(
+            LogicalRequirements::error_propagation(&ratio, AccuracyMetric::Relative),
+            Some(ErrorPropagation {
+                factor_per_input: vec![1.0 / (1.0 - b); 2],
+                validity_cap_per_input: vec![None, Some(b)],
+            })
+        );
+        assert_eq!(
+            LogicalRequirements::error_propagation(&ratio, AccuracyMetric::ABSOLUTE),
+            None
+        );
+        assert_eq!(
+            LogicalRequirements::error_propagation(&ratio, AccuracyMetric::Rank),
+            None
+        );
+        assert_eq!(
+            LogicalRequirements::error_propagation(
+                &arithmetic(ArithmeticOpKind::Add),
+                AccuracyMetric::ABSOLUTE
+            ),
+            Some(ErrorPropagation {
+                factor_per_input: vec![1.0, 1.0],
+                validity_cap_per_input: vec![None, None],
+            })
+        );
+        let keep_all = [
+            Operator::NonASAP(NonASAPOp::Project {
+                cols: vec![crate::ir::ProjectItem {
+                    alias: None,
+                    expr: ScalarExpr::Column(0),
+                }],
+                child: MemoGroupId(0),
+            }),
+            Operator::ASAP(ASAPOp::SummaryEstimate {
+                summary_input: MemoGroupId(0),
+                query: crate::ir::schema::SketchStatistic::Quantile { q: 0.5 },
+            }),
+            Operator::ASAP(ASAPOp::SummaryMerge {
+                children: vec![MemoGroupId(0)],
+                newest_tumbling_windows: None,
+                group_by: None,
+            }),
+        ];
+        for operator in &keep_all {
+            for metric in [
+                AccuracyMetric::ABSOLUTE,
+                AccuracyMetric::Relative,
+                AccuracyMetric::Rank,
+            ] {
+                assert_eq!(
+                    LogicalRequirements::error_propagation(operator, metric)
+                        .map(|propagation| propagation.factor_per_input),
+                    Some(vec![1.0]),
+                    "{operator:?} {metric:?}"
+                );
+            }
+        }
+        let aggregate = |measure: AggIntent| {
+            Operator::NonASAP(NonASAPOp::Aggregate {
+                child: MemoGroupId(0),
+                reduction: Reduction::by(vec![]),
+                measures: vec![measure],
+                output_names: vec![String::new()],
+                filters: vec![None],
+                having: None,
+            })
+        };
+        let count = aggregate(AggIntent::Count {
+            accuracy: crate::ir::properties::AccuracyTarget::exact(),
+        });
+        assert_eq!(
+            LogicalRequirements::error_propagation(&count, AccuracyMetric::Rank)
+                .map(|propagation| propagation.factor_per_input),
+            Some(vec![0.0])
+        );
+        let topk = aggregate(AggIntent::TopK {
+            k: 3,
+            accuracy: crate::ir::properties::AccuracyTarget::exact(),
+        });
+        assert_eq!(
+            LogicalRequirements::error_propagation(&topk, AccuracyMetric::ABSOLUTE),
+            None
+        );
+        let filter = Operator::NonASAP(NonASAPOp::Filter {
+            pred: crate::ir::Predicate(ScalarExpr::Column(0)),
+            child: MemoGroupId(0),
+        });
+        assert_eq!(
+            LogicalRequirements::error_propagation(&filter, AccuracyMetric::ABSOLUTE),
+            None
+        );
     }
 }
