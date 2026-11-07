@@ -230,11 +230,10 @@ impl OptimizationPass for Stage1ToStage3Pass {
 /// The PromQL or MetricsQL root `node` planned: `realized`, its series identity
 /// realization (`with_promql_series_identity`), or `node` itself, over its
 /// label columns, when the realization does not apply to one of its
-/// operators (`limitk(2, m)`'s `PromqlSeriesSample`, `info(m)`'s
-/// `PromqlInfoEnrich`). A realization defect is a planning error, since
-/// falling back would hide it: one that drops a column an operator reads
-/// (`DroppedColumn`) or rebuilds an operator whose schema no longer derives
-/// (`InvalidRealizedOperator`).
+/// operators (`info(m)`'s `PromqlInfoEnrich`). A realization defect is a
+/// planning error, since falling back would hide it: one that drops a
+/// column an operator reads (`DroppedColumn`) or rebuilds an operator whose
+/// schema no longer derives (`InvalidRealizedOperator`).
 fn promql_root(
     node: &Rc<OperatorNode>,
     realized: Result<Rc<OperatorNode>, SeriesIdentityError>,
