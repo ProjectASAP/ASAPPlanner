@@ -14,6 +14,7 @@
 //! per-candidate error bounds $E_c$ and $D_c$ (section 4). Costs come from
 //! `asap-cost`.
 
+mod candidate_cost;
 mod milp;
 mod models;
 mod report;

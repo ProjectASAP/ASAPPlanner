@@ -7,9 +7,7 @@ use asap_cost::analytical::AnalyticalCostError;
 use asap_cost::{CostModel, PlanCost};
 use asap_types::ir::physical_export::PhysicalASAPNodeId;
 use asap_types::ir::properties::AccuracyMetric;
-use asap_types::stages::{
-    DagOfSelectedCandidates, PhysicalCandidateId, PrunedCandidate, SelectedNodeId,
-};
+use asap_types::stages::{DagOfSelectedCandidates, PhysicalCandidateId, PrunedCandidate};
 use thiserror::Error;
 
 /// Peak memory above which a candidate's report carries a warning when the
@@ -190,15 +188,11 @@ impl std::fmt::Display for AcceptedAccuracy {
 pub struct Selection {
     /// The selected plan: one node per run of a candidate.
     pub selected_dag: DagOfSelectedCandidates,
-    /// Nodes of `selected_dag` whose open count-min weight requirement
-    /// Stage 3 proved; the facade applies the proof to each node's operator
-    /// node when it builds the plan.
-    pub nodes_with_proven_non_negative_weights: Vec<SelectedNodeId>,
     pub cost: PlanCost,
     /// Per query, the accuracy Stage 3 accepted for the selected plan.
     pub accepted_accuracy_per_query: Vec<AcceptedAccuracy>,
-    /// The candidates Stage 3 ruled out before the search: dominated ones and
-    /// those whose usage could not be costed.
+    /// The candidates Stage 3 ruled out before the search: those whose usage
+    /// could not be costed.
     pub pruned_candidates: Vec<PrunedCandidate<PhysicalCandidateId>>,
     pub search_report: SearchReport,
 }
