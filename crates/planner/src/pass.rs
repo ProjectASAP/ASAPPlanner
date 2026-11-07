@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use asap_types::ir::OperatorNode;
+use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::workload::parsed_workload::ParsedWorkload;
 use asap_types::workload::WorkloadError;
 
@@ -105,9 +105,13 @@ impl<'a> PlanningModels<'a> {
         }
     }
 
-    /// Stage 3's accuracy check inputs: `evidence`, and `accuracy`, or
+    /// Stage 3's accuracy check inputs over the front ends' `query_roots`
+    /// (by query): `evidence`, and `accuracy`, or
     /// [`IgnoreAccuracyGuarantees`] with `ignore_accuracy_guarantees`.
-    pub fn accuracy_check_inputs(&self) -> AccuracyCheckInputs<'a> {
+    pub fn accuracy_check_inputs<'b>(&self, query_roots: &'b [QueryRoot]) -> AccuracyCheckInputs<'b>
+    where
+        'a: 'b,
+    {
         AccuracyCheckInputs {
             model: if self.ignore_accuracy_guarantees {
                 &IGNORE_ACCURACY_GUARANTEES
@@ -115,6 +119,7 @@ impl<'a> PlanningModels<'a> {
                 self.accuracy
             },
             evidence: self.evidence,
+            query_roots,
         }
     }
 

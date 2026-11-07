@@ -86,6 +86,49 @@ pub fn local_guarantee(
         | FieldDataType::StatModel(..) => None,
     }
 }
+/// The guarantee of a distinct count read from a summary with parameters
+/// `parameters` built over the own rows of one source `source` (behind
+/// filters and time windows at most), whose distinct items per evaluation
+/// are at most `max_distinct`
+/// (`SourceFacts::max_distinct_per_evaluation`): classic HLL's
+/// ([`hll::classic_guarantee`]) or a distinct-count UnivMon's
+/// ([`univmon::distinct_guarantee`]), with its failure probability bound
+/// at `max_distinct` (1, no certificate, where the contract does not cover
+/// it). `None` for other parameters and for a shape the contracts do not
+/// cover; the generic guarantee of [`local_guarantee`] then applies, whose
+/// failure probability is unknown.
+pub fn distinct_count_guarantee_over_source(
+    parameters: &SketchParams,
+    source: &str,
+    max_distinct: u64,
+) -> Option<AccuracyGuarantee> {
+    let guarantee = match parameters {
+        SketchParams::Hll {
+            precision,
+            relative_error,
+        } => hll::classic_guarantee(*precision, *relative_error, source)?,
+        SketchParams::UnivMon { .. } => univmon::distinct_guarantee(parameters, source)?,
+        _ => return None,
+    };
+    Some(guarantee.bind(&|statistic| {
+        if let Some((precision, relative_error, _)) =
+            hll::parse_classic_failure_statistic(statistic)
+        {
+            return Some(hll::classic_failure_probability(
+                precision,
+                relative_error,
+                max_distinct,
+            ));
+        }
+        let (heap_size, layers, _) = univmon::parse_incomplete_top_layer_statistic(statistic)?;
+        Some(univmon::incomplete_top_layer_probability(
+            heap_size,
+            layers,
+            max_distinct,
+        ))
+    }))
+}
+
 /// `params` with the parameters its per-value failure probability depends
 /// on enlarged, never reduced, so that each value it answers fails with
 /// probability at most `delta` and its error bound is unchanged or smaller
@@ -586,5 +629,37 @@ mod tests {
         ] {
             assert!(local_guarantee(&exact, None, &total).is_some(), "{exact:?}");
         }
+    }
+
+    /// A distinct count over a source's own rows gets classic HLL's or a
+    /// distinct-count UnivMon's failure probability at the source's
+    /// distinct bound: certified (below 1) for a small bound, 1 (no
+    /// certificate) past the contract's range; other parameters get none.
+    #[test]
+    fn a_distinct_count_over_a_source_binds_its_failure_probability() {
+        let hll = asap_types::stages::parameter_list(SketchAlgorithm::Hll)[0].clone();
+        let univmon = asap_types::stages::parameter_list(SketchAlgorithm::UnivMon)
+            .iter()
+            .find(|p| {
+                matches!(
+                    p,
+                    SketchParams::UnivMon {
+                        distinct_failure_probability: Some(_),
+                        ..
+                    }
+                )
+            })
+            .unwrap()
+            .clone();
+        for parameters in [&hll, &univmon] {
+            let small = distinct_count_guarantee_over_source(parameters, "flows", 100).unwrap();
+            assert_eq!(small.spec.accuracy_metric, AccuracyMetric::Relative);
+            let delta = small.spec.failure_probability.evaluate().unwrap();
+            assert!(delta < 1.0, "{parameters:?}: {delta}");
+            let huge = distinct_count_guarantee_over_source(parameters, "flows", u64::MAX).unwrap();
+            assert_eq!(huge.spec.failure_probability.evaluate(), Some(1.0));
+        }
+        let kll = asap_types::stages::parameter_list(SketchAlgorithm::Kll)[0].clone();
+        assert!(distinct_count_guarantee_over_source(&kll, "flows", 1_000).is_none());
     }
 }

@@ -4,6 +4,7 @@
 
 mod time_series;
 
+mod accuracy_at_query_roots;
 mod columnar_batches;
 mod e2e_plan;
 mod execution_contexts;

@@ -12,8 +12,12 @@
 //! $y$ exists only on admissible edges) and (R). It decodes $\{x = 1\}$ and
 //! $\{y = 1\}$ into a `DagOfSelectedCandidates` (one node per selected
 //! execution), which the injected realizer builds. Accuracy at each query
-//! root, constraint (K), with per-candidate error bounds $E_c$ and $D_c$
-//! (section 4), is #1207 PR 8. Costs come from `asap-cost`.
+//! root is constraint (K) (section 4): error bounds $E_{\kappa,c,m}$ per
+//! execution and metric and failure probabilities $D_{\kappa,c}$, big-M on
+//! the selected edges, root checks against each query's target
+//! ([`crate::milp::error_bounds`]); the selected plan's composed guarantee
+//! is checked again with the deployment's accuracy model. Costs come from
+//! `asap-cost`.
 
 mod execution_cost;
 mod milp;

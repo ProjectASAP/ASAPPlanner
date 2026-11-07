@@ -348,7 +348,7 @@ pub fn run_stages_until(
         &physical,
         entries,
         data,
-        &models.accuracy_check_inputs(),
+        &models.accuracy_check_inputs(&roots),
         models.cost_inputs,
         &realizer,
     ) {

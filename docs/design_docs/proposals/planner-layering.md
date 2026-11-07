@@ -840,26 +840,18 @@ Output: Out — candidate replacement sub-DAGs for s
 17: return Out
 ```
 
-Every size is decided in Stage 1; Stage 3 only checks the composed accuracy.
-Algorithm 1 checks whether a family can meet `acc(s)` at all and
-yields the family unsized (`HowToComputeAggregateMeasure::Summary`). When
-Pass 1 attaches the family to its memo group, it creates one sized candidate
-per split of the accuracy budget: `accuracy_budget_parts` from 1 to the most
-approximate inputs of a query reaching the group, each sized by the accuracy
-model for its share. Pass 2 never resizes a summary for its own readers: a
-tumbling-window chain inherits the size of the build it replaces (a merge of equal-size
-tumbling windows keeps the guarantee when the family's merged error is `Exact` or
-`AsIfBuiltOverUnion`), and a build shared by several readers takes the
-strictest reader's size, one state group per distinct size. The failure
-probability is part of Pass 1's size too
-(`pass1_memo`): each approximate input
-of a candidate with `n` budget parts is sized for `δ / (n · V)`, the smallest
-over the queries reaching its group, where `V` is the number of values the
-query's accuracy scope covers (1 per value, at most `⌊1 / share⌋` for a record
-share, and `G` from the workload-derived bounds for the whole result), and a
-classic HLL's precision is raised for its source's declared distinct bound.
-Stage 3 never resizes: a candidate whose sizes miss the composed accuracy
-target is rejected.
+Every size comes from a predefined list: Pass 1 offers each summary family
+with every $\boldsymbol\theta$ of its list (`parameter_list`), each with its
+precomputed error bound and failure probability per value. Pass 2 sets each
+consumer's parameter floor from the query targets passed down through the
+error contracts (a pruning cap: it removes only sizes no query can use),
+and Stage 3 decides the sizes: constraint (K) composes each query's error at
+its root over the selected edges and keeps the error and failure probability
+within the target (concepts doc, section 4). The failure probability is per
+value; a whole-result target over `G` values (from the workload-derived
+bounds) allows `δ / G` per value, a record-share target `δ / ⌊1 / share⌋`.
+A distinct count over one source's own rows takes its failure probability at
+the source's declared distinct bound.
 Pass 1 creates no merge nodes: each candidate summarizes exactly its own
 window, and merging across windows comes from the window-composition rule in
 Pass 2.
@@ -1360,9 +1352,18 @@ flowchart TB
 
 ### 3. Plan selection
 
-Selection rejects every candidate that misses an accuracy target or a latency
-bound, or that is over the cluster's capacity, and then picks the
-cheapest remaining plan. It is the only stage that uses the deployment's cost
+Selection picks the cheapest plan that meets every query's accuracy target
+(constraint (K): each selected candidate's error bound per metric and
+failure probability, composed over the selected edges through each
+consumer's error contract, within the target at the query's root) unless the
+deployment's accuracy model may accept an output regardless of its guarantee
+or its evidence may meet a target (`IgnoreAccuracyGuarantees`, or a custom
+model or evidence provider): then (K) applies to no query and the check
+after the solve decides. After the solve it checks each
+query's composed guarantee again with the deployment's accuracy model and
+evidence; an output none accepts is an error
+(`ErrorSelectingPlan::SelectedPlanFailedCheck`). Latency bounds and cluster
+capacity are not encoded (cost model 1 only). It is the only stage that uses the deployment's cost
 and accuracy models, and the only stage that discards valid candidates;
 earlier stages only prune provably invalid ones. Accuracy is
 estimated by the deployment's accuracy model, not assumed from a summary's
