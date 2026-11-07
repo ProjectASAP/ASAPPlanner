@@ -219,7 +219,6 @@ fn distinct_heap(eps: f64, delta: f64) -> u32 {
 
 /// The statistic a UnivMon distinct count over `source` leaves its
 /// top-layer failure probability as.
-#[allow(dead_code)] // Read again in #1207 PR 8: δ of a distinct count over a source's own rows, with θ.
 pub(crate) fn incomplete_top_layer_statistic(heap_size: u32, layers: u8, source: &str) -> String {
     format!("{INCOMPLETE_TOP_LAYER}[k={heap_size},layers={layers}]({MAX_DISTINCT}[{source}])")
 }
@@ -264,7 +263,6 @@ pub fn incomplete_top_layer_probability(heap_size: u32, layers: u8, max_distinct
 /// `δ_c` plus the chance of an incomplete top layer, left symbolic in the
 /// source's distinct bound. `None` for a shape that was not sized for a
 /// distinct count, a heap under 8, or a shape the library would not build.
-#[allow(dead_code)] // Read again in #1207 PR 8: δ of a distinct count over a source's own rows, with θ.
 pub(crate) fn distinct_guarantee(params: &SketchParams, source: &str) -> Option<AccuracyGuarantee> {
     let SketchParams::UnivMon {
         heap_size,
