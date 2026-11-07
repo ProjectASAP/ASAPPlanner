@@ -187,7 +187,7 @@ fn filter(memo: &mut Memo, child: MemoGroupId, pred: Predicate<MemoGroupId>) -> 
 /// reads p99 / p50 of it. KLL state group holds one build per θ of KLL's
 /// list, DDSketch's state group likewise; the p95, p99 and p50 groups each
 /// read either state through their own readout groups. The metric rule
-/// (B's relative ratio cannot read KLL's rank error) drops edges in PR 4,
+/// (B's relative ratio cannot read KLL's rank error) drops edges in Pass 2,
 /// so Pass 1 offers both families to every quantile group.
 #[test]
 fn running_example_gives_one_build_per_theta_and_separate_readouts() {

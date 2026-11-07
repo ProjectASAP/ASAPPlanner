@@ -457,6 +457,7 @@ dependencies = [
 name = "asap-stage1-pass2-reuse-candidates"
 version = "0.1.0"
 dependencies = [
+ "asap-accuracy",
  "asap-types",
  "thiserror 2.0.18",
 ]

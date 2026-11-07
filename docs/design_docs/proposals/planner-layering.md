@@ -311,19 +311,19 @@ rule's origin, and gives each reader a candidate that reads that group.
 | `OriginOfCandidateForMemoGroup` | Added by | Candidates |
 |---|---|---|
 | `Pass1` | `try_populate_pass1` (`pass1/memo_population.rs`) | Every Pass 1 choice of the group's measures: exact, exact accumulator, each summary family and size, and fused computations. Each summary choice comes at every `accuracy_budget_parts` from 1 to the most approximate inputs a query reaching the group has. A fused candidate implements the groups it absorbs only when no other reader needs them; otherwise they stay groups of their own. |
-| `TumblingWindows` | Window composition: `add_local_window_composition` and `extend_local_window_composition` (`pass2/memo/window_candidates.rs`) | A window summary computed from tumbling windows, at each tumbling-window width the reader's evaluation grid allows. The tumbling-window chain stays private to the candidate. |
-| `WidenedScans` | Scan widening: `add_scan_label_candidates` (`pass2/memo/rules/scan_labels.rs`) | A reader of a metric's scans widened to a shared label set, read through a `Project`. |
-| `SummaryInput` | `factor_summary_inputs` (`pass2/memo/rules/summary_inputs.rs`) | Canonical value preprocessing feeding a summary build. |
-| `TopKReuse` | Exact top-k reuse: `add_topk_candidates` (`pass2/memo/rules/topk.rs`) | One ranking (`Limit(k_max)` over `Sort`), and each top-k reading its first `k` rows from it. |
-| `Rollup` | Rollup: `add_finer_aggregate_candidates` (`pass2/memo/rules/finer_aggregate.rs`), `add_rollup_candidates` and `add_window_rollup_candidates` (`pass2/memo/rules/rollup.rs`) | A coarse group computed from a finer group's values or states. |
-| `SummaryResult` | `factor_summary_results` (`pass2/memo/rules/summary_results.rs`) | A summary readout factored out of a composite implementation, so that other readers can read it. |
-| `SharedBuild` | Summary capability: `add_shared_summary_state_groups` (`pass2/memo/state_groups.rs`), Pass 2's last step | For each build made two or more times (by different candidates, or twice within one), one concrete summary-state group with one `SharedBuild` candidate; and for each candidate making such builds, one `SharedBuild` copy that reads the groups instead of building its own states. |
+| `TumblingWindows` | Rule 1, window composition: `add_local_window_composition` (`stage1-pass2-reuse-candidates/src/memo/window_candidates.rs`) | A build of a mergeable summary state over a range with a tumbling-window layout $\omega$, one per listed $\boldsymbol\theta$ and per width of the gcd closure of the evaluation grids of the queries reaching the state group (each width divides the window). Added to the state group, so every consumer of it sees it. |
+| `WidenedScans` | Rule 2, scan widening: `add_scan_label_candidates` (`memo/rules/scan_labels.rs`) | The group of a metric's scan widened to the union of its scans' labels, the widened image of every group above that passes labels on, and in each original group a `Project` of its own columns over its widened image. |
+| `TopKReuse` | Rule 4, exact top-k reuse: `add_topk_candidates` (`memo/rules/topk.rs`) | A top-k over the largest top-k group of the same input and partition. A top-k has no error contract, so only an exact producer gives it an edge. |
+| `Rollup` | Rule 5, `add_finer_aggregate_candidates` (`memo/rules/finer_aggregate.rs`); rule 6, `add_rollup_candidates` (`memo/rules/rollup.rs`) | A coarse SQL aggregate over a finer aggregate's result (through a compensating `Filter`); a coarse summary state merged from a finer state (`SummaryMerge` with `group_by`), whose windowed builds then serve the coarse state too. |
 
-The state-configuration rule (`pass2/memo/rules/shared_configuration_readers.rs`) runs just
-before the shared builds are found. It rewrites readers to each shared size
-and to the newest tumbling windows of each tumbling-window chain layout they may read, so that
-equal builds appear, and a rewrite keeps the origin of the candidate it
-rewrites.
+Pass 1 gives every input of a summary build its own group, so no rule
+factors summary inputs, and a coarse state's rollup reads the finer state
+group with its windowed builds, which covers a window rollup over the same range; a longer range read from a shorter range's tumbling windows is not offered (it needs a window requirement on the input, #1221).
+After the rules, Pass 2 passes each query's accuracy target down through
+each consumer's error contract (`LogicalRequirements::error_propagation`),
+capped by its validity caps, sets the parameter floor of every consumer
+reading a sketch state from that cap, and lists the logical edges with
+$\alpha^{\log}$: the floor and the metric rule (concepts doc, section 4).
 
 **Each stage over the memo.** Each stage keeps its decision, on groups
 instead of whole candidates:
@@ -332,7 +332,7 @@ instead of whole candidates:
 |---|---|
 | 0 | Hash-conses the frontends' roots into groups (`DagOfLogicalMemoGroups`). |
 | 1, Pass 1 | Emits the candidates for each memo group: exact, exact accumulator, each summary family and size, fused computations. |
-| 1, Pass 2 | Each rule adds candidates to groups. Identical expression is group identity (nothing to add). Summary capability: a reader reading a concrete summary-state group shared with other groups, one group per shared size. Window composition: tumbling windows, and the newest tumbling windows of a shared chain, one concrete group per chain layout (grid, longest window, size). Rollup and exact top-k reuse: a candidate that reads another group (a finer grouping, a ranking). Scan widening: a reader of a metric's scans widened to a shared label set. |
+| 1, Pass 2 | Each rule adds candidates or groups; none copies a consumer. Identical expression is group identity (nothing to add). Window composition: tumbling-window layouts of a state group's builds. Rollup and exact top-k reuse: a candidate that reads another group (a finer grouping or state, a larger top-k). Scan widening: a projection of a metric's scans widened to a shared label set. Then the logical edges, with parameter floors from the error caps and the metric rule. |
 | 2 | Chooses each candidate's materialization, once for a group however many parents read it. A scan read through one window is built once; one read through different windows may also be read per reader. |
 | 3 | Chooses one candidate per needed group, and costs each candidate's own nodes, per node, given its readers; plan-level charges are added once per plan. A source's retained raw data is a concrete group `raw window(S, H)`, one per distinct lookback `H` of the source's query-time readers (a window plus any offset); its storage of `H` of raw data is charged once when it is chosen (planned). |
 

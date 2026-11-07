@@ -12,7 +12,6 @@ pub mod hll;
 pub(crate) mod kll;
 pub mod univmon;
 
-#[allow(dead_code)] // Read again for the error bound of each listed θ (`parameter_list`), in #1207 PRs 3–4.
 pub(super) fn sketch_guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
@@ -58,28 +57,27 @@ fn bounded_guarantee(
     )
 }
 
-/// The built-in guarantee of reading `query` out of a summary of family
-/// `family` built over an **exact** input, derived from the family's
-/// committed parameters by inverting the same sizing formulas
-/// [`size_params`] uses. Exact for a plain value
-/// or an exact aggregate. `None` when a sketch does not answer `query` (its
-/// family-capability table row), and when the family has no error model
-/// (`SummarySample`, `Wavelet`, `StatModel`, and sketch evaluations without a
-/// certified bound): Pass 1 then leaves the guarantee `None` and keeps the
-/// candidate for plan selection to decide.
-pub(crate) fn local_guarantee(
+/// The built-in guarantee of reading `statistic` out of a summary of family
+/// `family` with parameters `parameters` ($\boldsymbol\theta$, a candidate's
+/// `LogicalProperties::parameters`) built over an **exact** input, derived
+/// by inverting the same sizing formulas [`size_params`] uses. Exact for a
+/// plain value or an exact aggregate. `None` when a sketch does not answer
+/// `statistic` (its family-capability table row), when a sketch has no
+/// parameters, and when the family has no error model (`SummarySample`,
+/// `Wavelet`, `StatModel`, and sketch evaluations without a certified
+/// bound).
+pub fn local_guarantee(
     family: &FieldDataType,
-    query: &SketchStatistic,
+    parameters: Option<&SketchParams>,
+    statistic: &SketchStatistic,
 ) -> Option<AccuracyGuarantee> {
     match family {
         FieldDataType::Plain(_) => Some(AccuracyGuarantee::exact("Plain value")),
         FieldDataType::ExactAggregate(kind, _) => Some(AccuracyGuarantee::exact(format!(
             "ExactAggregate({kind:?})"
         ))),
-        FieldDataType::Sketch(..) if FamilyCapability::of(family).answers(query) => {
-            todo!(
-                "#1207 PR 4: the guarantee of θ from the candidate's LogicalProperties::parameters"
-            )
+        FieldDataType::Sketch(algorithm, _) if FamilyCapability::of(family).answers(statistic) => {
+            sketch_guarantee(algorithm, parameters?, statistic)
         }
         FieldDataType::Sketch(..) => None,
         // No error model is registered for these families.
@@ -550,23 +548,43 @@ mod tests {
     }
 
     /// A sketch read for a statistic its table row does not answer (an HLL
-    /// for a total) has no guarantee; one it answers keeps its guarantee,
-    /// and a plain value or exact aggregate stays exact.
+    /// for a total) has no guarantee, nor one without θ; one it answers
+    /// has the guarantee of its θ, and a plain value or exact aggregate
+    /// stays exact.
     #[test]
-    fn local_guarantee_needs_a_statistic_the_family_answers() {
+    fn local_guarantee_needs_a_statistic_the_family_answers_and_its_parameters() {
         use asap_types::ir::scalar::expr_ir::ColumnRef;
         use asap_types::ir::schema::{DataType, ExactKind, ExactParams, GroupingStrategy};
+        use asap_types::stages::parameter_list;
         let hll = FieldDataType::Sketch(SketchAlgorithm::Hll, GroupingStrategy::default());
         let total = SketchStatistic::PointCount {
             key: ColumnRef::SampleValue,
             value: None,
         };
-        assert!(local_guarantee(&hll, &total).is_none());
+        let hll_parameters = &parameter_list(SketchAlgorithm::Hll)[0];
+        assert!(local_guarantee(&hll, Some(hll_parameters), &total).is_none());
+        let kll = FieldDataType::Sketch(SketchAlgorithm::Kll, GroupingStrategy::default());
+        let median = SketchStatistic::Quantile { q: 0.5 };
+        assert!(local_guarantee(&kll, None, &median).is_none());
+        let errors: Vec<f64> = parameter_list(SketchAlgorithm::Kll)
+            .iter()
+            .map(|parameters| {
+                let guarantee = local_guarantee(&kll, Some(parameters), &median).unwrap();
+                assert_eq!(guarantee.spec.accuracy_metric, AccuracyMetric::Rank);
+                guarantee.spec.error.evaluate().unwrap()
+            })
+            .collect();
+        // The list runs weakest first: each listed k bounds the rank error
+        // more tightly than the one before.
+        assert!(
+            errors.windows(2).all(|pair| pair[1] < pair[0]),
+            "{errors:?}"
+        );
         for exact in [
             FieldDataType::Plain(DataType::Float64),
             FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count),
         ] {
-            assert!(local_guarantee(&exact, &total).is_some(), "{exact:?}");
+            assert!(local_guarantee(&exact, None, &total).is_some(), "{exact:?}");
         }
     }
 }
