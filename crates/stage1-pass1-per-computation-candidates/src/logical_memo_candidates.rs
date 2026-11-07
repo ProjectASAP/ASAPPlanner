@@ -10,16 +10,6 @@ use crate::per_computation_candidates::{
     add_pass1_candidates, computation_targets, PerComputationCandidateError,
 };
 
-/// Why [`pass1_memo`] failed.
-#[derive(Debug, thiserror::Error)]
-pub enum Pass1Error {
-    /// A query's memo cannot be planned: a group's expression is already an
-    /// ASAP operator, a measure's accuracy target is invalid, or a
-    /// candidate Pass 1 built is rejected by the memo.
-    #[error(transparent)]
-    PerComputation(#[from] PerComputationCandidateError),
-}
-
 /// Stage 1, Pass 1: the initial candidates of the memo groups of `memo`
 /// (Stage 0's, without candidates). It finds one computation target per
 /// measure of each aggregate group with a realization besides exact
@@ -35,7 +25,7 @@ pub enum Pass1Error {
 pub fn pass1_memo(
     mut memo: Memo,
     supported_summaries: Option<&[SupportedSummary]>,
-) -> Result<Memo, Pass1Error> {
+) -> Result<Memo, PerComputationCandidateError> {
     let targets = computation_targets(&memo, supported_summaries)?;
     add_pass1_candidates(&mut memo, &targets)?;
     Ok(memo)

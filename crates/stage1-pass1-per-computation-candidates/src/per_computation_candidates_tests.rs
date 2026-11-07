@@ -21,13 +21,13 @@ use asap_types::stages::{
     parameter_list, CandidateForMemoGroup, HowToComputeAggregateMeasure, Memo, MemoGroupId,
 };
 
+use crate::pass1_memo;
 use crate::per_computation_candidates::{
     computation_candidates_for_intent, computation_targets, PerComputationCandidateError,
 };
 use crate::test_fixtures::{
     aggregate_group, group, metric_schema, query, scan_group, scan_operator,
 };
-use crate::{pass1_memo, Pass1Error};
 
 /// A compact printout of every group and its candidates: the expression's
 /// operator, then per candidate its operator, input groups, θ and input
@@ -440,9 +440,7 @@ fn asap_input_and_invalid_accuracy_are_rejected() {
     query(&mut memo, state);
     assert!(matches!(
         pass1_memo(memo, None),
-        Err(Pass1Error::PerComputation(
-            PerComputationCandidateError::ContainsAsap
-        ))
+        Err(PerComputationCandidateError::ContainsAsap)
     ));
     let mut memo = Memo::default();
     let rows = selector(&mut memo, TimeRangeKind::Instant, "m", &[]);
@@ -460,9 +458,7 @@ fn asap_input_and_invalid_accuracy_are_rejected() {
     query(&mut memo, invalid);
     assert!(matches!(
         pass1_memo(memo, None),
-        Err(Pass1Error::PerComputation(
-            PerComputationCandidateError::InvalidAccuracy { .. }
-        ))
+        Err(PerComputationCandidateError::InvalidAccuracy { .. })
     ));
 }
 

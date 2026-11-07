@@ -35,5 +35,5 @@ mod realization;
 #[cfg(test)]
 mod test_fixtures;
 
-pub use logical_memo_candidates::{pass1_memo, Pass1Error};
+pub use logical_memo_candidates::pass1_memo;
 pub use per_computation_candidates::PerComputationCandidateError;

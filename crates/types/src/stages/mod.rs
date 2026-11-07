@@ -24,9 +24,7 @@ pub use candidates::{
 pub use logical_memo_candidates::{LogicalASAPMemoCandidates, LogicalEdge};
 pub(crate) use memo::MemoGroupAsInput;
 pub use memo::{queries_rooted_at, root_groups, GroupProperties, MemoGroup, MemoGroupId};
-pub use per_computation_logical_memo_candidates::{
-    ComputationTarget, FusedComputation, HowToComputeAggregateMeasure,
-};
+pub use per_computation_logical_memo_candidates::HowToComputeAggregateMeasure;
 pub use physical::{
     output_references, producer_satisfies_physical_requirements, DagOfSelectedCandidates,
     ExecutionContext, ExecutionContextId, PhysicalASAPMemoCandidates, PhysicalCandidate,

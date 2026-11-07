@@ -69,9 +69,9 @@ use asap_types::ir::{
     ProjectItem, ScalarExpr, SchemaDerivationError,
 };
 use asap_types::stages::{
-    parameter_list, CandidateError, CandidateExpression, CandidateForMemoGroup, ComputationTarget,
-    FusedComputation, HowToComputeAggregateMeasure, LogicalProperties, LogicalPropertiesError,
-    LogicalRequirements, Memo, MemoGroupId, OriginOfCandidateForMemoGroup,
+    parameter_list, CandidateError, CandidateExpression, CandidateForMemoGroup,
+    HowToComputeAggregateMeasure, LogicalProperties, LogicalPropertiesError, LogicalRequirements,
+    Memo, MemoGroupId, OriginOfCandidateForMemoGroup,
 };
 use thiserror::Error;
 
@@ -82,6 +82,44 @@ use crate::realization::{
     expression, raw_data_samples_of_metric, realize_keyed_additive_summary_input, schema,
     summary_candidates,
 };
+
+/// One measure of an aggregate group with at least one realization besides
+/// exact execution.
+#[derive(Debug, Clone)]
+pub(crate) struct ComputationTarget {
+    /// The memo group of the `Aggregate` the measure belongs to.
+    pub aggregate_group: MemoGroupId,
+    /// Index into the aggregate's measures.
+    pub measure_index: usize,
+    /// The measure's unranked ways to compute it, the exact option first.
+    pub ways_to_compute: Vec<HowToComputeAggregateMeasure>,
+    /// The fused computation of this measure together with the target
+    /// directly beneath it, offered beside this target's own candidates;
+    /// `None` when no fusion applies.
+    pub fused_computation: Option<FusedComputation>,
+}
+
+/// A target's measure computed together with the targets beneath it, as
+/// one operator that replaces their operators in this appearance of the
+/// sub-expression (concepts doc §3, "Fused groups"): the whole-expression
+/// top-k over a per-item `sum` or `count` (`Summary` of a heap family), or
+/// a nested distributive aggregate, a grouped `sum`, `min` or `max` over the
+/// same reduction (`ExactAccumulator([Sum])`, `[Min]` or `[Max]`). It has
+/// the outer target's aggregate, measure, filter and `HAVING`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct FusedComputation {
+    /// The groups of the operators it replaces, which its builds list in
+    /// `fused_groups`: the aggregate directly beneath, then, for a
+    /// whole-expression heap over the raw data samples beneath a grouped sum
+    /// of per-series sums or counts (`topk(k, sum by (G)
+    /// (sum_over_time(m[W])))`), the per-series aggregate beneath that, then
+    /// the groups any of these targets' own fused computations replace.
+    pub absorbed_groups: Vec<MemoGroupId>,
+    /// How the fused computation is computed: exact or a summary. Empty
+    /// when Pass 1 pruned every one (today only for a family the deployment
+    /// does not support); the fusion is then not offered.
+    pub ways_to_compute: Vec<HowToComputeAggregateMeasure>,
+}
 
 /// Unranked candidates of one measure and the candidates pruned for it.
 #[derive(Debug, Clone, PartialEq)]
@@ -367,8 +405,8 @@ fn without_unsupported_summaries(
     }
 }
 
-/// Adds to each fused computation's `absorbed_targets` the targets its
-/// absorbed targets' own fused computations absorb, transitively: the
+/// Adds to each fused computation's `absorbed_groups` the groups its
+/// absorbed targets' own fused computations replace, transitively: the
 /// fused computation replaces all their operators, so its builds list all
 /// their groups in `fused_groups`.
 fn close_absorptions(targets: &mut [ComputationTarget]) {
@@ -378,12 +416,18 @@ fn close_absorptions(targets: &mut [ComputationTarget]) {
             let Some(fused) = &targets[t].fused_computation else {
                 continue;
             };
-            let beneath: Vec<usize> = fused
-                .absorbed_targets
+            let beneath: Vec<MemoGroupId> = fused
+                .absorbed_groups
                 .iter()
-                .filter_map(|&a| targets[a].fused_computation.as_ref())
-                .flat_map(|inner| inner.absorbed_targets.iter().copied())
-                .filter(|b| !fused.absorbed_targets.contains(b))
+                .filter_map(|&group| {
+                    targets
+                        .iter()
+                        .find(|target| target.aggregate_group == group)?
+                        .fused_computation
+                        .as_ref()
+                })
+                .flat_map(|inner| inner.absorbed_groups.iter().copied())
+                .filter(|b| !fused.absorbed_groups.contains(b))
                 .collect();
             if let Some(fused) = targets[t]
                 .fused_computation
@@ -391,8 +435,8 @@ fn close_absorptions(targets: &mut [ComputationTarget]) {
                 .filter(|_| !beneath.is_empty())
             {
                 for b in beneath {
-                    if !fused.absorbed_targets.contains(&b) {
-                        fused.absorbed_targets.push(b);
+                    if !fused.absorbed_groups.contains(&b) {
+                        fused.absorbed_groups.push(b);
                     }
                 }
                 changed = true;
@@ -450,7 +494,7 @@ fn add_nested_distributive_targets(memo: &Memo, targets: &mut [ComputationTarget
         };
         absorbed.push(inner);
         targets[t].fused_computation = Some(FusedComputation {
-            absorbed_targets: vec![inner],
+            absorbed_groups: vec![*child],
             ways_to_compute: vec![HowToComputeAggregateMeasure::ExactAccumulator(vec![kind])],
         });
     }
@@ -570,12 +614,9 @@ fn add_whole_expression_targets(memo: &Memo, targets: &mut [ComputationTarget]) 
         else {
             continue;
         };
-        let Some(inner) = targets
-            .iter()
-            .position(|other| other.aggregate_group == *child)
-        else {
+        if !targets.iter().any(|other| other.aggregate_group == *child) {
             continue;
-        };
+        }
         // Measure filters: `whole_expression_input` refuses them.
         if has_having(memo, target.aggregate_group) || has_having(memo, *child) {
             continue;
@@ -585,18 +626,18 @@ fn add_whole_expression_targets(memo: &Memo, targets: &mut [ComputationTarget]) 
         };
         // A heap over the raw data samples beneath a grouped sum of per-series
         // sums or counts also absorbs the per-series target.
-        let mut absorbs = vec![inner];
+        let mut absorbs = vec![*child];
         if let Operator::NonASAP(NonASAPOp::Aggregate {
             child: per_series, ..
-        }) = expression(memo, targets[inner].aggregate_group)
+        }) = expression(memo, *child)
         {
             let reads_below = expression(memo, *per_series).children().contains(&&input);
-            if reads_below {
-                absorbs.extend(
-                    targets
-                        .iter()
-                        .position(|other| other.aggregate_group == *per_series),
-                );
+            if reads_below
+                && targets
+                    .iter()
+                    .any(|other| other.aggregate_group == *per_series)
+            {
+                absorbs.push(*per_series);
             }
         }
         let (heaps, own): (Vec<_>, Vec<_>) =
@@ -614,7 +655,7 @@ fn add_whole_expression_targets(memo: &Memo, targets: &mut [ComputationTarget]) 
         let target = &mut targets[t];
         target.ways_to_compute = own;
         target.fused_computation = Some(FusedComputation {
-            absorbed_targets: absorbs,
+            absorbed_groups: absorbs,
             ways_to_compute: heaps,
         });
     }
@@ -793,7 +834,6 @@ pub(crate) fn add_pass1_candidates(
             below: &below,
             above: &above,
             targets: group_targets,
-            all_targets: targets,
         };
         add_aggregate_candidates(memo, &ways)?;
         for (filter, pred) in pushed_down {
@@ -824,8 +864,6 @@ struct AggregateWays<'a> {
     above: &'a [Predicate<MemoGroupId>],
     /// The aggregate's targets, one per measure that has one.
     targets: &'a [&'a ComputationTarget],
-    /// Every target, for the groups a fused computation absorbs.
-    all_targets: &'a [ComputationTarget],
 }
 
 /// One measure of an aggregate, computed on its own over `input`.
@@ -901,18 +939,13 @@ fn add_aggregate_candidates(
             )?;
         }
         if let Some(fused) = &target.fused_computation {
-            let absorbed_groups: Vec<MemoGroupId> = fused
-                .absorbed_targets
-                .iter()
-                .map(|&absorbed| ways.all_targets[absorbed].aggregate_group)
-                .collect();
             for way in &fused.ways_to_compute {
                 unless_unsupported(add_fused_candidate(
                     memo,
                     ways,
                     &measure(0),
                     way,
-                    &absorbed_groups,
+                    &fused.absorbed_groups,
                 ))?;
             }
         }
