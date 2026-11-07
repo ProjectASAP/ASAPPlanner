@@ -1882,4 +1882,159 @@ mod memo_tests {
             None
         );
     }
+
+    /// `Scan latency`: `[ts, value, job]`, `job` a label column.
+    fn scan_with_job(metric: &str) -> Operator<MemoGroupId> {
+        Operator::NonASAP(NonASAPOp::Scan {
+            source: Source::TimeSeries {
+                metric: metric.into(),
+            },
+            predicates: vec![],
+            schema: Schema::with_time_index(
+                vec![
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("value", DataType::Float64, false),
+                    Field::plain("job", DataType::Utf8, true),
+                ],
+                0,
+                vec![],
+            ),
+        })
+    }
+
+    /// Decided 2026-11-07 (E1, PR 4): constant error contracts. A `Filter`
+    /// whose predicate reads only key or label columns (here `job = "api"`
+    /// over a scan's `job` label) keeps or drops whole rows, so a value's
+    /// error passes through unchanged: β = 1 for absolute, relative and
+    /// rank errors. A `Project` of `abs`, `clamp` or a negation of the
+    /// value changes a value by at most its error: β = 1 for absolute
+    /// errors.
+    ///
+    /// Fails until E1's constant contracts are in `error_propagation`
+    /// (today a filter and a computed projection have none). If the
+    /// contract needs the input group's schema to tell a label column from
+    /// a value, the call here takes the memo then.
+    #[test]
+    fn e1_key_filters_and_value_preserving_projects_have_unit_contracts() {
+        let mut memo = Memo::default();
+        let g1 = memo.find_or_add_group(scan_with_job("latency")).unwrap();
+        let filter = memo
+            .find_or_add_group(Operator::NonASAP(NonASAPOp::Filter {
+                pred: crate::ir::Predicate(ScalarExpr::Compare {
+                    left: Box::new(ScalarExpr::Column(2)),
+                    op: crate::ir::scalar::CompareOpKind::Eq,
+                    right: Box::new(ScalarExpr::Literal(crate::ir::scalar::ScalarValue::Utf8(
+                        "api".into(),
+                    ))),
+                    semantics: crate::ir::ExprSemantics::Promql,
+                }),
+                child: g1,
+            }))
+            .unwrap();
+        let filter = &memo.groups()[filter.0 as usize].expression;
+        for metric in [
+            AccuracyMetric::ABSOLUTE,
+            AccuracyMetric::Relative,
+            AccuracyMetric::Rank,
+        ] {
+            assert_eq!(
+                LogicalRequirements::error_propagation(filter, metric)
+                    .map(|propagation| propagation.factor_per_input),
+                Some(vec![1.0]),
+                "key-only filter, {metric:?}"
+            );
+        }
+        let value = || Box::new(ScalarExpr::Column(1));
+        let literal = |x: f64| ScalarExpr::Literal(crate::ir::scalar::ScalarValue::Float64(x));
+        let computed = [
+            ScalarExpr::FunctionCall {
+                name: "abs".into(),
+                args: vec![*value()],
+            },
+            ScalarExpr::FunctionCall {
+                name: "clamp".into(),
+                args: vec![*value(), literal(0.0), literal(100.0)],
+            },
+            ScalarExpr::Negative {
+                expr: value(),
+                semantics: crate::ir::ExprSemantics::Promql,
+            },
+        ];
+        for expr in computed {
+            let project = Operator::NonASAP(NonASAPOp::Project {
+                cols: vec![
+                    crate::ir::ProjectItem {
+                        alias: None,
+                        expr: ScalarExpr::Column(0),
+                    },
+                    crate::ir::ProjectItem {
+                        alias: Some("value".into()),
+                        expr: expr.clone(),
+                    },
+                    crate::ir::ProjectItem {
+                        alias: None,
+                        expr: ScalarExpr::Column(2),
+                    },
+                ],
+                child: g1,
+            });
+            assert_eq!(
+                LogicalRequirements::error_propagation(&project, AccuracyMetric::ABSOLUTE)
+                    .map(|propagation| propagation.factor_per_input),
+                Some(vec![1.0]),
+                "{expr:?}"
+            );
+        }
+    }
+
+    /// Decided 2026-11-07 (D3): `Memo::set_input_requirements` replaces
+    /// $r^{\log}$ of the one candidate it names, leaving the group's other
+    /// candidates as they were.
+    #[test]
+    fn set_input_requirements_replaces_only_the_named_candidates() {
+        let mut memo = Memo::default();
+        let g1 = memo.find_or_add_group(scan("latency")).unwrap();
+        let g2 = memo.find_or_add_group(kll_state(g1)).unwrap();
+        for k in [200, 345] {
+            memo.add_candidate(g2, candidate(kll_state(g1), kll_k(k)))
+                .unwrap();
+        }
+        let floor = kll_k(400);
+        memo.set_input_requirements(
+            CandidateForMemoGroupId {
+                group: g2,
+                index_in_group: 1,
+            },
+            vec![LogicalRequirements::new(floor.clone())],
+        );
+        let floors: Vec<Option<SketchParams>> = memo.groups()[g2.0 as usize]
+            .candidates
+            .iter()
+            .map(|c| {
+                c.input_requirements[0]
+                    .parameter_floor_for_required_accuracy()
+                    .cloned()
+            })
+            .collect();
+        assert_eq!(floors, vec![None, floor]);
+    }
+
+    /// Decided 2026-11-07 (D3): one requirement per input group, or a
+    /// panic.
+    #[test]
+    #[should_panic(expected = "one requirement per input group")]
+    fn set_input_requirements_panics_on_a_length_mismatch() {
+        let mut memo = Memo::default();
+        let g1 = memo.find_or_add_group(scan("latency")).unwrap();
+        let g2 = memo.find_or_add_group(kll_state(g1)).unwrap();
+        memo.add_candidate(g2, candidate(kll_state(g1), kll_k(200)))
+            .unwrap();
+        memo.set_input_requirements(
+            CandidateForMemoGroupId {
+                group: g2,
+                index_in_group: 0,
+            },
+            Vec::new(),
+        );
+    }
 }

@@ -33,6 +33,9 @@ use crate::logical_edges::{merged_tumbling_windows_guarantee, OutputError};
 use crate::memo::window_candidates::tumbling_window_widths;
 use crate::parameter_floors::{strongest, weakest};
 
+/// The examples decided on 2026-11-07, as tests before their implementation.
+mod decided_examples;
+
 // ── Fixtures ──────────────────────────────────────────────────────────────
 
 /// Adds `operator` with `parameters` to `group`, as Pass 1 does.
