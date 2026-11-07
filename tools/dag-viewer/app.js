@@ -153,26 +153,21 @@
 
   function statusChip(status) {
     if (status === 'selected') return '<span class="chip selected">✓ selected</span>';
-    if (status === 'reference selected') return '<span class="chip costlier">reference pricer\'s pick</span>';
-    if (status === 'costlier') return '<span class="chip costlier">valid · costlier</span>';
-    if (status === 'rejected') return '<span class="chip invalid">✗ invalid</span>';
     if (status === 'not judged') return '<span class="chip">not judged</span>';
-    if (status === 'not kept') return '<span class="chip invalid">✗ invalid · not kept</span>';
     return `<span class="chip invalid">${esc(status)}</span>`;
   }
 
   function rowKey(row) {
-    if (row.status === 'not kept') return `X:${row.id}`;
-    return `${row.status === 'pruned' || row.status === 'composition error' ? 'L' : 'P'}:${row.id}`;
+    return `${row.status === 'composition error' ? 'L' : 'P'}:${row.id}`;
   }
 
   function renderRanking() {
     const pressed = current.physical ? `P:${current.physical}` : `L:${current.logical}`;
-    $('rank').innerHTML = rows.map((r) => `<li><button type="button" data-key="${esc(rowKey(r))}" aria-pressed="${rowKey(r) === pressed}"${r.status === 'not kept' ? ' disabled title="the default search did not keep this candidate"' : ''}>
+    $('rank').innerHTML = rows.map((r) => `<li><button type="button" data-key="${esc(rowKey(r))}" aria-pressed="${rowKey(r) === pressed}">
         <span class="pid">${esc(r.id)}</span><span class="plabel">${esc(r.display_name || r.id)}</span>
         <span class="ptotal">${r.total === null ? '—' : fmtCost(r.total)}</span>
         <span class="pstatus">${statusChip(r.status)}${r.reason ? `<span>${esc(r.reason)}</span>` : ''}${r.accepted ? `<span class="accepted">${esc(r.accepted)}</span>` : ''}</span></button></li>`).join('');
-    $('rank').querySelectorAll('button:not([disabled])').forEach((b) => b.addEventListener('click', () => {
+    $('rank').querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
       const [kind, id] = [b.dataset.key.slice(0, 1), b.dataset.key.slice(2)];
       if (kind === 'P') selectPhysical(id);
       else selectLogical(id);
@@ -180,9 +175,8 @@
   }
 
   // Choose Stage 1 candidate `id`: show its physical plan when it has one;
-  // a pruned or uncomposed candidate has none, so Stage 2 is cleared.
+  // an uncomposed candidate has none, so Stage 2 is cleared.
   function selectLogical(id) {
-    pressEnumeratedRow(null);
     const physical = doc.stage2_physical_asap_optimization.candidates.find((p) => p.from_logical === id);
     if (physical) { selectPhysical(physical.id); return; }
     showLogical(id);
@@ -200,32 +194,15 @@
     if (c.dag) {
       render(1, c.dag, false, null);
       const physicalFor = doc.stage2_physical_asap_optimization.candidates.filter((p) => p.from_logical === id).map((p) => p.id);
-      const pruned = (doc.stage2_physical_asap_optimization.pruned || []).find((p) => p.from_logical === id);
       $('lane1-meta').innerHTML = `${esc(c.display_name)} · ${c.dag.nodes.length} nodes · ` +
-        (pruned ? `pruned by Stage 2: ${esc(pruned.reason)}` : `physical plan ${physicalFor.map((p) => `<b>${esc(p)}</b>`).join(', ') || 'none'}`);
+        `physical plan ${physicalFor.map((p) => `<b>${esc(p)}</b>`).join(', ') || 'none'}`;
     } else {
       clearLane(1, '');
       $('lane1-meta').innerHTML = `${esc(c.display_name)} · <span class="error">composition error: ${esc(c.error)}</span>`;
     }
   }
 
-  // Draw enumerated DAG `id` of `memo.enumeration` (enumeration.js) in
-  // lane 1; the document has no physical plan for it.
-  function showEnumerated(id, dag, description, perQueryDag) {
-    current = { logical: null, physical: null };
-    $('pick1').value = '';
-    $('pick2').value = '';
-    // Its roots are its root groups; drawn per query when they map to queries.
-    if (perQueryDag) render(1, perQueryDag, false, null);
-    else render(1, dag, false, null, dag.roots.map((_, k) => `root group #${k + 1}`));
-    $('lane1-meta').innerHTML = `enumerated DAG <b>${esc(id)}</b> · ${esc(description)} · ${dag.nodes.length} nodes` +
-      (perQueryDag ? '' : ' · roots not matched to queries');
-    clearLane(2, 'no physical plan for an enumerated DAG');
-    renderRanking();
-  }
-
   function selectPhysical(id) {
-    pressEnumeratedRow(null);
     current.physical = id;
     $('pick2').value = id;
     const c = physicalById.get(id);
@@ -233,10 +210,9 @@
     const cost = selection.cost_per_candidate[id];
     render(2, c.dag, true, cost ? cost.per_node : null);
     const row = rows.find((r) => rowKey(r) === `P:${id}`);
-    const priced = rows.filter((r) => r.rank !== null).length;
     $('lane2-meta').innerHTML = `${esc(c.display_name)} · from <b>${esc(c.from_logical)}</b> · ` +
-      (cost && cost.cost_per_second !== null ? `total <b>${fmtCost(cost.cost_per_second)}</b> ${esc(cost.cost_unit.replace(/_/g, ' '))} · rank ${row.rank} of ${priced}`
-        : cost ? 'no price (cost model 3)' : 'not priced') +
+      (cost && cost.cost_per_second !== null ? `total <b>${fmtCost(cost.cost_per_second)}</b> ${esc(cost.cost_unit.replace(/_/g, ' '))}`
+        : cost ? 'no cost (cost model 3)' : 'not costed') +
       ` · ${statusChip(row.status)}` +
       (row.accepted ? ` · <span class="accepted">${esc(row.accepted)}</span>` : '') +
       (cost && cost.usage ? `<br>Stage 3 usage: ${esc(usageText(cost.usage))}` : '');
@@ -250,10 +226,8 @@
 
   // Show one stage document; `source` names it, `story` explains it.
   function showDocument(data, source, story) {
-    upgradeTumblingWindowNames(data);
-    upgradeMemoSteps(data);
     fillStagesNotRun(data);
-    const errors = validateStagePipeline(data).concat(validateMemoEnumeration(data));
+    const errors = validateStagePipeline(data);
     if (!errors.length && typeof validateMemo === 'function') errors.push(...validateMemo(data.memo, data.workload.queries.length));
     if (errors.length) throw new Error(errors.slice(0, 3).join('; '));
     doc = data;
@@ -280,11 +254,10 @@
       const req = [acc && `accuracy ${acc}`, r.max_latency_ms && `latency ≤ ${r.max_latency_ms} ms`, schedule].filter(Boolean).join(' · ');
       return `<div class="query"><span class="qid">${esc(q.id)} · ${esc(q.language)}</span><code>${esc(q.text)}</code>${req ? `<span class="req">${esc(req)}</span>` : ''}</div>`;
     }).join('');
-    const count = (status) => rows.filter((r) => r.status === status).length;
     $('counts').innerHTML = `Candidates per stage: <b>1</b> logical DAG → <b>${logical.combinations}</b> logical ASAP` +
       (logical.capped ? ` (<b>${logical.candidates.length}</b> shown)` : '') +
       ` → <b>${physicalById.size}</b> physical` +
-      (selection.selected_candidate ? ` → <b>1</b> selected (${count('rejected')} invalid, ${count('costlier')} valid but costlier)` : ' → none selected');
+      (selection.selected_candidate ? ' → <b>1</b> selected' : ' → none selected');
     $('rank-meta').textContent = [stageCandidateHeader(doc), accuracyGuaranteesText(doc), searchText(doc)].filter(Boolean).join(' · ');
     renderDataWorkload();
     const sel = selection.selected_candidate ? selection.cost_per_candidate[selection.selected_candidate] : null;
@@ -307,8 +280,6 @@
       renderRanking();
     }
     renderMaterializedViews();
-    renderMemoSearch();
-    renderEnumeration(doc, showEnumerated);
     if (window.MemoView) window.MemoView.show(doc, queryIds);
   }
 
@@ -366,22 +337,6 @@
       tr.addEventListener('click', pick);
       tr.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); } });
     });
-  }
-
-  // Joint-search metrics; historical documents may additionally list shared units.
-  function renderMemoSearch() {
-    const view = memoSearchView(doc);
-    $('memoPanel').hidden = !view;
-    if (!view) return;
-    $('memo-meta').textContent = [memoSummaryText(view.summary),
-      view.scansWidened ? 'selected plan: the scan-widening variant of the solution' : ''].filter(Boolean).join(' · ');
-    $('memoShared').innerHTML = view.sharedUnits.length
-      ? table(['shared unit', 'kind', 'readers', 'queries', 'threshold', 'runs', 'strictest reader'],
-        view.sharedUnits.map((u) => `<tr><td class="wrap">${esc(u.unit)}</td><td>${esc(u.kind)}</td><td class="wrap">${esc(u.readers.join(', '))}</td><td>${esc(u.queries.join(', '))}</td>` +
-          `<td class="wrap">${esc(u.threshold)}</td><td class="wrap">${esc(u.schedule)}</td><td>${esc(u.strictest)}</td></tr>`).join(''))
-      : (view.summary && view.summary.status
-        ? '<span class="status">Inspect the selected execution DAG for shared producer nodes.</span>'
-        : '<span class="status">No shared units recorded.</span>');
   }
 
   // Show the selected plan in the Stage 2 lane and select its node `id`.

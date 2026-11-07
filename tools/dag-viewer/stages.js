@@ -4,111 +4,17 @@
 // app.js draws them; test_viewer.py runs this file headless.
 const STAGE_PIPELINE_FORMAT = 'asap-stage-pipeline/v2';
 
-// Documents written before #1163 name the tumbling-window chain `PaneChain`,
-// its fields `pane_*`, and the memo origin `panes` (`Panes` in older MILP
-// search reports); renames them in place to today's names, keeping each
-// object's key order, so the rest of the viewer reads one set of names.
-// Remove once no document the viewer must open predates #1163.
-const TUMBLING_WINDOW_RENAMES = Object.freeze({
-  PaneChain: 'SummaryTumblingWindowChain',
-  pane_width_ms: 'tumbling_window_width_ms',
-  pane_count: 'tumbling_window_count',
-  newest_panes: 'newest_tumbling_windows',
-  pane_retention_ms: 'tumbling_window_retention_ms',
-});
-const ORIGIN_RENAMES = Object.freeze({ panes: 'tumbling_windows', Panes: 'TumblingWindows' });
-const has = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
-function upgradeTumblingWindowNames(value, parentKey) {
-  if (Array.isArray(value)) {
-    value.forEach((item, index) => {
-      if (item === 'PaneChain') value[index] = TUMBLING_WINDOW_RENAMES.PaneChain;
-      else upgradeTumblingWindowNames(item);
-    });
-    return value;
-  }
-  if (!value || typeof value !== 'object') return value;
-  // Origin counts are keyed by origin name.
-  const renames = parentKey === 'candidate_count_by_origin' || parentKey === 'candidates_by_origin'
-    ? ORIGIN_RENAMES : TUMBLING_WINDOW_RENAMES;
-  const entries = Object.entries(value);
-  if (!entries.some(([key]) => has(renames, key) && !has(value, renames[key]))) {
-    for (const [key, item] of entries) value[key] = upgradeItem(key, item);
-    return value;
-  }
-  for (const key of Object.keys(value)) delete value[key];
-  for (const [key, item] of entries) {
-    // An old key never overwrites a new one already present.
-    const renamed = has(renames, key) && !entries.some(([other]) => other === renames[key]) ? renames[key] : key;
-    value[renamed] = upgradeItem(key, item);
-  }
-  return value;
-}
-// Documents written before the planner dropped `MemoSteps` have a memo step
-// `pass2` (local window composition only) followed by `concrete_states`
-// (Pass 2's output); older ones also name Stage 1's pruned candidates
-// `pass1_pruned` (read by the memo group panel).
-// Renames them in place to today's steps, where `pass2` is Pass 2's output:
-// the window-composition step is dropped (its candidates are in Pass 2's
-// output, marked by their origin), `concrete_states` becomes `pass2`.
-// Remove once no document the viewer must open predates the change.
 // A stage `run_until` stopped before, or one after a failed stage, is null;
 // the viewer shows it empty.
 function fillStagesNotRun(doc) {
   if (!doc || typeof doc !== 'object') return doc;
   const empty = {
-    stage1_logical_asap_optimization: { combinations: 0, capped: false, pruned_candidates: [], candidates: [] },
-    stage2_physical_asap_optimization: { candidates: [], pruned: [], pruned_candidates: [] },
-    stage3_plan_selection: { selected_dag: null, materialized_views: [] },
+    stage1_logical_asap_optimization: { combinations: 0, capped: false, candidates: [] },
+    stage2_physical_asap_optimization: { candidates: [], physical_candidates: [], pruned_candidates: [] },
+    stage3_plan_selection: { selected_dag: null, materialized_views: [], pruned_candidates: [] },
   };
   Object.entries(empty).forEach(([stage, section]) => { if (doc[stage] === null) doc[stage] = section; });
   return doc;
-}
-
-function upgradeMemoSteps(doc) {
-  const stage1 = doc && doc.stage1_logical_asap_optimization;
-  if (stage1 && has(stage1, 'pass1_pruned') && !has(stage1, 'pruned_candidates')) {
-    stage1.pruned_candidates = stage1.pass1_pruned;
-    delete stage1.pass1_pruned;
-  }
-  const memo = doc && doc.memo;
-  if (!memo || !Array.isArray(memo.steps) || !memo.steps.some((step) => step && step.step === 'concrete_states')) return doc;
-  // `added` was relative to the dropped step: a candidate that step added
-  // (same group, node and children) is also new since Pass 1.
-  const dropped = memo.steps.find((step) => step && step.step === 'pass2');
-  const addedByDropped = new Set();
-  for (const group of (dropped && dropped.groups) || []) {
-    for (const candidate of group.candidates || []) {
-      if (candidate.added) addedByDropped.add(JSON.stringify([group.id, candidate.node, candidate.children]));
-    }
-  }
-  memo.steps = memo.steps.filter((step) => !step || step.step !== 'pass2');
-  for (const step of memo.steps) {
-    if (!step || step.step !== 'concrete_states') continue;
-    Object.assign(step, { step: 'pass2', title: 'Stage 1, Pass 2' });
-    for (const group of step.groups || []) {
-      for (const candidate of group.candidates || []) {
-        if (addedByDropped.has(JSON.stringify([group.id, candidate.node, candidate.children]))) candidate.added = true;
-      }
-    }
-  }
-  const enumeration = memo.enumeration;
-  if (enumeration && enumeration.per_step) {
-    const perStep = {};
-    for (const [step, count] of Object.entries(enumeration.per_step)) {
-      if (step === 'pass2') continue;
-      perStep[step === 'concrete_states' ? 'pass2' : step] = count;
-    }
-    enumeration.per_step = perStep;
-    // A listing of the dropped step is a listing of no step left.
-    if (enumeration.step === 'pass2') Object.assign(enumeration, { step: 'pass2', choices: [], priced: null });
-    else if (enumeration.step === 'concrete_states') enumeration.step = 'pass2';
-  }
-  return doc;
-}
-function upgradeItem(key, item) {
-  if (item === 'PaneChain') return TUMBLING_WINDOW_RENAMES.PaneChain;
-  if (key === 'origin' && has(ORIGIN_RENAMES, item)) return ORIGIN_RENAMES[item];
-  return upgradeTumblingWindowNames(item, key);
 }
 
 function isStagePipelineDocument(doc) {
@@ -151,49 +57,6 @@ function stageLogicalChildren(body) {
   // `PromqlVectorFromScalar`'s `{"PromqlScalarFromVector": id}`) is seen.
   Object.entries(body).forEach(([field, value]) => { if (!STAGE_CHILD_FIELDS.includes(field)) stageScalarRefs({ [field]: value }, ids); });
   return ids;
-}
-
-// `value` (an operator body field that is not a child field) with every
-// operator node id its scalar expressions read replaced by `f(id)`.
-function stageMapScalarRefs(value, f) {
-  if (Array.isArray(value)) return value.map((inner) => stageMapScalarRefs(inner, f));
-  if (!value || typeof value !== 'object') return value;
-  return Object.fromEntries(Object.entries(value).map(([field, inner]) => [field,
-    STAGE_SCALAR_REF_FIELDS.includes(field) && typeof inner === 'number' ? f(inner) : stageMapScalarRefs(inner, f)]));
-}
-
-// A logical operator with every node id it reads (those stageLogicalChildren
-// lists) replaced by `f(id)`.
-function stageMapLogicalChildren(operator, f) {
-  const [outer, inner] = Object.entries(operator)[0];
-  if (!inner || typeof inner !== 'object') return operator;
-  const [kind, body] = Object.entries(inner)[0];
-  if (!body || typeof body !== 'object' || Array.isArray(body)) return operator;
-  const mapped = Object.fromEntries(Object.entries(body).map(([field, value]) => {
-    if (!STAGE_CHILD_FIELDS.includes(field)) return [field, stageMapScalarRefs({ [field]: value }, f)[field]];
-    const id = (v) => (typeof v === 'number' ? f(v) : v);
-    return [field, Array.isArray(value) ? value.map(id) : id(value)];
-  }));
-  return { [outer]: { [kind]: mapped } };
-}
-
-// The flat DAG below `roots` (indices into `table`, the memo section's
-// `memo.nodes`): the nodes they reach, renumbered from 0 in table order (so
-// children still come before parents), with one operator root per entry of
-// `roots`.
-function memoNodeDag(table, roots) {
-  const reached = new Set();
-  const pending = [...roots];
-  while (pending.length) {
-    const id = pending.pop();
-    if (reached.has(id) || !table[id]) continue;
-    reached.add(id);
-    pending.push(...stageLogicalChildren(stageOperatorParts(table[id].operator)[1]));
-  }
-  const tableIds = [...reached].sort((a, b) => a - b);
-  const local = new Map(tableIds.map((id, i) => [id, i]));
-  const nodes = tableIds.map((id) => ({ ...table[id], operator: stageMapLogicalChildren(table[id].operator, (child) => local.get(child)) }));
-  return { nodes, roots: roots.map((id) => ({ Operator: local.get(id) })) };
 }
 
 // A scalar expression as short text: `time()`, `scalar(#3)` (node 3),
@@ -315,51 +178,13 @@ function uniqueIds(list, where, errors) {
   return ids;
 }
 
-// The `reference_pricing.pruned_candidates[].cause` values (`RejectionCause`)
-// of a candidate that failed a check (`RejectionCause::failed_a_check`):
-// it is not priced.
-const FAILED_CHECK_CAUSES = [
-  'accuracy_target_missed',
-  'count_min_weights_not_proven_non_negative',
-  'no_accuracy_guarantee', 'latency_bound_exceeded', 'latency_over_repeat_interval',
-  'over_cluster_capacity', 'infeasible', 'cost_not_representable',
-];
-// Every `reference_pricing.pruned_candidates[].cause` the reference pricer
-// writes: the failed checks, then the losses under the cost model (priced,
-// not selected).
-const REJECTION_CAUSES = FAILED_CHECK_CAUSES.concat([
-  'costlier', 'slower', 'more_memory',
-  'tied_lost_on_enumeration_order',
-]);
-
-// The per-candidate selection table the panels read, named as
-// `reference_pricing` names its keys, from Stage 3's `Selection`
-// (`stage3_plan_selection`): the selected plan `P1` with its cost and
-// accepted accuracy. Under `--exhaustive` it also holds the reference
-// pricer's table (`reference_pricing`) over the enumerated plans: their
-// costs, accepted accuracy and pruned candidates, with the reference
-// pricer's own pick as `reference_selected_candidate`. A document written
-// before `Selection` (its Stage 3 section has `costs`, `selected`,
-// `accepted`, `rejected` with `id`s) is read into the same table.
+// The per-candidate selection table the panels read, from Stage 3's
+// `Selection` (`stage3_plan_selection`): the selected plan `P1` with its
+// cost and accepted accuracy.
 function selectionTable(doc) {
   const stage3 = doc.stage3_plan_selection || {};
-  if ('costs' in stage3) {
-    const pruned = Array.isArray(stage3.rejected)
-      ? stage3.rejected.map((r) => (r && typeof r === 'object' ? { candidate: r.id, cause: r.cause, reason: r.reason } : r))
-      : stage3.rejected;
-    return {
-      ...stage3,
-      selected_candidate: stage3.selected,
-      cost_per_candidate: stage3.costs,
-      accepted_accuracy_per_candidate: stage3.accepted || {},
-      pruned_candidates: pruned,
-      pruned_candidates_not_enumerated: (stage3.search_rejected || []).map((r) => ({ candidate: r.id, cause: r.cause, reason: r.reason })),
-      pruned_candidate_count_by_cause: stage3.rejected_by_cause,
-    };
-  }
   const table = {
     selected_candidate: null, cost_per_candidate: {}, accepted_accuracy_per_candidate: {},
-    pruned_candidates: [], pruned_candidates_not_enumerated: [],
     error: stage3.error, warnings: stage3.warnings,
     materialized_views: stage3.materialized_views, materialized_views_error: stage3.materialized_views_error,
     tumbling_window_retention_ms: stage3.tumbling_window_retention_ms, search_report: stage3.search_report,
@@ -369,53 +194,67 @@ function selectionTable(doc) {
     table.cost_per_candidate.P1 = stage3.cost;
     table.accepted_accuracy_per_candidate.P1 = stage3.accepted_accuracy_per_query;
   }
-  const reference = doc.reference_pricing;
-  if (reference) {
-    Object.assign(table.cost_per_candidate, reference.cost_per_candidate || {});
-    Object.assign(table.accepted_accuracy_per_candidate, reference.accepted_accuracy_per_candidate || {});
-    table.pruned_candidates = (reference.pruned_candidates || []).slice();
-    table.pruned_candidates_not_enumerated = (reference.pruned_candidates_not_enumerated || []).slice();
-    table.pruned_candidate_count_by_cause = reference.pruned_candidate_count_by_cause;
-    table.reference_selected_candidate = reference.selected_candidate ?? null;
-    if (reference.error && !table.error) table.reference_error = reference.error;
-  }
   return table;
 }
 
-// The selection table's problems; paths name `reference_pricing`'s keys
-// (an archived document's Stage 3 section holds the same under its older
-// names).
+// The selection table's problems.
 function validateSelection(selection, physicalById) {
   const errors = [];
-  if (!selection || typeof selection !== 'object') return ['stage3_plan_selection must be an object'];
   if (selection.selected_candidate !== null && !physicalById.has(selection.selected_candidate)) {
     errors.push('selected_candidate must name a Stage 2 candidate or be null');
   }
-  if (!Array.isArray(selection.pruned_candidates)) return errors.concat('pruned_candidates must be an array');
-  const accounted = new Set([selection.selected_candidate, selection.reference_selected_candidate].filter((id) => id !== null && id !== undefined));
-  selection.pruned_candidates.forEach((entry, index) => {
-    const at = `pruned_candidates[${index}]`;
-    const id = entry && entry.candidate;
-    if (!physicalById.has(id)) errors.push(`${at}: ${JSON.stringify(id)} is not a Stage 2 candidate`);
-    else if (accounted.has(id)) errors.push(`${at}: ${id} is already selected or pruned`);
-    if (!entry || !REJECTION_CAUSES.includes(entry.cause)) errors.push(`${at}: cause must be one of ${REJECTION_CAUSES.join(', ')}`);
-    accounted.add(id);
-  });
-  if (selection.selected_candidate !== null) {
-    physicalById.forEach((_, id) => { if (!accounted.has(id)) errors.push(`stage3_plan_selection: ${id} is neither selected nor pruned`); });
-  }
-  const costs = selection.cost_per_candidate;
-  if (!costs || typeof costs !== 'object' || Array.isArray(costs)) return errors.concat('cost_per_candidate must be an object');
-  Object.entries(costs).forEach(([id, cost]) => {
+  Object.entries(selection.cost_per_candidate).forEach(([id, cost]) => {
     const at = `cost_per_candidate.${id}`;
     if (!physicalById.has(id)) { errors.push(`${at}: not a Stage 2 candidate`); return; }
-    // `cost_per_second` is null under cost model 3 (own cluster), which has no prices.
+    // `cost_per_second` is null under cost model 3 (own cluster), which has no unit costs.
     if (!cost || (cost.cost_per_second !== null && (typeof cost.cost_per_second !== 'number' || !Number.isFinite(cost.cost_per_second)))) errors.push(`${at}: cost_per_second must be a number or null`);
     if (!cost || typeof cost.cost_unit !== 'string') errors.push(`${at}: cost_unit must be a string`);
     const nodeIds = new Set(physicalById.get(id).dag.nodes.map((node) => String(node.id)));
     Object.keys((cost && cost.per_node) || {}).forEach((key) => {
       if (!nodeIds.has(key)) errors.push(`${at}.per_node names missing node ${key}`);
     });
+  });
+  return errors;
+}
+
+// The checks of Stage 2's `physical_candidates` and `pruned_candidates` and
+// Stage 3's `pruned_candidates` (the memo view reads them), as messages.
+// Physical candidates are numbered by their position; an edge's `producer`
+// and a Stage 3 entry's `candidate` and `dominated_by` index them.
+function validatePrunedAndPhysical(stage2, stage3) {
+  const errors = [];
+  const physical = stage2.physical_candidates;
+  const pruned2 = stage2.pruned_candidates;
+  const pruned3 = stage3.pruned_candidates === undefined ? [] : stage3.pruned_candidates;
+  if (!Array.isArray(physical) || !Array.isArray(pruned2)) return ['stage2_physical_asap_optimization: physical_candidates and pruned_candidates must be arrays'];
+  if (!Array.isArray(pruned3)) return ['stage3_plan_selection.pruned_candidates must be an array'];
+  const isIndex = (v) => Number.isInteger(v) && v >= 0;
+  const isCandidate = (v) => isIndex(v) && v < physical.length;
+  const hasProperties = (p) => !!p && typeof p.timing === 'string' && p.lifetime !== undefined;
+  physical.forEach((c, k) => {
+    const at = `stage2_physical_asap_optimization.physical_candidates[${k}]`;
+    if (!c || c.id !== k || !isIndex(c.group) || !isIndex(c.index_in_group) || !hasProperties(c.properties) || !Array.isArray(c.inputs)) {
+      errors.push(`${at}: needs id ${k}, group, index_in_group, properties {timing, lifetime} and inputs`);
+      return;
+    }
+    c.inputs.forEach((input, i) => {
+      if (!input || !isIndex(input.group) || !input.requirement || !Array.isArray(input.edges)
+        || !input.edges.every((e) => e && isCandidate(e.producer) && typeof e.selected === 'boolean'
+          && (e.rejection === null || typeof e.rejection === 'string'))) {
+        errors.push(`${at}.inputs[${i}]: needs group, requirement and edges whose producer is a physical candidate`);
+      }
+    });
+  });
+  pruned2.forEach((p, k) => {
+    if (!p || !isIndex(p.group) || !isIndex(p.index_in_group) || !hasProperties(p.properties) || typeof p.reason !== 'string') {
+      errors.push(`stage2_physical_asap_optimization.pruned_candidates[${k}]: needs group, index_in_group, properties and reason`);
+    }
+  });
+  pruned3.forEach((p, k) => {
+    if (!p || !isIndex(p.group) || !isCandidate(p.candidate) || typeof p.reason !== 'string'
+      || !(p.dominated_by === null || isCandidate(p.dominated_by))) {
+      errors.push(`stage3_plan_selection.pruned_candidates[${k}]: needs group, candidate and dominated_by naming physical candidates, and reason`);
+    }
   });
   return errors;
 }
@@ -443,7 +282,7 @@ function validateStagePipeline(doc) {
 
   const logical = Array.isArray(stage1.candidates) ? stage1.candidates : [];
   if (!Array.isArray(stage1.candidates)) errors.push('stage1_logical_asap_optimization.candidates must be an array');
-  const logicalIds = uniqueIds(logical, 'stage1_logical_asap_optimization.candidates', errors);
+  uniqueIds(logical, 'stage1_logical_asap_optimization.candidates', errors);
   const composed = new Set();
   logical.forEach((candidate) => {
     if (!candidate) return;
@@ -468,15 +307,13 @@ function validateStagePipeline(doc) {
     }
     errors.push(...validatePhysicalDag(candidate.dag, `stage2_physical_asap_optimization ${candidate.id}`, queries.length));
   });
-  (Array.isArray(stage2.pruned) ? stage2.pruned : []).forEach((entry, index) => {
-    if (!entry || !logicalIds.has(entry.from_logical)) errors.push(`stage2_physical_asap_optimization.pruned[${index}]: from_logical is not a Stage 1 candidate`);
-  });
+  errors.push(...validatePrunedAndPhysical(stage2, stage3));
   errors.push(...validateDataWorkload(doc.workload.data_workload));
   if (errors.length) return errors;
   const table = selectionTable(doc);
   const selectionErrors = validateSelection(table, physicalById);
   if (selectionErrors.length) return selectionErrors;
-  return validateMaterializedViews(table, physicalById).concat(validateMemoPlan((stage3.search || {}).memo_plan, doc.workload.queries.length));
+  return validateMaterializedViews(table, physicalById);
 }
 
 // A query's accuracy target (`AccuracyTarget` JSON: `accuracy_metric`,
@@ -516,57 +353,32 @@ function acceptedText(queries) {
   return parts.length ? parts.join('; ') : null;
 }
 
-// Stage 3's view of every candidate the document shows: the selected one,
-// the other valid ones cheapest first ("costlier"), the rejected ones with
-// their reasons ("not judged" when selection failed with an error), then
-// the Stage 2 pruned ones and the Stage 1 ones that did not compose
-// ("composition error") with theirs. `logical` names the Stage 1
-// candidate to show beside the row; `rank` counts the priced ones.
+// Stage 3's view of every candidate the document shows: the selected one
+// ("not judged" for another, as when selection failed with an error), then
+// the Stage 1 ones that did not compose ("composition error") with their
+// error. `logical` names the Stage 1 candidate to show beside the row.
 function stageCandidateRows(doc) {
   const selection = selectionTable(doc);
-  const costs = selection.cost_per_candidate || {};
-  const pruned = new Map((selection.pruned_candidates || []).map((r) => [r.candidate, r]));
-  const accepted = selection.accepted_accuracy_per_candidate || {};
-  const physical = doc.stage2_physical_asap_optimization || {};
-  const rows = (physical.candidates || []).map((candidate) => {
+  const costs = selection.cost_per_candidate;
+  const accepted = selection.accepted_accuracy_per_candidate;
+  const rows = ((doc.stage2_physical_asap_optimization || {}).candidates || []).map((candidate) => {
     const cost = costs[candidate.id];
-    const rejection = pruned.get(candidate.id);
-    // A rejection's cause says whether it failed a check or lost under
-    // the cost model; a failed selection (`error`) judged no candidate.
-    const status = candidate.id === selection.selected_candidate ? 'selected'
-      : candidate.id === selection.reference_selected_candidate ? 'reference selected'
-      : rejection ? (FAILED_CHECK_CAUSES.includes(rejection.cause) ? 'rejected' : 'costlier')
-        : selection.error ? 'not judged' : 'rejected';
+    const selected = candidate.id === selection.selected_candidate;
     return {
       id: candidate.id,
       logical: candidate.from_logical,
       display_name: candidate.display_name,
       total: cost ? cost.cost_per_second : null,
-      rank: null,
-      status,
-      reason: status === 'rejected' && rejection ? rejection.reason : null,
+      status: selected ? 'selected' : 'not judged',
+      reason: null,
       accepted: acceptedText(accepted[candidate.id]),
     };
   });
-  (physical.pruned || []).forEach((p) => rows.push({
-    id: p.from_logical, logical: p.from_logical, display_name: p.display_name, total: null, rank: null, status: 'pruned', reason: p.reason,
-  }));
   ((doc.stage1_logical_asap_optimization || {}).candidates || []).filter((c) => 'error' in c).forEach((c) => rows.push({
-    id: c.id, logical: c.id, display_name: c.display_name, total: null, rank: null, status: 'composition error', reason: c.error,
+    id: c.id, logical: c.id, display_name: c.display_name, total: null, status: 'composition error', reason: c.error,
   }));
-  // Rejections of candidates the document does not hold (the default search
-  // keeps only the best one and records the first rejection of each cause),
-  // and the search's own: listed with their cause, not clickable.
-  (selection.pruned_candidates_not_enumerated || []).forEach((r) => rows.push({
-    id: r.candidate, logical: null, display_name: `not kept · ${r.cause.replace(/_/g, ' ')}`, total: null, rank: null, status: 'not kept', reason: r.reason,
-  }));
-  const order = { selected: 0, 'reference selected': 1, costlier: 1, rejected: 2, 'not judged': 2, pruned: 3, 'composition error': 4, 'not kept': 5 };
-  rows.sort((a, b) => order[a.status] - order[b.status] || (a.total ?? 0) - (b.total ?? 0));
-  let rank = 0;
-  // Only valid candidates are ranked: the selected one and those that lost
-  // under the cost model, whether or not the document carries their cost.
-  rows.forEach((row) => { if (['selected', 'reference selected', 'costlier'].includes(row.status)) row.rank = ++rank; });
-  return rows;
+  const order = { selected: 0, 'not judged': 1, 'composition error': 2 };
+  return rows.sort((a, b) => order[a.status] - order[b.status]);
 }
 
 // The candidate list's header: how many candidates Stage 1 enumerated, how
@@ -601,53 +413,18 @@ function accuracyGuaranteesText(doc) {
   }[doc.accuracy_guarantees] || '';
 }
 
-// What the search behind the document did, for the candidate list's
-// header: "default search · 206 physical candidates checked · 2 independent
-// components searched separately · discarded before
-// composition: no accuracy guarantee ×3 (q3, q4, q5)", with why the
-// workload was searched as one ("searched as one: not in joint space") and
-// the classes of interchangeable queries, which took one shared choice
-// ("interchangeable queries: (p50, p90, p99)"); under the
-// exhaustive search, the pruned candidates by cause with their counts. "" for a
-// document that does not say.
+// The search behind the document and Stage 3's search report, for the
+// candidate list's header, e.g. "candidate-connection search · search
+// optimal · MILP 936 variables, …". "" for a document that names no search.
 function searchText(doc) {
-  const name = { default: 'default search', exhaustive: 'exhaustive search', 'candidate-connections': 'candidate-connection search', 'memo-milp': 'memo-MILP search', 'memo-brute-force': 'memo brute-force search' }[doc.search];
+  const name = { 'candidate-connections': 'candidate-connection search' }[doc.search];
   if (!name) return '';
   const parts = [name];
-  const selection = doc.stage3_plan_selection || {};
-  const search = selection.search;
-  const cause = (c) => String(c).replace(/_/g, ' ');
-  if (search) {
-    parts.push(`${search.candidates_checked} physical candidates checked`);
-    const componentCount = typeof search.candidate_connections?.independent_components === 'number'
-      ? search.candidate_connections.independent_components
-      : (search.components || []).length;
-    if (componentCount > 1) parts.push(`${componentCount} independent components searched separately`);
-    const queryIds = ((doc.workload || {}).queries || []).map((q) => q.id);
-    const byCause = new Map();
-    (search.queries || []).forEach((query, index) => query.discarded.forEach((d) => {
-      if (!byCause.has(d.cause)) byCause.set(d.cause, { count: 0, queries: new Set() });
-      byCause.get(d.cause).count += 1;
-      byCause.get(d.cause).queries.add(queryIds[index] || `q${index + 1}`);
-    }));
-    if (byCause.size) {
-      parts.push(`discarded before composition: ${[...byCause].map(([c, v]) => `${cause(c)} ×${v.count} (${[...v.queries].join(', ')})`).join(', ')}`);
-    }
-    if (search.raw_scan_candidates_skipped) parts.push(`${search.raw_scan_candidates_skipped} Stage 1 candidates skipped: they scan raw data at query time`);
-    if (search.raw_scan_assignments_skipped) parts.push(`${search.raw_scan_assignments_skipped} Stage 2 assignments skipped: they scan raw data at query time`);
-    if (search.searched_as_one) parts.push(`searched as one: ${cause(search.searched_as_one)}`);
-    const classes = (search.interchangeable_queries || []).map((members) => `(${members.map((i) => queryIds[i] || `q${i + 1}`).join(', ')})`);
-    if (classes.length) parts.push(`interchangeable queries: ${classes.join(', ')}`);
-  }
-  const report = selection.search_report;
+  const report = (doc.stage3_plan_selection || {}).search_report;
   if (report) {
     parts.push(`search ${String(report.status).replace(/_/g, ' ')}`);
     if (typeof report.cost_lower_bound_per_second === 'number') parts.push(`cost lower bound ${Number(report.cost_lower_bound_per_second.toPrecision(4))}`);
     parts.push(`MILP ${report.milp_variables} variables, ${report.milp_constraints} constraints · model ${report.model_construction_ms} ms, solve ${report.solver_ms} ms, validation ${report.validation_ms} ms`);
-  }
-  const counts = selectionTable(doc).pruned_candidate_count_by_cause;
-  if (doc.search === 'exhaustive' && counts && Object.keys(counts).length) {
-    parts.push(`pruned: ${Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([c, n]) => `${cause(c)} ×${n}`).join(', ')}`);
   }
   return parts.join(' · ');
 }
@@ -1197,217 +974,4 @@ function planningWorkloadQueries(workload) {
 // stage document (to show).
 function isPlanningWorkload(value) {
   return !!value && typeof value === 'object' && !isStagePipelineDocument(value) && !!value.query_workload && typeof value.query_workload === 'object';
-}
-
-// The memo-MILP search's selected plan over the memo
-// (`stage3_plan_selection.search.memo_plan`): every group, coupling-site and
-// query reference in range. An absent plan has nothing to check.
-function validateMemoPlan(plan, queryCount) {
-  if (plan === undefined || plan === null) return [];
-  const at = 'stage3_plan_selection.search.memo_plan';
-  if (typeof plan !== 'object' || !Array.isArray(plan.groups) || !Array.isArray(plan.coupling_sites)) return [`${at} must have groups and coupling_sites arrays`];
-  const errors = [];
-  const groupCount = plan.groups.length;
-  const siteCount = plan.coupling_sites.length;
-  const inRange = (ids, n) => Array.isArray(ids) && ids.every((i) => Number.isInteger(i) && i >= 0 && i < n);
-  plan.groups.forEach((group, index) => {
-    const where = `${at}.groups[${index}]`;
-    if (!group || group.group !== index) { errors.push(`${where}: group must be ${index}`); return; }
-    if (!inRange(group.parents, groupCount)) errors.push(`${where}: parents must name groups`);
-    if (!inRange(group.queries, queryCount) || !inRange(group.roots_of, queryCount)) errors.push(`${where}: queries and roots_of must name queries`);
-    if (group.implemented_by !== null && group.implemented_by !== undefined && !inRange([group.implemented_by], groupCount)) errors.push(`${where}: implemented_by must name a group`);
-    const chosen = group.chosen;
-    if (chosen && (!inRange(chosen.implements, groupCount) || !inRange(chosen.reads, groupCount) || !inRange(chosen.coupling_sites, siteCount))) {
-      errors.push(`${where}.chosen: implements and reads must name groups, coupling_sites must name coupling sites`);
-    }
-  });
-  plan.coupling_sites.forEach((site, index) => {
-    if (!site || !inRange(site.readers, groupCount)) errors.push(`${at}.coupling_sites[${index}]: readers must name groups`);
-  });
-  return errors;
-}
-
-// A coupling site's chosen threshold as text: a shared build's size, a tumbling window
-// chain's grid, a scan's label set or a raw horizon.
-function couplingThresholdText(kind, threshold) {
-  const t = threshold || {};
-  switch (kind) {
-    case 'SharedBuildSize':
-      if ('state' in t) return `finer state ${summaryFamilyText(t.state)}`;
-      if (!t.params) return 'exact accumulator (no size)';
-      return [Object.keys(t.params)[0]].concat(wireParams(t.params)).join(' · ');
-    case 'SummaryTumblingWindowChain': return `${durationText(t.tumbling_window_width_ms)} tumbling windows over ${durationText(t.longest_window_ms)} · ${summaryFamilyText(t.family)}`;
-    case 'ScanLabels': return `labels ${(t.labels || []).join(', ') || 'none'}`;
-    case 'RawHorizon': return `raw horizon ${durationText(t.horizon_ms)}`;
-    default: return compactWire(threshold);
-  }
-}
-
-function gcd(a, b) { return b ? gcd(b, a % b) : a; }
-
-// The memo-MILP search's view of a document, or null when its search built
-// no memo: the MILP summary (incumbent cost, lower bound, gap, rounds,
-// whether it certified, and the cost of each query planned alone), each
-// memo group with its chosen implementation candidate, and the selected
-// plan's shared units: each group one node serves to several readers, and
-// each coupling site read by several groups, with its readers, the queries
-// behind them, their repeat intervals (a shared unit runs on their union)
-// and the threshold (a size is set by its strictest reader).
-function memoSearchView(doc) {
-  const search = (doc.stage3_plan_selection || {}).search || {};
-  const candidate = search.candidate_connections;
-  if (candidate) {
-    const number = (value) => typeof value === 'number' ? String(Number(value.toPrecision(4))) : null;
-    return { summary: {
-      incumbent: number(search.incumbent_cost), lowerBound: number(candidate.lower_bound),
-      gap: candidate.relative_gap ?? null, rounds: candidate.refinements,
-      certified: candidate.status === 'optimal', alone: null, saving: null,
-      clusters: 0, memo: null, objective: candidate.objective,
-      status: candidate.status, calibration: candidate.calibration_scope,
-      generationMs: candidate.memo_expansion_ms, modelMs: candidate.model_construction_ms,
-      solverMs: candidate.solver_ms, validationMs: candidate.validation_ms,
-    }, groups: [], sharedUnits: [] };
-  }
-  const milp = search.milp;
-  const plan = search.memo_plan;
-  if (!milp && !plan) return null;
-  const queries = doc.workload.queries;
-  const qid = (i) => (queries[i] || {}).id || `q${i + 1}`;
-  const gid = (g) => `G${g + 1}`;
-  const interval = (i) => ((queries[i] || {}).requirements || {}).repeat_interval_ms;
-  const maxError = (i) => (((queries[i] || {}).requirements || {}).accuracy || {}).max_error;
-  const fixed = (x) => (typeof x !== 'number' ? null : (x !== 0 && Math.abs(x) < 1e-3 ? x.toExponential(3) : String(Number(x.toPrecision(4)))));
-  const summary = milp ? {
-    incumbent: fixed(search.incumbent_cost),
-    lowerBound: fixed(milp.lower_bound),
-    gap: typeof milp.gap === 'number' ? milp.gap : null,
-    rounds: milp.rounds,
-    certified: typeof milp.gap === 'number' && milp.gap <= 1e-4 && !milp.time_limit_reached,
-    alone: fixed(milp.queries_alone_cost),
-    saving: typeof milp.queries_alone_cost === 'number' && milp.queries_alone_cost > 0 && typeof search.incumbent_cost === 'number'
-      ? 1 - search.incumbent_cost / milp.queries_alone_cost : null,
-    clusters: (milp.clusters || []).length,
-    memo: search.memo || null,
-  } : null;
-  if (!plan) return { summary, groups: [], sharedUnits: [] };
-  // The queries (and their schedule and strictest target) behind readers.
-  const behind = (groupIds) => [...new Set(groupIds.flatMap((g) => plan.groups[g].queries))].sort((a, b) => a - b);
-  const schedule = (qs) => {
-    const every = [...new Set(qs.map(interval).filter((ms) => typeof ms === 'number'))].sort((a, b) => a - b);
-    if (every.length < 2) return every.length ? `every ${durationText(every[0])}` : '—';
-    return `${every.map((ms) => `every ${durationText(ms)}`).join(' ∪ ')} → on a ${durationText(every.reduce(gcd))} grid`;
-  };
-  const strictest = (qs) => {
-    const approx = qs.filter((q) => typeof maxError(q) === 'number');
-    if (!approx.length) return '—';
-    const best = Math.min(...approx.map(maxError));
-    return `${approx.filter((q) => maxError(q) === best).map(qid).join(', ')} (ε=${best})`;
-  };
-  const groups = plan.groups.map((g) => {
-    const [kind, body] = stageOperatorParts(g.operator);
-    const lines = stageNodeLines(g.operator, null).slice(1);
-    const c = g.chosen;
-    return {
-      id: gid(g.group),
-      label: [kind].concat(lines).join(' · '),
-      reads: stageLogicalChildren(body).map(gid),
-      readBy: g.parents.map(gid).concat(g.roots_of.map((q) => `${qid(q)} (root)`)),
-      queries: g.queries.map(qid),
-      candidates: g.candidates,
-      chosen: c ? [`${c.origin} · ${c.operator}`,
-        c.implements.length > 1 ? `fuses ${c.implements.map(gid).join(', ')}` : '',
-        c.reads.length ? `reads ${c.reads.map(gid).join(', ')}` : '',
-        c.built_once ? 'built once per evaluation' : '',
-        c.coupling_sites.length ? `at ${c.coupling_sites.map((s) => `S${s + 1}`).join(', ')}` : ''].filter(Boolean).join(' · ')
-        : (g.implemented_by !== null && g.implemented_by !== undefined ? `implemented by ${gid(g.implemented_by)}'s candidate`
-          : (g.parents.length ? 'no choice: inside its readers\' candidates' : 'not read by the plan')),
-      shared: g.parents.length + g.roots_of.length > 1,
-    };
-  });
-  // The plan's readers of group g: the queries whose root it is, and the
-  // parents whose chosen candidate (or the candidate fusing them) reads it.
-  const chosenOf = (p) => {
-    const parent = plan.groups[p];
-    if (parent.chosen) return [p, parent.chosen];
-    const by = parent.implemented_by;
-    return by === null || by === undefined ? [null, null] : [by, plan.groups[by].chosen];
-  };
-  const planReaders = (g) => {
-    const parents = [...new Set(g.parents.map(chosenOf).filter(([, c]) => c && c.reads.includes(g.group)).map(([p]) => p))];
-    return parents.map(gid).concat(g.roots_of.map(qid));
-  };
-  const sharedUnits = [];
-  plan.groups.forEach((g) => {
-    if (!g.chosen && (g.implemented_by === null || g.implemented_by === undefined)) return;
-    const readers = planReaders(g);
-    if (readers.length < 2) return;
-    const qs = g.queries;
-    sharedUnits.push({
-      unit: `${gid(g.group)} · ${groups[g.group].label}`,
-      kind: 'shared group',
-      readers,
-      queries: qs.map(qid),
-      threshold: g.chosen ? (g.chosen.built_once ? 'one node, built once per evaluation' : 'one node; its query-time part runs per reader') : `inside ${gid(g.implemented_by)}'s candidate`,
-      schedule: schedule(qs),
-      strictest: strictest(qs),
-    });
-  });
-  plan.coupling_sites.forEach((site, index) => {
-    const qs = behind(site.readers);
-    if (site.readers.length < 2 && qs.length < 2) return;
-    sharedUnits.push({
-      unit: `S${index + 1}`,
-      kind: `coupling site · ${site.kind}`,
-      readers: site.readers.map(gid),
-      queries: qs.map(qid),
-      threshold: `${couplingThresholdText(site.kind, site.threshold)} (1 of ${site.thresholds} thresholds)`,
-      schedule: schedule(qs),
-      strictest: strictest(qs),
-    });
-  });
-  // Scan widening is no model variable: when the selected plan is the
-  // widened variant, a source's scan groups are one scan.
-  if (plan.scans_widened) {
-    const bySource = new Map();
-    plan.groups.forEach((g) => {
-      const [kind, body] = stageOperatorParts(g.operator);
-      if (kind !== 'Scan') return;
-      const source = wireSource(body.source);
-      if (!bySource.has(source)) bySource.set(source, []);
-      bySource.get(source).push(g);
-    });
-    bySource.forEach((scans, source) => {
-      if (scans.length < 2) return;
-      const readers = scans.flatMap((g) => g.parents);
-      const qs = behind(scans.map((g) => g.group));
-      sharedUnits.push({
-        unit: `${scans.map((g) => gid(g.group)).join(' + ')} · Scan of ${source}`,
-        kind: 'widened scan',
-        readers: readers.map(gid),
-        queries: qs.map(qid),
-        threshold: 'one scan, widened to the union of its readers\' labels',
-        schedule: schedule(qs),
-        strictest: strictest(qs),
-      });
-    });
-  }
-  return { summary, groups, sharedUnits, scansWidened: !!plan.scans_widened };
-}
-
-// The MILP summary as one line, e.g. "incumbent 1.2 · lower bound 1.2 ·
-// gap 0 · 3 rounds · certified · queries planned alone 2.4 (sharing saves
-// 50%)".
-function memoSummaryText(summary) {
-  if (!summary) return '';
-  const parts = [`incumbent ${summary.incumbent ?? '—'}`, `lower bound ${summary.lowerBound ?? '—'}`,
-    `gap ${summary.gap === null ? '—' : (summary.gap === 0 ? '0' : summary.gap.toExponential(2))}`, `${summary.rounds} round${summary.rounds === 1 ? '' : 's'}`,
-    summary.certified ? (summary.status ? 'optimal over generated catalog' : 'certified (gap ≤ 1e-4)') : 'not certified'];
-  if (summary.status) parts.push(`status ${summary.status}`);
-  if (summary.objective) parts.push(`objective ${summary.objective}`);
-  if (summary.calibration) parts.push(`calibration ${summary.calibration}`);
-  if (summary.solverMs !== undefined) parts.push(`generation ${summary.generationMs ?? '—'} ms, model ${summary.modelMs ?? '—'} ms, solve ${summary.solverMs} ms, validation ${summary.validationMs ?? '—'} ms`);
-  if (summary.clusters > 1) parts.push(`${summary.clusters} independent clusters`);
-  if (summary.memo) parts.push(`${summary.memo.groups} groups (${summary.memo.shared_groups} shared), ${summary.memo.candidates} implementation candidates`);
-  if (summary.alone !== null) parts.push(`queries planned alone ${summary.alone}${summary.saving === null ? '' : ` (sharing saves ${Number((summary.saving * 100).toFixed(1))}%)`}`);
-  return parts.join(' · ');
 }
