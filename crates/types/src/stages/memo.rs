@@ -45,10 +45,9 @@ pub struct MemoGroup {
 pub struct GroupProperties {
     pub schema: Schema,
     pub result_kind: OperatorResultKind,
-    /// What an aggregate group covers: a summary state, a chain, a merge
-    /// over a chain's windows, or an exact `Aggregate` result; `None` for
-    /// any other group. Derived today for summary states only; exact
-    /// `Aggregate` groups follow in #1207 PR 2.
+    /// What an aggregate group covers: a summary state, a chain, a
+    /// `TimeRange`/`TimeShift` over a chain or a merge over one, or an exact
+    /// `Aggregate` result; `None` for any other group.
     pub aggregate_coverage: Option<SummaryCoverage>,
     /// Whether two equal expressions return the same rows for the same
     /// input rows, so they may be one group (not an unordered `LIMIT`).

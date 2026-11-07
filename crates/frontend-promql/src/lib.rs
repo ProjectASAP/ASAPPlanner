@@ -107,6 +107,7 @@ pub fn lower_promql_query_workload(
                 &entry.requirements.accuracy.clone(),
                 &sample_interval_of,
                 &metric_type_of,
+                entry.range_evaluation.is_some(),
             )?;
             Ok(root)
         })
@@ -118,11 +119,12 @@ mod tests {
     use std::rc::Rc;
     use std::time::Duration;
 
+    use asap_types::ir::operator::operator_properties::{AtModifier, TimeShift};
     use asap_types::ir::operator::Source;
-    use asap_types::ir::{NonASAPOp, OperatorNode, TimeRangeKind};
+    use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot, TimeRangeKind};
     use asap_types::workload::{
         BatchEntry, DataArrival, DataWorkload, PlanningWorkload, Query, QueryRequirements,
-        QueryWorkload, SourceFacts, WorkloadError,
+        QueryWorkload, RangeEvaluation, SourceFacts, WorkloadError,
     };
 
     use super::*;
@@ -366,5 +368,47 @@ mod tests {
             r#"max(s{quantile="0.99"}) + s{quantile="0.5"} + avg(g) + sum(s_count) + rate(s_sum[5m])"#
         )
         .is_empty());
+    }
+
+    /// `@ start()` and `@ end()` anchor a range query's subtree to the
+    /// range's start and end; in an instant query both are the evaluation
+    /// time, so they lower as no `@` (only the offset is left).
+    #[test]
+    fn at_start_and_at_end_stay_only_in_a_range_query() {
+        let shifts = |range_evaluation| {
+            let mut workload = workload("sum_over_time(data[5m] @ start() offset 1m)");
+            if let Some(batch) = workload.query_workload.query_batch.as_mut() {
+                batch[0].range_evaluation = range_evaluation;
+            }
+            let roots = lower_promql_query_workload(&workload).unwrap();
+            let [QueryRoot::Operator(root)] = &roots[..] else {
+                panic!("one operator root");
+            };
+            OperatorNode::reachable(root)
+                .iter()
+                .filter_map(|node| match node.non_asap()? {
+                    NonASAPOp::TimeShift { shift, .. } => Some(*shift),
+                    _ => None,
+                })
+                .collect::<Vec<TimeShift>>()
+        };
+        let hour = RangeEvaluation {
+            step_ms: 60_000,
+            span_ms: 3_600_000,
+        };
+        assert_eq!(
+            shifts(Some(hour)),
+            [TimeShift {
+                offset_ms: 60_000,
+                at: Some(AtModifier::Start),
+            }]
+        );
+        assert_eq!(
+            shifts(None),
+            [TimeShift {
+                offset_ms: 60_000,
+                at: None,
+            }]
+        );
     }
 }

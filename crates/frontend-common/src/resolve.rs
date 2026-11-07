@@ -487,11 +487,21 @@ fn resolve_expr_in(
         S::Not(e) => ScalarExpr::Not(bx(e)?),
         S::IsNull(e) => ScalarExpr::IsNull(bx(e)?),
         S::IsNotNull(e) => ScalarExpr::IsNotNull(bx(e)?),
-        S::Cast { expr, to, try_cast } => ScalarExpr::Cast {
-            expr: bx(expr)?,
-            to: to.clone(),
-            try_cast: *try_cast,
-        },
+        // A cast to the type its operand already has is the operand: SQL's
+        // `ts >= '2026-11-01'` casts the Timestamp column `ts` to DataFusion's
+        // nanosecond timestamp, which is the same IR type.
+        S::Cast { expr, to, try_cast } => {
+            let operand = bx(expr)?;
+            if matches!(operand.scalar_type(schema), Ok((dtype, _)) if dtype == *to) {
+                *operand
+            } else {
+                ScalarExpr::Cast {
+                    expr: operand,
+                    to: to.clone(),
+                    try_cast: *try_cast,
+                }
+            }
+        }
         S::InList {
             expr,
             list,

@@ -115,7 +115,7 @@ A node in the physical data will represent the data or summary instance, so a no
 | How is it computed? | by the planner, from the memo group's input groups, in one walk that yields both the definition and the selection | §4.2.2 |
 | How expensive is it? | proportional to the few operators directly under the `SummaryAgg`, not to the whole sub-DAG; derived once per memo group | §4.2.3 |
 | What uses it? | merge (in #646), rollup; slice, reuse (planned); subtract (reserved) | §5.6, §5.7 |
-| Where is it in the code? | `GroupProperties::summary_coverage`, `SummaryCoverage::derive_from_inputs` | §6.6 |
+| Where is it in the code? | `GroupProperties::aggregate_coverage`, `SummaryCoverage::derive_from_inputs` | §6.6 |
 | What is left out? | the deployment and runtime implementation, e.g. SDS | §4.3 |
 
 **Why coverage is not part of the schema.**
@@ -235,14 +235,14 @@ Formally, a state means `family(input(σ(C)))` for each group of `G`, where `C` 
 
 #### 4.2.2 Deriving the definition and the selection
 
-Coverage is derived for memo groups, never declared and never computed on operator-node trees. When `Memo::find_or_add_group` creates a summary-state group, `SummaryCoverage::derive_from_inputs` walks down from the group's `SummaryAgg` through its input groups' `expression`s in the memo and stores the result once in the group's `GroupProperties::summary_coverage`. One walk produces both parts: every filter condition either moves into the `selection` or stays in the `definition`. A `SummaryMerge` group reads its input groups' stored coverage; it is a valid group only when their definitions are equal and their selections are disjoint.
+Coverage is derived for memo groups, never declared and never computed on operator-node trees. When `Memo::find_or_add_group` creates an aggregate group (a summary state or an exact `Aggregate`), `SummaryCoverage::derive_from_inputs` walks down from the group's `SummaryAgg` or `Aggregate` through its input groups' `expression`s in the memo and stores the result once in the group's `GroupProperties::aggregate_coverage`. One walk produces both parts: every filter condition either moves into the `selection` or stays in the `definition`. A `SummaryMerge` group reads its input groups' stored coverage; it is a valid group only when their definitions are equal and their selections are disjoint (disjoint in time, for counter states).
 
 ```rust
 /// What a summary state computes, with every lifted selection removed.
 pub struct SummaryStateDefinition {
     /// The group the unlifted operators read: the first input under the
-    /// SummaryAgg that is not Filter / range TimeRange / TimeShift without @
-    /// / direct-column Project. `None` when that input is a `Scan` with a
+    /// SummaryAgg or Aggregate that is not Filter / range TimeRange /
+    /// TimeShift / direct-column Project. `None` when that input is a `Scan` with a
     /// liftable predicate (a PromQL label matcher): it is lifted too, and the
     /// `Scan` with the rest of its predicates is the last unlifted operator.
     pub input_group: Option<MemoGroupId>,
@@ -283,31 +283,31 @@ G8  Filter(job = "api" ∧ a + b > 10)(G1);  G9 TimeRange[1m](G8);  G10 SummaryA
 | Step | Group | Expression | What the walk does |
 |---|---|---|---|
 | 1 | G4 | `SummaryAgg[KLL](G3)` | the first unlifted operator, with no filter of its own |
-| 2 | G3 | `TimeRange[1m](G2)` | the one range window: lifted as time `(−60 s, 0]` |
+| 2 | G3 | `TimeRange[1m](G2)` | the one range window: lifted as `ts ∈ (t − 60 s, t]` (t the evaluation time) |
 | 3 | G2 | `Filter(job = "api")(G1)` | `job = "api"` is a value set on one column: lifted, nothing of the `Filter` remains |
 | 4 | G1 | `Scan latency` | not liftable, no predicate to lift: the walk stops; G1 is the `input_group` |
 
 ```text
-G4.summary_coverage = SummaryCoverage {
+G4.aggregate_coverage = SummaryCoverage {
     definition: SummaryStateDefinition {
         input_group: Some(G1),
         unlifted_operators: [SummaryAgg[KLL]],
     },
-    selection: [ { job ∈ {api}, time (−60 s, 0] } ],
+    selection: [ { job ∈ {api}, ts ∈ (t − 60 s, t] } ],
 }
 ```
 
-**Case 2, G7: the same definition, a disjoint selection.** The walk over G6 and G5 lifts `job = "web"` and the same minute, so G7's definition is G4's (`input_group: Some(G1)`, `unlifted_operators: [SummaryAgg[KLL]]`) and its `definition_id()` is the same; its selection is `{ job ∈ {web}, time (−60 s, 0] }`. The two selections are disjoint, so `SummaryMerge(G4, G7)` is a valid candidate (and group), covering `{ job ∈ {api, web}, time (−60 s, 0] }`.
+**Case 2, G7: the same definition, a disjoint selection.** The walk over G6 and G5 lifts `job = "web"` and the same minute, so G7's definition is G4's (`input_group: Some(G1)`, `unlifted_operators: [SummaryAgg[KLL]]`) and its `definition_id()` is the same; its selection is `{ job ∈ {web}, ts ∈ (t − 60 s, t] }`. The two selections are disjoint, so `SummaryMerge(G4, G7)` is a valid candidate (and group), covering `{ job ∈ {api, web}, ts ∈ (t − 60 s, t] }`.
 
 **Case 3, G10: `a + b > 10` cannot be lifted.** It spans two columns, so it is no selection. At G8 the walk lifts `job = "api"` and keeps the rest:
 
 ```text
-G10.summary_coverage = SummaryCoverage {
+G10.aggregate_coverage = SummaryCoverage {
     definition: SummaryStateDefinition {
         input_group: Some(G1),
         unlifted_operators: [SummaryAgg[KLL], Filter(a + b > 10)],
     },
-    selection: [ { job ∈ {api}, time (−60 s, 0] } ],
+    selection: [ { job ∈ {api}, ts ∈ (t − 60 s, t] } ],
 }
 ```
 
@@ -329,13 +329,23 @@ The `definition` is what remains of the operators the walk passed, with every co
 | a `Filter` whose conditions all move into `selection` | removed |
 | a `Filter` with some conditions that stay | kept, with only the conditions that stay; a scalar subquery among them names its group |
 | `SummaryAgg.filter` | trimmed the same way |
-| the one range `TimeRange`, and any `TimeShift`s, when they become relative time | removed |
-| a `TimeShift` with no range `TimeRange`, or two or more range `TimeRange`s | unchanged: no time is taken out |
+| the one range `TimeRange`, and every `TimeShift` (with or without `@`), when they become one interval on the timestamp column | removed |
+| a `TimeShift` with no range `TimeRange`, two or more range `TimeRange`s, two `@`s, or an interval that does not combine with a timestamp condition already lifted | unchanged: no time is taken out |
 | a direct-column `Project` | unchanged |
 | a `Scan` with a predicate that moves into `selection` (a PromQL label matcher) | the last operator, with only the predicates that stay; `input_group` is `None` |
 | any other operator (the first group the walk cannot pass) | not in the list: it is the `input_group` |
 
-A `SummaryTumblingWindowChain` covers what one build over its whole window does: the walk starts at that build's `SummaryAgg` over a range `TimeRange` of the whole window over the chain's input. A rollup (`SummaryMerge` with `group_by`) has its input's definition with the `SummaryAgg` grouped by the rollup's keys.
+An exact `Aggregate` is the first unlifted operator, kept whole (its per-measure filters and `HAVING` read its input or output, not the rows it reads). A `SummaryTumblingWindowChain[w](X)` has the definition of a build over X, and its selection leaves the timestamp column unconstrained: a chain has no range. A `TimeRange` or `TimeShift` over a chain (a group whose output is the chain's state with a time index) has the chain's coverage with the interval they select on the timestamp column of X, computed as over raw rows. A `SummaryMerge` over that group reads it, so `SummaryMerge(TimeRange(W, TimeShift(o, Chain[w](X))))` covers exactly what `SummaryAgg(TimeRange(W, TimeShift(o, X)))` does, and `Memo::add_candidate` accepts the merge as a candidate of the direct build's group:
+
+```text
+G1 Scan latency
+G2 TimeShift(1h)(G1);  G3 TimeRange[5m](G2);  G4 SummaryAgg[KLL](G3)       ts ∈ (t − 65m, t − 60m]
+G5 Chain[KLL, 1m](G1)                                                    ts unconstrained
+G6 TimeShift(1h)(G5);  G7 TimeRange[5m](G6)                              ts ∈ (t − 65m, t − 60m]
+G4 candidate: SummaryMerge(G7)                                           the same coverage as G4
+```
+
+A rollup (`SummaryMerge` with `group_by`) has its input's definition with the `SummaryAgg` grouped by the rollup's keys.
 
 **When two definitions are equal.** Merging (§5.6) requires equal definitions: the same `input_group` and the same `unlifted_operators`, compared as values. A definition with a scalar subquery compares like any other: two states whose `Filter(a > (SELECT threshold))` read the same group are equal there. Timing is not part of a group, so a tumbling window built at ingestion time can merge with one built at query time. States over different tables never merge: a KLL over `m1` and one over `m2` read different groups. To combine tables, put a `UNION ALL` with a column that marks the source table below one `SummaryAgg`; that column can then be used in `selection` or in the grouping.
 
@@ -379,11 +389,11 @@ So the `selection` is `latency ∈ (−∞, 100)`, `r ∈ {us}`. A PromQL exampl
 | Operator it must pass | Can it pass? | Why | Example |
 |---|---|---|---|
 | another `Filter` (also `Scan.predicates`, `SummaryAgg.filter`) | yes | filters only drop rows, so their order does not matter | `region = 'us'` below `Filter(value < 100)` ✓ |
-| `TimeRange` (range) or `TimeShift` (without `@`) | yes | they choose a time window, but do not change any row's values | `region = 'us'` below `TimeRange(1m)` ✓ |
+| `TimeRange` (range) or `TimeShift` (with or without `@`) | yes | they choose a time window, but do not change any row's values | `region = 'us'` below `TimeRange(1m)` ✓ |
 | `Project` | only if its column is passed through unchanged (a rename is fine) | the column must still be there, with the same values, above the `Project` | `Project [job, region AS r]`: `region = 'us'` ✓, it becomes `r = 'us'`. `Project [job, value * 2 AS v2]`: `value > 5` ✗, `value` is gone |
 | `Aggregate` (later) | only if it uses group columns | a group column has one value per group, so filtering before or after grouping keeps the same groups | below `SUM(value) by job`: `job = 'api'` ✓; `value > 5` ✗, it changes the sums |
 | `rate`, a window function, or an instant `TimeRange` (later) | only if it uses series labels | a label is the same for every sample of a series | below `rate(...)`: `job = 'api'` ✓; `value > 5` ✗, dropping raw samples changes the rate. Below an instant selector: `job = 'api'` ✓; `value > 5` ✗, the latest sample with value > 5 is not the latest sample |
-| any other operator, e.g. `Join`, a vector/vector `BinaryOp`, `Limit`, a `TimeShift` with `@` | no | | |
+| any other operator, e.g. `Join`, a vector/vector `BinaryOp`, `Limit` | no | | |
 
 A `Filter` *above* `rate` has nothing to pass: it keeps some rate outputs, and those are exactly the rows the `SummaryAgg` reads. How a PromQL comparison is lowered decides whether it is such a `Filter`:
 
@@ -423,18 +433,22 @@ Any other shape stays in `definition`:
 - Values of different types are never treated as different: `1` and `1.0` might be equal, so `x = 1` and `x = 1.0` are treated as possibly overlapping.
 - A constant may come from a cast: type coercion turns `latency < 100` on a `DOUBLE` column into `latency < CAST(100 AS DOUBLE)`, and the SQL front end folds a numeric cast of a literal as DataFusion's constant folding does, so the condition reads `latency < 100.0`.
 
-**Time.** Example: `quantile_over_time(0.99, m[1m] offset 2m)` lowers to `TimeRange(1m)` over `TimeShift(2m)` over `Scan m`. Its KLL state (one per series) has `definition` = the `SummaryAgg` over `Scan m`, and `selection` = time `(−3m, −2m]`, the minute that ended 2 minutes before evaluation. There are two kinds of time:
+**Time.** The timestamp column is a column like any other: a selection constrains it with an interval whose ends are `IntervalConstraintLimit`s, `EvaluationTimePlusMs(ms)` (relative to the evaluation time t) or `FixedValue(Timestamp(ms since the epoch))` (absolute). The walk turns the one range `TimeRange(W)` and the `TimeShift`s on its path, whose offsets sum to o, into `ts ∈ (anchor − o − W, anchor − o]` on the timestamp column of the `TimeRange`'s input. Like a PromQL range, which `m[r]` evaluated at t reads as (t − r, t], the interval is left-open and right-closed. The anchor is t, or T for `@ T`. `@ end()` and `@ start()` equal t in an instant query, where the PromQL front end lowers them as no `@`; in a range-evaluated query they pin the rows to one end of the requested range at every step, so their `TimeShift` and the `TimeRange` stay in `definition` (sharing them is #1251). Example: `quantile_over_time(0.99, m[1m] offset 2m)` lowers to `TimeRange(1m)` over `TimeShift(2m)` over `Scan m`; its KLL state has `definition` = the `SummaryAgg` over `Scan m`, and `selection` = `ts ∈ (t − 3m, t − 2m]`.
 
-| Kind | Comes from | Example |
+| Query fragment | `lower` | `upper` |
 |---|---|---|
-| **Relative** to the evaluation time | a range `TimeRange(w)` over a `TimeShift(s)` → `(−(s+w), −s]`; a SQL trailing window `ts >= now() - INTERVAL 'w'` lowers to `TimeRange(w)` | `TimeRange(1m)` alone → `(−1m, 0]`; over `TimeShift(1m)` → `(−2m, −1m]` |
-| **Absolute** (later) | an interval on the timestamp column | `ts >= t0 AND ts < t1` → `ts ∈ [t0, t1)` |
+| PromQL `m[5m]` | `Excluded(EvaluationTimePlusMs(-300_000))` | `Included(EvaluationTimePlusMs(0))` |
+| PromQL `m[5m] offset 1h` | `Excluded(EvaluationTimePlusMs(-3_900_000))` | `Included(EvaluationTimePlusMs(-3_600_000))` |
+| PromQL `m[5m] @ end()` or `@ start()`, instant query | as `m[5m]` | |
+| PromQL `m[5m] @ end()` or `@ start()`, range query | not lifted: stays in `definition` | |
+| PromQL `m[5m] @ 1700000000` | `Excluded(FixedValue(Timestamp(1_699_999_700_000)))` | `Included(FixedValue(Timestamp(1_700_000_000_000)))` |
+| SQL `WHERE ts >= now() - INTERVAL '5 minutes'` | lowers to `TimeRange(5m)`: as `m[5m]` | |
+| SQL `WHERE ts >= '2026-11-01'` | `Included(FixedValue(Timestamp(1_793_491_200_000)))` | `Unbounded` |
 
-- PromQL windows exclude their start, so relative windows are open on the left. A SQL trailing window takes the same timing, `>=` included.
-- Window composition ([Pass 2](planner-layering.md#pass-2-asap-aware-common-subexpression-elimination) of logical optimization) builds its tumbling windows this way: a 3-minute window as tumbling windows `(−1m, 0]`, `(−2m, −1m]`, `(−3m, −2m]`, so tumbling window times are derived, not declared (#601).
+- Window composition ([Pass 2](planner-layering.md#pass-2-asap-aware-common-subexpression-elimination) of logical optimization) reads a longer range from a chain: `TimeRange(3m)` over a 1-minute chain selects the windows `(t − 1m, t]`, `(t − 2m, t − 1m]`, `(t − 3m, t − 2m]`, and the merge over them covers `(t − 3m, t]`.
+- Counter states (`Rate`, `Increase`) merge only when their intervals on the timestamp column are disjoint (`MergeInputRule::DisjointInTime`); other families need any column disjoint.
 - An instant `TimeRange` (latest sample per series) does not pick rows by time, so it stays in `definition`. The walk also stops there, so for now the label matchers of an instant selector stay in `definition` too; lifting them is planned together with `rate` (Rule 1).
-- The IR cannot yet write a timestamp constant, so absolute SQL time filters stay in `definition` for now.
-- Absolute and relative time are never compared: a state over `(−1m, 0]` and one over `ts ∈ [t0, t1)` are treated as possibly overlapping.
+- Limits of different variants never compare: a state over `ts ∈ (t − 1m, t]` and one over `ts ∈ (t0, t1]` are treated as possibly overlapping, and a relative interval and an absolute timestamp condition on one path do not combine (time then stays in `definition`).
 
 **More examples** of what goes where. Each query's quantile is answered from a KLL `SummaryAgg`:
 
@@ -442,7 +456,7 @@ Any other shape stays in `definition`:
 |---|---|---|---|
 | SQL `… FROM t WHERE region = 'us'` | `Scan t {region = 'us'}` | `Scan t` | `region ∈ {us}` |
 | SQL `… FROM t WHERE latency < 100` | `Scan t {latency < 100}` | `Scan t` | `latency ∈ (−∞, 100)` |
-| PromQL `quantile_over_time(0.99, m[1m] offset 2m)` | `TimeRange(1m, TimeShift(2m, Scan m))` | `Scan m` | the last 3 to 2 minutes before evaluation, `(−3m, −2m]` |
+| PromQL `quantile_over_time(0.99, m[1m] offset 2m)` | `TimeRange(1m, TimeShift(2m, Scan m))` | `Scan m` | `ts ∈ (t − 3m, t − 2m]` |
 | PromQL `quantile(0.99, rate(m{job="api"}[5m]))` | `rate(TimeRange(5m, Scan m {job = 'api'}))` | all of it | nothing: `job = 'api'` is under `rate`, which the walk cannot pass yet (Rule 1, later) |
 | PromQL `quantile(0.99, rate(m[5m]) > 0)` | `Filter(value > 0, rate(TimeRange(5m, Scan m)))` | `rate(TimeRange(5m, Scan m))` | `value ∈ (0, ∞)`: the `Filter` is above `rate` |
 | PromQL `quantile(0.99, rate(a[5m]) > rate(b[5m]))` | `BinaryOp(>, rate(TimeRange(5m, Scan a)), rate(TimeRange(5m, Scan b)))` | all of it | nothing: a vector/vector comparison is a `BinaryOp`, not a `Filter` |
@@ -451,7 +465,7 @@ Any other shape stays in `definition`:
 
 #### 4.2.3 Cost of deriving coverage
 
-**When it runs.** `find_or_add_group` derives a summary-state group's coverage once, when it creates the group, and stores it in `GroupProperties::summary_coverage`; `add_candidate` derives a candidate's the same way. A `SummaryMerge` reads its inputs' stored coverage, so each state is derived once. Operator-node trees carry no coverage.
+**When it runs.** `find_or_add_group` derives an aggregate group's coverage once, when it creates the group, and stores it in `GroupProperties::aggregate_coverage`; `add_candidate` derives a candidate's the same way. A `SummaryMerge` reads its inputs' stored coverage, so each state is derived once. Operator-node trees carry no coverage.
 
 **Sizes used below.**
 
@@ -734,7 +748,7 @@ Window composition (Pass 2) can answer it from two one-minute tumbling windows, 
                                    │  State: series labels, state Sketch(KLL k=200)
                                    │
                           [[ SummaryMerge ]]
-                                   ▲             selection: time (−2m, 0]
+                                   ▲             selection: ts ∈ (t − 2m, t]
                                    │
                  ┌─────────────────┴─────────────────┐
                  │  State: series labels,            │  State: series labels,
@@ -742,7 +756,7 @@ Window composition (Pass 2) can answer it from two one-minute tumbling windows, 
                  │                                   │
      [[ SummaryAgg ]]  tumbling window 0             [[ SummaryAgg ]]  tumbling window 1
      KLL k=200, per series                KLL k=200, per series
-     selection: time (−1m, 0]             selection: time (−2m, −1m]
+     selection: ts ∈ (t − 1m, t]             selection: ts ∈ (t − 2m, t − 1m]
                  ▲                                   ▲
                  │                                   │
          [ TimeRange 1m ]                    [ TimeRange 1m ]
@@ -844,26 +858,26 @@ input groups                       output groups
 
 | State | Query | Selection |
 |---|---|---|
-| `A` | `quantile_over_time(0.99, m[1m])` | time `(−1m, 0]` |
-| `B` | `quantile_over_time(0.99, m[1m] offset 1m)` | time `(−2m, −1m]` |
-| `C` | `quantile_over_time(0.99, m[1m] offset 30s)` | time `(−90s, −30s]` |
-| `D` | `quantile_over_time(0.99, n[1m])` | time `(−1m, 0]`, but over metric `n`: definition `KLL(value) per series over Scan n` |
+| `A` | `quantile_over_time(0.99, m[1m])` | ts ∈ `(t − 1m, t]` |
+| `B` | `quantile_over_time(0.99, m[1m] offset 1m)` | ts ∈ `(t − 2m, t − 1m]` |
+| `C` | `quantile_over_time(0.99, m[1m] offset 30s)` | ts ∈ `(t − 90s, t − 30s]` |
+| `D` | `quantile_over_time(0.99, n[1m])` | ts ∈ `(t − 1m, t]`, but over metric `n`: definition `KLL(value) per series over Scan n` |
 
 | Merge | Allowed? | Why | Result's selection |
 |---|---|---|---|
-| `A + B` | ✓ | same definition, no overlap | `(−2m, 0]` (touching time windows join) |
-| `A + C` | ✗ | `(−60s, −30s]` is in both, so those rows would be counted twice | |
+| `A + B` | ✓ | same definition, no overlap | `(t − 2m, t]` (touching time windows join) |
+| `A + C` | ✗ | `(t − 60s, t − 30s]` is in both, so those rows would be counted twice | |
 | `A + A` | ✗ | every row is in both | |
 | `A + D` | ✗ | different definitions: `D` reads metric `n`, not `m` | |
 | `A` + a KLL with `k = 400` | ✗ | different schema: `k` is part of the state type, so the merge is rejected before coverage is checked | |
-| `(A + B)` + the state of `m[1m] offset 2m`, time `(−3m, −2m]` | ✓ | a merge has coverage like any state, so merges nest | `(−3m, 0]` |
+| `(A + B)` + the state of `m[1m] offset 2m`, ts ∈ `(t − 3m, t − 2m]` | ✓ | a merge has coverage like any state, so merges nest | `(t − 3m, t]` |
 
 **Whether inputs may overlap** depends on the summary type (family and algorithm, §3). This is #592 (open), which adds `FieldDataType::family_merges` and `merge_relation`; #646 alone requires every merge to be overlap-free:
 
 | Rule | Summary types | Example |
 |---|---|---|
-| **must not overlap** | KLL, DDSketch, Count-Min, Count Sketch, UnivMon, exact `Sum`/`Count` | KLL `A + C` ✗: the rows in `(−60s, −30s]` would be counted twice |
-| **may overlap** | HLL, exact `Min`/`Max` | HLL over `A`'s and `C`'s rows ✓: a value seen twice is still one distinct value. The result keeps both boxes, `(−1m, 0]` and `(−90s, −30s]`, which together cover `(−90s, 0]` |
+| **must not overlap** | KLL, DDSketch, Count-Min, Count Sketch, UnivMon, exact `Sum`/`Count` | KLL `A + C` ✗: the rows in `(t − 60s, t − 30s]` would be counted twice |
+| **may overlap** | HLL, exact `Min`/`Max` | HLL over `A`'s and `C`'s rows ✓: a value seen twice is still one distinct value. The result keeps both boxes, `(t − 1m, t]` and `(t − 90s, t − 30s]`, which together cover `(t − 90s, t]` |
 | **cannot merge (yet)** | `CmsWithHeap`, `CountSketchWithHeap`, Theta, KMV, exact `Rate`/`IRate`/`Increase`, samples, wavelets, models | no sound merge is modeled yet, so #592 rejects them |
 | **right inside left** | subtraction | 5.7 |
 
@@ -871,7 +885,7 @@ input groups                       output groups
 |---|---|
 | What comes out? | the children's schema; with `group_by`, its columns in order, then the state column. A `group_by` of no columns over a SQL relation's states stands for a global SQL aggregate, which has one row over no input rows: it outputs one state, empty when there is no input state |
 | When is it rejected? | no children; a child is not state; the schemas differ (e.g. different sketch parameters); the definitions differ (different column, filters or source); the selections may overlap (#646; with #592, only where the family does not allow it); the family cannot merge at all (#592); a `group_by` column is not a group key of the children's build, appears twice, or is the state or time column; `group_by` over a family that cannot merge different groups (counter states, `IRate`, Theta, Hydra) |
-| What is its coverage? | the shared `definition` (with `group_by`, the same build grouped by the columns `group_by` names), and the union of the children's selections. Two boxes join when they differ in only one dimension and their union is again one constraint, as in the paper's one range per column: touching time windows (`(−2m, −1m]` and `(−1m, 0]` give `(−2m, 0]`), touching value ranges (`latency < 100` and `latency >= 100` give `latency ∈ (−∞, ∞)`, which still excludes NULL), or value sets of one column (`{us}` and `{eu}` give `{us, eu}`). Gaps stay as separate boxes |
+| What is its coverage? | the shared `definition` (with `group_by`, the same build grouped by the columns `group_by` names), and the union of the children's selections. Two boxes join when they differ in only one dimension and their union is again one constraint, as in the paper's one range per column: touching time windows (`(t − 2m, t − 1m]` and `(t − 1m, t]` give `(t − 2m, t]`), touching value ranges (`latency < 100` and `latency >= 100` give `latency ∈ (−∞, ∞)`, which still excludes NULL), or value sets of one column (`{us}` and `{eu}` give `{us, eu}`). Gaps stay as separate boxes |
 | State or value? | state in, state out |
 
 **Guarantee after a rollup.** The groups of one build partition its rows, so the states a rollup merges into one output group are disjoint, and the family-capability table's merged error applies. A rolled-up state of these families keeps the guarantee one build of the same size would have over the coarse group's rows; most are exactly that build's state:
@@ -893,7 +907,7 @@ Rejected: counter states (`Rate`, `Increase`), which merge consecutive windows o
 **Other uses of coverage.** The planner also uses coverage to read or reuse a state without merging:
 
 - **Slice:** from a `by[region, job]` state, a query for `region = 'us'` by job reads only the `us` groups ✓. A query for `value < 50` ✗: `value` is not a grouping column, and a sketch cannot be filtered after it is built.
-- **Reuse:** a stored state answers a query when the definitions are equal and the query's rows are all in the state, with any difference covered by a slice. A stored `by[region, job]` state over `(−5m, 0]` answers p99 by job over the last 5 minutes for `region = 'us'` ✓, but not over the last 1 minute ✗: time is not a grouping column, so minutes 2–5 cannot be taken out.
+- **Reuse:** a stored state answers a query when the definitions are equal and the query's rows are all in the state, with any difference covered by a slice. A stored `by[region, job]` state over `(t − 5m, t]` answers p99 by job over the last 5 minutes for `region = 'us'` ✓, but not over the last 1 minute ✗: time is not a grouping column, so minutes 2–5 cannot be taken out.
 
 ### 5.7 Reserved operators (not implemented)
 
@@ -936,7 +950,7 @@ OperatorNode                                         §6.1
 │                 └── algorithm, params              §6.4
 └── guarantee: AccuracyGuarantee                       §6.5  (accuracy of an evaluation)
 
-MemoGroup.group_properties.summary_coverage: SummaryCoverage   §6.6
+MemoGroup.group_properties.aggregate_coverage: SummaryCoverage   §6.6
       └── definition: SummaryStateDefinition { input_group, unlifted_operators }
 ```
 
@@ -947,7 +961,7 @@ MemoGroup.group_properties.summary_coverage: SummaryCoverage   §6.6
 | §6.3 Schema and field types | `Schema`, `Field`, `FieldDataType` | every node's `schema`; `SummaryAgg.family` |
 | §6.4 Summary-family parameters | `SketchKind`, `SketchParams`, `GroupingStrategy`, exact/sample/wavelet/model params | the payload of each non-plain `FieldDataType` variant |
 | §6.5 Update input and evaluations | `SummaryUpdate`, `SketchStatistic`, `MaintainedPopulation`, `PopulationStatistic` | fields of the `ASAPOp` variants in §6.2 |
-| §6.6 Summary coverage | `SummaryCoverage`, `SummaryStateDefinition`, `SelectionBox`, `Constraint` | `GroupProperties::summary_coverage` of summary-state memo groups |
+| §6.6 Summary coverage | `SummaryCoverage`, `SummaryStateDefinition`, `SelectionBox`, `Constraint` | `GroupProperties::aggregate_coverage` of summary-state memo groups |
 
 **Example: the p99 latency state of §5.1.** The `SummaryAgg` node (§6.1) holds `ASAPOp::SummaryAgg` (§6.2) with `family = Sketch(SketchKind::new(Kll, Kll { k: 200 }), PerSubpopulationInstance)` (§6.3, §6.4) and `input = SummaryUpdate::column(latency)` (§6.5). Its `schema` (§6.3) is `(job Utf8, state Sketch(KLL k=200))`: the `state` field has the same type as `family`. A `SummaryEstimate` above it holds `query = Quantile { q: 0.99 }` (§6.5), and its node carries the `guarantee` of the evaluation. `coverage()` on the `SummaryAgg` node returns a `SummaryCoverage` (§6.6).
 

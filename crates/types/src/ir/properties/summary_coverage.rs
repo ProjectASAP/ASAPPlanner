@@ -3,15 +3,17 @@
 //! `docs/design_docs/proposals/asap-primitive-schema.md` §4.2, after
 //! Goldstein & Larson's view matching.
 //!
-//! Coverage is derived once for each summary-state memo group, from its
-//! input groups, never declared, and stored in its `GroupProperties`.
-//! Walking down from a `SummaryAgg` through the input groups' expressions, a
+//! Coverage is derived once for each aggregate memo group (a summary state
+//! or an exact `Aggregate`), from its input groups, never declared, and
+//! stored in its `GroupProperties::aggregate_coverage`. Walking down from a
+//! `SummaryAgg` or `Aggregate` through the input groups' expressions, a
 //! predicate conjunct moves into `selection` when it can be lifted to the
-//! `SummaryAgg` (through `Filter`, a range `TimeRange`, a `TimeShift` without
-//! `@` and direct-column `Project` items) and it is a value set or an
-//! interval on one column. Everything else stays in `definition` as a
-//! residual, so two states are merged only when they compute the same thing
-//! over disjoint rows. Node trees carry no coverage.
+//! top (through `Filter`, a range `TimeRange`, a `TimeShift` and
+//! direct-column `Project` items) and it is a value set or an interval on
+//! one column. The `TimeRange` and `TimeShift`s become one interval on the
+//! timestamp column ([`IntervalConstraintLimit`]). Everything else stays in
+//! `definition` as a residual, so two states are merged only when they
+//! compute the same thing over disjoint rows. Node trees carry no coverage.
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::ops::Bound;
@@ -23,7 +25,7 @@ use crate::ir::operator::asap::{selected_from, summary_agg_schema, ASAPOp};
 use crate::ir::operator::input::{InputOrTemporaryBuild, OperatorInput};
 use crate::ir::operator::node::{Operator, OperatorResultKind};
 use crate::ir::operator::non_asap::{NonASAPOp, TimeRangeKind};
-use crate::ir::operator::operator_properties::Reduction;
+use crate::ir::operator::operator_properties::{AtModifier, Reduction};
 use crate::ir::scalar::expr_ir::{CompareOpKind, ScalarValue};
 use crate::ir::scalar::{Predicate, ScalarExpr};
 use crate::ir::schema::family_capability::{FamilyCapability, MergeInputRule};
@@ -235,12 +237,12 @@ mod limit_bound {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CoverageError {
-    /// The node is not a summary state (`SummaryAgg`, `SummaryTumblingWindowChain` or
-    /// `SummaryMerge`): a caller bug, or bad input when it is a merge's
-    /// input.
-    #[error(
-        "coverage is derived only for SummaryAgg, SummaryTumblingWindowChain and SummaryMerge"
-    )]
+    /// The node has no coverage: it is no aggregate (`SummaryAgg`,
+    /// `Aggregate`, `SummaryTumblingWindowChain`, `SummaryMerge`), or a
+    /// `TimeRange`/`TimeShift` over a chain whose windows are not one
+    /// interval on the timestamp column. A caller bug, or bad input when it
+    /// is a merge's input.
+    #[error("coverage is derived only for aggregates and one time interval over a chain")]
     NotSummary,
     /// A `SummaryMerge` without inputs: bad input.
     #[error("summary merge requires at least one input")]
@@ -281,10 +283,15 @@ pub enum CoverageError {
 type GroupInput<'m> = InputOrTemporaryBuild<MemoGroupAsInput<'m>>;
 
 impl SummaryCoverage {
-    /// Coverage of a summary state a memo group computes with `operator`
-    /// over its input groups: a `SummaryAgg`, a `SummaryTumblingWindowChain`,
+    /// Coverage of what a memo group computes with `operator` over its
+    /// input groups: a `SummaryAgg`, an exact `Aggregate`, a
+    /// `SummaryTumblingWindowChain` (a build over its input, the timestamp
+    /// column unconstrained), a `TimeRange` or `TimeShift` over a chain (the
+    /// chain's coverage with the windows' interval on the timestamp column),
     /// a `SummaryMerge`, or a `Filter` that keeps whole states of a grouped
-    /// `SummaryAgg`. A merge reads its inputs' stored coverage and fails
+    /// `SummaryAgg`. So `SummaryMerge(TimeRange(W, TimeShift(o, Chain[w](X))))`
+    /// covers what `SummaryAgg(TimeRange(W, TimeShift(o, X)))` does. A merge
+    /// reads its inputs' stored coverage and fails
     /// unless every input has the same definition and their selections are
     /// pairwise disjoint; a family whose merge is idempotent
     /// ([`MergeInputRule::MayOverlap`] in the family-capability table) may
@@ -297,14 +304,43 @@ impl SummaryCoverage {
             op.map_children(|input| InputOrTemporaryBuild::Input(*input))
         };
         match operator {
+            Operator::NonASAP(NonASAPOp::Aggregate { child, .. }) => {
+                let top =
+                    unlifted(&operator.map_children(|input| InputOrTemporaryBuild::Input(*input)));
+                of_aggregate(&InputOrTemporaryBuild::Input(*child), None, |_| top)
+            }
+            Operator::NonASAP(NonASAPOp::TimeRange { .. } | NonASAPOp::TimeShift { .. })
+                if operator.output_kind() == OperatorResultKind::State =>
+            {
+                of_window_selection(operator)
+            }
             Operator::NonASAP(_) => match selected_build(operator)? {
                 Some(build) => of_summary_agg(&build),
                 None => Err(CoverageError::NotSummary),
             },
             Operator::ASAP(op @ ASAPOp::SummaryAgg { .. }) => of_summary_agg(&as_built(op)),
-            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => todo!(
-                "#1207 PR 2: a chain's coverage is a build's over its input, with the timestamp column unconstrained"
-            ),
+            Operator::ASAP(op @ ASAPOp::SummaryTumblingWindowChain { .. }) => {
+                let ASAPOp::SummaryTumblingWindowChain {
+                    child,
+                    family,
+                    input,
+                    reduction,
+                    grouping,
+                    filter,
+                    ..
+                } = as_built(op)
+                else {
+                    unreachable!("matched a chain");
+                };
+                of_summary_agg(&ASAPOp::SummaryAgg {
+                    child,
+                    family,
+                    input,
+                    reduction,
+                    grouping,
+                    filter,
+                })
+            }
             Operator::ASAP(ASAPOp::SummaryMerge {
                 children, group_by, ..
             }) => {
@@ -317,7 +353,7 @@ impl SummaryCoverage {
                             .ok_or(CoverageError::NotSummary)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                let merged = of_merge(&inputs)?;
+                let merged = of_merge(&inputs, time_column_of_build_input(&children[0]).as_ref())?;
                 match group_by {
                     None => Ok(merged),
                     Some(keys) => regrouped(merged, &children[0], keys),
@@ -410,8 +446,12 @@ fn selected_build<'m>(
     }))
 }
 
-/// The coverage of a merge of states covering `inputs`.
-fn of_merge(inputs: &[SummaryCoverage]) -> Result<SummaryCoverage, CoverageError> {
+/// The coverage of a merge of states covering `inputs`, whose builds read
+/// rows with timestamp column `time_column`.
+fn of_merge(
+    inputs: &[SummaryCoverage],
+    time_column: Option<&ColumnIdentity>,
+) -> Result<SummaryCoverage, CoverageError> {
     let first = inputs.first().ok_or(CoverageError::EmptyMerge)?;
     if inputs
         .iter()
@@ -428,12 +468,16 @@ fn of_merge(inputs: &[SummaryCoverage]) -> Result<SummaryCoverage, CoverageError
         _ => None,
     }
     .unwrap_or(MergeInputRule::Disjoint);
-    let separated: fn(&SelectionBox, &SelectionBox) -> bool = match required {
-        MergeInputRule::MayOverlap => |_, _| true,
-        MergeInputRule::DisjointInTime => todo!(
-            "#1207 PR 2: disjoint intervals on the timestamp column, with IntervalConstraintLimit ends"
-        ),
-        MergeInputRule::Disjoint => SelectionBox::disjoint,
+    let separated = |a: &SelectionBox, b: &SelectionBox| match required {
+        MergeInputRule::MayOverlap => true,
+        // Consecutive windows of one series: disjoint on the timestamp column.
+        MergeInputRule::DisjointInTime => time_column.is_some_and(|column| {
+            matches!(
+                (a.columns.get(column), b.columns.get(column)),
+                (Some(a), Some(b)) if a.disjoint(b)
+            )
+        }),
+        MergeInputRule::Disjoint => a.disjoint(b),
     };
     // Every pair of boxes of different inputs.
     if required != MergeInputRule::MayOverlap
@@ -548,9 +592,15 @@ fn build_input_schema<I: OperatorInput>(state: &I) -> Option<Schema> {
     }
 }
 
+/// The timestamp column of the rows the build of summary state `state`
+/// reads ([`build_input_schema`]), as a selection names it.
+fn time_column_of_build_input<I: OperatorInput>(state: &I) -> Option<ColumnIdentity> {
+    let rows = build_input_schema(state)?;
+    column_identity(&rows, rows.time_index?)
+}
+
 /// The coverage of `build`, a `SummaryAgg` over memo groups (or over an
-/// input a rule built over them): its operators walked down through the
-/// liftable operators of its input groups' expressions.
+/// input a rule built over them).
 fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, CoverageError> {
     let ASAPOp::SummaryAgg {
         child,
@@ -563,6 +613,27 @@ fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, Cov
     else {
         unreachable!("called on a SummaryAgg");
     };
+    of_aggregate(child, filter.as_ref(), |residual_filter| {
+        Operator::ASAP(ASAPOp::SummaryAgg {
+            child: None,
+            family: family.clone(),
+            input: input.clone(),
+            reduction: reduction.clone(),
+            grouping: grouping.clone(),
+            filter: residual_filter,
+        })
+    })
+}
+
+/// The coverage of an aggregate over `child`: its input's operators walked
+/// down through the liftable operators of the input groups' expressions.
+/// `filter` is the aggregate's own row filter (a `SummaryAgg`'s), and
+/// `unlifted_top` makes the aggregate's unlifted operator from that filter's residual.
+fn of_aggregate(
+    child: &GroupInput<'_>,
+    filter: Option<&Predicate<GroupInput<'_>>>,
+    unlifted_top: impl FnOnce(Option<Predicate<Option<MemoGroupId>>>) -> Operator<Option<MemoGroupId>>,
+) -> Result<SummaryCoverage, CoverageError> {
     // The operators a predicate can be lifted through, top to bottom, and
     // the first input below them. A subquery's group stays named in the
     // residual of the operator that reads it.
@@ -573,7 +644,7 @@ fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, Cov
         let passes = match &operator {
             Operator::NonASAP(NonASAPOp::Project { .. } | NonASAPOp::Filter { .. }) => true,
             Operator::NonASAP(NonASAPOp::TimeRange { kind, .. }) => *kind == TimeRangeKind::Range,
-            Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }) => shift.at.is_none(),
+            Operator::NonASAP(NonASAPOp::TimeShift { .. }) => true,
             _ => false,
         };
         if !passes {
@@ -590,9 +661,7 @@ fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, Cov
     // Top-down: decide which conjuncts are lifted. `kept[d]` is the residual
     // of `chain[d]` when it is a `Filter`.
     let mut lifted = BTreeMap::new();
-    let agg_filter = filter
-        .as_ref()
-        .and_then(|pred| residual(pred, top, &[], &mut lifted));
+    let agg_filter = filter.and_then(|pred| residual(pred, top, &[], &mut lifted));
     let kept: Vec<Option<Predicate<Option<MemoGroupId>>>> = chain
         .iter()
         .enumerate()
@@ -626,14 +695,26 @@ fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, Cov
         _ => None,
     };
 
-    let mut unlifted_operators = vec![Operator::ASAP(ASAPOp::SummaryAgg {
-        child: None,
-        family: family.clone(),
-        input: input.clone(),
-        reduction: reduction.clone(),
-        grouping: grouping.clone(),
-        filter: agg_filter,
-    })];
+    // The `TimeRange` and `TimeShift`s: one interval on the timestamp column
+    // of the `TimeRange`'s input, when they make one and it combines with
+    // what is lifted on that column already; else they stay unlifted.
+    let time = time_constraint(&chain).and_then(|constraint| {
+        let depth = chain
+            .iter()
+            .position(|link| matches!(link, Operator::NonASAP(NonASAPOp::TimeRange { .. })))?;
+        let column = chain[depth].children()[0].schema().time_index?;
+        let column = column_at_top(column, &chain[..=depth])?;
+        column_identity(top, column)?;
+        let combined = match lifted.get(&column) {
+            Some(existing) => existing.intersect(&constraint)?,
+            None => constraint,
+        };
+        Some((column, combined))
+    });
+    let lift_time = time.is_some();
+    lifted.extend(time);
+
+    let mut unlifted_operators = vec![unlifted_top(agg_filter)];
     for (depth, link) in chain.iter().enumerate() {
         match link {
             Operator::NonASAP(NonASAPOp::Filter { .. }) => {
@@ -644,9 +725,8 @@ fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, Cov
                     }));
                 }
             }
-            Operator::NonASAP(NonASAPOp::TimeRange { .. } | NonASAPOp::TimeShift { .. }) => todo!(
-                "#1207 PR 2: lift the range and the offset into an interval on the timestamp column, with IntervalConstraintLimit ends"
-            ),
+            Operator::NonASAP(NonASAPOp::TimeRange { .. } | NonASAPOp::TimeShift { .. })
+                if lift_time => {}
             other => unlifted_operators.push(unlifted(other)),
         }
     }
@@ -661,14 +741,7 @@ fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, Cov
     let selection = SelectionBox {
         columns: lifted
             .into_iter()
-            .map(|(column, constraint)| {
-                let field = &top.fields[column];
-                let identity = ColumnIdentity {
-                    table: field.table.clone(),
-                    name: field.name.clone(),
-                };
-                (identity, constraint)
-            })
+            .filter_map(|(column, constraint)| Some((column_identity(top, column)?, constraint)))
             .collect(),
     };
     Ok(SummaryCoverage {
@@ -684,8 +757,7 @@ fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, Cov
 /// `top`, the agg child's schema) and return the rest, each scalar subquery
 /// naming the group it reads. `above`
 /// are the operators between the predicate and the `SummaryAgg`, top to
-/// bottom. A column whose `(table, name)` is not unique in `top` cannot be
-/// named in a selection, so its conjuncts stay.
+/// bottom. A column [`column_identity`] cannot name stays.
 fn residual(
     pred: &Predicate<GroupInput<'_>>,
     top: &Schema,
@@ -696,15 +768,7 @@ fn residual(
     for conjunct in pred.0.conjuncts() {
         let lift = constraint_of(conjunct).and_then(|(column, constraint)| {
             let column = column_at_top(column, above)?;
-            let field = &top.fields[column];
-            let namesakes = top
-                .fields
-                .iter()
-                .filter(|f| f.name == field.name && f.table == field.table)
-                .count();
-            if namesakes != 1 {
-                return None;
-            }
+            column_identity(top, column)?;
             let combined = match lifted.get(&column) {
                 Some(existing) => existing.intersect(&constraint)?,
                 None => constraint,
@@ -733,8 +797,8 @@ fn group_id(input: &GroupInput<'_>) -> Option<MemoGroupId> {
     }
 }
 
-/// `link`, a liftable operator kept whole in a definition: its main input
-/// `None`, every other input the group it is.
+/// `link`, a liftable operator or an exact `Aggregate` kept whole in a
+/// definition: its main input `None`, every other input the group it is.
 fn unlifted(link: &Operator<GroupInput<'_>>) -> Operator<Option<MemoGroupId>> {
     let mut operator = link.map_children(group_id);
     match &mut operator {
@@ -742,9 +806,10 @@ fn unlifted(link: &Operator<GroupInput<'_>>) -> Operator<Option<MemoGroupId>> {
             NonASAPOp::Filter { child, .. }
             | NonASAPOp::Project { child, .. }
             | NonASAPOp::TimeRange { child, .. }
-            | NonASAPOp::TimeShift { child, .. },
+            | NonASAPOp::TimeShift { child, .. }
+            | NonASAPOp::Aggregate { child, .. },
         ) => *child = None,
-        _ => unreachable!("only liftable operators are walked"),
+        _ => unreachable!("only liftable operators and aggregates are unlifted"),
     }
     operator
 }
@@ -760,6 +825,119 @@ fn column_at_top<C>(mut column: ColumnId, above: &[Operator<C>]) -> Option<Colum
         }
     }
     Some(column)
+}
+
+/// The identity of `schema`'s column `column`; `None` when its
+/// `(table, name)` is not unique in `schema`, so a selection cannot name it.
+fn column_identity(schema: &Schema, column: ColumnId) -> Option<ColumnIdentity> {
+    let field = schema.fields.get(column)?;
+    let namesakes = schema
+        .fields
+        .iter()
+        .filter(|f| f.name == field.name && f.table == field.table)
+        .count();
+    (namesakes == 1).then(|| ColumnIdentity {
+        table: field.table.clone(),
+        name: field.name.clone(),
+    })
+}
+
+/// The interval on the timestamp column that `links` (top down, the
+/// `TimeRange` and `TimeShift`s between an aggregate and its input) select:
+/// `(anchor − o − W, anchor − o]` for the one range `TimeRange` of width W
+/// and the shifts' offsets summing to o, left-open and right-closed like a
+/// PromQL range. The anchor is the evaluation time t
+/// (`EvaluationTimePlusMs`), or T for `@ T` (`FixedValue(Timestamp)`).
+/// `None` when they are not one interval: no or several range `TimeRange`s,
+/// an instant one, several `@`s, or an `@ end()` or `@ start()`. Those occur
+/// only in a range-evaluated query (the PromQL front end lowers them as no
+/// `@` in an instant one), where they pin the rows to one end of the
+/// requested range at every step, so they stay unlifted (#1251).
+fn time_constraint<C>(links: &[Operator<C>]) -> Option<Constraint> {
+    let (mut width, mut offset_ms, mut at) = (None, 0i64, None::<AtModifier>);
+    for link in links {
+        match link {
+            Operator::NonASAP(NonASAPOp::TimeRange { range, kind, .. }) => {
+                if *kind != TimeRangeKind::Range || width.replace(*range).is_some() {
+                    return None;
+                }
+            }
+            Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }) => {
+                offset_ms = offset_ms.checked_add(shift.offset_ms)?;
+                if let Some(anchor) = shift.at {
+                    if at.replace(anchor).is_some() {
+                        return None;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let width_ms = i64::try_from(width?.as_millis()).ok()?;
+    let fixed_anchor = match at {
+        Some(AtModifier::Timestamp(ms)) => Some(ms),
+        Some(AtModifier::Start | AtModifier::End) => return None,
+        None => None,
+    };
+    let before_anchor = |ms: i64| -> Option<IntervalConstraintLimit> {
+        Some(match fixed_anchor {
+            Some(anchor) => {
+                IntervalConstraintLimit::FixedValue(ScalarValue::Timestamp(anchor.checked_sub(ms)?))
+            }
+            None => IntervalConstraintLimit::EvaluationTimePlusMs(ms.checked_neg()?),
+        })
+    };
+    Some(Constraint::Interval {
+        lower: Bound::Excluded(before_anchor(offset_ms.checked_add(width_ms)?)?),
+        upper: Bound::Included(before_anchor(offset_ms)?),
+    })
+}
+
+/// The coverage of `selection`, a `TimeRange` or `TimeShift` over a chain
+/// (through more of them): the chain's coverage with the interval they
+/// select on the timestamp column of the chain's input, in every box.
+fn of_window_selection(
+    selection: &Operator<MemoGroupAsInput<'_>>,
+) -> Result<SummaryCoverage, CoverageError> {
+    let mut links = vec![selection.clone()];
+    let mut below = *selection.children()[0];
+    loop {
+        match below.operator() {
+            link @ Operator::NonASAP(
+                NonASAPOp::TimeRange { child, .. } | NonASAPOp::TimeShift { child, .. },
+            ) => {
+                below = child;
+                links.push(link);
+            }
+            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => break,
+            _ => return Err(CoverageError::NotSummary),
+        }
+    }
+    let chain = below
+        .aggregate_coverage()
+        .ok_or(CoverageError::NotSummary)?;
+    let time_column = time_column_of_build_input(&below).ok_or(CoverageError::NotSummary)?;
+    let constraint = time_constraint(&links).ok_or(CoverageError::NotSummary)?;
+    let selection = chain
+        .selection
+        .iter()
+        .map(|selection_box| {
+            let mut columns = selection_box.columns.clone();
+            let combined = match columns.get(&time_column) {
+                Some(existing) => existing.intersect(&constraint),
+                None => Some(constraint.clone()),
+            };
+            columns.insert(
+                time_column.clone(),
+                combined.ok_or(CoverageError::NotSummary)?,
+            );
+            Ok(SelectionBox { columns })
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(SummaryCoverage {
+        definition: chain.definition.clone(),
+        selection,
+    })
 }
 
 /// `column = v`, `!=`, `<`, `<=`, `>`, `>=`, `[NOT] IN (...)` and `OR` of

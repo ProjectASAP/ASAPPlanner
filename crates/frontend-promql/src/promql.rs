@@ -97,6 +97,10 @@ pub(crate) struct PromqlLowerer<'a> {
     /// What a bare instant selector over a metric looks back; `None` when
     /// the metric declares no sample interval.
     sample_interval_of: &'a dyn Fn(&str) -> Option<Duration>,
+    /// Whether the query is range-evaluated. In an instant query
+    /// `@ start()` and `@ end()` are the evaluation time, so they are
+    /// lowered as no `@`.
+    range_evaluated: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -141,6 +145,7 @@ impl PromqlLowerer<'_> {
         accuracy: &AccuracyTarget,
         sample_interval_of: &dyn Fn(&str) -> Option<Duration>,
         metric_type_of: &dyn Fn(&str) -> Option<PrometheusMetricType>,
+        range_evaluated: bool,
     ) -> Result<asap_types::ir::QueryRoot> {
         let ast = parser::parse(query).map_err(LoweringError::Parse)?;
         check_depth(&ast, MAX_DEPTH)?;
@@ -149,6 +154,7 @@ impl PromqlLowerer<'_> {
         let lowerer = PromqlLowerer {
             accuracy: accuracy.clone(),
             sample_interval_of,
+            range_evaluated,
         };
         if metrics
             .iter()
@@ -240,7 +246,7 @@ impl PromqlLowerer<'_> {
                     child: Rc::new(self.walk(&sq.expr)?),
                 };
                 // `offset`/`@` move the whole subquery, including its step grid.
-                let shift = time_shift(sq.offset.as_ref(), sq.at.as_ref())?;
+                let shift = time_shift(sq.offset.as_ref(), sq.at.as_ref(), self.range_evaluated)?;
                 Ok(if shift.is_identity() {
                     subquery
                 } else {
@@ -251,11 +257,11 @@ impl PromqlLowerer<'_> {
                 })
             }
             Expr::VectorSelector(vs) => {
-                let (metric, matchers, shift) = vs_parts(vs)?;
+                let (metric, matchers, shift) = vs_parts(vs, self.range_evaluated)?;
                 self.instant_source(metric, matchers, shift)
             }
             Expr::MatrixSelector(ms) => {
-                let (metric, matchers, shift) = vs_parts(&ms.vs)?;
+                let (metric, matchers, shift) = vs_parts(&ms.vs, self.range_evaluated)?;
                 Ok(Unresolved::TimeRange {
                     range: ms.range,
                     kind: TimeRangeKind::Range,
@@ -993,7 +999,7 @@ impl PromqlLowerer<'_> {
     fn lower_inner(&self, expr: &Expr) -> Result<Inner> {
         match expr {
             Expr::VectorSelector(vs) => {
-                let (metric, matchers, shift) = vs_parts(vs)?;
+                let (metric, matchers, shift) = vs_parts(vs, self.range_evaluated)?;
                 Ok(Inner {
                     metric,
                     matchers,
@@ -1003,7 +1009,7 @@ impl PromqlLowerer<'_> {
                 })
             }
             Expr::MatrixSelector(ms) => {
-                let (metric, matchers, shift) = vs_parts(&ms.vs)?;
+                let (metric, matchers, shift) = vs_parts(&ms.vs, self.range_evaluated)?;
                 Ok(Inner {
                     metric,
                     matchers,
@@ -1026,7 +1032,8 @@ impl PromqlLowerer<'_> {
                 call.func.name.to_string(),
             ));
         };
-        let (metric, matchers, window, shift) = extract_matrix(arg(call, matrix_idx)?)?;
+        let (metric, matchers, window, shift) =
+            extract_matrix(arg(call, matrix_idx)?, self.range_evaluated)?;
         Ok(Inner {
             metric,
             matchers,
@@ -1577,12 +1584,12 @@ fn clamp_bounds_filter(min: &Scalar, max: &Scalar, child: Unresolved) -> Unresol
 fn collect_metric_names(expr: &Expr, out: &mut Vec<String>) {
     match expr {
         Expr::VectorSelector(vs) => {
-            if let Ok((metric, ..)) = vs_parts(vs) {
+            if let Ok((metric, ..)) = vs_parts(vs, false) {
                 out.push(metric);
             }
         }
         Expr::MatrixSelector(ms) => {
-            if let Ok((metric, ..)) = vs_parts(&ms.vs) {
+            if let Ok((metric, ..)) = vs_parts(&ms.vs, false) {
                 out.push(metric);
             }
         }
@@ -1714,7 +1721,10 @@ fn resolve_group(agg: &AggregateExpr) -> Result<(Vec<ColumnRef>, bool)> {
 
 // ── Free helpers ──────────────────────────────────────────────────────────────
 
-fn vs_parts(vs: &VectorSelector) -> Result<(String, Vec<Scalar>, TimeShift)> {
+fn vs_parts(
+    vs: &VectorSelector,
+    range_evaluated: bool,
+) -> Result<(String, Vec<Scalar>, TimeShift)> {
     // A non-equality `__name__` matcher (`=~` / `!~` / `!=`) selects *across*
     // metric names. `Source::TimeSeries { metric }` carries a single concrete
     // metric name, so there is no representation for a regex/negated name
@@ -1761,14 +1771,20 @@ fn vs_parts(vs: &VectorSelector) -> Result<(String, Vec<Scalar>, TimeShift)> {
         .collect();
     ms.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.value.cmp(&b.value)));
     let matchers = ms.into_iter().map(matcher_to_compare).collect();
-    let shift = time_shift(vs.offset.as_ref(), vs.at.as_ref())?;
+    let shift = time_shift(vs.offset.as_ref(), vs.at.as_ref(), range_evaluated)?;
     Ok((metric, matchers, shift))
 }
 
 /// Convert the parser's `offset` / `@` modifiers into a [`TimeShift`] (issue
 /// #40). Offset is signed milliseconds; `@ <ts>` (parser seconds → ms) becomes
-/// an absolute anchor, `@ start()`/`@ end()` the range bounds.
-fn time_shift(offset: Option<&Offset>, at: Option<&ParserAtModifier>) -> Result<TimeShift> {
+/// an absolute anchor, `@ start()`/`@ end()` the range bounds of a
+/// range-evaluated query. In an instant query both bounds are the evaluation
+/// time, so they are no `@`.
+fn time_shift(
+    offset: Option<&Offset>,
+    at: Option<&ParserAtModifier>,
+    range_evaluated: bool,
+) -> Result<TimeShift> {
     let offset_ms = match offset {
         None => 0,
         Some(Offset::Pos(d)) => duration_ms(*d)?,
@@ -1776,6 +1792,7 @@ fn time_shift(offset: Option<&Offset>, at: Option<&ParserAtModifier>) -> Result<
     };
     let at = match at {
         None => None,
+        Some(ParserAtModifier::Start | ParserAtModifier::End) if !range_evaluated => None,
         Some(ParserAtModifier::Start) => Some(AtModifier::Start),
         Some(ParserAtModifier::End) => Some(AtModifier::End),
         Some(ParserAtModifier::At(t)) => Some(AtModifier::Timestamp(system_time_ms(*t)?)),
@@ -1821,13 +1838,16 @@ fn matcher_to_compare(m: &Matcher) -> Scalar {
     }
 }
 
-fn extract_matrix(expr: &Expr) -> Result<(String, Vec<Scalar>, Duration, TimeShift)> {
+fn extract_matrix(
+    expr: &Expr,
+    range_evaluated: bool,
+) -> Result<(String, Vec<Scalar>, Duration, TimeShift)> {
     match expr {
         Expr::MatrixSelector(ms) => {
-            let (metric, matchers, shift) = vs_parts(&ms.vs)?;
+            let (metric, matchers, shift) = vs_parts(&ms.vs, range_evaluated)?;
             Ok((metric, matchers, ms.range, shift))
         }
-        Expr::Paren(p) => extract_matrix(&p.expr),
+        Expr::Paren(p) => extract_matrix(&p.expr, range_evaluated),
         // A range-vector function argument must be a (parenthesised) matrix
         // selector. Do NOT descend through an arbitrary `Call` — that would
         // silently strip an unsupported wrapper (`rate(deriv(m[5m]))` lowering

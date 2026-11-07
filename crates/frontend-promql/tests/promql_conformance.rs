@@ -1056,7 +1056,9 @@ fn offset_modifier_lowers_to_a_time_shift() {
 fn at_modifier_lowers_to_a_time_shift() {
     // SEMANTICS (PromQL, issue #40): `@ <ts>` pins the evaluation to an absolute
     // instant (PromQL seconds → IR milliseconds); `@ start()` / `@ end()` anchor
-    // to the query range bounds.
+    // to the query range bounds, which in an instant query (this harness) are
+    // both the evaluation time: no `@` (a range query keeps them, see the
+    // crate's `at_start_and_at_end_stay_only_in_a_range_query`).
     let qe = ok("http_requests_total @ 1609746000");
     let NonASAPOp::TimeRange { child, .. } = qe.expect_non_asap() else {
         panic!("expected an ingestion TimeRange");
@@ -1067,16 +1069,12 @@ fn at_modifier_lowers_to_a_time_shift() {
     assert_eq!(shift.at, Some(AtModifier::Timestamp(1_609_746_000_000)));
     assert_eq!(shift.offset_ms, 0);
 
-    let qe = ok("http_requests_total @ start()");
-    let NonASAPOp::TimeRange { child, .. } = qe.expect_non_asap() else {
-        panic!("expected an ingestion TimeRange");
-    };
-    let NonASAPOp::TimeShift { shift, .. } = child.expect_non_asap() else {
-        panic!("expected a TimeShift for `@ start()`");
-    };
-    assert_eq!(shift.at, Some(AtModifier::Start));
+    assert_eq!(
+        ok("http_requests_total @ start()"),
+        ok("http_requests_total")
+    );
 
-    // Offset and `@` compose: `@ end() offset 5m` carries both.
+    // Offset and `@` compose: `@ end() offset 5m` keeps the offset.
     let qe = ok("http_requests_total @ end() offset 5m");
     let NonASAPOp::TimeRange { child, .. } = qe.expect_non_asap() else {
         panic!("expected an ingestion TimeRange, got {qe:?}");
@@ -1084,7 +1082,7 @@ fn at_modifier_lowers_to_a_time_shift() {
     let NonASAPOp::TimeShift { shift, .. } = child.expect_non_asap() else {
         panic!("expected a TimeShift, got {qe:?}");
     };
-    assert_eq!(shift.at, Some(AtModifier::End));
+    assert_eq!(shift.at, None);
     assert_eq!(shift.offset_ms, 300_000);
 }
 
