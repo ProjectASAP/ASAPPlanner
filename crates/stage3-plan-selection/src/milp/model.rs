@@ -186,17 +186,16 @@ impl<'a> SelectionInputs<'a> {
     }
 
     /// The physical candidates of memo group `group`, ascending.
-    fn candidates_of_group(&self, group: MemoGroupId) -> Vec<PhysicalCandidateId> {
+    fn candidates_of_group(&self, group: MemoGroupId) -> &[PhysicalCandidateId] {
         self.candidates_of_group
             .get(&group)
-            .cloned()
-            .unwrap_or_default()
+            .map_or(&[], Vec::as_slice)
     }
 
     /// Each query's output groups $G_q$, each pair once, in output-reference
     /// order: a scalar query reads one per operator reference.
-    fn query_output_groups(&self) -> Vec<(QueryId, MemoGroupId)> {
-        self.query_output_groups.clone()
+    fn query_output_groups(&self) -> &[(QueryId, MemoGroupId)] {
+        &self.query_output_groups
     }
 
     /// The execution of `v` that gives query `query`'s output, when it can
@@ -251,8 +250,8 @@ fn selection_variables(
         }
     }
     let mut z = HashMap::new();
-    for (query, group) in inputs.query_output_groups() {
-        for v in inputs.candidates_of_group(group) {
+    for &(query, group) in inputs.query_output_groups() {
+        for &v in inputs.candidates_of_group(group) {
             if inputs.output_execution(query, v).is_some() {
                 z.entry((query, v))
                     .or_insert_with(|| problem.add(variable().binary()));
@@ -351,11 +350,11 @@ fn query_coverage_constraints(
     variables: &ExecutionContextVariables,
 ) -> Vec<Constraint> {
     let mut constraints = Vec::new();
-    for (query, group) in inputs.query_output_groups() {
+    for &(query, group) in inputs.query_output_groups() {
         let outputs: Vec<(PhysicalCandidateId, Variable)> = inputs
             .candidates_of_group(group)
-            .into_iter()
-            .filter_map(|v| selection.z.get(&(query, v)).map(|&z| (v, z)))
+            .iter()
+            .filter_map(|&v| selection.z.get(&(query, v)).map(|&z| (v, z)))
             .collect();
         let covered: Expression = outputs.iter().map(|&(_, z)| z).sum();
         constraints.push(constraint!(covered == 1));
@@ -424,8 +423,10 @@ fn utilization_constraints(
 }
 
 /// (R) $h_v \ge \operatorname{need}_{\kappa,v,c,i}\, y_{\kappa,v,c,i}$, per
-/// edge out of an `AcrossEvaluations` producer $v$: it retains as many
-/// tumbling windows as the most demanding selected consumer reads
+/// edge out of an `AcrossEvaluations` producer $v$, and
+/// $h_v \ge \operatorname{need}_{\kappa_q,v}\, z_{q,v}$ for a query whose
+/// output $v$ is: it retains as many tumbling windows as the most
+/// demanding selected consumer reads
 /// ([`SelectionInputs::retention_need_windows`]).
 ///
 /// Assumptions (decided 2026-11-06): an edge's need is the time horizon
@@ -435,9 +436,10 @@ fn utilization_constraints(
 /// starts.
 fn retention_constraints(
     inputs: &SelectionInputs<'_>,
+    selection: &SelectionVariables,
     variables: &ExecutionContextVariables,
 ) -> Vec<Constraint> {
-    sorted(&variables.y_in_execution_context)
+    let edges = sorted(&variables.y_in_execution_context)
         .into_iter()
         .filter_map(|(&(context, edge), &y)| {
             let Execution::Materialized(v) = inputs.executions_of_edge(context, edge).0 else {
@@ -446,8 +448,20 @@ fn retention_constraints(
             let h = variables.retention_amount[&v];
             let need = inputs.retention_need_windows(context, v) as f64;
             Some(constraint!(h >= need * y))
-        })
-        .collect()
+        });
+    // A query reading `v` itself is its consumer too, in its own context.
+    let outputs = sorted(&selection.z)
+        .into_iter()
+        .filter_map(|(&(query, v), &z)| {
+            let Some(Execution::Materialized(_)) = inputs.output_execution(query, v) else {
+                return None;
+            };
+            let context = inputs.contexts.context_of_query(query.0)?;
+            let h = variables.retention_amount[&v];
+            let need = inputs.retention_need_windows(context, v) as f64;
+            Some(constraint!(h >= need * z))
+        });
+    edges.chain(outputs).collect()
 }
 
 /// The component of each of `node_count` nodes in the graph of `arcs`
@@ -544,16 +558,12 @@ pub(crate) fn solve_selection(
 ) -> Result<SolvedSelection, SelectionMilpError> {
     // (C) cannot hold for a query output group without a costable output
     // execution.
-    if inputs
-        .query_output_groups()
-        .into_iter()
-        .any(|(query, group)| {
-            inputs
-                .candidates_of_group(group)
-                .into_iter()
-                .all(|v| inputs.output_execution(query, v).is_none())
-        })
-    {
+    if inputs.query_output_groups().iter().any(|&(query, group)| {
+        inputs
+            .candidates_of_group(group)
+            .iter()
+            .all(|&v| inputs.output_execution(query, v).is_none())
+    }) {
         return Err(SelectionMilpError::Infeasible);
     }
     let started = Instant::now();
@@ -565,7 +575,7 @@ pub(crate) fn solve_selection(
         query_coverage_constraints(inputs, &selection, &variables),
         acyclicity_constraints(inputs, &selection, &variables),
         utilization_constraints(inputs, &selection, &variables),
-        retention_constraints(inputs, &variables),
+        retention_constraints(inputs, &selection, &variables),
     ]
     .into_iter()
     .flatten()
@@ -671,8 +681,8 @@ pub(crate) fn solve_selection(
 /// The objective of a decoded selection, per second: each selected
 /// execution's cost ($W^{\mathrm{mat}}_v$ or $\rho_\kappa c_{\kappa,v}$)
 /// and $\pi_v h_v$ of each selected `AcrossEvaluations` candidate, $h_v$
-/// the largest need of its selected edges, which minimizes $\pi_v h_v$
-/// under (R).
+/// the largest need of its selected edges and of the queries it gives the
+/// output of, which minimizes $\pi_v h_v$ under (R).
 pub(crate) fn objective_of(
     inputs: &SelectionInputs<'_>,
     selected_dag: &DagOfSelectedCandidates,
@@ -685,6 +695,19 @@ pub(crate) fn objective_of(
             inputs
                 .contexts
                 .input_context(execution_of_node[edge.consumer.0]),
+        ) {
+            let need = inputs.retention_need_windows(context, v);
+            let windows = retained.entry(v).or_default();
+            *windows = (*windows).max(need);
+        }
+    }
+    for ((query, _), node) in output_references(&inputs.physical.query_roots)
+        .into_iter()
+        .zip(&selected_dag.node_of_output_reference)
+    {
+        if let (Some(Execution::Materialized(v)), Some(context)) = (
+            execution_of_node.get(node.0).copied(),
+            inputs.contexts.context_of_query(query),
         ) {
             let need = inputs.retention_need_windows(context, v);
             let windows = retained.entry(v).or_default();
@@ -753,9 +776,9 @@ fn decode(
             let query = QueryId(query);
             inputs
                 .candidates_of_group(group)
-                .into_iter()
-                .find(|v| selection.z.get(&(query, *v)).is_some_and(|&z| chosen(z)))
-                .and_then(|v| inputs.output_execution(query, v))
+                .iter()
+                .find(|v| selection.z.get(&(query, **v)).is_some_and(|&z| chosen(z)))
+                .and_then(|&v| inputs.output_execution(query, v))
                 .and_then(|execution| node_of.get(&execution).copied())
                 .unwrap_or(SelectedNodeId(usize::MAX))
         })

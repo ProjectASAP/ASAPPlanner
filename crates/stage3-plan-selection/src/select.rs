@@ -162,11 +162,25 @@ pub fn select_plan(
         })?;
     let difference = (objective_per_second - plan_cost_per_second).abs();
     let tolerance = COST_EQUALITY_TOLERANCE * plan_cost_per_second.abs().max(f64::MIN_POSITIVE);
-    let inexact_objective = (difference > tolerance).then(|| InexactObjective {
-        objective_per_second,
-        plan_cost_per_second,
-        inexact_terms: inexact_terms(physical, &contexts, &costs, &solved),
-    });
+    let inexact_objective = match difference > tolerance {
+        false => None,
+        true => {
+            let inexact_terms = inexact_terms(physical, &contexts, &costs, cost_inputs, &solved);
+            // A difference none of the formulation's known gaps explains is
+            // a bug in a cost coefficient.
+            if inexact_terms.is_empty() {
+                return Err(ErrorSelectingPlan::ObjectiveDiffersFromPlanCost {
+                    objective_per_second,
+                    plan_cost_per_second,
+                });
+            }
+            Some(InexactObjective {
+                objective_per_second,
+                plan_cost_per_second,
+                inexact_terms,
+            })
+        }
+    };
     let accepted_accuracy_per_query = accepted_accuracy(&realized, entries, accuracy_checks.model);
     let validation_ms = validation_started.elapsed().as_millis() as u64;
     Ok(Selection {
@@ -275,7 +289,7 @@ fn request_cost_per_second(
 
 /// The terms of `plan_cost` the objective does not encode that the
 /// selected executions may meet, each with how many of them: query-time
-/// results holding memory, not-materialized executions in a context of
+/// results holding memory (when memory has a cost), not-materialized executions in a context of
 /// several queries, query-time materialized chains, chains materialized
 /// across evaluations read through the realizer's merge, consumers costed
 /// over another producer than the selected one, ranges read only by
@@ -284,9 +298,14 @@ fn inexact_terms(
     physical: &PhysicalASAPMemoCandidates,
     contexts: &ExecutionContexts,
     costs: &ExecutionCosts,
+    cost_inputs: &CostInputs,
     solved: &SolvedSelection,
 ) -> BTreeMap<String, usize> {
     let memo = &physical.logical_candidates.memo;
+    let memory_costs = matches!(
+        &cost_inputs.cost_model,
+        CostModel::UsageOverTime(unit_cost) if unit_cost.cost_per_memory_byte_second > 0.0
+    );
     let execution_of_node = &solved.execution_of_node;
     let windowed = |node: usize| {
         memo.candidate(
@@ -352,7 +371,8 @@ fn inexact_terms(
         let logical = memo.candidate(candidate.logical_candidate_id);
         let query_time = properties.timing() == ExecutionTiming::QueryTime;
         let mut add = |term: &str| *terms.entry(term.to_string()).or_default() += 1;
-        if query_time
+        if memory_costs
+            && query_time
             && matches!(
                 properties.lifetime(),
                 Lifetime::None | Lifetime::OneEvaluation(StorageMedium::Memory)

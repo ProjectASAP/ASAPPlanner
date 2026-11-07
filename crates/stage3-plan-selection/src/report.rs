@@ -216,7 +216,8 @@ pub struct SearchReport {
     /// that the selection may meet (e.g. the memory a query-time result
     /// holds while its evaluation runs, which needs query latency); the
     /// plan is returned with its cost equality unproven. `None` when the
-    /// two are equal.
+    /// two are equal. A difference with no such term is an error
+    /// ([`ErrorSelectingPlan::ObjectiveDiffersFromPlanCost`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inexact_objective: Option<InexactObjective>,
 }
@@ -289,6 +290,18 @@ pub enum ErrorSelectingPlan {
     /// The selection MILP implements cost model 1 only (#1095 §3).
     #[error("the selection MILP does not support {0}")]
     UnsupportedCostModel(String),
+    /// `asap_cost::plan_cost` of the selected plan differs from the
+    /// selection MILP's objective and the selection meets none of the terms
+    /// the formulation's objective leaves out
+    /// ([`InexactObjective::inexact_terms`]): a bug in a cost coefficient.
+    #[error(
+        "the selection MILP's objective {objective_per_second:e} differs from plan_cost \
+         {plan_cost_per_second:e} (per second) with no term the objective leaves out"
+    )]
+    ObjectiveDiffersFromPlanCost {
+        objective_per_second: f64,
+        plan_cost_per_second: f64,
+    },
     /// The selected plan fails a check the selection MILP encodes
     /// (accuracy through the budget shares, latency): a bug in the
     /// accuracy weights, the sizing rule or a latency term, never a reason

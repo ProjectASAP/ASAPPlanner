@@ -498,11 +498,11 @@ fn reference_minimum(
     }
     // Every choice of one output execution per query output.
     let mut root_choices: Vec<BTreeSet<Execution>> = vec![BTreeSet::new()];
-    for (query, group) in inputs.query_output_groups() {
+    for &(query, group) in inputs.query_output_groups() {
         let options: Vec<Execution> = inputs
             .candidates_of_group(group)
-            .into_iter()
-            .filter_map(|v| inputs.output_execution(query, v))
+            .iter()
+            .filter_map(|&v| inputs.output_execution(query, v))
             .collect();
         root_choices = root_choices
             .into_iter()
@@ -977,4 +977,59 @@ fn chains_at_ingestion_share_the_pipeline_of_their_refresh_window() {
     let contexts = ExecutionContexts::new(&apart, &[entry(0), entry(0)]);
     let [first, second] = pipeline_of(&contexts);
     assert_ne!(first, second);
+}
+
+/// The objective's costs from `asap-cost` on the windowed example: $\rho_\kappa$
+/// per context (an evaluation every 10 s: 0.1/s; a query-time chain one
+/// build per window: 0.1/s for 10 s windows, 0.2/s for 5 s); the range a
+/// chain is built over costs nothing in the chain's computation, but does
+/// in the queries' evaluation; each chain has a positive cost $\pi_v$ per
+/// retained window; every execution is costed.
+#[test]
+fn execution_costs_follow_the_context_of_each_execution() {
+    use crate::execution_cost::{execution_costs, executions_per_second};
+    use asap_cost::CostInputs;
+    use asap_types::workload::{DataArrival, DataWorkload, DurationMs, SourceFacts};
+    let physical = windowed_example();
+    let entries = [entry(0), entry(0)];
+    let contexts = ExecutionContexts::new(&physical, &entries);
+    let cost_inputs = CostInputs::default();
+    let rate = |context: ExecutionContextId| {
+        executions_per_second(&physical, &contexts.contexts()[context.0], &cost_inputs).unwrap()
+    };
+    let evaluation = contexts.context_of_query(0).unwrap();
+    let chain_10s = contexts
+        .computation_context(PhysicalCandidateId(CHAIN_10S))
+        .unwrap();
+    let chain_5s = contexts
+        .computation_context(PhysicalCandidateId(CHAIN_5S))
+        .unwrap();
+    assert!((rate(evaluation) - 0.1).abs() < 1e-12);
+    assert!((rate(chain_10s) - 0.1).abs() < 1e-12);
+    assert!((rate(chain_5s) - 0.2).abs() < 1e-12);
+    let data = DataWorkload {
+        arrival: DataArrival::Ingesting {
+            rows_per_second: 100.0,
+        },
+        sources: [(
+            "latency".to_string(),
+            SourceFacts {
+                sample_interval: Some(DurationMs(10_000)),
+                series_count: Some(1_000),
+                ..SourceFacts::default()
+            },
+        )]
+        .into(),
+    };
+    let costs = execution_costs(&physical, &contexts, &data, &cost_inputs, 1.0);
+    assert_eq!(costs.uncostable, BTreeMap::new());
+    let range =
+        |context| costs.cost_per_second[&Execution::InContext(context, PhysicalCandidateId(RANGE))];
+    assert_eq!(range(chain_10s), 0.0);
+    assert_eq!(range(chain_5s), 0.0);
+    assert!(range(evaluation) > 0.0);
+    for chain in [CHAIN_10S, CHAIN_5S] {
+        let retention = costs.retention_cost_per_window_per_second[&PhysicalCandidateId(chain)];
+        assert!(retention > 0.0 && retention.is_finite());
+    }
 }

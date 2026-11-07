@@ -71,10 +71,10 @@ fn memory_free() -> CostInputs {
     }
 }
 
-/// One query; two queries of one context sharing a range; two queries in
-/// two contexts (every 10 s and every 15 s) reading the same range, each
-/// context running its own: in each, the objective equals `plan_cost`
-/// (no `inexact_objective`) and the solver's bound is reported.
+/// One query; two queries in two contexts (every 10 s and every 15 s)
+/// over one scan of `latency`, each context running its own: in each, the
+/// objective equals `plan_cost` (no `inexact_objective`) and the solver's
+/// bound is reported.
 #[tokio::test]
 async fn the_objective_equals_plan_cost_on_small_workloads() {
     let cost_inputs = memory_free();
