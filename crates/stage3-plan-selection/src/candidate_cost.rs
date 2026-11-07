@@ -1,6 +1,6 @@
 //! $w_v$: the fixed cost per second of each physical candidate under cost
 //! model 1, from `asap-cost` (concepts doc, section 3, "Stage 3: baseline
-//! selection and realization"). Each candidate is priced as one node of a
+//! selection and realization"). Each candidate is costed as one node of a
 //! plan ([`asap_cost::node_usage`]) over one representative producer per
 //! input, at a fixed number of computations per second:
 //!
@@ -16,17 +16,18 @@
 //! execution contexts (#1207 PR 7) make the cost per context, and the
 //! retention amount $h_v$ the cost of an `AcrossEvaluations` candidate per
 //! selected consumer. The cost includes the candidate's own computation and
-//! the raw data a query-time scan keeps on disk; the memory a query-time
+//! the raw data a query-time scan retains on disk; the memory a query-time
 //! result holds while its evaluation runs is left out, since it depends on
 //! the latency of the queries reading it.
 
 use std::collections::BTreeSet;
 
 use asap_cost::execution_demand::evaluation_rate;
-use asap_cost::{node_usage, CostInputs, CostModel, NodeUsage, ProducerOutput};
+use asap_cost::{node_usage, CostInputs, CostModel, NodeUsage, ProducerOutput, StateFamily};
 use asap_types::ir::physical_export::{PhysicalASAPDAGNode, ScanWindow};
 use asap_types::ir::properties::{DataPrimitive, ExecutionDataState};
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorResultKind};
+use asap_types::ir::schema::{ExactKind, SketchParams};
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorResultKind, TimeRangeKind};
 use asap_types::physical::{ExecutionTiming, Lifetime};
 use asap_types::stages::{
     Memo, MemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalEdge, WindowLayout,
@@ -35,8 +36,12 @@ use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 /// $w_v$ of every physical candidate, by [`PhysicalCandidateId`]: its cost
 /// per second, or why `asap-cost` could not cost it (the selection MILP
-/// leaves such a candidate out). A candidate one of whose inputs has no
-/// costable producer is not costable either.
+/// leaves such a candidate out). Candidates are costed producers first
+/// (Kahn's order over the admissible edges): a candidate is costed once
+/// each of its inputs has a costed producer, and its representative
+/// producer per input is the first costed one, so the representatives
+/// never form a cycle. A candidate one of whose inputs never gets a
+/// costed producer is not costable either.
 pub(crate) fn candidate_costs(
     physical: &PhysicalASAPMemoCandidates,
     entries: &[QueryWorkloadEntry],
@@ -54,129 +59,186 @@ pub(crate) fn candidate_costs(
             .children()
             .len()
     };
-    // A representative producer per input, chosen among costed candidates
-    // only, so the choices never form a cycle: each round costs the
-    // candidates whose every input has a costed admissible producer.
-    let mut representative: Vec<Option<Vec<usize>>> = vec![None; count];
-    let mut costs: Vec<Option<Result<f64, String>>> = vec![None; count];
-    let mut nodes: Vec<Option<PhysicalASAPDAGNode>> = vec![None; count];
-    let mut order: Vec<usize> = Vec::new();
-    loop {
-        let mut progressed = false;
-        for id in 0..count {
-            if costs[id].is_some() {
-                continue;
-            }
-            let producers: Option<Vec<usize>> = (0..input_count(id))
-                .map(|input| {
-                    physical
-                        .admissible_edges_into(PhysicalCandidateId(id), input)
-                        .iter()
-                        .map(|&edge| edges[edge.0].producer_candidate_id.0)
-                        .find(|&producer| matches!(costs[producer], Some(Ok(_))))
-                })
-                .collect();
-            let Some(producers) = producers else {
-                continue;
-            };
-            let node = candidate_node(physical, id, &producers);
-            nodes[id] = Some(node);
-            representative[id] = Some(producers);
-            // Placeholder until the usage pass below; marks it costable for
-            // the choice of its consumers' representatives.
-            costs[id] = Some(Ok(0.0));
-            order.push(id);
-            progressed = true;
-        }
-        if !progressed {
-            break;
-        }
-    }
-    let nodes: Vec<Option<PhysicalASAPDAGNode>> = nodes;
-    let mut usages: Vec<Option<NodeUsage<'_>>> = (0..count).map(|_| None).collect();
     let mut result: Vec<Result<f64, String>> = (0..count)
         .map(|_| Err("one of its inputs has no producer that can be costed".to_string()))
         .collect();
-    for &id in &order {
-        let node = nodes[id]
-            .as_ref()
-            .expect("built with its representative producers");
-        let producers: Vec<usize> = representative[id].clone().unwrap_or_default();
-        // A tumbling-window chain reads the input below its range: one
-        // level further down its range's representative producer.
-        let producers: Vec<usize> = match &node.payload {
-            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => producers
-                .iter()
-                .map(|&range| {
-                    representative[range]
-                        .as_ref()
-                        .map_or(range, |below| below[0])
-                })
-                .collect(),
-            _ => producers,
-        };
-        let Some(producer_outputs) = producers
-            .iter()
-            .map(|&producer| {
-                let usage = usages[producer].as_ref()?;
-                let producer_node = nodes[producer].as_ref()?;
-                Some(ProducerOutput {
-                    payload: &producer_node.payload,
-                    output_schema: &producer_node.output_schema,
-                    output: usage.output,
-                    sources: usage.sources.clone(),
-                    family: usage.family,
-                    unchanged_columns: usage.unchanged_columns.clone(),
-                })
+    let mut costed = vec![false; count];
+    // Per candidate, its inputs that have no costed producer yet.
+    let mut input_without_producer: Vec<Vec<bool>> =
+        (0..count).map(|id| vec![true; input_count(id)]).collect();
+    let mut missing: Vec<usize> = (0..count).map(input_count).collect();
+    let mut ready: Vec<usize> = (0..count).filter(|&id| missing[id] == 0).collect();
+    // Costed nodes and usages, in costing order, by candidate.
+    let mut representative: Vec<Vec<usize>> = vec![Vec::new(); count];
+    let mut node_of: Vec<Option<usize>> = vec![None; count];
+    let mut nodes: Vec<PhysicalASAPDAGNode> = Vec::new();
+    let mut usage_outputs: Vec<UsageOutput> = Vec::new();
+    while let Some(id) = ready.pop() {
+        let producers: Vec<usize> = (0..input_count(id))
+            .map(|input| {
+                physical
+                    .admissible_edges_into(PhysicalCandidateId(id), input)
+                    .iter()
+                    .map(|&edge| edges[edge.0].producer_candidate_id.0)
+                    .find(|&producer| costed[producer])
+                    .expect("ready: every input has a costed producer")
             })
-            .collect::<Option<Vec<_>>>()
-        else {
-            continue;
-        };
-        let candidate = &physical.physical_candidates[id];
-        let group = candidate.logical_candidate_id.group;
-        let per_second = match computations_per_second(memo, group, candidate, entries, cost_inputs)
-        {
-            Ok(per_second) => per_second,
+            .collect();
+        let costing = cost_candidate(
+            physical,
+            id,
+            &producers,
+            &representative,
+            &node_of,
+            &nodes,
+            &usage_outputs,
+            entries,
+            data,
+            cost_inputs,
+            formula_scale,
+        );
+        representative[id] = producers;
+        let (node, usage) = match costing {
+            Ok(costed_node) => costed_node,
             Err(error) => {
                 result[id] = Err(error);
                 continue;
             }
         };
-        let window_ms = window_ms_below(memo, group);
-        let usage = node_usage(
-            node,
-            &producer_outputs,
-            (1, per_second),
-            scan_window_of(memo, group),
-            asap_cost::tumbling_windows_of(node),
-            (candidate.physical_properties.timing() == ExecutionTiming::IngestionTime)
-                .then_some(window_ms)
-                .flatten(),
-            data,
-            cost_inputs,
-            formula_scale,
-        );
-        match usage {
-            Ok(usage) => {
-                result[id] = cost_per_second(&usage, cost_inputs);
-                usages[id] = Some(usage);
+        result[id] = Ok(usage.cost_per_second);
+        node_of[id] = Some(nodes.len());
+        nodes.push(node);
+        usage_outputs.push(usage);
+        costed[id] = true;
+        for &edge in physical.admissible_edges_out_of(PhysicalCandidateId(id)) {
+            let edge = &edges[edge.0];
+            let (consumer, input) = (edge.consumer_candidate_id.0, edge.input_index_of_consumer);
+            if std::mem::take(&mut input_without_producer[consumer][input]) {
+                missing[consumer] -= 1;
+                if missing[consumer] == 0 {
+                    ready.push(consumer);
+                }
             }
-            Err(error) => result[id] = Err(error.to_string()),
         }
     }
     result
 }
 
+/// What a costed candidate's consumers read of it ([`ProducerOutput`]
+/// without its borrowed node), and its $w_v$.
+struct UsageOutput {
+    output: asap_cost::EdgeStatistics,
+    sources: BTreeSet<String>,
+    family: OwnedStateFamily,
+    unchanged_columns: BTreeSet<String>,
+    cost_per_second: f64,
+}
+
+/// Cost candidate `id` over `producers` (its input `i` read from candidate
+/// `producers[i]`, already costed: `nodes[node_of[u]]` and
+/// `usage_outputs[node_of[u]]`): its node and what its consumers read of it.
+#[allow(clippy::too_many_arguments)]
+fn cost_candidate(
+    physical: &PhysicalASAPMemoCandidates,
+    id: usize,
+    producers: &[usize],
+    representative: &[Vec<usize>],
+    node_of: &[Option<usize>],
+    nodes: &[PhysicalASAPDAGNode],
+    usage_outputs: &[UsageOutput],
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    cost_inputs: &CostInputs,
+    formula_scale: f64,
+) -> Result<(PhysicalASAPDAGNode, UsageOutput), String> {
+    let memo = &physical.logical_candidates.memo;
+    let node = candidate_node(physical, id, producers)?;
+    // A tumbling-window chain reads the input below its range: the range's
+    // own representative producer, as the realizer builds it.
+    let producers: Vec<usize> = match &node.payload {
+        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => producers
+            .iter()
+            .map(|&range| representative[range].first().copied().unwrap_or(range))
+            .collect(),
+        _ => producers.to_vec(),
+    };
+    let producer_outputs: Vec<ProducerOutput<'_>> = producers
+        .iter()
+        .map(|&producer| {
+            let index = node_of[producer].expect("costed");
+            let output = &usage_outputs[index];
+            ProducerOutput {
+                payload: &nodes[index].payload,
+                output_schema: &nodes[index].output_schema,
+                output: output.output,
+                sources: output.sources.iter().map(String::as_str).collect(),
+                family: match &output.family {
+                    OwnedStateFamily::None => StateFamily::None,
+                    OwnedStateFamily::Sketch(parameters) => StateFamily::Sketch(parameters),
+                    OwnedStateFamily::Exact(kind) => StateFamily::Exact(kind),
+                },
+                unchanged_columns: output
+                    .unchanged_columns
+                    .iter()
+                    .map(String::as_str)
+                    .collect(),
+            }
+        })
+        .collect();
+    let candidate = &physical.physical_candidates[id];
+    let group = candidate.logical_candidate_id.group;
+    let per_second = computations_per_second(memo, group, candidate, entries, cost_inputs)?;
+    let usage = node_usage(
+        &node,
+        &producer_outputs,
+        (1, per_second),
+        scan_window_of(memo, group),
+        asap_cost::tumbling_windows_of(&node),
+        (candidate.physical_properties.timing() == ExecutionTiming::IngestionTime)
+            .then(|| window_ms_below(memo, group))
+            .flatten(),
+        data,
+        cost_inputs,
+        formula_scale,
+    )
+    .map_err(|error| error.to_string())?;
+    let cost_per_second = cost_per_second(&usage, cost_inputs)?;
+    let output = UsageOutput {
+        output: usage.output,
+        sources: usage.sources.iter().map(|s| s.to_string()).collect(),
+        family: match usage.family {
+            StateFamily::None => OwnedStateFamily::None,
+            StateFamily::Sketch(parameters) => OwnedStateFamily::Sketch(parameters.clone()),
+            StateFamily::Exact(kind) => OwnedStateFamily::Exact(*kind),
+        },
+        unchanged_columns: usage
+            .unchanged_columns
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        cost_per_second,
+    };
+    Ok((node, output))
+}
+
+/// [`StateFamily`] owned, so a costed candidate outlives its node's borrow.
+enum OwnedStateFamily {
+    None,
+    Sketch(SketchParams),
+    Exact(ExactKind),
+}
+
 /// Candidate `id` as one exported plan node over `producers` (its input
 /// `i` read from the node of candidate `producers[i]`): its operator, or
 /// for a tumbling-window layout the chain the realizer builds; its timing,
-/// lifetime and θ; its group's schema.
+/// lifetime and θ; its group's schema. Err for a tumbling-window layout the
+/// realizer would refuse: not on a build over a range whose window its width
+/// divides.
 fn candidate_node(
     physical: &PhysicalASAPMemoCandidates,
     id: usize,
     producers: &[usize],
-) -> PhysicalASAPDAGNode {
+) -> Result<PhysicalASAPDAGNode, String> {
     let memo = &physical.logical_candidates.memo;
     let candidate = &physical.physical_candidates[id];
     let logical = memo.candidate(candidate.logical_candidate_id);
@@ -198,8 +260,27 @@ fn candidate_node(
                 filter,
             }),
         ) => {
-            let window_ms =
-                window_ms_below(memo, candidate.logical_candidate_id.group).unwrap_or(width_ms);
+            let range_input = match &logical.expression.operator {
+                Operator::ASAP(ASAPOp::SummaryAgg { child, .. }) => *child,
+                _ => unreachable!("matched a build"),
+            };
+            let window_ms = match &memo.groups()[range_input.0 as usize].expression {
+                Operator::NonASAP(NonASAPOp::TimeRange {
+                    range,
+                    kind: TimeRangeKind::Range,
+                    ..
+                }) => u64::try_from(range.as_millis()).unwrap_or(u64::MAX),
+                _ => {
+                    return Err(
+                        "a tumbling-window layout on a build that does not read a range".into(),
+                    )
+                }
+            };
+            if width_ms == 0 || window_ms % width_ms != 0 {
+                return Err(format!(
+                    "tumbling windows {width_ms} ms wide do not divide the range of {window_ms} ms"
+                ));
+            }
             Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                 child,
                 family,
@@ -208,12 +289,14 @@ fn candidate_node(
                 grouping,
                 filter,
                 tumbling_window_width_ms: width_ms,
-                tumbling_window_count: u32::try_from(window_ms / width_ms.max(1))
-                    .unwrap_or(u32::MAX)
-                    .max(1),
+                tumbling_window_count: u32::try_from(window_ms / width_ms)
+                    .map_err(|_| "too many tumbling windows".to_string())?,
             })
         }
-        (_, operator) => operator,
+        (Some(_), _) => {
+            return Err("a tumbling-window layout on an operator other than a summary build".into())
+        }
+        (None, operator) => operator,
     };
     // As the realizer's export sets it: a summary state or a maintained
     // population is state, everything else raw values.
@@ -229,7 +312,7 @@ fn candidate_node(
         }
         _ => DataPrimitive::Raw,
     };
-    PhysicalASAPDAGNode {
+    Ok(PhysicalASAPDAGNode {
         id,
         payload,
         output_state: ExecutionDataState {
@@ -242,7 +325,7 @@ fn candidate_node(
         guarantee: None,
         retention_ms: None,
         summary_coverage: None,
-    }
+    })
 }
 
 /// How often `candidate` of `group` is computed per second (module doc).
@@ -279,10 +362,10 @@ fn computations_per_second(
 }
 
 /// $w_v$ from a candidate's usage: its cost per second under cost model 1
-/// plus the raw data a query-time scan keeps on disk.
+/// plus the raw data a query-time scan retains on disk.
 fn cost_per_second(usage: &NodeUsage<'_>, cost_inputs: &CostInputs) -> Result<f64, String> {
     let CostModel::UsageOverTime(unit_cost) = &cost_inputs.cost_model else {
-        return Err("the selection MILP prices under cost model 1 only".into());
+        return Err("the selection MILP costs under cost model 1 only".into());
     };
     let own = usage
         .cost

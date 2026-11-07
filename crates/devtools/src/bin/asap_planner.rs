@@ -63,7 +63,7 @@
 //     `P1`, the selected plan as Stage 2 built it;
 //   - stage3_plan_selection (from `stage3`): Stage 3's `Selection`:
 //     `selected_dag` (`candidate_of_node`, `edges`,
-//     `node_of_output_reference`), `nodes_with_proven_non_negative_weights`,
+//     `node_of_output_reference`),
 //     the plan's `cost` (its `usage`, `cost_per_second` and per-node
 //     charges), `accepted_accuracy_per_query`, `pruned_candidates` and
 //     `search_report`; `error` when no plan was selected.

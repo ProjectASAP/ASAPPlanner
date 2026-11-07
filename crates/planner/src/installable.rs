@@ -717,8 +717,18 @@ fn tumbling_window_retention_of_expanded_tumbling_windows(
                 if assignments.contains_key(&Rc::as_ptr(&node)) {
                     continue;
                 }
-                assignments.insert(Rc::as_ptr(&node), below.clone());
-                pending.extend(node.children().into_iter().cloned());
+                // A node of the realized plan (the chain's input) keeps its
+                // own assignment; only the new range and time shift run
+                // with the chain.
+                match id_of.get(&Rc::as_ptr(&node)) {
+                    Some(&id) => {
+                        assignments.insert(Rc::as_ptr(&node), assignment_of_node(id));
+                    }
+                    None => {
+                        assignments.insert(Rc::as_ptr(&node), below.clone());
+                        pending.extend(node.children().into_iter().cloned());
+                    }
+                }
             }
         }
         tumbling_windows_of_chain.push((chain_id, &expanded.tumbling_windows));

@@ -14,7 +14,7 @@ use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot, TimeR
 use asap_types::physical::{ExecutionTiming, Lifetime, PhysicalProperties, PhysicalWorkloadPlan};
 use asap_types::stages::{
     AssignmentRealizer, DagOfSelectedCandidates, MemoGroupId, PhysicalASAPMemoCandidates,
-    PhysicalCandidateError, RealizedPlan, WindowLayout,
+    PhysicalCandidateError, RealizedPlan, SelectedNodeId, WindowLayout,
 };
 use asap_types::workload::bounds::confirmed_weights;
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
@@ -37,7 +37,7 @@ impl AssignmentRealizer for Stage2AssignmentRealizer<'_> {
     /// of $W / w$ windows over the range's input, read through a
     /// `SummaryMerge` of the whole chain: the chain has the candidate's
     /// timing, lifetime and θ; the merge runs at query time unless every
-    /// consumer of the node runs at ingestion time. A summary build's update
+    /// consumer of the node runs at ingestion time and no query reads it. A summary build's update
     /// weights the data proves non-negative are confirmed
     /// (`bounds::confirmed_weights`). The query roots are the workload's
     /// roots over groups with each output reference replaced by its node.
@@ -103,6 +103,9 @@ impl AssignmentRealizer for Stage2AssignmentRealizer<'_> {
                     let merge_at_ingestion = candidate.physical_properties.timing()
                         == ExecutionTiming::IngestionTime
                         && !consumers[node].is_empty()
+                        && !selected
+                            .node_of_output_reference
+                            .contains(&SelectedNodeId(node))
                         && consumers[node].iter().all(|&consumer| {
                             physical.physical_candidates[selected.candidate_of_node[consumer].0]
                                 .physical_properties
@@ -136,14 +139,14 @@ impl AssignmentRealizer for Stage2AssignmentRealizer<'_> {
             assignments.insert(Rc::as_ptr(&operator_node), assignment);
             built[node] = Some(operator_node);
         }
-        let operator_node_of_selected_node: Vec<Rc<OperatorNode>> = built
+        let built: Vec<Rc<OperatorNode>> = built
             .into_iter()
             .map(|node| node.expect("every node is built"))
             .collect();
         let mut outputs = selected
             .node_of_output_reference
             .iter()
-            .map(|node| Rc::clone(&operator_node_of_selected_node[node.0]));
+            .map(|node| Rc::clone(&built[node.0]));
         let mut next_output = || {
             outputs
                 .next()
@@ -181,7 +184,6 @@ impl AssignmentRealizer for Stage2AssignmentRealizer<'_> {
                 dag,
             },
             tumbling_window_retention_ms,
-            operator_node_of_selected_node,
         })
     }
 }

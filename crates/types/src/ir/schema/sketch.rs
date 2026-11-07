@@ -589,7 +589,7 @@ pub enum WeightDomain {
     /// `metric`, or plain sums of them (no rate, no other arithmetic), so they
     /// are non-negative when every raw data sample of `metric` is: `metric` is
     /// declared a counter, or declared non-negative. Logical optimization
-    /// records it without reading the data workload; plan selection confirms
+    /// records it without reading the data workload; the realizer confirms
     /// it from the declared source facts
     /// ([`SourceFacts::metric_type`](crate::workload::SourceFacts::metric_type),
     /// [`SourceFacts::values_non_negative`](crate::workload::SourceFacts::values_non_negative)).

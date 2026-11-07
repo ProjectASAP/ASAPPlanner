@@ -859,7 +859,6 @@ fn the_realizer_exports_each_node_with_its_candidates_properties_and_theta() {
     let realized = realize(&physical, &selected).unwrap();
     let dag = &realized.plan.dag;
     assert_eq!(dag.nodes.len(), 4);
-    assert_eq!(realized.operator_node_of_selected_node.len(), 4);
     let build = dag
         .nodes
         .iter()

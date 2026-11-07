@@ -1,4 +1,4 @@
-//! Stage 3, plan selection: [`select_plan`] prices every physical candidate
+//! Stage 3, plan selection: [`select_plan`] costs every physical candidate
 //! ($w_v$, [`crate::candidate_cost`]), builds and solves the baseline
 //! selection MILP over Stage 2's candidates and admissible edges
 //! ([`crate::milp::model`]), decodes $\{x = 1\}$, $\{y = 1\}$ and
@@ -37,7 +37,7 @@ const FIXED_COST_PER_CANDIDATE: &str =
 
 /// Stage 3, plan selection: select one plan among `physical`'s candidates
 /// (module documentation). The selection is realized through `realizer`
-/// and priced under `cost_inputs` (cost model 1 only). `entries[q]` is
+/// and costed under `cost_inputs` (cost model 1 only). `entries[q]` is
 /// query `q`'s workload entry; `data` the data workload with its bounds.
 ///
 /// Accuracy: until constraint (K) (#1207 PR 8), a query's accuracy rests on
@@ -95,17 +95,13 @@ pub fn select_plan(
         .collect();
     let cost_per_second: Vec<Option<f64>> = costs.iter().map(|cost| cost.clone().ok()).collect();
 
-    let solved = solve_selection(&SelectionInputs {
-        physical,
-        cost_per_second: &cost_per_second,
-        entries,
-    })
-    .map_err(|error| match error {
-        SelectionMilpError::Infeasible => {
-            ErrorSelectingPlan::NoValidCandidate(vec![infeasible(&costs)])
-        }
-        SelectionMilpError::Solver(reason) => ErrorSelectingPlan::Solver(reason),
-    })?;
+    let solved = solve_selection(&SelectionInputs::new(physical, &cost_per_second, entries))
+        .map_err(|error| match error {
+            SelectionMilpError::Infeasible => {
+                ErrorSelectingPlan::NoValidCandidate(vec![infeasible(&costs)])
+            }
+            SelectionMilpError::Solver(reason) => ErrorSelectingPlan::Solver(reason),
+        })?;
     let validation_started = std::time::Instant::now();
     solved.selected_dag.validate(physical).map_err(|reason| {
         ErrorSelectingPlan::Solver(format!("the decoded selection is invalid: {reason}"))

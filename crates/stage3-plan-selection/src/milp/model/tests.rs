@@ -175,11 +175,7 @@ fn solve(
     costs: &[Option<f64>],
     entries: &[QueryWorkloadEntry],
 ) -> Result<SolvedSelection, SelectionMilpError> {
-    solve_selection(&SelectionInputs {
-        physical,
-        cost_per_second: costs,
-        entries,
-    })
+    solve_selection(&SelectionInputs::new(physical, costs, entries))
 }
 
 /// The selected candidates, ascending.
@@ -347,11 +343,7 @@ fn reference_minimum(
     costs: &[Option<f64>],
     entries: &[QueryWorkloadEntry],
 ) -> Option<f64> {
-    let inputs = SelectionInputs {
-        physical,
-        cost_per_second: costs,
-        entries,
-    };
+    let inputs = SelectionInputs::new(physical, costs, entries);
     let edges = inputs.edges();
     let producers = |c: PhysicalCandidateId, i: usize| -> Vec<PhysicalCandidateId> {
         physical

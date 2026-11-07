@@ -49,7 +49,8 @@ pub(crate) struct SelectionVariables {
 
 /// What the baseline MILP is built over: Stage 2's candidates and
 /// admissible edges, each candidate's $w_v$ (`None`: not costable, so
-/// $x_v = 0$), and $G_q$ for each query's output groups.
+/// $x_v = 0$), each query's entry, and indexes built once
+/// ([`Self::new`]).
 pub(crate) struct SelectionInputs<'a> {
     pub(crate) physical: &'a PhysicalASAPMemoCandidates,
     /// $w_v$ per second, by [`PhysicalCandidateId`].
@@ -57,12 +58,48 @@ pub(crate) struct SelectionInputs<'a> {
     /// Each query's workload entry, whose recurrence and range evaluation
     /// are its evaluation context.
     pub(crate) entries: &'a [QueryWorkloadEntry],
+    /// $\mathcal E$, by [`PhysicalEdgeId`].
+    edges: Vec<PhysicalEdge>,
+    /// The physical candidates of each memo group, ascending.
+    candidates_of_group: HashMap<MemoGroupId, Vec<PhysicalCandidateId>>,
+    /// Each query's output groups $G_q$, each pair once, in
+    /// output-reference order.
+    query_output_groups: Vec<(QueryId, MemoGroupId)>,
 }
 
-impl SelectionInputs<'_> {
+impl<'a> SelectionInputs<'a> {
+    pub(crate) fn new(
+        physical: &'a PhysicalASAPMemoCandidates,
+        cost_per_second: &'a [Option<f64>],
+        entries: &'a [QueryWorkloadEntry],
+    ) -> Self {
+        let mut candidates_of_group: HashMap<MemoGroupId, Vec<PhysicalCandidateId>> =
+            HashMap::new();
+        for (id, candidate) in physical.physical_candidates.iter().enumerate() {
+            candidates_of_group
+                .entry(candidate.logical_candidate_id.group)
+                .or_default()
+                .push(PhysicalCandidateId(id));
+        }
+        let mut seen = std::collections::HashSet::new();
+        let query_output_groups = output_references(&physical.query_roots)
+            .into_iter()
+            .map(|(query, group)| (QueryId(query), group))
+            .filter(|pair| seen.insert(*pair))
+            .collect();
+        Self {
+            physical,
+            cost_per_second,
+            entries,
+            edges: physical.edges().map(|(_, edge)| edge).collect(),
+            candidates_of_group,
+            query_output_groups,
+        }
+    }
+
     /// $\mathcal E$, by [`PhysicalEdgeId`].
-    fn edges(&self) -> Vec<PhysicalEdge> {
-        self.physical.edges().map(|(_, edge)| edge).collect()
+    fn edges(&self) -> &[PhysicalEdge] {
+        &self.edges
     }
 
     /// $|\mathcal I(c)|$: the inputs of candidate `c`.
@@ -113,27 +150,16 @@ impl SelectionInputs<'_> {
 
     /// The physical candidates of memo group `group`, ascending.
     fn candidates_of_group(&self, group: MemoGroupId) -> Vec<PhysicalCandidateId> {
-        (0..self.physical.physical_candidates.len())
-            .map(PhysicalCandidateId)
-            .filter(|id| {
-                self.physical.physical_candidates[id.0]
-                    .logical_candidate_id
-                    .group
-                    == group
-            })
-            .collect()
+        self.candidates_of_group
+            .get(&group)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Each query's output groups $G_q$, each pair once, in output-reference
     /// order: a scalar query reads one per operator reference.
     fn query_output_groups(&self) -> Vec<(QueryId, MemoGroupId)> {
-        let mut pairs: Vec<(QueryId, MemoGroupId)> = Vec::new();
-        for (query, group) in output_references(&self.physical.query_roots) {
-            if !pairs.contains(&(QueryId(query), group)) {
-                pairs.push((QueryId(query), group));
-            }
-        }
-        pairs
+        self.query_output_groups.clone()
     }
 }
 
