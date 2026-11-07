@@ -143,15 +143,35 @@ pub struct PhysicalASAPMemoCandidates {
 
 impl PhysicalASAPMemoCandidates {
     /// Stage 2's output over `physical_candidates` and `edges` (grouped by
-    /// (consumer, input)), with the admissible-edge indexes built once.
+    /// (consumer, input)), with the admissible-edge indexes built once and
+    /// no pruned candidates yet (Stage 2 sets `pruned_candidates`).
     pub fn new(
         logical_candidates: LogicalASAPMemoCandidates,
         physical_candidates: Vec<PhysicalCandidate>,
         query_roots: Vec<QueryRoot<MemoGroupId>>,
         edges: Vec<PhysicalEdge>,
     ) -> Self {
-        let _ = (logical_candidates, physical_candidates, query_roots, edges);
-        todo!("#1207 PR 5: index the admissible edges")
+        let mut admissible_edges_into_input: HashMap<_, Vec<PhysicalEdgeId>> = HashMap::new();
+        let mut admissible_edges_out_of_candidate = vec![Vec::new(); physical_candidates.len()];
+        for (id, edge) in edges.iter().enumerate() {
+            if edge.satisfies_logical_requirement && edge.satisfies_physical_requirement {
+                admissible_edges_into_input
+                    .entry((edge.consumer_candidate_id, edge.input_index_of_consumer))
+                    .or_default()
+                    .push(PhysicalEdgeId(id));
+                admissible_edges_out_of_candidate[edge.producer_candidate_id.0]
+                    .push(PhysicalEdgeId(id));
+            }
+        }
+        Self {
+            logical_candidates,
+            physical_candidates,
+            query_roots,
+            pruned_candidates: Vec::new(),
+            edges,
+            admissible_edges_into_input,
+            admissible_edges_out_of_candidate,
+        }
     }
 
     /// $\mathcal E$: every edge, in (consumer, input) order.
@@ -170,18 +190,14 @@ impl PhysicalASAPMemoCandidates {
         consumer: PhysicalCandidateId,
         input_index_of_consumer: usize,
     ) -> &[PhysicalEdgeId] {
-        let _ = (
-            consumer,
-            input_index_of_consumer,
-            &self.admissible_edges_into_input,
-        );
-        todo!("#1207 PR 5")
+        self.admissible_edges_into_input
+            .get(&(consumer, input_index_of_consumer))
+            .map_or(&[], Vec::as_slice)
     }
 
     /// The admissible edges out of `producer`: every consumer that may share it.
     pub fn admissible_edges_out_of(&self, producer: PhysicalCandidateId) -> &[PhysicalEdgeId] {
-        let _ = (producer, &self.admissible_edges_out_of_candidate);
-        todo!("#1207 PR 5")
+        &self.admissible_edges_out_of_candidate[producer.0]
     }
 }
 
