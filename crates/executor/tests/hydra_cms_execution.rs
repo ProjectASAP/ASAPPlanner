@@ -42,6 +42,16 @@ fn grouping() -> GroupingStrategy {
     }
 }
 
+/// θ of the HydraCms grid.
+fn hydra_params() -> SketchParams {
+    SketchParams::Hydra(HydraParams::HydraCms {
+        width: WIDTH,
+        depth: 3,
+        shared_rows: 3,
+        shared_columns: SHARED_COLUMNS,
+    })
+}
+
 fn family() -> FieldDataType {
     FieldDataType::Sketch(SketchAlgorithm::Cms, grouping())
 }
@@ -62,6 +72,7 @@ fn node(id: usize, payload: Payload, output: Schema) -> PhysicalASAPDAGNode {
         output_state: ExecutionDataState::QUERY_ROWS,
         lifetime: Lifetime::None,
         parameters: None,
+        summary_coverage: None,
         output_schema: output,
         guarantee: None,
         retention_ms: None,
@@ -105,7 +116,7 @@ fn unit_count() -> SummaryUpdate {
 /// The planner contract: item = the counted column, weight = unit count,
 /// reduction = the group-by keys.
 fn summary_agg(update: SummaryUpdate, filter: Option<Predicate<usize>>) -> PhysicalASAPDAGNode {
-    node(
+    let mut build = node(
         1,
         Payload::ASAP(ASAPOp::SummaryAgg {
             child: 0,
@@ -123,7 +134,9 @@ fn summary_agg(update: SummaryUpdate, filter: Option<Predicate<usize>>) -> Physi
                 nullable: false,
             },
         ]),
-    )
+    );
+    build.parameters = Some(hydra_params());
+    build
 }
 
 fn estimate(id: usize, query: SketchStatistic, dtype: DataType) -> PhysicalASAPDAGNode {
@@ -375,6 +388,7 @@ fn row_weight_serializes_as_one_field_and_rejects_constants_above_i32() {
         Operator::all_groups_summary_build(
             input_schema(),
             family(),
+            Some(hydra_params()),
             1,
             RowWeight::Constant(std::num::NonZeroU32::new(weight).unwrap()),
             vec![0],
@@ -405,8 +419,13 @@ fn constant_weight_above_i32_is_refused_at_validation() {
         },
         ..unit_count()
     };
-    let error = asap_executor::capability::validate_summary_kernel(&family(), &update, &grouping())
-        .expect_err("validation accepted a constant above i32::MAX");
+    let error = asap_executor::capability::validate_summary_kernel(
+        &family(),
+        Some(&hydra_params()),
+        &update,
+        &grouping(),
+    )
+    .expect_err("validation accepted a constant above i32::MAX");
     assert!(
         error.contains("HydraCms") && error.contains("i32::MAX"),
         "{error}"

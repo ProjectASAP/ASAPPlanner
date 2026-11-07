@@ -1,6 +1,7 @@
 //! Planner output binds directly to the shared runtime over raw counter samples.
 use planner_types::ir::schema::*;
 
+// The untyped heap updater must not silently round a Planner rate update.
 #[test]
 fn rate_updates_cannot_enter_integer_heap_factory() {
     let family = FieldDataType::Sketch(SketchAlgorithm::CmsWithHeap, Default::default());
@@ -15,7 +16,11 @@ fn rate_updates_cannot_enter_integer_heap_factory() {
     };
     assert!(asap_executor::factory::create_planner_accumulator(
         &family,
-        None,
+        Some(&SketchParams::CmsWithHeap {
+            width: 272,
+            depth: 5,
+            heap_size: 100,
+        }),
         &input,
         &Default::default()
     )

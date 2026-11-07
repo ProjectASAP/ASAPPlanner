@@ -7,7 +7,7 @@ use crate::summary_kernels::{
 };
 use crate::AggregateCore;
 use planner_types::ir::schema::{
-    FieldDataType as SummaryFamilyType, SketchAlgorithm, SketchKind, SketchParams,
+    FieldDataType as SummaryFamilyType, SketchAlgorithm, SketchParams,
 };
 
 /// Generate the clone-based `AccumulatorUpdater` methods for updaters whose
@@ -483,7 +483,7 @@ pub fn create_planner_accumulator(
         return Err("window-weighted summaries require typed DAG binding; integer heap updaters cannot consume rates".into());
     }
 
-    crate::capability::validate_summary_kernel(family, input, grouping)?;
+    crate::capability::validate_summary_kernel(family, parameters, input, grouping)?;
     use planner_types::ir::schema::GroupingStrategy;
     if grouping != &GroupingStrategy::PerSubpopulationInstance {
         return Err(
@@ -532,8 +532,7 @@ pub fn create_planner_accumulator(
         }
         (SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap, _) => {
             let (algorithm, width, depth, capacity) =
-                WeightedFrequency::configuration(&SketchKind::new(*kind, params.clone()))
-                    .map_err(|e| e.to_string())?;
+                WeightedFrequency::configuration(kind, params).map_err(|e| e.to_string())?;
             Box::new(
                 WeightedFrequencyUpdater::new(algorithm, width, depth, capacity)
                     .map_err(|e| e.to_string())?,
@@ -578,10 +577,15 @@ pub fn create_planner_accumulator(
 }
 
 /// Construct the one state a `SharedMultiSubpopulation { kind: HydraCms }`
-/// family shares across its groups. The update contract is checked with the
-/// plan by `validate_summary_kernel`.
-pub fn create_hydra_cms(family: &SummaryFamilyType) -> Result<HydraCms, String> {
-    let (shared_rows, shared_columns, width, depth) = crate::capability::hydra_cms_shape(family)?;
+/// family shares across its groups, sized by its θ `parameters`
+/// (`SketchParams::Hydra(HydraParams::HydraCms { .. })`). The update
+/// contract is checked with the plan by `validate_summary_kernel`.
+pub fn create_hydra_cms(
+    family: &SummaryFamilyType,
+    parameters: Option<&SketchParams>,
+) -> Result<HydraCms, String> {
+    let (shared_rows, shared_columns, width, depth) =
+        crate::capability::hydra_cms_shape(family, parameters)?;
     HydraCms::new(shared_rows, shared_columns, width, depth).map_err(|e| e.to_string())
 }
 
@@ -677,6 +681,155 @@ impl AccumulatorUpdater for UnivMonUpdater {
     impl_clone_accumulator_methods!(acc);
     fn reset(&mut self) {
         self.acc.clear();
+    }
+}
+
+#[cfg(test)]
+mod planner_parameter_regression {
+    use super::*;
+    use planner_types::ir::schema::{SummaryInputExpr, SummaryUpdate};
+
+    // Planner width is the bucket count; depth is the independent hash-row count.
+    #[test]
+    fn planner_sketch_dimensions_are_not_transposed() {
+        for (algorithm, params) in [
+            (
+                SketchAlgorithm::Cms,
+                SketchParams::Cms {
+                    width: 128,
+                    depth: 3,
+                },
+            ),
+            (
+                SketchAlgorithm::CountSketch,
+                SketchParams::CountSketch {
+                    width: 128,
+                    depth: 3,
+                },
+            ),
+            (
+                SketchAlgorithm::CmsWithHeap,
+                SketchParams::CmsWithHeap {
+                    width: 128,
+                    depth: 3,
+                    heap_size: 8,
+                },
+            ),
+            (
+                SketchAlgorithm::CountSketchWithHeap,
+                SketchParams::CountSketchWithHeap {
+                    width: 128,
+                    depth: 3,
+                    heap_size: 8,
+                },
+            ),
+        ] {
+            let family = SummaryFamilyType::Sketch(algorithm, Default::default());
+            let update = SummaryUpdate {
+                item: Some(SummaryInputExpr::Column(
+                    planner_types::ir::scalar::ColumnRef::Named("host".into()),
+                )),
+                weight: SummaryInputExpr::Constant(1.0),
+                weight_domain: Default::default(),
+            };
+            let state =
+                create_planner_accumulator(&family, Some(&params), &update, &Default::default())
+                    .unwrap()
+                    .snapshot_accumulator();
+            let dims = match algorithm {
+                SketchAlgorithm::Cms => {
+                    let s = state
+                        .as_any()
+                        .downcast_ref::<CountMinSketchAccumulator>()
+                        .unwrap();
+                    (s.inner.rows(), s.inner.cols())
+                }
+                SketchAlgorithm::CountSketch
+                | SketchAlgorithm::CmsWithHeap
+                | SketchAlgorithm::CountSketchWithHeap => {
+                    let (width, depth, _) = state
+                        .as_any()
+                        .downcast_ref::<WeightedFrequency>()
+                        .unwrap()
+                        .shape();
+                    (depth, width)
+                }
+                _ => unreachable!(),
+            };
+            assert_eq!(dims, (3, 128), "{algorithm:?}");
+        }
+    }
+
+    // A sketch kernel needs θ of its own algorithm; an exact one takes none.
+    #[test]
+    fn sketch_kernels_need_their_own_parameters() {
+        use planner_types::ir::schema::{ExactKind, ExactParams};
+        let update = SummaryUpdate::column(planner_types::ir::scalar::ColumnRef::SampleValue);
+        let kll = SummaryFamilyType::Sketch(SketchAlgorithm::Kll, Default::default());
+        let k200 = SketchParams::Kll {
+            k: 200,
+            failure_probability: None,
+        };
+        assert!(
+            create_planner_accumulator(&kll, Some(&k200), &update, &Default::default()).is_ok()
+        );
+        assert!(create_planner_accumulator(&kll, None, &update, &Default::default()).is_err());
+        let dd = SketchParams::DDSketch { alpha: 0.01 };
+        assert!(create_planner_accumulator(&kll, Some(&dd), &update, &Default::default()).is_err());
+        let sum = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+        assert!(create_planner_accumulator(&sum, None, &update, &Default::default()).is_ok());
+        assert!(
+            create_planner_accumulator(&sum, Some(&k200), &update, &Default::default()).is_err()
+        );
+    }
+
+    // HydraCms builds one shared grid shaped by its Hydra θ; it is never a
+    // per-group updater, and its family must be Count-Min.
+    #[test]
+    fn hydra_cms_builds_one_shared_grid() {
+        use planner_types::ir::schema::{
+            GroupingStrategy, HydraKind, HydraParams, NonNegativeWeightProof, WeightDomain,
+        };
+        let grouping = GroupingStrategy::SharedMultiSubpopulation {
+            kind: HydraKind::HydraCms,
+        };
+        let family = SummaryFamilyType::Sketch(SketchAlgorithm::Cms, grouping.clone());
+        let hydra = SketchParams::Hydra(HydraParams::HydraCms {
+            width: 128,
+            depth: 3,
+            shared_rows: 5,
+            shared_columns: 32,
+        });
+        assert_eq!(
+            create_hydra_cms(&family, Some(&hydra)).unwrap().shape(),
+            (5, 32, 128, 3)
+        );
+        // θ of the per-group Count-Min, not the Hydra grid's.
+        let cms = SketchParams::Cms {
+            width: 128,
+            depth: 3,
+        };
+        assert!(create_hydra_cms(&family, Some(&cms)).is_err());
+        assert!(create_hydra_cms(&family, None).is_err());
+        let kll = SummaryFamilyType::Sketch(SketchAlgorithm::Kll, grouping.clone());
+        assert!(create_hydra_cms(&kll, Some(&hydra)).is_err());
+        let update = SummaryUpdate {
+            item: Some(SummaryInputExpr::Column(
+                planner_types::ir::scalar::ColumnRef::Named("host".into()),
+            )),
+            weight: SummaryInputExpr::Constant(1.0),
+            weight_domain: WeightDomain::NonNegative {
+                proof: NonNegativeWeightProof::UnitCount,
+            },
+        };
+        assert!(crate::capability::validate_summary_kernel(
+            &family,
+            Some(&hydra),
+            &update,
+            &grouping
+        )
+        .is_ok());
+        assert!(create_planner_accumulator(&family, Some(&hydra), &update, &grouping).is_err());
     }
 }
 

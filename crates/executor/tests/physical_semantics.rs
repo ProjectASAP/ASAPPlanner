@@ -386,6 +386,7 @@ fn global_extrema_bind_with_planner_derived_schema() {
             output_state: ExecutionDataState::QUERY_ROWS,
             lifetime: Default::default(),
             parameters: None,
+            summary_coverage: None,
             output_schema: (*output).clone(),
             guarantee: None,
             retention_ms: None,
@@ -574,12 +575,19 @@ fn kll_partial_merge_and_multiple_evaluations_preserve_population() {
         dag.add(
             id + 3,
             vec![id],
-            Operator::per_group_summary_build(input.clone(), family.clone(), 0, None, vec![])
-                .unwrap(),
+            Operator::per_group_summary_build(
+                input.clone(),
+                family.clone(),
+                kll_512(),
+                0,
+                None,
+                vec![],
+            )
+            .unwrap(),
         )
         .unwrap();
     }
-    let state = Operator::per_group_summary_build(input, family, 0, None, vec![])
+    let state = Operator::per_group_summary_build(input, family, kll_512(), 0, None, vec![])
         .unwrap()
         .schema();
     dag.add(6, vec![3, 4], Operator::union(state.clone(), 2).unwrap())
@@ -652,7 +660,18 @@ fn compacted_kll_tumbling_windows_merge_within_the_calibrated_rank_error() {
     let input = schema(&[("v", DataType::Float64, false)]);
     let family = FieldDataType::Sketch(SketchAlgorithm::Kll, Default::default());
     let build = || {
-        Operator::per_group_summary_build(input.clone(), family.clone(), 0, None, vec![]).unwrap()
+        Operator::per_group_summary_build(
+            input.clone(),
+            family.clone(),
+            Some(planner_types::ir::schema::SketchParams::Kll {
+                k: K,
+                failure_probability: None,
+            }),
+            0,
+            None,
+            vec![],
+        )
+        .unwrap()
     };
     let state = build().schema();
     let mut dag = PhysicalDAG::default();
@@ -736,7 +755,7 @@ fn counter_tumbling_windows_merge_in_any_order() {
     ]);
     let family = FieldDataType::ExactAggregate(ExactKind::Increase, ExactParams::Increase);
     let build = || {
-        Operator::per_group_summary_build(input.clone(), family.clone(), 0, Some(1), vec![])
+        Operator::per_group_summary_build(input.clone(), family.clone(), None, 0, Some(1), vec![])
             .unwrap()
     };
     let state = build().schema();
@@ -826,6 +845,7 @@ fn empty_exact_summary_extrema_agree_with_ordinary_aggregation() {
         let build = Operator::per_group_summary_build(
             input.clone(),
             FieldDataType::ExactAggregate(kind, params),
+            None,
             0,
             None,
             vec![],
@@ -905,6 +925,14 @@ fn printed(rows: &[Vec<Value>]) -> Vec<String> {
     rows
 }
 
+/// θ of a KLL with k = 512.
+fn kll_512() -> Option<planner_types::ir::schema::SketchParams> {
+    Some(planner_types::ir::schema::SketchParams::Kll {
+        k: 512,
+        failure_probability: None,
+    })
+}
+
 fn keep() -> Option<Predicate<usize>> {
     Some(Predicate(ScalarExpr::Column(2)))
 }
@@ -913,12 +941,21 @@ fn planner_node(
     payload: PhysicalASAPOperatorPayload,
     fields: &[(&str, FieldDataType, bool)],
 ) -> PhysicalASAPDAGNode {
+    // A sketch build carries its θ.
+    let parameters = match &payload {
+        PhysicalASAPOperatorPayload::ASAP(planner_types::ir::ASAPOp::SummaryAgg {
+            family: FieldDataType::Sketch(algorithm, _),
+            ..
+        }) => asap_executor::physical_planner::test_support::test_parameters(algorithm),
+        _ => None,
+    };
     PhysicalASAPDAGNode {
         id: 1,
         payload,
         output_state: planner_types::ir::properties::ExecutionDataState::QUERY_ROWS,
         lifetime: Default::default(),
-        parameters: None,
+        parameters,
+        summary_coverage: None,
         output_schema: planner_types::ir::schema::Schema::new(
             fields
                 .iter()
@@ -1166,6 +1203,7 @@ fn exact_aggregate_node(
         output_state: ExecutionDataState::QUERY_ROWS,
         lifetime: Default::default(),
         parameters: None,
+        summary_coverage: None,
         output_schema: (*schema(&[(name, dtype, false)])).clone(),
         guarantee: None,
         retention_ms: None,

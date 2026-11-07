@@ -81,6 +81,7 @@ fn program_for_bool(operator: BinaryOperator, return_bool: bool) -> Operator {
         output_state: ExecutionDataState::QUERY_ROWS,
         lifetime: Default::default(),
         parameters: None,
+        summary_coverage: None,
         output_schema: (*schema).clone(),
         guarantee: None,
         retention_ms: None,
@@ -415,6 +416,7 @@ fn stored_series_evaluations_support_filters_and_sets() {
                         },
                         lifetime: Default::default(),
                         parameters: None,
+                        summary_coverage: None,
                         output_schema: match id {
                             0 | 1 => (*state_schema).clone(),
                             5 | 6 => sample_schema(),

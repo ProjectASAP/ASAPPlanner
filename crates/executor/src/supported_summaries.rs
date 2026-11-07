@@ -29,7 +29,8 @@ mod tests {
     use planner_types::ir::scalar::ColumnRef;
     use planner_types::ir::schema::{
         DataType, FamilyCapability, Field, FieldDataType, GroupingStrategy, Schema,
-        SketchAlgorithm, SketchStatistic, StatisticKind, SummaryInputExpr, SummaryUpdate,
+        SketchAlgorithm, SketchParams, SketchStatistic, StatisticKind, SummaryInputExpr,
+        SummaryUpdate,
     };
     use planner_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 
@@ -54,6 +55,60 @@ mod tests {
         StatisticKind::FrequencyEntropy,
         StatisticKind::TopK,
     ];
+
+    /// Valid θ of `algorithm`.
+    fn params(algorithm: &SketchAlgorithm) -> SketchParams {
+        use SketchAlgorithm as A;
+        match algorithm {
+            A::UnivMon => SketchParams::UnivMon {
+                heap_size: 32,
+                sketch_rows: 3,
+                sketch_cols: 1024,
+                layers: 8,
+                distinct_failure_probability: None,
+            },
+            A::Kll => SketchParams::Kll {
+                k: 200,
+                failure_probability: None,
+            },
+            A::Cms => SketchParams::Cms {
+                width: 64,
+                depth: 3,
+            },
+            A::Hll => SketchParams::Hll {
+                precision: 12,
+                relative_error: None,
+            },
+            A::DDSketch => SketchParams::DDSketch { alpha: 0.01 },
+            A::CmsWithHeap => SketchParams::CmsWithHeap {
+                width: 64,
+                depth: 3,
+                heap_size: 10,
+            },
+            A::Kmv => SketchParams::Kmv {
+                k: 1024,
+                relative_error: None,
+            },
+            A::CountSketch => SketchParams::CountSketch {
+                width: 64,
+                depth: 3,
+            },
+            A::CountSketchWithHeap => SketchParams::CountSketchWithHeap {
+                width: 64,
+                depth: 3,
+                heap_size: 10,
+            },
+            other => unreachable!("{other:?} is not probed"),
+        }
+    }
+
+    /// θ of a per-instance `family`.
+    fn family_params(family: &FieldDataType) -> Option<SketchParams> {
+        match family {
+            FieldDataType::Sketch(algorithm, _) => Some(params(algorithm)),
+            _ => None,
+        }
+    }
 
     fn per_instance(algorithm: &SketchAlgorithm) -> FieldDataType {
         FieldDataType::Sketch(*algorithm, GroupingStrategy::PerSubpopulationInstance)
@@ -92,8 +147,9 @@ mod tests {
             item: Some(SummaryInputExpr::Column(ColumnRef::Named("item".into()))),
             ..value.clone()
         };
-        create_planner_accumulator(family, None, &value, grouping).is_ok()
-            || create_planner_accumulator(family, None, &keyed, grouping).is_ok()
+        let theta = family_params(family);
+        create_planner_accumulator(family, theta.as_ref(), &value, grouping).is_ok()
+            || create_planner_accumulator(family, theta.as_ref(), &keyed, grouping).is_ok()
     }
 
     /// Whether the executor answers `readout` from `family`'s state: top-k
@@ -127,8 +183,9 @@ mod tests {
             item: Some(SummaryInputExpr::Column(ColumnRef::Named("item".into()))),
             ..value.clone()
         };
-        let Ok(mut updater) = create_planner_accumulator(family, None, &value, grouping)
-            .or_else(|_| create_planner_accumulator(family, None, &keyed, grouping))
+        let theta = family_params(family);
+        let Ok(mut updater) = create_planner_accumulator(family, theta.as_ref(), &value, grouping)
+            .or_else(|_| create_planner_accumulator(family, theta.as_ref(), &keyed, grouping))
         else {
             return false;
         };

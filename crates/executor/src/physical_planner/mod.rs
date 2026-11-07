@@ -485,8 +485,13 @@ fn compile_internal(
                         "per-entity summary requires complete source identity",
                     ));
                 }
-                crate::capability::validate_summary_kernel(family, update, grouping)
-                    .map_err(Error::Invalid)?;
+                crate::capability::validate_summary_kernel(
+                    family,
+                    node.parameters.as_ref(),
+                    update,
+                    grouping,
+                )
+                .map_err(Error::Invalid)?;
                 let value = match (frequency_item, &update.weight) {
                     (Some(item), _) => item,
                     (None, SummaryInputExpr::Column(value)) => value,
@@ -507,6 +512,7 @@ fn compile_internal(
                 let build = Operator::per_group_summary_build(
                     input,
                     family.clone(),
+                    node.parameters.clone(),
                     value,
                     Some(coordinate),
                     groups,
@@ -624,8 +630,9 @@ fn compile_internal(
             }) = &node.payload
             {
                 if keys.is_empty() && built_from_relation(&restored[&id]) {
+                    let parameters = build_parameters(id, &nodes, &dependencies);
                     let operator = compile_node(node, &schemas)
-                        .and_then(Operator::with_emit_empty_global)
+                        .and_then(|merge| merge.with_emit_empty_global(parameters))
                         .map_err(|error| invalid(format!("node {id}: {error}")))?;
                     physical_dag.add(id, inputs, operator)?;
                     continue;
@@ -656,6 +663,29 @@ fn compile_internal(
     }
     physical_dag.validate()?;
     Ok(physical_dag)
+}
+
+/// θ of the summary states node `id` reads: the `parameters` of the build
+/// node (`SummaryAgg` or `SummaryTumblingWindowChain`) at or below it,
+/// along first inputs. The states a node merges share one θ. `None` for an
+/// exact family's build, or when there is no build below.
+fn build_parameters(
+    id: NodeId,
+    nodes: &BTreeMap<NodeId, &PhysicalASAPDAGNode>,
+    dependencies: &BTreeMap<NodeId, Vec<NodeId>>,
+) -> Option<planner_types::ir::schema::SketchParams> {
+    let mut below = Some(id);
+    while let Some(id) = below {
+        let node = nodes.get(&id)?;
+        if matches!(
+            node.payload,
+            Payload::ASAP(ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. })
+        ) {
+            return node.parameters.clone();
+        }
+        below = first_input(id, dependencies);
+    }
+    None
 }
 
 /// Whether every summary state `state` merges was built from a relation's
@@ -1219,7 +1249,14 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                 crate::capability::validate_ingestion_time_summary(filter.as_ref())
                     .map_err(Error::Invalid)?;
             }
-            let build = summary_agg_build(input, family, update, reduction, grouping)?;
+            let build = summary_agg_build(
+                input,
+                family,
+                node.parameters.as_ref(),
+                update,
+                reduction,
+                grouping,
+            )?;
             match filter {
                 Some(filter) => build.with_row_filter(expression(&filter.0, input)?),
                 None => Ok(build),
@@ -1286,12 +1323,13 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
 fn summary_agg_build(
     input: &SchemaRef,
     family: &FieldDataType,
+    parameters: Option<&planner_types::ir::schema::SketchParams>,
     update: &planner_types::ir::schema::SummaryUpdate,
     reduction: &PlannerReduction,
     grouping: &planner_types::ir::schema::GroupingStrategy,
 ) -> Result<Operator, Error> {
     if grouping != &planner_types::ir::schema::GroupingStrategy::PerSubpopulationInstance {
-        crate::capability::validate_summary_kernel(family, update, grouping)
+        crate::capability::validate_summary_kernel(family, parameters, update, grouping)
             .map_err(Error::Invalid)?;
         let PlannerReduction::Reduce(keys) = reduction else {
             return Err(invalid("an all-groups summary requires explicit groups"));
@@ -1304,6 +1342,7 @@ fn summary_agg_build(
         return Operator::all_groups_summary_build(
             input.clone(),
             family.clone(),
+            parameters.cloned(),
             named_column(input, item)?,
             row_weight(input, &update.weight)?,
             groups(input, keys)?,
@@ -1315,7 +1354,7 @@ fn summary_agg_build(
         crate::capability::unit_frequency_column(update),
         unkeyed_frequency_family(family),
     ) {
-        crate::capability::validate_summary_kernel(family, update, grouping)
+        crate::capability::validate_summary_kernel(family, parameters, update, grouping)
             .map_err(Error::Invalid)?;
         let PlannerReduction::Reduce(keys) = reduction else {
             return Err(invalid(
@@ -1325,6 +1364,7 @@ fn summary_agg_build(
         return Operator::per_group_summary_build(
             input.clone(),
             family.clone(),
+            parameters.cloned(),
             named_column(input, item)?,
             input.time_index,
             groups(input, keys)?,
@@ -1363,12 +1403,14 @@ fn summary_agg_build(
         return Operator::per_group_keyed_summary_build(
             input.clone(),
             family.clone(),
+            parameters.cloned(),
             items,
             row_weight(input, &update.weight)?,
             groups(input, keys)?,
         );
     }
-    crate::capability::validate_summary_kernel(family, update, grouping).map_err(Error::Invalid)?;
+    crate::capability::validate_summary_kernel(family, parameters, update, grouping)
+        .map_err(Error::Invalid)?;
     let SummaryInputExpr::Column(column) = &update.weight else {
         return Err(invalid(
             "summary update expression must be projected to a column",
@@ -1382,6 +1424,7 @@ fn summary_agg_build(
     Operator::per_group_summary_build(
         input.clone(),
         family.clone(),
+        parameters.cloned(),
         named_column(input, column)?,
         input.time_index,
         groups(input, keys)?,
@@ -1604,6 +1647,86 @@ pub mod test_support {
     use planner_types::physical::{Lifetime, StorageMedium};
     use std::collections::HashMap;
 
+    /// θ for executor tests of a per-instance sketch of `algorithm`: values
+    /// its kernel builds, small enough for fast tests. `None` for an
+    /// algorithm with no kernel.
+    pub fn test_parameters(
+        algorithm: &planner_types::ir::schema::SketchAlgorithm,
+    ) -> Option<planner_types::ir::schema::SketchParams> {
+        use planner_types::ir::schema::{SketchAlgorithm as A, SketchParams as P};
+        Some(match algorithm {
+            A::UnivMon => P::UnivMon {
+                heap_size: 32,
+                sketch_rows: 3,
+                sketch_cols: 1024,
+                layers: 8,
+                distinct_failure_probability: None,
+            },
+            A::Kll => P::Kll {
+                k: 200,
+                failure_probability: None,
+            },
+            A::Cms => P::Cms {
+                width: 64,
+                depth: 3,
+            },
+            A::Hll => P::Hll {
+                precision: 12,
+                relative_error: None,
+            },
+            A::DDSketch => P::DDSketch { alpha: 0.01 },
+            A::CmsWithHeap => P::CmsWithHeap {
+                width: 64,
+                depth: 3,
+                heap_size: 10,
+            },
+            A::Kmv => P::Kmv {
+                k: 1024,
+                relative_error: None,
+            },
+            A::CountSketch => P::CountSketch {
+                width: 64,
+                depth: 3,
+            },
+            A::CountSketchWithHeap => P::CountSketchWithHeap {
+                width: 64,
+                depth: 3,
+                heap_size: 10,
+            },
+            _ => return None,
+        })
+    }
+
+    /// Set θ on every summary build node of `dag` (`SummaryAgg`,
+    /// `SummaryTumblingWindowChain`) whose family is a sketch, to
+    /// `parameters` of its family; exact builds keep `None`. For tests that
+    /// export hand-built plans, whose nodes carry no θ.
+    pub fn set_build_parameters(
+        dag: &mut PhysicalASAPDAG,
+        parameters: impl Fn(&FieldDataType) -> Option<planner_types::ir::schema::SketchParams>,
+    ) {
+        for node in &mut dag.nodes {
+            if let Payload::ASAP(
+                ASAPOp::SummaryAgg { family, .. }
+                | ASAPOp::SummaryTumblingWindowChain { family, .. },
+            ) = &node.payload
+            {
+                if let FieldDataType::Sketch(..) = family {
+                    node.parameters = parameters(family);
+                }
+            }
+        }
+    }
+
+    /// [`set_build_parameters`] with [`test_parameters`] of each sketch's
+    /// algorithm.
+    pub fn set_test_parameters(dag: &mut PhysicalASAPDAG) {
+        set_build_parameters(dag, |family| match family {
+            FieldDataType::Sketch(algorithm, _) => test_parameters(algorithm),
+            _ => None,
+        });
+    }
+
     /// The materialized views at `nodes`, in that order: each node that is
     /// not a view is marked materialized at ingestion time, and it and every node below it
     /// run at ingestion time (their outputs and outgoing edges); then every
@@ -1655,6 +1778,7 @@ pub mod test_support {
                 edge.data_state_mut().timing = ExecutionTiming::IngestionTime;
             }
         }
+        planner_types::test_support::set_summary_coverage_from_memo(dag);
         let views = dag
             .set_retention(&HashMap::new(), &HashMap::new())
             .map_err(|error| invalid(error.to_string()))?;

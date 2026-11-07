@@ -51,6 +51,7 @@ fn sorted_scan(schema: &Schema, identity: &Source) -> PhysicalASAPDAG {
         output_state: ExecutionDataState::QUERY_ROWS,
         lifetime: Default::default(),
         parameters: None,
+        summary_coverage: None,
         output_schema: schema.clone(),
         guarantee: None,
         retention_ms: None,
@@ -129,6 +130,55 @@ fn blocking_inputs_over_a_raw_data_slot_are_finite() {
     assert_eq!(opens.load(Ordering::SeqCst), 1);
 }
 
+/// A KLL kernel accepts `k` only up to the 26 602 `asap_sketchlib` caps it at.
+#[test]
+fn kll_kernel_rejects_a_k_above_the_library_cap() {
+    use asap_executor::capability::validate_summary_kernel;
+    use planner_types::ir::scalar::ColumnRef;
+    use planner_types::ir::schema::{
+        GroupingStrategy, SketchAlgorithm, SketchParams, SummaryInputExpr, SummaryUpdate,
+    };
+    let grouping = GroupingStrategy::default();
+    let update = SummaryUpdate {
+        item: None,
+        weight: SummaryInputExpr::Column(ColumnRef::SampleValue),
+        weight_domain: Default::default(),
+    };
+    let kll = FieldDataType::Sketch(SketchAlgorithm::Kll, grouping.clone());
+    let params = |k| SketchParams::Kll {
+        k,
+        failure_probability: None,
+    };
+    assert!(validate_summary_kernel(&kll, Some(&params(26_602)), &update, &grouping).is_ok());
+    assert!(validate_summary_kernel(&kll, Some(&params(26_603)), &update, &grouping).is_err());
+}
+
+/// A plain CountSketch reads the median of its rows, so plan validation and
+/// kernel construction both require a positive odd depth.
+#[test]
+fn count_sketch_kernel_requires_an_odd_depth() {
+    use asap_executor::{capability::validate_summary_kernel, factory::create_planner_accumulator};
+    use planner_types::ir::scalar::ColumnRef;
+    use planner_types::ir::schema::{
+        GroupingStrategy, SketchAlgorithm, SketchParams, SummaryInputExpr, SummaryUpdate,
+    };
+    let grouping = GroupingStrategy::default();
+    let mut update = SummaryUpdate::column(ColumnRef::SampleValue);
+    update.item = Some(SummaryInputExpr::Column(ColumnRef::Named("host".into())));
+    let family = FieldDataType::Sketch(SketchAlgorithm::CountSketch, grouping.clone());
+    for (depth, valid) in [(5, true), (4, false)] {
+        let params = SketchParams::CountSketch { width: 64, depth };
+        assert_eq!(
+            validate_summary_kernel(&family, Some(&params), &update, &grouping).is_ok(),
+            valid
+        );
+        assert_eq!(
+            create_planner_accumulator(&family, Some(&params), &update, &grouping).is_ok(),
+            valid
+        );
+    }
+}
+
 // Kernel support must not be mistaken for executable native state/evaluation support.
 #[test]
 fn summary_capability_levels_are_distinct() {
@@ -147,7 +197,13 @@ fn summary_capability_levels_are_distinct() {
         weight: planner_types::ir::schema::SummaryInputExpr::Constant(1.0),
         weight_domain: Default::default(),
     };
-    assert!(validate_summary_kernel(&cms, &update, &grouping).is_ok());
+    let cms_params = planner_types::ir::schema::SketchParams::Cms {
+        width: 64,
+        depth: 4,
+    };
+    assert!(validate_summary_kernel(&cms, Some(&cms_params), &update, &grouping).is_ok());
+    // A sketch kernel needs its θ.
+    assert!(validate_summary_kernel(&cms, None, &update, &grouping).is_err());
     // Stored Count-Min state reads only its bare count natively.
     assert!(validate_native_family(&cms).is_ok());
     let bare_count = SketchStatistic::PointCount {

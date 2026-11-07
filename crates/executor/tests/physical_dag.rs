@@ -163,7 +163,8 @@ fn summary_construction_merge_and_evaluation_at_both_phases() {
         .map(|v| Batch::try_new(schema.clone(), vec![vec![Value::Float64(v as f64)]]).unwrap())
         .collect();
     let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
-    let build = Operator::per_group_summary_build(schema.clone(), family, 0, None, vec![]).unwrap();
+    let build =
+        Operator::per_group_summary_build(schema.clone(), family, None, 0, None, vec![]).unwrap();
     let state = build.schema();
     let mut dag = PhysicalDAG::default();
     dag.add(0, vec![], Operator::source(schema, batches).unwrap())
@@ -322,6 +323,7 @@ fn binding_rejects_unsupported_operations() {
     assert!(Operator::per_group_summary_build(
         schema.clone(),
         FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate),
+        None,
         0,
         None,
         vec![]
@@ -330,6 +332,7 @@ fn binding_rejects_unsupported_operations() {
     let sum = Operator::per_group_summary_build(
         schema.clone(),
         FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+        None,
         0,
         None,
         vec![],
@@ -356,7 +359,18 @@ fn kll_raw_partial_and_precomputed_are_native_dags() {
         SketchAlgorithm::Kll,
         GroupingStrategy::PerSubpopulationInstance,
     );
-    let build = Operator::per_group_summary_build(input.clone(), family, 0, None, vec![]).unwrap();
+    let build = Operator::per_group_summary_build(
+        input.clone(),
+        family,
+        Some(planner_types::ir::schema::SketchParams::Kll {
+            k: 512,
+            failure_probability: None,
+        }),
+        0,
+        None,
+        vec![],
+    )
+    .unwrap();
     let state = build.schema();
     let build_range = |start: u32, end: u32| {
         let mut dag = PhysicalDAG::default();
@@ -533,6 +547,7 @@ fn bind_physical_asap_dag_before_execution() {
         output_state: ExecutionDataState::QUERY_ROWS,
         lifetime: Default::default(),
         parameters: None,
+        summary_coverage: None,
         output_schema: (*schema).clone(),
         guarantee: None,
         retention_ms: None,
@@ -610,6 +625,7 @@ fn empty_exact_count_is_an_integer_state_evaluation() {
     let build = Operator::per_group_summary_build(
         input.clone(),
         FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count),
+        None,
         0,
         None,
         vec![],
@@ -694,6 +710,7 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
         output_state: ExecutionDataState::QUERY_ROWS,
         lifetime: Default::default(),
         parameters: None,
+        summary_coverage: None,
         guarantee: None,
         retention_ms: None,
     };
@@ -1018,6 +1035,19 @@ fn assert_weighted_rate_topk(count_sketch: bool) {
     let build = Operator::per_group_keyed_summary_build(
         rates.schema(),
         family,
+        Some(if count_sketch {
+            planner_types::ir::schema::SketchParams::CountSketchWithHeap {
+                width: 4096,
+                depth: 5,
+                heap_size: 8,
+            }
+        } else {
+            planner_types::ir::schema::SketchParams::CmsWithHeap {
+                width: 4096,
+                depth: 5,
+                heap_size: 8,
+            }
+        }),
         vec![0],
         asap_executor::operators::RowWeight::Column(3),
         vec![1],
@@ -1116,6 +1146,7 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
         output_state: ExecutionDataState::QUERY_ROWS,
         lifetime: Default::default(),
         parameters: None,
+        summary_coverage: None,
         output_schema: (*input).clone(),
         guarantee: None,
         retention_ms: None,
@@ -1207,6 +1238,7 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
             output_state: ExecutionDataState::QUERY_ROWS,
             lifetime: Default::default(),
             parameters: None,
+            summary_coverage: None,
             guarantee: None,
             retention_ms: None,
             payload: PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::Join {
@@ -1313,6 +1345,7 @@ fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
         output_state: ExecutionDataState::INGESTION_ROWS,
         lifetime: Default::default(),
         parameters: None,
+        summary_coverage: None,
         guarantee: None,
         retention_ms: None,
         payload: PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::BinaryOp {

@@ -206,38 +206,55 @@ impl Value {
 
 pub(crate) use crate::capability::validate_native_family as validate_family;
 
+/// Whether `state` is a state of `family`: the kernel's state type of the
+/// family's algorithm and population layout. θ is not part of a family, so
+/// a state's shape is its own; a merge refuses states of different shapes.
 pub(super) fn validate_state(
     family: &SummaryFamilyType,
     state: &dyn AggregateCore,
 ) -> Result<(), Error> {
-    use crate::summary_kernels::exact::ExactAccumulator;
-
+    use crate::summary_kernels::weighted_frequency::{FrequencyAlgorithm, WeightedFrequency};
+    use crate::summary_kernels::{
+        count_min_sketch::CountMinSketchAccumulator, datasketches_kll::DatasketchesKLLAccumulator,
+        dd_sketch::DDSketchAccumulator, exact::ExactAccumulator, hll_sketch::HllSketchAccumulator,
+        kmv::KmvAccumulator, univmon::UnivMonAccumulator,
+    };
+    use planner_types::ir::schema::SketchAlgorithm as A;
     validate_family(family)?;
+    let state = state.as_any();
+    let frequency = |algorithm| {
+        state
+            .downcast_ref::<WeightedFrequency>()
+            .is_some_and(|s| s.algorithm() == algorithm && s.shape().2 > 0)
+    };
     let valid = match family {
         SummaryFamilyType::Sketch(_, grouping)
             if grouping
                 != &planner_types::ir::schema::GroupingStrategy::PerSubpopulationInstance =>
         {
-            let shape = crate::capability::hydra_cms_shape(family).map_err(Error::Invalid)?;
-            state
-                .as_any()
-                .downcast_ref::<crate::summary_kernels::HydraCmsGroup>()
-                .is_some_and(|s| s.grid.shape() == shape)
+            state.is::<crate::summary_kernels::HydraCmsGroup>()
         }
         SummaryFamilyType::ExactAggregate(..) => state
-            .as_any()
             .downcast_ref::<ExactAccumulator>()
             .is_some_and(|s| s.family() == family && !s.is_keyed()),
-        SummaryFamilyType::Sketch(..) => {
-            todo!("#1207 PR 6: compare the state with θ, which the exported node carries")
-        }
+        SummaryFamilyType::Sketch(algorithm, _) => match algorithm {
+            A::CmsWithHeap => frequency(FrequencyAlgorithm::Cms),
+            A::CountSketchWithHeap => frequency(FrequencyAlgorithm::CountSketch),
+            A::Kll => state.is::<DatasketchesKLLAccumulator>(),
+            A::DDSketch => state.is::<DDSketchAccumulator>(),
+            A::Hll => state.is::<HllSketchAccumulator>(),
+            A::Kmv => state.is::<KmvAccumulator>(),
+            A::UnivMon => state.is::<UnivMonAccumulator>(),
+            A::Cms => state.is::<CountMinSketchAccumulator>(),
+            _ => false,
+        },
         _ => false,
     };
     if valid {
         Ok(())
     } else {
         Err(Error::Invalid(
-            "state payload differs from declared family, parameters or population layout".into(),
+            "state payload differs from declared family or population layout".into(),
         ))
     }
 }
@@ -286,20 +303,22 @@ mod weighted_state_tests {
     use crate::summary_kernels::weighted_frequency::{FrequencyAlgorithm, WeightedFrequency};
     use planner_types::ir::schema::SketchAlgorithm;
 
-    // A state cannot acquire a different family or shape merely by relabeling its batch.
+    // A state cannot acquire a different family merely by relabeling its
+    // batch; states of different shapes (θ) do not merge.
     #[test]
-    fn weighted_state_family_and_shape_must_match() {
+    fn weighted_state_family_must_match_and_shapes_must_merge() {
         let cms = SummaryFamilyType::Sketch(SketchAlgorithm::CmsWithHeap, Default::default());
         let cs =
             SummaryFamilyType::Sketch(SketchAlgorithm::CountSketchWithHeap, Default::default());
         let state = WeightedFrequency::new(FrequencyAlgorithm::CountSketch, 32, 5, 8).unwrap();
         assert!(validate_state(&cs, &state).is_ok());
         assert!(validate_state(&cms, &state).is_err());
+        // A Count Sketch without a heap is not a heap family's state.
+        let no_heap = WeightedFrequency::new(FrequencyAlgorithm::CountSketch, 32, 5, 0).unwrap();
+        assert!(validate_state(&cs, &no_heap).is_err());
         let wrong_shape =
             WeightedFrequency::new(FrequencyAlgorithm::CountSketch, 64, 5, 8).unwrap();
-        assert!(validate_state(&cs, &wrong_shape).is_err());
-        let even_depth =
-            SummaryFamilyType::Sketch(SketchAlgorithm::CountSketchWithHeap, Default::default());
-        assert!(validate_family(&even_depth).is_err());
+        assert!(validate_state(&cs, &wrong_shape).is_ok());
+        assert!(state.merge(&wrong_shape).is_err());
     }
 }

@@ -51,6 +51,7 @@ fn view_over_samples(
         output_state,
         lifetime: Default::default(),
         parameters: None,
+        summary_coverage: None,
         output_schema,
         guarantee: None,
         retention_ms: None,
@@ -141,6 +142,7 @@ fn try_state_dag(
                 planner_types::physical::StorageMedium::Memory,
             ),
             parameters: None,
+            summary_coverage: None,
             output_schema: logical_schema(family.clone()),
             guarantee: None,
             retention_ms: None,
@@ -155,6 +157,7 @@ fn try_state_dag(
         output_state: ExecutionDataState::INGESTION_ROWS,
         lifetime: Default::default(),
         parameters: None,
+        summary_coverage: None,
         output_schema: logical_schema(FieldDataType::Plain(DataType::Float64)),
         guarantee: None,
         retention_ms: None,
@@ -175,6 +178,7 @@ fn try_state_dag(
                 planner_types::physical::StorageMedium::Memory,
             ),
             parameters: None,
+            summary_coverage: None,
             output_schema: logical_schema(target),
             guarantee: None,
             retention_ms: None,
@@ -193,6 +197,7 @@ fn try_state_dag(
         roots: vec![root],
         scalar_roots: vec![],
     };
+    asap_executor::physical_planner::test_support::set_test_parameters(&mut dag);
     let views = views_at(&mut dag, &[0])?;
     compile(&dag, &views, &[root as u64])
 }
