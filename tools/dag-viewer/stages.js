@@ -1,8 +1,8 @@
-// DOM-free logic of the Stage Viewer: checking an `asap-stage-pipeline/v1`
+// DOM-free logic of the Stage Viewer: checking an `asap-stage-pipeline/v2`
 // document (written by the `asap_planner` devtool), the Stage 3 candidate
 // list, and each stage's DAG as cytoscape elements with readable labels.
 // app.js draws them; test_viewer.py runs this file headless.
-const STAGE_PIPELINE_FORMAT = 'asap-stage-pipeline/v1';
+const STAGE_PIPELINE_FORMAT = 'asap-stage-pipeline/v2';
 
 // Documents written before #1163 name the tumbling-window chain `PaneChain`,
 // its fields `pane_*`, and the memo origin `panes` (`Panes` in older MILP

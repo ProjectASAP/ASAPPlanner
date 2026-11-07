@@ -1,7 +1,7 @@
 # ASAPPlanner Stage Viewer
 
 A browser view of what the planner does with one workload, read from an
-`asap-stage-pipeline/v1` document written by the `asap_planner` devtool
+`asap-stage-pipeline/v2` document written by the `asap_planner` devtool
 (`asap_planner --workload <file> --run-until stage3 --format json`). The
 document shows:
 
@@ -127,7 +127,7 @@ sharing; open one with **Open stage document or workload…**.
 
 ## Document format
 
-The `asap-stage-pipeline/v1` document is described in the header comment of
+The `asap-stage-pipeline/v2` document is described in the header comment of
 `crates/devtools/src/bin/asap_planner.rs`.
 
 ## Tests

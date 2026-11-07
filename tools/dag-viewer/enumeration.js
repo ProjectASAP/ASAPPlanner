@@ -1,4 +1,4 @@
-// The Enumerated DAGs panel: `memo.enumeration` of an asap-stage-pipeline/v1
+// The Enumerated DAGs panel: `memo.enumeration` of an asap-stage-pipeline/v2
 // document, the complete candidate DAGs the memo stands for, as `asap_planner`
 // enumerated and composed them. The document holds each listed choice's DAG
 // as its `roots` in the memo's node table (`memo.nodes`), so the page

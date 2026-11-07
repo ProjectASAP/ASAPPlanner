@@ -116,28 +116,27 @@ fn run_until_prints_exactly_the_stages_up_to_it() {
     }
 }
 
-/// Pass 2 composes tumbling-window candidates over every legal width, not only
-/// the seed grid: a 5 m quantile within 1% every 60 s gets a mergeable
-/// summary's tumbling-window chain for every width that divides 60 s (in ms), from
-/// 1 ms to 60 s.
+/// Pass 2 composes tumbling-window candidates at the greatest common
+/// divisor of the ranges and evaluation steps (phase 0): a 5 m quantile
+/// within 1% every 60 s gets its mergeable summary's tumbling windows of
+/// 60 s only.
 #[test]
-fn pass2_holds_a_tumbling_window_candidate_for_every_width_dividing_the_grid() {
+fn pass2_holds_tumbling_windows_at_the_gcd_of_ranges_and_steps() {
     let quantile = workload("quantile_over_time(0.5, data[5m])", 60_000, 0.01, "data");
     let text = stdout(planner(&quantile, &["--run-until", "stage1_pass2"]));
     let widths: BTreeSet<u64> = text
-        .split("tumbling_window_width_ms=")
+        .split("ω=tumbling ")
         .skip(1)
         .map(|rest| {
             let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
             digits.parse().unwrap()
         })
         .collect();
-    let divisors: BTreeSet<u64> = (1..=60_000).filter(|w| 60_000 % w == 0).collect();
-    assert_eq!(widths, divisors);
+    assert_eq!(widths, BTreeSet::from([60_000]));
 }
 
 /// Stage 3 selects among the candidates Stage 2 lists: every candidate a
-/// selected node runs (`nodeN:  C<k>`) is a line of Stage 2's output.
+/// selected node runs (`nodeN:  C<k> = ...`) is a line of Stage 2's output.
 #[test]
 fn stage3_selects_candidates_stage2_lists() {
     let text = stdout(planner(&rate_workload(), &["--run-until", "stage3"]));
@@ -150,7 +149,7 @@ fn stage3_selects_candidates_stage2_lists() {
     assert!(!selected.is_empty(), "{stage3}");
     for candidate in selected {
         assert!(
-            stage2.contains(&format!("\n    {candidate}:")),
+            stage2.contains(&format!("\n    {candidate} = ")),
             "{candidate} is not in Stage 2's output"
         );
     }

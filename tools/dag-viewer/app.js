@@ -1,4 +1,4 @@
-// ASAPPlanner Stage Viewer: an asap-stage-pipeline/v1 document as a Stage 3
+// ASAPPlanner Stage Viewer: an asap-stage-pipeline/v2 document as a Stage 3
 // candidate list beside three DAG lanes stacked top to bottom (Stage 0,
 // then the Stage 1 candidate, then its Stage 2 candidate), details below.
 // Each lane shows the whole workload. Document checks, the candidate list

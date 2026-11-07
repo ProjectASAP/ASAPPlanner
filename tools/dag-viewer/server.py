@@ -51,7 +51,7 @@ def sidecar_tables(workload: Path) -> list:
 def planner_args(workload: Path, tables: list, capabilities: str | None, cost_model: str | None,
                  accuracy_guarantees: str | None, out: str) -> list[str]:
     """The `asap_planner` arguments that plan `workload` through Stage 3 into
-    the asap-stage-pipeline/v1 document `out`: the SQL `tables` it reads,
+    the asap-stage-pipeline/v2 document `out`: the SQL `tables` it reads,
     the deployment capabilities file `capabilities`, the cost model
     `cost_model` (a COST_MODELS name) and the accuracy guarantee mode
     (`"enforced"`; anything else ignores them). Without capabilities or a
@@ -180,7 +180,7 @@ PLAN_TIMEOUT_SECONDS = 300
 
 def plan_workload(payload: object) -> dict:
     """Plan a PlanningWorkload request (`workload_args`) with `asap_planner`;
-    returns its asap-stage-pipeline/v1 document. Requests run one at a
+    returns its asap-stage-pipeline/v2 document. Requests run one at a
     time."""
     print("\n[planner] workload", flush=True)
     with PLAN_LOCK, tempfile.TemporaryDirectory() as tmp:

@@ -320,7 +320,7 @@ class PlanEndpointTests(unittest.TestCase):
         }
         document = post_plan({"workload": workload, "deployment_capabilities": {"raw_data_retained": False},
                               "cost_model": "usage-over-time"}, "/api/plan-workload")
-        self.assertEqual(document["format"], "asap-stage-pipeline/v1")
+        self.assertEqual(document["format"], "asap-stage-pipeline/v2")
         self.assertEqual(document["run_until"], "stage3")
         self.assertEqual(document["accuracy_guarantees"], "ignored")
         self.assertEqual(document["workload"]["data_workload"]["sources"]["m"]["series_count"], 100)

@@ -43,7 +43,7 @@ asap_planner (--workload <file>)... --run-until stage0|stage1_pass1|stage1_pass2
 | --- | --- |
 | `--workload <file>` | A `PlanningWorkload` JSON file: the queries, their requirements and recurrence, and the data-source facts. Repeat it to plan several files together, including PromQL and SQL files; sources they share must have the same facts. Required. |
 | `--run-until <stage>` | The last stage to run. Every stage up to and including it is printed. Required. |
-| `--format text\|json` | `text` (the default) for reading; `json` for an `asap-stage-pipeline/v1` document. |
+| `--format text\|json` | `text` (the default) for reading; `json` for an `asap-stage-pipeline/v2` document. |
 | `--out <file>` | Write to this file instead of standard output. |
 | `--sql-catalog-table <json>` | One SQL table a SQL workload reads, as `{"name", "columns": [{"name", "type", "nullable"}], "time_index"}`. Repeat it per table. |
 | `--cost-inputs <file>` | The cost model and its prices (`CostInputs` JSON). The files in `tools/dag-viewer/cost-inputs/` are ready to use. Without it, the built-in usage-over-time model is used. Stage 3 prices only usage-over-time models (`aws-fargate-us-east-1.json` is one); a provisioned- or cluster-capacity model ends Stage 3 with an `UnsupportedCostModel` error. |

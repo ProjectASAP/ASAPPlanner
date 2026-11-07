@@ -7,7 +7,7 @@
 // Runs the planner stages over a workload up to and including
 // `--run-until` (`stage0`, `stage1_pass1`, `stage1_pass2`, `stage2` or
 // `stage3`) and writes each stage's output, as text (`--format text`, the default;
-// `asap_devtools::planning_stages_text`) or as an `asap-stage-pipeline/v1`
+// `asap_devtools::planning_stages_text`) or as an `asap-stage-pipeline/v2`
 // document for the Stage Viewer (`--format json`), to `--out` or standard
 // output.
 //
@@ -308,7 +308,7 @@ fn document_of(
     match result {
         Ok(run) => Ok(document(queries, entries, &run)),
         Err(PlanningStagesError::Pass1(error)) => Ok(json!({
-            "format": "asap-stage-pipeline/v1",
+            "format": "asap-stage-pipeline/v2",
             "run_until": run_until.name(),
             "workload": { "queries": queries },
             "stage0_query_language_frontends": { "dag": export(roots) },
@@ -383,7 +383,7 @@ fn document(queries: Vec<Value>, entries: &[QueryWorkloadEntry], run: &PlanningS
     });
     let stage3 = (until == RunUntil::Stage3).then(|| stage3_json(run, entries));
     json!({
-        "format": "asap-stage-pipeline/v1",
+        "format": "asap-stage-pipeline/v2",
         "run_until": until.name(),
         "workload": { "queries": queries },
         "stage0_query_language_frontends": { "dag": export(&run.stage0_query_language_frontends) },
