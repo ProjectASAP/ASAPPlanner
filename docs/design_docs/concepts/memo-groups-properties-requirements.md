@@ -813,17 +813,17 @@ An edge satisfies the logical requirement when the producer meets the input's fl
 
 ### Stage 2: physical alternatives
 
-`enumerate_candidate_configurations` in `crates/physical-asap-optimization/src/catalog/configurations.rs` expands each logical candidate that survived Pass 2 using the dimensions and checks in Section 2. It offers ℓ = AcrossEvaluations only to chain candidates; the other candidates never get that value, and nothing is recorded for them. It creates no new logical candidates. Each logical edge is expanded between the relevant physical alternatives.
+`enumerate_candidate_configurations` in `crates/stage2-physical-optimization/src/catalog/configurations.rs` expands each logical candidate that survived Pass 2 using the dimensions and checks in Section 2. It offers ℓ = AcrossEvaluations only to chain candidates; the other candidates never get that value, and nothing is recorded for them. It creates no new logical candidates. Each logical edge is expanded between the relevant physical alternatives.
 
 Stage 2 reads the logical candidates, the data workload (per-source arrival, below) and the deployment's capabilities:
 
 ```rust
-// crates/physical-asap-optimization/src/catalog/mod.rs
+// crates/stage2-physical-optimization/src/catalog/mod.rs
 pub fn generate_physical_asap_memo_candidates(
     logical: &LogicalASAPMemoCandidates,
     data: &DataWorkload,
     capabilities: &DeploymentCapabilities,
-) -> Result<PhysicalASAPMemoCandidates, ErrorGeneratingPhysicalASAPMemoCandidates>;
+) -> PhysicalASAPMemoCandidates;   // Stage 2 cannot fail
 ```
 
 #### Data arrival
