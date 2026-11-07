@@ -1,6 +1,7 @@
 //! The bytes one summary or exact state holds and its update operations
 //! per input row, from its parameters and the rows it folds.
 
+use crate::analytical::AnalyticalCostError;
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::sketch::KLL_MAX_K;
 use asap_types::ir::schema::{
@@ -58,15 +59,21 @@ pub fn keeps_every_value(measure: &AggIntent) -> bool {
 /// Count-Min and Count-Sketch, plus one heap update for their top-k variants;
 /// for UnivMon, the same per layer it updates (`univmon_expected_layers`);
 /// 1 for every other sketch.
-pub fn summary_shape(family: &FieldDataType, input_rows: StateInputRows) -> (f64, u64) {
-    match family {
-        FieldDataType::Sketch(..) => {
-            let _ = input_rows;
-            todo!("#1207 PR 6: the state shape of θ from the candidate's LogicalProperties::parameters")
-        }
-        FieldDataType::ExactAggregate(..) => (1.0, EXACT_ACCUMULATOR_STATE_BYTES),
+///
+/// `parameters` is the build's θ (`PhysicalASAPDAGNode::parameters`). Err
+/// [`AnalyticalCostError::UnsupportedCandidate`] for a sketch without θ: a
+/// planner bug, since every sketch build carries its θ.
+pub fn summary_shape(
+    family: &FieldDataType,
+    parameters: Option<&SketchParams>,
+    input_rows: StateInputRows,
+) -> Result<(f64, u64), AnalyticalCostError> {
+    Ok(match (family, parameters) {
+        (FieldDataType::Sketch(..), Some(parameters)) => sketch_shape(parameters, input_rows),
+        (FieldDataType::Sketch(..), None) => return Err(AnalyticalCostError::UnsupportedCandidate),
+        (FieldDataType::ExactAggregate(..), _) => (1.0, EXACT_ACCUMULATOR_STATE_BYTES),
         _ => (1.0, 8),
-    }
+    })
 }
 
 /// What one summary state's bytes depend on besides its parameters (only
@@ -290,9 +297,10 @@ mod tests {
             assert_eq!(
                 summary_shape(
                     &FieldDataType::ExactAggregate(kind, params),
+                    None,
                     StateInputRows::UNKNOWN
                 ),
-                (1.0, 56)
+                Ok((1.0, 56))
             );
         }
         assert_eq!(asap_types::ir::schema::EXACT_ACCUMULATOR_STATE_BYTES, 56);
@@ -355,6 +363,147 @@ mod tests {
         }
         assert!(priced(Some(10_000), true) < priced(Some(10_000), false));
         assert_eq!(priced(Some(10_000), false), priced(None, false));
+    }
+
+    /// The state shape of a sketch of `algorithm` with θ `params`, its
+    /// samples unknown.
+    fn shape(algorithm: SketchAlgorithm, params: SketchParams) -> (f64, u64) {
+        summary_shape(
+            &FieldDataType::Sketch(algorithm, GroupingStrategy::default()),
+            Some(&params),
+            StateInputRows::UNKNOWN,
+        )
+        .unwrap()
+    }
+
+    /// A sketch build without θ is a planner bug: it cannot be sized.
+    #[test]
+    fn a_sketch_without_parameters_is_not_sized() {
+        assert_eq!(
+            summary_shape(
+                &FieldDataType::Sketch(SketchAlgorithm::Kll, GroupingStrategy::default()),
+                None,
+                StateInputRows::UNKNOWN,
+            ),
+            Err(AnalyticalCostError::UnsupportedCandidate)
+        );
+    }
+
+    /// DDSketch state grows as its relative accuracy α tightens.
+    #[test]
+    fn ddsketch_state_grows_as_alpha_shrinks() {
+        let bytes = |alpha| shape(SketchAlgorithm::DDSketch, SketchParams::DDSketch { alpha }).1;
+        assert!(
+            bytes(0.1) < bytes(0.01),
+            "{} vs {}",
+            bytes(0.1),
+            bytes(0.01)
+        );
+        assert!(
+            bytes(0.01) < bytes(0.001),
+            "{} vs {}",
+            bytes(0.01),
+            bytes(0.001)
+        );
+    }
+
+    /// Every sketch family's state is sized from its parameters, as
+    /// `asap_sketchlib` allocates it: an HLL's registers, a KMV's `k`
+    /// hashes once it has seen `k` distinct items, and a UnivMon's layers
+    /// once keys of the assumed size have churned through every heap.
+    #[test]
+    fn summary_state_is_sized_from_sketch_params() {
+        use asap_sketchlib::DataInput;
+        assert_eq!(
+            shape(
+                SketchAlgorithm::Hll,
+                SketchParams::Hll {
+                    precision: 14,
+                    relative_error: None
+                }
+            )
+            .1,
+            asap_sketchlib::HyperLogLog::<asap_sketchlib::Classic>::new().memory_bytes() as u64
+        );
+        let mut kmv: asap_sketchlib::Kmv = asap_sketchlib::Kmv::new(1_000);
+        for i in 0..2_000u64 {
+            kmv.update(&DataInput::U64(i));
+        }
+        assert_eq!(
+            shape(
+                SketchAlgorithm::Kmv,
+                SketchParams::Kmv {
+                    k: 1_000,
+                    relative_error: None
+                }
+            )
+            .1,
+            kmv.memory_bytes() as u64
+        );
+        let mut univmon = asap_sketchlib::UnivMon::new(8, 3, 64, 2);
+        for i in 0..10_000u64 {
+            let mut key = [0; ASSUMED_VALUE_KEY_BYTES];
+            key[..8].copy_from_slice(&i.to_le_bytes());
+            univmon.update_weighted(&DataInput::Bytes(&key), 1);
+        }
+        assert_eq!(
+            shape(
+                SketchAlgorithm::UnivMon,
+                SketchParams::UnivMon {
+                    heap_size: 8,
+                    sketch_rows: 3,
+                    sketch_cols: 64,
+                    layers: 2,
+                    distinct_failure_probability: None,
+                }
+            )
+            .1,
+            univmon.memory_bytes() as u64
+        );
+    }
+
+    /// KLL state whose samples are unknown is charged its fixed 744 bytes
+    /// and the item array at the capacity `asap_sketchlib` grows it to:
+    /// `compute_max_capacity(k, 8)` 8-byte items, with `k` capped at 26 602.
+    #[test]
+    fn kll_state_is_sized_as_asap_sketchlib_allocates_it() {
+        let bytes = |k| {
+            shape(
+                SketchAlgorithm::Kll,
+                SketchParams::Kll {
+                    k,
+                    failure_probability: None,
+                },
+            )
+            .1
+        };
+        assert_eq!(bytes(269), 744 + 8 * 1_206);
+        assert_eq!(bytes(26_602), 744 + 8 * 80_118);
+        assert_eq!(bytes(30_000), 744 + 8 * 80_118);
+    }
+
+    /// A UnivMon row updates layers `0..=b`, where its bottom layer `b` is
+    /// geometric (`asap_sketchlib`'s `bottom_layer_for_hash`), so
+    /// `2 - 2^(1 - layers)` layers in expectation; each updates one counter
+    /// per sketch row and its heap.
+    #[test]
+    fn univmon_update_cost_is_expected_layers_times_rows_and_heap() {
+        let ops = |layers| {
+            shape(
+                SketchAlgorithm::UnivMon,
+                SketchParams::UnivMon {
+                    heap_size: 256,
+                    sketch_rows: 5,
+                    sketch_cols: 1_024,
+                    layers,
+                    distinct_failure_probability: None,
+                },
+            )
+            .0
+        };
+        assert_eq!(ops(1), 6.0);
+        assert_eq!(ops(2), 1.5 * 6.0);
+        assert_eq!(ops(16), (2.0 - 2f64.powi(-15)) * 6.0);
     }
 
     /// A KLL state is charged what `asap_sketchlib` allocates for the

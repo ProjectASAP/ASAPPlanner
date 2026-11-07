@@ -458,15 +458,15 @@ fn each_node_usage<'a>(
     })
 }
 
-/// The state family of a node with `payload` whose first producer has
-/// `producer_family`: a build's own (one sketch instance per group; a
-/// shared Hydra structure is not that sketch), inherited by the merges,
+/// The state family of `node` whose first producer has `producer_family`:
+/// a build's own, its θ (`node.parameters`; one sketch instance per group;
+/// a shared Hydra structure is not that sketch), inherited by the merges,
 /// estimates and finalizations over it, none otherwise.
 fn state_family<'a>(
-    payload: &'a Payload,
+    node: &'a asap_types::ir::physical_export::PhysicalASAPDAGNode,
     producer_family: Option<StateFamily<'a>>,
 ) -> StateFamily<'a> {
-    match payload {
+    match &node.payload {
         Payload::ASAP(
             ASAPOp::SummaryAgg {
                 family, grouping, ..
@@ -478,7 +478,9 @@ fn state_family<'a>(
             FieldDataType::Sketch(..)
                 if *grouping == GroupingStrategy::PerSubpopulationInstance =>
             {
-                todo!("#1207 PR 6: the state family of θ from the candidate's LogicalProperties::parameters")
+                node.parameters
+                    .as_ref()
+                    .map_or(StateFamily::None, StateFamily::Sketch)
             }
             FieldDataType::ExactAggregate(kind, _) => StateFamily::Exact(kind),
             _ => StateFamily::None,
@@ -594,7 +596,7 @@ pub fn node_usage<'a>(
         missing: "an arrival rate (the arrival's rows_per_second, or the \
                   source's series_count with sample_interval)",
     };
-    let family = state_family(&node.payload, producers.first().map(|p| p.family));
+    let family = state_family(node, producers.first().map(|p| p.family));
     let unchanged_columns = unchanged_source_columns(
         node,
         &producers
@@ -916,7 +918,7 @@ pub fn node_usage<'a>(
                 rows_per_state: (!ingestion).then(|| input.rows.div_ceil(group_count.max(1))),
                 non_negative: raw_data_samples_non_negative(),
             };
-            let (depth, state_bytes) = summary_shape(family, input_rows);
+            let (depth, state_bytes) = summary_shape(family, node.parameters.as_ref(), input_rows)?;
             let state_bytes = measured_state_bytes.unwrap_or(state_bytes);
             let out = EdgeStatistics {
                 rows: group_count,
@@ -972,7 +974,7 @@ pub fn node_usage<'a>(
                 rows_per_state: Some(rows_per_tumbling_window.div_ceil(group_count.max(1))),
                 non_negative: raw_data_samples_non_negative(),
             };
-            let (depth, state_bytes) = summary_shape(family, input_rows);
+            let (depth, state_bytes) = summary_shape(family, node.parameters.as_ref(), input_rows)?;
             let state_bytes = measured_state_bytes.unwrap_or(state_bytes);
             let out = EdgeStatistics {
                 rows: states,
