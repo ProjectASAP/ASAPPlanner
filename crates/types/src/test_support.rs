@@ -154,3 +154,46 @@ pub fn population_over_selector(
     });
     Rc::new(OperatorNode::with_schema(evaluation, root.schema.clone()))
 }
+
+/// Each summary-state node of `dag` with the summary coverage of its memo
+/// group: the DAG's operators hash-consed bottom up into a `Memo`
+/// (`Memo::find_or_add_group`), each node's coverage read from its group's
+/// `GroupProperties::summary_coverage`, as the realizer does for a selected
+/// plan. For tests that hand-build plans with materialized views; coverage
+/// is derived only in the memo, never on node trees.
+pub fn set_summary_coverage_from_memo(dag: &mut crate::ir::physical_export::PhysicalASAPDAG) {
+    use crate::ir::materialized_view::ViewCoverage;
+    use crate::stages::{Memo, MemoGroupId};
+    use std::collections::HashMap;
+    let mut memo = Memo::default();
+    let mut group_of: HashMap<usize, MemoGroupId> = HashMap::new();
+    // Children before parents: repeat passes until every node's children
+    // have groups (hand-built DAGs need not number children first).
+    while group_of.len() < dag.nodes.len() {
+        let before = group_of.len();
+        for node in &dag.nodes {
+            if group_of.contains_key(&node.id)
+                || node
+                    .payload
+                    .children()
+                    .iter()
+                    .any(|c| !group_of.contains_key(*c))
+            {
+                continue;
+            }
+            let expression = node.payload.map_children(|child| group_of[child]);
+            let group = memo
+                .find_or_add_group(expression)
+                .expect("a valid plan's operators form memo groups");
+            group_of.insert(node.id, group);
+        }
+        assert!(group_of.len() > before, "the DAG has a cycle");
+    }
+    for node in &mut dag.nodes {
+        node.summary_coverage = memo.groups()[group_of[&node.id].0 as usize]
+            .group_properties
+            .summary_coverage
+            .as_ref()
+            .map(ViewCoverage::of);
+    }
+}
