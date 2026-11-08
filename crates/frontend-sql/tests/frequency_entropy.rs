@@ -4,7 +4,6 @@ use asap_frontend_common::resolve_root;
 use asap_frontend_sql::test_support::lower_unresolved;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::ir::operator::AggIntent;
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{NonASAPOp, OperatorNode};
 
@@ -32,15 +31,8 @@ fn has_entropy(node: &OperatorNode) -> bool {
 #[tokio::test]
 async fn recognizes_sql_entropy_in_nats() {
     let sql = "SELECT -SUM(p * LN(p)) AS entropy FROM (SELECT COUNT(*) * 1.0 / SUM(COUNT(*)) OVER () AS p FROM flows GROUP BY src_ip) f";
-    let rewritten = lower_sql(sql, &catalog(false), AccuracyTarget::exact())
-        .await
-        .unwrap();
-    let original = resolve_root(
-        &lower_unresolved(sql, &catalog(false), &AccuracyTarget::exact())
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let rewritten = lower_sql(sql, &catalog(false)).await.unwrap();
+    let original = resolve_root(&lower_unresolved(sql, &catalog(false)).await.unwrap()).unwrap();
     assert!(has_entropy(&rewritten));
     assert_eq!(original.schema, rewritten.schema);
     assert!(!has_entropy(&original));
@@ -59,7 +51,7 @@ async fn declines_non_equivalent_entropy_shapes() {
         ("SELECT -SUM(p*LN(p)) FROM (SELECT COUNT(*)*1.0/SUM(COUNT(*)) OVER () AS p FROM flows GROUP BY src_ip HAVING COUNT(*) > 1) f", false),
         ("SELECT -SUM(p*LN(p)) FROM (SELECT COUNT(*)*1.0/SUM(COUNT(*)) OVER () AS p FROM flows GROUP BY src_ip) f", true),
     ] {
-        let root = lower_sql(sql, &catalog(nullable), AccuracyTarget::exact())
+        let root = lower_sql(sql, &catalog(nullable))
             .await
             .unwrap();
         assert!(!has_entropy(&root), "{sql}");
@@ -70,8 +62,7 @@ async fn declines_non_equivalent_entropy_shapes() {
 /// is an exact count.
 #[tokio::test]
 async fn entropy_accuracy_and_population_guard_are_separate() {
-    let target = AccuracyTarget::max_error(0.05).failure_probability(0.01);
-    let node = lower_sql("SELECT -SUM(p*LN(p)) FROM (SELECT COUNT(*)*1.0/SUM(COUNT(*)) OVER () AS p FROM flows GROUP BY src_ip) f", &catalog(false), target.clone()).await.unwrap();
+    let node = lower_sql("SELECT -SUM(p*LN(p)) FROM (SELECT COUNT(*)*1.0/SUM(COUNT(*)) OVER () AS p FROM flows GROUP BY src_ip) f", &catalog(false)).await.unwrap();
     let NonASAPOp::Project { child, .. } = node.expect_non_asap() else {
         panic!("project");
     };
@@ -81,14 +72,9 @@ async fn entropy_accuracy_and_population_guard_are_separate() {
     let NonASAPOp::Aggregate { measures, .. } = left.expect_non_asap() else {
         panic!("entropy");
     };
-    assert!(
-        matches!(&measures[0], AggIntent::FrequencyEntropy { accuracy, .. } if *accuracy == target)
-    );
+    assert!(matches!(&measures[0], AggIntent::FrequencyEntropy { .. }));
     let NonASAPOp::Aggregate { measures, .. } = right.expect_non_asap() else {
         panic!("count");
     };
-    assert!(matches!(
-        measures.as_slice(),
-        [AggIntent::Count { accuracy }] if accuracy.is_exact()
-    ));
+    assert!(matches!(measures.as_slice(), [AggIntent::Count]));
 }

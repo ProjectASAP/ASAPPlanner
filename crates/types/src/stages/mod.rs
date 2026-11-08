@@ -13,26 +13,25 @@ mod memo;
 mod per_computation_logical_memo_candidates;
 mod physical;
 mod pruning;
-mod realizer;
 
 pub use candidates::{
-    parameter_list, producer_satisfies_logical_requirements, CandidateError, CandidateExpression,
-    CandidateForMemoGroup, CandidateForMemoGroupId, ErrorPropagation, LogicalProperties,
-    LogicalPropertiesError, LogicalRequirements, Memo, OriginOfCandidateForMemoGroup,
+    parameter_list, CandidateError, CandidateExpression, CandidateForMemoGroup,
+    CandidateForMemoGroupId, ErrorPropagation, LogicalProperties, LogicalPropertiesError,
+    LogicalRequirements, Memo, OriginOfCandidateForMemoGroup, RequiredAccuracy,
 };
 pub use logical_memo_candidates::{
     LogicalASAPMemoCandidates, LogicalEdge, PruneCause, PrunedLogicalCandidate, RootPruneReason,
 };
 pub(crate) use memo::MemoGroupAsInput;
-pub use memo::{queries_rooted_at, root_groups, GroupProperties, MemoGroup, MemoGroupId};
+pub use memo::{
+    queries_rooted_at, root_groups, GroupProperties, MemoGroup, MemoGroupId, ValueSign,
+};
 pub use per_computation_logical_memo_candidates::{
     ComputationTarget, FusedComputation, HavingEntry, HavingPlacement, HowToComputeAggregateMeasure,
 };
 pub use physical::{
-    output_references, producer_satisfies_physical_requirements, DagOfSelectedCandidates,
-    ExecutionContext, ExecutionContextId, PhysicalASAPMemoCandidates, PhysicalCandidate,
-    PhysicalCandidateId, PhysicalEdge, PhysicalEdgeId, RefreshWindowId, SelectedEdge,
-    SelectedNodeId,
+    output_references, producer_satisfies_physical_requirements, EvaluationGrid, ExecutionContext,
+    ExecutionContextId, PhysicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateId,
+    PhysicalEdge, PhysicalEdgeId,
 };
 pub use pruning::{PruneReason, PrunedCandidate};
-pub use realizer::{AssignmentRealizer, PhysicalCandidateError, RealizedPlan};

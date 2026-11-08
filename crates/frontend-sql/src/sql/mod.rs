@@ -67,7 +67,6 @@ use asap_types::ir::schema::{DataType, FieldDataType, Schema};
 use asap_types::ir::TimeRangeKind;
 
 use asap_types::ir::operator::{JoinKind, RelationalSetOpKind, WindowFuncKind};
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::{resolve_column_ref, ColumnRef, CompareOpKind, ScalarValue};
 use asap_types::workload::SqlDialect;
 
@@ -89,9 +88,6 @@ use self::types::{arrow_to_dtype, scalar_value_to_asap, schema_to_arrow};
 pub(crate) struct SqlLowerer<'a> {
     catalog: &'a SqlCatalog,
     dialect: SqlDialect,
-    /// The target [`lower`](Self::lower) threads onto every approximate
-    /// intent; exact until a `lower` call sets it.
-    accuracy: AccuracyTarget,
 }
 
 impl<'a> SqlLowerer<'a> {
@@ -109,16 +105,10 @@ impl<'a> SqlLowerer<'a> {
     /// still unknown to DataFusion's planner and still fails there, and
     /// `ElasticSQL` has no vendored parser at all.
     pub(crate) fn with_dialect(catalog: &'a SqlCatalog, dialect: SqlDialect) -> Self {
-        Self {
-            catalog,
-            dialect,
-            accuracy: AccuracyTarget::exact(),
-        }
+        Self { catalog, dialect }
     }
 
-    /// Parse + lower a SQL query to the name-based tree, threading
-    /// `accuracy` onto every approximate intent (`Count`, `Quantile`,
-    /// `Cardinality`) as it is built.
+    /// Parse + lower a SQL query to the name-based tree.
     ///
     /// Runs `ApplyFunctionRewrites` — the single `AnalyzerRule` DataFusion's
     /// own `Analyzer` uses internally to apply `FunctionRewrite`s, called
@@ -140,11 +130,7 @@ impl<'a> SqlLowerer<'a> {
     /// check would. Going straight to `ApplyFunctionRewrites` avoids that
     /// entirely. TypeCoercion then records implicit conversions explicitly,
     /// including timestamp literals in predicates, before IR validation.
-    pub(crate) async fn lower(
-        &mut self,
-        sql: &str,
-        accuracy: &AccuracyTarget,
-    ) -> Result<Unresolved, LoweringError> {
+    pub(crate) async fn lower(&self, sql: &str) -> Result<Unresolved, LoweringError> {
         let ctx = self.build_context()?;
         let state = ctx.state();
         let statement = if matches!(self.dialect, SqlDialect::ClickhouseSQL) {
@@ -201,7 +187,6 @@ impl<'a> SqlLowerer<'a> {
         let plan = datafusion::optimizer::analyzer::type_coercion::TypeCoercion::new()
             .analyze(plan, &ctx.state().options())?;
         let plan = drop_integer_decimal_widening(plan)?;
-        self.accuracy = accuracy.clone();
         self.lower_plan(&plan)
     }
 
@@ -859,7 +844,7 @@ impl<'a> SqlLowerer<'a> {
             .collect();
         let measures = aggr_expr
             .iter()
-            .map(|e| lower_agg_intent(e, &self.accuracy))
+            .map(lower_agg_intent)
             .collect::<Result<Vec<_>, LoweringError>>()?;
         // Empty when nothing is filtered — the one canonical unfiltered shape.
         let filters = if measure_filters.iter().any(Option::is_some) {
@@ -1106,7 +1091,7 @@ impl<'a> SqlLowerer<'a> {
             .collect::<Result<Vec<_>, LoweringError>>()?;
         let measures = aggr_expr
             .iter()
-            .map(|e| lower_agg_intent(e, &self.accuracy))
+            .map(lower_agg_intent)
             .collect::<Result<Vec<_>, LoweringError>>()?;
         let input = derived.wrap(input)?;
 
@@ -1701,17 +1686,14 @@ fn conditional_count_arm(expr: &Expr) -> Option<(&Expr, &Expr)> {
 /// (issue #225) as flat data (`NATIVE_FUNCTIONS`); what stays here is
 /// call-site logic that isn't a function of the name alone — the DISTINCT
 /// modifier rule, the "reducer argument must be a bare column" rule
-/// (`reducer_col`), φ extraction from a literal argument, and attaching
-/// `accuracy` to approximate intents. `resolve_root` resolves `col` to a positional
+/// (`reducer_col`) and φ extraction from a literal argument. `resolve_root`
+/// resolves `col` to a positional
 /// `ColumnId`; the output name (DataFusion's own, e.g.
 /// `"sum(metrics.bytes)"`) is threaded separately as `Aggregate.output_names`,
 /// not carried here.
-fn lower_agg_intent(
-    expr: &Expr,
-    accuracy: &AccuracyTarget,
-) -> Result<AggIntent<ColumnRef>, LoweringError> {
+fn lower_agg_intent(expr: &Expr) -> Result<AggIntent<ColumnRef>, LoweringError> {
     match expr {
-        Expr::Alias(a) => lower_agg_intent(&a.expr, accuracy),
+        Expr::Alias(a) => lower_agg_intent(&a.expr),
         Expr::AggregateFunction(agg_fn) => {
             let name = agg_fn.func.name().to_lowercase();
             // ClickHouse's row-selecting `argMax`/`argMin` — `RewriteKind::
@@ -1775,12 +1757,9 @@ fn lower_agg_intent(
                     }
                     args => AggIntent::Cardinality {
                         cols: args.iter().map(distinct_col).collect::<Result<_, _>>()?,
-                        accuracy: accuracy.clone(),
                     },
                 },
-                AggSemantic::Count => AggIntent::Count {
-                    accuracy: accuracy.clone(),
-                },
+                AggSemantic::Count => AggIntent::Count,
                 AggSemantic::Sum => AggIntent::Sum {
                     col: col(&agg_fn.params.args)?,
                 },
@@ -1820,11 +1799,9 @@ fn lower_agg_intent(
                             _ => extract_percentile_q(&agg_fn.params.args)?,
                         },
                     },
-                    accuracy: accuracy.clone(),
                 },
                 AggSemantic::Cardinality => AggIntent::Cardinality {
                     cols: vec![reducer_col(&name, &agg_fn.params.args)?],
-                    accuracy: accuracy.clone(),
                 },
             })
         }

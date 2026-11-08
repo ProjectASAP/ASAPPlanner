@@ -437,21 +437,12 @@ impl Planner {
             ),
         }
         .map_err(|e| e.to_string())?;
-        let selection = run
+        let (_plan, _selection) = run
             .run
             .selection
             .as_ref()
             .map_err(|e| format!("selection: {e}"))?;
-        let cost_per_second = selection
-            .cost
-            .cost_per_second
-            .ok_or("no cost per second (cost model 3)")?;
-        Ok(Planned {
-            selected: "selected".into(),
-            cost_per_second,
-            stage0_roots: roots,
-            logical_roots: run.run.selected_plan.as_ref().cloned(),
-        })
+        todo!("#1207 PR 9: the selected plan's cost (plan_cost) and roots from its PhysicalASAPDAG")
     }
 
     /// Stage 2 and Stage 3 over the logical plan `roots` of `workload`'s

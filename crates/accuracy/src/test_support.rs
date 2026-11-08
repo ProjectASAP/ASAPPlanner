@@ -7,7 +7,6 @@ use std::rc::Rc;
 use asap_types::ir::operator::operator_properties::Reduction;
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::guarantee::AccuracyGuarantee;
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{
     FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic, SummaryUpdate,
 };
@@ -72,19 +71,6 @@ pub fn source_distinct_guarantee(
     propagation::source_distinct_guarantee(family, query, input)
 }
 
-/// `crate::satisfies`.
-pub fn satisfies(guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool {
-    crate::satisfies(guarantee, target)
-}
-
-/// `crate::estimators::local_guarantee`.
-pub fn local_guarantee(
-    family: &FieldDataType,
-    query: &SketchStatistic,
-) -> Option<AccuracyGuarantee> {
-    crate::estimators::local_guarantee(family, query)
-}
-
 /// `crate::estimators::cms::cms_width`.
 pub fn cms_width(eps: f64) -> u32 {
     crate::estimators::cms::cms_width(eps)
@@ -109,9 +95,6 @@ pub fn default_size_params(
 ) -> SketchParams {
     crate::sizing::default_size_params(kind, intent, eps, delta)
 }
-
-/// `crate::sizing::DEFAULT_DELTA`.
-pub const DEFAULT_DELTA: f64 = crate::sizing::DEFAULT_DELTA;
 
 /// `crate::composition::QUOTIENT_OPERAND_DOMAINS`.
 pub const QUOTIENT_OPERAND_DOMAINS: &str = crate::composition::QUOTIENT_OPERAND_DOMAINS;

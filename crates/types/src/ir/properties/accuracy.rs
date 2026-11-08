@@ -318,9 +318,7 @@ pub fn default_metric_for_root(root: &QueryRoot) -> Option<AccuracyMetric> {
 /// intents without a listed default.
 fn intent_metric(intent: &AggIntent) -> Option<AccuracyMetric> {
     match intent {
-        AggIntent::Count { .. } | AggIntent::TopK { .. } => {
-            Some(AccuracyMetric::ABSOLUTE_STREAM_L1)
-        }
+        AggIntent::Count | AggIntent::TopK { .. } => Some(AccuracyMetric::ABSOLUTE_STREAM_L1),
         AggIntent::Cardinality { .. } | AggIntent::FrequencyL2 { .. } => {
             Some(AccuracyMetric::Relative)
         }
@@ -538,11 +536,7 @@ mod tests {
     }
 
     fn quantile() -> AggIntent {
-        AggIntent::Quantile {
-            col: None,
-            q: 0.99,
-            accuracy: AccuracyTarget::max_error(0.01),
-        }
+        AggIntent::Quantile { col: None, q: 0.99 }
     }
 
     /// A target reads and writes as a plain struct: every field but
@@ -629,9 +623,7 @@ mod tests {
         });
         let count = node(NonASAPOp::Aggregate {
             reduction: Reduction::PerEntity,
-            measures: vec![AggIntent::Count {
-                accuracy: AccuracyTarget::max_error(0.01),
-            }],
+            measures: vec![AggIntent::Count],
             output_names: vec![],
             filters: vec![],
             having: None,
@@ -652,43 +644,25 @@ mod tests {
     #[test]
     fn root_metric_defaults_follow_the_query_intent() {
         let metric = |intent: AggIntent| default_metric_for_root(&aggregate(vec![intent])).unwrap();
-        let exact = AccuracyTarget::exact();
-        assert_eq!(
-            metric(AggIntent::Count {
-                accuracy: exact.clone()
-            }),
-            AccuracyMetric::ABSOLUTE_STREAM_L1
-        );
+        assert_eq!(metric(AggIntent::Count), AccuracyMetric::ABSOLUTE_STREAM_L1);
         assert_eq!(
             metric(AggIntent::Sum { col: None }),
             AccuracyMetric::ABSOLUTE
         );
         assert_eq!(
-            metric(AggIntent::TopK {
-                k: 5,
-                accuracy: exact.clone()
-            }),
+            metric(AggIntent::TopK { k: 5 }),
             AccuracyMetric::ABSOLUTE_STREAM_L1
         );
         assert_eq!(
-            metric(AggIntent::Cardinality {
-                cols: vec![],
-                accuracy: exact.clone()
-            }),
+            metric(AggIntent::Cardinality { cols: vec![] }),
             AccuracyMetric::Relative
         );
         assert_eq!(
-            metric(AggIntent::FrequencyL2 {
-                col: None,
-                accuracy: exact.clone()
-            }),
+            metric(AggIntent::FrequencyL2 { col: None }),
             AccuracyMetric::Relative
         );
         assert_eq!(
-            metric(AggIntent::FrequencyEntropy {
-                col: None,
-                accuracy: exact.clone()
-            }),
+            metric(AggIntent::FrequencyEntropy { col: None }),
             AccuracyMetric::ABSOLUTE
         );
         assert_eq!(
@@ -711,15 +685,10 @@ mod tests {
         use crate::ir::operator::operator_properties::JoinKind;
         use crate::ir::scalar::{CompareOpKind, ScalarValue};
         use crate::ir::{Predicate, ProjectItem};
-        let exact = AccuracyTarget::exact();
-        let QueryRoot::Operator(l2) = aggregate(vec![AggIntent::FrequencyL2 {
-            col: None,
-            accuracy: exact.clone(),
-        }]) else {
+        let QueryRoot::Operator(l2) = aggregate(vec![AggIntent::FrequencyL2 { col: None }]) else {
             unreachable!()
         };
-        let QueryRoot::Operator(count) = aggregate(vec![AggIntent::Count { accuracy: exact }])
-        else {
+        let QueryRoot::Operator(count) = aggregate(vec![AggIntent::Count]) else {
             unreachable!()
         };
         let joined = node(NonASAPOp::Join {

@@ -25,8 +25,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use asap_cost::{NodePriceSource, OperatorKind};
-use asap_plan_selection::{SearchReport, Selection};
+use asap_cost::{NodeCostSource, OperatorKind, PlanCost};
 use asap_types::deployment_capabilities::DeploymentCapabilities;
 use asap_types::ir::materialized_view::{
     IngestionRefreshGroup, InstallableDagError, MaterializedView, RawDataRetention,
@@ -38,7 +37,6 @@ use asap_types::ir::physical_export::{
 };
 use asap_types::ir::properties::ExecutionTiming;
 
-use asap_types::stages::RealizedPlan;
 use asap_types::workload::QueryWorkloadEntry;
 use serde::{Deserialize, Serialize};
 
@@ -46,7 +44,7 @@ use crate::{e2e_plan, PlanError, UserInput};
 
 /// The version of the plan-file format [`InstallablePlan`] serializes to:
 /// the DAG, its nodes' fields and the query texts.
-pub const INSTALLABLE_PLAN_WIRE_VERSION: u32 = 13;
+pub const INSTALLABLE_PLAN_WIRE_VERSION: u32 = 14;
 
 /// The selected plan, ready to install and execute: what
 /// [`plan_installable`] returns and a runtime writes as its plan file.
@@ -65,7 +63,8 @@ pub struct InstallablePlan {
     pub query_texts: Vec<String>,
 }
 
-/// What Stage 3 recorded about the plan it selected, for reporting.
+/// The selected plan's cost (`asap_cost::plan_cost` of the plan), for
+/// reporting.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SelectedPlanReport {
@@ -75,15 +74,6 @@ pub struct SelectedPlanReport {
     /// The resources Stage 3 predicts it uses, for a runtime to report
     /// against what it measures.
     pub predicted_usage: PredictedUsage,
-    /// How the search behind the selection ended (`Selection::search_report`).
-    pub search_report: SearchReport,
-    /// The workload queries (entry indices) whose output Stage 3 accepted
-    /// only because the accuracy model accepts it regardless of its
-    /// guarantee (e.g. `PlanningModels::ignore_accuracy_guarantees`):
-    /// the guarantee check would have rejected it. Empty when every
-    /// output's guarantee meets its target; omitted from JSON then.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub queries_accepted_without_guarantee: Vec<usize>,
 }
 
 /// What Stage 3 predicts the selected plan uses, per second of wall time
@@ -134,7 +124,7 @@ pub struct PredictedNodeUsage {
     /// 2 and 3.
     pub cost_per_second: Option<f64>,
     /// Whether its CPU came from the measured cost table or the formulas.
-    pub price_source: NodePriceSource,
+    pub cost_source: NodeCostSource,
 }
 
 /// One query's predicted latency per evaluation.
@@ -176,10 +166,6 @@ pub enum InstallablePlanError {
     /// [`InstallableDagError`]).
     #[error("{0}")]
     Uninstallable(InstallableDagError),
-    /// Internal bug: Stage 3 records a tumbling-window retention for node `node_id`
-    /// of the selected plan, which is not one of its tumbling-window chains.
-    #[error("tumbling-window retention for node {node_id}, which is not a tumbling-window chain of the selected plan")]
-    TumblingWindowRetentionOfUnknownChain { node_id: PhysicalASAPNodeId },
     /// Unsatisfiable request: the executor cannot refresh materialized view
     /// `node_id` from its inputs (`reason`); for a refresh group, `node_id`
     /// is its first view and `reason` names every view compiled with it.
@@ -206,9 +192,8 @@ impl From<InstallableDagError> for InstallablePlanError {
 
 /// Plan `input` for a deployment runtime: the query-language frontends and
 /// Stages 1-3 as [`e2e_plan`] runs them, returning the single selected DAG
-/// ready to install, and beside it Stage 3's report of the selection
-/// (`None` for a pass that selects without pricing), which is not part of
-/// the plan file. Supported summaries the caller leaves unrestricted
+/// ready to install, and beside it the plan's cost report, which is not
+/// part of the plan file. Supported summaries the caller leaves unrestricted
 /// (`DeploymentCapabilities::supported_summaries` `None`) default to the
 /// families the Planner's executor runs; raw-data and query-time-result
 /// retention stay the caller's. Stage 3 does not compile candidates;
@@ -230,19 +215,18 @@ pub async fn plan_installable(
     };
     let output = e2e_plan(input).await?;
     let _ = (output, entries);
-    todo!("#1207 PR 6: install the plan the realizer built from the selected DAG")
+    todo!("#1207 PR 6: install the plan Stage 3 built, with its plan_cost report")
 }
 
-/// The installable plan of `realized`, the plan the realizer
-/// (`AssignmentRealizer::realize`) built from the selected DAG of a
-/// workload whose entries are `entries` (in `QueryWorkload::entries()`
-/// order), with Stage 3's report of its `selection` when there is one: what
-/// [`plan_installable`] returns after planning. A caller that runs the
-/// planning stages itself (e.g. a developer tool) uses it to see what a
+/// The installable plan of `plan`, the plan Stage 3 built for a workload
+/// whose entries are `entries` (in `QueryWorkload::entries()` order), with
+/// the report of its `cost` (`asap_cost::plan_cost` of `plan`) when there is
+/// one: what [`plan_installable`] returns after planning. A caller that runs
+/// the planning stages itself (e.g. a developer tool) uses it to see what a
 /// runtime would install.
 pub fn installable_plan_of(
-    realized: &RealizedPlan,
-    selection: Option<&Selection>,
+    plan: &PhysicalASAPDAG,
+    cost: Option<&PlanCost>,
     entries: &[QueryWorkloadEntry],
 ) -> Result<(InstallablePlan, Option<SelectedPlanReport>), InstallablePlanError> {
     // Each query's longest range-evaluation span, which the views it
@@ -252,8 +236,8 @@ pub fn installable_plan_of(
         .map(|entry| entry.range_evaluation.map_or(0, |range| range.span_ms))
         .collect();
     let query_texts: Vec<String> = entries.iter().map(|entry| entry.query.0.clone()).collect();
-    let expanded = tumbling_window_retention_of_expanded_tumbling_windows(realized)?;
-    let report = selection.map(|selection| report_of(selection, &expanded.installed_node_ids));
+    let expanded = tumbling_window_retention_of_expanded_tumbling_windows(plan)?;
+    let report = cost.map(|cost| report_of(cost, &expanded.installed_node_ids));
     let reader_span_ms_by_node = reader_span_ms_by_node(&expanded.dag, &range_spans_ms);
     let plan = InstallablePlan::of_dag(
         expanded.dag,
@@ -612,31 +596,21 @@ struct ExpandedWithRetention {
     installed_node_ids: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
 }
 
-/// The realized plan's DAG with its tumbling-window chains expanded; each
-/// tumbling window takes the retention Stage 2 gives its chain
-/// (`RealizedPlan::tumbling_window_retention_ms`).
+/// The plan's DAG with its tumbling-window chains expanded; each tumbling
+/// window takes its chain's retention (`retention_ms`, Stage 3's $h_v$).
 fn tumbling_window_retention_of_expanded_tumbling_windows(
-    realized: &RealizedPlan,
+    plan: &PhysicalASAPDAG,
 ) -> Result<ExpandedWithRetention, InstallablePlanError> {
-    let _ = realized;
-    todo!("#1207 PR 6: expand the realized DAG's tumbling-window chains")
+    let _ = plan;
+    todo!("#1207 PR 6: expand the plan's tumbling-window chains")
 }
 
-/// Stage 3's record of its selected plan.
+/// The report of the selected plan's `cost`.
 fn report_of(
-    selection: &Selection,
+    cost: &PlanCost,
     installed_node_ids: &HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
 ) -> SelectedPlanReport {
-    let cost = &selection.cost;
-    let queries_accepted_without_guarantee = selection
-        .accepted_accuracy_per_query
-        .iter()
-        .enumerate()
-        .filter(|(_, accepted)| accepted.guarantee_check_rejection.is_some())
-        .map(|(query, _)| query)
-        .collect();
     SelectedPlanReport {
-        queries_accepted_without_guarantee,
         cost_per_second: cost.cost_per_second,
         predicted_usage: PredictedUsage {
             cpu_core_seconds_per_second: cost
@@ -659,7 +633,7 @@ fn report_of(
                     timing: node.timing,
                     cpu_core_seconds_per_second: node.cpu_core_seconds_per_second,
                     cost_per_second: node.cost_per_second,
-                    price_source: node.price_source,
+                    cost_source: node.cost_source,
                 })
                 .collect(),
             per_query: cost
@@ -672,7 +646,6 @@ fn report_of(
                 })
                 .collect(),
         },
-        search_report: selection.search_report.clone(),
     }
 }
 
@@ -708,7 +681,7 @@ mod tests {
                   "predictability": {"predictable": {"known_at": null}}}]},
                 "data_workload": {"arrival": {"ingesting": {"rows_per_second": 10000.0}},
                   "sources": {"data": {"series_count": 1000, "metric_type": "gauge",
-                      "sample_interval": 100, "values_non_negative": true}}}}"#,
+                      "sample_interval": 100, "column_signs": {"value": "non_negative"}}}}}"#,
         )
         .unwrap();
         let capabilities = DeploymentCapabilities {

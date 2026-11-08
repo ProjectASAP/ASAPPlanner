@@ -4,6 +4,7 @@ pub mod parsed_workload;
 use std::collections::BTreeMap;
 
 use crate::ir::properties::AccuracyTarget;
+use crate::stages::ValueSign;
 use serde::{Deserialize, Serialize};
 
 // ── Query surface ─────────────────────────────────────────────────────────────
@@ -516,7 +517,7 @@ pub struct DataWorkload {
     pub arrival: DataArrival,
     /// Facts per source, keyed by PromQL metric name or SQL table name
     /// (default: none). A declared histogram or summary is keyed by its
-    /// family name; its `metric_type`, `values_non_negative` and
+    /// family name; its `metric_type`, `column_signs` and
     /// `sample_interval` apply to every series of the family
     /// ([`Self::series_facts`]). Counts, norms and bounds (`series_count`,
     /// `stream_norms`, …) differ per series name (a `foo_bucket` has one
@@ -546,15 +547,14 @@ pub struct SourceFacts {
     /// `_bucket`; an undeclared metric's samples may take any value.
     #[serde(default)]
     pub metric_type: Option<PrometheusMetricType>,
-    /// Whether every sample of the metric is non-negative (default `false`:
-    /// unknown). A counter's samples always are; this declares it for a
-    /// gauge, such as a latency or a queue length. The deployment must
-    /// ensure it. Plan selection reads it as the sign of the metric's
-    /// samples, which a relative-error bound needs to carry through a
-    /// `sum` or `avg`, and as proof that Count-Min weights over the raw
-    /// samples are non-negative. Omitted from JSON when `false`.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub values_non_negative: bool,
+    /// The declared sign of each column's values, keyed by column name
+    /// (default: none declared), e.g. `{"value": "non_negative"}` for a
+    /// latency gauge. A `Scan`'s `column_sign` reads it; an undeclared
+    /// column is `Unknown`, except a PromQL counter's value, which is
+    /// non-negative without a declaration. The deployment must ensure it.
+    /// Omitted from JSON when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub column_signs: BTreeMap<String, ValueSign>,
     /// How often each series of the metric (or group of rows of a SQL
     /// table) receives a sample (default: unknown). A PromQL or MetricsQL
     /// bare instant selector over the metric reads the latest sample within it; lowering such a
@@ -1633,7 +1633,10 @@ mod tests {
                     SourceFacts {
                         series_count: Some(10_000),
                         metric_type: Some(PrometheusMetricType::Counter),
-                        values_non_negative: true,
+                        column_signs: BTreeMap::from([(
+                            "value".to_string(),
+                            ValueSign::NonNegative,
+                        )]),
                         sample_interval: Some(DurationMs(15_000)),
                         stream_norms: Some(StreamNorms {
                             l1: Some(1e9),
@@ -1662,7 +1665,7 @@ mod tests {
                 "sources": {"requests_total": {
                     "series_count": 10000,
                     "metric_type": "counter",
-                    "values_non_negative": true,
+                    "column_signs": {"value": "non_negative"},
                     "sample_interval": 15000,
                     "stream_norms": {"l1": 1e9, "l2": null},
                     "max_distinct_per_evaluation": 100,

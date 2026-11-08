@@ -6,8 +6,8 @@ use asap_executor::operators::{Operator, RowWeight};
 use asap_executor::plan::PhysicalDAG;
 use asap_executor::planner::ir::scalar::ColumnRef;
 use asap_executor::planner::ir::schema::{
-    DataType, ExactKind, ExactParams, Field, FieldDataType, GroupingStrategy, HydraKind, Schema,
-    SketchAlgorithm, SketchParams, SketchStatistic,
+    DataType, ExactKind, ExactParams, Field, FieldDataType, Schema, SketchAlgorithm, SketchParams,
+    SketchStatistic,
 };
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::summary_kernels::weighted_frequency::WeightedFrequency;
@@ -92,7 +92,7 @@ fn input_batch() -> Batch {
 }
 
 fn sketch(algorithm: SketchAlgorithm, _params: SketchParams) -> FieldDataType {
-    FieldDataType::Sketch(algorithm, Default::default())
+    FieldDataType::Sketch(algorithm)
 }
 
 fn exact(kind: ExactKind, params: ExactParams) -> FieldDataType {
@@ -327,12 +327,7 @@ fn an_unknown_group_is_bad_input() {
 
 /// A HydraCms family: one shared grid for all groups.
 fn hydra_family() -> FieldDataType {
-    FieldDataType::Sketch(
-        SketchAlgorithm::Cms,
-        GroupingStrategy::SharedMultiSubpopulation {
-            kind: HydraKind::HydraCms,
-        },
-    )
+    FieldDataType::Sketch(SketchAlgorithm::HydraCms)
 }
 
 /// The per-sample HydraCms build: groups added with their key as series

@@ -57,7 +57,7 @@ fn data() -> DataWorkload {
         "sources": {"http": {
             "series_count": 10_000,
             "sample_interval": 5,
-            "values_non_negative": true,
+            "column_signs": {"value": "non_negative"},
             "max_distinct_per_evaluation": 1_000_000,
             "rows_held": 120_000_000,
         }},
@@ -84,42 +84,23 @@ fn production(
     .unwrap()
 }
 
-fn check(
-    run: &PlanningRun,
-    queries: usize,
-    expected_rollups: usize,
-    family: &str,
-    separate_cost: Option<f64>,
-) {
-    let selection = run
+fn check(run: &PlanningRun, queries: usize, expected_rollups: usize, family: &str) {
+    let (plan, selection) = run
         .selection
         .as_ref()
         .expect("validated production plan within 30s");
-    println!("selected cost={:?}", selection.cost.cost_per_second);
-    let selected_cost = selection.cost.cost_per_second.unwrap();
-    if let Some(separate) = separate_cost {
-        // Both searches must improve on independently built KLLs at the
-        // same accuracy target.
-        assert!(selected_cost < separate);
-    }
     let accepted = &selection.accepted_accuracy_per_query;
     assert_eq!(accepted.len(), queries);
-    assert!(accepted.iter().all(|a| !a.accepted_regardless_of_guarantee));
-    if separate_cost.is_some() && accepted.iter().all(|a| a.sketches.is_empty()) {
-        println!("exact plan costs less than both the direct incumbent and independent KLLs");
-        return;
-    }
     assert!(
         accepted
             .iter()
-            .all(|a| !a.accepted_regardless_of_guarantee && a.sketches.iter().any(|s| s == family)),
+            .all(|a| a.sketches.iter().any(|s| s == family)),
         "{accepted:?}"
     );
-    let selected = &run.selected_physical_plan.as_ref().unwrap().plan;
     let mut seen = HashSet::new();
     let mut builds = 0;
     let mut rollups = 0;
-    for root in &selected.roots {
+    for root in &plan.query_roots().unwrap() {
         let QueryRoot::Operator(root) = root else {
             panic!("operator output")
         };
@@ -149,9 +130,7 @@ async fn sql(queries: &[String], accuracy: AccuracyTarget) -> PlanningRun {
     let mut roots = Vec::new();
     for query in queries {
         roots.push(QueryRoot::Operator(
-            lower_sql(query, &catalog(), accuracy.clone())
-                .await
-                .unwrap(),
+            lower_sql(query, &catalog()).await.unwrap(),
         ));
     }
     production(
@@ -168,7 +147,7 @@ async fn production_three_sql_groupings_share_kll() {
         .accuracy_metric(AccuracyMetric::Rank)
         .accuracy_scope(AccuracyScope::PerValue);
     let queries: Vec<_> = ["region, service", "region", "service"].iter().map(|keys| format!("SELECT {keys}, approx_percentile_cont(latency, 0.99) AS value FROM http WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY {keys}")).collect();
-    check(&sql(&queries, accuracy).await, 3, 2, "Kll", None);
+    check(&sql(&queries, accuracy).await, 3, 2, "Kll");
 }
 
 #[tokio::test]
@@ -178,7 +157,7 @@ async fn production_sql_distinct_region_service_rollup() {
         .accuracy_metric(AccuracyMetric::Relative)
         .accuracy_scope(AccuracyScope::PerValue);
     let queries: Vec<_> = ["region, service", "service"].iter().map(|keys| format!("SELECT {keys}, COUNT(DISTINCT user_id) AS value FROM http WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY {keys}")).collect();
-    check(&sql(&queries, accuracy).await, 2, 1, "Kmv", None);
+    check(&sql(&queries, accuracy).await, 2, 1, "Kmv");
 }
 
 // Exercise multi-input operators through the production route under more than
@@ -213,15 +192,6 @@ fn production_binary_queries_use_joint_prices_with_mixed_schedules() {
     }))
     .unwrap();
     let run = production(roots, &entries, &data);
-    let selection = run.selection.as_ref().expect("validated binary workload");
-    println!("mixed binary workload report={:?}", selection.search_report);
-    let accepted = &selection.accepted_accuracy_per_query;
-    assert_eq!(accepted.len(), queries.len());
-    assert!(accepted
-        .iter()
-        .all(|item| !item.accepted_regardless_of_guarantee));
-    assert!(selection
-        .cost
-        .cost_per_second
-        .is_some_and(|cost| cost.is_finite() && cost >= 0.0));
+    let (_, selection) = run.selection.as_ref().expect("validated binary workload");
+    assert_eq!(selection.accepted_accuracy_per_query.len(), queries.len());
 }

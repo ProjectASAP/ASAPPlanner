@@ -390,6 +390,7 @@ fn global_extrema_bind_with_planner_derived_schema() {
             output_schema: (*output).clone(),
             guarantee: None,
             retention_ms: None,
+            selected_physical_candidate: None,
         };
         let operator = compile_node(&node, std::slice::from_ref(&input))
             .expect("global extremum should bind to its Planner schema");
@@ -558,7 +559,7 @@ fn kll_partial_merge_and_multiple_evaluations_preserve_population() {
     use planner_types::ir::schema::SketchAlgorithm;
 
     let input = schema(&[("v", DataType::Float64, false)]);
-    let family = FieldDataType::Sketch(SketchAlgorithm::Kll, Default::default());
+    let family = FieldDataType::Sketch(SketchAlgorithm::Kll);
     let mut dag = PhysicalDAG::default();
     for (id, range) in [(0, 0..64), (1, 64..128), (2, 0..128)] {
         let rows = range.map(|n| vec![Value::Float64(n as f64)]).collect();
@@ -651,7 +652,7 @@ fn compacted_kll_tumbling_windows_merge_within_the_calibrated_rank_error() {
     let bound = 2.296 / f64::from(K).powf(0.9723);
     let n = (TUMBLING_WINDOW_COUNT * ROWS_PER_TUMBLING_WINDOW) as f64;
     let input = schema(&[("v", DataType::Float64, false)]);
-    let family = FieldDataType::Sketch(SketchAlgorithm::Kll, Default::default());
+    let family = FieldDataType::Sketch(SketchAlgorithm::Kll);
     let build = || {
         Operator::per_group_summary_build(input.clone(), family.clone(), 0, None, vec![]).unwrap()
     };
@@ -933,6 +934,7 @@ fn planner_node(
         ),
         guarantee: None,
         retention_ms: None,
+        selected_physical_candidate: None,
     }
 }
 
@@ -948,20 +950,16 @@ fn round_trip(operator: Operator) -> Operator {
 fn measure_filters_keep_groups_without_matching_rows() {
     use asap_executor::physical_planner::compile_node;
     use planner_types::ir::operator::{AggIntent, GroupKeys, Reduction as Plan};
-    use planner_types::ir::properties::AccuracyTarget;
+
     let (input, rows) = filtered_input();
     let plain = |t: DataType| FieldDataType::Plain(t);
     let node = planner_node(
         PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Aggregate {
             reduction: Plan::Reduce(GroupKeys::by(vec![0])),
             measures: vec![
-                AggIntent::Count {
-                    accuracy: AccuracyTarget::exact(),
-                },
+                AggIntent::Count,
                 AggIntent::Sum { col: Some(1) },
-                AggIntent::Count {
-                    accuracy: AccuracyTarget::exact(),
-                },
+                AggIntent::Count,
             ],
             output_names: vec!["c".into(), "s".into(), "all".into()],
             filters: vec![keep(), keep(), None],
@@ -1020,7 +1018,7 @@ fn filtered_summary_build_keeps_empty_groups() {
     };
     use planner_types::ir::ASAPOp;
     let (input, rows) = filtered_input();
-    let kll = FieldDataType::Sketch(SketchAlgorithm::Kll, Default::default());
+    let kll = FieldDataType::Sketch(SketchAlgorithm::Kll);
     let count = FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count);
     let cases = [
         (
@@ -1043,10 +1041,9 @@ fn filtered_summary_build_keeps_empty_groups() {
         let build = planner_node(
             PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
                 child: 0,
-                family: family.clone(),
+                summary_type: family.clone(),
                 input: SummaryUpdate::column(ColumnRef::Named("x".into())),
                 reduction: Plan::Reduce(GroupKeys::by(vec![0])),
-                grouping: Default::default(),
                 filter: keep(),
             }),
             &[
@@ -1096,10 +1093,9 @@ fn filtered_summary_build_is_rejected_at_ingestion_time() {
         let mut node = planner_node(
             PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
                 child: 0,
-                family: family.clone(),
+                summary_type: family.clone(),
                 input: SummaryUpdate::column(ColumnRef::Named("x".into())),
                 reduction: Plan::Reduce(GroupKeys::by(vec![0])),
-                grouping: Default::default(),
                 filter,
             }),
             &[
@@ -1171,6 +1167,7 @@ fn exact_aggregate_node(
         output_schema: (*schema(&[(name, dtype, false)])).clone(),
         guarantee: None,
         retention_ms: None,
+        selected_physical_candidate: None,
     }
 }
 
@@ -1180,7 +1177,7 @@ fn exact_aggregate_node(
 fn exact_frequency_intents_execute_typed_keys_and_empty_input() {
     use asap_executor::physical_planner::compile_node;
     use planner_types::ir::operator::AggIntent;
-    use planner_types::ir::properties::AccuracyTarget;
+
     for (dtype, values) in [
         (
             DataType::Utf8,
@@ -1202,18 +1199,12 @@ fn exact_frequency_intents_execute_typed_keys_and_empty_input() {
         let input = schema(&[("key", dtype, true)]);
         for (measure, name, expected) in [
             (
-                AggIntent::FrequencyL2 {
-                    col: Some(0),
-                    accuracy: AccuracyTarget::exact(),
-                },
+                AggIntent::FrequencyL2 { col: Some(0) },
                 "frequency_l2",
                 8.0_f64.sqrt(),
             ),
             (
-                AggIntent::FrequencyEntropy {
-                    col: Some(0),
-                    accuracy: AccuracyTarget::exact(),
-                },
+                AggIntent::FrequencyEntropy { col: Some(0) },
                 "frequency_entropy",
                 1.0,
             ),
@@ -1315,20 +1306,14 @@ fn exact_frequency_rejects_non_finite_identities() {
 fn exact_cardinality_binds_and_executes_typed_tuples() {
     use asap_executor::physical_planner::compile_node;
     use planner_types::ir::operator::AggIntent;
-    use planner_types::ir::properties::AccuracyTarget;
+
     let input = schema(&[
         ("key", DataType::Int64, true),
         ("tag", DataType::Utf8, true),
     ]);
     for (cols, expected) in [(vec![0], 2), (vec![0, 1], 3)] {
-        let node = exact_aggregate_node(
-            AggIntent::Cardinality {
-                cols,
-                accuracy: AccuracyTarget::exact(),
-            },
-            "distinct",
-            DataType::Int64,
-        );
+        let node =
+            exact_aggregate_node(AggIntent::Cardinality { cols }, "distinct", DataType::Int64);
         let operator =
             compile_node(&node, std::slice::from_ref(&input)).expect("exact distinct intent binds");
         let rows = vec![

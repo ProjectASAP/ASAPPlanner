@@ -1,4 +1,4 @@
-//! Hydra over Count-Min Sketch (`HydraKind::HydraCms`) over `asap_sketchlib::Hydra`.
+//! Hydra over Count-Min Sketch (`SketchAlgorithm::HydraCms`) over `asap_sketchlib::Hydra`.
 //!
 //! One `shared_rows × shared_columns` grid of Count-Min cells serves every
 //! group: a group hashes to one cell per row, and that cell's Count-Min

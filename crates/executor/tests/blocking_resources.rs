@@ -222,7 +222,7 @@ fn weighted_summary_build_yields_within_a_batch() {
             Operator::source(input.clone(), vec![batch]).unwrap(),
         )
         .unwrap();
-    let family = FieldDataType::Sketch(SketchAlgorithm::CmsWithHeap, Default::default());
+    let family = FieldDataType::Sketch(SketchAlgorithm::CmsWithHeap);
     let operator = Operator::per_group_keyed_summary_build(
         input,
         family,

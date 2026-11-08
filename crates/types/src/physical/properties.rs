@@ -52,7 +52,7 @@ pub enum PhysicalPropertiesError {
 
 /// $p^{\mathrm{phys}}_v = (\tau, \ell)$. [`Self::new`] rejects the invalid
 /// combination (concepts doc, section 2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct PhysicalProperties {
     timing: ExecutionTiming,
     lifetime: Lifetime,

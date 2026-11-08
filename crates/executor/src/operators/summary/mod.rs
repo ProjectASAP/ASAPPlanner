@@ -4,7 +4,7 @@ use crate::values::arrow_columns::ColumnDepth;
 use crate::values::StateColumn;
 use crate::StateColumnUpdater;
 use arrow::array::{Array, BooleanArray, Float64Array, TimestampMillisecondArray, UInt32Array};
-use planner_types::ir::schema::{FamilyCapability, MergeInputRule};
+use planner_types::ir::schema::{MergeInputRule, SummaryTypeCapability};
 use std::num::NonZeroU32;
 
 /// What each input row adds to its item's count in a keyed summary build
@@ -166,7 +166,6 @@ impl Operator {
         crate::capability::validate_summary_kernel(
             &family,
             &SummaryUpdate::column(ColumnRef::SampleValue),
-            &Default::default(),
         )
         .map_err(Error::Invalid)?;
         let mut fields = groups
@@ -286,7 +285,7 @@ impl Operator {
 /// takes Utf8, and UnivMon Utf8 and Bool.
 fn accepts_update_type(family: &SummaryFamilyType, dtype: &DataType) -> bool {
     use planner_types::ir::schema::{ExactKind, SketchAlgorithm as A};
-    let SummaryFamilyType::Sketch(kind, _) = family else {
+    let SummaryFamilyType::Sketch(kind) = family else {
         return *dtype == DataType::Float64
             || matches!(
                 family,
@@ -329,7 +328,7 @@ impl Operator {
 /// output is Int64 and whose updates have unit weight; execution rejects a
 /// non-integral total rather than rounding it.
 fn integral_count(family: &SummaryFamilyType, query: &SummaryEvaluation) -> bool {
-    matches!(family, SummaryFamilyType::Sketch(kind, _)
+    matches!(family, SummaryFamilyType::Sketch(kind)
         if kind == &planner_types::ir::schema::SketchAlgorithm::Cms)
         && matches!(
             query,
@@ -846,7 +845,7 @@ async fn merge_summary(
     };
     // Counter states join consecutive windows pairwise, which is exact only
     // in time order: order the inputs by their window start.
-    if FamilyCapability::of(family).merge_inputs == Some(MergeInputRule::DisjointInTime) {
+    if SummaryTypeCapability::of(family).merge_inputs == Some(MergeInputRule::DisjointInTime) {
         entries.sort_by_cached_key(|&entry| {
             let (states, index) = state_of(entry);
             match states.storage() {

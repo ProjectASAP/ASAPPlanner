@@ -332,15 +332,19 @@ fn p99_avg_workload(values_non_negative: bool) -> PlanningWorkload {
               "predictability": {{"predictable": {{"known_at": null}}}}}}]}},
             "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 10000.0}}}},
               "sources": {{"data": {{"series_count": 1000, "metric_type": "gauge",
-                  "sample_interval": 100, "values_non_negative": {values_non_negative}}}}}}}}}"#
+                  "sample_interval": 100, "column_signs": {{"value": "{sign}"}}}}}}}}}}"#,
+        sign = if values_non_negative {
+            "non_negative"
+        } else {
+            "unknown"
+        }
     ))
     .unwrap()
 }
 
 /// The MVP benchmark's p99 query over an undeclared gauge, which has no
 /// valid plan with the built-in model, gets one with
-/// `ignore_accuracy_guarantees`, and the report marks its output as
-/// accepted without a guarantee.
+/// `ignore_accuracy_guarantees`.
 #[tokio::test]
 async fn ignoring_accuracy_guarantees_plans_the_undeclared_p99_query() {
     let capabilities = DeploymentCapabilities {
@@ -358,8 +362,7 @@ async fn ignoring_accuracy_guarantees_plans_the_undeclared_p99_query() {
     ))
     .await
     .expect("a plan is selected");
-    let report = report.as_ref().expect("Stage 3's report");
-    assert_eq!(report.queries_accepted_without_guarantee, vec![0]);
+    report.as_ref().expect("the plan's cost report");
     assert!(
         plan.raw_data_retention().unwrap().is_empty(),
         "no raw samples read"

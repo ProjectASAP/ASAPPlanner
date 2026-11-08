@@ -3,9 +3,9 @@
 //! from instead of its formulas.
 //!
 //! The Planner defines the table's structure; the deployment's runtime
-//! measures the numbers (e.g. ASAPQuery-backend's `measure_costs`, or
-//! sketch-bench's `rqe_atomic_costs.json` converted by `asap-devtools`'
-//! `convert_rqe_atomic_costs`) and puts the table in
+//! measures the numbers (e.g. sketch-bench's `rqe_atomic_costs.json`
+//! converted by `asap-devtools`' `convert_rqe_atomic_costs`) and puts the
+//! table in
 //! [`CostInputs::measured_operation_costs`]. The planner reads
 //! only this table, never a benchmark file.
 //!
@@ -503,14 +503,14 @@ struct TableFields {
     provenance: Option<CostTableProvenance>,
 }
 
-/// Which prices one node's CPU operations came from. A node is one operator
+/// Which costs one node's CPU operations came from. A node is one operator
 /// node of the candidate's physical plan DAG (`PhysicalASAPDAG`), keyed by
 /// its `PhysicalASAPNodeId` in [`PlanCost::per_node`]; not a machine.
 ///
 /// [`PlanCost::per_node`]: crate::PlanCost::per_node
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum NodePriceSource {
+pub enum NodeCostSource {
     /// Plan selection's formulas (`analytical_cost` and the sketch shapes),
     /// scaled by the calibration factor when the table has entries.
     Analytical,

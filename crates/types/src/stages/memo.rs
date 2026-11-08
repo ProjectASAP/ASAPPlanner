@@ -10,7 +10,7 @@ use crate::ir::schema::Schema;
 use crate::ir::{Operator, OperatorResultKind, QueryRoot};
 
 /// A group, by index in the memo's groups.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
 pub struct MemoGroupId(pub u32);
 
 /// One distinct logical sub-expression of the workload: what it computes
@@ -41,6 +41,8 @@ pub struct MemoGroup {
 pub struct GroupProperties {
     pub schema: Schema,
     pub result_kind: OperatorResultKind,
+    /// Per output column, in schema order: the sign of its values.
+    pub column_sign: Vec<ValueSign>,
     /// What an aggregate group covers: a summary state, a chain, a merge
     /// over a chain's windows, or an exact `Aggregate` result; `None` for
     /// any other group. Derived today for summary states only; exact
@@ -49,6 +51,18 @@ pub struct GroupProperties {
     /// Whether two equal expressions return the same rows for the same
     /// input rows, so they may be one group (not an unordered `LIMIT`).
     pub shareable_when_equal: bool,
+}
+
+/// The sign of one column's values, a group property derived from the
+/// input groups like lineage (concepts doc, section 3, "Value sign"); a
+/// `Scan`'s are declared per column in the data workload's source facts.
+/// Error contracts that hold only for values of one sign read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValueSign {
+    NonNegative,
+    NonPositive,
+    Unknown,
 }
 
 /// A memo group read as an operator's input: its `group_properties` and

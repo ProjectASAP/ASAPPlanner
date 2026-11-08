@@ -52,7 +52,7 @@ pub enum ExactParams {
 /// A specific sketch algorithm — bounded error, sized by its
 /// [`SketchParams`]. It is `asap_sketchlib`'s family enum; the statistics
 /// each answers are its row of the family-capability table
-/// ([`FamilyCapability`](crate::ir::schema::FamilyCapability)). The planner
+/// ([`SummaryTypeCapability`](crate::ir::schema::SummaryTypeCapability)). The planner
 /// sizes and offers only the families [`SketchParams`] has a variant for.
 pub use asap_sketchlib::SketchAlgorithm;
 
@@ -60,39 +60,20 @@ pub use asap_sketchlib::SketchAlgorithm;
 /// `k` at this (`MAX_CACHEABLE_K` in its `sketches::kll`).
 pub const KLL_MAX_K: u32 = 26_602;
 
-/// Concrete, catalog-validated parameters for a specific [`SketchAlgorithm`]
-/// instance. The variant must correspond to the associated `SketchAlgorithm`;
-/// mismatches are caught at post-ASAP bind time, before any later,
-/// deployment-specific stage ever sees the plan.
-///
-/// Equality compares the sketch that is built: a KLL's `failure_probability`
-/// and a UnivMon's `distinct_failure_probability` record what it was sized
-/// for, not its structure, so two KLLs with the same `k` are equal (they
-/// share, and match the same offline evidence), as are two UnivMons of the
-/// same shape.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The structure of a summary of one [`SketchAlgorithm`] (θ): its sizes,
+/// from the algorithm's predefined list (`parameter_list`). No field records
+/// the error or failure probability a configuration was sized for, so
+/// equality compares every field.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SketchParams {
     UnivMon {
         heap_size: u32,
         sketch_rows: u32,
         sketch_cols: u32,
         layers: u8,
-        /// The failure probability the heap was sized for when this
-        /// UnivMon answers a distinct count; its relative error follows from
-        /// it and the heap. `None`: not sized for a distinct count, which
-        /// then has no guarantee. Ignored by equality.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        distinct_failure_probability: Option<f64>,
     },
     Kll {
         k: u32,
-        /// The failure probability `k` was sized for, when below the
-        /// empirical 99% calibration's 0.01; `None` is that calibration.
-        /// Sizing never records `Some(δ)` for δ ≥ 0.01; a hand-built one is
-        /// read as a claim at that δ with the calibration's error bound, and
-        /// one outside (0, 1) gives no guarantee. Ignored by equality.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        failure_probability: Option<f64>,
     },
     Cms {
         width: u32,
@@ -100,12 +81,6 @@ pub enum SketchParams {
     },
     Hll {
         precision: u8,
-        /// The relative error `precision` was sized for (#694): the error
-        /// bound of its guarantee, at which its failure probability is
-        /// evaluated. `None`: not sized for a target; its error bound is
-        /// the relative standard error `1.04/√m`. Ignored by equality.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        relative_error: Option<f64>,
     },
     DDSketch {
         alpha: f64,
@@ -117,12 +92,6 @@ pub enum SketchParams {
     },
     Kmv {
         k: u32,
-        /// The relative error `k` was sized for (#694): the error bound of
-        /// its guarantee, at which its failure probability is evaluated.
-        /// `None`: not sized for a target; its error bound is the relative
-        /// standard error `1/√(k-2)`. Ignored by equality.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        relative_error: Option<f64>,
     },
     CountSketch {
         width: u32,
@@ -133,156 +102,9 @@ pub enum SketchParams {
         depth: u32,
         heap_size: u32,
     },
-    /// The sizes of a Hydra structure shared across subpopulations
-    /// ([`GroupingStrategy::SharedMultiSubpopulation`]): θ, like every other
-    /// family's parameters, not part of the grouping.
+    /// The sizes of a Hydra structure shared across subpopulations, for the
+    /// `Hydra*` algorithms.
     Hydra(HydraParams),
-}
-
-impl PartialEq for SketchParams {
-    fn eq(&self, other: &Self) -> bool {
-        use SketchParams as P;
-        match (self, other) {
-            (P::Kll { k: a, .. }, P::Kll { k: b, .. }) => a == b,
-            (
-                P::UnivMon {
-                    heap_size: a0,
-                    sketch_rows: a1,
-                    sketch_cols: a2,
-                    layers: a3,
-                    ..
-                },
-                P::UnivMon {
-                    heap_size: b0,
-                    sketch_rows: b1,
-                    sketch_cols: b2,
-                    layers: b3,
-                    ..
-                },
-            ) => (a0, a1, a2, a3) == (b0, b1, b2, b3),
-            (
-                P::Cms {
-                    width: a0,
-                    depth: a1,
-                },
-                P::Cms {
-                    width: b0,
-                    depth: b1,
-                },
-            )
-            | (
-                P::CountSketch {
-                    width: a0,
-                    depth: a1,
-                },
-                P::CountSketch {
-                    width: b0,
-                    depth: b1,
-                },
-            ) => (a0, a1) == (b0, b1),
-            (
-                P::CmsWithHeap {
-                    width: a0,
-                    depth: a1,
-                    heap_size: a2,
-                },
-                P::CmsWithHeap {
-                    width: b0,
-                    depth: b1,
-                    heap_size: b2,
-                },
-            )
-            | (
-                P::CountSketchWithHeap {
-                    width: a0,
-                    depth: a1,
-                    heap_size: a2,
-                },
-                P::CountSketchWithHeap {
-                    width: b0,
-                    depth: b1,
-                    heap_size: b2,
-                },
-            ) => (a0, a1, a2) == (b0, b1, b2),
-            (P::Hll { precision: a, .. }, P::Hll { precision: b, .. }) => a == b,
-            (P::DDSketch { alpha: a }, P::DDSketch { alpha: b }) => a == b,
-            (P::Kmv { k: a, .. }, P::Kmv { k: b, .. }) => a == b,
-            (P::Hydra(a), P::Hydra(b)) => a == b,
-            // Different variants. Listed by `self`'s variant, not `_`, so a
-            // new variant fails to compile here until it is compared above.
-            (P::UnivMon { .. }, _)
-            | (P::Kll { .. }, _)
-            | (P::Cms { .. }, _)
-            | (P::Hll { .. }, _)
-            | (P::DDSketch { .. }, _)
-            | (P::CmsWithHeap { .. }, _)
-            | (P::Kmv { .. }, _)
-            | (P::CountSketch { .. }, _)
-            | (P::CountSketchWithHeap { .. }, _)
-            | (P::Hydra(_), _) => false,
-        }
-    }
-}
-
-/// A committed sketch choice: the concrete [`SketchAlgorithm`] and the
-/// [`SketchParams`] realizing it. Sits between
-/// [`FieldDataType::Sketch`](crate::ir::schema::FieldDataType::Sketch)
-/// (the `Sketch` family as a whole, sibling to `SummarySample`/`Wavelet`/
-/// `StatModel`) and the bare algorithm. Which statistics a state of the
-/// kind answers is the family-capability table's
-/// ([`FamilyCapability`](crate::ir::schema::FamilyCapability)).
-///
-/// Construct through [`SketchKind::new`], which rejects parameters of a
-/// different algorithm. See `asap_logical_asap_optimization::summary_candidates` for the
-/// `AggIntent -> [SketchAlgorithm]` candidate list.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SketchKind {
-    algorithm: SketchAlgorithm,
-    params: SketchParams,
-}
-
-impl SketchKind {
-    /// The kind of `algorithm` with `params`. Panics when `params` belongs
-    /// to a different algorithm; invalid committed sketch states cannot be
-    /// constructed.
-    pub fn new(algorithm: SketchAlgorithm, params: SketchParams) -> Self {
-        let valid_params = matches!(
-            (&algorithm, &params),
-            (SketchAlgorithm::Kll, SketchParams::Kll { .. })
-                | (SketchAlgorithm::UnivMon, SketchParams::UnivMon { .. })
-                | (SketchAlgorithm::DDSketch, SketchParams::DDSketch { .. })
-                | (SketchAlgorithm::Hll, SketchParams::Hll { .. })
-                | (SketchAlgorithm::Kmv, SketchParams::Kmv { .. })
-                | (SketchAlgorithm::Cms, SketchParams::Cms { .. })
-                | (
-                    SketchAlgorithm::CountSketch,
-                    SketchParams::CountSketch { .. }
-                )
-                | (
-                    SketchAlgorithm::CmsWithHeap,
-                    SketchParams::CmsWithHeap { .. }
-                )
-                | (
-                    SketchAlgorithm::CountSketchWithHeap,
-                    SketchParams::CountSketchWithHeap { .. }
-                )
-        );
-        assert!(
-            valid_params,
-            "SketchKind parameter mismatch: algorithm={algorithm:?}, params={params:?}"
-        );
-        Self { algorithm, params }
-    }
-
-    /// The algorithm this kind committed to.
-    pub fn algorithm(&self) -> &SketchAlgorithm {
-        &self.algorithm
-    }
-
-    /// The parameters this kind committed to.
-    pub fn params(&self) -> &SketchParams {
-        &self.params
-    }
 }
 
 // ── Sampling summaries ───────────────────────────────────────────────────────
@@ -356,101 +178,20 @@ pub enum StatModelParams {
     },
 }
 
-// ── Grouping strategy: per-subpopulation vs. shared multi-subpopulation
-//    (Hydra) — issue #256 ──────────────────────────────────────────────────
-//
-// A grouped aggregate (`GROUP BY city, quantile(...)`) has always implicitly
-// built one independent summary instance per distinct `by` key — there was
-// no type anywhere expressing that as a *choice* rather than a foregone
-// conclusion. Hydra (Manousis et al., VLDB 2022 — see `HydraKind`'s own doc
-// for the full citation and which variants are its actual proven
-// construction) is the alternative: one shared structure serving every
-// subpopulation instead of N independent instances, trading memory/build
-// cost against per-subpopulation isolation.
-//
-// This axis is deliberately modeled here, alongside `SketchKind`/
-// `SamplingKind`/`WaveletKind`/`StatModelKind`, rather than as a new
-// `SketchKind` (or `SamplingKind`, etc.) entry: it is orthogonal to *which*
-// family/kind answers an intent — any family could in principle grow its own
-// per-subpopulation vs. shared-multi-subpopulation variant, so it is a
-// second, independent axis, not a member of any one family's own kind
-// vocabulary. It is legal only for a grouped aggregate (a non-empty `by`)
-// whose family has a Hydra variant (CMS or Count-Sketch); the planner does
-// not offer it as a candidate yet (#703).
+// ── Hydra: one structure shared by every subpopulation ─────────────────────
 
-/// A shared-multi-subpopulation summary family — one physical structure
-/// serving every subpopulation of a grouped aggregate instead of one
-/// independent instance per distinct `by` key. Named after Hydra (Manousis,
-/// Cheng, Ben Basat, Liu, Sekar. "Enabling Efficient and General
-/// Subpopulation Analytics in Multidimensional Data Streams." VLDB 2022).
-///
-/// Orthogonal to [`SketchKind`]/[`SamplingKind`]/[`WaveletKind`]/
-/// [`StatModelKind`] the same way [`GroupingStrategy`] as a whole is
-/// orthogonal to them.
-///
-/// ## Which variants are the paper's own proven construction, and which aren't
-///
-/// Hydra's accuracy proof (paper §4.5, Theorem 2) is over one specific
-/// construction: hash each subpopulation into one of a shared w×r grid of
-/// **linear, mergeable frequency-vector sketches** — the paper's own
-/// heavy-hitter substrate is Count-Sketch (§4.3); Count-Min Sketch is the
-/// same collision algebra — and bound the noise a colliding subpopulation's
-/// estimate picks up from the others sharing its cell.
-/// [`HydraKind::HydraCms`]/[`HydraKind::HydraCountSketch`] are exactly that
-/// construction over this crate's existing `SketchAlgorithm::Cms`/
-/// `CountSketch`, so the paper's bound applies to them directly.
-///
-/// [`HydraKind::HydraKll`] is **not** an instance of that proven
-/// construction: KLL is an order-statistics sketch, not a linear frequency
-/// vector, and has no analogous "sum the colliding contributions, bound the
-/// noise" algebra. The paper is explicit that its own construction cannot
-/// serve quantiles at all (§4.3: "A statistic that cannot directly be
-/// estimated by Hydra-sketch is quantiles."). `HydraKll` remains available
-/// as an explicit experimental IR value, but must not be exposed to
-/// semantics-preserving replacement search: no error bound is
-/// modeled for it (see [`HydraParams::HydraKll`]'s own doc). Enable automatic
-/// selection only alongside an actual proof and error model.
-///
-/// Not yet modeled: `HydraUnivMon`. The paper's own named "Hydra-sketch" is
-/// really the universal-sketch composition (L layers of Count-Sketch plus a
-/// heavy-hitter heap, Theorems 1+2 combined) estimating entropy/L1-norm/
-/// L2-norm/cardinality/frequency-moments as one instance. Standalone UnivMon
-/// and its frequency evaluations are represented here, but sharing a Hydra
-/// grid across populations still needs its own collision/error contract;
-/// standalone support does not establish that contract.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum HydraKind {
-    /// Hydra over a KLL-family quantile sketch. See this type's own doc:
-    /// **not** an instance of the paper's proven construction — the paper
-    /// excludes quantiles from Hydra-sketch entirely. Kept only as an
-    /// explicit experimental representation; automatic replacement search
-    /// must not treat it as equivalent to independent instances.
-    HydraKll,
-    /// Hydra over Count-Min Sketch: a direct instance of the paper's proven
-    /// w×r shared-grid construction (§4.2/§4.5) — CMS is exactly the
-    /// linear frequency-vector substrate Theorem 2 is proved over.
-    HydraCms,
-    /// Hydra over Count-Sketch — the paper's own heavy-hitter substrate
-    /// (§4.3). A direct instance of the same proven construction as
-    /// `HydraCms`, with Count-Sketch's balanced/zero-mean-error trade
-    /// instead of CMS's one-sided bias.
-    HydraCountSketch,
-}
-
-/// Parameters for a [`HydraKind`] instance. Unlike a plain [`SketchParams`]
-/// (sized purely for one instance's own accuracy), a Hydra structure needs
-/// both the per-subpopulation accuracy target it emulates *and* how big the
-/// one shared structure itself is — the latter is the whole memory/accuracy
-/// trade Hydra makes, and has no equivalent for an instance built
-/// independently per subpopulation. One variant per [`HydraKind`] because
-/// the knobs a "sketch of sketches" needs are specific to the inner
-/// sketch's own parameter shape — a `HydraCms` instance is sized in
-/// (`width`, `depth`), a `HydraKll` instance in `k`; there is no single knob
-/// set general enough to cover every inner sketch type.
+/// θ of the `Hydra*` algorithms ([`SketchAlgorithm::HydraKll`],
+/// [`SketchAlgorithm::HydraCms`], [`SketchAlgorithm::HydraCountSketch`]): one
+/// structure shared by every subpopulation of a grouped aggregate (Manousis
+/// et al., "Enabling Efficient and General Subpopulation Analytics in
+/// Multidimensional Data Streams", VLDB 2022). It holds both the
+/// per-subpopulation sketch's sizes and the shared grid's. HydraCms and
+/// HydraCountSketch are the paper's proven construction (§4.5, Theorem 2);
+/// HydraKll is not (the paper excludes quantiles, §4.3), so no error model
+/// covers it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum HydraParams {
-    /// See [`HydraKind::HydraKll`]: kept for legality, **no accuracy bound
-    /// is modeled for this variant**. `k`/`shared_buckets` give a bound
+    /// **No accuracy bound is modeled for this variant**. `k`/`shared_buckets` give a bound
     /// sketch a concrete size to build against; unlike `HydraCms`/
     /// `HydraCountSketch`'s fields, they are not backed by the paper's
     /// Theorem 2.
@@ -501,54 +242,12 @@ impl HydraParams {
     /// emulates, which its error bound and per-group state follow.
     pub fn per_subpopulation(&self) -> SketchParams {
         match *self {
-            HydraParams::HydraKll { k, .. } => SketchParams::Kll {
-                k,
-                failure_probability: None,
-            },
+            HydraParams::HydraKll { k, .. } => SketchParams::Kll { k },
             HydraParams::HydraCms { width, depth, .. } => SketchParams::Cms { width, depth },
             HydraParams::HydraCountSketch { width, depth, .. } => {
                 SketchParams::CountSketch { width, depth }
             }
         }
-    }
-}
-
-/// How a grouped aggregate's summary state is physically instantiated
-/// across its `by` subpopulations — orthogonal to *which*
-/// `SketchKind`/`SamplingKind`/`WaveletKind`/`StatModelKind` answers the
-/// intent (that choice lives alongside it on `FieldDataType`). Lives here,
-/// alongside `SketchKind`/`SketchParams` etc., rather than on any of those
-/// enums themselves, for exactly the reason explained in this section's
-/// module docs above.
-///
-/// Carried both on `ASAPOp::SummaryAgg` (where planning consults it)
-/// and on sketch-valued `FieldDataType` edges (where it prevents
-/// incompatible shared and independent physical states from type-checking
-/// as merge-compatible).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum GroupingStrategy {
-    /// One independent summary instance per distinct `by` key — today's
-    /// only (implicit) behavior, and this type's `Default` (below), so
-    /// every existing caller that never chose this axis explicitly keeps
-    /// observing exactly the same behavior it always has.
-    PerSubpopulationInstance,
-    /// One shared structure serving every subpopulation (Hydra and its
-    /// per-family variants — see [`HydraKind`]), trading per-subpopulation
-    /// isolation for shared memory/build cost.
-    ///
-    /// Named `SharedMultiSubpopulation`, not `SharedMultiTenant`: this
-    /// shares across a *query's own* subpopulations/group-by keys, not
-    /// across tenants in a deployment-isolation sense — a different, and
-    /// unrelated, kind of "sharing".
-    /// Its sizes are θ ([`SketchParams::Hydra`]), not part of the grouping.
-    SharedMultiSubpopulation { kind: HydraKind },
-}
-
-impl Default for GroupingStrategy {
-    /// [`GroupingStrategy::PerSubpopulationInstance`] — see that variant's
-    /// own doc for why this is the only sound default.
-    fn default() -> Self {
-        Self::PerSubpopulationInstance
     }
 }
 
@@ -592,7 +291,7 @@ pub enum WeightDomain {
     /// records it without reading the data workload; plan selection confirms
     /// it from the declared source facts
     /// ([`SourceFacts::metric_type`](crate::workload::SourceFacts::metric_type),
-    /// [`SourceFacts::values_non_negative`](crate::workload::SourceFacts::values_non_negative)).
+    /// [`SourceFacts::column_signs`](crate::workload::SourceFacts::column_signs)).
     /// Unconfirmed, it counts as not proven. Serialized as
     /// `samples_of_metric`.
     #[serde(rename = "samples_of_metric")]
@@ -610,44 +309,6 @@ pub enum WeightDomain {
     CounterDerivativeOfMetric {
         metric: String,
     },
-}
-
-impl WeightDomain {
-    /// The domain once the declared facts have answered an open requirement.
-    /// [`RawDataSamplesOfMetric`](Self::RawDataSamplesOfMetric) is proven when the
-    /// metric is a counter ([`NonNegativeWeightProof::CounterRawDataSamples`]) or else
-    /// declared non-negative
-    /// ([`NonNegativeWeightProof::DeclaredNonNegativeRawDataSamples`]);
-    /// [`CounterDerivativeOfMetric`](Self::CounterDerivativeOfMetric) only
-    /// when it is a counter
-    /// ([`NonNegativeWeightProof::ResetAwareCounterDerivative`]). Otherwise
-    /// unknown. Any other domain is returned unchanged.
-    pub(crate) fn confirmed(
-        &self,
-        is_counter: impl Fn(&str) -> bool,
-        is_declared_non_negative: impl Fn(&str) -> bool,
-    ) -> WeightDomain {
-        match self {
-            WeightDomain::RawDataSamplesOfMetric { metric } if is_counter(metric) => {
-                WeightDomain::NonNegative {
-                    proof: NonNegativeWeightProof::CounterRawDataSamples,
-                }
-            }
-            WeightDomain::RawDataSamplesOfMetric { metric } if is_declared_non_negative(metric) => {
-                WeightDomain::NonNegative {
-                    proof: NonNegativeWeightProof::DeclaredNonNegativeRawDataSamples,
-                }
-            }
-            WeightDomain::CounterDerivativeOfMetric { metric } if is_counter(metric) => {
-                WeightDomain::NonNegative {
-                    proof: NonNegativeWeightProof::ResetAwareCounterDerivative,
-                }
-            }
-            WeightDomain::RawDataSamplesOfMetric { .. }
-            | WeightDomain::CounterDerivativeOfMetric { .. } => WeightDomain::UnknownOrSigned,
-            other => other.clone(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -669,7 +330,7 @@ pub enum NonNegativeWeightProof {
     #[serde(rename = "counter_samples")]
     CounterRawDataSamples,
     /// Raw data samples of a metric declared non-negative
-    /// ([`SourceFacts::values_non_negative`](crate::workload::SourceFacts::values_non_negative)),
+    /// ([`SourceFacts::column_signs`](crate::workload::SourceFacts::column_signs)),
     /// such as a gauge, or plain sums of them. Plan selection gives it on
     /// confirming a [`WeightDomain::RawDataSamplesOfMetric`] requirement for a
     /// metric not declared a counter. Serialized as
@@ -758,40 +419,6 @@ mod tests {
                 query
             );
         }
-    }
-
-    #[test]
-    fn sketch_kind_keeps_a_valid_algorithm_and_params_pair() {
-        let kind = SketchKind::new(
-            SketchAlgorithm::Kll,
-            SketchParams::Kll {
-                k: 200,
-                failure_probability: None,
-            },
-        );
-        assert_eq!(kind.algorithm(), &SketchAlgorithm::Kll);
-    }
-
-    #[test]
-    #[should_panic(expected = "SketchKind parameter mismatch")]
-    fn sketch_kind_rejects_params_from_another_algorithm() {
-        SketchKind::new(
-            SketchAlgorithm::Kll,
-            SketchParams::Hll {
-                precision: 14,
-                relative_error: None,
-            },
-        );
-    }
-
-    #[test]
-    fn grouping_strategy_default_is_per_subpopulation_instance() {
-        // Existing/default behavior must stay `PerSubpopulationInstance` —
-        // this must not change any existing test's observed behavior.
-        assert_eq!(
-            GroupingStrategy::default(),
-            GroupingStrategy::PerSubpopulationInstance
-        );
     }
 
     /// The raw-data-sample and summary-sample renames keep their JSON names,

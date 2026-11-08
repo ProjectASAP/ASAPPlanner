@@ -18,17 +18,15 @@ use crate::state_bytes::{
 };
 use crate::{aggregate_lookup, lookup, StateFamily};
 use crate::{
-    CalibrationFit, CostInputs, CostModel, NodeCost, NodePriceSource, OperatorKind, PlanCost,
-    QueryLatency, ResourceUsage, COST_SOURCE, COST_UNIT, MEASURED_COST_SOURCE, MIXED_COST_SOURCE,
+    CalibrationFit, CostInputs, CostModel, NodeCost, NodeCostSource, OperatorKind, PlanCost,
+    QueryLatency, ResourceUsage, COST_SOURCE, MEASURED_COST_SOURCE, MIXED_COST_SOURCE,
 };
 use asap_types::ir::operator::{GroupKeys, Reduction, Source};
 use asap_types::ir::physical_export::{
-    PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload, ScanWindow,
+    PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
 };
 use asap_types::ir::properties::ExecutionTiming;
-use asap_types::ir::schema::{
-    FieldDataType, GroupingStrategy, Schema, SketchParams, SketchStatistic,
-};
+use asap_types::ir::schema::{FieldDataType, Schema, SketchParams, SketchStatistic};
 use asap_types::ir::{ASAPOp, NonASAPOp, TimeRangeKind};
 use asap_types::physical::{Lifetime, StorageMedium};
 use asap_types::workload::{DataWorkload, QueryRecurrence, RangeEvaluation};
@@ -46,15 +44,14 @@ use asap_types::workload::bounds::{
 /// ([`computations`]); an ingestion-time node over one second of arriving
 /// rows. A materialized node's state is counted in byte-seconds per
 /// second; a tumbling-window chain materialized beyond one evaluation keeps the tumbling windows its
-/// retention covers ([`tumbling_window_retention_ms`]). `nodes` and `materialized_chains` are
-/// `dag`'s ([`node_map`], [`materialized_tumbling_window_chains`]); `recurrence[q]` and
+/// retention covers ([`tumbling_window_retention_ms`]). `nodes` is `dag`'s
+/// ([`node_map`]); `recurrence[q]` and
 /// `range_evaluations[q]` say how often query `q` runs and how many steps
 /// each run evaluates (one when missing).
 #[allow(clippy::too_many_arguments)]
 pub fn plan_cost(
     dag: &PhysicalASAPDAG,
     nodes: &NodeMap<'_>,
-    materialized_chains: &HashSet<PhysicalASAPNodeId>,
     recurrence: &[QueryRecurrence],
     range_evaluations: &[Option<RangeEvaluation>],
     data: &DataWorkload,
@@ -77,13 +74,11 @@ pub fn plan_cost(
     } = each_node_usage(
         dag,
         nodes,
-        materialized_chains,
         recurrence,
         range_evaluations,
         data,
         settings,
         formula_scale,
-        None,
         None,
     )?;
     let mut output: HashMap<PhysicalASAPNodeId, EdgeStatistics> = HashMap::new();
@@ -339,11 +334,10 @@ pub fn plan_cost(
         PlanCost {
             usage,
             cost_per_second: cost,
-            cost_unit: COST_UNIT,
             source: if has_unattached_request_overhead {
                 if per_node
                     .values()
-                    .all(|node| node.price_source == NodePriceSource::Measured)
+                    .all(|node| node.cost_source == NodeCostSource::Measured)
                 {
                     MEASURED_COST_SOURCE
                 } else {
@@ -368,24 +362,18 @@ struct EachNodeUsage<'a> {
 }
 
 /// [`node_usage`] over every node of `dag`, children first, with the
-/// arguments of [`plan_cost`]. `root_scan_lookback_ms` is the
-/// look-back of a query-time scan no window above it in `dag` bounds (a
-/// scan priced without its consumers); `None` when the scan has no
-/// window, so it reads the source's `rows_held` or fails with
-/// `MissingSourceFact`, as Stage 3 does. `root_rates`, when given, are
+/// arguments of [`plan_cost`]. `root_rates`, when given, are
 /// the computations per second of each root's consumer in place of its
 /// query's own rate ([`computations`]).
 #[allow(clippy::too_many_arguments)]
 fn each_node_usage<'a>(
     dag: &'a PhysicalASAPDAG,
     nodes: &NodeMap<'a>,
-    materialized_chains: &HashSet<PhysicalASAPNodeId>,
     recurrence: &[QueryRecurrence],
     range_evaluations: &[Option<RangeEvaluation>],
     data: &DataWorkload,
     settings: &'a CostInputs,
     formula_scale: f64,
-    root_scan_lookback_ms: Option<u64>,
     root_rates: Option<&[f64]>,
 ) -> Result<EachNodeUsage<'a>, (PhysicalASAPNodeId, AnalyticalCostError)> {
     let first = dag.nodes.first().map(|n| n.id).unwrap_or_default();
@@ -421,25 +409,10 @@ fn each_node_usage<'a>(
                 }
             })
             .collect();
-        let scan_window = match (&node.payload, node.output_state.timing) {
-            (Payload::NonASAP(NonASAPOp::Scan { .. }), ExecutionTiming::QueryTime) => {
-                match dag.scan_window(node.id, materialized_chains) {
-                    // Priced as before #955 decides `@` anchors and
-                    // unwindowed queries: the widest window read.
-                    ScanWindow::Unbounded => trailing_window(
-                        widest_window_read_ms(dag, nodes, node.id, materialized_chains)
-                            .or(root_scan_lookback_ms),
-                    ),
-                    window => window,
-                }
-            }
-            _ => ScanWindow::Unbounded,
-        };
         let node_priced = node_usage(
             node,
             &views,
             multipliers[&node.id],
-            scan_window,
             retained_tumbling_windows(node, &retention_ms),
             (node.output_state.timing == ExecutionTiming::IngestionTime)
                 .then(|| maintained_window_ms(node.id, nodes, &producers_of))
@@ -469,15 +442,15 @@ fn state_family<'a>(
     match payload {
         Payload::ASAP(
             ASAPOp::SummaryAgg {
-                family, grouping, ..
+                summary_type: family,
+                ..
             }
             | ASAPOp::SummaryTumblingWindowChain {
-                family, grouping, ..
+                summary_type: family,
+                ..
             },
         ) => match family {
-            FieldDataType::Sketch(..)
-                if *grouping == GroupingStrategy::PerSubpopulationInstance =>
-            {
+            FieldDataType::Sketch(..) => {
                 todo!("#1207 PR 6: the state family of θ from the candidate's LogicalProperties::parameters")
             }
             FieldDataType::ExactAggregate(kind, _) => StateFamily::Exact(kind),
@@ -542,10 +515,8 @@ pub struct NodeUsage<'a> {
 
 /// Measure and price one node of a physical DAG (one step of
 /// [`plan_cost`]): `producers` are its producers in edge order,
-/// `rate` its `(multiplier, per_second)` ([`computations`]), `scan_window`
-/// the raw rows a query-time scan reads ([`PhysicalASAPDAG::scan_window`];
-/// read only for scans: it reads `width_ms` of rows and keeps them back to
-/// [`ScanWindow::lookback_ms`]), `retained_tumbling_window_count` the tumbling windows a tumbling-window chain keeps
+/// `rate` its `(multiplier, per_second)` ([`computations`]),
+/// `retained_tumbling_window_count` the tumbling windows a tumbling-window chain keeps
 /// completed (`retained_tumbling_windows`), and `ingestion_window_ms` the window an
 /// ingestion-time node maintains (`maintained_window_ms`).
 #[allow(clippy::too_many_arguments)]
@@ -553,7 +524,6 @@ pub fn node_usage<'a>(
     node: &'a asap_types::ir::physical_export::PhysicalASAPDAGNode,
     producers: &[ProducerOutput<'a>],
     rate: (u64, f64),
-    scan_window: ScanWindow,
     retained_tumbling_window_count: u64,
     ingestion_window_ms: Option<u64>,
     data: &DataWorkload,
@@ -572,7 +542,7 @@ pub fn node_usage<'a>(
     let mut held = None;
     let mut maintained = None;
     let mut raw_scan = None;
-    // A query-time scan's raw rows retained ([`ScanWindow::lookback_ms`]).
+    // A query-time scan's raw rows retained.
     let mut raw_retained_rows = None;
     let ingestion = node.output_state.timing == ExecutionTiming::IngestionTime;
     let inputs: Vec<EdgeStatistics> = producers.iter().map(|p| p.output).collect();
@@ -619,7 +589,7 @@ pub fn node_usage<'a>(
     let measured_state_bytes = unit_price
         .and_then(|p| p.memory_bytes_per_state)
         .map(|bytes| bytes.round() as u64);
-    let mut price_source = NodePriceSource::Analytical;
+    let mut cost_source = NodeCostSource::Analytical;
     let input = inputs
         .first()
         .copied()
@@ -707,12 +677,11 @@ pub fn node_usage<'a>(
                 // without a window).
                 let source = source_name(source);
                 let rows_held = data.sources.get(source).and_then(|facts| facts.rows_held);
-                let window_width_ms = match scan_window {
-                    ScanWindow::Within { width_ms, .. } => {
-                        Some(u64::try_from(width_ms).unwrap_or(0))
-                    }
-                    ScanWindow::Unbounded => None,
-                };
+                let (window_width_ms, retained_lookback_ms): (Option<u64>, Option<u64>) =
+                    match ingestion {
+                        true => (None, None),
+                        false => todo!("#1207 PR 7: a query-time Scan's read per edge (the TimeRange above it) and its retained rows from retention_ms (h_v)"),
+                    };
                 let lookback = match ingestion {
                     true => Some(1_000),
                     false => window_width_ms,
@@ -726,7 +695,7 @@ pub fn node_usage<'a>(
                 // oldest row it reads, `end_offset + width` (an offset
                 // window keeps more than it reads), at most those held.
                 if !ingestion {
-                    let retained_rows = match (by_rate(scan_window.lookback_ms()), rows_held) {
+                    let retained_rows = match (by_rate(retained_lookback_ms), rows_held) {
                         (Some(by_rate), Some(rows_held)) => Some(by_rate.min(rows_held)),
                         (by_rate, rows_held) => by_rate.or(rows_held),
                     };
@@ -906,7 +875,9 @@ pub fn node_usage<'a>(
             }
         },
         Payload::ASAP(ASAPOp::SummaryAgg {
-            family, reduction, ..
+            summary_type: family,
+            reduction,
+            ..
         }) => {
             let group_count = groups(reduction)?;
             // At query time, each state sees its group's input rows; at
@@ -933,7 +904,7 @@ pub fn node_usage<'a>(
                 )),
                 format!(
                     "build {} into {group_count} states: {} rows x depth {depth}",
-                    family_name(family),
+                    summary_type_name(family),
                     input.rows
                 ),
             )
@@ -1020,7 +991,7 @@ pub fn node_usage<'a>(
     // non-negative whatever the factor).
     let estimate = match unit_price {
         Some(unit) => {
-            price_source = NodePriceSource::Measured;
+            cost_source = NodeCostSource::Measured;
             let measured_ms = (units as f64 * unit.ns_per_unit + unit.ns_per_invocation) * 1e-6;
             fit.record(measured_ms * per_second, formula_ms * per_second);
             detail += &format!(
@@ -1198,14 +1169,14 @@ pub fn node_usage<'a>(
             cpu_core_seconds_per_second: node_ms * per_second / 1_000.0,
             multiplier,
             detail,
-            price_source,
+            cost_source,
         },
     })
 }
 
 /// [`PlanCost::source`] for nodes priced as `per_node` says.
 fn cost_source(per_node: &BTreeMap<PhysicalASAPNodeId, NodeCost>) -> &'static str {
-    let measured = |node: &NodeCost| node.price_source == NodePriceSource::Measured;
+    let measured = |node: &NodeCost| node.cost_source == NodeCostSource::Measured;
     if !per_node.values().any(measured) {
         COST_SOURCE
     } else if per_node.values().all(measured) {
@@ -1453,15 +1424,6 @@ pub fn maintained_window_ms(
     }
 }
 
-/// The window of a scan reading the `lookback_ms` up to the evaluation
-/// (`Unbounded` for `None`).
-pub fn trailing_window(lookback_ms: Option<u64>) -> ScanWindow {
-    lookback_ms.map_or(ScanWindow::Unbounded, |width_ms| ScanWindow::Within {
-        end_offset_ms: 0,
-        width_ms: i64::try_from(width_ms).unwrap_or(i64::MAX),
-    })
-}
-
 /// The nodes of `dag` by id.
 pub fn node_map(dag: &PhysicalASAPDAG) -> NodeMap<'_> {
     dag.nodes.iter().map(|n| (n.id, n)).collect()
@@ -1471,79 +1433,11 @@ pub fn node_map(dag: &PhysicalASAPDAG) -> NodeMap<'_> {
 pub type NodeMap<'a> =
     HashMap<PhysicalASAPNodeId, &'a asap_types::ir::physical_export::PhysicalASAPDAGNode>;
 
-/// The query-time tumbling-window chains of `dag` materialized across evaluations
-/// (lifetime `AcrossEvaluations` at query time, which Stage 2 offers only when the
-/// deployment keeps query-time results and every query builds one new
-/// tumbling window per evaluation). Each evaluation builds the newest tumbling window, and the
-/// older ones, which complete the queries' look-back, are retained from
-/// earlier evaluations.
-pub fn materialized_tumbling_window_chains(dag: &PhysicalASAPDAG) -> HashSet<PhysicalASAPNodeId> {
-    dag.nodes
-        .iter()
-        .filter(|node| {
-            matches!(
-                (&node.payload, node.output_state.timing, node.lifetime),
-                (
-                    Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }),
-                    ExecutionTiming::QueryTime,
-                    Lifetime::AcrossEvaluations(_),
-                )
-            )
-        })
-        .map(|node| node.id)
-        .collect()
-}
-
-/// The widest window, in milliseconds, read above the scan `scan` at query
-/// time, ignoring queries that read it outside a window and the anchors of
-/// shifts: each range `TimeRange` and `SummaryTumblingWindowChain` (its whole window, or
-/// one tumbling window for a chain in `materialized_chains`) reached through time shifts.
-/// Prices a scan whose [`PhysicalASAPDAG::scan_window`] is unbounded as
-/// Stage 3 did before; #955 decides `@` anchors.
-fn widest_window_read_ms(
-    dag: &PhysicalASAPDAG,
-    nodes: &NodeMap<'_>,
-    scan: PhysicalASAPNodeId,
-    materialized_chains: &HashSet<PhysicalASAPNodeId>,
-) -> Option<u64> {
-    let mut widest = None;
-    let mut stack = vec![scan];
-    let mut seen = HashSet::new();
-    while let Some(id) = stack.pop() {
-        if !seen.insert(id) {
-            continue;
-        }
-        for edge in dag.edges.iter().filter(|e| e.producer == id) {
-            let width_ms = match &nodes[&edge.consumer].payload {
-                Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) => range.as_millis() as u64,
-                Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
-                    tumbling_window_width_ms,
-                    ..
-                }) if materialized_chains.contains(&edge.consumer) => *tumbling_window_width_ms,
-                Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => todo!(
-                    "#1207 PR 7: the window a chain that is not materialized reads, from the TimeRange over it"
-                ),
-                Payload::NonASAP(NonASAPOp::TimeShift { .. }) => {
-                    stack.push(edge.consumer);
-                    continue;
-                }
-                _ => continue,
-            };
-            widest = widest.max(Some(width_ms));
-        }
-    }
-    widest
-}
-
-/// A summary family's name in reports: a shared (Hydra) structure by its
-/// Hydra kind, e.g. `HydraCms`; a sketch by its algorithm; an exact
-/// accumulator by its kind.
-pub fn family_name(family: &FieldDataType) -> String {
-    match family {
-        FieldDataType::Sketch(_, GroupingStrategy::SharedMultiSubpopulation { kind, .. }) => {
-            format!("{kind:?}")
-        }
-        FieldDataType::Sketch(algorithm, _) => format!("{algorithm:?}"),
+/// A summary type's name in reports: a sketch by its algorithm, e.g.
+/// `HydraCms`; an exact accumulator by its kind.
+pub fn summary_type_name(summary_type: &FieldDataType) -> String {
+    match summary_type {
+        FieldDataType::Sketch(algorithm) => format!("{algorithm:?}"),
         FieldDataType::ExactAggregate(kind, _) => format!("exact {kind:?} accumulator"),
         other => format!("{other:?}"),
     }

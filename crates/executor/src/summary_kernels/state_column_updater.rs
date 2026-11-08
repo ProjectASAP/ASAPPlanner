@@ -8,7 +8,7 @@ use super::weighted_frequency::WeightedFrequency;
 use crate::values::{StateColumn, Value};
 use crate::{AggregateCore, Error};
 
-use planner_types::ir::schema::{ExactKind, FieldDataType, GroupingStrategy};
+use planner_types::ir::schema::{ExactKind, FieldDataType};
 use std::sync::Arc;
 
 /// The open summary states of one family, one per group, updated one sample
@@ -74,30 +74,24 @@ impl StateColumnUpdater {
     /// `SummaryAgg` the plan builds one state per group of: an exact
     /// accumulator, a value sketch (KLL, DDSketch, HLL, KMV, UnivMon), a
     /// keyed frequency sketch with a heap, or a HydraCms grid shared by all
-    /// groups. Bad input for any other family.
+    /// groups. Bad input for any other summary type.
     pub fn new(family: &FieldDataType) -> Result<Self, Error> {
         crate::values::validate_family(family)?;
-        let hydra = matches!(
-            family,
-            FieldDataType::Sketch(_, GroupingStrategy::SharedMultiSubpopulation { .. })
-        );
         let states = match family {
-            FieldDataType::Sketch(..) if hydra => GroupStates::Hydra {
-                grid: Box::new(create_hydra_cms(family).map_err(Error::Invalid)?),
-                names: Vec::new(),
-            },
+            FieldDataType::Sketch(planner_types::ir::schema::SketchAlgorithm::HydraCms) => {
+                GroupStates::Hydra {
+                    grid: Box::new(create_hydra_cms(family).map_err(Error::Invalid)?),
+                    names: Vec::new(),
+                }
+            }
             FieldDataType::ExactAggregate(..) => GroupStates::Exact {
                 empty: ScalarState::empty(family).map_err(Error::Invalid)?,
                 states: Vec::new(),
             },
-            FieldDataType::Sketch(algorithm, grouping)
-                if grouping == &GroupingStrategy::PerSubpopulationInstance
-                    && matches!(
-                        algorithm,
-                        planner_types::ir::schema::SketchAlgorithm::CmsWithHeap
-                            | planner_types::ir::schema::SketchAlgorithm::CountSketchWithHeap
-                    ) =>
-            {
+            FieldDataType::Sketch(
+                planner_types::ir::schema::SketchAlgorithm::CmsWithHeap
+                | planner_types::ir::schema::SketchAlgorithm::CountSketchWithHeap,
+            ) => {
                 todo!("#1207 PR 6: the keyed frequency state of θ, which the exported node carries")
             }
             FieldDataType::Sketch(..) => {

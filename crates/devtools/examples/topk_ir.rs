@@ -4,7 +4,6 @@
 // resulting pre-ASAP IR. Used for interactive exploration; not a test.
 
 use asap_devtools::{lower_promql_with_sample_interval, lower_sql, SqlCatalog};
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, Schema};
 
 fn col(name: &str, dtype: DataType) -> Field {
@@ -39,7 +38,7 @@ fn catalog() -> SqlCatalog {
 async fn show_sql(label: &str, query: &str) {
     println!("━━━ {label} ━━━");
     println!("{query}");
-    match lower_sql(query, &catalog(), AccuracyTarget::exact()).await {
+    match lower_sql(query, &catalog()).await {
         Ok(qe) => println!("{qe:#?}"),
         Err(e) => println!("ERR: {e}"),
     }
@@ -49,7 +48,7 @@ async fn show_sql(label: &str, query: &str) {
 fn show_promql(label: &str, query: &str) {
     println!("━━━ {label} ━━━");
     println!("{query}");
-    match lower_promql_with_sample_interval(query, AccuracyTarget::exact(), 1_000) {
+    match lower_promql_with_sample_interval(query, 1_000) {
         Ok(qe) => println!("{qe:#?}"),
         Err(e) => println!("ERR: {e}"),
     }

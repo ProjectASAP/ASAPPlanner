@@ -83,13 +83,7 @@ fn q06_sum_by_job() {
 fn q07_count_is_row_count() {
     assert_eq!(
         lower("count(http_requests_total)"),
-        agg(
-            vec![],
-            AggIntent::Count {
-                accuracy: AccuracyTarget::exact()
-            },
-            scan("http_requests_total", &[]),
-        ),
+        agg(vec![], AggIntent::Count, scan("http_requests_total", &[]),),
     );
 }
 
@@ -184,11 +178,7 @@ fn q10_quantile_cross_series() {
         lower("quantile(0.99, http_requests_total)"),
         agg(
             vec![],
-            AggIntent::Quantile {
-                col: None,
-                q: 0.99,
-                accuracy: AccuracyTarget::exact()
-            },
+            AggIntent::Quantile { col: None, q: 0.99 },
             scan("http_requests_total", &[]),
         ),
     );

@@ -59,29 +59,27 @@ fn production_distinct_rollup_finds_shared_kmv() {
         asap_planner::PlanSearchSettings::default(),
     )
     .unwrap();
-    let selection = run
+    let (plan, selection) = run
         .selection
         .as_ref()
         .expect("validated plan within budget");
-    println!(
-        "production cost={:?} report={:?}",
-        selection.cost.cost_per_second, selection.search_report
-    );
     let accepted = &selection.accepted_accuracy_per_query;
     assert_eq!(accepted.len(), 2);
     assert!(accepted
         .iter()
-        .all(|accuracy| !accuracy.accepted_regardless_of_guarantee
-            && accuracy.sketches.iter().any(|sketch| sketch == "Kmv")));
-    assert!(selection.cost.cost_per_second.unwrap() < 2.0e-6);
-    let plan = &run.selected_physical_plan.as_ref().unwrap().plan;
-    let builds: HashSet<_> = nodes(&plan.roots)
+        .all(|accuracy| accuracy.sketches.iter().any(|sketch| sketch == "Kmv")));
+    assert!(
+        asap_integration_tests::planning::plan_cost_per_second(plan, &entries, data, &settings)
+            < 2.0e-6
+    );
+    let roots = plan.query_roots().unwrap();
+    let builds: HashSet<_> = nodes(&roots)
         .iter()
         .filter(|node| matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. })))
         .map(Rc::as_ptr)
         .collect();
     assert_eq!(builds.len(), 1, "both queries reuse a single state build");
-    let rollup = nodes(&plan.roots)
+    let rollup = nodes(&roots)
         .iter()
         .any(|n| matches!(n.asap(), Some(ASAPOp::SummaryMerge { .. })));
     assert!(

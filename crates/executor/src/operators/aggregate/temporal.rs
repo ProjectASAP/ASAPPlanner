@@ -122,7 +122,7 @@ pub(in crate::operators) fn window_value(
             .map(|v| Value::Float64(v * (end as f64 - start as f64) / 1000.)),
         AggIntent::Increase => rate(points, start, end, true)
             .map(|v| Value::Float64(v * (end as f64 - start as f64) / 1000.)),
-        AggIntent::Count { .. } => Some(Value::Int64(
+        AggIntent::Count => Some(Value::Int64(
             i64::try_from(points.len()).map_err(|_| Error::Invalid("count overflow".into()))?,
         )),
         AggIntent::Sum { .. } | AggIntent::Avg { .. } => {
@@ -326,7 +326,7 @@ mod tests {
         values::Batch,
     };
     use futures::StreamExt;
-    use planner_types::ir::properties::AccuracyTarget;
+
     use planner_types::ir::schema::{
         DataType, Field as SummaryField, FieldDataType as SummaryFamilyType, Schema,
     };
@@ -366,12 +366,7 @@ mod tests {
             for (intent, expected) in [
                 (AggIntent::Rate, Value::Float64(2.)),
                 (AggIntent::Increase, Value::Float64(4.)),
-                (
-                    AggIntent::Count {
-                        accuracy: AccuracyTarget::exact(),
-                    },
-                    Value::Int64(3),
-                ),
+                (AggIntent::Count, Value::Int64(3)),
             ] {
                 let batch = Batch::try_new(
                     schema.clone(),

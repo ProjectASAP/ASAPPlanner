@@ -3,9 +3,8 @@
 //! the candidates dead-candidate elimination removed, each with its root
 //! causes.
 
-use super::{CandidateForMemoGroupId, Memo};
+use super::{CandidateForMemoGroupId, Memo, RequiredAccuracy};
 use crate::ir::properties::AccuracyMetric;
-use crate::ir::schema::SketchParams;
 
 /// $(u, c, i)$ over logical candidates: `producer_candidate_id` is a
 /// candidate of $G_{c,i}$, the group input `input_index_of_consumer` of
@@ -37,7 +36,8 @@ pub struct LogicalASAPMemoCandidates {
 pub struct PrunedLogicalCandidate {
     pub candidate: CandidateForMemoGroupId,
     /// Every cause: one per failing edge it is cut off by, so mixed causes
-    /// (a floor on one edge, the metric rule on another) are all listed.
+    /// (a missed requirement on one edge, the metric rule on another) are
+    /// all listed.
     pub causes: Vec<PruneCause>,
 }
 
@@ -52,13 +52,14 @@ pub struct PruneCause {
 
 /// Why the edge at the end of a [`PruneCause`]'s path fails, or why the
 /// candidate has no edge at all.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub enum RootPruneReason {
-    /// The producer's parameters are weaker than the consumer input's floor.
-    BelowAccuracyFloorRequirement {
+    /// The producer's guarantee, at the required failure probability,
+    /// exceeds the consumer input's required error.
+    BelowRequiredAccuracy {
         consumer: CandidateForMemoGroupId,
         input: usize,
-        floor: SketchParams,
+        required: RequiredAccuracy,
     },
     /// The consumer's error contract carries none of the producer's metrics.
     MetricRule {

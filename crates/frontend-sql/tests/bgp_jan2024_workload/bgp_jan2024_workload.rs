@@ -14,7 +14,6 @@
 //! tally** by outcome category -- see the module doc on [`Category`] for why.
 
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog, SqlError};
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::workload::SqlDialect;
 use datafusion::error::DataFusionError;
@@ -71,13 +70,7 @@ fn catalog() -> SqlCatalog {
 }
 
 async fn lower(q: &str) -> Result<std::rc::Rc<asap_types::ir::OperatorNode>, SqlError> {
-    lower_sql_dialect(
-        q,
-        &catalog(),
-        SqlDialect::ClickhouseSQL,
-        AccuracyTarget::exact(),
-    )
-    .await
+    lower_sql_dialect(q, &catalog(), SqlDialect::ClickhouseSQL).await
 }
 
 /// Coarse outcome bucket for a corpus query. Deliberately coarser than

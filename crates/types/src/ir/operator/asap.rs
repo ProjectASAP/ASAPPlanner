@@ -1,5 +1,6 @@
 //! ASAP operators: summary-state construction, state operations and evaluations.
-//! The summary family, kind/algorithm and parameters are committed here.
+//! The summary type (family and algorithm) is an operator argument; θ is a
+//! candidate's logical property.
 
 use std::rc::Rc;
 
@@ -9,8 +10,8 @@ use super::input::{InputOrTemporaryBuild, OperatorInput};
 use super::node::{Operator, OperatorNode, OperatorResultKind};
 use crate::ir::operator::maintained_population::{MaintainedPopulation, PopulationStatistic};
 use crate::ir::operator::operator_properties::Reduction;
-use crate::ir::schema::sketch::{GroupingStrategy, SketchStatistic, SummaryUpdate};
-use crate::ir::schema::{ColumnId, DataType, FamilyCapability, Field, FieldDataType, Schema};
+use crate::ir::schema::sketch::{SketchStatistic, SummaryUpdate};
+use crate::ir::schema::{ColumnId, DataType, Field, FieldDataType, Schema, SummaryTypeCapability};
 use crate::ir::SchemaDerivationError;
 
 /// Why an ASAP operator cannot be used yet.
@@ -22,15 +23,14 @@ pub const UNIMPLEMENTED_ASAP_OP: &str =
 #[serde(bound(deserialize = "C: Deserialize<'de>"))]
 pub enum ASAPOp<C = Rc<OperatorNode>> {
     /// Summary aggregation. Output: grouping columns + one field carrying
-    /// partial summary state per group, typed `family`.
+    /// partial summary state per group, typed `summary_type`.
     SummaryAgg {
         child: C,
-        /// Which summary family realizes this aggregation. Never
+        /// The summary type (family and algorithm) of the state. Never
         /// `FieldDataType::Plain`.
-        family: FieldDataType,
+        summary_type: FieldDataType,
         input: SummaryUpdate,
         reduction: Reduction,
-        grouping: GroupingStrategy,
         #[serde(default)]
         filter: Option<crate::ir::scalar::Predicate<C>>,
     },
@@ -71,8 +71,8 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
         group_by: Option<Vec<ColumnId>>,
     },
     /// A chain of tumbling windows (concepts doc, section 3, "Chain
-    /// groups"): the `SummaryAgg` with these `family`, `input`, `reduction`,
-    /// `grouping` and `filter`, built over each window
+    /// groups"): the `SummaryAgg` with these `summary_type`, `input`,
+    /// `reduction` and `filter`, built over each window
     /// `(k·w, (k+1)·w]` of `child`, `w` = `tumbling_window_width_ms`, on a
     /// grid anchored at the epoch. Each window is built when it ends. Output:
     /// one row per window, (window end, keys, state), a state with a time
@@ -83,10 +83,9 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
     #[serde(alias = "PaneChain")]
     SummaryTumblingWindowChain {
         child: C,
-        family: FieldDataType,
+        summary_type: FieldDataType,
         input: SummaryUpdate,
         reduction: Reduction,
-        grouping: GroupingStrategy,
         #[serde(default)]
         filter: Option<crate::ir::scalar::Predicate<C>>,
         #[serde(alias = "pane_width_ms")]
@@ -105,7 +104,7 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
         outer: C,
         inner: C,
         key: ColumnId,
-        family: FieldDataType,
+        summary_type: FieldDataType,
     },
     Extension {
         child: C,
@@ -144,35 +143,31 @@ impl<C> ASAPOp<C> {
         match self {
             SummaryAgg {
                 child,
-                family,
+                summary_type: family,
                 input,
                 reduction,
-                grouping,
                 filter,
             } => SummaryAgg {
                 child: f(child),
-                family: family.clone(),
+                summary_type: family.clone(),
                 input: input.clone(),
                 reduction: reduction.clone(),
-                grouping: grouping.clone(),
                 filter: filter
                     .as_ref()
                     .map(|p| crate::ir::scalar::Predicate(p.0.map_operator_refs(&mut f))),
             },
             SummaryTumblingWindowChain {
                 child,
-                family,
+                summary_type: family,
                 input,
                 reduction,
-                grouping,
                 filter,
                 tumbling_window_width_ms,
             } => SummaryTumblingWindowChain {
                 child: f(child),
-                family: family.clone(),
+                summary_type: family.clone(),
                 input: input.clone(),
                 reduction: reduction.clone(),
-                grouping: grouping.clone(),
                 filter: filter
                     .as_ref()
                     .map(|p| crate::ir::scalar::Predicate(p.0.map_operator_refs(&mut f))),
@@ -210,12 +205,12 @@ impl<C> ASAPOp<C> {
                 outer,
                 inner,
                 key,
-                family,
+                summary_type: family,
             } => SummaryJoin {
                 outer: f(outer),
                 inner: f(inner),
                 key: *key,
-                family: family.clone(),
+                summary_type: family.clone(),
             },
             Extension { child, name } => Extension {
                 child: f(child),
@@ -250,9 +245,18 @@ impl<I: OperatorInput> ASAPOp<I> {
     /// The summary state this operator produces, if it produces state.
     pub fn produced_state(&self) -> Option<&FieldDataType> {
         match self {
-            ASAPOp::SummaryAgg { family, .. }
-            | ASAPOp::SummaryTumblingWindowChain { family, .. }
-            | ASAPOp::SummaryJoin { family, .. } => Some(family),
+            ASAPOp::SummaryAgg {
+                summary_type: family,
+                ..
+            }
+            | ASAPOp::SummaryTumblingWindowChain {
+                summary_type: family,
+                ..
+            }
+            | ASAPOp::SummaryJoin {
+                summary_type: family,
+                ..
+            } => Some(family),
             ASAPOp::SummaryMerge { children, .. } => children.first().and_then(|child| {
                 child
                     .schema()
@@ -274,13 +278,13 @@ impl<I: OperatorInput> ASAPOp<I> {
         Ok(match self {
             SummaryAgg {
                 child,
-                family,
+                summary_type: family,
                 reduction,
                 ..
             }
             | SummaryTumblingWindowChain {
                 child,
-                family,
+                summary_type: family,
                 reduction,
                 ..
             } => summary_agg_schema(child.schema(), family, reduction)?,
@@ -381,15 +385,12 @@ impl<I: OperatorInput> ASAPOp<I> {
                             )
                         }
                     };
-                    let accuracy = crate::ir::properties::AccuracyTarget::exact();
                     let measure = match evaluation {
-                        PopulationStatistic::Quantile { q } => AggIntent::Quantile {
-                            q: *q,
-                            col: column,
-                            accuracy,
-                        },
+                        PopulationStatistic::Quantile { q } => {
+                            AggIntent::Quantile { q: *q, col: column }
+                        }
                         PopulationStatistic::Sum => AggIntent::Sum { col: column },
-                        PopulationStatistic::Count => AggIntent::Count { accuracy },
+                        PopulationStatistic::Count => AggIntent::Count,
                         PopulationStatistic::Average => AggIntent::Avg { col: column },
                         PopulationStatistic::TopK { .. } => unreachable!(),
                     };
@@ -492,8 +493,8 @@ impl<I: OperatorInput> ASAPOp<I> {
                 query,
             } => {
                 needs_state(summary_input, "SummaryEstimate")?;
-                // The family-capability table is the one source of which
-                // statistic a state's family answers.
+                // The capability table is the one source of which statistic
+                // a summary type answers.
                 let states: Vec<_> = summary_input
                     .schema()
                     .fields
@@ -502,8 +503,8 @@ impl<I: OperatorInput> ASAPOp<I> {
                     .collect();
                 let valid = match states.as_slice() {
                     [field] => match &field.dtype {
-                        family @ FieldDataType::Sketch(..) => {
-                            FamilyCapability::of(family).answers(query)
+                        summary_type @ FieldDataType::Sketch(..) => {
+                            SummaryTypeCapability::of(summary_type).answers(query)
                         }
                         _ => false,
                     },
@@ -511,7 +512,7 @@ impl<I: OperatorInput> ASAPOp<I> {
                 };
                 if !valid {
                     return Err(SchemaDerivationError::InvalidScalarSignature(
-                        "evaluation does not match its summary family".into(),
+                        "evaluation does not match its summary type".into(),
                     ));
                 }
                 Ok(())
@@ -580,14 +581,14 @@ impl<I: OperatorInput> ASAPOp<I> {
     fn summary_agg_inputs(&self) -> Result<(), SchemaDerivationError> {
         let (ASAPOp::SummaryAgg {
             child,
-            family,
+            summary_type: family,
             input,
             filter,
             ..
         }
         | ASAPOp::SummaryTumblingWindowChain {
             child,
-            family,
+            summary_type: family,
             input,
             filter,
             ..
@@ -665,10 +666,9 @@ fn rolled_up_build<I: OperatorInput>(
     };
     let ASAPOp::SummaryAgg {
         child,
-        family,
+        summary_type: family,
         input: update,
         reduction,
-        grouping,
         filter,
     } = build
     else {
@@ -687,10 +687,9 @@ fn rolled_up_build<I: OperatorInput>(
     Some((
         ASAPOp::SummaryAgg {
             child,
-            family,
+            summary_type: family,
             input: update,
             reduction,
-            grouping,
             filter,
         },
         schema,
@@ -698,11 +697,11 @@ fn rolled_up_build<I: OperatorInput>(
 }
 
 /// The schema of a `SummaryAgg` (or `SummaryTumblingWindowChain`) of
-/// `family` by `reduction` over rows of schema `child`: the reduction's
+/// `summary_type` by `reduction` over rows of schema `child`: the reduction's
 /// output columns, its value column replaced by the state.
 pub(crate) fn summary_agg_schema(
     child: &Schema,
-    family: &FieldDataType,
+    summary_type: &FieldDataType,
     reduction: &Reduction,
 ) -> Result<Schema, SchemaDerivationError> {
     let mut schema = crate::ir::schema::aggregate_schema::aggregate_output_schema(
@@ -719,7 +718,7 @@ pub(crate) fn summary_agg_schema(
         .map_err(|e| SchemaDerivationError::InvalidScalarSignature(e.to_string()))?,
         Reduction::Reduce(_) => schema.fields.len() - 1,
     };
-    schema.fields[index] = Field::new("state", family.clone(), false);
+    schema.fields[index] = Field::new("state", summary_type.clone(), false);
     Ok(schema)
 }
 
@@ -732,7 +731,7 @@ fn finalized_schema<J: OperatorInput>(
 ) -> Result<Schema, SchemaDerivationError> {
     let value_result = if let Some(ASAPOp::SummaryAgg {
         child: source,
-        family: FieldDataType::ExactAggregate(kind, _),
+        summary_type: FieldDataType::ExactAggregate(kind, _),
         input,
         reduction,
         filter,
@@ -755,9 +754,7 @@ fn finalized_schema<J: OperatorInput>(
                 ExactKind::Sum => Some(AggIntent::Sum { col: column }),
                 ExactKind::Min => Some(AggIntent::Min { col: column }),
                 ExactKind::Max => Some(AggIntent::Max { col: column }),
-                ExactKind::Count => Some(AggIntent::Count {
-                    accuracy: crate::ir::properties::AccuracyTarget::exact(),
-                }),
+                ExactKind::Count => Some(AggIntent::Count),
                 ExactKind::Rate => Some(AggIntent::Rate),
                 ExactKind::IRate => Some(AggIntent::IRate),
                 ExactKind::Increase => Some(AggIntent::Increase),

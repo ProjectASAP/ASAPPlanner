@@ -8,7 +8,6 @@ use std::rc::Rc;
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::ir::operator::{AggIntent, GroupKeys};
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{NonASAPOp, OperatorNode};
 
@@ -113,7 +112,7 @@ async fn netflow_sql_corpus_lowers_to_expected_intents() {
 
     for (idx, (query, expected)) in queries.iter().zip(EXPECTED).enumerate() {
         // A successful `lower_sql` already derived every node's schema.
-        let qe = lower_sql(query, &catalog(), AccuracyTarget::exact())
+        let qe = lower_sql(query, &catalog())
             .await
             .unwrap_or_else(|err| panic!("q{} failed to lower:\n{query}\n{err}", idx + 1));
         assert!(
@@ -146,7 +145,7 @@ fn assert_expected(qe: &Rc<OperatorNode>, expected: Expected, case_no: usize) {
                 "q{case_no} expected count-ranked TopK({k}), got {qe:?}"
             );
             assert!(
-                aggregate_by_with(qe, inner_by, |agg| matches!(agg, AggIntent::Count { .. })),
+                aggregate_by_with(qe, inner_by, |agg| matches!(agg, AggIntent::Count)),
                 "q{case_no} expected inner Count grouped by {inner_by:?}, got {qe:?}"
             );
         }

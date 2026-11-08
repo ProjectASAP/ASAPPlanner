@@ -98,7 +98,7 @@ impl Operator {
                     | AggIntent::PredictLinear { .. }
                     | AggIntent::Increase
                     | AggIntent::Delta
-                    | AggIntent::Count { .. }
+                    | AggIntent::Count
                     | AggIntent::Sum { col: None }
                     | AggIntent::Avg { col: None }
                     | AggIntent::Min { col: None }

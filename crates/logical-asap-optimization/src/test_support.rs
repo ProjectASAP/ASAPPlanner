@@ -6,8 +6,9 @@ use std::rc::Rc;
 
 // Stage 1 internals other crates' tests call: Pass 1's working form,
 // and single-candidate composition.
+pub use crate::pass1::composition::compose_logical_candidate;
 pub use crate::pass1::per_computation_candidates::{
-    compose_logical_candidate, generate_per_computation_candidates, PerComputationCandidates,
+    generate_per_computation_candidates, PerComputationCandidates,
 };
 
 use asap_types::ir::properties::AccuracyTarget;
@@ -175,7 +176,7 @@ pub fn time_range(range: Duration, child: Rc<OperatorNode>) -> Rc<OperatorNode> 
 
 /// The Count-Min summary of a Stage 1 candidate of `query`.
 pub fn cms_summary(query: &str) -> OperatorNode {
-    use crate::pass1::per_computation_candidates::compose_logical_candidate;
+    use crate::pass1::composition::compose_logical_candidate;
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
     use asap_types::ir::{ASAPOp, QueryRoot};
@@ -183,7 +184,12 @@ pub fn cms_summary(query: &str) -> OperatorNode {
     let root = lower_promql(query, target);
     // Inspect each local computation choice under the built-in deployment.
     let per_computation = generate_per_computation_candidates(
-        &crate::stage0::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
+        &crate::stage0::memo_of_queries(
+            &[QueryRoot::Operator(root)],
+            &[None],
+            &asap_types::workload::DataWorkload::default(),
+        )
+        .unwrap(),
     )
     .unwrap()
     .without_unsupported_summaries(None);
@@ -207,7 +213,7 @@ pub fn cms_summary(query: &str) -> OperatorNode {
             matches!(
                 node.asap(),
                 Some(ASAPOp::SummaryAgg {
-                    family: FieldDataType::Sketch(kind, _),
+                    summary_type: FieldDataType::Sketch(kind),
                     ..
                 }) if *kind == SketchAlgorithm::Cms
             )

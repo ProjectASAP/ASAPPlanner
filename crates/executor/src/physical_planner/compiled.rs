@@ -24,7 +24,7 @@ pub(super) struct MaterializedViewSlot {
     pub(super) view: MaterializedView,
     /// The view node's schema.
     pub(super) schema: SchemaRef,
-    /// The data its state summarizes ([`PhysicalASAPDAG::view_window`]).
+    /// The data its state summarizes (`crate::sources::view_windows`).
     pub(super) window: ScanWindow,
 }
 
@@ -37,7 +37,7 @@ pub(super) struct RawDataSlot {
     pub(super) schema: SchemaRef,
     /// The `Scan`'s predicates, compiled over `schema`.
     pub(super) predicates: Vec<crate::expressions::CompiledExpression>,
-    /// The rows its readers read ([`PhysicalASAPDAG::scan_window`]).
+    /// The rows its readers read (`crate::sources::scan_windows`).
     pub(super) window: ScanWindow,
 }
 

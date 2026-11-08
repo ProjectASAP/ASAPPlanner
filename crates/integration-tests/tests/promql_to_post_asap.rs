@@ -19,8 +19,8 @@ use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::expr_ir::ColumnRef;
 use asap_types::ir::schema::DataType;
 use asap_types::ir::schema::{
-    EntityIdentity, ExactKind, ExactParams, FieldDataType, GroupingStrategy, Schema,
-    SketchAlgorithm, SketchStatistic, SummaryInputExpr, SummaryUpdate,
+    EntityIdentity, ExactKind, ExactParams, FieldDataType, Schema, SketchAlgorithm,
+    SketchStatistic, SummaryInputExpr, SummaryUpdate,
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
 
@@ -44,7 +44,7 @@ fn realize(root: &Rc<OperatorNode>, accuracy: AccuracyTarget) -> Rc<OperatorNode
 fn uses_sketch(node: &OperatorNode, algorithm: &SketchAlgorithm) -> bool {
     match &node.operator {
         Operator::ASAP(ASAPOp::SummaryAgg {
-            family: FieldDataType::Sketch(kind, _),
+            summary_type: FieldDataType::Sketch(kind),
             ..
         }) if kind == algorithm => true,
         _ => node
@@ -381,7 +381,7 @@ fn planner_heap_topk_reference_execution_matches_ground_truth() {
 ///
 /// ```text
 /// SummaryEstimate { query: Quantile{0.99} }          → {quantile: Float64}
-/// └─ SummaryAgg { Kll{k:269}, input: SampleValue }   → {state: Sketch(Kll, {k:269})}
+/// └─ SummaryAgg { Kll{k:269}, input: SampleValue }   → {state: Sketch(Kll)}
 ///    └─ FinalizeExactAccumulator
 ///       └─ SummaryAgg { Rate, input: SampleValue }   → {ts, state: ExactAggregate(Rate), …}
 ///          └─ TimeRange{5m} → Scan                   → {ts, value}
@@ -433,7 +433,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     // same empty `by: []` (issue #163).
     let Some(ASAPOp::SummaryAgg {
         child,
-        family,
+        summary_type: family,
         input,
         reduction,
         ..
@@ -441,10 +441,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     else {
         panic!("expected SummaryAgg, got {:?}", summary_input.operator);
     };
-    assert_eq!(
-        family,
-        &FieldDataType::Sketch(SketchAlgorithm::Kll, GroupingStrategy::default())
-    );
+    assert_eq!(family, &FieldDataType::Sketch(SketchAlgorithm::Kll));
     assert_eq!(input, &SummaryUpdate::column(ColumnRef::SampleValue));
     assert_eq!(
         reduction,
@@ -453,7 +450,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     );
     assert_eq!(
         dtype(&summary_input.schema, "state"),
-        &FieldDataType::Sketch(SketchAlgorithm::Kll, GroupingStrategy::default())
+        &FieldDataType::Sketch(SketchAlgorithm::Kll)
     );
 
     let Some(ASAPOp::FinalizeExactAccumulator { child }) = child.asap() else {
@@ -465,7 +462,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     // grouping concept at all — every entity stays its own summary.
     let Some(ASAPOp::SummaryAgg {
         child: leaf,
-        family,
+        summary_type: family,
         reduction,
         ..
     }) = child.asap()

@@ -201,8 +201,10 @@ cost model.
 
 ## Composing guarantees through a DAG
 
-`AccuracyModel` supplies local guarantees, propagation rules and target
-satisfaction. Its default implementation is conservative: an unregistered
+The accuracy crate supplies theoretical guarantees (`theoretical_guarantee`),
+propagation rules and target satisfaction (`satisfies`); the deployment's
+measurements (`AccuracyEvidence::measured_guarantee`) take precedence over a
+theoretical guarantee. The rules are conservative: an unregistered
 composition over approximate inputs is rejected rather than treated as exact.
 
 The principal composition rules are:
@@ -264,8 +266,7 @@ configuration or candidate is needed.
 
 ## Evidence and trust boundaries
 
-`AccuracyEvidenceProvider` supplies estimator contracts, operand domains
-and propagation evidence. The evidence must cover the population to which the
+`AccuracyEvidence` supplies the deployment's measured guarantees. The evidence must cover the population to which the
 claimed guarantee applies: sources, filters, grouping, evaluation windows and
 all merged tumbling windows. Evidence for a narrower population cannot silently certify
 a wider one. Data-workload facts are declared: the planner has no clock, so the caller
@@ -377,7 +378,7 @@ The `asap_accuracy` crate separates these responsibilities:
 ```text
 accuracy/src/
 ├── lib.rs              # Public interfaces and unified entry point (satisfies, per-input targets)
-├── model.rs            # AccuracyModel, AccuracyEvidenceProvider and their built-in defaults
+├── model.rs            # AccuracyEvidence and producer_satisfies_logical_requirements (α^log)
 ├── evidence.rs         # Evidence and source contracts
 ├── composition.rs      # Error propagation across computations
 ├── budget.rs           # Splitting a query's accuracy budget across approximate inputs
@@ -408,8 +409,8 @@ Adding an estimator or composition requires:
 5. Tests from target and evidence through sizing, composition and selection, including missing evidence and infeasible targets.
 
 Algorithm-specific mathematics belongs behind this common contract. It does
-not require a new selection rule for every sketch. Deployment extensions to
-`AccuracyModel` remain possible, but carry the same obligation to justify
+not require a new selection rule for every sketch. A deployment's measured
+guarantees (`AccuracyEvidence`) carry the same obligation to justify
 metrics, assumptions and propagation.
 
 For implementation details, see the [accuracy crate](../../../crates/accuracy/src/lib.rs),

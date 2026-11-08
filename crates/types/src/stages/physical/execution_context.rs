@@ -1,36 +1,34 @@
-//! $\kappa$: where a candidate with $\ell$ = None or `OneEvaluation` runs
-//! (concepts doc, section 5). Stage 3 indexes $x_{\kappa,v}$ and
-//! $y_{\kappa,u,c,i}$ by it; [`super::PhysicalCandidate::delivers_on`] reads
-//! it, so it lives with the physical candidates.
+//! $\kappa$: a class of executions that happen at the same times (concepts
+//! doc, section 5). Stage 3 indexes $x_{\kappa,v}$ and $y_{\kappa,u,c,i}$ by
+//! it; [`super::PhysicalCandidate::delivers_on`] reads it, so it lives with
+//! the physical candidates.
 
-use super::graph::PhysicalCandidateId;
-use crate::workload::{QueryRecurrence, RangeEvaluation};
-
-/// A refresh window of the workload's ingestion pipelines, by index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct RefreshWindowId(pub usize);
+use super::memo_candidates::PhysicalCandidateId;
+use crate::ir::materialized_view::RefreshWindow;
 
 /// Index of an [`ExecutionContext`] in the workload's list of distinct
-/// contexts. Contexts are deduplicated by equality: [`QueryRecurrence`]
-/// holds an `f64` (`EstimatedRate`), so a context cannot be hashed.
+/// contexts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ExecutionContextId(pub usize);
 
-/// $\kappa$: a class of executions with a common owner and schedule, where
-/// a candidate with $\ell$ = None or `OneEvaluation` runs.
-#[derive(Debug, Clone, PartialEq)]
+/// $\kappa$: within one context a computation runs once, and every consumer
+/// in it shares that run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ExecutionContext {
-    /// The evaluation of every query with this recurrence and range
-    /// evaluation, the workload's own description of when it runs: queries
-    /// with equal ones are evaluated together and share its `OneEvaluation`
-    /// results. A and B both every 10 s at phase 0 give one context; a
-    /// one-off query's context is its `OneTime` recurrence.
-    Evaluation {
-        recurrence: QueryRecurrence,
-        range_evaluation: Option<RangeEvaluation>,
-    },
-    /// $I_r$: the ingestion pipeline of a refresh window.
-    IngestionPipeline(RefreshWindowId),
-    /// $\kappa_m$: inside an `AcrossEvaluations` candidate's own computation.
+    /// At every time of an evaluation grid, answering queries: every query
+    /// evaluated on the grid, a range query's steps included. An alert
+    /// every 10 s at phase 0 is the grid 10 s @ 0.
+    Evaluation { grid: EvaluationGrid },
+    /// As data arrives, in batches of one refresh window.
+    IngestionPipeline(RefreshWindow),
+    /// The own computation of a candidate materialized across evaluations,
+    /// on its own schedule, whoever reads it.
     Materialized(PhysicalCandidateId),
+}
+
+/// The evaluation times `phase_ms + k · period_ms`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EvaluationGrid {
+    pub period_ms: u64,
+    pub phase_ms: u64,
 }

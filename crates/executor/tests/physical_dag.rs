@@ -350,13 +350,10 @@ fn binding_rejects_unsupported_operations() {
 // KLL is one family example: precomputation changes input sources, not operators.
 #[test]
 fn kll_raw_partial_and_precomputed_are_native_dags() {
-    use planner_types::ir::schema::{GroupingStrategy, SketchAlgorithm};
+    use planner_types::ir::schema::SketchAlgorithm;
 
     let input = schema(&[("value", DataType::Float64, false)]);
-    let family = FieldDataType::Sketch(
-        SketchAlgorithm::Kll,
-        GroupingStrategy::PerSubpopulationInstance,
-    );
+    let family = FieldDataType::Sketch(SketchAlgorithm::Kll);
     let build = Operator::per_group_summary_build(input.clone(), family, 0, None, vec![]).unwrap();
     let state = build.schema();
     let build_range = |start: u32, end: u32| {
@@ -538,6 +535,7 @@ fn bind_physical_asap_dag_before_execution() {
         output_schema: (*schema).clone(),
         guarantee: None,
         retention_ms: None,
+        selected_physical_candidate: None,
     };
     let mut dag = PhysicalASAPDAG {
         nodes: vec![
@@ -699,6 +697,7 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
         parameters: None,
         guarantee: None,
         retention_ms: None,
+        selected_physical_candidate: None,
     };
     let edge = |producer, consumer, role, schema: &asap_executor::values::SchemaRef| {
         PhysicalASAPDAGEdge::new(
@@ -1010,14 +1009,11 @@ fn assert_weighted_rate_topk(count_sketch: bool) {
         Some((0, 60_000)),
     )
     .unwrap();
-    let family = FieldDataType::Sketch(
-        if count_sketch {
-            SketchAlgorithm::CountSketchWithHeap
-        } else {
-            SketchAlgorithm::CmsWithHeap
-        },
-        Default::default(),
-    );
+    let family = FieldDataType::Sketch(if count_sketch {
+        SketchAlgorithm::CountSketchWithHeap
+    } else {
+        SketchAlgorithm::CmsWithHeap
+    });
     let build = Operator::per_group_keyed_summary_build(
         rates.schema(),
         family,
@@ -1122,6 +1118,7 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
         output_schema: (*input).clone(),
         guarantee: None,
         retention_ms: None,
+        selected_physical_candidate: None,
     };
     let edge = |producer, consumer| {
         PhysicalASAPDAGEdge::new(
@@ -1223,6 +1220,7 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
                 left: 0,
                 right: 1,
             }),
+            selected_physical_candidate: None,
         };
         let join = if certified {
             Operator::certified_semi_join(schema.clone(), schema.clone(), vec![(0, 0)]).unwrap()
@@ -1329,6 +1327,7 @@ fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
             lhs: 0,
             rhs: 1,
         }),
+        selected_physical_candidate: None,
     };
     let binary = compile_node(&node, &[input.clone(), input.clone()]).unwrap();
     for (right, expected) in [

@@ -8,7 +8,7 @@ use crate::{ClusterObjective, CostModel, PlanCost, QueryLatency, ResourceUsage};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanRanking {
     /// Cost models 1 and 2: by cost per second.
-    Price,
+    Cost,
     /// Latency, then peak memory, then disk.
     Latency,
     /// Peak memory, then disk, then latency.
@@ -18,7 +18,7 @@ pub enum PlanRanking {
 impl PlanRanking {
     pub fn of(model: &CostModel) -> Self {
         match model {
-            CostModel::UsageOverTime(_) | CostModel::ProvisionedCapacity(_) => Self::Price,
+            CostModel::UsageOverTime(_) | CostModel::ProvisionedCapacity(_) => Self::Cost,
             CostModel::ClusterCapacity(limits) => match limits.objective {
                 ClusterObjective::LowestLatency => Self::Latency,
                 ClusterObjective::LeastMemory => Self::Memory,
@@ -40,7 +40,7 @@ impl PlanRanking {
         let memory = || a.peak_memory_bytes.cmp(&b.peak_memory_bytes);
         let disk = || a.disk_bytes.cmp(&b.disk_bytes);
         let order = match self {
-            Self::Price => rounded(
+            Self::Cost => rounded(
                 cost.cost_per_second.unwrap_or(f64::INFINITY),
                 best.cost_per_second.unwrap_or(f64::INFINITY),
             ),

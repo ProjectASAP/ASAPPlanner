@@ -14,26 +14,18 @@
 //! downstream consumers rely on.
 
 use std::collections::BTreeMap;
-use std::rc::Rc;
 
-use asap_types::ir::OperatorNode;
 use asap_types::workload::parsed_workload::ParsedWorkload;
 use asap_types::workload::WorkloadError;
 
 use crate::run::{SelectionError, Stage1ToStage3Pass};
-use asap_accuracy::{
-    AccuracyEvidenceProvider, AccuracyModel, BuiltinAccuracyModel, IgnoreAccuracyGuarantees,
-    NoAccuracyEvidence,
-};
+use asap_accuracy::AccuracyEvidence;
 use asap_cost::CostInputs;
 use asap_logical_asap_optimization::PerComputationCandidateError;
-use asap_plan_selection::{AccuracyCheckInputs, Selection};
 use asap_types::deployment_capabilities::DeploymentCapabilities;
-use asap_types::ir::physical_export::PhysicalASAPNodeId;
+use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPDAGValidationError};
 
-static BUILTIN_ACCURACY_MODEL: BuiltinAccuracyModel = BuiltinAccuracyModel;
-static IGNORE_ACCURACY_GUARANTEES: IgnoreAccuracyGuarantees = IgnoreAccuracyGuarantees;
-static NO_ACCURACY_EVIDENCE: NoAccuracyEvidence = NoAccuracyEvidence;
+static NO_ACCURACY_EVIDENCE: AccuracyEvidence = AccuracyEvidence {};
 static DEFAULT_COST_INPUTS: std::sync::LazyLock<CostInputs> =
     std::sync::LazyLock::new(CostInputs::default);
 static DEFAULT_DEPLOYMENT: std::sync::LazyLock<DeploymentCapabilities> =
@@ -45,21 +37,15 @@ static DEFAULT_DEPLOYMENT: std::sync::LazyLock<DeploymentCapabilities> =
 /// a built-in default, evidence about a particular deployment cannot.
 ///
 /// The facade splits them by stage: Stage 1 reads the supported summaries
-/// of `deployment_capabilities`, Stage 2 its retention, and Stage 3
-/// (plan selection) checks each candidate's guarantee with `accuracy` and
-/// `evidence` ([`AccuracyCheckInputs`]) and compares candidates under
-/// `cost_inputs` ([`CostInputs`]).
+/// of `deployment_capabilities`, Pass 2 the accuracy `evidence`, Stage 2 the
+/// deployment's retention, and Stage 3 (plan selection) compares candidates
+/// under `cost_inputs` ([`CostInputs`]).
 #[derive(Clone, Copy)]
 #[non_exhaustive]
 pub struct PlanningModels<'a> {
-    /// Decides whether a candidate's accuracy guarantee meets its query's
-    /// target, and whether the deployment accepts an output regardless of
-    /// its guarantee; [`BuiltinAccuracyModel`] by default.
-    /// `ignore_accuracy_guarantees` overrides it.
-    pub accuracy: &'a dyn AccuracyModel,
-    /// Deployment facts the guarantees need (operand domains, observed
-    /// guarantees); [`NoAccuracyEvidence`] by default.
-    pub evidence: &'a dyn AccuracyEvidenceProvider,
+    /// The deployment's measured accuracy, which Pass 2 reads before each
+    /// summary's theoretical guarantee; none by default.
+    pub evidence: &'a AccuracyEvidence,
     /// The deployment's cost inputs: the cost model (default
     /// cost model 1 with illustrative unit costs), the resource speed and
     /// the non-repeating query horizon.
@@ -69,25 +55,18 @@ pub struct PlanningModels<'a> {
     /// whether it keeps query-time results across evaluations (Stage 2);
     /// default [`DeploymentCapabilities::default`].
     pub deployment_capabilities: &'a DeploymentCapabilities,
-    /// Accept every query output regardless of its accuracy guarantee: the
-    /// facade passes Stage 3 [`IgnoreAccuracyGuarantees`] in place of
-    /// `accuracy`. For comparing candidates on cost alone, e.g. a
-    /// benchmark of sketch plans with no analytical guarantee;
-    /// executability checks still apply, and each output accepted only
-    /// because of it is marked in the report
-    /// (`AcceptedAccuracy::guarantee_check_rejection`). Default `false`.
+    /// Do not enforce accuracy: the facade gives every query "no accuracy
+    /// target" before Pass 2, so no readout gets a required accuracy and
+    /// every θ connects (a top-k's heap still holds k). For comparing
+    /// candidates on cost alone, e.g. a benchmark of sketch plans with no
+    /// analytical guarantee. Default `false`.
     pub ignore_accuracy_guarantees: bool,
 }
 
 impl<'a> PlanningModels<'a> {
-    /// These accuracy and evidence models with the default plan selection
-    /// settings.
-    pub fn new(
-        accuracy: &'a dyn AccuracyModel,
-        evidence: &'a dyn AccuracyEvidenceProvider,
-    ) -> Self {
+    /// This evidence with the default plan selection settings.
+    pub fn new(evidence: &'a AccuracyEvidence) -> Self {
         Self {
-            accuracy,
             evidence,
             cost_inputs: &DEFAULT_COST_INPUTS,
             deployment_capabilities: &DEFAULT_DEPLOYMENT,
@@ -95,43 +74,19 @@ impl<'a> PlanningModels<'a> {
         }
     }
 
-    /// The built-in models.
+    /// The built-in models: no accuracy evidence.
     pub fn builtin() -> PlanningModels<'static> {
-        PlanningModels {
-            accuracy: &BUILTIN_ACCURACY_MODEL,
-            evidence: &NO_ACCURACY_EVIDENCE,
-            cost_inputs: &DEFAULT_COST_INPUTS,
-            deployment_capabilities: &DEFAULT_DEPLOYMENT,
-            ignore_accuracy_guarantees: false,
-        }
+        PlanningModels::new(&NO_ACCURACY_EVIDENCE)
     }
 
-    /// Stage 3's accuracy check inputs: `evidence`, and `accuracy`, or
-    /// [`IgnoreAccuracyGuarantees`] with `ignore_accuracy_guarantees`.
-    pub fn accuracy_check_inputs(&self) -> AccuracyCheckInputs<'a> {
-        AccuracyCheckInputs {
-            model: if self.ignore_accuracy_guarantees {
-                &IGNORE_ACCURACY_GUARANTEES
-            } else {
-                self.accuracy
-            },
-            evidence: self.evidence,
-        }
-    }
-
-    /// These models, accepting every query output regardless of its
-    /// accuracy guarantee when `ignore` (`ignore_accuracy_guarantees`).
+    /// These models, enforcing no accuracy target when `ignore`
+    /// (`ignore_accuracy_guarantees`).
     pub fn with_ignore_accuracy_guarantees(mut self, ignore: bool) -> Self {
         self.ignore_accuracy_guarantees = ignore;
         self
     }
 
-    pub fn with_accuracy(mut self, accuracy: &'a dyn AccuracyModel) -> Self {
-        self.accuracy = accuracy;
-        self
-    }
-
-    pub fn with_evidence(mut self, evidence: &'a dyn AccuracyEvidenceProvider) -> Self {
+    pub fn with_evidence(mut self, evidence: &'a AccuracyEvidence) -> Self {
         self.evidence = evidence;
         self
     }
@@ -182,123 +137,19 @@ pub enum OptimizationInputError {
 
 // ── Output ───────────────────────────────────────────────────────────────
 
-/// One query's selected post-ASAP DAG, or one operator sub-DAG a standalone
-/// scalar query reads. The DAG is `root`.
-#[derive(Debug, Clone)]
-pub struct QueryPlan {
-    /// Index into `QueryWorkload::entries()`.
-    pub entry_index: usize,
-    pub root: Rc<OperatorNode>,
-}
-
-/// One multi-root workload DAG with query bindings in entry order;
-/// `check_contract` enforces that.
-///
-/// Plans are not deduplicated across entries: a summary state that several
-/// queries share appears in each of their plans as the same `Rc`, so a
-/// consumer that deploys or costs the workload must dedupe by `Rc::ptr_eq`.
+/// The selected plan: one `PhysicalASAPDAG`, the only plan structure, in
+/// memory and, serialized, in the plan file installed on the executor. Its
+/// `roots` answer the operator queries and its `scalar_roots` the standalone
+/// scalar queries, in entry order; `check_contract` enforces that.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct PlanOutput {
-    pub plans: Vec<QueryPlan>,
-    /// Standalone scalar queries, keyed by position in the batch, which is
-    /// the entry index because `check_contract` requires dense entry
-    /// indices. Each operator reference is the root of one of
-    /// `scalar_plans`.
-    pub scalar_roots: Vec<(usize, asap_types::ir::ScalarExpr)>,
-    /// One plan per distinct operator sub-DAG a scalar root reads, keyed by
-    /// that scalar's entry, in `scalar_roots` order.
-    pub scalar_plans: Vec<QueryPlan>,
-    /// How plan selection chose the plan, when the pass selects among priced
-    /// candidates.
-    pub selection: Option<Selection>,
-    /// For each tumbling-window chain of the selected plan materialized beyond one
-    /// evaluation, by node id in its physical DAG, how long its completed
-    /// tumbling windows are retained ([`RealizedPlan::tumbling_window_retention_ms`](asap_types::stages::RealizedPlan::tumbling_window_retention_ms));
-    /// empty for a pass that does not set it.
-    pub tumbling_window_retention_ms: BTreeMap<PhysicalASAPNodeId, u64>,
+    pub plan: PhysicalASAPDAG,
 }
 
 impl PlanOutput {
-    pub fn new(plans: Vec<QueryPlan>) -> Self {
-        Self {
-            plans,
-            scalar_roots: Vec::new(),
-            scalar_plans: Vec::new(),
-            selection: None,
-            tumbling_window_retention_ms: BTreeMap::new(),
-        }
-    }
-
-    /// Entry indices in output order.
-    pub fn entry_indices(&self) -> Vec<usize> {
-        let mut indices: Vec<_> = self
-            .plans
-            .iter()
-            .map(|p| p.entry_index)
-            .chain(self.scalar_roots.iter().map(|(i, _)| *i))
-            .collect();
-        if !self.scalar_roots.is_empty() {
-            indices.sort_unstable();
-        }
-        indices
-    }
-
-    /// All query roots in workload order, including standalone scalars.
-    pub fn roots(&self) -> Vec<asap_types::ir::QueryRoot> {
-        let mut roots: Vec<_> = self
-            .plans
-            .iter()
-            .map(|p| {
-                (
-                    p.entry_index,
-                    asap_types::ir::QueryRoot::Operator(Rc::clone(&p.root)),
-                )
-            })
-            .chain(
-                self.scalar_roots
-                    .iter()
-                    .map(|(i, expr)| (*i, asap_types::ir::QueryRoot::Scalar(expr.clone()))),
-            )
-            .collect();
-        roots.sort_by_key(|(i, _)| *i);
-        roots.into_iter().map(|(_, root)| root).collect()
-    }
-
-    /// The selected operator roots. Use `roots()` to include scalar queries.
-    pub fn operator_roots(&self) -> Vec<Rc<OperatorNode>> {
-        self.plans.iter().map(|p| Rc::clone(&p.root)).collect()
-    }
-
-    /// Unique operators in the entire workload DAG, including scalar-plan dependencies.
-    /// Several query roots can reach the same operator; it is returned once.
-    pub fn operators(&self) -> Vec<Rc<OperatorNode>> {
-        let mut seen = std::collections::HashSet::new();
-        let mut nodes = Vec::new();
-        for root in self.roots() {
-            let inputs = match root {
-                asap_types::ir::QueryRoot::Operator(node) => vec![node],
-                asap_types::ir::QueryRoot::Scalar(expr) => {
-                    expr.operator_refs().into_iter().cloned().collect()
-                }
-            };
-            for input in inputs {
-                for node in OperatorNode::reachable(&input) {
-                    if seen.insert(Rc::as_ptr(&node)) {
-                        nodes.push(node);
-                    }
-                }
-            }
-        }
-        nodes
-    }
-
-    pub fn len(&self) -> usize {
-        self.plans.len() + self.scalar_roots.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
+    pub fn new(plan: PhysicalASAPDAG) -> Self {
+        Self { plan }
     }
 }
 
@@ -315,6 +166,12 @@ pub enum OptimizeError {
     /// defect in the pass, not in its input.
     #[error("pass `{pass}` violated the output contract: {detail}")]
     ContractViolation { pass: &'static str, detail: String },
+    /// The pass returned an invalid DAG: a defect in the pass.
+    #[error("pass `{pass}` returned an invalid plan: {error}")]
+    InvalidPlan {
+        pass: &'static str,
+        error: PhysicalASAPDAGValidationError,
+    },
 }
 
 // ── The pass ─────────────────────────────────────────────────────────────
@@ -333,9 +190,9 @@ pub trait OptimizationPass {
 /// Run `pass` over `input`: validate once, then check the output contract.
 ///
 /// Prefer this over calling [`OptimizationPass::optimize`] directly. A pass is
-/// third-party code, but `ASAPQuery-backend` and `ASAPCollector` read every
-/// pass's output against the same contract; checking here means a defective
-/// pass fails at the boundary instead of corrupting a deployment.
+/// third-party code, but every deployment runtime reads every pass's output
+/// against the same contract; checking here means a defective pass fails at
+/// the boundary instead of corrupting a deployment.
 pub fn optimize(
     pass: &dyn OptimizationPass,
     input: OptimizationInput<'_>,
@@ -348,53 +205,26 @@ pub fn optimize(
     Ok(output)
 }
 
-/// Structural checks only — that every query is accounted for, in order.
-/// Whether the pass chose *well* is not checked.
+/// Structural checks only — that every query is answered once, by an
+/// operator root or the scalar root keyed with its entry index, and that
+/// the DAG is valid. Whether the pass chose *well* is not checked.
 fn check_contract(
     output: &PlanOutput,
     pass: &'static str,
     expected_len: usize,
 ) -> Result<(), OptimizeError> {
-    let violation = |detail: String| OptimizeError::ContractViolation { pass, detail };
-
-    if output.len() != expected_len {
-        return Err(violation(format!(
-            "{} plan(s) for {expected_len} workload entry/entries",
-            output.len()
-        )));
+    let plan = &output.plan;
+    let answered = plan.roots.len() + plan.scalar_roots.len();
+    if answered != expected_len {
+        return Err(OptimizeError::ContractViolation {
+            pass,
+            detail: format!("{answered} plan root(s) for {expected_len} workload entry/entries"),
+        });
     }
-    for (position, entry_index) in output.entry_indices().into_iter().enumerate() {
-        if entry_index != position {
-            return Err(violation(format!(
-                "plan at position {position} carries entry_index {entry_index}"
-            )));
-        }
-    }
-    // `scalar_plans` holds one plan per distinct reference of each scalar
-    // root, in `scalar_roots` order, keyed by that scalar's entry.
-    let mut scalar_plans = output.scalar_plans.iter();
-    for (entry_index, expr) in &output.scalar_roots {
-        let mut refs: Vec<&Rc<OperatorNode>> = Vec::new();
-        for node in expr.operator_refs() {
-            if !refs.iter().any(|r| Rc::ptr_eq(r, node)) {
-                refs.push(node);
-            }
-        }
-        for node in refs {
-            match scalar_plans.next() {
-                Some(plan) if plan.entry_index == *entry_index && Rc::ptr_eq(&plan.root, node) => {}
-                _ => {
-                    return Err(violation(format!(
-                        "scalar root {entry_index} reads an operator without its scalar plan"
-                    )))
-                }
-            }
-        }
-    }
-    if scalar_plans.next().is_some() {
-        return Err(violation(
-            "a scalar plan is read by no scalar root".to_string(),
-        ));
+    // An empty workload's plan has no roots, which `validate` rejects.
+    if expected_len > 0 {
+        plan.validate()
+            .map_err(|error| OptimizeError::InvalidPlan { pass, error })?;
     }
     Ok(())
 }
@@ -465,137 +295,60 @@ mod tests {
 
     struct Stub(&'static str);
 
+    fn empty_plan() -> PlanOutput {
+        PlanOutput::new(PhysicalASAPDAG {
+            nodes: vec![],
+            edges: vec![],
+            roots: vec![],
+            scalar_roots: vec![],
+        })
+    }
+
     impl OptimizationPass for Stub {
         fn name(&self) -> &'static str {
             self.0
         }
         fn optimize(&self, _input: OptimizationInput<'_>) -> Result<PlanOutput, OptimizeError> {
-            Ok(PlanOutput::new(Vec::new()))
+            Ok(empty_plan())
         }
     }
 
-    /// Dropping a query is rejected: the output is positionally aligned with
-    /// the workload's entries, so a short vector is not a partial result.
+    /// Dropping a query is rejected: the plan's roots answer the workload's
+    /// entries in order, so a plan with fewer roots is not a partial result.
     #[test]
     fn contract_rejects_a_plan_count_that_does_not_cover_every_entry() {
-        let output = PlanOutput::new(Vec::new());
-        let err = check_contract(&output, "stub", 2).unwrap_err();
+        let err = check_contract(&empty_plan(), "stub", 2).unwrap_err();
         assert!(matches!(
             err,
             OptimizeError::ContractViolation { pass: "stub", .. }
         ));
     }
 
-    /// A scalar root's operator reference must be the root of its scalar
-    /// plan; a scalar root without one is rejected.
+    /// A scalar root keyed by an entry index the workload does not have is
+    /// rejected as an invalid plan.
     #[test]
-    fn contract_rejects_a_scalar_reference_without_its_plan() {
-        use asap_types::ir::operator::non_asap::NonASAPOp;
-        use asap_types::ir::operator::operator_properties::Source;
-        use asap_types::ir::schema::{DataType, Field, Schema};
-        use asap_types::ir::{Operator, ScalarExpr};
-        let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
-            source: Source::TimeSeries { metric: "m".into() },
-            predicates: vec![],
-            schema: Schema::with_time_index(
-                vec![Field::plain("ts", DataType::Timestamp, false)],
-                0,
-                vec![],
-            ),
-        }))
-        .unwrap();
-        let mut output = PlanOutput::new(Vec::new());
+    fn contract_rejects_a_scalar_root_keyed_beyond_the_entries() {
+        use asap_types::ir::scalar::ScalarValue;
+        use asap_types::ir::ScalarExpr;
+        let mut output = empty_plan();
         output
+            .plan
             .scalar_roots
-            .push((0, ScalarExpr::PromqlScalarFromVector(scan)));
+            .push((1, ScalarExpr::Literal(ScalarValue::Float64(1.0))));
         let err = check_contract(&output, "stub", 1).unwrap_err();
         assert!(matches!(
             err,
-            OptimizeError::ContractViolation { pass: "stub", .. }
+            OptimizeError::InvalidPlan {
+                pass: "stub",
+                error: PhysicalASAPDAGValidationError::ScalarRootPosition(1)
+            }
         ));
-    }
-
-    /// A scalar plan read from `root`, keyed by `entry_index`.
-    fn scalar_plan(entry_index: usize, root: &Rc<OperatorNode>) -> QueryPlan {
-        QueryPlan {
-            entry_index,
-            root: Rc::clone(root),
-        }
-    }
-
-    /// `scalar_plans` holds one plan per distinct reference of each scalar
-    /// root, in order and keyed by that root's entry: a plan out of order,
-    /// under another entry, or read by no scalar root is rejected.
-    #[test]
-    fn contract_checks_scalar_plan_order_entry_and_count() {
-        use asap_types::ir::operator::non_asap::NonASAPOp;
-        use asap_types::ir::operator::operator_properties::Source;
-        use asap_types::ir::scalar::ArithmeticOpKind;
-        use asap_types::ir::schema::{DataType, Field, Schema};
-        use asap_types::ir::{ExprSemantics, Operator, ScalarExpr};
-        let series = |metric: &str| {
-            OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
-                source: Source::TimeSeries {
-                    metric: metric.into(),
-                },
-                predicates: vec![],
-                schema: Schema::with_time_index(
-                    vec![Field::plain("ts", DataType::Timestamp, false)],
-                    0,
-                    vec![],
-                ),
-            }))
-            .unwrap()
-        };
-        let (a, b) = (series("a"), series("b"));
-        let read = |node: &Rc<OperatorNode>| ScalarExpr::PromqlScalarFromVector(Rc::clone(node));
-        let combine = |left, right| ScalarExpr::Arithmetic {
-            op: ArithmeticOpKind::Sub,
-            left: Box::new(left),
-            right: Box::new(right),
-            semantics: ExprSemantics::Promql,
-        };
-        let with_plans = |plans: Vec<QueryPlan>| {
-            let mut output = PlanOutput::new(Vec::new());
-            // `a - b`, then `a - a`: one plan per distinct reference.
-            output.scalar_roots = vec![
-                (0, combine(read(&a), read(&b))),
-                (1, combine(read(&a), read(&a))),
-            ];
-            output.scalar_plans = plans;
-            check_contract(&output, "stub", 2)
-        };
-        with_plans(vec![
-            scalar_plan(0, &a),
-            scalar_plan(0, &b),
-            scalar_plan(1, &a),
-        ])
-        .unwrap();
-        for plans in [
-            // Wrong order.
-            vec![scalar_plan(0, &b), scalar_plan(0, &a), scalar_plan(1, &a)],
-            // Wrong entry key.
-            vec![scalar_plan(0, &a), scalar_plan(1, &b), scalar_plan(1, &a)],
-            // An extra plan.
-            vec![
-                scalar_plan(0, &a),
-                scalar_plan(0, &b),
-                scalar_plan(1, &a),
-                scalar_plan(1, &a),
-            ],
-        ] {
-            assert!(matches!(
-                with_plans(plans),
-                Err(OptimizeError::ContractViolation { pass: "stub", .. })
-            ));
-        }
     }
 
     /// The matching count passes.
     #[test]
     fn contract_accepts_an_empty_workload() {
-        let output = PlanOutput::new(Vec::new());
-        assert!(check_contract(&output, "stub", 0).is_ok());
+        assert!(check_contract(&empty_plan(), "stub", 0).is_ok());
     }
 
     /// Registering a name twice fails instead of overwriting, so a comparison

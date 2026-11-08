@@ -19,7 +19,7 @@ not turn an unknown guarantee into a satisfied accuracy requirement.
 ## Candidate state
 
 Here, **certified for a target** means Planner has a fully known
-`AccuracyGuarantee` for the candidate and `AccuracyModel::satisfies(guarantee,
+`AccuracyGuarantee` for the candidate and `asap_accuracy::satisfies(guarantee,
 target)` returns `true`. **Uncertified** means Planner cannot make that claim:
 the guarantee is absent, contains unknown terms, or is known not to meet the
 target. An uncertified summary may still be a well-formed logical candidate;
@@ -73,7 +73,7 @@ not emit a `RejectedCandidate` for that case.
 The backend must still check summary family, window, and state-operation
 capabilities before deployment.
 
-- Accuracy/domain: `AccuracyEvidenceProvider` supplies quantile domains and
+- Accuracy/domain: `AccuracyEvidence` supplies measured guarantees; the data workload supplies quantile domains and
   propagation statistics. DDSketch ratio domains, Hydra shared-grid bounds,
   TopK margin intervals, HLL confidence, and composition row counts may be
   missing. A missing non-negative-value proof for relative-error composition
@@ -134,7 +134,7 @@ All three start from PromQL text and exercise frontend lowering and planning.
 None runs a deployed query.
 
 For a workload containing `quantile_over_time(0.9,data[5m]) /
-quantile_over_time(0.5,data[5m])`, search with `NoAccuracyEvidence` and a root
+quantile_over_time(0.5,data[5m])`, search with no accuracy evidence and a root
 target may expose a direct DDSketch ratio candidate. Its missing domain proof
 is visible through `has_missing_accuracy_evidence()`. The backend examines the
 operand windows and its own data-domain facts, checks whether the denominator

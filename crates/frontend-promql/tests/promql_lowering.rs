@@ -30,17 +30,11 @@ fn frequency_extensions_lower_to_explicit_frequency_statistics() {
     for (query, expected) in [
         (
             "entropy_over_time(cpu_usage[5m])",
-            AggIntent::FrequencyEntropy {
-                col: None,
-                accuracy: AccuracyTarget::exact(),
-            },
+            AggIntent::FrequencyEntropy { col: None },
         ),
         (
             "l2_over_time(cpu_usage[5m])",
-            AggIntent::FrequencyL2 {
-                col: None,
-                accuracy: AccuracyTarget::exact(),
-            },
+            AggIntent::FrequencyL2 { col: None },
         ),
     ] {
         assert!(all_intents(&lower(query))
@@ -50,9 +44,9 @@ fn frequency_extensions_lower_to_explicit_frequency_statistics() {
 }
 
 #[test]
-fn distinct_over_time_preserves_cardinality_accuracy_and_nested_windows() {
-    // Distinct counts sample values, not samples or series; all lowering routes
-    // retain the caller's accuracy requirement, including subquery arguments.
+fn distinct_over_time_lowers_to_cardinality_over_nested_windows() {
+    // Distinct counts sample values, not samples or series, on every lowering
+    // route, subquery arguments included.
     for query in [
         "distinct_over_time(cpu_usage{job=\"worker\"}[5m] offset 1h)",
         "distinct_over_time((cpu_usage + 1)[5m:1m])",
@@ -63,14 +57,14 @@ fn distinct_over_time_preserves_cardinality_accuracy_and_nested_windows() {
             let mut intents = Vec::new();
             collect_intents(&dag, &mut intents);
             assert!(
-                intents.iter().any(|intent| matches!(
-                    intent, AggIntent::Cardinality { accuracy: actual, .. } if *actual == accuracy
-                )),
+                intents
+                    .iter()
+                    .any(|intent| matches!(intent, AggIntent::Cardinality { .. })),
                 "{query}: {dag:?}"
             );
             assert!(!intents
                 .iter()
-                .any(|intent| matches!(intent, AggIntent::Count { .. })));
+                .any(|intent| matches!(intent, AggIntent::Count)));
         }
     }
 }
@@ -441,7 +435,7 @@ fn count_over_rate_keeps_both_levels() {
     else {
         panic!("expected outer Aggregate{{Count}}, got {qe:?}");
     };
-    assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Count]));
     assert!(matches!(
         child.expect_non_asap(),
         NonASAPOp::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate])
@@ -473,7 +467,7 @@ fn count_over_distinct_over_time_preserves_both_aggregates() {
             panic!("expected outer Count: {dag:?}");
         };
         assert!(
-            matches!(measures.as_slice(), [AggIntent::Count { .. }]),
+            matches!(measures.as_slice(), [AggIntent::Count]),
             "{query}: {dag:?}"
         );
         assert_eq!(actual, &reduction, "{query}");
@@ -513,7 +507,7 @@ fn count_never_lowers_to_distinct_sample_values() {
         let dag = lower(query);
         let intents = all_intents(&dag);
         assert!(
-            intents.iter().any(|i| matches!(i, AggIntent::Count { .. })),
+            intents.iter().any(|i| matches!(i, AggIntent::Count)),
             "{query}: {dag:?}"
         );
         assert!(
@@ -541,7 +535,7 @@ fn outer_count_counts_series() {
         panic!("expected outer Aggregate grouped by symbol, got {qe:?}");
     };
     assert_eq!(reduction, &Reduction::by(vec![2]));
-    assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Count]));
     // Inner: Aggregate{Count} over TimeRange (per-series count_over_time).
     let NonASAPOp::Aggregate {
         measures, child, ..
@@ -549,7 +543,7 @@ fn outer_count_counts_series() {
     else {
         panic!("expected Aggregate (count_over_time) under the outer count, got {child:?}");
     };
-    assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Count]));
     assert!(matches!(
         child.expect_non_asap(),
         NonASAPOp::TimeRange { .. }
@@ -584,7 +578,7 @@ fn topk_over_count_is_heavy_hitter_topk() {
     else {
         panic!("expected Aggregate (count_over_time) under TopK, got {child:?}");
     };
-    assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Count]));
     let NonASAPOp::TimeRange { range, child, .. } = child.expect_non_asap() else {
         panic!("expected TimeRange under Count aggregate, got {child:?}");
     };
@@ -686,7 +680,7 @@ fn bottomk_over_count_is_generic_sort_ascending() {
     };
     assert!(keys[0].ascending, "bottomk ranks ascending");
     // Count intent is still present (as the inner aggregate), no TopK.
-    assert!(has_intent(&qe, |i| matches!(i, AggIntent::Count { .. })));
+    assert!(has_intent(&qe, |i| matches!(i, AggIntent::Count)));
     assert!(!has_intent(&qe, |i| matches!(i, AggIntent::TopK { .. })));
 }
 
@@ -737,7 +731,7 @@ fn topk_count_output_schema_carries_group_key() {
     else {
         panic!("expected inner Aggregate{{Count}}, got {child:?}");
     };
-    assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Count]));
     assert!(matches!(
         child.expect_non_asap(),
         NonASAPOp::TimeRange { .. }
@@ -1039,22 +1033,6 @@ fn fill_modifiers_are_rejected_not_ignored() {
 }
 
 // ── accuracy propagation ──────────────────────────────────────────────────────
-
-#[test]
-fn accuracy_target_flows_into_quantile_intent() {
-    let qe = lower_promql(
-        "quantile_over_time(0.9, m[5m])",
-        AccuracyTarget::max_error(0.01),
-    )
-    .unwrap();
-    let NonASAPOp::Aggregate { measures, .. } = qe.expect_non_asap() else {
-        panic!("expected Aggregate");
-    };
-    assert!(matches!(
-        &measures[0],
-        AggIntent::Quantile { accuracy, .. } if (accuracy.max_error - 0.01).abs() < 1e-12
-    ));
-}
 
 // ── schema flow (positional, carried on Scan; derived on demand) ─────────────────
 

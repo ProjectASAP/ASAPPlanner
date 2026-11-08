@@ -68,16 +68,18 @@ Based on our requirement, each field should contain the following information.
 1. **What type of the ASAP Primitive is.** The field's type is a [`FieldDataType`](#63-schema-and-field-types-cratestypessrcirschemamodrs) (`crates/types/src/ir/schema/mod.rs`). A column is either a raw value or a summary state:
 
    - **Raw value**: `Plain(DataType)`, e.g., a number or a string.
-   - **Summary state**: described from coarse to fine by three levels:
+   - **Summary state**: described from coarse to fine by these terms:
 
-   | Level | Code | Values | KLL example |
+   | Term | Code | Values | KLL example |
    |---|---|---|---|
    | Family | `FieldDataType` variant | `ExactAggregate`, `Sketch`, `SummarySample`, `Wavelet`, `StatModel` | `Sketch` |
-   | Algorithm | `SketchAlgorithm` (other families: `ExactKind`, `SamplingKind`, …) | `Kll`, `Cms`, `Hll`, `DDSketch`, … | `Kll` |
-   | Parameters | `SketchParams` (other families: `ExactParams`, `SamplingParams`, …) | per algorithm | `Kll { k: 200 }` |
+   | Algorithm | `SketchAlgorithm` (other families: `ExactKind`, `SamplingKind`, …) | `Kll`, `Cms`, `Hll`, `DDSketch`, `HydraKll`, … | `Kll` |
+   | Summary type | family and algorithm: one `FieldDataType` value, the column's type | `FieldDataType::Sketch(SketchAlgorithm)`, … | `Sketch(Kll)` |
+   | Parameters θ | `SketchParams` (other families: `ExactParams`, `SamplingParams`, …), on the candidate's `LogicalProperties`, not in the type | per algorithm, from `parameter_list(algorithm)` | `Kll { k: 547 }` |
 
-   - For a sketch, algorithm and parameters are bundled as one `SketchKind` ([§6.4](#64-summary-family-parameters-cratestypessrcirschemasketchrs)). A sketch also records its `GroupingStrategy`: one instance per group, or one shared structure (Hydra) for all groups.
-   - So a quantile KLL sketch with `k = 200`, one instance per group, has the type `Sketch(SketchKind { Kll, Kll { k: 200 } }, PerSubpopulationInstance)`. Which statistics a family answers is the family-capability table's (`FamilyCapability`), not part of the type.
+   - The summary type is the operator's `summary_type` argument (`SummaryAgg`, the chain). θ is structure only (sizes, no sized-for error fields) and lives on the candidate, so builds that differ only in θ are candidates of one memo group.
+   - A shared multi-subpopulation structure (Hydra) is an algorithm of its own (`HydraKll`, `HydraCms`, `HydraCountSketch`, …), not a separate grouping dimension.
+   - So a quantile KLL sketch with `k = 547` has the type `Sketch(Kll)` and θ `Kll { k: 547 }`. Which statistics a summary type answers is its row of the capability table (`SummaryTypeCapability`), not part of the type.
 
 2. **What query intent the summarized ASAP Primitive can support.** This is not stored in the field: it follows from the type in item 1. There are two kinds of intent:
 
@@ -877,15 +879,15 @@ Every struct field and enum-variant field below has a comment saying what it hol
 OperatorNode                                         §6.1
 ├── operator: Operator::ASAP(ASAPOp)                 §6.2
 │     ├── SummaryAgg
-│     │     ├── family: FieldDataType ───────────┐   §6.3 → §6.4
+│     │     ├── summary_type: FieldDataType ─────┐   §6.3 → §6.4
 │     │     └── input:  SummaryUpdate            │   §6.5  (what each row adds)
 │     ├── SummaryEstimate.query: SketchStatistic │   §6.5  (what is read out)
 │     ├── MaintainPopulation.population          │   §6.5
 │     └── EvaluatePopulation.evaluation          │   §6.5
 ├── schema: Schema                               │   §6.3
 │     └── fields[i].dtype: FieldDataType ◀───────┘   §6.3  (the same type: the output
-│           └── Sketch(SketchKind, GroupingStrategy)        `state` field has type `family`)
-│                 └── algorithm, params              §6.4
+│           └── Sketch(SketchAlgorithm)              `state` field has type `summary_type`)
+│                 (θ, `SketchParams`, is on the candidate)  §6.4
 ├── guarantee: AccuracyGuarantee                       §6.5  (accuracy of an evaluation)
 └── coverage() → SummaryCoverage                     §6.6
       └── definition: OperatorNode   (again a node, so the same structure)
@@ -895,12 +897,12 @@ OperatorNode                                         §6.1
 |---|---|---|
 | §6.1 DAG node | `OperatorNode` | the DAG itself |
 | §6.2 ASAP operators | `ASAPOp` | `OperatorNode.operator` |
-| §6.3 Schema and field types | `Schema`, `Field`, `FieldDataType` | every node's `schema`; `SummaryAgg.family` |
-| §6.4 Summary-family parameters | `SketchKind`, `SketchParams`, `GroupingStrategy`, exact/sample/wavelet/model params | the payload of each non-plain `FieldDataType` variant |
+| §6.3 Schema and field types | `Schema`, `Field`, `FieldDataType` | every node's `schema`; `SummaryAgg.summary_type` |
+| §6.4 Summary algorithms and parameters | `SketchAlgorithm`, `SketchParams`, `HydraParams`, exact/sample/wavelet/model kinds and params | the payload of each non-plain `FieldDataType` variant; θ on a candidate's `LogicalProperties` |
 | §6.5 Update input and evaluations | `SummaryUpdate`, `SketchStatistic`, `MaintainedPopulation`, `PopulationStatistic` | fields of the `ASAPOp` variants in §6.2 |
 | §6.6 Summary coverage | `SummaryCoverage`, `SelectionBox`, `Constraint` | `OperatorNode::coverage()` on summary nodes |
 
-**Example: the p99 latency state of §5.1.** The `SummaryAgg` node (§6.1) holds `ASAPOp::SummaryAgg` (§6.2) with `family = Sketch(SketchKind::new(Kll, Kll { k: 200 }), PerSubpopulationInstance)` (§6.3, §6.4) and `input = SummaryUpdate::column(latency)` (§6.5). Its `schema` (§6.3) is `(job Utf8, state Sketch(KLL k=200))`: the `state` field has the same type as `family`. A `SummaryEstimate` above it holds `query = Quantile { q: 0.99 }` (§6.5), and its node carries the `guarantee` of the evaluation. `coverage()` on the `SummaryAgg` node returns a `SummaryCoverage` (§6.6).
+**Example: the p99 latency state of §5.1.** The `SummaryAgg` node (§6.1) holds `ASAPOp::SummaryAgg` (§6.2) with `summary_type = Sketch(Kll)` (§6.3, §6.4) and `input = SummaryUpdate::column(latency)` (§6.5); its candidate's θ is `Kll { k: 200 }`. Its `schema` (§6.3) is `(job Utf8, state Sketch(Kll))`: the `state` field has the same type as `summary_type`. A `SummaryEstimate` above it holds `query = Quantile { q: 0.99 }` (§6.5), and its node carries the `guarantee` of the evaluation. `coverage()` on the `SummaryAgg` node returns a `SummaryCoverage` (§6.6).
 
 ### 6.1 DAG node (`crates/types/src/ir/operator/node.rs`)
 
@@ -948,14 +950,12 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
         /// The input rows.
         child: C,
         /// The summary type of the output `state` field. Never `Plain`.
-        family: FieldDataType,
+        summary_type: FieldDataType,
         /// What each input row adds to the state (item and weight).
         input: SummaryUpdate,
         /// The grouping: `Reduce(by columns)`, or `PerEntity` for one state per
         /// input series without grouping.
         reduction: Reduction,
-        /// Whether each group gets its own sketch or all groups share one.
-        grouping: GroupingStrategy,
         /// Rows to include, applied before updating the state. `None`: all rows.
         filter: Option<Predicate<C>>,
     },
@@ -1003,7 +1003,7 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
         outer: C,               // one input state
         inner: C,               // the other input state
         key: ColumnId,          // the join key column
-        family: FieldDataType,  // the summary type of the result
+        summary_type: FieldDataType,  // the summary type of the result
     },
     Extension {
         child: C,               // the input
@@ -1026,7 +1026,7 @@ impl ASAPOp {
     /// Whether the operator is reserved and cannot be built yet: Subtract,
     /// Delete, Join, Extension.
     pub fn is_unimplemented(&self) -> bool;
-    /// The summary type this operator outputs: `family` for SummaryAgg and
+    /// The summary type this operator outputs: `summary_type` for SummaryAgg and
     /// SummaryJoin, the inputs' state type for SummaryMerge, `None` otherwise.
     pub fn produced_state(&self) -> Option<&FieldDataType>;
     /// The output schema, derived from the operator and its inputs. An error
@@ -1105,15 +1105,16 @@ impl Field<FieldDataType> {
     pub fn is_plain(&self) -> bool;
 }
 
-/// A column's type: a plain value, or summary state of one family (§3).
+/// A column's type: a plain value, or summary state of one summary type
+/// (family and algorithm, §3).
 pub enum FieldDataType {
     /// A readable value of this type.
     Plain(DataType),
     /// Exact accumulator state: which accumulator, and its parameters.
     ExactAggregate(ExactKind, ExactParams),
-    /// Sketch state: the chosen sketch (algorithm, parameters), and
-    /// whether each group has its own sketch or all groups share one.
-    Sketch(SketchKind, GroupingStrategy),
+    /// Sketch state of one algorithm; θ is not part of the type. The
+    /// `Hydra*` algorithms share one structure across all groups.
+    Sketch(SketchAlgorithm),
     /// Summary sample state: the sampling method, and its parameters.
     #[serde(rename = "Sample")]
     SummarySample(SamplingKind, SamplingParams),
@@ -1143,7 +1144,7 @@ pub enum DataType {
 }
 ```
 
-### 6.4 Summary-family parameters (`crates/types/src/ir/schema/sketch.rs`)
+### 6.4 Summary algorithms and parameters (`crates/types/src/ir/schema/sketch.rs`)
 
 ```rust
 /// Which exact accumulator. None of them has parameters, so `ExactParams`
@@ -1151,28 +1152,15 @@ pub enum DataType {
 pub enum ExactKind   { Sum, Count, Min, Max, Increase, Rate, IRate }
 pub enum ExactParams { Sum, Count, Min, Max, Increase, Rate, IRate }
 
-/// A chosen sketch. Built only through `new`, so the two fields always agree.
-/// Which statistics it answers is its family's row of the family-capability
-/// table (`FamilyCapability`).
-pub struct SketchKind {
-    /// Which sketch algorithm.
-    algorithm: SketchAlgorithm,
-    /// That algorithm's size parameters; must match `algorithm`.
-    params: SketchParams,
-}
-impl SketchKind {
-    /// The only constructor. Panics if `params` belong to a different
-    /// algorithm.
-    pub fn new(algorithm: SketchAlgorithm, params: SketchParams) -> Self;
-    /// The sketch algorithm.
-    pub fn algorithm(&self) -> &SketchAlgorithm;
-    /// The algorithm's size parameters.
-    pub fn params(&self) -> &SketchParams;
-}
-// Theta is not offered as a candidate until asap_sketchlib has a Theta sketch.
-pub enum SketchAlgorithm { UnivMon, Kll, Cms, Hll, DDSketch, CmsWithHeap, Kmv, Theta, CountSketch, CountSketchWithHeap }
+/// `asap_sketchlib`'s algorithm enum, the Hydra algorithms (`HydraKll`,
+/// `HydraCms`, `HydraCountSketch`, …) included. Which statistics each
+/// answers is its row of the capability table (`SummaryTypeCapability`).
+pub use asap_sketchlib::SketchAlgorithm;
 
-/// Size parameters of each algorithm. Larger values: more memory, less error.
+/// θ: the structure of each algorithm, from its predefined list
+/// (`parameter_list`). Larger values: more memory, less error. No field
+/// records what error a configuration was sized for; equality compares
+/// every field.
 pub enum SketchParams {
     /// `layers`: number of sampling levels. Each level has a Count Sketch of
     /// `sketch_rows` hash rows × `sketch_cols` counters, and a heap of the
@@ -1190,24 +1178,15 @@ pub enum SketchParams {
     CmsWithHeap { width: u32, depth: u32, heap_size: u32 },
     /// `k`: number of smallest hash values kept.
     Kmv { k: u32 },
-    /// `k`: number of hash values kept (nominal entries).
-    Theta { k: u32 },
     /// `width`: counters per row. `depth`: number of hash rows.
     CountSketch { width: u32, depth: u32 },
     /// Count Sketch `width` × `depth`, plus a heap of the `heap_size` heaviest items.
     CountSketchWithHeap { width: u32, depth: u32, heap_size: u32 },
+    /// θ of a `Hydra*` algorithm.
+    Hydra(HydraParams),
 }
 
-/// How a grouped sketch is laid out across the `by` groups. Independent of the family.
-pub enum GroupingStrategy {
-    /// One separate sketch per group. The default.
-    PerSubpopulationInstance,
-    /// One shared structure for all groups (Hydra). `kind`: which shared
-    /// structure. `params`: its sizes.
-    SharedMultiSubpopulation { kind: HydraKind, params: HydraParams },
-}
-pub enum HydraKind { HydraKll /* experimental, no error bound */, HydraCms, HydraCountSketch }
-/// Sizes of the shared structure.
+/// Sizes of a Hydra structure, one shared by all groups.
 pub enum HydraParams {
     /// `k`: KLL `k` each group sees. `shared_buckets`: size of the one structure
     /// shared by all groups.
@@ -1218,11 +1197,6 @@ pub enum HydraParams {
     /// Same fields as `HydraCms`, for Count Sketch.
     HydraCountSketch { width: u32, depth: u32, shared_rows: u32, shared_columns: u32 },
 }
-/// The shared (Hydra) version of an algorithm, if one with a known error
-/// bound exists: `Cms` → `HydraCms`, `CountSketch` → `HydraCountSketch`;
-/// `None` for all others.
-pub fn hydra_kind_for(a: &SketchAlgorithm) -> Option<HydraKind>;
-
 /// `size`: number of rows kept in the reservoir.
 pub enum SamplingKind  { Reservoir }    pub enum SamplingParams  { Reservoir { size: u32 } }
 /// `coefficients`: number of wavelet coefficients kept.

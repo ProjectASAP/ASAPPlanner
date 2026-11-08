@@ -6,7 +6,7 @@ use std::time::Duration;
 use asap_types::ir::operator::operator_properties::{Reduction, Source};
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
-use asap_types::ir::schema::{GroupingStrategy, SketchAlgorithm, SummaryUpdate};
+use asap_types::ir::schema::{SketchAlgorithm, SummaryUpdate};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, TimeRangeKind};
 
 const MINUTE: u64 = 60_000;
@@ -28,17 +28,16 @@ fn scan() -> Rc<OperatorNode> {
 }
 
 fn kll() -> FieldDataType {
-    FieldDataType::Sketch(SketchAlgorithm::Kll, GroupingStrategy::default())
+    FieldDataType::Sketch(SketchAlgorithm::Kll)
 }
 
 /// 1-min KLL tumbling windows per series over `input`.
 fn chain(input: Rc<OperatorNode>) -> Rc<OperatorNode> {
     OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
         child: input,
-        family: kll(),
+        summary_type: kll(),
         input: SummaryUpdate::column(ColumnRef::SampleValue),
         reduction: Reduction::PerEntity,
-        grouping: GroupingStrategy::default(),
         filter: None,
         tumbling_window_width_ms: MINUTE,
     }))
@@ -61,10 +60,9 @@ fn a_chain_reads_an_instant_vector() {
     };
     let empty = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
         child: scan(),
-        family: kll(),
+        summary_type: kll(),
         input: SummaryUpdate::column(ColumnRef::SampleValue),
         reduction: Reduction::PerEntity,
-        grouping: GroupingStrategy::default(),
         filter: None,
         tumbling_window_width_ms: 0,
     }))

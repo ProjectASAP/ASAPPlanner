@@ -47,7 +47,7 @@ fn catalog() -> SqlCatalog {
 
 /// Lower `sql` and take the logical DAG the planner pipeline selects.
 async fn plan(sql: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
-    let pre = lower_sql(sql, &catalog(), accuracy.clone())
+    let pre = lower_sql(sql, &catalog())
         .await
         .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"));
     selected_dag(pre, accuracy)

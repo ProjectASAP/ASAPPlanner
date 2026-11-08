@@ -55,7 +55,7 @@ fn one_large_batch_fails_near_the_memory_limit() {
         .map(|i| vec![Value::Utf8(format!("s{i}").into()), Value::Float64(1.0)])
         .collect();
     let batch = Batch::try_new(input.clone(), rows).unwrap();
-    let family = FieldDataType::Sketch(SketchAlgorithm::Kll, Default::default());
+    let family = FieldDataType::Sketch(SketchAlgorithm::Kll);
     let mut dag = PhysicalDAG::default();
     dag.add(
         0,

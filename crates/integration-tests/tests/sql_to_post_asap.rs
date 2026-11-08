@@ -30,8 +30,7 @@ use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::expr_ir::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::schema::{
-    ExactKind, ExactParams, FieldDataType, GroupingStrategy, SketchAlgorithm, SketchStatistic,
-    SummaryUpdate,
+    ExactKind, ExactParams, FieldDataType, SketchAlgorithm, SketchStatistic, SummaryUpdate,
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr};
 use asap_types::workload::SqlDialect;
@@ -140,8 +139,8 @@ fn catalog() -> SqlCatalog {
     )
 }
 
-async fn lower(sql: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
-    lower_sql(sql, &catalog(), accuracy)
+async fn lower(sql: &str) -> Rc<OperatorNode> {
+    lower_sql(sql, &catalog())
         .await
         .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"))
 }
@@ -162,18 +161,13 @@ async fn clickhouse_temporal_sql_reuses_rate_and_increase_physical_summaries() {
             "SELECT service, {function}(latency, ts, 300000) AS v \
              FROM metrics WHERE bytes > 0 GROUP BY service"
         );
-        let pre_asap = lower_sql_dialect(
-            &sql,
-            &catalog(),
-            SqlDialect::ClickhouseSQL,
-            AccuracyTarget::exact(),
-        )
-        .await
-        .expect("explicit temporal SQL must lower");
+        let pre_asap = lower_sql_dialect(&sql, &catalog(), SqlDialect::ClickhouseSQL)
+            .await
+            .expect("explicit temporal SQL must lower");
         let planned = realize(&pre_asap, AccuracyTarget::exact());
         let physical = first_summary_agg(&planned);
         let Operator::ASAP(ASAPOp::SummaryAgg {
-            family,
+            summary_type: family,
             reduction,
             child,
             ..
@@ -208,20 +202,16 @@ async fn clickhouse_outer_sum_recursively_binds_inner_temporal_aggregate() {
              SELECT service, {function}(latency, ts, {window_ms}) AS v \
              FROM metrics GROUP BY service)"
         );
-        let pre_asap = lower_sql_dialect(
-            &sql,
-            &catalog(),
-            SqlDialect::ClickhouseSQL,
-            AccuracyTarget::exact(),
-        )
-        .await
-        .expect("nested temporal SQL must lower");
+        let pre_asap = lower_sql_dialect(&sql, &catalog(), SqlDialect::ClickhouseSQL)
+            .await
+            .expect("nested temporal SQL must lower");
         let root = realize(&pre_asap, AccuracyTarget::exact());
 
         fn has_temporal_summary(node: &OperatorNode) -> bool {
             match &node.operator {
                 Operator::ASAP(ASAPOp::SummaryAgg {
-                    family: FieldDataType::ExactAggregate(ExactKind::Rate | ExactKind::Increase, _),
+                    summary_type:
+                        FieldDataType::ExactAggregate(ExactKind::Rate | ExactKind::Increase, _),
                     ..
                 }) => true,
                 Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) => {
@@ -237,7 +227,10 @@ async fn clickhouse_outer_sum_recursively_binds_inner_temporal_aggregate() {
         );
         // The outer sum is an exact Sum state over the finalized per-series
         // values, so the export keeps both summaries.
-        let Operator::ASAP(ASAPOp::SummaryAgg { family, .. }) = &first_summary_agg(&root).operator
+        let Operator::ASAP(ASAPOp::SummaryAgg {
+            summary_type: family,
+            ..
+        }) = &first_summary_agg(&root).operator
         else {
             unreachable!()
         };
@@ -261,11 +254,7 @@ async fn clickhouse_outer_sum_recursively_binds_inner_temporal_aggregate() {
 
 #[tokio::test]
 async fn sql_full_query_retains_project_and_binds_inner_aggregate() {
-    let pre_asap = lower(
-        "SELECT approx_percentile_cont(latency, 0.99) AS p99 FROM metrics",
-        AccuracyTarget::max_error(0.01),
-    )
-    .await;
+    let pre_asap = lower("SELECT approx_percentile_cont(latency, 0.99) AS p99 FROM metrics").await;
     let Some(NonASAPOp::Project {
         cols: expected_cols,
         qualifier: expected_qualifier,
@@ -311,7 +300,6 @@ async fn sql_join_recursively_binds_both_temporal_aggregate_children() {
          ON b.service=a.service",
         &catalog(),
         SqlDialect::ClickhouseSQL,
-        AccuracyTarget::exact(),
     )
     .await
     .expect("two-subquery rate ratio must lower");
@@ -384,7 +372,7 @@ async fn sql_join_recursively_binds_both_temporal_aggregate_children() {
         assert!(matches!(
             aggregate.operator,
             Operator::ASAP(ASAPOp::SummaryAgg {
-                family: FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate),
+                summary_type: FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate),
                 ..
             })
         ));
@@ -421,7 +409,6 @@ async fn sql_relational_parents_retain_summary_bound_aggregate() {
          (SELECT service, approx_percentile_cont(latency, 0.9) AS p \
           FROM metrics GROUP BY service) t \
          WHERE t.p > 100 ORDER BY t.p DESC LIMIT 5",
-        AccuracyTarget::max_error(0.01),
     )
     .await;
     let root = realize_ignoring_guarantees(&pre_asap, AccuracyTarget::max_error(0.01));
@@ -469,7 +456,6 @@ async fn sql_filter_keeps_read_predicate_and_summary_population_selection() {
          (SELECT service, approx_percentile_cont(latency, 0.9) AS p \
           FROM metrics WHERE service = 'api' GROUP BY service) t \
          WHERE t.p > 100",
-        AccuracyTarget::max_error(0.01),
     )
     .await;
     let expected_read_predicate = {
@@ -551,11 +537,7 @@ async fn sql_filter_keeps_read_predicate_and_summary_population_selection() {
 
 #[tokio::test]
 async fn sql_quantile_binds_kll_sketch_over_named_column() {
-    let pre_asap = lower(
-        "SELECT approx_percentile_cont(latency, 0.99) FROM metrics",
-        AccuracyTarget::max_error(0.01),
-    )
-    .await;
+    let pre_asap = lower("SELECT approx_percentile_cont(latency, 0.99) FROM metrics").await;
     let planned = asap_integration_tests::planning::explicit_summary_candidate(
         pre_asap,
         SketchAlgorithm::Kll,
@@ -583,7 +565,7 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
 
     let Operator::ASAP(ASAPOp::SummaryAgg {
         child,
-        family,
+        summary_type: family,
         input,
         reduction,
         ..
@@ -591,10 +573,7 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
     else {
         panic!("expected SummaryAgg, got {:?}", summary_input.operator);
     };
-    assert_eq!(
-        family,
-        &FieldDataType::Sketch(SketchAlgorithm::Kll, GroupingStrategy::default())
-    );
+    assert_eq!(family, &FieldDataType::Sketch(SketchAlgorithm::Kll));
     assert_eq!(
         input,
         &SummaryUpdate::column(ColumnRef::Qualified {
@@ -610,7 +589,7 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
     );
     assert_eq!(
         summary_input.schema.fields[0].dtype,
-        FieldDataType::Sketch(SketchAlgorithm::Kll, GroupingStrategy::default())
+        FieldDataType::Sketch(SketchAlgorithm::Kll)
     );
 
     assert!(
@@ -636,11 +615,7 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
 /// 1/(2ε²δ)` reaches precision 18, the largest.
 #[tokio::test]
 async fn sql_count_distinct_with_epsilon_binds_hll_over_named_column() {
-    let pre_asap = lower(
-        "SELECT COUNT(DISTINCT service) FROM metrics",
-        AccuracyTarget::max_error(0.01),
-    )
-    .await;
+    let pre_asap = lower("SELECT COUNT(DISTINCT service) FROM metrics").await;
     let planned = asap_integration_tests::planning::explicit_summary_candidate(
         pre_asap,
         SketchAlgorithm::Hll,
@@ -662,7 +637,7 @@ async fn sql_count_distinct_with_epsilon_binds_hll_over_named_column() {
     );
 
     let Operator::ASAP(ASAPOp::SummaryAgg {
-        family,
+        summary_type: family,
         input,
         reduction,
         ..
@@ -670,10 +645,7 @@ async fn sql_count_distinct_with_epsilon_binds_hll_over_named_column() {
     else {
         panic!("expected SummaryAgg, got {:?}", summary_input.operator);
     };
-    assert_eq!(
-        family,
-        &FieldDataType::Sketch(SketchAlgorithm::Hll, GroupingStrategy::default())
-    );
+    assert_eq!(family, &FieldDataType::Sketch(SketchAlgorithm::Hll));
     assert_eq!(
         input,
         &SummaryUpdate::column(ColumnRef::Qualified {
@@ -688,7 +660,7 @@ async fn sql_count_distinct_with_epsilon_binds_hll_over_named_column() {
 async fn map_projection_export_keeps_the_map_over_an_avg_of_exact_states() {
     let pre = lower_sql_dialect(
         "SELECT map('job', t.service) AS labels, t.avg_bytes FROM (SELECT service, AVG(bytes) AS avg_bytes FROM metrics GROUP BY service) t WHERE t.avg_bytes > 100",
-        &catalog(), SqlDialect::ClickhouseSQL, AccuracyTarget::exact(),
+        &catalog(), SqlDialect::ClickhouseSQL,
     ).await.unwrap();
     let root = realize(&pre, AccuracyTarget::exact());
     let dag = physical_asap_dag(&root);
@@ -702,7 +674,10 @@ async fn map_projection_export_keeps_the_map_over_an_avg_of_exact_states() {
         .nodes
         .iter()
         .filter_map(|node| match &node.payload {
-            PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { family, .. }) => Some(family),
+            PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
+                summary_type: family,
+                ..
+            }) => Some(family),
             _ => None,
         })
         .collect();

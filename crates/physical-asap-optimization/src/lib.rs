@@ -7,9 +7,9 @@
 //! $(\tau, \ell)$, each logical edge into its physical edges with
 //! $\alpha^{\log}$ and $\alpha^{\mathrm{phys}}$, and the pruned alternatives
 //! (`asap_types::stages::PhysicalASAPMemoCandidates`). Stage 3 selects from
-//! that output, and [`Stage2AssignmentRealizer`] builds the selected DAG as a
-//! physical plan. The crate depends on no other stage crate.
+//! that output and builds the plan. The crate depends on no other stage
+//! crate.
 
 mod catalog;
 
-pub use catalog::{generate_physical_asap_memo_candidates, Stage2AssignmentRealizer};
+pub use catalog::generate_physical_asap_memo_candidates;

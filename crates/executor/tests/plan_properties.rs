@@ -54,6 +54,7 @@ fn sorted_scan(schema: &Schema, identity: &Source) -> PhysicalASAPDAG {
         output_schema: schema.clone(),
         guarantee: None,
         retention_ms: None,
+        selected_physical_candidate: None,
     };
     PhysicalASAPDAG {
         nodes: vec![
@@ -137,9 +138,8 @@ fn summary_capability_levels_are_distinct() {
         planner::ir::schema::SketchStatistic,
     };
     use planner_types::ir::scalar::ColumnRef;
-    use planner_types::ir::schema::{GroupingStrategy, SketchAlgorithm, SummaryUpdate};
-    let grouping = GroupingStrategy::default();
-    let cms = FieldDataType::Sketch(SketchAlgorithm::Cms, grouping.clone());
+    use planner_types::ir::schema::{SketchAlgorithm, SummaryUpdate};
+    let cms = FieldDataType::Sketch(SketchAlgorithm::Cms);
     let update = SummaryUpdate {
         item: Some(planner_types::ir::schema::SummaryInputExpr::Column(
             ColumnRef::Named("host".into()),
@@ -147,7 +147,7 @@ fn summary_capability_levels_are_distinct() {
         weight: planner_types::ir::schema::SummaryInputExpr::Constant(1.0),
         weight_domain: Default::default(),
     };
-    assert!(validate_summary_kernel(&cms, &update, &grouping).is_ok());
+    assert!(validate_summary_kernel(&cms, &update).is_ok());
     // Stored Count-Min state reads only its bare count natively.
     assert!(validate_native_family(&cms).is_ok());
     let bare_count = SketchStatistic::PointCount {
@@ -163,7 +163,7 @@ fn summary_capability_levels_are_distinct() {
         }
     )
     .is_err());
-    let kll = FieldDataType::Sketch(SketchAlgorithm::Kll, grouping);
+    let kll = FieldDataType::Sketch(SketchAlgorithm::Kll);
     assert!(validate_native_family(&kll).is_ok());
     assert!(validate_sketch_evaluation(&kll, &SketchStatistic::Quantile { q: 1.5 }).is_err());
     assert!(validate_sketch_evaluation(&kll, &SketchStatistic::Cardinality).is_err());

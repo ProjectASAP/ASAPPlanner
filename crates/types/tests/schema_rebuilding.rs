@@ -2,7 +2,7 @@ use asap_types::ir::operator::{AggIntent, Reduction, Source};
 use asap_types::ir::properties::AccuracyGuarantee;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
-use asap_types::ir::schema::{ExactKind, ExactParams, GroupingStrategy, SummaryUpdate};
+use asap_types::ir::schema::{ExactKind, ExactParams, SummaryUpdate};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 use std::rc::Rc;
 
@@ -23,10 +23,9 @@ fn aggregate(child: Rc<OperatorNode>, asap: bool) -> Rc<OperatorNode> {
     let operator = if asap {
         Operator::ASAP(ASAPOp::SummaryAgg {
             child,
-            family: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            summary_type: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
             input: SummaryUpdate::column(ColumnRef::Named("value".into())),
             reduction: Reduction::by(vec![0]),
-            grouping: GroupingStrategy::default(),
             filter: None,
         })
     } else {

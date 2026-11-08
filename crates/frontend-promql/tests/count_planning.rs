@@ -4,8 +4,8 @@ use crate::support;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{
-    ExactKind, FieldDataType, GroupingStrategy, NonNegativeWeightProof, SketchAlgorithm,
-    SummaryInputExpr, WeightDomain,
+    ExactKind, FieldDataType, NonNegativeWeightProof, SketchAlgorithm, SummaryInputExpr,
+    WeightDomain,
 };
 use asap_types::ir::{ASAPOp, Operator, OperatorNode};
 use std::rc::Rc;
@@ -17,7 +17,13 @@ fn reads_hydra(node: &Rc<OperatorNode>) -> bool {
         matches!(
             &node.operator,
             Operator::ASAP(ASAPOp::SummaryAgg {
-                family: FieldDataType::Sketch(_, GroupingStrategy::SharedMultiSubpopulation { .. }),
+                summary_type: FieldDataType::Sketch(
+                    SketchAlgorithm::HydraCms
+                        | SketchAlgorithm::HydraCountSketch
+                        | SketchAlgorithm::HydraKll
+                        | SketchAlgorithm::HydraHll
+                        | SketchAlgorithm::HydraUnivMon
+                ),
                 ..
             })
         )
@@ -49,7 +55,7 @@ fn exact_counts_select_count_accumulators() {
                 matches!(
                     &node.operator,
                     Operator::ASAP(ASAPOp::SummaryAgg {
-                        family: FieldDataType::ExactAggregate(ExactKind::Count, _),
+                        summary_type: FieldDataType::ExactAggregate(ExactKind::Count, _),
                         ..
                     })
                 )
@@ -82,7 +88,7 @@ fn frequency_count_candidates_use_unit_weights() {
                 continue;
             };
             let Operator::ASAP(ASAPOp::SummaryAgg {
-                family: FieldDataType::Sketch(kind, _),
+                summary_type: FieldDataType::Sketch(kind),
                 input,
                 ..
             }) = &summary_input.operator
@@ -157,7 +163,7 @@ fn aggregate_fixture(query: &str, series: &[Vec<f64>]) -> Vec<f64> {
         other => panic!("unsupported fixture input: {other:?}"),
     }
     let aggregate = |values: &[f64]| match measures.as_slice() {
-        [AggIntent::Count { .. }] => values.len() as f64,
+        [AggIntent::Count] => values.len() as f64,
         [AggIntent::Cardinality { .. }] => {
             let mut distinct = values.to_vec();
             distinct.sort_by(f64::total_cmp);
@@ -235,7 +241,7 @@ fn cms_count_updates_total_ten_for_zero_positive_and_negative_samples() {
                 .iter()
                 .any(|node| {
                     matches!(&node.payload,
-            PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
+            PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { summary_type: FieldDataType::Sketch(kind), .. })
                 if kind == &SketchAlgorithm::Cms)
                 })
                 .then_some(dag)

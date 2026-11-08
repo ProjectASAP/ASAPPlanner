@@ -3,7 +3,6 @@ use std::rc::Rc;
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::ir::operator::AggIntent;
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{NonASAPOp, OperatorNode, ScalarExpr};
 
@@ -19,9 +18,7 @@ fn catalog() -> SqlCatalog {
 }
 
 async fn lower(sql: &str) -> Rc<OperatorNode> {
-    lower_sql(sql, &catalog(), AccuracyTarget::exact())
-        .await
-        .unwrap()
+    lower_sql(sql, &catalog()).await.unwrap()
 }
 
 fn aggregate(query: &OperatorNode) -> (&[AggIntent], &OperatorNode) {
@@ -111,12 +108,7 @@ async fn corr_rejects_unrepresented_forms() {
         "SELECT corr(x, y) OVER () FROM a",
         "SELECT corr(x) FROM a",
     ] {
-        assert!(
-            lower_sql(sql, &catalog(), AccuracyTarget::exact())
-                .await
-                .is_err(),
-            "{sql}"
-        );
+        assert!(lower_sql(sql, &catalog()).await.is_err(), "{sql}");
     }
 }
 

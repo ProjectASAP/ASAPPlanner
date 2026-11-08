@@ -11,8 +11,8 @@
 
 use crate::Error;
 use planner_types::ir::schema::{
-    ExactKind, ExactParams, FamilyCapability, FieldDataType as SummaryFamilyType, GroupingStrategy,
-    SketchAlgorithm, SketchStatistic, StatisticKind, SummaryUpdate,
+    ExactKind, ExactParams, FieldDataType as SummaryFamilyType, SketchAlgorithm, SketchStatistic,
+    StatisticKind, SummaryTypeCapability, SummaryUpdate,
 };
 
 /// Check the same contract used by `create_planner_accumulator` before a plan
@@ -20,10 +20,9 @@ use planner_types::ir::schema::{
 pub fn validate_summary_kernel(
     family: &SummaryFamilyType,
     input: &SummaryUpdate,
-    grouping: &GroupingStrategy,
 ) -> Result<(), String> {
-    if grouping != &GroupingStrategy::PerSubpopulationInstance {
-        return validate_hydra_cms(family, input, grouping);
+    if SummaryTypeCapability::shares_one_state_across_groups(family) {
+        return validate_hydra_cms(family, input);
     }
     let keyed = match family {
         SummaryFamilyType::ExactAggregate(kind, params) => {
@@ -42,11 +41,7 @@ pub fn validate_summary_kernel(
             }
             input.item.is_some()
         }
-        SummaryFamilyType::Sketch(kind, layout) => {
-            if layout != grouping {
-                return Err("Planner family and operator grouping disagree".into());
-            }
-            let _ = kind;
+        SummaryFamilyType::Sketch(_) => {
             todo!("#1207 PR 6: check θ, which the exported node carries")
         }
         _ => return Err(format!("unsupported summary kernel {family:?}")),
@@ -57,20 +52,13 @@ pub fn validate_summary_kernel(
     Ok(())
 }
 
-/// The only shared grouping with a kernel: Hydra over Count-Min. Each update
+/// The only Hydra algorithm with a kernel: Hydra over Count-Min. Each update
 /// adds one item column's value to its group, with weight 1 (a row count,
 /// `UnitCount`), a positive integer constant (`PositiveConstant`) or a weight
 /// column proven non-negative (a Count-Min point count only overestimates
 /// when no weight is negative).
-fn validate_hydra_cms(
-    family: &SummaryFamilyType,
-    input: &SummaryUpdate,
-    grouping: &GroupingStrategy,
-) -> Result<(), String> {
+fn validate_hydra_cms(family: &SummaryFamilyType, input: &SummaryUpdate) -> Result<(), String> {
     use planner_types::ir::schema::{NonNegativeWeightProof, SummaryInputExpr, WeightDomain};
-    if !matches!(family, SummaryFamilyType::Sketch(_, layout) if layout == grouping) {
-        return Err("Planner family and operator grouping disagree".into());
-    }
     hydra_cms_shape(family)?;
     if !matches!(input.item, Some(SummaryInputExpr::Column(_))) {
         return Err("HydraCms requires one item column".into());
@@ -113,25 +101,13 @@ pub(crate) fn constant_row_weight(weight: f64) -> Result<std::num::NonZeroU32, S
     }
 }
 
-/// `(shared_rows, shared_columns, width, depth)` of a HydraCms family. The
-/// family is the per-group Count-Min it emulates, with the Hydra's own width
-/// and depth.
+/// `(shared_rows, shared_columns, width, depth)` of a HydraCms state.
 pub(crate) fn hydra_cms_shape(
     family: &SummaryFamilyType,
 ) -> Result<(usize, usize, usize, usize), String> {
-    use planner_types::ir::schema::HydraKind;
-    let SummaryFamilyType::Sketch(
-        kind,
-        GroupingStrategy::SharedMultiSubpopulation {
-            kind: HydraKind::HydraCms,
-        },
-    ) = family
-    else {
-        return Err("a shared-grouping (Hydra) family has no registered kernel".into());
+    let SummaryFamilyType::Sketch(SketchAlgorithm::HydraCms) = family else {
+        return Err("a Hydra algorithm other than HydraCms has no registered kernel".into());
     };
-    if kind != &SketchAlgorithm::Cms {
-        return Err("HydraCms family must be Count-Min with the Hydra width and depth".into());
-    }
     todo!("#1207 PR 6: the Hydra grid's sizes are θ, which the exported node carries")
 }
 
@@ -186,14 +162,14 @@ pub(crate) fn unit_frequency_column(
 
 pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
     use planner_types::ir::schema::SketchAlgorithm as A;
-    if let SummaryFamilyType::Sketch(kind, grouping) = family {
+    if let SummaryFamilyType::Sketch(kind) = family {
         // Plain Count-Min is native as stored state only: it merges and reads
         // its bare count, but the DAG does not build it from rows. HydraCms
         // is built by the all-groups summary build.
+        if let A::HydraCms = kind {
+            return hydra_cms_shape(family).map(|_| ()).map_err(Error::Invalid);
+        }
         if let A::Cms = kind {
-            if grouping != &GroupingStrategy::PerSubpopulationInstance {
-                return hydra_cms_shape(family).map(|_| ()).map_err(Error::Invalid);
-            }
             todo!("#1207 PR 6: check the Count-Min θ, which the exported node carries")
         }
         if matches!(kind, A::CmsWithHeap | A::CountSketchWithHeap) {
@@ -202,7 +178,7 @@ pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
     }
     match family {
         SummaryFamilyType::ExactAggregate(..) => {}
-        SummaryFamilyType::Sketch(A::Kll | A::DDSketch | A::Hll | A::Kmv | A::UnivMon, _) => {}
+        SummaryFamilyType::Sketch(A::Kll | A::DDSketch | A::Hll | A::Kmv | A::UnivMon) => {}
         _ => {
             return Err(Error::Invalid(
                 "summary family has no native DAG state implementation".into(),
@@ -214,7 +190,6 @@ pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
         &planner_types::ir::schema::SummaryUpdate::column(
             planner_types::ir::scalar::ColumnRef::SampleValue,
         ),
-        &Default::default(),
     )
     .map_err(Error::Invalid)
 }
@@ -248,16 +223,11 @@ pub(crate) const EVALUATED_READOUTS: &[(SketchAlgorithm, &[StatisticKind])] = &[
 /// Whether the executor reads `readout` from a state of `family` whose
 /// family-capability table row answers it.
 fn evaluates(family: &SummaryFamilyType, readout: StatisticKind) -> bool {
-    use planner_types::ir::schema::HydraKind;
     match family {
-        SummaryFamilyType::Sketch(kind, GroupingStrategy::PerSubpopulationInstance) => {
-            EVALUATED_READOUTS
-                .iter()
-                .any(|(family, readouts)| family == kind && readouts.contains(&readout))
-        }
-        SummaryFamilyType::Sketch(_, GroupingStrategy::SharedMultiSubpopulation { kind, .. }) => {
-            matches!(kind, HydraKind::HydraCms | HydraKind::HydraKll)
-        }
+        SummaryFamilyType::Sketch(SketchAlgorithm::HydraCms | SketchAlgorithm::HydraKll) => true,
+        SummaryFamilyType::Sketch(kind) => EVALUATED_READOUTS
+            .iter()
+            .any(|(family, readouts)| family == kind && readouts.contains(&readout)),
         _ => false,
     }
 }
@@ -275,16 +245,7 @@ pub fn validate_sketch_evaluation(
     // HydraCms answers a group's item frequency. A group's total needs a
     // group-mass query asap_sketchlib's Hydra lacks.
     if readout == StatisticKind::Total
-        && matches!(
-            family,
-            SummaryFamilyType::Sketch(
-                _,
-                GroupingStrategy::SharedMultiSubpopulation {
-                    kind: planner_types::ir::schema::HydraKind::HydraCms,
-                    ..
-                }
-            )
-        )
+        && matches!(family, SummaryFamilyType::Sketch(SketchAlgorithm::HydraCms))
     {
         return Err(Error::Invalid(
             "HydraCms does not answer a group total: asap_sketchlib's Hydra has no group-mass \
@@ -293,7 +254,7 @@ pub fn validate_sketch_evaluation(
         ));
     }
     if readout == StatisticKind::TopK
-        || !FamilyCapability::of(family).answers(query)
+        || !SummaryTypeCapability::of(family).answers(query)
         || !evaluates(family, readout)
     {
         return Err(Error::Invalid(

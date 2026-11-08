@@ -15,20 +15,20 @@
 
 pub mod aggregate_schema;
 pub mod error;
-pub mod family_capability;
 pub mod schema_support;
 pub mod sketch;
+pub mod summary_type_capability;
 pub mod topk;
 
 pub use aggregate_schema::aggregate_output_schema;
-pub use family_capability::{
-    FamilyCapability, MergeInputRule, MergedError, StatisticKind, SupportedSummary,
-};
 pub use sketch::{
-    EntityIdentity, ExactKind, ExactParams, GroupingStrategy, HydraKind, HydraParams,
-    NonNegativeWeightProof, SamplingKind, SamplingParams, SketchAlgorithm, SketchKind,
-    SketchParams, SketchStatistic, StatModelKind, StatModelParams, SummaryInputExpr, SummaryUpdate,
-    WaveletKind, WaveletParams, WeightDomain, EXACT_ACCUMULATOR_STATE_BYTES,
+    EntityIdentity, ExactKind, ExactParams, HydraParams, NonNegativeWeightProof, SamplingKind,
+    SamplingParams, SketchAlgorithm, SketchParams, SketchStatistic, StatModelKind, StatModelParams,
+    SummaryInputExpr, SummaryUpdate, WaveletKind, WaveletParams, WeightDomain,
+    EXACT_ACCUMULATOR_STATE_BYTES,
+};
+pub use summary_type_capability::{
+    MergeInputRule, MergedError, StatisticKind, SummaryTypeCapability, SupportedSummary,
 };
 
 use serde::{Deserialize, Serialize};
@@ -143,11 +143,10 @@ impl From<Field<DataType>> for Field<FieldDataType> {
 /// What a schema field carries: an ordinary readable value, or the summary /
 /// exact-accumulator state produced by a `SummaryAgg`.
 ///
-/// Every non-`Plain` variant carries the physical state identity required by
-/// that family (`Sketch` additionally carries its grouping layout), so the
-/// type system can reject merges of incompatible summaries at plan
-/// construction time — a `SummaryMerge` over `Sketch(Kll, …)` and
-/// `Sketch(Cms, …)` inputs is a plan-time error, and a `Sketch(…)` can never
+/// Every non-`Plain` variant is a summary type: its family (the variant) and
+/// its algorithm, so the type system can reject merges of incompatible
+/// summaries at plan construction time — a `SummaryMerge` over `Sketch(Kll)`
+/// and `Sketch(Cms)` inputs is a plan-time error, and a `Sketch(…)` can never
 /// be confused for a `SummarySample(…)` even though both are "opaque summary
 /// state" at a glance.
 ///
@@ -163,12 +162,12 @@ pub enum FieldDataType {
     /// Exact, mergeable accumulator state (`Sum`/`Count`/`Min`/`Max`/`Rate`/
     /// `Increase`). Value consumers require an explicit finalization boundary.
     ExactAggregate(ExactKind, ExactParams),
-    /// Approximate sketch state (KLL/CMS/HLL/…), evaluated by a
-    /// `SummaryEstimate`: its family and grouping layout. The family's
-    /// parameters θ are not part of the state's type, so states of one family
-    /// and grouping are one memo group whatever their size; θ is a
-    /// candidate's `LogicalProperties::parameters` (concepts doc, section 3).
-    Sketch(SketchAlgorithm, GroupingStrategy),
+    /// Approximate sketch state (KLL/CMS/HLL/…, and the `Hydra*` algorithms,
+    /// one structure shared by every subpopulation), evaluated by a
+    /// `SummaryEstimate`. θ is not part of the type, so states of one
+    /// algorithm are one memo group whatever their size; θ is a candidate's
+    /// `LogicalProperties::parameters` (concepts doc, section 1).
+    Sketch(SketchAlgorithm),
     /// A summary sample: the subset of input rows a [`SamplingKind`] keeps,
     /// such as a reservoir. Not raw data samples. Serialized as `Sample`.
     #[serde(rename = "Sample")]

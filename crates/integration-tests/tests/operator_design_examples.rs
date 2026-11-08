@@ -2,12 +2,9 @@
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::ir::operator::AggIntent;
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, Schema};
-use asap_types::ir::schema::{
-    ExactKind, ExactParams, FieldDataType, GroupingStrategy, SummaryUpdate,
-};
+use asap_types::ir::schema::{ExactKind, ExactParams, FieldDataType, SummaryUpdate};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
 use std::rc::Rc;
 
@@ -32,7 +29,6 @@ async fn sql_filter_projection_example() {
     let root = lower_sql(
         "SELECT l_quantity * 2 AS q2 FROM lineitem WHERE l_quantity > 10",
         &catalog(),
-        AccuracyTarget::exact(),
     )
     .await
     .unwrap();
@@ -55,7 +51,6 @@ async fn sql_sum_projection_before_and_after_summary_rewrite() {
     let root = lower_sql(
         "SELECT SUM(bytes) + 1 AS total_bytes FROM requests WHERE status = 200",
         &catalog(),
-        AccuracyTarget::exact(),
     )
     .await
     .unwrap();
@@ -78,12 +73,11 @@ async fn sql_sum_projection_before_and_after_summary_rewrite() {
             let state = Rc::new(
                 OperatorNode::new(Operator::ASAP(ASAPOp::SummaryAgg {
                     child: Rc::clone(child),
-                    family: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+                    summary_type: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
                     input: SummaryUpdate::column(ColumnRef::Named(
                         child.schema.fields[*column].name.clone(),
                     )),
                     reduction: reduction.clone(),
-                    grouping: GroupingStrategy::default(),
                     filter: None,
                 }))
                 .unwrap(),
@@ -123,9 +117,7 @@ async fn sql_scalar_subquery_retains_its_cardinality_contract() {
         "SELECT (SELECT bytes FROM requests) AS v FROM lineitem",
         "SELECT l_quantity NOT IN (SELECT bytes FROM requests) AS present FROM lineitem",
     ] {
-        let root = lower_sql(query, &catalog(), AccuracyTarget::exact())
-            .await
-            .unwrap();
+        let root = lower_sql(query, &catalog()).await.unwrap();
         root.validate_structure().unwrap();
         assert!(root.children().len() > 1);
         let wire = asap_types::test_support::physical_asap_dag_at_query_time(&root).unwrap();
@@ -150,7 +142,6 @@ async fn sql_sum_example_executes_with_sql_null_semantics() {
     let root = lower_sql(
         "SELECT SUM(bytes) + 1 AS total_bytes FROM requests WHERE status = 200",
         &catalog(),
-        AccuracyTarget::exact(),
     )
     .await
     .unwrap();
@@ -231,7 +222,7 @@ async fn sql_window_and_filtered_aggregate_types() {
         "SELECT MIN(l_quantity) OVER (ORDER BY l_quantity ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING) AS s FROM lineitem",
         "SELECT SUM(l_quantity) FILTER (WHERE l_quantity < 0) AS s FROM lineitem GROUP BY l_quantity",
     ] {
-        let root = lower_sql(query, &catalog(), AccuracyTarget::exact()).await.unwrap();
+        let root = lower_sql(query, &catalog()).await.unwrap();
         root.validate_structure().unwrap();
         assert_eq!(root.schema.fields[0], Field::plain("s", DataType::Int64, true), "{query}");
     }

@@ -112,6 +112,7 @@ pub mod physical_export {
 /// `run_planning`) for one
 /// query, with the built-in models.
 pub mod planning {
+    use asap_types::ir::physical_export::PhysicalASAPDAG;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot};
     use asap_types::workload::{DataArrival, DataWorkload, SourceFacts};
@@ -188,10 +189,52 @@ pub mod planning {
     /// The logical DAG the planner pipeline selects for the single query
     /// `root` at `accuracy`.
     pub fn selected_dag(root: Rc<OperatorNode>, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
-        match run_all_stages(root, accuracy).run.selected_plan.as_deref() {
-            Some([QueryRoot::Operator(node)]) => Rc::clone(node),
+        match selected_operator_roots(&run_all_stages(root, accuracy)).as_slice() {
+            [node] => Rc::clone(node),
             other => panic!("one selected operator root: {other:?}"),
         }
+    }
+
+    /// `plan`'s cost per second (`asap_cost::plan_cost`) for queries with
+    /// `entries` over `data`, under `settings`' cost model 1 or 2.
+    pub fn plan_cost_per_second(
+        plan: &PhysicalASAPDAG,
+        entries: &[asap_types::workload::QueryWorkloadEntry],
+        data: &DataWorkload,
+        settings: &asap_cost::CostInputs,
+    ) -> f64 {
+        let recurrence: Vec<_> = entries
+            .iter()
+            .map(|entry| entry.recurrence.clone())
+            .collect();
+        let range_evaluations: Vec<_> =
+            entries.iter().map(|entry| entry.range_evaluation).collect();
+        let (cost, _) = asap_cost::plan_cost(
+            plan,
+            &asap_cost::node_map(plan),
+            &recurrence,
+            &range_evaluations,
+            data,
+            settings,
+            1.0,
+        )
+        .unwrap();
+        cost.cost_per_second.expect("cost model 1 or 2")
+    }
+
+    /// The operator roots of the plan Stage 3 built in `run`, as IR.
+    fn selected_operator_roots(
+        run: &asap_devtools::planning_stages::PlanningStagesRun,
+    ) -> Vec<Rc<OperatorNode>> {
+        let (plan, _) = run.run.selection.as_ref().expect("a plan is selected");
+        plan.query_roots()
+            .unwrap()
+            .into_iter()
+            .filter_map(|root| match root {
+                QueryRoot::Operator(node) => Some(node),
+                QueryRoot::Scalar(_) => None,
+            })
+            .collect()
     }
 
     /// Exact computation and each explicit single-target rule application.
@@ -201,7 +244,12 @@ pub mod planning {
             compose_logical_candidate, generate_per_computation_candidates,
         };
         let local = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
+            &asap_logical_asap_optimization::memo_of_queries(
+                &[QueryRoot::Operator(root)],
+                &[None],
+                &Default::default(),
+            )
+            .unwrap(),
         )
         .unwrap();
         let mut choices = std::collections::BTreeSet::from([vec![0; local.targets.len()]]);
@@ -237,7 +285,12 @@ pub mod planning {
         };
         use asap_types::stages::HowToComputeAggregateMeasure;
         let local = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
+            &asap_logical_asap_optimization::memo_of_queries(
+                &[QueryRoot::Operator(root)],
+                &[None],
+                &Default::default(),
+            )
+            .unwrap(),
         )
         .unwrap();
         let choices = local.targets.iter().map(|target| target.ways_to_compute.iter()
@@ -251,50 +304,27 @@ pub mod planning {
         }
     }
 
-    /// Logical plans visited by the bounded search for `root`, in archive order.
-    /// This is not the generated candidate catalog. Rule-existence tests should
-    /// use explicit fixtures; failed compositions in this archive still panic.
+    /// The selected plan's operator roots for `root`. This is not the
+    /// generated candidate catalog: rule-existence tests should use explicit
+    /// fixtures.
     pub fn logical_candidates(
         root: Rc<OperatorNode>,
         accuracy: AccuracyTarget,
     ) -> Vec<Rc<OperatorNode>> {
-        require_composed_operator_candidates(run_all_stages(root, accuracy).logical_candidates())
+        selected_operator_roots(&run_all_stages(root, accuracy))
     }
 
-    /// [`logical_candidates`] with every output accepted whatever its
-    /// accuracy guarantee (`ignore_accuracy_guarantees`), so Pass 1 keeps
-    /// the summaries no query can use for `accuracy`
-    /// (`PruneReason::NoErrorBoundForQueryTarget`). For tests of a
-    /// rewrite's structure or execution over a summary whose output has no
-    /// guarantee that meets `accuracy` (e.g. a value filter over an
-    /// estimate), not of accuracy acceptance.
+    /// [`logical_candidates`] with accuracy not enforced
+    /// (`ignore_accuracy_guarantees`): no readout gets a required accuracy.
+    /// For tests of a rewrite's structure or execution over a summary whose
+    /// output has no guarantee that meets `accuracy` (e.g. a value filter
+    /// over an estimate), not of accuracy acceptance.
     pub fn logical_candidates_ignoring_guarantees(
         root: Rc<OperatorNode>,
         accuracy: AccuracyTarget,
     ) -> Vec<Rc<OperatorNode>> {
         let models = asap_planner::PlanningModels::builtin().with_ignore_accuracy_guarantees(true);
-        require_composed_operator_candidates(
-            run_all_stages_with(root, accuracy, models).logical_candidates(),
-        )
-    }
-
-    /// Fail on rejected composition rather than silently skipping a candidate.
-    pub fn require_composed_operator_candidates(
-        candidates: Vec<asap_devtools::planning_stages::ShownLogicalCandidate>,
-    ) -> Vec<Rc<OperatorNode>> {
-        candidates
-            .into_iter()
-            .filter_map(|candidate| {
-                match candidate
-                    .roots
-                    .unwrap_or_else(|e| panic!("{} does not compose: {e}", candidate.id))
-                    .remove(0)
-                {
-                    QueryRoot::Operator(node) => Some(node),
-                    QueryRoot::Scalar(_) => None,
-                }
-            })
-            .collect()
+        selected_operator_roots(&run_all_stages_with(root, accuracy, models))
     }
 
     /// Whether `node` builds a summary.

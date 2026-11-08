@@ -772,7 +772,7 @@ mod tests {
     }
 
     fn dd_family() -> FieldDataType {
-        FieldDataType::Sketch(SketchAlgorithm::DDSketch, Default::default())
+        FieldDataType::Sketch(SketchAlgorithm::DDSketch)
     }
 
     // Rows sharing a state keep sharing one state; filtering rows shares the
@@ -1130,7 +1130,7 @@ mod tests {
         let family = if exact {
             FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
         } else {
-            FieldDataType::Sketch(SketchAlgorithm::Kll, Default::default())
+            FieldDataType::Sketch(SketchAlgorithm::Kll)
         };
         let mut updater = StateColumnUpdater::new(&family).unwrap();
         updater.ensure_groups(count as usize).unwrap();

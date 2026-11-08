@@ -86,10 +86,7 @@ mod tests {
     #[test]
     fn topk_heap_capacity_respects_accuracy_and_output_count() {
         use crate::estimators::size_params;
-        let intent = AggIntent::TopK {
-            k: 25,
-            accuracy: AccuracyTarget::max_error(0.01),
-        };
+        let intent = AggIntent::TopK { k: 25 };
         assert_eq!(
             size_params(SketchAlgorithm::CmsWithHeap, &intent, 0.01, 0.01),
             SketchParams::CmsWithHeap {

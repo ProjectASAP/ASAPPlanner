@@ -1,16 +1,14 @@
-//! `asap-accuracy` — the accuracy model the planning stages share (Pass 1,
-//! Pass 2 and Stage 3): the planner's built-in analytical accuracy rules
-//! (estimators, composition, guarantee propagation through a DAG, sizing,
-//! budget split and target check) and the deployment's accuracy model and
-//! evidence traits.
+//! `asap-accuracy` — the accuracy rules the planning stages share: the
+//! planner's built-in analytical rules (estimators, composition, guarantee
+//! propagation through a DAG, sizing, budget split and target check), the
+//! deployment's measured accuracy ([`AccuracyEvidence`]) and $\alpha^{\log}$
+//! of a logical edge ([`producer_satisfies_logical_requirements`]).
 //!
-//! Estimator models derive local guarantees, composition propagates them,
-//! `propagation` composes them through every node of a DAG, `sizing` sizes
-//! a summary for its target, the budget split sizes each approximate input
-//! of a composition for an equal share of its target, and `evidence` holds
-//! the scoped contracts and statistics the rules consult. The deployment's accuracy model
-//! ([`AccuracyModel`]) and evidence provider ([`AccuracyEvidenceProvider`])
-//! are read only by plan selection (Stage 3).
+//! Estimator models derive theoretical guarantees, composition propagates
+//! them, `propagation` composes them through every node of a DAG, `sizing`
+//! sizes a summary for its target, the budget split sizes each approximate
+//! input of a composition for an equal share of its target, and `evidence`
+//! holds the scoped contracts and statistics the rules consult.
 //! See `docs/design_docs/concepts/accuracy-models.md` for the design.
 //!
 //! It depends only on `asap-types`, never on a stage crate, so every stage
@@ -28,12 +26,9 @@ pub mod sizing;
 pub mod test_support;
 
 pub use budget::per_input_target;
-pub use evidence::OperandDomain;
+pub use estimators::theoretical_guarantee;
 pub(crate) use evidence::PropagationStats;
-pub use model::{
-    AccuracyEvidenceProvider, AccuracyModel, BuiltinAccuracyModel, IgnoreAccuracyGuarantees,
-    NoAccuracyEvidence,
-};
+pub use model::{producer_satisfies_logical_requirements, AccuracyEvidence};
 
 #[cfg(test)]
 use asap_types::ir::properties::AccuracyScope;
@@ -56,9 +51,8 @@ const SATISFACTION_TOLERANCE: f64 = 1e-9;
 /// in that metric (or one with a sound direct comparison): a bound in
 /// another metric does not satisfy, however small. When it sets none, a
 /// bound in any metric does, each compared in its own metric. Unknown
-/// required dimensions fail. Plan selection's default accuracy model
-/// ([`BuiltinAccuracyModel`]) delegates to it.
-pub(crate) fn satisfies(guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool {
+/// required dimensions fail.
+pub fn satisfies(guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool {
     let within = |value: Option<f64>, limit: f64| {
         value.is_some_and(|v| v <= limit * (1.0 + SATISFACTION_TOLERANCE) + f64::EPSILON)
     };

@@ -23,7 +23,6 @@ use std::rc::Rc;
 
 use asap_frontend_sql::{lower_sql, SqlCatalog, SqlError as LoweringError};
 use asap_types::ir::operator::{AggIntent, GroupKeys};
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{NonASAPOp, OperatorNode};
 
@@ -125,7 +124,7 @@ fn has_window_func(node: &OperatorNode) -> bool {
 }
 
 async fn lower(q: &str) -> Rc<OperatorNode> {
-    lower_sql(q, &catalog(), AccuracyTarget::exact())
+    lower_sql(q, &catalog())
         .await
         .unwrap_or_else(|e| panic!("expected {q:?} to lower, got error: {e}"))
 }
@@ -145,7 +144,7 @@ async fn corpus_lowering_covers_every_query() {
     let mut t = Tally::default();
     for q in queries() {
         // A panic here (not an `Err`) fails the test — the totality guarantee.
-        match lower_sql(&q, &cat, AccuracyTarget::exact()).await {
+        match lower_sql(&q, &cat).await {
             Ok(_) => t.lowered += 1,
             // DataFusion surfaces parse/plan failures as `DataFusion(_)`.
             Err(LoweringError::DataFusion(_)) => t.unparseable += 1,
@@ -183,7 +182,7 @@ async fn packet_count_is_count_intent() {
     let qe = lower("SELECT COUNT(*) AS total_packets FROM packets").await;
     let (by, measures) = first_aggregate(&qe).expect("expected an Aggregate");
     assert!(by.is_empty(), "global count has no grouping");
-    assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Count]));
 }
 
 #[tokio::test]
@@ -224,7 +223,7 @@ async fn five_tuple_flow_group_by_binds_five_keys() {
     .await;
     let (by, measures) = first_aggregate(&qe).expect("expected an Aggregate");
     assert_eq!(by.len(), 5, "grouped by the 5-tuple");
-    assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Count]));
 }
 
 #[tokio::test]

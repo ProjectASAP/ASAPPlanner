@@ -274,7 +274,7 @@ const DDSKETCH_ASSUMED_VALUE_RANGE: f64 = 1e9;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::ir::schema::{GroupingStrategy, SketchAlgorithm};
+    use asap_types::ir::schema::SketchAlgorithm;
 
     /// An exact accumulator's state is priced at the executor's per-group
     /// state, 56 bytes for every kind (a counter's state alone is 48), so a
@@ -376,10 +376,7 @@ mod tests {
         };
         let model_bytes = |rows_per_state| {
             sketch_shape(
-                &SketchParams::Kll {
-                    k,
-                    failure_probability: None,
-                },
+                &SketchParams::Kll { k },
                 StateInputRows {
                     rows_per_state,
                     non_negative: true,
@@ -478,10 +475,7 @@ mod tests {
         let families = [
             (
                 A::Kll,
-                SketchParams::Kll {
-                    k: 200,
-                    failure_probability: None,
-                },
+                SketchParams::Kll { k: 200 },
                 Rows::Values,
                 Priced::Kll { k: 200 },
                 0,
@@ -543,10 +537,7 @@ mod tests {
             ),
             (
                 A::Hll,
-                SketchParams::Hll {
-                    precision: 12,
-                    relative_error: None,
-                },
+                SketchParams::Hll { precision: 12 },
                 Rows::Values,
                 Priced::Exact,
                 hll_precision_tag,
@@ -554,10 +545,7 @@ mod tests {
             ),
             (
                 A::Kmv,
-                SketchParams::Kmv {
-                    k: 1_024,
-                    relative_error: None,
-                },
+                SketchParams::Kmv { k: 1_024 },
                 Rows::Values,
                 Priced::Exact,
                 0,
@@ -572,7 +560,6 @@ mod tests {
                     sketch_rows: 1,
                     sketch_cols: 16,
                     layers: 4,
-                    distinct_failure_probability: None,
                 },
                 Rows::Labels,
                 Priced::Bound,
@@ -616,19 +603,13 @@ mod tests {
         assert_eq!(key.to_bytes().unwrap().len(), ASSUMED_HEAP_KEY_BYTES);
         for (algorithm, params, rows, priced_as, fields, full) in &families {
             for n in [1, 100, *full] {
-                let family = FieldDataType::Sketch(*algorithm, GroupingStrategy::default());
+                let family = FieldDataType::Sketch(*algorithm);
                 let input = match rows {
                     Rows::Values => &value,
                     Rows::Labels => &labeled,
                     Rows::Keyed => &keyed,
                 };
-                let mut updater = create_planner_accumulator(
-                    &family,
-                    Some(params),
-                    input,
-                    &GroupingStrategy::default(),
-                )
-                .unwrap();
+                let mut updater = create_planner_accumulator(&family, Some(params), input).unwrap();
                 for i in 0..n {
                     match rows {
                         // Distinct magnitudes over the assumed range, in a

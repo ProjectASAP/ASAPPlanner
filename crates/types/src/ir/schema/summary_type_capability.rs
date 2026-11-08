@@ -1,31 +1,31 @@
-//! The generic family-capability table: what each summary family can do,
-//! keyed by its [`FieldDataType`].
+//! The summary-type capability table: what each summary type can do, keyed
+//! by its [`FieldDataType`] (family and algorithm).
 //!
-//! The IR stays permissive: a `SummaryMerge` over any state family is
+//! The IR stays permissive: a `SummaryMerge` over any state type is
 //! structurally valid. The planner rules and the executor consult this
 //! table to decide whether a composition is sound. It is the one source of
-//! which statistic a family answers: the IR's `SummaryEstimate` validation,
-//! the executor's evaluation check and its supported-summary list all read
-//! it. One row per family says
+//! which statistic a summary type answers: the IR's `SummaryEstimate`
+//! validation, the executor's evaluation check and its supported-summary
+//! list all read it. One row per summary type says
 //! how the inputs of a merge must relate ([`MergeInputRule`]) and which
 //! statistics ([`StatisticKind`]) one state answers, each with the error of
 //! that readout from a merged state ([`MergedError`]), so one state can
 //! serve every consumer whose statistic it answers.
 //!
-//! A sketch family's row is `asap_sketchlib`'s
-//! ([`SketchAlgorithm::capability`]), read unchanged: the family,
+//! A sketch algorithm's row is `asap_sketchlib`'s
+//! ([`SketchAlgorithm::capability`]), read unchanged: the algorithm,
 //! statistic and merged-error vocabulary is the library's. The planner
 //! writes the rows of the exact accumulators, which the library does not
 //! have. Which readouts an executor evaluates is its own declaration
 //! (`DeploymentCapabilities::supported_summaries`), not this table's.
 
-use super::sketch::{ExactKind, GroupingStrategy, HydraKind, SketchAlgorithm, SketchStatistic};
+use super::sketch::{ExactKind, SketchAlgorithm, SketchStatistic};
 use crate::ir::schema::FieldDataType;
 pub use asap_sketchlib::{MergedError, StatisticKind};
 
-/// What one summary family can do: its row of the family-capability table.
+/// What one summary type can do: its row of the capability table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FamilyCapability {
+pub struct SummaryTypeCapability {
     /// How the inputs of a merge of the family's states must relate; `None`
     /// when the family has no sound merge.
     pub merge_inputs: Option<MergeInputRule>,
@@ -89,7 +89,7 @@ impl From<asap_sketchlib::MergeInputRule> for MergeInputRule {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-impl FamilyCapability {
+impl SummaryTypeCapability {
     /// Each statistic one state of the family answers, with the error of
     /// that readout from a merged state.
     pub fn readouts(&self) -> &'static [(StatisticKind, MergedError)] {
@@ -97,20 +97,28 @@ impl FamilyCapability {
     }
 }
 
-impl FamilyCapability {
-    /// Whether a rollup may merge different groups' states of `family`: its
-    /// merge takes disjoint or overlapping inputs, and each group has its own
-    /// state. Counter states merge consecutive windows of one series; a
-    /// family without a merge merges nothing; a Hydra's groups share one
-    /// state.
-    pub fn merges_groups(family: &FieldDataType) -> bool {
+impl SummaryTypeCapability {
+    /// Whether a rollup may merge different groups' states of
+    /// `summary_type`: its merge takes disjoint or overlapping inputs, and
+    /// each group has its own state. Counter states merge consecutive
+    /// windows of one series; a summary type without a merge merges nothing;
+    /// a Hydra's groups share one state.
+    pub fn merges_groups(summary_type: &FieldDataType) -> bool {
         matches!(
-            Self::of(family).merge_inputs,
+            Self::of(summary_type).merge_inputs,
             Some(MergeInputRule::Disjoint | MergeInputRule::MayOverlap)
-        ) && !matches!(
-            family,
-            FieldDataType::Sketch(_, grouping)
-                if *grouping != GroupingStrategy::PerSubpopulationInstance
+        ) && !Self::shares_one_state_across_groups(summary_type)
+    }
+
+    /// Whether `summary_type` is a Hydra algorithm: one structure shared by
+    /// every group, not one state per group.
+    pub fn shares_one_state_across_groups(summary_type: &FieldDataType) -> bool {
+        use SketchAlgorithm as A;
+        matches!(
+            summary_type,
+            FieldDataType::Sketch(
+                A::HydraCms | A::HydraCountSketch | A::HydraKll | A::HydraHll | A::HydraUnivMon
+            )
         )
     }
 
@@ -135,54 +143,38 @@ impl FamilyCapability {
             .map(|&(_, error)| error)
     }
 
-    /// The capability of a per-subpopulation state of `algorithm`, whatever
-    /// its parameters: `asap_sketchlib`'s row of the family, which the IR and
-    /// a deployment's executor read.
-    pub fn of_per_instance_sketch(algorithm: &SketchAlgorithm) -> Self {
-        let row = algorithm.capability();
-        Self {
-            merge_inputs: row.merge_inputs.map(MergeInputRule::from),
-            readouts: row.readouts,
-        }
-    }
-
-    /// The capability of `family`. Families not listed have no capability
-    /// (they fail closed).
-    pub fn of(family: &FieldDataType) -> Self {
+    /// The capability of `summary_type`. Summary types not listed have no
+    /// capability (they fail closed).
+    pub fn of(summary_type: &FieldDataType) -> Self {
         use ExactKind as E;
         use MergeInputRule::{Disjoint, DisjointInTime, MayOverlap};
-        let (merge_inputs, readouts): (_, &'static [(StatisticKind, MergedError)]) = match family {
-            FieldDataType::ExactAggregate(kind, _) => match kind {
-                E::Sum | E::Count => (Some(Disjoint), &[]),
-                E::Min | E::Max => (Some(MayOverlap), &[]),
-                // The counter accumulator joins time-ordered windows with
-                // reset handling (`IncreaseAccumulator::merge_pair`).
-                E::Rate | E::Increase => (Some(DisjointInTime), &[]),
-                // IRate reads the last two samples of the window, which a
-                // tumbling window does not keep across its boundary.
-                E::IRate => (None, &[]),
-            },
-            // A Hydra answers per subpopulation from a shared grid of the
-            // inner family's cells. HydraKll merges as sketchlib's row says:
-            // `Hydra::merge` requires the same k and m and otherwise returns
-            // an error (asap_sketchlib #251). Nothing builds one yet: Pass 1
-            // offers no Hydra, and the executor builds only HydraCms
-            // (`create_hydra_cms`).
-            FieldDataType::Sketch(_, GroupingStrategy::SharedMultiSubpopulation { kind, .. }) => {
-                return Self::of_per_instance_sketch(&match kind {
-                    HydraKind::HydraCms => SketchAlgorithm::HydraCms,
-                    HydraKind::HydraCountSketch => SketchAlgorithm::HydraCountSketch,
-                    HydraKind::HydraKll => SketchAlgorithm::HydraKll,
-                })
-            }
-            FieldDataType::Sketch(algorithm, GroupingStrategy::PerSubpopulationInstance) => {
-                return Self::of_per_instance_sketch(algorithm)
-            }
-            FieldDataType::Plain(_)
-            | FieldDataType::SummarySample(..)
-            | FieldDataType::Wavelet(..)
-            | FieldDataType::StatModel(..) => (None, &[]),
-        };
+        let (merge_inputs, readouts): (_, &'static [(StatisticKind, MergedError)]) =
+            match summary_type {
+                FieldDataType::ExactAggregate(kind, _) => match kind {
+                    E::Sum | E::Count => (Some(Disjoint), &[]),
+                    E::Min | E::Max => (Some(MayOverlap), &[]),
+                    // The counter accumulator joins time-ordered windows with
+                    // reset handling (`IncreaseAccumulator::merge_pair`).
+                    E::Rate | E::Increase => (Some(DisjointInTime), &[]),
+                    // IRate reads the last two samples of the window, which a
+                    // tumbling window does not keep across its boundary.
+                    E::IRate => (None, &[]),
+                },
+                // A sketch algorithm's row is sketchlib's. HydraKll merges as
+                // that row says: `Hydra::merge` requires the same k and m and
+                // otherwise returns an error (asap_sketchlib #251).
+                FieldDataType::Sketch(algorithm) => {
+                    let row = algorithm.capability();
+                    return Self {
+                        merge_inputs: row.merge_inputs.map(MergeInputRule::from),
+                        readouts: row.readouts,
+                    };
+                }
+                FieldDataType::Plain(_)
+                | FieldDataType::SummarySample(..)
+                | FieldDataType::Wavelet(..)
+                | FieldDataType::StatModel(..) => (None, &[]),
+            };
         Self {
             merge_inputs,
             readouts,
@@ -194,11 +186,7 @@ impl FamilyCapability {
 mod tests {
     use super::*;
     use crate::ir::scalar::expr_ir::ColumnRef;
-    use crate::ir::schema::{ExactParams, SketchParams};
-
-    fn sketch(algorithm: SketchAlgorithm, _params: SketchParams) -> FieldDataType {
-        FieldDataType::Sketch(algorithm, GroupingStrategy::default())
-    }
+    use crate::ir::schema::ExactParams;
 
     fn total() -> SketchStatistic {
         SketchStatistic::PointCount {
@@ -218,16 +206,7 @@ mod tests {
     /// so it can serve all four; it answers no quantile or top-k.
     #[test]
     fn univmon_answers_its_total_and_every_frequency_moment() {
-        let univmon = FamilyCapability::of(&sketch(
-            SketchAlgorithm::UnivMon,
-            SketchParams::UnivMon {
-                heap_size: 256,
-                sketch_rows: 5,
-                sketch_cols: 1024,
-                layers: 16,
-                distinct_failure_probability: None,
-            },
-        ));
+        let univmon = SummaryTypeCapability::of(&FieldDataType::Sketch(SketchAlgorithm::UnivMon));
         for statistic in [
             total(),
             SketchStatistic::Cardinality,
@@ -249,40 +228,12 @@ mod tests {
     /// HLL answers the distinct count, not its total.
     #[test]
     fn summary_capability_facts() {
-        let kll = sketch(
-            SketchAlgorithm::Kll,
-            SketchParams::Kll {
-                k: 200,
-                failure_probability: None,
-            },
-        );
-        let ddsketch = sketch(
-            SketchAlgorithm::DDSketch,
-            SketchParams::DDSketch { alpha: 0.01 },
-        );
-        let count_sketch = sketch(
-            SketchAlgorithm::CountSketch,
-            SketchParams::CountSketch {
-                width: 64,
-                depth: 5,
-            },
-        );
-        let cms_heap = sketch(
-            SketchAlgorithm::CmsWithHeap,
-            SketchParams::CmsWithHeap {
-                width: 64,
-                depth: 5,
-                heap_size: 10,
-            },
-        );
-        let hll = sketch(
-            SketchAlgorithm::Hll,
-            SketchParams::Hll {
-                precision: 12,
-                relative_error: None,
-            },
-        );
-        for (family, yes, no) in [
+        let kll = FieldDataType::Sketch(SketchAlgorithm::Kll);
+        let ddsketch = FieldDataType::Sketch(SketchAlgorithm::DDSketch);
+        let count_sketch = FieldDataType::Sketch(SketchAlgorithm::CountSketch);
+        let cms_heap = FieldDataType::Sketch(SketchAlgorithm::CmsWithHeap);
+        let hll = FieldDataType::Sketch(SketchAlgorithm::Hll);
+        for (summary_type, yes, no) in [
             (
                 &kll,
                 vec![
@@ -317,12 +268,18 @@ mod tests {
                 vec![SketchStatistic::FrequencyL2, item(), total()],
             ),
         ] {
-            let capability = FamilyCapability::of(family);
+            let capability = SummaryTypeCapability::of(summary_type);
             for statistic in yes {
-                assert!(capability.answers(&statistic), "{family:?} {statistic:?}");
+                assert!(
+                    capability.answers(&statistic),
+                    "{summary_type:?} {statistic:?}"
+                );
             }
             for statistic in no {
-                assert!(!capability.answers(&statistic), "{family:?} {statistic:?}");
+                assert!(
+                    !capability.answers(&statistic),
+                    "{summary_type:?} {statistic:?}"
+                );
             }
         }
     }
@@ -332,16 +289,9 @@ mod tests {
     /// per group: not counters, IRate or a Hydra.
     #[test]
     fn only_per_group_mergeable_families_merge_groups() {
-        use crate::ir::schema::HydraKind;
-        let kll = sketch(
-            SketchAlgorithm::Kll,
-            SketchParams::Kll {
-                k: 200,
-                failure_probability: None,
-            },
-        );
-        assert!(FamilyCapability::merges_groups(&kll));
-        assert!(FamilyCapability::merges_groups(
+        let kll = FieldDataType::Sketch(SketchAlgorithm::Kll);
+        assert!(SummaryTypeCapability::merges_groups(&kll));
+        assert!(SummaryTypeCapability::merges_groups(
             &FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
         ));
         for (kind, params) in [
@@ -349,37 +299,23 @@ mod tests {
             (ExactKind::Increase, ExactParams::Increase),
             (ExactKind::IRate, ExactParams::IRate),
         ] {
-            assert!(!FamilyCapability::merges_groups(
+            assert!(!SummaryTypeCapability::merges_groups(
                 &FieldDataType::ExactAggregate(kind, params)
             ));
         }
-        let FieldDataType::Sketch(kind, _) = sketch(
-            SketchAlgorithm::Cms,
-            SketchParams::Cms {
-                width: 64,
-                depth: 5,
-            },
-        ) else {
-            unreachable!()
-        };
-        let hydra = FieldDataType::Sketch(
-            kind,
-            GroupingStrategy::SharedMultiSubpopulation {
-                kind: HydraKind::HydraCms,
-            },
-        );
+        let hydra = FieldDataType::Sketch(SketchAlgorithm::HydraCms);
         assert_eq!(
-            FamilyCapability::of(&hydra).merge_inputs,
+            SummaryTypeCapability::of(&hydra).merge_inputs,
             Some(MergeInputRule::Disjoint)
         );
-        assert!(!FamilyCapability::merges_groups(&hydra));
+        assert!(!SummaryTypeCapability::merges_groups(&hydra));
     }
 
     /// An exact accumulator is read as its finalized value, not a readout.
     #[test]
     fn exact_accumulators_answer_no_readout() {
         let sum = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
-        assert!(FamilyCapability::of(&sum).readouts.is_empty());
-        assert!(!FamilyCapability::of(&sum).answers(&total()));
+        assert!(SummaryTypeCapability::of(&sum).readouts.is_empty());
+        assert!(!SummaryTypeCapability::of(&sum).answers(&total()));
     }
 }

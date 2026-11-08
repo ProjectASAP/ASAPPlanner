@@ -53,23 +53,17 @@
 //   - stage0_query_language_frontends: the frontends' DAG, one root per query;
 //   - stage1_logical_asap_optimization (from `stage1_pass1`): `pruned_candidates`,
 //     the ways to compute a measure Pass 1 pruned (each on its aggregate's
-//     memo `group`, with `candidate` and `reason`); with `stage3`,
-//     `candidates` holds `L1`, the selected plan's roots (as Stage 2 built
-//     them, with Stage 3's weight proofs); `error` when Pass 1 failed;
+//     memo `group`, with `candidate` and `reason`); `error` when Pass 1
+//     failed;
 //   - stage2_physical_asap_optimization (from `stage2`): `pruned_candidates`,
 //     the physical candidates Stage 2 pruned (each with its memo `group`,
 //     `operator_node`, `operator`, `implementation_root`, `timing`,
-//     `lifetime` and `reason`); with `stage3`, `candidates` holds
-//     `P1`, the selected plan as Stage 2 built it;
-//   - stage3_plan_selection (from `stage3`): Stage 3's `Selection`:
-//     `selected_dag` (`candidate_of_node`, `edges`,
-//     `node_of_output_reference`), `nodes_with_proven_non_negative_weights`,
-//     the plan's `cost` (its `usage`, `cost_per_second` and per-node
-//     charges), `accepted_accuracy_per_query`, `pruned_candidates` and
-//     `search_report`; `error` when no plan was selected.
-//     `tumbling_window_retention_ms` maps each tumbling-window chain the plan
-//     keeps beyond one evaluation (by node id in `P1`) to how far back its
-//     tumbling windows are retained.
+//     `lifetime` and `reason`);
+//   - stage3_plan_selection (from `stage3`): the `plan` Stage 3 built (a
+//     `PhysicalASAPDAG`) and its `Selection`: `accepted_accuracy_per_query`,
+//     `pruned_candidates`, `milp_variables`, `milp_constraints`,
+//     `milp_construction_ms` and `milp_solve_ms`; `error` when no plan was
+//     selected.
 //     `materialized_views` are the plan's materialized views as
 //     `plan_installable` derives them, each with the node of `P1` it is
 //     installed from (`stage2_node_id`), its position among that node's
@@ -99,7 +93,7 @@
 use std::collections::btree_map::Entry;
 use std::collections::BTreeSet;
 
-use asap_cost::{CostInputs, ResourceUsage};
+use asap_cost::CostInputs;
 use asap_devtools::candidate_labels::node_label;
 use asap_devtools::planning_stages::{
     lower_promql_roots, lower_sql_roots, run_stages_until, sql_catalog, PlanningStagesError,
@@ -112,6 +106,7 @@ use asap_plan_selection::{large_peak_memory_warning, AcceptedAccuracy, Selection
 use asap_planner::{installable_plan_of, PlanningModels, SelectionError};
 use asap_types::deployment_capabilities::DeploymentCapabilities;
 use asap_types::ir::flat::{flatten, FlatDag, FlatNode};
+use asap_types::ir::physical_export::PhysicalASAPDAG;
 use asap_types::ir::properties::{default_metric_for_root, AccuracyTarget};
 use asap_types::ir::QueryRoot;
 use asap_types::stages::PhysicalASAPMemoCandidates;
@@ -238,11 +233,11 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             .as_ref()
             .ok()
             .and_then(|run| run.run.selection.as_ref().ok())
-            .and_then(|selection| {
-                large_peak_memory_warning(
-                    selection.cost.usage.peak_memory_bytes,
-                    &cost_inputs.cost_model,
-                )
+            .map(|(_plan, _selection)| -> u64 {
+                todo!("#1207 PR 6: the selected plan's peak memory, from plan_cost(&plan)")
+            })
+            .and_then(|peak_memory_bytes| {
+                large_peak_memory_warning(peak_memory_bytes, &cost_inputs.cost_model)
             }),
     );
     let text = if json_format {
@@ -305,10 +300,7 @@ fn document_of(
             "workload": { "queries": queries },
             "stage0_query_language_frontends": { "dag": export(roots) },
             "stage1_logical_asap_optimization": {
-                "combinations": 0,
-                "capped": false,
                 "pruned_candidates": [],
-                "candidates": [],
                 "error": format!("Pass 1: {error}"),
             },
             "stage2_physical_asap_optimization": null,
@@ -322,30 +314,8 @@ fn document_of(
 /// section of a stage `run` ran, the others null.
 fn document(queries: Vec<Value>, entries: &[QueryWorkloadEntry], run: &PlanningStagesRun) -> Value {
     let until = run.run_until;
-    let labels = asap_devtools::candidate_labels::candidate_labels(run);
-    let logical: Vec<_> = run
-        .logical_candidates()
-        .iter()
-        .map(|c| match &c.roots {
-            Ok(roots) => {
-                json!({ "id": c.id, "display_name": labels[&c.id], "dag": export(roots) })
-            }
-            Err(error) => {
-                json!({ "id": c.id, "display_name": labels[&c.id], "error": error })
-            }
-        })
-        .collect();
-    let physical: Vec<_> = run
-        .physical_candidates()
-        .iter()
-        .map(|p| json!({ "id": p.id, "from_logical": p.from_logical, "display_name": labels[&p.id], "dag": p.dag }))
-        .collect();
     let stage1 = (until >= RunUntil::Pass1).then(|| {
-        let mut stage1 = json!({
-            "combinations": logical.len(),
-            "capped": false,
-            "candidates": logical,
-        });
+        let mut stage1 = json!({});
         // Pass 1 or Pass 2 failed, or the deployment's capabilities
         // contradict the data workload.
         if run.run.logical_asap_candidates.is_none() {
@@ -359,7 +329,6 @@ fn document(queries: Vec<Value>, entries: &[QueryWorkloadEntry], run: &PlanningS
     });
     let stage2 = (until >= RunUntil::Stage2).then(|| {
         let mut stage2 = json!({
-            "candidates": physical,
             "pruned": [],
             "pruned_candidates": stage2_pruned_candidates_json(run.run.physical_asap_candidates.as_ref()),
         });
@@ -384,27 +353,19 @@ fn document(queries: Vec<Value>, entries: &[QueryWorkloadEntry], run: &PlanningS
     })
 }
 
-/// Stage 3's section: the selection, the selected plan's tumbling-window retention and
-/// its materialized views.
+/// Stage 3's section: the plan, the selection and the plan's materialized
+/// views.
 fn stage3_json(run: &PlanningStagesRun, entries: &[QueryWorkloadEntry]) -> Value {
     let mut stage3 = selection_json(&run.run.selection);
-    match (&run.run.selection, &run.run.selected_physical_plan) {
-        (Ok(selection), Some(realized)) => {
-            stage3["tumbling_window_retention_ms"] = realized
-                .tumbling_window_retention_ms
-                .iter()
-                .map(|(node, ms)| (node.to_string(), json!(ms)))
-                .collect::<serde_json::Map<_, _>>()
-                .into();
-            match materialized_views_json(realized, selection, entries) {
-                Ok(views) => stage3["materialized_views"] = Value::Array(views),
-                Err(error) => {
-                    stage3["materialized_views"] = json!([]);
-                    stage3["materialized_views_error"] = json!(error);
-                }
+    match &run.run.selection {
+        Ok((plan, _)) => match materialized_views_json(plan, entries) {
+            Ok(views) => stage3["materialized_views"] = Value::Array(views),
+            Err(error) => {
+                stage3["materialized_views"] = json!([]);
+                stage3["materialized_views_error"] = json!(error);
             }
-        }
-        _ => stage3["materialized_views"] = json!([]),
+        },
+        Err(_) => stage3["materialized_views"] = json!([]),
     }
     stage3
 }
@@ -623,12 +584,10 @@ fn arrival_together(earlier: DataArrival, later: DataArrival) -> Option<DataArri
 /// position among that node's installed nodes (`installed_position`: a
 /// tumbling-window chain's tumbling windows, newest first) and their number (`installed_count`).
 fn materialized_views_json(
-    realized: &asap_types::stages::RealizedPlan,
-    selection: &Selection,
+    plan: &asap_types::ir::physical_export::PhysicalASAPDAG,
     entries: &[QueryWorkloadEntry],
 ) -> Result<Vec<Value>, String> {
-    let (plan, report) =
-        installable_plan_of(realized, Some(selection), entries).map_err(|e| e.to_string())?;
+    let (plan, report) = installable_plan_of(plan, None, entries).map_err(|e| e.to_string())?;
     let views = plan.materialized_views().map_err(|e| e.to_string())?;
     let mut stage2_of = std::collections::HashMap::new();
     for node in report
@@ -669,56 +628,14 @@ fn stage2_pruned_candidates_json(stage2: Option<&PhysicalASAPMemoCandidates>) ->
     todo!("#1207 PR 9 (#1205): each pruned PhysicalCandidate with its reason")
 }
 
-/// One plan's cost: per second, its predicted CPU, unit and source, its
-/// usage and each node's charge.
-fn cost_json(cost: &asap_cost::PlanCost) -> Value {
-    let per_node: serde_json::Map<_, _> = cost
-        .per_node
-        .iter()
-        .map(|(node, c)| {
-            (
-                node.to_string(),
-                json!({
-                    "operator": c.operator,
-                    "timing": c.timing,
-                    "cpu_core_seconds_per_second": c.cpu_core_seconds_per_second,
-                    "cost_per_second": c.cost_per_second,
-                    "multiplier": c.multiplier,
-                    "detail": c.detail,
-                    "price_source": c.price_source,
-                }),
-            )
-        })
-        .collect();
-    json!({
-        "cost_per_second": cost.cost_per_second,
-        // Report-only: the nodes' predicted CPU, summed as
-        // `plan_installable`'s predicted usage sums it.
-        "cpu_core_seconds_per_second": cost
-            .per_node
-            .values()
-            .map(|node| node.cpu_core_seconds_per_second)
-            .sum::<f64>(),
-        "cost_unit": cost.cost_unit,
-        "source": cost.source,
-        "usage": usage_json(&cost.usage),
-        "per_node": per_node,
-    })
-}
-
-/// Per query, the accuracy Stage 3 accepted: the target's metric, the
-/// accepted metric, whether it was accepted regardless of its guarantee,
-/// why the guarantee check would have rejected it, the sketches read and a
-/// one-line summary.
+/// Per query, the accuracy Stage 3 accepted: the accepted metric, the
+/// sketches read and a one-line summary.
 fn accepted_json(queries: &[AcceptedAccuracy]) -> Value {
     queries
         .iter()
         .map(|accepted| {
             json!({
-                "target_metric": accepted.target_metric,
                 "accepted_metric": accepted.accepted_metric,
-                "accepted_regardless_of_guarantee": accepted.accepted_regardless_of_guarantee,
-                "guarantee_check_rejection": accepted.guarantee_check_rejection,
                 "sketches": accepted.sketches,
                 "summary": accepted.to_string(),
             })
@@ -726,57 +643,26 @@ fn accepted_json(queries: &[AcceptedAccuracy]) -> Value {
         .collect()
 }
 
-/// Stage 3's selection ([`Selection`]): the selected DAG over the selected
-/// round's Stage 2 candidates (one node per run of a candidate), the nodes
-/// whose weights it proved non-negative, the plan's cost, the accuracy accepted per query, the
-/// candidates it pruned and its search report; `error` when the facade
-/// selected no plan.
-fn selection_json(selection: &Result<Selection, SelectionError>) -> Value {
-    let selection = match selection {
-        Ok(selection) => selection,
-        Err(error) => return json!({ "selected_dag": null, "error": error.to_string() }),
-    };
-    let dag = &selection.selected_dag;
-    let nodes = |nodes: &[asap_types::stages::SelectedNodeId]| -> Vec<usize> {
-        nodes.iter().map(|node| node.0).collect()
+/// Stage 3's plan and selection ([`Selection`]): the plan it built, the
+/// accuracy accepted per query, the candidates it pruned and the selection
+/// MILP's size and time; `error` when the facade selected no plan.
+fn selection_json(selection: &Result<(PhysicalASAPDAG, Selection), SelectionError>) -> Value {
+    let (plan, selection) = match selection {
+        Ok(selected) => selected,
+        Err(error) => return json!({ "plan": null, "error": error.to_string() }),
     };
     json!({
-        "selected_dag": {
-            "candidate_of_node": dag.candidate_of_node.iter().map(|id| id.0).collect::<Vec<_>>(),
-            "edges": dag
-                .edges
-                .iter()
-                .map(|e| json!({ "producer": e.producer.0, "consumer": e.consumer.0, "input": e.input_index_of_consumer }))
-                .collect::<Vec<_>>(),
-            "node_of_output_reference": nodes(&dag.node_of_output_reference),
-        },
-        "nodes_with_proven_non_negative_weights":
-            nodes(&selection.nodes_with_proven_non_negative_weights),
-        "cost": cost_json(&selection.cost),
+        "plan": plan,
         "accepted_accuracy_per_query": accepted_json(&selection.accepted_accuracy_per_query),
         "pruned_candidates": selection
             .pruned_candidates
             .iter()
-            .map(|p| json!({ "candidate": p.candidate.0, "reason": format!("{:?}", p.reason) }))
+            .map(|p| json!({ "candidate": format!("{:?}", p.candidate), "reason": format!("{:?}", p.reason) }))
             .collect::<Vec<_>>(),
-        "search_report": selection.search_report,
-    })
-}
-
-/// A candidate's resource usage, in the units its field names give.
-fn usage_json(usage: &ResourceUsage) -> Value {
-    json!({
-        "cpu_ops_per_second": usage.cpu_ops_per_second,
-        "scanned_bytes_per_second": usage.scanned_bytes_per_second,
-        "average_memory_bytes": usage.average_memory_bytes,
-        "peak_memory_bytes": usage.peak_memory_bytes,
-        "disk_bytes": usage.disk_bytes,
-        "peak_cpu_cores": usage.peak_cpu_cores,
-        "latency_per_query": usage
-            .latency_per_query
-            .iter()
-            .map(|l| json!({ "compaction_ms": l.compaction_ms, "query_ms": l.query_ms }))
-            .collect::<Vec<_>>(),
+        "milp_variables": selection.milp_variables,
+        "milp_constraints": selection.milp_constraints,
+        "milp_construction_ms": selection.milp_construction_ms,
+        "milp_solve_ms": selection.milp_solve_ms,
     })
 }
 

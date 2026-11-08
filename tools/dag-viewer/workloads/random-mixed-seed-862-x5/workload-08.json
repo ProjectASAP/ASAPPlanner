@@ -186,7 +186,7 @@
    "data": {
     "series_count": 50000,
     "metric_type": "gauge",
-    "values_non_negative": true,
+    "column_signs": {"value": "non_negative"},
     "sample_interval": 100,
     "stream_norms": null,
     "max_distinct_per_evaluation": null

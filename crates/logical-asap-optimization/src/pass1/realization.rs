@@ -5,13 +5,11 @@
 
 use asap_types::ir::operator::agg_intent::AggIntent;
 use asap_types::ir::operator::Reduction;
-use asap_types::ir::scalar::column_resolution::{resolve_column_ref, ResolveError};
+use asap_types::ir::scalar::column_resolution::resolve_column_ref;
 use asap_types::ir::scalar::expr_ir::ColumnRef;
-use asap_types::ir::schema::topk::ranked_column;
-use asap_types::ir::schema::ColumnId;
 use asap_types::ir::schema::{
-    EntityIdentity, FamilyCapability, Field, FieldDataType, NonNegativeWeightProof, Schema,
-    SketchAlgorithm, SummaryInputExpr, SummaryUpdate, WeightDomain,
+    EntityIdentity, Field, FieldDataType, NonNegativeWeightProof, SketchAlgorithm,
+    SummaryInputExpr, SummaryTypeCapability, SummaryUpdate, WeightDomain,
 };
 use asap_types::ir::{NonASAPOp, OperatorNode};
 #[cfg(test)]
@@ -35,19 +33,21 @@ const FAMILY_PREFERENCE: &[SketchAlgorithm] = &[
     SketchAlgorithm::UnivMon,
 ];
 
-/// The sketch kinds that can serve an intent, most-preferred first: the
-/// families whose family-capability table row answers the intent's
-/// statistic, in preference order, less UnivMon for a distinct-tuple
+/// The sketch algorithms that can serve an intent, most-preferred first:
+/// those whose capability table row answers the intent's statistic, in
+/// preference order, less UnivMon for a distinct-tuple
 /// count. Empty for an intent no sketch
 /// statistic serves.
 pub(crate) fn summary_candidates(intent: &AggIntent) -> Vec<SketchAlgorithm> {
-    candidates_by(intent, FamilyCapability::of_per_instance_sketch)
+    candidates_by(intent, |algorithm| {
+        SummaryTypeCapability::of(&FieldDataType::Sketch(*algorithm))
+    })
 }
 
-/// [`summary_candidates`] with each family's table row read from `capability`.
+/// [`summary_candidates`] with each algorithm's table row read from `capability`.
 fn candidates_by(
     intent: &AggIntent,
-    capability: impl Fn(&SketchAlgorithm) -> FamilyCapability,
+    capability: impl Fn(&SketchAlgorithm) -> SummaryTypeCapability,
 ) -> Vec<SketchAlgorithm> {
     let Some(statistic) = sketch_statistic(intent) else {
         return Vec::new();
@@ -64,62 +64,6 @@ fn candidates_by(
         .filter(|family| !(tuple && **family == SketchAlgorithm::UnivMon))
         .cloned()
         .collect()
-}
-
-/// The column fed into a *single-column* summary: the intent's leading
-/// positional input resolved to a name against the child schema, or the PromQL
-/// sample value when it reads none. Callers are responsible for only reaching
-/// here with a one-column intent — [`summarised_input`] is the general form.
-pub(crate) fn summarised_column(intent: &AggIntent, child_schema: &Schema) -> ColumnRef {
-    match intent
-        .input_cols()
-        .first()
-        .and_then(|id| child_schema.fields.get(*id))
-    {
-        Some(c) => c.column_ref(),
-        None => ColumnRef::SampleValue,
-    }
-}
-
-/// [`ranked_column`] as a reference: the sample value when it is that
-/// column, else the column by name.
-pub(crate) fn ranked_value(
-    child: &Rc<OperatorNode>,
-) -> Result<(ColumnId, ColumnRef), ResolveError> {
-    let ranked = ranked_column(child)?;
-    let column = match resolve_column_ref(&ColumnRef::SampleValue, &child.schema) {
-        Ok(value) if value == ranked => ColumnRef::SampleValue,
-        _ => child.schema.fields[ranked].column_ref(),
-    };
-    Ok((ranked, column))
-}
-
-/// What the summary consumes per input row. An intent that reads one column (or
-/// none) feeds that column; `COUNT(DISTINCT a, b)` feeds the whole tuple as one
-/// item, so the distinct-count sketch hashes `(a, b)` rather than `a` — the
-/// difference between tuple cardinality and single-column cardinality.
-///
-/// A tuple leg outside the child schema is an error rather than
-/// [`summarised_column`]'s sample-value fallback: a leg has no sample-value
-/// reading, and silently dropping one would under-count: `None` then.
-pub(crate) fn summarised_input(
-    intent: &AggIntent,
-    child_schema: &Schema,
-) -> Option<SummaryInputExpr> {
-    let cols = intent.input_cols();
-    if cols.len() < 2 {
-        return Some(SummaryInputExpr::Column(summarised_column(
-            intent,
-            child_schema,
-        )));
-    }
-    let legs = cols
-        .iter()
-        .map(|id| child_schema.fields.get(*id).map(Field::column_ref))
-        .collect::<Option<Vec<_>>>()?;
-    Some(SummaryInputExpr::Tuple(
-        legs.into_iter().map(SummaryInputExpr::Column).collect(),
-    ))
 }
 
 /// The physical input consumed by one summary realization. Most summaries
@@ -145,7 +89,7 @@ pub(crate) fn realize_keyed_additive_summary_input(
     if !matches!(intent, AggIntent::TopK { .. }) {
         return None;
     }
-    let FieldDataType::Sketch(kind, _) = family else {
+    let FieldDataType::Sketch(kind) = family else {
         return None;
     };
     let heap_algorithm = kind;
@@ -199,8 +143,8 @@ pub(crate) fn realize_keyed_additive_summary_input(
     let samples = summed_per_series_samples(child);
     // A raw data sample's count or a count's row weighs one.
     let counted = match &samples {
-        Some((_, inner)) => matches!(inner, AggIntent::Count { .. }),
-        None => matches!(measures.as_slice(), [AggIntent::Count { .. }]),
+        Some((_, inner)) => matches!(inner, AggIntent::Count),
+        None => matches!(measures.as_slice(), [AggIntent::Count]),
     };
     let weight = match measures.as_slice() {
         _ if counted => SummaryInputExpr::Constant(1.0),
@@ -321,8 +265,7 @@ fn summed_per_series_samples(grouped: &OperatorNode) -> Option<(Rc<OperatorNode>
     else {
         return None;
     };
-    let [inner @ (AggIntent::Sum { col: None } | AggIntent::Count { .. })] = inner.as_slice()
-    else {
+    let [inner @ (AggIntent::Sum { col: None } | AggIntent::Count)] = inner.as_slice() else {
         return None;
     };
     if by.is_without()
@@ -352,10 +295,9 @@ fn summed_per_series_samples(grouped: &OperatorNode) -> Option<(Rc<OperatorNode>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pass1::composition::summarised_input;
     use crate::test_support::metric_scan;
-    use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::scalar::{CompareOpKind, ScalarValue};
-    use asap_types::ir::schema::GroupingStrategy;
     use asap_types::ir::{ExprSemantics, Predicate};
 
     /// A heap sketch consumes every raw row, so the keyed input rule refuses
@@ -365,9 +307,7 @@ mod tests {
         let count_by_job = |filter: Option<Predicate>| {
             OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Aggregate {
                 reduction: Reduction::by(vec![2]),
-                measures: vec![AggIntent::Count {
-                    accuracy: AccuracyTarget::exact(),
-                }],
+                measures: vec![AggIntent::Count],
                 output_names: vec![],
                 filters: vec![filter],
                 having: None,
@@ -375,12 +315,8 @@ mod tests {
             }))
             .unwrap()
         };
-        let intent = AggIntent::TopK {
-            k: 5,
-            accuracy: AccuracyTarget::max_error(0.01),
-        };
-        let family =
-            FieldDataType::Sketch(SketchAlgorithm::CmsWithHeap, GroupingStrategy::default());
+        let intent = AggIntent::TopK { k: 5 };
+        let family = FieldDataType::Sketch(SketchAlgorithm::CmsWithHeap);
         let output =
             Reduction::Reduce(asap_types::ir::operator::operator_properties::GroupKeys::none());
         assert!(realize_keyed_additive_summary_input(
@@ -422,10 +358,7 @@ mod tests {
             ),
         ];
         for (cols, want) in cases {
-            let intent = AggIntent::Cardinality {
-                cols: cols.clone(),
-                accuracy: AccuracyTarget::max_error(0.01),
-            };
+            let intent = AggIntent::Cardinality { cols: cols.clone() };
             assert_eq!(
                 summarised_input(&intent, &scan.schema),
                 Some(want),
@@ -440,50 +373,22 @@ mod tests {
     #[test]
     fn summary_candidates_keep_the_hand_written_lists() {
         use SketchAlgorithm as S;
-        let accuracy = AccuracyTarget::max_error(0.01);
-        let cardinality = |cols: Vec<usize>| AggIntent::Cardinality {
-            cols,
-            accuracy: accuracy.clone(),
-        };
+        let cardinality = |cols: Vec<usize>| AggIntent::Cardinality { cols };
         let cases = [
             (
-                AggIntent::Quantile {
-                    col: None,
-                    q: 0.99,
-                    accuracy: accuracy.clone(),
-                },
+                AggIntent::Quantile { col: None, q: 0.99 },
                 vec![S::Kll, S::DDSketch],
             ),
             (cardinality(vec![]), vec![S::Hll, S::Kmv, S::UnivMon]),
             (cardinality(vec![1]), vec![S::Hll, S::Kmv, S::UnivMon]),
             (cardinality(vec![1, 2]), vec![S::Hll, S::Kmv]),
+            (AggIntent::FrequencyL2 { col: None }, vec![S::UnivMon]),
+            (AggIntent::FrequencyEntropy { col: None }, vec![S::UnivMon]),
             (
-                AggIntent::FrequencyL2 {
-                    col: None,
-                    accuracy: accuracy.clone(),
-                },
-                vec![S::UnivMon],
-            ),
-            (
-                AggIntent::FrequencyEntropy {
-                    col: None,
-                    accuracy: accuracy.clone(),
-                },
-                vec![S::UnivMon],
-            ),
-            (
-                AggIntent::TopK {
-                    k: 10,
-                    accuracy: accuracy.clone(),
-                },
+                AggIntent::TopK { k: 10 },
                 vec![S::CmsWithHeap, S::CountSketchWithHeap],
             ),
-            (
-                AggIntent::Count {
-                    accuracy: accuracy.clone(),
-                },
-                vec![S::Cms, S::UnivMon],
-            ),
+            (AggIntent::Count, vec![S::Cms, S::UnivMon]),
             (AggIntent::Sum { col: None }, vec![]),
         ];
         for (intent, want) in cases {
@@ -497,15 +402,12 @@ mod tests {
     fn a_dropped_readout_drops_the_family() {
         // Count-Min-with-heap answered from Count-Min's row: no top-k readout.
         let heap_without_top_k = |family: &SketchAlgorithm| {
-            FamilyCapability::of_per_instance_sketch(match family {
-                SketchAlgorithm::CmsWithHeap => &SketchAlgorithm::Cms,
-                other => other,
-            })
+            SummaryTypeCapability::of(&FieldDataType::Sketch(match family {
+                SketchAlgorithm::CmsWithHeap => SketchAlgorithm::Cms,
+                other => *other,
+            }))
         };
-        let top_k = AggIntent::TopK {
-            k: 10,
-            accuracy: AccuracyTarget::max_error(0.01),
-        };
+        let top_k = AggIntent::TopK { k: 10 };
         assert_eq!(
             candidates_by(&top_k, heap_without_top_k),
             vec![SketchAlgorithm::CountSketchWithHeap]
