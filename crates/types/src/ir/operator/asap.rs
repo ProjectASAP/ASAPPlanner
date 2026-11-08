@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use super::input::{InputOrTemporaryBuild, OperatorInput};
 use super::node::{Operator, OperatorNode, OperatorResultKind};
+use super::non_asap::NonASAPOp;
+use super::tumbling_window_chain::is_time_indexed_state;
 use crate::ir::operator::maintained_population::{MaintainedPopulation, PopulationStatistic};
 use crate::ir::operator::operator_properties::Reduction;
 use crate::ir::schema::sketch::{SketchStatistic, SummaryUpdate};
@@ -75,8 +77,9 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
     /// `reduction` and `filter`, built over each window
     /// `(k·w, (k+1)·w]` of `child`, `w` = `tumbling_window_width_ms`, on a
     /// grid anchored at the epoch. Each window is built when it ends. Output:
-    /// one row per window, (window end, keys, state), a state with a time
-    /// index. It has no range and no window count: a `TimeRange` (and
+    /// one row per window and key, (window_end, keys, state), a state with
+    /// a time index (`window_end`, column 0), unique by (window_end, keys).
+    /// It has no range and no window count: a `TimeRange` (and
     /// `TimeShift`) over it selects the windows a query reads, and how many
     /// windows it retains is $h_v$, a Stage 3 choice.
     // Written as `PaneChain` before #1163; the aliases read those documents.
@@ -281,13 +284,13 @@ impl<I: OperatorInput> ASAPOp<I> {
                 summary_type: family,
                 reduction,
                 ..
-            }
-            | SummaryTumblingWindowChain {
+            } => summary_agg_schema(child.schema(), family, reduction)?,
+            SummaryTumblingWindowChain {
                 child,
                 summary_type: family,
                 reduction,
                 ..
-            } => summary_agg_schema(child.schema(), family, reduction)?,
+            } => chain_schema(child.schema(), family, reduction)?,
             SummaryEstimate {
                 summary_input,
                 query,
@@ -336,9 +339,8 @@ impl<I: OperatorInput> ASAPOp<I> {
                 if let Some((build, schema)) = rolled_up_build(child) {
                     return finalized_schema(Some(&build), &schema);
                 }
-                if super::tumbling_window_chain::merged_chain(child).is_some() {
-                    todo!("#1207 PR 1: finalize the windows a TimeRange over a chain selects as one build over that TimeRange")
-                }
+                // The windows a `TimeRange` over a chain selects, merged,
+                // finalize as the chain's build over that range.
                 finalized_schema(summary_build(child).as_ref(), child.schema())?
             }
             MaintainPopulation { child, .. } => child.schema().clone(),
@@ -410,9 +412,22 @@ impl<I: OperatorInput> ASAPOp<I> {
             } => {
                 self.validate_inputs()?;
                 let input = children[0].schema();
-                match group_by {
-                    None => input.clone(),
-                    Some(keys) => regrouped_schema(input, keys)?,
+                match (group_by, summary_build(&children[0])) {
+                    (Some(keys), _) => regrouped_schema(input, keys)?,
+                    // The windows a `TimeRange` over a chain selects merge
+                    // into the state of the chain's build over that range,
+                    // which has no window column (a `TimeRange` and a
+                    // `TimeShift` keep their input's schema).
+                    (
+                        None,
+                        Some(SummaryTumblingWindowChain {
+                            child,
+                            summary_type,
+                            reduction,
+                            ..
+                        }),
+                    ) => summary_agg_schema(child.schema(), &summary_type, &reduction)?,
+                    (None, _) => input.clone(),
                 }
             }
             SummarySubtract { .. }
@@ -472,6 +487,19 @@ impl<I: OperatorInput> ASAPOp<I> {
                 {
                     return Err(SchemaDerivationError::InvalidScalarSignature(
                         "summary merge requires exactly one state column".into(),
+                    ));
+                }
+                // Over a time-indexed state: the windows one `TimeRange`
+                // over a chain selects, not the whole chain.
+                if children.iter().any(is_time_indexed_state)
+                    && !matches!(
+                        children.as_slice(),
+                        [child] if matches!(child.operator(), Operator::NonASAP(NonASAPOp::TimeRange { .. }))
+                    )
+                {
+                    return Err(SchemaDerivationError::InvalidScalarSignature(
+                        "a summary merge over a time-indexed state reads one TimeRange over a chain"
+                            .into(),
                     ));
                 }
                 for child in children {
@@ -655,22 +683,31 @@ fn rolled_up_build<I: OperatorInput>(
         return None;
     };
     let input = selected_from(input).unwrap_or_else(|| input.clone());
-    let build = match input.operator() {
-        Operator::ASAP(op @ ASAPOp::SummaryAgg { .. }) => {
+    // A build, or the windows a `TimeRange` over a chain selects, merged:
+    // the chain's build over that range, whose schema is the build's over
+    // the chain's input.
+    let build = match (input.operator(), summary_build(&input)) {
+        (Operator::ASAP(op @ ASAPOp::SummaryAgg { .. }), _)
+        | (_, Some(op @ ASAPOp::SummaryTumblingWindowChain { .. })) => {
             op.map_children(|child| InputOrTemporaryBuild::Input(child.clone()))
-        }
-        _ if super::tumbling_window_chain::merged_chain(&input).is_some() => {
-            todo!("#1207 PR 1: roll up the windows a TimeRange over a chain selects as one build over that TimeRange")
         }
         _ => return None,
     };
-    let ASAPOp::SummaryAgg {
+    let (ASAPOp::SummaryAgg {
         child,
-        summary_type: family,
+        summary_type,
         input: update,
         reduction,
         filter,
-    } = build
+    }
+    | ASAPOp::SummaryTumblingWindowChain {
+        child,
+        summary_type,
+        input: update,
+        reduction,
+        filter,
+        ..
+    }) = build
     else {
         return None;
     };
@@ -683,11 +720,11 @@ fn rolled_up_build<I: OperatorInput>(
         })
         .collect::<Option<Vec<_>>>()?;
     let reduction = Reduction::by(mapped);
-    let schema = summary_agg_schema(child.schema(), &family, &reduction).ok()?;
+    let schema = summary_agg_schema(child.schema(), &summary_type, &reduction).ok()?;
     Some((
         ASAPOp::SummaryAgg {
             child,
-            summary_type: family,
+            summary_type,
             input: update,
             reduction,
             filter,
@@ -722,6 +759,39 @@ pub(crate) fn summary_agg_schema(
     Ok(schema)
 }
 
+/// The schema of a `SummaryTumblingWindowChain` of `summary_type` by `reduction`
+/// over rows of schema `child`: a state with a time index, one row per
+/// window and key, (window_end, keys…, state). `window_end` (column 0, the
+/// time index) is computed, so it takes no name or table from `child`; the
+/// build's own time column, which a per-entity build keeps, is dropped. The
+/// unique key is (window_end, keys).
+fn chain_schema(
+    child: &Schema,
+    summary_type: &FieldDataType,
+    reduction: &Reduction,
+) -> Result<Schema, SchemaDerivationError> {
+    let mut schema = summary_agg_schema(child, summary_type, reduction)?;
+    let time = child
+        .time_index
+        .and_then(|index| child.fields.get(index))
+        .ok_or_else(|| {
+            SchemaDerivationError::InvalidScalarSignature(
+                "a tumbling-window chain reads rows with a time column".into(),
+            )
+        })?;
+    if let Some(build_time) = schema.time_index.take() {
+        schema.fields.remove(build_time);
+    }
+    schema
+        .fields
+        .insert(0, Field::new("window_end", time.dtype.clone(), false));
+    schema.time_index = Some(0);
+    schema.unique_keys = vec![(0..schema.fields.len())
+        .filter(|&column| schema.fields[column].is_plain())
+        .collect()];
+    Ok(schema)
+}
+
 /// The schema `FinalizeExactAccumulator` derives over state of
 /// `state_schema` that `build` (the state's `SummaryAgg`, if any) builds:
 /// each exact aggregate replaced by the value it finalizes to.
@@ -729,14 +799,24 @@ fn finalized_schema<J: OperatorInput>(
     build: Option<&ASAPOp<J>>,
     state_schema: &Schema,
 ) -> Result<Schema, SchemaDerivationError> {
-    let value_result = if let Some(ASAPOp::SummaryAgg {
-        child: source,
-        summary_type: FieldDataType::ExactAggregate(kind, _),
-        input,
-        reduction,
-        filter,
-        ..
-    }) = build
+    let value_result = if let Some(
+        ASAPOp::SummaryAgg {
+            child: source,
+            summary_type: FieldDataType::ExactAggregate(kind, _),
+            input,
+            reduction,
+            filter,
+            ..
+        }
+        | ASAPOp::SummaryTumblingWindowChain {
+            child: source,
+            summary_type: FieldDataType::ExactAggregate(kind, _),
+            input,
+            reduction,
+            filter,
+            ..
+        },
+    ) = build
     {
         {
             use crate::ir::operator::AggIntent;
@@ -842,22 +922,24 @@ fn finalized_data_type(kind: &crate::ir::schema::sketch::ExactKind) -> DataType 
     }
 }
 
-/// The states `node` selects from when it is a `Filter` that keeps whole
-/// summary states by their plain columns (its output is state); `None` for
+/// The states `node` selects from when it keeps whole summary states (its
+/// output is state): a `Filter` by their plain columns, or a `TimeRange` or
+/// `TimeShift` over a time-indexed state, which selects windows. `None` for
 /// any other input.
 pub fn selected_from<I: OperatorInput>(node: &I) -> Option<I> {
     match node.operator() {
-        Operator::NonASAP(crate::ir::NonASAPOp::Filter { child, .. })
-            if node.result_kind() == OperatorResultKind::State =>
-        {
-            Some(child)
-        }
+        Operator::NonASAP(
+            NonASAPOp::Filter { child, .. }
+            | NonASAPOp::TimeRange { child, .. }
+            | NonASAPOp::TimeShift { child, .. },
+        ) if node.result_kind() == OperatorResultKind::State => Some(child),
         _ => None,
     }
 }
 
 /// The build whose state this summary state carries: a `SummaryAgg` or
-/// `SummaryTumblingWindowChain` itself, or the first input's build under
+/// `SummaryTumblingWindowChain` itself, the chain under the `TimeRange` and
+/// `TimeShift`s that select its windows, or the first input's build under
 /// `SummaryMerge`s (merged inputs have one definition, which summary
 /// coverage checks). `None` under a regrouping merge, whose states no build
 /// carries (its coverage's definition is the build it stands for), and for
@@ -872,6 +954,22 @@ pub fn summary_build<I: OperatorInput>(state: &I) -> Option<ASAPOp<I>> {
             group_by: None,
             ..
         }) => summary_build(children.first()?),
+        Operator::NonASAP(
+            NonASAPOp::TimeRange { child, .. } | NonASAPOp::TimeShift { child, .. },
+        ) => summary_build(&child),
+        _ => None,
+    }
+}
+
+/// The summary type a build operator builds: a `SummaryAgg`'s or a
+/// `SummaryTumblingWindowChain`'s `summary_type`; `None` for every other
+/// operator.
+pub fn summary_type_of_operator<I>(operator: &Operator<I>) -> Option<&FieldDataType> {
+    match operator {
+        Operator::ASAP(
+            ASAPOp::SummaryAgg { summary_type, .. }
+            | ASAPOp::SummaryTumblingWindowChain { summary_type, .. },
+        ) => Some(summary_type),
         _ => None,
     }
 }
