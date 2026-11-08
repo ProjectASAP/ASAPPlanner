@@ -1020,7 +1020,7 @@ The baseline uses the formulation's variables and constraints. Stage 3 adds no c
 | (B) | Chosen producers are selected | $y_{u,c,i}\le x_u$ |
 | (C) | One output per query | $\sum_{v\in G_q}z_{q,v}=1$ |
 | (D) | Output candidates are selected | $z_{q,v}\le x_v$ |
-| (E) | Acyclic dependencies | $t_u+1\le t_c+\lvert\mathcal C\rvert(1-y_{u,c,i})$ |
+| (E) | Acyclic dependencies, only on edges inside a strongly connected component of the admissible edges (below) | $t_u+1\le t_c+n(1-y_{u,c,i})$, $n$ = the component's size |
 | (F) | Selected candidates are used | $x_v\le\sum_{(v,c,i)\in\mathcal E}y_{v,c,i}+\sum_{q:v\in G_q}z_{q,v}$ |
 | (G) | Logical compatibility | $y_{u,c,i}\le\alpha^{\mathrm{log}}_{u,c,i}$ |
 | (H) | Physical compatibility | $y_{u,c,i}\le\alpha^{\mathrm{phys}}_{u,c,i}$ |
@@ -1036,12 +1036,30 @@ $$
 
 The cost includes input reading, the candidate's own computation, and lifetime-dependent retention. It excludes producers' computation, which is charged at those producers. This objective assumes execution frequencies and retention costs are fixed before optimization and independent of the selected consumers. When that assumption does not hold, use the execution extension in Section 5; do not silently reuse the same cost coefficient.
 
+#### When the candidate graph has a cycle
+
+Group expressions only reference input groups, so the graph of groups has no cycle. Candidates are different: a rule may add to a group a candidate that reads another group, and when two groups can each be computed from the other, their candidates form a cycle. A plan may use either direction, but not both: if each reads the other, neither is computed. Constraint (E) rules that out. Rejecting one direction when the memo is built would lose plans: which direction is cheaper is a cost question only the MILP can answer.
+
+**Example.** A readout group whose column names differ from its consumer's gets a renaming `Project`:
+
+| Group | Candidates |
+|---|---|
+| Ga: `(job, p99)` | ① its own expression; ② `Project(value → p99)(Gb)` |
+| Gb: `(job, value)` | ① its own expression; ② `Project(p99 → value)(Ga)` |
+
+Ga ① with Gb ② is a valid plan, and so is Gb ① with Ga ②; Ga ② with Gb ② is a cycle and (E) forbids it.
+
+Cycles can appear when two groups compute **equivalent results** that rules can derive from each other: renamings in both directions, rollups between groups with equal definitions, selections and keys, or any future rewrite that has an inverse. Today's rules add one direction only, so in practice the admissible edges have no cycle.
+
+$t_v$ and (E) are therefore built only for candidates inside a strongly connected component of the admissible edges, with $n$ the component's size; outside one, no edge can close a cycle. When there is no cycle, $t$ is all `None` and (E) adds no constraint. Merging groups proven equivalent into one group (as Cascades-style memos do) would remove such cycles without losing candidates; it needs an equivalence rule and is not part of this design.
+
 ```rust
 struct SelectionVariables {
     x: Vec<Variable>,
     y: HashMap<PhysicalEdgeId, Variable>,
     z: HashMap<(QueryId, PhysicalCandidateId), Variable>,
-    t: Vec<Variable>,
+    /// t_v only for candidates on a cycle of admissible edges; None elsewhere.
+    t: Vec<Option<Variable>>,
 }
 
 // Schematic constraint-building entry points; signatures omitted.
