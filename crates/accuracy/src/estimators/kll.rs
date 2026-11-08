@@ -52,6 +52,7 @@ pub(crate) fn kll_rank_error_99(k: u32) -> f64 {
 /// normalized rank-error fit: `epsilon = 2.296 / k^0.9723`. Capped at
 /// [`KLL_MAX_K`], the largest `k` `asap_sketchlib` builds; an `eps` that
 /// needs more gets that `k`, whose guarantee then misses the target.
+#[cfg(test)]
 pub(crate) fn kll_k(eps: f64) -> u32 {
     saturating_ceil(
         (KLL_RANK_ERROR_COEFFICIENT_99 / eps).powf(1.0 / KLL_RANK_ERROR_EXPONENT_99),
@@ -133,6 +134,7 @@ fn normal_quantile(p: f64) -> f64 {
 /// `k` for rank error `eps` at failure probability `delta`: the empirical
 /// 99% calibration for `delta >= 0.01`; below, the calibration at
 /// `eps / delta_scale(delta)`, recording `delta` so the guarantee reports it.
+#[cfg(test)]
 pub(crate) fn size_params(eps: f64, delta: f64) -> SketchParams {
     if delta.is_nan() || delta <= 0.0 || delta >= KLL_CALIBRATED_FAILURE_PROBABILITY {
         return SketchParams::Kll { k: kll_k(eps) };
