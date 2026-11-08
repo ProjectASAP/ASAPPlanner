@@ -1,5 +1,6 @@
 //! Dispatch committed estimator parameters to their accuracy models.
 use super::*;
+#[cfg(test)]
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::SummaryTypeCapability;
 
@@ -80,7 +81,10 @@ pub fn theoretical_guarantee(
     }
 }
 
-#[allow(dead_code)] // Read again for the predefined θ lists (`parameter_list`), in #1207 PR 1.
+/// Today's sizing: the parameters of algorithm `kind` for error `eps` at failure
+/// probability `delta`. Test-only: the predefined lists (`parameter_list`)
+/// are this sizing over an error grid, which a test keeps equal.
+#[cfg(test)]
 pub(crate) fn size_params(
     kind: SketchAlgorithm,
     intent: &AggIntent,
@@ -185,6 +189,7 @@ pub(crate) fn binomial_upper_tail(n: u32, p: f64, k: u32) -> f64 {
 
 /// Accuracy-dependent candidate budget, not a completeness theorem. The
 /// membership model must still certify the selected set independently.
+#[cfg(test)]
 pub(crate) fn topk_capacity(k: usize, eps: f64) -> u32 {
     u32::try_from(k)
         .unwrap_or(u32::MAX)
@@ -203,6 +208,108 @@ pub(crate) fn saturating_ceil(x: f64, lo: u32, hi: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each algorithm's predefined list (`parameter_list`) is today's sizing
+    /// over the error grid ε = 0.1 … 0.001 at failure probability 0.01,
+    /// smallest first, without repeats; KMV's and UnivMon's distinct counts
+    /// stop at ε = 0.01. Count-Min lists each sized width with depths 5, 7,
+    /// 10 and 12, Count Sketch with 47, 81, 117 and 155, and a heap variant
+    /// each of those with
+    /// every heap size of the 1-2-5 series 10 … 10 000. UnivMon's list also
+    /// combines each L2 shape with each distinct-count shape (28 entries).
+    #[test]
+    fn parameter_list_is_the_sizing_over_the_error_grid() {
+        use asap_types::ir::operator::agg_intent::{default_cardinality, default_quantile};
+        use asap_types::stages::parameter_list;
+        let full_grid = [0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001];
+        let distinct_grid = [0.1, 0.05, 0.02, 0.01];
+        let cms_depths = [5, 7, 10, 12];
+        let count_sketch_depths = [47, 81, 117, 155];
+        let heap_sizes = [10, 20, 50, 100, 200, 500, 1_000, 2_000, 5_000, 10_000];
+        let l2 = AggIntent::FrequencyL2 { col: None };
+        let top_1 = AggIntent::TopK { k: 1 };
+        let quantile = default_quantile(0.5);
+        let distinct = default_cardinality();
+        for (algorithm, intents) in [
+            (SketchAlgorithm::Kll, vec![&quantile]),
+            (SketchAlgorithm::DDSketch, vec![&quantile]),
+            (SketchAlgorithm::Hll, vec![&distinct]),
+            (SketchAlgorithm::Kmv, vec![&distinct]),
+            (SketchAlgorithm::Cms, vec![&distinct]),
+            (SketchAlgorithm::CountSketch, vec![&distinct]),
+            (SketchAlgorithm::CmsWithHeap, vec![&top_1]),
+            (SketchAlgorithm::CountSketchWithHeap, vec![&top_1]),
+            (SketchAlgorithm::UnivMon, vec![&l2, &distinct, &quantile]),
+        ] {
+            let mut sized: Vec<SketchParams> = Vec::new();
+            for intent in intents {
+                let grid: &[f64] = match (algorithm, intent) {
+                    (
+                        SketchAlgorithm::Kmv | SketchAlgorithm::UnivMon,
+                        AggIntent::Cardinality { .. },
+                    ) => &distinct_grid,
+                    _ => &full_grid,
+                };
+                for &eps in grid {
+                    let listed: Vec<SketchParams> = match size_params(algorithm, intent, eps, 0.01)
+                    {
+                        SketchParams::Cms { width, .. } => cms_depths
+                            .iter()
+                            .map(|&depth| SketchParams::Cms { width, depth })
+                            .collect(),
+                        SketchParams::CountSketch { width, .. } => count_sketch_depths
+                            .iter()
+                            .map(|&depth| SketchParams::CountSketch { width, depth })
+                            .collect(),
+                        SketchParams::CmsWithHeap { width, .. } => cms_depths
+                            .iter()
+                            .flat_map(|&depth| {
+                                heap_sizes
+                                    .iter()
+                                    .map(move |&heap_size| SketchParams::CmsWithHeap {
+                                        width,
+                                        depth,
+                                        heap_size,
+                                    })
+                            })
+                            .collect(),
+                        SketchParams::CountSketchWithHeap { width, .. } => count_sketch_depths
+                            .iter()
+                            .flat_map(|&depth| {
+                                heap_sizes.iter().map(move |&heap_size| {
+                                    SketchParams::CountSketchWithHeap {
+                                        width,
+                                        depth,
+                                        heap_size,
+                                    }
+                                })
+                            })
+                            .collect(),
+                        other => vec![other],
+                    };
+                    for params in listed {
+                        if !sized.contains(&params) {
+                            sized.push(params);
+                        }
+                    }
+                }
+            }
+            let list = parameter_list(algorithm);
+            let (listed_sized, combined): (Vec<_>, Vec<_>) =
+                list.iter().partition(|params| sized.contains(params));
+            assert_eq!(
+                format!("{listed_sized:?}"),
+                format!("{:?}", sized.iter().collect::<Vec<_>>()),
+                "{algorithm:?}"
+            );
+            let expected_combined = if algorithm == SketchAlgorithm::UnivMon {
+                28
+            } else {
+                0
+            };
+            assert_eq!(combined.len(), expected_combined, "{algorithm:?}");
+        }
+    }
 
     /// Classic HLL's precision grows until its failure probability over the
     /// source's distinct bound meets the target, up to 18.

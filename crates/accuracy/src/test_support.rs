@@ -5,11 +5,8 @@
 use std::rc::Rc;
 
 use asap_types::ir::operator::operator_properties::Reduction;
-use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::guarantee::AccuracyGuarantee;
-use asap_types::ir::schema::{
-    FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic, SummaryUpdate,
-};
+use asap_types::ir::schema::{FieldDataType, SketchStatistic, SummaryUpdate};
 use asap_types::ir::{OperatorNode, ScalarExpr};
 
 use crate::composition::StreamNorm;
@@ -71,11 +68,6 @@ pub fn source_distinct_guarantee(
     propagation::source_distinct_guarantee(family, query, input)
 }
 
-/// `crate::estimators::cms::cms_width`.
-pub fn cms_width(eps: f64) -> u32 {
-    crate::estimators::cms::cms_width(eps)
-}
-
 /// `crate::estimators::cms::cms_depth`.
 pub fn cms_depth(delta: f64) -> u32 {
     crate::estimators::cms::cms_depth(delta)
@@ -84,16 +76,6 @@ pub fn cms_depth(delta: f64) -> u32 {
 /// `crate::estimators::kll::kll_rank_error_99`.
 pub fn kll_rank_error_99(k: u32) -> f64 {
     crate::estimators::kll::kll_rank_error_99(k)
-}
-
-/// `crate::sizing::default_size_params`.
-pub fn default_size_params(
-    kind: SketchAlgorithm,
-    intent: &AggIntent,
-    eps: f64,
-    delta: f64,
-) -> SketchParams {
-    crate::sizing::default_size_params(kind, intent, eps, delta)
 }
 
 /// `crate::composition::QUOTIENT_OPERAND_DOMAINS`.

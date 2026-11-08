@@ -25,6 +25,7 @@ pub(super) fn guarantee(
 }
 
 /// CMS: over-count ≤ ε·N with width `w = ⌈e/ε⌉` columns.
+#[cfg(test)]
 pub(crate) fn cms_width(eps: f64) -> u32 {
     saturating_ceil(std::f64::consts::E / eps, 2, 1 << 26)
 }
