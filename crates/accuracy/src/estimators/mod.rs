@@ -276,7 +276,8 @@ mod tests {
 
     /// Each family's predefined list is today's sizing at failure
     /// probability 0.01 over the error grid, weakest first, without repeats
-    /// (a UnivMon's: its L2-norm, distinct-count and other shapes). KMV's and
+    /// (a UnivMon's: its L2-norm, distinct-count and other shapes, plus each
+    /// L2 shape combined with each distinct-count shape). KMV's and
     /// UnivMon's distinct counts stop at ε = 0.01. A heap variant's width × depth is the top-1
     /// sizing, each with every heap size of the 1-2-5 series 10 … 10 000.
     #[test]
@@ -344,9 +345,23 @@ mod tests {
                     }
                 }
             }
+            // UnivMon's list also combines each L2 shape with each
+            // distinct-count shape; the sized shapes keep their order.
+            let list = parameter_list(family);
+            let (listed_sized, combined): (Vec<_>, Vec<_>) =
+                list.iter().partition(|params| sized.contains(params));
             assert_eq!(
-                format!("{:?}", parameter_list(family)),
-                format!("{sized:?}"),
+                format!("{listed_sized:?}"),
+                format!("{:?}", sized.iter().collect::<Vec<_>>()),
+                "{family:?}"
+            );
+            assert_eq!(
+                combined.len(),
+                if family == SketchAlgorithm::UnivMon {
+                    28
+                } else {
+                    0
+                },
                 "{family:?}"
             );
         }

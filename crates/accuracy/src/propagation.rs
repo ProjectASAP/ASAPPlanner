@@ -523,14 +523,6 @@ fn rolled_up_guarantee(node: &OperatorNode) -> Option<Option<AccuracyGuarantee>>
     Some(composed_guarantee(&consumer))
 }
 
-/// The chain whose windows `state` merges (its
-/// [`OperatorNode::summary_build`] is a chain); `None` for any other state.
-fn merged_windows_chain(state: &Rc<OperatorNode>) -> Option<ASAPOp> {
-    state
-        .summary_build()
-        .filter(|build| matches!(build, ASAPOp::SummaryTumblingWindowChain { .. }))
-}
-
 /// The guarantee of an estimate or finalized value read from merged
 /// tumbling windows (a state whose [`OperatorNode::summary_build`] is a
 /// chain): the guarantee of the same read of one build over the time range
@@ -540,23 +532,22 @@ fn merged_windows_chain(state: &Rc<OperatorNode>) -> Option<ASAPOp> {
 /// only, for plan selection to judge) or the family has no merge. `None` for
 /// any node that does not read merged tumbling windows.
 fn merged_tumbling_windows_guarantee(node: &OperatorNode) -> Option<Option<AccuracyGuarantee>> {
-    let merged = match node.asap()? {
+    let (state, query) = match node.asap()? {
         ASAPOp::SummaryEstimate {
             summary_input,
             query,
-        } => {
-            let chain = merged_windows_chain(summary_input)?;
-            let family = chain.produced_state()?;
-            FamilyCapability::of(family).merged_error(query)
-        }
-        ASAPOp::FinalizeExactAccumulator { child } => {
-            let chain = merged_windows_chain(child)?;
-            let family = chain.produced_state()?;
-            // An exact accumulator's merged state is exact.
-            let merged = FamilyCapability::of(family).merge_inputs;
-            merged.map(|_| MergedError::Exact)
-        }
+        } => (summary_input, Some(query)),
+        ASAPOp::FinalizeExactAccumulator { child } => (child, None),
         _ => return None,
+    };
+    let ASAPOp::SummaryTumblingWindowChain { family, .. } = state.summary_build()? else {
+        return None;
+    };
+    let capability = FamilyCapability::of(&family);
+    let merged = match query {
+        Some(query) => capability.merged_error(query),
+        // An exact accumulator's merged state is exact.
+        None => capability.merge_inputs.map(|_| MergedError::Exact),
     };
     if !matches!(
         merged,
@@ -668,14 +659,18 @@ pub(crate) fn estimates_raw_data_samples_of(node: &OperatorNode) -> Option<Strin
         },
         // Only a φ in [0, 1] picks one of the values; outside it the answer
         // is -Inf or +Inf, whatever their sign. Merged tumbling windows of one
-        // definition ([`merged_windows_chain`]) are read through their `SummaryTumblingWindowChain`:
+        // definition are read through their `SummaryTumblingWindowChain`:
         // a quantile of the merged state is still one of the tumbling windows'
         // samples, or between two of them.
         Operator::ASAP(ASAPOp::SummaryEstimate {
             summary_input,
             query: SketchStatistic::Quantile { q },
         }) if (0.0..=1.0).contains(q) => {
-            match &merged_windows_chain(summary_input).or_else(|| summary_input.asap().cloned())? {
+            let build = match summary_input.summary_build()? {
+                chain @ ASAPOp::SummaryTumblingWindowChain { .. } => chain,
+                _ => summary_input.asap()?.clone(),
+            };
+            match &build {
                 ASAPOp::SummaryAgg {
                     input:
                         SummaryUpdate {

@@ -251,9 +251,6 @@ impl LogicalProperties {
             (Some(_), None) => return Err(LogicalPropertiesError::SketchBuildWithoutParameters),
             (None, Some(_)) => return Err(LogicalPropertiesError::ParametersOnExactOperator),
             (Some(family), Some(parameters)) => {
-                if family != family_of_parameters(parameters) {
-                    return Err(LogicalPropertiesError::ParametersOfAnotherFamily);
-                }
                 if !parameter_list(family).contains(parameters) {
                     return Err(LogicalPropertiesError::ParametersNotInList);
                 }
@@ -288,10 +285,12 @@ pub enum LogicalPropertiesError {
 /// Each list is today's sizing (`asap_accuracy`'s `size_params`) at
 /// failure probability 0.01 over the errors ε = 0.1, 0.05, 0.02, 0.01,
 /// 0.005, 0.002 and 0.001, weakest first, without repeats; an
-/// `asap_accuracy` test keeps them equal. Distinct counts (KMV, and
+/// `asap_accuracy` test keeps them equal (UnivMon's combined shapes are
+/// added to its sizing). Distinct counts (KMV, and
 /// UnivMon's distinct-count shapes) stop at ε = 0.01. A UnivMon's list is
-/// its L2-norm shapes, then its distinct-count shapes, then its shape for
-/// every other statistic. A heap variant combines each width × depth with
+/// its L2-norm shapes, its distinct-count shapes, each L2 shape combined
+/// with each distinct-count shape, then its shape for every other
+/// statistic. A heap variant combines each width × depth with
 /// each heap size of [`HEAP_SIZES`], by width, then heap size: a top-k
 /// consumer's floor is heap_size ≥ k, and the next listed step up is at most
 /// 2.5× too large. Empty for a family Pass 1 does not offer (the Hydra
@@ -363,65 +362,23 @@ const KMV_PARAMETERS: [SketchParams; 4] = [
 ];
 
 const CMS_PARAMETERS: [SketchParams; 7] = [
-    SketchParams::Cms {
-        width: 28,
-        depth: 5,
-    },
-    SketchParams::Cms {
-        width: 55,
-        depth: 5,
-    },
-    SketchParams::Cms {
-        width: 136,
-        depth: 5,
-    },
-    SketchParams::Cms {
-        width: 272,
-        depth: 5,
-    },
-    SketchParams::Cms {
-        width: 544,
-        depth: 5,
-    },
-    SketchParams::Cms {
-        width: 1_360,
-        depth: 5,
-    },
-    SketchParams::Cms {
-        width: 2_719,
-        depth: 5,
-    },
+    cms(28),
+    cms(55),
+    cms(136),
+    cms(272),
+    cms(544),
+    cms(1_360),
+    cms(2_719),
 ];
 
 const COUNT_SKETCH_PARAMETERS: [SketchParams; 7] = [
-    SketchParams::CountSketch {
-        width: 300,
-        depth: 47,
-    },
-    SketchParams::CountSketch {
-        width: 1_200,
-        depth: 47,
-    },
-    SketchParams::CountSketch {
-        width: 7_500,
-        depth: 47,
-    },
-    SketchParams::CountSketch {
-        width: 30_000,
-        depth: 47,
-    },
-    SketchParams::CountSketch {
-        width: 120_000,
-        depth: 47,
-    },
-    SketchParams::CountSketch {
-        width: 750_000,
-        depth: 47,
-    },
-    SketchParams::CountSketch {
-        width: 3_000_000,
-        depth: 47,
-    },
+    count_sketch(300),
+    count_sketch(1_200),
+    count_sketch(7_500),
+    count_sketch(30_000),
+    count_sketch(120_000),
+    count_sketch(750_000),
+    count_sketch(3_000_000),
 ];
 
 /// The heap sizes of a heap variant's list: the 1-2-5 series from 10 to
@@ -463,32 +420,70 @@ const fn with_heap_sizes(shapes: &[SketchParams; 7]) -> [SketchParams; 70] {
     list
 }
 
-const UNIVMON_PARAMETERS: [SketchParams; 12] = [
-    univmon_l2(624),
-    univmon_l2(2_367),
-    univmon_l2(14_349),
-    univmon_l2(56_817),
-    univmon_l2(226_130),
-    univmon_l2(1_409_067),
-    univmon_l2(5_630_630),
-    univmon_distinct(13_500),
-    univmon_distinct(54_000),
-    univmon_distinct(337_500),
-    univmon_distinct(1_350_000),
-    SketchParams::UnivMon {
+/// UnivMon's L2-norm column counts and distinct-count heap sizes.
+const UNIVMON_L2_COLUMNS: [u32; 7] = [624, 2_367, 14_349, 56_817, 226_130, 1_409_067, 5_630_630];
+const UNIVMON_DISTINCT_HEAP_SIZES: [u32; 4] = [13_500, 54_000, 337_500, 1_350_000];
+
+const UNIVMON_PARAMETERS: [SketchParams; 40] = univmon_parameters();
+
+/// The L2-norm shapes, the distinct-count shapes, then each L2 column
+/// count × distinct heap size (by column count, then heap size), so the
+/// [`strongest`] of an L2 floor and a distinct-count floor is dominated by
+/// a listed entry; last the shape for every other statistic.
+const fn univmon_parameters() -> [SketchParams; 40] {
+    const BASELINE: SketchParams = SketchParams::UnivMon {
         heap_size: 256,
         sketch_rows: 5,
         sketch_cols: 1_024,
         layers: 16,
         distinct_failure_probability: None,
-    },
-];
+    };
+    let mut list = [BASELINE; 40];
+    let mut next = 0;
+    let mut columns = 0;
+    while columns < UNIVMON_L2_COLUMNS.len() {
+        list[next] = univmon_l2(UNIVMON_L2_COLUMNS[columns]);
+        next += 1;
+        columns += 1;
+    }
+    let mut heap = 0;
+    while heap < UNIVMON_DISTINCT_HEAP_SIZES.len() {
+        list[next] = univmon_distinct(UNIVMON_DISTINCT_HEAP_SIZES[heap]);
+        next += 1;
+        heap += 1;
+    }
+    columns = 0;
+    while columns < UNIVMON_L2_COLUMNS.len() {
+        heap = 0;
+        while heap < UNIVMON_DISTINCT_HEAP_SIZES.len() {
+            list[next] = SketchParams::UnivMon {
+                heap_size: UNIVMON_DISTINCT_HEAP_SIZES[heap],
+                sketch_rows: 5,
+                sketch_cols: UNIVMON_L2_COLUMNS[columns],
+                layers: 19,
+                distinct_failure_probability: Some(0.01),
+            };
+            next += 1;
+            heap += 1;
+        }
+        columns += 1;
+    }
+    list
+}
 
 const fn kll(k: u32) -> SketchParams {
     SketchParams::Kll {
         k,
         failure_probability: None,
     }
+}
+
+const fn cms(width: u32) -> SketchParams {
+    SketchParams::Cms { width, depth: 5 }
+}
+
+const fn count_sketch(width: u32) -> SketchParams {
+    SketchParams::CountSketch { width, depth: 47 }
 }
 
 const fn hll(precision: u8, relative_error: f64) -> SketchParams {
@@ -522,26 +517,6 @@ const fn univmon_distinct(heap_size: u32) -> SketchParams {
         sketch_cols: 1,
         layers: 19,
         distinct_failure_probability: Some(0.01),
-    }
-}
-
-/// The family `parameters` size.
-fn family_of_parameters(parameters: &SketchParams) -> SketchAlgorithm {
-    match parameters {
-        SketchParams::UnivMon { .. } => SketchAlgorithm::UnivMon,
-        SketchParams::Kll { .. } => SketchAlgorithm::Kll,
-        SketchParams::Cms { .. } => SketchAlgorithm::Cms,
-        SketchParams::Hll { .. } => SketchAlgorithm::Hll,
-        SketchParams::DDSketch { .. } => SketchAlgorithm::DDSketch,
-        SketchParams::CmsWithHeap { .. } => SketchAlgorithm::CmsWithHeap,
-        SketchParams::Kmv { .. } => SketchAlgorithm::Kmv,
-        SketchParams::CountSketch { .. } => SketchAlgorithm::CountSketch,
-        SketchParams::CountSketchWithHeap { .. } => SketchAlgorithm::CountSketchWithHeap,
-        SketchParams::Hydra(HydraParams::HydraKll { .. }) => SketchAlgorithm::HydraKll,
-        SketchParams::Hydra(HydraParams::HydraCms { .. }) => SketchAlgorithm::HydraCms,
-        SketchParams::Hydra(HydraParams::HydraCountSketch { .. }) => {
-            SketchAlgorithm::HydraCountSketch
-        }
     }
 }
 
@@ -880,7 +855,6 @@ mod tests {
         let no_parameters = Err(Invalid::ParametersOnExactOperator);
         let needs_parameters = Err(Invalid::SketchBuildWithoutParameters);
         let not_in_list = Err(Invalid::ParametersNotInList);
-        let another_family = Err(Invalid::ParametersOfAnotherFamily);
         let exact = [
             Ok(()),
             no_parameters,
@@ -888,11 +862,12 @@ mod tests {
             no_parameters,
             no_parameters,
         ];
+        // Another family's parameters are not in KLL's list either.
         let kll_build = [
             needs_parameters,
             Ok(()),
-            another_family,
-            another_family,
+            not_in_list,
+            not_in_list,
             not_in_list,
         ];
         // Per operator: the result for each of `parameters`.
@@ -906,10 +881,10 @@ mod tests {
                 summary_agg(sketch(SketchAlgorithm::Cms, hydra)),
                 [
                     needs_parameters,
-                    another_family,
-                    another_family,
                     not_in_list,
-                    another_family,
+                    not_in_list,
+                    not_in_list,
+                    not_in_list,
                 ],
             ),
             (summary_agg(FieldDataType::exact(ExactKind::Sum)), exact),
@@ -992,8 +967,7 @@ mod tests {
         assert_eq!(weakest(&CMS, &HYDRA_CMS), None);
     }
 
-    /// Each predefined list holds only its family's parameters, without
-    /// repeats, and is empty exactly for the families Pass 1 does not offer.
+    /// Each predefined list holds one parameter type, without repeats, and is empty exactly for the families Pass 1 does not offer.
     #[test]
     fn parameter_list_holds_its_family_without_repeats() {
         let offered = [
@@ -1016,10 +990,34 @@ mod tests {
             let list = parameter_list(family);
             assert_eq!(list.is_empty(), !offered.contains(&family), "{family:?}");
             for (i, parameters) in list.iter().enumerate() {
-                assert_eq!(family_of_parameters(parameters), family);
+                assert_eq!(
+                    std::mem::discriminant(parameters),
+                    std::mem::discriminant(&list[0])
+                );
                 assert!(!list[..i].contains(parameters), "{parameters:?} repeats");
             }
         }
+    }
+
+    /// A UnivMon read for an L2 norm and for a distinct count needs the
+    /// stronger of both floors, l2(624) and distinct(13 500): heap 13 500, 5
+    /// rows, 624 columns, 19 layers. A listed configuration dominates it.
+    #[test]
+    fn a_listed_univmon_dominates_an_l2_and_a_distinct_floor() {
+        let univmon = parameter_list(SketchAlgorithm::UnivMon);
+        let (l2_624, distinct_13500) = (&univmon[0], &univmon[7]);
+        let both = strongest(l2_624, distinct_13500).unwrap();
+        let SketchParams::UnivMon {
+            heap_size: 13_500,
+            sketch_rows: 5,
+            sketch_cols: 624,
+            layers: 19,
+            ..
+        } = both
+        else {
+            panic!("{both:?}")
+        };
+        assert!(univmon.iter().any(|listed| dominates(listed, &both)));
     }
 
     /// `LogicalRequirements::new` accepts no floor and any value of a family's
@@ -1080,10 +1078,28 @@ mod tests {
             unreachable!()
         };
         let univmon = list(SketchAlgorithm::UnivMon);
-        let (l2_624, l2_2367, distinct_13500, univmon_other) =
-            (&univmon[0], &univmon[1], &univmon[7], &univmon[11]);
+        let (l2_624, l2_2367, distinct_13500, univmon_other) = (
+            &univmon[0],
+            &univmon[1],
+            &univmon[7],
+            &univmon[univmon.len() - 1],
+        );
+        // A build of the family whose list holds `parameters`.
         let build = |parameters: &SketchParams| {
-            let family = family_of_parameters(parameters);
+            let family = [
+                SketchAlgorithm::Kll,
+                SketchAlgorithm::DDSketch,
+                SketchAlgorithm::Hll,
+                SketchAlgorithm::Kmv,
+                SketchAlgorithm::Cms,
+                SketchAlgorithm::CountSketch,
+                SketchAlgorithm::CmsWithHeap,
+                SketchAlgorithm::CountSketchWithHeap,
+                SketchAlgorithm::UnivMon,
+            ]
+            .into_iter()
+            .find(|family| parameter_list(*family).contains(parameters))
+            .unwrap();
             LogicalProperties::new(
                 &summary_agg(sketch(family, GroupingStrategy::default())),
                 Some(parameters.clone()),
@@ -1149,6 +1165,9 @@ mod tests {
             (univmon_other, l2_2367, false),
             (univmon_other, distinct_13500, false),
             (distinct_13500, univmon_other, false),
+            // An L2 shape and a distinct-count shape combined dominate both.
+            (&univmon[11], l2_624, true),
+            (&univmon[11], distinct_13500, true),
             // Another family.
             (kll_547, dd_10, false),
             (cms_55, cs_300, false),

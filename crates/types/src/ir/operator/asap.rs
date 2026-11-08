@@ -77,8 +77,9 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
     /// `grouping` and `filter`, built over each window
     /// `(k·w, (k+1)·w]` of `child`, `w` = `tumbling_window_width_ms`, on a
     /// grid anchored at the epoch. Each window is built when it ends. Output:
-    /// one row per window, (window end, keys, state), a state with a time
-    /// index. It has no range and no window count: a `TimeRange` (and
+    /// one row per window and key, (window_end, keys, state), a state with
+    /// a time index (`window_end`, column 0), unique by (window_end, keys).
+    /// It has no range and no window count: a `TimeRange` (and
     /// `TimeShift`) over it selects the windows a query reads, and how many
     /// windows it retains is $h_v$, a Stage 3 choice.
     // Written as `PaneChain` before #1163; the aliases read those documents.
@@ -762,31 +763,34 @@ pub(crate) fn summary_agg_schema(
 
 /// The schema of a `SummaryTumblingWindowChain` of `family` by `reduction`
 /// over rows of schema `child`: a state with a time index, one row per
-/// window, (window end, keys, state). The window end is `child`'s time
-/// column; a per-entity build already keeps it.
+/// window and key, (window_end, keys…, state). `window_end` (column 0, the
+/// time index) is computed, so it takes no name or table from `child`; the
+/// build's own time column, which a per-entity build keeps, is dropped. The
+/// unique key is (window_end, keys).
 fn chain_schema(
     child: &Schema,
     family: &FieldDataType,
     reduction: &Reduction,
 ) -> Result<Schema, SchemaDerivationError> {
     let mut schema = summary_agg_schema(child, family, reduction)?;
-    if schema.time_index.is_none() {
-        let window_end = child
-            .time_index
-            .and_then(|index| child.fields.get(index))
-            .ok_or_else(|| {
-                SchemaDerivationError::InvalidScalarSignature(
-                    "a tumbling-window chain reads rows with a time column".into(),
-                )
-            })?;
-        schema.fields.insert(0, window_end.clone());
-        schema.time_index = Some(0);
-        // One row per window and key.
-        for key in &mut schema.unique_keys {
-            key.iter_mut().for_each(|column| *column += 1);
-            key.insert(0, 0);
-        }
+    let time = child
+        .time_index
+        .and_then(|index| child.fields.get(index))
+        .ok_or_else(|| {
+            SchemaDerivationError::InvalidScalarSignature(
+                "a tumbling-window chain reads rows with a time column".into(),
+            )
+        })?;
+    if let Some(build_time) = schema.time_index.take() {
+        schema.fields.remove(build_time);
     }
+    schema
+        .fields
+        .insert(0, Field::new("window_end", time.dtype.clone(), false));
+    schema.time_index = Some(0);
+    schema.unique_keys = vec![(0..schema.fields.len())
+        .filter(|&column| schema.fields[column].is_plain())
+        .collect()];
     Ok(schema)
 }
 
@@ -954,9 +958,9 @@ pub fn summary_build<I: OperatorInput>(state: &I) -> Option<ASAPOp<I>> {
             group_by: None,
             ..
         }) => summary_build(children.first()?),
-        Operator::NonASAP(NonASAPOp::TimeRange { .. } | NonASAPOp::TimeShift { .. }) => {
-            summary_build(&selected_from(state)?)
-        }
+        Operator::NonASAP(
+            NonASAPOp::TimeRange { child, .. } | NonASAPOp::TimeShift { child, .. },
+        ) => summary_build(&child),
         _ => None,
     }
 }

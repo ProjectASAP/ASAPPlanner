@@ -163,26 +163,36 @@ fn merge(children: Vec<Rc<OperatorNode>>, group_by: Option<Vec<usize>>) -> Opera
     Operator::ASAP(ASAPOp::SummaryMerge { children, group_by })
 }
 
-/// A chain's output is a state with a time index, one row per window:
-/// (window end, keys, state) by host, and the per-series build's own time
-/// column per series. The plain build by host has no time index.
+/// A chain's output is a state with a time index, one row per window and
+/// key: (window_end, keys, state), unique by (window_end, keys), for a
+/// keyed chain and a per-series one alike. `window_end` replaces the
+/// input's `ts`. The plain build by host has no time index.
 #[test]
 fn a_chain_is_a_state_with_a_time_index() {
+    let names = |node: &Rc<OperatorNode>| -> Vec<String> {
+        node.schema.fields.iter().map(|f| f.name.clone()).collect()
+    };
     let by_host_chain = node(by_host(scan_with_host(), kll(), true));
-    assert_eq!(by_host_chain.result_kind, OperatorResultKind::State);
-    assert_eq!(by_host_chain.schema.time_index, Some(0));
-    let names: Vec<_> = by_host_chain
-        .schema
-        .fields
-        .iter()
-        .map(|f| f.name.as_str())
-        .collect();
-    assert_eq!(names, ["ts", "host", "state"]);
+    let per_series = node(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+        child: scan_with_host(),
+        family: kll(),
+        input: SummaryUpdate::column(ColumnRef::SampleValue),
+        reduction: Reduction::PerEntity,
+        grouping: GroupingStrategy::default(),
+        filter: None,
+        tumbling_window_width_ms: MINUTE,
+    }));
+    for chain in [&by_host_chain, &per_series] {
+        assert_eq!(chain.result_kind, OperatorResultKind::State);
+        assert_eq!(chain.schema.time_index, Some(0));
+        assert_eq!(names(chain), ["window_end", "host", "state"]);
+        assert_eq!(chain.schema.unique_keys, [vec![0, 1]]);
+    }
     let build = node(by_host(scan_with_host(), kll(), false));
     assert_eq!(build.schema.time_index, None);
-    let per_series = chain(scan());
-    assert_eq!(per_series.result_kind, OperatorResultKind::State);
-    assert_eq!(per_series.schema.time_index, Some(0));
+    let without_labels = chain(scan());
+    assert_eq!(names(&without_labels), ["window_end", "state"]);
+    assert_eq!(without_labels.schema.unique_keys, [vec![0]]);
 }
 
 /// `TimeRange` and `TimeShift` accept a time-indexed state, a chain or a
@@ -202,6 +212,19 @@ fn time_range_and_time_shift_select_a_chains_windows() {
     }))
     .unwrap();
     assert!(over_build.validate_structure().is_err());
+}
+
+/// A `TimeRange` over a chain selects a range of windows; an instant one
+/// is rejected.
+#[test]
+fn an_instant_time_range_over_a_chain_is_rejected() {
+    let instant = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
+        range: Duration::from_millis(5 * MINUTE),
+        kind: TimeRangeKind::Instant,
+        child: node(by_host(scan_with_host(), kll(), true)),
+    }))
+    .unwrap();
+    assert!(instant.validate_structure().is_err());
 }
 
 /// Merging the windows `TimeRange(5m, TimeShift(1h, chain(X)))` selects

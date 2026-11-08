@@ -149,6 +149,15 @@ impl FamilyCapability {
     /// The capability of `family`. Families not listed have no capability
     /// (they fail closed).
     pub fn of(family: &FieldDataType) -> Self {
+        // A Hydra answers per subpopulation from a shared grid of the inner
+        // family's cells, so its row is its Hydra family's. HydraKll merges
+        // as sketchlib's row says: `Hydra::merge` requires the same k and m
+        // and otherwise returns an error (asap_sketchlib #251). Nothing
+        // builds one yet: Pass 1 offers no Hydra, and the executor builds
+        // only HydraCms (`create_hydra_cms`).
+        if let Some(algorithm) = sketch_algorithm_of(family) {
+            return Self::of_per_instance_sketch(&algorithm);
+        }
         use ExactKind as E;
         use MergeInputRule::{Disjoint, DisjointInTime, MayOverlap};
         let (merge_inputs, readouts): (_, &'static [(StatisticKind, MergedError)]) = match family {
@@ -162,17 +171,7 @@ impl FamilyCapability {
                 // tumbling window does not keep across its boundary.
                 E::IRate => (None, &[]),
             },
-            // A Hydra answers per subpopulation from a shared grid of the
-            // inner family's cells, so its row is its Hydra family's. HydraKll
-            // merges as sketchlib's row says: `Hydra::merge` requires the same
-            // k and m and otherwise returns an error (asap_sketchlib #251).
-            // Nothing builds one yet: Pass 1 offers no Hydra, and the executor
-            // builds only HydraCms (`create_hydra_cms`).
-            FieldDataType::Sketch(..) => {
-                return Self::of_per_instance_sketch(
-                    &sketch_algorithm_of(family).expect("a sketch family has an algorithm"),
-                )
-            }
+            FieldDataType::Sketch(..) => unreachable!("handled above"),
             FieldDataType::Plain(_)
             | FieldDataType::SummarySample(..)
             | FieldDataType::Wavelet(..)

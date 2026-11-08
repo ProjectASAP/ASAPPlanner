@@ -1177,6 +1177,15 @@ impl<I: OperatorInput> NonASAPOp<I> {
                         "a time selection over state requires a time-indexed state",
                     ));
                 }
+                if matches!(
+                    self,
+                    TimeRange {
+                        kind: TimeRangeKind::Instant,
+                        ..
+                    }
+                ) {
+                    return Err(invalid("a time selection over a chain is a range"));
+                }
             }
             TimeRange { child, .. } => {
                 if child.result_kind() != OperatorResultKind::Relation {
