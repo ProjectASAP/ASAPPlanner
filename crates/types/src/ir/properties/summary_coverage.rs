@@ -178,14 +178,15 @@ pub enum Constraint {
     /// The value is none of these.
     NotIn(Vec<ScalarValue>),
     /// The value lies between `lower` and `upper`; each end is `Included`,
-    /// `Excluded` or `Unbounded`. Examples, on the timestamp column `ts`
-    /// (ms) unless stated:
+    /// `Excluded` or `Unbounded`. A PromQL range `m[r]` evaluated at t reads
+    /// the samples in (t − r, t]: left-open, right-closed. Examples, on the
+    /// timestamp column `ts` (ms) unless stated:
     ///
     /// | Query fragment | `lower` | `upper` |
     /// |---|---|---|
-    /// | PromQL `m[5m]` | `Included(EvaluationTimePlusMs(-300_000))` | `Excluded(EvaluationTimePlusMs(0))` |
-    /// | PromQL `m[5m] offset 1h` | `Included(EvaluationTimePlusMs(-3_900_000))` | `Excluded(EvaluationTimePlusMs(-3_600_000))` |
-    /// | PromQL `m[5m] @ 1700000000` | `Included(FixedValue(Timestamp(1_699_999_700_000)))` | `Excluded(FixedValue(Timestamp(1_700_000_000_000)))` |
+    /// | PromQL `m[5m]` | `Excluded(EvaluationTimePlusMs(-300_000))` | `Included(EvaluationTimePlusMs(0))` |
+    /// | PromQL `m[5m] offset 1h` | `Excluded(EvaluationTimePlusMs(-3_900_000))` | `Included(EvaluationTimePlusMs(-3_600_000))` |
+    /// | PromQL `m[5m] @ 1700000000` | `Excluded(FixedValue(Timestamp(1_699_999_700_000)))` | `Included(FixedValue(Timestamp(1_700_000_000_000)))` |
     /// | SQL `WHERE ts >= '2026-11-01'` | `Included(FixedValue(Timestamp(..)))` | `Unbounded` |
     /// | SQL `WHERE price > 10` (column `price`) | `Excluded(FixedValue(Float64(10.0)))` | `Unbounded` |
     Interval {
@@ -208,7 +209,7 @@ pub enum IntervalConstraintLimit {
     FixedValue(ScalarValue),
     /// The evaluation time t of a repeatedly evaluated query plus this many
     /// ms (negative: before t); only on the timestamp column. `m[5m]` is
-    /// `[EvaluationTimePlusMs(-300_000), EvaluationTimePlusMs(0))`.
+    /// `(EvaluationTimePlusMs(-300_000), EvaluationTimePlusMs(0)]`.
     EvaluationTimePlusMs(i64),
 }
 
@@ -1149,8 +1150,8 @@ mod tests {
 
     fn relative(lower_ms: i64, upper_ms: i64) -> Constraint {
         Constraint::Interval {
-            lower: Bound::Included(EvaluationTimePlusMs(lower_ms)),
-            upper: Bound::Excluded(EvaluationTimePlusMs(upper_ms)),
+            lower: Bound::Excluded(EvaluationTimePlusMs(lower_ms)),
+            upper: Bound::Included(EvaluationTimePlusMs(upper_ms)),
         }
     }
 
@@ -1183,8 +1184,8 @@ mod tests {
         let offset_5m = relative(-600_000, -300_000);
         assert!(last_5m.disjoint(&offset_5m));
         let at = Constraint::Interval {
-            lower: Bound::Included(FixedValue(ScalarValue::Timestamp(1_699_999_700_000))),
-            upper: Bound::Excluded(FixedValue(ScalarValue::Timestamp(1_700_000_000_000))),
+            lower: Bound::Excluded(FixedValue(ScalarValue::Timestamp(1_699_999_700_000))),
+            upper: Bound::Included(FixedValue(ScalarValue::Timestamp(1_700_000_000_000))),
         };
         assert!(!last_5m.disjoint(&at));
         assert_eq!(last_5m.intersect(&at), None);
@@ -1205,8 +1206,8 @@ mod tests {
         assert_eq!(
             json,
             serde_json::json!({"interval": {
-                "lower": {"included": {"evaluation_time_plus_ms": -3_900_000}},
-                "upper": {"excluded": {"evaluation_time_plus_ms": -3_600_000}},
+                "lower": {"excluded": {"evaluation_time_plus_ms": -3_900_000}},
+                "upper": {"included": {"evaluation_time_plus_ms": -3_600_000}},
             }})
         );
         assert_eq!(

@@ -1390,11 +1390,13 @@ pub enum IntervalConstraintLimit {
 }
 ```
 
+A PromQL range `m[r]` evaluated at t reads the samples in (t − r, t]: left-open, right-closed.
+
 | Query fragment | `lower` | `upper` |
 |---|---|---|
-| PromQL `m[5m]` | `Included(EvaluationTimePlusMs(-300_000))` | `Excluded(EvaluationTimePlusMs(0))` |
-| PromQL `m[5m] offset 1h` | `Included(EvaluationTimePlusMs(-3_900_000))` | `Excluded(EvaluationTimePlusMs(-3_600_000))` |
-| PromQL `m[5m] @ 1700000000` | `Included(FixedValue(Timestamp(1_699_999_700_000)))` | `Excluded(FixedValue(Timestamp(1_700_000_000_000)))` |
+| PromQL `m[5m]` | `Excluded(EvaluationTimePlusMs(-300_000))` | `Included(EvaluationTimePlusMs(0))` |
+| PromQL `m[5m] offset 1h` | `Excluded(EvaluationTimePlusMs(-3_900_000))` | `Included(EvaluationTimePlusMs(-3_600_000))` |
+| PromQL `m[5m] @ 1700000000` | `Excluded(FixedValue(Timestamp(1_699_999_700_000)))` | `Included(FixedValue(Timestamp(1_700_000_000_000)))` |
 | SQL `WHERE ts >= '2026-11-01'` | `Included(FixedValue(Timestamp(..)))` | `Unbounded` |
 | SQL `WHERE price > 10` | `Excluded(FixedValue(Float64(10.0)))` | `Unbounded` |
 
