@@ -68,16 +68,18 @@ Based on our requirement, each field should contain the following information.
 1. **What type of the ASAP Primitive is.** The field's type is a [`FieldDataType`](#63-schema-and-field-types-cratestypessrcirschemamodrs) (`crates/types/src/ir/schema/mod.rs`). A column is either a raw value or a summary state:
 
    - **Raw value**: `Plain(DataType)`, e.g., a number or a string.
-   - **Summary state**: described from coarse to fine by three levels:
+   - **Summary state**: described from coarse to fine by these terms:
 
-   | Level | Code | Values | KLL example |
+   | Term | Code | Values | KLL example |
    |---|---|---|---|
    | Family | `FieldDataType` variant | `ExactAggregate`, `Sketch`, `SummarySample`, `Wavelet`, `StatModel` | `Sketch` |
-   | Algorithm | `SketchAlgorithm` (other families: `ExactKind`, `SamplingKind`, …) | `Kll`, `Cms`, `Hll`, `DDSketch`, … | `Kll` |
-   | Parameters | `SketchParams` (other families: `ExactParams`, `SamplingParams`, …) | per algorithm | `Kll { k: 200 }` |
+   | Algorithm | `SketchAlgorithm` (other families: `ExactKind`, `SamplingKind`, …) | `Kll`, `Cms`, `Hll`, `DDSketch`, `HydraKll`, … | `Kll` |
+   | Summary type | family and algorithm: one `FieldDataType` value, the column's type | `FieldDataType::Sketch(SketchAlgorithm)`, … | `Sketch(Kll)` |
+   | Parameters θ | `SketchParams` (other families: `ExactParams`, `SamplingParams`, …), on the candidate's `LogicalProperties`, not in the type | per algorithm, from `parameter_list(algorithm)` | `Kll { k: 547 }` |
 
-   - For a sketch, algorithm and parameters are bundled as one `SketchKind` ([§6.4](#64-summary-family-parameters-cratestypessrcirschemasketchrs)). A sketch also records its `GroupingStrategy`: one instance per group, or one shared structure (Hydra) for all groups.
-   - So a quantile KLL sketch with `k = 200`, one instance per group, has the type `Sketch(SketchKind { Kll, Kll { k: 200 } }, PerSubpopulationInstance)`. Which statistics a family answers is the family-capability table's (`FamilyCapability`), not part of the type.
+   - The summary type is the operator's `summary_type` argument (`SummaryAgg`, the chain). θ is structure only (sizes, no sized-for error fields) and lives on the candidate, so builds that differ only in θ are candidates of one memo group.
+   - A shared multi-subpopulation structure (Hydra) is an algorithm of its own (`HydraKll`, `HydraCms`, `HydraCountSketch`, …), not a separate grouping dimension.
+   - So a quantile KLL sketch with `k = 547` has the type `Sketch(Kll)` and θ `Kll { k: 547 }`. Which statistics a summary type answers is its row of the capability table (`SummaryTypeCapability`), not part of the type.
 
 2. **What query intent the summarized ASAP Primitive can support.** This is not stored in the field: it follows from the type in item 1. There are two kinds of intent:
 
