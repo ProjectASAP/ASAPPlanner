@@ -57,12 +57,14 @@ fn count_sketch_failure_probability(width: u32, depth: u32) -> Option<f64> {
 }
 
 /// CountSketch `L2` point-query width: ε = sqrt(3/w).
+#[cfg(test)]
 pub(crate) fn count_sketch_width(eps: f64) -> u32 {
     saturating_ceil(3.0 / (eps * eps), 2, 1 << 26)
 }
 
 /// The smallest positive odd depth whose binomial median failure
 /// probability at `width` is at most `delta`, capped at 255.
+#[cfg(test)]
 pub(crate) fn count_sketch_depth(width: u32, delta: f64) -> u32 {
     if !(delta.is_finite() && delta > 0.0 && delta < 1.0) {
         return 255;
