@@ -84,7 +84,7 @@ This is the single reference table for property dimensions. Stage descriptions b
 
 | Dimension | Values and meaning | Code reference or target |
 |---|---|---|
-| Parameters | A predefined configuration list per family: KLL and KMV `k`; DDSketch `alpha`; HLL `precision`; CMS and CountSketch `width` and `depth`; heap variants also `heap_size`; UnivMon its sizing parameters. The lists are today's sizing over ε = 0.1 down to 0.001; KMV's and UnivMon's distinct-count entries stop at ε = 0.01. A heap variant combines each width × depth with heap sizes from the 1-2-5 series 10, 20, 50, …, 10 000: a top-k consumer's floor is heap_size ≥ k, and the smallest listed heap that meets it is the next step up, at most 2.5× too large. A sketch build's parameters must be in its family's list; exact operators have no sketch parameters. Hydra and the other families Pass 1 does not size have empty `parameter_list`s, so no build of theirs is a valid candidate until their error models exist (#1228). | `SketchParams` in `crates/types/src/ir/schema/sketch.rs`; predefined lists are the #1203 target |
+| Parameters | A predefined configuration list per family: KLL and KMV `k`; DDSketch `alpha`; HLL `precision`; CMS and CountSketch `width` and `depth`; heap variants also `heap_size`; UnivMon its sizing parameters. The lists are today's sizing over ε = 0.1 down to 0.001; KMV's and UnivMon's distinct-count entries stop at ε = 0.01. UnivMon's list is the product of its 7 L2 column counts and its 4 distinct-count heap sizes, plus the baseline, so the per-parameter maximum of an L2 floor and a distinct-count floor is dominated by a listed entry. A heap variant combines each width × depth with heap sizes from the 1-2-5 series 10, 20, 50, …, 10 000: a top-k consumer's floor is heap_size ≥ k, and the smallest listed heap that meets it is the next step up, at most 2.5× too large. A sketch build's parameters must be in its family's list; exact operators have no sketch parameters. Hydra and the other families Pass 1 does not size have empty `parameter_list`s, so no build of theirs is a valid candidate until their error models exist (#1228). | `SketchParams` in `crates/types/src/ir/schema/sketch.rs`; predefined lists are the #1203 target |
 | Timing | `IngestionTime` or `QueryTime` | `ExecutionTiming` |
 | Lifetime | `None`: discard after the consuming execution; `OneEvaluation`: retain until consumers within that evaluation finish; `AcrossEvaluations`: retain across evaluations in the specified period. A non-`None` lifetime means materialized. | `Lifetime`; #1200 |
 | Storage medium — Extension | `Memory` or `Disk`, carried by a materialized lifetime | `StorageMedium` |
@@ -116,17 +116,17 @@ QT means QueryTime; IT means IngestionTime. Alignment, data coverage, and retent
 
 **Alignment.** There is no physical schedule property. When a result can be read follows from its lifetime and, for a chain, its window width:
 - **None** and **OneEvaluation**: the result is computed inside one evaluation context κ (Section 5) and read there. A OneEvaluation result belongs to one context: queries with equal recurrence and range evaluation are evaluated together, and that evaluation's consumers share the result. When it runs is the context's schedule, and Stage 3 chooses it through $x_{\kappa,v}$, just as for ℓ = None. Sharing across differently scheduled queries through a gcd schedule is not offered: it is rarely beneficial and wastes runs.
-- **AcrossEvaluations** is offered only to chain candidates, `SummaryTumblingWindowChain[w](X)`: the input is cut into tumbling windows [k·w, (k+1)·w), with the grid anchored at phase 0 (the epoch). Each window is built when it ends and can be read from then on. A `TimeRange` over the chain selects the windows that lie fully inside [t − range, t), so a consumer can read a range whose ends lie on window boundaries. With w = 10 s, a `[1m]` query evaluated every 30 s at phase 0 merges 6 windows; one evaluated at phase 15 s cannot, because its range ends inside a window; with that query in the workload, the gcd closure also offers w = 5 s, which both can read. Every other candidate, including the `TimeRange` and `TimeShift` groups over a chain, is computed within one evaluation.
+- **AcrossEvaluations** is offered only to chain candidates, `SummaryTumblingWindowChain[w](X)`: the input is cut into tumbling windows (k·w, (k+1)·w], with the grid anchored at phase 0 (the epoch). Windows are left-open and right-closed like a PromQL range, which `m[r]` evaluated at t reads as (t − r, t]. Each window is built when it ends and can be read from then on. A `TimeRange` over the chain selects the windows that lie fully inside (t − range, t], so a consumer can read a range whose ends lie on window boundaries. With w = 10 s, a `[1m]` query evaluated every 30 s at phase 0 merges 6 windows; one evaluated at phase 15 s cannot, because its range ends inside a window; with that query in the workload, the gcd closure also offers w = 5 s, which both can read. Every other candidate, including the `TimeRange` and `TimeShift` groups over a chain, is computed within one evaluation.
 
 A grid phase is not needed: a phase is absorbed by the width, because width candidates come from the gcd closure of the queries' grids, ranges and offsets (Section 3). For example, phases 0 and 5 s with w = 10 s give w = 5 s. Alignment alone does not ensure sufficient retained history; that is $h_v$ (Section 5).
 
-**Why a chain needs a declared phase.** Take `sum_over_time(m[5m])` evaluated every 60 s, and a 60 s chain with windows [12:00:00, 12:01:00), [12:01:00, 12:02:00), …
+**Why a chain needs a declared phase.** Take `sum_over_time(m[5m])` evaluated every 60 s, and a 60 s chain with windows (12:00:00, 12:01:00], (12:01:00, 12:02:00], …
 
 | Case | Evaluation at | Data needed | Windows |
 |---|---|---|---|
-| Phase 0 declared | 12:05:00 | [12:00:00, 12:05:00) | exactly the 5 windows [12:00, 12:01) … [12:04, 12:05): the merge is correct |
-| No phase declared; the engine actually evaluates at second 17 | 12:05:17 | [12:00:17, 12:05:17) | [12:00, 12:01) holds only 43 s of the range and [12:05, 12:06) only 17 s: merging only full windows misses [12:00:17, 12:01:00) and [12:05:00, 12:05:17); adding the partial windows counts [12:00:00, 12:00:17) and [12:05:17, 12:06:00) too. Both answers are wrong |
-| Phase 15 s declared | 12:05:15 | [12:00:15, 12:05:15) | the widths divide gcd(60 s, 5 m, 15 s) = 15 s; with w = 15 s the range is exactly 20 windows |
+| Phase 0 declared | 12:05:00 | (12:00:00, 12:05:00] | exactly the 5 windows (12:00, 12:01] … (12:04, 12:05]: the merge is correct |
+| No phase declared; the engine actually evaluates at second 17 | 12:05:17 | (12:00:17, 12:05:17] | (12:00, 12:01] holds only 43 s of the range and (12:05, 12:06] only 17 s: merging only full windows misses (12:00:17, 12:01:00] and (12:05:00, 12:05:17]; adding the partial windows counts (12:00:00, 12:00:17] and (12:05:17, 12:06:00] too. Both answers are wrong |
+| Phase 15 s declared | 12:05:15 | (12:00:15, 12:05:15] | the widths divide gcd(60 s, 5 m, 15 s) = 15 s; with w = 15 s the range is exactly 20 windows |
 
 Prometheus staggers rule-group evaluations by a hash of the group, so a fixed interval without a declared phase does not mean phase 0. One rule decides both sides: `QueryRecurrence::evaluation_grid_ms` returns `None` for a `FixedInterval` without a phase. Pass 2 then offers that query no chain width, and `delivers_on` lets it read no chain. Workloads declare the phase with `FixedIntervalAt { interval, evaluation_phase }` to use chains.
 
@@ -142,7 +142,7 @@ An evaluation context κ is described by the workload's own recurrence and range
 | `FixedInterval` without a phase, `OneTime { execute_at: None }`, `EstimatedRate`, `Unknown` | Never: the evaluation times are not known, and `evaluation_grid_ms` is `None` |
 | AcrossEvaluations on a candidate that is not a chain | Not offered: only chain candidates are materialized across evaluations |
 
-The evaluation grid is `QueryRecurrence::evaluation_grid_ms(range_evaluation)` in `crates/types/src/workload/mod.rs`, which the workload entries, Pass 2's chain widths and `delivers_on` all use. One-off queries are supported: each is a context of its own recurrence, run `invocations` times.
+The evaluation grid is `QueryRecurrence::evaluation_grid_ms(range_evaluation)` in `crates/types/src/workload/mod.rs`, which Pass 2's chain widths and `delivers_on` both use. One-off queries are supported: each is a context of its own recurrence, run `invocations` times.
 
 ### Invalid combinations
 
@@ -337,7 +337,7 @@ A group is its expression: one operator, with its arguments, over input groups. 
 Everything that was computed on operator-node trees is computed on groups. `find_or_add_group` derives `GroupProperties` once, when the group is created, with `derive_group_properties`: the rules that check operator nodes (schema derivation, input validation, merge check), applied to the expression over `MemoGroupAsInput`s, which read only the input groups' `expression` and `group_properties`, never a node tree:
 
 - `schema` and `result_kind` from the operator and its input groups' schemas and result kinds; a scalar subquery reads the referenced group's schema.
-- `aggregate_coverage`, for a summary state or an exact `Aggregate` result: walking down from the SummaryAgg or Aggregate through the input groups' expressions while each is a Filter, a TimeRange, a TimeShift (with or without `@`) or a direct-column Project, lifting their predicates into the selection; a TimeRange or TimeShift becomes an interval on the timestamp column (below). The group below them is the definition's `input_group`. A Scan's predicates (PromQL label matchers, SQL filters, including absolute timestamp filters) are lifted too; the Scan with its residual predicates is then the last unlifted operator and `input_group` is `None`. The operators not lifted, each with its residual arguments, are `unlifted_operators`. A chain `SummaryTumblingWindowChain[w](X)` has the definition of a build over X and leaves the timestamp column unconstrained; a `TimeRange` or `TimeShift` over a chain constrains it as over raw rows. A merge's coverage comes from its inputs' stored coverage; a merge is valid only over inputs with equal definitions and disjoint selections, or over one time-indexed state. So the coverage of `SummaryMerge(TimeRange(TimeShift(Chain[w](X))))` equals that of `SummaryAgg(TimeRange(TimeShift(X)))`, and `add_candidate` accepts the merge in the original state group.
+- `aggregate_coverage`, for a summary state or an exact `Aggregate` result: walking down from the SummaryAgg or Aggregate through the input groups' expressions while each is a Filter, a TimeRange, a TimeShift (without `@` or with `@ T`; `@ end()` and `@ start()` are not lifted, see below) or a direct-column Project, lifting their predicates into the selection; a TimeRange or TimeShift becomes an interval on the timestamp column (below). The group below them is the definition's `input_group`. A Scan's predicates (PromQL label matchers, SQL filters, including absolute timestamp filters) are lifted too; the Scan with its residual predicates is then the last unlifted operator and `input_group` is `None`. The operators not lifted, each with its residual arguments, are `unlifted_operators`. A chain `SummaryTumblingWindowChain[w](X)` has the definition of a build over X and leaves the timestamp column unconstrained; a `TimeRange` or `TimeShift` over a chain constrains it as over raw rows. A merge's coverage comes from its inputs' stored coverage; a merge is valid only over inputs with equal definitions and disjoint selections, or over one time-indexed state. So the coverage of `SummaryMerge(TimeRange(TimeShift(Chain[w](X))))` equals that of `SummaryAgg(TimeRange(TimeShift(X)))`, and `add_candidate` accepts the merge in the original state group.
 - The checks that read an input's operator (a merge over a time-indexed state reads a `TimeRange` over a chain; a selected build) read the input group's `expression`.
 - `shareable_when_equal`: a `LIMIT` is shareable over a `Sort` with the same partitions (the input group's `expression`); a `Dedup` on every column (the input group's schema).
 
@@ -401,17 +401,19 @@ pub enum IntervalConstraintLimit {
 }
 ```
 
-A repeatedly evaluated query covers different absolute times at every evaluation, so its group's coverage is written relative to the evaluation time t (`EvaluationTimePlusMs`); an `@ T` modifier or a SQL timestamp filter is absolute (`FixedValue(Timestamp)`). Both are intervals on the timestamp column, compared and lifted like any other column constraint; a value column such as `price` uses `FixedValue` ends. For a range evaluation over [t − D, t] (D is the query range's duration):
+A repeatedly evaluated query covers different absolute times at every evaluation, so its group's coverage is written relative to the evaluation time t (`EvaluationTimePlusMs`); an `@ T` modifier or a SQL timestamp filter is absolute (`FixedValue(Timestamp)`). Both are intervals on the timestamp column, compared and lifted like any other column constraint; a value column such as `price` uses `FixedValue` ends. A PromQL range `m[r]` evaluated at t reads the samples in (t − r, t]: left-open, right-closed.
 
 | Query fragment | `lower` | `upper` |
 |---|---|---|
-| `m[5m]` | `Included(EvaluationTimePlusMs(-300_000))` | `Excluded(EvaluationTimePlusMs(0))` |
-| `m[5m] offset 1h` | `Included(EvaluationTimePlusMs(-3_900_000))` | `Excluded(EvaluationTimePlusMs(-3_600_000))` |
-| `m[5m] @ end()` | as `m[5m]`: the same as no `@` in an instant query | |
-| `m[5m] @ start()` | `Included(EvaluationTimePlusMs(-D - 300_000))` | `Excluded(EvaluationTimePlusMs(-D))`: an offset of D |
-| `m[5m] @ 1700000000` | `Included(FixedValue(Timestamp(1_699_999_700_000)))` | `Excluded(FixedValue(Timestamp(1_700_000_000_000)))` |
+| `m[5m]` | `Excluded(EvaluationTimePlusMs(-300_000))` | `Included(EvaluationTimePlusMs(0))` |
+| `m[5m] offset 1h` | `Excluded(EvaluationTimePlusMs(-3_900_000))` | `Included(EvaluationTimePlusMs(-3_600_000))` |
+| `m[5m] @ end()` or `@ start()`, instant query | as `m[5m]`: both equal t, and the PromQL front end lowers them as no `@` | |
+| `m[5m] @ end()` or `@ start()`, range query | not lifted: the `TimeShift` stays in `unlifted_operators` | |
+| `m[5m] @ 1700000000` | `Excluded(FixedValue(Timestamp(1_699_999_700_000)))` | `Included(FixedValue(Timestamp(1_700_000_000_000)))` |
 | SQL `WHERE ts >= '2026-11-01'` | `Included(FixedValue(Timestamp(..)))` | `Unbounded` |
 | SQL `WHERE price > 10` (column `price`) | `Excluded(FixedValue(Float64(10.0)))` | `Unbounded` |
+
+A range-evaluated query evaluates its expression at every step t of [start, end]. `@ end()` and `@ start()` pin a subtree to one end of that interval, so the subtree reads the same rows at every step while a plain `m[5m]` reads different rows at every step; the two are not equal coverage, and the `@` subtree is not shared. Evaluating `@` subtrees once per request and sharing them is future work (#1251).
 
 **Derivation, per operator** (from the input groups' `column_lineage`):
 
@@ -421,6 +423,7 @@ A repeatedly evaluated query covers different absolute times at every evaluation
 | `Filter`, `TimeRange`, `TimeShift`, `Sort`, `Limit`, `Dedup` | the input's, unchanged |
 | `Project` | a column item, renamed or not: that input column's lineage; an expression item: `Computed` |
 | `Aggregate`, `SummaryAgg`, readouts | group-by keys: the input's lineage of that key; measures, states and values: `Computed` |
+| `SummaryTumblingWindowChain` | `window_end` (column 0): `Computed`; keys: the input's lineage of that key; state: `Computed` |
 | `Join` | the left input's columns, then the right input's |
 | `SetOp`, `Concat` | per column: the inputs' lineage if they all agree, else `Computed` |
 | `BinaryOp` (vector match) | label columns: the matched side's lineage; the value: `Computed` |
@@ -553,8 +556,8 @@ pub struct LogicalProperties {
 
 impl LogicalProperties {
     /// Rejects parameters missing on a sketch build (a chain included),
-    /// present on an exact operator, of another family or not in the
-    /// family's list.
+    /// present on an exact operator, or not in the family's list (which
+    /// also rejects another family's parameters).
     pub fn new(
         expression: &CandidateExpression,
         parameters: Option<SketchParams>,
@@ -641,10 +644,10 @@ A Scan has no aggregation, so for scans every column is a key and the rollup ste
 |---|---|---|---|---|
 | G1 | `Scan latency` | | | |
 | G2 | `TimeRange(5m, G1)` | | | |
-| G3 | `SummaryAgg[KLL, by job, host](G2)` | D, `ts` ∈ [t − 5m, t) | job, host | builds |
+| G3 | `SummaryAgg[KLL, by job, host](G2)` | D, `ts` ∈ (t − 5m, t] | job, host | builds |
 | G4 | `Scan latency{job="api"}` | | | |
 | G5 | `TimeRange(5m, G4)` | | | |
-| G6 | `SummaryAgg[KLL, by host](G5)` | D, `ts` ∈ [t − 5m, t), `job` ∈ {api} | host | builds; **`SummaryMerge(by host)(G7)`** |
+| G6 | `SummaryAgg[KLL, by host](G5)` | D, `ts` ∈ (t − 5m, t], `job` ∈ {api} | host | builds; **`SummaryMerge(by host)(G7)`** |
 | G7 | `Filter(job = "api", G3)` | | | its own expression; output is states |
 
 The definitions are equal, the narrowing `job ∈ {api}` is on a key of G3, {host} ⊆ {job, host}, and KLL states merge. G3 is already the finest group of the cluster {G3, G6}, so $G^*$ = G3. A query `quantile by (host)(…latency{status="500"}[5m])` gets no such candidate: `status` is not a key of G3, and every state already mixes status 200 and 500 samples.
@@ -755,15 +758,18 @@ The KLL builds' own edges satisfy their consumers; they are dead because their o
 A state group whose expression is `SummaryAgg(TimeRange(W, TimeShift*(X)))` can be computed from a chain of tumbling windows over X:
 
 ```rust
-// The chain: one row per window, (window end, keys, state): a State with a
-// time index. No range and no window count: how much it retains is h_v.
+// The chain: one row per window and key, (window_end, keys…, state): a State
+// with a time index. Column 0, `window_end`, is the time index, computed
+// (lineage `Computed`); the build's own time column is dropped; the unique
+// key is (window_end, keys). No range and no window count: how much it
+// retains is h_v.
 SummaryTumblingWindowChain { child: X, family, input, reduction, grouping, filter,
                              tumbling_window_width_ms: u64 }
 // Merges every input state, or regroups them; no window-selection field.
 SummaryMerge { children, group_by }
 ```
 
-`TimeRange` and `TimeShift` accept a time-indexed state: over a chain, `TimeRange(W)` at evaluation time t selects the windows lying fully inside [t − W, t), and `TimeShift(o)` moves that interval to [t − o − W, t − o). This needs w to divide W and o, and t to lie on the grid; the widths below and `delivers_on` (Section 2) ensure both. The `TimeRange` and `TimeShift` groups over a chain have only their own expression as a candidate and are computed within one evaluation; only the chain is materialized across evaluations.
+`TimeRange` and `TimeShift` accept a time-indexed state: over a chain, `TimeRange(W)` at evaluation time t selects the windows lying fully inside (t − W, t], and `TimeShift(o)` moves that interval to (t − o − W, t − o]. A `TimeRange` over a chain must be a range (`TimeRangeKind::Range`); an instant one is a validation error. This needs w to divide W and o, and t to lie on the grid; the widths below and `delivers_on` (Section 2) ensure both. The `TimeRange` and `TimeShift` groups over a chain have only their own expression as a candidate and are computed within one evaluation; only the chain is materialized across evaluations.
 
 **The rule, for each width w of a state group S:**
 1. Walk down from S: `SummaryAgg` → `TimeRange(W)` → zero or more `TimeShift`s → X.
@@ -774,8 +780,8 @@ SummaryMerge { children, group_by }
 There is one chain per width, shared by every state group over the same X and family.
 
 **Widths.** Each query q that reaches S (step 3) and repeats with a known evaluation grid $g_q$ (`evaluation_grid_ms` is `Some`) gives the width $\gcd(g_q, W, o_1, \ldots)$, with the offsets $o_j$ on its path; S's widths are the gcd closure of these. Queries without a known grid give none, so a group read only by such queries gets no chain. `@` modifiers:
-- `@ end()` reads [t − W, t) relative to the end of the query range, as no `@` does: it is stripped and re-wrapped like a shift and adds no offset.
-- `@ start()` is an offset of the query range's duration D and enters the gcd as one.
+- `@ end()` and `@ start()` in an instant query equal t; the front end lowers them as no `@`, so they need nothing here.
+- `@ end()` and `@ start()` in a range-evaluated query are not lifted (Section 3), so the walk stops at their `TimeShift` and the state group gets no chain.
 - `@ T` (absolute) contributes no widths: S gets a merge only over chains that other queries' widths created, and only for widths that divide T. Whether reusing the chain is cheaper than computing the result once and materializing it is Stage 3's choice; its retention need is in Section 5.
 
 **Example: three queries share one chain.** A = `sum_over_time(m[5m])`, B = `sum_over_time(m[5m] offset 1h)`, C = `sum_over_time(m[1h])`, each `FixedIntervalAt { 60 s, phase 0 }`. The widths are gcd(60 s, 5m) = gcd(60 s, 5m, 1h) = gcd(60 s, 1h) = 60 s.
@@ -792,7 +798,7 @@ There is one chain per width, shared by every state group over the same X and fa
 | Gb | `TimeRange(5m, Gs)` | its own expression |
 | Gc | `TimeRange(1h, Gw)` | its own expression |
 
-At t = 12:00, Ga selects the 5 windows [11:55, 11:56) … [11:59, 12:00), Gb the 5 windows [10:55, 10:56) … [10:59, 11:00), and Gc 60 windows. Each sample updates one chain instead of three, and the chain retains max(5m, 1h + 5m, 1h) = 65m, 65 windows (Section 5).
+At t = 12:00, Ga selects the 5 windows (11:55, 11:56] … (11:59, 12:00], Gb the 5 windows (10:55, 10:56] … (10:59, 11:00], and Gc 60 windows. Each sample updates one chain instead of three, and the chain retains max(5m, 1h + 5m, 1h) = 65m, 65 windows (Section 5).
 
 **Example: the rule step by step, for B.** Before the rule:
 
@@ -1236,7 +1242,7 @@ $$
 h_v\ge\operatorname{need}_{\kappa,v,c,i}\,y_{\kappa,v,c,i}.
 $$
 
-The need is fixed per edge from the time horizon of the queries it serves, so constraint (R) is linear. For a chain it is the reading path's offset plus range: in the example of Section 3, the edge to A's path needs 5m, B's 1h + 5m and C's 1h, so $h_v$ for the shared 60 s chain is at least 65m, 65 windows. `@ end()` needs the range; `@ start()` needs the query range's duration plus the range. An `@ T` path needs the end of the horizon − T + range; when the horizon is unbounded the need is too, and that merge candidate is not offered. It ignores query latency: a result is assumed read as soon as its evaluation starts, so a slow consumer that reads later does not extend the horizon. Modeling that needs the latency design, which is out of scope (Section 5). The retention unit (windows, or seconds of data) and an upper bound on $h_v$ are fixed per candidate when Stage 2 builds it.
+The need is fixed per edge from the time horizon of the queries it serves, so constraint (R) is linear. For a chain it is the reading path's offset plus range: in the example of Section 3, the edge to A's path needs 5m, B's 1h + 5m and C's 1h, so $h_v$ for the shared 60 s chain is at least 65m, 65 windows. `@ end()` and `@ start()` in an instant query need the range, as no `@` does; in a range query they read no chain. An `@ T` path needs the end of the horizon − T + range; when the horizon is unbounded the need is too, and that merge candidate is not offered. It ignores query latency: a result is assumed read as soon as its evaluation starts, so a slow consumer that reads later does not extend the horizon. Modeling that needs the latency design, which is out of scope (Section 5). The retention unit (windows, or seconds of data) and an upper bound on $h_v$ are fixed per candidate when Stage 2 builds it.
 
 ### No consumer-count policies
 
