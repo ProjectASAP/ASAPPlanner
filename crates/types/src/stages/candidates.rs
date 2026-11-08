@@ -259,8 +259,6 @@ impl LogicalProperties {
 /// [`LogicalProperties::new`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum LogicalPropertiesError {
-    #[error("the parameters belong to another family than the operator's")]
-    ParametersOfAnotherFamily,
     #[error("an exact operator has no summary parameters")]
     ParametersOnExactOperator,
     #[error("a sketch build needs parameters from its family's list")]

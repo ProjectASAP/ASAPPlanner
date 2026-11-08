@@ -73,7 +73,7 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
     /// A chain of tumbling windows (concepts doc, section 3, "Chain
     /// groups"): the `SummaryAgg` with these `family`, `input`, `reduction`,
     /// `grouping` and `filter`, built over each window
-    /// `[k·w, (k+1)·w)` of `child`, `w` = `tumbling_window_width_ms`, on a
+    /// `(k·w, (k+1)·w]` of `child`, `w` = `tumbling_window_width_ms`, on a
     /// grid anchored at the epoch. Each window is built when it ends. Output:
     /// one row per window, (window end, keys, state), a state with a time
     /// index. It has no range and no window count: a `TimeRange` (and
