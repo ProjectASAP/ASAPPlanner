@@ -1206,68 +1206,93 @@ Compute the parameter floor from this cap only under the ordering condition in S
 
 These extensions go beyond constraints (A)–(I) and the formulation's fixed-cost assumption. They are separated here so that the baseline reads on its own.
 
-### Execution identity
+### Execution contexts, by example
 
-An AcrossEvaluations candidate, always a chain, has its own computation: each window is built when it ends. A candidate with ℓ = None runs inside an execution that needs it. For example, a finalize candidate used by queries A (every 10 s) and C (every 15 s) may execute in both evaluation contexts even though Stage 2 enumerates it only once. A OneEvaluation candidate also runs inside one evaluation context κ, and that evaluation's consumers share the result.
+The cost of a plan is how often each computation runs and what one run costs. Choosing candidates does not say either: a candidate may run at every evaluation of one query, at the evaluations of several queries, as data arrives, or on its own schedule. Whether two consumers of one candidate share a run depends on whether they need it at the same times. An **execution context** κ names a class of executions that happen at the same times: within one κ, a computation runs once and every consumer in κ shares that run.
 
-A **context** identifies a class of executions with a common owner and schedule across the accounting horizon. It is not necessarily one timestamp. An evaluation context reuses the workload's own description of when queries run, their `QueryRecurrence` and `RangeEvaluation`: queries with equal ones are evaluated together and share its OneEvaluation results. Queries A and B of the running example, both every 10 s at phase 0, form one context; a one-off query forms the context of its `OneTime` recurrence. `QueryRecurrence` holds an `f64` (`EstimatedRate`) and cannot be hashed, so contexts are deduplicated by equality and `ExecutionContextId` indexes the list of distinct contexts.
+There are three kinds of context:
+
+| Context | When its executions happen | Executions per second ($\rho_\kappa$) | Example |
+|---|---|---|---|
+| `Evaluation { grid }` | at every time of an evaluation grid (phase + k·period), answering queries | 1000 / period (ms) | an alert every 10 s at phase 0: grid 10 s @ 0 |
+| `IngestionPipeline(RefreshWindow)` | as data arrives, in batches of one refresh window `{ width_ms, phase_ms }` | 1000 / width | samples fed into the current window of a chain every 5 s |
+| `Materialized(v)` | the own computation of a candidate v materialized across evaluations, on v's schedule, whoever reads it | v's (e.g. one build per window) | a query-time chain built when each window ends |
 
 ```rust
-pub struct ExecutionContextId(pub usize);
-
 pub enum ExecutionContext {
-    Evaluation {
-        recurrence: QueryRecurrence,
-        range_evaluation: Option<RangeEvaluation>,
-    },
-    IngestionPipeline(RefreshWindowId),
+    Evaluation { grid: EvaluationGrid },
+    IngestionPipeline(RefreshWindow),
     Materialized(PhysicalCandidateId),
 }
+pub struct EvaluationGrid { pub period_ms: u64, pub phase_ms: u64 }
 ```
 
-A chain of ℓ = None and OneEvaluation candidates inherits its consuming context. Encountering an AcrossEvaluations producer switches to that producer's own computation context when traversing its inputs. The context identifies where the operation runs; `delivers_on` with the context decides whether a chain producer can supply it.
+**Evaluation grids, and range queries.** An evaluation context is a grid of evaluation times, not a query. A range query is expanded into evaluations on its grid: with step 10 s, phase 0, each of its steps is an evaluation at a time of grid 10 s @ 0, so its steps and an instant query on the same grid are the same context and share runs. How many requests cover each grid time (61 for a 1 h span at 1 min steps refreshed every minute) multiplies the cost; it does not create another context. The subtree under `TimeShift { at: End }` in a range query runs on the grid of request end times, the one an instant query with the request's recurrence uses (Section 3, `@` handling).
 
-| Extended variable | Meaning |
+**Lifetimes and contexts.** A candidate with ℓ = None or OneEvaluation runs inside a context: once per execution of every context that selects it ($x_{\kappa,v}$). A candidate with ℓ = AcrossEvaluations runs once, in its own context `Materialized(v)` ($x^{\mathrm{mat}}_v$); consumers in other contexts read what it has stored, through edges whose producer must deliver on the consumer's context (`delivers_on`, Section 2). Its inputs run in its context. A ℓ = None producer has at most one consumer per context ($\sum_{c,i} y_{\kappa,u,c,i} \le x_{\kappa,u}$); consumers that share a result in one context read a OneEvaluation producer, or a materialized one.
+
+| Variable | Meaning |
 |---|---|
-| $x_v^{\mathrm{mat}}$ | AcrossEvaluations candidate selected |
-| $x_{\kappa,v}$ | Candidate with ℓ = None or OneEvaluation executes in context kappa |
-| $y_{\kappa,u,c,i}$ | Input edge selected for a consumer execution in context kappa |
-| $h_v$ | Selected retention amount for an AcrossEvaluations producer |
+| $x_{\kappa,v}$ | candidate v (ℓ = None or OneEvaluation) runs in context κ |
+| $x^{\mathrm{mat}}_v$ | candidate v (ℓ = AcrossEvaluations) is selected and runs in `Materialized(v)` |
+| $y_{\kappa,u,c,i}$ | in context κ, input i of consumer c reads producer u |
+| $z_{q,v}$ | query q's output is v |
+| $h_v$ | how long a materialized v retains its rows (windows, results, raw data) |
 
-The unindexed edge variable belongs to the baseline only. In the extension, every edge is indexed by its consumer's context, including the dedicated computation context of an AcrossEvaluations consumer. This avoids silently switching between two meanings of `y`.
+**Example.** Q_A = `quantile_over_time(0.99, latency[1m])` and Q_B = `quantile_over_time(0.50, latency[1m])`, both every 10 s at phase 0; Q_C = Q_A's expression every 30 s at phase 0.
 
-Activation, input satisfaction, utilization, output selection, and acyclicity must be defined for these execution instances. One binary per context/candidate assumes at most one reusable execution of that candidate within that context. If two uses require independent computations, the context or execution identity must distinguish them.
+| Group | Expression | Candidates |
+|---|---|---|
+| G1 | `Scan latency` | |
+| G2 | `TimeRange(1m, G1)` | |
+| G3 | `SummaryAgg[KLL](G2)` | ① a build at query time; ② `SummaryMerge(TimeRange(1m, Gw))` |
+| Gw | `SummaryTumblingWindowChain[KLL, w = 10 s](G1)` | a build at ingestion time, materialized across evaluations |
+| G4 / G5 | p99 / p50 readouts of G3 | |
+
+Contexts: κ10 = `Evaluation{10 s @ 0}` (Q_A, Q_B), κ30 = `Evaluation{30 s @ 0}` (Q_C), κw = `Materialized(Gw)`.
+
+Plan 1, build at query time:
+
+| Execution | Runs per second | Why |
+|---|---|---|
+| G3① in κ10 | 0.1 | read by G4 and G5 in κ10, so G3 is OneEvaluation and runs once for both |
+| G3① in κ30 | 0.033 | Q_C's own run |
+| G2, G1 in κ10 and κ30 | 0.1 and 0.033 | each build scans 1 minute of raw data |
+
+Plan 2, a shared chain:
+
+| Execution | Runs per second | Why |
+|---|---|---|
+| Gw in κw | one window per 10 s, built from the samples as they arrive | one computation, whoever reads it |
+| G3② in κ10 | 0.1 | Q_A and Q_B; Gw delivers on κ10 (10 s divides 10 s) |
+| G3② in κ30 | 0.033 | Q_C; Gw delivers on κ30 (10 s divides 30 s) |
+| $h_{Gw}$ | 1 min, 6 windows | (R): the longest need of its selected readers |
+
+The MILP compares the two plans' cost per second. With much data, plan 2's single incremental build is usually cheaper; with little data, plan 1 can be.
 
 ### Cost and retention
 
-To avoid confusing per-execution costs with the baseline's horizon-wide cost, use separate coefficient names:
-
 | Symbol | Definition |
 |---|---|
-| $W_v^{\mathrm{mat}}$ | Fixed computation and access cost over the horizon for an AcrossEvaluations candidate (a chain), one build per window, excluding variable retention |
-| $c_{\kappa,v}$ | Cost of one execution in the specified context of a candidate with ℓ = None or OneEvaluation, including a OneEvaluation result's storage within that evaluation |
-| $\rho_\kappa$ | Fixed number or expected number of context executions over the common horizon, from the existing evaluation counting in `crates/cost/src/execution_demand.rs` (a one-off query's is its `invocations`) |
-| $h_v$ | Retention amount in a declared unit, such as retained windows |
-| $\pi_v$ | Horizon-wide retention cost per unit of retained amount |
-| $\operatorname{need}_{\kappa,v,c,i}$ | Retention amount producer v needs to serve this consumer input in this context: the time horizon the queries served by that context read, e.g. a 5m range over 10 s tumbling windows needs 30 windows. Query latency is ignored for now |
-
-A proposed linear objective is:
+| $W_v^{\mathrm{mat}}$ | cost per second of v's own computation in `Materialized(v)` (e.g. one build per window), excluding retention |
+| $c_{\kappa,v}$ | cost of one run of v in context κ, from v's own operator and the logical size of its inputs; it does not depend on which producer v reads |
+| $c_{\kappa,u,c,i}$ | cost, per run of κ, of consumer c reading input i from producer u: transferring or reading u's output, and the part of c's work that changes with u's physical form (u's θ, its number of windows). Everything that does not change when another producer of the same group is chosen is in $c_{\kappa,c}$ |
+| $\rho_\kappa$ | executions of κ per second; for an evaluation grid, times the number of requests covering each grid time |
+| $h_v$, $\pi_v$ | retained amount and its cost per unit per second |
+| $\operatorname{need}_{\kappa,v,c,i}$ | how much of v's rows this edge reads back: for a time-indexed producer (raw data, a chain, results stored per evaluation time) the reading path's offset plus range |
 
 $$
 \min\left(
-\sum_{v\text{ across evaluations}}W_v^{\mathrm{mat}}x_v^{\mathrm{mat}}
-+\sum_{\kappa,\ v\text{ None or OneEvaluation}}\rho_\kappa c_{\kappa,v}x_{\kappa,v}
-+\sum_{v\text{ across evaluations}}\pi_v h_v
-\right).
+\sum_{v}W_v^{\mathrm{mat}}x_v^{\mathrm{mat}}
++\sum_{\kappa,v}\rho_\kappa c_{\kappa,v}x_{\kappa,v}
++\sum_{\kappa,u,c,i}\rho_\kappa c_{\kappa,u,c,i}\,y_{\kappa,u,c,i}
++\sum_{v}\pi_v h_v
+\right),
+\qquad
+h_v\ge\operatorname{need}_{\kappa,v,c,i}\,y_{\kappa,v,c,i}\ \ (\mathrm{R}).
 $$
 
-A selected input edge imposes the corresponding retention lower bound:
-
-$$
-h_v\ge\operatorname{need}_{\kappa,v,c,i}\,y_{\kappa,v,c,i}.
-$$
-
-The need is fixed per edge from the time horizon of the queries it serves, so constraint (R) is linear. For a chain it is the reading path's offset plus range: in the example of Section 3, the edge to A's path needs 5m, B's 1h + 5m and C's 1h, so $h_v$ for the shared 60 s chain is at least 65m, 65 windows. `@ end()` and `@ start()` in an instant query need the range, as no `@` does; in a range query they read no chain. An `@ T` path needs the end of the horizon − T + range; when the horizon is unbounded the need is too, and that merge candidate is not offered. It ignores query latency: a result is assumed read as soon as its evaluation starts, so a slow consumer that reads later does not extend the horizon. Modeling that needs the latency design, which is out of scope (Section 5). The retention unit (windows, or seconds of data) and an upper bound on $h_v$ are fixed per candidate when Stage 2 builds it.
+Every term is exact: no producer is chosen to stand for others. In the example of Section 3, the edges to A's, B's and C's paths need 5m, 1h + 5m and 1h, so the shared 60 s chain retains 65 windows. A Scan's raw data is a time-indexed producer like any other: its retention is its $h_v$ under the same (R). `@ T` needs the end of the horizon − T + range; with an unbounded horizon that candidate is not offered. Query latency is ignored: a result is taken to be read when its evaluation starts. $h_v$ has no upper bound here: it is minimized, and per-candidate bounds belong to resource budgets, outside this design.
 
 ### No consumer-count policies
 
