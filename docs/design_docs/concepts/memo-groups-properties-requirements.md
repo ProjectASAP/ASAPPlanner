@@ -589,8 +589,9 @@ The floor representation has the applicability condition stated in Section 2. Cr
 
 **Fused groups.** A fused candidate computes, as one operator, a sub-DAG pattern of several operators in one appearance of the sub-expression; `fused_groups` lists the groups of the operators it replaces. Reusing a common sub-expression across appearances is Pass 2's reuse, not fusion. Fusion rules:
 - top-k (a sort and limit over an aggregate, as one heap summary);
-- sum over sum, min over min, max over max (distributive aggregates, as one aggregate);
-- possibly Hydra (a summary over every sub-population at once).
+- sum over sum, min over min, max over max (distributive aggregates, as one aggregate).
+
+Hydra is not a fusion: it is a rollup strategy of the finest-common-group rule (Pass 2, Example 4).
 
 TODO: revisit each fused candidate's inputs and outputs to check that the fusing rules are correct.
 
@@ -672,6 +673,30 @@ Both are exact `Aggregate` groups with equal definitions and selections, so they
 | G3 | `Filter(host = "xxx", G*)` | | | its own expression |
 
 The hull of {all, host ∈ {xxx}} is all; the keys are {host} ∪ {job} ∪ {host}, where the last `host` is the column on which G2 is narrower. Stage 3 chooses between two KLL builds and one build of G\* with job × host states.
+
+**Rollup by subpopulation readout (Hydra).** When $G^*$ is built with an algorithm that answers any subset of its keys directly (the Hydra algorithms: `HydraKll`, `HydraCms`, `HydraCountSketch`; a capability in `SummaryTypeCapability`), a member does not need a `SummaryMerge`: its **readout group** gets a candidate that reads the subpopulation straight from $G^*$'s state. A KLL rollup happens at the state level (merge the states, then read); a Hydra rollup happens at the readout level (read each subpopulation from one shared structure). This needs `SummaryEstimate` to name the keys it reads the subpopulation by (`subpopulation_keys`), which it cannot express today; both are added when Hydra is back in scope.
+
+**Example 4: Hydra as a rollup strategy.** Q1 = `quantile by (job)(0.99, latency[5m])`, Q2 = `quantile by (host)(0.99, latency[5m])`, Q3 = `quantile by (job, host)(0.99, latency[5m])`; 10 jobs, 1 000 hosts, 5 000 (job, host) pairs present.
+
+| Group | Expression | Candidates |
+|---|---|---|
+| G2 | `TimeRange(5m, Scan latency)` | |
+| S_jh (= G\*) | `SummaryAgg[by job, host](G2)` | one `Sketch(Kll)` build per θ (one KLL per pair); one `Sketch(HydraKll)` build per θ (one shared structure) |
+| S_j | `SummaryAgg[by job](G2)` | `Sketch(Kll)` builds; **`SummaryMerge(group_by job)(S_jh)`** (valid when S_jh is built with KLL) |
+| S_h | `SummaryAgg[by host](G2)` | `Sketch(Kll)` builds; **`SummaryMerge(group_by host)(S_jh)`** (KLL) |
+| R_jh ← Q3 | `SummaryEstimate(p99)(S_jh)` | reads S_jh |
+| R_j ← Q1 | `SummaryEstimate(p99)(S_j)` | reads S_j; **`SummaryEstimate(p99, subpopulation_keys: [job])(S_jh)`** (valid when S_jh is built with Hydra) |
+| R_h ← Q2 | `SummaryEstimate(p99)(S_h)` | reads S_h; **`SummaryEstimate(p99, subpopulation_keys: [host])(S_jh)`** (Hydra) |
+
+Stage 3 chooses among:
+
+| Plan | Built | States | Extra work per query |
+|---|---|---|---|
+| ① separate | S_jh, S_j, S_h with KLL | 5 000 + 10 + 1 000 KLLs | none |
+| ② KLL and merge | S_jh with KLL; S_j, S_h merged from it | 5 000 KLLs | Q1 merges 5 000 KLLs into 10, Q2 into 1 000 |
+| ③ Hydra | S_jh with HydraKll; all three read it | one structure, its size set by θ, not by the number of pairs | one subpopulation query per group |
+
+With many pairs and queries ③ is cheapest; with few pairs ① or ② can be. Hydra's error per subpopulation follows from its θ and enters (K) on the edges like any readout's.
 
 #### Reach, caps and floors
 
