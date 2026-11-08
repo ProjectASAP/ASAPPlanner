@@ -33,6 +33,7 @@ use super::*;
 /// The smallest `k` `asap_sketchlib`'s KMV estimate `(k-1)/U` is defined for.
 const KMV_MIN_K: u32 = 2;
 /// The largest `k` sizing returns.
+#[cfg(test)]
 const KMV_MAX_K: u32 = 1 << 26;
 
 pub(super) fn guarantee(
@@ -81,6 +82,7 @@ pub(crate) fn kmv_failure_probability(k: u32, eps: f64) -> f64 {
 /// The smallest `k` whose KMV failure probability at relative error `eps`
 /// is at most `delta` ([`kmv_failure_probability`]), up to `2^26`; a
 /// degenerate `eps` or `delta` saturates to `2^26`.
+#[cfg(test)]
 pub(crate) fn kmv_k(eps: f64, delta: f64) -> u32 {
     if !(eps.is_finite() && eps > 0.0 && delta.is_finite() && delta > 0.0) {
         return KMV_MAX_K;
