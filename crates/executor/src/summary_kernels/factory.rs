@@ -7,7 +7,7 @@ use crate::summary_kernels::{
 };
 use crate::AggregateCore;
 use planner_types::ir::schema::{
-    FieldDataType as SummaryFamilyType, SketchAlgorithm, SketchKind, SketchParams,
+    FieldDataType as SummaryFamilyType, SketchAlgorithm, SketchParams,
 };
 
 /// Generate the clone-based `AccumulatorUpdater` methods for updaters whose
@@ -469,7 +469,6 @@ pub fn create_planner_accumulator(
     family: &SummaryFamilyType,
     parameters: Option<&SketchParams>,
     input: &planner_types::ir::schema::SummaryUpdate,
-    grouping: &planner_types::ir::schema::GroupingStrategy,
 ) -> Result<Box<dyn AccumulatorUpdater>, String> {
     if input.item.is_some()
         && matches!(
@@ -483,11 +482,10 @@ pub fn create_planner_accumulator(
         return Err("window-weighted summaries require typed DAG binding; integer heap updaters cannot consume rates".into());
     }
 
-    crate::capability::validate_summary_kernel(family, input, grouping)?;
-    use planner_types::ir::schema::GroupingStrategy;
-    if grouping != &GroupingStrategy::PerSubpopulationInstance {
+    crate::capability::validate_summary_kernel(family, input)?;
+    if matches!(family, SummaryFamilyType::Sketch(SketchAlgorithm::HydraCms)) {
         return Err(
-            "shared grouping has one state for all groups; build it with `create_hydra_cms`".into(),
+            "HydraCms has one state for all groups; build it with `create_hydra_cms`".into(),
         );
     }
     if matches!(family, SummaryFamilyType::ExactAggregate(..)) {
@@ -498,12 +496,9 @@ pub fn create_planner_accumulator(
             )?,
         }));
     }
-    let SummaryFamilyType::Sketch(kind, family_grouping) = family else {
+    let SummaryFamilyType::Sketch(kind) = family else {
         return Err(format!("unsupported Planner summary family {family:?}"));
     };
-    if family_grouping != grouping {
-        return Err("Planner family and operator grouping disagree".into());
-    }
     let Some(params) = parameters else {
         return Err("a sketch summary needs its parameters θ".into());
     };
@@ -532,8 +527,7 @@ pub fn create_planner_accumulator(
         }
         (SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap, _) => {
             let (algorithm, width, depth, capacity) =
-                WeightedFrequency::configuration(&SketchKind::new(*kind, params.clone()))
-                    .map_err(|e| e.to_string())?;
+                WeightedFrequency::configuration(kind, params).map_err(|e| e.to_string())?;
             Box::new(
                 WeightedFrequencyUpdater::new(algorithm, width, depth, capacity)
                     .map_err(|e| e.to_string())?,

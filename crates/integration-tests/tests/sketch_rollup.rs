@@ -20,7 +20,6 @@ use asap_integration_tests::planning::explicit_local_candidates;
 use asap_types::ir::operator::operator_properties::Reduction;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::properties::summary_coverage::CoverageError;
-use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
 use asap_types::ir::schema::{
     DataType, ExactKind, ExactParams, Field, FieldDataType, Schema, SketchAlgorithm,
 };
@@ -191,10 +190,9 @@ fn replace(
 fn rolled_up(coarse: &OperatorNode) -> Rc<OperatorNode> {
     let Some(ASAPOp::SummaryAgg {
         child,
-        family,
+        summary_type: family,
         input,
         reduction: Reduction::Reduce(by),
-        grouping,
         filter,
     }) = coarse.asap()
     else {
@@ -204,10 +202,9 @@ fn rolled_up(coarse: &OperatorNode) -> Rc<OperatorNode> {
     assert_eq!(by.keys().len(), 1);
     let finer = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
         child: Rc::clone(child),
-        family: family.clone(),
+        summary_type: family.clone(),
         input: input.clone(),
         reduction: Reduction::by(vec![region, by.keys()[0]]),
-        grouping: grouping.clone(),
         filter: filter.clone(),
     }))
     .unwrap();
@@ -224,16 +221,15 @@ fn rolled_up(coarse: &OperatorNode) -> Rc<OperatorNode> {
 /// of the search archive and its tighter, potentially much larger capacities.
 async fn direct_and_rolled_up(
     sql: &str,
-    accuracy: AccuracyTarget,
 ) -> Vec<(SketchAlgorithm, Rc<OperatorNode>, Rc<OperatorNode>)> {
-    let root = lower_sql(sql, &catalog(), accuracy.clone()).await.unwrap();
+    let root = lower_sql(sql, &catalog()).await.unwrap();
     let mut out = Vec::new();
     for candidate in explicit_local_candidates(root) {
         let Some(build) = build(&candidate) else {
             continue;
         };
         let Some(ASAPOp::SummaryAgg {
-            family: FieldDataType::Sketch(kind, _),
+            summary_type: FieldDataType::Sketch(kind),
             ..
         }) = build.asap()
         else {
@@ -253,14 +249,9 @@ async fn direct_and_rolled_up(
 /// counters add), so every answer is the direct build's.
 #[tokio::test]
 async fn distinct_counts_rolled_up_equal_the_direct_build() {
-    let accuracy = AccuracyTarget::max_error(0.05)
-        .failure_probability(0.05)
-        .accuracy_metric(AccuracyMetric::Relative);
-    let pairs = direct_and_rolled_up(
-        "SELECT job, COUNT(DISTINCT user_id) AS value FROM http GROUP BY job",
-        accuracy,
-    )
-    .await;
+    let pairs =
+        direct_and_rolled_up("SELECT job, COUNT(DISTINCT user_id) AS value FROM http GROUP BY job")
+            .await;
     let families: Vec<_> = pairs.iter().map(|(family, ..)| *family).collect();
     assert!(families.contains(&SketchAlgorithm::Kmv), "{families:?}");
     for (family, direct, rolled) in pairs {
@@ -277,13 +268,9 @@ async fn distinct_counts_rolled_up_equal_the_direct_build() {
 #[tokio::test]
 async fn quantiles_rolled_up_keep_the_sketch_bound() {
     const EPSILON: f64 = 0.05;
-    for metric in [AccuracyMetric::Rank, AccuracyMetric::Relative] {
-        let accuracy = AccuracyTarget::max_error(EPSILON)
-            .failure_probability(0.01)
-            .accuracy_metric(metric);
+    {
         let pairs = direct_and_rolled_up(
             "SELECT job, approx_percentile_cont(latency, 0.99) AS value FROM http GROUP BY job",
-            accuracy,
         )
         .await;
         for (family, direct, rolled) in pairs {
@@ -318,13 +305,9 @@ async fn quantiles_rolled_up_keep_the_sketch_bound() {
 /// groups.
 #[tokio::test]
 async fn invalid_rollups_are_rejected() {
-    let accuracy = AccuracyTarget::max_error(0.05)
-        .failure_probability(0.05)
-        .accuracy_metric(AccuracyMetric::Relative);
     let root = lower_sql(
         "SELECT job, COUNT(DISTINCT user_id) AS value FROM http GROUP BY job",
         &catalog(),
-        accuracy.clone(),
     )
     .await
     .unwrap();
@@ -335,7 +318,7 @@ async fn invalid_rollups_are_rejected() {
                 matches!(
                     build.asap(),
                     Some(ASAPOp::SummaryAgg {
-                        family: FieldDataType::Sketch(..),
+                        summary_type: FieldDataType::Sketch(..),
                         ..
                     })
                 )
@@ -364,7 +347,6 @@ async fn invalid_rollups_are_rejected() {
         child,
         input,
         reduction,
-        grouping,
         ..
     }) = finer.asap()
     else {
@@ -372,10 +354,9 @@ async fn invalid_rollups_are_rejected() {
     };
     let rates = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
         child: Rc::clone(child),
-        family: FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate),
+        summary_type: FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate),
         input: input.clone(),
         reduction: reduction.clone(),
-        grouping: grouping.clone(),
         filter: None,
     }))
     .unwrap();
@@ -386,5 +367,5 @@ async fn invalid_rollups_are_rejected() {
     assert!(merged_rates
         .unwrap_err()
         .to_string()
-        .contains(&CoverageError::FamilyCannotRegroup.to_string()));
+        .contains(&CoverageError::SummaryTypeCannotRegroup.to_string()));
 }

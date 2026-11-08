@@ -89,6 +89,7 @@ fn plan(
         output_schema: (**schema).clone(),
         guarantee: None,
         retention_ms: None,
+        selected_physical_candidate: None,
     };
     let edge = |producer, consumer| {
         PhysicalASAPDAGEdge::new(
@@ -510,6 +511,7 @@ fn windowed_plan(shift_ms: Option<i64>) -> PhysicalASAPDAG {
         output_schema: schema.clone(),
         guarantee: None,
         retention_ms: None,
+        selected_physical_candidate: None,
     };
     let edge = |producer, consumer| {
         PhysicalASAPDAGEdge::new(
@@ -844,20 +846,20 @@ fn windowed_count_plan(shift_ms: Option<i64>) -> PhysicalASAPDAG {
             output_schema: output_schema.clone(),
             guarantee: None,
             retention_ms: None,
+            selected_physical_candidate: None,
         }
     };
     dag.nodes.push(node(
         3,
         PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
             child: 2,
-            family,
+            summary_type: family,
             input: SummaryUpdate {
                 item: None,
                 weight: SummaryInputExpr::Constant(1.0),
                 weight_domain: Default::default(),
             },
             reduction: Reduction::Reduce(GroupKeys::by(vec![])),
-            grouping: GroupingStrategy::default(),
             filter: None,
         }),
         &state,

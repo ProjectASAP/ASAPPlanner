@@ -86,6 +86,7 @@ fn program_for_bool(operator: BinaryOperator, return_bool: bool) -> Operator {
         output_schema: (*schema).clone(),
         guarantee: None,
         retention_ms: None,
+        selected_physical_candidate: None,
     };
     compile_node(&node, &[schema.clone(), schema]).unwrap()
 }
@@ -373,10 +374,9 @@ fn stored_series_evaluations_support_filters_and_sets() {
                         payload: match id {
                             0 | 1 => PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
                                 child: 6,
-                                family: family.clone(),
+                                summary_type: family.clone(),
                                 input: SummaryUpdate::column(ColumnRef::SampleValue),
                                 reduction: Reduction::Reduce(GroupKeys::by(vec![0])),
-                                grouping: GroupingStrategy::PerSubpopulationInstance,
                                 filter: None,
                             }),
                             5 => PhysicalASAPOperatorPayload::NonASAP(
@@ -426,6 +426,7 @@ fn stored_series_evaluations_support_filters_and_sets() {
                         },
                         guarantee: None,
                         retention_ms: None,
+                        selected_physical_candidate: None,
                     })
                     .collect::<Vec<_>>();
             let edges = [

@@ -16,8 +16,7 @@ use asap_types::ir::operator::{GroupKeys, Reduction, Source};
 use asap_types::ir::physical_export::PhysicalASAPDAG;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{
-    DataType, Field, FieldDataType, GroupingStrategy, Schema, SketchAlgorithm, SketchStatistic,
-    SummaryUpdate,
+    DataType, Field, FieldDataType, Schema, SketchAlgorithm, SketchStatistic, SummaryUpdate,
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot, TimeRangeKind};
 use futures::{executor::block_on, StreamExt};
@@ -32,7 +31,7 @@ use std::{
 const TUMBLING_WINDOW_WIDTH_MS: i64 = 60_000;
 
 fn family(_k: u32) -> FieldDataType {
-    FieldDataType::Sketch(SketchAlgorithm::Kll, Default::default())
+    FieldDataType::Sketch(SketchAlgorithm::Kll)
 }
 /// `t(ts, value)`, time index `ts`.
 fn table_schema() -> Schema {
@@ -87,10 +86,9 @@ fn fixture() -> Fixture {
             }));
             new(asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
                 child: range,
-                family: family(200),
+                summary_type: family(200),
                 input: SummaryUpdate::column(ColumnRef::Named("value".into())),
                 reduction: Reduction::Reduce(GroupKeys::default()),
-                grouping: GroupingStrategy::PerSubpopulationInstance,
                 filter: None,
             }))
         })

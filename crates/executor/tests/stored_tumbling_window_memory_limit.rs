@@ -25,7 +25,7 @@ fn tumbling_window() -> (Arc<Schema>, Batch) {
 
 /// One tumbling window of `series` KLL states (k = 200), keyed by series.
 fn tumbling_window_of(series_count: u32) -> (Arc<Schema>, Batch) {
-    let family = FieldDataType::Sketch(SketchAlgorithm::Kll, Default::default());
+    let family = FieldDataType::Sketch(SketchAlgorithm::Kll);
     let schema = Arc::new(Schema {
         fields: vec![
             Field {
@@ -301,7 +301,7 @@ fn merge_over_a_stored_tumbling_window(
     };
     use asap_executor::planner::ir::properties::ExecutionDataState;
     use asap_executor::planner::ir::scalar::ColumnRef;
-    use asap_executor::planner::ir::schema::{GroupingStrategy, SummaryUpdate};
+    use asap_executor::planner::ir::schema::SummaryUpdate;
     use asap_executor::planner::ir::{ASAPOp, NonASAPOp, TimeRangeKind};
     let samples = Schema::with_time_index(
         vec![
@@ -321,16 +321,16 @@ fn merge_over_a_stored_tumbling_window(
         parameters: None,
         guarantee: None,
         retention_ms: None,
+        selected_physical_candidate: None,
     };
     let nodes = vec![
         node(
             0,
             Payload::ASAP(ASAPOp::SummaryAgg {
                 child: 3,
-                family: schema.fields[1].dtype.clone(),
+                summary_type: schema.fields[1].dtype.clone(),
                 input: SummaryUpdate::column(ColumnRef::SampleValue),
                 reduction: Reduction::Reduce(GroupKeys::by(vec![0])),
-                grouping: GroupingStrategy::default(),
                 filter: None,
             }),
             schema,

@@ -17,10 +17,10 @@ in `asap-integration-tests` (`crate_graph`) checks these edges with
 
 | Crate | Role |
 | --- | --- |
-| `asap-types` (`crates/types`) | Shared vocabulary, by IR section: `ir::operator` (`OperatorNode`, `NonASAPOp`, `ASAPOp`, operator parameters, `AggIntent`), `ir::scalar` (`ScalarExpr`, `ColumnRef`), `ir::schema` (`Schema`, `FieldDataType`, summary-state types such as `SketchAlgorithm` and `FamilyCapability`), `ir::properties` (`AccuracyTarget`, `AccuracyMetric`, `AccuracyGuarantee`, execution timing, summary coverage), plus `ir::flat` and `ir::physical_export`; the planner inputs (`workload`); Stage 2 decision data (`physical`: `PhysicalProperties` (timing and `Lifetime`), tumbling windows) |
+| `asap-types` (`crates/types`) | Shared vocabulary, by IR section: `ir::operator` (`OperatorNode`, `NonASAPOp`, `ASAPOp`, operator parameters, `AggIntent`), `ir::scalar` (`ScalarExpr`, `ColumnRef`), `ir::schema` (`Schema`, `FieldDataType`, summary-state types such as `SketchAlgorithm` and `SummaryTypeCapability`), `ir::properties` (`AccuracyTarget`, `AccuracyMetric`, `AccuracyGuarantee`, execution timing, summary coverage), plus `ir::flat` and `ir::physical_export`; the planner inputs (`workload`); Stage 2 decision data (`physical`: `PhysicalProperties` (timing and `Lifetime`), tumbling windows) |
 | `asap-frontend-sql`, `asap-frontend-promql`, `asap-frontend-metricsql` (with `asap-frontend-common`) | Stage 0, the query-language frontends: lower each query into the logical DAG (`QueryRoot`s of `NonASAPOp` nodes, no summaries, no timing) |
 | `asap-logical-asap-optimization` (`crates/logical-asap-optimization`) | Stage 1: Pass 1 and Pass 2 (the memo rules) |
-| `asap-accuracy` (`crates/accuracy`) | The accuracy model the stages share: the analytical rules (per-family estimators, composition, budget split, target check) and the deployment's `AccuracyModel` and `AccuracyEvidenceProvider`; depends only on `asap-types` |
+| `asap-accuracy` (`crates/accuracy`) | The accuracy model the stages share: the analytical rules (per-algorithm estimators, composition, budget split, target check), the deployment's measured accuracy (`AccuracyEvidence`) and α^log (`producer_satisfies_logical_requirements`); depends only on `asap-types` |
 | `asap-physical-asap-optimization` (`crates/physical-asap-optimization`) | Stage 2: materialization and physical operator implementation |
 | `asap-cost` (`crates/cost`) | The cost model the stages share: resource-usage estimation (the analytical per-operator model, measured operation costs, state byte sizes) and the cost models (`ResourceUsage`, `CostModel`, `CostInputs`); depends only on `asap-types` |
 | `asap-plan-selection` (`crates/plan-selection`) | Stage 3: `select_plan` over Stage 2's output; accuracy and latency checks, pricing candidates with `asap-cost` |
@@ -53,14 +53,14 @@ LogicalASAPMemoCandidates
   │  asap_physical_asap_optimization::generate_physical_asap_memo_candidates  Stage 2
   ▼
 PhysicalASAPMemoCandidates (operator nodes per timing/materialization + pruned_candidates)
-  │  asap_plan_selection::select_plan (with Stage 2's AssignmentRealizer) Stage 3
+  │  asap_plan_selection::select_plan                                 Stage 3
   ▼
-Selection (selected_dag, cost, accepted_accuracy_per_query, search_report)
+(PhysicalASAPDAG, Selection) — the plan, and accepted_accuracy_per_query,
+pruned_candidates and the selection MILP's size and time
 ```
 
 `asap_planner::run_planning` runs all of it over lowered roots: Pass 1, then
-Pass 2 over every tumbling-window width, Stage 2 and Stage 3, and builds the
-selected plan with `AssignmentRealizer::realize`.
+Pass 2, Stage 2 and Stage 3, which builds the selected plan.
 It returns every stage's output (`PlanningRun`); `Stage1ToStage3Pass` is the
 same pipeline behind the `OptimizationPass` trait.
 
@@ -70,14 +70,14 @@ same pipeline behind the `OptimizationPass` trait.
 | Which summary families serve an intent (`summary_candidates`) | `asap-logical-asap-optimization`, `pass1/realization.rs` |
 | Pass 2 memo rules: shared producers (identical expressions by memo group identity, one build at different sizes), scan-label widening, window composition (tumbling windows), rollup, exact top-k reuse and finer-aggregate reuse | `asap-logical-asap-optimization`, `pass2/memo/rules/` and `pass2/memo/window_candidates.rs`, over the helpers in `pass2/asap_aware_cse.rs` |
 | Enumeration of the plans a memo stands for (reference pricer, DAG viewer) | `asap-logical-asap-optimization`, `pass2/memo/enumeration.rs` |
-| What each summary family can merge and answer (`FamilyCapability::of`: `merge_inputs`, `readouts`) | `asap-types`, `ir/schema/family_capability.rs` |
+| What each summary type can merge and answer (`SummaryTypeCapability::of`: `merge_inputs`, `readouts`) | `asap-types`, `ir/schema/summary_type_capability.rs` |
 | Stage 2: physical properties options per summary build (not materialized; materialized at ingestion time `AcrossEvaluations`; materialized at query time `OneEvaluation` or `AcrossEvaluations`), ingestion-time eligibility, physical operator implementation | `asap-physical-asap-optimization` |
 | Timing and data-state edge rules applied from a `PhysicalPropertiesAssignment` | `asap-types`, `ir/properties/timing.rs` and `ir/properties/execution_data_state.rs`; `PhysicalProperties` and `Lifetime` in `physical/properties.rs` |
 | Stage 3: accuracy check, latency check, resource usage (`ResourceUsage`), cost models 1–3 (`CostModel`), measured operation costs | `asap-plan-selection`, `lib.rs`; `asap-cost`, `lib.rs` and `measured.rs` |
 | The analytical per-operator resource model Stage 3 measures with | `asap-cost`, `analytical.rs` and `operator_statistics.rs` |
-| The accuracy algebra: per-family guarantees, composition, budget split; guarantee propagation through a DAG; sizing a summary for its target, (ε, δ) budget and default sizes | `asap-accuracy` (`AccuracyModel`, `BuiltinAccuracyModel`, `estimators/`, `composition.rs`, `budget.rs`, `propagation.rs`, `sizing.rs`) |
+| The accuracy algebra: per-family guarantees, composition, budget split; guarantee propagation through a DAG; sizing a summary for its target, (ε, δ) budget and default sizes | `asap-accuracy` (`AccuracyEvidence`, `theoretical_guarantee`, `estimators/`, `composition.rs`, `budget.rs`, `propagation.rs`, `sizing.rs`) |
 | What the executor supports (`DeploymentCapabilities`) | `asap-logical-asap-optimization`, `deployment_capabilities.rs`; Pass 1 receives only `supported_summaries` and Stage 2 only `query_time_results_retained` and `raw_data_retained` (`bool` arguments, so Stage 2 does not depend on the Stage 1 crate); Stage 3 reads none of it |
-| The inputs every stage reads (`PlanningModels`: accuracy model, evidence, cost inputs, deployment capabilities) and the `OptimizationPass` trait | `asap-planner`, `pass.rs`; the facade gives Stage 3 only `AccuracyCheckInputs` and `CostInputs` |
+| The inputs every stage reads (`PlanningModels`: accuracy evidence, cost inputs, deployment capabilities) and the `OptimizationPass` trait | `asap-planner`, `pass.rs`; the facade gives Pass 2 the evidence and Stage 3 only `CostInputs` |
 
 The current production search organizes these computations in memo result/state
 groups and jointly selects physical candidates and connections; it does not

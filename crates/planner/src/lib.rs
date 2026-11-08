@@ -6,10 +6,10 @@
 //! ```
 //!
 //! The default pass, [`Stage1ToStage3Pass`], orchestrates the stages
-//! ([`run_planning`]): Stage 0, Pass 1, Pass 2 over every tumbling-window width,
-//! Stage 2 (`generate_physical_asap_memo_candidates`) and Stage 3
-//! (`asap_plan_selection::select_plan`), and builds the selected plan through
-//! Stage 2's realizer. The stages never call each other.
+//! ([`run_planning`]): Stage 0, Pass 1, Pass 2, Stage 2
+//! (`generate_physical_asap_memo_candidates`) and Stage 3
+//! (`asap_plan_selection::select_plan`), which builds the selected plan.
+//! The stages never call each other.
 //!
 //! [`e2e_plan`] runs both steps. [`plan_installable`] runs them for a
 //! deployment runtime and returns the single selected DAG ready to install
@@ -29,7 +29,7 @@ mod pass;
 mod run;
 pub use pass::{
     optimize, OptimizationInput, OptimizationInputError, OptimizationPass, OptimizeError,
-    PassNameConflict, PassRegistry, PlanOutput, PlanningModels, QueryPlan,
+    PassNameConflict, PassRegistry, PlanOutput, PlanningModels,
 };
 pub use run::{
     run_planning, PlanSearchSettings, PlanningReport, PlanningRun, SelectionError,
@@ -47,13 +47,11 @@ pub use installable::{
 // `InstallablePlan`, so it depends on this crate and `asap-executor` alone.
 pub use asap_cost::{
     ClusterLimits, ClusterObjective, CostInputs, CostModel, CostTableProvenance,
-    MeasuredOperationCost, MeasuredOperationCosts, NodePriceSource, OperatorCost, OperatorKind,
+    MeasuredOperationCost, MeasuredOperationCosts, NodeCostSource, OperatorCost, OperatorKind,
     ResourceSpeed, ResourceUnitCost, SummaryOperation,
 };
 pub use asap_frontend_sql::SqlCatalog;
-pub use asap_plan_selection::{
-    AcceptedAccuracy, ErrorSelectingPlan, RejectionCause, SearchReport, SearchStatus, Selection,
-};
+pub use asap_plan_selection::{AcceptedAccuracy, ErrorSelectingPlan, RejectionCause, Selection};
 pub use asap_types::deployment_capabilities::{DeploymentCapabilities, SupportedSummary};
 pub use asap_types::ir::materialized_view::{
     IngestionRefreshGroup, InstallableDagError, MaterializedView, MaterializedViewInputs,
@@ -226,17 +224,12 @@ async fn lower(input: &UserInput<'_>) -> Result<Vec<asap_types::ir::QueryRoot>, 
             };
             let mut lowered = Vec::new();
             for (index, entry) in input.workload.query_workload.entries().enumerate() {
-                let expr = lower_sql_dialect(
-                    &entry.query.0,
-                    catalog,
-                    dialect.clone(),
-                    entry.requirements.accuracy.clone(),
-                )
-                .await
-                .map_err(|source| PlanError::Lowering {
-                    entry_index: Some(index),
-                    source: LoweringError::Sql(source),
-                })?;
+                let expr = lower_sql_dialect(&entry.query.0, catalog, dialect.clone())
+                    .await
+                    .map_err(|source| PlanError::Lowering {
+                        entry_index: Some(index),
+                        source: LoweringError::Sql(source),
+                    })?;
                 lowered.push(expr.into());
             }
             Ok(lowered)

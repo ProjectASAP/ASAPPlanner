@@ -9,17 +9,13 @@ pub(super) fn guarantee(
     params: &SketchParams,
     query: &SketchStatistic,
 ) -> Option<AccuracyGuarantee> {
-    let SketchParams::Kll {
-        k,
-        failure_probability,
-    } = params
-    else {
+    let SketchParams::Kll { k } = params else {
         return None;
     };
     if *k > KLL_MAX_K {
         return None;
     }
-    let delta = failure_probability.unwrap_or(KLL_CALIBRATED_FAILURE_PROBABILITY);
+    let delta = KLL_CALIBRATED_FAILURE_PROBABILITY;
     let scale = delta_scale(delta)?;
     let contract = if delta < KLL_CALIBRATED_FAILURE_PROBABILITY {
         KLL_DELTA_SCALED_CONTRACT
@@ -139,44 +135,10 @@ fn normal_quantile(p: f64) -> f64 {
 /// `eps / delta_scale(delta)`, recording `delta` so the guarantee reports it.
 pub(crate) fn size_params(eps: f64, delta: f64) -> SketchParams {
     if delta.is_nan() || delta <= 0.0 || delta >= KLL_CALIBRATED_FAILURE_PROBABILITY {
-        return SketchParams::Kll {
-            k: kll_k(eps),
-            failure_probability: None,
-        };
+        return SketchParams::Kll { k: kll_k(eps) };
     }
     SketchParams::Kll {
         k: kll_k(eps / delta_scale(delta).unwrap_or(1.0)),
-        failure_probability: Some(delta),
-    }
-}
-
-/// `params` resized to fail with probability at most `delta` at no larger
-/// rank error: `k` for its current error at `delta`'s scale, never smaller.
-/// Unchanged when it already fails no more often.
-pub(crate) fn with_failure_probability(params: &SketchParams, delta: f64) -> SketchParams {
-    let SketchParams::Kll {
-        k,
-        failure_probability,
-    } = params
-    else {
-        return params.clone();
-    };
-    let current = failure_probability.unwrap_or(KLL_CALIBRATED_FAILURE_PROBABILITY);
-    let Some(scale) = delta_scale(current) else {
-        return params.clone();
-    };
-    if delta >= current {
-        return params.clone();
-    }
-    match size_params(kll_rank_error_99(*k) * scale, delta) {
-        SketchParams::Kll {
-            k: resized,
-            failure_probability,
-        } => SketchParams::Kll {
-            k: resized.max(*k),
-            failure_probability,
-        },
-        other => other,
     }
 }
 
@@ -217,61 +179,6 @@ mod tests {
         )));
     }
 
-    /// Below δ = 0.01, KLL is sized by the KLL bound's δ dependence: k is
-    /// larger than at δ = 0.01, and the guarantee meets ε = 0.01, δ = 0.001.
-    #[test]
-    fn sizing_meets_a_failure_probability_below_one_percent() {
-        use crate::estimators::size_params;
-        use asap_types::ir::operator::agg_intent::default_quantile;
-        let q = default_quantile(0.99);
-        let k = |delta| match size_params(SketchAlgorithm::Kll, &q, 0.01, delta) {
-            SketchParams::Kll { k, .. } => k,
-            other => panic!("{other:?}"),
-        };
-        assert!(k(0.001) > k(0.01), "{} vs {}", k(0.001), k(0.01));
-        let params = size_params(SketchAlgorithm::Kll, &q, 0.01, 0.001);
-        let g = guarantee(
-            &SketchAlgorithm::Kll,
-            &params,
-            &SketchStatistic::Quantile { q: 0.99 },
-        )
-        .unwrap();
-        assert!(satisfies(
-            &g,
-            &AccuracyTarget::max_error(0.01)
-                .failure_probability(0.001)
-                .accuracy_metric(AccuracyMetric::Rank)
-                .accuracy_scope(asap_types::ir::properties::AccuracyScope::PerValue)
-        ));
-        assert_eq!(g.spec.failure_probability.evaluate(), Some(0.001));
-    }
-
-    /// A KLL sized below δ = 0.01 names its own contract, not the empirical
-    /// 99% calibration's.
-    #[test]
-    fn sizing_below_one_percent_names_a_distinct_contract() {
-        let contract = |delta| {
-            let g = guarantee(
-                &SketchAlgorithm::Kll,
-                &size_params(0.01, delta),
-                &SketchStatistic::Quantile { q: 0.99 },
-            )
-            .unwrap();
-            match &g.provenance[..] {
-                [GuaranteeSource::SketchEvaluation { contract, .. }] => contract.clone(),
-                other => panic!("{other:?}"),
-            }
-        };
-        assert_eq!(
-            contract(0.01),
-            "apache_datasketches_kll_empirical_99_a9b42755072b"
-        );
-        assert_eq!(
-            contract(0.001),
-            "apache_datasketches_kll_empirical_99_delta_scaled_a9b42755072b"
-        );
-    }
-
     /// `k` never exceeds the 26 602 `asap_sketchlib` silently caps it at, so
     /// a guarantee never claims a larger `k` than runs.
     #[test]
@@ -286,10 +193,7 @@ mod tests {
         let g = |k| {
             guarantee(
                 &SketchAlgorithm::Kll,
-                &SketchParams::Kll {
-                    k,
-                    failure_probability: None,
-                },
+                &SketchParams::Kll { k },
                 &SketchStatistic::Quantile { q: 0.99 },
             )
         };
@@ -319,30 +223,8 @@ mod tests {
             size_params(0.01, 0.001),
             SketchParams::Kll {
                 k: kll_k(0.01 / ratio),
-                failure_probability: Some(0.001),
             }
         );
-    }
-
-    /// A hand-built failure probability outside (0, 1) gives no guarantee
-    /// rather than an infinite or NaN error bound.
-    #[test]
-    fn an_invalid_failure_probability_gives_no_guarantee() {
-        for delta in [0.0, -0.1, 1.0, 1.5, f64::NAN, f64::INFINITY] {
-            let params = SketchParams::Kll {
-                k: 200,
-                failure_probability: Some(delta),
-            };
-            assert!(
-                guarantee(
-                    &SketchAlgorithm::Kll,
-                    &params,
-                    &SketchStatistic::Quantile { q: 0.99 },
-                )
-                .is_none(),
-                "{delta}"
-            );
-        }
     }
 
     /// KLL `k` inverts the rank-error fit: ε = 0.01 → 269, ε = 0.05 → 52.
@@ -353,17 +235,11 @@ mod tests {
         let q = default_quantile(0.99);
         assert_eq!(
             size_params(SketchAlgorithm::Kll, &q, 0.01, 0.01),
-            SketchParams::Kll {
-                k: 269,
-                failure_probability: None
-            }
+            SketchParams::Kll { k: 269 }
         );
         assert_eq!(
             size_params(SketchAlgorithm::Kll, &q, 0.05, 0.01),
-            SketchParams::Kll {
-                k: 52,
-                failure_probability: None
-            }
+            SketchParams::Kll { k: 52 }
         );
     }
 
@@ -374,10 +250,7 @@ mod tests {
         use asap_types::ir::operator::agg_intent::default_quantile;
         assert_eq!(
             size_params(SketchAlgorithm::Kll, &default_quantile(0.99), 0.0, 0.01),
-            SketchParams::Kll {
-                k: 26_602,
-                failure_probability: None
-            }
+            SketchParams::Kll { k: 26_602 }
         );
     }
 }

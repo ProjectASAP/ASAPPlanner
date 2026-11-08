@@ -53,9 +53,8 @@ fn cost(queries: &[String]) -> f64 {
         PlanSearchSettings::default(),
     )
     .unwrap();
-    let selection = run.run.selection.as_ref().unwrap();
-    println!("{queries:?}: status {:?}", selection.search_report.status);
-    selection.cost.cost_per_second.unwrap()
+    let (plan, _) = run.run.selection.as_ref().unwrap();
+    asap_integration_tests::planning::plan_cost_per_second(plan, &entries, &w.data, &settings)
 }
 
 /// Asserts the joint plan of `queries` costs no more than their separate

@@ -9,7 +9,7 @@ use crate::ir::operator::operator_properties::{
 };
 use crate::ir::operator::{AggIntent, GroupKeys, Reduction, Source};
 use crate::ir::physical_export::PhysicalASAPOperatorPayload as Payload;
-use crate::ir::schema::{Schema, SketchStatistic, WeightDomain};
+use crate::ir::schema::{Schema, SketchStatistic};
 use crate::ir::{
     ASAPOp, NonASAPOp, Operator, OperatorNode, OperatorResultKind, QueryRoot, ScalarExpr,
 };
@@ -406,25 +406,14 @@ fn at_most_one_row(node: &OperatorNode) -> bool {
     }
 }
 
-/// `domain` with an open requirement answered from `data`'s declared source
-/// facts (`WeightDomain::confirmed`): samples are proven when the metric is
-/// declared a counter or non-negative, a counter derivative only when it is
-/// declared a counter; unknown otherwise. No type is inferred from a name.
-pub fn confirmed_weights(domain: &WeightDomain, data: &DataWorkload) -> WeightDomain {
-    domain.confirmed(
-        |metric| declared_counter(data, metric),
-        |metric| declared_non_negative(data, metric),
-    )
-}
-
 /// Whether `data` declares every sample of `metric` non-negative: the
-/// metric is declared a counter, or a metric (a gauge, say) with
-/// [`SourceFacts::values_non_negative`](crate::workload::SourceFacts::values_non_negative).
+/// metric is declared a counter, or its `value` column is declared
+/// non-negative ([`SourceFacts::column_signs`](crate::workload::SourceFacts::column_signs)).
 pub fn declared_non_negative(data: &DataWorkload, metric: &str) -> bool {
     declared_counter(data, metric)
-        || data
-            .series_facts(metric)
-            .is_some_and(|(facts, _)| facts.values_non_negative)
+        || data.series_facts(metric).is_some_and(|(facts, _)| {
+            facts.column_signs.get("value") == Some(&crate::stages::ValueSign::NonNegative)
+        })
 }
 
 /// Whether `data` declares `metric` a counter, itself or as the `_sum` or
@@ -434,70 +423,6 @@ pub fn declared_non_negative(data: &DataWorkload, metric: &str) -> bool {
 fn declared_counter(data: &DataWorkload, metric: &str) -> bool {
     data.series_facts(metric)
         .is_some_and(|(_, series_type)| series_type == Some(PrometheusMetricType::Counter))
-}
-
-/// `roots` with every open [`WeightDomain::RawDataSamplesOfMetric`] requirement
-/// replaced by its answer from `data` ([`confirmed_weights`]): the form of a
-/// selected plan the executor runs, which reads no data workload. The same
-/// `Rc` where nothing changes.
-pub fn with_confirmed_weights(roots: &[QueryRoot], data: &DataWorkload) -> Vec<QueryRoot> {
-    with_confirmed_weights_at(roots, data, &|_| true)
-}
-
-/// [`with_confirmed_weights`] at the summaries `confirm_at` names only: the
-/// selected plan with the weight proofs Stage 3 made for its candidates
-/// applied (`Selection::nodes_with_proven_non_negative_weights`).
-pub fn with_confirmed_weights_at(
-    roots: &[QueryRoot],
-    data: &DataWorkload,
-    confirm_at: &dyn Fn(&Rc<OperatorNode>) -> bool,
-) -> Vec<QueryRoot> {
-    fn confirm(
-        node: &Rc<OperatorNode>,
-        data: &DataWorkload,
-        confirm_at: &dyn Fn(&Rc<OperatorNode>) -> bool,
-        cache: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
-    ) -> Rc<OperatorNode> {
-        if let Some(done) = cache.get(&Rc::as_ptr(node)) {
-            return Rc::clone(done);
-        }
-        let mut changed = false;
-        let mut operator = node.operator.map_children(|child| {
-            let rebuilt = confirm(child, data, confirm_at, cache);
-            changed |= !Rc::ptr_eq(&rebuilt, child);
-            rebuilt
-        });
-        if let Operator::ASAP(
-            ASAPOp::SummaryAgg { input, .. } | ASAPOp::SummaryTumblingWindowChain { input, .. },
-        ) = &mut operator
-        {
-            let confirmed = confirmed_weights(&input.weight_domain, data);
-            if confirmed != input.weight_domain && confirm_at(node) {
-                input.weight_domain = confirmed;
-                changed = true;
-            }
-        }
-        let rebuilt = if changed {
-            Rc::new(
-                OperatorNode::with_schema(operator, node.schema.clone())
-                    .with_guarantee(node.guarantee.clone()),
-            )
-        } else {
-            Rc::clone(node)
-        };
-        cache.insert(Rc::as_ptr(node), Rc::clone(&rebuilt));
-        rebuilt
-    }
-    let mut cache = HashMap::new();
-    roots
-        .iter()
-        .map(|root| match root {
-            QueryRoot::Operator(n) => QueryRoot::Operator(confirm(n, data, confirm_at, &mut cache)),
-            QueryRoot::Scalar(expr) => QueryRoot::Scalar(
-                expr.map_operator_refs(&mut |n| confirm(n, data, confirm_at, &mut cache)),
-            ),
-        })
-        .collect()
 }
 
 /// Rows per millisecond the sources in `sources` receive together, each

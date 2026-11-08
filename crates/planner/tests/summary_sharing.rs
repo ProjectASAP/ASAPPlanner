@@ -1,5 +1,5 @@
 //! Structurally identical summary producers chosen by different queries are
-//! shared: one `Rc<OperatorNode>` across their plans, planned by Pass 2
+//! shared: one node of the plan across their roots, planned by Pass 2
 //! (ASAP-aware CSE). Some older cost-selection tests stay ignored: with the built-in cost model,
 //! plan selection still selects an exact plan for at least one of their
 //! queries (#580).
@@ -11,7 +11,8 @@ use asap_frontend_promql::promql_metric_names;
 use asap_frontend_sql::SqlCatalog;
 
 use asap_planner::{e2e_plan, FrontendInput, UserInput};
-use asap_planner::{PlanOutput, PlanningModels, QueryPlan};
+use asap_planner::{PlanOutput, PlanningModels};
+use asap_types::ir::QueryRoot;
 
 use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
 use asap_types::ir::schema::{DataType, Field, Schema};
@@ -120,9 +121,24 @@ async fn plan_sql(queries: &[&str]) -> PlanOutput {
     e2e_plan(input).await.expect("workload plans")
 }
 
-/// Every summary state (`SummaryAgg`) each plan reaches, in traversal order.
-fn plan_states(plan: &QueryPlan) -> Vec<Rc<OperatorNode>> {
-    OperatorNode::reachable(&plan.root)
+/// Each operator query's root of `output`'s plan, as IR, in entry order.
+fn operator_roots(output: &PlanOutput) -> Vec<Rc<OperatorNode>> {
+    output
+        .plan
+        .query_roots()
+        .unwrap()
+        .into_iter()
+        .filter_map(|root| match root {
+            QueryRoot::Operator(node) => Some(node),
+            QueryRoot::Scalar(_) => None,
+        })
+        .collect()
+}
+
+/// Every summary state (`SummaryAgg`) a query's root reaches, in traversal
+/// order.
+fn plan_states(root: &Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
+    OperatorNode::reachable(root)
         .into_iter()
         .filter(|node| {
             matches!(
@@ -135,12 +151,11 @@ fn plan_states(plan: &QueryPlan) -> Vec<Rc<OperatorNode>> {
 
 /// Every summary state each plan reaches; each plan selects at least one.
 fn states(output: &PlanOutput) -> Vec<Vec<Rc<OperatorNode>>> {
-    output
-        .plans
+    operator_roots(output)
         .iter()
-        .map(|plan| {
-            let states = plan_states(plan);
-            assert!(!states.is_empty(), "{:?}", plan.root);
+        .map(|root| {
+            let states = plan_states(root);
+            assert!(!states.is_empty(), "{root:?}");
             states
         })
         .collect()
@@ -158,8 +173,8 @@ fn same_states(states: &[Vec<Rc<OperatorNode>>]) -> bool {
 /// The summary states a consumer would run, deduplicated by pointer.
 fn unique_deployments(output: &PlanOutput) -> usize {
     let mut seen: Vec<*const OperatorNode> = Vec::new();
-    for plan in &output.plans {
-        for state in plan_states(plan) {
+    for root in operator_roots(output) {
+        for state in plan_states(&root) {
             let ptr = Rc::as_ptr(&state);
             if !seen.contains(&ptr) {
                 seen.push(ptr);
@@ -203,12 +218,10 @@ async fn sql_p50_and_p99_share_one_producer() {
     let output = plan_sql(&[p50, p99]).await;
     assert!(same_states(&states(&output)));
     assert_eq!(unique_deployments(&output), 1);
-    let names: Vec<_> = output
-        .plans
+    let names: Vec<_> = operator_roots(&output)
         .iter()
-        .map(|plan| {
-            plan.root
-                .schema
+        .map(|root| {
+            root.schema
                 .fields
                 .iter()
                 .map(|field| field.name.clone())
@@ -241,7 +254,7 @@ async fn sql_p50_and_p99_share_one_producer() {
 
 /// Front ends build structurally identical references as separate nodes.
 /// The selected graph may reuse a producer or choose separate physical
-/// candidates. Every distinct selected reference must be exported exactly once.
+/// candidates; the scalar root reads at least the distinct ones.
 #[tokio::test]
 async fn identical_scalar_references_satisfy_the_plan_contract() {
     for (query, distinct) in [
@@ -252,23 +265,12 @@ async fn identical_scalar_references_satisfy_the_plan_contract() {
         ),
     ] {
         let output = plan_promql(&[(query, 0.01)]).await;
-        let references: std::collections::HashSet<_> = output.scalar_roots[0]
+        let references: std::collections::HashSet<_> = output.plan.scalar_roots[0]
             .1
             .operator_refs()
             .into_iter()
-            .map(Rc::as_ptr)
+            .copied()
             .collect();
-        assert_eq!(output.scalar_plans.len(), references.len(), "{query}");
         assert!(references.len() >= distinct, "{query}");
-        let (_, expr) = &output.scalar_roots[0];
-        for node in expr.operator_refs() {
-            assert!(
-                output
-                    .scalar_plans
-                    .iter()
-                    .any(|read| Rc::ptr_eq(&read.root, node)),
-                "{query}"
-            );
-        }
     }
 }

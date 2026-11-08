@@ -3,6 +3,8 @@
 //! [`pass1_memo`], whose output
 //! memo Pass 2 extends.
 
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod composition;
 /// Stage 1, Pass 1's entry: the initial candidates of the memo groups.
 pub(crate) mod logical_memo_candidates;
 /// Stage 1, Pass 1's computation targets, their candidates and their

@@ -28,8 +28,8 @@ mod tests {
     use planner_types::ir::operator::operator_properties::{Reduction, Source};
     use planner_types::ir::scalar::ColumnRef;
     use planner_types::ir::schema::{
-        DataType, FamilyCapability, Field, FieldDataType, GroupingStrategy, Schema,
-        SketchAlgorithm, SketchStatistic, StatisticKind, SummaryInputExpr, SummaryUpdate,
+        DataType, Field, FieldDataType, Schema, SketchAlgorithm, SketchStatistic, StatisticKind,
+        SummaryInputExpr, SummaryTypeCapability, SummaryUpdate,
     };
     use planner_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 
@@ -56,7 +56,7 @@ mod tests {
     ];
 
     fn per_instance(algorithm: &SketchAlgorithm) -> FieldDataType {
-        FieldDataType::Sketch(*algorithm, GroupingStrategy::PerSubpopulationInstance)
+        FieldDataType::Sketch(*algorithm)
     }
 
     /// A statistic of kind `readout`.
@@ -84,7 +84,7 @@ mod tests {
     /// Whether the factory builds the per-instance `family` from rows, with
     /// a value column or keyed items.
     fn factory_builds(family: &FieldDataType) -> bool {
-        let FieldDataType::Sketch(_, grouping) = family else {
+        let FieldDataType::Sketch(_) = family else {
             return false;
         };
         let value = SummaryUpdate::column(ColumnRef::SampleValue);
@@ -92,8 +92,8 @@ mod tests {
             item: Some(SummaryInputExpr::Column(ColumnRef::Named("item".into()))),
             ..value.clone()
         };
-        create_planner_accumulator(family, None, &value, grouping).is_ok()
-            || create_planner_accumulator(family, None, &keyed, grouping).is_ok()
+        create_planner_accumulator(family, None, &value).is_ok()
+            || create_planner_accumulator(family, None, &keyed).is_ok()
     }
 
     /// Whether the executor answers `readout` from `family`'s state: top-k
@@ -101,7 +101,7 @@ mod tests {
     /// sketch evaluation, whose kernel must then read it from a built state.
     fn evaluation_answers(family: &FieldDataType, readout: StatisticKind) -> bool {
         match (readout, family) {
-            (StatisticKind::TopK, FieldDataType::Sketch(kind, _)) => matches!(
+            (StatisticKind::TopK, FieldDataType::Sketch(kind)) => matches!(
                 kind,
                 planner_types::ir::schema::SketchAlgorithm::CmsWithHeap
                     | planner_types::ir::schema::SketchAlgorithm::CountSketchWithHeap
@@ -119,7 +119,7 @@ mod tests {
     /// Whether the kernel of a per-instance `family` state built from one
     /// update reads `readout`.
     fn kernel_answers(family: &FieldDataType, readout: StatisticKind) -> bool {
-        let FieldDataType::Sketch(_, grouping) = family else {
+        let FieldDataType::Sketch(_) = family else {
             return false;
         };
         let value = SummaryUpdate::column(ColumnRef::SampleValue);
@@ -127,8 +127,8 @@ mod tests {
             item: Some(SummaryInputExpr::Column(ColumnRef::Named("item".into()))),
             ..value.clone()
         };
-        let Ok(mut updater) = create_planner_accumulator(family, None, &value, grouping)
-            .or_else(|_| create_planner_accumulator(family, None, &keyed, grouping))
+        let Ok(mut updater) = create_planner_accumulator(family, None, &value)
+            .or_else(|_| create_planner_accumulator(family, None, &keyed))
         else {
             return false;
         };
@@ -160,10 +160,9 @@ mod tests {
         .unwrap();
         let state = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
             child: scan,
-            family: family.clone(),
+            summary_type: family.clone(),
             input: SummaryUpdate::column(ColumnRef::SampleValue),
             reduction: Reduction::by(vec![]),
-            grouping: GroupingStrategy::default(),
             filter: None,
         }))
         .unwrap();
@@ -192,7 +191,7 @@ mod tests {
                     .iter()
                     .any(|s| &s.family == algorithm && s.readouts.contains(&readout));
                 assert_eq!(declared, executed, "{algorithm:?} {readout:?}");
-                let answered = FamilyCapability::of(&family).answers(&statistic(readout));
+                let answered = SummaryTypeCapability::of(&family).answers(&statistic(readout));
                 assert_eq!(
                     ir_builds_estimate(&family, readout),
                     answered,

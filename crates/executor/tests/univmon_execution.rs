@@ -15,14 +15,14 @@ use planner_types::ir::properties::ExecutionDataState;
 use planner_types::ir::scalar::ColumnRef;
 use planner_types::ir::schema::{DataType, Schema};
 use planner_types::ir::schema::{
-    Field, FieldDataType, GroupingStrategy, NonNegativeWeightProof, SketchAlgorithm,
-    SketchStatistic, SummaryInputExpr, SummaryUpdate, WeightDomain,
+    Field, FieldDataType, NonNegativeWeightProof, SketchAlgorithm, SketchStatistic,
+    SummaryInputExpr, SummaryUpdate, WeightDomain,
 };
 use planner_types::ir::ASAPOp;
 use std::sync::Arc;
 
 fn family() -> FieldDataType {
-    FieldDataType::Sketch(SketchAlgorithm::UnivMon, GroupingStrategy::default())
+    FieldDataType::Sketch(SketchAlgorithm::UnivMon)
 }
 
 fn context() -> RunContext {
@@ -166,7 +166,7 @@ fn planner_unit_frequency_update_binds_as_a_value_frequency_build() -> Result<()
         id: 1,
         payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
             child: 0,
-            family: family(),
+            summary_type: family(),
             input: SummaryUpdate {
                 item: Some(SummaryInputExpr::Column(ColumnRef::Named("src_ip".into()))),
                 weight: SummaryInputExpr::Constant(1.0),
@@ -175,7 +175,6 @@ fn planner_unit_frequency_update_binds_as_a_value_frequency_build() -> Result<()
                 },
             },
             reduction: Reduction::Reduce(GroupKeys::by(vec![])),
-            grouping: GroupingStrategy::default(),
             filter: None,
         }),
         output_state: ExecutionDataState::QUERY_ROWS,
@@ -184,6 +183,7 @@ fn planner_unit_frequency_update_binds_as_a_value_frequency_build() -> Result<()
         output_schema: (*state).clone(),
         guarantee: None,
         retention_ms: None,
+        selected_physical_candidate: None,
     };
     let build = compile_node(&node, std::slice::from_ref(&input))?;
     let batch = Batch::try_new(

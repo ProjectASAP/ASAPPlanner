@@ -39,7 +39,6 @@ use std::rc::Rc;
 
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog, SqlError as LoweringError};
 use asap_types::ir::operator::{AggIntent, GroupKeys};
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{NonASAPOp, OperatorNode};
 use asap_types::workload::SqlDialect;
@@ -96,13 +95,7 @@ fn queries() -> Vec<String> {
 }
 
 async fn lower(q: &str) -> Result<Rc<OperatorNode>, LoweringError> {
-    lower_sql_dialect(
-        q,
-        &catalog(),
-        SqlDialect::ClickhouseSQL,
-        AccuracyTarget::exact(),
-    )
-    .await
+    lower_sql_dialect(q, &catalog(), SqlDialect::ClickhouseSQL).await
 }
 
 /// Pinned outcome for one corpus query.
@@ -258,7 +251,7 @@ async fn top_k_queries_are_count_grouped_by_prefix() {
             idx + 1
         );
         assert!(
-            matches!(measures.as_slice(), [AggIntent::Count { .. }]),
+            matches!(measures.as_slice(), [AggIntent::Count]),
             "q{} ({label}) expected a single Count aggregate, got {measures:?}",
             idx + 1
         );

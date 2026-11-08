@@ -89,18 +89,15 @@ fn scalar_type_rules_fail_closed() {
 fn state_evaluations_and_passthrough_keep_their_contracts() {
     use asap_types::ir::operator::Reduction;
     use asap_types::ir::scalar::ColumnRef;
-    use asap_types::ir::schema::{
-        FieldDataType, GroupingStrategy, SketchAlgorithm, SketchStatistic, SummaryUpdate,
-    };
+    use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchStatistic, SummaryUpdate};
     use asap_types::ir::{ASAPOp, Operator, ProjectItem};
-    let family = FieldDataType::Sketch(SketchAlgorithm::Kll, GroupingStrategy::default());
+    let family = FieldDataType::Sketch(SketchAlgorithm::Kll);
     let state = Rc::new(
         OperatorNode::new(Operator::ASAP(ASAPOp::SummaryAgg {
             child: scan(),
-            family,
+            summary_type: family,
             input: SummaryUpdate::column(ColumnRef::Named("x".into())),
             reduction: Reduction::by(vec![]),
-            grouping: GroupingStrategy::default(),
             filter: None,
         }))
         .unwrap(),
@@ -139,17 +136,16 @@ fn shared_construction_derives_both_operator_categories() {
     use asap_types::ir::operator::Reduction;
     use asap_types::ir::scalar::ColumnRef;
     use asap_types::ir::schema::FieldDataType;
-    use asap_types::ir::schema::{ExactKind, ExactParams, GroupingStrategy, SummaryUpdate};
+    use asap_types::ir::schema::{ExactKind, ExactParams, SummaryUpdate};
     use asap_types::ir::{ASAPOp, Operator, ProjectItem};
 
     let input = scan();
     let state = Rc::new(
         OperatorNode::new(Operator::ASAP(ASAPOp::SummaryAgg {
             child: input.clone(),
-            family: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            summary_type: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
             input: SummaryUpdate::column(ColumnRef::Named("x".into())),
             reduction: Reduction::by(vec![]),
-            grouping: GroupingStrategy::default(),
             filter: None,
         }))
         .unwrap(),

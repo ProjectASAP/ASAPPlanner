@@ -17,8 +17,8 @@ use serde_json::{json, Value};
 use asap_types::ir::operator::agg_intent::AggIntent;
 use asap_types::ir::operator::operator_properties::Reduction;
 use asap_types::ir::scalar::{ColumnRef, CompareOpKind, ScalarValue};
-use asap_types::ir::schema::family_capability::FamilyCapability;
 use asap_types::ir::schema::sketch::{SketchAlgorithm, SketchStatistic};
+use asap_types::ir::schema::summary_type_capability::SummaryTypeCapability;
 use asap_types::ir::schema::{DataType, FieldDataType};
 use asap_types::ir::{
     ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorNode, Predicate, ProjectItem, QueryRoot,
@@ -990,7 +990,14 @@ fn with_root_estimate(
 fn state_family(state: &Rc<OperatorNode>) -> Result<FieldDataType, String> {
     match state.summary_build() {
         Some(
-            ASAPOp::SummaryAgg { family, .. } | ASAPOp::SummaryTumblingWindowChain { family, .. },
+            ASAPOp::SummaryAgg {
+                summary_type: family,
+                ..
+            }
+            | ASAPOp::SummaryTumblingWindowChain {
+                summary_type: family,
+                ..
+            },
         ) => Ok(family),
         _ => Err("q's estimate reads no single summary build".into()),
     }
@@ -1118,7 +1125,7 @@ pub fn witness_root(
         Witness::SketchRollup { labels } => {
             let (state, query) = root_estimate(q_root)?;
             let family = state_family(&state)?;
-            if !FamilyCapability::merges_groups(&family) {
+            if !SummaryTypeCapability::merges_groups(&family) {
                 return Err(format!("q's family {family:?} does not merge groups"));
             }
             let group_by = labels
@@ -1192,7 +1199,7 @@ pub fn witness_root(
         Witness::OtherStatistic { statistic } => {
             let answers = |state: &Rc<OperatorNode>| -> Result<(), String> {
                 let family = state_family(state)?;
-                if FamilyCapability::of(&family).answers(statistic) {
+                if SummaryTypeCapability::of(&family).answers(statistic) {
                     Ok(())
                 } else {
                     Err(format!(
@@ -1242,7 +1249,7 @@ pub fn witness_root(
                 return Err("both selections read one state".into());
             }
             let family = state_family(&state)?;
-            if FamilyCapability::of(&family).merge_inputs.is_none() {
+            if SummaryTypeCapability::of(&family).merge_inputs.is_none() {
                 return Err(format!("q's family {family:?} has no merge"));
             }
             // The merge's coverage check refuses states of different

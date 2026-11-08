@@ -3,7 +3,7 @@ use planner_types::ir::schema::*;
 
 #[test]
 fn rate_updates_cannot_enter_integer_heap_factory() {
-    let family = FieldDataType::Sketch(SketchAlgorithm::CmsWithHeap, Default::default());
+    let family = FieldDataType::Sketch(SketchAlgorithm::CmsWithHeap);
     let input = SummaryUpdate {
         item: Some(SummaryInputExpr::Column(
             planner_types::ir::scalar::ColumnRef::Named("service".into()),
@@ -13,11 +13,5 @@ fn rate_updates_cannot_enter_integer_heap_factory() {
             proof: NonNegativeWeightProof::ResetAwareCounterDerivative,
         },
     };
-    assert!(asap_executor::factory::create_planner_accumulator(
-        &family,
-        None,
-        &input,
-        &Default::default()
-    )
-    .is_err());
+    assert!(asap_executor::factory::create_planner_accumulator(&family, None, &input).is_err());
 }

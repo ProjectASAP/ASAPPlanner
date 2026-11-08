@@ -8,8 +8,8 @@
 //! *vocabulary* that fixes that — the typed metric, the symbolic bound and
 //! failure-probability expressions, the provenance trail, and the typed
 //! rejection reasons. The *algebra* that composes these (the built-in
-//! conservative rules and budget allocation) and the deployment's
-//! pluggable `AccuracyModel` trait live one layer up in `asap_accuracy`:
+//! conservative rules and budget allocation) and the deployment's measured
+//! accuracy (`AccuracyEvidence`) live one layer up in `asap_accuracy`:
 //! this crate defines the shapes, the planning crates decide.
 //!
 //! ## What a guarantee says

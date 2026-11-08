@@ -8,7 +8,6 @@ use asap_frontend_common::{
 use asap_types::ir::operator::{
     AggIntent, BinaryOpKind, GroupKeys, PromQLVectorSetOpKind, Reduction, Source,
 };
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
 use asap_types::ir::{BinaryOperator, ExprSemantics, TimeRangeKind};
 use asap_types::workload::{DurationMs, PlanningWorkload, QueryLanguage, WorkloadError};
@@ -63,13 +62,7 @@ pub fn lower_metricsql_query_workload(
     workload
         .query_workload
         .entries()
-        .map(|entry| {
-            lower_with_sample_intervals(
-                &entry.query.0,
-                entry.requirements.accuracy.clone(),
-                &sample_interval_of,
-            )
-        })
+        .map(|entry| lower_with_sample_intervals(&entry.query.0, &sample_interval_of))
         .collect()
 }
 
@@ -79,7 +72,6 @@ pub fn lower_metricsql_query_workload(
 /// [`WorkloadError::MissingSampleInterval`].
 pub(crate) fn lower_with_sample_intervals(
     query: &str,
-    accuracy: AccuracyTarget,
     sample_interval_of: &dyn Fn(&str) -> Option<Duration>,
 ) -> Result<asap_types::ir::QueryRoot, MetricsqlError> {
     let ast = parse_metricsql(query)?;
@@ -88,18 +80,13 @@ pub(crate) fn lower_with_sample_intervals(
             asap_types::ir::ScalarExpr::literal_f64(number.value),
         ));
     }
-    let unresolved = Lowerer {
-        accuracy,
-        sample_interval_of,
-    }
-    .lower(&ast)?;
+    let unresolved = Lowerer { sample_interval_of }.lower(&ast)?;
     resolve_root(&unresolved)
         .map(asap_types::ir::QueryRoot::Operator)
         .map_err(|e| MetricsqlError::Resolve(e.to_string()))
 }
 
 struct Lowerer<'a> {
-    accuracy: AccuracyTarget,
     /// What a bare instant selector over a metric looks back; `None` when
     /// the metric declares no sample interval.
     sample_interval_of: &'a dyn Fn(&str) -> Option<Duration>,
@@ -220,9 +207,7 @@ impl Lowerer<'_> {
             RollupFunction::MinOverTime => AggIntent::Min { col: None },
             RollupFunction::MaxOverTime => AggIntent::Max { col: None },
             RollupFunction::SumOverTime => AggIntent::Sum { col: None },
-            RollupFunction::CountOverTime => AggIntent::Count {
-                accuracy: self.accuracy.clone(),
-            },
+            RollupFunction::CountOverTime => AggIntent::Count,
             RollupFunction::StddevOverTime => AggIntent::StdDev {
                 col: None,
                 population: true,
@@ -245,7 +230,6 @@ impl Lowerer<'_> {
             RollupFunction::QuantileOverTime => AggIntent::Quantile {
                 col: None,
                 q: number_arg(&function.args, 0)?,
-                accuracy: self.accuracy.clone(),
             },
             _ => {
                 return Err(unsupported(format!(
@@ -294,9 +278,7 @@ impl Lowerer<'_> {
             AggregateFunction::Min => AggIntent::Min { col: None },
             AggregateFunction::Max => AggIntent::Max { col: None },
             // `count(v)` counts series, not distinct sample values.
-            AggregateFunction::Count => AggIntent::Count {
-                accuracy: self.accuracy.clone(),
-            },
+            AggregateFunction::Count => AggIntent::Count,
             AggregateFunction::StdDev => AggIntent::StdDev {
                 col: None,
                 population: true,
@@ -309,7 +291,6 @@ impl Lowerer<'_> {
             AggregateFunction::Quantile => AggIntent::Quantile {
                 col: None,
                 q: number_arg(&expr.args, 0)?,
-                accuracy: self.accuracy.clone(),
             },
             _ => return Err(unsupported(format!("aggregate `{}`", expr.name()))),
         };
@@ -457,10 +438,9 @@ fn unsupported(message: impl Into<String>) -> MetricsqlError {
 /// [`lower_metricsql_query`]).
 pub fn lower_metricsql(
     query: &str,
-    accuracy: AccuracyTarget,
     sample_interval: Duration,
 ) -> Result<Rc<asap_types::ir::OperatorNode>, MetricsqlError> {
-    match lower_metricsql_query(query, accuracy, sample_interval)? {
+    match lower_metricsql_query(query, sample_interval)? {
         asap_types::ir::QueryRoot::Operator(node) => Ok(node),
         _ => Err(MetricsqlError::UnsupportedFeature(
             "scalar root: use lower_metricsql_query".into(),
@@ -473,8 +453,7 @@ pub fn lower_metricsql(
 /// back that long for its latest sample.
 pub fn lower_metricsql_query(
     query: &str,
-    accuracy: AccuracyTarget,
     sample_interval: Duration,
 ) -> Result<asap_types::ir::QueryRoot, MetricsqlError> {
-    lower_with_sample_intervals(query, accuracy, &|_| Some(sample_interval))
+    lower_with_sample_intervals(query, &|_| Some(sample_interval))
 }

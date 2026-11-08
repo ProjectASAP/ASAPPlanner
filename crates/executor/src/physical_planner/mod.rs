@@ -3,6 +3,7 @@
 //! A node without a native lowering fails compilation; the deployment runtime
 //! must execute it.
 use crate::operators::{RowWeight, SummaryEvaluation};
+use crate::sources::{scan_windows, time_range_window, view_windows, ScanWindow};
 use crate::summary_kernels::exact::ExactEvaluation;
 use crate::{
     operators::{Expression, Operator, Reduction, SortKey},
@@ -15,12 +16,12 @@ use planner_types::ir::operator::{
     agg_has_exact_per_entity_kernel, AggIntent, GroupKeys, Reduction as PlannerReduction,
 };
 use planner_types::ir::physical_export::{
-    time_range_window, PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
-    PhysicalASAPOperatorPayload as Payload, ScanWindow,
+    PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
+    PhysicalASAPOperatorPayload as Payload,
 };
 use planner_types::ir::scalar::{ColumnRef, CompareOpKind};
 use planner_types::ir::schema::{
-    DataType, FamilyCapability, FieldDataType, SketchStatistic, SummaryInputExpr,
+    DataType, FieldDataType, SketchStatistic, SummaryInputExpr, SummaryTypeCapability,
 };
 // `promql_rows` reads `OperatorNode` through `super::*` only in its
 // test-support helpers.
@@ -159,13 +160,13 @@ fn compile_internal(
     }
     // Each view's and each `Scan`'s window, the DAG indexed once for all:
     // a materialized tumbling-window chain has a view per tumbling window.
-    let view_windows = dag.view_windows(views.iter().map(|view| view.node_id));
-    let scan_windows = dag.scan_windows(
+    let view_windows = view_windows(dag, views.iter().map(|view| view.node_id));
+    let scan_windows = scan_windows(
+        dag,
         dag.nodes
             .iter()
             .filter(|node| matches!(node.payload, Payload::NonASAP(NonASAPOp::Scan { .. })))
             .map(|node| node.id),
-        &Default::default(),
     );
     let compile_roots: BTreeSet<NodeId> = roots.iter().copied().collect();
     let mut physical_dag = CompiledPhysicalDAG::new(roots.to_vec());
@@ -377,7 +378,7 @@ fn compile_internal(
                     )));
                 }
                 let reduction = match measure {
-                    AggIntent::Count { .. } => Reduction::Count,
+                    AggIntent::Count => Reduction::Count,
                     AggIntent::Sum { .. } => Reduction::Sum(value),
                     AggIntent::Avg { .. } => Reduction::Avg(value),
                     AggIntent::Min { .. } => Reduction::Min(value),
@@ -448,10 +449,9 @@ fn compile_internal(
             // A closed row must include either all source labels or the explicit
             // complete-label identity. Projected labels alone are insufficient.
             if let Payload::ASAP(ASAPOp::SummaryAgg {
-                family,
+                summary_type: family,
                 input: update,
                 reduction: PlannerReduction::PerEntity,
-                grouping,
                 filter: None,
                 ..
             }) = &node.payload
@@ -479,7 +479,7 @@ fn compile_internal(
                         "per-entity summary requires complete source identity",
                     ));
                 }
-                crate::capability::validate_summary_kernel(family, update, grouping)
+                crate::capability::validate_summary_kernel(family, update)
                     .map_err(Error::Invalid)?;
                 let value = match (frequency_item, &update.weight) {
                     (Some(item), _) => item,
@@ -879,7 +879,7 @@ fn temporal_evaluation_drops_name(node: &PhysicalASAPDAGNode) -> bool {
 /// one only when the family-capability table gives the family a sound merge.
 pub(crate) fn require_sound_merge(input: &SchemaRef) -> Result<(), Error> {
     let state = &input.fields[summary_column(input)?].dtype;
-    if FamilyCapability::of(state).merge_inputs.is_none() {
+    if SummaryTypeCapability::of(state).merge_inputs.is_none() {
         return Err(invalid(format!(
             "summary merge over {state:?} is unsupported: the family has no sound merge"
         )));
@@ -1137,7 +1137,7 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                                 .unwrap_or_else(|| named_column(input, &ColumnRef::SampleValue))
                         };
                         let m = match m {
-                            AggIntent::Count { .. } => Reduction::Count,
+                            AggIntent::Count => Reduction::Count,
                             AggIntent::Cardinality { cols, .. } => {
                                 Reduction::Cardinality(if cols.is_empty() {
                                     vec![column(None)?]
@@ -1200,10 +1200,9 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
             _ => Err(invalid("value operation has no native implementation")),
         },
         Payload::ASAP(ASAPOp::SummaryAgg {
-            family,
+            summary_type: family,
             input: update,
             reduction,
-            grouping,
             filter,
             ..
         }) => {
@@ -1213,7 +1212,7 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                 crate::capability::validate_ingestion_time_summary(filter.as_ref())
                     .map_err(Error::Invalid)?;
             }
-            let build = summary_agg_build(input, family, update, reduction, grouping)?;
+            let build = summary_agg_build(input, family, update, reduction)?;
             match filter {
                 Some(filter) => build.with_row_filter(expression(&filter.0, input)?),
                 None => Ok(build),
@@ -1228,9 +1227,9 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                 // share one state.
                 Some(keys) => {
                     let family = &input.fields[state].dtype;
-                    if !FamilyCapability::merges_groups(family) {
+                    if !SummaryTypeCapability::merges_groups(family) {
                         return Err(invalid(format!(
-                            "a rollup of {family:?} states: the family cannot merge different groups"
+                            "a rollup of {family:?} states: the summary type cannot merge different groups"
                         )));
                     }
                     keys.clone()
@@ -1282,11 +1281,12 @@ fn summary_agg_build(
     family: &FieldDataType,
     update: &planner_types::ir::schema::SummaryUpdate,
     reduction: &PlannerReduction,
-    grouping: &planner_types::ir::schema::GroupingStrategy,
 ) -> Result<Operator, Error> {
-    if grouping != &planner_types::ir::schema::GroupingStrategy::PerSubpopulationInstance {
-        crate::capability::validate_summary_kernel(family, update, grouping)
-            .map_err(Error::Invalid)?;
+    if matches!(
+        family,
+        FieldDataType::Sketch(planner_types::ir::schema::SketchAlgorithm::HydraCms)
+    ) {
+        crate::capability::validate_summary_kernel(family, update).map_err(Error::Invalid)?;
         let PlannerReduction::Reduce(keys) = reduction else {
             return Err(invalid("an all-groups summary requires explicit groups"));
         };
@@ -1309,8 +1309,7 @@ fn summary_agg_build(
         crate::capability::unit_frequency_column(update),
         unkeyed_frequency_family(family),
     ) {
-        crate::capability::validate_summary_kernel(family, update, grouping)
-            .map_err(Error::Invalid)?;
+        crate::capability::validate_summary_kernel(family, update).map_err(Error::Invalid)?;
         let PlannerReduction::Reduce(keys) = reduction else {
             return Err(invalid(
                 "summary construction requires explicit grouping columns",
@@ -1328,7 +1327,7 @@ fn summary_agg_build(
         let PlannerReduction::Reduce(keys) = reduction else {
             return Err(invalid("keyed summary requires explicit partitions"));
         };
-        if matches!(family, FieldDataType::Sketch(kind, _) if kind == &planner_types::ir::schema::SketchAlgorithm::CmsWithHeap)
+        if matches!(family, FieldDataType::Sketch(kind) if kind == &planner_types::ir::schema::SketchAlgorithm::CmsWithHeap)
             && !matches!(
                 update.weight_domain,
                 planner_types::ir::schema::WeightDomain::NonNegative { .. }
@@ -1362,7 +1361,7 @@ fn summary_agg_build(
             groups(input, keys)?,
         );
     }
-    crate::capability::validate_summary_kernel(family, update, grouping).map_err(Error::Invalid)?;
+    crate::capability::validate_summary_kernel(family, update).map_err(Error::Invalid)?;
     let SummaryInputExpr::Column(column) = &update.weight else {
         return Err(invalid(
             "summary update expression must be projected to a column",
@@ -1397,7 +1396,7 @@ fn row_weight(input: &SchemaRef, weight: &SummaryInputExpr) -> Result<RowWeight,
 /// Families whose state counts values of one column without keyed items:
 /// their unit-frequency update builds over that column.
 fn unkeyed_frequency_family(family: &FieldDataType) -> bool {
-    matches!(family, FieldDataType::Sketch(kind, _) if matches!(
+    matches!(family, FieldDataType::Sketch(kind) if matches!(
         kind,
         planner_types::ir::schema::SketchAlgorithm::UnivMon
             | planner_types::ir::schema::SketchAlgorithm::Hll

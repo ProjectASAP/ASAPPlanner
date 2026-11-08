@@ -104,7 +104,6 @@ pub fn lower_promql_query_workload(
         .map(|entry| {
             let root = promql::PromqlLowerer::lower_query(
                 &entry.query.0,
-                &entry.requirements.accuracy.clone(),
                 &sample_interval_of,
                 &metric_type_of,
             )?;

@@ -12,13 +12,14 @@ use crate::{
 use futures::{stream, StreamExt};
 use planner_types::ir::materialized_view::MaterializedView;
 use planner_types::ir::operator::Source;
-use planner_types::ir::physical_export::ScanWindow;
 use planner_types::ir::schema::DataType;
 use planner_types::ir::ScalarExpr;
 use std::sync::Arc;
 
 mod data_store;
 pub use data_store::{DataStore, MaterializedViewRequest, RawDataRequest};
+mod window;
+pub(crate) use window::{scan_windows, time_range_window, view_windows, ScanWindow};
 mod memory;
 pub use memory::InMemoryDataStore;
 

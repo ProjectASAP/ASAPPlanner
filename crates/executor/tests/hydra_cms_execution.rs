@@ -36,14 +36,8 @@ const ROWS: [(&str, &str, f64); 9] = [
     ("db", "vacuum", 2.),
 ];
 
-fn grouping() -> GroupingStrategy {
-    GroupingStrategy::SharedMultiSubpopulation {
-        kind: HydraKind::HydraCms,
-    }
-}
-
 fn family() -> FieldDataType {
-    FieldDataType::Sketch(SketchAlgorithm::Cms, grouping())
+    FieldDataType::Sketch(SketchAlgorithm::HydraCms)
 }
 
 fn schema(fields: Vec<Field>) -> Schema {
@@ -65,6 +59,7 @@ fn node(id: usize, payload: Payload, output: Schema) -> PhysicalASAPDAGNode {
         output_schema: output,
         guarantee: None,
         retention_ms: None,
+        selected_physical_candidate: None,
     }
 }
 
@@ -109,10 +104,9 @@ fn summary_agg(update: SummaryUpdate, filter: Option<Predicate<usize>>) -> Physi
         1,
         Payload::ASAP(ASAPOp::SummaryAgg {
             child: 0,
-            family: family(),
+            summary_type: family(),
             input: update,
             reduction: Reduction::Reduce(GroupKeys::by(vec![0])),
-            grouping: grouping(),
             filter,
         }),
         schema(vec![
@@ -405,7 +399,7 @@ fn constant_weight_above_i32_is_refused_at_validation() {
         },
         ..unit_count()
     };
-    let error = asap_executor::capability::validate_summary_kernel(&family(), &update, &grouping())
+    let error = asap_executor::capability::validate_summary_kernel(&family(), &update)
         .expect_err("validation accepted a constant above i32::MAX");
     assert!(
         error.contains("HydraCms") && error.contains("i32::MAX"),

@@ -144,7 +144,7 @@ fn compile_aggregate(
     let reduction = match intent {
         AggIntent::Sum { .. } => Reduction::Sum(1),
         AggIntent::Avg { .. } => Reduction::Avg(1),
-        AggIntent::Count { .. } => Reduction::Count,
+        AggIntent::Count => Reduction::Count,
         AggIntent::Min { .. } => Reduction::Min(1),
         AggIntent::Max { .. } => Reduction::Max(1),
         _ => return Err(Error::Invalid("unsupported vector aggregate".into())),
@@ -328,9 +328,7 @@ fn grouping_preserves_unenumerated_labels_and_empty_label_semantics() {
     equal_rows(
         run(
             compile_aggregate(
-                &AggIntent::Count {
-                    accuracy: planner_types::ir::properties::AccuracyTarget::exact(),
-                },
+                &AggIntent::Count,
                 &GroupKeys::by(vec![ColumnRef::Named("job".into())]),
             )
             .unwrap(),
@@ -542,7 +540,6 @@ fn exact_state_evaluations_recover_and_finalize_tumbling_windows() {
                         &family,
                         None,
                         &SummaryUpdate::column(ColumnRef::SampleValue),
-                        &GroupingStrategy::PerSubpopulationInstance,
                     )
                     .unwrap();
                     for sample in samples {
@@ -591,7 +588,6 @@ fn recovered_exact_counter_uses_window_and_omits_insufficient_samples() {
                     &family,
                     None,
                     &SummaryUpdate::column(ColumnRef::SampleValue),
-                    &GroupingStrategy::PerSubpopulationInstance,
                 )
                 .unwrap();
                 state.update_single(100., -50_000).unwrap();

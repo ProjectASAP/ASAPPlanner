@@ -70,8 +70,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::physical_export::{
-    offset_below, PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPDAGValidationError,
-    PhysicalASAPNodeId, ScanWindow,
+    PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPDAGValidationError, PhysicalASAPNodeId,
 };
 use crate::ir::operator::asap::ASAPOp;
 use crate::ir::operator::node::{Operator, OperatorNode};
@@ -509,8 +508,8 @@ impl PhysicalASAPDAG {
     /// `SummaryTumblingWindowChain` (a DAG with its chains unexpanded), its newest tumbling window's,
     /// `(tumbling_window_width, s mod tumbling_window_width)` with `s` the sum of the offsets of
     /// the `TimeShift`s below it; for any other node, that of its window
-    /// ([`Self::view_windows`], which counts a chain below it as all its
-    /// tumbling windows). A chain and each of its expanded tumbling windows have the same one.
+    /// (the windows below it, a chain below it counting as all its tumbling
+    /// windows). A chain and each of its expanded tumbling windows have the same one.
     /// `None` when the window is unbounded or empty. O(nodes + edges).
     pub fn refresh_window(&self, node: PhysicalASAPNodeId) -> Option<RefreshWindow> {
         self.refresh_windows([node])[&node]
@@ -522,45 +521,8 @@ impl PhysicalASAPDAG {
         &self,
         nodes: impl IntoIterator<Item = PhysicalASAPNodeId>,
     ) -> HashMap<PhysicalASAPNodeId, Option<RefreshWindow>> {
-        let payloads = self.payloads_by_id();
-        let (chains, others): (Vec<_>, Vec<_>) = nodes.into_iter().partition(|id| {
-            matches!(
-                payloads.get(id),
-                Some(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }))
-            )
-        });
-        let mut windows: HashMap<PhysicalASAPNodeId, Option<RefreshWindow>> = self
-            .view_windows(others)
-            .into_iter()
-            .map(|(id, window)| {
-                let refresh_window = match window {
-                    ScanWindow::Within {
-                        end_offset_ms,
-                        width_ms,
-                    } => RefreshWindow::of_window(end_offset_ms, width_ms),
-                    ScanWindow::Unbounded => None,
-                };
-                (id, refresh_window)
-            })
-            .collect();
-        for chain in chains {
-            let Some(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
-                child,
-                tumbling_window_width_ms,
-                ..
-            })) = payloads.get(&chain)
-            else {
-                continue;
-            };
-            // The newest tumbling window ends at the offsets of the shifts below the chain.
-            let end_offset_ms = offset_below(*child, |id| payloads.get(&id).copied());
-            let width_ms = i64::try_from(*tumbling_window_width_ms).unwrap_or(0);
-            windows.insert(
-                chain,
-                end_offset_ms.and_then(|offset| RefreshWindow::of_window(offset, width_ms)),
-            );
-        }
-        windows
+        let _ = nodes.into_iter();
+        todo!("#1207 PR 6: a node's refresh window from the TimeRange and TimeShift nodes above its inputs")
     }
 
     /// Sets `retention_ms` on every materialized view and every query-time
@@ -580,7 +542,7 @@ impl PhysicalASAPDAG {
     /// nodes once keeps them for the largest requirement among those nodes.
     ///
     /// A query-time `Scan` keeps its rows for its consumers' window
-    /// ([`Self::scan_window`]'s `lookback_ms`) plus their longest
+    /// (how far back they read) plus their longest
     /// range-evaluation span, and at least the retention of every view
     /// refreshed on first read from it (which may be refreshed for its
     /// oldest step); `None` when its window is unbounded. In an installed
@@ -594,70 +556,8 @@ impl PhysicalASAPDAG {
         tumbling_window_retention_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
         reader_span_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
     ) -> Result<Vec<MaterializedView>, InstallableDagError> {
-        let (mut views, scans_read): (Vec<MaterializedView>, Vec<Vec<PhysicalASAPNodeId>>) =
-            self.views_with_node_retention()?.into_iter().unzip();
-        let mut reach_ms_by_node = HashMap::new();
-        let mut position_of = HashMap::new();
-        for (position, view) in views.iter_mut().enumerate() {
-            let reach_ms = reach_ms_of(&view.inputs, &reach_ms_by_node);
-            let span_ms = match view.inputs.materialized_views.is_empty() {
-                true => 0,
-                false => reader_span_ms_by_node
-                    .get(&view.node_id)
-                    .copied()
-                    .unwrap_or(0),
-            };
-            view.retention_ms = tumbling_window_retention_ms_by_node
-                .get(&view.node_id)
-                .copied()
-                .unwrap_or(reach_ms + span_ms);
-            reach_ms_by_node.insert(view.node_id, reach_ms);
-            position_of.insert(view.node_id, position);
-        }
-        // Views before their inputs: an input stays while every view built
-        // from it may still be refreshed.
-        for index in (0..views.len()).rev() {
-            let view = &views[index];
-            let needed_ms = match view.refresh {
-                MaterializedViewRefresh::OnFirstRead => view.retention_ms,
-                MaterializedViewRefresh::AtIngestion => reach_ms_by_node[&view.node_id],
-            };
-            for input in view.inputs.materialized_views.clone() {
-                let retained = &mut views[position_of[&input]].retention_ms;
-                *retained = (*retained).max(needed_ms);
-            }
-        }
-        let mut retention_ms_by_node: HashMap<PhysicalASAPNodeId, Option<u64>> = views
-            .iter()
-            .map(|view| (view.node_id, Some(view.retention_ms)))
-            .collect();
-        // How long each scan's rows are needed by the views refreshed on
-        // first read from it.
-        let mut view_need_ms_by_scan: HashMap<PhysicalASAPNodeId, u64> = HashMap::new();
-        for (view, scans) in views.iter().zip(&scans_read) {
-            if view.refresh == MaterializedViewRefresh::OnFirstRead {
-                for scan in scans {
-                    let need_ms = view_need_ms_by_scan.entry(*scan).or_insert(0);
-                    *need_ms = (*need_ms).max(view.retention_ms);
-                }
-            }
-        }
-        let scan_windows = self.query_time_scan_windows();
-        for node in self.nodes.iter().filter(|node| is_query_time_scan(node)) {
-            let window_ms = scan_windows[&node.id].lookback_ms();
-            let retention_ms = window_ms.map(|window_ms| {
-                let span_ms = reader_span_ms_by_node.get(&node.id).copied().unwrap_or(0);
-                let views_ms = view_need_ms_by_scan.get(&node.id).copied().unwrap_or(0);
-                (window_ms + span_ms).max(views_ms)
-            });
-            retention_ms_by_node.insert(node.id, retention_ms);
-        }
-        for node in &mut self.nodes {
-            if let Some(&retention_ms) = retention_ms_by_node.get(&node.id) {
-                node.retention_ms = retention_ms;
-            }
-        }
-        Ok(views)
+        let _ = (tumbling_window_retention_ms_by_node, reader_span_ms_by_node);
+        todo!("#1207 PR 6: each materialized node's retention_ms is its h_v, which Stage 3 sets")
     }
 
     /// For each raw-data source some query-time `Scan` reads, in the order
@@ -665,52 +565,10 @@ impl PhysicalASAPDAG {
     /// scans, `None` when one reads it unbounded: the raw data a runtime
     /// keeps for the DAG's queries, the raw-data counterpart of each view's
     /// retention. A source read only at ingestion time is absent. Checks
-    /// that each scan reading a bounded window ([`Self::scan_window`]) has a
+    /// that each scan reading a bounded window has a
     /// retention covering it.
     pub fn raw_data_retention(&self) -> Result<Vec<RawDataRetention>, InstallableDagError> {
-        let scan_windows = self.query_time_scan_windows();
-        let mut retention: Vec<RawDataRetention> = Vec::new();
-        for node in self.nodes.iter().filter(|node| is_query_time_scan(node)) {
-            let Operator::NonASAP(NonASAPOp::Scan { source, .. }) = &node.payload else {
-                continue;
-            };
-            let window_ms = scan_windows[&node.id].lookback_ms();
-            let lookback_ms = match (window_ms, node.retention_ms) {
-                (None, _) => None,
-                (Some(window_ms), Some(kept_ms)) if kept_ms >= window_ms => Some(kept_ms),
-                (Some(_), Some(_)) => {
-                    return Err(InstallableDagError::ScanRetentionTooShort { node_id: node.id })
-                }
-                (Some(_), None) => {
-                    return Err(InstallableDagError::ScanWithoutRetention { node_id: node.id })
-                }
-            };
-            match retention
-                .iter_mut()
-                .find(|retained| &retained.source == source)
-            {
-                Some(retained) => {
-                    retained.lookback_ms =
-                        retained.lookback_ms.zip(lookback_ms).map(|(a, b)| a.max(b))
-                }
-                None => retention.push(RawDataRetention {
-                    source: source.clone(),
-                    lookback_ms,
-                }),
-            }
-        }
-        Ok(retention)
-    }
-
-    /// [`Self::scan_window`] of each query-time `Scan`, with no chain materialized,
-    /// by id.
-    fn query_time_scan_windows(&self) -> HashMap<PhysicalASAPNodeId, ScanWindow> {
-        let scans = self
-            .nodes
-            .iter()
-            .filter(|node| is_query_time_scan(node))
-            .map(|node| node.id);
-        self.scan_windows(scans, &HashSet::new())
+        todo!("#1207 PR 6: each source's retention from its Scan nodes' retention_ms")
     }
 
     /// Checks that every raw-data window the DAG reads (each `TimeRange`,
@@ -743,41 +601,20 @@ impl PhysicalASAPDAG {
         };
         let mut derived = Vec::new();
         let mut coverage_by_node: HashMap<PhysicalASAPNodeId, SummaryCoverage> = HashMap::new();
-        // The window each view summarizes ([`PhysicalASAPDAG::view_window`]):
-        // its raw-data windows and those of the views it reads, unioned.
-        let mut window_by_view: HashMap<PhysicalASAPNodeId, ScanWindow> = HashMap::new();
         for &id in index.children_first.iter().filter(|id| views.contains(id)) {
             let node = index.nodes[&id];
             let (inputs, scans) = index.inputs_of_view(id, &views)?;
-            let read_windows: Vec<ScanWindow> = inputs
-                .materialized_views
-                .iter()
-                .filter_map(|read| window_by_view.get(read).copied())
-                .collect();
-            if let Some(window) = inputs
-                .raw_data_windows
-                .iter()
-                .map(|window| ScanWindow::Within {
-                    end_offset_ms: window.end_offset_ms,
-                    width_ms: window.width_ms,
-                })
-                .chain(read_windows.iter().copied())
-                .reduce(ScanWindow::union)
-            {
-                window_by_view.insert(id, window);
-            }
             let refreshed_at_ingestion = node.output_state.timing == ExecutionTiming::IngestionTime;
             if refreshed_at_ingestion {
                 // An ingestion run reads each view for the window ending at
                 // its end, so a view read must end where the raw windows do.
+                if !inputs.materialized_views.is_empty() {
+                    todo!("#1207 PR 6: the window a materialized view it reads ends at, from that node's time constraints")
+                }
                 let mut end_offsets_ms: Vec<i64> = inputs
                     .raw_data_windows
                     .iter()
                     .map(|window| window.end_offset_ms)
-                    .chain(read_windows.iter().filter_map(|window| match window {
-                        ScanWindow::Within { end_offset_ms, .. } => Some(*end_offset_ms),
-                        ScanWindow::Unbounded => None,
-                    }))
                     .collect();
                 end_offsets_ms.sort_unstable();
                 end_offsets_ms.dedup();
@@ -844,8 +681,8 @@ fn reach_ms_of(
 
 /// The nodes of a DAG by id, each node's inputs in edge order, and two
 /// facts every raw-data window check reads, computed in one pass each over
-/// the DAG (O(nodes + edges)). `scan_window` counts the windows of a `Scan`
-/// for pricing; this walks down from each window to check its shape.
+/// the DAG (O(nodes + edges)); it walks down from each window to check its
+/// shape.
 struct ViewIndex<'a> {
     dag: &'a PhysicalASAPDAG,
     nodes: HashMap<PhysicalASAPNodeId, &'a PhysicalASAPDAGNode>,

@@ -52,23 +52,23 @@ Read the sections below when changing one of those contracts.
 Accuracy reasoning and allocation are separate from cost modeling:
 
 ```rust
-trait AccuracyModel {
-    fn local_guarantee(/* family, query, parameters */)
-        -> Option<AccuracyGuarantee>;
+/// The theoretical guarantee of reading `statistic` from a state of
+/// `summary_type` with parameters θ: the algorithm's error formula.
+pub fn theoretical_guarantee(
+    summary_type: &FieldDataType,
+    parameters: &SketchParams,
+    statistic: &SketchStatistic,
+) -> Option<AccuracyGuarantee>;
 
-    fn propagate(
+/// The deployment's measured guarantee for the same configuration, read
+/// first when present.
+impl AccuracyEvidence {
+    pub fn measured_guarantee(
         &self,
-        op: &CompositionOperator,
-        inputs: &[AccuracyGuarantee],
-        local: Option<&AccuracyGuarantee>,
-        stats: &PropagationStats,
-    ) -> Result<AccuracyGuarantee, AccuracyError>;
-
-    fn satisfies(
-        &self,
-        guarantee: &AccuracyGuarantee,
-        target: &AccuracyTarget,
-    ) -> bool;
+        summary_type: &FieldDataType,
+        parameters: &SketchParams,
+        statistic: &SketchStatistic,
+    ) -> Option<AccuracyGuarantee>;
 }
 ```
 
@@ -257,9 +257,9 @@ with probability at most `1/3`. Zero or even depth has no modeled guarantee.
 
 ASAPPlanner contains the guarantee algebra and parameter-derived contracts.
 Planner is not a query executor. Data- or runtime-dependent evidence enters
-through an `AccuracyEvidenceProvider`, is exposed to propagation as typed
-`PropagationStats`, and is recorded in provenance. `NoAccuracyEvidence` is the
-default: it supplies no missing facts. Guarantee derivation remains conservative.
+through `AccuracyEvidence` (measured guarantees) or the data workload's
+declared facts, is exposed to propagation as typed `PropagationStats`, and
+is recorded in provenance. The default evidence has no measurements. Guarantee derivation remains conservative.
 
 ### TopK membership
 

@@ -17,9 +17,8 @@ use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
 use asap_types::ir::scalar::{resolve_column_ref, ColumnRef, CompareOpKind, ScalarValue};
 use asap_types::ir::schema::{DataType, Schema};
 use asap_types::ir::schema::{
-    ExactKind, FamilyCapability, FieldDataType, GroupingStrategy, MergedError,
-    NonNegativeWeightProof, SketchAlgorithm, SketchStatistic, SummaryInputExpr, SummaryUpdate,
-    WeightDomain,
+    ExactKind, FieldDataType, MergedError, NonNegativeWeightProof, SketchAlgorithm,
+    SketchStatistic, SummaryInputExpr, SummaryTypeCapability, SummaryUpdate, WeightDomain,
 };
 use asap_types::ir::{
     ASAPOp, BinaryOperator, NonASAPOp, Operator, OperatorNode, ProjectItem, QueryRoot, ScalarExpr,
@@ -30,7 +29,6 @@ use crate::composition::{
     additive_as_absolute, propagate, raw_data_samples_sign_statistic, StreamNorm, GROUP_ROW_COUNT,
     PRODUCT_OPERAND_DOMAINS, QUOTIENT_OPERAND_DOMAINS,
 };
-use crate::estimators::local_guarantee;
 
 use crate::function_rules::approximate_input_composition;
 use crate::PropagationStats;
@@ -97,10 +95,10 @@ pub fn approximate_inputs(root: &QueryRoot) -> Vec<Rc<OperatorNode>> {
                 node.asap(),
                 Some(
                     ASAPOp::SummaryAgg {
-                        family: FieldDataType::Sketch(..),
+                        summary_type: FieldDataType::Sketch(..),
                         ..
                     } | ASAPOp::SummaryTumblingWindowChain {
-                        family: FieldDataType::Sketch(..),
+                        summary_type: FieldDataType::Sketch(..),
                         ..
                     }
                 )
@@ -346,13 +344,13 @@ pub fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
     match &node.operator {
         Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child }) => match child.asap() {
             Some(ASAPOp::SummaryAgg {
-                family: FieldDataType::ExactAggregate(..),
+                summary_type: FieldDataType::ExactAggregate(..),
                 ..
             }) if exact_inputs(child) => Some(AccuracyGuarantee::exact(
                 "exact accumulator over exact input",
             )),
             Some(ASAPOp::SummaryAgg {
-                family: FieldDataType::ExactAggregate(kind, _),
+                summary_type: FieldDataType::ExactAggregate(kind, _),
                 child: input,
                 reduction,
                 ..
@@ -377,7 +375,7 @@ pub fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
             query,
         }) => match summary_input.asap() {
             Some(ASAPOp::SummaryAgg {
-                family,
+                summary_type: family,
                 input: update,
                 child: input,
                 reduction,
@@ -388,7 +386,9 @@ pub fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
                 let local = match estimate_bound_over_raw_data_samples(family, update, query) {
                     Some(gated) => gated,
                     None => source_distinct_guarantee(family, query, input)
-                        .or_else(|| local_guarantee(family, query))?,
+                        .or_else(|| {
+                            todo!("#1207 PR 4: the guarantee of θ from the candidate's LogicalProperties::parameters")
+                        })?,
                 };
                 let local = interpolation_guarantee(family, update, query, input, local)?;
                 if exact_inputs(summary_input) {
@@ -501,9 +501,11 @@ fn rolled_up_guarantee(node: &OperatorNode) -> Option<Option<AccuracyGuarantee>>
         asap_types::ir::operator::asap::selected_from(input).unwrap_or_else(|| Rc::clone(input));
     let family = state.asap()?.produced_state()?;
     let merged = match node.asap()? {
-        ASAPOp::SummaryEstimate { query, .. } => FamilyCapability::of(family).merged_error(query),
+        ASAPOp::SummaryEstimate { query, .. } => {
+            SummaryTypeCapability::of(family).merged_error(query)
+        }
         // An exact accumulator merged across groups is exact.
-        _ => FamilyCapability::merges_groups(family).then_some(MergedError::Exact),
+        _ => SummaryTypeCapability::merges_groups(family).then_some(MergedError::Exact),
     };
     if !matches!(
         merged,
@@ -540,13 +542,13 @@ fn merged_tumbling_windows_guarantee(node: &OperatorNode) -> Option<Option<Accur
         } => {
             let chain = merged_chain(summary_input)?;
             let family = chain.asap()?.produced_state()?;
-            FamilyCapability::of(family).merged_error(query)
+            SummaryTypeCapability::of(family).merged_error(query)
         }
         ASAPOp::FinalizeExactAccumulator { child } => {
             let chain = merged_chain(child)?;
             let family = chain.asap()?.produced_state()?;
             // An exact accumulator's merged state is exact.
-            let merged = FamilyCapability::of(family).merge_inputs;
+            let merged = SummaryTypeCapability::of(family).merge_inputs;
             merged.map(|_| MergedError::Exact)
         }
         _ => return None,
@@ -575,8 +577,7 @@ pub(crate) fn source_distinct_guarantee(
     query: &SketchStatistic,
     input: &Rc<OperatorNode>,
 ) -> Option<AccuracyGuarantee> {
-    let FieldDataType::Sketch(algorithm, GroupingStrategy::PerSubpopulationInstance) = family
-    else {
+    let FieldDataType::Sketch(algorithm) = family else {
         return None;
     };
     if *query != SketchStatistic::Cardinality {
@@ -652,7 +653,7 @@ pub(crate) fn estimates_raw_data_samples_of(node: &OperatorNode) -> Option<Strin
         }
         Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child }) => match child.asap()? {
             ASAPOp::SummaryAgg {
-                family: FieldDataType::ExactAggregate(ExactKind::Sum, _),
+                summary_type: FieldDataType::ExactAggregate(ExactKind::Sum, _),
                 child,
                 filter: None,
                 ..
@@ -1108,7 +1109,7 @@ pub(crate) fn stream_norm(node: &Rc<OperatorNode>) -> Option<StreamNorm> {
             matches!(
                 node.asap(),
                 Some(ASAPOp::SummaryAgg {
-                    family: FieldDataType::Sketch(algorithm, _),
+                    summary_type: FieldDataType::Sketch(algorithm),
                     ..
                 }) if matches!(
                     algorithm,
@@ -1487,7 +1488,7 @@ pub(crate) fn estimate_has_bound(
 ) -> bool {
     let count_min = matches!(
         family,
-        FieldDataType::Sketch(algorithm, _)
+        FieldDataType::Sketch(algorithm)
             if matches!(algorithm, SketchAlgorithm::Cms | SketchAlgorithm::CmsWithHeap)
     );
     !matches!(query, SketchStatistic::TopK { .. })
@@ -1505,7 +1506,7 @@ fn interpolation_guarantee(
     input: &OperatorNode,
     mut guarantee: AccuracyGuarantee,
 ) -> Option<AccuracyGuarantee> {
-    let interpolates = matches!(family, FieldDataType::Sketch(SketchAlgorithm::DDSketch, _))
+    let interpolates = matches!(family, FieldDataType::Sketch(SketchAlgorithm::DDSketch))
         && matches!(query, SketchStatistic::Quantile { q } if *q > 0.0 && *q < 1.0);
     if !interpolates || matches!(update.weight_domain, WeightDomain::NonNegative { .. }) {
         return Some(guarantee);
@@ -1554,16 +1555,8 @@ pub(crate) fn estimate_bound_over_raw_data_samples(
     if !estimate_has_bound(family, &proven, query) {
         return None;
     }
-    let mut local = local_guarantee(family, query)?;
-    local.spec.error = asap_types::ir::properties::BoundExpr::Product {
-        factors: vec![
-            local.spec.error,
-            asap_types::ir::properties::BoundExpr::Unknown {
-                statistic: raw_data_samples_sign_statistic(metric),
-            },
-        ],
-    };
-    Some(local)
+    let _ = metric;
+    todo!("#1207 PR 4: the guarantee of θ from the candidate's LogicalProperties::parameters, its bound gated on the metric's sign")
 }
 
 pub fn split_and(expr: &ScalarExpr, out: &mut Vec<ScalarExpr>) {

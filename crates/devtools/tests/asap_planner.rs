@@ -533,7 +533,6 @@ fn the_nine_query_workload_lowers_and_installs() {
     plan.validate().unwrap();
     assert_eq!(plan.query_texts.len(), queries);
     let report = report.unwrap();
-    assert!(report.queries_accepted_without_guarantee.is_empty());
     assert!(report
         .cost_per_second
         .is_some_and(|cost| cost.is_finite() && cost > 0.0));
@@ -763,7 +762,7 @@ fn a_quantile_target_without_a_metric_accepts_rank_or_relative() {
             }]},
             // Relative DDS interpolation requires this explicit domain proof.
             "data_workload": {"arrival": "unknown", "sources": {"m": {
-                "sample_interval": 1000, "series_count": 1, "values_non_negative": true
+                "sample_interval": 1000, "series_count": 1, "column_signs": {"value": "non_negative"}
             }}}
         });
         document(&workload, &["--run-until", "stage3"])
@@ -1025,7 +1024,7 @@ fn milp_lower_bound_is_consistent_with_the_selected_cost() {
             "sources": {"data": {
                 "series_count": 10000,
                 "metric_type": "gauge",
-                "values_non_negative": true,
+                "column_signs": {"value": "non_negative"},
                 "sample_interval": 5,
             }},
         },

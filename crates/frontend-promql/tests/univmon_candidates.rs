@@ -14,7 +14,7 @@ fn univmon_estimate(root: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
         let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &node.operator else {
             return false;
         };
-        matches!(&summary_input.operator, Operator::ASAP(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
+        matches!(&summary_input.operator, Operator::ASAP(ASAPOp::SummaryAgg { summary_type: FieldDataType::Sketch(kind), .. })
             if kind == &SketchAlgorithm::UnivMon)
     })
 }
@@ -41,11 +41,12 @@ fn uncalibrated_frequency_evaluations_do_not_bypass_accuracy_targets() {
                 assert!(unknown.is_empty(), "{query}");
             } else {
                 assert!(!unknown.is_empty(), "{query}");
-                let [asap_types::ir::QueryRoot::Operator(selected)] = run
-                    .selected_plan
-                    .as_deref()
-                    .expect("a certified plan is selected")
-                else {
+                let (plan, _) = run
+                    .selection
+                    .as_ref()
+                    .expect("a certified plan is selected");
+                let roots = plan.query_roots().unwrap();
+                let [asap_types::ir::QueryRoot::Operator(selected)] = roots.as_slice() else {
                     panic!("one operator result");
                 };
                 assert!(selected.guarantee.is_some(), "{query}");

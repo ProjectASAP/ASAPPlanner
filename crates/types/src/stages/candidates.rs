@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 use super::{GroupProperties, MemoGroup, MemoGroupAsInput, MemoGroupId};
 use crate::ir::properties::summary_coverage::SummaryCoverage;
-use crate::ir::properties::AccuracyMetric;
+use crate::ir::properties::{AccuracyMetric, AccuracyTarget};
 use crate::ir::schema::{SketchAlgorithm, SketchParams};
 use crate::ir::ASAPOp;
 use crate::ir::Operator;
@@ -16,7 +16,7 @@ use crate::ir::SchemaDerivationError;
 
 /// One candidate: position `index_in_group` in group `group`'s candidates
 /// ([`MemoGroup::candidates`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
 pub struct CandidateForMemoGroupId {
     pub group: MemoGroupId,
     pub index_in_group: usize,
@@ -32,6 +32,13 @@ pub struct Memo {
     groups: Vec<MemoGroup>,
     /// Each query's root over groups, by index in the workload.
     pub query_roots: Vec<QueryRoot<MemoGroupId>>,
+    /// Each query's accuracy target $A_q$, by index; `None` for a query
+    /// without one (every query when accuracy is not enforced).
+    pub query_accuracy_targets: Vec<Option<AccuracyTarget>>,
+    /// Each query's $n_q$, the number of values one evaluation returns, by
+    /// index; `None` when the data workload does not bound it. Pass 2 turns
+    /// a whole-result failure probability into a per-value one with it.
+    pub query_values_per_evaluation: Vec<Option<u64>>,
 }
 
 impl Memo {
@@ -40,11 +47,17 @@ impl Memo {
         &self.groups
     }
 
-    /// Adds a query whose root is `root` and returns its index: the root's
-    /// groups and every group below them list it
-    /// ([`MemoGroup::reached_by_queries`]). Stage 0 adds each query once.
-    pub fn add_query(&mut self, root: QueryRoot<MemoGroupId>) -> usize {
-        let _ = root;
+    /// Adds a query whose root is `root`, with its accuracy target and
+    /// $n_q$, and returns its index: the root's groups and every group below
+    /// them list it ([`MemoGroup::reached_by_queries`]). Stage 0 adds each
+    /// query once.
+    pub fn add_query(
+        &mut self,
+        root: QueryRoot<MemoGroupId>,
+        accuracy_target: Option<AccuracyTarget>,
+        values_per_evaluation: Option<u64>,
+    ) -> usize {
+        let _ = (root, accuracy_target, values_per_evaluation);
         todo!("#1207 PR 2")
     }
 
@@ -81,10 +94,9 @@ impl Memo {
     }
 
     /// Replaces candidate `id`'s input requirements $r^{\log}_{c,i}$, one
-    /// per input group. The only way to change a candidate's
-    /// $r^{\log}$: Pass 2 sets each parameter floor from the input's caps
-    /// and direct needs after the rules have run. Panics when the vector
-    /// does not have one entry per input group.
+    /// per input group. The only way to change a candidate's $r^{\log}$:
+    /// Pass 2 sets a readout's required accuracy after the rules have run.
+    /// Panics when the vector does not have one entry per input group.
     pub fn set_input_requirements(
         &mut self,
         id: CandidateForMemoGroupId,
@@ -147,6 +159,8 @@ impl Memo {
 /// input group's `group_properties` and `expression`
 /// ([`MemoGroupAsInput`]), never a node tree. Fails when the expression
 /// breaks them (schema derivation, input validation, merge check).
+// `column_sign` is derived in #1207 PR 2; until then the result is unreachable.
+#[allow(unreachable_code)]
 fn derive_group_properties(
     memo: &Memo,
     expression: &Operator<MemoGroupId>,
@@ -167,6 +181,7 @@ fn derive_group_properties(
         result_kind: operator.output_kind(),
         aggregate_coverage,
         shareable_when_equal: operator.is_shareable_when_equal(),
+        column_sign: todo!("#1207 PR 2: each output column's sign, per operator, from the input groups' and the sources' declared signs"),
     })
 }
 
@@ -203,9 +218,9 @@ pub struct CandidateForMemoGroup {
 }
 
 /// Which rule added a candidate. Nothing in planning reads it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum OriginOfCandidateForMemoGroup {
-    /// Pass 1: exact, exact accumulator, or a summary family.
+    /// Pass 1: exact, exact accumulator, or a summary type.
     Pass1,
     /// Canonical value preprocessing feeding a summary build.
     SummaryInput,
@@ -228,14 +243,14 @@ pub struct CandidateExpression {
     pub operator: Operator<MemoGroupId>,
 }
 
-/// $p^{\log}_v = \boldsymbol\theta_v$. The family is the operator's
+/// $p^{\log}_v = \boldsymbol\theta_v$. The summary type is the operator's
 /// argument, not a property, and a tumbling-window chain's width is the
 /// chain operator's argument. [`Self::new`] rejects parameters of another
-/// family, not in the family's list, missing on a sketch build (a chain
+/// algorithm, not in the algorithm's list, missing on a sketch build (a chain
 /// included) or present on an exact operator.
 #[derive(Debug, Clone)]
 pub struct LogicalProperties {
-    /// $\boldsymbol\theta_v$, from the family's predefined list; `None` for
+    /// $\boldsymbol\theta_v$, from the algorithm's predefined list; `None` for
     /// an exact operator.
     parameters: Option<SketchParams>,
 }
@@ -261,43 +276,45 @@ impl LogicalProperties {
 pub enum LogicalPropertiesError {
     #[error("an exact operator has no summary parameters")]
     ParametersOnExactOperator,
-    #[error("a sketch build needs parameters from its family's list")]
+    #[error("a sketch build needs parameters from its algorithm's list")]
     SketchBuildWithoutParameters,
-    #[error("the parameters are not in their family's predefined list")]
+    #[error("the parameters are not in their algorithm's predefined list")]
     ParametersNotInList,
 }
 
-/// The family's predefined $\boldsymbol\theta$ list (#1207 step 6), each with
-/// its error bound derived through `estimators::local_guarantee` for a given
-/// statistic.
-pub fn parameter_list(family: SketchAlgorithm) -> &'static [SketchParams] {
-    let _ = family;
-    todo!("#1207 PR 1: the predefined θ list per family")
+/// The algorithm's predefined $\boldsymbol\theta$ list: structures only; the
+/// error of each, for a statistic at a failure probability, is its guarantee
+/// (`asap_accuracy::theoretical_guarantee`).
+pub fn parameter_list(algorithm: SketchAlgorithm) -> &'static [SketchParams] {
+    let _ = algorithm;
+    todo!("#1207 PR 1: the predefined θ list per algorithm")
 }
 
-/// $r^{\log}_{c,i}$: only what $G_{c,i}$'s identity does not fix.
-#[derive(Debug, Clone)]
+/// $r^{\log}_{c,i}$: only what $G_{c,i}$'s identity does not fix. Only a
+/// readout's input (`SummaryEstimate`, `FinalizeExactAccumulator`,
+/// `EvaluatePopulation` over an approximate state) carries one (concepts
+/// doc, section 2, "Logical requirements").
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct LogicalRequirements {
-    /// $\boldsymbol\theta^{\min}_{c,i}$: the weakest parameters whose
-    /// $\varepsilon$, for the statistic the consumer reads, is at most
-    /// $\text{cap}_{c,i}$ = min(validity cap of $g_c$, pruning cap), or a
-    /// direct need such as heap_size ≥ k. Any value of the family's parameter
-    /// type; it need not be in the family's list.
-    parameter_floor_for_required_accuracy: Option<SketchParams>,
+    /// `None` on every input that is not a readout's, and on a readout's
+    /// input when no accuracy target reaches it.
+    pub required_accuracy: Option<RequiredAccuracy>,
+}
+
+/// The accuracy a readout's input needs from its producer: the producer's
+/// guarantee for the readout's statistic, evaluated at
+/// `failure_probability`, is at most `max_error` in `metric`. It is also
+/// the readout's own output error.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct RequiredAccuracy {
+    pub metric: AccuracyMetric,
+    /// $\varepsilon_r$, in the metric's units.
+    pub max_error: f64,
+    /// $\delta_r$, per value; 1 when the target sets none.
+    pub failure_probability: f64,
 }
 
 impl LogicalRequirements {
-    pub fn new(parameter_floor_for_required_accuracy: Option<SketchParams>) -> Self {
-        Self {
-            parameter_floor_for_required_accuracy,
-        }
-    }
-
-    /// $\boldsymbol\theta^{\min}_{c,i}$.
-    pub fn parameter_floor_for_required_accuracy(&self) -> Option<&SketchParams> {
-        self.parameter_floor_for_required_accuracy.as_ref()
-    }
-
     /// $g_c$'s linear bound for errors in `metric`, each input's and the
     /// output's: $\beta_{c,i}$ and $b_{c,i}$ per input, read from the
     /// operator and its arguments. `None` when the consumer has no error
@@ -323,15 +340,4 @@ pub struct ErrorPropagation {
     /// `None` when the bound holds everywhere (e.g. a ratio caps only its
     /// denominator).
     pub validity_cap_per_input: Vec<Option<f64>>,
-}
-
-/// $\alpha^{\log}_{u,c,i}$: $\boldsymbol\theta_u \succeq
-/// \boldsymbol\theta^{\min}_{c,i}$, compared per family on the parameters
-/// that set $\varepsilon$. No floor, or an exact producer, always satisfies.
-pub fn producer_satisfies_logical_requirements(
-    producer: &LogicalProperties,
-    requirement: &LogicalRequirements,
-) -> bool {
-    let _ = (producer, requirement);
-    todo!("#1207 PR 1: per-family dominance")
 }

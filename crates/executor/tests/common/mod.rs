@@ -11,11 +11,11 @@ pub fn selected_dag(
     accuracy: planner_types::ir::properties::AccuracyTarget,
 ) -> Rc<OperatorNode> {
     let run = run_all_stages(root, accuracy);
-    let [QueryRoot::Operator(selected)] = run
-        .selected_plan
-        .as_deref()
-        .unwrap_or_else(|| panic!("a plan is selected: {:?}", run.selection))
-    else {
+    let roots = match &run.selection {
+        Ok((plan, _)) => plan.query_roots().unwrap(),
+        Err(error) => panic!("a plan is selected: {error}"),
+    };
+    let [QueryRoot::Operator(selected)] = roots.as_slice() else {
         panic!("one operator root");
     };
     Rc::clone(selected)
@@ -29,7 +29,12 @@ pub fn computation_candidates(root: Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
         compose_logical_candidate, generate_per_computation_candidates,
     };
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
+        &asap_logical_asap_optimization::memo_of_queries(
+            &[QueryRoot::Operator(root)],
+            &[None],
+            &Default::default(),
+        )
+        .unwrap(),
     )
     .expect("Pass 1 accepts the query");
     let mut choices = vec![vec![0; inventory.targets.len()]];

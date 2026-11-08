@@ -15,7 +15,6 @@ use std::path::Path;
 use std::time::Duration;
 
 use asap_frontend_metricsql::{lower_metricsql_query, MetricsqlError};
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::QueryRoot;
 
 use crate::support::logical_plan;
@@ -71,10 +70,9 @@ fn normalize(msg: &str) -> String {
 
 /// Tally `corpus`, counting each failure's normalized message in `errors`.
 fn tally(corpus: &str, errors: &mut HashMap<String, usize>) -> Tally {
-    let accuracy = AccuracyTarget::max_error(0.01);
     let mut t = Tally::default();
     for q in queries(corpus) {
-        match lower_metricsql_query(q, accuracy.clone(), Duration::from_secs(15)) {
+        match lower_metricsql_query(q, Duration::from_secs(15)) {
             Ok(QueryRoot::Operator(dag)) => {
                 t.lowered += 1;
                 if logical_plan(&dag).is_err() {

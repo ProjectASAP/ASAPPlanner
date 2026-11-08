@@ -7,14 +7,13 @@
 //! its selection MILP (dominated and uncostable candidates); its
 //! rejections of whole plans keep their own cause (`RejectionCause` in plan
 //! selection). The planner does not check whether an executor implements an
-//! operator or family, so no reason names it.
+//! operator or summary type, so no reason names it.
 
 use super::PhysicalCandidateId;
 
-/// One candidate a stage removed, and why. `C` is the stage's candidate
-/// type: Stage 2's [`PhysicalCandidate`](super::PhysicalCandidate), Stage
-/// 3's [`PhysicalCandidateId`]. The candidate names its group through its
-/// logical candidate, so there is no separate group field.
+/// One candidate a stage removed, and why: Stage 2 and Stage 3 record the
+/// [`PhysicalCandidate`](super::PhysicalCandidate). The candidate names its
+/// group through its logical candidate, so there is no separate group field.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PrunedCandidate<C> {
     pub candidate: C,
@@ -24,7 +23,7 @@ pub struct PrunedCandidate<C> {
 /// Why a stage removed a candidate: first Stage 2's (the physical candidate
 /// cannot be built, run or read by a query output), then Stage 3's, before
 /// its selection MILP.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
 pub enum PruneReason {
     /// Stage 2: it runs at ingestion time, and the source has no ingestion
     /// pipeline (its data is at rest or its arrival unknown).
@@ -43,6 +42,10 @@ pub enum PruneReason {
     /// Stage 2: no query output can read it, directly or through other
     /// candidates, once each candidate's allowed consumers are applied.
     ReachesNoQueryOutput,
+    /// Stage 2: a Count-Min build (`Cms`, `CmsWithHeap`, `HydraCms`) whose
+    /// weight column's `column_sign` is not `NonNegative`: its estimates are
+    /// bounds only for non-negative weights.
+    CountMinWeightsNotProvenNonNegative,
     /// Stage 3: the candidate it names, in the same memo group with the
     /// same producers and consumers, is at least as good in every respect
     /// (guarantee, usage, latency, output, held state), so no optimal plan

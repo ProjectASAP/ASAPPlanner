@@ -21,12 +21,16 @@ async fn targets(sql: &str) -> Vec<ComputationTarget> {
             Field::plain("bytes", DataType::Float64, false),
         ]),
     );
-    let accuracy = AccuracyTarget::max_error(0.01).failure_probability(0.01);
-    let root = lower_sql(sql, &catalog, accuracy)
+    let root = lower_sql(sql, &catalog)
         .await
         .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"));
     generate_per_computation_candidates(
-        &asap_logical_asap_optimization::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
+        &asap_logical_asap_optimization::memo_of_queries(
+            &[QueryRoot::Operator(root)],
+            &[None],
+            &Default::default(),
+        )
+        .unwrap(),
     )
     .unwrap()
     .targets
@@ -75,7 +79,7 @@ fn reads_quantile_sketch(node: &std::rc::Rc<asap_types::ir::OperatorNode>) -> bo
             matches!(
                 node.asap(),
                 Some(asap_types::ir::ASAPOp::SummaryAgg {
-                    family: asap_types::ir::schema::FieldDataType::Sketch(kind, _),
+                    summary_type: asap_types::ir::schema::FieldDataType::Sketch(kind),
                     ..
                 }) if matches!(kind, SketchAlgorithm::Kll | SketchAlgorithm::DDSketch)
             )
@@ -121,7 +125,7 @@ async fn a_filter_or_group_key_over_an_estimate_has_no_guarantee() {
         "SELECT count(p) FROM \
          (SELECT src, approx_percentile_cont(bytes, 0.99) AS p FROM flows GROUP BY src) s",
     ] {
-        let root = lower_sql(sql, &catalog, accuracy.clone())
+        let root = lower_sql(sql, &catalog)
             .await
             .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"));
         // No guarantee meets the target, so Pass 1 prunes the sketch
@@ -150,7 +154,7 @@ fn reads_ddsketch(node: &std::rc::Rc<asap_types::ir::OperatorNode>) -> bool {
             matches!(
                 node.asap(),
                 Some(asap_types::ir::ASAPOp::SummaryAgg {
-                    family: asap_types::ir::schema::FieldDataType::Sketch(kind, _),
+                    summary_type: asap_types::ir::schema::FieldDataType::Sketch(kind),
                     ..
                 }) if matches!(kind, SketchAlgorithm::DDSketch)
             )
@@ -170,12 +174,11 @@ async fn a_sql_fold_over_estimates_leaves_its_row_count_unbound() {
             Field::plain("bytes", DataType::Float64, false),
         ]),
     );
-    let accuracy = AccuracyTarget::max_error(0.01);
     // q=1 is an endpoint, so this isolates the fold's row-count statistic
     // without assuming a sign for SQL bytes or interpolating across zero.
     let sql = "SELECT max(p) FROM \
                (SELECT src, approx_percentile_cont(bytes, 1.0) AS p FROM flows GROUP BY src) s";
-    let root = lower_sql(sql, &catalog, accuracy.clone()).await.unwrap();
+    let root = lower_sql(sql, &catalog).await.unwrap();
     let candidates = vec![
         asap_integration_tests::planning::explicit_summary_candidate(
             root,
@@ -209,10 +212,14 @@ async fn heap_updates(key: &str, key_type: DataType, sql: &str) -> Vec<(String, 
 /// [`heap_updates`] over `flows(fields)`.
 async fn heap_updates_over(fields: Vec<Field>, sql: &str) -> Vec<(String, String)> {
     let catalog = SqlCatalog::new().with_table("flows", Schema::new(fields));
-    let accuracy = AccuracyTarget::max_error(0.01).failure_probability(0.01);
-    let root = lower_sql(sql, &catalog, accuracy).await.unwrap();
+    let root = lower_sql(sql, &catalog).await.unwrap();
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
+        &asap_logical_asap_optimization::memo_of_queries(
+            &[QueryRoot::Operator(root)],
+            &[None],
+            &Default::default(),
+        )
+        .unwrap(),
     )
     .unwrap();
     let name = |expr: &SummaryInputExpr| match expr {
@@ -255,7 +262,7 @@ async fn heap_updates_over(fields: Vec<Field>, sql: &str) -> Vec<(String, String
             };
             for node in OperatorNode::reachable(root) {
                 if let Some(ASAPOp::SummaryAgg {
-                    family: FieldDataType::Sketch(..),
+                    summary_type: FieldDataType::Sketch(..),
                     input,
                     ..
                 }) = node.asap()

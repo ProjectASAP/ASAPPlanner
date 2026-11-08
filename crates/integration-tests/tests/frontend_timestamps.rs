@@ -31,13 +31,9 @@ async fn promql_eval_time_and_sql_current_timestamp_remain_distinct() {
         "metrics",
         Schema::new(vec![Field::plain("value", DataType::Float64, false)]),
     );
-    let sql = lower_sql(
-        "SELECT CURRENT_TIMESTAMP FROM metrics",
-        &catalog,
-        AccuracyTarget::exact(),
-    )
-    .await
-    .expect("lower SQL CURRENT_TIMESTAMP");
+    let sql = lower_sql("SELECT CURRENT_TIMESTAMP FROM metrics", &catalog)
+        .await
+        .expect("lower SQL CURRENT_TIMESTAMP");
     let Some(NonASAPOp::Project { cols, child, .. }) = sql.non_asap() else {
         panic!("expected SQL projection, got {sql:?}");
     };

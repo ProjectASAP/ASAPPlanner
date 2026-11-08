@@ -43,7 +43,7 @@ async fn sql(query: &str) -> QueryRoot {
             Field::plain("bytes", DataType::Float64, false),
         ]),
     );
-    let root = lower_sql(query, &catalog, accuracy())
+    let root = lower_sql(query, &catalog)
         .await
         .unwrap_or_else(|e| panic!("lower failed for {query:?}: {e}"));
     QueryRoot::Operator(root)
@@ -98,7 +98,8 @@ fn output_columns(root: &QueryRoot) -> Vec<(String, String, bool)> {
 fn compose_all(label: &str, root: QueryRoot) -> usize {
     let expected = output_columns(&root);
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::memo_of_queries(&[root]).unwrap(),
+        &asap_logical_asap_optimization::memo_of_queries(&[root], &[None], &Default::default())
+            .unwrap(),
     )
     .unwrap();
     let radix: Vec<_> = inventory
@@ -177,7 +178,8 @@ fn promql_candidates_compose() {
 /// choice, every other target taking its first.
 fn composed_estimates(root: QueryRoot) -> Vec<Rc<OperatorNode>> {
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::memo_of_queries(&[root]).unwrap(),
+        &asap_logical_asap_optimization::memo_of_queries(&[root], &[None], &Default::default())
+            .unwrap(),
     )
     .unwrap();
     let targets = inventory.targets.len();
@@ -211,7 +213,7 @@ fn update_of(estimate: &OperatorNode) -> (SketchAlgorithm, SummaryUpdate) {
         unreachable!()
     };
     let Some(ASAPOp::SummaryAgg {
-        family: FieldDataType::Sketch(kind, _),
+        summary_type: FieldDataType::Sketch(kind),
         input,
         ..
     }) = summary_input.asap()
@@ -267,7 +269,12 @@ async fn subquery_in_a_measure_filter_is_substituted() {
     let query = "SELECT src, count(*) FILTER (WHERE bytes > (SELECT approx_percentile_cont(bytes, 0.5) FROM flows)) \
                  FROM flows GROUP BY src";
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::memo_of_queries(&[sql(query).await]).unwrap(),
+        &asap_logical_asap_optimization::memo_of_queries(
+            &[sql(query).await],
+            &[None],
+            &Default::default(),
+        )
+        .unwrap(),
     )
     .unwrap();
     assert_eq!(inventory.targets.len(), 2);
@@ -399,10 +406,14 @@ async fn avg_as_sum_and_count(
     catalog: &SqlCatalog,
     query: &str,
 ) -> (Rc<OperatorNode>, Rc<OperatorNode>) {
-    let exact = lower_sql(query, catalog, accuracy()).await.unwrap();
+    let exact = lower_sql(query, catalog).await.unwrap();
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::memo_of_queries(&[QueryRoot::Operator(exact.clone())])
-            .unwrap(),
+        &asap_logical_asap_optimization::memo_of_queries(
+            &[QueryRoot::Operator(exact.clone())],
+            &[None],
+            &Default::default(),
+        )
+        .unwrap(),
     )
     .unwrap();
     let choice: Vec<_> = inventory
@@ -536,7 +547,12 @@ async fn filtered_sql_avg_is_null_without_matching_rows() {
 #[test]
 fn promql_avg_divides_sum_and_count_vectors() {
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::memo_of_queries(&[promql("avg by (job) (m)")]).unwrap(),
+        &asap_logical_asap_optimization::memo_of_queries(
+            &[promql("avg by (job) (m)")],
+            &[None],
+            &Default::default(),
+        )
+        .unwrap(),
     )
     .unwrap();
     assert_eq!(
@@ -576,9 +592,14 @@ async fn every_candidate(
     HowToComputeAggregateMeasure,
     Result<Vec<QueryRoot>, asap_logical_asap_optimization::PerComputationCandidateError>,
 )> {
-    let root = lower_sql(query, catalog, accuracy()).await.unwrap();
+    let root = lower_sql(query, catalog).await.unwrap();
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::memo_of_queries(&[QueryRoot::Operator(root)]).unwrap(),
+        &asap_logical_asap_optimization::memo_of_queries(
+            &[QueryRoot::Operator(root)],
+            &[None],
+            &Default::default(),
+        )
+        .unwrap(),
     )
     .unwrap();
     assert_eq!(inventory.targets.len(), 1, "{query}");
@@ -603,11 +624,14 @@ fn count_updates(root: &QueryRoot) -> Vec<SummaryUpdate> {
     OperatorNode::reachable(root)
         .iter()
         .filter_map(|node| match node.asap() {
-            Some(ASAPOp::SummaryAgg { family, input, .. })
-                if !matches!(
-                    family,
-                    FieldDataType::ExactAggregate(asap_types::ir::schema::ExactKind::Sum, _)
-                ) =>
+            Some(ASAPOp::SummaryAgg {
+                summary_type: family,
+                input,
+                ..
+            }) if !matches!(
+                family,
+                FieldDataType::ExactAggregate(asap_types::ir::schema::ExactKind::Sum, _)
+            ) =>
             {
                 Some(input.clone())
             }

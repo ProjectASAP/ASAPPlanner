@@ -38,5 +38,5 @@ fn count_is_row_count_not_distinct_sample_value_count() {
     let NonASAPOp::Aggregate { measures, .. } = tree.expect_non_asap() else {
         panic!("expected aggregate")
     };
-    assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Count]));
 }

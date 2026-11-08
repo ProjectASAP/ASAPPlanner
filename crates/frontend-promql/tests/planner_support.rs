@@ -37,7 +37,8 @@ pub fn run_all_stages(
 /// at `accuracy`.
 pub fn selected_dag(root: Rc<OperatorNode>, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
     let run = run_all_stages(root, accuracy);
-    match run.selected_plan.as_deref().expect("a plan is selected") {
+    let (plan, _) = run.selection.as_ref().expect("a plan is selected");
+    match plan.query_roots().unwrap().as_slice() {
         [asap_types::ir::QueryRoot::Operator(node)] => Rc::clone(node),
         other => panic!("one operator root: {other:?}"),
     }

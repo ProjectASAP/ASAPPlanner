@@ -24,7 +24,7 @@ fn plan(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
 fn aggregate(node: &OperatorNode) -> (&FieldDataType, &SummaryUpdate, &Reduction) {
     match &node.operator {
         Operator::ASAP(ASAPOp::SummaryAgg {
-            family,
+            summary_type: family,
             input,
             reduction,
             ..
@@ -120,7 +120,7 @@ fn checked_ratio_must_not_certify_cross_zero_interpolation() {
     )
     .unwrap();
     let node = explicit_summary_candidate(root, asap_types::ir::schema::SketchAlgorithm::DDSketch);
-    assert_eq!(OperatorNode::reachable(&node).iter().filter(|node| matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }) if *kind == asap_types::ir::schema::SketchAlgorithm::DDSketch)).count(), 2,
+    assert_eq!(OperatorNode::reachable(&node).iter().filter(|node| matches!(node.asap(), Some(ASAPOp::SummaryAgg { summary_type: FieldDataType::Sketch(kind), .. }) if *kind == asap_types::ir::schema::SketchAlgorithm::DDSketch)).count(), 2,
         "the signed interpolation counterexample requires two explicit DDSketch builds");
     assert!(
         matches!(node.operator, Operator::NonASAP(NonASAPOp::BinaryOp { .. }))
@@ -228,7 +228,7 @@ fn quantile_over_temporal_average_keeps_a_legal_candidate() {
                     matches!(
                         n.asap(),
                         Some(ASAPOp::SummaryAgg {
-                            family: FieldDataType::Sketch(..),
+                            summary_type: FieldDataType::Sketch(..),
                             ..
                         })
                     )
@@ -257,7 +257,7 @@ fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
                 matches!(
                     n.asap(),
                     Some(ASAPOp::SummaryAgg {
-                        family: FieldDataType::Sketch(..),
+                        summary_type: FieldDataType::Sketch(..),
                         ..
                     })
                 )
@@ -273,7 +273,7 @@ fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
             .find_map(|node| {
                 let state = heap(node)?;
                 let (family, _, _) = aggregate(&state);
-                matches!(family, FieldDataType::Sketch(kind, _) if kind == &wanted)
+                matches!(family, FieldDataType::Sketch(kind) if kind == &wanted)
                     .then_some((node, state))
             })
             .expect("weighted sketch candidate");
@@ -295,7 +295,7 @@ fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
             // so plan selection rejects it.
             for state in candidates.iter().filter_map(heap) {
                 let (family, update, _) = aggregate(&state);
-                if matches!(family, FieldDataType::Sketch(kind, _) if kind == &SketchAlgorithm::CmsWithHeap)
+                if matches!(family, FieldDataType::Sketch(kind) if kind == &SketchAlgorithm::CmsWithHeap)
                 {
                     assert!(!matches!(
                         update.weight_domain,
@@ -329,16 +329,4 @@ fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
         }
         physical_asap_dag(node);
     }
-}
-
-// A rejected composition must fail the assertion helper without relying on a planner bug.
-#[test]
-#[should_panic(expected = "does not compose")]
-fn logical_candidates_fails_on_a_candidate_that_does_not_compose() {
-    asap_integration_tests::planning::require_composed_operator_candidates(vec![
-        asap_devtools::planning_stages::ShownLogicalCandidate {
-            id: "invalid-composition".into(),
-            roots: Err("invalid choice".into()),
-        },
-    ]);
 }

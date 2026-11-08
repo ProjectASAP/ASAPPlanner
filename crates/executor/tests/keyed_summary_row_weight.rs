@@ -31,10 +31,7 @@ const ROWS: [(&str, &str); 6] = [
 ];
 
 fn heap_family() -> FieldDataType {
-    FieldDataType::Sketch(
-        SketchAlgorithm::CmsWithHeap,
-        GroupingStrategy::PerSubpopulationInstance,
-    )
+    FieldDataType::Sketch(SketchAlgorithm::CmsWithHeap)
 }
 
 fn schema(fields: Vec<Field>) -> SchemaRef {
@@ -137,7 +134,7 @@ fn query_time_count_heap_binds_a_constant_row_weight() {
         id: 1,
         payload: Payload::ASAP(ASAPOp::SummaryAgg {
             child: 0,
-            family: heap_family(),
+            summary_type: heap_family(),
             input: SummaryUpdate {
                 item: Some(SummaryInputExpr::Tuple(vec![SummaryInputExpr::Column(
                     ColumnRef::Named("service".into()),
@@ -148,7 +145,6 @@ fn query_time_count_heap_binds_a_constant_row_weight() {
                 },
             },
             reduction: Reduction::Reduce(GroupKeys::by(vec![0])),
-            grouping: GroupingStrategy::PerSubpopulationInstance,
             filter: None,
         }),
         output_state: ExecutionDataState::QUERY_ROWS,
@@ -166,6 +162,7 @@ fn query_time_count_heap_binds_a_constant_row_weight() {
         .clone(),
         guarantee: None,
         retention_ms: None,
+        selected_physical_candidate: None,
     };
     let build = compile_node(&node, std::slice::from_ref(&input)).unwrap();
     let wire = serde_json::to_value(&build).unwrap();
@@ -241,10 +238,7 @@ fn int64_weight_column_equals_float64_column() {
         ),
         counts(limit as f64)
     );
-    let count_sketch = FieldDataType::Sketch(
-        SketchAlgorithm::CountSketchWithHeap,
-        GroupingStrategy::PerSubpopulationInstance,
-    );
+    let count_sketch = FieldDataType::Sketch(SketchAlgorithm::CountSketchWithHeap);
     let signed = Operator::per_group_keyed_summary_build(
         int64.clone(),
         count_sketch,

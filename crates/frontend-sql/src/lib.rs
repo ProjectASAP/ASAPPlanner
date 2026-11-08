@@ -17,7 +17,6 @@ pub mod test_support;
 use std::rc::Rc;
 
 use asap_frontend_common::resolve_root;
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::OperatorNode;
 use asap_types::workload::SqlDialect;
 
@@ -30,13 +29,9 @@ use sql::SqlLowerer;
 ///
 /// The `catalog` supplies table schemas (used both to plan the SQL with
 /// DataFusion and to carry positional column identity into the resolved
-/// DAG). `accuracy` is threaded onto every approximate intent as it's built.
-pub async fn lower_sql(
-    query: &str,
-    catalog: &SqlCatalog,
-    accuracy: AccuracyTarget,
-) -> Result<Rc<OperatorNode>, SqlError> {
-    lower_sql_dialect(query, catalog, SqlDialect::DataFusionSQL, accuracy).await
+/// DAG).
+pub async fn lower_sql(query: &str, catalog: &SqlCatalog) -> Result<Rc<OperatorNode>, SqlError> {
+    lower_sql_dialect(query, catalog, SqlDialect::DataFusionSQL).await
 }
 
 /// Lower a single SQL query string under an explicit [`SqlDialect`].
@@ -51,10 +46,9 @@ pub async fn lower_sql_dialect(
     query: &str,
     catalog: &SqlCatalog,
     dialect: SqlDialect,
-    accuracy: AccuracyTarget,
 ) -> Result<Rc<OperatorNode>, SqlError> {
     let unresolved = SqlLowerer::with_dialect(catalog, dialect)
-        .lower(query, &accuracy)
+        .lower(query)
         .await?;
     // Binding resolves names and derives every node's schema; result-type
     // checks (such as temporal subtraction, whose duration unit the IR cannot

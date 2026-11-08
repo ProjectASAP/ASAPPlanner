@@ -214,10 +214,7 @@ pub(super) fn validate_state(
 
     validate_family(family)?;
     let valid = match family {
-        SummaryFamilyType::Sketch(_, grouping)
-            if grouping
-                != &planner_types::ir::schema::GroupingStrategy::PerSubpopulationInstance =>
-        {
+        SummaryFamilyType::Sketch(planner_types::ir::schema::SketchAlgorithm::HydraCms) => {
             let shape = crate::capability::hydra_cms_shape(family).map_err(Error::Invalid)?;
             state
                 .as_any()
@@ -289,17 +286,15 @@ mod weighted_state_tests {
     // A state cannot acquire a different family or shape merely by relabeling its batch.
     #[test]
     fn weighted_state_family_and_shape_must_match() {
-        let cms = SummaryFamilyType::Sketch(SketchAlgorithm::CmsWithHeap, Default::default());
-        let cs =
-            SummaryFamilyType::Sketch(SketchAlgorithm::CountSketchWithHeap, Default::default());
+        let cms = SummaryFamilyType::Sketch(SketchAlgorithm::CmsWithHeap);
+        let cs = SummaryFamilyType::Sketch(SketchAlgorithm::CountSketchWithHeap);
         let state = WeightedFrequency::new(FrequencyAlgorithm::CountSketch, 32, 5, 8).unwrap();
         assert!(validate_state(&cs, &state).is_ok());
         assert!(validate_state(&cms, &state).is_err());
         let wrong_shape =
             WeightedFrequency::new(FrequencyAlgorithm::CountSketch, 64, 5, 8).unwrap();
         assert!(validate_state(&cs, &wrong_shape).is_err());
-        let even_depth =
-            SummaryFamilyType::Sketch(SketchAlgorithm::CountSketchWithHeap, Default::default());
+        let even_depth = SummaryFamilyType::Sketch(SketchAlgorithm::CountSketchWithHeap);
         assert!(validate_family(&even_depth).is_err());
     }
 }

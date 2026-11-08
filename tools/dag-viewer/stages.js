@@ -320,7 +320,6 @@ function uniqueIds(list, where, errors) {
 // it is not priced.
 const FAILED_CHECK_CAUSES = [
   'accuracy_target_missed',
-  'count_min_weights_not_proven_non_negative',
   'no_accuracy_guarantee', 'latency_bound_exceeded', 'latency_over_repeat_interval',
   'over_cluster_capacity', 'infeasible', 'cost_not_representable',
 ];
@@ -1035,7 +1034,7 @@ function dataWorkloadView(dataWorkload, queries) {
     name,
     series: typeof facts.series_count === 'number' ? facts.series_count : '—',
     type: facts.metric_type || '—',
-    nonNegative: facts.values_non_negative ? 'yes' : String(facts.metric_type).toLowerCase() === 'counter' ? 'yes (counter)' : '—',
+    nonNegative: (facts.column_signs || {}).value === 'non_negative' ? 'yes' : String(facts.metric_type).toLowerCase() === 'counter' ? 'yes (counter)' : '—',
     sampleInterval: facts.sample_interval === undefined || facts.sample_interval === null ? '—' : durationText(facts.sample_interval),
     streamNorms: norms(facts.stream_norms),
     maxDistinct: typeof facts.max_distinct_per_evaluation === 'number' ? facts.max_distinct_per_evaluation : '—',

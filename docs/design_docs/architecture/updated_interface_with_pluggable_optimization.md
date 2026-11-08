@@ -127,7 +127,7 @@ tracked in #580.
 | Prepare roots | Entries in `entries()` order, the accuracy target from each entry's `requirements`; PromQL operator roots carry the series identity (`with_promql_series_identity`) where it has a realization |
 | Stage 1: logical ASAP-aware optimization | `pass1_memo` (Pass 1), then `generate_logical_asap_memo_candidates` (Pass 2) over every tumbling-window width |
 | Stage 2: physical ASAP-aware optimization | `generate_physical_asap_memo_candidates` |
-| Stage 3: plan selection | `select_plan`: check accuracy and latency, price under the cost model, select one plan; the facade builds it with Stage 2's `AssignmentRealizer::realize` |
+| Stage 3: plan selection | `select_plan`: select one plan under the cost model and build it (`PhysicalASAPDAG`) |
 
 `run_planning` runs these steps over the query-language frontends' roots
 (Stage 0) and returns `PlanningRun`: Pass 1's candidates, the Pass 2 and
@@ -233,7 +233,7 @@ pass no longer runs these steps; another pass need not run any of them.
 | Crate | What it holds |
 |---|---|
 | `asap-types` | `ParsedWorkload` |
-| `asap-plan-selection` | Stage 3: `select_plan`, `Selection`, `SearchReport`, `AccuracyCheckInputs` |
+| `asap-plan-selection` | Stage 3: `select_plan`, `Selection` |
 | `asap-planner` *(new)* | `e2e_plan`, `UserInput`, `FrontendInput`, lowering dispatch; `OptimizationPass`, `OptimizationInput`, `PlanOutput`, `PlanningModels`, `optimize`, `PassRegistry`, `Stage1ToStage3Pass`, `run_planning` |
 
 ```text
@@ -247,8 +247,8 @@ asap-planner ──┬──> asap-frontend-{sql, promql, metricsql}
 frontend; before it, the sole facade re-exporting more than one was
 `asap-devtools`, a developer-tools crate. It is also the only crate that
 depends on every stage, so it orchestrates them; `PlanningModels` lives in
-it, and it gives each stage only its part (Stage 3 gets
-`AccuracyCheckInputs` and `CostInputs`).
+it, and it gives each stage only its part (Pass 2 gets the accuracy
+evidence, Stage 3 `CostInputs`).
 
 ---
 

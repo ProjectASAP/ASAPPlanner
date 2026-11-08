@@ -36,8 +36,9 @@ asap-plan-selection = { path = "../plan-selection" }
 asap-physical-asap-optimization = { path = "../physical-asap-optimization" }
 # Pass 1's target list (`per_computation_candidates`) for the tests.
 asap-logical-asap-optimization = { path = "../logical-asap-optimization", features = ["test-support"] }
-# The deployment accuracy model tests implement `AccuracyModel`.
 asap-accuracy = { path = "../accuracy", features = ["test-support"] }
+# Tests read a plan's roots as IR (`PhysicalASAPDAG::query_roots`).
+asap-types = { path = "../types", features = ["test-support"] }
 # The SQL frontend plans through DataFusion, which is async; `e2e_plan` is
 # therefore async and its tests need a runtime.
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }

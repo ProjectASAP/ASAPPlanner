@@ -55,7 +55,6 @@ const BASELINE: SketchParams = SketchParams::UnivMon {
     sketch_rows: 5,
     sketch_cols: 1024,
     layers: 16,
-    distinct_failure_probability: None,
 };
 
 pub(super) fn guarantee(
@@ -252,27 +251,30 @@ pub fn incomplete_top_layer_probability(heap_size: u32, layers: u8, max_distinct
     }
 }
 
-/// A UnivMon distinct count over `source`'s own rows: relative error at
-/// most `√(1.35/(k δ_c))`, where `δ_c` is the share of the sized failure
-/// probability left after the top layer's, failing with probability
-/// `δ_c` plus the chance of an incomplete top layer, left symbolic in the
-/// source's distinct bound. `None` for a shape that was not sized for a
-/// distinct count, a heap under 8, or a shape the library would not build.
+/// A UnivMon distinct count over `source`'s own rows, at failure
+/// probability `delta`: relative error at most `√(1.35/(k δ_c))`, where
+/// `δ_c` is the share of `delta` left after the top layer's, failing with
+/// probability `δ_c` plus the chance of an incomplete top layer, left
+/// symbolic in the source's distinct bound. `None` for a heap under 8, a
+/// `delta` too small for the heap, or a shape the library would not build.
 #[allow(dead_code)] // Read again in #1207 PR 4, with θ from `LogicalProperties::parameters`.
-pub(crate) fn distinct_guarantee(params: &SketchParams, source: &str) -> Option<AccuracyGuarantee> {
+pub(crate) fn distinct_guarantee(
+    params: &SketchParams,
+    delta: f64,
+    source: &str,
+) -> Option<AccuracyGuarantee> {
     let SketchParams::UnivMon {
         heap_size,
         sketch_rows,
         sketch_cols,
         layers,
-        distinct_failure_probability: Some(delta),
     } = params
     else {
         return None;
     };
     if *heap_size < DISTINCT_MIN_HEAP
         || !hash_independent(*sketch_rows, *sketch_cols, *layers)
-        || !(*delta > 0.0 && *delta < 1.0)
+        || !(delta > 0.0 && delta < 1.0)
     {
         return None;
     }
@@ -308,35 +310,6 @@ pub(crate) fn distinct_guarantee(params: &SketchParams, source: &str) -> Option<
     ))
 }
 
-/// A distinct-count `params` resized to fail with probability at most
-/// `delta` at no larger relative error: the heap for its current error at
-/// `delta` ([`distinct_heap`]), never smaller. Unchanged for a shape not
-/// sized for a distinct count, or one that already fails no more often.
-pub(crate) fn with_failure_probability(params: &SketchParams, delta: f64) -> SketchParams {
-    let SketchParams::UnivMon {
-        heap_size,
-        sketch_rows,
-        sketch_cols,
-        layers,
-        distinct_failure_probability: Some(current),
-    } = params
-    else {
-        return params.clone();
-    };
-    let chebyshev = current - incomplete_top_layer_bound(*heap_size);
-    if delta >= *current || chebyshev <= 0.0 {
-        return params.clone();
-    }
-    let relative_error = (DISTINCT_VARIANCE / (f64::from(*heap_size) * chebyshev)).sqrt();
-    SketchParams::UnivMon {
-        heap_size: distinct_heap(relative_error, delta).max(*heap_size),
-        sketch_rows: *sketch_rows,
-        sketch_cols: *sketch_cols,
-        layers: *layers,
-        distinct_failure_probability: Some(delta),
-    }
-}
-
 /// Size a UnivMon for one readout's `(eps, delta)`:
 /// - L2: the smallest rows and columns meeting the target ([`l2_shape`]),
 ///   one layer (L2 reads only layer 0) and a one-key heap;
@@ -356,7 +329,6 @@ pub(super) fn size_params(intent: &AggIntent, eps: f64, delta: f64) -> SketchPar
                 sketch_rows,
                 sketch_cols,
                 layers: 1,
-                distinct_failure_probability: None,
             }
         }
         AggIntent::Cardinality { .. } => SketchParams::UnivMon {
@@ -364,7 +336,6 @@ pub(super) fn size_params(intent: &AggIntent, eps: f64, delta: f64) -> SketchPar
             sketch_rows: 1,
             sketch_cols: 1,
             layers: MAX_LAYERS,
-            distinct_failure_probability: Some(delta),
         },
         _ => BASELINE,
     }
@@ -376,25 +347,15 @@ mod tests {
     use asap_types::ir::operator::agg_intent::default_cardinality;
 
     fn l2_intent() -> AggIntent {
-        AggIntent::FrequencyL2 {
-            col: None,
-            accuracy: AccuracyTarget::exact(),
-        }
+        AggIntent::FrequencyL2 { col: None }
     }
 
-    fn univmon(
-        heap_size: u32,
-        rows: u32,
-        cols: u32,
-        layers: u8,
-        delta: Option<f64>,
-    ) -> SketchParams {
+    fn univmon(heap_size: u32, rows: u32, cols: u32, layers: u8) -> SketchParams {
         SketchParams::UnivMon {
             heap_size,
             sketch_rows: rows,
             sketch_cols: cols,
             layers,
-            distinct_failure_probability: delta,
         }
     }
 
@@ -492,9 +453,9 @@ mod tests {
     #[test]
     fn l2_shapes_stay_within_the_hash_budget() {
         // 8 · (16 + 1) = 136 > 128.
-        assert!(l2(&univmon(1, 8, 1 << 16, 1, None)).is_none());
-        assert!(l2(&univmon(1, 7, 1 << 16, 1, None)).is_some());
-        assert!(l2(&univmon(1, 5, 1024, 20, None)).is_none());
+        assert!(l2(&univmon(1, 8, 1 << 16, 1)).is_none());
+        assert!(l2(&univmon(1, 7, 1 << 16, 1)).is_some());
+        assert!(l2(&univmon(1, 5, 1024, 20)).is_none());
         for (eps, delta) in [(0.001, 1e-6), (1e-5, 0.01), (0.01, 1e-12)] {
             let params = size_params(&l2_intent(), eps, delta);
             let SketchParams::UnivMon {
@@ -521,8 +482,8 @@ mod tests {
     fn univmon_past_twenty_rows_is_not_hash_independent() {
         assert!(hash_independent(20, 32, 1));
         assert!(!hash_independent(21, 32, 1));
-        assert!(l2(&univmon(1, 20, 32, 1, None)).is_some());
-        assert!(l2(&univmon(1, 21, 32, 1, None)).is_none());
+        assert!(l2(&univmon(1, 20, 32, 1)).is_some());
+        assert!(l2(&univmon(1, 21, 32, 1)).is_none());
     }
 
     /// Each distinct-count heap meets its target once the source's bound
@@ -532,7 +493,8 @@ mod tests {
         for (eps, delta) in TARGETS {
             let params = size_params(&default_cardinality(), eps, delta);
             let bind = |params: &SketchParams, max_distinct| {
-                let guarantee = distinct_guarantee(params, "m").expect("a distinct guarantee");
+                let guarantee =
+                    distinct_guarantee(params, delta, "m").expect("a distinct guarantee");
                 guarantee.bind(&|statistic| {
                     let (k, layers, source) = parse_incomplete_top_layer_statistic(statistic)?;
                     (source == "m")
@@ -571,7 +533,7 @@ mod tests {
     #[test]
     fn distinct_guarantee_needs_the_source_bound_and_enough_layers() {
         let params = size_params(&default_cardinality(), 0.05, 0.01);
-        let guarantee = distinct_guarantee(&params, "m").unwrap();
+        let guarantee = distinct_guarantee(&params, 0.01, "m").unwrap();
         assert_eq!(guarantee.spec.failure_probability.evaluate(), None);
         assert!(!meets(&guarantee, 0.05, 0.01));
         let SketchParams::UnivMon { heap_size: k, .. } = params else {
@@ -591,15 +553,13 @@ mod tests {
         assert_eq!(incomplete_top_layer_probability(8, 19, u64::MAX), 1.0);
     }
 
-    /// Only a shape sized for a distinct count, with a heap of at least 8
-    /// and a buildable shape, gets a distinct guarantee; the guarantee
-    /// without a source is none.
+    /// Only a heap of at least 8 and a buildable shape gets a distinct
+    /// guarantee; the guarantee without a source is none.
     #[test]
-    fn distinct_guarantee_needs_a_distinct_sizing() {
-        assert!(distinct_guarantee(&univmon(256, 5, 1024, 16, None), "m").is_none());
-        assert!(distinct_guarantee(&univmon(7, 1, 1, 19, Some(0.5)), "m").is_none());
-        assert!(distinct_guarantee(&univmon(8, 1, 1, 20, Some(0.5)), "m").is_none());
-        assert!(distinct_guarantee(&univmon(8, 1, 1, 19, Some(0.5)), "m").is_some());
+    fn distinct_guarantee_needs_a_heap_of_eight_and_a_buildable_shape() {
+        assert!(distinct_guarantee(&univmon(7, 1, 1, 19), 0.5, "m").is_none());
+        assert!(distinct_guarantee(&univmon(8, 1, 1, 20), 0.5, "m").is_none());
+        assert!(distinct_guarantee(&univmon(8, 1, 1, 19), 0.5, "m").is_some());
         let sized = size_params(&default_cardinality(), 0.05, 0.01);
         assert!(guarantee(
             &SketchAlgorithm::UnivMon,

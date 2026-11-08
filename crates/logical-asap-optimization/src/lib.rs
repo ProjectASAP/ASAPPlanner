@@ -50,11 +50,10 @@
 //! approximate-over-approximate compositions under conservative rules (no
 //! independence assumptions, unknown statistics stay unknown). A
 //! composition with no rule leaves the guarantee `None` and keeps the
-//! candidate. Pass 1 takes the deployment's `AccuracyModel` and evidence
-//! only to prune summaries no query reading them can use (when they cannot
-//! accept an output without its guarantee) and sizes every summary for its
-//! consumers; plan selection (Stage 3) checks each selected candidate's
-//! guarantee against its query's `AccuracyTarget` and never resizes.
+//! candidate. Pass 1 prunes nothing for accuracy; Pass 2 gives each readout
+//! its required accuracy and eliminates the candidates no query can use,
+//! with the deployment's measured accuracy (`AccuracyEvidence`) read before
+//! each summary's theoretical guarantee.
 
 mod pass1;
 mod pass2;

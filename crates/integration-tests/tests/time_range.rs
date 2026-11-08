@@ -74,13 +74,7 @@ fn q14_increase() {
 fn q15_count_over_time() {
     assert_eq!(
         lower("count_over_time(http_requests_total[5m])"),
-        range_agg(
-            300,
-            AggIntent::Count {
-                accuracy: AccuracyTarget::exact()
-            },
-            "http_requests_total"
-        ),
+        range_agg(300, AggIntent::Count, "http_requests_total"),
     );
 }
 
@@ -159,11 +153,7 @@ fn q17_quantile_over_time() {
         lower("quantile_over_time(0.99, http_requests_total[5m])"),
         range_agg(
             300,
-            AggIntent::Quantile {
-                col: None,
-                q: 0.99,
-                accuracy: AccuracyTarget::exact()
-            },
+            AggIntent::Quantile { col: None, q: 0.99 },
             "http_requests_total",
         ),
     );

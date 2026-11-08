@@ -56,6 +56,7 @@ fn raw_node(id: usize, payload: NonASAPOp<usize>) -> PhysicalASAPDAGNode {
         parameters: None,
         guarantee: None,
         retention_ms: None,
+        selected_physical_candidate: None,
     }
 }
 
@@ -114,12 +115,11 @@ fn summary_projection_survives_recovery() {
                 id: 0,
                 payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
                     child: 3,
-                    family: family.clone(),
+                    summary_type: family.clone(),
                     input: SummaryUpdate::column(ColumnRef::SampleValue),
                     reduction: planner_types::ir::operator::Reduction::Reduce(
                         planner_types::ir::operator::GroupKeys::by(vec![2]),
                     ),
-                    grouping: GroupingStrategy::PerSubpopulationInstance,
                     filter: None,
                 }),
                 output_schema: (*schema).clone(),
@@ -128,6 +128,7 @@ fn summary_projection_survives_recovery() {
                 parameters: None,
                 guarantee: None,
                 retention_ms: None,
+                selected_physical_candidate: None,
             },
             raw_node(2, scan()),
             raw_node(
@@ -157,6 +158,7 @@ fn summary_projection_survives_recovery() {
                 parameters: None,
                 guarantee: None,
                 retention_ms: None,
+                selected_physical_candidate: None,
             },
         ],
         edges: vec![
@@ -196,7 +198,6 @@ fn summary_projection_survives_recovery() {
         &family,
         None,
         &SummaryUpdate::column(ColumnRef::SampleValue),
-        &GroupingStrategy::PerSubpopulationInstance,
     )
     .unwrap();
     accumulator.update_single(7., 1).unwrap();
@@ -266,6 +267,7 @@ fn summary_merge_without_inputs_is_rejected() {
             parameters: None,
             guarantee: None,
             retention_ms: None,
+            selected_physical_candidate: None,
         }],
         edges: vec![],
         roots: vec![0],

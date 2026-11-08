@@ -172,7 +172,7 @@ fn spatial_heap_ranks_latest_values_in_independent_runs() {
                 heap_size: 100,
             },
         };
-        let family = FieldDataType::Sketch(algorithm, Default::default());
+        let family = FieldDataType::Sketch(algorithm);
         let build = Operator::per_group_keyed_summary_build(
             schema(),
             family,

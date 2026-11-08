@@ -26,8 +26,7 @@ use crate::ir::operator::non_asap::{NonASAPOp, TimeRangeKind};
 use crate::ir::operator::operator_properties::Reduction;
 use crate::ir::scalar::expr_ir::{CompareOpKind, ScalarValue};
 use crate::ir::scalar::{Predicate, ScalarExpr};
-use crate::ir::schema::family_capability::{FamilyCapability, MergeInputRule};
-use crate::ir::schema::sketch::GroupingStrategy;
+use crate::ir::schema::summary_type_capability::{MergeInputRule, SummaryTypeCapability};
 use crate::ir::schema::{ColumnId, Schema};
 use crate::ir::SchemaDerivationError;
 use crate::stages::{MemoGroupAsInput, MemoGroupId};
@@ -264,12 +263,12 @@ pub enum CoverageError {
     /// none): bad input.
     #[error("regrouping merge key {key} is not a group key of its input states")]
     NotAGroupKey { key: ColumnId },
-    /// A regrouping `SummaryMerge` of states whose family does not merge
-    /// different groups: counter states (`Rate`, `Increase`) merge
-    /// consecutive windows of one series, a family without a merge merges
-    /// nothing, and a Hydra's groups share one state. Bad input.
-    #[error("the inputs' family cannot merge different groups")]
-    FamilyCannotRegroup,
+    /// A regrouping `SummaryMerge` of states whose summary type does not
+    /// merge different groups: counter states (`Rate`, `Increase`) merge
+    /// consecutive windows of one series, a summary type without a merge
+    /// merges nothing, and a Hydra's groups share one state. Bad input.
+    #[error("the inputs' summary type cannot merge different groups")]
+    SummaryTypeCannotRegroup,
     /// The build a regrouping `SummaryMerge` stands for does not derive:
     /// bad input.
     #[error("the regrouped build does not derive: {reason}")]
@@ -362,10 +361,9 @@ fn selected_build<'m>(
     }
     let Operator::ASAP(ASAPOp::SummaryAgg {
         child,
-        family,
+        summary_type: family,
         input,
         reduction: Reduction::Reduce(by),
-        grouping,
         filter,
     }) = states.operator()
     else {
@@ -402,10 +400,9 @@ fn selected_build<'m>(
     summary_agg_schema(rows.schema(), &family, &reduction).map_err(regrouped_build)?;
     Ok(Some(ASAPOp::SummaryAgg {
         child: rows,
-        family,
+        summary_type: family,
         input,
         reduction,
-        grouping,
         filter: filter.map(|pred| Predicate(pred.0.map_operator_refs(&mut built))),
     }))
 }
@@ -422,9 +419,10 @@ fn of_merge(inputs: &[SummaryCoverage]) -> Result<SummaryCoverage, CoverageError
     // A family without a merge is checked as the strictest rule; the
     // executor rejects the merge itself.
     let required = match first.definition.unlifted_operators.first() {
-        Some(Operator::ASAP(ASAPOp::SummaryAgg { family, .. })) => {
-            FamilyCapability::of(family).merge_inputs
-        }
+        Some(Operator::ASAP(ASAPOp::SummaryAgg {
+            summary_type: family,
+            ..
+        })) => SummaryTypeCapability::of(family).merge_inputs,
         _ => None,
     }
     .unwrap_or(MergeInputRule::Disjoint);
@@ -466,20 +464,17 @@ fn regrouped(
     keys: &[ColumnId],
 ) -> Result<SummaryCoverage, CoverageError> {
     let Some(Operator::ASAP(ASAPOp::SummaryAgg {
-        family,
+        summary_type: family,
         input,
         reduction,
-        grouping,
         filter,
         ..
     })) = merged.definition.unlifted_operators.first()
     else {
         return Err(CoverageError::NotSummary);
     };
-    if !FamilyCapability::merges_groups(family)
-        || *grouping != GroupingStrategy::PerSubpopulationInstance
-    {
-        return Err(CoverageError::FamilyCannotRegroup);
+    if !SummaryTypeCapability::merges_groups(family) {
+        return Err(CoverageError::SummaryTypeCannotRegroup);
     }
     let state = first.schema();
     let rows = build_input_schema(first).ok_or(CoverageError::NotSummary)?;
@@ -517,10 +512,9 @@ fn regrouped(
     let mut definition = merged.definition.clone();
     definition.unlifted_operators[0] = Operator::ASAP(ASAPOp::SummaryAgg {
         child: None,
-        family: family.clone(),
+        summary_type: family.clone(),
         input: input.clone(),
         reduction,
-        grouping: grouping.clone(),
         filter: filter.clone(),
     });
     Ok(SummaryCoverage {
@@ -554,10 +548,9 @@ fn build_input_schema<I: OperatorInput>(state: &I) -> Option<Schema> {
 fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, CoverageError> {
     let ASAPOp::SummaryAgg {
         child,
-        family,
+        summary_type: family,
         input,
         reduction,
-        grouping,
         filter,
     } = build
     else {
@@ -628,10 +621,9 @@ fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, Cov
 
     let mut unlifted_operators = vec![Operator::ASAP(ASAPOp::SummaryAgg {
         child: None,
-        family: family.clone(),
+        summary_type: family.clone(),
         input: input.clone(),
         reduction: reduction.clone(),
-        grouping: grouping.clone(),
         filter: agg_filter,
     })];
     for (depth, link) in chain.iter().enumerate() {

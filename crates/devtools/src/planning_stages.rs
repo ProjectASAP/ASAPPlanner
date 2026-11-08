@@ -7,23 +7,17 @@ use asap_logical_asap_optimization::{
     memo_of_queries, pass1_memo, pass2_after_local_window_composition,
     pass2_local_window_composition, Pass1Error,
 };
-use asap_physical_asap_optimization::{
-    generate_physical_asap_memo_candidates, Stage2AssignmentRealizer,
-};
+use asap_physical_asap_optimization::generate_physical_asap_memo_candidates;
 use asap_plan_selection::select_plan;
 use asap_planner::{
     run_planning, PlanSearchSettings, PlanningModels, PlanningReport, PlanningRun, SelectionError,
 };
 use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::schema::{DataType, Field, Schema};
-use asap_types::ir::{OperatorNode, QueryRoot};
-use asap_types::physical::PhysicalWorkloadPlan;
-use asap_types::stages::{AssignmentRealizer, Memo};
-use asap_types::workload::bounds::with_confirmed_weights_at;
+use asap_types::ir::QueryRoot;
+use asap_types::stages::Memo;
 use asap_types::workload::{DataWorkload, PlanningWorkload, QueryWorkloadEntry};
 use serde_json::Value;
-use std::collections::HashSet;
-use std::rc::Rc;
 
 /// The last stage a run runs (`asap_planner --run-until`); the run's
 /// fields for later stages are left empty.
@@ -83,43 +77,6 @@ pub struct PlanningStagesRun {
     pub run: PlanningRun,
 }
 
-/// A logical candidate the document shows: its id and composed roots, or
-/// why they do not compose.
-#[derive(Debug, Clone)]
-pub struct ShownLogicalCandidate {
-    pub id: String,
-    pub roots: Result<Vec<QueryRoot>, String>,
-}
-
-impl PlanningStagesRun {
-    /// The logical candidates the document shows: the selected plan (`L1`;
-    /// its roots as Stage 2 built them, with Stage 3's weight proofs).
-    pub fn logical_candidates(&self) -> Vec<ShownLogicalCandidate> {
-        self.run
-            .selected_plan
-            .iter()
-            .map(|plan| ShownLogicalCandidate {
-                id: "L1".into(),
-                roots: Ok(plan.clone()),
-            })
-            .collect()
-    }
-
-    /// The physical candidates the document shows: the selected plan as
-    /// Stage 2 built it (`P1`, from `L1`).
-    pub fn physical_candidates(&self) -> Vec<PhysicalWorkloadPlan> {
-        self.run
-            .selected_physical_plan
-            .iter()
-            .map(|realized| PhysicalWorkloadPlan {
-                id: "P1".into(),
-                from_logical: "L1".into(),
-                ..realized.plan.clone()
-            })
-            .collect()
-    }
-}
-
 /// Lower a PromQL workload, each series' identity as a column (the row
 /// representation per-series state needs at runtime).
 pub fn lower_promql_roots(workload: &PlanningWorkload) -> Result<Vec<QueryRoot>, String> {
@@ -157,7 +114,6 @@ pub fn lower_sql_roots(
                     &entry.query.0,
                     catalog,
                     dialect.clone(),
-                    entry.requirements.accuracy.clone(),
                 ))
                 .map(QueryRoot::Operator)
                 .map_err(|e| format!("lowering: {e}"))
@@ -242,9 +198,6 @@ pub fn run_search_over(
     validate(&roots)?;
     let run = run_planning(roots.clone(), entries, data, models, settings)
         .map_err(|e| PlanningStagesError::Pass1(e.to_string()))?;
-    if let Some(plan) = &run.selected_plan {
-        validate(plan)?;
-    }
     Ok(PlanningStagesRun {
         run_until: RunUntil::Stage3,
         stage0_memo_groups: None,
@@ -266,8 +219,16 @@ pub fn run_stages_until(
     until: RunUntil,
 ) -> Result<PlanningStagesRun, PlanningStagesError> {
     validate(&roots)?;
-    let stage0_dag =
-        memo_of_queries(&roots).map_err(|e| PlanningStagesError::Validation(e.to_string()))?;
+    // As `run_planning`: each query with its accuracy target, or none when
+    // accuracy is not enforced.
+    let accuracy_targets: Vec<_> = entries
+        .iter()
+        .map(|entry| {
+            (!models.ignore_accuracy_guarantees).then(|| entry.requirements.accuracy.clone())
+        })
+        .collect();
+    let stage0_dag = memo_of_queries(&roots, &accuracy_targets, data)
+        .map_err(|e| PlanningStagesError::Validation(e.to_string()))?;
     let mut stages = PlanningStagesRun {
         run_until: until,
         stage0_memo_groups: Some(stage0_dag.clone()),
@@ -278,8 +239,6 @@ pub fn run_stages_until(
             logical_asap_candidates: None,
             physical_asap_candidates: None,
             selection: Err(SelectionError::NotRun),
-            selected_physical_plan: None,
-            selected_plan: None,
             report: PlanningReport::default(),
         },
     };
@@ -287,17 +246,8 @@ pub fn run_stages_until(
         return Ok(stages);
     }
     let run = &mut stages.run;
-    let accuracy_targets: Vec<_> = entries
-        .iter()
-        .map(|entry| entry.requirements.accuracy.clone())
-        .collect();
-    let accuracy = models.accuracy_check_inputs();
     let pass1 = pass1_memo(
         stage0_dag,
-        &accuracy_targets,
-        accuracy.model,
-        accuracy.evidence,
-        data,
         models
             .deployment_capabilities
             .supported_summaries
@@ -331,7 +281,7 @@ pub fn run_stages_until(
         }
     };
     stages.pass2_local_window_composition = Some(composed.clone());
-    let logical = match pass2_after_local_window_composition(composed) {
+    let logical = match pass2_after_local_window_composition(composed, models.evidence) {
         Ok(logical) => logical,
         Err(error) => {
             run.selection = Err(SelectionError::LogicalASAPCandidates(error.to_string()));
@@ -350,44 +300,8 @@ pub fn run_stages_until(
         run.physical_asap_candidates = Some(physical);
         return Ok(stages);
     }
-    let realizer = Stage2AssignmentRealizer {
-        original_roots: &roots,
-        entries,
-        data,
-        query_time_results_retained: models.deployment_capabilities.query_time_results_retained,
-    };
-    match select_plan(
-        &physical,
-        entries,
-        data,
-        &accuracy,
-        models.cost_inputs,
-        &realizer,
-    ) {
-        Ok(selection) => {
-            match realizer.realize(&physical, &selection.selected_dag) {
-                Ok(realized) => {
-                    // As the facade does: the plan to run carries the weight
-                    // proofs Stage 3 made.
-                    let proven: HashSet<*const OperatorNode> = selection
-                        .nodes_with_proven_non_negative_weights
-                        .iter()
-                        .filter_map(|node| realized.operator_node_of_selected_node.get(node.0))
-                        .map(Rc::as_ptr)
-                        .collect();
-                    let plan = with_confirmed_weights_at(&realized.plan.roots, data, &|node| {
-                        proven.contains(&Rc::as_ptr(node))
-                    });
-                    validate(&plan)?;
-                    run.selected_plan = Some(plan);
-                    run.selected_physical_plan = Some(realized);
-                    run.selection = Ok(selection);
-                }
-                Err(error) => run.selection = Err(SelectionError::Realization(error)),
-            }
-        }
-        Err(error) => run.selection = Err(SelectionError::Selection(error)),
-    }
+    run.selection = select_plan(&physical, entries, data, models.cost_inputs)
+        .map_err(SelectionError::Selection);
     run.physical_asap_candidates = Some(physical);
     Ok(stages)
 }

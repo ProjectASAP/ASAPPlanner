@@ -10,15 +10,16 @@ owns the decision.
 
 A new sketch that Pass 1 can offer for an intent.
 
-1. **Type.** `SketchAlgorithm` is `asap_sketchlib`'s family enum, so the
-   family must exist in the library first. Add its parameters to
-   `SketchParams` (`crates/types/src/ir/schema/sketch.rs`); a Hydra kind
-   maps to its library family in `FamilyCapability::of`.
+1. **Type.** `SketchAlgorithm` is `asap_sketchlib`'s algorithm enum, so the
+   algorithm must exist in the library first; its summary type is
+   `FieldDataType::Sketch(algorithm)`. Add its parameters to `SketchParams`
+   (`crates/types/src/ir/schema/sketch.rs`) and its predefined list to
+   `parameter_list`.
 2. **Capability.** Its row, which inputs it can merge and which statistics
    it answers with the merged error, is the library's family-capability
    table (`SketchAlgorithm::capability`), read unchanged by
-   `FamilyCapability::of_per_instance_sketch`
-   (`crates/types/src/ir/schema/family_capability.rs`). Pass 2's sharing,
+   `SummaryTypeCapability::of`
+   (`crates/types/src/ir/schema/summary_type_capability.rs`). Pass 2's sharing,
    tumbling window and rollup rules read only this table. Which readouts the executor
    evaluates is its own declaration, `EVALUATED_READOUTS`
    (`crates/executor/src/capability.rs`); add the family's readouts there
@@ -29,8 +30,8 @@ A new sketch that Pass 1 can offer for an intent.
    Size it in `asap_accuracy::sizing::default_size_params`.
 4. **Accuracy.** Add its error model under
    `crates/accuracy/src/estimators/` and return
-   it from `BuiltinAccuracyModel`'s `local_guarantee`, by inverting the same
-   sizing formulas. Without a guarantee, every candidate that uses it is
+   it from `theoretical_guarantee`, evaluated at the required failure
+   probability. Without a guarantee, every candidate that uses it is
    rejected.
 5. **Cost.** Give it a state size (the library's `estimated_memory_bytes`
    for the type the executor builds; KLL keeps the planner's own formula)
@@ -58,7 +59,7 @@ work.
    (for example `rollup.rs` or `topk.rs`): it adds candidates (and, when it
    needs them, groups) to the memo groups it implements, keeping every
    existing candidate. Read summary families only through
-   `FamilyCapability`. Shared rewrite helpers live in
+   `SummaryTypeCapability`. Shared rewrite helpers live in
    `pass2/asap_aware_cse.rs`.
 2. Declare it in `pass2/memo/rules.rs` and call it from `apply_sharing_rules`
    (`pass2/logical_memo_candidates.rs`), after the

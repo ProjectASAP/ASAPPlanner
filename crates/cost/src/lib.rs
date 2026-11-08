@@ -35,21 +35,17 @@ mod usage;
 use analytical::AnalyticalCostError;
 pub(crate) use measured::aggregate_lookup;
 pub use measured::{
-    lookup, CostTableProvenance, MeasuredOperationCost, MeasuredOperationCosts, NodePriceSource,
+    lookup, CostTableProvenance, MeasuredOperationCost, MeasuredOperationCosts, NodeCostSource,
     OperatorCost, OperatorKind, StateFamily, SummaryOperation,
 };
 pub use operator_statistics::EdgeStatistics;
 pub use ranking::{cheaper, worst_latency_ms, PlanRanking};
 pub use usage::{
-    family_name, maintained_window_ms, materialized_tumbling_window_chains, node_map, node_usage,
-    plan_cost, query_reach, retained_tumbling_windows, trailing_window,
-    tumbling_window_retention_ms, tumbling_window_retention_ms_of_plan, tumbling_windows_of,
-    NodeMap, NodeUsage, ProducerOutput,
+    maintained_window_ms, node_map, node_usage, plan_cost, query_reach, retained_tumbling_windows,
+    summary_type_name, tumbling_window_retention_ms, tumbling_window_retention_ms_of_plan,
+    tumbling_windows_of, NodeMap, NodeUsage, ProducerOutput,
 };
 
-/// Cost per second of wall time; one unit is one CPU-millisecond under
-/// [`ResourceUnitCost::illustrative`].
-pub const COST_UNIT: &str = "cost_per_second";
 /// [`PlanCost::source`] when every node is priced from the formulas.
 pub const COST_SOURCE: &str = "analytical-cost-v2 (illustrative statistics)";
 /// [`PlanCost::source`] when every node is priced from the measured
@@ -382,9 +378,9 @@ pub struct NodeCost {
     /// ... bytes": one computation's work, the times it is computed per
     /// second and what it keeps.
     pub detail: String,
-    /// Whether its CPU operations were priced from the measured table or
+    /// Whether its CPU operations were costed from the measured table or
     /// from the formulas.
-    pub price_source: NodePriceSource,
+    pub cost_source: NodeCostSource,
 }
 
 /// One candidate's usage and price over the whole workload: `usage` is
@@ -397,9 +393,7 @@ pub struct PlanCost {
     /// sum of its nodes' charges plus request overhead for queries without
     /// operator nodes); `None` under cost model 3.
     pub cost_per_second: Option<f64>,
-    /// The unit of `cost_per_second`: always [`COST_UNIT`].
-    pub cost_unit: &'static str,
-    /// Where its prices came from, from its nodes' [`NodeCost::price_source`]:
+    /// Where its prices came from, from its nodes' [`NodeCost::cost_source`]:
     /// [`COST_SOURCE`] (all formulas), [`MEASURED_COST_SOURCE`] (all
     /// measured) or [`MIXED_COST_SOURCE`].
     pub source: &'static str,

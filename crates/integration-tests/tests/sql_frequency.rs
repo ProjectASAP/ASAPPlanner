@@ -4,7 +4,6 @@
 use crate::physical_common;
 use asap_executor::values::Value;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, Schema};
 
 const ENTROPY: &str = "SELECT -SUM(p * LN(p)) FROM (\
@@ -27,9 +26,7 @@ fn rows(sources: &[&str]) -> Vec<Vec<Value>> {
 }
 
 async fn run(sql: &str, sources: &[&str]) -> Option<f64> {
-    let root = lower_sql(sql, &catalog(), AccuracyTarget::exact())
-        .await
-        .unwrap();
+    let root = lower_sql(sql, &catalog()).await.unwrap();
     let result = physical_common::execute_raw_rows(&root, rows(sources));
     match result.as_slice() {
         [row] => match row.as_slice() {

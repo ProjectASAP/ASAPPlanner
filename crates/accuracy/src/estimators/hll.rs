@@ -465,14 +465,10 @@ mod tests {
         use asap_types::ir::operator::agg_intent::default_cardinality;
         for (eps, delta, precision) in [(0.05, 0.01, 15), (0.02, 0.01, 17)] {
             let params = size_params(SketchAlgorithm::Hll, &default_cardinality(), eps, delta);
-            let SketchParams::Hll {
-                precision: sized,
-                relative_error,
-            } = params
-            else {
+            let SketchParams::Hll { precision: sized } = params else {
                 panic!("{params:?}")
             };
-            assert_eq!((sized, relative_error), (precision, Some(eps)));
+            assert_eq!(sized, precision);
         }
     }
 

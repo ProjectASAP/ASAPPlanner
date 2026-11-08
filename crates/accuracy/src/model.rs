@@ -1,177 +1,44 @@
-//! The deployment's accuracy model, read only by plan selection (#509
-//! Stage 3).
-//!
-//! Stage 1 composes each candidate's guarantee with the planner's built-in
-//! analytical rules (this crate's [`composition`](crate::composition)) and
-//! keeps a candidate it has no rule for with `guarantee = None`. Stage 3 decides,
-//! with the model here, whether a guarantee meets its query's target (after
-//! the data workload and the deployment's evidence,
-//! [`AccuracyEvidenceProvider`], bind the statistics Stage 1 left unknown),
-//! and whether the deployment accepts an output directly, whatever its
-//! guarantee says.
+//! The deployment's measured accuracy, and α^log of a logical edge.
 
-use crate::OperandDomain;
-use asap_types::ir::properties::{AccuracyGuarantee, AccuracyMetric, AccuracyTarget};
-use asap_types::ir::{OperatorNode, QueryRoot};
+use asap_types::ir::properties::AccuracyGuarantee;
+use asap_types::ir::schema::{FieldDataType, SketchParams, SketchStatistic};
+use asap_types::stages::{CandidateForMemoGroupId, Memo};
 
-/// The deployment's accuracy decisions in plan selection: whether a
-/// guarantee meets a query's target, and whether the deployment accepts an
-/// output directly, whatever its guarantee. This crate ships
-/// [`BuiltinAccuracyModel`]; a deployment with its own target check (a
-/// registered cross-metric conversion, say) or its own measurements
-/// implements this trait and passes it in
-/// `asap_planner::PlanningModels::accuracy`.
-/// Guarantees are composed with the built-in rules only
-/// (`propagate`).
-pub trait AccuracyModel {
-    /// Whether `guarantee` meets `target`: a bound within its ε, and within
-    /// its δ when it states one, over the values the target's scope covers
-    /// (a per-value δ does not meet a whole-result target). When the target
-    /// sets a metric, the bound must be in that metric (or one with a sound
-    /// direct comparison): a bound in another metric does not satisfy,
-    /// however small. When it sets none, a bound in any metric does, each
-    /// compared in its own metric. Unknown required dimensions fail;
-    /// selection separately excludes missing accuracy evidence.
-    fn satisfies(&self, guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool;
+/// The deployment's measured accuracy, per summary configuration. A
+/// producer's guarantee for a readout is its measurement when there is one,
+/// else [`theoretical_guarantee`](crate::estimators::theoretical_guarantee);
+/// the source is decided before Pass 2 builds the logical edges (concepts
+/// doc, section 2, "Where the guarantee comes from").
+#[derive(Debug, Clone, Default)]
+pub struct AccuracyEvidence {}
 
-    /// Whether the deployment accepts `output`, one query's output in a
-    /// candidate, for `target` directly, whatever its guarantee says:
-    /// missing (Stage 1 had no analytical rule), met or missed. Stage 3 asks
-    /// this for every query output; when it returns `true`, the output is
-    /// accepted, and the guarantee and evidence check only records whether
-    /// it would have rejected it (`AcceptedAccuracy::guarantee_check_rejection`).
-    /// It does not override the executability check before it: a plan that
-    /// reads Count-Min (plain, CmsWithHeap or Hydra Count-Min) over update
-    /// weights not proven non-negative is rejected
-    /// (`RejectionCause::CountMinWeightsNotProvenNonNegative`) whatever this
-    /// returns, because the executor refuses CmsWithHeap and HydraCms when it
-    /// builds the plan and plain Count-Min adds a negative weight, which voids
-    /// its never-underestimate bound. The default accepts
-    /// none, so Stage 3 checks the Stage 1 guarantee, then the evidence
-    /// ([`AccuracyEvidenceProvider::output_guarantee`]) with
-    /// [`Self::satisfies`].
-    fn accepts_output_regardless_of_guarantee(
+impl AccuracyEvidence {
+    /// The measured guarantee of reading `statistic` from a state of
+    /// `summary_type` with parameters `parameters`; `None` when the
+    /// deployment has no measurement for it. No measurement source exists
+    /// yet, so every configuration has none.
+    pub fn measured_guarantee(
         &self,
-        _output: &QueryRoot,
-        _target: &AccuracyTarget,
-    ) -> bool {
-        false
-    }
-
-    /// Whether [`Self::accepts_output_regardless_of_guarantee`] may accept
-    /// some output. Plan selection discards a query's candidate before
-    /// composition for a missing or unknown guarantee only when this is
-    /// `false`: otherwise the model might accept the same plan with larger
-    /// summaries, which sharing with another query can give it. The default
-    /// is `true`, which keeps every such candidate.
-    fn may_accept_regardless_of_guarantee(&self) -> bool {
-        true
-    }
-
-    /// Whether a guarantee stated in `metric` can meet `target` with some
-    /// error bound and failure probability, however small: Pass 1 prunes a
-    /// summary with which no reading query's output can. The default is
-    /// [`Self::satisfies`]'s built-in rule: an exact target accepts only an
-    /// exact output, and a target that sets a metric only a bound in that
-    /// metric (or an L2-scaled bound for an L1-scaled target). A model that
-    /// converts between metrics overrides it.
-    fn metric_can_meet(&self, metric: AccuracyMetric, target: &AccuracyTarget) -> bool {
-        !target.is_exact()
-            && target
-                .accuracy_metric
-                .is_none_or(|wanted| crate::metric_meets(metric, wanted))
-    }
-}
-
-/// The planner's built-in analytical rules as an [`AccuracyModel`]: the
-/// conservative target check `satisfies` makes, and no
-/// output accepted regardless of its guarantee.
-/// The default in `asap_planner::PlanningModels::builtin`.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct BuiltinAccuracyModel;
-
-impl AccuracyModel for BuiltinAccuracyModel {
-    fn satisfies(&self, guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool {
-        crate::satisfies(guarantee, target)
-    }
-
-    fn may_accept_regardless_of_guarantee(&self) -> bool {
-        false
-    }
-}
-
-/// The deployment's planning-time accuracy evidence, read only by plan
-/// selection: enforced operand domains the propagation rules need, and
-/// empirical guarantees for whole query outputs. Passed in
-/// `asap_planner::PlanningModels::evidence`.
-pub trait AccuracyEvidenceProvider {
-    /// Enforced domain of `operand`'s true values ([`OperandDomain`]), scoped
-    /// to this complete expression, including its source, filters, grouping
-    /// and window: the operands of a product or quotient of estimates whose
-    /// errors are not both relative. `None` means unknown.
-    fn operand_domain(&self, _operand: &OperatorNode) -> Option<OperandDomain> {
+        summary_type: &FieldDataType,
+        parameters: &SketchParams,
+        statistic: &SketchStatistic,
+    ) -> Option<AccuracyGuarantee> {
+        let _ = (summary_type, parameters, statistic);
         None
     }
-
-    /// The deployment's empirical accuracy for one candidate's whole query
-    /// output, as a guarantee. Plan selection (#509 Stage 3) accepts a
-    /// candidate whose output has no theoretical guarantee that meets the
-    /// target (e.g. a difference of two quantile estimates) when this shows
-    /// the output meets it. Stage 1 never reads it: root guarantees there
-    /// come from the built-in analytical rules. `None` means no evidence.
-    fn output_guarantee(&self, _output: &QueryRoot) -> Option<AccuracyGuarantee> {
-        None
-    }
-
-    /// Whether this provider may return any evidence: an operand domain or
-    /// an output guarantee. Plan selection discards a query's candidate
-    /// before composition for a missing or unknown guarantee only when this
-    /// is `false`: otherwise evidence might exist for the same plan with
-    /// larger summaries, which sharing with another query can give it. The
-    /// default is `true`, which keeps every such candidate.
-    fn may_provide_evidence(&self) -> bool {
-        true
-    }
 }
 
-/// No deployment evidence: every operand domain and output guarantee is
-/// unknown. The default in `asap_planner::PlanningModels::builtin`.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct NoAccuracyEvidence;
-
-impl AccuracyEvidenceProvider for NoAccuracyEvidence {
-    fn may_provide_evidence(&self) -> bool {
-        false
-    }
-}
-
-/// Accepts every query output regardless of its guarantee, for comparing
-/// candidates on cost alone (e.g. a benchmark of sketch plans that have no
-/// analytical guarantee); [`Self::satisfies`] is the built-in rule. The
-/// facade passes it to plan selection when the caller asks to ignore
-/// accuracy guarantees (`PlanningModels::ignore_accuracy_guarantees`).
-/// Executability checks still run: Count-Min over update weights not proven
-/// non-negative is rejected. Each output accepted only because of it is
-/// marked in the report (`AcceptedAccuracy::guarantee_check_rejection`).
-#[derive(Debug, Default, Clone, Copy)]
-pub struct IgnoreAccuracyGuarantees;
-
-impl AccuracyModel for IgnoreAccuracyGuarantees {
-    fn satisfies(&self, guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool {
-        BuiltinAccuracyModel.satisfies(guarantee, target)
-    }
-
-    fn accepts_output_regardless_of_guarantee(
-        &self,
-        _output: &QueryRoot,
-        _target: &AccuracyTarget,
-    ) -> bool {
-        true
-    }
-
-    /// It accepts every output, so no candidate is discarded early for
-    /// its accuracy.
-    fn may_accept_regardless_of_guarantee(&self) -> bool {
-        true
-    }
+/// $\alpha^{\log}$ of one edge (concepts doc, section 2): for a readout's
+/// input, the producer's guarantee for the readout's statistic at the
+/// required failure probability is within the required error, and a
+/// top-k's heap holds k; for any other input, the metric rule (section 4).
+pub fn producer_satisfies_logical_requirements(
+    memo: &Memo,
+    producer: CandidateForMemoGroupId,
+    consumer: CandidateForMemoGroupId,
+    input_index_of_consumer: usize,
+    evidence: &AccuracyEvidence,
+) -> bool {
+    let _ = (memo, producer, consumer, input_index_of_consumer, evidence);
+    todo!("#1207 PR 4: the readout rule against RequiredAccuracy, else the metric rule")
 }

@@ -506,12 +506,10 @@ into one plan and check and cost it with Stage 2 and Stage 3. The search is
 the group selection MILP (mixed-integer linear program, #1095): it chooses one
 candidate per memo group and execution context, with each shareable candidate
 charged once, and is solved once; it prices cost model 1 only (cost models 2
-and 3 are an `UnsupportedCostModel` error, #888). Stage 3 realizes the chosen
-plan through Stage 2's `AssignmentRealizer`, which the facade builds and passes in,
-so Stage 3 does not depend on the Stage 2 crate. The facade runs Pass 2,
-Stage 2 and Stage 3 once, over the full tumbling-window-width domain, with no
-time limit. Stage 3 checks that `plan_cost` of the realized plan
-equals the MILP's objective, and that every query's accuracy and latency hold.
+and 3 are an `UnsupportedCostModel` error, #888). Stage 3 builds the chosen
+plan, a `PhysicalASAPDAG`, as its last step, so it does not depend on the
+Stage 2 crate. The facade runs Pass 2, Stage 2 and Stage 3 once, over the
+full tumbling-window-width domain, with no time limit.
 
 #### Memo code interface
 
@@ -528,7 +526,7 @@ candidates is in `crates/plan-selection/src/` (`select.rs`, `groups/`, `milp/`).
 | Memo types | `DagOfLogicalMemoGroups`, `PerComputationLogicalMemoCandidates`, `HowToComputeAggregateMeasure`, Pass 1's working types (`ComputationTarget`, `FusedComputation`, `HavingEntry`, `HavingPlacement`), `Memo`, `CandidateForMemoGroup`, `OriginOfCandidateForMemoGroup`, `LogicalASAPMemoCandidates`, `CandidateGenerationTimeout`, `root_groups`, `queries_rooted_at` | `crates/types/src/stages/` (`asap_types::stages`) |
 | Pass 2 | `generate_logical_asap_memo_candidates` → `LogicalASAPMemoCandidates`, from Pass 1's output. It calls in this order: 1. window composition for every legal tumbling-window width (`add_local_window_composition`); 2–9. the rules in `pass2/memo/rules/`: scan widening, summary inputs, top-k reuse, finer aggregate, rollup, window rollup, summary results, state configurations; 10. `add_shared_summary_state_groups`, the shared builds | `pass2/logical_memo_candidates.rs` (`LogicalASAPMemoCandidates` itself: `asap_types::stages`); `pass2/memo/window_candidates.rs`, `pass2/memo/rules/`, `pass2/memo/state_groups.rs`, `pass2/memo/shared_configurations.rs` |
 | Memo to candidate DAGs | `enumerate`, `build_logical_asap_dags_from_chosen_candidates`, `ChosenCandidatePerMemoGroup`, `AllChosenCandidatesPerMemoGroup`, `ErrorBuildingLogicalASAPDagsFromChosenCandidates` | `pass2/memo/enumeration.rs` (re-exported at the crate root) |
-| Production memo build and search | The facade's `run_planning` builds the DAG of logical memo groups and runs Pass 1 (`pass1_memo`) once; then `generate_logical_asap_memo_candidates`, `generate_physical_asap_memo_candidates` and Stage 3's `select_plan`, once each, and builds the selected plan with Stage 2's `AssignmentRealizer::realize`. Behind `select_plan`: the group selection MILP (#1095), `groups/` and `milp/` | `crates/planner/src/run.rs`; `crates/plan-selection/src/select.rs` |
+| Production memo build and search | The facade's `run_planning` builds the DAG of logical memo groups and runs Pass 1 (`pass1_memo`) once; then `generate_logical_asap_memo_candidates`, `generate_physical_asap_memo_candidates` and Stage 3's `select_plan`, once each; `select_plan` builds the plan. Behind `select_plan`: the group selection MILP (#1095), `groups/` and `milp/` | `crates/planner/src/run.rs`; `crates/plan-selection/src/select.rs` |
 
 ## ASAPPlanner Detailed Design: Planning Stages and their decisions/Strategies
 

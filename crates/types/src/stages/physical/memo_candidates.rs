@@ -7,10 +7,13 @@
 use std::collections::HashMap;
 
 use super::execution_context::ExecutionContext;
-use super::graph::PhysicalCandidateId;
 use crate::ir::QueryRoot;
-use crate::physical::PhysicalProperties;
+use crate::physical::{ExecutionTiming, PhysicalProperties};
 use crate::stages::{CandidateForMemoGroupId, LogicalASAPMemoCandidates, Memo, PrunedCandidate};
+
+/// Index into [`PhysicalASAPMemoCandidates::physical_candidates`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
+pub struct PhysicalCandidateId(pub usize);
 
 /// Index into [`PhysicalASAPMemoCandidates::edges`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -46,9 +49,9 @@ impl PhysicalCandidate {
 /// [`PhysicalCandidate::delivers_on`].
 pub fn producer_satisfies_physical_requirements(
     producer: &PhysicalCandidate,
-    consumer: &PhysicalCandidate,
+    consumer_timing: ExecutionTiming,
 ) -> bool {
-    let _ = (producer, consumer);
+    let _ = (producer, consumer_timing);
     todo!("#1207 PR 1: the timing x lifetime table of section 2")
 }
 

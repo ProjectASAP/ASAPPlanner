@@ -41,10 +41,9 @@ pub(super) fn guarantee(
     query: &SketchStatistic,
 ) -> Option<AccuracyGuarantee> {
     match params {
-        SketchParams::Kmv { k, relative_error } => {
-            // Not sized for a target: its relative standard error.
-            let eps = relative_error
-                .unwrap_or_else(|| 1.0 / f64::from(k.saturating_sub(2).max(1)).sqrt());
+        SketchParams::Kmv { k } => {
+            // Its relative standard error.
+            let eps = 1.0 / f64::from(k.saturating_sub(2).max(1)).sqrt();
             Some(super::bounded_guarantee(
                 algorithm,
                 params,
@@ -113,61 +112,6 @@ pub(crate) fn kmv_k(eps: f64, delta: f64) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::ir::operator::agg_intent::default_cardinality;
-
-    fn error_and_delta(params: &SketchParams) -> (f64, f64) {
-        let g = guarantee(&SketchAlgorithm::Kmv, params, &SketchStatistic::Cardinality).unwrap();
-        (
-            g.spec.error.evaluate().unwrap(),
-            g.spec.failure_probability.evaluate().unwrap(),
-        )
-    }
-
-    /// KMV sized for (ε, δ) certifies both (#700): its failure probability
-    /// is the requested δ's, not a fixed 0.01.
-    #[test]
-    fn kmv_sized_for_a_failure_probability_meets_it() {
-        for (eps, delta) in [(0.01, 0.001), (0.05, 0.01), (0.02, 1e-6)] {
-            let params =
-                super::super::size_params(SketchAlgorithm::Kmv, &default_cardinality(), eps, delta);
-            let (error, failure_probability) = error_and_delta(&params);
-            assert!(error <= eps, "{params:?}: {error}");
-            assert!(
-                failure_probability <= delta,
-                "{params:?}: {failure_probability}"
-            );
-        }
-    }
-
-    /// KMV's sizing grows `k` for a smaller δ at the same ε, near the
-    /// module's closed form, and a KMV sized for one δ is enlarged for a
-    /// smaller one at the same relative error.
-    #[test]
-    fn kmv_k_follows_the_failure_probability() {
-        // Ten times smaller than the former Chebyshev calibration's 40,002.
-        assert_eq!(kmv_k(0.05, 0.01), 4323);
-        assert_eq!(kmv_k(0.02, 0.01), 26656);
-        assert!(kmv_k(0.05, 1e-6) > kmv_k(0.05, 0.01));
-        assert!(kmv_failure_probability(kmv_k(0.05, 0.01) - 1, 0.05) > 0.01);
-        assert_eq!(kmv_k(0.0, 0.01), KMV_MAX_K);
-        let sized =
-            super::super::size_params(SketchAlgorithm::Kmv, &default_cardinality(), 0.05, 0.01);
-        let enlarged = super::super::with_failure_probability(&sized, 1e-4);
-        let (error, delta) = error_and_delta(&enlarged);
-        assert_eq!(error, 0.05);
-        assert!(delta <= 1e-4);
-        assert_ne!(enlarged, sized);
-        // Not sized for a relative error: nothing to enlarge for.
-        let unsized_kmv = SketchParams::Kmv {
-            k: 1024,
-            relative_error: None,
-        };
-        assert_eq!(
-            super::super::with_failure_probability(&unsized_kmv, 1e-4),
-            unsized_kmv
-        );
-        assert_eq!(error_and_delta(&unsized_kmv).1, 1.0);
-    }
 
     /// The bound dominates the exact failure probability of the order
     /// statistic for every number of distinct items checked: exact below

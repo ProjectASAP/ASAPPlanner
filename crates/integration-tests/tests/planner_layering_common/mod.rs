@@ -24,7 +24,6 @@ use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot};
 use asap_types::physical::Lifetime;
-use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::workload::{PlanningWorkload, QueryRecurrence, RepeatedDemand};
 
 pub use asap_devtools::planner_layering_examples::*;
@@ -127,12 +126,12 @@ pub struct Physical {
     pub id: String,
     pub from_logical: String,
     pub query_roots: Vec<NodeId>,
-    pub candidate: PhysicalWorkloadPlan,
+    pub dag: PhysicalASAPDAG,
 }
 
 impl Physical {
     pub fn dag(&self) -> &PhysicalASAPDAG {
-        &self.candidate.dag
+        &self.dag
     }
 }
 
@@ -262,10 +261,10 @@ pub fn is_summary(payload: &Payload) -> bool {
         payload,
         Operator::ASAP(
             ASAPOp::SummaryAgg {
-                family: FieldDataType::Sketch(..),
+                summary_type: FieldDataType::Sketch(..),
                 ..
             } | ASAPOp::SummaryTumblingWindowChain {
-                family: FieldDataType::Sketch(..),
+                summary_type: FieldDataType::Sketch(..),
                 ..
             } | ASAPOp::SummaryEstimate { .. }
                 | ASAPOp::SummaryMerge { .. }

@@ -3,10 +3,10 @@ use asap_types::ir::operator::operator_properties::{Reduction, Source};
 use asap_types::ir::scalar::expr_ir::{CompareOpKind, ScalarValue};
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{
-    DataType, ExactKind, ExactParams, FamilyCapability, Field, FieldDataType, GroupingStrategy,
-    HydraKind, HydraParams, MergeInputRule, MergedError, SamplingKind, SamplingParams, Schema,
-    SketchAlgorithm, SketchParams, SketchStatistic, StatModelKind, StatModelParams, StatisticKind,
-    SummaryUpdate, WaveletKind, WaveletParams,
+    DataType, ExactKind, ExactParams, Field, FieldDataType, MergeInputRule, MergedError,
+    SamplingKind, SamplingParams, Schema, SketchAlgorithm, SketchStatistic, StatModelKind,
+    StatModelParams, StatisticKind, SummaryTypeCapability, SummaryUpdate, WaveletKind,
+    WaveletParams,
 };
 use asap_types::ir::{
     ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr,
@@ -15,10 +15,7 @@ use std::rc::Rc;
 /// KLL over `value` for one `region`, so states of different regions are
 /// disjoint.
 fn state(_k: u32, region: &str) -> Rc<OperatorNode> {
-    family_state(
-        FieldDataType::Sketch(SketchAlgorithm::Kll, Default::default()),
-        region,
-    )
+    family_state(FieldDataType::Sketch(SketchAlgorithm::Kll), region)
 }
 /// A `family` state over `value` for one `region`.
 fn family_state(family: FieldDataType, region: &str) -> Rc<OperatorNode> {
@@ -45,10 +42,9 @@ fn family_state(family: FieldDataType, region: &str) -> Rc<OperatorNode> {
     .unwrap();
     OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
         child: only_region,
-        family,
+        summary_type: family,
         input: SummaryUpdate::column(ColumnRef::SampleValue),
         reduction: Reduction::by(vec![]),
-        grouping: GroupingStrategy::default(),
         filter: None,
     }))
     .unwrap()
@@ -80,50 +76,20 @@ fn incompatible_merge_inputs_fail() {
     }
 }
 
-fn sketch(algorithm: SketchAlgorithm, _params: SketchParams) -> FieldDataType {
-    FieldDataType::Sketch(algorithm, Default::default())
-}
-fn hydra(
-    algorithm: SketchAlgorithm,
-    _params: SketchParams,
-    kind: HydraKind,
-    _hydra_params: HydraParams,
-) -> FieldDataType {
-    FieldDataType::Sketch(
-        algorithm,
-        GroupingStrategy::SharedMultiSubpopulation { kind },
-    )
+fn sketch(algorithm: SketchAlgorithm) -> FieldDataType {
+    FieldDataType::Sketch(algorithm)
 }
 fn exact(kind: ExactKind, params: ExactParams) -> FieldDataType {
     FieldDataType::ExactAggregate(kind, params)
 }
 fn kll() -> FieldDataType {
-    sketch(
-        SketchAlgorithm::Kll,
-        SketchParams::Kll {
-            k: 200,
-            failure_probability: None,
-        },
-    )
+    sketch(SketchAlgorithm::Kll)
 }
 fn hll() -> FieldDataType {
-    sketch(
-        SketchAlgorithm::Hll,
-        SketchParams::Hll {
-            precision: 12,
-            relative_error: None,
-        },
-    )
+    sketch(SketchAlgorithm::Hll)
 }
 fn cms_with_heap() -> FieldDataType {
-    sketch(
-        SketchAlgorithm::CmsWithHeap,
-        SketchParams::CmsWithHeap {
-            width: 64,
-            depth: 4,
-            heap_size: 10,
-        },
-    )
+    sketch(SketchAlgorithm::CmsWithHeap)
 }
 fn merge(children: Vec<Rc<OperatorNode>>) -> Result<Rc<OperatorNode>, String> {
     OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
@@ -133,15 +99,14 @@ fn merge(children: Vec<Rc<OperatorNode>>) -> Result<Rc<OperatorNode>, String> {
     .map_err(|e| e.to_string())
 }
 
-/// The family-capability table, row by row: how each family's merge
+/// The summary-type capability table, row by row: how each type's merge
 /// inputs must relate, and which statistics one state answers with the
 /// error of each from a merged state. Every statistic kind is probed
 /// through `answers` and `merged_error`, so the table and both lookups are
 /// pinned together.
 #[test]
-fn family_capability_table() {
+fn summary_type_capability_table() {
     use MergeInputRule::{Disjoint, DisjointInTime, MayOverlap};
-    let (width, depth, heap_size) = (64, 4, 10);
     // (family, how its merge inputs must relate, its readouts).
     type Row = (
         FieldDataType,
@@ -217,101 +182,30 @@ fn family_capability_table() {
     };
     let sketches = [
         (kll(), SketchAlgorithm::Kll),
-        (
-            sketch(
-                SketchAlgorithm::DDSketch,
-                SketchParams::DDSketch { alpha: 0.01 },
-            ),
-            SketchAlgorithm::DDSketch,
-        ),
+        (sketch(SketchAlgorithm::DDSketch), SketchAlgorithm::DDSketch),
         (hll(), SketchAlgorithm::Hll),
+        (sketch(SketchAlgorithm::Cms), SketchAlgorithm::Cms),
         (
-            sketch(SketchAlgorithm::Cms, SketchParams::Cms { width, depth }),
-            SketchAlgorithm::Cms,
-        ),
-        (
-            sketch(
-                SketchAlgorithm::CountSketch,
-                SketchParams::CountSketch { width, depth },
-            ),
+            sketch(SketchAlgorithm::CountSketch),
             SketchAlgorithm::CountSketch,
         ),
-        (
-            sketch(
-                SketchAlgorithm::UnivMon,
-                SketchParams::UnivMon {
-                    heap_size,
-                    sketch_rows: depth,
-                    sketch_cols: width,
-                    layers: 8,
-                    distinct_failure_probability: None,
-                },
-            ),
-            SketchAlgorithm::UnivMon,
-        ),
-        (
-            sketch(
-                SketchAlgorithm::Kmv,
-                SketchParams::Kmv {
-                    k: 1024,
-                    relative_error: None,
-                },
-            ),
-            SketchAlgorithm::Kmv,
-        ),
+        (sketch(SketchAlgorithm::UnivMon), SketchAlgorithm::UnivMon),
+        (sketch(SketchAlgorithm::Kmv), SketchAlgorithm::Kmv),
         (cms_with_heap(), SketchAlgorithm::CmsWithHeap),
         (
-            sketch(
-                SketchAlgorithm::CountSketchWithHeap,
-                SketchParams::CountSketchWithHeap {
-                    width,
-                    depth,
-                    heap_size,
-                },
-            ),
+            sketch(SketchAlgorithm::CountSketchWithHeap),
             SketchAlgorithm::CountSketchWithHeap,
         ),
         (
-            hydra(
-                SketchAlgorithm::Cms,
-                SketchParams::Cms { width, depth },
-                HydraKind::HydraCms,
-                HydraParams::HydraCms {
-                    width,
-                    depth,
-                    shared_rows: depth,
-                    shared_columns: width,
-                },
-            ),
+            FieldDataType::Sketch(SketchAlgorithm::HydraCms),
             SketchAlgorithm::HydraCms,
         ),
         (
-            hydra(
-                SketchAlgorithm::CountSketch,
-                SketchParams::CountSketch { width, depth },
-                HydraKind::HydraCountSketch,
-                HydraParams::HydraCountSketch {
-                    width,
-                    depth,
-                    shared_rows: depth,
-                    shared_columns: width,
-                },
-            ),
+            FieldDataType::Sketch(SketchAlgorithm::HydraCountSketch),
             SketchAlgorithm::HydraCountSketch,
         ),
         (
-            hydra(
-                SketchAlgorithm::Kll,
-                SketchParams::Kll {
-                    k: 200,
-                    failure_probability: None,
-                },
-                HydraKind::HydraKll,
-                HydraParams::HydraKll {
-                    k: 200,
-                    shared_buckets: width,
-                },
-            ),
+            FieldDataType::Sketch(SketchAlgorithm::HydraKll),
             SketchAlgorithm::HydraKll,
         ),
     ];
@@ -338,7 +232,7 @@ fn family_capability_table() {
         SketchStatistic::TopK { k: 5 },
     ];
     for (family, merge_inputs, readouts) in rows {
-        let capability = FamilyCapability::of(&family);
+        let capability = SummaryTypeCapability::of(&family);
         assert_eq!(capability.merge_inputs, merge_inputs, "{family:?}");
         assert_eq!(capability.readouts().to_vec(), readouts, "{family:?}");
         for statistic in &statistics {
@@ -376,16 +270,7 @@ fn merged_error_depends_on_the_readout() {
         key: ColumnRef::Named("k".into()),
         value: None,
     };
-    let univmon = FamilyCapability::of(&sketch(
-        SketchAlgorithm::UnivMon,
-        SketchParams::UnivMon {
-            heap_size: 10,
-            sketch_rows: 4,
-            sketch_cols: 64,
-            layers: 8,
-            distinct_failure_probability: None,
-        },
-    ));
+    let univmon = SummaryTypeCapability::of(&sketch(SketchAlgorithm::UnivMon));
     for (readout, error) in [
         (FrequencyL2, MergedError::AsIfBuiltOverUnion),
         (point(), MergedError::Exact),
@@ -395,7 +280,7 @@ fn merged_error_depends_on_the_readout() {
         assert_eq!(univmon.merged_error(&readout), Some(error), "{readout:?}");
     }
     assert_eq!(univmon.merged_error(&TopK { k: 5 }), None);
-    let heap = FamilyCapability::of(&cms_with_heap());
+    let heap = SummaryTypeCapability::of(&cms_with_heap());
     assert_eq!(
         heap.merged_error(&TopK { k: 5 }),
         Some(MergedError::Approximate)
@@ -403,13 +288,7 @@ fn merged_error_depends_on_the_readout() {
     assert_eq!(heap.merged_error(&point()), None);
     // Count Sketch's signed counters give no total: no merged error for a
     // bare point count, and one build's guarantee for an item's frequency.
-    let count_sketch = FamilyCapability::of(&sketch(
-        SketchAlgorithm::CountSketch,
-        SketchParams::CountSketch {
-            width: 64,
-            depth: 5,
-        },
-    ));
+    let count_sketch = SummaryTypeCapability::of(&sketch(SketchAlgorithm::CountSketch));
     assert!(!count_sketch.answers(&point()));
     assert_eq!(count_sketch.merged_error(&point()), None);
     let item = SketchStatistic::PointCount {
@@ -422,17 +301,20 @@ fn merged_error_depends_on_the_readout() {
     );
     // An exact accumulator is read as its finalized value, not a readout.
     let sum = exact(ExactKind::Sum, ExactParams::Sum);
-    assert_eq!(FamilyCapability::of(&sum).merged_error(&point()), None);
+    assert_eq!(SummaryTypeCapability::of(&sum).merged_error(&point()), None);
     assert_eq!(
-        FamilyCapability::of(&hll()).merged_error(&Cardinality),
+        SummaryTypeCapability::of(&hll()).merged_error(&Cardinality),
         Some(MergedError::AsIfBuiltOverUnion)
     );
     assert_eq!(
-        FamilyCapability::of(&kll()).merged_error(&SketchStatistic::Quantile { q: 0.99 }),
+        SummaryTypeCapability::of(&kll()).merged_error(&SketchStatistic::Quantile { q: 0.99 }),
         Some(MergedError::AsIfBuiltOverUnion)
     );
     let irate = exact(ExactKind::IRate, ExactParams::IRate);
-    assert_eq!(FamilyCapability::of(&irate).merged_error(&point()), None);
+    assert_eq!(
+        SummaryTypeCapability::of(&irate).merged_error(&point()),
+        None
+    );
 }
 
 /// A structurally validated `SummaryEstimate` of `query` over a `family`
@@ -452,17 +334,8 @@ fn estimate(family: FieldDataType, query: SketchStatistic) -> Result<Rc<Operator
 /// readout of an exact accumulator. What the table answers builds.
 #[test]
 fn a_statistic_the_family_does_not_answer_is_rejected() {
-    let cms = sketch(
-        SketchAlgorithm::Cms,
-        SketchParams::Cms {
-            width: 64,
-            depth: 4,
-        },
-    );
-    let ddsketch = sketch(
-        SketchAlgorithm::DDSketch,
-        SketchParams::DDSketch { alpha: 0.01 },
-    );
+    let cms = sketch(SketchAlgorithm::Cms);
+    let ddsketch = sketch(SketchAlgorithm::DDSketch);
     let total = || SketchStatistic::PointCount {
         key: ColumnRef::SampleValue,
         value: None,
@@ -476,7 +349,7 @@ fn a_statistic_the_family_does_not_answer_is_rejected() {
     ] {
         let error = estimate(family.clone(), query.clone()).unwrap_err();
         assert!(
-            error.contains("evaluation does not match its summary family"),
+            error.contains("evaluation does not match its summary type"),
             "{family:?} {query:?}: {error}"
         );
     }
@@ -486,8 +359,8 @@ fn a_statistic_the_family_does_not_answer_is_rejected() {
 }
 
 /// What the `SummaryEstimate` validation accepted before it read the
-/// family-capability table: a match on the algorithm's category, with
-/// Hydra classified by its inner algorithm.
+/// capability table: a match on the algorithm's category, a Hydra
+/// algorithm classified by the sketch in its cells.
 fn accepted_by_category(algorithm: &SketchAlgorithm, query: &SketchStatistic) -> bool {
     use SketchAlgorithm as A;
     use SketchStatistic as Q;
@@ -497,6 +370,8 @@ fn accepted_by_category(algorithm: &SketchAlgorithm, query: &SketchStatistic) ->
         A::Cms | A::CountSketch => matches!(query, Q::PointCount { .. }),
         A::CmsWithHeap | A::CountSketchWithHeap => matches!(query, Q::TopK { .. }),
         A::UnivMon => !matches!(query, Q::Quantile { .. }),
+        A::HydraKll => matches!(query, Q::Quantile { .. }),
+        A::HydraCms | A::HydraCountSketch => matches!(query, Q::PointCount { .. }),
         _ => unreachable!("{algorithm:?} is not probed"),
     }
 }
@@ -509,94 +384,25 @@ fn accepted_by_category(algorithm: &SketchAlgorithm, query: &SketchStatistic) ->
 /// answer.
 #[test]
 fn estimate_validation_matches_the_category_match_except_the_fixed_rows() {
-    let (width, depth) = (64, 4);
+    use SketchAlgorithm as A;
     let mut families: Vec<FieldDataType> = [
-        SketchParams::Kll {
-            k: 200,
-            failure_probability: None,
-        },
-        SketchParams::DDSketch { alpha: 0.01 },
-        SketchParams::Hll {
-            precision: 12,
-            relative_error: None,
-        },
-        SketchParams::Kmv {
-            k: 1024,
-            relative_error: None,
-        },
-        SketchParams::Cms { width, depth },
-        SketchParams::CountSketch { width, depth },
-        SketchParams::CmsWithHeap {
-            width,
-            depth,
-            heap_size: 10,
-        },
-        SketchParams::CountSketchWithHeap {
-            width,
-            depth,
-            heap_size: 10,
-        },
-        SketchParams::UnivMon {
-            heap_size: 10,
-            sketch_rows: depth,
-            sketch_cols: width,
-            layers: 8,
-            distinct_failure_probability: None,
-        },
+        A::Kll,
+        A::DDSketch,
+        A::Hll,
+        A::Kmv,
+        A::Cms,
+        A::CountSketch,
+        A::CmsWithHeap,
+        A::CountSketchWithHeap,
+        A::UnivMon,
     ]
     .into_iter()
-    .map(|params| {
-        use SketchAlgorithm as A;
-        let algorithm = match &params {
-            SketchParams::Kll { .. } => A::Kll,
-            SketchParams::DDSketch { .. } => A::DDSketch,
-            SketchParams::Hll { .. } => A::Hll,
-            SketchParams::Kmv { .. } => A::Kmv,
-            SketchParams::Cms { .. } => A::Cms,
-            SketchParams::CountSketch { .. } => A::CountSketch,
-            SketchParams::CmsWithHeap { .. } => A::CmsWithHeap,
-            SketchParams::CountSketchWithHeap { .. } => A::CountSketchWithHeap,
-            SketchParams::UnivMon { .. } => A::UnivMon,
-            SketchParams::Hydra(_) => unreachable!("no Hydra parameters in this list"),
-        };
-        sketch(algorithm, params)
-    })
+    .map(sketch)
     .collect();
     families.extend([
-        hydra(
-            SketchAlgorithm::Cms,
-            SketchParams::Cms { width, depth },
-            HydraKind::HydraCms,
-            HydraParams::HydraCms {
-                width,
-                depth,
-                shared_rows: depth,
-                shared_columns: width,
-            },
-        ),
-        hydra(
-            SketchAlgorithm::CountSketch,
-            SketchParams::CountSketch { width, depth },
-            HydraKind::HydraCountSketch,
-            HydraParams::HydraCountSketch {
-                width,
-                depth,
-                shared_rows: depth,
-                shared_columns: width,
-            },
-        ),
-        hydra(
-            SketchAlgorithm::Kll,
-            SketchParams::Kll {
-                k: 200,
-                failure_probability: None,
-            },
-            HydraKind::HydraKll,
-            HydraParams::HydraKll {
-                k: 200,
-                shared_buckets: width,
-            },
-        ),
+        FieldDataType::Sketch(SketchAlgorithm::HydraCms),
+        FieldDataType::Sketch(SketchAlgorithm::HydraCountSketch),
+        FieldDataType::Sketch(SketchAlgorithm::HydraKll),
     ]);
     let statistics = [
         SketchStatistic::PointCount {
@@ -614,7 +420,7 @@ fn estimate_validation_matches_the_category_match_except_the_fixed_rows() {
         SketchStatistic::TopK { k: 5 },
     ];
     for family in families {
-        let FieldDataType::Sketch(kind, _) = &family else {
+        let FieldDataType::Sketch(kind) = &family else {
             unreachable!()
         };
         for query in &statistics {
@@ -623,11 +429,13 @@ fn estimate_validation_matches_the_category_match_except_the_fixed_rows() {
                 (
                     SketchAlgorithm::UnivMon,
                     StatisticKind::ItemFrequency | StatisticKind::TopK
-                ) | (SketchAlgorithm::CountSketch, StatisticKind::Total)
-                    | (
-                        SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap,
-                        StatisticKind::ItemFrequency,
-                    )
+                ) | (
+                    SketchAlgorithm::CountSketch | SketchAlgorithm::HydraCountSketch,
+                    StatisticKind::Total
+                ) | (
+                    SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap,
+                    StatisticKind::ItemFrequency,
+                )
             );
             let before = accepted_by_category(kind, query);
             let after = estimate(family.clone(), query.clone()).is_ok();
@@ -648,5 +456,5 @@ fn summary_merge_is_permissive_about_the_family() {
     ])
     .unwrap();
     merged.validate_structure().unwrap();
-    assert_eq!(FamilyCapability::of(&irate()).merge_inputs, None);
+    assert_eq!(SummaryTypeCapability::of(&irate()).merge_inputs, None);
 }

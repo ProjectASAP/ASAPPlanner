@@ -2,12 +2,10 @@
 //! builds from the memo and Stage 3 selects from (#1047, #1054, #1200, #1201).
 
 mod execution_context;
-mod graph;
 mod memo_candidates;
 
-pub use execution_context::{ExecutionContext, ExecutionContextId, RefreshWindowId};
-pub use graph::{DagOfSelectedCandidates, PhysicalCandidateId, SelectedEdge, SelectedNodeId};
+pub use execution_context::{EvaluationGrid, ExecutionContext, ExecutionContextId};
 pub use memo_candidates::{
     output_references, producer_satisfies_physical_requirements, PhysicalASAPMemoCandidates,
-    PhysicalCandidate, PhysicalEdge, PhysicalEdgeId,
+    PhysicalCandidate, PhysicalCandidateId, PhysicalEdge, PhysicalEdgeId,
 };

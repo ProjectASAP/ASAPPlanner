@@ -5,7 +5,7 @@
 //! |---|---|---|
 //! | baseline (section 3) | $x_v$, $y_{u,c,i}$, $z_{q,v}$, $t_v$ ([`SelectionVariables`]) | (A) [`input_satisfaction_constraints`], (B) [`producer_selection_constraints`], (C)/(D) [`query_coverage_constraints`], (E) [`acyclicity_constraints`], (F) [`utilization_constraints`]; (G), (H): $y$ exists only on admissible edges |
 //! | execution contexts (section 5) | $x^{\mathrm{mat}}_v$, $x_{\kappa,v}$, $y_{\kappa,u,c,i}$, $h_v$ ([`ExecutionContextVariables`]) | (R) [`retention_constraints`] |
-//! | accuracy (section 4) | $E_c$, $F_{c,i}$, $D_c$, $H_{c,i}$ ([`AccuracyVariables`]) | (K) [`accuracy_constraints`] |
+//! | accuracy (section 4) | $E_{c,m}$, $F_{c,i,m}$, $D_c$, $H_{c,i}$ ([`AccuracyVariables`]) | (K) [`accuracy_constraints`] |
 //!
 //! Every function body is `todo!()` until #1207 PRs 6 (baseline), 7
 //! (contexts) and 8 (accuracy) fill them in; until then nothing calls
@@ -16,6 +16,7 @@ use std::collections::HashMap;
 
 use good_lp::{Constraint, Variable};
 
+use asap_types::ir::properties::AccuracyMetric;
 use asap_types::stages::{
     ExecutionContextId, PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalEdgeId,
 };
@@ -32,8 +33,9 @@ struct SelectionVariables {
     y: HashMap<PhysicalEdgeId, Variable>,
     /// $z_{q,v}$, for $v \in G_q$.
     z: HashMap<(QueryId, PhysicalCandidateId), Variable>,
-    /// $t_v$, by [`PhysicalCandidateId`].
-    t: Vec<Variable>,
+    /// $t_v$, by [`PhysicalCandidateId`]: only for candidates on a cycle of
+    /// admissible edges (a strongly connected component); `None` elsewhere.
+    t: Vec<Option<Variable>>,
 }
 
 /// The execution-context variables (section 5), which replace $x$ and the
@@ -51,10 +53,11 @@ struct ExecutionContextVariables {
 
 /// The accuracy variables of constraint (K) (section 4), all continuous.
 struct AccuracyVariables {
-    /// $E_c$, by [`PhysicalCandidateId`].
-    error_bound: Vec<Variable>,
-    /// $F_{c,i}$: the chosen producer's error bound on input $i$ of $c$.
-    error_bound_of_input: HashMap<(PhysicalCandidateId, usize), Variable>,
+    /// $E_{c,m}$: candidate $c$'s error bound in metric $m$.
+    error_bound: HashMap<(PhysicalCandidateId, AccuracyMetric), Variable>,
+    /// $F_{c,i,m}$: the chosen producer's error bound in metric $m$ on input
+    /// $i$ of $c$.
+    error_bound_of_input: HashMap<(PhysicalCandidateId, usize, AccuracyMetric), Variable>,
     /// $D_c$, by [`PhysicalCandidateId`].
     failure_probability: Vec<Variable>,
     /// $H_{c,i}$: the chosen producer's failure probability on input $i$ of $c$.
@@ -88,7 +91,8 @@ fn query_coverage_constraints(
     todo!("#1207 PR 6: constraints (C) and (D)")
 }
 
-/// (E) $t_u + 1 \le t_c + |\mathcal C|(1 - y_{u,c,i})$.
+/// (E) $t_u + 1 \le t_c + n(1 - y_{u,c,i})$, only on edges inside a strongly
+/// connected component of the admissible edges, $n$ its size.
 fn acyclicity_constraints(
     physical: &PhysicalASAPMemoCandidates,
     variables: &SelectionVariables,
@@ -106,13 +110,11 @@ fn utilization_constraints(
     todo!("#1207 PR 6: constraint (F)")
 }
 
-/// (R) $h_v \ge \operatorname{need}_{\kappa,v,c,i}\, y_{\kappa,v,c,i}$.
-///
-/// Assumptions (decided 2026-11-06): an edge's need is the time horizon
-/// the queries it serves read, a constant per edge (a 5m range over 10 s
-/// windows needs 30 windows), so (R) is linear; query latency is ignored
-/// until the latency design: a result counts as read when its evaluation
-/// starts.
+/// (R) $h_v \ge \operatorname{need}_{\kappa,v,c,i}\, y_{\kappa,v,c,i}$: for a
+/// time-indexed producer (raw data, a chain, results stored per evaluation
+/// time) the reading path's offset plus range, a constant per edge, so (R)
+/// is linear. Query latency is ignored: a result counts as read when its
+/// evaluation starts.
 fn retention_constraints(
     physical: &PhysicalASAPMemoCandidates,
     variables: &ExecutionContextVariables,
@@ -121,8 +123,9 @@ fn retention_constraints(
     todo!("#1207 PR 7: constraint (R)")
 }
 
-/// (K): $E_c$ and $D_c$ per candidate, big-M on selected edges, and the
-/// root checks $E_v \le \varepsilon_q + M_q(1 - z_{q,v})$,
+/// (K): $E_{c,m}$ per candidate and metric and $D_c$ per candidate, big-M on
+/// selected edges, the metric rule on the selected path, and the root
+/// checks $E_{v,m_q} \le \varepsilon_q + M_q(1 - z_{q,v})$,
 /// $D_v \le \delta_q + (1 - z_{q,v})$.
 fn accuracy_constraints(
     physical: &PhysicalASAPMemoCandidates,

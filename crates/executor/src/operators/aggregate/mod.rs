@@ -155,7 +155,7 @@ impl Operator {
                 | AggIntent::Deriv
                 | AggIntent::PredictLinear { .. }
                 | AggIntent::Increase
-                | AggIntent::Count { .. }
+                | AggIntent::Count
                 | AggIntent::Sum { col: None }
                 | AggIntent::Avg { col: None }
                 | AggIntent::Min { col: None }
@@ -187,7 +187,7 @@ impl Operator {
             .collect::<Vec<_>>();
         fields.push(result_field(
             "value",
-            if matches!(intent, AggIntent::Count { .. }) {
+            if matches!(intent, AggIntent::Count) {
                 DataType::Int64
             } else {
                 DataType::Float64
