@@ -1,5 +1,5 @@
 //! Costing a physical plan DAG node by node: each node's resource usage
-//! ([`node_usage`]), then the plan's usage, latency, retention, retained tumbling window
+//! ([`node_resource_usage_and_cost`]), then the plan's usage, latency, retention, retained tumbling window
 //! chains and cost ([`plan_cost`]). Moved from Stage 3 (`asap-stage3-plan-selection`,
 //! whose module doc, "Cost model", describes the model), so Stage 3 computes
 //! no cost of its own.
@@ -9,10 +9,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use crate::analytical::{
     estimate_operator, AnalyticalCostError, PhysicalOperator, ResourceEstimate,
 };
-use crate::execution_demand::{computations, consumers, evaluation_rate, query_starts, Consumer};
+use crate::execution_demand::{computations, evaluation_rate, query_starts};
 use crate::operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
 };
+use crate::read_back::read_back_ms;
 use crate::state_bytes::{
     keeps_every_value, row_bytes, sketch_shape, summary_shape, StateInputRows,
 };
@@ -29,7 +30,7 @@ use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::{FieldDataType, Schema, SketchParams, SketchStatistic};
 use asap_types::ir::{ASAPOp, NonASAPOp, TimeRangeKind};
 use asap_types::physical::{Lifetime, StorageMedium};
-use asap_types::workload::{DataWorkload, QueryRecurrence, RangeEvaluation};
+use asap_types::workload::{DataWorkload, QueryRecurrence, QueryWorkloadEntry, RangeEvaluation};
 
 use asap_types::workload::bounds::{
     declared_non_negative, declared_series, group_count_bound, source_name, source_rows_per_ms,
@@ -44,20 +45,25 @@ use asap_types::workload::bounds::{
 /// ([`computations`]); an ingestion-time node over one second of arriving
 /// rows. A materialized node's state is counted in byte-seconds per
 /// second; a tumbling-window chain materialized beyond one evaluation keeps the tumbling windows its
-/// retention covers ([`tumbling_window_retention_ms`]). `nodes` is `dag`'s
-/// ([`node_map`]); `recurrence[q]` and
-/// `range_evaluations[q]` say how often query `q` runs and how many steps
-/// each run evaluates (one when missing).
-#[allow(clippy::too_many_arguments)]
+/// `retention_ms` ($h_v$) covers. `entries[q]` says how often query `q`
+/// runs and how many steps each run evaluates; the formulas are scaled by
+/// `settings.frozen_calibration_factor` (1 when unset).
 pub fn plan_cost(
     dag: &PhysicalASAPDAG,
-    nodes: &NodeMap<'_>,
-    recurrence: &[QueryRecurrence],
-    range_evaluations: &[Option<RangeEvaluation>],
+    entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     settings: &CostInputs,
-    formula_scale: f64,
 ) -> Result<(PlanCost, CalibrationFit), (PhysicalASAPNodeId, AnalyticalCostError)> {
+    let nodes = &node_map(dag);
+    let recurrence: &[QueryRecurrence] = &entries
+        .iter()
+        .map(|entry| entry.recurrence.clone())
+        .collect::<Vec<_>>();
+    let range_evaluations: &[Option<RangeEvaluation>] = &entries
+        .iter()
+        .map(|entry| entry.range_evaluation)
+        .collect::<Vec<_>>();
+    let formula_scale = settings.frozen_calibration_factor.unwrap_or(1.0);
     let first = dag.nodes.first().map(|n| n.id).unwrap_or_default();
     let table = &settings.measured_operation_costs;
     let mut fit = CalibrationFit::default();
@@ -70,7 +76,6 @@ pub fn plan_cost(
     let EachNodeUsage {
         priced,
         multipliers,
-        reach,
     } = each_node_usage(
         dag,
         nodes,
@@ -89,12 +94,6 @@ pub fn plan_cost(
     // Each node's work in ms on one core: one computation at query time,
     // one second of arriving rows at ingestion time.
     let mut work_ms: HashMap<PhysicalASAPNodeId, f64> = HashMap::new();
-    // Query-time memory held only while one evaluation runs, a OneEvaluation
-    // state in memory or a not-materialized node's working memory: (bytes,
-    // per second, whether each consumer computes its own copy),
-    // counted once the evaluations' latencies are known, in node order so
-    // the sum is the same in every run.
-    let mut held: BTreeMap<PhysicalASAPNodeId, (u64, f64, bool)> = BTreeMap::new();
     // The raw data query-time scans read, retained on disk: per source, the
     // largest scan's (bytes, node).
     let mut raw_data: HashMap<&Source, (u64, PhysicalASAPNodeId)> = HashMap::new();
@@ -122,9 +121,6 @@ pub fn plan_cost(
         output.insert(node.id, node_priced.output);
         if node_priced.family != StateFamily::None {
             family_of.insert(node.id, node_priced.family);
-        }
-        if let Some(entry) = node_priced.held {
-            held.insert(node.id, entry);
         }
         if let Some(window) = node_priced.maintained {
             maintained.push((node.id, window));
@@ -241,65 +237,6 @@ pub fn plan_cost(
     for (latency, evaluation_ms) in latency.iter_mut().zip(evaluation_ms_per_query) {
         latency.query_ms += evaluation_ms;
     }
-    // Query-time memory is held for one evaluation: a `OneEvaluation` state from
-    // its build until the longest query reading it finishes, about that
-    // query's latency, once per execution. A not-materialized node's working
-    // memory is computed once per consumer ([`consumers`]), and each copy is
-    // held while its consumer's evaluation runs: a query's for that query's
-    // latency, at its rate; a materialized node's until the longest query
-    // reading that node finishes, at the node's rate, as its `OneEvaluation`
-    // state is.
-    let longest_reader_ms = |id: PhysicalASAPNodeId| {
-        reach
-            .iter()
-            .zip(&latency)
-            .filter(|(reached, _)| reached.contains(&id))
-            .map(|(_, l)| l.total_ms())
-            .fold(0.0, f64::max)
-    };
-    let consumers_of = consumers(dag);
-    for (id, (state, per_second, computed_per_consumer)) in held {
-        // The milliseconds it is held per second: each execution's held
-        // time times its executions per second, summed.
-        let held_ms_per_second = match computed_per_consumer {
-            false => per_second * longest_reader_ms(id),
-            true => {
-                let mut sum = 0.0;
-                for &consumer in consumers_of.get(&id).into_iter().flatten() {
-                    sum += match consumer {
-                        Consumer::Query(query) => {
-                            let rate = evaluation_rate(
-                                recurrence
-                                    .get(query)
-                                    .map(|r| (r, range_evaluations.get(query).copied().flatten())),
-                                settings.non_repeating_query_horizon_seconds,
-                            )
-                            .map_err(|error| (id, error))?;
-                            rate * latency.get(query).map_or(0.0, QueryLatency::total_ms)
-                        }
-                        Consumer::Materialized(node) => {
-                            multipliers[&node].1 * longest_reader_ms(node)
-                        }
-                    };
-                }
-                sum
-            }
-        };
-        let evaluation_ms = match per_second > 0.0 {
-            true => held_ms_per_second / per_second,
-            false => 0.0,
-        };
-        let byte_seconds = state as f64 * held_ms_per_second / 1_000.0;
-        let node = per_node.get_mut(&id).expect("every node is measured");
-        usage.average_memory_bytes += byte_seconds;
-        node.detail += &format!("; holds {state} bytes for {evaluation_ms:.1} ms");
-        if let (Some(cost), Some(prices)) = (&mut node.cost_per_second, usage_prices) {
-            *cost += prices.cost_per_memory_byte_second * byte_seconds;
-            if !cost.is_finite() {
-                return Err((id, AnalyticalCostError::Overflow));
-            }
-        }
-    }
     usage.peak_cpu_cores = peak_cpu_cores(
         dag,
         nodes,
@@ -353,15 +290,13 @@ pub fn plan_cost(
 }
 
 /// Every node of a physical DAG priced ([`each_node_usage`]), with each
-/// node's `(multiplier, per_second)` ([`computations`]) and the nodes each
-/// query reaches at query time ([`query_reach`]).
+/// node's `(multiplier, per_second)` ([`computations`]).
 struct EachNodeUsage<'a> {
-    priced: HashMap<PhysicalASAPNodeId, NodeUsage<'a>>,
+    priced: HashMap<PhysicalASAPNodeId, NodeResourceUsageAndCost<'a>>,
     multipliers: HashMap<PhysicalASAPNodeId, (u64, f64)>,
-    reach: Vec<HashSet<PhysicalASAPNodeId>>,
 }
 
-/// [`node_usage`] over every node of `dag`, children first, with the
+/// [`node_resource_usage_and_cost`] over every node of `dag`, children first, with the
 /// arguments of [`plan_cost`]. `root_rates`, when given, are
 /// the computations per second of each root's consumer in place of its
 /// query's own rate ([`computations`]).
@@ -385,20 +320,20 @@ fn each_node_usage<'a>(
         root_rates,
     )
     .map_err(|error| (first, error))?;
-    let reach = query_reach(dag, nodes);
-    let retention_ms = tumbling_window_retention_ms(dag, &reach, range_evaluations);
     let mut producers_of: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
+    let mut consumers_of: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
     for e in &dag.edges {
         producers_of.entry(e.consumer).or_default().push(e.producer);
+        consumers_of.entry(e.producer).or_default().push(e.consumer);
     }
-    let mut priced: HashMap<PhysicalASAPNodeId, NodeUsage<'a>> = HashMap::new();
+    let mut priced: HashMap<PhysicalASAPNodeId, NodeResourceUsageAndCost<'a>> = HashMap::new();
     for node in &dag.nodes {
         let views: Vec<ProducerOutput<'a>> = producers_of
             .get(&node.id)
             .map_or(&[][..], Vec::as_slice)
             .iter()
             .map(|p| {
-                let produced: &NodeUsage<'a> = &priced[p];
+                let produced: &NodeResourceUsageAndCost<'a> = &priced[p];
                 ProducerOutput {
                     payload: &nodes[p].payload,
                     output_schema: &nodes[p].output_schema,
@@ -406,17 +341,19 @@ fn each_node_usage<'a>(
                     sources: produced.sources.clone(),
                     family: produced.family,
                     unchanged_columns: produced.unchanged_columns.clone(),
+                    tumbling_windows: produced.tumbling_windows,
                 }
             })
             .collect();
-        let node_priced = node_usage(
+        let window_ms = match node.output_state.timing {
+            ExecutionTiming::IngestionTime => maintained_window_ms(node.id, nodes, &producers_of),
+            ExecutionTiming::QueryTime => scan_read_ms(node, nodes, &consumers_of),
+        };
+        let node_priced = node_resource_usage_and_cost(
             node,
             &views,
             multipliers[&node.id],
-            retained_tumbling_windows(node, &retention_ms),
-            (node.output_state.timing == ExecutionTiming::IngestionTime)
-                .then(|| maintained_window_ms(node.id, nodes, &producers_of))
-                .flatten(),
+            window_ms,
             data,
             settings,
             formula_scale,
@@ -427,19 +364,42 @@ fn each_node_usage<'a>(
     Ok(EachNodeUsage {
         priced,
         multipliers,
-        reach,
     })
 }
 
-/// The state family of a node with `payload` whose first producer has
-/// `producer_family`: a build's own (one sketch instance per group; a
-/// shared Hydra structure is not that sketch), inherited by the merges,
-/// estimates and finalizations over it, none otherwise.
+/// The window a query-time `Scan` `node` reads per execution: the most
+/// offset + range its consumers read ([`read_back_ms`], no range-evaluation
+/// span), once however many consumers read it. `None` for any other node,
+/// or when a consumer reads it whole.
+fn scan_read_ms(
+    node: &asap_types::ir::physical_export::PhysicalASAPDAGNode,
+    nodes: &NodeMap<'_>,
+    consumers_of: &HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
+) -> Option<u64> {
+    if !matches!(node.payload, Payload::NonASAP(NonASAPOp::Scan { .. })) {
+        return None;
+    }
+    let readers = |id: PhysicalASAPNodeId| consumers_of.get(&id).cloned().unwrap_or_default();
+    read_back_ms(
+        readers(node.id),
+        |id| &nodes[&id].payload,
+        readers,
+        |_| 0,
+        true,
+    )
+}
+
+/// The state family of `node` whose first producer has `producer_family`:
+/// a build's own, its θ (`node.parameters`; one sketch instance per group;
+/// a shared Hydra structure is not that sketch), inherited by the merges,
+/// estimates and finalizations over it, none otherwise. Err
+/// [`AnalyticalCostError::UnsupportedCandidate`] for a sketch build without
+/// θ, a planner bug.
 fn state_family<'a>(
-    payload: &'a Payload,
+    node: &'a asap_types::ir::physical_export::PhysicalASAPDAGNode,
     producer_family: Option<StateFamily<'a>>,
-) -> StateFamily<'a> {
-    match payload {
+) -> Result<StateFamily<'a>, AnalyticalCostError> {
+    Ok(match &node.payload {
         Payload::ASAP(
             ASAPOp::SummaryAgg {
                 summary_type: family,
@@ -450,9 +410,11 @@ fn state_family<'a>(
                 ..
             },
         ) => match family {
-            FieldDataType::Sketch(..) => {
-                todo!("#1207 PR 6: the state family of θ from the candidate's LogicalProperties::parameters")
-            }
+            FieldDataType::Sketch(..) => node
+                .parameters
+                .as_ref()
+                .map(StateFamily::Sketch)
+                .ok_or(AnalyticalCostError::UnsupportedCandidate)?,
             FieldDataType::ExactAggregate(kind, _) => StateFamily::Exact(kind),
             _ => StateFamily::None,
         },
@@ -462,10 +424,10 @@ fn state_family<'a>(
             | ASAPOp::FinalizeExactAccumulator { .. },
         ) => producer_family.unwrap_or(StateFamily::None),
         _ => StateFamily::None,
-    }
+    })
 }
 
-/// One producer of a node being priced ([`node_usage`]): its payload and
+/// One producer of a node being priced ([`node_resource_usage_and_cost`]): its payload and
 /// schema, its output statistics, the sources it reads and its state
 /// family.
 #[derive(Debug, Clone)]
@@ -478,33 +440,34 @@ pub struct ProducerOutput<'a> {
     /// Its output columns that still hold one source row's label (or
     /// column) values unchanged ([`unchanged_source_columns`]).
     pub unchanged_columns: BTreeSet<&'a str>,
+    /// The tumbling windows its rows span: those a `TimeRange` selects
+    /// from a chain, 1 for any other node.
+    pub tumbling_windows: u64,
 }
 
-/// What one node uses and outputs ([`node_usage`]): its output statistics, sources and state family for its
+/// What one node uses and outputs ([`node_resource_usage_and_cost`]): its output statistics, sources and state family for its
 /// consumers; its work for one computation (one execution) in ms on one
-/// core; its usage per second; what is charged
-/// once the whole plan is known (memory held for a query's evaluation, an
-/// in-memory ingestion window's partial copies, the raw data a query-time
-/// scan keeps on disk); its calibration fit and its [`NodeCost`].
+/// core; its usage per second (query-time memory held while it computes
+/// included); what is charged once the whole plan is known (an in-memory
+/// ingestion window's partial copies, the raw data a query-time scan keeps
+/// on disk); its calibration fit and its [`NodeCost`].
 #[derive(Debug, Clone)]
-pub struct NodeUsage<'a> {
+pub struct NodeResourceUsageAndCost<'a> {
     pub output: EdgeStatistics,
     pub sources: BTreeSet<&'a str>,
     pub family: StateFamily<'a>,
     /// Its output columns that still hold one source row's label (or
     /// column) values unchanged ([`unchanged_source_columns`]).
     pub unchanged_columns: BTreeSet<&'a str>,
+    /// The tumbling windows its rows span: those a `TimeRange` selects
+    /// from a chain, 1 for any other node.
+    pub tumbling_windows: u64,
     pub work_ms_per_execution: f64,
     pub cpu_ops_per_second: f64,
     pub scanned_bytes_per_second: f64,
     pub average_memory_bytes: f64,
     pub peak_memory_bytes: u64,
     pub disk_bytes: u64,
-    /// Query-time memory held while an evaluation runs: (bytes, computations
-    /// per second, whether each consumer computes its own copy, held while
-    /// that consumer's evaluation runs ([`plan_cost`]), rather than one copy
-    /// held until the longest query reading the node finishes).
-    pub held: Option<(u64, f64, bool)>,
     /// An in-memory ingestion-time state's bytes per window.
     pub maintained: Option<u64>,
     /// A query-time scan's source and the raw bytes it reads.
@@ -515,21 +478,24 @@ pub struct NodeUsage<'a> {
 
 /// Measure and price one node of a physical DAG (one step of
 /// [`plan_cost`]): `producers` are its producers in edge order,
-/// `rate` its `(multiplier, per_second)` ([`computations`]),
-/// `retained_tumbling_window_count` the tumbling windows a tumbling-window chain keeps
-/// completed (`retained_tumbling_windows`), and `ingestion_window_ms` the window an
-/// ingestion-time node maintains (`maintained_window_ms`).
+/// `rate` its `(multiplier, per_second)` ([`computations`]), and
+/// `window_ms` the time window one execution covers: the window an
+/// ingestion-time node maintains, or a query-time `Scan`'s read, the most
+/// offset + range its consumers read ([`read_back_ms`] without a span;
+/// `None`: it reads what it retains)
+/// (`maintained_window_ms`). A materialized node keeps what its
+/// `retention_ms` ($h_v$) covers: a tumbling-window chain its windows in
+/// it, a query-time `Scan` its raw rows in it.
 #[allow(clippy::too_many_arguments)]
-pub fn node_usage<'a>(
+pub fn node_resource_usage_and_cost<'a>(
     node: &'a asap_types::ir::physical_export::PhysicalASAPDAGNode,
     producers: &[ProducerOutput<'a>],
     rate: (u64, f64),
-    retained_tumbling_window_count: u64,
-    ingestion_window_ms: Option<u64>,
+    window_ms: Option<u64>,
     data: &DataWorkload,
     settings: &'a CostInputs,
     formula_scale: f64,
-) -> Result<NodeUsage<'a>, AnalyticalCostError> {
+) -> Result<NodeResourceUsageAndCost<'a>, AnalyticalCostError> {
     let table = &settings.measured_operation_costs;
     let speed = settings.resource_speed;
     let usage_prices = match &settings.cost_model {
@@ -539,12 +505,27 @@ pub fn node_usage<'a>(
     let sketch_size =
         |params: &SketchParams| sketch_shape(params, StateInputRows::UNKNOWN).1 as f64;
     let mut fit = CalibrationFit::default();
-    let mut held = None;
+    // Query-time memory held while the node computes.
+    let mut held_bytes = None;
     let mut maintained = None;
     let mut raw_scan = None;
     // A query-time scan's raw rows retained.
     let mut raw_retained_rows = None;
     let ingestion = node.output_state.timing == ExecutionTiming::IngestionTime;
+    // The completed tumbling windows a chain retains: its `retention_ms`
+    // over its window width, at least one.
+    let retained_tumbling_window_count = match &node.payload {
+        Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            tumbling_window_width_ms,
+            ..
+        }) => node
+            .retention_ms
+            .map_or(1, |retention_ms| {
+                retention_ms.div_ceil((*tumbling_window_width_ms).max(1))
+            })
+            .max(1),
+        _ => 1,
+    };
     let inputs: Vec<EdgeStatistics> = producers.iter().map(|p| p.output).collect();
     let sources: BTreeSet<&str> = match &node.payload {
         Payload::NonASAP(NonASAPOp::Scan { source, .. }) => [source_name(source)].into(),
@@ -564,7 +545,7 @@ pub fn node_usage<'a>(
         missing: "an arrival rate (the arrival's rows_per_second, or the \
                   source's series_count with sample_interval)",
     };
-    let family = state_family(&node.payload, producers.first().map(|p| p.family));
+    let family = state_family(node, producers.first().map(|p| p.family))?;
     let unchanged_columns = unchanged_source_columns(
         node,
         &producers
@@ -631,8 +612,7 @@ pub fn node_usage<'a>(
     let rows_read = || match ingestion {
         false => Ok(input.rows.max(1)),
         true => {
-            let window_ms =
-                ingestion_window_ms.ok_or(AnalyticalCostError::IngestionGroupingWithoutWindow)?;
+            let window_ms = window_ms.ok_or(AnalyticalCostError::IngestionGroupingWithoutWindow)?;
             // Name a source with no rate of its own.
             let rows_per_ms = rows_per_ms.ok_or_else(|| {
                 let unrated = sources
@@ -680,7 +660,11 @@ pub fn node_usage<'a>(
                 let (window_width_ms, retained_lookback_ms): (Option<u64>, Option<u64>) =
                     match ingestion {
                         true => (None, None),
-                        false => todo!("#1207 PR 7: a query-time Scan's read per edge (the TimeRange above it) and its retained rows from retention_ms (h_v)"),
+                        // One execution reads the most its consumers read
+                        // (`window_ms`), else what the scan retains (its
+                        // `retention_ms`, $h_v$); `None` reads every row
+                        // held. It keeps `retention_ms`.
+                        false => (window_ms.or(node.retention_ms), node.retention_ms),
                     };
                 let lookback = match ingestion {
                     true => Some(1_000),
@@ -694,7 +678,13 @@ pub fn node_usage<'a>(
                 // The raw rows retained for a query-time scan: back to the
                 // oldest row it reads, `end_offset + width` (an offset
                 // window keeps more than it reads), at most those held.
-                if !ingestion {
+                // So are those an ingestion-time scan materialized across
+                // evaluations keeps: back `retention_ms` ($h_v$).
+                let retained_lookback_ms = match ingestion {
+                    true => node.retention_ms,
+                    false => retained_lookback_ms,
+                };
+                if !ingestion || matches!(node.lifetime, Lifetime::AcrossEvaluations(_)) {
                     let retained_rows = match (by_rate(retained_lookback_ms), rows_held) {
                         (Some(by_rate), Some(rows_held)) => Some(by_rate.min(rows_held)),
                         (by_rate, rows_held) => by_rate.or(rows_held),
@@ -731,6 +721,17 @@ pub fn node_usage<'a>(
                         source_read_bytes: out.bytes,
                     },
                 );
+                // Raw data materialized at ingestion time: its consumers
+                // read the rows it retains, not one second of them.
+                let out = match (ingestion, node.lifetime) {
+                    (true, Lifetime::AcrossEvaluations(_)) => edge(raw_retained_rows.ok_or(
+                        AnalyticalCostError::MissingSourceFact {
+                            source_name: source.to_string(),
+                            missing: "its rows_held (raw data retained without a bound)",
+                        },
+                    )?)?,
+                    _ => out,
+                };
                 (out, estimate, format!("scan {} samples", out.rows))
             }
             NonASAPOp::Aggregate {
@@ -832,6 +833,37 @@ pub fn node_usage<'a>(
                 ),
                 format!("time shift: pass {} rows, free", input.rows),
             ),
+            NonASAPOp::TimeRange { range, .. } if chain_width_ms(producers).is_some() => {
+                // Over a chain, the windows inside the range: one
+                // window's states per window.
+                let windows = selected_tumbling_windows(range, producers)?;
+                let out = EdgeStatistics {
+                    rows: input
+                        .rows
+                        .checked_mul(windows)
+                        .ok_or(AnalyticalCostError::Overflow)?,
+                    bytes: input
+                        .bytes
+                        .checked_mul(windows)
+                        .ok_or(AnalyticalCostError::Overflow)?,
+                };
+                // It reads those windows' states from the chain's store.
+                let estimate = estimate_operator(
+                    PhysicalOperator::TimeRange,
+                    OperatorStatistics::PassThrough {
+                        edges: UnaryEdgeStatistics {
+                            input: out,
+                            output: out,
+                            promql: None,
+                        },
+                    },
+                );
+                (
+                    out,
+                    estimate,
+                    format!("time range {range:?}: {windows} tumbling windows of states"),
+                )
+            }
             NonASAPOp::TimeRange { range, kind, .. } => {
                 // A range keeps its window's samples; an instant
                 // selector the latest sample of each series.
@@ -887,7 +919,7 @@ pub fn node_usage<'a>(
                 rows_per_state: (!ingestion).then(|| input.rows.div_ceil(group_count.max(1))),
                 non_negative: raw_data_samples_non_negative(),
             };
-            let (depth, state_bytes) = summary_shape(family, input_rows);
+            let (depth, state_bytes) = summary_shape(family, node.parameters.as_ref(), input_rows)?;
             let state_bytes = measured_state_bytes.unwrap_or(state_bytes);
             let out = EdgeStatistics {
                 rows: group_count,
@@ -909,22 +941,66 @@ pub fn node_usage<'a>(
                 ),
             )
         }
-        Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => {
-            todo!("#1207 PR 7: a chain's states and memory over the windows it retains (h_v)")
+        Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            summary_type: family,
+            reduction,
+            tumbling_window_width_ms,
+            ..
+        }) => {
+            // One window's states: each input row updates the window its
+            // time falls in. At ingestion time the rows of one window
+            // arrive at the rate of one second's `input.rows`; at query
+            // time its input holds the rows of every retained window.
+            let group_count = groups(reduction)?;
+            let rows_per_tumbling_window = match ingestion {
+                true => u64::try_from(
+                    (u128::from(input.rows) * u128::from(*tumbling_window_width_ms))
+                        .div_ceil(1_000),
+                )
+                .map_err(|_| AnalyticalCostError::Overflow)?,
+                false => input.rows.div_ceil(retained_tumbling_window_count),
+            };
+            let input_rows = StateInputRows {
+                rows_per_state: Some(rows_per_tumbling_window.div_ceil(group_count.max(1))),
+                non_negative: raw_data_samples_non_negative(),
+            };
+            let (depth, state_bytes) = summary_shape(family, node.parameters.as_ref(), input_rows)?;
+            let state_bytes = measured_state_bytes.unwrap_or(state_bytes);
+            let out = EdgeStatistics {
+                rows: group_count,
+                bytes: group_count
+                    .checked_mul(state_bytes)
+                    .ok_or(AnalyticalCostError::Overflow)?,
+            };
+            (
+                out,
+                Ok(ResourceEstimate::new(
+                    input.rows as f64 * (depth + 1.0),
+                    out.bytes,
+                    0,
+                )),
+                format!(
+                    "build {} in tumbling windows of {tumbling_window_width_ms} ms for \
+                     {group_count} groups: {} rows x (1 + depth {depth})",
+                    summary_type_name(family),
+                    input.rows
+                ),
+            )
         }
         Payload::ASAP(ASAPOp::SummaryMerge { group_by, .. }) => {
             // One operation per input state read; one state per group
-            // out. A rollup's groups are those of its keys, at most its
-            // input groups.
+            // out: an input's groups are its states of one window (all
+            // its states unless it selects a chain's windows). A
+            // rollup's groups are those of its keys, at most its input
+            // groups.
             let mut group_count = 0;
             for producer in producers {
-                if matches!(
-                    producer.payload,
-                    Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
-                ) {
-                    todo!("#1207 PR 7: the states a merge reads from a chain's windows")
-                }
-                group_count = group_count.max(producer.output.rows);
+                group_count = group_count.max(
+                    producer
+                        .output
+                        .rows
+                        .div_ceil(producer.tumbling_windows.max(1)),
+                );
             }
             let states = merged_states(producers)?;
             if let Some(keys) = group_by {
@@ -1027,52 +1103,38 @@ pub fn node_usage<'a>(
     // State retained between computations: at ingestion time, the window
     // being built and the completed ones queries read (a chain of N
     // tumbling windows keeps N + 1), every second. At query time the output is
-    // reused only within one evaluation, so it is held only while that
-    // evaluation runs (counted below, once latencies are known). The
-    // state is what the node holds: its output, or the values an exact
-    // aggregate keeps per group when that is more. A computation that
-    // keeps nothing holds its working memory while it runs, once per
-    // consumer that recomputes it; at query time, that is held for the
-    // evaluation too (counted in [`plan_cost`], per consumer: a query's
-    // latency, or a materialized consumer's longest query's, as a
-    // OneEvaluation state is).
+    // held only while the node computes (below). The state is what the
+    // node holds: its output, or the values an exact aggregate keeps per
+    // group when that is more. A computation that keeps nothing holds its
+    // working memory while it runs.
     let state = out.bytes.max(estimate.peak_memory_bytes());
     let (materialized_bytes, medium) = match (ingestion, node.lifetime, &node.payload) {
         (_, Lifetime::None, _) => {
             let working_memory_bytes = estimate.peak_memory_bytes();
             peak_memory_bytes = working_memory_bytes.saturating_mul(multiplier);
             if !ingestion && working_memory_bytes > 0 {
-                held = Some((working_memory_bytes, per_second, true));
+                held_bytes = Some(working_memory_bytes);
             }
             (0, StorageMedium::Memory)
         }
-        // A tumbling-window chain materialized across evaluations holds the tumbling windows its
-        // retention covers ([`tumbling_window_retention_ms`]: N, plus one per tumbling window
-        // width of the queries' range-evaluation span), all but the
-        // newest between evaluations and all while one runs.
+        // A tumbling-window chain materialized across evaluations holds the
+        // tumbling windows its retention covers, all but the newest between
+        // evaluations and all while one runs. `state` is one window's.
         (
             false,
             Lifetime::AcrossEvaluations(medium),
             Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }),
         ) => {
-            let tumbling_windows = tumbling_windows_of(node);
             let retained = retained_tumbling_window_count;
-            let between = (state / tumbling_windows)
-                .checked_mul(
-                    retained
-                        .checked_sub(1)
-                        .ok_or(AnalyticalCostError::Overflow)?,
-                )
+            let between = state
+                .checked_mul(retained - 1)
                 .ok_or(AnalyticalCostError::Overflow)?;
             match medium {
                 StorageMedium::Memory => {
                     average_memory_bytes = between as f64;
-                    peak_memory_bytes = match retained == tumbling_windows {
-                        true => state,
-                        false => (state / tumbling_windows)
-                            .checked_mul(retained)
-                            .ok_or(AnalyticalCostError::Overflow)?,
-                    };
+                    peak_memory_bytes = state
+                        .checked_mul(retained)
+                        .ok_or(AnalyticalCostError::Overflow)?;
                 }
                 StorageMedium::Disk => disk_bytes = between,
             }
@@ -1082,7 +1144,7 @@ pub fn node_usage<'a>(
         (_, Lifetime::OneEvaluation(medium), _) => {
             match medium {
                 StorageMedium::Memory => {
-                    held = Some((state, per_second, false));
+                    held_bytes = Some(state);
                     peak_memory_bytes = state;
                 }
                 StorageMedium::Disk => disk_bytes = state,
@@ -1094,18 +1156,19 @@ pub fn node_usage<'a>(
             true,
             Lifetime::AcrossEvaluations(medium),
             Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }),
-        ) => {
-            let tumbling_windows = tumbling_windows_of(node);
-            (
-                (state / tumbling_windows)
-                    .checked_mul(
-                        retained_tumbling_window_count
-                            .checked_add(1)
-                            .ok_or(AnalyticalCostError::Overflow)?,
-                    )
-                    .ok_or(AnalyticalCostError::Overflow)?,
-                medium,
-            )
+        ) => (
+            state
+                .checked_mul(
+                    retained_tumbling_window_count
+                        .checked_add(1)
+                        .ok_or(AnalyticalCostError::Overflow)?,
+                )
+                .ok_or(AnalyticalCostError::Overflow)?,
+            medium,
+        ),
+        // Raw data materialized at ingestion time: the rows it retains.
+        (true, Lifetime::AcrossEvaluations(medium), Payload::NonASAP(NonASAPOp::Scan { .. })) => {
+            (edge(raw_retained_rows.unwrap_or(out.rows))?.bytes, medium)
         }
         // A whole state materialized across evaluations: it and the one being built.
         (_, Lifetime::AcrossEvaluations(medium), _) => (
@@ -1114,7 +1177,7 @@ pub fn node_usage<'a>(
         ),
     };
     if ingestion && node.lifetime == Lifetime::AcrossEvaluations(StorageMedium::Memory) {
-        maintained = Some(state / tumbling_windows_of(node));
+        maintained = Some(state);
     }
     if materialized_bytes > 0 {
         match medium {
@@ -1135,6 +1198,14 @@ pub fn node_usage<'a>(
             raw_scan = Some((source, retained));
         }
     }
+    // Query-time memory is held only while the node computes (concepts doc,
+    // section 5, "Memory held while computing"): its bytes for its work per
+    // execution, at its executions per second. Query latency does not
+    // enter it.
+    if let Some(bytes) = held_bytes {
+        average_memory_bytes += bytes as f64 * node_ms / 1_000.0 * per_second;
+        detail += &format!("; holds {bytes} bytes for {node_ms:.3} ms");
+    }
     // One computation's CPU and scan price times its rate, then the
     // materialized state's.
     let cost = usage_prices.map(|prices| {
@@ -1147,18 +1218,26 @@ pub fn node_usage<'a>(
     if cost.is_some_and(|cost| !cost.is_finite()) {
         return Err(AnalyticalCostError::Overflow);
     }
-    Ok(NodeUsage {
+    let tumbling_windows = match &node.payload {
+        Payload::NonASAP(NonASAPOp::TimeRange { range, .. })
+            if chain_width_ms(producers).is_some() =>
+        {
+            selected_tumbling_windows(range, producers)?
+        }
+        _ => 1,
+    };
+    Ok(NodeResourceUsageAndCost {
         output: out,
         sources,
         family,
         unchanged_columns,
+        tumbling_windows,
         work_ms_per_execution: node_ms,
         cpu_ops_per_second: estimate.cpu_ops() * per_second,
         scanned_bytes_per_second: estimate.scan_bytes() as f64 * per_second,
         average_memory_bytes,
         peak_memory_bytes,
         disk_bytes,
-        held,
         maintained,
         raw_scan,
         fit,
@@ -1241,7 +1320,7 @@ fn query_latencies(
         |id: PhysicalASAPNodeId| nodes[&id].output_state.timing == ExecutionTiming::IngestionTime;
     let compaction_ms = |state: PhysicalASAPNodeId| {
         let workers = ingest_workers(dag, work_ms, state) as f64;
-        let states = (output[&state].rows / tumbling_windows_of(nodes[&state])) as f64;
+        let states = output[&state].rows as f64;
         let per_merge_ms = merge_ms.get(&state).copied().unwrap_or(formula_merge_ms);
         (workers - 1.0) * states * per_merge_ms
     };
@@ -1294,40 +1373,28 @@ fn ingest_workers(
     (ingest_ms_per_s / 1_000.0).ceil().max(1.0) as u64
 }
 
-/// For each tumbling-window chain of `dag` materialized across
-/// evaluations, how far back from the newest evaluation its completed
-/// windows must be retained, in milliseconds. `reach` is [`query_reach`] of
-/// `dag`; `range_evaluations[q]` is query `q`'s (none when missing).
-pub fn tumbling_window_retention_ms(
-    dag: &PhysicalASAPDAG,
-    reach: &[HashSet<PhysicalASAPNodeId>],
-    range_evaluations: &[Option<RangeEvaluation>],
-) -> BTreeMap<PhysicalASAPNodeId, u64> {
-    let nodes = node_map(dag);
-    dag.nodes
-        .iter()
-        .filter_map(|node| match (&node.payload, node.lifetime) {
-            (
-                Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }),
-                Lifetime::AcrossEvaluations(_),
-            ) => {
-                let _ = (&nodes, reach, range_evaluations);
-                todo!("#1207 PR 7: a chain's retention, max(offset + range) over the paths that read it")
-            }
-            _ => None,
-        })
-        .collect()
+/// The tumbling-window width of the chain `producers` starts with, if it
+/// is one: a `TimeRange` over it selects windows.
+fn chain_width_ms(producers: &[ProducerOutput<'_>]) -> Option<u64> {
+    match producers.first()?.payload {
+        Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            tumbling_window_width_ms,
+            ..
+        }) => Some(*tumbling_window_width_ms),
+        _ => None,
+    }
 }
 
-/// The tumbling-window retention of every materialized tumbling-window chain of `dag`
-/// ([`tumbling_window_retention_ms`] over [`query_reach`]), for a plan whose query
-/// `q` has range evaluation `range_evaluations[q]` (none when missing):
-/// what Stage 2's realizer records for a realized plan.
-pub fn tumbling_window_retention_ms_of_plan(
-    dag: &PhysicalASAPDAG,
-    range_evaluations: &[Option<RangeEvaluation>],
-) -> BTreeMap<PhysicalASAPNodeId, u64> {
-    tumbling_window_retention_ms(dag, &query_reach(dag, &node_map(dag)), range_evaluations)
+/// The windows a `TimeRange` of `range` selects from the chain
+/// `producers` starts with: those inside the range, at least one.
+fn selected_tumbling_windows(
+    range: &std::time::Duration,
+    producers: &[ProducerOutput<'_>],
+) -> Result<u64, AnalyticalCostError> {
+    let width_ms = chain_width_ms(producers).unwrap_or(1).max(1);
+    Ok(u64::try_from(range.as_millis() / u128::from(width_ms))
+        .map_err(|_| AnalyticalCostError::Overflow)?
+        .max(1))
 }
 
 /// The input states a `SummaryMerge` over `producers` reads: every row of
@@ -1340,73 +1407,19 @@ fn merged_states(producers: &[ProducerOutput<'_>]) -> Result<u64, AnalyticalCost
     })
 }
 
-/// The panes a chain in `retention_ms` ([`tumbling_window_retention_ms`]) keeps
-/// completed: its retention over its pane width, at least its pane count.
-pub fn retained_tumbling_windows(
-    node: &asap_types::ir::physical_export::PhysicalASAPDAGNode,
-    retention_ms: &BTreeMap<PhysicalASAPNodeId, u64>,
-) -> u64 {
-    match (&node.payload, retention_ms.get(&node.id)) {
-        (
-            Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
-                tumbling_window_width_ms,
-                ..
-            }),
-            Some(&retention),
-        ) => (retention / tumbling_window_width_ms.max(&1)).max(tumbling_windows_of(node)),
-        _ => tumbling_windows_of(node),
-    }
-}
-
-/// A node's tumbling windows: a tumbling-window chain's count, 1 for any other node.
-pub fn tumbling_windows_of(node: &asap_types::ir::physical_export::PhysicalASAPDAGNode) -> u64 {
-    match &node.payload {
-        Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => {
-            todo!("#1207 PR 7: the windows a chain retains (h_v)")
-        }
-        _ => 1,
-    }
-}
-
-/// The nodes each query reaches at query time, in workload order: its walk
-/// from its roots, stopping at (and including) ingestion-time nodes.
-pub fn query_reach(
-    dag: &PhysicalASAPDAG,
-    nodes: &HashMap<PhysicalASAPNodeId, &asap_types::ir::physical_export::PhysicalASAPDAGNode>,
-) -> Vec<HashSet<PhysicalASAPNodeId>> {
-    query_starts(dag)
-        .into_iter()
-        .map(|mut stack| {
-            let mut seen = HashSet::new();
-            while let Some(id) = stack.pop() {
-                if seen.insert(id)
-                    && nodes[&id].output_state.timing != ExecutionTiming::IngestionTime
-                {
-                    stack.extend(
-                        dag.edges
-                            .iter()
-                            .filter(|e| e.consumer == id)
-                            .map(|e| e.producer),
-                    );
-                }
-            }
-            seen
-        })
-        .collect()
-}
-
 /// The window an ingestion-time grouping `node` maintains: a tumbling-window chain's
 /// tumbling windows, or the time range below it (through filters, projections and
 /// time shifts). `None` when there is none.
-pub fn maintained_window_ms(
+fn maintained_window_ms(
     node: PhysicalASAPNodeId,
     nodes: &NodeMap<'_>,
     producers_of: &HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
 ) -> Option<u64> {
     match &nodes[&node].payload {
-        Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => {
-            todo!("#1207 PR 7: the window a chain maintains, its retention (h_v)")
-        }
+        Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            tumbling_window_width_ms,
+            ..
+        }) => return Some(*tumbling_window_width_ms),
         Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) => {
             return Some(range.as_millis() as u64)
         }
@@ -1425,12 +1438,12 @@ pub fn maintained_window_ms(
 }
 
 /// The nodes of `dag` by id.
-pub fn node_map(dag: &PhysicalASAPDAG) -> NodeMap<'_> {
+fn node_map(dag: &PhysicalASAPDAG) -> NodeMap<'_> {
     dag.nodes.iter().map(|n| (n.id, n)).collect()
 }
 
 /// The nodes of a physical DAG by id.
-pub type NodeMap<'a> =
+type NodeMap<'a> =
     HashMap<PhysicalASAPNodeId, &'a asap_types::ir::physical_export::PhysicalASAPDAGNode>;
 
 /// A summary type's name in reports: a sketch by its algorithm, e.g.
@@ -1453,5 +1466,213 @@ fn split(input: EdgeStatistics, partitions: u64) -> PartitionStatistics {
                 bytes: part(input.bytes, i),
             })
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use asap_types::ir::physical_export::PhysicalASAPDAGNode;
+    use asap_types::ir::properties::ExecutionDataState;
+    use asap_types::ir::scalar::ColumnRef;
+    use asap_types::ir::schema::{ExactKind, ExactParams, SummaryUpdate};
+
+    use super::*;
+
+    fn node(payload: Payload) -> PhysicalASAPDAGNode {
+        PhysicalASAPDAGNode {
+            id: 0,
+            payload,
+            output_state: ExecutionDataState::QUERY_ROWS,
+            lifetime: Lifetime::None,
+            parameters: None,
+            output_schema: Schema::default(),
+            guarantee: None,
+            retention_ms: None,
+            summary_coverage: None,
+            selected_physical_candidate: None,
+        }
+    }
+
+    fn produced<'a>(
+        node: &'a PhysicalASAPDAGNode,
+        usage: &NodeResourceUsageAndCost<'a>,
+    ) -> ProducerOutput<'a> {
+        ProducerOutput {
+            payload: &node.payload,
+            output_schema: &node.output_schema,
+            output: usage.output,
+            sources: usage.sources.clone(),
+            family: usage.family,
+            unchanged_columns: usage.unchanged_columns.clone(),
+            tumbling_windows: usage.tumbling_windows,
+        }
+    }
+
+    /// A merge of the five 60 s windows a 5m `TimeRange` selects from a
+    /// chain of 1000 states per window reads 5000 states and outputs one
+    /// state per group, 1000, not one per state read.
+    #[test]
+    fn a_merge_over_a_chain_s_windows_outputs_one_state_per_group() {
+        let settings = CostInputs::default();
+        let data = DataWorkload::default();
+        let chain = node(Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            child: 0,
+            summary_type: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::PerEntity,
+            filter: None,
+            tumbling_window_width_ms: 60_000,
+        }));
+        let chain_output = ProducerOutput {
+            payload: &chain.payload,
+            output_schema: &chain.output_schema,
+            output: EdgeStatistics {
+                rows: 1_000,
+                bytes: 16_000,
+            },
+            sources: BTreeSet::new(),
+            family: StateFamily::Exact(&ExactKind::Sum),
+            unchanged_columns: BTreeSet::new(),
+            tumbling_windows: 1,
+        };
+        let windows = node(Payload::NonASAP(NonASAPOp::TimeRange {
+            range: Duration::from_secs(300),
+            kind: TimeRangeKind::Range,
+            child: 0,
+        }));
+        let windows_usage = node_resource_usage_and_cost(
+            &windows,
+            &[chain_output],
+            (1, 1.0),
+            None,
+            &data,
+            &settings,
+            1.0,
+        )
+        .unwrap();
+        assert_eq!(windows_usage.output.rows, 5_000);
+        assert_eq!(windows_usage.tumbling_windows, 5);
+        let merge = node(Payload::ASAP(ASAPOp::SummaryMerge {
+            children: vec![0],
+            group_by: None,
+        }));
+        let merge_usage = node_resource_usage_and_cost(
+            &merge,
+            &[produced(&windows, &windows_usage)],
+            (1, 1.0),
+            None,
+            &data,
+            &settings,
+            1.0,
+        )
+        .unwrap();
+        assert_eq!(merge_usage.output.rows, 1_000);
+        assert_eq!(merge_usage.output.bytes, 16_000);
+        assert!(
+            merge_usage
+                .cost
+                .detail
+                .starts_with("merge 5000 states into 1000;"),
+            "{}",
+            merge_usage.cost.detail
+        );
+    }
+
+    /// Decided 2026-11-09 (A3): a query-time node holds its state only
+    /// while it computes: bytes × its work per execution × its executions
+    /// per second, with no query latency. A KLL state of 2 MB whose own
+    /// work takes 3 ms, run 0.1 times per second, holds 2,000,000 × 0.003 ×
+    /// 0.1 = 600 byte·s per second; here, a `OneEvaluation` merge run 0.1
+    /// times per second.
+    #[test]
+    fn query_time_memory_is_held_only_while_the_node_computes() {
+        let settings = CostInputs::default();
+        let data = DataWorkload::default();
+        let input = node(Payload::NonASAP(NonASAPOp::TimeRange {
+            range: Duration::from_secs(300),
+            kind: TimeRangeKind::Range,
+            child: 0,
+        }));
+        let states = ProducerOutput {
+            payload: &input.payload,
+            output_schema: &input.output_schema,
+            output: EdgeStatistics {
+                rows: 5_000,
+                bytes: 80_000,
+            },
+            sources: BTreeSet::new(),
+            family: StateFamily::Exact(&ExactKind::Sum),
+            unchanged_columns: BTreeSet::new(),
+            tumbling_windows: 1,
+        };
+        let merge = PhysicalASAPDAGNode {
+            lifetime: Lifetime::OneEvaluation(StorageMedium::Memory),
+            ..node(Payload::ASAP(ASAPOp::SummaryMerge {
+                children: vec![0],
+                group_by: None,
+            }))
+        };
+        let usage =
+            node_resource_usage_and_cost(&merge, &[states], (1, 0.1), None, &data, &settings, 1.0)
+                .unwrap();
+        let held: u64 = usage
+            .cost
+            .detail
+            .split("holds ")
+            .nth(1)
+            .and_then(|rest| rest.split(' ').next())
+            .and_then(|bytes| bytes.parse().ok())
+            .expect("the held bytes are in the detail");
+        assert!(held > 0);
+        let expected = held as f64 * usage.work_ms_per_execution / 1_000.0 * 0.1;
+        assert!(
+            (usage.average_memory_bytes - expected).abs() <= 1e-9 * expected,
+            "{} vs {expected}",
+            usage.average_memory_bytes
+        );
+    }
+
+    /// Decided 2026-11-09 (A5): a query-time `Scan` keeps what its
+    /// `retention_ms` covers but reads, per execution, only the most its
+    /// consumers read (no range-evaluation span): under a `TimeRange` of 1 s
+    /// over 1,000 rows per second it reads 1,000 rows while it keeps
+    /// 3,601,000 (a 1 h range query with step 1 s over an instant
+    /// selector).
+    #[test]
+    fn a_query_time_scan_reads_what_its_consumers_read_and_keeps_its_retention() {
+        use asap_types::ir::schema::{DataType, Field};
+        use asap_types::workload::DurationMs;
+        let settings = CostInputs::default();
+        let mut data = DataWorkload::sampled_every(["x".to_string()], DurationMs(1_000));
+        for facts in data.sources.values_mut() {
+            facts.series_count = Some(1_000);
+        }
+        let scan = PhysicalASAPDAGNode {
+            retention_ms: Some(3_601_000),
+            output_schema: Schema::new(vec![
+                Field::plain("ts", DataType::Timestamp, false),
+                Field::plain("value", DataType::Float64, false),
+            ]),
+            ..node(Payload::NonASAP(NonASAPOp::Scan {
+                source: Source::TimeSeries { metric: "x".into() },
+                predicates: vec![],
+                schema: Schema::default(),
+            }))
+        };
+        let instant = node(Payload::NonASAP(NonASAPOp::TimeRange {
+            range: Duration::from_secs(1),
+            kind: TimeRangeKind::Range,
+            child: 0,
+        }));
+        let read_ms = read_back_ms([1], |_| &instant.payload, |_| vec![], |_| 0, true);
+        assert_eq!(read_ms, Some(1_000));
+        let usage =
+            node_resource_usage_and_cost(&scan, &[], (1, 1.0), read_ms, &data, &settings, 1.0)
+                .unwrap();
+        assert_eq!(usage.output.rows, 1_000);
+        let (_, kept_bytes) = usage.raw_scan.expect("a query-time scan keeps raw data");
+        assert_eq!(kept_bytes, usage.output.bytes * 3_601);
     }
 }

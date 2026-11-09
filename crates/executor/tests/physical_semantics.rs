@@ -389,6 +389,7 @@ fn global_extrema_bind_with_planner_derived_schema() {
             output_schema: (*output).clone(),
             guarantee: None,
             retention_ms: None,
+            summary_coverage: None,
             selected_physical_candidate: None,
         };
         let operator = compile_node(&node, std::slice::from_ref(&input))
@@ -552,6 +553,11 @@ fn boolean_truth_tables_agree_between_expression_paths() {
     }
 }
 
+/// θ of a KLL with k = 512.
+fn kll_512() -> planner_types::ir::schema::SketchParams {
+    planner_types::ir::schema::SketchParams::Kll { k: 512 }
+}
+
 // Partial/final execution must agree with one build for an uncompacted KLL population.
 #[test]
 fn kll_partial_merge_and_multiple_evaluations_preserve_population() {
@@ -575,12 +581,19 @@ fn kll_partial_merge_and_multiple_evaluations_preserve_population() {
         dag.add(
             id + 3,
             vec![id],
-            Operator::per_group_summary_build(input.clone(), family.clone(), 0, None, vec![])
-                .unwrap(),
+            Operator::per_group_summary_build(
+                input.clone(),
+                family.clone(),
+                Some(kll_512()),
+                0,
+                None,
+                vec![],
+            )
+            .unwrap(),
         )
         .unwrap();
     }
-    let state = Operator::per_group_summary_build(input, family, 0, None, vec![])
+    let state = Operator::per_group_summary_build(input, family, Some(kll_512()), 0, None, vec![])
         .unwrap()
         .schema();
     dag.add(6, vec![3, 4], Operator::union(state.clone(), 2).unwrap())
@@ -653,7 +666,15 @@ fn compacted_kll_tumbling_windows_merge_within_the_calibrated_rank_error() {
     let input = schema(&[("v", DataType::Float64, false)]);
     let family = FieldDataType::Sketch(SketchAlgorithm::Kll);
     let build = || {
-        Operator::per_group_summary_build(input.clone(), family.clone(), 0, None, vec![]).unwrap()
+        Operator::per_group_summary_build(
+            input.clone(),
+            family.clone(),
+            Some(planner_types::ir::schema::SketchParams::Kll { k: K }),
+            0,
+            None,
+            vec![],
+        )
+        .unwrap()
     };
     let state = build().schema();
     let mut dag = PhysicalDAG::default();
@@ -737,7 +758,7 @@ fn counter_tumbling_windows_merge_in_any_order() {
     ]);
     let family = FieldDataType::ExactAggregate(ExactKind::Increase, ExactParams::Increase);
     let build = || {
-        Operator::per_group_summary_build(input.clone(), family.clone(), 0, Some(1), vec![])
+        Operator::per_group_summary_build(input.clone(), family.clone(), None, 0, Some(1), vec![])
             .unwrap()
     };
     let state = build().schema();
@@ -827,6 +848,7 @@ fn empty_exact_summary_extrema_agree_with_ordinary_aggregation() {
         let build = Operator::per_group_summary_build(
             input.clone(),
             FieldDataType::ExactAggregate(kind, params),
+            None,
             0,
             None,
             vec![],
@@ -932,6 +954,7 @@ fn planner_node(
         ),
         guarantee: None,
         retention_ms: None,
+        summary_coverage: None,
         selected_physical_candidate: None,
     }
 }
@@ -1036,7 +1059,7 @@ fn filtered_summary_build_keeps_empty_groups() {
         ),
     ];
     for (family, read, (result, nullable), expected) in cases {
-        let build = planner_node(
+        let mut build = planner_node(
             PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
                 child: 0,
                 summary_type: family.clone(),
@@ -1049,6 +1072,7 @@ fn filtered_summary_build_keeps_empty_groups() {
                 ("state", family, false),
             ],
         );
+        asap_executor::physical_planner::test_support::set_build_parameters([&mut build], None);
         let build = round_trip(compile_node(&build, std::slice::from_ref(&input)).unwrap());
         let read = planner_node(
             PhysicalASAPOperatorPayload::ASAP(read),
@@ -1165,6 +1189,7 @@ fn exact_aggregate_node(
         output_schema: (*schema(&[(name, dtype, false)])).clone(),
         guarantee: None,
         retention_ms: None,
+        summary_coverage: None,
         selected_physical_candidate: None,
     }
 }

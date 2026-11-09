@@ -27,4 +27,5 @@ mod summary_projection;
 mod text_extremum_memory;
 mod thread_safety;
 mod time_series_window;
+mod tumbling_window_chain;
 mod univmon_execution;

@@ -36,7 +36,7 @@ async fn a_tumbling_window_is_built_from_arrow_columns_with_one_label_entry_per_
     let workload: PlanningWorkload = serde_json::from_str(
         r#"{"query_workload": {"language": "promql", "repeating_queries": [
               {"query": "quantile_over_time(0.99, latency_ms[60m])",
-               "demand": {"fixed_interval": 600000},
+               "demand": {"fixed_interval_at": {"interval": 600000, "evaluation_phase": 0}},
                "requirements": {"accuracy": {"accuracy_metric": "rank", "max_error": 0.01,
                    "failure_probability": 0.01, "accuracy_scope": "whole_result"},
                    "max_latency_ms": 200.0},
