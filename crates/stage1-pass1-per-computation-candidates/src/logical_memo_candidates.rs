@@ -3,20 +3,12 @@
 //! configuration, fused builds), with every intermediate result its own
 //! group (a [`Memo`]), which Pass 2 extends.
 
-use crate::per_computation_candidates::{
-    generate_per_computation_candidates, PerComputationCandidateError,
-};
 use asap_types::deployment_capabilities::SupportedSummary;
 use asap_types::stages::Memo;
 
-/// Why [`pass1_memo`] failed.
-#[derive(Debug, thiserror::Error)]
-pub enum Pass1Error {
-    /// A query's DAG cannot be planned: it already holds ASAP or physical
-    /// annotations, or a measure's accuracy target is invalid.
-    #[error(transparent)]
-    PerComputation(#[from] PerComputationCandidateError),
-}
+use crate::per_computation_candidates::{
+    add_pass1_candidates, computation_targets, PerComputationCandidateError,
+};
 
 /// Stage 1, Pass 1: the initial candidates of the memo groups of `memo`
 /// (Stage 0's, without candidates). It finds one computation target per
@@ -25,14 +17,16 @@ pub enum Pass1Error {
 /// (`supported_summaries`, the deployment's
 /// `DeploymentCapabilities::supported_summaries`; `None` supports every
 /// one), and adds each way to compute a group as candidates, through
-/// `Memo::find_or_add_group` and `Memo::add_candidate`. Accuracy prunes
-/// nothing here: Pass 2's dead-candidate elimination does.
+/// `Memo::find_or_add_group` and `Memo::add_candidate`: every group's own
+/// expression, exact accumulators, one summary build per configuration of
+/// the algorithm's predefined list with separate readouts, and fused builds.
+/// Accuracy prunes nothing here: Pass 2 gives each readout its required
+/// accuracy and eliminates the candidates no query can use.
 pub fn pass1_memo(
-    memo: Memo,
+    mut memo: Memo,
     supported_summaries: Option<&[SupportedSummary]>,
-) -> Result<Memo, Pass1Error> {
-    let per_computation = generate_per_computation_candidates(&memo)?
-        .without_unsupported_summaries(supported_summaries);
-    let _ = (memo, per_computation);
-    todo!("#1207 PR 3: add each way to compute as candidates, one per listed θ")
+) -> Result<Memo, PerComputationCandidateError> {
+    let targets = computation_targets(&memo, supported_summaries)?;
+    add_pass1_candidates(&mut memo, &targets)?;
+    Ok(memo)
 }

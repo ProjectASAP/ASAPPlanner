@@ -29,9 +29,7 @@ pub use memo::{
     queries_rooted_at, root_groups, ColumnLineage, GroupProperties, MemoGroup, MemoGroupId,
     ValueSign,
 };
-pub use per_computation_logical_memo_candidates::{
-    ComputationTarget, FusedComputation, HavingEntry, HavingPlacement, HowToComputeAggregateMeasure,
-};
+pub use per_computation_logical_memo_candidates::HowToComputeAggregateMeasure;
 pub use physical::{
     output_references, producer_satisfies_physical_requirements, EvaluationGrid, ExecutionContext,
     ExecutionContextId, PhysicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateId,
