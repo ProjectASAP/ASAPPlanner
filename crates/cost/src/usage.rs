@@ -998,7 +998,8 @@ pub fn node_usage<'a>(
             // One window's states: each input row updates the window its
             // time falls in. At ingestion time the rows of one window
             // arrive at the rate of one second's `input.rows`; at query
-            // time its input holds the rows of every retained window.
+            // time each build reads the rows of the window that just ended,
+            // its input.
             let group_count = groups(reduction)?;
             let rows_per_tumbling_window = match ingestion {
                 true => u64::try_from(
@@ -1006,7 +1007,7 @@ pub fn node_usage<'a>(
                         .div_ceil(1_000),
                 )
                 .map_err(|_| AnalyticalCostError::Overflow)?,
-                false => input.rows.div_ceil(retained_tumbling_window_count),
+                false => input.rows,
             };
             let input_rows = StateInputRows {
                 rows_per_state: Some(rows_per_tumbling_window.div_ceil(group_count.max(1))),

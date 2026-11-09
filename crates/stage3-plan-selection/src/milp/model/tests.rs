@@ -1,12 +1,14 @@
-//! The baseline MILP over small hand-built candidate graphs with given
-//! costs: which candidates and edges its optimum selects, and the plan
-//! built from it.
+//! The selection MILP over small hand-built candidate graphs with given
+//! costs: which executions and edges its optimum selects, its retention,
+//! and the plan built from it.
 
-use std::collections::HashMap;
 use std::time::Duration;
 
+use asap_types::ir::operator::operator_properties::Reduction;
 use asap_types::ir::operator::TimeShift;
-use asap_types::ir::{NonASAPOp, Operator, QueryRoot, TimeRangeKind};
+use asap_types::ir::scalar::expr_ir::ColumnRef;
+use asap_types::ir::schema::{ExactKind, ExactParams, FieldDataType, SummaryUpdate};
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot, TimeRangeKind};
 use asap_types::physical::{ExecutionTiming, Lifetime, PhysicalProperties, StorageMedium};
 use asap_types::stages::{
     CandidateForMemoGroupId, LogicalASAPMemoCandidates, Memo, MemoGroupId, MemoQuery,
@@ -16,13 +18,18 @@ use asap_types::stages::{
 use asap_types::test_support::{
     add_candidate, group_with_own_candidate, series_schema, time_series_scan,
 };
+use asap_types::workload::{
+    Predictability, Query, QueryRecurrence, QueryRequirements, RepeatedDemand, RepetitionInterval,
+    TimestampMs,
+};
 
 use super::*;
-use crate::cost::SelectionCosts;
+use crate::cost::ExecutionCosts;
 use crate::plan::plan_of;
 
 const NONE: Lifetime = Lifetime::None;
 const ONE_EVALUATION: Lifetime = Lifetime::OneEvaluation(StorageMedium::Memory);
+const ACROSS_EVALUATIONS: Lifetime = Lifetime::AcrossEvaluations(StorageMedium::Memory);
 
 fn scan(memo: &mut Memo) -> MemoGroupId {
     group_with_own_candidate(memo, time_series_scan("m", series_schema(&["job"]), vec![]))
@@ -119,75 +126,119 @@ fn edge(physical: &PhysicalASAPMemoCandidates, u: usize, c: usize) -> PhysicalEd
         .0
 }
 
-/// Costs `w` per candidate and `edge_costs` per (producer, consumer), 0 for
-/// every other edge.
-fn costs(
-    physical: &PhysicalASAPMemoCandidates,
-    w: &[f64],
-    edge_costs: &[((usize, usize), f64)],
-) -> SelectionCosts {
-    let mut edge_cost: HashMap<PhysicalEdgeId, f64> =
-        physical.edges().map(|(id, _)| (id, 0.0)).collect();
-    for &((u, c), cost) in edge_costs {
-        edge_cost.insert(edge(physical, u, c), cost);
-    }
-    SelectionCosts {
-        candidate: w.iter().map(|&w| Ok(w)).collect(),
-        edge: edge_cost,
+/// Every query on a 10 s grid, `count` of them.
+fn every_10s(count: usize) -> Vec<QueryWorkloadEntry> {
+    (0..count).map(|_| every(10_000)).collect()
+}
+
+/// A query every `interval_ms` at phase 0.
+fn every(interval_ms: u32) -> QueryWorkloadEntry {
+    QueryWorkloadEntry {
+        query: Query("q".into()),
+        requirements: QueryRequirements::default(),
+        predictability: Predictability::default(),
+        recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+            interval: RepetitionInterval(interval_ms),
+            evaluation_phase: TimestampMs(0),
+        }),
+        range_evaluation: None,
     }
 }
 
-/// Each query output reference of `physical`'s memo with every candidate of
-/// its group.
-fn outputs(physical: &PhysicalASAPMemoCandidates) -> Vec<(QueryId, Vec<PhysicalCandidateId>)> {
+/// Each query output reference of `physical`'s memo: query `q` reads its
+/// operator root.
+fn outputs(physical: &PhysicalASAPMemoCandidates) -> Vec<(QueryId, MemoGroupId)> {
     physical
         .logical_candidates
         .memo
         .queries
         .iter()
         .enumerate()
-        .map(|(query, memo_query)| {
-            let QueryRoot::Operator(group) = memo_query.root else {
-                unreachable!("operator roots only")
-            };
-            let candidates = (0..physical.physical_candidates.len())
-                .filter(|&v| physical.physical_candidates[v].logical_candidate_id.group == group)
-                .map(PhysicalCandidateId)
-                .collect();
-            (QueryId(query), candidates)
+        .map(|(query, memo_query)| match memo_query.root {
+            QueryRoot::Operator(group) => (QueryId(query), group),
+            QueryRoot::Scalar(_) => unreachable!("operator roots only"),
         })
         .collect()
 }
 
+/// Solves over `physical` for `entries` with every execution of candidate
+/// `v` costing `w[v]`, every edge from `u` to `c` `edge_costs[(u, c)]` (0
+/// when missing) and candidate `v` retaining at `retention[v]` per ms;
+/// returns the solution and the contexts it is over.
 fn solve(
     physical: &PhysicalASAPMemoCandidates,
-    costs: &SelectionCosts,
-) -> Result<SolvedSelection, SelectionMilpError> {
-    solve_selection(&SelectionInputs {
+    entries: &[QueryWorkloadEntry],
+    w: &[f64],
+    edge_costs: &[((usize, usize), f64)],
+    retention: &[(usize, f64)],
+) -> (
+    Result<SolvedSelection, SelectionMilpError>,
+    ExecutionContexts,
+) {
+    let (contexts, query_outputs) = ExecutionContexts::new(physical, entries, &outputs(physical));
+    let costs = ExecutionCosts {
+        per_execution: contexts
+            .executions()
+            .iter()
+            .map(|execution| Ok(w[execution.candidate.0]))
+            .collect(),
+        per_edge: contexts
+            .edges()
+            .iter()
+            .map(|&(_, id, _)| {
+                let edge = physical.edge(id);
+                let key = (edge.producer_candidate_id.0, edge.consumer_candidate_id.0);
+                Some(
+                    edge_costs
+                        .iter()
+                        .find(|(pair, _)| *pair == key)
+                        .map_or(0.0, |(_, cost)| *cost),
+                )
+            })
+            .collect(),
+        retention_cost_per_second: retention
+            .iter()
+            .map(|&(v, per_ms)| (PhysicalCandidateId(v), per_ms))
+            .collect(),
+    };
+    let solved = solve_selection(&SelectionInputs {
         physical,
-        costs,
-        query_outputs: &outputs(physical),
-    })
+        entries,
+        contexts: &contexts,
+        costs: &costs,
+        query_outputs: &query_outputs,
+    });
+    (solved, contexts)
 }
 
-fn ids(ids: &[usize]) -> Vec<PhysicalCandidateId> {
-    ids.iter().copied().map(PhysicalCandidateId).collect()
+/// The candidates of `solved`'s executions, one per execution, ascending.
+fn candidates(solved: &SolvedSelection) -> Vec<usize> {
+    let mut candidates: Vec<usize> = solved
+        .executions
+        .iter()
+        .map(|execution| execution.candidate.0)
+        .collect();
+    candidates.sort_unstable();
+    candidates
+}
+
+fn first(group: MemoGroupId) -> CandidateForMemoGroupId {
+    CandidateForMemoGroupId {
+        group,
+        index_in_group: 0,
+    }
 }
 
 /// `m[5m]`, its scan with two physical candidates. Through v0 the read
 /// costs 1 + 5, through v1 2 + 0: the optimum takes v1, and the plan built
 /// from it is the scan v1 below the range v2, the scan retaining the 5
-/// minutes the range reads.
+/// minutes the range reads (R).
 #[test]
 fn selects_the_producer_whose_own_and_edge_costs_are_lowest() {
     let mut memo = Memo::default();
     let m = scan(&mut memo);
     let last_5m = range(&mut memo, 300, m);
     query(&mut memo, last_5m);
-    let first = |group: MemoGroupId| CandidateForMemoGroupId {
-        group,
-        index_in_group: 0,
-    };
     let physical = physical(
         memo,
         &[
@@ -196,45 +247,48 @@ fn selects_the_producer_whose_own_and_edge_costs_are_lowest() {
             (first(last_5m), NONE),
         ],
     );
-    let costs = costs(&physical, &[1.0, 2.0, 1.0], &[((0, 2), 5.0)]);
-    let solved = solve(&physical, &costs).unwrap();
-    assert_eq!(solved.candidates, ids(&[1, 2]));
-    assert_eq!(solved.edges, vec![edge(&physical, 1, 2)]);
-    assert_eq!(solved.outputs, ids(&[2]));
+    let (solved, _) = solve(
+        &physical,
+        &every_10s(1),
+        &[1.0, 2.0, 1.0],
+        &[((0, 2), 5.0)],
+        &[(1, 1e-9)],
+    );
+    let solved = solved.unwrap();
+    assert_eq!(candidates(&solved), vec![1, 2]);
+    assert_eq!(solved.edges.len(), 1);
+    assert_eq!(solved.edges[0].1, edge(&physical, 1, 2));
+    assert_eq!(solved.outputs[0].candidate, PhysicalCandidateId(2));
 
-    let outputs = vec![(QueryId(0), last_5m)];
-    let plan = plan_of(&physical, &[], &solved, &outputs).unwrap();
+    let plan = plan_of(&physical, &solved, &outputs(&physical)).unwrap();
     assert_eq!(plan.roots, vec![1]);
     assert_eq!(plan.edges.len(), 1);
     assert_eq!((plan.edges[0].producer, plan.edges[0].consumer), (0, 1));
-    let candidates: Vec<_> = plan
+    let selected: Vec<_> = plan
         .nodes
         .iter()
         .map(|node| node.selected_physical_candidate)
         .collect();
     assert_eq!(
-        candidates,
+        selected,
         vec![Some(PhysicalCandidateId(1)), Some(PhysicalCandidateId(2))]
     );
     assert_eq!(plan.nodes[0].retention_ms, Some(300_000));
     assert_eq!(plan.nodes[1].retention_ms, None);
 }
 
-/// `m[5m]` and `m[1m]` both read the scan. Its candidate that is not
-/// materialized (cost 1) may have one consumer, so the optimum reads the
-/// scan's `OneEvaluation` candidate (cost 10) twice rather than both.
+/// `m[5m]` and `m[1m]` both read the scan, both queries every 10 s: one
+/// context. Its candidate that is not materialized (cost 1) may have one
+/// consumer there, so the optimum reads the scan's `OneEvaluation`
+/// candidate (cost 10) twice rather than both; without it no plan exists.
 #[test]
-fn a_query_time_result_that_is_not_materialized_has_one_consumer() {
+fn a_query_time_result_that_is_not_materialized_has_one_consumer_per_context() {
     let mut memo = Memo::default();
     let m = scan(&mut memo);
     let last_5m = range(&mut memo, 300, m);
     let last_1m = range(&mut memo, 60, m);
     query(&mut memo, last_5m);
     query(&mut memo, last_1m);
-    let first = |group: MemoGroupId| CandidateForMemoGroupId {
-        group,
-        index_in_group: 0,
-    };
     let physical = physical(
         memo,
         &[
@@ -244,9 +298,8 @@ fn a_query_time_result_that_is_not_materialized_has_one_consumer() {
             (first(m), ONE_EVALUATION),
         ],
     );
-    let with_one_evaluation = costs(&physical, &[1.0, 1.0, 1.0, 10.0], &[]);
-    let solved = solve(&physical, &with_one_evaluation).unwrap();
-    assert_eq!(solved.candidates, ids(&[1, 2, 3]));
+    let (solved, _) = solve(&physical, &every_10s(2), &[1.0, 1.0, 1.0, 10.0], &[], &[]);
+    assert_eq!(candidates(&solved.unwrap()), vec![1, 2, 3]);
 
     let without_one_evaluation = PhysicalASAPMemoCandidates::new(
         physical.logical_candidates.clone(),
@@ -258,11 +311,110 @@ fn a_query_time_result_that_is_not_materialized_has_one_consumer() {
             .collect(),
         vec![],
     );
-    let only_unshared = costs(&without_one_evaluation, &[0.0, 1.0, 1.0], &[]);
-    assert_eq!(
-        solve(&without_one_evaluation, &only_unshared).unwrap_err(),
-        SelectionMilpError::Infeasible
+    let (solved, _) = solve(
+        &without_one_evaluation,
+        &every_10s(2),
+        &[0.0, 1.0, 1.0],
+        &[],
+        &[],
     );
+    assert_eq!(solved.unwrap_err(), SelectionMilpError::Infeasible);
+}
+
+/// The same two queries every 10 s and every 15 s: two contexts, each
+/// running the scan that is not materialized once for its own query
+/// (cost 1 each), cheaper than one `OneEvaluation` run (cost 10), which
+/// could not be shared across contexts anyway.
+#[test]
+fn a_result_that_is_not_materialized_runs_once_per_context_that_reads_it() {
+    let mut memo = Memo::default();
+    let m = scan(&mut memo);
+    let last_5m = range(&mut memo, 300, m);
+    let last_1m = range(&mut memo, 60, m);
+    query(&mut memo, last_5m);
+    query(&mut memo, last_1m);
+    let physical = physical(
+        memo,
+        &[
+            (first(m), NONE),
+            (first(last_5m), NONE),
+            (first(last_1m), NONE),
+            (first(m), ONE_EVALUATION),
+        ],
+    );
+    let (solved, contexts) = solve(
+        &physical,
+        &[every(10_000), every(15_000)],
+        &[1.0, 1.0, 1.0, 10.0],
+        &[],
+        &[],
+    );
+    let solved = solved.unwrap();
+    assert_eq!(candidates(&solved), vec![0, 0, 1, 2]);
+    let scan_contexts: Vec<_> = solved
+        .executions
+        .iter()
+        .filter(|execution| execution.candidate.0 == 0)
+        .map(|execution| execution.context)
+        .collect();
+    assert_ne!(scan_contexts[0], scan_contexts[1]);
+    let plan = plan_of(&physical, &solved, &outputs(&physical)).unwrap();
+    assert_eq!(plan.nodes.len(), 4);
+    assert_eq!(contexts.executions().len(), 6);
+}
+
+/// `m[1m]` every 10 s and `m[5m]` every 20 s, both over a chain of 10 s
+/// windows of the scan, materialized across evaluations: the chain runs
+/// once, in its own context, and delivers on both grids; it retains the
+/// longest range its selected consumers read, 5 minutes (R).
+#[test]
+fn a_materialized_chain_runs_once_and_retains_what_its_consumers_read_back() {
+    let mut memo = Memo::default();
+    let m = scan(&mut memo);
+    let chain = group_with_own_candidate(
+        &mut memo,
+        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            child: m,
+            summary_type: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::PerEntity,
+            filter: None,
+            tumbling_window_width_ms: 10_000,
+        }),
+    );
+    let last_1m = range(&mut memo, 60, chain);
+    let last_5m = range(&mut memo, 300, chain);
+    query(&mut memo, last_1m);
+    query(&mut memo, last_5m);
+    let physical = physical(
+        memo,
+        &[
+            (first(m), NONE),
+            (first(chain), ACROSS_EVALUATIONS),
+            (first(last_1m), NONE),
+            (first(last_5m), NONE),
+        ],
+    );
+    let (solved, _) = solve(
+        &physical,
+        &[every(10_000), every(20_000)],
+        &[1.0, 1.0, 1.0, 1.0],
+        &[],
+        &[(1, 1e-6)],
+    );
+    let solved = solved.unwrap();
+    assert_eq!(candidates(&solved), vec![0, 1, 2, 3]);
+    assert_eq!(
+        solved.retention_ms.get(&PhysicalCandidateId(1)),
+        Some(&300_000)
+    );
+    let plan = plan_of(&physical, &solved, &outputs(&physical)).unwrap();
+    let chain_node = plan
+        .nodes
+        .iter()
+        .find(|node| node.selected_physical_candidate == Some(PhysicalCandidateId(1)))
+        .unwrap();
+    assert_eq!(chain_node.retention_ms, Some(300_000));
 }
 
 /// Ga = `m offset 1s` and Gb = `m offset 2s`, each also computed from the
@@ -280,10 +432,6 @@ fn acyclicity_forbids_two_groups_reading_each_other() {
     let b_from_a = add_candidate(&mut memo, b, shift(1_000, a), None).unwrap();
     query(&mut memo, a);
     query(&mut memo, b);
-    let first = |group: MemoGroupId| CandidateForMemoGroupId {
-        group,
-        index_in_group: 0,
-    };
     // v0 scan; v1 Ga①, v2 Gb①, v3 Ga②, v4 Gb②.
     let physical = physical(
         memo,
@@ -295,13 +443,55 @@ fn acyclicity_forbids_two_groups_reading_each_other() {
             (b_from_a, ONE_EVALUATION),
         ],
     );
-    let costs = costs(&physical, &[0.0, 10.0, 10.0, 1.0, 1.0], &[]);
-    let solved = solve(&physical, &costs).unwrap();
-    assert!(
-        solved.candidates == ids(&[0, 1, 4]) || solved.candidates == ids(&[0, 2, 3]),
-        "{:?}",
-        solved.candidates
+    let (solved, _) = solve(
+        &physical,
+        &every_10s(2),
+        &[0.0, 10.0, 10.0, 1.0, 1.0],
+        &[],
+        &[],
     );
-    let outputs = vec![(QueryId(0), a), (QueryId(1), b)];
-    plan_of(&physical, &[], &solved, &outputs).unwrap();
+    let solved = solved.unwrap();
+    let selected = candidates(&solved);
+    assert!(
+        selected == vec![0, 1, 4] || selected == vec![0, 2, 3],
+        "{selected:?}"
+    );
+    plan_of(&physical, &solved, &outputs(&physical)).unwrap();
+}
+
+/// `m[5m]` over a chain of 10 s windows of the scan: a chain materialized
+/// across evaluations builds only its newest window from the scan (10 s
+/// read back); one rebuilt in each evaluation builds every window the range
+/// over it reads (5 minutes).
+#[test]
+fn a_chain_rebuilt_in_each_evaluation_reads_back_what_its_consumers_read() {
+    let mut memo = Memo::default();
+    let m = scan(&mut memo);
+    let chain = group_with_own_candidate(
+        &mut memo,
+        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            child: m,
+            summary_type: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::PerEntity,
+            filter: None,
+            tumbling_window_width_ms: 10_000,
+        }),
+    );
+    let last_5m = range(&mut memo, 300, chain);
+    query(&mut memo, last_5m);
+    let physical = physical(
+        memo,
+        &[
+            (first(m), NONE),
+            (first(chain), ACROSS_EVALUATIONS),
+            (first(chain), NONE),
+            (first(last_5m), NONE),
+        ],
+    );
+    let need_ms = |chain: usize| {
+        crate::cost::edge_retention_need_ms(&physical, &every_10s(1), edge(&physical, 0, chain))
+    };
+    assert_eq!(need_ms(1), Some(10_000));
+    assert_eq!(need_ms(2), Some(300_000));
 }

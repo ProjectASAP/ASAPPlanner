@@ -10,6 +10,7 @@
 use super::analytical::AnalyticalCostError;
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
 use asap_types::ir::properties::ExecutionTiming;
+use asap_types::ir::{ASAPOp, Operator};
 use asap_types::physical::Lifetime;
 use asap_types::workload::{QueryRecurrence, RangeEvaluation, RepeatedDemand};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -335,22 +336,28 @@ pub fn consumers(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, Vec<Consu
 }
 
 /// How often each node of `dag` is computed: `(multiplier, per_second)`
-/// (module doc, "Cost model"). A materialized node is computed once for all
-/// its queries: once per second at ingestion time (materialized at ingestion time), at
+/// (module doc, "Cost model"; the execution contexts of the concepts doc,
+/// section 5). A materialized node is computed once for all its queries:
+/// once per second at ingestion time (materialized at ingestion time), at
 /// the combined rate of the queries reaching it (`OneEvaluation`,
-/// [`evaluation_rate`]), or once per request of those queries for a chain
-/// materialized across evaluations, whose request builds only its newest tumbling window
-/// however many range steps it evaluates. `range_evaluations[q]` is query
-/// `q`'s range evaluation (none when missing). A not-materialized node is computed once per
-/// consumer that reaches it ([`consumers`]), at that consumer's rate. A consumer is a query
-/// (operator or scalar root), at its own rate, or a materialized node, at
-/// that node's rate; a walk stops at the first materialized node it meets,
+/// [`evaluation_rate`]), once per tumbling window for a query-time chain
+/// materialized across evaluations, which builds each window when it ends,
+/// or once per request of those queries for another query-time result
+/// materialized across evaluations. `range_evaluations[q]` is query `q`'s
+/// range evaluation (none when missing). A not-materialized node is
+/// computed once per execution context of the consumers that reach it
+/// ([`consumers`]). A consumer is a query (operator or scalar root) or a
+/// materialized node; a walk stops at the first materialized node it meets,
 /// and a node read several times within one consumer's walk counts once for
-/// it. The consumers materialized at ingestion time of one refresh window
+/// it. The queries on one evaluation grid
+/// (`QueryRecurrence::evaluation_grid_ms` of their range evaluation; 1 ms
+/// when not known) are one context, which computes the node at their
+/// combined rate ([`evaluation_rate`]); a materialized node is a context of
+/// its own, at its rate. The consumers materialized at ingestion time of one refresh window
 /// ([`PhysicalASAPDAG::refresh_window`]) are refreshed in one ingestion run,
-/// which computes the node once for all of them: they count as one
-/// consumer (a consumer with an unbounded window counts alone). Its
-/// `multiplier` is that number of consumers.
+/// which computes the node once for all of them: they are one context (a
+/// consumer with an unbounded window is one alone). Its `multiplier` is
+/// that number of contexts.
 pub fn computations(
     dag: &PhysicalASAPDAG,
     recurrence: &[QueryRecurrence],
@@ -365,6 +372,18 @@ pub fn computations(
         .iter()
         .filter(|node| node.lifetime != Lifetime::None)
         .map(|node| (node.id, (node.output_state.timing, node.lifetime)))
+        .collect();
+    // Each tumbling-window chain's width.
+    let chain_width_ms: HashMap<PhysicalASAPNodeId, u64> = dag
+        .nodes
+        .iter()
+        .filter_map(|node| match node.payload {
+            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                tumbling_window_width_ms,
+                ..
+            }) => Some((node.id, tumbling_window_width_ms)),
+            _ => None,
+        })
         .collect();
     let inputs = |id: PhysicalASAPNodeId| {
         dag.edges
@@ -389,10 +408,12 @@ pub fn computations(
     let mut rate_of_materialized = HashMap::new();
     for (&id, &(timing, lifetime)) in &materialized_nodes {
         let at_ingestion = timing == ExecutionTiming::IngestionTime;
-        // A query-time chain materialized across evaluations is built once per request.
+        // A query-time result materialized across evaluations is computed
+        // once per request; a query-time chain builds one window when it ends.
         let per_request = !at_ingestion && matches!(lifetime, Lifetime::AcrossEvaluations(_));
-        let rate = match at_ingestion {
-            true => 1.0,
+        let rate = match (at_ingestion, chain_width_ms.get(&id)) {
+            (true, _) => 1.0,
+            (false, Some(&width_ms)) if per_request => 1_000.0 / width_ms.max(1) as f64,
             _ => evaluation_rate(
                 reached.get(&id).into_iter().flatten().filter_map(|&q| {
                     let range = if per_request { None } else { range_of(q) };
@@ -421,23 +442,48 @@ pub fn computations(
             .filter(|(_, (timing, _))| *timing == ExecutionTiming::IngestionTime)
             .map(|(&id, _)| id),
     );
+    // Each query's evaluation grid: the queries on one grid are one
+    // execution context, evaluated together.
+    let grid_ms = |query: usize| {
+        recurrence
+            .get(query)
+            .and_then(|r| r.evaluation_grid_ms(range_of(query)))
+            .unwrap_or(1)
+    };
     let mut count: HashMap<_, (u64, f64)> = HashMap::new();
     for (id, of_node) in consumers(dag) {
         let entry = count.entry(id).or_default();
         // The refresh windows whose ingestion run already computes the node.
         let mut runs = HashSet::new();
+        // The queries reaching it, by evaluation grid.
+        let mut queries_by_grid: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
         for consumer in of_node {
-            if let Consumer::Materialized(node) = consumer {
-                if let Some(Some(window)) = refresh_windows.get(&node) {
-                    if !runs.insert(*window) {
-                        continue;
+            match consumer {
+                Consumer::Query(query) => queries_by_grid
+                    .entry(grid_ms(query))
+                    .or_default()
+                    .push(query),
+                Consumer::Materialized(node) => {
+                    if let Some(Some(window)) = refresh_windows.get(&node) {
+                        if !runs.insert(*window) {
+                            continue;
+                        }
                     }
+                    entry.0 += 1;
+                    entry.1 += rate_of_materialized[&node];
                 }
             }
+        }
+        for queries in queries_by_grid.into_values() {
             entry.0 += 1;
-            entry.1 += match consumer {
-                Consumer::Query(query) => query_rates[query],
-                Consumer::Materialized(node) => rate_of_materialized[&node],
+            entry.1 += match root_rates {
+                Some(_) => queries.iter().map(|&query| query_rates[query]).sum(),
+                None => evaluation_rate(
+                    queries
+                        .iter()
+                        .filter_map(|&query| recurrence.get(query).map(|r| (r, range_of(query)))),
+                    non_repeating_query_horizon_seconds,
+                )?,
             };
         }
     }
@@ -622,6 +668,134 @@ mod tests {
             offset_intersection_count(&[(large - 1, large), (large - 3, large)]),
             1
         );
+    }
+
+    /// A plan node `id` running `payload` with `timing` and `lifetime`.
+    fn node(
+        id: PhysicalASAPNodeId,
+        payload: Operator<PhysicalASAPNodeId>,
+        timing: ExecutionTiming,
+        lifetime: Lifetime,
+    ) -> asap_types::ir::physical_export::PhysicalASAPDAGNode {
+        use asap_types::ir::properties::{DataPrimitive, ExecutionDataState};
+        use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
+        asap_types::ir::physical_export::PhysicalASAPDAGNode {
+            id,
+            output_state: ExecutionDataState {
+                timing,
+                primitive: DataPrimitive::of(
+                    &payload,
+                    asap_types::ir::OperatorResultKind::RangeVector,
+                ),
+            },
+            parameters: matches!(payload, Operator::ASAP(_))
+                .then_some(asap_types::ir::schema::SketchParams::Kll { k: 200 }),
+            payload,
+            lifetime,
+            output_schema: Schema::with_time_index(
+                vec![
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::new("value", FieldDataType::Plain(DataType::Float64), false),
+                ],
+                0,
+                vec![],
+            ),
+            guarantee: None,
+            retention_ms: None,
+            summary_coverage: None,
+            selected_physical_candidate: None,
+        }
+    }
+
+    fn scan() -> Operator<PhysicalASAPNodeId> {
+        use asap_types::ir::operator::operator_properties::Source;
+        use asap_types::ir::schema::{DataType, Field, Schema};
+        Operator::NonASAP(asap_types::ir::NonASAPOp::Scan {
+            source: Source::TimeSeries { metric: "m".into() },
+            predicates: vec![],
+            schema: Schema::with_time_index(
+                vec![
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("value", DataType::Float64, false),
+                ],
+                0,
+                vec![],
+            ),
+        })
+    }
+
+    fn last(seconds: u64, child: PhysicalASAPNodeId) -> Operator<PhysicalASAPNodeId> {
+        Operator::NonASAP(asap_types::ir::NonASAPOp::TimeRange {
+            range: std::time::Duration::from_secs(seconds),
+            kind: asap_types::ir::TimeRangeKind::Range,
+            child,
+        })
+    }
+
+    /// `m[5m]` read by three queries: two every 10 s at phase 0, one every
+    /// 30 s. The two on the 10 s grid are one execution context, which
+    /// computes the not-materialized range and scan once for both: two
+    /// contexts, 1/10 + 1/30 per second.
+    #[test]
+    fn a_not_materialized_node_is_computed_once_per_evaluation_grid() {
+        let query_time = ExecutionTiming::QueryTime;
+        let dag = PhysicalASAPDAG::new(
+            vec![
+                node(0, scan(), query_time, Lifetime::None),
+                node(1, last(300, 0), query_time, Lifetime::None),
+            ],
+            vec![1, 1, 1],
+            vec![],
+        )
+        .unwrap();
+        let recurrence = [
+            fixed(10_000, Some(0)),
+            fixed(10_000, Some(0)),
+            fixed(30_000, Some(0)),
+        ];
+        let rates = computations(&dag, &recurrence, &[], 3600.0, None).unwrap();
+        for id in [0, 1] {
+            assert_eq!(rates[&id].0, 2);
+            close(rates[&id].1, 1.0 / 10.0 + 1.0 / 30.0);
+        }
+    }
+
+    /// A query-time chain of 10 s windows materialized across evaluations,
+    /// read through its last minute by a query every 60 s: it builds one
+    /// window when each ends, 1/10 per second, and so does the scan it
+    /// builds from; the range over it runs at the query's rate.
+    #[test]
+    fn a_query_time_chain_builds_one_window_per_width() {
+        use asap_types::ir::operator::operator_properties::Reduction;
+        use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SummaryUpdate};
+        let query_time = ExecutionTiming::QueryTime;
+        let chain = Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            child: 0,
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::Kll),
+            input: SummaryUpdate::column(asap_types::ir::scalar::expr_ir::ColumnRef::SampleValue),
+            reduction: Reduction::PerEntity,
+            filter: None,
+            tumbling_window_width_ms: 10_000,
+        });
+        let dag = PhysicalASAPDAG::new(
+            vec![
+                node(0, scan(), query_time, Lifetime::None),
+                node(
+                    1,
+                    chain,
+                    query_time,
+                    Lifetime::AcrossEvaluations(asap_types::physical::StorageMedium::Memory),
+                ),
+                node(2, last(60, 1), query_time, Lifetime::None),
+            ],
+            vec![2],
+            vec![],
+        )
+        .unwrap();
+        let rates = computations(&dag, &[fixed(60_000, Some(0))], &[], 3600.0, None).unwrap();
+        close(rates[&0].1, 1.0 / 10.0);
+        close(rates[&1].1, 1.0 / 10.0);
+        close(rates[&2].1, 1.0 / 60.0);
     }
 
     // Invalid fixed intervals and estimated rates still produce the evaluator's error.
