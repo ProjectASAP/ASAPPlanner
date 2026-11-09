@@ -41,7 +41,11 @@ impl PhysicalCandidate {
     /// phase; any other result is stored on its group's evaluation grid
     /// (`evaluation_grid_of_group`), which must hold every time of the
     /// context, unless the group does not depend on the evaluation time
-    /// (then it delivers on every context).
+    /// (then it delivers on every context). The times of a
+    /// `Materialized(v)` context are $v$'s own: every window end of a chain
+    /// $v$ (its width at phase 0), else its group's evaluation grid; with
+    /// neither they are not known, and no time-dependent producer delivers
+    /// on it.
     pub fn delivers_on(
         &self,
         candidates: &PhysicalASAPMemoCandidates,
@@ -53,22 +57,12 @@ impl PhysicalCandidate {
             Lifetime::AcrossEvaluations(_) => {
                 let logical = &candidates.logical_candidates;
                 let group = self.logical_candidate_id.group;
-                let chain_width_ms = match logical
-                    .memo
-                    .candidate(self.logical_candidate_id)
-                    .expression
-                    .operator
-                {
-                    Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
-                        tumbling_window_width_ms,
-                        ..
-                    }) => Some(tumbling_window_width_ms),
-                    _ => None,
-                };
+                let chain_tumbling_window_width_ms =
+                    self.chain_tumbling_window_width_ms(candidates);
                 let depends_on_evaluation_time = logical.memo.groups()[group.0 as usize]
                     .group_properties
                     .depends_on_evaluation_time;
-                if chain_width_ms.is_none() && !depends_on_evaluation_time {
+                if chain_tumbling_window_width_ms.is_none() && !depends_on_evaluation_time {
                     return true;
                 }
                 let (period_ms, phase_ms) = match context {
@@ -76,13 +70,20 @@ impl PhysicalCandidate {
                     ExecutionContext::IngestionPipeline(window) => {
                         (window.width_ms, window.phase_ms)
                     }
-                    ExecutionContext::Materialized(_) => {
-                        todo!(
-                            "#1207 PR 7: the times of a Materialized(v) context, v's own schedule"
-                        )
+                    ExecutionContext::Materialized(v) => {
+                        let materialized = &candidates.physical_candidates[v.0];
+                        match materialized.chain_tumbling_window_width_ms(candidates) {
+                            Some(width_ms) => (width_ms, 0),
+                            None => match logical.evaluation_grid_of_group
+                                [materialized.logical_candidate_id.group.0 as usize]
+                            {
+                                Some(grid) => (grid.period_ms, grid.phase_ms),
+                                None => return false,
+                            },
+                        }
                     }
                 };
-                match chain_width_ms {
+                match chain_tumbling_window_width_ms {
                     Some(width_ms) => {
                         period_ms.is_multiple_of(width_ms) && phase_ms.is_multiple_of(width_ms)
                     }
@@ -94,6 +95,27 @@ impl PhysicalCandidate {
                     }
                 }
             }
+        }
+    }
+
+    /// Its tumbling-window width when it is a chain
+    /// (`SummaryTumblingWindowChain`).
+    pub fn chain_tumbling_window_width_ms(
+        &self,
+        candidates: &PhysicalASAPMemoCandidates,
+    ) -> Option<u64> {
+        match candidates
+            .logical_candidates
+            .memo
+            .candidate(self.logical_candidate_id)
+            .expression
+            .operator
+        {
+            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                tumbling_window_width_ms,
+                ..
+            }) => Some(tumbling_window_width_ms),
+            _ => None,
         }
     }
 }
@@ -491,6 +513,70 @@ mod tests {
             (&without_grid, evaluation(60_000, 0), false),
         ] {
             assert_eq!(x.delivers_on(candidates, &context), delivers, "{context:?}");
+        }
+    }
+
+    /// In `Materialized(v)` a producer delivers on $v$'s own times: a
+    /// 5 s chain inside the computation of a 10 s chain (every 10 s) and of
+    /// X = the scan's last 5 minutes stored on its 60 s grid, but not a
+    /// 10 s chain inside X's computation every 25 s, nor anything
+    /// time-dependent inside a build with neither a width nor a grid.
+    #[test]
+    fn delivers_on_the_own_times_of_a_materialized_computation() {
+        let grid = |period_ms| {
+            Some(EvaluationGrid {
+                period_ms,
+                phase_ms: 0,
+            })
+        };
+        let materialized = |grid_of_x| {
+            let mut candidates = candidates(memo(), vec![None, None, None, None, grid_of_x]);
+            candidates.physical_candidates = vec![
+                candidate(WINDOWS_10S, QueryTime, Lifetime::AcrossEvaluations(MEMORY)),
+                candidate(LAST_5M, QueryTime, Lifetime::AcrossEvaluations(MEMORY)),
+                candidate(BUILD, QueryTime, Lifetime::AcrossEvaluations(MEMORY)),
+            ];
+            candidates
+        };
+        let across_5s = candidate(WINDOWS_5S, QueryTime, Lifetime::AcrossEvaluations(MEMORY));
+        let across_10s = candidate(
+            WINDOWS_10S,
+            IngestionTime,
+            Lifetime::AcrossEvaluations(MEMORY),
+        );
+        let in_computation_of = |v| ExecutionContext::Materialized(PhysicalCandidateId(v));
+        for (candidates, producer, context, delivers) in [
+            (
+                materialized(grid(60_000)),
+                &across_5s,
+                in_computation_of(0),
+                true,
+            ),
+            (
+                materialized(grid(60_000)),
+                &across_5s,
+                in_computation_of(1),
+                true,
+            ),
+            (
+                materialized(grid(25_000)),
+                &across_10s,
+                in_computation_of(1),
+                false,
+            ),
+            (
+                materialized(grid(60_000)),
+                &across_5s,
+                in_computation_of(2),
+                false,
+            ),
+        ] {
+            assert_eq!(
+                producer.delivers_on(&candidates, &context),
+                delivers,
+                "{:?} in {context:?}",
+                producer.logical_candidate_id
+            );
         }
     }
 

@@ -150,6 +150,10 @@ pub struct Selection {
     /// How long building and solving the selection MILP took.
     pub milp_construction_ms: u64,
     pub milp_solve_ms: u64,
+    /// The selection MILP's optimal objective, in cost per second under
+    /// cost model 1: `asap_cost::plan_cost` of the plan, which the MILP
+    /// models exactly.
+    pub milp_objective: f64,
 }
 
 /// Why Stage 3 selected no plan.
