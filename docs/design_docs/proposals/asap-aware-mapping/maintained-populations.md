@@ -10,7 +10,7 @@
 
 A **population** is the multiset of records that an aggregation is defined over,
 after applying its source selection, predicates, membership semantics and grouping.
-A **maintained population** is that multiset represented by state which is kept
+A **maintained population** is that multiset represented by state which is retained
 across evaluations and updated when members enter, change, leave or expire.
 A **readout** computes a result from the maintained state at an admitted evaluation.
 

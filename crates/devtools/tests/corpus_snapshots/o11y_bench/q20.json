@@ -1,75 +1,55 @@
 {
   "accuracy_guarantees": "enforced",
   "materialized_views": [],
-  "proven_optimal": true,
   "query": "sum(process_resident_memory_bytes)",
   "selected": {
     "accepted": [
       {
         "accepted_metric": null,
-        "accepted_regardless_of_guarantee": false,
-        "guarantee_check_rejection": null,
         "sketches": [],
-        "summary": "metric not set; accepted exact",
-        "target_metric": null
+        "summary": "accepted exact"
       }
     ],
     "cost": {
-      "cost_per_second": 0.00630435009457,
-      "cost_unit": "cost_per_second",
-      "cpu_core_seconds_per_second": 6.30435e-6,
+      "cost_per_second": 14.4102333415,
+      "cpu_core_seconds_per_second": 6.23333333333e-6,
       "per_node": {
         "0": {
-          "cost_per_second": 0.00427000002522,
-          "cpu_core_seconds_per_second": 4.27e-6,
-          "detail": "scan 1000 samples; x 1.0167/s; keeps 32000 bytes of raw data on disk; holds 32 bytes for 0.0 ms",
+          "cost_per_second": 14.4082,
+          "cost_source": "analytical",
+          "cpu_core_seconds_per_second": 4.2e-6,
+          "detail": "scan 3601000 samples; x 1.0000/s; keeps 115232000 bytes",
           "multiplier": 1,
           "operator": "Scan",
-          "price_source": "analytical",
-          "timing": "query_time"
+          "timing": "ingestion_time"
         },
         "1": {
-          "cost_per_second": 0.00101666669188,
+          "cost_per_second": 0.0010166748,
+          "cost_source": "analytical",
           "cpu_core_seconds_per_second": 1.01666666667e-6,
-          "detail": "time range 1s: keep 1000 of 1000 rows; x 1.0167/s; holds 32 bytes for 0.0 ms",
+          "detail": "time range 1s: keep 1000 of 3601000 rows; x 1.0167/s; holds 32000 bytes for 0.0 ms",
           "multiplier": 1,
           "operator": "TimeRange",
-          "price_source": "analytical",
           "timing": "query_time"
         },
         "2": {
-          "cost_per_second": 0.0010166667108,
+          "cost_per_second": 0.00101666667277,
+          "cost_source": "analytical",
           "cpu_core_seconds_per_second": 1.01666666667e-6,
-          "detail": "build exact Sum accumulator into 1 states: 1000 rows x depth 1; x 1.0167/s; holds 56 bytes for 0.0 ms",
+          "detail": "hash aggregate 1000 rows into 1 groups; x 1.0167/s; holds 24 bytes for 0.0 ms",
           "multiplier": 1,
-          "operator": "SummaryAgg",
-          "price_source": "analytical",
-          "timing": "query_time"
-        },
-        "3": {
-          "cost_per_second": 1.01666666667e-6,
-          "cpu_core_seconds_per_second": 1.01666666667e-9,
-          "detail": "finalize 1 accumulators; x 1.0167/s",
-          "multiplier": 1,
-          "operator": "FinalizeExactAccumulator",
-          "price_source": "analytical",
+          "operator": "Aggregate",
           "timing": "query_time"
         }
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 0.000756522,
-        "cpu_ops_per_second": 3051.01666667,
-        "disk_bytes": 32000,
-        "latency_per_query": [
-          {
-            "compaction_ms": 0.0,
-            "query_ms": 0.006201
-          }
-        ],
-        "peak_cpu_cores": 1,
-        "peak_memory_bytes": 120,
-        "scanned_bytes_per_second": 32533.3333333
+        "average_memory_bytes": 115232000.065,
+        "cpu_ops_per_second": 3033.33333333,
+        "disk_bytes": 0,
+        "peak_cpu_cores": 2,
+        "peak_memory_bytes": 115264024,
+        "scanned_bytes_per_second": 32000.0
       }
     },
     "dag": {
@@ -78,7 +58,7 @@
           "consumer": 1,
           "data_state": {
             "primitive": "Raw",
-            "timing": "query_time"
+            "timing": "ingestion_time"
           },
           "grouping": "NotApplicable",
           "intermediate_schema": {
@@ -89,24 +69,21 @@
                   "Plain": "timestamp"
                 },
                 "name": "ts",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "float64"
                 },
                 "name": "value",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "$promql_series_identity",
-                "nullable": false,
-                "table": null
+                "nullable": false
               }
             ],
             "time_index": 0,
@@ -136,24 +113,21 @@
                   "Plain": "timestamp"
                 },
                 "name": "ts",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "float64"
                 },
                 "name": "value",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "$promql_series_identity",
-                "nullable": false,
-                "table": null
+                "nullable": false
               }
             ],
             "time_index": 0,
@@ -167,59 +141,15 @@
           "producer": 1,
           "role": "Input",
           "window": "NotApplicable"
-        },
-        {
-          "consumer": 3,
-          "data_state": {
-            "primitive": "SummaryState",
-            "timing": "query_time"
-          },
-          "grouping": "NotApplicable",
-          "intermediate_schema": {
-            "closed": true,
-            "fields": [
-              {
-                "dtype": {
-                  "ExactAggregate": [
-                    "Sum",
-                    "Sum"
-                  ]
-                },
-                "name": "state",
-                "nullable": false,
-                "table": null
-              }
-            ],
-            "time_index": null,
-            "unique_keys": []
-          },
-          "producer": 2,
-          "role": "Input",
-          "window": "NotApplicable"
         }
       ],
       "nodes": [
         {
-          "guarantee": {
-            "provenance": [
-              {
-                "kind": "exact",
-                "reason": "exact over exact inputs"
-              }
-            ],
-            "spec": {
-              "accuracy_metric": "absolute",
-              "accuracy_scope": "per_value",
-              "error": {
-                "op": "zero"
-              },
-              "failure_probability": {
-                "op": "zero"
-              }
-            }
-          },
+          "guarantee": null,
           "id": 0,
-          "lifetime": "None",
+          "lifetime": {
+            "AcrossEvaluations": "Memory"
+          },
           "output_schema": {
             "closed": true,
             "fields": [
@@ -228,24 +158,21 @@
                   "Plain": "timestamp"
                 },
                 "name": "ts",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "float64"
                 },
                 "name": "value",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "$promql_series_identity",
-                "nullable": false,
-                "table": null
+                "nullable": false
               }
             ],
             "time_index": 0,
@@ -258,7 +185,7 @@
           },
           "output_state": {
             "primitive": "Raw",
-            "timing": "query_time"
+            "timing": "ingestion_time"
           },
           "payload": {
             "NonASAP": {
@@ -272,24 +199,21 @@
                         "Plain": "timestamp"
                       },
                       "name": "ts",
-                      "nullable": false,
-                      "table": null
+                      "nullable": false
                     },
                     {
                       "dtype": {
                         "Plain": "float64"
                       },
                       "name": "value",
-                      "nullable": false,
-                      "table": null
+                      "nullable": false
                     },
                     {
                       "dtype": {
                         "Plain": "utf8"
                       },
                       "name": "$promql_series_identity",
-                      "nullable": false,
-                      "table": null
+                      "nullable": false
                     }
                   ],
                   "time_index": 0,
@@ -307,29 +231,15 @@
                 }
               }
             }
-          }
+          },
+          "retention_ms": 3601000
         },
         {
-          "guarantee": {
-            "provenance": [
-              {
-                "kind": "exact",
-                "reason": "exact over exact inputs"
-              }
-            ],
-            "spec": {
-              "accuracy_metric": "absolute",
-              "accuracy_scope": "per_value",
-              "error": {
-                "op": "zero"
-              },
-              "failure_probability": {
-                "op": "zero"
-              }
-            }
-          },
+          "guarantee": null,
           "id": 1,
-          "lifetime": "None",
+          "lifetime": {
+            "OneEvaluation": "Memory"
+          },
           "output_schema": {
             "closed": true,
             "fields": [
@@ -338,24 +248,21 @@
                   "Plain": "timestamp"
                 },
                 "name": "ts",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "float64"
                 },
                 "name": "value",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "$promql_series_identity",
-                "nullable": false,
-                "table": null
+                "nullable": false
               }
             ],
             "time_index": 0,
@@ -386,78 +293,9 @@
         {
           "guarantee": null,
           "id": 2,
-          "lifetime": "None",
-          "output_schema": {
-            "closed": true,
-            "fields": [
-              {
-                "dtype": {
-                  "ExactAggregate": [
-                    "Sum",
-                    "Sum"
-                  ]
-                },
-                "name": "state",
-                "nullable": false,
-                "table": null
-              }
-            ],
-            "time_index": null,
-            "unique_keys": []
+          "lifetime": {
+            "OneEvaluation": "Memory"
           },
-          "output_state": {
-            "primitive": "SummaryState",
-            "timing": "query_time"
-          },
-          "payload": {
-            "ASAP": {
-              "SummaryAgg": {
-                "child": 1,
-                "family": {
-                  "ExactAggregate": [
-                    "Sum",
-                    "Sum"
-                  ]
-                },
-                "filter": null,
-                "grouping": "PerSubpopulationInstance",
-                "input": {
-                  "item": null,
-                  "weight": {
-                    "Column": "SampleValue"
-                  },
-                  "weight_domain": {
-                    "kind": "unknown_or_signed"
-                  }
-                },
-                "reduction": {
-                  "Reduce": []
-                }
-              }
-            }
-          }
-        },
-        {
-          "guarantee": {
-            "provenance": [
-              {
-                "kind": "exact",
-                "reason": "exact accumulator over exact input"
-              }
-            ],
-            "spec": {
-              "accuracy_metric": "absolute",
-              "accuracy_scope": "per_value",
-              "error": {
-                "op": "zero"
-              },
-              "failure_probability": {
-                "op": "zero"
-              }
-            }
-          },
-          "id": 3,
-          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -466,8 +304,7 @@
                   "Plain": "float64"
                 },
                 "name": "sum",
-                "nullable": false,
-                "table": null
+                "nullable": false
               }
             ],
             "time_index": null,
@@ -478,20 +315,32 @@
             "timing": "query_time"
           },
           "payload": {
-            "ASAP": {
-              "FinalizeExactAccumulator": {
-                "child": 2
+            "NonASAP": {
+              "Aggregate": {
+                "child": 1,
+                "filters": [],
+                "having": null,
+                "measures": [
+                  {
+                    "col": null,
+                    "kind": "sum"
+                  }
+                ],
+                "output_names": [
+                  ""
+                ],
+                "reduction": {
+                  "Reduce": []
+                }
               }
             }
           }
         }
       ],
       "roots": [
-        3
+        2
       ],
       "scalar_roots": []
-    },
-    "display_name": "Q1 Sum acc"
-  },
-  "tumbling_window_retention_ms": {}
+    }
+  }
 }

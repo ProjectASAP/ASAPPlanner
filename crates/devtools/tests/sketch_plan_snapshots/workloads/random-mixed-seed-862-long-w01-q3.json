@@ -6,7 +6,10 @@
       {
         "query": "avg by (region) (quantile_over_time(0.95, data[300s]))",
         "demand": {
-          "fixed_interval": 1000
+          "fixed_interval_at": {
+            "interval": 1000,
+            "evaluation_phase": 0
+          }
         },
         "requirements": {
           "accuracy": {

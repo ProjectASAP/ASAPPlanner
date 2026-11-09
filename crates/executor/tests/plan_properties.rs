@@ -1,4 +1,4 @@
-//! A blocking parent over a raw data slot is finite, and binding it opens no reader.
+//! A blocking parent over a raw data slot is finite, and binding it opens no source cursor.
 use asap_executor::{
     physical_planner::compile,
     plan::{Boundedness, Emission},
@@ -94,7 +94,7 @@ fn sorted_scan(schema: &Schema, identity: &Source) -> PhysicalASAPDAG {
     }
 }
 // A blocking parent over a raw data slot is Bounded and emits after its
-// input: the `Scan` reads a finite request. Instantiation opens no reader;
+// input: the `Scan` reads a finite request. Instantiation opens no source cursor;
 // the run opens it once.
 #[test]
 fn blocking_inputs_over_a_raw_data_slot_are_finite() {

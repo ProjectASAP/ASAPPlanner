@@ -9,7 +9,7 @@
 -- Regenerate with, from the sidra repo:
 --   uv run python pyscripts/asap-planner_test/emit_sql_set.py workload/tpch_deequ.yaml
 --
--- ONE QUERY PER LINE, and the reader splits on newlines rather than on `;`:
+-- ONE QUERY PER LINE, and the loader splits on newlines rather than on `;`:
 -- U-P3p's regex literal is '^[a-zA-Z ,.:;!?-]+$', which contains a semicolon,
 -- so a `;` split would fragment it. `fuse` emits single-line SQL, so the line
 -- is an exact statement boundary and no escaping is needed.

@@ -638,13 +638,12 @@ pub fn agg_has_exact_per_entity_kernel(op: &AggIntent) -> bool {
     )
 }
 
-/// Default `Cardinality` intent over the sample value — HLL standard error at
-/// precision p=14.
+/// `Cardinality` intent over the sample value.
 pub fn default_cardinality() -> AggIntent {
     AggIntent::Cardinality { cols: vec![] }
 }
 
-/// Default `Quantile` intent over the sample value at φ = `q`, `accuracy = ε 0.01`.
+/// `Quantile` intent over the sample value at φ = `q`.
 pub fn default_quantile(q: f64) -> AggIntent {
     AggIntent::Quantile { col: None, q }
 }

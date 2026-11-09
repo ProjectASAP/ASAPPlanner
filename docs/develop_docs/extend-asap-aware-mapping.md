@@ -73,7 +73,7 @@ and must keep the composed DAG's meaning. Stage 3 decides whether it pays off.
 Tests: unit tests beside the rule in `pass2/memo/rules/` for when it applies
 and when it must not; an end-to-end test like
 `crates/integration-tests/tests/reuse_rules.rs` that the planned workload
-contains the candidate and that Stage 3 prices it.
+contains the candidate and that Stage 3 costs it.
 
 ## 3. Add a Stage 2 physical properties option
 
@@ -85,7 +85,7 @@ contains the candidate and that Stage 3 prices it.
    `MaterializedOutputCandidate` options), after the existing options so default
    candidate ids stay the same, and gate it on the deployment input that
    allows it.
-3. Price it in `crates/cost/src/usage.rs` (`asap_cost::node_usage`): what it keeps in memory or on
+3. Cost it in `crates/cost/src/usage.rs` (`asap_cost::node_usage`): what it keeps in memory or on
    disk, and what each evaluation rebuilds.
 
 Tests: Stage 2 unit tests for when the option is offered;
@@ -96,10 +96,10 @@ tests in `planner_layering_example4.rs`.
 
 - A new validity check goes in `select_plan` and rejects a candidate with a
   `Rejection { cause, reason }` whose `cause` is a new failed-check
-  `RejectionCause` variant (listed in `RejectionCause::failed_a_check`); it never fails the whole selection
+  `RejectionCause` variant; it never fails the whole selection
   unless the input itself is bad (a new `ErrorSelectingPlan` variant, documented
   as bad input).
-- A new pricing input goes in `CostInputs` (validated in its
+- A new costing input goes in `CostInputs` (validated in its
   `validate`); a new statement about the executor goes in
   `DeploymentCapabilities`. Both reach the stages through `PlanningModels`;
   a stage function takes only the field it reads (Stage 2 takes
