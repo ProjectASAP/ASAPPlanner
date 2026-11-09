@@ -132,7 +132,6 @@ fn map_value(expr: ScalarExpr<MemoGroupId>, child: MemoGroupId) -> Operator<Memo
             item(expr, "value"),
             item(ScalarExpr::Column(HOST), "host"),
         ],
-        qualifier: None,
         child,
     })
 }

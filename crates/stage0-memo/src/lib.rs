@@ -511,7 +511,6 @@ mod tests {
                 alias: Some("v".into()),
                 expr: ScalarExpr::literal_f64(value),
             }],
-            qualifier: None,
             child: scan(),
         })
     }

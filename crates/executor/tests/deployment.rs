@@ -248,7 +248,6 @@ fn heap_sketch_states_load_as_dag_summary_values() {
                 name: "state".into(),
                 dtype: family.clone(),
                 nullable: false,
-                table: None,
             }],
             unique_keys: vec![],
             closed: false,

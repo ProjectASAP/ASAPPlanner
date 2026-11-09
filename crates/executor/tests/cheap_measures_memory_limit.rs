@@ -90,7 +90,6 @@ fn many_groups_of_cheap_measures_fail_near_the_memory_limit() {
         name: name.into(),
         dtype: FieldDataType::Plain(dtype),
         nullable: false,
-        table: None,
     };
     let input = Arc::new(Schema {
         fields: vec![field("k", DataType::Int64), field("v", DataType::Float64)],

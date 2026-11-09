@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use super::column_sign::output_column_sign;
+use super::column_properties::{columns_of_group, output_column_properties};
 use super::hash_consing::{expression_hash, same_expression, same_value};
 use super::{GroupProperties, MemoGroup, MemoGroupAsInput, MemoGroupId, ValueSign};
 use crate::ir::operator::asap::summary_type_of_operator;
@@ -310,8 +310,18 @@ fn derive_group_properties(
         }
         Err(_) => None,
     };
+    let (column_lineage, column_sign) = output_column_properties(
+        &operator,
+        &schema,
+        &memo.declared_column_signs,
+        &columns_of_group,
+    )
+    .into_iter()
+    .map(|column| (column.lineage, column.sign))
+    .unzip();
     Ok(GroupProperties {
-        column_sign: output_column_sign(&operator, &schema, &memo.declared_column_signs),
+        column_lineage,
+        column_sign,
         depends_on_evaluation_time: depends_on_evaluation_time(&operator),
         schema,
         result_kind: operator.output_kind(),
@@ -1050,7 +1060,6 @@ mod memo_tests {
                 alias: None,
                 expr: crate::ir::ScalarExpr::Column(0),
             }],
-            qualifier: None,
             child: input,
         })
     }

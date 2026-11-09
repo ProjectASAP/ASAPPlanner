@@ -22,7 +22,6 @@ fn logical_schema(family: FieldDataType) -> Schema {
         unique_keys: vec![],
         closed: false,
         fields: vec![Field {
-            table: None,
             name: "value".into(),
             dtype: family,
             nullable: false,
