@@ -4,6 +4,8 @@
 //! section 3; #1203).
 
 use crate::ir::operator::input::reads_only_time_series;
+use crate::workload::bounds::source_name;
+use crate::workload::SourceFacts;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::column_properties::{columns_of_group, output_column_properties};
@@ -11,12 +13,16 @@ use super::hash_consing::{expression_hash, same_expression, same_value};
 use super::{ColumnLineage, GroupProperties, MemoGroup, MemoGroupAsInput, MemoGroupId, ValueSign};
 use crate::ir::operator::asap::summary_type_of_operator;
 use crate::ir::operator::operator_properties::BinaryOpKind;
-use crate::ir::operator::operator_properties::{AtModifier, SourceColumn, TimeShift};
+use crate::ir::operator::operator_properties::{AtModifier, TimeShift};
 use crate::ir::operator::AggIntent;
 use crate::ir::properties::summary_coverage::SummaryCoverage;
 use crate::ir::properties::{AccuracyMetric, AccuracyTarget};
+use crate::ir::scalar::column_resolution::resolve_column_ref;
 use crate::ir::scalar::expr_ir::ArithmeticOpKind;
-use crate::ir::schema::{ExactKind, FieldDataType, SketchAlgorithm, SketchParams};
+use crate::ir::scalar::expr_ir::ColumnRef;
+use crate::ir::schema::{
+    ExactKind, FieldDataType, SketchAlgorithm, SketchParams, SummaryInputExpr,
+};
 use crate::ir::ASAPOp;
 use crate::ir::Operator;
 use crate::ir::OperatorResultKind;
@@ -46,9 +52,12 @@ pub struct Memo {
     /// [`expression_hash`] of their expression: every group whose sharing
     /// is legal ([`GroupProperties::shareable_when_equal`]).
     groups_by_expression_hash: HashMap<u64, Vec<MemoGroupId>>,
-    /// The sign the data workload declares for each source column it
-    /// declares one for: a `Scan`'s [`GroupProperties::column_sign`].
-    declared_column_signs: BTreeMap<SourceColumn, ValueSign>,
+    /// The data workload's facts of each source the queries scan, by the
+    /// name the `Scan` reads (a histogram's series by its family's facts),
+    /// a counter's `value` declared non-negative: a `Scan`'s
+    /// [`GroupProperties::column_sign`] and the distinct bound of
+    /// [`Self::max_distinct_per_evaluation`].
+    source_facts: BTreeMap<String, SourceFacts>,
 }
 
 /// One query of the memo: its root over groups, its accuracy target and
@@ -66,13 +75,41 @@ pub struct MemoQuery {
 }
 
 impl Memo {
-    /// A memo without groups whose `Scan`s read `declared_column_signs`
-    /// (an undeclared source column's sign is `Unknown`).
-    pub fn new(declared_column_signs: BTreeMap<SourceColumn, ValueSign>) -> Self {
+    /// A memo without groups over the sources `source_facts` describes, by
+    /// the name a `Scan` reads (an undeclared source column's sign is
+    /// `Unknown`).
+    pub fn new(source_facts: BTreeMap<String, SourceFacts>) -> Self {
         Self {
-            declared_column_signs,
+            source_facts,
             ..Self::default()
         }
+    }
+
+    /// The most distinct items one distinct-count summary over `group`'s
+    /// rows counts in one evaluation: the sum of the bounds the data
+    /// declares for the sources scanned below it
+    /// (`SourceFacts::max_distinct_per_evaluation`); `None` when one has
+    /// none. Example: `count(distinct user_id)` over `Scan events` with
+    /// `events` bounded at 9,636 gives 9,636 for every group above the scan.
+    pub fn max_distinct_per_evaluation(&self, group: MemoGroupId) -> Option<u64> {
+        let mut seen = HashSet::new();
+        let mut pending = vec![group];
+        let mut total: u64 = 0;
+        while let Some(group) = pending.pop() {
+            if !seen.insert(group) {
+                continue;
+            }
+            let expression = &self.groups[group.0 as usize].expression;
+            if let Operator::NonASAP(NonASAPOp::Scan { source, .. }) = expression {
+                let bound = self
+                    .source_facts
+                    .get(source_name(source))?
+                    .max_distinct_per_evaluation?;
+                total = total.checked_add(bound)?;
+            }
+            pending.extend(expression.children().into_iter().copied());
+        }
+        Some(total)
     }
 
     /// The groups, by id.
@@ -351,15 +388,11 @@ fn derive_group_properties(
         }
         Err(_) => None,
     };
-    let (column_lineage, column_sign) = output_column_properties(
-        &operator,
-        &schema,
-        &memo.declared_column_signs,
-        &columns_of_group,
-    )
-    .into_iter()
-    .map(|column| (column.lineage, column.sign))
-    .unzip();
+    let (column_lineage, column_sign) =
+        output_column_properties(&operator, &schema, &memo.source_facts, &columns_of_group)
+            .into_iter()
+            .map(|column| (column.lineage, column.sign))
+            .unzip();
     Ok(GroupProperties {
         column_lineage,
         column_sign,
@@ -861,8 +894,10 @@ impl LogicalRequirements {
     /// - a `Project` whose computed items are `abs`, `clamp`, `clamp_min`,
     ///   `clamp_max` or a negation of a column: absolute, $\beta = 1$;
     /// - an `Aggregate` (or exact accumulator build) of counts ($\beta = 0$),
-    ///   min and max (absolute or relative, $\beta = 1$) and avg (absolute,
-    ///   $\beta = 1$), without measure filters or `HAVING`;
+    ///   min and max (absolute or relative, $\beta = 1$), avg (absolute,
+    ///   $\beta = 1$), and sum and avg (relative, $\beta = 1$) over values
+    ///   of one sign (the input column's `column_sign` is `NonNegative` or
+    ///   `NonPositive`), without measure filters or `HAVING`;
     /// - `+` and `-`: absolute, $\beta = 1$; `/`: relative,
     ///   $\beta = 1/(1-b)$ on both, the denominator capped at $b$; `*`:
     ///   relative, $(1+b, 1)$, the right operand capped at $b$
@@ -870,7 +905,8 @@ impl LogicalRequirements {
     ///   [`RELATIVE_OPERAND_VALIDITY_CAP`].
     ///
     /// Every other operator (a filter comparing a computed value, a ranking,
-    /// a `sum`, a comparison, another function) has none.
+    /// a `sum` over values of unknown sign, a comparison, another function)
+    /// has none.
     pub fn error_propagation(
         memo: &Memo,
         consumer: &Operator<MemoGroupId>,
@@ -917,16 +953,26 @@ impl LogicalRequirements {
                     measures,
                     filters,
                     having: None,
+                    child,
                     ..
                 } if filters.iter().all(Option::is_none) && !measures.is_empty() => {
                     let mut factor: f64 = 0.0;
                     for measure in measures {
+                        let of_one_sign = || {
+                            let column = measure.input_cols().first().copied();
+                            values_of_one_sign(memo, *child, column)
+                        };
                         match measure {
                             AggIntent::Count => {}
                             AggIntent::Min { .. } | AggIntent::Max { .. } if extremum_metric => {
                                 factor = factor.max(1.0)
                             }
                             AggIntent::Avg { .. } if absolute => factor = factor.max(1.0),
+                            AggIntent::Sum { .. } | AggIntent::Avg { .. }
+                                if metric == AccuracyMetric::Relative && of_one_sign() =>
+                            {
+                                factor = factor.max(1.0)
+                            }
                             _ => return None,
                         }
                     }
@@ -971,21 +1017,49 @@ impl LogicalRequirements {
                 ASAPOp::SummaryAgg {
                     summary_type: FieldDataType::ExactAggregate(kind, _),
                     filter: None,
+                    child,
+                    input,
                     ..
                 }
                 | ASAPOp::SummaryTumblingWindowChain {
                     summary_type: FieldDataType::ExactAggregate(kind, _),
                     filter: None,
+                    child,
+                    input,
                     ..
                 } => match kind {
                     ExactKind::Count => Some(uniform(0.0)),
                     ExactKind::Min | ExactKind::Max if extremum_metric => Some(uniform(1.0)),
+                    ExactKind::Sum if metric == AccuracyMetric::Relative => {
+                        let SummaryInputExpr::Column(column) = &input.weight else {
+                            return None;
+                        };
+                        let schema = &memo.groups()[child.0 as usize].group_properties.schema;
+                        let column = resolve_column_ref(column, schema).ok()?;
+                        values_of_one_sign(memo, *child, Some(column)).then(|| uniform(1.0))
+                    }
                     _ => None,
                 },
                 _ => None,
             },
         }
     }
+}
+
+/// Whether the values of column `column` of group `group` (its sample
+/// value when `None`) all have one sign (`column_sign` `NonNegative` or
+/// `NonPositive`): a sum of such values with relative errors is off by at
+/// most the largest of them, relative to the sum.
+fn values_of_one_sign(memo: &Memo, group: MemoGroupId, column: Option<usize>) -> bool {
+    let properties = &memo.groups()[group.0 as usize].group_properties;
+    let column =
+        column.or_else(|| resolve_column_ref(&ColumnRef::SampleValue, &properties.schema).ok());
+    column.is_some_and(|column| {
+        matches!(
+            properties.column_sign.get(column),
+            Some(ValueSign::NonNegative | ValueSign::NonPositive)
+        )
+    })
 }
 
 /// Whether `expr` changes a column's value by at most its error: `abs`,
@@ -1576,6 +1650,61 @@ mod memo_tests {
         }
     }
 
+    /// A relative error of a sum or an average is the largest of its
+    /// inputs' only when the values have one sign (E1(c), H2): `latency`
+    /// declared non-negative has the contract, `delta` of unknown sign has
+    /// none; the exact sum accumulator build likewise.
+    #[test]
+    fn sums_and_averages_carry_a_relative_error_over_values_of_one_sign() {
+        let mut memo = Memo::new(crate::test_support::value_signs(&[(
+            "latency",
+            ValueSign::NonNegative,
+        )]));
+        let latency = memo.find_or_add_group(scan_with_job("latency")).unwrap();
+        let delta = memo.find_or_add_group(scan_with_job("delta")).unwrap();
+        let aggregate = |child, measure| {
+            Operator::NonASAP(NonASAPOp::Aggregate {
+                reduction: Reduction::by(vec![2]),
+                measures: vec![measure],
+                output_names: vec![String::new()],
+                filters: vec![None],
+                having: None,
+                child,
+            })
+        };
+        let sum_build = |child| {
+            Operator::ASAP(ASAPOp::SummaryAgg {
+                child,
+                summary_type: FieldDataType::exact(ExactKind::Sum),
+                input: SummaryUpdate::column(ColumnRef::SampleValue),
+                reduction: Reduction::by(vec![2]),
+                filter: None,
+            })
+        };
+        let relative = |consumer: &Operator<MemoGroupId>| {
+            LogicalRequirements::error_propagation(&memo, consumer, AccuracyMetric::Relative)
+                .map(|propagation| propagation.factor_per_input)
+        };
+        for measure in [AggIntent::Sum { col: None }, AggIntent::Avg { col: None }] {
+            assert_eq!(
+                relative(&aggregate(latency, measure.clone())),
+                Some(vec![1.0])
+            );
+            assert_eq!(relative(&aggregate(delta, measure)), None);
+        }
+        assert_eq!(relative(&sum_build(latency)), Some(vec![1.0]));
+        assert_eq!(relative(&sum_build(delta)), None);
+        assert_eq!(
+            LogicalRequirements::error_propagation(
+                &memo,
+                &aggregate(latency, AggIntent::Sum { col: None }),
+                AccuracyMetric::ABSOLUTE
+            ),
+            None,
+            "a sum's absolute error grows with its count"
+        );
+    }
+
     /// Decided 2026-11-07 (E1): constant error contracts. A `Filter` whose
     /// predicate reads only columns copied from a source keeps or drops
     /// whole rows: β = 1 in every metric. Over a readout of a KLL state of
@@ -1688,8 +1817,8 @@ mod memo_tests {
 
     /// A ratio carries relative error with factor 1/(1 − 0.1) on both
     /// inputs and caps its denominator at 0.1; a count reads no value
-    /// (factor 0); a sum has no contract here (#1207 PR 8 adds its sign
-    /// condition).
+    /// (factor 0); a sum over values of unknown sign (`latency` is not
+    /// declared here) has none.
     #[test]
     fn error_contracts_of_a_ratio_a_count_and_a_sum() {
         let mut memo = Memo::default();
