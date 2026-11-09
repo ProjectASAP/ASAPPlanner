@@ -499,7 +499,7 @@ pub fn unchanged_source_columns<'a>(
             .map(|(name, _)| name)
             .collect()
     };
-    let kept = || -> BTreeSet<&'a str> {
+    let remaining = || -> BTreeSet<&'a str> {
         first().map_or_else(BTreeSet::new, |(unchanged, _)| {
             output_names()
                 .filter(|name| unchanged.contains(name))
@@ -514,7 +514,7 @@ pub fn unchanged_source_columns<'a>(
             | NonASAPOp::Limit { .. }
             | NonASAPOp::Dedup { .. }
             | NonASAPOp::TimeRange { .. }
-            | NonASAPOp::TimeShift { .. } => kept(),
+            | NonASAPOp::TimeShift { .. } => remaining(),
             NonASAPOp::Project { cols, .. } => {
                 passed_on(&mut cols.iter().map(|col| match col.expr {
                     ScalarExpr::Column(input) => Some(input),
@@ -544,7 +544,7 @@ pub fn unchanged_source_columns<'a>(
                 let Some((_, schema)) = first() else {
                     return BTreeSet::new();
                 };
-                let mut columns = kept();
+                let mut columns = remaining();
                 for measure in measures {
                     for input in measure.input_cols() {
                         if let Some(field) = schema.fields.get(input) {
@@ -562,7 +562,7 @@ pub fn unchanged_source_columns<'a>(
                 ..
             }
             | NonASAPOp::Concat { .. } => {
-                let mut columns = kept();
+                let mut columns = remaining();
                 for (_, unchanged) in producers {
                     columns.retain(|name| unchanged.contains(name));
                 }
@@ -576,13 +576,13 @@ pub fn unchanged_source_columns<'a>(
             | ASAPOp::SummaryMerge { .. }
             | ASAPOp::SummaryEstimate { .. }
             | ASAPOp::FinalizeExactAccumulator { .. },
-        ) => kept(),
+        ) => remaining(),
         _ => BTreeSet::new(),
     }
 }
 
 /// The groups (or partitions) a `by (keys)` over rows of schema `input`
-/// from `sources` is priced at, from declared or derivable facts only: the
+/// from `sources` is costed at, from declared or derivable facts only: the
 /// smallest of
 /// - when the keys read one source and are all in
 ///   `unchanged_input_columns` (one source row's labels, unchanged), the

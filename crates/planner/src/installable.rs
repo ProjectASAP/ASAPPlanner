@@ -68,7 +68,7 @@ pub struct InstallablePlan {
 #[serde(deny_unknown_fields)]
 pub struct SelectedPlanReport {
     /// Its cost per second; `None` under cost model 3, which has no
-    /// prices.
+    /// unit costs.
     pub cost_per_second: Option<f64>,
     /// The resources Stage 3 predicts it uses, for a runtime to report
     /// against what it measures.
@@ -93,7 +93,7 @@ pub struct PredictedUsage {
     pub disk_bytes: u64,
     /// CPU cores to provision for the peak.
     pub peak_cpu_cores: u32,
-    /// One per operator node of the plan Stage 3 priced, in node order.
+    /// One per operator node of the plan Stage 3 costed, in node order.
     pub per_node: Vec<PredictedNodeUsage>,
     /// One per workload query, in workload order.
     pub per_query: Vec<PredictedQueryUsage>,
@@ -111,7 +111,7 @@ pub struct PredictedNodeUsage {
     pub timing: ExecutionTiming,
     /// Core-seconds of CPU per second.
     pub cpu_core_seconds_per_second: f64,
-    /// Its price per second under cost model 1; `None` under cost models
+    /// Its cost per second under cost model 1; `None` under cost models
     /// 2 and 3.
     pub cost_per_second: Option<f64>,
     /// Whether its CPU came from the measured cost table or the formulas.

@@ -62,7 +62,7 @@
 //! materialized view slots. A node several roots share runs once per run,
 //! so a `Scan` below two chains of equal width reads each window's raw data
 //! once. Stage 3's cost assumes this grouping; a runtime that splits a group
-//! computes the same states at a higher cost than priced.
+//! computes the same states at a higher cost than Stage 3 computed.
 //!
 //! Each view's `coverage` says what its stored state is: a stable id of its
 //! definition (what it computes) and its selection (which rows went in,

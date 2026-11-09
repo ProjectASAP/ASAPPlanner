@@ -538,7 +538,7 @@ mod tests {
     }
 
     // A group's labels are its own first row's values, as the row operators
-    // kept them: with two group columns, the group (0.0, "a") seen after
+    // retained them: with two group columns, the group (0.0, "a") seen after
     // (-0.0, "b") is labelled 0.0, not the -0.0 its float part was first
     // seen with.
     #[test]

@@ -13,7 +13,7 @@ use crate::ir::SchemaDerivationError;
 /// Output schema of a *per-series* window/range reduction (`rate`/`increase`,
 /// or an `*_over_time` reducer under a time `Window`). Such a reduction emits
 /// one value per series, so every label column of `input` is preserved and only
-/// the sample value is replaced — kept named `value` so the PromQL sample-value
+/// the sample value is replaced — retained named `value` so the PromQL sample-value
 /// convention (and any outer `SampleValue` reference) still resolves it by name.
 fn per_series_reduction_schema(
     input: &Schema,
@@ -83,11 +83,11 @@ pub fn aggregate_output_schema(
         Reduction::Reduce(by) => by,
     };
 
-    // `without(excluded)` groups by every label *except* those listed: the kept
+    // `without(excluded)` groups by every label *except* those listed: the retained
     // labels are the input's label columns minus the excluded positions (and the
     // ts / sample-value columns), and the schema stays **open** because the full
     // runtime label set isn't known. The `by(...)` path instead enumerates its
-    // kept columns and freezes to closed (issue #39).
+    // retained columns and freezes to closed (issue #39).
     if by.is_without() {
         return without_output_schema(in_schema, by.keys(), measures, output_names);
     }
@@ -190,10 +190,10 @@ pub fn aggregate_output_schema(
     })
 }
 
-/// Output schema of a `without(excluded)` aggregate: the kept labels (every
+/// Output schema of a `without(excluded)` aggregate: the retained labels (every
 /// input label column except the `excluded` positions, the time axis, and the
 /// sample-value column) followed by the aggregate output column(s). Unlike the
-/// `by` path this stays **open** — the excluded set is enumerable but the kept
+/// `by` path this stays **open** — the excluded set is enumerable but the retained
 /// set is not (the runtime carries labels the usage-derived schema never saw),
 /// so the schema can't freeze to closed and claims no unique key (issue #39).
 fn without_output_schema(
@@ -254,7 +254,7 @@ fn without_output_schema(
         fields: out_cols,
         time_index: None,
         unique_keys: Vec::new(),
-        // The kept label set is runtime-only, so — unlike `by` — this does not
+        // The retained label set is runtime-only, so — unlike `by` — this does not
         // freeze the open schema to closed.
         closed: false,
     })
@@ -364,7 +364,7 @@ mod tests {
         assert_eq!(out.unique_keys, vec![vec![0]]);
     }
 
-    // A nested aggregate's renamed sample value is not a kept label:
+    // A nested aggregate's renamed sample value is not a retained label:
     // `sum without (inst) (sum by (inst, job) (m))` over `[inst, job, sum]`.
     #[test]
     fn without_aggregate_drops_a_renamed_sample_value() {

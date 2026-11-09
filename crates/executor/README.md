@@ -112,7 +112,7 @@ materialized views the computation reads (`PhysicalASAPDAG::materialized_views`)
 and output roots. Every `Scan` leaf is a raw data slot and every given view a
 materialized view slot; each has its node's `output_schema`. It returns a
 reusable `CompiledPhysicalDAG` containing selected native operators and no
-live readers. Compilation validates schemas, input ordering, sharing and
+live source cursors. Compilation validates schemas, input ordering, sharing and
 boundedness before deployment source access.
 
 A deployment calls `CompiledPhysicalDAG::instantiate` with one `DataStore`

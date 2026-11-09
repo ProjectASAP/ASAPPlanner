@@ -19,8 +19,8 @@ Audience: planner developers.
 ```sh
 cargo run --release -p asap-devtools --bin planner_fuzz -- \
   --seed 1 --cases 1000 --time-budget-s 3600 --out out/run-1 \
-  [--relations a,b,tighter-accuracy] [--search candidate-connections|exhaustive] \
-  [--seed-workload eval/rangeheavy.workload.json]... [--ignore-accuracy-guarantees] \
+  [--relations b,c,added-query] [--search candidate-connections] \
+  [--seed-workload eval/rangeheavy.workload.json]... \
   [--relative-tolerance 0.01] [--absolute-tolerance 1e-6] \
   [--max-shrink-attempts 60] [--case-timeout-s 120]
 ```
@@ -79,7 +79,7 @@ planning that slow is a finding of its own.
   `tables.json` next to it. A file may instead be
   `{"workload": ..., "tables": [...]}`.
   Seed queries have no structured form. Only the relations that need no
-  structure apply to them: a, f, i, tighter-accuracy, added-query (when
+  structure apply to them: f, i, added-query (when
   structured), no-raw-retention, results-retained, relaxed-latency and
   reordered.
 
@@ -88,13 +88,12 @@ planning that slow is a finding of its own.
 ### Marginal-cost relations
 
 For a query `q` of workload `W` and a query `q'` derivable from `q`, the tester
-builds a **witness**. The witness is `W`'s selected logical plan (its Stage 1
-candidate) plus one more root that derives `q'` from `q`'s node in that plan,
-by the operator the relation names. Three witnesses change that plan too: m
-and n lengthen the tumbling-window chain `q` reads (so `q` merges its newest tumbling windows of
-the longer chain); l's `q'` also reads a sibling query, so `W` is planned
-with the sibling added; and h's second witness is `W ∪ {q'}` planned with
-UnivMon as the only sketch family. Each is a plan for `W ∪ {q'}`. The tester
+builds a **witness**. The witness is `W`'s selected plan (the
+`PhysicalASAPDAG` Stage 3 built) plus one more root that derives `q'` from
+`q`'s node in that plan, by the operator the relation names. Two witnesses
+start from another plan: l's `q'` also reads a sibling query, so `W` is
+planned with the sibling added; and h's second witness is `W ∪ {q'}` planned
+with UnivMon as the only sketch algorithm. Each is a plan for `W ∪ {q'}`. The tester
 then checks:
 
 ```text
@@ -102,47 +101,51 @@ cost(W ∪ {q'}) − cost(W) ≤ derive_cost + max(rel_tol · cost(W ∪ {q'}), 
 derive_cost = cost(witness) − cost(W's plan)
 ```
 
-**How `derive_cost` is computed.** It comes from Stage 3's per-node prices,
-never from a guess:
+**How `derive_cost` is computed.** It comes from the cost model's per-node
+costs, never from a guess:
 
-1. Stage 2 and Stage 3 implement and price the witness the same way they price
-   any candidate. Each physical properties assignment goes through
-   `optimize_physical_asap` and `select_plan`, using the same cost model,
-   deployment capabilities and accuracy checks as the search. The cheapest assignment is kept.
-2. `W`'s selected logical plan is priced the same way. This gives the witness
+1. The witness is costed by `asap_cost::plan_cost`, as Stage 3 costs a
+   selected plan, with the same cost inputs as the search. Each node of `W`'s
+   plan keeps the timing, lifetime, θ, coverage and retention Stage 3 gave
+   it; each derived node runs at query time, not materialized, and a derived
+   `TimeRange` over a retained node (m's longer range over `q`'s chain)
+   widens that node's retention to its range. A node of `W`'s plan that `q'`
+   and a query in the same evaluation context (the same evaluation grid, as
+   Stage 3's contexts) both read at query time, not materialized, is
+   materialized for one evaluation, as Stage 3 may select. The witness holds
+   ASAP operators, which Pass 1 does not take as input, so it is not planned
+   again.
+2. `W`'s selected plan is costed the same way. This gives the witness
    a reference point on the same footing.
 3. `derive_cost` is the difference between the two. Under cost model 1, a
-   candidate's cost is the sum of its nodes' prices. So `derive_cost` is the
-   price of the derived operator alone, plus any change it causes in the
-   shared nodes' prices (for example, a shared node now materialized once
-   instead of computed per reader).
+   plan's cost is the sum of its nodes' costs. So `derive_cost` is the
+   cost of the derived operator alone, plus any change it causes in the
+   shared nodes' costs (for example, a shared node read once more).
 4. Each draft also lists the witness's per-node cost of the nodes only `q'`
    reads, and their operators.
 
 Two rules decide whether a check counts:
 
-- A witness that Stage 2, Stage 3 or validation rejects makes the check
+- A witness that cannot be built, exported or costed makes the check
   *inconclusive*, never violated.
-- A `Filter` on a group key keeps its input's guarantee in the witness. This
-  is because whole groups selected by an exact key keep each remaining row's
-  bound. Stage 1's guarantee composition gives no guarantee to any filter over
-  approximate rows.
+- Every workload is planned with accuracy not enforced (no query has an
+  accuracy target), so no witness needs an accuracy check, and no relation
+  changes an accuracy target: the plannings would be of the same queries.
 
 | Relation | `q'` from `q` | Derived by (witness) |
 |---|---|---|
-| `a-looser-accuracy` | `q` at the next looser target | reading `q`'s node |
 | `b-filter-on-group-key` | grouped `q` plus `label = 'value'` on a group key | `Filter` over `q`'s result |
 | `c-coarser-grouping` | `q` grouped by one key fewer | exact `Aggregate` (sum / max / min) over `q`'s result, or a sketch `SummaryMerge{group_by}` over `q`'s state |
-| `d-nested-shorter-window` | `q` over a shorter window that divides it | `SummaryMerge{newest_tumbling_windows}` over `q`'s tumbling-window chain |
+| `d-nested-shorter-window` | `q` over a shorter window that divides it | `q`'s `TimeRange` over its tumbling-window chain at the shorter window, over the same chain |
 | `e-other-quantile-rank` | `q` at another rank | `q`'s estimate (or exact quantile aggregate) at the other rank, same input |
 | `f-exact-duplicate` | `q` | reading `q`'s node |
 | `g-outer-over-result` | an operator over `q`, by `q`'s outer operator: `topk(3, q)` (sum), `bottomk(3, q)` (count), `max(q)` (max), `quantile(0.5, q)` (avg), `q > 0` (min, quantile) | the operator's lowering grafted onto `q`'s node |
-| `h-other-statistic` | SQL, ungrouped: another frequency statistic of `q`'s column (distinct count → row count, L2 → distinct count, entropy → L2) | a `SummaryEstimate` of it from `q`'s state, when its family answers it (`SummaryTypeCapability::answers`); or `W ∪ {q'}` planned with UnivMon as the only sketch family, priced with every family |
+| `h-other-statistic` | SQL, ungrouped: another frequency statistic of `q`'s column (distinct count → row count, L2 → distinct count, entropy → L2) | a `SummaryEstimate` of it from `q`'s state, when its summary type answers it (`SummaryTypeCapability::answers`); or `W ∪ {q'}` planned with UnivMon as the only sketch algorithm, costed with every algorithm |
 | `i-other-repeat-interval` | `q` at a longer repeat interval | reading `q`'s node |
 | `j-smaller-topk` | `q`'s top-k at k = 3 | `q`'s `Limit` / `TopK` at 3 over the same input |
 | `k-union-of-selections` | `q` over `label =~ "v1\|v2"`, with `q`'s `v2` twin added to `W` | `SummaryMerge` of the two states, then `q`'s estimate |
 | `l-binary-over-result` | PromQL: `q{label="v"} / q` on a label `q` does not group by, or `q / q_count` for a `sum_over_time` `q` with no outer operator or `sum` (avg as sum/count) | the division's lowering grafted onto `q`'s node |
-| `m-longer-window` | `q` over the shortest longer window (up to 1 h) that is a multiple of `q`'s; not for `rate` or `increase` | `q`'s tumbling-window chain lengthened: every merge of it in `W`'s plan reads its old newest tumbling windows, and `q'` merges the whole chain |
+| `m-longer-window` | `q` over the shortest longer window (up to 1 h) that is a multiple of `q`'s; not for `rate` or `increase` | `q`'s `TimeRange` over its tumbling-window chain at the longer window, over the same chain |
 | `n-longer-window-rollup` | `q` over a longer window, as in m, grouped by one key fewer | m's derivation, then c's rollup |
 | `o-equivalent-range-function` | `q` with `rate` and `increase` swapped (not under `count`) | `q`'s result times (or divided by) the window in seconds, grafted onto `q`'s node |
 
@@ -152,7 +155,6 @@ Two rules decide whether a check counts:
 
 | Relation | `W'` | Holds when |
 |---|---|---|
-| `tighter-accuracy` | one query's target one step tighter | `cost(W') ≥ cost(W) − tol` |
 | `added-query` | `W` plus a random query | `cost(W') ≥ cost(W) − tol` |
 | `no-raw-retention` | raw data not retained | `cost(W') ≥ cost(W) − tol` |
 | `results-retained` | query-time results retained across evaluations | `cost(W') ≤ cost(W) + tol` |
@@ -161,8 +163,8 @@ Two rules decide whether a check counts:
 | `reordered` | queries in reverse order | `|cost(W') − cost(W)| ≤ tol` |
 | `disjoint-copy` | `W` plus a copy over renamed sources | `|cost(W') − 2·cost(W)| ≤ tol` |
 
-When a monotonicity relation is violated, the draft also prices the other
-side's logical plan for this side's workload. That is a concrete plan the
+When a monotonicity relation is violated, the draft also costs the other
+side's plan for this side's workload. That is a concrete plan the
 search could have selected.
 
 ## Shrinking
@@ -196,7 +198,7 @@ status column, "conclusive" means the check either held or was violated.
 
 | Pattern | Doc reference | Relation | Status on main (one-hour run) |
 |---|---|---|---|
-| Looser accuracy target reads the tighter build (an exact result meets any ε) | accuracy-models.md "Sharing across consumers" L308–368; planner-layering.md L530–533, L640–641 | `a-looser-accuracy` | VIOLATED (208 of 2,596 conclusive checks): #903 |
+| Looser accuracy target reads the tighter build (an exact result meets any ε) | accuracy-models.md "Sharing across consumers" L308–368; planner-layering.md L530–533, L640–641 | — | not checked: the fuzzer plans with accuracy not enforced (an earlier run with accuracy enforced found #903) |
 | Slice: a filter on a group key over a grouped result or summary (planned) | asap-primitive-schema.md "Other uses of coverage" L846–848, L118 | `b-filter-on-group-key` | VIOLATED (995 of 1,003): #891, #902 (#689 for approximate inputs) |
 | Rollup to a coarser grouping: exact, or sketch `SummaryMerge{group_by}` | planner-layering.md rule table L588; asap-primitive-schema.md §5.6 L670, L754–794, L830–844; joint-planning-search.md L324 | `c-coarser-grouping` | VIOLATED (167 of 389): new drafts (exact rollup; sketch rollup over an inner range function) |
 | Scan widening: scans of one metric with different labels share one scan | planner-layering.md Pass 2 L597–607 | `c-coarser-grouping` (sketch rollup witness) | covered by c; no separate violation |
@@ -208,7 +210,7 @@ status column, "conclusive" means the check either held or was violated.
 | gcd tumbling-window grid across repeat intervals | planner-layering.md L791–809 | `i-other-repeat-interval` | VIOLATED (49 of 2,717): new draft; compare #731 |
 | Exact top-k reuse (smaller k) | planner-layering.md rule table L589; joint-planning-search.md L325 | `j-smaller-topk` | holds (62 conclusive checks) |
 | Merge of disjoint selections | asap-primitive-schema.md §4.2 L194–232, §5.6 Example B L721–752 | `k-union-of-selections` | never conclusive: Stage 1 composes no guarantee for the merged estimate |
-| Tumbling windows kept across evaluations when query-time results are retained | planner-layering.md Materialization L889–893 | `results-retained` | holds (1,442 conclusive checks) |
+| Tumbling windows materialized across evaluations when query-time results are retained | planner-layering.md Materialization L889–893 | `results-retained` | holds (1,442 conclusive checks) |
 | Window = interval: the whole window as a one-tumbling-window chain | planner-layering.md Materialization L895–905 | — | not checked: a Stage 2 choice within one query |
 | Rollup over newest tumbling windows (windowed rollup) | planner-layering.md L809–823 | — | not checked: a composition of c and d |
 | avg as sum/count: shared exact accumulators | planner-layering.md L372–383, L502–503; ASAPWorkloads #8 | `l-binary-over-result` | holds (15 conclusive checks, with the ratio row below); checks that the sum is shared, not one accumulator for both |
@@ -220,4 +222,3 @@ status column, "conclusive" means the check either held or was violated.
 
 Monotonicity and invariance relations (no doc pattern; they guard the search):
 - `added-query`, `no-raw-retention`, `relaxed-latency`, `renamed`, `reordered` and `disjoint-copy` held in every conclusive check.
-- `tighter-accuracy` was violated 4 times in 2,152 checks. One case is a default-search miss: `--exhaustive` finds the plan. The others are #903.

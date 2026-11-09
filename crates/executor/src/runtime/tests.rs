@@ -88,16 +88,16 @@ fn source(fail: bool) -> (Source, Rc<Cell<usize>>, Rc<Cell<usize>>) {
     )
 }
 
-// A shared producer runs once, and the slow reader bounds producer progress.
+// A shared producer runs once, and the slow consumer bounds producer progress.
 #[test]
 fn shared_source_backpressure_and_reader_drop() {
     let (source, starts, polls) = source(false);
     let mut dag = PhysicalDAG::default();
     dag.add(0, vec![], source).unwrap();
     let context = context();
-    let mut readers = dag.execute(&[0, 0], context.clone()).unwrap();
-    let mut slow = readers.pop().unwrap();
-    let mut fast = readers.pop().unwrap();
+    let mut consumers = dag.execute(&[0, 0], context.clone()).unwrap();
+    let mut slow = consumers.pop().unwrap();
+    let mut fast = consumers.pop().unwrap();
     assert_eq!(starts.get(), 1);
     let first = block_on(fast.next()).unwrap().unwrap();
     assert_eq!(*first, 0);

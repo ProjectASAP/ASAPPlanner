@@ -1,7 +1,7 @@
 // cargo run -p asap-devtools --bin planner_fuzz -- \
 //     --seed 1 --cases 200 --time-budget-s 600 --out /tmp/planner-fuzz
 // cargo run -p asap-devtools --bin planner_fuzz -- \
-//     --seed 2 --cases 50 --relations a,b,tighter-accuracy --search candidate-connections \
+//     --seed 2 --cases 50 --relations b,c,added-query --search candidate-connections \
 //     --seed-workload eval/rangeheavy.workload.json --out out
 //
 // Metamorphic fuzz testing for missed reuse and sharing
@@ -14,11 +14,10 @@
 // draft per distinct shrunk violation with its two workload files. Nothing
 // is filed.
 //
-// `--relations` takes relation names or the letters a–o (default: all);
-// `--search` is `candidate-connections` (the default search);
-// `--ignore-accuracy-guarantees` accepts every output
-// regardless of its accuracy guarantee (guarantees are enforced by
-// default, as `plan_installable` does). A relation is violated when it misses by more
+// `--relations` takes relation names or the letters b–o (default: all);
+// `--search` is `candidate-connections` (the default search). Every
+// workload is planned with accuracy not enforced (no query has an accuracy
+// target), so a witness needs no accuracy check. A relation is violated when it misses by more
 // than max(`--relative-tolerance` (default 0.01) × cost,
 // `--absolute-tolerance` (default 1e-6)). `--max-shrink-attempts` (default
 // 60) bounds the checks one shrink runs. Each case and each shrink runs in
@@ -34,7 +33,7 @@ use asap_devtools::planner_fuzz::{read_seed_file, FuzzSettings, SearchKind};
 
 const USAGE: &str = "usage: planner_fuzz --seed <u64> --cases <n> --time-budget-s <s> \
 [--relations <name|letter>,...] [--search candidate-connections] \
-[--seed-workload <file>]... [--ignore-accuracy-guarantees] [--relative-tolerance <f64>] \
+[--seed-workload <file>]... [--relative-tolerance <f64>] \
 [--absolute-tolerance <f64>] [--max-shrink-attempts <n>] [--case-timeout-s <s>] --out <dir>";
 
 fn main() {
@@ -98,7 +97,6 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 }
             }
             "--seed-workload" => seeds.push(read_seed_file(&PathBuf::from(value()?))?),
-            "--ignore-accuracy-guarantees" => settings.enforce_accuracy_guarantees = false,
             "--relative-tolerance" => {
                 settings.relative_tolerance = value()?.parse().map_err(|e| format!("{e}"))?
             }

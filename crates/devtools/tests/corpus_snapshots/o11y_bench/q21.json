@@ -1,362 +1,82 @@
 {
   "accuracy_guarantees": "enforced",
-  "materialized_views": [
-    {
-      "coverage": {
-        "definition_id": "b167c0953f55d24c1c15591dddb42cb4",
-        "selection": [
-          {
-            "columns": [
-              {
-                "column": {
-                  "name": "job",
-                  "table": null
-                },
-                "constraint": {
-                  "in": [
-                    {
-                      "Utf8": "order-service"
-                    }
-                  ]
-                }
-              }
-            ],
-            "relative_time": [
-              {
-                "excluded": -3660000
-              },
-              {
-                "included": -3600000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 3600000,
-            "source": {
-              "TimeSeries": {
-                "metric": "http_requests_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 5,
-      "installed_position": 0,
-      "node_id": 3,
-      "refresh": "at_ingestion",
-      "retention_ms": 7500000,
-      "stage2_node_id": 2
-    },
-    {
-      "coverage": {
-        "definition_id": "b167c0953f55d24c1c15591dddb42cb4",
-        "selection": [
-          {
-            "columns": [
-              {
-                "column": {
-                  "name": "job",
-                  "table": null
-                },
-                "constraint": {
-                  "in": [
-                    {
-                      "Utf8": "order-service"
-                    }
-                  ]
-                }
-              }
-            ],
-            "relative_time": [
-              {
-                "excluded": -3720000
-              },
-              {
-                "included": -3660000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 3660000,
-            "source": {
-              "TimeSeries": {
-                "metric": "http_requests_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 5,
-      "installed_position": 1,
-      "node_id": 6,
-      "refresh": "at_ingestion",
-      "retention_ms": 7500000,
-      "stage2_node_id": 2
-    },
-    {
-      "coverage": {
-        "definition_id": "b167c0953f55d24c1c15591dddb42cb4",
-        "selection": [
-          {
-            "columns": [
-              {
-                "column": {
-                  "name": "job",
-                  "table": null
-                },
-                "constraint": {
-                  "in": [
-                    {
-                      "Utf8": "order-service"
-                    }
-                  ]
-                }
-              }
-            ],
-            "relative_time": [
-              {
-                "excluded": -3780000
-              },
-              {
-                "included": -3720000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 3720000,
-            "source": {
-              "TimeSeries": {
-                "metric": "http_requests_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 5,
-      "installed_position": 2,
-      "node_id": 9,
-      "refresh": "at_ingestion",
-      "retention_ms": 7500000,
-      "stage2_node_id": 2
-    },
-    {
-      "coverage": {
-        "definition_id": "b167c0953f55d24c1c15591dddb42cb4",
-        "selection": [
-          {
-            "columns": [
-              {
-                "column": {
-                  "name": "job",
-                  "table": null
-                },
-                "constraint": {
-                  "in": [
-                    {
-                      "Utf8": "order-service"
-                    }
-                  ]
-                }
-              }
-            ],
-            "relative_time": [
-              {
-                "excluded": -3840000
-              },
-              {
-                "included": -3780000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 3780000,
-            "source": {
-              "TimeSeries": {
-                "metric": "http_requests_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 5,
-      "installed_position": 3,
-      "node_id": 12,
-      "refresh": "at_ingestion",
-      "retention_ms": 7500000,
-      "stage2_node_id": 2
-    },
-    {
-      "coverage": {
-        "definition_id": "b167c0953f55d24c1c15591dddb42cb4",
-        "selection": [
-          {
-            "columns": [
-              {
-                "column": {
-                  "name": "job",
-                  "table": null
-                },
-                "constraint": {
-                  "in": [
-                    {
-                      "Utf8": "order-service"
-                    }
-                  ]
-                }
-              }
-            ],
-            "relative_time": [
-              {
-                "excluded": -3900000
-              },
-              {
-                "included": -3840000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 3840000,
-            "source": {
-              "TimeSeries": {
-                "metric": "http_requests_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 5,
-      "installed_position": 4,
-      "node_id": 15,
-      "refresh": "at_ingestion",
-      "retention_ms": 7500000,
-      "stage2_node_id": 2
-    }
-  ],
-  "proven_optimal": true,
+  "materialized_views": [],
+  "materialized_views_error": "materialized view 1 reads a source outside a raw-data window",
   "query": "sum(rate(http_requests_total{job=\"order-service\"}[5m] offset 1h))",
   "selected": {
     "accepted": [
       {
         "accepted_metric": null,
-        "accepted_regardless_of_guarantee": false,
-        "guarantee_check_rejection": null,
         "sketches": [],
-        "summary": "metric not set; accepted exact",
-        "target_metric": null
+        "summary": "accepted exact"
       }
     ],
     "cost": {
-      "cost_per_second": 0.896917733207,
-      "cost_unit": "cost_per_second",
-      "cpu_core_seconds_per_second": 0.0000149176833333,
+      "cost_per_second": 0.0218666737925,
+      "cpu_core_seconds_per_second": 9.86666666667e-6,
       "per_node": {
         "0": {
           "cost_per_second": 0.0058,
+          "cost_source": "analytical",
           "cpu_core_seconds_per_second": 5.8e-6,
           "detail": "scan 1000 samples; x 1.0000/s",
           "multiplier": 1,
           "operator": "Scan",
-          "price_source": "analytical",
           "timing": "ingestion_time"
         },
         "1": {
-          "cost_per_second": 0.0,
+          "cost_per_second": 0.012,
+          "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.0,
-          "detail": "time shift: pass 1000 rows, free; x 1.0000/s",
+          "detail": "time shift: pass 1000 rows, free; x 1.0000/s; keeps 96000 bytes",
           "multiplier": 1,
           "operator": "TimeShift",
-          "price_source": "analytical",
           "timing": "ingestion_time"
         },
         "2": {
-          "cost_per_second": 0.884,
-          "cpu_core_seconds_per_second": 2e-6,
-          "detail": "build exact Rate accumulator in 5 tumbling windows of 60000 ms for 1000 groups: 1000 rows x (1 + depth 1); x 1.0000/s; keeps 7056000 bytes",
+          "cost_per_second": 0.00101666667277,
+          "cost_source": "analytical",
+          "cpu_core_seconds_per_second": 1.01666666667e-6,
+          "detail": "time range 300s: keep 1000 of 1000 rows; x 1.0167/s; holds 48 bytes for 0.001 ms",
           "multiplier": 1,
-          "operator": "SummaryTumblingWindowChain",
-          "price_source": "analytical",
-          "timing": "ingestion_time"
+          "operator": "TimeRange",
+          "timing": "query_time"
         },
         "3": {
-          "cost_per_second": 0.00508338315712,
-          "cpu_core_seconds_per_second": 5.08333333333e-6,
-          "detail": "merge 5000 states into 1000; x 1.0167/s; holds 56000 bytes for 0.0 ms",
+          "cost_per_second": 0.00101667378333,
+          "cost_source": "analytical",
+          "cpu_core_seconds_per_second": 1.01666666667e-6,
+          "detail": "build exact Rate accumulator into 1000 states: 1000 rows x depth 1; x 1.0167/s; holds 56000 bytes for 0.001 ms",
           "multiplier": 1,
-          "operator": "SummaryMerge",
-          "price_source": "analytical",
+          "operator": "SummaryAgg",
           "timing": "query_time"
         },
         "4": {
           "cost_per_second": 0.00101666666667,
+          "cost_source": "analytical",
           "cpu_core_seconds_per_second": 1.01666666667e-6,
           "detail": "finalize 1000 accumulators; x 1.0167/s",
           "multiplier": 1,
           "operator": "FinalizeExactAccumulator",
-          "price_source": "analytical",
           "timing": "query_time"
         },
         "5": {
-          "cost_per_second": 0.00101666671649,
+          "cost_per_second": 0.00101666666972,
+          "cost_source": "analytical",
           "cpu_core_seconds_per_second": 1.01666666667e-6,
-          "detail": "build exact Sum accumulator into 1 states: 1000 rows x depth 1; x 1.0167/s; holds 56 bytes for 0.0 ms",
+          "detail": "hash aggregate 1000 rows into 1 groups; x 1.0167/s; holds 24 bytes for 0.001 ms",
           "multiplier": 1,
-          "operator": "SummaryAgg",
-          "price_source": "analytical",
-          "timing": "query_time"
-        },
-        "6": {
-          "cost_per_second": 1.01666666667e-6,
-          "cpu_core_seconds_per_second": 1.01666666667e-9,
-          "detail": "finalize 1 accumulators; x 1.0167/s",
-          "multiplier": 1,
-          "operator": "FinalizeExactAccumulator",
-          "price_source": "analytical",
+          "operator": "Aggregate",
           "timing": "query_time"
         }
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 7056000.39899,
-        "cpu_ops_per_second": 10117.6833333,
+        "average_memory_bytes": 96000.0570065,
+        "cpu_ops_per_second": 5066.66666667,
         "disk_bytes": 0,
-        "latency_per_query": [
-          {
-            "compaction_ms": 0.0,
-            "query_ms": 0.007001
-          }
-        ],
         "peak_cpu_cores": 2,
-        "peak_memory_bytes": 7112104,
+        "peak_memory_bytes": 152120,
         "scanned_bytes_per_second": 48000.0
       }
     },
@@ -377,32 +97,28 @@
                   "Plain": "timestamp"
                 },
                 "name": "ts",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "float64"
                 },
                 "name": "value",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "job",
-                "nullable": true,
-                "table": null
+                "nullable": true
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "$promql_series_identity",
-                "nullable": false,
-                "table": null
+                "nullable": false
               }
             ],
             "time_index": 0,
@@ -415,7 +131,7 @@
           },
           "producer": 0,
           "role": "Input",
-          "window": "RequiresAlignedPanePhaseOrExactBoundaryResidual"
+          "window": "NotApplicable"
         },
         {
           "consumer": 2,
@@ -432,32 +148,28 @@
                   "Plain": "timestamp"
                 },
                 "name": "ts",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "float64"
                 },
                 "name": "value",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "job",
-                "nullable": true,
-                "table": null
+                "nullable": true
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "$promql_series_identity",
-                "nullable": false,
-                "table": null
+                "nullable": false
               }
             ],
             "time_index": 0,
@@ -470,13 +182,13 @@
           },
           "producer": 1,
           "role": "Input",
-          "window": "RequiresAlignedPanePhaseOrExactBoundaryResidual"
+          "window": "NotApplicable"
         },
         {
           "consumer": 3,
           "data_state": {
-            "primitive": "SummaryState",
-            "timing": "ingestion_time"
+            "primitive": "Raw",
+            "timing": "query_time"
           },
           "grouping": "NotApplicable",
           "intermediate_schema": {
@@ -487,35 +199,28 @@
                   "Plain": "timestamp"
                 },
                 "name": "ts",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
-                  "ExactAggregate": [
-                    "Rate",
-                    "Rate"
-                  ]
+                  "Plain": "float64"
                 },
-                "name": "state",
-                "nullable": false,
-                "table": null
+                "name": "value",
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "job",
-                "nullable": true,
-                "table": null
+                "nullable": true
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "$promql_series_identity",
-                "nullable": false,
-                "table": null
+                "nullable": false
               }
             ],
             "time_index": 0,
@@ -545,8 +250,7 @@
                   "Plain": "timestamp"
                 },
                 "name": "ts",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
@@ -556,24 +260,21 @@
                   ]
                 },
                 "name": "state",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "job",
-                "nullable": true,
-                "table": null
+                "nullable": true
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "$promql_series_identity",
-                "nullable": false,
-                "table": null
+                "nullable": false
               }
             ],
             "time_index": 0,
@@ -603,32 +304,28 @@
                   "Plain": "timestamp"
                 },
                 "name": "ts",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "float64"
                 },
                 "name": "value",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "job",
-                "nullable": true,
-                "table": null
+                "nullable": true
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "$promql_series_identity",
-                "nullable": false,
-                "table": null
+                "nullable": false
               }
             ],
             "time_index": 0,
@@ -642,57 +339,11 @@
           "producer": 4,
           "role": "Input",
           "window": "NotApplicable"
-        },
-        {
-          "consumer": 6,
-          "data_state": {
-            "primitive": "SummaryState",
-            "timing": "query_time"
-          },
-          "grouping": "NotApplicable",
-          "intermediate_schema": {
-            "closed": true,
-            "fields": [
-              {
-                "dtype": {
-                  "ExactAggregate": [
-                    "Sum",
-                    "Sum"
-                  ]
-                },
-                "name": "state",
-                "nullable": false,
-                "table": null
-              }
-            ],
-            "time_index": null,
-            "unique_keys": []
-          },
-          "producer": 5,
-          "role": "Input",
-          "window": "NotApplicable"
         }
       ],
       "nodes": [
         {
-          "guarantee": {
-            "provenance": [
-              {
-                "kind": "exact",
-                "reason": "exact over exact inputs"
-              }
-            ],
-            "spec": {
-              "accuracy_metric": "absolute",
-              "accuracy_scope": "per_value",
-              "error": {
-                "op": "zero"
-              },
-              "failure_probability": {
-                "op": "zero"
-              }
-            }
-          },
+          "guarantee": null,
           "id": 0,
           "lifetime": "None",
           "output_schema": {
@@ -703,32 +354,28 @@
                   "Plain": "timestamp"
                 },
                 "name": "ts",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "float64"
                 },
                 "name": "value",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "job",
-                "nullable": true,
-                "table": null
+                "nullable": true
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "$promql_series_identity",
-                "nullable": false,
-                "table": null
+                "nullable": false
               }
             ],
             "time_index": 0,
@@ -770,32 +417,28 @@
                         "Plain": "timestamp"
                       },
                       "name": "ts",
-                      "nullable": false,
-                      "table": null
+                      "nullable": false
                     },
                     {
                       "dtype": {
                         "Plain": "float64"
                       },
                       "name": "value",
-                      "nullable": false,
-                      "table": null
+                      "nullable": false
                     },
                     {
                       "dtype": {
                         "Plain": "utf8"
                       },
                       "name": "job",
-                      "nullable": true,
-                      "table": null
+                      "nullable": true
                     },
                     {
                       "dtype": {
                         "Plain": "utf8"
                       },
                       "name": "$promql_series_identity",
-                      "nullable": false,
-                      "table": null
+                      "nullable": false
                     }
                   ],
                   "time_index": 0,
@@ -816,26 +459,11 @@
           }
         },
         {
-          "guarantee": {
-            "provenance": [
-              {
-                "kind": "exact",
-                "reason": "exact over exact inputs"
-              }
-            ],
-            "spec": {
-              "accuracy_metric": "absolute",
-              "accuracy_scope": "per_value",
-              "error": {
-                "op": "zero"
-              },
-              "failure_probability": {
-                "op": "zero"
-              }
-            }
-          },
+          "guarantee": null,
           "id": 1,
-          "lifetime": "None",
+          "lifetime": {
+            "AcrossEvaluations": "Memory"
+          },
           "output_schema": {
             "closed": true,
             "fields": [
@@ -844,32 +472,28 @@
                   "Plain": "timestamp"
                 },
                 "name": "ts",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "float64"
                 },
                 "name": "value",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "job",
-                "nullable": true,
-                "table": null
+                "nullable": true
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "$promql_series_identity",
-                "nullable": false,
-                "table": null
+                "nullable": false
               }
             ],
             "time_index": 0,
@@ -894,14 +518,13 @@
                 }
               }
             }
-          }
+          },
+          "retention_ms": 3900000
         },
         {
           "guarantee": null,
           "id": 2,
-          "lifetime": {
-            "AcrossEvaluations": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -910,35 +533,28 @@
                   "Plain": "timestamp"
                 },
                 "name": "ts",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
-                  "ExactAggregate": [
-                    "Rate",
-                    "Rate"
-                  ]
+                  "Plain": "float64"
                 },
-                "name": "state",
-                "nullable": false,
-                "table": null
+                "name": "value",
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "job",
-                "nullable": true,
-                "table": null
+                "nullable": true
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "$promql_series_identity",
-                "nullable": false,
-                "table": null
+                "nullable": false
               }
             ],
             "time_index": 0,
@@ -950,33 +566,18 @@
             ]
           },
           "output_state": {
-            "primitive": "SummaryState",
-            "timing": "ingestion_time"
+            "primitive": "Raw",
+            "timing": "query_time"
           },
           "payload": {
-            "ASAP": {
-              "SummaryTumblingWindowChain": {
+            "NonASAP": {
+              "TimeRange": {
                 "child": 1,
-                "family": {
-                  "ExactAggregate": [
-                    "Rate",
-                    "Rate"
-                  ]
-                },
-                "filter": null,
-                "grouping": "PerSubpopulationInstance",
-                "input": {
-                  "item": null,
-                  "weight": {
-                    "Column": "SampleValue"
-                  },
-                  "weight_domain": {
-                    "kind": "unknown_or_signed"
-                  }
-                },
-                "reduction": "PerEntity",
-                "tumbling_window_count": 5,
-                "tumbling_window_width_ms": 60000
+                "kind": "range",
+                "range": {
+                  "nanos": 0,
+                  "secs": 300
+                }
               }
             }
           }
@@ -984,7 +585,9 @@
         {
           "guarantee": null,
           "id": 3,
-          "lifetime": "None",
+          "lifetime": {
+            "OneEvaluation": "Memory"
+          },
           "output_schema": {
             "closed": true,
             "fields": [
@@ -993,8 +596,7 @@
                   "Plain": "timestamp"
                 },
                 "name": "ts",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
@@ -1004,24 +606,21 @@
                   ]
                 },
                 "name": "state",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "job",
-                "nullable": true,
-                "table": null
+                "nullable": true
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "$promql_series_identity",
-                "nullable": false,
-                "table": null
+                "nullable": false
               }
             ],
             "time_index": 0,
@@ -1038,33 +637,28 @@
           },
           "payload": {
             "ASAP": {
-              "SummaryMerge": {
-                "children": [
-                  2
-                ]
+              "SummaryAgg": {
+                "child": 2,
+                "filter": null,
+                "input": {
+                  "item": null,
+                  "weight": {
+                    "Column": "SampleValue"
+                  }
+                },
+                "reduction": "PerEntity",
+                "summary_type": {
+                  "ExactAggregate": [
+                    "Rate",
+                    "Rate"
+                  ]
+                }
               }
             }
           }
         },
         {
-          "guarantee": {
-            "provenance": [
-              {
-                "kind": "exact",
-                "reason": "exact accumulator over exact input"
-              }
-            ],
-            "spec": {
-              "accuracy_metric": "absolute",
-              "accuracy_scope": "per_value",
-              "error": {
-                "op": "zero"
-              },
-              "failure_probability": {
-                "op": "zero"
-              }
-            }
-          },
+          "guarantee": null,
           "id": 4,
           "lifetime": "None",
           "output_schema": {
@@ -1075,32 +669,28 @@
                   "Plain": "timestamp"
                 },
                 "name": "ts",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "float64"
                 },
                 "name": "value",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "job",
-                "nullable": true,
-                "table": null
+                "nullable": true
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "$promql_series_identity",
-                "nullable": false,
-                "table": null
+                "nullable": false
               }
             ],
             "time_index": 0,
@@ -1126,78 +716,9 @@
         {
           "guarantee": null,
           "id": 5,
-          "lifetime": "None",
-          "output_schema": {
-            "closed": true,
-            "fields": [
-              {
-                "dtype": {
-                  "ExactAggregate": [
-                    "Sum",
-                    "Sum"
-                  ]
-                },
-                "name": "state",
-                "nullable": false,
-                "table": null
-              }
-            ],
-            "time_index": null,
-            "unique_keys": []
+          "lifetime": {
+            "OneEvaluation": "Memory"
           },
-          "output_state": {
-            "primitive": "SummaryState",
-            "timing": "query_time"
-          },
-          "payload": {
-            "ASAP": {
-              "SummaryAgg": {
-                "child": 4,
-                "family": {
-                  "ExactAggregate": [
-                    "Sum",
-                    "Sum"
-                  ]
-                },
-                "filter": null,
-                "grouping": "PerSubpopulationInstance",
-                "input": {
-                  "item": null,
-                  "weight": {
-                    "Column": "SampleValue"
-                  },
-                  "weight_domain": {
-                    "kind": "unknown_or_signed"
-                  }
-                },
-                "reduction": {
-                  "Reduce": []
-                }
-              }
-            }
-          }
-        },
-        {
-          "guarantee": {
-            "provenance": [
-              {
-                "kind": "exact",
-                "reason": "exact accumulator over exact input"
-              }
-            ],
-            "spec": {
-              "accuracy_metric": "absolute",
-              "accuracy_scope": "per_value",
-              "error": {
-                "op": "zero"
-              },
-              "failure_probability": {
-                "op": "zero"
-              }
-            }
-          },
-          "id": 6,
-          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -1206,8 +727,7 @@
                   "Plain": "float64"
                 },
                 "name": "sum",
-                "nullable": false,
-                "table": null
+                "nullable": false
               }
             ],
             "time_index": null,
@@ -1218,22 +738,32 @@
             "timing": "query_time"
           },
           "payload": {
-            "ASAP": {
-              "FinalizeExactAccumulator": {
-                "child": 5
+            "NonASAP": {
+              "Aggregate": {
+                "child": 4,
+                "filters": [],
+                "having": null,
+                "measures": [
+                  {
+                    "col": null,
+                    "kind": "sum"
+                  }
+                ],
+                "output_names": [
+                  ""
+                ],
+                "reduction": {
+                  "Reduce": []
+                }
               }
             }
           }
         }
       ],
       "roots": [
-        6
+        5
       ],
       "scalar_roots": []
-    },
-    "display_name": "Q1 Sum acc + Rate acc ×5 tumbling windows · ingestion time: Rate acc for Q1, 5 × 1m tumbling windows"
-  },
-  "tumbling_window_retention_ms": {
-    "2": 7500000
+    }
   }
 }

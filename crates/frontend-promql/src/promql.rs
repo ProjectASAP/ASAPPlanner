@@ -48,7 +48,7 @@
 //! | `OUTER by (dims) (…)` | `Aggregate.reduction = Reduce(by = dims)` (generic `topk by`/`bottomk` grouping → `Sort.partition_by`) |
 //! | `count by (d) (…)` | `Aggregate{[Count], …}` |
 //! | `group(v)` / `count_values("l", v)` | `Aggregate{[Group]}` (constant 1) / `Aggregate{[CountValues{l}]}` (group-by-value + count, new label `l`) — issue #49 |
-//! | `limitk(k, v)` / `limit_ratio(r, v)` | `PromqlSeriesSample{LimitK(k) \| LimitRatio(r)}` — series-sampling selection, whole series kept unchanged (issue #86) |
+//! | `limitk(k, v)` / `limit_ratio(r, v)` | `PromqlSeriesSample{LimitK(k) \| LimitRatio(r)}` — series-sampling selection, whole series left unchanged (issue #86) |
 //! | `topk(k, count_over_time(…))` / `topk(k, sum_over_time(…))` | `Aggregate{[TopK{k}]}` (heavy-hitter intent) over the explicit inner `Aggregate{[Count/Sum]}` |
 //! | `topk(k, sum by (G) (count_over_time\|sum_over_time\|rate\|increase\|irate(…)))` | `Aggregate{[TopK{k}]}` over the explicit grouped `Aggregate{[Sum]}` and per-series aggregate |
 //! | `topk(k, <other>)` / `bottomk(k, …)` | `Sort{value} → Limit{k}` |
@@ -260,7 +260,7 @@ impl PromqlLowerer<'_> {
                     TimeRangeKind::Range,
                 ))
             }
-            // Scalar-typed, dispatched above; kept for exhaustiveness. String
+            // Scalar-typed, dispatched above; retained for exhaustiveness. String
             // literals only appear as function args (`label_replace`, …), so a
             // bare one is rejected (issue #35).
             Expr::NumberLiteral(_) => unreachable!("scalar handled above"),
@@ -1545,7 +1545,7 @@ fn absent_labels(v: &Expr) -> BTreeMap<String, String> {
 /// Extract the `info` data-label selector's matchers. Unlike an ordinary
 /// selector these are **info-metric-side** and may carry regex / multiple
 /// `__name__` matchers (which pick the info metric(s)), so they bypass the
-/// single-metric `vs_parts` restriction and are kept symbolic.
+/// single-metric `vs_parts` restriction and are left symbolic.
 fn info_selector(expr: &Expr) -> Result<Vec<InfoMatcher>> {
     match expr {
         Expr::VectorSelector(vs) => Ok(vs
@@ -1713,8 +1713,8 @@ fn str_arg(call: &Call, idx: usize) -> Result<String> {
 
 /// Resolve an aggregation's grouping modifier into a `(keys, without)` pair.
 ///
-/// `by(labels)` → the kept labels, `without = false`. `without(labels)` → the
-/// **excluded** labels, `without = true`: the kept set (the complement) can't be
+/// `by(labels)` → the retained labels, `without = false`. `without(labels)` → the
+/// **excluded** labels, `without = true`: the retained set (the complement) can't be
 /// enumerated under an open usage-derived schema, so it is deferred to the
 /// runtime and only the excluded positions are carried (issue #39). Both forms
 /// canonicalise their label set (sort + dedup) so equivalent groupings lower

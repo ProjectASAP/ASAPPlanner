@@ -153,7 +153,7 @@ Invariants:
 
 * One selected id. Every other candidate is listed once as rejected, with a
   reason, and marked invalid or valid but costlier.
-* Only valid candidates are priced. Each valid candidate's cost has one entry
+* Only valid candidates are costed. Each valid candidate's cost has one entry
   per DAG node, and `cost_per_second` is their sum. A materialized node is charged
   once. A `Lifetime::None` node is charged once per consumer that reads it
   (its multiplier), where a consumer is a query or a materialized node and
