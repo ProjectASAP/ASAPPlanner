@@ -29,6 +29,12 @@ pub trait PhysicalOperator<V, S> {
     fn validate_context(&self, _context: &RunContext) -> Result<(), Error> {
         Ok(())
     }
+    /// The run context its inputs run in: this run's, unless the operator
+    /// evaluates its inputs at another time (a `TimeShift` with an `@`
+    /// anchor).
+    fn input_context(&self, context: &RunContext) -> Result<RunContext, Error> {
+        Ok(context.clone())
+    }
     fn input_schemas(&self) -> Vec<S>;
     fn output_schema(&self) -> S;
     fn start<'a>(

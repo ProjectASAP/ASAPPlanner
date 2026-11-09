@@ -88,6 +88,7 @@ fn plan(
         output_schema: (**schema).clone(),
         guarantee: None,
         retention_ms: None,
+        summary_coverage: None,
         selected_physical_candidate: None,
     };
     let edge = |producer, consumer| {
@@ -510,6 +511,7 @@ fn windowed_plan(shift_ms: Option<i64>) -> PhysicalASAPDAG {
         output_schema: schema.clone(),
         guarantee: None,
         retention_ms: None,
+        summary_coverage: None,
         selected_physical_candidate: None,
     };
     let edge = |producer, consumer| {
@@ -844,6 +846,7 @@ fn windowed_count_plan(shift_ms: Option<i64>) -> PhysicalASAPDAG {
             output_schema: output_schema.clone(),
             guarantee: None,
             retention_ms: None,
+            summary_coverage: None,
             selected_physical_candidate: None,
         }
     };
@@ -917,8 +920,7 @@ impl DataStore for RecordingViewStore {
     }
 }
 
-// A materialized view slot (the count over the range, as an expanded tumbling window
-// over its range) is asked for its window, `(T - 5m, T]` or
+// A materialized view slot (the count over the range) is asked for its window, `(T - 5m, T]` or
 // `(T - 15m, T - 10m]` under a 10-minute shift, and its state is the
 // answer's.
 #[test]

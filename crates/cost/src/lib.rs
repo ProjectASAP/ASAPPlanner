@@ -40,11 +40,7 @@ pub use measured::{
 };
 pub use operator_statistics::EdgeStatistics;
 pub use ranking::{cheaper, worst_latency_ms, PlanRanking};
-pub use usage::{
-    maintained_window_ms, node_map, node_usage, plan_cost, query_reach, retained_tumbling_windows,
-    summary_type_name, tumbling_window_retention_ms, tumbling_window_retention_ms_of_plan,
-    tumbling_windows_of, NodeMap, NodeUsage, ProducerOutput,
-};
+pub use usage::{node_usage, plan_cost, summary_type_name, NodeUsage, ProducerOutput};
 
 /// [`PlanCost::source`] when every node is priced from the formulas.
 pub const COST_SOURCE: &str = "analytical-cost-v2 (illustrative statistics)";

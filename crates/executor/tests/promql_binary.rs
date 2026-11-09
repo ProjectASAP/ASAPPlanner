@@ -84,6 +84,7 @@ fn program_for_bool(operator: BinaryOperator, return_bool: bool) -> Operator {
         output_schema: (*schema).clone(),
         guarantee: None,
         retention_ms: None,
+        summary_coverage: None,
         selected_physical_candidate: None,
     };
     compile_node(&node, &[schema.clone(), schema]).unwrap()
@@ -422,6 +423,7 @@ fn stored_series_evaluations_support_filters_and_sets() {
                         },
                         guarantee: None,
                         retention_ms: None,
+                        summary_coverage: None,
                         selected_physical_candidate: None,
                     })
                     .collect::<Vec<_>>();
@@ -479,7 +481,10 @@ fn stored_series_evaluations_support_filters_and_sets() {
                     ]],
                 )
                 .unwrap();
-                store = store.with_materialized_view(id, vec![batch]).unwrap();
+                // Each view is read for its one-minute window ending at T = 1.
+                store
+                    .append_materialized_view(&views[id], (1 - 60_000, 1), vec![batch])
+                    .unwrap();
             }
             let bound = physical_dag.instantiate(Arc::new(store)).unwrap();
             let context = RunContext::new(
