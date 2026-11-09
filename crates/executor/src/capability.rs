@@ -53,22 +53,19 @@ pub fn validate_summary_kernel(
 }
 
 /// The only Hydra algorithm with a kernel: Hydra over Count-Min. Each update
-/// adds one item column's value to its group, with weight 1 (a row count,
-/// `UnitCount`), a positive integer constant (`PositiveConstant`) or a weight
-/// column proven non-negative (a Count-Min point count only overestimates
-/// when no weight is negative).
+/// adds one item column's value to its group, with weight 1 (a row count), a
+/// positive integer constant or a weight column. The planner offers a
+/// Count-Min build only over weights proven non-negative (a Count-Min point
+/// count only overestimates when no weight is negative), and the build
+/// rejects a negative weight value.
 fn validate_hydra_cms(family: &SummaryFamilyType, input: &SummaryUpdate) -> Result<(), String> {
-    use planner_types::ir::schema::{NonNegativeWeightProof, SummaryInputExpr, WeightDomain};
+    use planner_types::ir::schema::SummaryInputExpr;
     hydra_cms_shape(family)?;
     if !matches!(input.item, Some(SummaryInputExpr::Column(_))) {
         return Err("HydraCms requires one item column".into());
     }
-    let WeightDomain::NonNegative { proof } = &input.weight_domain else {
-        return Err("HydraCms weights must be non-negative; the weight's sign is unknown".into());
-    };
-    match (&input.weight, proof) {
-        (SummaryInputExpr::Constant(w), NonNegativeWeightProof::UnitCount) if *w == 1.0 => Ok(()),
-        (SummaryInputExpr::Constant(w), NonNegativeWeightProof::PositiveConstant) => {
+    match &input.weight {
+        SummaryInputExpr::Constant(w) => {
             let weight = constant_row_weight(*w).map_err(|error| format!("HydraCms {error}"))?;
             i32::try_from(weight.get()).map(|_| ()).map_err(|_| {
                 format!(
@@ -77,11 +74,9 @@ fn validate_hydra_cms(family: &SummaryFamilyType, input: &SummaryUpdate) -> Resu
                 )
             })
         }
-        (SummaryInputExpr::Column(_), _) => Ok(()),
+        SummaryInputExpr::Column(_) => Ok(()),
         _ => Err(
-            "HydraCms weight must be the unit count, a positive constant or a non-negative \
-             weight column"
-                .into(),
+            "HydraCms weight must be the unit count, a positive constant or a weight column".into(),
         ),
     }
 }
@@ -116,10 +111,8 @@ pub(crate) fn hydra_cms_shape(
 /// none of the query's columns for the filter predicate to read, so only a
 /// query-time build can apply it. The ingestion-time compiler and the
 /// binding of any ingestion-timed `SummaryAgg` apply this check. The planner
-/// applies the same rule: Stage 2 never offers materializing at ingestion time for a
-/// filtered build (`IngestionPruneReason::Filtered`), and materialization
-/// timing rejects an explicit one (`FilteredSummaryAtIngestion`). This check
-/// guards plans that did not come from the planner.
+/// offers a filtered build at ingestion time when its input is produced at
+/// ingestion time; feeding such a build its input rows is #1207 PR 6.
 pub fn validate_ingestion_time_summary<C>(
     filter: Option<&planner_types::ir::Predicate<C>>,
 ) -> Result<(), String> {
@@ -147,15 +140,13 @@ fn valid_matrix(width: u32, depth: u32) -> bool {
 pub(crate) fn unit_frequency_column(
     update: &planner_types::ir::schema::SummaryUpdate,
 ) -> Option<&planner_types::ir::scalar::ColumnRef> {
-    use planner_types::ir::schema::{NonNegativeWeightProof, SummaryInputExpr, WeightDomain};
-    match (&update.item, &update.weight, &update.weight_domain) {
-        (
-            Some(SummaryInputExpr::Column(column)),
-            SummaryInputExpr::Constant(weight),
-            WeightDomain::NonNegative {
-                proof: NonNegativeWeightProof::UnitCount,
-            },
-        ) if *weight == 1.0 => Some(column),
+    use planner_types::ir::schema::SummaryInputExpr;
+    match (&update.item, &update.weight) {
+        (Some(SummaryInputExpr::Column(column)), SummaryInputExpr::Constant(weight))
+            if *weight == 1.0 =>
+        {
+            Some(column)
+        }
         _ => None,
     }
 }

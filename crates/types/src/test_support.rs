@@ -1,17 +1,25 @@
 //! Helpers that only tests call (this crate's integration tests and other
 //! crates' tests), exposed under the `test-support` feature so the normal
 //! public API stays as narrow as its production users need. Each forwards
-//! to the crate-private function of the same name, except the fixture
-//! [`population_over_selector`], which the executor's tests build.
+//! to the crate-private function of the same name, except the fixtures:
+//! [`population_over_selector`], which the executor's tests build, and the
+//! memo fixtures the stage crates' tests share ([`series_schema`],
+//! [`time_series_scan`], [`add_candidate`], [`group_with_own_candidate`]).
 
 use crate::ir::materialized_view::RawDataWindow;
 use crate::ir::operator::maintained_population::CurrentSeriesInput;
 use crate::ir::operator::node::Operator;
 use crate::ir::properties::summary_coverage::SummaryCoverage;
 
-use crate::ir::schema::Schema;
-use crate::ir::{ASAPOp, NonASAPOp};
+use crate::ir::operator::operator_properties::Source;
+use crate::ir::schema::schema_support::with_promql_series_identity;
+use crate::ir::schema::{DataType, Field, Schema, SketchParams};
+use crate::ir::{ASAPOp, NonASAPOp, Predicate};
 use crate::ir::{OperatorNode, SchemaDerivationError};
+use crate::stages::{
+    CandidateError, CandidateExpression, CandidateForMemoGroup, CandidateForMemoGroupId,
+    LogicalProperties, LogicalRequirements, Memo, MemoGroupId, OriginOfCandidateForMemoGroup,
+};
 use std::rc::Rc;
 
 /// `SummaryCoverage::definition_id`.
@@ -139,4 +147,78 @@ pub fn population_over_selector(
         evaluation: statistic,
     });
     Rc::new(OperatorNode::with_schema(evaluation, root.schema.clone()))
+}
+
+/// `[ts, value, labels...]`, time index 0, with the series identity realized
+/// as the planner realizes it before Stage 0 (`with_promql_series_identity`):
+/// a closed schema whose last column is `$promql_series_identity`.
+pub fn series_schema(labels: &[&str]) -> Schema {
+    let mut fields = vec![
+        Field::plain("ts", DataType::Timestamp, false),
+        Field::plain("value", DataType::Float64, false),
+    ];
+    fields.extend(
+        labels
+            .iter()
+            .map(|label| Field::plain(*label, DataType::Utf8, true)),
+    );
+    let open = OperatorNode::new_shared(time_series_scan(
+        "m",
+        Schema::with_time_index(fields, 0, vec![]),
+        vec![],
+    ))
+    .expect("a scan schema with a time index");
+    with_promql_series_identity(&open)
+        .expect("a PromQL scan")
+        .schema
+        .clone()
+}
+
+/// A `TimeSeries(metric)` scan with `schema`, filtered by `predicates`.
+pub fn time_series_scan<C>(
+    metric: &str,
+    schema: Schema,
+    predicates: Vec<Predicate<C>>,
+) -> Operator<C> {
+    Operator::NonASAP(NonASAPOp::Scan {
+        source: Source::TimeSeries {
+            metric: metric.into(),
+        },
+        predicates,
+        schema,
+    })
+}
+
+/// Adds `operator` with `parameters` to `group` as Pass 1 does: no input
+/// requirement and no fused group.
+pub fn add_candidate(
+    memo: &mut Memo,
+    group: MemoGroupId,
+    operator: Operator<MemoGroupId>,
+    parameters: Option<SketchParams>,
+) -> Result<CandidateForMemoGroupId, CandidateError> {
+    let expression = CandidateExpression { operator };
+    let logical_properties = LogicalProperties::new(&expression, parameters)
+        .expect("parameters from the algorithm's list");
+    let input_requirements =
+        vec![LogicalRequirements::default(); expression.operator.children().len()];
+    memo.add_candidate(
+        group,
+        CandidateForMemoGroup {
+            expression,
+            logical_properties,
+            input_requirements,
+            fused_groups: Vec::new(),
+            origin: OriginOfCandidateForMemoGroup::Pass1,
+        },
+    )
+}
+
+/// The group of `operator`, with `operator` as its own candidate.
+pub fn group_with_own_candidate(memo: &mut Memo, operator: Operator<MemoGroupId>) -> MemoGroupId {
+    let group = memo
+        .find_or_add_group(operator.clone())
+        .expect("an expression the node rules accept");
+    add_candidate(memo, group, operator, None).expect("the group's own expression");
+    group
 }

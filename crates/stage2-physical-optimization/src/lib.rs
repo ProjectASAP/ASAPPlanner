@@ -3,7 +3,7 @@
 //!
 //! The planner facade calls [`generate_physical_asap_memo_candidates`] on
 //! Pass 2's output (`asap_types::stages::LogicalASAPMemoCandidates`): each
-//! logical candidate expanded into one physical candidate per valid
+//! logical candidate expanded into one physical candidate per offered
 //! $(\tau, \ell)$, each logical edge into its physical edges with
 //! $\alpha^{\log}$ and $\alpha^{\mathrm{phys}}$, and the pruned alternatives
 //! (`asap_types::stages::PhysicalASAPMemoCandidates`). Stage 3 selects from

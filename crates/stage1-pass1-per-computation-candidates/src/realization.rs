@@ -5,15 +5,14 @@
 
 use asap_types::ir::operator::agg_intent::AggIntent;
 use asap_types::ir::operator::non_asap::any_measure_filtered;
-use asap_types::ir::operator::operator_properties::Source;
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::scalar::column_resolution::{resolve_column_ref, ResolveError};
 use asap_types::ir::scalar::expr_ir::ColumnRef;
 use asap_types::ir::schema::topk::ranked_column_of_group;
 use asap_types::ir::schema::ColumnId;
 use asap_types::ir::schema::{
-    EntityIdentity, Field, FieldDataType, NonNegativeWeightProof, Schema, SketchAlgorithm,
-    SummaryInputExpr, SummaryTypeCapability, SummaryUpdate, WeightDomain,
+    EntityIdentity, Field, FieldDataType, Schema, SketchAlgorithm, SummaryInputExpr,
+    SummaryTypeCapability, SummaryUpdate,
 };
 use asap_types::ir::{NonASAPOp, Operator};
 use asap_types::stages::{Memo, MemoGroupId};
@@ -177,26 +176,17 @@ pub(crate) fn realize_keyed_additive_summary_input(
     if any_measure_filtered(filters) {
         return None;
     }
-    // A grouped sum of per-series `rate`/`increase`/`irate` values: the
-    // metric they derive from, whose declared type decides their sign.
-    let derivative_of = match (measures.as_slice(), expression(memo, raw_child)) {
+    // A grouped sum of per-series `rate`/`increase`/`irate` values.
+    let counter_input = matches!(
+        (measures.as_slice(), expression(memo, raw_child)),
         (
             [AggIntent::Sum { .. }],
-            Operator::NonASAP(NonASAPOp::Aggregate {
-                measures: derivative,
-                child: samples,
-                ..
-            }),
+            Operator::NonASAP(NonASAPOp::Aggregate { measures: derivative, .. }),
         ) if matches!(
             derivative.as_slice(),
             [AggIntent::Rate | AggIntent::Increase | AggIntent::IRate]
-        ) =>
-        {
-            Some(raw_data_samples_of_metric(memo, *samples))
-        }
-        _ => None,
-    };
-    let counter_input = derivative_of.is_some();
+        )
+    );
     // `sum by (G) (sum_over_time(m[W]))` or `... count_over_time ...`: the
     // grouped sum of per-series sums (counts) of raw data samples is their sum
     // (count) by `G`, so the heap reads those samples.
@@ -227,22 +217,6 @@ pub(crate) fn realize_keyed_additive_summary_input(
         }),
         _ => return None,
     };
-    let weight_domain = match derivative_of {
-        _ if counted => WeightDomain::NonNegative {
-            proof: NonNegativeWeightProof::UnitCount,
-        },
-        Some(Some(metric)) => WeightDomain::CounterDerivativeOfMetric { metric },
-        _ => WeightDomain::UnknownOrSigned,
-    };
-    if matches!(heap_algorithm, SketchAlgorithm::CmsWithHeap)
-        && !matches!(
-            weight_domain,
-            WeightDomain::NonNegative { .. } | WeightDomain::CounterDerivativeOfMetric { .. }
-        )
-    {
-        // Unsupported: value-weighted CMS requires non-negative update evidence; use CountSketch for arbitrary values.
-        return None;
-    }
     let subpopulation_columns = match output_reduction {
         Reduction::PerEntity => vec![],
         Reduction::Reduce(keys) => keys
@@ -301,7 +275,6 @@ pub(crate) fn realize_keyed_additive_summary_input(
         input: SummaryUpdate {
             item: Some(item),
             weight,
-            weight_domain,
         },
     })
 }
@@ -378,35 +351,6 @@ pub(crate) fn expression(memo: &Memo, group: MemoGroupId) -> &Operator<MemoGroup
 /// The output schema of group `group`.
 pub(crate) fn schema(memo: &Memo, group: MemoGroupId) -> &Schema {
     &memo.groups()[group.0 as usize].group_properties.schema
-}
-
-/// The metric whose raw data samples, or plain sums of them, are every value
-/// group `group` outputs, or `None`: walking down the groups' expressions
-/// through a time range, an `offset`-only time shift (it moves the window,
-/// not the samples) and a plain `sum`, to a time-series scan. Any other
-/// operator (rate and arithmetic included) ends it. Whether the metric's
-/// samples are non-negative is plan selection's question
-/// ([`WeightDomain::RawDataSamplesOfMetric`]).
-pub(crate) fn raw_data_samples_of_metric(memo: &Memo, group: MemoGroupId) -> Option<String> {
-    let Operator::NonASAP(operator) = expression(memo, group) else {
-        return None;
-    };
-    match operator {
-        NonASAPOp::Scan {
-            source: Source::TimeSeries { metric },
-            ..
-        } => Some(metric.clone()),
-        NonASAPOp::TimeRange { child, .. } => raw_data_samples_of_metric(memo, *child),
-        NonASAPOp::TimeShift { shift, child } if shift.at.is_none() => {
-            raw_data_samples_of_metric(memo, *child)
-        }
-        NonASAPOp::Aggregate {
-            measures, child, ..
-        } if matches!(measures.as_slice(), [AggIntent::Sum { col: None }]) => {
-            raw_data_samples_of_metric(memo, *child)
-        }
-        _ => None,
-    }
 }
 
 #[cfg(test)]

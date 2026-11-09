@@ -22,10 +22,9 @@ pub mod topk;
 
 pub use aggregate_schema::aggregate_output_schema;
 pub use sketch::{
-    EntityIdentity, ExactKind, ExactParams, HydraParams, NonNegativeWeightProof, SamplingKind,
-    SamplingParams, SketchAlgorithm, SketchParams, SketchStatistic, StatModelKind, StatModelParams,
-    SummaryInputExpr, SummaryUpdate, WaveletKind, WaveletParams, WeightDomain,
-    EXACT_ACCUMULATOR_STATE_BYTES,
+    EntityIdentity, ExactKind, ExactParams, HydraParams, SamplingKind, SamplingParams,
+    SketchAlgorithm, SketchParams, SketchStatistic, StatModelKind, StatModelParams,
+    SummaryInputExpr, SummaryUpdate, WaveletKind, WaveletParams, EXACT_ACCUMULATOR_STATE_BYTES,
 };
 pub use summary_type_capability::{
     MergeInputRule, MergedError, StatisticKind, SummaryTypeCapability, SupportedSummary,
@@ -132,7 +131,7 @@ impl From<Field<DataType>> for Field<FieldDataType> {
 ///
 /// "Sample" means two things in the planner, and the names keep them apart:
 /// a *raw data sample* is one timestamped value of a time series as it
-/// arrives (`RawDataSamplesOfMetric`), and a *summary sample* is the subset of
+/// arrives (a time-series `Scan`'s rows), and a *summary sample* is the subset of
 /// input rows a sampling summary family keeps as its state
 /// ([`FieldDataType::SummarySample`], [`SamplingKind`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
