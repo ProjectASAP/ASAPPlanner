@@ -553,13 +553,16 @@ A range-evaluated query evaluates its expression at every step t of [start, end]
 | Operator | Output column lineage |
 |---|---|
 | `Scan` | each column: `SourceColumn(SourceColumn { source, column })` |
-| `Filter`, `TimeRange`, `TimeShift`, `Sort`, `Limit`, `Dedup` | the input's, unchanged |
+| `Filter`, `TimeRange`, `TimeShift`, `Sort`, `Limit`, `Dedup` | the input's, unchanged; also a `TimeRange` or `TimeShift` over a chain (it selects windows) and `TimeShift { at: End \| Start }` above a selector |
 | `Project` | a column item, renamed or not: that input column's lineage; an expression item: `Computed` |
 | `Aggregate`, `SummaryAgg`, readouts | group-by keys: the input's lineage of that key; measures, states and values: `Computed` |
 | `SummaryTumblingWindowChain` | `window_end` (column 0): `Computed`; keys: the input's lineage of that key; state: `Computed` |
+| `SummaryMerge` | per column: the inputs' lineage if they all agree, else `Computed`; over a chain's selected windows, the chain's build's (keys, then state); a regrouping merge: its keys', then the state |
 | `Join` | the left input's columns, then the right input's |
 | `SetOp`, `Concat` | per column: the inputs' lineage if they all agree, else `Computed` |
 | `BinaryOp` (vector match) | label columns: the matched side's lineage; the value: `Computed` |
+
+Lineage and sign (Value sign, below) are derived together, by one per-operator column layout: an output column that copies an input column keeps its lineage and sign; a computed one is `Computed`, with the sign the operator's rule gives.
 
 **What reads it:**
 - **Summary coverage.** A selection constrains columns keyed by their `SourceColumn` lineage, not by (qualifier, name). A predicate on a `Computed` column is not lifted; it stays in `unlifted_operators`. A merge's group keys must have equal lineage.
