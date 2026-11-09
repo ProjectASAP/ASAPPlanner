@@ -289,14 +289,19 @@ A deployment declares `DataWorkload.sources[source].max_distinct_per_evaluation`
 for the source the distinct count reads. It asserts an enforced maximum
 distinct population per evaluation, including all merged tumbling windows; the classic
 estimator and independent uniform bucket hashing are the model's
-assumptions. Stage 1 sizes the precision from the query or allocated local
-target and leaves the failure probability symbolic, as
-`classic_hll_failure_probability[p=P,eps=ε](max_distinct[source])`. Pass 1
-then raises the precision when the source's declared bound needs it (for its
-share of the failure probability), and Stage 3 binds the failure probability
-from that bound in the normal selection checks. A bound outside the
-contract's range gives a failure probability of 1; a missing bound leaves it
-unknown, so the target is not met.
+assumptions. The memo holds the scanned sources' facts, and
+`Memo::max_distinct_per_evaluation(group)` sums the bounds of the sources
+below the HLL state. The theoretical guarantee of precision p for the distinct
+count at the readout's required failure probability δ is the least relative
+error ε whose classic failure probability over that bound is at most δ; the
+readout's edge (α^log, Pass 2) holds when that ε meets its requirement. A
+bound outside the contract's range certifies no error, and a missing bound
+none either: the edge fails with `BelowRequiredAccuracy`. The readout's
+metric (relative) does not depend on the bound.
+
+Example: `COUNT(DISTINCT user_id)` within relative 0.05 at δ = 0.01. With
+`max_distinct_per_evaluation` 9,636, precision 18 meets it; with 1,000,000
+(outside the contract) or no bound, no HLL precision does.
 
 The current model supports maxima from 1 to 131,072 (2^17) and precisions from 4 to 18,
 and certifies only configurations that remain in the linear-counting branch.

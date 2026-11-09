@@ -150,16 +150,19 @@ and, for a top-k readout, `heap_size` ≥ k. An exact producer has error 0 and s
 | width 272, depth 5 | 0.0100 | 6.7e-3 | yes | no |
 | width 272, depth 10 | 0.0100 | 4.5e-5 | yes | yes |
 
-**Where the guarantee comes from.** `guarantee` is `AccuracyEvidence::measured_guarantee(summary type, θ, statistic, δ_r)` when the deployment's evidence has a measurement for that configuration, and `theoretical_guarantee(summary type, θ, statistic, δ_r)` (the algorithm's error formula) otherwise. Each returns the error bound that holds at failure probability δ_r, or `None` when θ cannot fail that rarely (no edge). The bound is compared with ε_r through `target_limit(ε_r)`, which admits only floating-point noise above ε_r. The source is decided before Pass 2 builds the logical edges, so (K) always has every readout's bound, and nothing is checked again after Stage 3.
+**Where the guarantee comes from.** `guarantee` is `AccuracyEvidence::measured_guarantee(summary type, θ, statistic, δ_r)` when the deployment's evidence has a measurement for that configuration, and `theoretical_guarantee(summary type, θ, statistic, δ_r, distinct bound)` (the algorithm's error formula) otherwise. Each returns the error bound that holds at failure probability δ_r, or `None` when θ cannot fail that rarely (no edge). The bound is compared with ε_r through `target_limit(ε_r)`, which admits only floating-point noise above ε_r. The source is decided before Pass 2 builds the logical edges, so (K) always has every readout's bound, and nothing is checked again after Stage 3.
 
 ```rust
 /// The theoretical error bound of reading `statistic` from a state of
-/// `summary_type` with parameters θ at `failure_probability`.
+/// `summary_type` with parameters θ at `failure_probability`; a distinct
+/// count from classic HLL only over at most `max_distinct_per_evaluation`
+/// items (`Memo::max_distinct_per_evaluation` of the state's group).
 pub fn theoretical_guarantee(
     summary_type: &FieldDataType,
     parameters: &SketchParams,
     statistic: &SketchStatistic,
     failure_probability: f64,
+    max_distinct_per_evaluation: Option<u64>,
 ) -> Option<AccuracyGuarantee>;
 
 /// The deployment's measured accuracy, read before the theoretical bound.
@@ -412,9 +415,11 @@ pub struct Memo {
     pub queries: Vec<MemoQuery>,
     // Private: the groups `find_or_add_group` may return, by expression hash.
     groups_by_expression_hash: HashMap<u64, Vec<MemoGroupId>>,
-    // Private: the sign the data workload declares for each source column it
-    // declares one for; a `Scan`'s `column_sign` reads it ("Value sign").
-    declared_column_signs: BTreeMap<SourceColumn, ValueSign>,
+    // Private: the data workload's facts of each source the queries scan, by
+    // the name the Scan reads (a counter's `value` non-negative): a `Scan`'s
+    // `column_sign` ("Value sign") and the distinct bound of
+    // `max_distinct_per_evaluation`.
+    source_facts: BTreeMap<String, SourceFacts>,
 }
 
 pub struct MemoQuery {
@@ -426,8 +431,12 @@ pub struct MemoQuery {
 }
 
 impl Memo {
-    /// A memo without groups whose Scans read `declared_column_signs`.
-    pub fn new(declared_column_signs: BTreeMap<SourceColumn, ValueSign>) -> Self;
+    /// A memo without groups over the sources `source_facts` describes.
+    pub fn new(source_facts: BTreeMap<String, SourceFacts>) -> Self;
+    /// The most distinct items one distinct-count summary over `group`'s rows
+    /// counts in one evaluation: the sum of the scanned sources' declared
+    /// `max_distinct_per_evaluation`; `None` when one has none.
+    pub fn max_distinct_per_evaluation(&self, group: MemoGroupId) -> Option<u64>;
     pub fn groups(&self) -> &[MemoGroup];
     /// Adds a query; its root's groups and those below list it.
     pub fn add_query(&mut self, query: MemoQuery) -> usize;
@@ -619,7 +628,7 @@ Some error contracts hold only for values of a known sign: a relative error of a
 pub enum ValueSign { NonNegative, NonPositive, Unknown }
 ```
 
-A source's signs are declared per column in the data workload's source facts (for example, `latency`'s value is non-negative). A PromQL counter's value is non-negative without a declaration. A column without a declaration is `Unknown`. `memo_of_queries` collects the declared signs of the sources the queries scan into the memo (`Memo::new`), and `find_or_add_group` reads them for a `Scan`.
+A source's signs are declared per column in the data workload's source facts (for example, `latency`'s value is non-negative). A PromQL counter's value is non-negative without a declaration. A column without a declaration is `Unknown`. `memo_of_queries` collects the facts of the sources the queries scan into the memo (`Memo::new`), and `find_or_add_group` reads their signs for a `Scan`.
 
 | Operator | Output column sign |
 |---|---|
@@ -1584,6 +1593,8 @@ The MILP compares the two plans' cost per second. With much data, plan 2's singl
 | $\rho_\kappa$ | executions of κ per second; for an evaluation grid, times the number of requests covering each grid time. A candidate's run rate in κ counts only the queries of κ that reach it |
 | $h_v$, $\pi_v$ | retained amount and its cost per unit per second |
 | $\operatorname{need}_{\kappa,v,c,i}$ | how much of v's rows this edge reads back: for a time-indexed producer (raw data, a chain, results stored per evaluation time) the reading path's offset plus range |
+| $r_e$, $\sigma_e$ | for an execution e of a query-time Scan: what one run reads back, and its cost per unit per second |
+| $\operatorname{read}_{\kappa,u,c,i}$ | what one run of the edge's consumer reads of u: $\operatorname{need}$ without the range-evaluation span |
 
 $$
 \min\left(
@@ -1591,16 +1602,19 @@ $$
 +\sum_{\kappa,v}\rho_\kappa c_{\kappa,v}x_{\kappa,v}
 +\sum_{\kappa,u,c,i}\rho_\kappa c_{\kappa,u,c,i}\,y_{\kappa,u,c,i}
 +\sum_{v}\pi_v h_v
++\sum_{e}\sigma_e r_e
 \right),
 \qquad
-h_v\ge\operatorname{need}_{\kappa,v,c,i}\,y_{\kappa,v,c,i}\ \ (\mathrm{R}).
+h_v\ge\operatorname{need}_{\kappa,v,c,i}\,y_{\kappa,v,c,i}\ \ (\mathrm{R}),
+\qquad
+r_e\ge\operatorname{read}_{\kappa,u,c,i}\,y_{\kappa,u,c,i}\ \ (\mathrm{S}).
 $$
 
 Every term is exact: no producer is chosen to stand for others. In the example of Section 3, the edges to A's, B's and C's paths need 5m, 1h + 5m and 1h, so the shared 60 s chain retains 65 windows. A Scan's raw data is a time-indexed producer like any other: its retention is its $h_v$ under the same (R). `@ T` needs the end of the horizon − T + range; with an unbounded horizon that candidate is not offered. Query latency is left for later: a result is taken to be read when its evaluation starts. $h_v$ has no upper bound here: it is minimized, and per-candidate bounds belong to resource budgets, outside this design; a candidate with an unbounded need (a consumer whose reach has no bound) gets no $h_v$ and is not offered materialized.
 
 **Memory held while computing.** A query-time execution holds its output in memory only while it computes: its cost $c_{\kappa,v}$ includes bytes$_v$ × work$_v$ (s) × the memory cost per byte-second, per run. Example: a KLL state of 2 MB whose own work takes 3 ms, run 0.1 times per second, holds 2 MB × 0.003 s × 0.1/s = 600 byte·s per second. Query latency does not enter it. `plan_cost` charges the same term, so the MILP objective equals `plan_cost` of the selected plan.
 
-**Scan reads.** A query-time Scan keeps its retention (offset + range + range-evaluation span) but reads, per execution, the largest offset + range among its selected consumers (no span): a 1 h range query with step 1 s over an instant selector keeps 3,601,000 ms of samples and reads 1 s per step. Stage 3 and `plan_cost` share one function for it. A range query's `@ end()` / `@ start()` subtree runs once per request, in Stage 3 and in `plan_cost` alike.
+**Scan reads.** A query-time Scan keeps its retention (offset + range + range-evaluation span) but reads, per execution, the largest offset + range among its selected consumers (no span; $r_e$ under (S), its cost linear in the amount read): a 1 h range query with step 1 s over an instant selector keeps 3,601,000 ms of samples and reads 1 s per step. Stage 3 and `plan_cost` share one function for it. A range query's `@ end()` / `@ start()` subtree runs once per request, in Stage 3 and in `plan_cost` alike.
 
 ### No consumer-count policies
 
