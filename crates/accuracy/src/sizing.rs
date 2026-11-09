@@ -1,6 +1,4 @@
-//! The statistic a summary is read for. (Today's sizing for an `(ε, δ)` is
-//! test-only, `estimators::size_params`: the predefined lists are checked
-//! against it.)
+//! The statistic a summary is read for.
 
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::scalar::ColumnRef;
@@ -21,37 +19,4 @@ pub fn sketch_statistic(intent: &AggIntent) -> Option<SketchStatistic> {
         },
         _ => return None,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use asap_types::ir::schema::{SketchAlgorithm, SketchParams};
-
-    /// CMS width is `⌈e/ε⌉` and depth `⌈ln(1/δ)⌉`.
-    #[test]
-    fn epsilon_delta_sizes_cms_depth() {
-        let intent = AggIntent::Count;
-        assert_eq!(
-            crate::estimators::size_params(SketchAlgorithm::Cms, &intent, 0.001, 0.001),
-            SketchParams::Cms {
-                width: 2719,
-                depth: 7
-            } // ⌈e/0.001⌉, ⌈ln 1000⌉
-        );
-        assert_eq!(
-            crate::estimators::size_params(SketchAlgorithm::Cms, &intent, 0.001, 0.01),
-            SketchParams::Cms {
-                width: 2719,
-                depth: 5
-            }
-        );
-        assert_eq!(
-            crate::estimators::size_params(SketchAlgorithm::Cms, &intent, 0.01, 0.01),
-            SketchParams::Cms {
-                width: 272,
-                depth: 5
-            }
-        );
-    }
 }

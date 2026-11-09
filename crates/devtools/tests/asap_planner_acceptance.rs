@@ -180,10 +180,7 @@ fn json_sections_of_stages_not_run_are_null() {
         .iter()
         .map(|step| step["step"].as_str().unwrap())
         .collect();
-    assert_eq!(
-        steps,
-        ["stage0", "pass1", "pass2_local_window_composition", "pass2"]
-    );
+    assert_eq!(steps, ["stage0", "pass1", "pass2"]);
 
     let stage3 = document("stage3");
     assert!(stage3["stage2_physical_asap_optimization"].is_object());

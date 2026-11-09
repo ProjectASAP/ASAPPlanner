@@ -22,7 +22,7 @@ use asap_types::ir::scalar::expr_ir::{ArithmeticOpKind, CompareOpKind, ScalarVal
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{
     DataType, ExactKind, Field, FieldDataType, MergeInputRule, Schema, SketchAlgorithm,
-    SketchStatistic, SummaryUpdate,
+    SketchParams, SketchStatistic, SummaryUpdate,
 };
 use asap_types::ir::{
     ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorResultKind, Predicate, ScalarExpr,
@@ -454,7 +454,7 @@ fn scan_predicates_lift_and_their_states_merge() {
 /// G1 Scan latency
 /// G2 TimeShift(1h)(G1);  G3 TimeRange[5m](G2);  G4 SummaryAgg[KLL](G3)   (the query)
 /// G5 Chain[KLL, 1m](G1);  G6 TimeShift(1h)(G5);  G7 TimeRange[5m](G6)
-/// G4 candidate: SummaryMerge(G7)
+/// G4 candidate: SummaryMerge[k=269](G7)
 /// ```
 #[test]
 fn a_merge_over_a_chains_windows_covers_the_direct_build() {
@@ -478,7 +478,8 @@ fn a_merge_over_a_chains_windows_covers_the_direct_build() {
         operator: merge(vec![g7]),
     };
     let merge_of_windows = CandidateForMemoGroup {
-        logical_properties: LogicalProperties::new(&expression, None).unwrap(),
+        logical_properties: LogicalProperties::new(&expression, Some(SketchParams::Kll { k: 269 }))
+            .unwrap(),
         expression,
         input_requirements: vec![LogicalRequirements::default()],
         fused_groups: vec![],

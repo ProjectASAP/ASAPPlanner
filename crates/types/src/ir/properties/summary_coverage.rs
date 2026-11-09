@@ -64,7 +64,6 @@ pub struct SummaryCoverage {
     pub(crate) selection: Vec<SelectionBox>,
 }
 
-#[cfg(any(test, feature = "test-support"))]
 impl SummaryCoverage {
     pub fn definition(&self) -> &SummaryStateDefinition {
         &self.definition
@@ -1223,8 +1222,8 @@ impl Constraint {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
 impl SelectionBox {
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new(columns: BTreeMap<SourceColumn, Constraint>) -> Self {
         Self { columns }
     }
