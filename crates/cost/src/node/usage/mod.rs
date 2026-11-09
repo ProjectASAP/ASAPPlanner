@@ -123,8 +123,13 @@ pub struct ProducerOutput<'a> {
     /// column) values unchanged ([`unchanged_source_columns`]).
     pub unchanged_columns: BTreeSet<&'a str>,
     /// The tumbling windows its rows span: those a `TimeRange` selects
-    /// from a chain, 1 for any other node.
+    /// from a chain (through `TimeShift`s), 1 for any other node.
     pub tumbling_windows: u64,
+    /// The tumbling-window width of the chain whose states its rows are
+    /// read from: a chain's own, kept through the `TimeShift`s over it,
+    /// so a `TimeRange` over them selects windows; `None` for any other
+    /// node.
+    pub chain_tumbling_window_width_ms: Option<u64>,
 }
 
 /// What one node uses and outputs ([`node_resource_usage_and_cost`]): its
@@ -146,8 +151,13 @@ pub struct NodeResourceUsageAndCost<'a> {
     /// column) values unchanged ([`unchanged_source_columns`]).
     pub unchanged_columns: BTreeSet<&'a str>,
     /// The tumbling windows its rows span: those a `TimeRange` selects
-    /// from a chain, 1 for any other node.
+    /// from a chain (through `TimeShift`s), 1 for any other node.
     pub tumbling_windows: u64,
+    /// The tumbling-window width of the chain whose states its rows are
+    /// read from: a chain's own, kept through the `TimeShift`s over it,
+    /// so a `TimeRange` over them selects windows; `None` for any other
+    /// node.
+    pub chain_tumbling_window_width_ms: Option<u64>,
     /// Work of one execution, in ms on one core.
     pub work_ms_per_execution: f64,
     /// CPU operations per second.
@@ -187,6 +197,7 @@ impl<'a> NodeResourceUsageAndCost<'a> {
             family: self.family,
             unchanged_columns: self.unchanged_columns.clone(),
             tumbling_windows: self.tumbling_windows,
+            chain_tumbling_window_width_ms: self.chain_tumbling_window_width_ms,
         }
     }
 }
@@ -249,9 +260,10 @@ pub fn maintained_window_ms<'o, N: Copy + Ord, C: 'o>(
 /// most offset + range its consumers read ([`read_back_ms`] without a span;
 /// `None`: it reads what it retains). A materialized node keeps what its
 /// `retention_ms` ($h_v$) covers: a tumbling-window chain its windows in
-/// it, a query-time `Scan` its raw rows in it, any other view materialized
-/// at ingestion time one output per refresh in it (one second of rows
-/// when it maintains no window). The formulas' CPU is scaled by
+/// it, a query-time `Scan` and raw rows materialized at ingestion time (a
+/// `Scan`, or a `TimeShift` by an offset over one) their raw rows in it,
+/// any other view materialized at ingestion time one output per refresh in
+/// it (one second of rows when it maintains no window). The formulas' CPU is scaled by
 /// `settings.frozen_calibration_factor` (1 when unset).
 ///
 /// [`executions_per_second`]: crate::plan::execution_demand::executions_per_second
@@ -310,13 +322,16 @@ pub fn node_resource_usage_and_cost<'a>(
         .max(1);
     let inputs: Vec<EdgeStatistics> = producers.iter().map(|p| p.output).collect();
     // The tumbling windows its rows span: those a `TimeRange` selects from
-    // a chain, 1 otherwise.
+    // a chain (through `TimeShift`s, which pass them on), 1 otherwise.
     let tumbling_windows = match &node.payload {
         Payload::NonASAP(NonASAPOp::TimeRange { range, .. })
-            if chain_width_ms(producers).is_some() =>
+            if chain_tumbling_window_width_ms(producers).is_some() =>
         {
             selected_tumbling_windows(range, producers)?
         }
+        Payload::NonASAP(NonASAPOp::TimeShift { .. }) => producers
+            .first()
+            .map_or(1, |producer| producer.tumbling_windows),
         _ => 1,
     };
     let sources: BTreeSet<&str> = match &node.payload {
@@ -331,7 +346,43 @@ pub fn node_resource_usage_and_cost<'a>(
     // The rows per ms its sources receive, which its scans and time
     // ranges read, when the data declares an arrival rate.
     let rows_per_ms = source_rows_per_ms(&sources, data);
+    // Raw rows materialized at ingestion time: a `Scan`, or a `TimeShift`
+    // by an offset over one, across evaluations. It is a time-indexed store
+    // its consumers read back in, retaining `retention_ms` ($h_v$) of rows,
+    // which behind an offset includes the offset.
+    let raw_rows_materialized_at_ingestion = ingestion
+        && matches!(node.lifetime, Lifetime::AcrossEvaluations(_))
+        && match &node.payload {
+            Payload::NonASAP(NonASAPOp::Scan { .. }) => true,
+            Payload::NonASAP(NonASAPOp::TimeShift { shift, .. }) => {
+                shift.at.is_none()
+                    && producers.first().is_some_and(|producer| {
+                        matches!(producer.payload, Payload::NonASAP(NonASAPOp::Scan { .. }))
+                    })
+            }
+            _ => false,
+        };
+    // The raw rows of its sources back `lookback_ms` (every row held
+    // without one): by arrival rate, at most the rows they hold.
+    let retained_raw_rows = |lookback_ms: Option<u64>| -> Option<u64> {
+        let by_rate = rows_per_ms
+            .zip(lookback_ms)
+            .map(|(rows_per_ms, lookback_ms)| (rows_per_ms * lookback_ms as f64).round() as u64);
+        let rows_held: Option<u64> = sources
+            .iter()
+            .map(|source| data.sources.get(*source).and_then(|facts| facts.rows_held))
+            .sum();
+        match (by_rate, rows_held) {
+            (Some(by_rate), Some(rows_held)) => Some(by_rate.min(rows_held)),
+            (by_rate, rows_held) => by_rate.or(rows_held),
+        }
+        .map(|rows| rows.max(1))
+    };
     // The fact a rate needs, named when it is missing.
+    let retained_without_a_bound = |source: &str| AnalyticalCostError::MissingSourceFact {
+        source_name: source.to_string(),
+        missing: "its rows_held (raw data retained without a bound)",
+    };
     let missing_rate = |source: &str| AnalyticalCostError::MissingSourceFact {
         source_name: source.to_string(),
         missing: "an arrival rate (the arrival's rows_per_second, or the \
@@ -466,12 +517,8 @@ pub fn node_resource_usage_and_cost<'a>(
                 // materialized across evaluations, keeps: back to the
                 // oldest row read, its `retention_ms` ($h_v$; an offset
                 // window keeps more than it reads), at most those held.
-                if !ingestion || matches!(node.lifetime, Lifetime::AcrossEvaluations(_)) {
-                    let retained_rows = match (by_rate(node.retention_ms), rows_held) {
-                        (Some(by_rate), Some(rows_held)) => Some(by_rate.min(rows_held)),
-                        (by_rate, rows_held) => by_rate.or(rows_held),
-                    };
-                    raw_retained_rows = retained_rows.map(|rows| rows.max(1));
+                if !ingestion || raw_rows_materialized_at_ingestion {
+                    raw_retained_rows = retained_raw_rows(node.retention_ms);
                 }
                 let by_rate = by_rate(lookback);
                 let rows = match (ingestion, by_rate, rows_held) {
@@ -505,14 +552,9 @@ pub fn node_resource_usage_and_cost<'a>(
                 );
                 // Raw data materialized at ingestion time: its consumers
                 // read the rows it retains, not one second of them.
-                let out = match (ingestion, node.lifetime) {
-                    (true, Lifetime::AcrossEvaluations(_)) => edge(raw_retained_rows.ok_or(
-                        AnalyticalCostError::MissingSourceFact {
-                            source_name: source.to_string(),
-                            missing: "its rows_held (raw data retained without a bound)",
-                        },
-                    )?)?,
-                    _ => out,
+                let out = match raw_rows_materialized_at_ingestion {
+                    true => edge(raw_retained_rows.ok_or(retained_without_a_bound(source))?)?,
+                    false => out,
                 };
                 (out, estimate, format!("scan {} samples", out.rows))
             }
@@ -605,17 +647,33 @@ pub fn node_resource_usage_and_cost<'a>(
                 );
                 (out, estimate, format!("limit to {} rows", out.rows))
             }
-            NonASAPOp::TimeShift { .. } => (
-                input,
-                estimate_operator(
-                    PhysicalOperator::TimeShift,
-                    OperatorStatistics::PassThrough {
-                        edges: unary(input),
-                    },
-                ),
-                format!("time shift: pass {} rows, free", input.rows),
-            ),
-            NonASAPOp::TimeRange { range, .. } if chain_width_ms(producers).is_some() => {
+            NonASAPOp::TimeShift { .. } => {
+                // Raw rows materialized at ingestion time: like a
+                // materialized `Scan`'s, its consumers read the rows it
+                // retains (its retention, its offset included), not one
+                // second of them.
+                let out = match raw_rows_materialized_at_ingestion {
+                    true => {
+                        raw_retained_rows = retained_raw_rows(node.retention_ms);
+                        let source = sources.first().copied().unwrap_or("(none)");
+                        edge(raw_retained_rows.ok_or(retained_without_a_bound(source))?)?
+                    }
+                    false => input,
+                };
+                (
+                    out,
+                    estimate_operator(
+                        PhysicalOperator::TimeShift,
+                        OperatorStatistics::PassThrough {
+                            edges: unary(input),
+                        },
+                    ),
+                    format!("time shift: pass {} rows, free", input.rows),
+                )
+            }
+            NonASAPOp::TimeRange { range, .. }
+                if chain_tumbling_window_width_ms(producers).is_some() =>
+            {
                 // Over a chain, the windows inside the range: one
                 // window's states per window.
                 let windows = tumbling_windows;
@@ -932,8 +990,8 @@ pub fn node_resource_usage_and_cost<'a>(
             }
             (0, medium)
         }
-        // Raw data materialized at ingestion time: the rows it retains.
-        (true, Lifetime::AcrossEvaluations(medium), Payload::NonASAP(NonASAPOp::Scan { .. })) => {
+        // Raw rows materialized at ingestion time: the rows it retains.
+        (_, Lifetime::AcrossEvaluations(medium), _) if raw_rows_materialized_at_ingestion => {
             (edge(raw_retained_rows.unwrap_or(out.rows))?.bytes, medium)
         }
         // Any other view materialized at ingestion time, a chain included:
@@ -1000,12 +1058,21 @@ pub fn node_resource_usage_and_cost<'a>(
     if cost.is_some_and(|cost| !cost.is_finite()) {
         return Err(AnalyticalCostError::Overflow);
     }
+    let chain_tumbling_window_width_ms = match &node.payload {
+        Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            tumbling_window_width_ms,
+            ..
+        }) => Some(*tumbling_window_width_ms),
+        Payload::NonASAP(NonASAPOp::TimeShift { .. }) => chain_tumbling_window_width_ms(producers),
+        _ => None,
+    };
     Ok(NodeResourceUsageAndCost {
         output: out,
         sources,
         family,
         unchanged_columns,
         tumbling_windows,
+        chain_tumbling_window_width_ms,
         work_ms_per_execution: node_ms,
         cpu_ops_per_second: estimate.cpu_ops() * per_second,
         scanned_bytes_per_second: estimate.scan_bytes() as f64 * per_second,
@@ -1039,16 +1106,11 @@ pub(crate) fn cost_source(per_node: &BTreeMap<PhysicalASAPNodeId, NodeCost>) -> 
     }
 }
 
-/// The tumbling-window width of the chain `producers` starts with, if it
-/// is one: a `TimeRange` over it selects windows.
-fn chain_width_ms(producers: &[ProducerOutput<'_>]) -> Option<u64> {
-    match producers.first()?.payload {
-        Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
-            tumbling_window_width_ms,
-            ..
-        }) => Some(*tumbling_window_width_ms),
-        _ => None,
-    }
+/// The tumbling-window width of the chain the first of `producers` reads
+/// from, if any ([`ProducerOutput::chain_tumbling_window_width_ms`]): a
+/// `TimeRange` over it selects windows.
+fn chain_tumbling_window_width_ms(producers: &[ProducerOutput<'_>]) -> Option<u64> {
+    producers.first()?.chain_tumbling_window_width_ms
 }
 
 /// The windows a `TimeRange` of `range` selects from the chain
@@ -1057,7 +1119,9 @@ fn selected_tumbling_windows(
     range: &std::time::Duration,
     producers: &[ProducerOutput<'_>],
 ) -> Result<u64, AnalyticalCostError> {
-    let width_ms = chain_width_ms(producers).unwrap_or(1).max(1);
+    let width_ms = chain_tumbling_window_width_ms(producers)
+        .unwrap_or(1)
+        .max(1);
     Ok(u64::try_from(range.as_millis() / u128::from(width_ms))
         .map_err(|_| AnalyticalCostError::Overflow)?
         .max(1))
