@@ -6,7 +6,6 @@
 //! memo fixtures the stage crates' tests share ([`series_schema`],
 //! [`time_series_scan`], [`add_candidate`], [`group_with_own_candidate`]).
 
-use crate::ir::materialized_view::RawDataWindow;
 use crate::ir::operator::maintained_population::CurrentSeriesInput;
 use crate::ir::operator::node::Operator;
 use crate::ir::properties::summary_coverage::SummaryCoverage;
@@ -45,11 +44,6 @@ pub fn validate_asap_inputs(op: &ASAPOp) -> Result<(), SchemaDerivationError> {
 /// `CurrentSeriesInput::matches_node`.
 pub fn matches_node(input: &CurrentSeriesInput, node: &Rc<OperatorNode>) -> bool {
     input.matches_node(node)
-}
-
-/// `RawDataWindow::lookback_ms`.
-pub fn lookback_ms(window: &RawDataWindow) -> u64 {
-    window.lookback_ms()
 }
 
 /// `physical_export::physical_asap_dag_at_query_time_with_node_ids`: `roots`

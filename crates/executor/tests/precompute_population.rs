@@ -6,6 +6,7 @@ use asap_executor::{
     values::{Batch, Value},
 };
 use futures::{executor::block_on, StreamExt};
+use planner_types::ir::materialized_view::MaterializedView;
 use planner_types::ir::operator::{GroupKeys, Reduction};
 use planner_types::ir::physical_export::{
     EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
@@ -50,6 +51,7 @@ fn view_over_samples(family: FieldDataType, scan: usize) -> [PhysicalASAPDAGNode
         output_schema,
         guarantee: None,
         retention_ms: None,
+        summary_coverage: None,
         selected_physical_candidate: None,
     };
     [
@@ -112,14 +114,14 @@ fn state_dag(
     family: FieldDataType,
     target: Option<FieldDataType>,
     merge: bool,
-) -> CompiledPhysicalDAG {
+) -> (CompiledPhysicalDAG, MaterializedView) {
     try_state_dag(family, target, merge).unwrap()
 }
 fn try_state_dag(
     family: FieldDataType,
     target: Option<FieldDataType>,
     merge: bool,
-) -> Result<CompiledPhysicalDAG, asap_executor::Error> {
+) -> Result<(CompiledPhysicalDAG, MaterializedView), asap_executor::Error> {
     let scan = 2 + usize::from(merge) + usize::from(target.is_some());
     let [view, scan_node, range_node] = view_over_samples(family.clone(), scan);
     let mut nodes = vec![view];
@@ -138,6 +140,7 @@ fn try_state_dag(
             output_schema: logical_schema(family.clone()),
             guarantee: None,
             retention_ms: None,
+            summary_coverage: None,
             selected_physical_candidate: None,
         });
     }
@@ -153,6 +156,7 @@ fn try_state_dag(
         output_schema: logical_schema(FieldDataType::Plain(DataType::Float64)),
         guarantee: None,
         retention_ms: None,
+        summary_coverage: None,
         selected_physical_candidate: None,
     });
     if let Some(target) = target {
@@ -173,6 +177,7 @@ fn try_state_dag(
             output_schema: logical_schema(target),
             guarantee: None,
             retention_ms: None,
+            summary_coverage: None,
             selected_physical_candidate: None,
         });
     }
@@ -189,16 +194,17 @@ fn try_state_dag(
         roots: vec![root],
         scalar_roots: vec![],
     };
+    asap_executor::physical_planner::test_support::set_build_parameters(&mut dag.nodes, None);
     let views = views_at(&mut dag, &[0])?;
-    compile(&dag, &views, &[root as u64])
+    Ok((compile(&dag, &views, &[root as u64])?, views[0].clone()))
 }
 fn native_run(
-    program: &CompiledPhysicalDAG,
+    (program, view): &(CompiledPhysicalDAG, MaterializedView),
     family: FieldDataType,
     states: Vec<Arc<dyn asap_executor::AggregateCore>>,
     context: RunContext,
 ) -> Result<Vec<Vec<Value>>, asap_executor::Error> {
-    let (view, schema) = program.input_slots().next().unwrap();
+    let (_, schema) = program.input_slots().next().unwrap();
     let rows = states
         .into_iter()
         .map(|state| {
@@ -209,7 +215,10 @@ fn native_run(
         })
         .collect();
     let input = Batch::try_new(schema.clone(), rows)?;
-    let store = InMemoryDataStore::default().with_materialized_view(view as usize, vec![input])?;
+    let mut store = InMemoryDataStore::default();
+    // Every run reads the view's one-minute window ending at the ingestion
+    // run's end.
+    store.append_materialized_view(view, (2000 - 60_000, 2000), vec![input])?;
     let physical_dag = program.instantiate(Arc::new(store))?;
     block_on(async {
         let mut rows = Vec::new();
