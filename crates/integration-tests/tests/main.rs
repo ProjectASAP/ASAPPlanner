@@ -16,6 +16,7 @@ mod independent_plan_seed;
 mod joint_search_equivalence;
 mod kll_tumbling_window_execution;
 mod materialized_views;
+mod milp_objective;
 mod nested;
 mod operator_design_examples;
 mod operator_sharing;
