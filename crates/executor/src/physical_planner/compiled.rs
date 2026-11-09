@@ -24,8 +24,10 @@ pub(super) struct MaterializedViewSlot {
     pub(super) view: MaterializedView,
     /// The view node's schema.
     pub(super) schema: SchemaRef,
-    /// The data its state summarizes (`crate::sources::view_windows`).
-    pub(super) window: ScanWindow,
+    /// The rows a read selects, `(end_offset_ms, width_ms)` back from the
+    /// evaluation time: for a chain, the windows the `TimeRange`s above it
+    /// select; for any other view, the data its state summarizes.
+    pub(super) read_window_ms: (i64, i64),
 }
 
 /// A `Scan` leaf, computed once at compile time: what [`CompiledPhysicalDAG::instantiate`]
@@ -37,8 +39,9 @@ pub(super) struct RawDataSlot {
     pub(super) schema: SchemaRef,
     /// The `Scan`'s predicates, compiled over `schema`.
     pub(super) predicates: Vec<crate::expressions::CompiledExpression>,
-    /// The rows its readers read (`crate::sources::scan_windows`).
-    pub(super) window: ScanWindow,
+    /// The rows its consumers read, `(end_offset_ms, width_ms)` back from
+    /// the evaluation time; `None` when one reads every row.
+    pub(super) read_window_ms: Option<(i64, i64)>,
 }
 
 /// Selected native operators and input slots. Rebinding never repeats lowering.
@@ -183,9 +186,8 @@ impl CompiledPhysicalDAG {
                         store.clone(),
                         slot.view.clone(),
                         slot.schema.clone(),
-                        slot.window,
-                    )
-                    .map_err(|error| at_slot(id, error))?;
+                        slot.read_window_ms,
+                    );
                     dag.add(id, vec![], scan)?;
                 }
                 Node::RawData(slot) => {
@@ -194,7 +196,7 @@ impl CompiledPhysicalDAG {
                         slot.source.clone(),
                         slot.schema.clone(),
                         slot.predicates.clone(),
-                        slot.window,
+                        slot.read_window_ms,
                     );
                     dag.add(id, vec![], scan)?;
                 }
@@ -207,14 +209,6 @@ impl CompiledPhysicalDAG {
         Ok(dag)
     }
 }
-/// `error` binding the slot `id`.
-fn at_slot(id: NodeId, error: Error) -> Error {
-    match error {
-        Error::Invalid(message) => invalid(format!("physical input {id}: {message}")),
-        other => other,
-    }
-}
-
 /// Stands in for an input slot when validating or deriving properties.
 struct UnboundInput(SchemaRef);
 impl PhysicalOperator<Batch, SchemaRef> for UnboundInput {

@@ -85,16 +85,17 @@ mod tests {
     /// Whether the factory builds the per-instance `family` from rows, with
     /// a value column or keyed items.
     fn factory_builds(family: &FieldDataType) -> bool {
-        let FieldDataType::Sketch(_) = family else {
+        let FieldDataType::Sketch(algorithm) = family else {
             return false;
         };
+        let theta = planner_types::summary_type::parameter_list(*algorithm).first();
         let value = SummaryUpdate::column(ColumnRef::SampleValue);
         let keyed = SummaryUpdate {
             item: Some(SummaryInputExpr::Column(ColumnRef::Named("item".into()))),
             ..value.clone()
         };
-        create_planner_accumulator(family, None, &value).is_ok()
-            || create_planner_accumulator(family, None, &keyed).is_ok()
+        create_planner_accumulator(family, theta, &value).is_ok()
+            || create_planner_accumulator(family, theta, &keyed).is_ok()
     }
 
     /// Whether the executor answers `readout` from `family`'s state: top-k
@@ -120,16 +121,17 @@ mod tests {
     /// Whether the kernel of a per-instance `family` state built from one
     /// update reads `readout`.
     fn kernel_answers(family: &FieldDataType, readout: StatisticKind) -> bool {
-        let FieldDataType::Sketch(_) = family else {
+        let FieldDataType::Sketch(algorithm) = family else {
             return false;
         };
+        let theta = planner_types::summary_type::parameter_list(*algorithm).first();
         let value = SummaryUpdate::column(ColumnRef::SampleValue);
         let keyed = SummaryUpdate {
             item: Some(SummaryInputExpr::Column(ColumnRef::Named("item".into()))),
             ..value.clone()
         };
-        let Ok(mut updater) = create_planner_accumulator(family, None, &value)
-            .or_else(|_| create_planner_accumulator(family, None, &keyed))
+        let Ok(mut updater) = create_planner_accumulator(family, theta, &value)
+            .or_else(|_| create_planner_accumulator(family, theta, &keyed))
         else {
             return false;
         };

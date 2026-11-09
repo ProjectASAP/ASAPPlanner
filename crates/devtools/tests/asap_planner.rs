@@ -1247,11 +1247,7 @@ fn check_workload_example(root: &Path, example: &Value) {
     );
     let nodes: HashSet<_> = dag.nodes.iter().map(|node| node.id as u64).collect();
     for view in selection["materialized_views"].as_array().unwrap() {
-        assert!(nodes.contains(&view["stage2_node_id"].as_u64().unwrap()));
-        assert!(
-            view["installed_position"].as_u64().unwrap()
-                < view["installed_count"].as_u64().unwrap()
-        );
+        assert!(nodes.contains(&view["node_id"].as_u64().unwrap()));
     }
     assert!(
         selection["search_report"].is_object(),

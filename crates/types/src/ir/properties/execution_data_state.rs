@@ -36,6 +36,26 @@ pub enum DataPrimitive {
 }
 
 impl DataPrimitive {
+    /// What a node with `operator` and `result_kind` outputs: a summary
+    /// state (a summary operator's state or a maintained population, or any
+    /// `State` result) or raw values.
+    pub fn of<C>(
+        operator: &crate::ir::Operator<C>,
+        result_kind: crate::ir::OperatorResultKind,
+    ) -> Self {
+        use crate::ir::{ASAPOp, Operator, OperatorResultKind};
+        match operator {
+            Operator::ASAP(
+                ASAPOp::SummaryAgg { .. }
+                | ASAPOp::SummaryTumblingWindowChain { .. }
+                | ASAPOp::SummaryJoin { .. }
+                | ASAPOp::MaintainPopulation { .. },
+            ) => Self::SummaryState,
+            _ if result_kind == OperatorResultKind::State => Self::SummaryState,
+            _ => Self::Raw,
+        }
+    }
+
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Raw => "raw",

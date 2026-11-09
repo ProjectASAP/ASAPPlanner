@@ -75,19 +75,20 @@ pub struct PhysicalASAPDAGNode {
     /// with no assignment has lifetime `None`. With `output_state.timing` it
     /// is the node's `PhysicalProperties`.
     pub lifetime: Lifetime,
-    /// θ of a summary build (`SummaryAgg`, `SummaryTumblingWindowChain`): its
-    /// candidate's `LogicalProperties::parameters`, which the executor builds
-    /// the sketch from. `None` on every other node and for an exact build.
+    /// θ of a sketch state node: a build's (`SummaryAgg`,
+    /// `SummaryTumblingWindowChain`), which the executor builds the sketch
+    /// from, or, on a `SummaryMerge` or a `Filter`, `TimeRange` or
+    /// `TimeShift` over sketch states, the θ of the states it reads: its
+    /// candidate's `LogicalProperties::parameters`. `None` on every other
+    /// node and for exact states.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parameters: Option<SketchParams>,
     pub output_schema: Schema,
     /// For a materialized view (a node whose lifetime materializes its output
     /// across evaluations), how far back from the newest evaluation
-    /// time its output must stay available once refreshed; for a query-time
-    /// `Scan`, how far back its source's rows must stay available (`None`
-    /// when it reads them unbounded). `None` on every other node, and on
-    /// every node of a DAG exported before installation sets it
-    /// ([`PhysicalASAPDAG::set_retention`]). A
+    /// time its stored rows are kept; for a raw-data `Scan` (at query time or materialized), how far back
+    /// its source's rows are kept (`None` when it reads them unbounded):
+    /// $h_v$, which Stage 3 sets. `None` on every other node. A
     /// node field rather than part of [`Lifetime`], because Stage 2
     /// enumerates lifetimes before Stage 3 knows retention.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -132,6 +133,14 @@ pub struct ViewCoverage {
 
 #[cfg(any(test, feature = "test-support"))]
 impl ViewCoverage {
+    /// The coverage of definition `definition_id` over `selection`.
+    pub fn new(definition_id: String, selection: Vec<SelectionBox>) -> Self {
+        Self {
+            definition_id,
+            selection,
+        }
+    }
+
     /// The plan-scope content id of what the view computes.
     pub fn definition_id(&self) -> &str {
         &self.definition_id
@@ -241,7 +250,7 @@ pub enum PhysicalASAPDAGValidationError {
         consumer: PhysicalASAPNodeId,
     },
     #[error(
-        "node {0:?} has a retention_ms but is neither a materialized view nor a query-time scan"
+        "node {0:?} has a retention_ms but is neither a materialized view nor a raw-data scan"
     )]
     UnexpectedRetention(PhysicalASAPNodeId),
     #[error("duplicate physical ASAP node id {0:?}")]
@@ -363,7 +372,7 @@ impl PhysicalASAPDAG {
             }
             if node.retention_ms.is_some()
                 && !matches!(node.lifetime, Lifetime::AcrossEvaluations(_))
-                && !super::materialized_view::is_query_time_scan(node)
+                && !super::materialized_view::is_raw_data_scan(node)
             {
                 return Err(PhysicalASAPDAGValidationError::UnexpectedRetention(node.id));
             }
@@ -588,6 +597,46 @@ pub(crate) fn is_materializable_state_output<C>(operator: &Operator<C>) -> bool 
     )
 }
 
+impl PhysicalASAPDAG {
+    /// The DAG of `nodes` (each after its inputs), with one edge per input
+    /// of each node's payload ([`edge_roles`]), carrying its producer's
+    /// schema and data state; `roots` and `scalar_roots` as the fields say.
+    /// Validated. Stage 3 builds its plan this way.
+    pub fn new(
+        nodes: Vec<PhysicalASAPDAGNode>,
+        roots: Vec<PhysicalASAPNodeId>,
+        scalar_roots: Vec<(usize, ScalarExpr<PhysicalASAPNodeId>)>,
+    ) -> Result<Self, PhysicalASAPDAGValidationError> {
+        let by_id: HashMap<PhysicalASAPNodeId, &PhysicalASAPDAGNode> =
+            nodes.iter().map(|node| (node.id, node)).collect();
+        let mut edges = Vec::new();
+        for node in &nodes {
+            for (producer, role) in edge_roles(&node.payload) {
+                let input = by_id.get(&producer).ok_or(
+                    PhysicalASAPDAGValidationError::MissingEdgeEndpoint(producer),
+                )?;
+                edges.push(PhysicalASAPDAGEdge {
+                    producer,
+                    consumer: node.id,
+                    role,
+                    intermediate_schema: input.output_schema.clone(),
+                    data_state: input.output_state,
+                    grouping: grouping_compatibility(&input.payload, &node.payload),
+                    window: WindowEdgeCompatibility::NotApplicable,
+                });
+            }
+        }
+        let dag = Self {
+            nodes,
+            edges,
+            roots,
+            scalar_roots,
+        };
+        dag.validate()?;
+        Ok(dag)
+    }
+}
+
 /// Test-only: `roots` exported as one DAG with every node at query time and
 /// not materialized, and no θ (every `parameters` is `None`), with each
 /// exported node's operator node by node id. Executor tests hand-build DAGs
@@ -612,57 +661,31 @@ pub(crate) fn physical_asap_dag_at_query_time_with_node_ids(
             }
         })
         .collect();
-    let mut nodes: Vec<PhysicalASAPDAGNode> = Vec::with_capacity(flat.nodes.len());
-    let mut edges = Vec::new();
-    for (id, flat_node) in flat.nodes.into_iter().enumerate() {
-        let node = &nodes_by_id[id];
-        let primitive = match &node.operator {
-            Operator::ASAP(op) if op.produced_state().is_some() => DataPrimitive::SummaryState,
-            Operator::ASAP(ASAPOp::MaintainPopulation { .. }) => DataPrimitive::SummaryState,
-            _ if node.result_kind == crate::ir::OperatorResultKind::State => {
-                DataPrimitive::SummaryState
-            }
-            _ => DataPrimitive::Raw,
-        };
-        let output_state = ExecutionDataState {
-            timing: ExecutionTiming::QueryTime,
-            primitive,
-        };
-        // Children come before their parents, so every producer is already in `nodes`.
-        for (producer, role) in edge_roles(&flat_node.operator) {
-            edges.push(PhysicalASAPDAGEdge {
-                producer,
-                consumer: id,
-                role,
-                intermediate_schema: nodes[producer].output_schema.clone(),
-                data_state: nodes[producer].output_state,
-                grouping: grouping_compatibility(&nodes[producer].payload, &flat_node.operator),
-                window: WindowEdgeCompatibility::NotApplicable,
-            });
-        }
-        nodes.push(PhysicalASAPDAGNode {
+    let nodes = flat
+        .nodes
+        .into_iter()
+        .enumerate()
+        .map(|(id, flat_node)| PhysicalASAPDAGNode {
             id,
+            output_state: ExecutionDataState {
+                timing: ExecutionTiming::QueryTime,
+                primitive: DataPrimitive::of(&flat_node.operator, nodes_by_id[id].result_kind),
+            },
             payload: flat_node.operator,
-            output_state,
             lifetime: Lifetime::None,
             parameters: None,
             output_schema: flat_node.schema,
             retention_ms: None,
             selected_physical_candidate: None,
             view_coverage: None,
-        });
-    }
-    let dag = PhysicalASAPDAG {
-        nodes,
-        edges,
-        roots,
-        scalar_roots,
-    };
-    dag.validate()?;
-    Ok((dag, nodes_by_id))
+        })
+        .collect();
+    Ok((
+        PhysicalASAPDAG::new(nodes, roots, scalar_roots)?,
+        nodes_by_id,
+    ))
 }
 
-#[cfg(any(test, feature = "test-support"))]
 fn grouping_compatibility<C>(
     producer: &Operator<C>,
     consumer: &Operator<C>,

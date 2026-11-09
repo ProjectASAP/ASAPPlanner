@@ -164,7 +164,8 @@ fn summary_construction_merge_and_evaluation_at_both_phases() {
         .map(|v| Batch::try_new(schema.clone(), vec![vec![Value::Float64(v as f64)]]).unwrap())
         .collect();
     let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
-    let build = Operator::per_group_summary_build(schema.clone(), family, 0, None, vec![]).unwrap();
+    let build =
+        Operator::per_group_summary_build(schema.clone(), family, None, 0, None, vec![]).unwrap();
     let state = build.schema();
     let mut dag = PhysicalDAG::default();
     dag.add(0, vec![], Operator::source(schema, batches).unwrap())
@@ -323,6 +324,7 @@ fn binding_rejects_unsupported_operations() {
     assert!(Operator::per_group_summary_build(
         schema.clone(),
         FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate),
+        None,
         0,
         None,
         vec![]
@@ -331,6 +333,7 @@ fn binding_rejects_unsupported_operations() {
     let sum = Operator::per_group_summary_build(
         schema.clone(),
         FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+        None,
         0,
         None,
         vec![],
@@ -354,7 +357,15 @@ fn kll_raw_partial_and_precomputed_are_native_dags() {
 
     let input = schema(&[("value", DataType::Float64, false)]);
     let family = FieldDataType::Sketch(SketchAlgorithm::Kll);
-    let build = Operator::per_group_summary_build(input.clone(), family, 0, None, vec![]).unwrap();
+    let build = Operator::per_group_summary_build(
+        input.clone(),
+        family,
+        Some(planner_types::summary_type::SketchParams::Kll { k: 200 }),
+        0,
+        None,
+        vec![],
+    )
+    .unwrap();
     let state = build.schema();
     let build_range = |start: u32, end: u32| {
         let mut dag = PhysicalDAG::default();
@@ -609,6 +620,7 @@ fn empty_exact_count_is_an_integer_state_evaluation() {
     let build = Operator::per_group_summary_build(
         input.clone(),
         FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count),
+        None,
         0,
         None,
         vec![],
@@ -968,7 +980,7 @@ fn weighted_rate_topk_preserves_partitions_fractional_scores_and_evaluation_scop
     }
 }
 fn assert_weighted_rate_topk(count_sketch: bool) {
-    use planner_types::summary_type::SketchAlgorithm;
+    use planner_types::summary_type::{SketchAlgorithm, SketchParams};
 
     let raw = schema(&[
         ("service", DataType::Utf8, false),
@@ -1012,9 +1024,23 @@ fn assert_weighted_rate_topk(count_sketch: bool) {
     } else {
         SketchAlgorithm::CmsWithHeap
     });
+    let parameters = if count_sketch {
+        SketchParams::CountSketchWithHeap {
+            width: 1024,
+            depth: 3,
+            heap_size: 8,
+        }
+    } else {
+        SketchParams::CmsWithHeap {
+            width: 1024,
+            depth: 3,
+            heap_size: 8,
+        }
+    };
     let build = Operator::per_group_keyed_summary_build(
         rates.schema(),
         family,
+        Some(parameters),
         vec![0],
         asap_executor::operators::RowWeight::Column(3),
         vec![1],

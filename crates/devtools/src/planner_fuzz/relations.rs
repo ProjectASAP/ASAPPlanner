@@ -1489,7 +1489,7 @@ fn confirming(
     roots: Option<&Vec<QueryRoot>>,
     keep: usize,
 ) -> Option<WitnessReport> {
-    let priced = planner.price(workload, &roots?[..keep], false).ok()?;
+    let priced = planner.price(workload, &roots?[..keep]).ok()?;
     Some(WitnessReport {
         derivation: None,
         cost_per_second: priced.cost_per_second,
@@ -1602,9 +1602,7 @@ fn evaluate_marginal(
             &base_roots,
             check.target,
         )
-        .and_then(|roots| {
-            planner.price(related, &roots, matches!(witness, Witness::Filter { .. }))
-        });
+        .and_then(|roots| planner.price(related, &roots));
         match priced {
             Ok(priced)
                 if best

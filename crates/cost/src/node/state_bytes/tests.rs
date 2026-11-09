@@ -15,9 +15,10 @@ fn exact_state_is_priced_at_the_executors_state_size() {
         assert_eq!(
             summary_shape(
                 &FieldDataType::ExactAggregate(kind, params),
+                None,
                 StateInputRows::UNKNOWN
             ),
-            (1.0, 56)
+            Ok((1.0, 56))
         );
     }
     assert_eq!(asap_types::summary_type::EXACT_ACCUMULATOR_STATE_BYTES, 56);

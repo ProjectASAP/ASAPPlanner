@@ -96,36 +96,19 @@ impl DataStore for CountingStore {
     }
 }
 
-/// Compile `ids` of `dag` over the stored states `views` (by node id) and
-/// run them in `scope` over the raw `samples`, as a runtime does with the
-/// executor: each id's output batches.
+/// Compile `ids` of `dag` and run them in `scope` over the raw `samples`,
+/// as a runtime does with the executor: each id's output batches.
 fn run(
     dag: &PhysicalASAPDAG,
-    views: BTreeMap<u64, Batch>,
     samples: &[RawDataSample],
     ids: &[u64],
     scope: Scope,
 ) -> Vec<Vec<Batch>> {
-    // The materialized views the run reads; each one's schema is its DAG node's.
-    let read: Vec<MaterializedView> = if views.is_empty() {
-        Vec::new()
-    } else {
-        dag.materialized_views()
-            .unwrap()
-            .into_iter()
-            .filter(|view| views.contains_key(&(view.node_id as u64)))
-            .collect()
-    };
-    assert_eq!(read.len(), views.len(), "every bound state is a view's");
-    // The executor's plan for `ids`, reading the views; every `Scan` it
-    // reaches is a raw data slot.
-    let compiled = compile(dag, &read, ids).expect("the executor compiles the plan");
-    // The plan's data in one store: raw samples at the `Scan`s by metric,
-    // and each view's states by node id.
-    let mut store = time_series_tables(dag, samples);
-    for (id, batch) in views {
-        store = store.with_materialized_view(id as _, vec![batch]).unwrap();
-    }
+    // The executor's plan for `ids`; every `Scan` it reaches is a raw data
+    // slot.
+    let compiled = compile(dag, &[], ids).expect("the executor compiles the plan");
+    // The plan's raw samples at the `Scan`s by metric.
+    let store = time_series_tables(dag, samples);
     let instance = compiled
         .instantiate(Arc::new(CountingStore(store)))
         .unwrap();
@@ -249,33 +232,21 @@ async fn the_plan_carries_stage3s_predicted_usage() {
         && node.timing == asap_planner::ExecutionTiming::IngestionTime));
     assert_eq!(usage.per_query.len(), 1);
     assert!(usage.peak_memory_bytes > 0);
-    // Each prediction names the installed nodes that run it: the tumbling window
-    // chain its selected tumbling windows, the query's root its own node.
+    // Each prediction names its node of the installed DAG: the chain is
+    // one materialized view, and the query's root has its own.
     let installed: BTreeSet<_> = plan.dag.nodes.iter().map(|node| node.id).collect();
-    for node in &usage.per_node {
-        assert!(
-            node.installed_node_ids
-                .iter()
-                .all(|id| installed.contains(id)),
-            "{node:?}"
-        );
-    }
+    assert!(usage
+        .per_node
+        .iter()
+        .all(|node| installed.contains(&node.node_id)));
     let chain = usage
         .per_node
         .iter()
         .find(|node| node.operator == OperatorKind::SummaryTumblingWindowChain)
         .unwrap();
-    assert_eq!(chain.installed_node_ids.len(), views.len(), "{chain:?}");
-    let view_ids: BTreeSet<_> = views.iter().map(|v| v.node_id).collect();
-    assert!(chain
-        .installed_node_ids
-        .iter()
-        .all(|id| view_ids.contains(id)));
+    assert!(views.iter().any(|view| view.node_id == chain.node_id));
     let root = plan.dag.roots[0];
-    assert!(usage
-        .per_node
-        .iter()
-        .any(|node| node.installed_node_ids == [root]));
+    assert!(usage.per_node.iter().any(|node| node.node_id == root));
 }
 
 /// `sum(latency_ms)` reads an instant selector: per series, only the latest
@@ -309,7 +280,7 @@ async fn an_instant_selector_reads_the_latest_sample_per_series() {
     let query = Scope::Query {
         evaluation_time_ms: EVALUATION_MS,
     };
-    let answered = answers(&run(dag, BTreeMap::new(), &samples, &query_roots(&plan), query)[0]);
+    let answered = answers(&run(dag, &samples, &query_roots(&plan), query)[0]);
     assert_eq!(answered.len(), 1);
     assert_eq!(answered[0].1, 110.0);
 }

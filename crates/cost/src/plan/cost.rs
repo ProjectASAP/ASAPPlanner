@@ -1,32 +1,32 @@
 //! Costing a physical plan DAG node by node: each node's resource usage
-//! ([`node_usage`]), then the plan's usage, latency, retention, retained
-//! tumbling window chains and cost ([`plan_cost`]). Moved from Stage 3
-//! (`asap-stage3-plan-selection`, whose module doc, "Cost model", describes the
-//! model), so Stage 3 computes no cost of its own.
+//! ([`node_resource_usage_and_cost`]), then the plan's usage, latency and
+//! cost ([`plan_cost`]). Moved from Stage 3 (`asap-stage3-plan-selection`,
+//! whose module doc, "Cost model", describes the model), so Stage 3 computes
+//! no cost of its own.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::node::analytical::AnalyticalCostError;
 use crate::node::operator_statistics::EdgeStatistics;
 use crate::node::state_bytes::{sketch_shape, StateInputRows};
-use crate::node::usage::cost_source;
-use crate::plan::execution_demand::{
-    computations, consumers, evaluation_rate, query_starts, Consumer,
-};
+use crate::node::usage::{cost_source, node_map, NodeMap};
+use crate::plan::execution_demand::{computations, evaluation_rate, query_starts};
+use crate::plan::read_back::read_back_ms;
 use crate::{lookup, StateFamily};
-use crate::{
-    maintained_window_ms, node_usage, query_reach, retained_tumbling_windows,
-    tumbling_window_retention_ms, tumbling_windows_of, NodeMap, NodeUsage, ProducerOutput,
-};
+use crate::{node_resource_usage_and_cost, NodeResourceUsageAndCost, ProducerOutput};
 use crate::{
     CalibrationFit, CostInputs, CostModel, NodeCost, NodeCostSource, OperatorKind, ResourceUsage,
     MEASURED_COST_SOURCE, MIXED_COST_SOURCE,
 };
 use asap_types::ir::operator::Source;
 use asap_types::ir::properties::ExecutionTiming;
-use asap_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPNodeId};
+use asap_types::ir::{ASAPOp, NonASAPOp};
+use asap_types::plan::physical_asap_dag::{
+    PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
+    PhysicalASAPOperatorPayload as Payload,
+};
 use asap_types::summary_type::SketchParams;
-use asap_types::workload::{DataWorkload, QueryRecurrence, RangeEvaluation};
+use asap_types::workload::{DataWorkload, QueryRecurrence, QueryWorkloadEntry, RangeEvaluation};
 
 /// One candidate's usage and price over the whole workload: `usage` is
 /// the whole candidate's, `per_node` one price per operator node of its
@@ -77,20 +77,25 @@ impl QueryLatency {
 /// ([`computations`]); an ingestion-time node over one second of arriving
 /// rows. A materialized node's state is counted in byte-seconds per
 /// second; a tumbling-window chain materialized beyond one evaluation keeps the tumbling windows its
-/// retention covers ([`tumbling_window_retention_ms`]). `nodes` is `dag`'s
-/// ([`node_map`](crate::node_map)); `recurrence[q]` and
-/// `range_evaluations[q]` say how often query `q` runs and how many steps
-/// each run evaluates (one when missing).
-#[allow(clippy::too_many_arguments)]
+/// `retention_ms` ($h_v$) covers. `entries[q]` says how often query `q`
+/// runs and how many steps each run evaluates; the formulas are scaled by
+/// `settings.frozen_calibration_factor` (1 when unset).
 pub fn plan_cost(
     dag: &PhysicalASAPDAG,
-    nodes: &NodeMap<'_>,
-    recurrence: &[QueryRecurrence],
-    range_evaluations: &[Option<RangeEvaluation>],
+    entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     settings: &CostInputs,
-    formula_scale: f64,
 ) -> Result<(PlanCost, CalibrationFit), (PhysicalASAPNodeId, AnalyticalCostError)> {
+    let nodes = &node_map(dag);
+    let recurrence: &[QueryRecurrence] = &entries
+        .iter()
+        .map(|entry| entry.recurrence.clone())
+        .collect::<Vec<_>>();
+    let range_evaluations: &[Option<RangeEvaluation>] = &entries
+        .iter()
+        .map(|entry| entry.range_evaluation)
+        .collect::<Vec<_>>();
+    let formula_scale = settings.frozen_calibration_factor.unwrap_or(1.0);
     let first = dag.nodes.first().map(|n| n.id).unwrap_or_default();
     let table = &settings.measured_operation_costs;
     let mut fit = CalibrationFit::default();
@@ -100,11 +105,10 @@ pub fn plan_cost(
         CostModel::UsageOverTime(prices) => Some(prices),
         _ => None,
     };
-    let EachNodeUsage {
+    let EachNodeResourceUsageAndCost {
         priced,
         multipliers,
-        reach,
-    } = each_node_usage(
+    } = each_node_resource_usage_and_cost(
         dag,
         nodes,
         recurrence,
@@ -122,12 +126,6 @@ pub fn plan_cost(
     // Each node's work in ms on one core: one computation at query time,
     // one second of arriving rows at ingestion time.
     let mut work_ms: HashMap<PhysicalASAPNodeId, f64> = HashMap::new();
-    // Query-time memory held only while one evaluation runs, a OneEvaluation
-    // state in memory or a not-materialized node's working memory: (bytes,
-    // per second, whether each consumer computes its own copy),
-    // counted once the evaluations' latencies are known, in node order so
-    // the sum is the same in every run.
-    let mut held: BTreeMap<PhysicalASAPNodeId, (u64, f64, bool)> = BTreeMap::new();
     // The raw data query-time scans read, retained on disk: per source, the
     // largest scan's (bytes, node).
     let mut raw_data: HashMap<&Source, (u64, PhysicalASAPNodeId)> = HashMap::new();
@@ -155,9 +153,6 @@ pub fn plan_cost(
         output.insert(node.id, node_priced.output);
         if node_priced.family != StateFamily::None {
             family_of.insert(node.id, node_priced.family);
-        }
-        if let Some(entry) = node_priced.held {
-            held.insert(node.id, entry);
         }
         if let Some(window) = node_priced.maintained {
             maintained.push((node.id, window));
@@ -274,65 +269,6 @@ pub fn plan_cost(
     for (latency, evaluation_ms) in latency.iter_mut().zip(evaluation_ms_per_query) {
         latency.query_ms += evaluation_ms;
     }
-    // Query-time memory is held for one evaluation: a `OneEvaluation` state from
-    // its build until the longest query reading it finishes, about that
-    // query's latency, once per execution. A not-materialized node's working
-    // memory is computed once per consumer ([`consumers`]), and each copy is
-    // held while its consumer's evaluation runs: a query's for that query's
-    // latency, at its rate; a materialized node's until the longest query
-    // reading that node finishes, at the node's rate, as its `OneEvaluation`
-    // state is.
-    let longest_reader_ms = |id: PhysicalASAPNodeId| {
-        reach
-            .iter()
-            .zip(&latency)
-            .filter(|(reached, _)| reached.contains(&id))
-            .map(|(_, l)| l.total_ms())
-            .fold(0.0, f64::max)
-    };
-    let consumers_of = consumers(dag);
-    for (id, (state, per_second, computed_per_consumer)) in held {
-        // The milliseconds it is held per second: each execution's held
-        // time times its executions per second, summed.
-        let held_ms_per_second = match computed_per_consumer {
-            false => per_second * longest_reader_ms(id),
-            true => {
-                let mut sum = 0.0;
-                for &consumer in consumers_of.get(&id).into_iter().flatten() {
-                    sum += match consumer {
-                        Consumer::Query(query) => {
-                            let rate = evaluation_rate(
-                                recurrence
-                                    .get(query)
-                                    .map(|r| (r, range_evaluations.get(query).copied().flatten())),
-                                settings.non_repeating_query_horizon_seconds,
-                            )
-                            .map_err(|error| (id, error))?;
-                            rate * latency.get(query).map_or(0.0, QueryLatency::total_ms)
-                        }
-                        Consumer::Materialized(node) => {
-                            multipliers[&node].1 * longest_reader_ms(node)
-                        }
-                    };
-                }
-                sum
-            }
-        };
-        let evaluation_ms = match per_second > 0.0 {
-            true => held_ms_per_second / per_second,
-            false => 0.0,
-        };
-        let byte_seconds = state as f64 * held_ms_per_second / 1_000.0;
-        let node = per_node.get_mut(&id).expect("every node is measured");
-        usage.average_memory_bytes += byte_seconds;
-        node.detail += &format!("; holds {state} bytes for {evaluation_ms:.1} ms");
-        if let (Some(cost), Some(prices)) = (&mut node.cost_per_second, usage_prices) {
-            *cost += prices.cost_per_memory_byte_second * byte_seconds;
-            if !cost.is_finite() {
-                return Err((id, AnalyticalCostError::Overflow));
-            }
-        }
-    }
     usage.peak_cpu_cores = peak_cpu_cores(
         dag,
         nodes,
@@ -385,21 +321,19 @@ pub fn plan_cost(
     ))
 }
 
-/// Every node of a physical DAG priced ([`each_node_usage`]), with each
-/// node's `(multiplier, per_second)` ([`computations`]) and the nodes each
-/// query reaches at query time ([`query_reach`]).
-struct EachNodeUsage<'a> {
-    priced: HashMap<PhysicalASAPNodeId, NodeUsage<'a>>,
+/// Every node of a physical DAG priced ([`each_node_resource_usage_and_cost`]), with each
+/// node's `(multiplier, per_second)` ([`computations`]).
+struct EachNodeResourceUsageAndCost<'a> {
+    priced: HashMap<PhysicalASAPNodeId, NodeResourceUsageAndCost<'a>>,
     multipliers: HashMap<PhysicalASAPNodeId, (u64, f64)>,
-    reach: Vec<HashSet<PhysicalASAPNodeId>>,
 }
 
-/// [`node_usage`] over every node of `dag`, children first, with the
+/// [`node_resource_usage_and_cost`] over every node of `dag`, children first, with the
 /// arguments of [`plan_cost`]. `root_rates`, when given, are
 /// the computations per second of each root's consumer in place of its
 /// query's own rate ([`computations`]).
 #[allow(clippy::too_many_arguments)]
-fn each_node_usage<'a>(
+fn each_node_resource_usage_and_cost<'a>(
     dag: &'a PhysicalASAPDAG,
     nodes: &NodeMap<'a>,
     recurrence: &[QueryRecurrence],
@@ -408,7 +342,7 @@ fn each_node_usage<'a>(
     settings: &'a CostInputs,
     formula_scale: f64,
     root_rates: Option<&[f64]>,
-) -> Result<EachNodeUsage<'a>, (PhysicalASAPNodeId, AnalyticalCostError)> {
+) -> Result<EachNodeResourceUsageAndCost<'a>, (PhysicalASAPNodeId, AnalyticalCostError)> {
     let first = dag.nodes.first().map(|n| n.id).unwrap_or_default();
     let multipliers = computations(
         dag,
@@ -418,20 +352,20 @@ fn each_node_usage<'a>(
         root_rates,
     )
     .map_err(|error| (first, error))?;
-    let reach = query_reach(dag, nodes);
-    let retention_ms = tumbling_window_retention_ms(dag, &reach, range_evaluations);
     let mut producers_of: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
+    let mut consumers_of: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
     for e in &dag.edges {
         producers_of.entry(e.consumer).or_default().push(e.producer);
+        consumers_of.entry(e.producer).or_default().push(e.consumer);
     }
-    let mut priced: HashMap<PhysicalASAPNodeId, NodeUsage<'a>> = HashMap::new();
+    let mut priced: HashMap<PhysicalASAPNodeId, NodeResourceUsageAndCost<'a>> = HashMap::new();
     for node in &dag.nodes {
         let views: Vec<ProducerOutput<'a>> = producers_of
             .get(&node.id)
             .map_or(&[][..], Vec::as_slice)
             .iter()
             .map(|p| {
-                let produced: &NodeUsage<'a> = &priced[p];
+                let produced: &NodeResourceUsageAndCost<'a> = &priced[p];
                 ProducerOutput {
                     payload: &nodes[p].payload,
                     output_schema: &nodes[p].output_schema,
@@ -439,17 +373,19 @@ fn each_node_usage<'a>(
                     sources: produced.sources.clone(),
                     family: produced.family,
                     unchanged_columns: produced.unchanged_columns.clone(),
+                    tumbling_windows: produced.tumbling_windows,
                 }
             })
             .collect();
-        let node_priced = node_usage(
+        let window_ms = match node.output_state.timing {
+            ExecutionTiming::IngestionTime => maintained_window_ms(node.id, nodes, &producers_of),
+            ExecutionTiming::QueryTime => scan_read_ms(node, nodes, &consumers_of),
+        };
+        let node_priced = node_resource_usage_and_cost(
             node,
             &views,
             multipliers[&node.id],
-            retained_tumbling_windows(node, &retention_ms),
-            (node.output_state.timing == ExecutionTiming::IngestionTime)
-                .then(|| maintained_window_ms(node.id, nodes, &producers_of))
-                .flatten(),
+            window_ms,
             data,
             settings,
             formula_scale,
@@ -457,11 +393,32 @@ fn each_node_usage<'a>(
         .map_err(|error| (node.id, error))?;
         priced.insert(node.id, node_priced);
     }
-    Ok(EachNodeUsage {
+    Ok(EachNodeResourceUsageAndCost {
         priced,
         multipliers,
-        reach,
     })
+}
+
+/// The window a query-time `Scan` `node` reads per execution: the most
+/// offset + range its consumers read ([`read_back_ms`], no range-evaluation
+/// span), once however many consumers read it. `None` for any other node,
+/// or when a consumer reads it whole.
+fn scan_read_ms(
+    node: &PhysicalASAPDAGNode,
+    nodes: &NodeMap<'_>,
+    consumers_of: &HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
+) -> Option<u64> {
+    if !matches!(node.payload, Payload::NonASAP(NonASAPOp::Scan { .. })) {
+        return None;
+    }
+    let readers = |id: PhysicalASAPNodeId| consumers_of.get(&id).cloned().unwrap_or_default();
+    read_back_ms(
+        readers(node.id),
+        |id| &nodes[&id].payload,
+        readers,
+        |_| 0,
+        true,
+    )
 }
 
 /// The CPU cores a candidate needs at its peak: enough for its
@@ -470,7 +427,7 @@ fn each_node_usage<'a>(
 /// its average query-time work fills.
 fn peak_cpu_cores(
     dag: &PhysicalASAPDAG,
-    nodes: &HashMap<PhysicalASAPNodeId, &asap_types::plan::physical_asap_dag::PhysicalASAPDAGNode>,
+    nodes: &HashMap<PhysicalASAPNodeId, &PhysicalASAPDAGNode>,
     work_ms: &HashMap<PhysicalASAPNodeId, f64>,
     multipliers: &HashMap<PhysicalASAPNodeId, (u64, f64)>,
     latency: &[QueryLatency],
@@ -503,7 +460,7 @@ fn peak_cpu_cores(
 /// one, and one operation otherwise.
 fn query_latencies(
     dag: &PhysicalASAPDAG,
-    nodes: &HashMap<PhysicalASAPNodeId, &asap_types::plan::physical_asap_dag::PhysicalASAPDAGNode>,
+    nodes: &HashMap<PhysicalASAPNodeId, &PhysicalASAPDAGNode>,
     output: &HashMap<PhysicalASAPNodeId, EdgeStatistics>,
     work_ms: &HashMap<PhysicalASAPNodeId, f64>,
     merge_ms: &HashMap<PhysicalASAPNodeId, f64>,
@@ -519,7 +476,7 @@ fn query_latencies(
         |id: PhysicalASAPNodeId| nodes[&id].output_state.timing == ExecutionTiming::IngestionTime;
     let compaction_ms = |state: PhysicalASAPNodeId| {
         let workers = ingest_workers(dag, work_ms, state) as f64;
-        let states = (output[&state].rows / tumbling_windows_of(nodes[&state])) as f64;
+        let states = output[&state].rows as f64;
         let per_merge_ms = merge_ms.get(&state).copied().unwrap_or(formula_merge_ms);
         (workers - 1.0) * states * per_merge_ms
     };
@@ -570,4 +527,34 @@ fn ingest_workers(
         }
     }
     (ingest_ms_per_s / 1_000.0).ceil().max(1.0) as u64
+}
+
+/// The window an ingestion-time grouping `node` maintains: a tumbling-window chain's
+/// tumbling windows, or the time range below it (through filters, projections and
+/// time shifts). `None` when there is none.
+fn maintained_window_ms(
+    node: PhysicalASAPNodeId,
+    nodes: &NodeMap<'_>,
+    producers_of: &HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
+) -> Option<u64> {
+    match &nodes[&node].payload {
+        Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            tumbling_window_width_ms,
+            ..
+        }) => return Some(*tumbling_window_width_ms),
+        Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) => {
+            return Some(range.as_millis() as u64)
+        }
+        _ => {}
+    }
+    let producer = *producers_of.get(&node)?.first()?;
+    match &nodes[&producer].payload {
+        Payload::NonASAP(
+            NonASAPOp::TimeRange { .. }
+            | NonASAPOp::Filter { .. }
+            | NonASAPOp::Project { .. }
+            | NonASAPOp::TimeShift { .. },
+        ) => maintained_window_ms(producer, nodes, producers_of),
+        _ => None,
+    }
 }

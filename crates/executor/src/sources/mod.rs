@@ -18,8 +18,6 @@ use std::sync::Arc;
 
 mod data_store;
 pub use data_store::{DataStore, MaterializedViewRequest, RawDataRequest};
-mod window;
-pub(crate) use window::{scan_windows, time_range_window, view_windows, ScanWindow};
 mod memory;
 pub use memory::InMemoryDataStore;
 
@@ -45,16 +43,18 @@ enum ScanInput {
         predicates: Vec<CompiledExpression>,
         /// `predicates` as the store receives them.
         predicate_hints: Vec<ScalarExpr<()>>,
-        /// The rows its readers read.
-        window: ScanWindow,
+        /// The rows its consumers read, `(end_offset_ms, width_ms)` back
+        /// from the time the run evaluates it at
+        /// ([`window_bounds_ms`]); `None` when one reads every row.
+        read_window_ms: Option<(i64, i64)>,
     },
     /// A materialized view slot: exact, never re-filtered; its states are
     /// the store's.
     MaterializedView {
         view: MaterializedView,
-        /// The data its state summarizes, back from the evaluation time;
-        /// always `Within`.
-        window: ScanWindow,
+        /// The rows a read selects, `(end_offset_ms, width_ms)` back from
+        /// the evaluation time ([`window_bounds_ms`]).
+        read_window_ms: (i64, i64),
     },
 }
 
@@ -72,7 +72,7 @@ impl Scan {
         source: Source,
         output: SchemaRef,
         predicates: Vec<CompiledExpression>,
-        window: ScanWindow,
+        read_window_ms: Option<(i64, i64)>,
     ) -> Self {
         let predicate_hints = predicates
             .iter()
@@ -85,29 +85,26 @@ impl Scan {
                 source,
                 predicates,
                 predicate_hints,
-                window,
+                read_window_ms,
             },
         }
     }
-    /// A materialized view slot reading `view`, whose state summarizes
-    /// `window`; bad input when the window is unbounded.
+    /// A materialized view slot reading the rows of `view` that
+    /// `read_window_ms` selects.
     pub(crate) fn materialized_view(
         store: Arc<dyn DataStore>,
         view: MaterializedView,
         output: SchemaRef,
-        window: ScanWindow,
-    ) -> Result<Self, Error> {
-        if window == ScanWindow::Unbounded {
-            return Err(Error::Invalid(format!(
-                "materialized view {} summarizes an unbounded window",
-                view.node_id
-            )));
-        }
-        Ok(Self {
+        read_window_ms: (i64, i64),
+    ) -> Self {
+        Self {
             store,
             output,
-            input: ScanInput::MaterializedView { view, window },
-        })
+            input: ScanInput::MaterializedView {
+                view,
+                read_window_ms,
+            },
+        }
     }
     /// `batch` in the slot's schema; bad input when its columns differ.
     fn to_output(&self, batch: Batch) -> Result<Batch, Error> {
@@ -168,11 +165,18 @@ impl PhysicalOperator<Batch, SchemaRef> for Scan {
                 source,
                 predicates,
                 predicate_hints,
-                window,
-            } => self.start_raw_data(source, predicates, predicate_hints, *window, context),
-            ScanInput::MaterializedView { view, window } => {
-                self.start_materialized_view(view, *window, context)
-            }
+                read_window_ms,
+            } => self.start_raw_data(
+                source,
+                predicates,
+                predicate_hints,
+                *read_window_ms,
+                context,
+            ),
+            ScanInput::MaterializedView {
+                view,
+                read_window_ms,
+            } => self.start_materialized_view(view, *read_window_ms, context),
         }
     }
 }
@@ -180,23 +184,18 @@ impl Scan {
     fn start_materialized_view<'a>(
         &'a self,
         view: &'a MaterializedView,
-        window: ScanWindow,
+        read_window_ms: (i64, i64),
         context: RunContext,
     ) -> Result<OutputStream<'a, Batch>, Error> {
         // A query run reads the window back from its evaluation time; an
-        // ingestion run builds the windows ending at its end.
+        // ingestion run reads the window ending at its end, whatever the
+        // offset.
+        let (end_offset_ms, _) = read_window_ms;
         let at_ms = match context.scope {
             Scope::Query { evaluation_time_ms } => evaluation_time_ms,
-            Scope::Ingestion { window_end_ms, .. } => match window {
-                ScanWindow::Within { end_offset_ms, .. } => {
-                    window_end_ms.saturating_add(end_offset_ms)
-                }
-                ScanWindow::Unbounded => window_end_ms,
-            },
+            Scope::Ingestion { window_end_ms, .. } => window_end_ms.saturating_add(end_offset_ms),
         };
-        let time_range_ms = window
-            .bounds_ms(at_ms)
-            .ok_or_else(|| Error::Invalid("unbounded materialized view window".into()))?;
+        let time_range_ms = window_bounds_ms(read_window_ms, at_ms);
         let opening = context.clone();
         let stream = stream::once(async move {
             if opening.is_cancelled() {
@@ -227,7 +226,7 @@ impl Scan {
         source: &'a Source,
         predicates: &'a [CompiledExpression],
         predicate_hints: &'a [ScalarExpr<()>],
-        window: ScanWindow,
+        read_window_ms: Option<(i64, i64)>,
         context: RunContext,
     ) -> Result<OutputStream<'a, Batch>, Error> {
         // `now()` in the predicates is this run's evaluation time.
@@ -239,13 +238,15 @@ impl Scan {
             })
             .collect();
         let time_range_ms = match context.scope {
-            Scope::Query { evaluation_time_ms } => window.bounds_ms(evaluation_time_ms),
+            Scope::Query { evaluation_time_ms } => {
+                read_window_ms.map(|window| window_bounds_ms(window, evaluation_time_ms))
+            }
             // A slot read through windows reads the rows of the window the
             // run builds.
             Scope::Ingestion {
                 window_start_ms,
                 window_end_ms,
-            } => (window != ScanWindow::Unbounded).then_some((window_start_ms, window_end_ms)),
+            } => read_window_ms.map(|_| (window_start_ms, window_end_ms)),
         };
         let time_filter = match time_range_ms {
             Some(range) => Some((
@@ -323,6 +324,13 @@ impl Scan {
             })
             .boxed_local())
     }
+}
+
+/// `(start, end]` of the window `(end_offset_ms, width_ms)` back from
+/// `at_ms`: `(at_ms - end_offset_ms - width_ms, at_ms - end_offset_ms]`.
+pub(crate) fn window_bounds_ms((end_offset_ms, width_ms): (i64, i64), at_ms: i64) -> (i64, i64) {
+    let end = at_ms.saturating_sub(end_offset_ms);
+    (end.saturating_sub(width_ms), end)
 }
 
 /// The rows of `batch` that `keep` keeps; `batch` itself, uncopied, when it

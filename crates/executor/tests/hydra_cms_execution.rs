@@ -37,6 +37,16 @@ const ROWS: [(&str, &str, f64); 9] = [
     ("db", "vacuum", 2.),
 ];
 
+/// θ of the HydraCms grid.
+fn hydra_params() -> SketchParams {
+    SketchParams::Hydra(HydraParams::HydraCms {
+        width: WIDTH,
+        depth: 3,
+        shared_rows: 3,
+        shared_columns: SHARED_COLUMNS,
+    })
+}
+
 fn family() -> FieldDataType {
     FieldDataType::Sketch(SketchAlgorithm::HydraCms)
 }
@@ -98,7 +108,7 @@ fn unit_count() -> SummaryUpdate {
 /// The planner contract: item = the counted column, weight = unit count,
 /// reduction = the group-by keys.
 fn summary_agg(update: SummaryUpdate, filter: Option<Predicate<usize>>) -> PhysicalASAPDAGNode {
-    node(
+    let mut build = node(
         1,
         Payload::ASAP(ASAPOp::SummaryAgg {
             child: 0,
@@ -115,7 +125,9 @@ fn summary_agg(update: SummaryUpdate, filter: Option<Predicate<usize>>) -> Physi
                 nullable: false,
             },
         ]),
-    )
+    );
+    build.parameters = Some(hydra_params());
+    build
 }
 
 fn estimate(id: usize, query: SketchStatistic, dtype: DataType) -> PhysicalASAPDAGNode {
@@ -349,6 +361,7 @@ fn row_weight_serializes_as_one_field_and_rejects_constants_above_i32() {
         Operator::all_groups_summary_build(
             input_schema(),
             family(),
+            Some(hydra_params()),
             1,
             RowWeight::Constant(std::num::NonZeroU32::new(weight).unwrap()),
             vec![0],
@@ -376,8 +389,12 @@ fn constant_weight_above_i32_is_refused_at_validation() {
         weight: SummaryInputExpr::Constant(2_147_483_648.0),
         ..unit_count()
     };
-    let error = asap_executor::capability::validate_summary_kernel(&family(), &update)
-        .expect_err("validation accepted a constant above i32::MAX");
+    let error = asap_executor::capability::validate_summary_kernel(
+        &family(),
+        Some(&hydra_params()),
+        &update,
+    )
+    .expect_err("validation accepted a constant above i32::MAX");
     assert!(
         error.contains("HydraCms") && error.contains("i32::MAX"),
         "{error}"

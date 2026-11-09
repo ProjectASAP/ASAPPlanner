@@ -211,8 +211,10 @@ fn summary_projection_survives_recovery() {
         ]],
     )
     .unwrap();
-    let store = InMemoryDataStore::default()
-        .with_materialized_view(0, vec![batch])
+    let mut store = InMemoryDataStore::default();
+    // The view is read for its one-minute window ending at T = 1.
+    store
+        .append_materialized_view(&views[0], (1 - 60_000, 1), vec![batch])
         .unwrap();
     let physical_dag = program.instantiate(Arc::new(store)).unwrap();
     let context = RunContext::new(

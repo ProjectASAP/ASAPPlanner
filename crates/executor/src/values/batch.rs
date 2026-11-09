@@ -852,7 +852,7 @@ mod tests {
         use crate::StateColumnUpdater;
         use planner_types::summary_type::{ExactKind, ExactParams};
         let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
-        let mut updater = StateColumnUpdater::new(&family).unwrap();
+        let mut updater = StateColumnUpdater::new(&family, None).unwrap();
         updater.ensure_groups(2).unwrap();
         updater.update(0, 1.5, 0).unwrap();
         updater.update(1, 4.0, 0).unwrap();
@@ -913,10 +913,10 @@ mod tests {
             states: states.clone(),
         };
         let other_family = Arc::new(
-            StateColumnUpdater::new(&FieldDataType::ExactAggregate(
-                ExactKind::Count,
-                ExactParams::Count,
-            ))
+            StateColumnUpdater::new(
+                &FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count),
+                None,
+            )
             .unwrap()
             .seal(),
         );
@@ -994,7 +994,7 @@ mod tests {
         use crate::StateColumnUpdater;
         use planner_types::summary_type::{ExactKind, ExactParams};
         let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
-        let mut updater = StateColumnUpdater::new(&family).unwrap();
+        let mut updater = StateColumnUpdater::new(&family, None).unwrap();
         updater.ensure_groups(10).unwrap();
         for group in 0..10 {
             updater.update(group, f64::from(group), 0).unwrap();
@@ -1066,7 +1066,7 @@ mod tests {
         // States [10, 20, 30] referenced as rows [2, 0, 2]; states [1, 2]
         // referenced as rows [1].
         let batch = |sums: &[f64], rows: Vec<u32>| {
-            let mut updater = StateColumnUpdater::new(&family).unwrap();
+            let mut updater = StateColumnUpdater::new(&family, None).unwrap();
             updater.ensure_groups(sums.len()).unwrap();
             for (group, &sum) in sums.iter().enumerate() {
                 updater.update(group as u32, sum, 0).unwrap();
@@ -1121,12 +1121,18 @@ mod tests {
     fn state_batch(count: u32, exact: bool) -> Batch {
         use crate::StateColumnUpdater;
         use planner_types::summary_type::{ExactKind, ExactParams, SketchAlgorithm};
-        let family = if exact {
-            FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
+        let (family, parameters) = if exact {
+            (
+                FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+                None,
+            )
         } else {
-            FieldDataType::Sketch(SketchAlgorithm::Kll)
+            (
+                FieldDataType::Sketch(SketchAlgorithm::Kll),
+                Some(planner_types::summary_type::SketchParams::Kll { k: 200 }),
+            )
         };
-        let mut updater = StateColumnUpdater::new(&family).unwrap();
+        let mut updater = StateColumnUpdater::new(&family, parameters.as_ref()).unwrap();
         updater.ensure_groups(count as usize).unwrap();
         for group in 0..count {
             updater.update(group, f64::from(group), 0).unwrap();

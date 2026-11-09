@@ -259,7 +259,7 @@ fn physical_node_ids_serialize_in_deterministic_binding_order() {
 }
 
 /// A window 600,000 ms wide ending 300,000 ms before T = 3,600,000 covers
-/// `(2,700,000, 3,300,000]`, and reaches 900,000 ms back.
+/// `(2,700,000, 3,300,000]`.
 #[test]
 fn a_raw_data_window_ends_its_offset_before_the_evaluation() {
     let window = asap_types::plan::materialized_view::RawDataWindow::new(
@@ -270,10 +270,6 @@ fn a_raw_data_window_ends_its_offset_before_the_evaluation() {
         600_000,
     );
     assert_eq!(window.bounds_ms(3_600_000), (2_700_000, 3_300_000));
-    assert_eq!(
-        asap_types::test_support::forwarders::lookback_ms(&window),
-        900_000
-    );
 }
 
 /// High-fan-in merge/concat validation is independent of wire edge order and

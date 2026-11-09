@@ -73,6 +73,11 @@ impl PhysicalASAPMemoCandidates {
             .map(|(id, edge)| (PhysicalEdgeId(id), *edge))
     }
 
+    /// Edge `id` of $\mathcal E$.
+    pub fn edge(&self, id: PhysicalEdgeId) -> &PhysicalEdge {
+        &self.edges[id.0]
+    }
+
     /// $P^{\mathrm{adm}}_{c,i}$: the admissible edges into input
     /// `input_index_of_consumer` of `consumer`
     /// ($\alpha^{\log} = \alpha^{\mathrm{phys}} = 1$).

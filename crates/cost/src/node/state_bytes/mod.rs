@@ -1,6 +1,7 @@
 //! The bytes one summary or exact state holds and its update operations
 //! per input row, from its parameters and the rows it folds.
 
+use crate::node::analytical::AnalyticalCostError;
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::{DataType, FieldDataType, Schema};
 use asap_types::summary_type::KLL_MAX_K;
@@ -57,15 +58,21 @@ pub fn keeps_every_value(measure: &AggIntent) -> bool {
 /// Count-Min and Count-Sketch, plus one heap update for their top-k variants;
 /// for UnivMon, the same per layer it updates (`univmon_expected_layers`);
 /// 1 for every other sketch.
-pub fn summary_shape(family: &FieldDataType, input_rows: StateInputRows) -> (f64, u64) {
-    match family {
-        FieldDataType::Sketch(..) => {
-            let _ = input_rows;
-            todo!("#1207 PR 6: the state shape of θ from the candidate's LogicalProperties::parameters")
-        }
-        FieldDataType::ExactAggregate(..) => (1.0, EXACT_ACCUMULATOR_STATE_BYTES),
+///
+/// `parameters` is the build's θ (`PhysicalASAPDAGNode::parameters`). Err
+/// [`AnalyticalCostError::UnsupportedCandidate`] for a sketch without θ: a
+/// planner bug, since every sketch build carries its θ.
+pub fn summary_shape(
+    family: &FieldDataType,
+    parameters: Option<&SketchParams>,
+    input_rows: StateInputRows,
+) -> Result<(f64, u64), AnalyticalCostError> {
+    Ok(match (family, parameters) {
+        (FieldDataType::Sketch(..), Some(parameters)) => sketch_shape(parameters, input_rows),
+        (FieldDataType::Sketch(..), None) => return Err(AnalyticalCostError::UnsupportedCandidate),
+        (FieldDataType::ExactAggregate(..), _) => (1.0, EXACT_ACCUMULATOR_STATE_BYTES),
         _ => (1.0, 8),
-    }
+    })
 }
 
 /// What one summary state's bytes depend on besides its parameters (only

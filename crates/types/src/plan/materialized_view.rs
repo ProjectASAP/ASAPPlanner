@@ -1,16 +1,29 @@
 //! What a deployment runtime keeps for an installed physical ASAP DAG: its
 //! materialized views ([`PhysicalASAPDAG::materialized_views`]) and how far
-//! back it keeps each raw-data source for query-time scans
+//! back it keeps each raw-data source for raw-data scans
 //! ([`PhysicalASAPDAG::raw_data_retention`]), derived from the DAG and the
-//! `retention_ms` installation sets on its nodes
-//! ([`PhysicalASAPDAG::set_retention`]).
+//! `retention_ms` Stage 3 sets on its materialized nodes and query-time
+//! `Scan`s, which these functions check.
 //!
 //! A **materialized view** is a node whose output is materialized across
 //! evaluations: its lifetime is `AcrossEvaluations`, at ingestion time or
 //! at query time, and it carries its `retention_ms`. A node materialized for
 //! `OneEvaluation` is not a view: its output is discarded after one
-//! evaluation. A query-time `Scan` carries how long its source's rows are
-//! retained for it (`None` when it reads them unbounded).
+//! evaluation.
+//!
+//! ## The time-indexed store
+//!
+//! A runtime keeps every view, and the raw data of every raw-data `Scan`,
+//! in one time-indexed, append-only store: a `SummaryTumblingWindowChain`'s
+//! rows by the end of their window, any other view's state by the interval
+//! of data it summarizes, raw rows by their time. Each is read only through
+//! the `TimeRange` and `TimeShift` nodes above it, which select rows by time:
+//! over a chain, `TimeRange(W)` over shifts summing to `o` selects, at
+//! evaluation time `T`, the windows ending in `(T - o - W, T - o]`. A node's
+//! `retention_ms` is how far back from the newest evaluation time its rows
+//! are kept; it covers what those `TimeRange`s and `TimeShift`s above it
+//! read back (`o + W`), which [`PhysicalASAPDAG::materialized_views`] and
+//! [`PhysicalASAPDAG::raw_data_retention`] check, and older rows are dropped.
 //!
 //! ## Refreshing a view
 //!
@@ -21,20 +34,18 @@
 //! that view's node (for a view refreshed at ingestion, together with the
 //! rest of its refresh group, below), with each view it reads that the run
 //! does not refresh as a materialized view slot and raw data read by
-//! `Source` at each `Scan`. It
-//! refreshes the view in an ingestion run
+//! `Source` at each `Scan`. It refreshes the view in an ingestion run
 //! ([`MaterializedViewRefresh::AtIngestion`]) or in the query run of the
-//! evaluation that first reads it
-//! ([`MaterializedViewRefresh::OnFirstRead`]), keeps the result, and binds
-//! it the same way wherever the DAG reads that node. An ingestion run over
+//! evaluation that first reads it ([`MaterializedViewRefresh::OnFirstRead`])
+//! and appends the result to the store. An ingestion run over
 //! `(window_start_ms, window_end_ms]` refreshes the windows ending at
-//! `window_end_ms`: each `TimeRange(w)` keeps `(window_end_ms - w,
-//! window_end_ms]`, whatever the shifts below it, so a runtime refreshes a
-//! window `(start, end]` of `raw_data_windows` ([`RawDataWindow::bounds_ms`]
-//! at the evaluation it is refreshed for) in the run over `(start, end]`. A
-//! view refreshed in an ingestion run therefore reads windows that all end
-//! at one offset before the evaluation; a DAG with one that does not is
-//! refused ([`InstallableDagError::IngestionBuildReadsWindowsOfDifferentOffsets`]).
+//! `window_end_ms`: a chain builds its window ending there, each
+//! `TimeRange(w)` keeps `(window_end_ms - w, window_end_ms]` whatever the
+//! shifts below it, and each view it reads is read for the window ending
+//! there. A view refreshed in an ingestion run therefore reads windows that
+//! all end at one offset before the evaluation; a DAG with one that does
+//! not is refused
+//! ([`InstallableDagError::IngestionBuildReadsWindowsOfDifferentOffsets`]).
 //! A query run binds the views it reaches from the roots without passing
 //! another view; a view only other views read is read through them.
 //!
@@ -44,17 +55,14 @@
 //! ([`PhysicalASAPDAG::ingestion_refresh_groups`]): the views whose windows
 //! have one width `W` and end at one offset `p` modulo `W` (their
 //! [`RefreshWindow`]; a view with an unbounded window is a group of its
-//! own). A runtime refreshes a group with one ingestion run per window
-//! `(e - W, e]`, `e ≡ p (mod W)`. The run's roots are the views of the group
-//! whose state for the window ending at `e` is not stored yet: in steady
-//! state the newest tumbling window of each chain, since older tumbling windows are the same
-//! states, stored by earlier runs. A view of the group that a root reads is
-//! computed in the run; views of other groups are materialized view slots.
-//! A node several roots share runs once per run, so a `Scan` below a KLL
-//! tumbling-window chain and a DDSketch tumbling-window chain of equal tumbling-window width reads each
-//! tumbling window's raw data once. Stage 3's cost assumes this grouping; a runtime
-//! that splits a group computes the same states at a higher cost than
-//! priced.
+//! own). A chain's window is one of its tumbling windows. A runtime
+//! refreshes a group with one ingestion run per window `(e - W, e]`, `e ≡ p
+//! (mod W)`, whose roots are the views of the group; a view of the group a
+//! root reads is computed in the run, and views of other groups are
+//! materialized view slots. A node several roots share runs once per run,
+//! so a `Scan` below two chains of equal width reads each window's raw data
+//! once. Stage 3's cost assumes this grouping; a runtime that splits a group
+//! computes the same states at a higher cost than priced.
 //!
 //! Each view's `coverage` says what its stored state is: a stable id of its
 //! definition (what it computes) and its selection (which rows went in,
@@ -93,25 +101,26 @@ pub struct MaterializedView {
     /// What its refresh reads.
     pub inputs: MaterializedViewInputs,
     /// The node's `retention_ms`: how far back from the newest evaluation
-    /// time its output must stay available once refreshed. At least how
-    /// far back the data it summarizes reaches (its raw-data windows', and
-    /// the views it reads, `end_offset_ms + width_ms`).
+    /// time its stored rows are kept. At least how far back the
+    /// `TimeRange`s and `TimeShift`s above it read.
     pub(crate) retention_ms: u64,
 }
 
-#[cfg(any(test, feature = "test-support"))]
 impl MaterializedView {
     /// Which run refreshes it.
     pub fn refresh(&self) -> MaterializedViewRefresh {
         self.refresh
     }
 
-    /// How far back from the newest evaluation time its output stays
-    /// available.
+    /// How far back from the newest evaluation time its stored rows are
+    /// kept.
     pub fn retention_ms(&self) -> u64 {
         self.retention_ms
     }
+}
 
+#[cfg(any(test, feature = "test-support"))]
+impl MaterializedView {
     /// What the stored state is.
     pub fn coverage(&self) -> &ViewCoverage {
         &self.coverage
@@ -184,15 +193,9 @@ impl RawDataWindow {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl RawDataWindow {
-    /// How far back from the evaluation time the window reaches:
-    /// `end_offset_ms + width_ms`.
-    pub(crate) fn lookback_ms(&self) -> u64 {
-        u64::try_from(self.end_offset_ms.saturating_add(self.width_ms)).unwrap_or(0)
-    }
-
     /// `(start, end]` of the window at evaluation time `evaluation_time_ms`.
-    #[cfg(any(test, feature = "test-support"))]
     pub fn bounds_ms(&self, evaluation_time_ms: i64) -> (i64, i64) {
         let end = evaluation_time_ms - self.end_offset_ms;
         (end - self.width_ms, end)
@@ -246,10 +249,8 @@ impl RefreshWindow {
 
 /// The views refreshed at ingestion that share one refresh window
 /// ([`PhysicalASAPDAG::ingestion_refresh_groups`]). A runtime refreshes
-/// them with one ingestion run per window `(e - W, e]`; each run's roots are
-/// the views whose state for the window ending at `e` is not stored yet (in
-/// steady state the newest tumbling window of each chain), and a view of the group a
-/// root reads is computed in the run.
+/// them with one ingestion run per window `(e - W, e]`, whose roots are its
+/// views; a view of the group a root reads is computed in the run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IngestionRefreshGroup {
     /// The refresh window of every view of the group; `None` for a view
@@ -260,13 +261,13 @@ pub struct IngestionRefreshGroup {
 }
 
 /// How far back from the evaluation time a runtime keeps a raw-data source
-/// for the DAG's query-time scans ([`PhysicalASAPDAG::raw_data_retention`]).
+/// for the DAG's raw-data scans ([`PhysicalASAPDAG::raw_data_retention`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawDataRetention {
     /// The source.
     pub(crate) source: Source,
-    /// The longest `retention_ms` of a query-time `Scan` of it; `None` when
+    /// The longest `retention_ms` of a raw-data `Scan` of it; `None` when
     /// one reads it unbounded (every row the source holds).
     pub(crate) lookback_ms: Option<u64>,
 }
@@ -285,7 +286,7 @@ impl RawDataRetention {
         &self.source
     }
 
-    /// The longest `retention_ms` of a query-time `Scan` of it; `None` when
+    /// The longest `retention_ms` of a raw-data `Scan` of it; `None` when
     /// one reads it unbounded.
     pub fn lookback_ms(&self) -> Option<u64> {
         self.lookback_ms
@@ -344,15 +345,15 @@ pub enum InstallableDagError {
     #[error("materialized view {node_id} has no retention_ms")]
     ViewWithoutRetention { node_id: PhysicalASAPNodeId },
     /// Bad input (a plan file): view `node_id` is retained for less than the
-    /// data it summarizes reaches back, so a later evaluation would miss
-    /// it.
-    #[error("materialized view {node_id} is retained for less than its data reaches back")]
+    /// `TimeRange`s and `TimeShift`s above it read back, so a later
+    /// evaluation would miss its rows.
+    #[error("materialized view {node_id} is retained for less than its consumers read back")]
     ViewRetentionTooShort { node_id: PhysicalASAPNodeId },
-    /// Bad input (a plan file): query-time `Scan` `node_id` reads a bounded
+    /// Bad input (a plan file): raw-data `Scan` `node_id` reads a bounded
     /// window but has no `retention_ms`.
     #[error("query-time scan {node_id} reads a bounded window but has no retention_ms")]
     ScanWithoutRetention { node_id: PhysicalASAPNodeId },
-    /// Bad input (a plan file): query-time `Scan` `node_id` keeps its rows
+    /// Bad input (a plan file): raw-data `Scan` `node_id` keeps its rows
     /// for less than its consumers' window reaches back.
     #[error("query-time scan {node_id} is retained for less than its window reaches back")]
     ScanRetentionTooShort { node_id: PhysicalASAPNodeId },
@@ -363,29 +364,25 @@ impl PhysicalASAPDAG {
     /// it reads), with its refresh mode, coverage, inputs and the node's
     /// `retention_ms`. Validates the DAG and checks that every raw-data
     /// window it reads has a supported shape and that each view's retention
-    /// covers how far back its data reaches. O(views · nodes) for the
-    /// coverages, plus O(nodes + edges).
+    /// covers what the `TimeRange`s and `TimeShift`s above it read back.
+    /// O(views · nodes) for the inputs, plus O(nodes + edges).
     pub fn materialized_views(&self) -> Result<Vec<MaterializedView>, InstallableDagError> {
         if let Some(node) = self.nodes.iter().find(|node| {
-            matches!(node.lifetime, Lifetime::AcrossEvaluations(_)) && node.retention_ms.is_none()
+            matches!(node.lifetime, Lifetime::AcrossEvaluations(_))
+                && !is_raw_data_scan(node)
+                && node.retention_ms.is_none()
         }) {
             return Err(InstallableDagError::ViewWithoutRetention { node_id: node.id });
         }
         self.validate()?;
-        let views: Vec<MaterializedView> = self
-            .views_with_node_retention()?
-            .into_iter()
-            .map(|(view, _)| view)
-            .collect();
-        let mut reach_ms_by_node = HashMap::new();
+        let index = ViewIndex::new(self);
+        let views = index.views()?;
         for view in &views {
-            let reach_ms = reach_ms_of(&view.inputs, &reach_ms_by_node);
-            if view.retention_ms < reach_ms {
+            if view.retention_ms < index.read_back_ms(view.node_id).0 {
                 return Err(InstallableDagError::ViewRetentionTooShort {
                     node_id: view.node_id,
                 });
             }
-            reach_ms_by_node.insert(view.node_id, reach_ms);
         }
         Ok(views)
     }
@@ -474,12 +471,12 @@ impl PhysicalASAPDAG {
     }
 
     /// The refresh window of `node` ([`RefreshWindow::of_window`]): for a
-    /// `SummaryTumblingWindowChain` (a DAG with its chains unexpanded), its newest tumbling window's,
-    /// `(tumbling_window_width, s mod tumbling_window_width)` with `s` the sum of the offsets of
-    /// the `TimeShift`s below it; for any other node, that of its window
-    /// (the windows below it, a chain below it counting as all its tumbling
-    /// windows). A chain and each of its expanded tumbling windows have the same one.
-    /// `None` when the window is unbounded or empty. O(nodes + edges).
+    /// `SummaryTumblingWindowChain` of width `w`, `(w, s mod w)` with `s`
+    /// the sum of the offsets of the `TimeShift`s below it; for any other
+    /// node, that of the smallest window holding the windows below it (each
+    /// `TimeRange`'s, and each chain's reached without passing one). `None`
+    /// when that window is unbounded (none below it, or an `@` anchor below
+    /// a `TimeRange`) or empty. O(nodes + edges).
     pub fn refresh_window(&self, node: PhysicalASAPNodeId) -> Option<RefreshWindow> {
         self.refresh_windows([node])[&node]
     }
@@ -490,161 +487,102 @@ impl PhysicalASAPDAG {
         &self,
         nodes: impl IntoIterator<Item = PhysicalASAPNodeId>,
     ) -> HashMap<PhysicalASAPNodeId, Option<RefreshWindow>> {
-        let _ = nodes.into_iter();
-        todo!("#1207 PR 6: a node's refresh window from the TimeRange and TimeShift nodes above its inputs")
+        let index = ViewIndex::new(self);
+        nodes
+            .into_iter()
+            .map(|node| {
+                let window = index.windows_below(node).and_then(|windows| {
+                    windows
+                        .into_iter()
+                        .reduce(|(a_end, a_width), (b_end, b_width)| {
+                            let end = a_end.min(b_end);
+                            let start_back = a_end
+                                .saturating_add(a_width)
+                                .max(b_end.saturating_add(b_width));
+                            (end, start_back.saturating_sub(end))
+                        })
+                });
+                let refresh_window = window.and_then(|(end_offset_ms, width_ms)| {
+                    RefreshWindow::of_window(end_offset_ms, width_ms)
+                });
+                (node, refresh_window)
+            })
+            .collect()
     }
 
-    /// Sets `retention_ms` on every materialized view and every query-time
-    /// `Scan` of an installed DAG (tumbling-window chains expanded), and returns the
-    /// views ([`Self::materialized_views`]).
-    ///
-    /// A view takes `tumbling_window_retention_ms_by_node`'s value (Stage 3's retention
-    /// of a tumbling window's chain: its offset plus its window plus the longest
-    /// range-evaluation span of its consumers); otherwise how far back its
-    /// data reaches, plus, for a view built from other views, its consumers'
-    /// longest range-evaluation span (`reader_span_ms_by_node`). Then each
-    /// view is retained at least as long as every view built from it needs it:
-    /// as long as that view's own retention when it is refreshed on first
-    /// read (a range request may refresh it for its oldest step), else as
-    /// far back as that view's data reaches. This is each node's own
-    /// requirement: a runtime that stores identical outputs of several
-    /// nodes once keeps them for the largest requirement among those nodes.
-    ///
-    /// A query-time `Scan` keeps its rows for its consumers' window
-    /// (how far back they read) plus their longest
-    /// range-evaluation span, and at least the retention of every view
-    /// refreshed on first read from it (which may be refreshed for its
-    /// oldest step); `None` when its window is unbounded. In an installed
-    /// DAG a chain materialized across evaluations is its expanded tumbling windows, so its
-    /// scan keeps the reach of all of them: reusing a tumbling window refreshed at an
-    /// earlier evaluation is optional, and a restart or an older range step
-    /// refreshes older tumbling windows from raw data. (Stage 3 prices a materialized chain on
-    /// the unexpanded DAG as reading its newest tumbling window.)
-    pub fn set_retention(
-        &mut self,
-        tumbling_window_retention_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
-        reader_span_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
-    ) -> Result<Vec<MaterializedView>, InstallableDagError> {
-        let _ = (tumbling_window_retention_ms_by_node, reader_span_ms_by_node);
-        todo!("#1207 PR 6: each materialized node's retention_ms is its h_v, which Stage 3 sets")
-    }
-
-    /// For each raw-data source some query-time `Scan` reads, in the order
-    /// of its first such `Scan`, the longest `retention_ms` among those
-    /// scans, `None` when one reads it unbounded: the raw data a runtime
-    /// keeps for the DAG's queries, the raw-data counterpart of each view's
-    /// retention. A source read only at ingestion time is absent. Checks
-    /// that each scan reading a bounded window has a
-    /// retention covering it.
+    /// For each raw-data source some raw-data `Scan` (at query time, or
+    /// materialized at ingestion time) reads, in the order of its first such
+    /// `Scan`, the longest `retention_ms` among those
+    /// scans, `None` when one reads it unbounded (a consumer reads it
+    /// outside a `TimeRange` or chain): the raw data a runtime keeps for the
+    /// DAG's queries, the raw-data counterpart of each view's retention. A
+    /// source read only at ingestion time is absent. Checks that each scan
+    /// read through windows has a retention covering what the `TimeRange`s
+    /// and `TimeShift`s above it read back.
     pub fn raw_data_retention(&self) -> Result<Vec<RawDataRetention>, InstallableDagError> {
-        todo!("#1207 PR 6: each source's retention from its Scan nodes' retention_ms")
+        let index = ViewIndex::new(self);
+        let mut retention: Vec<RawDataRetention> = Vec::new();
+        for node in self.nodes.iter().filter(|node| is_raw_data_scan(node)) {
+            let Operator::NonASAP(NonASAPOp::Scan { source, .. }) = &node.payload else {
+                continue;
+            };
+            let (read_back_ms, read_outside_windows) = index.read_back_ms(node.id);
+            let lookback_ms = match (read_outside_windows, node.retention_ms) {
+                (true, _) => None,
+                (false, Some(kept_ms)) if kept_ms >= read_back_ms => Some(kept_ms),
+                (false, Some(_)) => {
+                    return Err(InstallableDagError::ScanRetentionTooShort { node_id: node.id })
+                }
+                (false, None) => {
+                    return Err(InstallableDagError::ScanWithoutRetention { node_id: node.id })
+                }
+            };
+            match retention
+                .iter_mut()
+                .find(|retained| &retained.source == source)
+            {
+                Some(retained) => {
+                    retained.lookback_ms =
+                        retained.lookback_ms.zip(lookback_ms).map(|(a, b)| a.max(b))
+                }
+                None => retention.push(RawDataRetention {
+                    source: source.clone(),
+                    lookback_ms,
+                }),
+            }
+        }
+        Ok(retention)
     }
 
     /// Checks that every raw-data window the DAG reads (each `TimeRange`,
-    /// and each `SummaryTumblingWindowChain`'s tumbling window, reading a `Scan` without passing another
-    /// `TimeRange`) has a supported shape
+    /// and each `SummaryTumblingWindowChain`'s tumbling window, reading a
+    /// `Scan` without passing another `TimeRange`) has a supported shape
     /// ([`InstallableDagError::UnsupportedRawDataWindow`]). O(nodes + edges)
     /// plus the depth below each window.
     pub fn check_raw_data_windows(&self) -> Result<(), InstallableDagError> {
         ViewIndex::new(self).check_raw_data_windows()
     }
-
-    /// The views, each with the node's `retention_ms` (0 when unset) and the
-    /// `Scan`s its refresh reads through its raw-data windows.
-    fn views_with_node_retention(
-        &self,
-    ) -> Result<Vec<(MaterializedView, Vec<PhysicalASAPNodeId>)>, InstallableDagError> {
-        let index = ViewIndex::new(self);
-        index.check_raw_data_windows()?;
-        let views: HashSet<PhysicalASAPNodeId> = self
-            .nodes
-            .iter()
-            .filter(|node| matches!(node.lifetime, Lifetime::AcrossEvaluations(_)))
-            .map(|node| node.id)
-            .collect();
-        let mut derived = Vec::new();
-        for &id in index.children_first.iter().filter(|id| views.contains(id)) {
-            let node = index.nodes[&id];
-            let (inputs, scans) = index.inputs_of_view(id, &views)?;
-            let refreshed_at_ingestion = node.output_state.timing == ExecutionTiming::IngestionTime;
-            if refreshed_at_ingestion {
-                // An ingestion run reads each view for the window ending at
-                // its end, so a view read must end where the raw windows do.
-                if !inputs.materialized_views.is_empty() {
-                    todo!("#1207 PR 6: the window a materialized view it reads ends at, from that node's time constraints")
-                }
-                let mut end_offsets_ms: Vec<i64> = inputs
-                    .raw_data_windows
-                    .iter()
-                    .map(|window| window.end_offset_ms)
-                    .collect();
-                end_offsets_ms.sort_unstable();
-                end_offsets_ms.dedup();
-                if end_offsets_ms.len() > 1 {
-                    return Err(
-                        InstallableDagError::IngestionBuildReadsWindowsOfDifferentOffsets {
-                            node_id: id,
-                            end_offsets_ms,
-                        },
-                    );
-                }
-            }
-            let coverage = node.view_coverage.clone().ok_or_else(|| {
-                InstallableDagError::ViewWithoutCoverage {
-                    node_id: id,
-                    reason: "the plan node carries no view_coverage".into(),
-                }
-            })?;
-            let view = MaterializedView {
-                node_id: id,
-                refresh: if refreshed_at_ingestion {
-                    MaterializedViewRefresh::AtIngestion
-                } else {
-                    MaterializedViewRefresh::OnFirstRead
-                },
-                coverage,
-                inputs,
-                retention_ms: node.retention_ms.unwrap_or(0),
-            };
-            derived.push((view, scans));
-        }
-        Ok(derived)
-    }
 }
 
-/// How far back from the evaluation time the data a view refreshed from
-/// `inputs` summarizes reaches: the farthest of its raw-data windows and of
-/// the views it reads (`reach_ms_by_node`, each already computed).
-/// Whether `node` is a `Scan` run at query time, which carries how long its
-/// source's rows are retained for it.
-pub(crate) fn is_query_time_scan(node: &PhysicalASAPDAGNode) -> bool {
+/// Whether `node` is a `Scan` whose raw data is kept for its consumers to
+/// read back: one run at query time, or materialized across evaluations
+/// at ingestion time. It carries how long its source's rows are retained
+/// for it, and is no view: raw data is stored by its `Source`.
+pub(crate) fn is_raw_data_scan(node: &PhysicalASAPDAGNode) -> bool {
     matches!(node.payload, Operator::NonASAP(NonASAPOp::Scan { .. }))
-        && node.output_state.timing == ExecutionTiming::QueryTime
+        && (node.output_state.timing == ExecutionTiming::QueryTime
+            || matches!(node.lifetime, Lifetime::AcrossEvaluations(_)))
 }
 
-fn reach_ms_of(
-    inputs: &MaterializedViewInputs,
-    reach_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
-) -> u64 {
-    let windows = inputs
-        .raw_data_windows
-        .iter()
-        .map(RawDataWindow::lookback_ms);
-    let views = inputs
-        .materialized_views
-        .iter()
-        .map(|id| reach_ms_by_node.get(id).copied().unwrap_or(0));
-    windows.chain(views).max().unwrap_or(0)
-}
-
-/// The nodes of a DAG by id, each node's inputs in edge order, and two
-/// facts every raw-data window check reads, computed in one pass each over
-/// the DAG (O(nodes + edges)); it walks down from each window to check its
-/// shape.
+/// The nodes of a DAG by id, each node's inputs and consumers in edge
+/// order, and two facts every raw-data window check reads, computed in one
+/// pass each over the DAG (O(nodes + edges)); it walks down from each
+/// window to check its shape.
 struct ViewIndex<'a> {
     dag: &'a PhysicalASAPDAG,
     nodes: HashMap<PhysicalASAPNodeId, &'a PhysicalASAPDAGNode>,
     inputs: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
+    consumers: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
     /// Every node after its inputs, from the DAG's node order.
     children_first: Vec<PhysicalASAPNodeId>,
     /// The nodes whose rows come from raw data: a `Scan` is reachable below
@@ -671,8 +609,13 @@ impl<'a> ViewIndex<'a> {
     fn new(dag: &'a PhysicalASAPDAG) -> Self {
         let nodes: HashMap<_, _> = dag.nodes.iter().map(|n| (n.id, n)).collect();
         let mut inputs: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
+        let mut consumers: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
         for edge in &dag.edges {
             inputs.entry(edge.consumer).or_default().push(edge.producer);
+            consumers
+                .entry(edge.producer)
+                .or_default()
+                .push(edge.consumer);
         }
         // Every node after its inputs: an iterative depth-first postorder.
         let mut children_first = Vec::with_capacity(dag.nodes.len());
@@ -719,6 +662,7 @@ impl<'a> ViewIndex<'a> {
             dag,
             nodes,
             inputs,
+            consumers,
             children_first,
             reading_raw_data,
             re_timed_from_above,
@@ -737,6 +681,155 @@ impl<'a> ViewIndex<'a> {
             Some([input]) => Some(*input),
             _ => None,
         }
+    }
+
+    /// Every materialized view, in dependency order, with the node's
+    /// `retention_ms` (0 when unset), after checking the DAG's raw-data
+    /// windows.
+    fn views(&self) -> Result<Vec<MaterializedView>, InstallableDagError> {
+        self.check_raw_data_windows()?;
+        let views: HashSet<PhysicalASAPNodeId> = self
+            .dag
+            .nodes
+            .iter()
+            .filter(|node| {
+                matches!(node.lifetime, Lifetime::AcrossEvaluations(_)) && !is_raw_data_scan(node)
+            })
+            .map(|node| node.id)
+            .collect();
+        let mut derived = Vec::new();
+        for &id in self.children_first.iter().filter(|id| views.contains(id)) {
+            let node = self.nodes[&id];
+            let inputs = self.inputs_of_view(id, &views)?;
+            let refreshed_at_ingestion = node.output_state.timing == ExecutionTiming::IngestionTime;
+            if refreshed_at_ingestion {
+                // An ingestion run builds the windows ending at its end, so
+                // every window the view reads must end at one offset.
+                let mut end_offsets_ms: Vec<i64> = self
+                    .windows_below(id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(end_offset_ms, _)| end_offset_ms)
+                    .collect();
+                end_offsets_ms.sort_unstable();
+                end_offsets_ms.dedup();
+                if end_offsets_ms.len() > 1 {
+                    return Err(
+                        InstallableDagError::IngestionBuildReadsWindowsOfDifferentOffsets {
+                            node_id: id,
+                            end_offsets_ms,
+                        },
+                    );
+                }
+            }
+            let coverage = node.view_coverage.clone().ok_or_else(|| {
+                InstallableDagError::ViewWithoutCoverage {
+                    node_id: id,
+                    reason: "the plan node carries no view_coverage".into(),
+                }
+            })?;
+            derived.push(MaterializedView {
+                node_id: id,
+                refresh: if refreshed_at_ingestion {
+                    MaterializedViewRefresh::AtIngestion
+                } else {
+                    MaterializedViewRefresh::OnFirstRead
+                },
+                coverage,
+                inputs,
+                retention_ms: node.retention_ms.unwrap_or(0),
+            });
+        }
+        Ok(derived)
+    }
+
+    /// The windows `(end_offset_ms, width_ms)` back from the evaluation
+    /// time that `node` reads: a chain of width `w` over `TimeShift`s
+    /// summing to `s` its own `(s, w)`; any other node each `TimeRange(w)`
+    /// below it over shifts summing to `s`, `(s, w)`, and each chain below
+    /// it reached without passing a `TimeRange`. `None` when one is read
+    /// through an `@` anchor below its `TimeRange` or chain.
+    fn windows_below(&self, node: PhysicalASAPNodeId) -> Option<Vec<(i64, i64)>> {
+        let mut windows = Vec::new();
+        let mut seen = HashSet::new();
+        let mut pending = vec![node];
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            let width_ms = match &self.nodes.get(&id)?.payload {
+                Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) => {
+                    i64::try_from(range.as_millis()).ok()?
+                }
+                Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                    tumbling_window_width_ms,
+                    ..
+                }) => i64::try_from(*tumbling_window_width_ms).ok()?,
+                _ => {
+                    pending.extend(self.inputs.get(&id).into_iter().flatten().copied());
+                    continue;
+                }
+            };
+            windows.push((self.offset_below(id)?, width_ms));
+        }
+        Some(windows)
+    }
+
+    /// The sum of the offsets of the `TimeShift`s right below `node`;
+    /// `None` when one has an `@` anchor.
+    fn offset_below(&self, node: PhysicalASAPNodeId) -> Option<i64> {
+        let mut end_offset_ms = 0i64;
+        let mut current = node;
+        while let Some(input) = self.only_input(current) {
+            let Some(NonASAPOp::TimeShift { shift, .. }) = self.relational(input) else {
+                break;
+            };
+            if shift.at.is_some() {
+                return None;
+            }
+            end_offset_ms = end_offset_ms.saturating_add(shift.offset_ms);
+            current = input;
+        }
+        Some(end_offset_ms)
+    }
+
+    /// How far back from the evaluation time the consumers of `node` read
+    /// it: through `TimeShift`s (without an `@` anchor) summing to `o`, a
+    /// `TimeRange(r)` reads `o + r` back, a chain of width `w` `o + w`, and
+    /// any other consumer `o`; the most of these, and whether a consumer
+    /// other than a `TimeRange` or chain (or a root) reads it, outside a
+    /// window.
+    fn read_back_ms(&self, node: PhysicalASAPNodeId) -> (u64, bool) {
+        let mut read_back_ms = 0u64;
+        let mut read_outside_windows = false;
+        let mut pending = vec![(node, 0i64)];
+        while let Some((id, offset_ms)) = pending.pop() {
+            if self.dag.roots.contains(&id) {
+                read_outside_windows = true;
+            }
+            for &consumer in self.consumers.get(&id).into_iter().flatten() {
+                let width_ms = match &self.nodes[&consumer].payload {
+                    Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }) if shift.at.is_none() => {
+                        pending.push((consumer, offset_ms.saturating_add(shift.offset_ms)));
+                        continue;
+                    }
+                    Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) => {
+                        u64::try_from(range.as_millis()).unwrap_or(u64::MAX)
+                    }
+                    Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                        tumbling_window_width_ms,
+                        ..
+                    }) => *tumbling_window_width_ms,
+                    _ => {
+                        read_outside_windows = true;
+                        0
+                    }
+                };
+                let offset_ms = u64::try_from(offset_ms).unwrap_or(0);
+                read_back_ms = read_back_ms.max(offset_ms.saturating_add(width_ms));
+            }
+        }
+        (read_back_ms, read_outside_windows)
     }
 
     /// See [`PhysicalASAPDAG::check_raw_data_windows`].
@@ -761,12 +854,11 @@ impl<'a> ViewIndex<'a> {
         Ok(())
     }
 
-    /// The raw-data window read through the `TimeRange` `time_range` and
-    /// the `Scan` it reads, or why its shape is unsupported.
+    /// The raw-data window read through the `TimeRange` `time_range`, or why its shape is unsupported.
     fn window_at(
         &self,
         time_range: PhysicalASAPNodeId,
-    ) -> Result<(RawDataWindow, PhysicalASAPNodeId), InstallableDagError> {
+    ) -> Result<RawDataWindow, InstallableDagError> {
         let Some(NonASAPOp::TimeRange { range, .. }) = self.relational(time_range) else {
             return Err(InstallableDagError::UnsupportedRawDataWindow {
                 time_range_node_id: time_range,
@@ -777,19 +869,25 @@ impl<'a> ViewIndex<'a> {
     }
 
     /// The window of width `width_ms` that `time_range` (a `TimeRange`, or
-    /// a `SummaryTumblingWindowChain`'s tumbling window) reads from the `Scan` below it, and that
-    /// `Scan`, or why its shape is unsupported. It does not allocate or
-    /// compile every tumbling window in a chain.
+    /// a `SummaryTumblingWindowChain`'s tumbling window) reads from the
+    /// `Scan` below it, or why its shape is unsupported. A
+    /// `TimeRange` run at ingestion time may have no `TimeShift` or subquery
+    /// above it; a query run evaluates one, and a chain's windows are
+    /// selected by the `TimeRange`s above it.
     fn raw_window_below(
         &self,
         time_range: PhysicalASAPNodeId,
         width_ms: u128,
-    ) -> Result<(RawDataWindow, PhysicalASAPNodeId), InstallableDagError> {
+    ) -> Result<RawDataWindow, InstallableDagError> {
         let unsupported = |reason| InstallableDagError::UnsupportedRawDataWindow {
             time_range_node_id: time_range,
             reason,
         };
-        if self.re_timed_from_above.contains(&time_range) {
+        let node = self.nodes[&time_range];
+        if self.re_timed_from_above.contains(&time_range)
+            && node.output_state.timing == ExecutionTiming::IngestionTime
+            && matches!(node.payload, Operator::NonASAP(NonASAPOp::TimeRange { .. }))
+        {
             return Err(unsupported("a subquery or a TimeShift above the range"));
         }
         let width_ms =
@@ -818,7 +916,7 @@ impl<'a> ViewIndex<'a> {
                         end_offset_ms,
                         width_ms,
                     };
-                    return Ok((window, current));
+                    return Ok(window);
                 }
                 _ => {
                     return Err(unsupported(
@@ -829,14 +927,28 @@ impl<'a> ViewIndex<'a> {
         }
     }
 
-    /// What view `node`'s refresh reads: below it, each view (`views`) and
-    /// each raw-data `TimeRange` it reaches without passing another of
-    /// them, in node order, and the `Scan` below each `TimeRange`.
+    /// What view `node`'s refresh reads: a chain reading raw data, the
+    /// window of its tumbling window; any other view, below it, each view
+    /// (`views`) and each raw-data `TimeRange` it reaches without passing
+    /// another of them, in node order.
     fn inputs_of_view(
         &self,
         node: PhysicalASAPNodeId,
         views: &HashSet<PhysicalASAPNodeId>,
-    ) -> Result<(MaterializedViewInputs, Vec<PhysicalASAPNodeId>), InstallableDagError> {
+    ) -> Result<MaterializedViewInputs, InstallableDagError> {
+        if let Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            tumbling_window_width_ms,
+            ..
+        }) = &self.nodes[&node].payload
+        {
+            if self.reading_raw_data.contains(&node) {
+                let window = self.raw_window_below(node, u128::from(*tumbling_window_width_ms))?;
+                return Ok(MaterializedViewInputs {
+                    raw_data_windows: vec![window],
+                    materialized_views: Vec::new(),
+                });
+            }
+        }
         let mut raw_ranges = Vec::new();
         let mut view_inputs = Vec::new();
         let mut seen = HashSet::new();
@@ -868,16 +980,13 @@ impl<'a> ViewIndex<'a> {
         }
         raw_ranges.sort_unstable();
         view_inputs.sort_unstable();
-        let (raw_data_windows, scans) = raw_ranges
+        let raw_data_windows = raw_ranges
             .into_iter()
             .map(|range| self.window_at(range))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .unzip();
-        let inputs = MaterializedViewInputs {
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(MaterializedViewInputs {
             raw_data_windows,
             materialized_views: view_inputs,
-        };
-        Ok((inputs, scans))
+        })
     }
 }
