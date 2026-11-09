@@ -8,6 +8,7 @@ use std::rc::Rc;
 
 use super::node::{Operator, OperatorNode, OperatorResultKind};
 use super::non_asap::NonASAPOp;
+use super::operator_properties::Source;
 use crate::ir::properties::summary_coverage::SummaryCoverage;
 use crate::ir::schema::Schema;
 use crate::ir::SchemaDerivationError;
@@ -21,6 +22,25 @@ pub trait OperatorInput: Sized + Clone {
     /// What the input covers when it is an aggregate group in the memo;
     /// `None` for any other input.
     fn aggregate_coverage(&self) -> Option<&SummaryCoverage>;
+    /// Whether every `Scan` below it reads a time series (PromQL rows):
+    /// [`reads_only_time_series`] of its operator, a memo group's stored
+    /// property.
+    fn reads_only_time_series(&self) -> bool;
+}
+
+/// Whether every `Scan` at or below `operator` reads a time series: a
+/// `Scan` of a `Source::TimeSeries`, or any other operator all of whose
+/// inputs do.
+pub(crate) fn reads_only_time_series<I: OperatorInput>(operator: &Operator<I>) -> bool {
+    match operator {
+        Operator::NonASAP(NonASAPOp::Scan { source, .. }) => {
+            matches!(source, Source::TimeSeries { .. })
+        }
+        operator => operator
+            .children()
+            .into_iter()
+            .all(OperatorInput::reads_only_time_series),
+    }
 }
 
 /// A front-end node tree. Node trees carry no summary coverage.
@@ -39,6 +59,10 @@ impl OperatorInput for Rc<OperatorNode> {
 
     fn aggregate_coverage(&self) -> Option<&SummaryCoverage> {
         None
+    }
+
+    fn reads_only_time_series(&self) -> bool {
+        reads_only_time_series(&self.operator)
     }
 }
 
@@ -113,6 +137,13 @@ impl<I: OperatorInput> OperatorInput for InputOrTemporaryBuild<I> {
         match self {
             Self::Input(input) => input.aggregate_coverage(),
             Self::TemporaryBuild(_) => None,
+        }
+    }
+
+    fn reads_only_time_series(&self) -> bool {
+        match self {
+            Self::Input(input) => input.reads_only_time_series(),
+            Self::TemporaryBuild(build) => reads_only_time_series(&build.operator),
         }
     }
 }

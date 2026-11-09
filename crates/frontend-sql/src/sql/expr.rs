@@ -1,5 +1,6 @@
 use std::rc::Rc;
 
+use datafusion::arrow::datatypes::{DataType as ArrowDataType, TimeUnit};
 use datafusion::logical_expr::utils::{split_binary, split_conjunction};
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 
@@ -137,17 +138,27 @@ impl SqlLowerer<'_> {
 
             Expr::IsNotNull(inner) => Ok(Unresolved::IsNotNull(bx(inner)?)),
 
-            // Fold a numeric cast of a literal, as DataFusion's constant folding
-            // does: type coercion turns `latency < 100` on a DOUBLE column into
-            // `latency < CAST(100 AS DOUBLE)`, which lowers as `latency < 100.0`.
+            // Fold a numeric or timestamp cast of a literal, as DataFusion's
+            // constant folding does: type coercion turns `latency < 100` on a
+            // DOUBLE column into `latency < CAST(100 AS DOUBLE)`, which lowers
+            // as `latency < 100.0`, and `ts >= '2026-11-01'` into a cast of the
+            // string, which lowers as a `Timestamp` literal (ms since the epoch).
             Expr::Cast(c)
                 if matches!(c.expr.as_ref(), Expr::Literal(v, _) if !v.is_null())
-                    && (c.field.data_type().is_integer() || c.field.data_type().is_floating()) =>
+                    && (c.field.data_type().is_integer()
+                        || c.field.data_type().is_floating()
+                        || matches!(c.field.data_type(), ArrowDataType::Timestamp(..))) =>
             {
                 let Expr::Literal(sv, _) = c.expr.as_ref() else {
                     unreachable!()
                 };
-                match sv.cast_to(c.field.data_type()) {
+                let to = match c.field.data_type() {
+                    ArrowDataType::Timestamp(..) => {
+                        ArrowDataType::Timestamp(TimeUnit::Millisecond, None)
+                    }
+                    other => other.clone(),
+                };
+                match sv.cast_to(&to) {
                     Ok(folded) => scalar_value_to_asap(&folded).map(Unresolved::Literal),
                     Err(_) => Ok(Unresolved::Cast {
                         expr: bx(&c.expr)?,
