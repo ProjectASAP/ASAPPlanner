@@ -62,7 +62,7 @@ pub(in crate::operators) async fn reduce_batch(
     }
     work.checkpoint_rows(batch.num_rows()).await?;
     workspace.set_bytes(table.memory_bytes() + 16 * batch.num_rows())?;
-    let mut kept = Vec::new();
+    let mut remaining = Vec::new();
     let mut results = Vec::new();
     for group in table.groups_in_key_order() {
         work.checkpoint().await?;
@@ -95,11 +95,11 @@ pub(in crate::operators) async fn reduce_batch(
             )?
         };
         if let Some(result) = result {
-            kept.push(group);
+            remaining.push(group);
             results.push(result);
         }
     }
-    let labels = table.label_arrays(batch.schema(), &kept)?;
+    let labels = table.label_arrays(batch.schema(), &remaining)?;
     Ok((labels, results))
 }
 

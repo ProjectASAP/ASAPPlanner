@@ -1,114 +1,21 @@
-// DOM-free logic of the Stage Viewer: checking an `asap-stage-pipeline/v1`
-// document (written by the `asap_planner` devtool), the Stage 3 candidate
-// list, and each stage's DAG as cytoscape elements with readable labels.
+// DOM-free logic of the Stage Viewer: checking an `asap-stage-pipeline/v2`
+// document (written by the `asap_planner` devtool), the selected plan's row,
+// and each drawn DAG (Stage 0's and Stage 3's plan) as cytoscape elements
+// with readable labels.
 // app.js draws them; test_viewer.py runs this file headless.
-const STAGE_PIPELINE_FORMAT = 'asap-stage-pipeline/v1';
+const STAGE_PIPELINE_FORMAT = 'asap-stage-pipeline/v2';
 
-// Documents written before #1163 name the tumbling-window chain `PaneChain`,
-// its fields `pane_*`, and the memo origin `panes` (`Panes` in older MILP
-// search reports); renames them in place to today's names, keeping each
-// object's key order, so the rest of the viewer reads one set of names.
-// Remove once no document the viewer must open predates #1163.
-const TUMBLING_WINDOW_RENAMES = Object.freeze({
-  PaneChain: 'SummaryTumblingWindowChain',
-  pane_width_ms: 'tumbling_window_width_ms',
-  pane_count: 'tumbling_window_count',
-  newest_panes: 'newest_tumbling_windows',
-  pane_retention_ms: 'tumbling_window_retention_ms',
-});
-const ORIGIN_RENAMES = Object.freeze({ panes: 'tumbling_windows', Panes: 'TumblingWindows' });
-const has = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
-function upgradeTumblingWindowNames(value, parentKey) {
-  if (Array.isArray(value)) {
-    value.forEach((item, index) => {
-      if (item === 'PaneChain') value[index] = TUMBLING_WINDOW_RENAMES.PaneChain;
-      else upgradeTumblingWindowNames(item);
-    });
-    return value;
-  }
-  if (!value || typeof value !== 'object') return value;
-  // Origin counts are keyed by origin name.
-  const renames = parentKey === 'candidate_count_by_origin' || parentKey === 'candidates_by_origin'
-    ? ORIGIN_RENAMES : TUMBLING_WINDOW_RENAMES;
-  const entries = Object.entries(value);
-  if (!entries.some(([key]) => has(renames, key) && !has(value, renames[key]))) {
-    for (const [key, item] of entries) value[key] = upgradeItem(key, item);
-    return value;
-  }
-  for (const key of Object.keys(value)) delete value[key];
-  for (const [key, item] of entries) {
-    // An old key never overwrites a new one already present.
-    const renamed = has(renames, key) && !entries.some(([other]) => other === renames[key]) ? renames[key] : key;
-    value[renamed] = upgradeItem(key, item);
-  }
-  return value;
-}
-// Documents written before the planner dropped `MemoSteps` have a memo step
-// `pass2` (local window composition only) followed by `concrete_states`
-// (Pass 2's output); older ones also name Stage 1's pruned candidates
-// `pass1_pruned` (read by the memo group panel).
-// Renames them in place to today's steps, where `pass2` is Pass 2's output:
-// the window-composition step is dropped (its candidates are in Pass 2's
-// output, marked by their origin), `concrete_states` becomes `pass2`.
-// Remove once no document the viewer must open predates the change.
 // A stage `run_until` stopped before, or one after a failed stage, is null;
 // the viewer shows it empty.
 function fillStagesNotRun(doc) {
   if (!doc || typeof doc !== 'object') return doc;
   const empty = {
-    stage1_logical_asap_optimization: { combinations: 0, capped: false, pruned_candidates: [], candidates: [] },
-    stage2_physical_asap_optimization: { candidates: [], pruned: [], pruned_candidates: [] },
-    stage3_plan_selection: { selected_dag: null, materialized_views: [] },
+    stage1_logical_asap_optimization: { pruned_candidates: [] },
+    stage2_physical_asap_optimization: { physical_candidates: [], pruned_candidates: [] },
+    stage3_plan_selection: { plan: null, materialized_views: [], pruned_candidates: [] },
   };
   Object.entries(empty).forEach(([stage, section]) => { if (doc[stage] === null) doc[stage] = section; });
   return doc;
-}
-
-function upgradeMemoSteps(doc) {
-  const stage1 = doc && doc.stage1_logical_asap_optimization;
-  if (stage1 && has(stage1, 'pass1_pruned') && !has(stage1, 'pruned_candidates')) {
-    stage1.pruned_candidates = stage1.pass1_pruned;
-    delete stage1.pass1_pruned;
-  }
-  const memo = doc && doc.memo;
-  if (!memo || !Array.isArray(memo.steps) || !memo.steps.some((step) => step && step.step === 'concrete_states')) return doc;
-  // `added` was relative to the dropped step: a candidate that step added
-  // (same group, node and children) is also new since Pass 1.
-  const dropped = memo.steps.find((step) => step && step.step === 'pass2');
-  const addedByDropped = new Set();
-  for (const group of (dropped && dropped.groups) || []) {
-    for (const candidate of group.candidates || []) {
-      if (candidate.added) addedByDropped.add(JSON.stringify([group.id, candidate.node, candidate.children]));
-    }
-  }
-  memo.steps = memo.steps.filter((step) => !step || step.step !== 'pass2');
-  for (const step of memo.steps) {
-    if (!step || step.step !== 'concrete_states') continue;
-    Object.assign(step, { step: 'pass2', title: 'Stage 1, Pass 2' });
-    for (const group of step.groups || []) {
-      for (const candidate of group.candidates || []) {
-        if (addedByDropped.has(JSON.stringify([group.id, candidate.node, candidate.children]))) candidate.added = true;
-      }
-    }
-  }
-  const enumeration = memo.enumeration;
-  if (enumeration && enumeration.per_step) {
-    const perStep = {};
-    for (const [step, count] of Object.entries(enumeration.per_step)) {
-      if (step === 'pass2') continue;
-      perStep[step === 'concrete_states' ? 'pass2' : step] = count;
-    }
-    enumeration.per_step = perStep;
-    // A listing of the dropped step is a listing of no step left.
-    if (enumeration.step === 'pass2') Object.assign(enumeration, { step: 'pass2', choices: [], priced: null });
-    else if (enumeration.step === 'concrete_states') enumeration.step = 'pass2';
-  }
-  return doc;
-}
-function upgradeItem(key, item) {
-  if (item === 'PaneChain') return TUMBLING_WINDOW_RENAMES.PaneChain;
-  if (key === 'origin' && has(ORIGIN_RENAMES, item)) return ORIGIN_RENAMES[item];
-  return upgradeTumblingWindowNames(item, key);
 }
 
 function isStagePipelineDocument(doc) {
@@ -153,49 +60,6 @@ function stageLogicalChildren(body) {
   return ids;
 }
 
-// `value` (an operator body field that is not a child field) with every
-// operator node id its scalar expressions read replaced by `f(id)`.
-function stageMapScalarRefs(value, f) {
-  if (Array.isArray(value)) return value.map((inner) => stageMapScalarRefs(inner, f));
-  if (!value || typeof value !== 'object') return value;
-  return Object.fromEntries(Object.entries(value).map(([field, inner]) => [field,
-    STAGE_SCALAR_REF_FIELDS.includes(field) && typeof inner === 'number' ? f(inner) : stageMapScalarRefs(inner, f)]));
-}
-
-// A logical operator with every node id it reads (those stageLogicalChildren
-// lists) replaced by `f(id)`.
-function stageMapLogicalChildren(operator, f) {
-  const [outer, inner] = Object.entries(operator)[0];
-  if (!inner || typeof inner !== 'object') return operator;
-  const [kind, body] = Object.entries(inner)[0];
-  if (!body || typeof body !== 'object' || Array.isArray(body)) return operator;
-  const mapped = Object.fromEntries(Object.entries(body).map(([field, value]) => {
-    if (!STAGE_CHILD_FIELDS.includes(field)) return [field, stageMapScalarRefs({ [field]: value }, f)[field]];
-    const id = (v) => (typeof v === 'number' ? f(v) : v);
-    return [field, Array.isArray(value) ? value.map(id) : id(value)];
-  }));
-  return { [outer]: { [kind]: mapped } };
-}
-
-// The flat DAG below `roots` (indices into `table`, the memo section's
-// `memo.nodes`): the nodes they reach, renumbered from 0 in table order (so
-// children still come before parents), with one operator root per entry of
-// `roots`.
-function memoNodeDag(table, roots) {
-  const reached = new Set();
-  const pending = [...roots];
-  while (pending.length) {
-    const id = pending.pop();
-    if (reached.has(id) || !table[id]) continue;
-    reached.add(id);
-    pending.push(...stageLogicalChildren(stageOperatorParts(table[id].operator)[1]));
-  }
-  const tableIds = [...reached].sort((a, b) => a - b);
-  const local = new Map(tableIds.map((id, i) => [id, i]));
-  const nodes = tableIds.map((id) => ({ ...table[id], operator: stageMapLogicalChildren(table[id].operator, (child) => local.get(child)) }));
-  return { nodes, roots: roots.map((id) => ({ Operator: local.get(id) })) };
-}
-
 // A scalar expression as short text: `time()`, `scalar(#3)` (node 3),
 // literals as their value; other forms by name.
 function stageScalarText(expr) {
@@ -211,10 +75,10 @@ function stageScalarText(expr) {
   }
 }
 
-// One stage DAG in one shape for both kinds. A logical DAG (Stage 0 and
-// Stage 1) is flat: node i is `nodes[i]`, its inputs are ids inside its
-// operator, and each query's root is `{"Operator": id}` or
-// `{"Scalar": expr}`. A physical DAG (Stage 2) has node ids, an edge list,
+// One stage DAG in one shape for both kinds. A logical DAG (Stage 0) is
+// flat: node i is `nodes[i]`, its inputs are ids inside its operator, and
+// each query's root is `{"Operator": id}` or `{"Scalar": expr}`. A physical
+// DAG (Stage 3's plan) has node ids, an edge list,
 // operator roots in `roots`, and standalone scalar queries in
 // `scalar_roots` as `[query position, expr]`, so query i is not `roots[i]`.
 // `queries` holds, per workload query, `{ node: id }` or `{ scalar: expr }`.
@@ -305,117 +169,95 @@ function validatePhysicalDag(dag, where, queryCount) {
   return errors;
 }
 
-function uniqueIds(list, where, errors) {
-  const ids = new Set();
-  list.forEach((entry, index) => {
-    if (!entry || typeof entry.id !== 'string' || !entry.id) errors.push(`${where}[${index}]: id must be a non-empty string`);
-    else if (ids.has(entry.id)) errors.push(`${where}[${index}]: duplicate id ${entry.id}`);
-    else ids.add(entry.id);
-  });
-  return ids;
+const isPlainObject = (value) => !!value && typeof value === 'object' && !Array.isArray(value);
+
+// A pruning reason of Stage 2 or Stage 3 (a serialized `PruneReason`): a
+// snake_case string, e.g. "usage_not_costable" as "usage not costable", or
+// `{"dominated_by": id}` as "dominated by C<id>", the physical candidate
+// that dominates it.
+function prunedReasonText(reason) {
+  if (typeof reason === 'string') return reason.replace(/_/g, ' ');
+  if (isPlainObject(reason) && 'dominated_by' in reason) return `dominated by C${reason.dominated_by}`;
+  return compactWire(reason);
 }
 
-// The `reference_pricing.pruned_candidates[].cause` values (`RejectionCause`)
-// of a candidate that failed a check (`RejectionCause::failed_a_check`):
-// it is not priced.
-const FAILED_CHECK_CAUSES = [
-  'accuracy_target_missed',
-  'no_accuracy_guarantee', 'latency_bound_exceeded', 'latency_over_repeat_interval',
-  'over_cluster_capacity', 'infeasible', 'cost_not_representable',
-];
-// Every `reference_pricing.pruned_candidates[].cause` the reference pricer
-// writes: the failed checks, then the losses under the cost model (priced,
-// not selected).
-const REJECTION_CAUSES = FAILED_CHECK_CAUSES.concat([
-  'costlier', 'slower', 'more_memory',
-  'tied_lost_on_enumeration_order',
-]);
-
-// The per-candidate selection table the panels read, named as
-// `reference_pricing` names its keys, from Stage 3's `Selection`
-// (`stage3_plan_selection`): the selected plan `P1` with its cost and
-// accepted accuracy. Under `--exhaustive` it also holds the reference
-// pricer's table (`reference_pricing`) over the enumerated plans: their
-// costs, accepted accuracy and pruned candidates, with the reference
-// pricer's own pick as `reference_selected_candidate`. A document written
-// before `Selection` (its Stage 3 section has `costs`, `selected`,
-// `accepted`, `rejected` with `id`s) is read into the same table.
-function selectionTable(doc) {
-  const stage3 = doc.stage3_plan_selection || {};
-  if ('costs' in stage3) {
-    const pruned = Array.isArray(stage3.rejected)
-      ? stage3.rejected.map((r) => (r && typeof r === 'object' ? { candidate: r.id, cause: r.cause, reason: r.reason } : r))
-      : stage3.rejected;
-    return {
-      ...stage3,
-      selected_candidate: stage3.selected,
-      cost_per_candidate: stage3.costs,
-      accepted_accuracy_per_candidate: stage3.accepted || {},
-      pruned_candidates: pruned,
-      pruned_candidates_not_enumerated: (stage3.search_rejected || []).map((r) => ({ candidate: r.id, cause: r.cause, reason: r.reason })),
-      pruned_candidate_count_by_cause: stage3.rejected_by_cause,
-    };
-  }
-  const table = {
-    selected_candidate: null, cost_per_candidate: {}, accepted_accuracy_per_candidate: {},
-    pruned_candidates: [], pruned_candidates_not_enumerated: [],
-    error: stage3.error, warnings: stage3.warnings,
-    materialized_views: stage3.materialized_views, materialized_views_error: stage3.materialized_views_error,
-    tumbling_window_retention_ms: stage3.tumbling_window_retention_ms, search_report: stage3.search_report,
-  };
-  if (stage3.cost) {
-    table.selected_candidate = 'P1';
-    table.cost_per_candidate.P1 = stage3.cost;
-    table.accepted_accuracy_per_candidate.P1 = stage3.accepted_accuracy_per_query;
-  }
-  const reference = doc.reference_pricing;
-  if (reference) {
-    Object.assign(table.cost_per_candidate, reference.cost_per_candidate || {});
-    Object.assign(table.accepted_accuracy_per_candidate, reference.accepted_accuracy_per_candidate || {});
-    table.pruned_candidates = (reference.pruned_candidates || []).slice();
-    table.pruned_candidates_not_enumerated = (reference.pruned_candidates_not_enumerated || []).slice();
-    table.pruned_candidate_count_by_cause = reference.pruned_candidate_count_by_cause;
-    table.reference_selected_candidate = reference.selected_candidate ?? null;
-    if (reference.error && !table.error) table.reference_error = reference.error;
-  }
-  return table;
-}
-
-// The selection table's problems; paths name `reference_pricing`'s keys
-// (an archived document's Stage 3 section holds the same under its older
-// names).
-function validateSelection(selection, physicalById) {
-  const errors = [];
-  if (!selection || typeof selection !== 'object') return ['stage3_plan_selection must be an object'];
-  if (selection.selected_candidate !== null && !physicalById.has(selection.selected_candidate)) {
-    errors.push('selected_candidate must name a Stage 2 candidate or be null');
-  }
-  if (!Array.isArray(selection.pruned_candidates)) return errors.concat('pruned_candidates must be an array');
-  const accounted = new Set([selection.selected_candidate, selection.reference_selected_candidate].filter((id) => id !== null && id !== undefined));
-  selection.pruned_candidates.forEach((entry, index) => {
-    const at = `pruned_candidates[${index}]`;
-    const id = entry && entry.candidate;
-    if (!physicalById.has(id)) errors.push(`${at}: ${JSON.stringify(id)} is not a Stage 2 candidate`);
-    else if (accounted.has(id)) errors.push(`${at}: ${id} is already selected or pruned`);
-    if (!entry || !REJECTION_CAUSES.includes(entry.cause)) errors.push(`${at}: cause must be one of ${REJECTION_CAUSES.join(', ')}`);
-    accounted.add(id);
-  });
-  if (selection.selected_candidate !== null) {
-    physicalById.forEach((_, id) => { if (!accounted.has(id)) errors.push(`stage3_plan_selection: ${id} is neither selected nor pruned`); });
-  }
-  const costs = selection.cost_per_candidate;
-  if (!costs || typeof costs !== 'object' || Array.isArray(costs)) return errors.concat('cost_per_candidate must be an object');
-  Object.entries(costs).forEach(([id, cost]) => {
-    const at = `cost_per_candidate.${id}`;
-    if (!physicalById.has(id)) { errors.push(`${at}: not a Stage 2 candidate`); return; }
-    // `cost_per_second` is null under cost model 3 (own cluster), which has no prices.
-    if (!cost || (cost.cost_per_second !== null && (typeof cost.cost_per_second !== 'number' || !Number.isFinite(cost.cost_per_second)))) errors.push(`${at}: cost_per_second must be a number or null`);
-    if (!cost || typeof cost.cost_unit !== 'string') errors.push(`${at}: cost_unit must be a string`);
-    const nodeIds = new Set(physicalById.get(id).dag.nodes.map((node) => String(node.id)));
+// Stage 3's plan, its cost and its materialized views, whose node ids are
+// the plan's. Without a plan (selection failed or did not run) there is no
+// view. `cost` is null when the plan could not be costed.
+function validatePlanSelection(stage3, queryCount) {
+  const at = 'stage3_plan_selection';
+  const views = stage3.materialized_views === undefined ? [] : stage3.materialized_views;
+  if (!Array.isArray(views)) return [`${at}.materialized_views must be an array`];
+  if (stage3.plan === null || stage3.plan === undefined) return views.length ? [`${at}.materialized_views must be empty without a plan`] : [];
+  const errors = validatePhysicalDag(stage3.plan, `${at}.plan`, queryCount);
+  if (errors.length) return errors;
+  const nodeIds = new Set(stage3.plan.nodes.map((node) => node.id));
+  const cost = stage3.cost;
+  if (cost !== null && cost !== undefined) {
+    // `cost_per_second` is null under cost model 3 (own cluster), which has no unit costs.
+    if (!isPlainObject(cost) || (cost.cost_per_second !== null && !Number.isFinite(cost.cost_per_second))) errors.push(`${at}.cost: cost_per_second must be a number or null`);
     Object.keys((cost && cost.per_node) || {}).forEach((key) => {
-      if (!nodeIds.has(key)) errors.push(`${at}.per_node names missing node ${key}`);
+      if (!nodeIds.has(Number(key))) errors.push(`${at}.cost.per_node names missing node ${key}`);
+    });
+  }
+  views.forEach((view, index) => {
+    const where = `${at}.materialized_views[${index}]`;
+    if (!isPlainObject(view)) { errors.push(`${where} must be an object`); return; }
+    if (!nodeIds.has(view.node_id)) errors.push(`${where}: node_id must name a node of the plan`);
+    if (!VIEW_REFRESHES.includes(view.refresh)) errors.push(`${where}: refresh must be one of ${VIEW_REFRESHES.join(', ')}`);
+    if (!view.coverage || typeof view.coverage.definition_id !== 'string') errors.push(`${where}: coverage.definition_id must be a string`);
+    if (!view.inputs || !Array.isArray(view.inputs.raw_data_windows) || !Array.isArray(view.inputs.materialized_views)) {
+      errors.push(`${where}: inputs needs raw_data_windows and materialized_views arrays`);
+    }
+    if (!(typeof view.retention_ms === 'number' && view.retention_ms >= 0)) errors.push(`${where}: retention_ms must be a non-negative number`);
+  });
+  return errors;
+}
+
+// The checks of the pruned candidates of Pass 2, Stage 2 and Stage 3 and of
+// Stage 2's physical candidates (the memo view reads them), as messages.
+// Physical candidates are numbered by their position; a physical edge's
+// `producer` and a `dominated_by` reason index them.
+function validatePrunedAndPhysical(stage1, stage2, stage3) {
+  const pass2 = stage1.pruned_candidates === undefined ? [] : stage1.pruned_candidates;
+  const physical = stage2.physical_candidates;
+  const pruned2 = stage2.pruned_candidates;
+  const pruned3 = stage3.pruned_candidates === undefined ? [] : stage3.pruned_candidates;
+  if (!Array.isArray(pass2)) return ['stage1_logical_asap_optimization.pruned_candidates must be an array'];
+  if (!Array.isArray(physical) || !Array.isArray(pruned2)) return ['stage2_physical_asap_optimization: physical_candidates and pruned_candidates must be arrays'];
+  if (!Array.isArray(pruned3)) return ['stage3_plan_selection.pruned_candidates must be an array'];
+  const errors = [];
+  const isIndex = (v) => Number.isInteger(v) && v >= 0;
+  const isCandidate = (v) => isIndex(v) && v < physical.length;
+  const isMemoCandidate = (c) => !!c && isIndex(c.group) && isIndex(c.index_in_group);
+  const hasProperties = (p) => !!p && typeof p.timing === 'string' && p.lifetime !== undefined;
+  const isReason = (r) => typeof r === 'string' || (isPlainObject(r) && (!('dominated_by' in r) || isCandidate(r.dominated_by)));
+  pass2.forEach((p, k) => {
+    if (!isMemoCandidate(p) || !Array.isArray(p.causes) || !p.causes.length || !p.causes.every((cause) => cause
+      && Array.isArray(cause.through_pruned_candidates) && cause.through_pruned_candidates.every(isMemoCandidate)
+      && (typeof cause.root === 'string' || isPlainObject(cause.root)) && typeof cause.text === 'string')) {
+      errors.push(`stage1_logical_asap_optimization.pruned_candidates[${k}]: needs group, index_in_group and causes, each with through_pruned_candidates, root and text`);
+    }
+  });
+  physical.forEach((c, k) => {
+    const at = `stage2_physical_asap_optimization.physical_candidates[${k}]`;
+    if (!c || c.id !== k || !isMemoCandidate(c) || !hasProperties(c.properties) || !Array.isArray(c.inputs)) {
+      errors.push(`${at}: needs id ${k}, group, index_in_group, properties {timing, lifetime} and inputs`);
+      return;
+    }
+    c.inputs.forEach((input, i) => {
+      if (!input || !isIndex(input.group) || !Array.isArray(input.edges)
+        || !input.edges.every((e) => e && isCandidate(e.producer) && typeof e.satisfies_physical_requirement === 'boolean'
+          && typeof e.selected === 'boolean' && (e.rejection === null || typeof e.rejection === 'string'))) {
+        errors.push(`${at}.inputs[${i}]: needs group and edges whose producer is a physical candidate`);
+      }
     });
   });
+  [['stage2_physical_asap_optimization', pruned2], ['stage3_plan_selection', pruned3]].forEach(([stage, pruned]) => pruned.forEach((p, k) => {
+    if (!isMemoCandidate(p) || !hasProperties(p.properties) || !isReason(p.reason)) {
+      errors.push(`${stage}.pruned_candidates[${k}]: needs group, index_in_group, properties and a reason (dominated_by naming a physical candidate)`);
+    }
+  }));
   return errors;
 }
 
@@ -423,7 +265,6 @@ function validateSelection(selection, physicalById) {
 // shown. The viewer refuses a document with problems rather than guessing.
 function validateStagePipeline(doc) {
   if (!isStagePipelineDocument(doc)) return [`format must be ${JSON.stringify(STAGE_PIPELINE_FORMAT)}`];
-  const errors = [];
   const queries = doc.workload && doc.workload.queries;
   if (!Array.isArray(queries) || queries.length === 0) return ['workload.queries must be a non-empty array'];
   const stage0 = doc.stage0_query_language_frontends;
@@ -435,47 +276,15 @@ function validateStagePipeline(doc) {
     ['stage2_physical_asap_optimization', stage2], ['stage3_plan_selection', stage3],
   ].filter(([, stage]) => !stage || typeof stage !== 'object').map(([name]) => `${name} is missing`);
   if (missing.length) return missing;
+  const errors = [];
   if (doc.accuracy_guarantees !== undefined && !ACCURACY_GUARANTEE_MODES.includes(doc.accuracy_guarantees)) {
     errors.push(`accuracy_guarantees must be ${ACCURACY_GUARANTEE_MODES.map((m) => JSON.stringify(m)).join(' or ')}`);
   }
   errors.push(...validateLogicalDag(stage0.dag, 'stage0_query_language_frontends', queries.length));
-
-  const logical = Array.isArray(stage1.candidates) ? stage1.candidates : [];
-  if (!Array.isArray(stage1.candidates)) errors.push('stage1_logical_asap_optimization.candidates must be an array');
-  const logicalIds = uniqueIds(logical, 'stage1_logical_asap_optimization.candidates', errors);
-  const composed = new Set();
-  logical.forEach((candidate) => {
-    if (!candidate) return;
-    const where = `stage1_logical_asap_optimization ${candidate.id}`;
-    if (candidate.dag) {
-      composed.add(candidate.id);
-      errors.push(...validateLogicalDag(candidate.dag, where, queries.length));
-    } else if (typeof candidate.error !== 'string') {
-      errors.push(`${where}: needs a dag or an error`);
-    }
-  });
-
-  const physical = Array.isArray(stage2.candidates) ? stage2.candidates : [];
-  if (!Array.isArray(stage2.candidates)) errors.push('stage2_physical_asap_optimization.candidates must be an array');
-  uniqueIds(physical, 'stage2_physical_asap_optimization.candidates', errors);
-  const physicalById = new Map();
-  physical.forEach((candidate) => {
-    if (!candidate) return;
-    physicalById.set(candidate.id, candidate);
-    if (!composed.has(candidate.from_logical)) {
-      errors.push(`stage2_physical_asap_optimization ${candidate.id}: from_logical ${JSON.stringify(candidate.from_logical)} is not a composed Stage 1 candidate`);
-    }
-    errors.push(...validatePhysicalDag(candidate.dag, `stage2_physical_asap_optimization ${candidate.id}`, queries.length));
-  });
-  (Array.isArray(stage2.pruned) ? stage2.pruned : []).forEach((entry, index) => {
-    if (!entry || !logicalIds.has(entry.from_logical)) errors.push(`stage2_physical_asap_optimization.pruned[${index}]: from_logical is not a Stage 1 candidate`);
-  });
+  errors.push(...validatePrunedAndPhysical(stage1, stage2, stage3));
+  errors.push(...validatePlanSelection(stage3, queries.length));
   errors.push(...validateDataWorkload(doc.workload.data_workload));
-  if (errors.length) return errors;
-  const table = selectionTable(doc);
-  const selectionErrors = validateSelection(table, physicalById);
-  if (selectionErrors.length) return selectionErrors;
-  return validateMaterializedViews(table, physicalById).concat(validateMemoPlan((stage3.search || {}).memo_plan, doc.workload.queries.length));
+  return errors;
 }
 
 // A query's accuracy target (`AccuracyTarget` JSON: `accuracy_metric`,
@@ -505,93 +314,56 @@ function scopeText(scope) {
   return '';
 }
 
-// What Stage 3 accepted for a valid candidate's queries
-// (`accepted_accuracy_per_candidate[id]`:
-// one entry per query), as "q1: …; q2: …"; null
-// when the document has none.
+// What Stage 3 accepted per query (`accepted_accuracy_per_query`), as
+// "q1: …; q2: …"; null when the document has none.
 function acceptedText(queries) {
   if (!Array.isArray(queries)) return null;
   const parts = queries.map((q, index) => (q && q.summary ? `q${index + 1}: ${q.summary}` : null)).filter(Boolean);
   return parts.length ? parts.join('; ') : null;
 }
 
-// Stage 3's view of every candidate the document shows: the selected one,
-// the other valid ones cheapest first ("costlier"), the rejected ones with
-// their reasons ("not judged" when selection failed with an error), then
-// the Stage 2 pruned ones and the Stage 1 ones that did not compose
-// ("composition error") with theirs. `logical` names the Stage 1
-// candidate to show beside the row; `rank` counts the priced ones.
-function stageCandidateRows(doc) {
-  const selection = selectionTable(doc);
-  const costs = selection.cost_per_candidate || {};
-  const pruned = new Map((selection.pruned_candidates || []).map((r) => [r.candidate, r]));
-  const accepted = selection.accepted_accuracy_per_candidate || {};
-  const physical = doc.stage2_physical_asap_optimization || {};
-  const rows = (physical.candidates || []).map((candidate) => {
-    const cost = costs[candidate.id];
-    const rejection = pruned.get(candidate.id);
-    // A rejection's cause says whether it failed a check or lost under
-    // the cost model; a failed selection (`error`) judged no candidate.
-    const status = candidate.id === selection.selected_candidate ? 'selected'
-      : candidate.id === selection.reference_selected_candidate ? 'reference selected'
-      : rejection ? (FAILED_CHECK_CAUSES.includes(rejection.cause) ? 'rejected' : 'costlier')
-        : selection.error ? 'not judged' : 'rejected';
-    return {
-      id: candidate.id,
-      logical: candidate.from_logical,
-      display_name: candidate.display_name,
-      total: cost ? cost.cost_per_second : null,
-      rank: null,
-      status,
-      reason: status === 'rejected' && rejection ? rejection.reason : null,
-      accepted: acceptedText(accepted[candidate.id]),
-    };
-  });
-  (physical.pruned || []).forEach((p) => rows.push({
-    id: p.from_logical, logical: p.from_logical, display_name: p.display_name, total: null, rank: null, status: 'pruned', reason: p.reason,
-  }));
-  ((doc.stage1_logical_asap_optimization || {}).candidates || []).filter((c) => 'error' in c).forEach((c) => rows.push({
-    id: c.id, logical: c.id, display_name: c.display_name, total: null, rank: null, status: 'composition error', reason: c.error,
-  }));
-  // Rejections of candidates the document does not hold (the default search
-  // keeps only the best one and records the first rejection of each cause),
-  // and the search's own: listed with their cause, not clickable.
-  (selection.pruned_candidates_not_enumerated || []).forEach((r) => rows.push({
-    id: r.candidate, logical: null, display_name: `not kept · ${r.cause.replace(/_/g, ' ')}`, total: null, rank: null, status: 'not kept', reason: r.reason,
-  }));
-  const order = { selected: 0, 'reference selected': 1, costlier: 1, rejected: 2, 'not judged': 2, pruned: 3, 'composition error': 4, 'not kept': 5 };
-  rows.sort((a, b) => order[a.status] - order[b.status] || (a.total ?? 0) - (b.total ?? 0));
-  let rank = 0;
-  // Only valid candidates are ranked: the selected one and those that lost
-  // under the cost model, whether or not the document carries their cost.
-  rows.forEach((row) => { if (['selected', 'reference selected', 'costlier'].includes(row.status)) row.rank = ++rank; });
-  return rows;
+// Stage 3's outcome as the plan list's one row: the selected plan with its
+// cost per second (null when not costed or under cost model 3) and the
+// accuracy it accepted, or selection's error; null when Stage 3 did not run.
+function selectedPlanRow(doc) {
+  const stage3 = doc.stage3_plan_selection || {};
+  if (stage3.plan) {
+    return { status: 'selected', total: stage3.cost ? stage3.cost.cost_per_second : null, accepted: acceptedText(stage3.accepted_accuracy_per_query), reason: null };
+  }
+  if (stage3.error) return { status: 'no plan', total: null, accepted: null, reason: stage3.error };
+  return null;
 }
 
-// The candidate list's header: how many candidates Stage 1 enumerated, how
-// many the document shows when it caps them, why Stage 1 failed (a Pass 1
-// error) and why plan selection failed when it failed for a reason other
-// than rejecting every candidate, then the selection's warnings (e.g. a
-// very large peak memory with no declared memory capacity).
-// Plan ids in plan-number order: P2 before P2-m1 before P10.
-function byPlanNumber(a, b) {
-  return a.localeCompare(b, undefined, { numeric: true });
+// The plan list's header: why Stage 1 (Pass 1 or Pass 2) or Stage 2 failed,
+// why selection failed, and the selection's warnings (e.g. a very large
+// peak memory with no declared memory capacity); "" when there is none.
+function planHeader(doc) {
+  const stage1 = doc.stage1_logical_asap_optimization || {};
+  const stage2 = doc.stage2_physical_asap_optimization || {};
+  const stage3 = doc.stage3_plan_selection || {};
+  return [
+    stage1.error ? `Stage 1 failed: ${stage1.error}` : '',
+    stage2.error ? `Stage 2 failed: ${stage2.error}` : '',
+    stage3.error ? `selection failed: ${stage3.error}` : '',
+    ...(stage3.warnings || []).map((warning) => `warning: ${warning}`),
+  ].filter(Boolean).join(' · ');
 }
 
-function stageCandidateHeader(doc) {
-  const logical = doc.stage1_logical_asap_optimization || {};
-  const selection = selectionTable(doc);
-  const shown = logical.capped ? ` (document shows ${(logical.candidates || []).length})` : '';
-  const error = [
-    logical.error ? ` · Stage 1 failed: ${logical.error}` : '',
-    selection.error ? ` · selection failed: ${selection.error}` : '',
-    ...(selection.warnings || []).map((warning) => ` · warning: ${warning}`),
-  ].join('');
-  return `${logical.combinations ?? 0} candidates${shown}${error}`;
+// The candidates at each stage as one line: the logical candidates of the
+// Pass 2 memo and how many Pass 2 pruned, the physical candidates and how
+// many Stage 2 and Stage 3 pruned, and whether a plan was selected.
+function candidateCountsText(doc) {
+  const pass2 = ((doc.memo || {}).steps || []).find((step) => step.step === 'pass2');
+  const logical = pass2 ? pass2.groups.reduce((n, g) => n + g.candidate_count, 0) : 0;
+  const count = (section) => ((section || {}).pruned_candidates || []).length;
+  const physical = ((doc.stage2_physical_asap_optimization || {}).physical_candidates || []).length;
+  return `Candidates per stage: ${logical} logical (${count(doc.stage1_logical_asap_optimization)} pruned by Pass 2)`
+    + ` → ${physical} physical (${count(doc.stage2_physical_asap_optimization)} pruned by Stage 2, ${count(doc.stage3_plan_selection)} by Stage 3)`
+    + ` → ${(doc.stage3_plan_selection || {}).plan ? 'plan selected' : 'no plan selected'}`;
 }
 
 // Whether Stage 3 checked accuracy guarantees (`accuracy_guarantees`), for
-// the candidate list's header; "" for a document that does not say.
+// the plan list's header; "" for a document that does not say.
 const ACCURACY_GUARANTEE_MODES = ['ignored', 'enforced'];
 function accuracyGuaranteesText(doc) {
   return {
@@ -600,55 +372,17 @@ function accuracyGuaranteesText(doc) {
   }[doc.accuracy_guarantees] || '';
 }
 
-// What the search behind the document did, for the candidate list's
-// header: "default search · 206 physical candidates checked · 2 independent
-// components searched separately · discarded before
-// composition: no accuracy guarantee ×3 (q3, q4, q5)", with why the
-// workload was searched as one ("searched as one: not in joint space") and
-// the classes of interchangeable queries, which took one shared choice
-// ("interchangeable queries: (p50, p90, p99)"); under the
-// exhaustive search, the pruned candidates by cause with their counts. "" for a
-// document that does not say.
+// The search behind the document and the size and times of Stage 3's
+// selection MILP, for the plan list's header, e.g. "candidate-connection
+// search · MILP 88 variables, 126 constraints · construction 1 ms, solve
+// 23 ms". "" for a document that names no search.
 function searchText(doc) {
-  const name = { default: 'default search', exhaustive: 'exhaustive search', 'candidate-connections': 'candidate-connection search', 'memo-milp': 'memo-MILP search', 'memo-brute-force': 'memo brute-force search' }[doc.search];
+  const name = { 'candidate-connections': 'candidate-connection search' }[doc.search];
   if (!name) return '';
-  const parts = [name];
-  const selection = doc.stage3_plan_selection || {};
-  const search = selection.search;
-  const cause = (c) => String(c).replace(/_/g, ' ');
-  if (search) {
-    parts.push(`${search.candidates_checked} physical candidates checked`);
-    const componentCount = typeof search.candidate_connections?.independent_components === 'number'
-      ? search.candidate_connections.independent_components
-      : (search.components || []).length;
-    if (componentCount > 1) parts.push(`${componentCount} independent components searched separately`);
-    const queryIds = ((doc.workload || {}).queries || []).map((q) => q.id);
-    const byCause = new Map();
-    (search.queries || []).forEach((query, index) => query.discarded.forEach((d) => {
-      if (!byCause.has(d.cause)) byCause.set(d.cause, { count: 0, queries: new Set() });
-      byCause.get(d.cause).count += 1;
-      byCause.get(d.cause).queries.add(queryIds[index] || `q${index + 1}`);
-    }));
-    if (byCause.size) {
-      parts.push(`discarded before composition: ${[...byCause].map(([c, v]) => `${cause(c)} ×${v.count} (${[...v.queries].join(', ')})`).join(', ')}`);
-    }
-    if (search.raw_scan_candidates_skipped) parts.push(`${search.raw_scan_candidates_skipped} Stage 1 candidates skipped: they scan raw data at query time`);
-    if (search.raw_scan_assignments_skipped) parts.push(`${search.raw_scan_assignments_skipped} Stage 2 assignments skipped: they scan raw data at query time`);
-    if (search.searched_as_one) parts.push(`searched as one: ${cause(search.searched_as_one)}`);
-    const classes = (search.interchangeable_queries || []).map((members) => `(${members.map((i) => queryIds[i] || `q${i + 1}`).join(', ')})`);
-    if (classes.length) parts.push(`interchangeable queries: ${classes.join(', ')}`);
-  }
-  const report = selection.search_report;
-  if (report) {
-    parts.push(`search ${String(report.status).replace(/_/g, ' ')}`);
-    if (typeof report.cost_lower_bound_per_second === 'number') parts.push(`cost lower bound ${Number(report.cost_lower_bound_per_second.toPrecision(4))}`);
-    parts.push(`MILP ${report.milp_variables} variables, ${report.milp_constraints} constraints · model ${report.model_construction_ms} ms, solve ${report.solver_ms} ms, validation ${report.validation_ms} ms`);
-  }
-  const counts = selectionTable(doc).pruned_candidate_count_by_cause;
-  if (doc.search === 'exhaustive' && counts && Object.keys(counts).length) {
-    parts.push(`pruned: ${Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([c, n]) => `${cause(c)} ×${n}`).join(', ')}`);
-  }
-  return parts.join(' · ');
+  const stage3 = doc.stage3_plan_selection || {};
+  if (typeof stage3.milp_variables !== 'number') return name;
+  return `${name} · MILP ${stage3.milp_variables} variables, ${stage3.milp_constraints} constraints`
+    + ` · construction ${stage3.milp_construction_ms} ms, solve ${stage3.milp_solve_ms} ms`;
 }
 
 function compactWire(value) {
@@ -695,29 +429,13 @@ function formatTiming(timing) {
   return String(timing || 'unknown');
 }
 
-// `{"Variant": {"width": 272, ...}}` as "width 272 · ..."; `heap_size` reads as "heap".
-function wireParams(params) {
-  const inner = params && typeof params === 'object' ? Object.values(params)[0] : null;
-  if (!inner || typeof inner !== 'object') return [];
-  return Object.entries(inner).map(([key, value]) => `${key.replace(/_size$/, '')} ${compactWire(value)}`);
-}
-
-// A summary family with its configured parameters, e.g. "CmsWithHeap · depth 7 · heap 100 · width 272".
-function summaryFamilyText(family) {
-  if (family && Array.isArray(family.Sketch)) {
-    const kind = family.Sketch[0] || {};
-    return [kind.algorithm || 'sketch'].concat(wireParams(kind.params)).join(' · ');
-  }
-  if (family && Array.isArray(family.ExactAggregate)) return `exact ${family.ExactAggregate[0]}`;
-  return compactWire(family);
-}
-
-// Whether a summary keeps one state per group or one shared (Hydra) state for all groups.
-function summaryInstancesText(grouping, reduction) {
-  const shared = grouping && grouping.SharedMultiSubpopulation;
-  if (shared) return [`one shared ${shared.kind}`].concat(wireParams(shared.params)).join(' · ');
-  if (grouping === 'PerSubpopulationInstance') return reduction === 'PerEntity' ? 'one per series' : 'one per group';
-  return compactWire(grouping);
+// A summary type (`FieldDataType` JSON), e.g. `{"Sketch": "Kll"}` as "Kll"
+// and `{"ExactAggregate": ["Sum", "Sum"]}` as "exact Sum". θ is not part
+// of the type: the memo view shows each candidate's.
+function summaryTypeText(summaryType) {
+  if (summaryType && typeof summaryType.Sketch === 'string') return summaryType.Sketch;
+  if (summaryType && Array.isArray(summaryType.ExactAggregate)) return `exact ${summaryType.ExactAggregate[0]}`;
+  return compactWire(summaryType);
 }
 
 // Box text for an operator (`{"NonASAP": {...}}` or `{"ASAP": {...}}`)
@@ -749,17 +467,13 @@ function stageNodeLines(operator, inputSchema) {
       if (wirePartition(op.partition_by, inputSchema)) lines.push(wirePartition(op.partition_by, inputSchema));
       break;
     case 'SummaryAgg':
-      lines.push(`summary: ${summaryFamilyText(op.family)}`);
+      lines.push(`summary: ${summaryTypeText(op.summary_type)}`);
       if (grouping) lines.push(grouping);
-      lines.push(`instances: ${summaryInstancesText(op.grouping, op.reduction)}`);
       break;
     case 'SummaryEstimate': lines.push(`query: ${compactWire(op.query)}`); break;
-    case 'SummaryMerge':
-      if (op.newest_tumbling_windows) lines.push(`newest ${op.newest_tumbling_windows} tumbling windows`);
-      break;
     case 'SummaryTumblingWindowChain':
-      lines.push(`summary: ${summaryFamilyText(op.family)}`);
-      lines.push(`${op.tumbling_window_count} tumbling windows × ${durationText(op.tumbling_window_width_ms)}`);
+      lines.push(`summary: ${summaryTypeText(op.summary_type)}`);
+      lines.push(`tumbling windows of ${durationText(op.tumbling_window_width_ms)}`);
       if (grouping) lines.push(grouping);
       break;
     default: break;
@@ -791,13 +505,6 @@ function stageQueryReach(lane) {
   return reach;
 }
 
-// The time range a tumbling window covers, relative to the evaluation time `t`: tumbling window `k` (0 is the
-// newest) of width `width` covers "t−(k+1)·width … t−k·width".
-function tumblingWindowTimeText(k, width) {
-  const end = k === 0 ? 't' : `t−${durationText(k * width)}`;
-  return `t−${durationText((k + 1) * width)} … ${end}`;
-}
-
 // A physical node's timing as its lane class, which colors its fill:
 // `ingestionTime`, `queryTime`, or "" without a timing (a logical node).
 function timingClass(timing) {
@@ -811,16 +518,11 @@ function timingClass(timing) {
 // one node per operator (`n<id>`), one `Scalar` node per standalone scalar
 // query (`s<query position>`) over the nodes it reads, and one edge per
 // input. Each node lists the queries whose root reaches it (`reachedBy`;
-// "shared ×n" in its box when n > 1). Options: `physical` (a Stage 2 DAG:
-// nodes show their timing), `costPerNode` (the candidate's Stage 3
-// `per_node` costs), `queryIds` (the workload's query ids, to mark each
-// query's root), `expandedChains` (ids of SummaryTumblingWindowChain nodes to draw as their
-// tumbling windows: per tumbling window `k`, newest first, a TimeShift by k tumbling windows (`n<id>p<k>s`,
-// none for the newest), a TimeRange of one tumbling window (`n<id>p<k>r`) and the
-// tumbling window's build (`n<id>p<k>`), each tumbling window fed by the chain's input and read by
-// the chain's readers). Display only: the document keeps the chain.
+// "shared ×n" in its box when n > 1). Options: `physical` (Stage 3's plan:
+// nodes show their timing), `costPerNode` (the plan's Stage 3 `per_node`
+// costs), `queryIds` (the workload's query ids, to mark each query's root).
 function stageLaneElements(dag, options) {
-  const { physical = false, costPerNode = null, queryIds = [], expandedChains = [] } = options || {};
+  const { physical = false, costPerNode = null, queryIds = [] } = options || {};
   const group = typeof nodeGroup === 'function' ? nodeGroup : () => 'rel';
   const lane = stageDag(dag, physical);
   const byId = new Map(lane.nodes.map((node) => [node.id, node]));
@@ -834,33 +536,11 @@ function stageLaneElements(dag, options) {
   });
   const queryName = (index) => queryIds[index] || `query #${index + 1}`;
   const reach = stageQueryReach(lane);
-  const reachedBy = (id) => (reach.get(id) || []).map(queryName);
-  const expanded = new Set(lane.nodes.filter((node) => node.kind === 'SummaryTumblingWindowChain' && expandedChains.includes(node.id)).map((node) => node.id));
 
-  const nodes = [];
-  lane.nodes.forEach((node) => {
+  const nodes = lane.nodes.map((node) => {
     const input = inputOf.get(node.id);
-    const operator = physical ? node.raw.payload : node.raw.operator;
-    const queries = reachedBy(node.id);
-    if (expanded.has(node.id)) {
-      const body = node.body;
-      const width = body.tumbling_window_width_ms;
-      for (let k = 0; k < body.tumbling_window_count; k += 1) {
-        const id = `n${node.id}p${k}`;
-        const common = { tumblingWindowOf: node.id, tumblingWindowIndex: k, reachedBy: queries, rootFor: [], timing: node.timing, node: node.raw };
-        if (k > 0) {
-          nodes.push({ data: Object.assign({ id: `${id}s`, nodeId: `${node.id}p${k}s`, kind: 'TimeShift', group: group('TimeShift'),
-            label: `TimeShift\nshift: ${durationText(k * width)}` }, common), classes: `tumblingWindow ${timingClass(node.timing)}`.trim() });
-        }
-        nodes.push({ data: Object.assign({ id: `${id}r`, nodeId: `${node.id}p${k}r`, kind: 'TimeRange', group: group('TimeRange'),
-          label: `TimeRange\nrange: ${durationText(width)}` }, common), classes: `tumblingWindow ${timingClass(node.timing)}`.trim() });
-        nodes.push({ data: Object.assign({ id, nodeId: `${node.id}p${k}`, kind: 'tumblingWindow', group: 'summary',
-          label: [`tumbling window ${k + 1} of ${body.tumbling_window_count}`, `summary: ${summaryFamilyText(body.family)}`, `window ${tumblingWindowTimeText(k, width)}`,
-            'click to collapse'].join('\n') }, common), classes: `tumblingWindow ${timingClass(node.timing)}`.trim() });
-      }
-      return;
-    }
-    const lines = stageNodeLines(operator, input && input.schema);
+    const queries = (reach.get(node.id) || []).map(queryName);
+    const lines = stageNodeLines(physical ? node.raw.payload : node.raw.operator, input && input.schema);
     const cost = costPerNode ? costPerNode[String(node.id)] : undefined;
     if (physical && node.timing !== undefined) lines.push(`⏱ ${formatTiming(node.timing)}`);
     if (cost && typeof cost.cost_per_second === 'number') {
@@ -869,41 +549,15 @@ function stageLaneElements(dag, options) {
     if (queries.length > 1) lines.push(`shared ×${queries.length}`);
     const roots = rootFor.get(node.id) || [];
     if (roots.length) lines.push(`root of ${roots.join(', ')}`);
-    if (node.kind === 'SummaryTumblingWindowChain') lines.push('click to expand');
-    nodes.push({
+    return {
       data: {
         id: `n${node.id}`, nodeId: node.id, kind: node.kind, group: group(node.kind), label: lines.join('\n'),
-        rootFor: roots, reachedBy: queries, timing: node.timing, cost, node: node.raw, expandable: node.kind === 'SummaryTumblingWindowChain',
+        rootFor: roots, reachedBy: queries, timing: node.timing, cost, node: node.raw,
       },
       classes: timingClass(node.timing),
-    });
+    };
   });
-  const edges = [];
-  const edge = (id, source, target, raw) => edges.push({ data: { id, source, target, edge: raw } });
-  lane.edges.forEach((e, index) => {
-    const into = expanded.has(e.consumer);
-    const from = expanded.has(e.producer);
-    if (!into && !from) { edge(`e${index}`, `n${e.producer}`, `n${e.consumer}`, e.raw); return; }
-    // An expanded chain's input feeds each tumbling window's TimeRange; each tumbling window feeds
-    // the chain's readers.
-    const tumblingWindowCount = (chain) => byId.get(chain).body.tumbling_window_count;
-    if (into) {
-      for (let k = 0; k < tumblingWindowCount(e.consumer); k += 1) {
-        const tumblingWindowId = `n${e.consumer}p${k}`;
-        edge(`e${index}p${k}`, `n${e.producer}`, k > 0 ? `${tumblingWindowId}s` : `${tumblingWindowId}r`, e.raw);
-        if (k > 0) edge(`e${index}p${k}s`, `${tumblingWindowId}s`, `${tumblingWindowId}r`, null);
-        edge(`e${index}p${k}r`, `${tumblingWindowId}r`, tumblingWindowId, null);
-      }
-    }
-    if (from) {
-      // A merge of the chain's newest tumbling windows reads only those.
-      const consumer = byId.get(e.consumer);
-      const read = (consumer && consumer.body && consumer.body.newest_tumbling_windows) || tumblingWindowCount(e.producer);
-      for (let k = 0; k < read; k += 1) {
-        edge(`e${index}q${k}`, `n${e.producer}p${k}`, into ? `n${e.consumer}p0r` : `n${e.consumer}`, e.raw);
-      }
-    }
-  });
+  const edges = lane.edges.map((e, index) => ({ data: { id: `e${index}`, source: `n${e.producer}`, target: `n${e.consumer}`, edge: e.raw } }));
   lane.queries.forEach((query, index) => {
     if (!('scalar' in query)) return;
     const id = `s${index}`;
@@ -916,7 +570,7 @@ function stageLaneElements(dag, options) {
       classes: '',
     });
     stageScalarRefs(query.scalar).forEach((producer, k) => edges.push({
-      data: { id: `${id}e${k}`, source: expanded.has(producer) ? `n${producer}p0` : `n${producer}`, target: id, edge: null },
+      data: { id: `${id}e${k}`, source: `n${producer}`, target: id, edge: null },
     }));
   });
   return nodes.concat(edges);
@@ -966,38 +620,8 @@ function validateDataWorkload(dataWorkload) {
     .map(([name]) => `${at}.sources.${name} must be an object`);
 }
 
+// How a materialized view is refreshed (`MaterializedViewRefresh`).
 const VIEW_REFRESHES = ['at_ingestion', 'on_first_read'];
-
-// The selected plan's materialized views (`stage3_plan_selection.materialized_views`,
-// from the installable plan): each names its installed node, how it is
-// refreshed, its coverage's definition and its retention, and the node of the
-// selected Stage 2 candidate it is installed from (or null). Absent in older
-// documents; empty without a selection.
-function validateMaterializedViews(selection, physicalById) {
-  const views = selection.materialized_views;
-  if (views === undefined) return [];
-  const at = 'stage3_plan_selection.materialized_views';
-  if (!Array.isArray(views)) return [`${at} must be an array`];
-  if (selection.selected_candidate === null && views.length) return [`${at} must be empty without a selected plan`];
-  const selected = selection.selected_candidate === null ? null : physicalById.get(selection.selected_candidate);
-  const nodeIds = new Set(selected ? selected.dag.nodes.map((node) => node.id) : []);
-  const errors = [];
-  views.forEach((output, index) => {
-    const where = `${at}[${index}]`;
-    if (!output || typeof output !== 'object') { errors.push(`${where} must be an object`); return; }
-    if (typeof output.node_id !== 'number') errors.push(`${where}: node_id must be a number`);
-    if (!VIEW_REFRESHES.includes(output.refresh)) errors.push(`${where}: refresh must be one of ${VIEW_REFRESHES.join(', ')}`);
-    if (!output.coverage || typeof output.coverage.definition_id !== 'string') errors.push(`${where}: coverage.definition_id must be a string`);
-    if (!output.inputs || !Array.isArray(output.inputs.raw_data_windows) || !Array.isArray(output.inputs.materialized_views)) {
-      errors.push(`${where}: inputs needs raw_data_windows and materialized_views arrays`);
-    }
-    if (!(typeof output.retention_ms === 'number' && output.retention_ms >= 0)) errors.push(`${where}: retention_ms must be a non-negative number`);
-    if (output.stage2_node_id !== null && output.stage2_node_id !== undefined && !nodeIds.has(output.stage2_node_id)) {
-      errors.push(`${where}: stage2_node_id ${output.stage2_node_id} is not a node of the selected candidate ${selection.selected_candidate}`);
-    }
-  });
-  return errors;
-}
 
 // Milliseconds in units, largest first: "100 ms", "15 s", "10 min",
 // "9 min 40 s", "1 h".
@@ -1046,83 +670,36 @@ function dataWorkloadView(dataWorkload, queries) {
 }
 
 // The workload query ids whose root reaches node `nodeId` of a physical DAG
-// (Stage 2): the queries that read it, directly or through other nodes.
-function physicalReaders(dag, nodeId, queryIds) {
+// (Stage 3's plan): the queries that read it, directly or through other nodes.
+function planQueriesReaching(dag, nodeId, queryIds) {
   return (stageQueryReach(stageDag(dag, true)).get(nodeId) || []).map((index) => queryIds[index] || `query #${index + 1}`);
 }
 
-// The selected plan's materialized views as table rows: the coverage's
-// definition, the Stage 2 node's operator and summary parameters, its tumbling window
-// (a tumbling-window chain's tumbling windows, newest first), how and when it is refreshed, its
-// retention, the Stage 3 cost of its Stage 2 node and the queries that read
-// it. Empty without a selection.
+// The selected plan's materialized views as table rows: the plan node, its
+// coverage's definition, the node's operator and summary type, how it is
+// refreshed, what its refresh reads, its retention, the raw-data windows it
+// scans, the node's Stage 3 cost and the queries that read it. Empty
+// without a plan.
 function materializedViewRows(doc) {
-  const selection = selectionTable(doc);
-  const views = Array.isArray(selection.materialized_views) ? selection.materialized_views : [];
-  const candidate = ((doc.stage2_physical_asap_optimization || {}).candidates || []).find((c) => c.id === selection.selected_candidate);
-  if (!candidate) return [];
+  const stage3 = doc.stage3_plan_selection || {};
+  if (!stage3.plan) return [];
   const queryIds = doc.workload.queries.map((q) => q.id);
-  const nodes = new Map(candidate.dag.nodes.map((node) => [node.id, node]));
-  const perNode = ((selection.cost_per_candidate || {})[selection.selected_candidate] || {}).per_node || {};
-  return views.map((output) => {
-    const node = nodes.get(output.stage2_node_id);
-    const [kind, body] = node ? stageOperatorParts(node.payload) : ['—', {}];
-    const summary = kind === 'SummaryAgg' || kind === 'SummaryTumblingWindowChain' ? summaryFamilyText(body.family) : '';
-    const tumblingWindow = kind === 'SummaryTumblingWindowChain' && typeof output.installed_position === 'number'
-      ? `tumbling window ${output.installed_position + 1} of ${output.installed_count} (newest first), ${durationText(body.tumbling_window_width_ms)} wide` : '—';
-    const cost = perNode[String(output.stage2_node_id)];
+  const nodes = new Map(stage3.plan.nodes.map((node) => [node.id, node]));
+  const perNode = (stage3.cost || {}).per_node || {};
+  return (stage3.materialized_views || []).map((view) => {
+    const [kind, body] = stageOperatorParts(nodes.get(view.node_id).payload);
+    const cost = perNode[String(view.node_id)];
     return {
-      nodeId: output.node_id,
-      stage2NodeId: node ? output.stage2_node_id : null,
-      definition: output.coverage.definition_id,
-      kind: summary ? `${kind} · ${summary}` : kind,
-      tumblingWindow,
-      refresh: output.refresh === 'at_ingestion' ? 'at ingestion' : 'on first read (materialized across evaluations)',
-      inputs: `${output.inputs.raw_data_windows.length} raw-data window(s)` +
-        (output.inputs.materialized_views.length ? `, views ${output.inputs.materialized_views.join(', ')}` : ''),
-      retention: durationText(output.retention_ms),
-      window: output.inputs.raw_data_windows.map((w) => `t−${durationText(w.end_offset_ms + w.width_ms)} … ${w.end_offset_ms ? `t−${durationText(w.end_offset_ms)}` : 't'}`).join(', ') || '—',
-      position: output.installed_position,
+      nodeId: view.node_id,
+      definition: view.coverage.definition_id,
+      kind: 'summary_type' in body ? `${kind} · ${summaryTypeText(body.summary_type)}` : kind,
+      refresh: view.refresh === 'at_ingestion' ? 'at ingestion' : 'on first read (materialized across evaluations)',
+      inputs: `${view.inputs.raw_data_windows.length} raw-data window(s)` +
+        (view.inputs.materialized_views.length ? `, views ${view.inputs.materialized_views.join(', ')}` : ''),
+      retention: durationText(view.retention_ms),
+      window: view.inputs.raw_data_windows.map((w) => `t−${durationText(w.end_offset_ms + w.width_ms)} … ${w.end_offset_ms ? `t−${durationText(w.end_offset_ms)}` : 't'}`).join(', ') || '—',
       cost: cost ? cost.detail || '' : '',
-      readBy: node ? physicalReaders(candidate.dag, output.stage2_node_id, queryIds) : [],
-    };
-  });
-}
-
-// The selected plan's materialized views grouped by the Stage 2 node they are
-// installed from: one group per tumbling-window chain (its tumbling windows, newest first, with
-// "count × width"), one per other node. Each group has its Stage 2 node,
-// definition(s), kind, how it is refreshed, its retention (a range when the
-// tumbling windows differ), the Stage 3 cost and the queries that read it.
-function materializedViewGroups(doc) {
-  const rows = materializedViewRows(doc);
-  const candidate = ((doc.stage2_physical_asap_optimization || {}).candidates || []).find((c) => c.id === selectionTable(doc).selected_candidate);
-  const nodes = new Map(candidate ? candidate.dag.nodes.map((node) => [node.id, node]) : []);
-  const groups = [];
-  const byNode = new Map();
-  rows.forEach((row) => {
-    const key = row.stage2NodeId === null ? `installed ${row.nodeId}` : row.stage2NodeId;
-    if (!byNode.has(key)) { byNode.set(key, []); groups.push(key); }
-    byNode.get(key).push(row);
-  });
-  const joined = (values) => [...new Set(values)].join(', ');
-  return groups.map((key) => {
-    const tumblingWindows = byNode.get(key).slice().sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
-    const first = tumblingWindows[0];
-    const node = nodes.get(first.stage2NodeId);
-    const [kind, body] = node ? stageOperatorParts(node.payload) : ['—', {}];
-    const retention = tumblingWindows.map((p) => p.retention);
-    return {
-      stage2NodeId: first.stage2NodeId,
-      nodeIds: tumblingWindows.map((p) => p.nodeId),
-      definition: joined(tumblingWindows.map((p) => p.definition)),
-      kind: first.kind,
-      tumblingWindowsText: kind === 'SummaryTumblingWindowChain' ? `${body.tumbling_window_count} × ${durationText(body.tumbling_window_width_ms)}` : '—',
-      refresh: joined(tumblingWindows.map((p) => p.refresh)),
-      retention: new Set(retention).size === 1 ? retention[0] : `${retention[0]} … ${retention[retention.length - 1]}`,
-      cost: first.cost,
-      readBy: first.readBy,
-      tumblingWindows,
+      readBy: planQueriesReaching(stage3.plan, view.node_id, queryIds),
     };
   });
 }
@@ -1136,8 +713,11 @@ function queryScheduleText(query) {
   const [kind, body] = typeof recurrence === 'string' ? [recurrence, null]
     : recurrence && typeof recurrence === 'object' ? Object.entries(recurrence)[0] || [null, null] : [null, null];
   if (kind === 'repeated') {
-    const interval = body && typeof body === 'object' ? body.fixed_interval : undefined;
-    parts.push(typeof interval === 'number' ? `every ${durationText(interval)}` : `repeated: ${compactWire(body)}`);
+    // `fixed_interval` (ms) or `fixed_interval_at` (`interval` and `evaluation_phase`, ms).
+    const at = body && typeof body === 'object' ? body.fixed_interval_at : undefined;
+    const interval = at ? at.interval : body && typeof body === 'object' ? body.fixed_interval : undefined;
+    const phase = at && at.evaluation_phase ? ` at phase ${durationText(at.evaluation_phase)}` : '';
+    parts.push(typeof interval === 'number' ? `every ${durationText(interval)}${phase}` : `repeated: ${compactWire(body)}`);
   } else if (kind === 'one_time') {
     parts.push(body && body.invocations > 1 ? `${body.invocations} invocations` : 'once');
     if (body && typeof body.execute_at === 'number') parts.push(`at ${body.execute_at} ms`);
@@ -1169,7 +749,7 @@ function usageText(usage) {
 function deploymentText(capabilities) {
   if (!capabilities || typeof capabilities !== 'object') return '';
   const summaries = Array.isArray(capabilities.supported_summaries)
-    ? `summaries: ${capabilities.supported_summaries.map((s) => `${s.summary_type} (${(s.readouts || []).join(', ')})`).join(', ')}`
+    ? `summaries: ${capabilities.supported_summaries.map((s) => `${s.family} (${(s.readouts || []).join(', ')})`).join(', ')}`
     : 'every summary the planner builds';
   return [capabilities.raw_data_retained === false ? 'raw data not retained' : 'raw data retained',
     capabilities.query_time_results_retained ? 'query-time results retained' : 'query-time results not retained', summaries].join(' · ');
@@ -1186,8 +766,11 @@ function planningWorkloadQueries(workload) {
   }));
   const repeating = (qw.repeating_queries || []).map((entry) => {
     const demand = entry.demand || {};
-    const interval = typeof demand === 'object' ? demand.fixed_interval : undefined;
-    return { text: entry.query, runs: typeof interval === 'number' ? `every ${durationText(interval)}` : compactWire(demand), accuracy: accuracy(entry.requirements) };
+    // `fixed_interval` (ms) or `fixed_interval_at` (`interval` and `evaluation_phase`, ms).
+    const at = typeof demand === 'object' ? demand.fixed_interval_at : undefined;
+    const interval = at ? at.interval : typeof demand === 'object' ? demand.fixed_interval : undefined;
+    const phase = at && at.evaluation_phase ? ` at phase ${durationText(at.evaluation_phase)}` : '';
+    return { text: entry.query, runs: typeof interval === 'number' ? `every ${durationText(interval)}${phase}` : compactWire(demand), accuracy: accuracy(entry.requirements) };
   });
   return batch.concat(repeating);
 }
@@ -1196,217 +779,4 @@ function planningWorkloadQueries(workload) {
 // stage document (to show).
 function isPlanningWorkload(value) {
   return !!value && typeof value === 'object' && !isStagePipelineDocument(value) && !!value.query_workload && typeof value.query_workload === 'object';
-}
-
-// The memo-MILP search's selected plan over the memo
-// (`stage3_plan_selection.search.memo_plan`): every group, coupling-site and
-// query reference in range. An absent plan has nothing to check.
-function validateMemoPlan(plan, queryCount) {
-  if (plan === undefined || plan === null) return [];
-  const at = 'stage3_plan_selection.search.memo_plan';
-  if (typeof plan !== 'object' || !Array.isArray(plan.groups) || !Array.isArray(plan.coupling_sites)) return [`${at} must have groups and coupling_sites arrays`];
-  const errors = [];
-  const groupCount = plan.groups.length;
-  const siteCount = plan.coupling_sites.length;
-  const inRange = (ids, n) => Array.isArray(ids) && ids.every((i) => Number.isInteger(i) && i >= 0 && i < n);
-  plan.groups.forEach((group, index) => {
-    const where = `${at}.groups[${index}]`;
-    if (!group || group.group !== index) { errors.push(`${where}: group must be ${index}`); return; }
-    if (!inRange(group.parents, groupCount)) errors.push(`${where}: parents must name groups`);
-    if (!inRange(group.queries, queryCount) || !inRange(group.roots_of, queryCount)) errors.push(`${where}: queries and roots_of must name queries`);
-    if (group.implemented_by !== null && group.implemented_by !== undefined && !inRange([group.implemented_by], groupCount)) errors.push(`${where}: implemented_by must name a group`);
-    const chosen = group.chosen;
-    if (chosen && (!inRange(chosen.implements, groupCount) || !inRange(chosen.reads, groupCount) || !inRange(chosen.coupling_sites, siteCount))) {
-      errors.push(`${where}.chosen: implements and reads must name groups, coupling_sites must name coupling sites`);
-    }
-  });
-  plan.coupling_sites.forEach((site, index) => {
-    if (!site || !inRange(site.readers, groupCount)) errors.push(`${at}.coupling_sites[${index}]: readers must name groups`);
-  });
-  return errors;
-}
-
-// A coupling site's chosen threshold as text: a shared build's size, a tumbling window
-// chain's grid, a scan's label set or a raw horizon.
-function couplingThresholdText(kind, threshold) {
-  const t = threshold || {};
-  switch (kind) {
-    case 'SharedBuildSize':
-      if ('state' in t) return `finer state ${summaryFamilyText(t.state)}`;
-      if (!t.params) return 'exact accumulator (no size)';
-      return [Object.keys(t.params)[0]].concat(wireParams(t.params)).join(' · ');
-    case 'SummaryTumblingWindowChain': return `${durationText(t.tumbling_window_width_ms)} tumbling windows over ${durationText(t.longest_window_ms)} · ${summaryFamilyText(t.family)}`;
-    case 'ScanLabels': return `labels ${(t.labels || []).join(', ') || 'none'}`;
-    case 'RawHorizon': return `raw horizon ${durationText(t.horizon_ms)}`;
-    default: return compactWire(threshold);
-  }
-}
-
-function gcd(a, b) { return b ? gcd(b, a % b) : a; }
-
-// The memo-MILP search's view of a document, or null when its search built
-// no memo: the MILP summary (incumbent cost, lower bound, gap, rounds,
-// whether it certified, and the cost of each query planned alone), each
-// memo group with its chosen implementation candidate, and the selected
-// plan's shared units: each group one node serves to several readers, and
-// each coupling site read by several groups, with its readers, the queries
-// behind them, their repeat intervals (a shared unit runs on their union)
-// and the threshold (a size is set by its strictest reader).
-function memoSearchView(doc) {
-  const search = (doc.stage3_plan_selection || {}).search || {};
-  const candidate = search.candidate_connections;
-  if (candidate) {
-    const number = (value) => typeof value === 'number' ? String(Number(value.toPrecision(4))) : null;
-    return { summary: {
-      incumbent: number(search.incumbent_cost), lowerBound: number(candidate.lower_bound),
-      gap: candidate.relative_gap ?? null, rounds: candidate.refinements,
-      certified: candidate.status === 'optimal', alone: null, saving: null,
-      clusters: 0, memo: null, objective: candidate.objective,
-      status: candidate.status, calibration: candidate.calibration_scope,
-      generationMs: candidate.memo_expansion_ms, modelMs: candidate.model_construction_ms,
-      solverMs: candidate.solver_ms, validationMs: candidate.validation_ms,
-    }, groups: [], sharedUnits: [] };
-  }
-  const milp = search.milp;
-  const plan = search.memo_plan;
-  if (!milp && !plan) return null;
-  const queries = doc.workload.queries;
-  const qid = (i) => (queries[i] || {}).id || `q${i + 1}`;
-  const gid = (g) => `G${g + 1}`;
-  const interval = (i) => ((queries[i] || {}).requirements || {}).repeat_interval_ms;
-  const maxError = (i) => (((queries[i] || {}).requirements || {}).accuracy || {}).max_error;
-  const fixed = (x) => (typeof x !== 'number' ? null : (x !== 0 && Math.abs(x) < 1e-3 ? x.toExponential(3) : String(Number(x.toPrecision(4)))));
-  const summary = milp ? {
-    incumbent: fixed(search.incumbent_cost),
-    lowerBound: fixed(milp.lower_bound),
-    gap: typeof milp.gap === 'number' ? milp.gap : null,
-    rounds: milp.rounds,
-    certified: typeof milp.gap === 'number' && milp.gap <= 1e-4 && !milp.time_limit_reached,
-    alone: fixed(milp.queries_alone_cost),
-    saving: typeof milp.queries_alone_cost === 'number' && milp.queries_alone_cost > 0 && typeof search.incumbent_cost === 'number'
-      ? 1 - search.incumbent_cost / milp.queries_alone_cost : null,
-    clusters: (milp.clusters || []).length,
-    memo: search.memo || null,
-  } : null;
-  if (!plan) return { summary, groups: [], sharedUnits: [] };
-  // The queries (and their schedule and strictest target) behind readers.
-  const behind = (groupIds) => [...new Set(groupIds.flatMap((g) => plan.groups[g].queries))].sort((a, b) => a - b);
-  const schedule = (qs) => {
-    const every = [...new Set(qs.map(interval).filter((ms) => typeof ms === 'number'))].sort((a, b) => a - b);
-    if (every.length < 2) return every.length ? `every ${durationText(every[0])}` : '—';
-    return `${every.map((ms) => `every ${durationText(ms)}`).join(' ∪ ')} → on a ${durationText(every.reduce(gcd))} grid`;
-  };
-  const strictest = (qs) => {
-    const approx = qs.filter((q) => typeof maxError(q) === 'number');
-    if (!approx.length) return '—';
-    const best = Math.min(...approx.map(maxError));
-    return `${approx.filter((q) => maxError(q) === best).map(qid).join(', ')} (ε=${best})`;
-  };
-  const groups = plan.groups.map((g) => {
-    const [kind, body] = stageOperatorParts(g.operator);
-    const lines = stageNodeLines(g.operator, null).slice(1);
-    const c = g.chosen;
-    return {
-      id: gid(g.group),
-      label: [kind].concat(lines).join(' · '),
-      reads: stageLogicalChildren(body).map(gid),
-      readBy: g.parents.map(gid).concat(g.roots_of.map((q) => `${qid(q)} (root)`)),
-      queries: g.queries.map(qid),
-      candidates: g.candidates,
-      chosen: c ? [`${c.origin} · ${c.operator}`,
-        c.implements.length > 1 ? `fuses ${c.implements.map(gid).join(', ')}` : '',
-        c.reads.length ? `reads ${c.reads.map(gid).join(', ')}` : '',
-        c.built_once ? 'built once per evaluation' : '',
-        c.coupling_sites.length ? `at ${c.coupling_sites.map((s) => `S${s + 1}`).join(', ')}` : ''].filter(Boolean).join(' · ')
-        : (g.implemented_by !== null && g.implemented_by !== undefined ? `implemented by ${gid(g.implemented_by)}'s candidate`
-          : (g.parents.length ? 'no choice: inside its readers\' candidates' : 'not read by the plan')),
-      shared: g.parents.length + g.roots_of.length > 1,
-    };
-  });
-  // The plan's readers of group g: the queries whose root it is, and the
-  // parents whose chosen candidate (or the candidate fusing them) reads it.
-  const chosenOf = (p) => {
-    const parent = plan.groups[p];
-    if (parent.chosen) return [p, parent.chosen];
-    const by = parent.implemented_by;
-    return by === null || by === undefined ? [null, null] : [by, plan.groups[by].chosen];
-  };
-  const planReaders = (g) => {
-    const parents = [...new Set(g.parents.map(chosenOf).filter(([, c]) => c && c.reads.includes(g.group)).map(([p]) => p))];
-    return parents.map(gid).concat(g.roots_of.map(qid));
-  };
-  const sharedUnits = [];
-  plan.groups.forEach((g) => {
-    if (!g.chosen && (g.implemented_by === null || g.implemented_by === undefined)) return;
-    const readers = planReaders(g);
-    if (readers.length < 2) return;
-    const qs = g.queries;
-    sharedUnits.push({
-      unit: `${gid(g.group)} · ${groups[g.group].label}`,
-      kind: 'shared group',
-      readers,
-      queries: qs.map(qid),
-      threshold: g.chosen ? (g.chosen.built_once ? 'one node, built once per evaluation' : 'one node; its query-time part runs per reader') : `inside ${gid(g.implemented_by)}'s candidate`,
-      schedule: schedule(qs),
-      strictest: strictest(qs),
-    });
-  });
-  plan.coupling_sites.forEach((site, index) => {
-    const qs = behind(site.readers);
-    if (site.readers.length < 2 && qs.length < 2) return;
-    sharedUnits.push({
-      unit: `S${index + 1}`,
-      kind: `coupling site · ${site.kind}`,
-      readers: site.readers.map(gid),
-      queries: qs.map(qid),
-      threshold: `${couplingThresholdText(site.kind, site.threshold)} (1 of ${site.thresholds} thresholds)`,
-      schedule: schedule(qs),
-      strictest: strictest(qs),
-    });
-  });
-  // Scan widening is no model variable: when the selected plan is the
-  // widened variant, a source's scan groups are one scan.
-  if (plan.scans_widened) {
-    const bySource = new Map();
-    plan.groups.forEach((g) => {
-      const [kind, body] = stageOperatorParts(g.operator);
-      if (kind !== 'Scan') return;
-      const source = wireSource(body.source);
-      if (!bySource.has(source)) bySource.set(source, []);
-      bySource.get(source).push(g);
-    });
-    bySource.forEach((scans, source) => {
-      if (scans.length < 2) return;
-      const readers = scans.flatMap((g) => g.parents);
-      const qs = behind(scans.map((g) => g.group));
-      sharedUnits.push({
-        unit: `${scans.map((g) => gid(g.group)).join(' + ')} · Scan of ${source}`,
-        kind: 'widened scan',
-        readers: readers.map(gid),
-        queries: qs.map(qid),
-        threshold: 'one scan, widened to the union of its readers\' labels',
-        schedule: schedule(qs),
-        strictest: strictest(qs),
-      });
-    });
-  }
-  return { summary, groups, sharedUnits, scansWidened: !!plan.scans_widened };
-}
-
-// The MILP summary as one line, e.g. "incumbent 1.2 · lower bound 1.2 ·
-// gap 0 · 3 rounds · certified · queries planned alone 2.4 (sharing saves
-// 50%)".
-function memoSummaryText(summary) {
-  if (!summary) return '';
-  const parts = [`incumbent ${summary.incumbent ?? '—'}`, `lower bound ${summary.lowerBound ?? '—'}`,
-    `gap ${summary.gap === null ? '—' : (summary.gap === 0 ? '0' : summary.gap.toExponential(2))}`, `${summary.rounds} round${summary.rounds === 1 ? '' : 's'}`,
-    summary.certified ? (summary.status ? 'optimal over generated catalog' : 'certified (gap ≤ 1e-4)') : 'not certified'];
-  if (summary.status) parts.push(`status ${summary.status}`);
-  if (summary.objective) parts.push(`objective ${summary.objective}`);
-  if (summary.calibration) parts.push(`calibration ${summary.calibration}`);
-  if (summary.solverMs !== undefined) parts.push(`generation ${summary.generationMs ?? '—'} ms, model ${summary.modelMs ?? '—'} ms, solve ${summary.solverMs} ms, validation ${summary.validationMs ?? '—'} ms`);
-  if (summary.clusters > 1) parts.push(`${summary.clusters} independent clusters`);
-  if (summary.memo) parts.push(`${summary.memo.groups} groups (${summary.memo.shared_groups} shared), ${summary.memo.candidates} implementation candidates`);
-  if (summary.alone !== null) parts.push(`queries planned alone ${summary.alone}${summary.saving === null ? '' : ` (sharing saves ${Number((summary.saving * 100).toFixed(1))}%)`}`);
-  return parts.join(' · ');
 }

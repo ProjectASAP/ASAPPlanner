@@ -9,7 +9,7 @@
 > stage read it: physical query lowering (`query_physical_lowering`),
 > `EvidenceBackedPhysicalDAG`, `estimate_physical_dag` and its comparison and
 > cache variants, `ComparisonScope`, `CacheProfile`, and the storage and
-> handoff estimators. Stage 3 prices each node with `estimate_operator` over
+> handoff estimators. Stage 3 costs each node with `estimate_operator` over
 > the `OperatorStatistics` it derives for that node. The sections on those
 > deleted parts record the design, not current code.
 > Unsupported operators, arrival modes and missing evidence remain unavailable;
@@ -94,7 +94,7 @@ ResourceEstimate {
 ### Terms used by this document
 
 The following terms are part of the model, rather than assumptions that a
-reader must recover from the implementation:
+person must recover from the implementation:
 
 | Term | Definition |
 |---|---|
@@ -183,12 +183,12 @@ simultaneously live memory found by the DAG schedule. Transient state from
 sequential evaluations can be reused, while state declared as retained remains
 live across later reads.
 
-Average memory, which cost model 1 prices per byte per second, does follow
-executions: retained state counts for every second it is kept, and transient
+Average memory, which cost model 1 costs per byte per second, does follow
+executions: retained state counts for every second it is retained, and transient
 state counts for the time it is held. State recomputed for each consumer
 counts its bytes times each reading query's latency times that query's
 evaluations per second; state built once per evaluation and shared counts its
-bytes times its longest reader's latency, once per evaluation. Memory a query
+bytes times its longest consumer's latency, once per evaluation. Memory a query
 holds only while it runs is
 therefore charged, in proportion to how long and how often it runs.
 
@@ -736,7 +736,7 @@ input.
 ## Summary operator formulas
 
 Stage 2 materialization (#509) decides whether a summary is built at ingestion
-or at query time, and Stage 3 prices that choice. The formulas below give
+or at query time, and Stage 3 costs that choice. The formulas below give
 per-operation work and state size.
 
 ### Ranking complete physical implementations

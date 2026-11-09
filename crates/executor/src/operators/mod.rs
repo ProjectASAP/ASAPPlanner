@@ -169,7 +169,7 @@ enum Kind {
         value: usize,
         time: Option<usize>,
         groups: Vec<usize>,
-        /// Rows for which this is not true update no state; their group is kept.
+        /// Rows for which this is not true update no state; their group is retained.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<Box<Expression>>,
     },
@@ -185,7 +185,7 @@ enum Kind {
         /// What each row adds to its item's count.
         row_weight: RowWeight,
         groups: Vec<usize>,
-        /// Rows for which this is not true update no state; their group is kept.
+        /// Rows for which this is not true update no state; their group is retained.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<Box<Expression>>,
     },
@@ -201,7 +201,7 @@ enum Kind {
         /// What each row adds to its item's count.
         row_weight: RowWeight,
         groups: Vec<usize>,
-        /// Rows for which this is not true update no state; their group is kept.
+        /// Rows for which this is not true update no state; their group is retained.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<Box<Expression>>,
     },

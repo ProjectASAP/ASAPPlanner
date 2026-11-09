@@ -24,8 +24,8 @@ become one physical node, and a physical operator is not merely a renamed
 logical variant.
 
 Current state: no code lowers a whole candidate to a `PhysicalOperator` DAG.
-The recursive lowering and the physical-DAG estimator that priced its output
-were deleted with no remaining reader. Stage 3 prices each node of a physical
+The recursive lowering and the physical-DAG estimator that costed its output
+were deleted with no remaining caller. Stage 3 costs each node of a physical
 candidate with `estimate_operator` (`asap-cost`, `analytical.rs`) over the
 `OperatorStatistics` it derives for that node. The lowering obligations and
 comparison rules below are the contract a whole-DAG lowering must meet.
@@ -98,7 +98,7 @@ its modeled descendants is invalid because it undercounts the candidate.
 ### Pre-ASAP lowering
 
 Every `NonASAPOp` node lowers recursively, whether it is in a raw query or
-kept exact inside a post-ASAP plan. Typical physical
+retained exact inside a post-ASAP plan. Typical physical
 operators include scans, filters, projections, hash aggregates, joins,
 ordering, bounded Top-K, limits, and PromQL-specific operators. The selected
 physical algorithm, rather than the logical spelling, determines the formula.
@@ -442,7 +442,7 @@ Version 6 (current) exports one node per operator: retained exact operators are
 Post-ASAP DAG wire version 7 adds a per-measure row predicate to the aggregate
 operators (#466): `filters` on the exact aggregate value operation, parallel to
 its measures, and `filter` on `SummaryAgg`, gating which rows update the
-summary state. The version bump makes an older reader fail loudly instead of
+summary state. The version bump makes an older parser fail loudly instead of
 taking a filtered aggregate as unfiltered. No planner rule sets `SummaryAgg.filter`
 yet; a filtered pre-ASAP measure is retained as an exact fallback.
 The native physical planner rejects either field when set.

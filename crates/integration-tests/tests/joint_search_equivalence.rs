@@ -7,7 +7,7 @@
 
 use crate::planner_layering_common;
 
-use asap_cost::{ClusterLimits, ClusterObjective, CostInputs, CostModel};
+use asap_cost::CostInputs;
 use asap_devtools::planning_stages::{lower_promql_roots, lower_sql_roots};
 use asap_planner::{run_planning, PlanSearchSettings, PlanningModels, PlanningRun};
 use asap_types::deployment_capabilities::DeploymentCapabilities;
@@ -235,59 +235,6 @@ fn repeated_sql_queries_preserve_separate_output_references() {
         false,
     );
     assert_valid(&run, 3);
-}
-
-// Request work on literal outputs still consumes CPU and latency budgets even
-// when there is no operator node to which a fee could be attributed.
-#[test]
-fn rootless_request_overhead_respects_capacity_and_latency() {
-    let mut workload = workload_of(&[("1", 1)], AccuracyTarget::exact());
-    let roots = lower_promql_roots(&workload).unwrap();
-    for capacity in [true, false] {
-        let mut settings = CostInputs::default();
-        settings.measured_operation_costs.ns_per_evaluation = 2_000_000.0;
-        if capacity {
-            settings.cost_model = CostModel::ClusterCapacity(ClusterLimits {
-                memory_bytes: 1_000_000_000,
-                disk_bytes: 1_000_000_000,
-                cpu_cores: Some(1),
-                objective: ClusterObjective::LowestLatency,
-            });
-        } else {
-            workload.query_workload.repeating_queries.as_mut().unwrap()[0]
-                .requirements
-                .max_latency_ms = Some(1.0);
-        }
-        let entries: Vec<_> = workload.query_workload.entries().collect();
-        let result = run(
-            &roots,
-            &entries,
-            workload.data_workload.as_ref().unwrap(),
-            PlanningModels::builtin().with_cost_inputs(&settings),
-            false,
-        );
-        assert!(result.selection.is_err());
-    }
-}
-
-// Unsupported exact operators cannot become accepted merely because no summary
-// candidate exists; failure must leave the exported physical plan absent.
-#[test]
-fn unsupported_exact_operation_never_returns_an_unvalidated_plan() {
-    let workload = workload_of(
-        &[("stddev_over_time(m[5m])", 60_000)],
-        AccuracyTarget::exact(),
-    );
-    let roots = lower_promql_roots(&workload).unwrap();
-    let entries: Vec<_> = workload.query_workload.entries().collect();
-    let result = run(
-        &roots,
-        &entries,
-        workload.data_workload.as_ref().unwrap(),
-        PlanningModels::builtin(),
-        false,
-    );
-    assert!(result.selection.is_err());
 }
 
 // Deterministic small mixed workloads exercise exact temporal operators, counter

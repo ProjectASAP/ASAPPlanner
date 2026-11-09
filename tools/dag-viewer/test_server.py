@@ -74,7 +74,7 @@ FLOWS_TABLE = {"name": "flows", "time_index": 0, "columns": [
 SQL_WORKLOAD = {
     "query_workload": {"language": {"sql": "datafusion_sql"}, "query_batch": None, "repeating_queries": [{
         "query": "SELECT dst_port, COUNT(*) AS value FROM flows WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY dst_port",
-        "demand": {"fixed_interval": 60000},
+        "demand": {"fixed_interval_at": {"interval": 60000, "evaluation_phase": 0}},
         "requirements": {"accuracy": {"max_error": 0.0, "failure_probability": 0.0, "accuracy_scope": "whole_result"}, "max_latency_ms": None},
         "predictability": {"predictable": {"known_at": None}}}]},
     "data_workload": {"arrival": {"ingesting": {"rows_per_second": 1000.0}},
@@ -200,7 +200,7 @@ class PlanTests(unittest.TestCase):
                 peak = max(peak, running)
             time.sleep(0.05)
             out = args[args.index("--out") + 1]
-            Path(out).write_text(json.dumps({"stage3_plan_selection": {"cost": {}}}))
+            Path(out).write_text(json.dumps({"stage3_plan_selection": {"plan": None}}))
             with guard:
                 running -= 1
             return subprocess.CompletedProcess(args, 0, "", "")
@@ -246,15 +246,15 @@ class WriteExamplesTests(unittest.TestCase):
         return calls
 
     def test_missing_documents_are_written_and_existing_ones_kept(self):
-        """Only the missing document is planned; an existing one is kept."""
+        """Only the missing document is planned; an existing one is left as it is."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "out").mkdir()
-            (root / "out" / "a.json").write_text("kept")
+            (root / "out" / "a.json").write_text("existing")
             calls = self.run_write(root, force=False)
             self.assertEqual(calls, [[str(server.BINARY), "--workload", str(root / "workloads" / "b.json"), *STAGE3_JSON,
                                       "--ignore-accuracy-guarantees", "--out", str(root / "out" / "b.json")]])
-            self.assertEqual((root / "out" / "a.json").read_text(), "kept")
+            self.assertEqual((root / "out" / "a.json").read_text(), "existing")
 
     def test_regenerate_rewrites_every_document(self):
         """--regenerate plans every entry again."""
@@ -312,7 +312,7 @@ class PlanEndpointTests(unittest.TestCase):
         with its deployment capabilities, keeping materialized views."""
         workload = {
             "query_workload": {"language": "promql", "query_batch": None, "repeating_queries": [{
-                "query": "sum by (job) (sum_over_time(m[1m]))", "demand": {"fixed_interval": 10000},
+                "query": "sum by (job) (sum_over_time(m[1m]))", "demand": {"fixed_interval_at": {"interval": 10000, "evaluation_phase": 0}},
                 "requirements": {"accuracy": {"max_error": 0.0, "failure_probability": 0.0, "accuracy_scope": "whole_result"}, "max_latency_ms": None},
                 "predictability": {"predictable": {"known_at": None}}}]},
             "data_workload": {"arrival": {"ingesting": {"rows_per_second": 1000.0}},
@@ -320,12 +320,12 @@ class PlanEndpointTests(unittest.TestCase):
         }
         document = post_plan({"workload": workload, "deployment_capabilities": {"raw_data_retained": False},
                               "cost_model": "usage-over-time"}, "/api/plan-workload")
-        self.assertEqual(document["format"], "asap-stage-pipeline/v1")
+        self.assertEqual(document["format"], "asap-stage-pipeline/v2")
         self.assertEqual(document["run_until"], "stage3")
         self.assertEqual(document["accuracy_guarantees"], "ignored")
         self.assertEqual(document["workload"]["data_workload"]["sources"]["m"]["series_count"], 100)
         self.assertFalse(document["deployment_capabilities"]["raw_data_retained"])
-        self.assertIsNotNone(document["stage3_plan_selection"]["selected_dag"])
+        self.assertIsNotNone(document["stage3_plan_selection"]["plan"], document["stage3_plan_selection"].get("error"))
         self.assertTrue(document["stage3_plan_selection"]["materialized_views"])
 
     def test_plan_workload_endpoint_plans_a_sql_workload_with_its_tables(self):
@@ -335,7 +335,7 @@ class PlanEndpointTests(unittest.TestCase):
                              "/api/plan-workload")
         self.assertEqual(document["workload"]["queries"][0]["language"], "sql")
         self.assertEqual(document["accuracy_guarantees"], "enforced")
-        self.assertIsNotNone(document["stage3_plan_selection"]["selected_dag"])
+        self.assertIsNotNone(document["stage3_plan_selection"]["plan"], document["stage3_plan_selection"].get("error"))
 
 
 if __name__ == "__main__":
