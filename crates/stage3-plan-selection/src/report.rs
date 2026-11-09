@@ -106,8 +106,11 @@ impl RejectionCause {
 /// bound that met its target, and the sketches its output reads.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AcceptedAccuracy {
-    /// The metric of the accepted error bound; `None` for an exact output,
-    /// which meets every metric, and for a query without an accuracy target.
+    /// Whether the query has an accuracy target.
+    pub has_accuracy_target: bool,
+    /// The metric of the accepted error bound, that of the sketch readout
+    /// the output reads; `None` for an exact output, which meets every
+    /// metric, and for a query without an accuracy target.
     pub accepted_metric: Option<AccuracyMetric>,
     /// The sketch algorithms the query's output reads, in plan order
     /// (e.g. `["Kll"]`); empty for an exact plan.
@@ -115,9 +118,11 @@ pub struct AcceptedAccuracy {
 }
 
 impl std::fmt::Display for AcceptedAccuracy {
-    /// E.g. `accepted rank (Kll)`, or `accepted exact`.
+    /// E.g. `accepted rank (Kll)`, `accepted exact`, or `no accuracy
+    /// target (DDSketch)`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.accepted_metric {
+            None if !self.has_accuracy_target => write!(f, "no accuracy target")?,
             None => write!(f, "accepted exact")?,
             Some(metric) => {
                 let name = serde_json::to_value(metric)

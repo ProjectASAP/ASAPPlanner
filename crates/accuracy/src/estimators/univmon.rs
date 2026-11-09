@@ -8,8 +8,8 @@
 //!   `⌈r/2⌉` rows fail, an exact binomial tail;
 //! - the distinct count is unbiased with `Var ≤ 1.35 F0²/k` for a heap of
 //!   `k ≥ 8` once the top layer is complete, which needs the source's
-//!   distinct bound, so its guarantee is built where the source is known
-//!   (`distinct_guarantee`) and plan selection binds it;
+//!   distinct bound (`incomplete_top_layer_probability`), so it has no
+//!   guarantee here;
 //! - entropy has no certified bound.
 //!
 //! Every bound assumes the key hash is uniformly random and the shape keeps
@@ -27,17 +27,7 @@ pub(crate) const MAX_LAYERS: u8 =
 /// more than `ε₂ F2` with probability at most `2q/ε₂² = 0.1`. Fixing it
 /// lets a shape state one `(ε, δ)`: the columns give `ε`, the rows `δ`.
 const L2_ROW_FAILURE: f64 = 0.1;
-/// `Var[estimate_cardinality] ≤ 1.35 F0²/k` for `k ≥ 8`, the constant the library
-/// proves (it also states the looser `2 F0²/k`).
-const DISTINCT_VARIANCE: f64 = 1.35;
-/// The smallest heap the distinct-count variance bound holds for.
-const DISTINCT_MIN_HEAP: u32 = 8;
 const L2_CONTRACT: &str = "univmon_layer0_f2_median_chebyshev_binomial_v1";
-const DISTINCT_CONTRACT: &str = "univmon_distinct_complete_top_layer_chebyshev_v1";
-/// Names the probability that the top layer is incomplete, left symbolic
-/// in `max_distinct[source]` ([`incomplete_top_layer_statistic`]).
-const INCOMPLETE_TOP_LAYER: &str = "univmon_incomplete_top_layer_probability";
-const MAX_DISTINCT: &str = "max_distinct";
 
 /// The shape baseline for readouts without a size model: the total (exact
 /// whatever the shape) and entropy (uncertified).
@@ -81,7 +71,7 @@ pub(super) fn guarantee(
             ))
         }
         // The distinct count needs the source's distinct bound
-        // ([`distinct_guarantee`]); entropy has no certified bound.
+        // (`incomplete_top_layer_probability`); entropy has no certified bound.
         _ => None,
     }
 }
@@ -141,30 +131,8 @@ fn incomplete_top_layer_bound(heap_size: u32) -> f64 {
     (f64::from(heap_size) / 2.0 * (1.0 - 2.0 * std::f64::consts::LN_2)).exp()
 }
 
-/// The statistic a UnivMon distinct count over `source` leaves its
-/// top-layer failure probability as.
-#[allow(dead_code)] // Read again in #1207 PR 8: δ of a distinct count over a source's own rows, with θ.
-pub(crate) fn incomplete_top_layer_statistic(heap_size: u32, layers: u8, source: &str) -> String {
-    format!("{INCOMPLETE_TOP_LAYER}[k={heap_size},layers={layers}]({MAX_DISTINCT}[{source}])")
-}
-
-/// The heap, layers and source an `incomplete_top_layer_statistic` names.
-pub fn parse_incomplete_top_layer_statistic(statistic: &str) -> Option<(u32, u8, &str)> {
-    let rest = statistic
-        .strip_prefix(INCOMPLETE_TOP_LAYER)?
-        .strip_prefix("[k=")?;
-    let (heap_size, rest) = rest.split_once(",layers=")?;
-    let (layers, rest) = rest.split_once(']')?;
-    let source = rest
-        .strip_prefix('(')?
-        .strip_prefix(MAX_DISTINCT)?
-        .strip_prefix('[')?
-        .strip_suffix("])")?;
-    Some((heap_size.parse().ok()?, layers.parse().ok()?, source))
-}
-
-/// The probability an `incomplete_top_layer_statistic` names, given the
-/// source's distinct bound `F0_max`:
+/// The probability that a heap-`k` UnivMon's top layer is incomplete over
+/// a source of at most `F0_max` distinct items:
 /// - 0 when `F0_max ≤ k`: the top layer cannot receive more keys than its
 ///   heap holds;
 /// - `(e/4)^(k/2)` when `layers ≥ ⌈log2(F0_max/k)⌉ + 2`, i.e.
@@ -180,65 +148,6 @@ pub fn incomplete_top_layer_probability(heap_size: u32, layers: u8, max_distinct
     } else {
         1.0
     }
-}
-
-/// A UnivMon distinct count over `source`'s own rows, at failure
-/// probability `delta`: relative error at most `√(1.35/(k δ_c))`, where
-/// `δ_c` is the share of `delta` left after the top layer's, failing with
-/// probability `δ_c` plus the chance of an incomplete top layer, left
-/// symbolic in the source's distinct bound. `None` for a heap under 8, a
-/// `delta` too small for the heap, or a shape the library would not build.
-#[allow(dead_code)] // Read again in #1207 PR 8: δ of a distinct count over a source's own rows, with θ.
-pub(crate) fn distinct_guarantee(
-    params: &SketchParams,
-    delta: f64,
-    source: &str,
-) -> Option<AccuracyGuarantee> {
-    let SketchParams::UnivMon {
-        heap_size,
-        sketch_rows,
-        sketch_cols,
-        layers,
-    } = params
-    else {
-        return None;
-    };
-    if *heap_size < DISTINCT_MIN_HEAP
-        || !hash_independent(*sketch_rows, *sketch_cols, *layers)
-        || !(delta > 0.0 && delta < 1.0)
-    {
-        return None;
-    }
-    let chebyshev = delta - incomplete_top_layer_bound(*heap_size);
-    if chebyshev <= 0.0 {
-        return None;
-    }
-    let relative_error = (DISTINCT_VARIANCE / (f64::from(*heap_size) * chebyshev)).sqrt();
-    let statistic = incomplete_top_layer_statistic(*heap_size, *layers, source);
-    Some(AccuracyGuarantee::new(
-        AccuracyMetric::Relative,
-        BoundExpr::Constant {
-            value: relative_error,
-        },
-        ProbabilityExpr::UnionBound {
-            terms: vec![
-                ProbabilityExpr::Constant { value: chebyshev },
-                ProbabilityExpr::Unknown { statistic },
-            ],
-        },
-        vec![GuaranteeSource::SketchEvaluation {
-            algorithm: "UnivMon".into(),
-            contract: DISTINCT_CONTRACT.into(),
-            params: serde_json::json!({"heap_size": heap_size, "layers": layers,
-                "max_distinct": format!("{MAX_DISTINCT}[{source}]"),
-                "relative_error": relative_error,
-                "variance": "1.35 F0^2 / k",
-                "hash_assumption": "independent_uniform_layer_hashes",
-                "mode": "standard",
-                "population_scope": "complete_evaluation_including_merged_tumbling_windows"}),
-            query: "Cardinality".into(),
-        }],
-    ))
 }
 
 #[cfg(test)]
@@ -294,19 +203,11 @@ mod tests {
         assert!(l2(&univmon(1, 21, 32, 1)).is_none());
     }
 
-    /// Without the source's bound the failure probability stays unknown
-    /// and no target is met; a bound the pyramid is too shallow for gives
-    /// probability 1.
+    /// The top layer is complete for certain over at most k keys, nearly
+    /// so up to the deepest bound the layers cover, and uncertified past it.
     #[test]
-    fn distinct_guarantee_needs_the_source_bound_and_enough_layers() {
-        let params = univmon(54_000, 1, 1, MAX_LAYERS);
-        let guarantee = distinct_guarantee(&params, 0.01, "m").unwrap();
-        assert_eq!(guarantee.spec.failure_probability.evaluate(), None);
-        assert!(!meets(&guarantee, 0.05, Some(0.01)));
-        let SketchParams::UnivMon { heap_size: k, .. } = params else {
-            unreachable!()
-        };
-        // At most k keys: complete for certain.
+    fn incomplete_top_layer_probability_needs_enough_layers() {
+        let k = 54_000;
         assert_eq!(incomplete_top_layer_probability(k, 2, u64::from(k)), 0.0);
         // F0_max = k · 2^(L−2) is the deepest bound L layers cover.
         let deepest = u64::from(k) << 17;
@@ -318,38 +219,13 @@ mod tests {
             1.0
         );
         assert_eq!(incomplete_top_layer_probability(8, 19, u64::MAX), 1.0);
-    }
-
-    /// Only a heap of at least 8 and a buildable shape gets a distinct
-    /// guarantee; the guarantee without a source is none.
-    #[test]
-    fn distinct_guarantee_needs_a_heap_of_eight_and_a_buildable_shape() {
-        assert!(distinct_guarantee(&univmon(7, 1, 1, 19), 0.5, "m").is_none());
-        assert!(distinct_guarantee(&univmon(8, 1, 1, 20), 0.5, "m").is_none());
-        assert!(distinct_guarantee(&univmon(8, 1, 1, 19), 0.5, "m").is_some());
-        let sized = univmon(54_000, 1, 1, MAX_LAYERS);
+        // Without the source's bound a distinct count has no guarantee.
         assert!(guarantee(
             &SketchAlgorithm::UnivMon,
-            &sized,
+            &univmon(54_000, 1, 1, MAX_LAYERS),
             &SketchStatistic::Cardinality
         )
         .is_none());
-    }
-
-    /// The statistic names its heap, layers and source, any source name.
-    #[test]
-    fn incomplete_top_layer_statistics_round_trip() {
-        for source in ["flows_src_ip", "a[b]", "x])(", ""] {
-            let statistic = incomplete_top_layer_statistic(337_500, 19, source);
-            assert_eq!(
-                parse_incomplete_top_layer_statistic(&statistic),
-                Some((337_500, 19, source))
-            );
-        }
-        assert_eq!(
-            parse_incomplete_top_layer_statistic("max_distinct[m]"),
-            None
-        );
     }
 
     /// The total stays exact; entropy stays uncertified.

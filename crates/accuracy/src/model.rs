@@ -1,15 +1,17 @@
 //! The deployment's measured accuracy, and α^log of a logical edge.
 
+use crate::estimators::sketch_guarantee;
 use crate::{target_limit, theoretical_guarantee};
 use asap_types::ir::operator::asap::summary_type_of_operator;
 use asap_types::ir::properties::{AccuracyGuarantee, AccuracyMetric};
 use asap_types::ir::schema::{
-    FieldDataType, MergedError, SketchParams, SketchStatistic, SummaryTypeCapability,
+    FieldDataType, MergedError, SketchAlgorithm, SketchParams, SketchStatistic,
+    SummaryTypeCapability,
 };
 use asap_types::ir::{ASAPOp, Operator, QueryRoot};
 use asap_types::stages::{
     parameter_list, CandidateForMemoGroupId, LogicalRequirements, Memo, MemoGroupId,
-    RootPruneReason,
+    RootPruneReason, ValueSign,
 };
 
 /// The deployment's measured accuracy, per summary configuration. A
@@ -54,11 +56,13 @@ impl AccuracyEvidence for NoMeasuredGuarantees {
 /// [`accepted_metrics`] of `memo`.
 /// - A readout's input (`SummaryEstimate`) from a sketch state: the
 ///   readout's metric is one its output accepts (the metric rule; no rule
-///   where no query with a target reaches it), and the guarantee of the
+///   where no query with a target reaches it; `NoGuarantee` when the
+///   summary type has no guarantee for the statistic), and the guarantee of the
 ///   producer's θ for the readout's statistic, at the required failure
 ///   probability, is within the required error and in its metric: the
 ///   deployment's measurement (`evidence`) when it has one, else
-///   [`theoretical_guarantee`]; a merged state (any producer but a build)
+///   [`theoretical_guarantee`] when its sign condition holds for the
+///   state's values ([`sign_condition_holds`]); a merged state (any producer but a build)
 ///   must keep the guarantee (`MergedError::Exact` or
 ///   `AsIfBuiltOverUnion`). A top-k's heap holds its `k` whatever the
 ///   requirement.
@@ -110,8 +114,9 @@ pub fn producer_satisfies_logical_requirements(
             .collect();
         return metric_rule(producer_metric, on_input);
     };
-    let summary_type =
-        summary_type_of_operator(&memo.groups()[summary_input.0 as usize].expression);
+    let state_group = &memo.groups()[summary_input.0 as usize];
+    let summary_type = summary_type_of_operator(&state_group.expression);
+    let state_sign = state_group.group_properties.state_column_sign();
     let producer_candidate = memo.candidate(producer);
     let (Some(summary_type @ FieldDataType::Sketch(_)), Some(parameters)) = (
         summary_type,
@@ -129,10 +134,12 @@ pub fn producer_satisfies_logical_requirements(
             });
         }
     }
-    if let (Some(metric), Some(accepted)) = (
-        readout_metric(summary_type, statistic),
-        &accepted[consumer.group.0 as usize],
-    ) {
+    if let Some(accepted) = &accepted[consumer.group.0 as usize] {
+        // A readout with no guarantee in any metric has an error without a
+        // bound: no query with a target may read it.
+        let Some(metric) = readout_metric(summary_type, statistic) else {
+            return Err(RootPruneReason::NoGuarantee { consumer, input });
+        };
         metric_rule(metric, accepted.clone())?;
     }
     let Some(required) = consumer_candidate.input_requirements[input].required_accuracy else {
@@ -155,12 +162,17 @@ pub fn producer_satisfies_logical_requirements(
             required.failure_probability,
         )
         .or_else(|| {
-            theoretical_guarantee(
-                summary_type,
-                parameters,
-                statistic,
-                required.failure_probability,
-            )
+            sign_condition_holds(summary_type, statistic, state_sign)
+                .then(|| {
+                    theoretical_guarantee(
+                        summary_type,
+                        parameters,
+                        statistic,
+                        required.failure_probability,
+                        memo.max_distinct_per_evaluation(*summary_input),
+                    )
+                })
+                .flatten()
         });
     let meets = guarantee.is_some_and(|guarantee| {
         guarantee.spec.accuracy_metric == required.metric
@@ -251,12 +263,32 @@ pub fn readout_metric(
     let FieldDataType::Sketch(algorithm) = summary_type else {
         return None;
     };
+    if !SummaryTypeCapability::of(summary_type).answers(statistic) {
+        return None;
+    }
     let parameters = parameter_list(*algorithm).first()?;
     Some(
-        theoretical_guarantee(summary_type, parameters, statistic, 1.0)?
+        sketch_guarantee(algorithm, parameters, statistic)?
             .spec
             .accuracy_metric,
     )
+}
+
+/// Whether the theoretical guarantee of reading `statistic` from a state
+/// of `summary_type` holds for states updated with values of sign `sign`
+/// (concepts doc, section 2, "Sign conditions"): DDSketch's relative error
+/// on a quantile needs values of one sign, `NonNegative` or `NonPositive`.
+fn sign_condition_holds(
+    summary_type: &FieldDataType,
+    statistic: &SketchStatistic,
+    sign: Option<ValueSign>,
+) -> bool {
+    match (summary_type, statistic) {
+        (FieldDataType::Sketch(SketchAlgorithm::DDSketch), SketchStatistic::Quantile { .. }) => {
+            matches!(sign, Some(ValueSign::NonNegative | ValueSign::NonPositive))
+        }
+        _ => true,
+    }
 }
 
 /// A heap variant's heap size.
@@ -282,4 +314,163 @@ fn sketch_readout_metric(memo: &Memo, producer: CandidateForMemoGroupId) -> Opti
         summary_type_of_operator(&memo.groups()[summary_input.0 as usize].expression)?,
         query,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use asap_types::ir::operator::operator_properties::Reduction;
+    use asap_types::ir::scalar::expr_ir::ColumnRef;
+    use asap_types::ir::schema::{ExactKind, SummaryUpdate};
+    use asap_types::stages::RequiredAccuracy;
+    use asap_types::test_support::{
+        add_candidate, group_with_own_candidate, series_schema, time_series_scan,
+    };
+    use asap_types::workload::SourceFacts;
+
+    /// Decided 2026-11-09 (A6): the edge from an HLL build at precision 18
+    /// into `count(distinct)`'s readout, which requires relative error 0.05
+    /// at δ = 0.01, holds when the data bounds the scanned source at 9,636
+    /// distinct items per evaluation, and is `BelowRequiredAccuracy` at
+    /// 1,000,000 (outside the contract) or without a bound.
+    #[test]
+    fn a_distinct_count_readout_reads_the_scanned_source_s_bound() {
+        for (bound, holds) in [(Some(9_636), true), (Some(1_000_000), false), (None, false)] {
+            let facts = SourceFacts {
+                max_distinct_per_evaluation: bound,
+                ..SourceFacts::default()
+            };
+            let mut memo = Memo::new([("events".to_string(), facts)].into());
+            let scan = group_with_own_candidate(
+                &mut memo,
+                time_series_scan("events", series_schema(&[]), vec![]),
+            );
+            let build = Operator::ASAP(ASAPOp::SummaryAgg {
+                child: scan,
+                summary_type: FieldDataType::Sketch(SketchAlgorithm::Hll),
+                input: SummaryUpdate::column(ColumnRef::SampleValue),
+                reduction: Reduction::PerEntity,
+                filter: None,
+            });
+            let state = memo.find_or_add_group(build.clone()).unwrap();
+            let producer = add_candidate(
+                &mut memo,
+                state,
+                build,
+                Some(SketchParams::Hll { precision: 18 }),
+            )
+            .unwrap();
+            let readout = Operator::ASAP(ASAPOp::SummaryEstimate {
+                summary_input: state,
+                query: SketchStatistic::Cardinality,
+            });
+            let distinct = memo.find_or_add_group(readout.clone()).unwrap();
+            let consumer = add_candidate(&mut memo, distinct, readout, None).unwrap();
+            memo.set_input_requirements(
+                consumer,
+                vec![LogicalRequirements {
+                    required_accuracy: Some(RequiredAccuracy {
+                        metric: AccuracyMetric::Relative,
+                        max_error: 0.05,
+                        failure_probability: 0.01,
+                    }),
+                }],
+            );
+            let accepted = vec![None; memo.groups().len()];
+            let result = producer_satisfies_logical_requirements(
+                &memo,
+                &accepted,
+                producer,
+                consumer,
+                0,
+                &NoMeasuredGuarantees,
+            );
+            assert_eq!(result.is_ok(), holds, "{bound:?}: {result:?}");
+            if !holds {
+                assert!(
+                    matches!(result, Err(RootPruneReason::BelowRequiredAccuracy { .. })),
+                    "{result:?}"
+                );
+            }
+        }
+    }
+
+    /// A distinct count read from UnivMon, which has no guarantee for it
+    /// in any metric, under a query with a relative target: the edge fails
+    /// with `NoGuarantee` (its error would reach the root unbounded); with
+    /// no target reaching it, it holds.
+    #[test]
+    fn a_readout_without_a_guarantee_serves_no_query_with_a_target() {
+        let mut memo = Memo::default();
+        let scan = group_with_own_candidate(
+            &mut memo,
+            time_series_scan("events", series_schema(&[]), vec![]),
+        );
+        let build = Operator::ASAP(ASAPOp::SummaryAgg {
+            child: scan,
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::UnivMon),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::PerEntity,
+            filter: None,
+        });
+        let state = memo.find_or_add_group(build.clone()).unwrap();
+        let parameters = parameter_list(SketchAlgorithm::UnivMon)[0].clone();
+        let producer = add_candidate(&mut memo, state, build, Some(parameters)).unwrap();
+        let readout = Operator::ASAP(ASAPOp::SummaryEstimate {
+            summary_input: state,
+            query: SketchStatistic::Cardinality,
+        });
+        let distinct = memo.find_or_add_group(readout.clone()).unwrap();
+        let consumer = add_candidate(&mut memo, distinct, readout, None).unwrap();
+        let mut accepted = vec![None; memo.groups().len()];
+        let edge = |accepted: &[Option<Vec<AccuracyMetric>>]| {
+            producer_satisfies_logical_requirements(
+                &memo,
+                accepted,
+                producer,
+                consumer,
+                0,
+                &NoMeasuredGuarantees,
+            )
+        };
+        assert!(edge(&accepted).is_ok());
+        accepted[distinct.0 as usize] = Some(vec![AccuracyMetric::Relative]);
+        assert!(
+            matches!(
+                edge(&accepted),
+                Err(RootPruneReason::NoGuarantee { input: 0, .. })
+            ),
+            "{:?}",
+            edge(&accepted)
+        );
+    }
+
+    /// A readout's metric is its guarantee's, whatever its failure
+    /// probability or the source's distinct bound: HLL's distinct count
+    /// still reads a relative error.
+    #[test]
+    fn readout_metric_is_the_guarantee_s_metric() {
+        let quantile = SketchStatistic::Quantile { q: 0.5 };
+        let sketch = |algorithm| FieldDataType::Sketch(algorithm);
+        assert_eq!(
+            readout_metric(&sketch(SketchAlgorithm::Kll), &quantile),
+            Some(AccuracyMetric::Rank)
+        );
+        assert_eq!(
+            readout_metric(&sketch(SketchAlgorithm::DDSketch), &quantile),
+            Some(AccuracyMetric::Relative)
+        );
+        assert_eq!(
+            readout_metric(&sketch(SketchAlgorithm::Hll), &SketchStatistic::Cardinality),
+            Some(AccuracyMetric::Relative)
+        );
+        assert_eq!(
+            readout_metric(&sketch(SketchAlgorithm::Hll), &quantile),
+            None
+        );
+        assert_eq!(
+            readout_metric(&FieldDataType::exact(ExactKind::Sum), &quantile),
+            None
+        );
+    }
 }

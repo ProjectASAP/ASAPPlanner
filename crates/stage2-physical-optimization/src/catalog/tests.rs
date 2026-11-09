@@ -6,9 +6,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use asap_types::deployment_capabilities::DeploymentCapabilities;
-use asap_types::ir::operator::operator_properties::{
-    AtModifier, Reduction, Source, SourceColumn, TimeShift,
-};
+use asap_types::ir::operator::operator_properties::{AtModifier, Reduction, Source, TimeShift};
 use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
 use asap_types::ir::scalar::{ColumnRef, ScalarValue};
 use asap_types::ir::schema::{
@@ -25,9 +23,9 @@ use asap_types::stages::{
     PruneCause, PruneReason, PrunedLogicalCandidate, RootPruneReason, ValueSign,
 };
 use asap_types::test_support::{
-    add_candidate, group_with_own_candidate, series_schema, time_series_scan,
+    add_candidate, group_with_own_candidate, series_schema, time_series_scan, value_signs,
 };
-use asap_types::workload::{DataArrival, DataWorkload};
+use asap_types::workload::{DataArrival, DataWorkload, SourceFacts};
 use ExecutionTiming::{IngestionTime, QueryTime};
 
 use super::generate_physical_asap_memo_candidates;
@@ -638,7 +636,7 @@ fn a_counter_state_runs_at_ingestion_time_over_ordered_rows() {
 /// data declares `m`'s values non-negative, and then offered.
 #[test]
 fn a_count_min_build_needs_weights_proven_non_negative() {
-    let heap = |declared: BTreeMap<SourceColumn, ValueSign>| {
+    let heap = |declared: BTreeMap<String, SourceFacts>| {
         let mut memo = Memo::new(declared);
         let scan = group_with_own_candidate(
             &mut memo,
@@ -681,13 +679,7 @@ fn a_count_min_build_needs_weights_proven_non_negative() {
             PruneReason::CountMinWeightsNotProvenNonNegative
         )
     );
-    let (kept, unproven) = heap(BTreeMap::from([(
-        SourceColumn {
-            source: "m".into(),
-            column: "value".into(),
-        },
-        ValueSign::NonNegative,
-    )]));
+    let (kept, unproven) = heap(value_signs(&[("m", ValueSign::NonNegative)]));
     assert_eq!(kept, list(&[QT_NONE, QT_ONE]));
     assert_eq!(unproven, vec![]);
 }
