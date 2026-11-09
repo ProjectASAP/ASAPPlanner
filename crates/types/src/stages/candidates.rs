@@ -8,17 +8,21 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::column_properties::{columns_of_group, output_column_properties};
 use super::hash_consing::{expression_hash, same_expression, same_value};
-use super::{GroupProperties, MemoGroup, MemoGroupAsInput, MemoGroupId, ValueSign};
+use super::{ColumnLineage, GroupProperties, MemoGroup, MemoGroupAsInput, MemoGroupId, ValueSign};
 use crate::ir::operator::asap::summary_type_of_operator;
+use crate::ir::operator::operator_properties::BinaryOpKind;
 use crate::ir::operator::operator_properties::{AtModifier, SourceColumn, TimeShift};
+use crate::ir::operator::AggIntent;
 use crate::ir::properties::summary_coverage::SummaryCoverage;
 use crate::ir::properties::{AccuracyMetric, AccuracyTarget};
-use crate::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams};
+use crate::ir::scalar::expr_ir::ArithmeticOpKind;
+use crate::ir::schema::{ExactKind, FieldDataType, SketchAlgorithm, SketchParams};
 use crate::ir::ASAPOp;
 use crate::ir::Operator;
+use crate::ir::OperatorResultKind;
 use crate::ir::QueryRoot;
 use crate::ir::SchemaDerivationError;
-use crate::ir::{NonASAPOp, ScalarExpr};
+use crate::ir::{BinaryOperator, NonASAPOp, ScalarExpr};
 
 /// One candidate: position `index_in_group` in group `group`'s candidates
 /// ([`MemoGroup::candidates`]).
@@ -140,15 +144,18 @@ impl Memo {
 
     /// Adds `candidate` to `group`'s candidates and returns its id, unless
     /// the group already has a candidate with the same expression
-    /// (`same_expression`) and logical properties: then that candidate's
-    /// id, and `candidate` is dropped. A new candidate makes `group` a parent
+    /// (`same_expression`), logical properties and input requirements: then
+    /// that candidate's id, and `candidate` is dropped. A new candidate makes `group` a parent
     /// of each of its input groups, and `group`'s queries reach each input
     /// group and every group below it.
     ///
     /// Fails, leaving the memo unchanged, when the candidate's expression
     /// breaks the node rules a group's does ([`derive_group_properties`]),
-    /// or when its output schema or kind differs from the group's: then it
-    /// does not compute the group's result.
+    /// when its output schema or kind differs from the group's (then it
+    /// does not compute the group's result), or when its θ does not fit the
+    /// group's output: a candidate of a sketch state group (a build, or a
+    /// merge, `Filter`, `TimeRange` or `TimeShift` passing states on) has a
+    /// θ from that algorithm's list, any other candidate none.
     pub fn add_candidate(
         &mut self,
         group: MemoGroupId,
@@ -162,10 +169,15 @@ impl Memo {
         {
             return Err(CandidateError::OutputDiffersFromGroup { group });
         }
+        parameters_fit(
+            sketch_algorithm_of_state(group_properties),
+            candidate.logical_properties.parameters(),
+        )
+        .map_err(CandidateError::LogicalProperties)?;
         let candidates = &mut self.groups[group.0 as usize].candidates;
         if let Some(index_in_group) = candidates
             .iter()
-            .position(|known| same_expression_and_logical_properties(known, &candidate))
+            .position(|known| same_candidate(known, &candidate))
         {
             return Ok(CandidateForMemoGroupId {
                 group,
@@ -246,6 +258,34 @@ impl Memo {
             "one input requirement per input group of candidate {id:?}"
         );
         candidate.input_requirements = input_requirements;
+    }
+
+    /// The candidates `consumer` may read on input `input`: those of the
+    /// input group, except that a consumer with a θ (a build, or a candidate
+    /// passing states on) reads only producers with the same θ or none.
+    pub fn producers(
+        &self,
+        consumer: CandidateForMemoGroupId,
+        input: usize,
+    ) -> Vec<CandidateForMemoGroupId> {
+        let candidate = self.candidate(consumer);
+        let group = *candidate.expression.operator.children()[input];
+        let theta = candidate.logical_properties.parameters();
+        self.groups[group.0 as usize]
+            .candidates
+            .iter()
+            .enumerate()
+            .filter(
+                |(_, producer)| match (theta, producer.logical_properties.parameters()) {
+                    (Some(theta), Some(produced)) => theta == produced,
+                    _ => true,
+                },
+            )
+            .map(|(index_in_group, _)| CandidateForMemoGroupId {
+                group,
+                index_in_group,
+            })
+            .collect()
     }
 
     /// The groups, each after every group it or one of its candidates
@@ -382,6 +422,26 @@ pub enum CandidateError {
     /// not compute the group's result (a bug in the rule that built it).
     #[error("the candidate's output differs from group {group:?}'s")]
     OutputDiffersFromGroup { group: MemoGroupId },
+    /// Its θ does not fit the group's output (a bug in the rule that built
+    /// it).
+    #[error("the candidate's parameters do not fit its group's output: {0}")]
+    LogicalProperties(LogicalPropertiesError),
+}
+
+/// The sketch algorithm of the state a group outputs; `None` for rows,
+/// values and exact states.
+fn sketch_algorithm_of_state(group: &GroupProperties) -> Option<SketchAlgorithm> {
+    if group.result_kind != OperatorResultKind::State {
+        return None;
+    }
+    group
+        .schema
+        .fields
+        .iter()
+        .find_map(|field| match field.dtype {
+            FieldDataType::Sketch(algorithm) => Some(algorithm),
+            _ => None,
+        })
 }
 
 /// Lists `parent` among `group`'s parents, once.
@@ -392,17 +452,16 @@ fn add_parent(group: &mut MemoGroup, parent: MemoGroupId) {
 }
 
 /// Whether `left` and `right` are one candidate of a group: the same
-/// expression ([`same_expression`]) and logical properties (parameters by
-/// [`same_value`]).
-fn same_expression_and_logical_properties(
-    left: &CandidateForMemoGroup,
-    right: &CandidateForMemoGroup,
-) -> bool {
+/// expression ([`same_expression`]), logical properties (parameters by
+/// [`same_value`]) and input requirements, so two readouts of one state
+/// with different required accuracy are two candidates.
+fn same_candidate(left: &CandidateForMemoGroup, right: &CandidateForMemoGroup) -> bool {
     same_expression(&left.expression.operator, &right.expression.operator)
         && same_value(
             &left.logical_properties.parameters,
             &right.logical_properties.parameters,
         )
+        && left.input_requirements == right.input_requirements
 }
 
 /// $v = (e_v, p^{\log}_v)$: one candidate of a memo group.
@@ -433,17 +492,13 @@ pub struct CandidateForMemoGroup {
 pub enum OriginOfCandidateForMemoGroup {
     /// Pass 1: exact, exact accumulator, or a summary type.
     Pass1,
-    /// Canonical value preprocessing feeding a summary build.
-    SummaryInput,
     /// A tumbling-window chain, or a merge reading one, of a summary state group.
     TumblingWindows,
-    /// A coarse group regrouping a finer group.
+    /// A coarse group rolled up from a finer one, the compensating `Filter`
+    /// it reads, or a build of a finest common group.
     Rollup,
     /// A top-k read from another group's ranking.
     TopKReuse,
-    /// Its metric's scans widened to a shared label set, read through a
-    /// `Project` (scan widening).
-    WidenedScans,
 }
 
 /// $e_v = \operatorname{op}_v(G_{v,1}, \dots, G_{v,n})$: one operator, with
@@ -456,9 +511,13 @@ pub struct CandidateExpression {
 
 /// $p^{\log}_v = \boldsymbol\theta_v$. The summary type is the operator's
 /// argument, not a property, and a tumbling-window chain's width is the
-/// chain operator's argument. [`Self::new`] rejects parameters of another
-/// algorithm, not in the algorithm's list, missing on a sketch build (a chain
-/// included) or present on an exact operator.
+/// chain operator's argument. A candidate passing states on without building
+/// them (`SummaryMerge`, and a `Filter`, `TimeRange` or `TimeShift` over
+/// states) carries the θ of the states it reads. [`Self::new`] rejects
+/// parameters of another algorithm, not in the algorithm's list or missing
+/// on a sketch build (a chain included), and parameters on an operator that
+/// neither builds nor passes on states; [`Memo::add_candidate`] checks a
+/// pass-through's θ against its group's state.
 #[derive(Debug, Clone)]
 pub struct LogicalProperties {
     /// $\boldsymbol\theta_v$, from the algorithm's predefined list; `None` for
@@ -471,19 +530,21 @@ impl LogicalProperties {
         expression: &CandidateExpression,
         parameters: Option<SketchParams>,
     ) -> Result<Self, LogicalPropertiesError> {
-        let algorithm = match summary_type_of_operator(&expression.operator) {
-            Some(FieldDataType::Sketch(algorithm)) => Some(*algorithm),
-            _ => None,
-        };
-        match (algorithm, &parameters) {
-            (Some(_), None) => return Err(LogicalPropertiesError::SketchBuildWithoutParameters),
-            (None, Some(_)) => return Err(LogicalPropertiesError::ParametersOnExactOperator),
-            (Some(algorithm), Some(parameters)) => {
-                if !parameter_list(algorithm).contains(parameters) {
-                    return Err(LogicalPropertiesError::ParametersNotInList);
-                }
-            }
-            (None, None) => {}
+        let passes_states_on = matches!(
+            expression.operator,
+            Operator::ASAP(ASAPOp::SummaryMerge { .. })
+                | Operator::NonASAP(
+                    NonASAPOp::Filter { .. }
+                        | NonASAPOp::TimeRange { .. }
+                        | NonASAPOp::TimeShift { .. }
+                )
+        );
+        if !passes_states_on {
+            let algorithm = match summary_type_of_operator(&expression.operator) {
+                Some(FieldDataType::Sketch(algorithm)) => Some(*algorithm),
+                _ => None,
+            };
+            parameters_fit(algorithm, parameters.as_ref())?;
         }
         Ok(Self { parameters })
     }
@@ -494,13 +555,29 @@ impl LogicalProperties {
     }
 }
 
+/// Whether θ `parameters` fit an output of sketch `algorithm` (`None`: no
+/// sketch state): from its list, and present exactly for a sketch.
+fn parameters_fit(
+    algorithm: Option<SketchAlgorithm>,
+    parameters: Option<&SketchParams>,
+) -> Result<(), LogicalPropertiesError> {
+    match (algorithm, parameters) {
+        (Some(_), None) => Err(LogicalPropertiesError::SketchBuildWithoutParameters),
+        (None, Some(_)) => Err(LogicalPropertiesError::ParametersOnExactOperator),
+        (Some(algorithm), Some(parameters)) if !parameter_list(algorithm).contains(parameters) => {
+            Err(LogicalPropertiesError::ParametersNotInList)
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Logical properties that do not fit their operator: bad input to
 /// [`LogicalProperties::new`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum LogicalPropertiesError {
     #[error("an exact operator has no summary parameters")]
     ParametersOnExactOperator,
-    #[error("a sketch build needs parameters from its algorithm's list")]
+    #[error("a sketch build, or a candidate passing sketch states on, needs parameters from its algorithm's list")]
     SketchBuildWithoutParameters,
     #[error("the parameters are not in their algorithm's predefined list")]
     ParametersNotInList,
@@ -510,10 +587,10 @@ pub enum LogicalPropertiesError {
 /// error of each, for a statistic at a failure probability, is its guarantee
 /// (`asap_accuracy::theoretical_guarantee`).
 ///
-/// The widths, `k`s, precisions, `alpha`s and heap sizes are today's sizing
-/// (`asap_accuracy`'s test-only `size_params`) over the errors ε = 0.1,
-/// 0.05, 0.02, 0.01, 0.005, 0.002 and 0.001, smallest first, without
-/// repeats; an `asap_accuracy` test keeps them equal. Distinct counts (KMV,
+/// The widths, `k`s, precisions, `alpha`s and heap sizes span the errors
+/// ε = 0.1, 0.05, 0.02, 0.01, 0.005, 0.002 and 0.001, smallest first,
+/// without repeats; an `asap_accuracy` test checks every entry has a
+/// guarantee at δ = 0.01. Distinct counts (KMV,
 /// and UnivMon's distinct-count shapes) stop at ε = 0.01. Where δ is set by
 /// a structural parameter, the list covers the δ levels with it: Count-Min
 /// lists each width with each depth of [`CMS_DEPTHS`], Count Sketch with
@@ -771,17 +848,171 @@ pub struct RequiredAccuracy {
 impl LogicalRequirements {
     /// $g_c$'s linear bound for errors in `metric`, each input's and the
     /// output's: $\beta_{c,i}$ and $b_{c,i}$ per input, read from the
-    /// operator and its arguments. `None` when the consumer has no error
-    /// contract for `metric`: an input whose error is in `metric` then gives
-    /// no edge (the metric rule). No factor is guessed.
+    /// operator, its arguments and, for a `Filter`, its input group's column
+    /// lineage in `memo`. `None` when the consumer has no error contract for
+    /// `metric`: an input whose error is in `metric` then gives no edge (the
+    /// metric rule). No factor is guessed; every contract keeps the metric
+    /// (concepts doc, section 4, "Local propagation"):
+    /// - value-preserving (a `Project` of columns and literals, `Sort`,
+    ///   `TimeRange`, `TimeShift`, `Concat`, a readout, a finalize, a
+    ///   `SummaryMerge`): $\beta = 1$ in any metric;
+    /// - a `Filter` whose predicate reads only columns copied from a source
+    ///   (lineage `SourceColumn`, labels and keys): $\beta = 1$ in any metric;
+    /// - a `Project` whose computed items are `abs`, `clamp`, `clamp_min`,
+    ///   `clamp_max` or a negation of a column: absolute, $\beta = 1$;
+    /// - an `Aggregate` (or exact accumulator build) of counts ($\beta = 0$),
+    ///   min and max (absolute or relative, $\beta = 1$) and avg (absolute,
+    ///   $\beta = 1$), without measure filters or `HAVING`;
+    /// - `+` and `-`: absolute, $\beta = 1$; `/`: relative,
+    ///   $\beta = 1/(1-b)$ on both, the denominator capped at $b$; `*`:
+    ///   relative, $(1+b, 1)$, the right operand capped at $b$
+    ///   ($(1+x)(1+y)-1 \le (1+b)\,x + y$ for $y \le b$), with $b$ =
+    ///   [`RELATIVE_OPERAND_VALIDITY_CAP`].
+    ///
+    /// Every other operator (a filter comparing a computed value, a ranking,
+    /// a `sum`, a comparison, another function) has none.
     pub fn error_propagation(
+        memo: &Memo,
         consumer: &Operator<MemoGroupId>,
         metric: AccuracyMetric,
     ) -> Option<ErrorPropagation> {
-        let _ = (consumer, metric);
-        todo!("#1207 PR 4: the error contract of each operator, per metric")
+        let inputs = consumer.children().len();
+        let uniform = |factor: f64| ErrorPropagation {
+            factor_per_input: vec![factor; inputs],
+            validity_cap_per_input: vec![None; inputs],
+        };
+        let absolute = matches!(metric, AccuracyMetric::Absolute { .. });
+        let extremum_metric = absolute || metric == AccuracyMetric::Relative;
+        match consumer {
+            Operator::NonASAP(op) => match op {
+                NonASAPOp::Scan { .. }
+                | NonASAPOp::Values { .. }
+                | NonASAPOp::Sort { .. }
+                | NonASAPOp::TimeRange { .. }
+                | NonASAPOp::TimeShift { .. }
+                | NonASAPOp::Concat { .. } => Some(uniform(1.0)),
+                NonASAPOp::Project { cols, .. } => {
+                    let preserves = |expr: &ScalarExpr<MemoGroupId>| {
+                        matches!(expr, ScalarExpr::Column(_) | ScalarExpr::Literal(_))
+                    };
+                    // A computed item that changes a value by at most its
+                    // error keeps an absolute bound only.
+                    cols.iter()
+                        .all(|item| {
+                            preserves(&item.expr) || (absolute && one_lipschitz(&item.expr))
+                        })
+                        .then(|| uniform(1.0))
+                }
+                NonASAPOp::Filter { pred, child } => {
+                    let lineage = &memo.groups()[child.0 as usize]
+                        .group_properties
+                        .column_lineage;
+                    (pred.0.operator_refs().is_empty()
+                        && pred.0.columns_referenced().iter().all(|&column| {
+                            matches!(lineage.get(column), Some(ColumnLineage::SourceColumn(_)))
+                        }))
+                    .then(|| uniform(1.0))
+                }
+                NonASAPOp::Aggregate {
+                    measures,
+                    filters,
+                    having: None,
+                    ..
+                } if filters.iter().all(Option::is_none) && !measures.is_empty() => {
+                    let mut factor: f64 = 0.0;
+                    for measure in measures {
+                        match measure {
+                            AggIntent::Count => {}
+                            AggIntent::Min { .. } | AggIntent::Max { .. } if extremum_metric => {
+                                factor = factor.max(1.0)
+                            }
+                            AggIntent::Avg { .. } if absolute => factor = factor.max(1.0),
+                            _ => return None,
+                        }
+                    }
+                    Some(uniform(factor))
+                }
+                NonASAPOp::BinaryOp {
+                    operator:
+                        BinaryOperator {
+                            kind: BinaryOpKind::Arithmetic(kind),
+                            ..
+                        },
+                    return_bool: false,
+                    ..
+                } => {
+                    let b = RELATIVE_OPERAND_VALIDITY_CAP;
+                    match (kind, metric) {
+                        (ArithmeticOpKind::Add | ArithmeticOpKind::Sub, _) if absolute => {
+                            Some(uniform(1.0))
+                        }
+                        (ArithmeticOpKind::Div, AccuracyMetric::Relative) => {
+                            Some(ErrorPropagation {
+                                factor_per_input: vec![1.0 / (1.0 - b); 2],
+                                validity_cap_per_input: vec![None, Some(b)],
+                            })
+                        }
+                        (ArithmeticOpKind::Mul, AccuracyMetric::Relative) => {
+                            Some(ErrorPropagation {
+                                factor_per_input: vec![1.0 + b, 1.0],
+                                validity_cap_per_input: vec![None, Some(b)],
+                            })
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            },
+            Operator::ASAP(op) => match op {
+                ASAPOp::SummaryEstimate { .. }
+                | ASAPOp::EvaluatePopulation { .. }
+                | ASAPOp::FinalizeExactAccumulator { .. }
+                | ASAPOp::SummaryMerge { .. } => Some(uniform(1.0)),
+                ASAPOp::SummaryAgg {
+                    summary_type: FieldDataType::ExactAggregate(kind, _),
+                    filter: None,
+                    ..
+                }
+                | ASAPOp::SummaryTumblingWindowChain {
+                    summary_type: FieldDataType::ExactAggregate(kind, _),
+                    filter: None,
+                    ..
+                } => match kind {
+                    ExactKind::Count => Some(uniform(0.0)),
+                    ExactKind::Min | ExactKind::Max if extremum_metric => Some(uniform(1.0)),
+                    _ => None,
+                },
+                _ => None,
+            },
+        }
     }
 }
+
+/// Whether `expr` changes a column's value by at most its error: `abs`,
+/// `clamp`, `clamp_min` or `clamp_max` of a column with literal bounds, or
+/// a column's negation (1-Lipschitz).
+fn one_lipschitz<C>(expr: &ScalarExpr<C>) -> bool {
+    match expr {
+        ScalarExpr::Negative { expr, .. } => matches!(**expr, ScalarExpr::Column(_)),
+        ScalarExpr::FunctionCall { name, args } => {
+            matches!(
+                name.to_ascii_lowercase().as_str(),
+                "abs" | "clamp" | "clamp_min" | "clamp_max"
+            ) && matches!(args.first(), Some(ScalarExpr::Column(_)))
+                && args[1..]
+                    .iter()
+                    .all(|arg| matches!(arg, ScalarExpr::Literal(_)))
+        }
+        _ => false,
+    }
+}
+
+/// $b$ of a ratio's denominator and a product's right operand: the
+/// relative error under which [`LogicalRequirements::error_propagation`]'s
+/// linear bound holds, $\varepsilon_{X/Y} \le (\varepsilon_X +
+/// \varepsilon_Y) / (1 - b)$ (concepts doc, section 4). 0.1 is the weakest
+/// error of every algorithm's list, so it never excludes a listed θ.
+const RELATIVE_OPERAND_VALIDITY_CAP: f64 = 0.1;
 
 /// The local error propagation of one consumer: its output error is at
 /// most $\sum_i \beta_{c,i}\varepsilon_{c,i}$ while each input's error stays
@@ -830,8 +1061,8 @@ mod tests {
 
     /// `LogicalProperties::new` over every operator kind and parameters: a
     /// sketch build (a chain included) needs parameters of its algorithm from
-    /// its list; parameters are rejected on an operator that builds no
-    /// sketch.
+    /// its list; a merge may carry any (its group decides); parameters are
+    /// rejected on an operator that neither builds nor passes on states.
     #[test]
     fn logical_properties_new_over_every_operator_and_parameters() {
         use LogicalPropertiesError as Invalid;
@@ -850,6 +1081,12 @@ mod tests {
             operator: Operator::ASAP(ASAPOp::SummaryEstimate {
                 summary_input: MemoGroupId(0),
                 query: crate::ir::schema::SketchStatistic::Quantile { q: 0.5 },
+            }),
+        };
+        let merge = CandidateExpression {
+            operator: Operator::ASAP(ASAPOp::SummaryMerge {
+                children: vec![MemoGroupId(0)],
+                group_by: None,
             }),
         };
         // k = 270 is KLL's structure but not in its list.
@@ -895,6 +1132,8 @@ mod tests {
             (summary_agg(FieldDataType::exact(ExactKind::Sum)), exact),
             (kll_chain, kll_build),
             (readout, exact),
+            // A merge's θ is checked against its group by `add_candidate`.
+            (merge, [Ok(()); 5]),
         ];
         for (expression, by_parameters) in table {
             for (parameters, expected) in parameters.iter().zip(by_parameters) {
@@ -1006,6 +1245,7 @@ mod memo_tests {
     use super::*;
     use crate::ir::operator::operator_properties::{GroupKeys, Reduction, Source};
     use crate::ir::scalar::expr_ir::ColumnRef;
+    use crate::ir::scalar::{CompareOpKind, ScalarValue};
     use crate::ir::schema::{
         DataType, Field, FieldDataType, Schema, SketchStatistic, SummaryUpdate,
     };
@@ -1077,9 +1317,13 @@ mod memo_tests {
     ) -> CandidateForMemoGroup {
         let input_requirements = vec![LogicalRequirements::default(); operator.children().len()];
         CandidateForMemoGroup {
-            // Built directly: the doc example's k = 200 and k = 345 are not
-            // in today's KLL list, which `LogicalProperties::new` checks.
-            logical_properties: LogicalProperties { parameters },
+            logical_properties: LogicalProperties::new(
+                &CandidateExpression {
+                    operator: operator.clone(),
+                },
+                parameters,
+            )
+            .unwrap(),
             expression: CandidateExpression { operator },
             input_requirements,
             fused_groups: vec![],
@@ -1152,26 +1396,26 @@ mod memo_tests {
         assert!(memo.groups()[g2.0 as usize].parent_groups().is_empty());
     }
 
-    /// KLL builds with k = 200 and k = 345 are two candidates of one group
+    /// KLL builds with k = 269 and k = 547 are two candidates of one group
     /// G2: θ is a logical property, not part of the expression.
     #[test]
-    fn kll_builds_with_k_200_and_k_345_share_one_group() {
+    fn kll_builds_with_k_269_and_k_547_share_one_group() {
         let mut memo = Memo::default();
         let g1 = memo.find_or_add_group(scan("latency")).unwrap();
-        let k200_group = memo.find_or_add_group(kll_state(g1)).unwrap();
-        let k200 = memo
-            .add_candidate(k200_group, candidate(kll_state(g1), kll_k(200)))
+        let k269_group = memo.find_or_add_group(kll_state(g1)).unwrap();
+        let k269 = memo
+            .add_candidate(k269_group, candidate(kll_state(g1), kll_k(269)))
             .unwrap();
-        let k345_group = memo.find_or_add_group(kll_state(g1)).unwrap();
-        let k345 = memo
-            .add_candidate(k345_group, candidate(kll_state(g1), kll_k(345)))
+        let k547_group = memo.find_or_add_group(kll_state(g1)).unwrap();
+        let k547 = memo
+            .add_candidate(k547_group, candidate(kll_state(g1), kll_k(547)))
             .unwrap();
-        assert_eq!(k200_group, k345_group);
-        assert_ne!(k200, k345);
-        assert_eq!(memo.groups()[k200_group.0 as usize].candidates.len(), 2);
+        assert_eq!(k269_group, k547_group);
+        assert_ne!(k269, k547);
+        assert_eq!(memo.groups()[k269_group.0 as usize].candidates.len(), 2);
         assert_eq!(
-            memo.candidate(k345).logical_properties.parameters(),
-            kll_k(345).as_ref()
+            memo.candidate(k547).logical_properties.parameters(),
+            kll_k(547).as_ref()
         );
     }
 
@@ -1183,10 +1427,10 @@ mod memo_tests {
         let g1 = memo.find_or_add_group(scan("latency")).unwrap();
         let g2 = memo.find_or_add_group(kll_state(g1)).unwrap();
         let first = memo
-            .add_candidate(g2, candidate(kll_state(g1), kll_k(200)))
+            .add_candidate(g2, candidate(kll_state(g1), kll_k(269)))
             .unwrap();
         let again = memo
-            .add_candidate(g2, candidate(kll_state(g1), kll_k(200)))
+            .add_candidate(g2, candidate(kll_state(g1), kll_k(269)))
             .unwrap();
         assert_eq!(first, again);
         assert_eq!(
@@ -1196,7 +1440,7 @@ mod memo_tests {
                 index_in_group: 0
             }
         );
-        let other_size = candidate(kll_state(g1), kll_k(345));
+        let other_size = candidate(kll_state(g1), kll_k(547));
         assert_ne!(memo.add_candidate(g2, other_size).unwrap(), first);
         assert_eq!(memo.groups()[g2.0 as usize].candidates.len(), 2);
     }
@@ -1301,5 +1545,291 @@ mod memo_tests {
         assert!(memo.find_or_add_group(out_of_range).is_err());
         assert_eq!(memo.groups().len(), 1);
         assert!(memo.groups()[g1.0 as usize].parent_groups().is_empty());
+    }
+
+    /// `Scan latency`: `[ts, value, job]`, `job` a label column.
+    fn scan_with_job(metric: &str) -> Operator<MemoGroupId> {
+        Operator::NonASAP(NonASAPOp::Scan {
+            source: Source::TimeSeries {
+                metric: metric.into(),
+            },
+            predicates: vec![],
+            schema: Schema::with_time_index(
+                vec![
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("value", DataType::Float64, false),
+                    Field::plain("job", DataType::Utf8, true),
+                ],
+                0,
+                vec![],
+            ),
+        })
+    }
+
+    /// `column <op> literal`, PromQL semantics.
+    fn compare(column: usize, op: CompareOpKind, literal: ScalarValue) -> ScalarExpr<MemoGroupId> {
+        ScalarExpr::Compare {
+            left: Box::new(ScalarExpr::Column(column)),
+            op,
+            right: Box::new(ScalarExpr::Literal(literal)),
+            semantics: crate::ir::ExprSemantics::Promql,
+        }
+    }
+
+    /// Decided 2026-11-07 (E1): constant error contracts. A `Filter` whose
+    /// predicate reads only columns copied from a source keeps or drops
+    /// whole rows: β = 1 in every metric. Over a readout of a KLL state of
+    /// `latency` by `job`, `job = "api"` reads such a column; `value > 0.5`
+    /// compares the computed estimate and has no contract. A `Project` of
+    /// `abs`, `clamp` or a negation of the value changes it by at most its
+    /// error: β = 1 for absolute errors only.
+    #[test]
+    fn e1_key_filters_and_value_preserving_projects_have_unit_contracts() {
+        let mut memo = Memo::default();
+        let g1 = memo.find_or_add_group(scan_with_job("latency")).unwrap();
+        let state = memo
+            .find_or_add_group(Operator::ASAP(ASAPOp::SummaryAgg {
+                child: g1,
+                summary_type: FieldDataType::Sketch(SketchAlgorithm::Kll),
+                input: SummaryUpdate::column(ColumnRef::SampleValue),
+                reduction: Reduction::by(vec![2]),
+                filter: None,
+            }))
+            .unwrap();
+        let readout = memo
+            .find_or_add_group(quantile_readout(state, 0.9))
+            .unwrap();
+        let lineage = &memo.groups()[readout.0 as usize]
+            .group_properties
+            .column_lineage;
+        let column_where = |copied: bool| {
+            lineage
+                .iter()
+                .position(|l| matches!(l, ColumnLineage::SourceColumn(_)) == copied)
+                .expect("the readout has a label and an estimate")
+        };
+        let (job, estimate) = (column_where(true), column_where(false));
+        let filter = |pred| {
+            Operator::NonASAP(NonASAPOp::Filter {
+                pred: crate::ir::Predicate(pred),
+                child: readout,
+            })
+        };
+        let by_job = filter(compare(
+            job,
+            CompareOpKind::Eq,
+            ScalarValue::Utf8("api".into()),
+        ));
+        let by_value = filter(compare(
+            estimate,
+            CompareOpKind::Gt,
+            ScalarValue::Float64(0.5),
+        ));
+        for metric in AccuracyMetric::ALL {
+            assert_eq!(
+                LogicalRequirements::error_propagation(&memo, &by_job, metric)
+                    .map(|propagation| propagation.factor_per_input),
+                Some(vec![1.0]),
+                "key-only filter, {metric:?}"
+            );
+            assert_eq!(
+                LogicalRequirements::error_propagation(&memo, &by_value, metric),
+                None,
+                "a filter comparing the estimate, {metric:?}"
+            );
+        }
+        let value = || Box::new(ScalarExpr::Column(1));
+        let literal = |x: f64| ScalarExpr::Literal(ScalarValue::Float64(x));
+        let computed = [
+            ScalarExpr::FunctionCall {
+                name: "abs".into(),
+                args: vec![*value()],
+            },
+            ScalarExpr::FunctionCall {
+                name: "clamp".into(),
+                args: vec![*value(), literal(0.0), literal(100.0)],
+            },
+            ScalarExpr::Negative {
+                expr: value(),
+                semantics: crate::ir::ExprSemantics::Promql,
+            },
+        ];
+        for expr in computed {
+            let project = Operator::NonASAP(NonASAPOp::Project {
+                cols: vec![
+                    crate::ir::ProjectItem {
+                        alias: None,
+                        expr: ScalarExpr::Column(0),
+                    },
+                    crate::ir::ProjectItem {
+                        alias: Some("value".into()),
+                        expr: expr.clone(),
+                    },
+                    crate::ir::ProjectItem {
+                        alias: None,
+                        expr: ScalarExpr::Column(2),
+                    },
+                ],
+                child: g1,
+            });
+            assert_eq!(
+                LogicalRequirements::error_propagation(&memo, &project, AccuracyMetric::ABSOLUTE)
+                    .map(|propagation| propagation.factor_per_input),
+                Some(vec![1.0]),
+                "{expr:?}"
+            );
+            assert_eq!(
+                LogicalRequirements::error_propagation(&memo, &project, AccuracyMetric::Relative),
+                None,
+                "{expr:?}"
+            );
+        }
+    }
+
+    /// A ratio carries relative error with factor 1/(1 − 0.1) on both
+    /// inputs and caps its denominator at 0.1; a count reads no value
+    /// (factor 0); a sum has no contract here (#1207 PR 8 adds its sign
+    /// condition).
+    #[test]
+    fn error_contracts_of_a_ratio_a_count_and_a_sum() {
+        let mut memo = Memo::default();
+        let g1 = memo.find_or_add_group(scan_with_job("latency")).unwrap();
+        let divide = Operator::NonASAP(NonASAPOp::BinaryOp {
+            operator: BinaryOperator {
+                checked_relative_division: false,
+                checked_finite_division: false,
+                kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
+                vector_match: None,
+            },
+            return_bool: false,
+            lhs: g1,
+            rhs: g1,
+        });
+        assert_eq!(
+            LogicalRequirements::error_propagation(&memo, &divide, AccuracyMetric::Relative),
+            Some(ErrorPropagation {
+                factor_per_input: vec![1.0 / 0.9; 2],
+                validity_cap_per_input: vec![None, Some(0.1)],
+            })
+        );
+        for metric in [AccuracyMetric::ABSOLUTE, AccuracyMetric::Rank] {
+            assert_eq!(
+                LogicalRequirements::error_propagation(&memo, &divide, metric),
+                None
+            );
+        }
+        let aggregate = |measure| {
+            Operator::NonASAP(NonASAPOp::Aggregate {
+                reduction: Reduction::by(vec![2]),
+                measures: vec![measure],
+                output_names: vec![],
+                filters: vec![None],
+                having: None,
+                child: g1,
+            })
+        };
+        assert_eq!(
+            LogicalRequirements::error_propagation(
+                &memo,
+                &aggregate(AggIntent::Count),
+                AccuracyMetric::Rank
+            )
+            .map(|propagation| propagation.factor_per_input),
+            Some(vec![0.0])
+        );
+        assert_eq!(
+            LogicalRequirements::error_propagation(
+                &memo,
+                &aggregate(AggIntent::Sum { col: Some(1) }),
+                AccuracyMetric::ABSOLUTE
+            ),
+            None
+        );
+    }
+
+    /// One readout's required accuracy.
+    fn required(max_error: f64) -> Vec<LogicalRequirements> {
+        vec![LogicalRequirements {
+            required_accuracy: Some(RequiredAccuracy {
+                metric: AccuracyMetric::Rank,
+                max_error,
+                failure_probability: 1.0,
+            }),
+        }]
+    }
+
+    /// Decided 2026-11-07 (D3): `Memo::set_input_requirements` replaces
+    /// $r^{\log}$ of the one candidate it names; two readouts of one state
+    /// with different required accuracy are two candidates.
+    #[test]
+    fn set_input_requirements_replaces_only_the_named_candidate() {
+        let mut memo = Memo::default();
+        let g1 = memo.find_or_add_group(scan("latency")).unwrap();
+        let g2 = memo.find_or_add_group(kll_state(g1)).unwrap();
+        let g3 = memo.find_or_add_group(quantile_readout(g2, 0.9)).unwrap();
+        let first = memo
+            .add_candidate(g3, candidate(quantile_readout(g2, 0.9), None))
+            .unwrap();
+        memo.set_input_requirements(first, required(0.01));
+        let second = memo
+            .add_candidate(g3, candidate(quantile_readout(g2, 0.9), None))
+            .unwrap();
+        assert_ne!(first, second, "an unset copy is a new candidate");
+        memo.set_input_requirements(second, required(0.02));
+        let requirements: Vec<_> = memo.groups()[g3.0 as usize]
+            .candidates
+            .iter()
+            .map(|c| c.input_requirements.clone())
+            .collect();
+        assert_eq!(requirements, vec![required(0.01), required(0.02)]);
+    }
+
+    /// Decided 2026-11-09 (A1): a merge of KLL states carries the θ of the
+    /// states it reads. Without one it is rejected; `merge[k=547]` reads only
+    /// the k = 547 build of its input group.
+    #[test]
+    fn a_merge_carries_the_parameters_of_the_states_it_reads() {
+        let mut memo = Memo::default();
+        let g1 = memo.find_or_add_group(scan("latency")).unwrap();
+        let g2 = memo.find_or_add_group(kll_state(g1)).unwrap();
+        for k in [269, 547] {
+            memo.add_candidate(g2, candidate(kll_state(g1), kll_k(k)))
+                .unwrap();
+        }
+        let merge = Operator::ASAP(ASAPOp::SummaryMerge {
+            children: vec![g2],
+            group_by: None,
+        });
+        let g3 = memo.find_or_add_group(merge.clone()).unwrap();
+        assert!(matches!(
+            memo.add_candidate(g3, candidate(merge.clone(), None)),
+            Err(CandidateError::LogicalProperties(
+                LogicalPropertiesError::SketchBuildWithoutParameters
+            ))
+        ));
+        let merged = memo
+            .add_candidate(g3, candidate(merge, kll_k(547)))
+            .unwrap();
+        assert_eq!(
+            memo.producers(merged, 0),
+            vec![CandidateForMemoGroupId {
+                group: g2,
+                index_in_group: 1
+            }]
+        );
+    }
+
+    /// Decided 2026-11-07 (D3): one requirement per input group, or a
+    /// panic.
+    #[test]
+    #[should_panic(expected = "one input requirement per input group")]
+    fn set_input_requirements_panics_on_a_length_mismatch() {
+        let mut memo = Memo::default();
+        let g1 = memo.find_or_add_group(scan("latency")).unwrap();
+        let g2 = memo.find_or_add_group(kll_state(g1)).unwrap();
+        let build = memo
+            .add_candidate(g2, candidate(kll_state(g1), kll_k(269)))
+            .unwrap();
+        memo.set_input_requirements(build, Vec::new());
     }
 }

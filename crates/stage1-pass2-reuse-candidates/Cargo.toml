@@ -12,3 +12,6 @@ asap-types = { path = "../types" }
 # The deployment's measured accuracy (`AccuracyEvidence`) Pass 2 reads.
 asap-accuracy = { path = "../accuracy" }
 thiserror = "2"
+
+[dev-dependencies]
+asap-types = { path = "../types", features = ["test-support"] }
