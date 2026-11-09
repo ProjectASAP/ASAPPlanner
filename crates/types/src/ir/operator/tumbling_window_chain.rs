@@ -3,8 +3,8 @@
 //! with a time index. A chain has no range and no window count: a
 //! `TimeRange` (and `TimeShift`s) over it select the windows a query reads,
 //! a `SummaryMerge` over that selection is the state of the chain's build
-//! over the same range, and how many windows it retains is $h_v$ (not yet
-//! specified).
+//! over the same range, and how many windows it retains is $h_v$, the
+//! longest its selected consumers read back (Stage 3's constraint (R)).
 use super::asap::ASAPOp;
 use super::input::OperatorInput;
 use super::node::Operator;

@@ -22,6 +22,7 @@ use asap_planner::{
     SelectedPlanReport, UserInput,
 };
 use asap_types::ir::operator::Source;
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
 
 use futures::{executor::block_on, StreamExt};
 
@@ -34,11 +35,19 @@ const EVALUATION_MS: i64 = 3_600_000;
 /// δ 0.01, over 1,000 ingesting `latency_ms` series sampled every second:
 /// #509 Example 4b when the one query is its p99.
 fn workload(queries: &[&str]) -> PlanningWorkload {
+    let every_10_minutes: Vec<(&str, u64)> =
+        queries.iter().map(|&query| (query, 600_000)).collect();
+    workload_every(&every_10_minutes)
+}
+
+/// [`workload`] with each query repeating every `interval_ms` of its own, at
+/// phase 0.
+fn workload_every(queries: &[(&str, u64)]) -> PlanningWorkload {
     let entries: Vec<String> = queries
         .iter()
-        .map(|query| {
+        .map(|(query, interval_ms)| {
             format!(
-                r#"{{"query": {query:?}, "demand": {{"fixed_interval_at": {{"interval": 600000, "evaluation_phase": 0}}}},
+                r#"{{"query": {query:?}, "demand": {{"fixed_interval_at": {{"interval": {interval_ms}, "evaluation_phase": 0}}}},
                   "requirements": {{"accuracy": {{"accuracy_metric": "rank", "max_error": 0.01,
                       "failure_probability": 0.01, "accuracy_scope": "whole_result"}},
                       "max_latency_ms": 200.0}},
@@ -246,6 +255,53 @@ async fn the_plan_carries_stage3s_predicted_usage() {
     assert!(views.iter().any(|view| view.node_id == chain.node_id));
     let root = plan.dag.roots[0];
     assert!(usage.per_node.iter().any(|node| node.node_id == root));
+}
+
+/// Example 4b's p99 every 10 minutes and its p50 every 30 minutes: two
+/// evaluation contexts. The chain of windows maintained at ingestion time
+/// runs once, whoever reads it, and retains the hour both read back
+/// ($h_v$, constraint (R)); each context reads it with query-time nodes of
+/// its own.
+#[tokio::test]
+async fn one_chain_serves_two_evaluation_contexts() {
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: false,
+        ..DeploymentCapabilities::default()
+    };
+    let (plan, _) = plan_with_report_for(
+        workload_every(&[
+            ("quantile_over_time(0.99, latency_ms[60m])", 600_000),
+            ("quantile_over_time(0.5, latency_ms[60m])", 1_800_000),
+        ]),
+        &capabilities,
+    )
+    .await;
+    let chains: Vec<_> = plan
+        .dag
+        .nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.payload,
+                Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+            )
+        })
+        .collect();
+    assert_eq!(chains.len(), 1, "{:#?}", plan.dag.nodes);
+    assert_eq!(chains[0].retention_ms, Some(3_600_000));
+    let ranges_over_the_chain = plan
+        .dag
+        .nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.payload,
+                Operator::NonASAP(NonASAPOp::TimeRange { child, .. }) if child == chains[0].id
+            )
+        })
+        .count();
+    assert_eq!(ranges_over_the_chain, 2);
+    assert_ne!(plan.dag.roots[0], plan.dag.roots[1]);
 }
 
 /// `sum(latency_ms)` reads an instant selector: per series, only the latest

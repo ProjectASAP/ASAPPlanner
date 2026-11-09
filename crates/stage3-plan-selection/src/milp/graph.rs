@@ -1,32 +1,34 @@
 //! The strongly connected components of the selectable edges between
-//! candidates: acyclicity (E) needs an order variable $t_v$ only inside a
+//! executions: acyclicity (E) needs an order variable $t$ only inside a
 //! component, bounded by its size.
 
 use std::collections::HashMap;
 
 use super::model::SelectionInputs;
 
-/// Each candidate's strongly connected component of the selectable edges
-/// (those [`crate::cost::SelectionCosts::edge_cost_change_per_second`] costs), computed once per model.
+/// Each execution's strongly connected component of the selectable edges
+/// (those [`crate::cost::ExecutionCosts::per_edge`] costs), computed once
+/// per model, by position in `ExecutionContexts::executions`.
 pub(crate) struct Components {
-    /// Each candidate's component number.
+    /// Each execution's component number.
     pub(crate) of: Vec<usize>,
-    /// The size of each candidate's component: 1 for a candidate on no
+    /// The size of each execution's component: 1 for an execution on no
     /// cycle.
     pub(crate) size: Vec<usize>,
 }
 
 impl Components {
     pub(crate) fn of(inputs: &SelectionInputs<'_>) -> Self {
+        let contexts = inputs.contexts;
         let of = strongly_connected_components(
-            inputs.physical.physical_candidates.len(),
-            inputs
-                .costs
-                .edge_cost_change_per_second
-                .keys()
-                .map(|&edge| {
-                    let edge = inputs.physical.edge(edge);
-                    (edge.producer_candidate_id.0, edge.consumer_candidate_id.0)
+            contexts.executions().len(),
+            contexts
+                .edges()
+                .iter()
+                .zip(&inputs.costs.per_edge)
+                .filter(|(_, cost)| cost.is_some())
+                .map(|(&(consumer, _, producer), _)| {
+                    (contexts.index_of(producer), contexts.index_of(consumer))
                 }),
         );
         let mut count: HashMap<usize, usize> = HashMap::new();
