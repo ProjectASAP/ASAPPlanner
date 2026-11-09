@@ -22,7 +22,6 @@ asap-devtools = { path = "../devtools" }
 
 [dev-dependencies]
 asap-types = { path = "../types", features = ["test-support"] }
-asap-accuracy = { path = "../accuracy", features = ["test-support"] }
 asap-stage2-physical-optimization = { path = "../stage2-physical-optimization" }
 asap-devtools = { path = "../devtools" }
 # The tests plan PromQL and SQL workloads through the facade.

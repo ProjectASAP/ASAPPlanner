@@ -4,18 +4,31 @@
 use super::*;
 use asap_types::ir::schema::sketch::KLL_MAX_K;
 
+/// The calibrated guarantee, at failure probability 0.01.
 pub(super) fn guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
     query: &SketchStatistic,
 ) -> Option<AccuracyGuarantee> {
+    guarantee_at(algorithm, params, query, KLL_CALIBRATED_FAILURE_PROBABILITY)
+}
+
+/// The rank error of `k` at failure probability `failure_probability`: the
+/// calibration at 0.01 and above, scaled by [`delta_scale`] below. `None`
+/// for a `k` above the library's cap or a probability outside (0, 1].
+pub(super) fn guarantee_at(
+    algorithm: &SketchAlgorithm,
+    params: &SketchParams,
+    query: &SketchStatistic,
+    failure_probability: f64,
+) -> Option<AccuracyGuarantee> {
     let SketchParams::Kll { k } = params else {
         return None;
     };
-    if *k > KLL_MAX_K {
+    if *k > KLL_MAX_K || !(failure_probability > 0.0 && failure_probability <= 1.0) {
         return None;
     }
-    let delta = KLL_CALIBRATED_FAILURE_PROBABILITY;
+    let delta = failure_probability.min(KLL_CALIBRATED_FAILURE_PROBABILITY);
     let scale = delta_scale(delta)?;
     let contract = if delta < KLL_CALIBRATED_FAILURE_PROBABILITY {
         KLL_DELTA_SCALED_CONTRACT
@@ -46,19 +59,6 @@ pub(crate) const KLL_CALIBRATED_FAILURE_PROBABILITY: f64 = 0.01;
 
 pub(crate) fn kll_rank_error_99(k: u32) -> f64 {
     KLL_RANK_ERROR_COEFFICIENT_99 / f64::from(k).powf(KLL_RANK_ERROR_EXPONENT_99)
-}
-
-/// Invert Apache DataSketches' empirical 99th-percentile, single-sided KLL
-/// normalized rank-error fit: `epsilon = 2.296 / k^0.9723`. Capped at
-/// [`KLL_MAX_K`], the largest `k` `asap_sketchlib` builds; an `eps` that
-/// needs more gets that `k`, whose guarantee then misses the target.
-#[cfg(test)]
-pub(crate) fn kll_k(eps: f64) -> u32 {
-    saturating_ceil(
-        (KLL_RANK_ERROR_COEFFICIENT_99 / eps).powf(1.0 / KLL_RANK_ERROR_EXPONENT_99),
-        8,
-        KLL_MAX_K,
-    )
 }
 
 /// How much the rank error at failure probability `delta` exceeds the error
@@ -131,54 +131,9 @@ fn normal_quantile(p: f64) -> f64 {
     }
 }
 
-/// `k` for rank error `eps` at failure probability `delta`: the empirical
-/// 99% calibration for `delta >= 0.01`; below, the calibration at
-/// `eps / delta_scale(delta)`, recording `delta` so the guarantee reports it.
-#[cfg(test)]
-pub(crate) fn size_params(eps: f64, delta: f64) -> SketchParams {
-    if delta.is_nan() || delta <= 0.0 || delta >= KLL_CALIBRATED_FAILURE_PROBABILITY {
-        return SketchParams::Kll { k: kll_k(eps) };
-    }
-    SketchParams::Kll {
-        k: kll_k(eps / delta_scale(delta).unwrap_or(1.0)),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn local_guarantee_inverts_rank_sizing() {
-        use crate::estimators::size_params;
-        use asap_types::ir::operator::agg_intent::default_quantile;
-        let q = default_quantile(0.99);
-        let params = size_params(SketchAlgorithm::Kll, &q, 0.01, 0.01);
-        let g = sketch_guarantee(
-            &SketchAlgorithm::Kll,
-            &params,
-            &SketchStatistic::Quantile { q: 0.99 },
-        )
-        .unwrap();
-        assert_eq!(g.spec.accuracy_metric, AccuracyMetric::Rank);
-        assert!(meets(&g, 0.01, None));
-        assert_eq!(g.spec.failure_probability.evaluate(), Some(0.01));
-        assert!(meets(&g, 0.01, Some(0.01)));
-        assert_eq!(g.approximate_layer_count(), 1);
-        assert!(g.provenance.iter().any(|source| matches!(
-            source,
-            GuaranteeSource::SketchEvaluation { contract, .. }
-                if contract == "apache_datasketches_kll_empirical_99_a9b42755072b"
-        )));
-    }
-
-    /// `k` never exceeds the 26 602 `asap_sketchlib` silently caps it at, so
-    /// a guarantee never claims a larger `k` than runs.
-    #[test]
-    fn kll_k_is_capped_at_the_library_maximum() {
-        assert_eq!(kll_k(1e-6), KLL_MAX_K);
-        assert_eq!(KLL_MAX_K, 26_602);
-    }
 
     /// A hand-built `k` above the library's cap gives no guarantee.
     #[test]
@@ -212,38 +167,5 @@ mod tests {
             let scale = delta_scale(delta).unwrap();
             assert!((scale - expected).abs() < 1e-8, "{delta}: {scale}");
         }
-        assert_eq!(
-            size_params(0.01, 0.001),
-            SketchParams::Kll {
-                k: kll_k(0.01 / ratio),
-            }
-        );
-    }
-
-    /// KLL `k` inverts the rank-error fit: ε = 0.01 → 269, ε = 0.05 → 52.
-    #[test]
-    fn accuracy_target_drives_kll_k() {
-        use crate::estimators::size_params;
-        use asap_types::ir::operator::agg_intent::default_quantile;
-        let q = default_quantile(0.99);
-        assert_eq!(
-            size_params(SketchAlgorithm::Kll, &q, 0.01, 0.01),
-            SketchParams::Kll { k: 269 }
-        );
-        assert_eq!(
-            size_params(SketchAlgorithm::Kll, &q, 0.05, 0.01),
-            SketchParams::Kll { k: 52 }
-        );
-    }
-
-    /// A zero ε saturates KLL `k` to the tightest buildable value.
-    #[test]
-    fn degenerate_epsilon_saturates_to_tightest_kll_params() {
-        use crate::estimators::size_params;
-        use asap_types::ir::operator::agg_intent::default_quantile;
-        assert_eq!(
-            size_params(SketchAlgorithm::Kll, &default_quantile(0.99), 0.0, 0.01),
-            SketchParams::Kll { k: 26_602 }
-        );
     }
 }

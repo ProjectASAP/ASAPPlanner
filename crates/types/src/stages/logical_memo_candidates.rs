@@ -75,6 +75,14 @@ pub enum RootPruneReason {
         producer_metric: AccuracyMetric,
         consumer_carries: Vec<AccuracyMetric>,
     },
+    /// The consumer is a top-k readout whose `k` exceeds the producer's
+    /// heap size: the heap cannot hold the k ranked keys, whatever accuracy
+    /// is required.
+    HeapSmallerThanTopK {
+        consumer: CandidateForMemoGroupId,
+        input: usize,
+        k: usize,
+    },
     /// The candidate never had a consumer and is not a query output. A
     /// candidate whose consumers were eliminated is traced to their causes.
     NoConsumer,
