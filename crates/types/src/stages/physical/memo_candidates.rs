@@ -264,7 +264,7 @@ mod tests {
     /// Group 1, KLL states over the scan group 0, groups 2 and 3, chains
     /// of KLL states over it 5 s and 10 s wide, and group 4, the scan's last
     /// 5 minutes, each with its own expression as its one candidate. Built
-    /// through `find_or_add_group` and `add_candidate` (#1207 PR 2).
+    /// through `find_or_add_group` and `add_candidate`.
     fn memo() -> Memo {
         let mut memo = Memo::default();
         let scan = memo

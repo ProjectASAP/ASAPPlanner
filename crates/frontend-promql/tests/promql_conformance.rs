@@ -39,7 +39,7 @@ use crate::support;
 use asap_frontend_promql::PromqlError as LoweringError;
 use asap_types::ir::operator::{
     AggIntent, AtModifier, BinaryOpKind, PromQLVectorSetOpKind, Reduction, SampleKind, Source,
-    TimeFunc,
+    TimeFunc, TimeShift,
 };
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::{ArithmeticOpKind, CompareOpKind, ScalarValue};
@@ -1039,7 +1039,9 @@ fn offset_modifier_lowers_to_a_time_shift() {
 fn at_modifier_lowers_to_a_time_shift() {
     // SEMANTICS (PromQL, issue #40): `@ <ts>` pins the evaluation to an absolute
     // instant (PromQL seconds → IR milliseconds); `@ start()` / `@ end()` anchor
-    // to the query range bounds.
+    // to the query range bounds: a `TimeShift { at }` above the selector, which
+    // is lowered without the `@`, so it is the selector of the same query
+    // without `@`.
     let qe = ok("http_requests_total @ 1609746000");
     let NonASAPOp::TimeRange { child, .. } = qe.expect_non_asap() else {
         panic!("expected an ingestion TimeRange");
@@ -1051,24 +1053,27 @@ fn at_modifier_lowers_to_a_time_shift() {
     assert_eq!(shift.offset_ms, 0);
 
     let qe = ok("http_requests_total @ start()");
-    let NonASAPOp::TimeRange { child, .. } = qe.expect_non_asap() else {
-        panic!("expected an ingestion TimeRange");
+    let NonASAPOp::TimeShift { shift, child } = qe.expect_non_asap() else {
+        panic!("expected a TimeShift for `@ start()`, got {qe:?}");
     };
-    let NonASAPOp::TimeShift { shift, .. } = child.expect_non_asap() else {
-        panic!("expected a TimeShift for `@ start()`");
-    };
-    assert_eq!(shift.at, Some(AtModifier::Start));
+    assert_eq!(
+        *shift,
+        TimeShift {
+            offset_ms: 0,
+            at: Some(AtModifier::Start)
+        }
+    );
+    assert_eq!(**child, *ok("http_requests_total"));
 
-    // Offset and `@` compose: `@ end() offset 5m` carries both.
+    // Offset and `@` compose: `@ end() offset 5m` is `@ end()` over the
+    // selector with `offset 5m`.
     let qe = ok("http_requests_total @ end() offset 5m");
-    let NonASAPOp::TimeRange { child, .. } = qe.expect_non_asap() else {
-        panic!("expected an ingestion TimeRange, got {qe:?}");
-    };
-    let NonASAPOp::TimeShift { shift, .. } = child.expect_non_asap() else {
+    let NonASAPOp::TimeShift { shift, child } = qe.expect_non_asap() else {
         panic!("expected a TimeShift, got {qe:?}");
     };
     assert_eq!(shift.at, Some(AtModifier::End));
-    assert_eq!(shift.offset_ms, 300_000);
+    assert_eq!(shift.offset_ms, 0);
+    assert_eq!(**child, *ok("http_requests_total offset 5m"));
 }
 
 #[test]

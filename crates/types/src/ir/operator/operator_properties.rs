@@ -178,6 +178,16 @@ pub enum Source {
     Table { table_ref: String },
 }
 
+/// A column of a source (a `Scan`'s metric or table), by name: what the data
+/// workload declares facts about, such as a column's sign
+/// ([`SourceFacts::column_signs`](crate::workload::SourceFacts::column_signs)).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceColumn {
+    pub source: String,
+    pub column: String,
+}
+
 /// Operator on the query-level `BinaryOp` node. Reuses the scalar IR's
 /// [`ArithmeticOpKind`] / [`CompareOpKind`] so every arithmetic/comparison
 /// operator has exactly one representation (and one `Display`) across the IR.

@@ -25,10 +25,14 @@ pub struct MemoGroup {
     /// changes.
     pub group_properties: GroupProperties,
     /// The groups that read it ([`Self::parent_groups`]) through their
-    /// expression or a candidate's.
+    /// expression or a candidate's: kept up to date by
+    /// [`Memo::find_or_add_group`](super::Memo::find_or_add_group) and
+    /// [`Memo::add_candidate`](super::Memo::add_candidate).
     pub parents: Vec<MemoGroupId>,
     /// The queries whose roots reach it ([`Self::reached_by_queries`]),
-    /// ascending.
+    /// ascending: kept up to date by
+    /// [`Memo::add_query`](super::Memo::add_query) and
+    /// [`Memo::add_candidate`](super::Memo::add_candidate).
     pub queries: Vec<usize>,
     /// Its candidates: empty after Stage 0, filled by Stage 1.
     pub candidates: Vec<CandidateForMemoGroup>,
@@ -41,18 +45,19 @@ pub struct MemoGroup {
 pub struct GroupProperties {
     pub schema: Schema,
     pub result_kind: OperatorResultKind,
-    /// Per output column, in schema order: the sign of its values.
+    /// Per output column, in schema order: the sign of its values, from the
+    /// input groups' and, for a `Scan`, the declared ones.
     pub column_sign: Vec<ValueSign>,
     /// Whether the result changes with the evaluation time: true for a
     /// group under a `TimeRange` relative to the evaluation time
-    /// (`sum_over_time(m[5m])`), false for one under a fixed `@ T` or
-    /// reading no time. A result that does not depend on it is the same at
-    /// every evaluation, so a stored copy delivers on every grid.
+    /// (`sum_over_time(m[5m])`) or reading it (`time()`, `now()`), false
+    /// for one under a fixed `@ T` or reading no time. A result that does
+    /// not depend on it is the same at every evaluation, so a stored copy
+    /// delivers on every grid.
     pub depends_on_evaluation_time: bool,
-    /// What an aggregate group covers: a summary state, a chain, a merge
-    /// over a chain's windows, or an exact `Aggregate` result; `None` for
-    /// any other group. Derived today for summary states only; exact
-    /// `Aggregate` groups follow in #1207 PR 2.
+    /// What an aggregate group covers: a summary state, a chain, a
+    /// `TimeRange`/`TimeShift` over a chain or a merge over one, or an exact
+    /// `Aggregate` result; `None` for any other group.
     pub aggregate_coverage: Option<SummaryCoverage>,
     /// Whether two equal expressions return the same rows for the same
     /// input rows, so they may be one group (not an unordered `LIMIT`).
@@ -82,6 +87,10 @@ pub(crate) struct MemoGroupAsInput<'m> {
 impl<'m> MemoGroupAsInput<'m> {
     fn group(&self) -> &'m MemoGroup {
         &self.memo.groups()[self.group_id.0 as usize]
+    }
+
+    pub(crate) fn group_properties(&self) -> &'m GroupProperties {
+        &self.group().group_properties
     }
 }
 
