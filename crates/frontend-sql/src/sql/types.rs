@@ -53,6 +53,13 @@ pub(super) fn scalar_value_to_asap(sv: &DfScalarValue) -> Result<ScalarValue, Lo
         | DfScalarValue::LargeUtf8(Some(s))
         | DfScalarValue::Utf8View(Some(s)) => Ok(ScalarValue::Utf8(s.clone())),
         DfScalarValue::Boolean(Some(b)) => Ok(ScalarValue::Boolean(*b)),
+        // A timestamp is ms since the epoch, as the executor's columns.
+        DfScalarValue::TimestampSecond(Some(s), _) => Ok(ScalarValue::Timestamp(s * 1_000)),
+        DfScalarValue::TimestampMillisecond(Some(ms), _) => Ok(ScalarValue::Timestamp(*ms)),
+        DfScalarValue::TimestampMicrosecond(Some(us), _) => Ok(ScalarValue::Timestamp(us / 1_000)),
+        DfScalarValue::TimestampNanosecond(Some(ns), _) => {
+            Ok(ScalarValue::Timestamp(ns / 1_000_000))
+        }
         // All three of DataFusion's interval scalars land on one canonical
         // shape; the narrower two simply leave the fields they do not carry
         // at zero.
