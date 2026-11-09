@@ -17,7 +17,7 @@ mod pruning;
 pub use candidates::{
     parameter_list, CandidateError, CandidateExpression, CandidateForMemoGroup,
     CandidateForMemoGroupId, ErrorPropagation, LogicalProperties, LogicalPropertiesError,
-    LogicalRequirements, Memo, OriginOfCandidateForMemoGroup, RequiredAccuracy,
+    LogicalRequirements, Memo, MemoQuery, OriginOfCandidateForMemoGroup, RequiredAccuracy,
 };
 pub use logical_memo_candidates::{
     LogicalASAPMemoCandidates, LogicalEdge, PruneCause, PrunedLogicalCandidate, RootPruneReason,

@@ -19,7 +19,7 @@
     const parts = [];
     if (capabilities.raw_data_retained === false) parts.push('raw data not retained');
     if (capabilities.query_time_results_retained === true) parts.push('query-time results retained');
-    if (Array.isArray(capabilities.supported_summaries)) parts.push(`${capabilities.supported_summaries.length} supported summary families`);
+    if (Array.isArray(capabilities.supported_summaries)) parts.push(`${capabilities.supported_summaries.length} supported summary types`);
     return parts.join(', ') || 'default deployment capabilities';
   }
 

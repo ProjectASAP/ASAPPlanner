@@ -19,8 +19,8 @@ not turn an unknown guarantee into a satisfied accuracy requirement.
 ## Candidate state
 
 Here, **certified for a target** means Planner has a fully known
-`AccuracyGuarantee` for the candidate and `asap_accuracy::satisfies(guarantee,
-target)` returns `true`. **Uncertified** means Planner cannot make that claim:
+`AccuracyGuarantee` for the candidate whose evaluated error is within the
+target's (`asap_accuracy::target_limit`). **Uncertified** means Planner cannot make that claim:
 the guarantee is absent, contains unknown terms, or is known not to meet the
 target. An uncertified summary may still be a well-formed logical candidate;
 this label says nothing about whether the backend can physically execute it.

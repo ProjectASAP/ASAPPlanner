@@ -202,8 +202,8 @@ cost model.
 ## Composing guarantees through a DAG
 
 The accuracy crate supplies theoretical guarantees (`theoretical_guarantee`),
-propagation rules and target satisfaction (`satisfies`); the deployment's
-measurements (`AccuracyEvidence::measured_guarantee`) take precedence over a
+propagation rules and the comparison limit of a target (`target_limit`); the
+deployment's measurements (`AccuracyEvidence::measured_guarantee`) take precedence over a
 theoretical guarantee. The rules are conservative: an unregistered
 composition over approximate inputs is rejected rather than treated as exact.
 

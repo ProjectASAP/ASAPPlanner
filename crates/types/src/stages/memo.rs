@@ -3,11 +3,11 @@
 
 use std::collections::BTreeSet;
 
-use super::{CandidateForMemoGroup, Memo};
+use super::{CandidateForMemoGroup, Memo, MemoQuery};
 use crate::ir::operator::input::OperatorInput;
 use crate::ir::properties::summary_coverage::SummaryCoverage;
 use crate::ir::schema::Schema;
-use crate::ir::{Operator, OperatorResultKind, QueryRoot};
+use crate::ir::{Operator, OperatorResultKind};
 
 /// A group, by index in the memo's groups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
@@ -43,6 +43,12 @@ pub struct GroupProperties {
     pub result_kind: OperatorResultKind,
     /// Per output column, in schema order: the sign of its values.
     pub column_sign: Vec<ValueSign>,
+    /// Whether the result changes with the evaluation time: true for a
+    /// group under a `TimeRange` relative to the evaluation time
+    /// (`sum_over_time(m[5m])`), false for one under a fixed `@ T` or
+    /// reading no time. A result that does not depend on it is the same at
+    /// every evaluation, so a stored copy delivers on every grid.
+    pub depends_on_evaluation_time: bool,
     /// What an aggregate group covers: a summary state, a chain, a merge
     /// over a chain's windows, or an exact `Aggregate` result; `None` for
     /// any other group. Derived today for summary states only; exact
@@ -112,19 +118,19 @@ impl MemoGroup {
     }
 }
 
-/// The groups some query's root reads, ascending: the groups of
-/// `query_roots` that are a query's result or a scalar query's operand.
-pub fn root_groups(query_roots: &[QueryRoot<MemoGroupId>]) -> BTreeSet<MemoGroupId> {
-    query_roots
+/// The groups some query's root reads, ascending: the groups of the
+/// `queries`' roots that are a query's result or a scalar query's operand.
+pub fn root_groups(queries: &[MemoQuery]) -> BTreeSet<MemoGroupId> {
+    queries
         .iter()
-        .flat_map(QueryRoot::operator_refs)
+        .flat_map(|query| query.root.operator_refs())
         .copied()
         .collect()
 }
 
 /// The queries whose root reads `group`, ascending.
-pub fn queries_rooted_at(query_roots: &[QueryRoot<MemoGroupId>], group: MemoGroupId) -> Vec<usize> {
-    (0..query_roots.len())
-        .filter(|&query| query_roots[query].operator_refs().contains(&&group))
+pub fn queries_rooted_at(queries: &[MemoQuery], group: MemoGroupId) -> Vec<usize> {
+    (0..queries.len())
+        .filter(|&query| queries[query].root.operator_refs().contains(&&group))
         .collect()
 }

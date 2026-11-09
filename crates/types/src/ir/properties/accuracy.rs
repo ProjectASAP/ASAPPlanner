@@ -171,21 +171,6 @@ impl AccuracyScope {
             }
         }
     }
-
-    /// Whether a statement over this scope also covers every value `other`
-    /// covers: the whole result covers every scope, a record share covers a
-    /// larger share (not every value: a smaller group is outside it), and a
-    /// single value only itself.
-    pub fn covers(self, other: Self) -> bool {
-        match (self, other) {
-            (Self::WholeResult, _) | (Self::PerValue, Self::PerValue) => true,
-            (
-                Self::GroupsWithRecordShareAtLeast(share),
-                Self::GroupsWithRecordShareAtLeast(other_share),
-            ) => share <= other_share,
-            _ => false,
-        }
-    }
 }
 
 /// The outer shape of an accuracy guarantee
@@ -814,22 +799,6 @@ mod tests {
             GroupsWithRecordShareAtLeast(0.01).max_values_covered(Some(4)),
             Some(4)
         );
-    }
-
-    /// The whole result covers every scope; a record share covers a larger
-    /// share but not a single value, which may be a smaller group; a single
-    /// value covers only itself.
-    #[test]
-    fn a_wider_scope_covers_a_narrower_one() {
-        use AccuracyScope::*;
-        let share = GroupsWithRecordShareAtLeast;
-        assert!(WholeResult.covers(share(0.01)));
-        assert!(share(0.01).covers(share(0.05)));
-        assert!(!share(0.05).covers(PerValue));
-        assert!(PerValue.covers(PerValue));
-        assert!(!share(0.05).covers(share(0.01)));
-        assert!(!share(0.05).covers(WholeResult));
-        assert!(!PerValue.covers(share(0.05)));
     }
 
     /// Exact means zero error with certainty, whatever the metric; an

@@ -919,14 +919,14 @@ fn deployment_capabilities_flag_sets_the_capabilities_and_shows_them() {
         })
     );
     let kll_kept = with_capabilities(
-        r#"{"supported_summaries": [{"family": "Kll", "readouts": ["Quantile"]}],
+        r#"{"supported_summaries": [{"summary_type": "Kll", "readouts": ["Quantile"]}],
             "query_time_results_retained": true}"#,
         &["--ignore-accuracy-guarantees"],
     );
     assert_eq!(
         kll_kept["deployment_capabilities"],
         json!({
-            "supported_summaries": [{ "family": "Kll", "readouts": ["Quantile"] }],
+            "supported_summaries": [{ "summary_type": "Kll", "readouts": ["Quantile"] }],
             "raw_data_retained": true,
             "query_time_results_retained": true,
         })

@@ -18,7 +18,7 @@ use asap_types::workload::QueryWorkloadEntry;
 pub fn generate_logical_asap_memo_candidates(
     pass1: Memo,
     entries: &[QueryWorkloadEntry],
-    evidence: &AccuracyEvidence,
+    evidence: &dyn AccuracyEvidence,
 ) -> Result<LogicalASAPMemoCandidates, Pass2RuleError> {
     pass2_after_local_window_composition(pass2_local_window_composition(pass1, entries)?, evidence)
 }
@@ -41,7 +41,7 @@ pub fn pass2_local_window_composition(
 /// (`asap_accuracy::producer_satisfies_logical_requirements`).
 pub fn pass2_after_local_window_composition(
     mut memo: Memo,
-    evidence: &AccuracyEvidence,
+    evidence: &dyn AccuracyEvidence,
 ) -> Result<LogicalASAPMemoCandidates, Pass2RuleError> {
     // 2. Scan widening.
     scan_labels::add_scan_label_candidates(&mut memo)?;

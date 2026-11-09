@@ -19,13 +19,12 @@ use asap_types::workload::parsed_workload::ParsedWorkload;
 use asap_types::workload::WorkloadError;
 
 use crate::run::{SelectionError, Stage1ToStage3Pass};
-use asap_accuracy::AccuracyEvidence;
+use asap_accuracy::{AccuracyEvidence, NoMeasuredGuarantees};
 use asap_cost::CostInputs;
 use asap_logical_asap_optimization::PerComputationCandidateError;
 use asap_types::deployment_capabilities::DeploymentCapabilities;
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPDAGValidationError};
 
-static NO_ACCURACY_EVIDENCE: AccuracyEvidence = AccuracyEvidence {};
 static DEFAULT_COST_INPUTS: std::sync::LazyLock<CostInputs> =
     std::sync::LazyLock::new(CostInputs::default);
 static DEFAULT_DEPLOYMENT: std::sync::LazyLock<DeploymentCapabilities> =
@@ -45,7 +44,7 @@ static DEFAULT_DEPLOYMENT: std::sync::LazyLock<DeploymentCapabilities> =
 pub struct PlanningModels<'a> {
     /// The deployment's measured accuracy, which Pass 2 reads before each
     /// summary's theoretical guarantee; none by default.
-    pub evidence: &'a AccuracyEvidence,
+    pub evidence: &'a dyn AccuracyEvidence,
     /// The deployment's cost inputs: the cost model (default
     /// cost model 1 with illustrative unit costs), the resource speed and
     /// the non-repeating query horizon.
@@ -65,7 +64,7 @@ pub struct PlanningModels<'a> {
 
 impl<'a> PlanningModels<'a> {
     /// This evidence with the default plan selection settings.
-    pub fn new(evidence: &'a AccuracyEvidence) -> Self {
+    pub fn new(evidence: &'a dyn AccuracyEvidence) -> Self {
         Self {
             evidence,
             cost_inputs: &DEFAULT_COST_INPUTS,
@@ -76,7 +75,7 @@ impl<'a> PlanningModels<'a> {
 
     /// The built-in models: no accuracy evidence.
     pub fn builtin() -> PlanningModels<'static> {
-        PlanningModels::new(&NO_ACCURACY_EVIDENCE)
+        PlanningModels::new(&NoMeasuredGuarantees)
     }
 
     /// These models, enforcing no accuracy target when `ignore`
@@ -86,7 +85,7 @@ impl<'a> PlanningModels<'a> {
         self
     }
 
-    pub fn with_evidence(mut self, evidence: &'a AccuracyEvidence) -> Self {
+    pub fn with_evidence(mut self, evidence: &'a dyn AccuracyEvidence) -> Self {
         self.evidence = evidence;
         self
     }

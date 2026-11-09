@@ -468,9 +468,8 @@ impl AccuracyGuarantee {
     /// never fails (`δ = 0`) holds for every value at once; an unbound `n`
     /// (the whole result of an unbound `G`) leaves the failure probability
     /// symbolic in [`VALUES_PER_RESULT`]. A guarantee over any other scope
-    /// is returned as it is: the check then accepts it only for a scope it
-    /// covers ([`AccuracyScope::covers`]). Plan selection uses it to check a
-    /// target over `scope`.
+    /// is returned as it is. Plan selection uses it to check a target over
+    /// `scope`.
     pub fn over_scope(&self, scope: AccuracyScope, values_per_result: Option<u64>) -> Self {
         let mut over = self.clone();
         // Only a per-value statement extends to more values by the union

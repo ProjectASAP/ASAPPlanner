@@ -405,9 +405,9 @@ pub fn generate_per_computation_candidates(
     // a group several queries read is one node.
     let node = |g: &MemoGroupId| Rc::clone(&logical_nodes[g.0 as usize]);
     let roots: Vec<QueryRoot> = memo
-        .query_roots
+        .queries
         .iter()
-        .map(|root| match root {
+        .map(|query| match &query.root {
             QueryRoot::Operator(g) => QueryRoot::Operator(node(g)),
             QueryRoot::Scalar(expr) => QueryRoot::Scalar(expr.map_operator_refs(&mut |g| node(g))),
         })

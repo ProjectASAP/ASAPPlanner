@@ -207,7 +207,7 @@ impl FuzzWorkload {
                     .filter(|supported| {
                         self.sketch_families
                             .as_ref()
-                            .is_none_or(|only| only.contains(&supported.family))
+                            .is_none_or(|only| only.contains(&supported.summary_type))
                     })
                     .collect(),
             ),

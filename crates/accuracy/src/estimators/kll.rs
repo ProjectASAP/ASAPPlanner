@@ -159,18 +159,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(g.spec.accuracy_metric, AccuracyMetric::Rank);
-        assert!(satisfies(
-            &g,
-            &AccuracyTarget::max_error(0.01).accuracy_metric(AccuracyMetric::Rank)
-        ));
+        assert!(meets(&g, 0.01, None));
         assert_eq!(g.spec.failure_probability.evaluate(), Some(0.01));
-        assert!(satisfies(
-            &g,
-            &AccuracyTarget::max_error(0.01)
-                .failure_probability(0.01)
-                .accuracy_metric(AccuracyMetric::Rank)
-                .accuracy_scope(asap_types::ir::properties::AccuracyScope::PerValue)
-        ));
+        assert!(meets(&g, 0.01, Some(0.01)));
         assert_eq!(g.approximate_layer_count(), 1);
         assert!(g.provenance.iter().any(|source| matches!(
             source,

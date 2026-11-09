@@ -209,9 +209,9 @@ fn write_memo(out: &mut String, memo: &Memo, previous: Option<&Memo>, with_candi
         todo!("#1207 PR 9: print each candidate's expression, logical properties and input requirements")
     }
     let roots: Vec<String> = memo
-        .query_roots
+        .queries
         .iter()
-        .map(|root| match root {
+        .map(|query| match &query.root {
             QueryRoot::Operator(group) => format!("G{}", group.0),
             scalar => format!("{scalar:?}"),
         })

@@ -12,8 +12,8 @@ use planner_types::ir::schema::SupportedSummary;
 pub fn supported_summary_families() -> Vec<SupportedSummary> {
     EVALUATED_READOUTS
         .iter()
-        .map(|&(family, readouts)| SupportedSummary {
-            family,
+        .map(|&(summary_type, readouts)| SupportedSummary {
+            summary_type,
             readouts: readouts.to_vec(),
         })
         .collect()
@@ -189,7 +189,7 @@ mod tests {
                 let executed = factory_builds(&family) && evaluation_answers(&family, readout);
                 let declared = listed
                     .iter()
-                    .any(|s| &s.family == algorithm && s.readouts.contains(&readout));
+                    .any(|s| &s.summary_type == algorithm && s.readouts.contains(&readout));
                 assert_eq!(declared, executed, "{algorithm:?} {readout:?}");
                 let answered = SummaryTypeCapability::of(&family).answers(&statistic(readout));
                 assert_eq!(

@@ -3,13 +3,13 @@
 //!
 //! [`DeploymentCapabilities`] says three things:
 //!
-//! * which sketch families the executor supports, and which readouts it
-//!   supports for each. A family is supported when the executor can build
+//! * which sketch summary types the executor supports, and which readouts
+//!   it supports for each. A summary type is supported when the executor can build
 //!   its state, and a readout of it when the executor can answer that
 //!   statistic ([`StatisticKind`]) from the state. Stage 1 (Pass 1) offers
-//!   no summary candidate whose family or readout is unsupported, so no
+//!   no summary candidate whose summary type or readout is unsupported, so no
 //!   Pass 2 candidate has one either (Pass 2 rules share, split into tumbling windows
-//!   or reuse existing builds; none adds a family or a readout). Exact
+//!   or reuse existing builds; none adds a summary type or a readout). Exact
 //!   accumulators and plain exact execution are always supported;
 //! * whether raw data samples are retained. If they are, Stage 3 counts them on
 //!   disk once per source, at the longest window a query-time scan of it
@@ -31,7 +31,7 @@
 //! and keeps no query-time result across evaluations, which is the
 //! planner's behavior without deployment inputs.
 
-// The executor lists the families it builds as `SupportedSummary`s, so the
+// The executor lists the summary types it builds as `SupportedSummary`s, so the
 // type lives with the readout vocabulary in `asap-types`.
 pub use crate::ir::schema::SupportedSummary;
 use crate::ir::schema::{SketchAlgorithm, StatisticKind};
@@ -46,8 +46,8 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DeploymentCapabilities {
-    /// The sketch families the executor can build, each with the readouts
-    /// it can answer from one; `None` (the default) supports every family
+    /// The sketch summary types the executor can build, each with the
+    /// readouts it can answer from one; `None` (the default) supports every summary type
     /// and readout the planner can build.
     pub supported_summaries: Option<Vec<SupportedSummary>>,
     /// Whether raw data samples are retained for query-time scans; default `true`.
@@ -68,9 +68,9 @@ impl Default for DeploymentCapabilities {
 }
 
 impl DeploymentCapabilities {
-    /// Whether the executor can build `family` and answer `readout` from it.
-    pub fn supports(&self, family: &SketchAlgorithm, readout: StatisticKind) -> bool {
-        summary_supported(self.supported_summaries.as_deref(), family, readout)
+    /// Whether the executor can build `summary_type` and answer `readout` from it.
+    pub fn supports(&self, summary_type: &SketchAlgorithm, readout: StatisticKind) -> bool {
+        summary_supported(self.supported_summaries.as_deref(), summary_type, readout)
     }
 
     /// Checks these capabilities against the data workload: stored data
@@ -90,18 +90,18 @@ impl DeploymentCapabilities {
 }
 
 /// Whether an executor that builds `supported_summaries` (`None`: every
-/// family and readout the planner can build) can build `family` and answer
-/// `readout` from it. Pass 1 reads only this field of
-/// [`DeploymentCapabilities`].
+/// summary type and readout the planner can build) can build
+/// `summary_type` and answer `readout` from it. Pass 1 reads only this
+/// field of [`DeploymentCapabilities`].
 pub fn summary_supported(
     supported_summaries: Option<&[SupportedSummary]>,
-    family: &SketchAlgorithm,
+    summary_type: &SketchAlgorithm,
     readout: StatisticKind,
 ) -> bool {
     supported_summaries.is_none_or(|supported| {
         supported
             .iter()
-            .any(|s| s.family == *family && s.readouts.contains(&readout))
+            .any(|s| s.summary_type == *summary_type && s.readouts.contains(&readout))
     })
 }
 
@@ -122,7 +122,7 @@ pub enum DeploymentCapabilitiesError {
 mod tests {
     use super::*;
 
-    /// The default supports every family and readout, retains raw data and
+    /// The default supports every summary type and readout, retains raw data and
     /// keeps no query-time result across evaluations; a JSON object with
     /// only some fields keeps the defaults for the rest.
     #[test]
@@ -131,7 +131,7 @@ mod tests {
         assert!(default.supports(&SketchAlgorithm::Bloom, StatisticKind::TopK));
         assert!(default.raw_data_retained && !default.query_time_results_retained);
         let parsed: DeploymentCapabilities = serde_json::from_str(
-            r#"{"supported_summaries": [{"family": "Kll", "readouts": ["Quantile"]}]}"#,
+            r#"{"supported_summaries": [{"summary_type": "Kll", "readouts": ["Quantile"]}]}"#,
         )
         .unwrap();
         assert!(parsed.supports(&SketchAlgorithm::Kll, StatisticKind::Quantile));

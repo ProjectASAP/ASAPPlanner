@@ -57,21 +57,24 @@ fn bounded_guarantee(
     )
 }
 
-/// The theoretical guarantee of reading `statistic` from a state of
-/// `summary_type` with parameters `parameters`: the algorithm's error
-/// formula (concepts doc, section 2, "Where the guarantee comes from").
-/// `None` when the summary type does not answer `statistic` (its
-/// capability row) or has no error model (`SummarySample`, `Wavelet`,
-/// `StatModel`, and sketch readouts without a certified bound).
+/// The theoretical error bound of reading `statistic` from a state of
+/// `summary_type` with parameters `parameters` at failure probability
+/// `failure_probability` (the guarantee's own failure probability): the
+/// algorithm's error formula (concepts doc, section 2, "Where the guarantee
+/// comes from"). `None` when this θ cannot fail that rarely, when the
+/// summary type does not answer `statistic` (its capability row) or has no
+/// error model (`SummarySample`, `Wavelet`, `StatModel`, and sketch
+/// readouts without a certified bound).
 pub fn theoretical_guarantee(
     summary_type: &FieldDataType,
     parameters: &SketchParams,
     statistic: &SketchStatistic,
+    failure_probability: f64,
 ) -> Option<AccuracyGuarantee> {
     match summary_type {
         FieldDataType::Sketch(_) if SummaryTypeCapability::of(summary_type).answers(statistic) => {
-            let _ = parameters;
-            todo!("#1207 PR 4: the algorithm's error formula at θ, at the required failure probability")
+            let _ = (parameters, failure_probability);
+            todo!("#1207 PR 4: the algorithm's error formula at θ, at failure_probability")
         }
         _ => None,
     }
