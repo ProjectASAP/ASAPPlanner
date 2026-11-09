@@ -252,6 +252,70 @@ fn delivers_on_a_stored_result_on_its_group_grid() {
     }
 }
 
+/// In `Materialized(v)` a producer delivers on $v$'s own times: a
+/// 5 s chain inside the computation of a 10 s chain (every 10 s) and of
+/// X = the scan's last 5 minutes stored on its 60 s grid, but not a
+/// 10 s chain inside X's computation every 25 s, nor anything
+/// time-dependent inside a build with neither a width nor a grid.
+#[test]
+fn delivers_on_the_own_times_of_a_materialized_computation() {
+    let grid = |period_ms| {
+        Some(EvaluationGrid {
+            period_ms,
+            phase_ms: 0,
+        })
+    };
+    let materialized = |grid_of_x| {
+        let mut candidates = candidates(memo(), vec![None, None, None, None, grid_of_x]);
+        candidates.physical_candidates = vec![
+            candidate(WINDOWS_10S, QueryTime, Lifetime::AcrossEvaluations(MEMORY)),
+            candidate(LAST_5M, QueryTime, Lifetime::AcrossEvaluations(MEMORY)),
+            candidate(BUILD, QueryTime, Lifetime::AcrossEvaluations(MEMORY)),
+        ];
+        candidates
+    };
+    let across_5s = candidate(WINDOWS_5S, QueryTime, Lifetime::AcrossEvaluations(MEMORY));
+    let across_10s = candidate(
+        WINDOWS_10S,
+        IngestionTime,
+        Lifetime::AcrossEvaluations(MEMORY),
+    );
+    let in_computation_of = |v| ExecutionContext::Materialized(PhysicalCandidateId(v));
+    for (candidates, producer, context, delivers) in [
+        (
+            materialized(grid(60_000)),
+            &across_5s,
+            in_computation_of(0),
+            true,
+        ),
+        (
+            materialized(grid(60_000)),
+            &across_5s,
+            in_computation_of(1),
+            true,
+        ),
+        (
+            materialized(grid(25_000)),
+            &across_10s,
+            in_computation_of(1),
+            false,
+        ),
+        (
+            materialized(grid(60_000)),
+            &across_5s,
+            in_computation_of(2),
+            false,
+        ),
+    ] {
+        assert_eq!(
+            producer.delivers_on(&candidates, &context),
+            delivers,
+            "{:?} in {context:?}",
+            producer.logical_candidate_id
+        );
+    }
+}
+
 /// `producer_satisfies_physical_requirements` over every valid producer state and every valid
 /// consumer state: a query-time producer serves only query-time
 /// consumers, an ingestion-time producer that is not materialized only

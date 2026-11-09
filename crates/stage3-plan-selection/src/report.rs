@@ -13,7 +13,7 @@ use asap_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPNodeId};
 use asap_types::stages::{PhysicalASAPMemoCandidates, PhysicalCandidate, PrunedCandidate};
 use thiserror::Error;
 
-use crate::cost::SelectionCosts;
+use crate::cost::ExecutionCosts;
 
 /// Peak memory above which a candidate's report carries a warning when the
 /// deployment declares no memory capacity: 10^12 bytes (1 TB), more than
@@ -193,12 +193,12 @@ pub enum ErrorSelectingPlan {
     UnsupportedCostModel(String),
 }
 
-/// The selection MILP is infeasible, with the reasons candidates could not
+/// The selection MILP is infeasible, with the reasons executions could not
 /// be costed.
-pub(crate) fn infeasible(costs: &SelectionCosts) -> ErrorSelectingPlan {
+pub(crate) fn infeasible(costs: &ExecutionCosts) -> ErrorSelectingPlan {
     let mut reasons: Vec<&str> = Vec::new();
     for reason in costs
-        .candidate_cost_per_second
+        .per_execution
         .iter()
         .filter_map(|cost| cost.as_ref().err())
     {
@@ -207,11 +207,12 @@ pub(crate) fn infeasible(costs: &SelectionCosts) -> ErrorSelectingPlan {
         }
     }
     let mut reason = "no plan gives every query output a candidate whose every input has an \
-                      admissible producer (the selection MILP is infeasible)"
+                      admissible producer that delivers on its context (the selection MILP is \
+                      infeasible)"
         .to_string();
     if !reasons.is_empty() {
         reason += &format!(
-            "; candidates left out because they could not be costed: {}",
+            "; executions left out because they could not be costed: {}",
             reasons.join("; ")
         );
     }
@@ -296,35 +297,4 @@ fn sketches_below(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use asap_cost::{ClusterLimits, ClusterObjective, ResourceUnitCost};
-
-    /// Without a declared memory capacity nothing rejects a candidate for
-    /// its memory, so a peak over `LARGE_PEAK_MEMORY_BYTES` is reported
-    /// as a warning (the eval's 24 h quantiles plan peaked at 1.43 TB).
-    /// Under cost model 3 the cluster's memory is declared and its capacity
-    /// check applies instead, so there is no warning.
-    #[test]
-    fn a_very_large_peak_memory_is_warned_about_only_without_a_declared_capacity() {
-        let usage_over_time = CostModel::UsageOverTime(ResourceUnitCost::illustrative());
-        assert_eq!(
-            large_peak_memory_warning(1_430_000_000_000, &usage_over_time).as_deref(),
-            Some(
-                "peak memory 1430000000000 bytes is over 1000000000000 bytes and the deployment \
-                 declares no memory capacity to check it against"
-            )
-        );
-        assert_eq!(
-            large_peak_memory_warning(LARGE_PEAK_MEMORY_BYTES, &usage_over_time),
-            None
-        );
-        let cluster = CostModel::ClusterCapacity(ClusterLimits {
-            memory_bytes: u64::MAX,
-            disk_bytes: u64::MAX,
-            cpu_cores: None,
-            objective: ClusterObjective::LowestLatency,
-        });
-        assert_eq!(large_peak_memory_warning(1_430_000_000_000, &cluster), None);
-    }
-}
+mod tests;
