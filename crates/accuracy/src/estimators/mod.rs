@@ -10,7 +10,7 @@ pub mod hll;
 pub(crate) mod kll;
 pub mod univmon;
 
-pub(super) fn sketch_guarantee(
+pub(crate) fn sketch_guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
     query: &SketchStatistic,
@@ -66,12 +66,16 @@ fn bounded_guarantee(
 /// that rarely. `None` when this θ cannot fail that rarely, when the
 /// summary type does not answer `statistic` (its capability row) or has no
 /// error model (`SummarySample`, `Wavelet`, `StatModel`, and sketch
-/// readouts without a certified bound).
+/// readouts without a certified bound). A distinct count from classic HLL
+/// is certified only over a source of at most `max_distinct_per_evaluation`
+/// distinct items (`Memo::max_distinct_per_evaluation`); `None` without
+/// that bound.
 pub fn theoretical_guarantee(
     summary_type: &FieldDataType,
     parameters: &SketchParams,
     statistic: &SketchStatistic,
     failure_probability: f64,
+    max_distinct_per_evaluation: Option<u64>,
 ) -> Option<AccuracyGuarantee> {
     let FieldDataType::Sketch(algorithm) = summary_type else {
         return None;
@@ -80,6 +84,13 @@ pub fn theoretical_guarantee(
         return None;
     }
     match parameters {
+        SketchParams::Hll { precision, .. } if *statistic == SketchStatistic::Cardinality => {
+            hll::classic_guarantee_at(
+                *precision,
+                failure_probability,
+                max_distinct_per_evaluation?,
+            )
+        }
         SketchParams::Kll { .. } => {
             kll::guarantee_at(algorithm, parameters, statistic, failure_probability)
         }
@@ -172,7 +183,7 @@ mod tests {
                 .iter()
                 .map(|parameters| {
                     let guarantee =
-                        theoretical_guarantee(&summary_type, parameters, &statistic, 0.01)
+                        theoretical_guarantee(&summary_type, parameters, &statistic, 0.01, None)
                             .unwrap_or_else(|| panic!("{algorithm:?} {parameters:?}"));
                     assert_eq!(guarantee.spec.accuracy_metric, metric, "{algorithm:?}");
                     guarantee.spec.error.evaluate().unwrap()
@@ -201,7 +212,7 @@ mod tests {
         let kll = FieldDataType::Sketch(SketchAlgorithm::Kll);
         let k = SketchParams::Kll { k: 547 };
         let error_at = |delta| {
-            theoretical_guarantee(&kll, &k, &quantile, delta)
+            theoretical_guarantee(&kll, &k, &quantile, delta, None)
                 .unwrap()
                 .spec
                 .error
@@ -216,11 +227,40 @@ mod tests {
             value: None,
         };
         let depth = |depth| SketchParams::Cms { width: 272, depth };
-        assert!(theoretical_guarantee(&cms, &depth(5), &point, 1e-2).is_some());
-        assert!(theoretical_guarantee(&cms, &depth(5), &point, 1e-4).is_none());
-        assert!(theoretical_guarantee(&cms, &depth(10), &point, 1e-4).is_some());
+        assert!(theoretical_guarantee(&cms, &depth(5), &point, 1e-2, None).is_some());
+        assert!(theoretical_guarantee(&cms, &depth(5), &point, 1e-4, None).is_none());
+        assert!(theoretical_guarantee(&cms, &depth(10), &point, 1e-4, None).is_some());
         // A statistic the summary type does not answer has no guarantee.
-        assert!(theoretical_guarantee(&kll, &k, &SketchStatistic::Cardinality, 0.01).is_none());
+        assert!(
+            theoretical_guarantee(&kll, &k, &SketchStatistic::Cardinality, 0.01, None).is_none()
+        );
+    }
+
+    /// Decided 2026-11-09 (A6): `COUNT(DISTINCT user_id)` within relative
+    /// 0.05 at δ = 0.01 from classic HLL at precision 18 is certified over a
+    /// source of at most 9,636 distinct users per evaluation, not over
+    /// 1,000,000 (outside the contract) and not without a bound.
+    #[test]
+    fn a_distinct_count_needs_the_source_s_distinct_bound() {
+        let hll = FieldDataType::Sketch(SketchAlgorithm::Hll);
+        let precision_18 = SketchParams::Hll { precision: 18 };
+        let error = |bound| {
+            theoretical_guarantee(
+                &hll,
+                &precision_18,
+                &SketchStatistic::Cardinality,
+                0.01,
+                bound,
+            )
+            .map(|guarantee| {
+                assert_eq!(guarantee.spec.accuracy_metric, AccuracyMetric::Relative);
+                guarantee.spec.error.evaluate().unwrap()
+            })
+        };
+        let at_9636 = error(Some(9_636));
+        assert!(at_9636.is_some_and(|error| error <= 0.05), "{at_9636:?}");
+        assert_eq!(error(Some(1_000_000)), None);
+        assert_eq!(error(None), None);
     }
 
     /// Classic HLL's precision grows until its failure probability over the

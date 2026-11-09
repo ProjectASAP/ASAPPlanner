@@ -287,6 +287,26 @@ impl AccuracyTarget {
     pub fn is_exact(&self) -> bool {
         self.max_error == 0.0 && self.failure_probability == Some(0.0)
     }
+
+    /// The target's failure probability per value: its δ split evenly over
+    /// the values its scope covers when one evaluation returns
+    /// `values_per_evaluation` ($n_q$; [`AccuracyScope::max_values_covered`]);
+    /// 1 when it sets no δ. `None` when that count is not known for a δ over
+    /// the whole result: no per-value δ follows (Pass 2 prunes the query's
+    /// readouts with `ValuesPerEvaluationUnknown`).
+    ///
+    /// Example: δ = 0.01 over the whole result of a query returning 100
+    /// series gives 0.0001 per value; with the number of series unknown,
+    /// `None`; per value (`AccuracyScope::PerValue`), 0.01 either way.
+    pub fn failure_probability_per_value(&self, values_per_evaluation: Option<u64>) -> Option<f64> {
+        let Some(delta) = self.failure_probability else {
+            return Some(1.0);
+        };
+        let values = self
+            .accuracy_scope
+            .max_values_covered(values_per_evaluation)?;
+        Some(delta / values.max(1) as f64)
+    }
 }
 
 /// The metric a query's result is most naturally stated in, from the
