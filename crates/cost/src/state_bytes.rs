@@ -434,9 +434,7 @@ mod tests {
         use asap_executor::summary_kernels::HllSketchAccumulator;
         use asap_executor::values::Value;
         use asap_types::ir::scalar::expr_ir::ColumnRef;
-        use asap_types::ir::schema::{
-            NonNegativeWeightProof, SummaryInputExpr, SummaryUpdate, WeightDomain,
-        };
+        use asap_types::ir::schema::{SummaryInputExpr, SummaryUpdate};
         use std::mem::{align_of, size_of};
         use SketchAlgorithm as A;
         /// How the priced bytes relate to the sketch's.
@@ -576,9 +574,6 @@ mod tests {
         let labeled = SummaryUpdate {
             item,
             weight: SummaryInputExpr::Constant(1.0),
-            weight_domain: WeightDomain::NonNegative {
-                proof: NonNegativeWeightProof::UnitCount,
-            },
         };
         // A 16-byte label value: its key has the assumed size.
         let label = |i: u32| format!("{i:016}");

@@ -15,8 +15,7 @@ use planner_types::ir::properties::ExecutionDataState;
 use planner_types::ir::scalar::ColumnRef;
 use planner_types::ir::schema::{DataType, Schema};
 use planner_types::ir::schema::{
-    Field, FieldDataType, NonNegativeWeightProof, SketchAlgorithm, SketchStatistic,
-    SummaryInputExpr, SummaryUpdate, WeightDomain,
+    Field, FieldDataType, SketchAlgorithm, SketchStatistic, SummaryInputExpr, SummaryUpdate,
 };
 use planner_types::ir::ASAPOp;
 use std::sync::Arc;
@@ -169,9 +168,6 @@ fn planner_unit_frequency_update_binds_as_a_value_frequency_build() -> Result<()
             input: SummaryUpdate {
                 item: Some(SummaryInputExpr::Column(ColumnRef::Named("src_ip".into()))),
                 weight: SummaryInputExpr::Constant(1.0),
-                weight_domain: WeightDomain::NonNegative {
-                    proof: NonNegativeWeightProof::UnitCount,
-                },
             },
             reduction: Reduction::Reduce(GroupKeys::by(vec![])),
             filter: None,
