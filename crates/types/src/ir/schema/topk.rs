@@ -14,9 +14,31 @@ use crate::ir::{ASAPOp, NonASAPOp, Operator, ScalarExpr};
 /// `FinalizeExactAccumulator` or `SummaryEstimate`, under the `Project`
 /// restoring its names (a renaming) and a value `HAVING`'s `Filter`. Over
 /// per-series rows (PromQL `topk by (..) (k, rows)`) it is the sample value.
-pub fn ranked_column<I: OperatorInput>(child: &I) -> Result<ColumnId, ResolveError> {
+pub(crate) fn ranked_column<I: OperatorInput>(child: &I) -> Result<ColumnId, ResolveError> {
+    match ranked_source(child) {
+        RankedSource::TopK(reduction) => Ok(reduction.group_keys().map_or(0, |keys| keys.len())),
+        RankedSource::OneRowPerItem(Reduction::Reduce(_)) => Ok(child.schema().fields.len() - 1),
+        RankedSource::OneRowPerItem(Reduction::PerEntity) | RankedSource::Rows => {
+            resolve_column_ref(&ColumnRef::SampleValue, child.schema())
+        }
+    }
+}
+
+/// What a top-k's input rows are, seen through a renaming `Project`, a
+/// value `HAVING`'s `Filter`, a finalize or a summary readout.
+enum RankedSource {
+    /// Another top-k's ranked rows, grouped by this reduction.
+    TopK(Reduction),
+    /// One row per item: a one-measure aggregate (or a summary build), per
+    /// group of this reduction or per series.
+    OneRowPerItem(Reduction),
+    /// Any other rows, possibly several per item.
+    Rows,
+}
+
+fn ranked_source<I: OperatorInput>(child: &I) -> RankedSource {
     let mut node = child.clone();
-    let reduction = loop {
+    loop {
         match node.operator() {
             // Only a renaming keeps the measure last.
             Operator::NonASAP(NonASAPOp::Project { cols, child, .. })
@@ -36,23 +58,73 @@ pub fn ranked_column<I: OperatorInput>(child: &I) -> Result<ColumnId, ResolveErr
                     ..
                 },
             ) => node = child,
-            Operator::ASAP(ASAPOp::SummaryAgg { reduction, .. }) => break Some(reduction),
+            Operator::ASAP(ASAPOp::SummaryAgg { reduction, .. }) => {
+                return RankedSource::OneRowPerItem(reduction)
+            }
             Operator::NonASAP(NonASAPOp::Aggregate {
                 reduction,
                 measures,
                 ..
             }) if measures.len() == 1 => {
                 if matches!(measures[0], crate::ir::operator::AggIntent::TopK { .. }) {
-                    return Ok(reduction.group_keys().map_or(0, |keys| keys.len()));
+                    return RankedSource::TopK(reduction);
                 }
-                break Some(reduction);
+                return RankedSource::OneRowPerItem(reduction);
             }
-            _ => break None,
+            _ => return RankedSource::Rows,
         }
-    };
-    match reduction {
-        Some(Reduction::Reduce(_)) => Ok(child.schema().fields.len() - 1),
-        _ => resolve_column_ref(&ColumnRef::SampleValue, child.schema()),
+    }
+}
+
+/// Whether the item columns `item_columns` of `input` identify each item
+/// completely: `input` lists every column its rows carry (it is closed), or
+/// the items include the realized PromQL series identity. An open PromQL
+/// label set may carry unlisted labels, so its listed columns cannot.
+pub(crate) fn item_identity_is_complete(
+    input: &crate::ir::schema::Schema,
+    item_columns: impl IntoIterator<Item = ColumnId>,
+) -> bool {
+    input.closed
+        || item_columns
+            .into_iter()
+            .any(|index| input.fields[index].name == PROMQL_SERIES_IDENTITY)
+}
+
+/// The unique key of ranked rows (one row per partition and item) with
+/// `columns` columns, the ranked value at `value`: every other column. The
+/// one rule for a top-k's ranked rows, exact or a heap's readout.
+pub(crate) fn ranked_rows_unique_keys(columns: usize, value: ColumnId) -> Vec<Vec<ColumnId>> {
+    let key: Vec<ColumnId> = (0..columns).filter(|&column| column != value).collect();
+    if key.is_empty() {
+        Vec::new()
+    } else {
+        vec![key]
+    }
+}
+
+/// The unique keys of an exact top-k's ranked rows (`output`, the
+/// projection [`ranked_row_projection`] gives, its ranked value after the
+/// `partitions` keys) over `child`: one row per (partition, item) when
+/// `child` has one row per item whose identity is complete
+/// ([`item_identity_is_complete`]); else the projection's own keys.
+pub(crate) fn exact_topk_unique_keys<I: OperatorInput>(
+    child: &I,
+    partitions: usize,
+    output: &crate::ir::schema::Schema,
+) -> Vec<Vec<ColumnId>> {
+    let item_columns = (0..child.schema().fields.len()).filter(|&index| {
+        output
+            .fields
+            .iter()
+            .skip(partitions + 1)
+            .any(|field| field.name == child.schema().fields[index].name)
+    });
+    if matches!(ranked_source(child), RankedSource::OneRowPerItem(_))
+        && item_identity_is_complete(child.schema(), item_columns)
+    {
+        ranked_rows_unique_keys(output.fields.len(), partitions)
+    } else {
+        output.unique_keys.clone()
     }
 }
 

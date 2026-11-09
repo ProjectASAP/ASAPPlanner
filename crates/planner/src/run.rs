@@ -8,9 +8,7 @@ use asap_stage0_memo::memo_of_queries;
 use std::rc::Rc;
 use std::time::Instant;
 
-use asap_stage1_pass1_per_computation_candidates::{
-    pass1_memo, Pass1Error, PerComputationCandidateError,
-};
+use asap_stage1_pass1_per_computation_candidates::{pass1_memo, PerComputationCandidateError};
 use asap_stage1_pass2_reuse_candidates::generate_logical_asap_memo_candidates;
 use asap_stage2_physical_optimization::generate_physical_asap_memo_candidates;
 use asap_stage3_plan_selection::{select_plan, ErrorSelectingPlan, Selection};
@@ -108,24 +106,20 @@ pub fn run_planning(
         })
         .collect();
     let initial = memo_of_queries(&roots, &accuracy_targets, data)?;
-    // Pass 1: the per-computation candidates the deployment can run.
+    // Pass 1: the initial candidates the deployment can run. A query Pass 1
+    // cannot plan is an input error.
     let pass1 = pass1_memo(
         initial,
         models
             .deployment_capabilities
             .supported_summaries
             .as_deref(),
-    );
-    // A query Pass 1 cannot plan is an input error.
-    let pass1 = match pass1 {
-        Err(Pass1Error::PerComputation(error)) => return Err(error),
-        pass1 => pass1,
-    };
+    )?;
     let mut report = PlanningReport {
         pass1_ms: elapsed_ms(started),
         ..PlanningReport::default()
     };
-    let pass1_memo = pass1.as_ref().ok().filter(|_| settings.inspect).cloned();
+    let pass1_memo = settings.inspect.then(|| pass1.clone());
     let mut logical_asap_candidates = None;
     let mut physical_asap_candidates = None;
     let selection = (|| {
@@ -133,8 +127,6 @@ pub fn run_planning(
             .deployment_capabilities
             .validate(data)
             .map_err(SelectionError::InvalidDeploymentCapabilities)?;
-        let pass1 =
-            pass1.map_err(|error| SelectionError::LogicalASAPCandidates(error.to_string()))?;
         // Pass 2: the reuse rules, readout requirements and logical edges.
         let started = Instant::now();
         let logical = generate_logical_asap_memo_candidates(pass1, entries, models.evidence);

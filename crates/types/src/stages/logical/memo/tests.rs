@@ -11,7 +11,14 @@ use crate::ir::schema::{DataType, Field, FieldDataType, Schema};
 use crate::ir::{ExprSemantics, NonASAPOp, Predicate, ScalarExpr};
 use crate::stages::logical::group::MemoGroupAsInput;
 use crate::stages::{CandidateExpression, LogicalProperties, OriginOfCandidateForMemoGroup};
-use crate::summary_type::{SketchAlgorithm, SketchParams, SketchStatistic};
+use std::time::Duration;
+
+use crate::ir::scalar::ColumnRef;
+use crate::ir::schema::series_identity::with_promql_series_identity;
+use crate::ir::{ASAPOp, OperatorNode, TimeRangeKind};
+use crate::summary_type::{
+    SketchAlgorithm, SketchParams, SketchStatistic, SummaryUpdate, WeightDomain,
+};
 use crate::test_support::memo_fixtures::{aggregate_where, readout, scan, state};
 
 /// An unordered `LIMIT 10` over `input`, whose copies may return
@@ -579,4 +586,116 @@ fn signed_zero_and_non_finite_literals_are_different_groups() {
         assert!(!one_group(literal(a), literal(b)), "{a} and {b}");
     }
     assert!(one_group(literal(f64::INFINITY), literal(f64::INFINITY)));
+}
+
+/// A memo group's output schema.
+fn schema_of_group(memo: &Memo, group: MemoGroupId) -> &Schema {
+    &memo.groups()[group.0 as usize].group_properties.schema
+}
+
+/// `topk by (job) (10, sum_over_time(m[1m]))` over series whose identity
+/// is realized: the exact top-k's group and a heap's ranked readout of
+/// the same rows (a `Project` naming the estimate's columns as the
+/// top-k's) derive the same unique keys, one row per (job, series).
+#[test]
+fn exact_topk_and_heap_readout_derive_the_same_unique_keys() {
+    let open = Schema::with_time_index(
+        vec![
+            Field::plain("ts", DataType::Timestamp, false),
+            Field::plain("value", DataType::Float64, false),
+            Field::plain("job", DataType::Utf8, true),
+        ],
+        0,
+        vec![],
+    );
+    fn scan<C>(schema: Schema) -> Operator<C> {
+        Operator::NonASAP(NonASAPOp::Scan {
+            source: Source::TimeSeries { metric: "m".into() },
+            predicates: vec![],
+            schema,
+        })
+    }
+    let realized = with_promql_series_identity(&OperatorNode::new_shared(scan(open)).unwrap())
+        .unwrap()
+        .schema
+        .clone();
+    let mut memo = Memo::new(&DataWorkload::default());
+    let rows = memo.find_or_add_group(scan(realized)).unwrap();
+    let window = memo
+        .find_or_add_group(Operator::NonASAP(NonASAPOp::TimeRange {
+            range: Duration::from_secs(60),
+            kind: TimeRangeKind::Range,
+            child: rows,
+        }))
+        .unwrap();
+    let per_series = memo
+        .find_or_add_group(Operator::NonASAP(NonASAPOp::Aggregate {
+            child: window,
+            reduction: Reduction::PerEntity,
+            measures: vec![AggIntent::Sum { col: None }],
+            output_names: vec![String::new()],
+            filters: vec![None],
+            having: None,
+        }))
+        .unwrap();
+    let topk = AggIntent::TopK { k: 10 };
+    let exact = memo
+        .find_or_add_group(Operator::NonASAP(NonASAPOp::Aggregate {
+            child: per_series,
+            reduction: Reduction::by(vec![2]),
+            measures: vec![topk],
+            output_names: vec![String::new()],
+            filters: vec![None],
+            having: None,
+        }))
+        .unwrap();
+    let heap = memo
+        .find_or_add_group(Operator::ASAP(ASAPOp::SummaryAgg {
+            child: window,
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::CountSketchWithHeap),
+            input: SummaryUpdate {
+                item: Some(crate::ir::schema::topk::series_identity_item(
+                    schema_of_group(&memo, window),
+                    &[2],
+                )),
+                weight: crate::summary_type::SummaryInputExpr::Column(ColumnRef::SampleValue),
+                weight_domain: WeightDomain::UnknownOrSigned,
+            },
+            reduction: Reduction::by(vec![2]),
+            filter: None,
+        }))
+        .unwrap();
+    let estimate = memo
+        .find_or_add_group(Operator::ASAP(ASAPOp::SummaryEstimate {
+            summary_input: heap,
+            query: SketchStatistic::TopK { k: 10 },
+        }))
+        .unwrap();
+    let estimated = schema_of_group(&memo, estimate).fields.len() - 1;
+    let cols = schema_of_group(&memo, exact)
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(index, field)| ProjectItem {
+            alias: Some(field.name.clone()),
+            expr: ScalarExpr::Column(if index == 1 {
+                estimated
+            } else {
+                schema_of_group(&memo, estimate)
+                    .fields
+                    .iter()
+                    .position(|input| input.name == field.name)
+                    .unwrap()
+            }),
+        })
+        .collect();
+    let readout = memo
+        .find_or_add_group(Operator::NonASAP(NonASAPOp::Project {
+            cols,
+            child: estimate,
+        }))
+        .unwrap();
+    let exact_keys = &schema_of_group(&memo, exact).unique_keys;
+    assert!(!exact_keys.is_empty());
+    assert_eq!(exact_keys, &schema_of_group(&memo, readout).unique_keys);
 }
