@@ -155,6 +155,14 @@ pub fn root_groups(queries: &[MemoQuery]) -> BTreeSet<MemoGroupId> {
         .collect()
 }
 
+/// Whether every scan below `group` reads a time series (PromQL rows).
+pub fn reads_only_time_series(memo: &Memo, group: MemoGroupId) -> bool {
+    crate::ir::schema::topk::reads_only_time_series(&MemoGroupAsInput {
+        memo,
+        group_id: group,
+    })
+}
+
 /// The queries whose root reads `group`, ascending.
 pub fn queries_rooted_at(queries: &[MemoQuery], group: MemoGroupId) -> Vec<usize> {
     (0..queries.len())

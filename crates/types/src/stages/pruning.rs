@@ -31,9 +31,10 @@ pub enum PruneReason {
     /// Stage 2: it scans raw data at query time, and the deployment does
     /// not retain raw data, so no window of it is there to scan.
     RawDataNotRetained,
-    /// Stage 2: it is a query-time result materialized (`OneEvaluation` or
-    /// `AcrossEvaluations`), and the deployment retains no query-time
-    /// results.
+    /// Stage 2: it is a query-time result materialized across evaluations
+    /// (`AcrossEvaluations`), and the deployment retains no query-time
+    /// result across evaluations
+    /// (`DeploymentCapabilities::query_time_results_retained`).
     QueryTimeResultsNotRetained,
     /// Stage 2: one of its inputs has no producer candidate that can be
     /// built: none is left, or every one depends, directly or through a
