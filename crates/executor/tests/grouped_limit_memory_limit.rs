@@ -43,7 +43,6 @@ fn many_groups_in_one_batch_fail_near_the_memory_limit() {
             name: "k".into(),
             dtype: FieldDataType::Plain(DataType::Int64),
             nullable: false,
-            table: None,
         }],
         time_index: None,
         unique_keys: vec![],

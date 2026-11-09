@@ -109,7 +109,6 @@ fn state_evaluations_and_passthrough_keep_their_contracts() {
             expr: ScalarExpr::Column(0),
             alias: None,
         }],
-        qualifier: None,
     }))
     .unwrap();
     pass.validate_structure().unwrap();
@@ -162,7 +161,6 @@ fn shared_construction_derives_both_operator_categories() {
                 expr: ScalarExpr::Column(99),
                 alias: None
             }],
-            qualifier: None,
         }))
         .is_err()
     );

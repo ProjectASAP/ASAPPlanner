@@ -121,7 +121,7 @@ impl OperatorNode {
         Ok(Self::with_schema(operator, schema))
     }
 
-    /// Build a node with caller-supplied output names and qualifiers. For
+    /// Build a node with caller-supplied output names. For
     /// either operator category, `validate_structure` requires all other
     /// schema metadata to agree with derivation; output kind is derived here.
     pub fn with_schema(operator: Operator, schema: Schema) -> Self {
@@ -190,10 +190,9 @@ impl OperatorNode {
 
     /// Replace the children and rebuild: each child is replaced by `f(child)`
     /// and the node is rebuilt over the new children, re-deriving all
-    /// structural schema metadata. Only names and qualifiers that override
-    /// the old derived schema are retained, for either operator category. A
-    /// change in output arity with such overrides needs an explicit new
-    /// naming assignment.
+    /// structural schema metadata. Only names that override the old derived
+    /// schema are retained, for either operator category. A change in output
+    /// arity with such overrides needs an explicit new naming assignment.
     /// `guarantee` depends on the inputs and is cleared.
     pub fn with_new_children(
         &self,
@@ -203,22 +202,15 @@ impl OperatorNode {
         let mut rebuilt = Self::new(self.operator.map_children(f))?;
         for (i, (derived, retained)) in previous.fields.iter().zip(&self.schema.fields).enumerate()
         {
-            let renamed = retained.name != derived.name;
-            let requalified = retained.table != derived.table;
-            if !renamed && !requalified {
+            if retained.name == derived.name {
                 continue;
             }
             if rebuilt.schema.fields.len() != previous.fields.len() {
                 return Err(SchemaDerivationError::InvalidScalarSignature(
-                    "output arity changed; reassign explicit output names and qualifiers".into(),
+                    "output arity changed; reassign explicit output names".into(),
                 ));
             }
-            if renamed {
-                rebuilt.schema.fields[i].name = retained.name.clone();
-            }
-            if requalified {
-                rebuilt.schema.fields[i].table = retained.table.clone();
-            }
+            rebuilt.schema.fields[i].name = retained.name.clone();
         }
         Ok(rebuilt)
     }
@@ -262,7 +254,7 @@ impl OperatorNode {
     /// input contract, scalar typing against the owning operator's input
     /// schema, and agreement between each retained schema and the one
     /// derived from the operator. Both operator categories may override field
-    /// names and qualifiers; all structural metadata must match derivation.
+    /// names; all structural metadata must match derivation.
     pub fn validate_structure(self: &Rc<Self>) -> Result<(), SchemaDerivationError> {
         for node in Self::reachable(self) {
             if node.schema.time_index.is_some_and(|i| {
@@ -291,7 +283,6 @@ impl OperatorNode {
             // so new structural metadata cannot accidentally escape validation.
             for (field, retained) in derived.fields.iter_mut().zip(&node.schema.fields) {
                 field.name = retained.name.clone();
-                field.table = retained.table.clone();
             }
             let agree = derived == node.schema;
             if !agree {

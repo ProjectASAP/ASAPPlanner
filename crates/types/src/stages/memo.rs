@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 
 use super::{CandidateForMemoGroup, Memo, MemoQuery};
 use crate::ir::operator::input::OperatorInput;
+use crate::ir::operator::operator_properties::SourceColumn;
 use crate::ir::properties::summary_coverage::SummaryCoverage;
 use crate::ir::schema::Schema;
 use crate::ir::{Operator, OperatorResultKind};
@@ -43,8 +44,12 @@ pub struct MemoGroup {
 /// operator nodes.
 #[derive(Debug, Clone)]
 pub struct GroupProperties {
+    /// Fields: name, type, nullability; no table qualifier.
     pub schema: Schema,
     pub result_kind: OperatorResultKind,
+    /// Per output column, in schema order: the source column its values
+    /// are copied from, or `Computed`.
+    pub column_lineage: Vec<ColumnLineage>,
     /// Per output column, in schema order: the sign of its values, from the
     /// input groups' and, for a `Scan`, the declared ones.
     pub column_sign: Vec<ValueSign>,
@@ -66,6 +71,19 @@ pub struct GroupProperties {
     /// `Scan` of a `Source::TimeSeries`, or any other operator all of whose
     /// input groups do. A PromQL top-k ranks one row per series.
     pub reads_only_time_series: bool,
+}
+
+/// Where an output column's values come from, a group property derived
+/// from the input groups (concepts doc, section 3, "Column lineage"). It
+/// names a column across groups where a schema field's name cannot: two
+/// join sides' columns of one name have different lineage, and a renamed
+/// column keeps its lineage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ColumnLineage {
+    /// Copied unchanged from a column of a source.
+    SourceColumn(SourceColumn),
+    /// Computed by an operator: a measure, an expression, a summary state or readout.
+    Computed,
 }
 
 /// The sign of one column's values, a group property derived from the

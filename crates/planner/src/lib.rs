@@ -59,9 +59,10 @@ pub use asap_types::ir::materialized_view::{
     IngestionRefreshGroup, InstallableDagError, MaterializedView, MaterializedViewInputs,
     MaterializedViewRefresh, RawDataRetention, RawDataWindow, RefreshWindow, ViewCoverage,
 };
+pub use asap_types::ir::operator::SourceColumn;
 pub use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
 pub use asap_types::ir::properties::summary_coverage::{
-    ColumnIdentity, Constraint, IntervalConstraintLimit, SelectionBox,
+    Constraint, IntervalConstraintLimit, SelectionBox,
 };
 pub use asap_types::ir::properties::ExecutionTiming;
 pub use asap_types::ir::schema::{SketchAlgorithm, SketchParams, StatisticKind};

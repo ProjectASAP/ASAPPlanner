@@ -25,7 +25,6 @@ fn schema() -> SchemaRef {
         closed: false,
         fields: vec![
             Field {
-                table: None,
                 name: "labels".into(),
                 dtype: FieldDataType::Plain(DataType::Map {
                     key: Box::new(DataType::Utf8),
@@ -35,7 +34,6 @@ fn schema() -> SchemaRef {
                 nullable: false,
             },
             Field {
-                table: None,
                 name: "value".into(),
                 dtype: FieldDataType::Plain(DataType::Float64),
                 nullable: false,
@@ -344,13 +342,11 @@ fn stored_series_evaluations_support_filters_and_sets() {
             closed: false,
             fields: vec![
                 Field {
-                    table: None,
                     name: PROMQL_SERIES_IDENTITY.into(),
                     dtype: FieldDataType::Plain(DataType::Utf8),
                     nullable: false,
                 },
                 Field {
-                    table: None,
                     name: "value".into(),
                     dtype: family.clone(),
                     nullable: false,
