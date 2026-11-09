@@ -486,15 +486,7 @@ mod tests {
         .unwrap();
         assert_eq!(g.spec.accuracy_metric, AccuracyMetric::Relative);
         assert_eq!(g.spec.failure_probability.evaluate(), None);
-        assert!(satisfies(
-            &g,
-            &AccuracyTarget::max_error(0.01).accuracy_metric(AccuracyMetric::Relative)
-        ));
-        assert!(!satisfies(
-            &g,
-            &AccuracyTarget::max_error(0.01)
-                .failure_probability(0.01)
-                .accuracy_metric(AccuracyMetric::Relative)
-        ));
+        assert!(meets(&g, 0.01, None));
+        assert!(!meets(&g, 0.01, Some(0.01)));
     }
 }

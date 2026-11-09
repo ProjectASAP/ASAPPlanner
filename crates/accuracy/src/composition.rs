@@ -1135,7 +1135,7 @@ mod tests {
             s,
             GuaranteeSource::UnavailableStatistic { statistic } if statistic == "input_row_count"
         )));
-        assert!(!satisfies(&out, &AccuracyTarget::max_error(1.0)));
+        assert!(!meets(&out, 1.0, None));
 
         let known = PropagationStats {
             input_row_count: Some(4),

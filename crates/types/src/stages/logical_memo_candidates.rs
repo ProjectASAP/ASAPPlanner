@@ -3,7 +3,7 @@
 //! the candidates dead-candidate elimination removed, each with its root
 //! causes.
 
-use super::{CandidateForMemoGroupId, Memo, RequiredAccuracy};
+use super::{CandidateForMemoGroupId, EvaluationGrid, Memo, RequiredAccuracy};
 use crate::ir::properties::AccuracyMetric;
 
 /// $(u, c, i)$ over logical candidates: `producer_candidate_id` is a
@@ -29,6 +29,13 @@ pub struct LogicalASAPMemoCandidates {
     /// The candidates dead-candidate elimination removed: no logical edge
     /// names them, and Stage 2 does not expand them.
     pub pruned: Vec<PrunedLogicalCandidate>,
+    /// Per group, by `MemoGroupId`: the grid a result of the group is
+    /// evaluated on, the coarsest grid holding every evaluation time of the
+    /// queries reaching it (X = `sum_over_time(m[5m])` read every 60 s and
+    /// every 120 s: 60 s); `None` when those times are not on one known
+    /// grid. A result of the group materialized across evaluations is
+    /// stored at these times.
+    pub evaluation_grid_of_group: Vec<Option<EvaluationGrid>>,
 }
 
 /// A candidate eliminated by Pass 2.

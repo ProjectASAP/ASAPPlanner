@@ -30,15 +30,22 @@ pub struct Memo {
     /// The groups, by id ([`Self::groups`]); added only through
     /// [`Self::find_or_add_group`].
     groups: Vec<MemoGroup>,
-    /// Each query's root over groups, by index in the workload.
-    pub query_roots: Vec<QueryRoot<MemoGroupId>>,
-    /// Each query's accuracy target $A_q$, by index; `None` for a query
-    /// without one (every query when accuracy is not enforced).
-    pub query_accuracy_targets: Vec<Option<AccuracyTarget>>,
-    /// Each query's $n_q$, the number of values one evaluation returns, by
-    /// index; `None` when the data workload does not bound it. Pass 2 turns
-    /// a whole-result failure probability into a per-value one with it.
-    pub query_values_per_evaluation: Vec<Option<u64>>,
+    /// The queries, by index in the workload.
+    pub queries: Vec<MemoQuery>,
+}
+
+/// One query of the memo: its root over groups, its accuracy target and
+/// $n_q$.
+#[derive(Debug, Clone)]
+pub struct MemoQuery {
+    pub root: QueryRoot<MemoGroupId>,
+    /// $A_q$; `None` for a query without one (every query when accuracy is
+    /// not enforced).
+    pub accuracy_target: Option<AccuracyTarget>,
+    /// $n_q$, the number of values one evaluation returns; `None` when the
+    /// data workload does not bound it. Pass 2 turns a whole-result failure
+    /// probability into a per-value one with it.
+    pub values_per_evaluation: Option<u64>,
 }
 
 impl Memo {
@@ -47,17 +54,11 @@ impl Memo {
         &self.groups
     }
 
-    /// Adds a query whose root is `root`, with its accuracy target and
-    /// $n_q$, and returns its index: the root's groups and every group below
-    /// them list it ([`MemoGroup::reached_by_queries`]). Stage 0 adds each
-    /// query once.
-    pub fn add_query(
-        &mut self,
-        root: QueryRoot<MemoGroupId>,
-        accuracy_target: Option<AccuracyTarget>,
-        values_per_evaluation: Option<u64>,
-    ) -> usize {
-        let _ = (root, accuracy_target, values_per_evaluation);
+    /// Adds `query` and returns its index: its root's groups and every
+    /// group below them list it ([`MemoGroup::reached_by_queries`]). Stage 0
+    /// adds each query once.
+    pub fn add_query(&mut self, query: MemoQuery) -> usize {
+        let _ = query;
         todo!("#1207 PR 2")
     }
 
@@ -159,7 +160,8 @@ impl Memo {
 /// input group's `group_properties` and `expression`
 /// ([`MemoGroupAsInput`]), never a node tree. Fails when the expression
 /// breaks them (schema derivation, input validation, merge check).
-// `column_sign` is derived in #1207 PR 2; until then the result is unreachable.
+// `column_sign` and `depends_on_evaluation_time` are derived in #1207 PR 2;
+// until then the result is unreachable.
 #[allow(unreachable_code)]
 fn derive_group_properties(
     memo: &Memo,
@@ -182,6 +184,7 @@ fn derive_group_properties(
         aggregate_coverage,
         shareable_when_equal: operator.is_shareable_when_equal(),
         column_sign: todo!("#1207 PR 2: each output column's sign, per operator, from the input groups' and the sources' declared signs"),
+        depends_on_evaluation_time: todo!("#1207 PR 2: whether the result changes with the evaluation time, from the operator and the input groups"),
     })
 }
 

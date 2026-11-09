@@ -54,13 +54,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(g.spec.accuracy_metric, AccuracyMetric::ABSOLUTE_STREAM_L1);
-        assert!(satisfies(
-            &g,
-            &AccuracyTarget::max_error(0.01)
-                .failure_probability(0.001)
-                .accuracy_metric(AccuracyMetric::ABSOLUTE_STREAM_L1)
-                .accuracy_scope(asap_types::ir::properties::AccuracyScope::PerValue)
-        ));
+        assert!(meets(&g, 0.01, Some(0.001)));
     }
 
     #[test]

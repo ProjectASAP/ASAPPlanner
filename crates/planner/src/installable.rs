@@ -735,7 +735,7 @@ mod tests {
         assert!(!defaulted.supports(&SketchAlgorithm::CountSketch, StatisticKind::ItemFrequency));
         let kll_only = DeploymentCapabilities {
             supported_summaries: Some(vec![SupportedSummary {
-                family: SketchAlgorithm::Kll,
+                summary_type: SketchAlgorithm::Kll,
                 readouts: vec![StatisticKind::Quantile],
             }]),
             ..DeploymentCapabilities::default()

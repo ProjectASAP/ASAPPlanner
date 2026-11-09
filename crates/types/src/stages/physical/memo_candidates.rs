@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use super::execution_context::ExecutionContext;
 use crate::ir::QueryRoot;
 use crate::physical::{ExecutionTiming, PhysicalProperties};
-use crate::stages::{CandidateForMemoGroupId, LogicalASAPMemoCandidates, Memo, PrunedCandidate};
+use crate::stages::{CandidateForMemoGroupId, LogicalASAPMemoCandidates, PrunedCandidate};
 
 /// Index into [`PhysicalASAPMemoCandidates::physical_candidates`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
@@ -33,13 +33,20 @@ impl PhysicalCandidate {
     /// concepts doc's alignment table, section 2). True for $\ell$ = None,
     /// and for `OneEvaluation` in the same context. A chain producer
     /// (`SummaryTumblingWindowChain`) with $\ell$ = `AcrossEvaluations`, with
-    /// $w$ the chain operator's width in its expression in `memo`, needs every evaluation time of the context on its
-    /// grid: $w$ divides the context's evaluation grid (interval, range step
-    /// and phase), each scheduled time, or a one-off query's time; false
-    /// when the times are not known (an interval without a phase, an
-    /// estimated rate, an unknown recurrence).
-    pub fn delivers_on(&self, memo: &Memo, context: &ExecutionContext) -> bool {
-        let _ = (memo, context);
+    /// $w$ the chain operator's width, needs every time of the context on
+    /// its grid: $w$ divides the context's period and phase. Any other
+    /// producer with $\ell$ = `AcrossEvaluations` is stored on its group's
+    /// evaluation grid (`evaluation_grid_of_group`): it delivers on every
+    /// context when the group does not depend on the evaluation time, else
+    /// when that grid holds every time of the context. In
+    /// `Materialized(v)`, the context's times are v's, read from
+    /// `candidates`.
+    pub fn delivers_on(
+        &self,
+        candidates: &PhysicalASAPMemoCandidates,
+        context: &ExecutionContext,
+    ) -> bool {
+        let _ = (candidates, context);
         todo!("#1207 PR 1: the alignment table of section 2")
     }
 }

@@ -367,16 +367,6 @@ mod tests {
         )
     }
 
-    fn meets(guarantee: &AccuracyGuarantee, epsilon: f64, delta: f64) -> bool {
-        satisfies(
-            guarantee,
-            &crate::native_target(
-                &AccuracyTarget::max_error(epsilon).failure_probability(delta),
-                guarantee,
-            ),
-        )
-    }
-
     fn with(params: &SketchParams, f: impl FnOnce(&mut u32, &mut u32, &mut u32)) -> SketchParams {
         let mut params = params.clone();
         let SketchParams::UnivMon {
@@ -410,17 +400,17 @@ mod tests {
             let guarantee = l2(&params).expect("an L2 guarantee");
             assert_eq!(guarantee.spec.accuracy_metric, AccuracyMetric::Relative);
             assert!(
-                meets(&guarantee, eps, delta),
+                meets(&guarantee, eps, Some(delta)),
                 "({eps}, {delta}): {params:?}"
             );
             let fewer_rows = with(&params, |_, rows, _| *rows -= 1);
             assert!(
-                l2(&fewer_rows).is_none_or(|g| !meets(&g, eps, delta)),
+                l2(&fewer_rows).is_none_or(|g| !meets(&g, eps, Some(delta))),
                 "({eps}, {delta}): {fewer_rows:?}"
             );
             let fewer_cols = with(&params, |_, _, cols| *cols -= 1);
             assert!(
-                l2(&fewer_cols).is_none_or(|g| !meets(&g, eps, delta)),
+                l2(&fewer_cols).is_none_or(|g| !meets(&g, eps, Some(delta))),
                 "({eps}, {delta}): {fewer_cols:?}"
             );
         }
@@ -471,7 +461,10 @@ mod tests {
                 hash_independent(sketch_rows, sketch_cols, layers),
                 "{params:?}"
             );
-            assert!(!meets(&l2(&params).unwrap(), eps, delta), "{params:?}");
+            assert!(
+                !meets(&l2(&params).unwrap(), eps, Some(delta)),
+                "{params:?}"
+            );
         }
     }
 
@@ -505,12 +498,12 @@ mod tests {
                 let guarantee = bind(&params, max_distinct);
                 assert_eq!(guarantee.spec.accuracy_metric, AccuracyMetric::Relative);
                 assert!(
-                    meets(&guarantee, eps, delta),
+                    meets(&guarantee, eps, Some(delta)),
                     "({eps}, {delta}): {params:?}"
                 );
                 let smaller = with(&params, |heap, _, _| *heap -= 1);
                 assert!(
-                    !meets(&bind(&smaller, max_distinct), eps, delta),
+                    !meets(&bind(&smaller, max_distinct), eps, Some(delta)),
                     "({eps}, {delta}): {smaller:?}"
                 );
             }
@@ -535,7 +528,7 @@ mod tests {
         let params = size_params(&default_cardinality(), 0.05, 0.01);
         let guarantee = distinct_guarantee(&params, 0.01, "m").unwrap();
         assert_eq!(guarantee.spec.failure_probability.evaluate(), None);
-        assert!(!meets(&guarantee, 0.05, 0.01));
+        assert!(!meets(&guarantee, 0.05, Some(0.01)));
         let SketchParams::UnivMon { heap_size: k, .. } = params else {
             unreachable!()
         };

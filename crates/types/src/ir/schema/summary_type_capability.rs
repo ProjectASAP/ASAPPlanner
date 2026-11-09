@@ -37,15 +37,15 @@ pub struct SummaryTypeCapability {
     pub(crate) readouts: &'static [(StatisticKind, MergedError)],
 }
 
-/// One sketch family a deployment's executor can build, with the readouts
-/// it can answer from the family's state: an entry of
+/// One sketch summary type a deployment's executor can build, with the
+/// readouts it can answer from its state: an entry of
 /// `DeploymentCapabilities::supported_summaries`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SupportedSummary {
-    /// The family the executor can build.
-    pub family: SketchAlgorithm,
-    /// The statistics it can answer from one state of the family.
+    /// The summary type the executor can build.
+    pub summary_type: SketchAlgorithm,
+    /// The statistics it can answer from one state of the summary type.
     pub readouts: Vec<StatisticKind>,
 }
 

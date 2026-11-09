@@ -52,22 +52,25 @@ Read the sections below when changing one of those contracts.
 Accuracy reasoning and allocation are separate from cost modeling:
 
 ```rust
-/// The theoretical guarantee of reading `statistic` from a state of
-/// `summary_type` with parameters θ: the algorithm's error formula.
+/// The theoretical error bound of reading `statistic` from a state of
+/// `summary_type` with parameters θ at `failure_probability`: the
+/// algorithm's error formula. `None` when θ cannot fail that rarely.
 pub fn theoretical_guarantee(
     summary_type: &FieldDataType,
     parameters: &SketchParams,
     statistic: &SketchStatistic,
+    failure_probability: f64,
 ) -> Option<AccuracyGuarantee>;
 
-/// The deployment's measured guarantee for the same configuration, read
-/// first when present.
-impl AccuracyEvidence {
-    pub fn measured_guarantee(
+/// The deployment's measured error bound for the same configuration, read
+/// first when present; `NoMeasuredGuarantees` has none.
+pub trait AccuracyEvidence {
+    fn measured_guarantee(
         &self,
         summary_type: &FieldDataType,
         parameters: &SketchParams,
         statistic: &SketchStatistic,
+        failure_probability: f64,
     ) -> Option<AccuracyGuarantee>;
 }
 ```

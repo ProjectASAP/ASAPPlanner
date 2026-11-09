@@ -172,13 +172,7 @@ mod tests {
             guarantee.spec.accuracy_metric,
             AccuracyMetric::ABSOLUTE_STREAM_L2
         );
-        assert!(satisfies(
-            &guarantee,
-            &AccuracyTarget::max_error(0.01)
-                .failure_probability(0.01)
-                .accuracy_metric(AccuracyMetric::ABSOLUTE_STREAM_L2)
-                .accuracy_scope(asap_types::ir::properties::AccuracyScope::PerValue)
-        ));
+        assert!(meets(&guarantee, 0.01, Some(0.01)));
     }
 
     /// The depth is the smallest odd one whose binomial tail meets δ. Each

@@ -1169,7 +1169,7 @@ function usageText(usage) {
 function deploymentText(capabilities) {
   if (!capabilities || typeof capabilities !== 'object') return '';
   const summaries = Array.isArray(capabilities.supported_summaries)
-    ? `summaries: ${capabilities.supported_summaries.map((s) => `${s.family} (${(s.readouts || []).join(', ')})`).join(', ')}`
+    ? `summaries: ${capabilities.supported_summaries.map((s) => `${s.summary_type} (${(s.readouts || []).join(', ')})`).join(', ')}`
     : 'every summary the planner builds';
   return [capabilities.raw_data_retained === false ? 'raw data not retained' : 'raw data retained',
     capabilities.query_time_results_retained ? 'query-time results retained' : 'query-time results not retained', summaries].join(' · ');

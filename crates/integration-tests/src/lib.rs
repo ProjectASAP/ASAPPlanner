@@ -369,7 +369,8 @@ pub mod planning {
             .iter()
             .enumerate()
             .filter(|(group, _)| {
-                memo.query_roots[q]
+                memo.queries[q]
+                    .root
                     .operator_refs()
                     .contains(&&asap_types::stages::MemoGroupId(*group as u32))
             })
