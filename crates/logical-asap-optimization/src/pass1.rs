@@ -1,14 +1,12 @@
-//! Stage 1, Pass 1: per-computation candidate generation and composition,
-//! and the summary realizations it offers. Its one entry is
+//! Stage 1, Pass 1: per-computation candidate generation and the summary
+//! realizations it offers. Its one entry is
 //! [`pass1_memo`], whose output
 //! memo Pass 2 extends.
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod composition;
 /// Stage 1, Pass 1's entry: the initial candidates of the memo groups.
 pub(crate) mod logical_memo_candidates;
-/// Stage 1, Pass 1's computation targets, their candidates and their
-/// composition. No execution timing is assigned: that is a Stage 2
+/// Stage 1, Pass 1's computation targets and their candidates. No execution timing is assigned: that is a Stage 2
 /// materialization decision. Its target list
 /// (`PerComputationCandidates`) is Pass 1's working form, public only to
 /// tests (`crate::test_support`, feature `test-support`).

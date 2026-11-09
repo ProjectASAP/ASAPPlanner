@@ -295,7 +295,6 @@ fn summed_per_series_samples(grouped: &OperatorNode) -> Option<(Rc<OperatorNode>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pass1::composition::summarised_input;
     use crate::test_support::metric_scan;
     use asap_types::ir::scalar::{CompareOpKind, ScalarValue};
     use asap_types::ir::{ExprSemantics, Predicate};
@@ -339,32 +338,6 @@ mod tests {
             &count_by_job(Some(value_above_one))
         )
         .is_none());
-    }
-
-    /// A summary reads the intent's own input columns: one column by name,
-    /// none as the sample value, several as one hashed tuple.
-    #[test]
-    fn summarised_input_reads_the_intents_columns() {
-        // `metric_scan(&["job"])` → columns [ts=0, value=1, job=2].
-        let scan = metric_scan(&["job"]);
-        let column = |name: &str| SummaryInputExpr::Column(ColumnRef::Named(name.into()));
-        let cases = [
-            (vec![2], column("job")),
-            (vec![1], column("value")),
-            (vec![], SummaryInputExpr::Column(ColumnRef::SampleValue)),
-            (
-                vec![1, 2],
-                SummaryInputExpr::Tuple(vec![column("value"), column("job")]),
-            ),
-        ];
-        for (cols, want) in cases {
-            let intent = AggIntent::Cardinality { cols: cols.clone() };
-            assert_eq!(
-                summarised_input(&intent, &scan.schema),
-                Some(want),
-                "wrong summarised input for cols={cols:?}"
-            );
-        }
     }
 
     /// Each approximable intent is offered the families it was offered when

@@ -137,48 +137,6 @@ pub fn declared_data(root: &Rc<OperatorNode>) -> DataWorkload {
     }
 }
 
-/// Local computation candidates for frontend binding tests. Other computations
-/// keep their default choices; a timed MILP archive is not a candidate catalog.
-#[allow(dead_code)]
-pub fn logical_candidates(root: Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
-    local_computation_candidates(root).expect("generated computation candidates compose")
-}
-
-fn local_computation_candidates(root: Rc<OperatorNode>) -> Result<Vec<Rc<OperatorNode>>, String> {
-    use asap_logical_asap_optimization::test_support::{
-        compose_logical_candidate, generate_per_computation_candidates,
-    };
-    use asap_types::ir::QueryRoot;
-    let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::memo_of_queries(
-            &[QueryRoot::Operator(root)],
-            &[None],
-            &Default::default(),
-        )
-        .unwrap(),
-    )
-    .map_err(|error| error.to_string())?;
-    let mut choices = vec![vec![0; inventory.targets.len()]];
-    for (index, target) in inventory.targets.iter().enumerate() {
-        for choice in 1..target.choice_count() {
-            let mut selected = vec![0; inventory.targets.len()];
-            selected[index] = choice;
-            choices.push(selected);
-        }
-    }
-    choices
-        .into_iter()
-        .map(|choice| {
-            let mut roots = compose_logical_candidate(&inventory, &choice)
-                .map_err(|error| error.to_string())?;
-            match roots.remove(0) {
-                QueryRoot::Operator(root) => Ok(root),
-                QueryRoot::Scalar(_) => Err("expected an operator root".into()),
-            }
-        })
-        .collect()
-}
-
 /// A composed logical candidate, or why it does not compose.
 #[allow(dead_code)]
 pub struct LogicalCandidate {
@@ -204,16 +162,4 @@ pub fn require_composed_operator_candidates(
             }
         })
         .collect()
-}
-
-/// One generated ASAP candidate, or the exact computation if no local rule
-/// applies. Corpus coverage tests exercise binding, not cost-based selection.
-#[allow(dead_code)]
-pub fn logical_plan(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, String> {
-    let candidates = local_computation_candidates(Rc::clone(root))?;
-    Ok(candidates
-        .iter()
-        .find(|node| node.contains_asap())
-        .unwrap_or(&candidates[0])
-        .clone())
 }

@@ -149,6 +149,3 @@ fn duration_text(value: &Value) -> String {
         _ => value.to_string(),
     }
 }
-
-#[cfg(test)]
-mod tests {}

@@ -238,6 +238,3 @@ fn group_label(group: &MemoGroup) -> String {
     let _ = group;
     todo!("#1207 PR 9: label a group by its expression")
 }
-
-#[cfg(test)]
-mod tests {}
