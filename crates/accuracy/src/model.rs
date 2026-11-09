@@ -2,16 +2,18 @@
 
 use std::collections::HashMap;
 
+use crate::estimators::sketch_guarantee;
 use crate::{target_limit, theoretical_guarantee};
 use asap_types::ir::operator::asap::summary_type_of_operator;
 use asap_types::ir::properties::{AccuracyGuarantee, AccuracyMetric};
 use asap_types::ir::schema::{
-    FieldDataType, MergedError, SketchParams, SketchStatistic, SummaryTypeCapability,
+    FieldDataType, MergedError, SketchAlgorithm, SketchParams, SketchStatistic,
+    SummaryTypeCapability,
 };
 use asap_types::ir::{ASAPOp, Operator, OperatorResultKind};
 use asap_types::stages::{
     parameter_list, CandidateForMemoGroupId, LogicalRequirements, Memo, MemoGroupId,
-    RootPruneReason,
+    RootPruneReason, ValueSign,
 };
 
 /// The deployment's measured accuracy, per summary configuration. A
@@ -58,7 +60,8 @@ impl AccuracyEvidence for NoMeasuredGuarantees {
 ///   builds below it) has a guarantee for the readout's statistic, at the
 ///   required failure probability, within the required error and in its
 ///   metric: the deployment's measurement (`evidence`) when it has one,
-///   else [`theoretical_guarantee`]; a merge must keep the guarantee
+///   else [`theoretical_guarantee`] when its sign condition holds for the
+///   state's values ([`sign_condition_holds`]); a merge must keep the guarantee
 ///   (`MergedError::Exact` or `AsIfBuiltOverUnion`). A top-k's heap holds
 ///   its `k` whatever the requirement.
 /// - Any other input: the metric rule, when a query with an accuracy target
@@ -81,8 +84,9 @@ pub fn producer_satisfies_logical_requirements(
             query: statistic,
         }) => {
             let required = consumer_candidate.input_requirements[input].required_accuracy;
-            let summary_type =
-                summary_type_of_operator(&memo.groups()[summary_input.0 as usize].expression);
+            let state_group = &memo.groups()[summary_input.0 as usize];
+            let summary_type = summary_type_of_operator(&state_group.expression);
+            let state_sign = state_group.group_properties.state_column_sign();
             for (parameters, merged) in carried_parameters(memo, producer) {
                 let (Some(summary_type @ FieldDataType::Sketch(_)), Some(parameters)) =
                     (summary_type, parameters)
@@ -117,12 +121,16 @@ pub fn producer_satisfies_logical_requirements(
                         required.failure_probability,
                     )
                     .or_else(|| {
-                        theoretical_guarantee(
-                            summary_type,
-                            parameters,
-                            statistic,
-                            required.failure_probability,
-                        )
+                        sign_condition_holds(summary_type, statistic, state_sign)
+                            .then(|| {
+                                theoretical_guarantee(
+                                    summary_type,
+                                    parameters,
+                                    statistic,
+                                    required.failure_probability,
+                                )
+                            })
+                            .flatten()
                     });
                 let meets = guarantee.is_some_and(|guarantee| {
                     guarantee.spec.accuracy_metric == required.metric
@@ -174,6 +182,23 @@ pub fn producer_satisfies_logical_requirements(
     }
 }
 
+/// Whether the theoretical guarantee of reading `statistic` from a state
+/// of `summary_type` holds for states updated with values of sign `sign`
+/// (concepts doc, section 2, "Sign conditions"): DDSketch's relative error
+/// on a quantile needs values of one sign, `NonNegative` or `NonPositive`.
+fn sign_condition_holds(
+    summary_type: &FieldDataType,
+    statistic: &SketchStatistic,
+    sign: Option<ValueSign>,
+) -> bool {
+    match (summary_type, statistic) {
+        (FieldDataType::Sketch(SketchAlgorithm::DDSketch), SketchStatistic::Quantile { .. }) => {
+            matches!(sign, Some(ValueSign::NonNegative | ValueSign::NonPositive))
+        }
+        _ => true,
+    }
+}
+
 /// The metric of the error reading `statistic` from a state of
 /// `summary_type` has: its first listed θ's guarantee's. `None` for an
 /// exact state and for a summary type with no listed θ or no guarantee
@@ -185,9 +210,12 @@ pub fn readout_metric(
     let FieldDataType::Sketch(algorithm) = summary_type else {
         return None;
     };
+    if !SummaryTypeCapability::of(summary_type).answers(statistic) {
+        return None;
+    }
     let parameters = parameter_list(*algorithm).first()?;
     Some(
-        theoretical_guarantee(summary_type, parameters, statistic, 1.0)?
+        sketch_guarantee(algorithm, parameters, statistic)?
             .spec
             .accuracy_metric,
     )
@@ -306,4 +334,39 @@ fn group_output_metrics(
     }
     by_group.insert(group, metrics.clone());
     metrics
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use asap_types::ir::schema::ExactKind;
+
+    /// A readout's metric is its guarantee's, whatever its failure
+    /// probability: HLL's distinct count, whose failure probability is
+    /// unknown, still reads a relative error.
+    #[test]
+    fn readout_metric_is_the_guarantee_s_metric() {
+        let quantile = SketchStatistic::Quantile { q: 0.5 };
+        let sketch = |algorithm| FieldDataType::Sketch(algorithm);
+        assert_eq!(
+            readout_metric(&sketch(SketchAlgorithm::Kll), &quantile),
+            Some(AccuracyMetric::Rank)
+        );
+        assert_eq!(
+            readout_metric(&sketch(SketchAlgorithm::DDSketch), &quantile),
+            Some(AccuracyMetric::Relative)
+        );
+        assert_eq!(
+            readout_metric(&sketch(SketchAlgorithm::Hll), &SketchStatistic::Cardinality),
+            Some(AccuracyMetric::Relative)
+        );
+        assert_eq!(
+            readout_metric(&sketch(SketchAlgorithm::Hll), &quantile),
+            None
+        );
+        assert_eq!(
+            readout_metric(&FieldDataType::exact(ExactKind::Sum), &quantile),
+            None
+        );
+    }
 }

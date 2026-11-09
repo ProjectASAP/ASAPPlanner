@@ -7,7 +7,9 @@
 
 use std::collections::BTreeSet;
 
+use asap_accuracy::readout_metric;
 use asap_cost::{summary_type_name, CostInputs, CostModel};
+use asap_types::ir::operator::asap::summary_type_of_operator;
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, Operator, QueryRoot};
@@ -158,17 +160,16 @@ fn infeasible(costs: &ExecutionCosts) -> ErrorSelectingPlan {
 }
 
 /// Per query, the sketches its output reads in `plan` (each sketch build
-/// below its root, in node order) and, when it reads one, its target's
-/// metric.
+/// below its root, in node order) and, when it has an accuracy target and
+/// reads a sketch, the metric of the first sketch readout below its root
+/// ([`readout_metric`]).
 fn accepted_accuracy(
     physical: &PhysicalASAPMemoCandidates,
     plan: &PhysicalASAPDAG,
 ) -> Vec<AcceptedAccuracy> {
+    let memo = &physical.logical_candidates.memo;
     let mut operator_roots = plan.roots.iter();
-    physical
-        .logical_candidates
-        .memo
-        .queries
+    memo.queries
         .iter()
         .enumerate()
         .map(|(query, memo_query)| {
@@ -180,10 +181,48 @@ fn accepted_accuracy(
                 Some((_, expression)) => expression.operator_refs().into_iter().copied().collect(),
                 None => vec![*operator_roots.next().expect("one operator root per query")],
             };
-            let sketches = sketches_below(plan, starts);
+            let below = nodes_below(plan, starts);
+            let mut sketches: Vec<String> = Vec::new();
+            let mut readout_metrics = Vec::new();
+            for node in plan.nodes.iter().filter(|node| below.contains(&node.id)) {
+                match &node.payload {
+                    Operator::ASAP(
+                        ASAPOp::SummaryAgg { summary_type, .. }
+                        | ASAPOp::SummaryTumblingWindowChain { summary_type, .. },
+                    ) if matches!(summary_type, FieldDataType::Sketch(_)) => {
+                        let name = summary_type_name(summary_type);
+                        if !sketches.contains(&name) {
+                            sketches.push(name);
+                        }
+                    }
+                    Operator::ASAP(ASAPOp::SummaryEstimate { query, .. }) => {
+                        // The state group the readout's candidate reads.
+                        let readout = node.selected_physical_candidate.and_then(|v| {
+                            match memo
+                                .candidate(physical.physical_candidates[v.0].logical_candidate_id)
+                                .expression
+                                .operator
+                            {
+                                Operator::ASAP(ASAPOp::SummaryEstimate {
+                                    summary_input, ..
+                                }) => summary_type_of_operator(
+                                    &memo.groups()[summary_input.0 as usize].expression,
+                                ),
+                                _ => None,
+                            }
+                        });
+                        readout_metrics.extend(
+                            readout.and_then(|summary_type| readout_metric(summary_type, query)),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            let has_accuracy_target = memo_query.accuracy_target.is_some();
             AcceptedAccuracy {
-                accepted_metric: (!sketches.is_empty())
-                    .then(|| memo_query.accuracy_target.as_ref()?.accuracy_metric)
+                has_accuracy_target,
+                accepted_metric: (has_accuracy_target && !sketches.is_empty())
+                    .then(|| readout_metrics.first().copied())
                     .flatten(),
                 sketches,
             }
@@ -191,9 +230,11 @@ fn accepted_accuracy(
         .collect()
 }
 
-/// The summary type names of the sketch builds at or below `starts` in
-/// `plan`, in node order, each once.
-fn sketches_below(plan: &PhysicalASAPDAG, starts: Vec<PhysicalASAPNodeId>) -> Vec<String> {
+/// The nodes at or below `starts` in `plan`.
+fn nodes_below(
+    plan: &PhysicalASAPDAG,
+    starts: Vec<PhysicalASAPNodeId>,
+) -> BTreeSet<PhysicalASAPNodeId> {
     let mut below = BTreeSet::new();
     let mut pending = starts;
     while let Some(id) = pending.pop() {
@@ -206,20 +247,144 @@ fn sketches_below(plan: &PhysicalASAPDAG, starts: Vec<PhysicalASAPNodeId>) -> Ve
             );
         }
     }
-    let mut sketches: Vec<String> = Vec::new();
-    for node in plan.nodes.iter().filter(|node| below.contains(&node.id)) {
-        if let Operator::ASAP(
-            ASAPOp::SummaryAgg { summary_type, .. }
-            | ASAPOp::SummaryTumblingWindowChain { summary_type, .. },
-        ) = &node.payload
-        {
-            if matches!(summary_type, FieldDataType::Sketch(_)) {
-                let name = summary_type_name(summary_type);
-                if !sketches.contains(&name) {
-                    sketches.push(name);
-                }
-            }
-        }
+    below
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use asap_types::ir::operator::operator_properties::Reduction;
+    use asap_types::ir::physical_export::{
+        EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAGEdge, WindowEdgeCompatibility,
+    };
+    use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget, ExecutionDataState};
+    use asap_types::ir::scalar::expr_ir::ColumnRef;
+    use asap_types::ir::schema::{SketchAlgorithm, SketchStatistic, SummaryUpdate};
+    use asap_types::ir::{NonASAPOp, TimeRangeKind};
+    use asap_types::physical::{ExecutionTiming, Lifetime, PhysicalProperties};
+    use asap_types::stages::{
+        parameter_list, CandidateForMemoGroupId, LogicalASAPMemoCandidates, Memo, MemoQuery,
+        PhysicalCandidate, PhysicalCandidateId,
+    };
+    use asap_types::test_support::{
+        add_candidate, group_with_own_candidate, series_schema, time_series_scan,
+    };
+
+    use super::*;
+    use crate::cost::candidate_node;
+
+    /// `quantile_over_time(0.5, m[1m])` answered by a DDSketch readout,
+    /// under `accuracy_target`: the physical memo and the plan reading it.
+    fn ddsketch_plan(
+        accuracy_target: Option<AccuracyTarget>,
+    ) -> (PhysicalASAPMemoCandidates, PhysicalASAPDAG) {
+        let mut memo = Memo::default();
+        let scan =
+            group_with_own_candidate(&mut memo, time_series_scan("m", series_schema(&[]), vec![]));
+        let last_minute = group_with_own_candidate(
+            &mut memo,
+            Operator::NonASAP(NonASAPOp::TimeRange {
+                range: Duration::from_secs(60),
+                kind: TimeRangeKind::Range,
+                child: scan,
+            }),
+        );
+        let build = Operator::ASAP(ASAPOp::SummaryAgg {
+            child: last_minute,
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::DDSketch),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::PerEntity,
+            filter: None,
+        });
+        let state = memo.find_or_add_group(build.clone()).unwrap();
+        let parameters = parameter_list(SketchAlgorithm::DDSketch)[0].clone();
+        add_candidate(&mut memo, state, build, Some(parameters)).unwrap();
+        let readout = group_with_own_candidate(
+            &mut memo,
+            Operator::ASAP(ASAPOp::SummaryEstimate {
+                summary_input: state,
+                query: SketchStatistic::Quantile { q: 0.5 },
+            }),
+        );
+        memo.add_query(MemoQuery {
+            root: QueryRoot::Operator(readout),
+            accuracy_target,
+            values_per_evaluation: None,
+        });
+        let groups = [scan, last_minute, state, readout];
+        let physical = PhysicalASAPMemoCandidates::new(
+            LogicalASAPMemoCandidates {
+                evaluation_grid_of_group: vec![None; memo.groups().len()],
+                memo,
+                edges: vec![],
+                pruned: vec![],
+            },
+            groups
+                .iter()
+                .map(|&group| PhysicalCandidate {
+                    logical_candidate_id: CandidateForMemoGroupId {
+                        group,
+                        index_in_group: 0,
+                    },
+                    physical_properties: PhysicalProperties::new(
+                        ExecutionTiming::QueryTime,
+                        Lifetime::None,
+                    )
+                    .unwrap(),
+                })
+                .collect(),
+            vec![],
+            vec![],
+        );
+        // Node i is candidate i, reading node i - 1.
+        let nodes = (0..groups.len())
+            .map(|i| {
+                let inputs: Vec<PhysicalASAPNodeId> = i.checked_sub(1).into_iter().collect();
+                candidate_node(&physical, PhysicalCandidateId(i), i, &inputs)
+            })
+            .collect::<Vec<_>>();
+        let edges = (1..groups.len())
+            .map(|i| {
+                PhysicalASAPDAGEdge::new(
+                    i - 1,
+                    i,
+                    EdgeRole::Input,
+                    nodes[i - 1].output_schema.clone(),
+                    ExecutionDataState::QUERY_ROWS,
+                    GroupingEdgeCompatibility::NotApplicable,
+                    WindowEdgeCompatibility::NotApplicable,
+                )
+            })
+            .collect();
+        let plan = PhysicalASAPDAG {
+            nodes,
+            edges,
+            roots: vec![groups.len() - 1],
+            scalar_roots: vec![],
+        };
+        (physical, plan)
     }
-    sketches
+
+    /// The accepted metric is the readout's, here DDSketch's relative
+    /// error, also when the target sets no metric; without a target there
+    /// is none to accept (was "accepted exact (DDSketch)" for both).
+    #[test]
+    fn the_accepted_metric_is_the_readout_s() {
+        let target = AccuracyTarget {
+            accuracy_metric: None,
+            max_error: 0.01,
+            failure_probability: None,
+            accuracy_scope: asap_types::ir::properties::AccuracyScope::PerValue,
+        };
+        let (physical, plan) = ddsketch_plan(Some(target));
+        let accepted = accepted_accuracy(&physical, &plan);
+        assert_eq!(accepted[0].accepted_metric, Some(AccuracyMetric::Relative));
+        assert_eq!(accepted[0].to_string(), "accepted relative (DDSketch)");
+
+        let (physical, plan) = ddsketch_plan(None);
+        let accepted = accepted_accuracy(&physical, &plan);
+        assert_eq!(accepted[0].accepted_metric, None);
+        assert_eq!(accepted[0].to_string(), "no accuracy target (DDSketch)");
+    }
 }

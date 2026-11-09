@@ -10,7 +10,7 @@ pub mod hll;
 pub(crate) mod kll;
 pub mod univmon;
 
-pub(super) fn sketch_guarantee(
+pub(crate) fn sketch_guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
     query: &SketchStatistic,

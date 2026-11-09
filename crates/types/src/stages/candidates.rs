@@ -14,8 +14,12 @@ use crate::ir::operator::operator_properties::{AtModifier, SourceColumn, TimeShi
 use crate::ir::operator::AggIntent;
 use crate::ir::properties::summary_coverage::SummaryCoverage;
 use crate::ir::properties::{AccuracyMetric, AccuracyTarget};
+use crate::ir::scalar::column_resolution::resolve_column_ref;
 use crate::ir::scalar::expr_ir::ArithmeticOpKind;
-use crate::ir::schema::{ExactKind, FieldDataType, SketchAlgorithm, SketchParams};
+use crate::ir::scalar::expr_ir::ColumnRef;
+use crate::ir::schema::{
+    ExactKind, FieldDataType, SketchAlgorithm, SketchParams, SummaryInputExpr,
+};
 use crate::ir::ASAPOp;
 use crate::ir::Operator;
 use crate::ir::QueryRoot;
@@ -780,8 +784,10 @@ impl LogicalRequirements {
     /// - a `Project` whose computed items are `abs`, `clamp`, `clamp_min`,
     ///   `clamp_max` or a negation of a column: absolute, $\beta = 1$;
     /// - an `Aggregate` (or exact accumulator build) of counts ($\beta = 0$),
-    ///   min and max (absolute or relative, $\beta = 1$) and avg (absolute,
-    ///   $\beta = 1$), without measure filters or `HAVING`;
+    ///   min and max (absolute or relative, $\beta = 1$), avg (absolute,
+    ///   $\beta = 1$), and sum and avg (relative, $\beta = 1$) over values
+    ///   of one sign (the input column's `column_sign` is `NonNegative` or
+    ///   `NonPositive`), without measure filters or `HAVING`;
     /// - `+` and `-`: absolute, $\beta = 1$; `/`: relative,
     ///   $\beta = 1/(1-b)$ on both, the denominator capped at $b$; `*`:
     ///   relative, $(1+b, 1)$, the right operand capped at $b$
@@ -789,7 +795,8 @@ impl LogicalRequirements {
     ///   [`RELATIVE_OPERAND_VALIDITY_CAP`].
     ///
     /// Every other operator (a filter comparing a computed value, a ranking,
-    /// a `sum`, a comparison, another function) has none.
+    /// a `sum` over values of unknown sign, a comparison, another function)
+    /// has none.
     pub fn error_propagation(
         memo: &Memo,
         consumer: &Operator<MemoGroupId>,
@@ -836,16 +843,26 @@ impl LogicalRequirements {
                     measures,
                     filters,
                     having: None,
+                    child,
                     ..
                 } if filters.iter().all(Option::is_none) && !measures.is_empty() => {
                     let mut factor: f64 = 0.0;
                     for measure in measures {
+                        let of_one_sign = || {
+                            let column = measure.input_cols().first().copied();
+                            values_of_one_sign(memo, *child, column)
+                        };
                         match measure {
                             AggIntent::Count => {}
                             AggIntent::Min { .. } | AggIntent::Max { .. } if extremum_metric => {
                                 factor = factor.max(1.0)
                             }
                             AggIntent::Avg { .. } if absolute => factor = factor.max(1.0),
+                            AggIntent::Sum { .. } | AggIntent::Avg { .. }
+                                if metric == AccuracyMetric::Relative && of_one_sign() =>
+                            {
+                                factor = factor.max(1.0)
+                            }
                             _ => return None,
                         }
                     }
@@ -890,21 +907,49 @@ impl LogicalRequirements {
                 ASAPOp::SummaryAgg {
                     summary_type: FieldDataType::ExactAggregate(kind, _),
                     filter: None,
+                    child,
+                    input,
                     ..
                 }
                 | ASAPOp::SummaryTumblingWindowChain {
                     summary_type: FieldDataType::ExactAggregate(kind, _),
                     filter: None,
+                    child,
+                    input,
                     ..
                 } => match kind {
                     ExactKind::Count => Some(uniform(0.0)),
                     ExactKind::Min | ExactKind::Max if extremum_metric => Some(uniform(1.0)),
+                    ExactKind::Sum if metric == AccuracyMetric::Relative => {
+                        let SummaryInputExpr::Column(column) = &input.weight else {
+                            return None;
+                        };
+                        let schema = &memo.groups()[child.0 as usize].group_properties.schema;
+                        let column = resolve_column_ref(column, schema).ok()?;
+                        values_of_one_sign(memo, *child, Some(column)).then(|| uniform(1.0))
+                    }
                     _ => None,
                 },
                 _ => None,
             },
         }
     }
+}
+
+/// Whether the values of column `column` of group `group` (its sample
+/// value when `None`) all have one sign (`column_sign` `NonNegative` or
+/// `NonPositive`): a sum of such values with relative errors is off by at
+/// most the largest of them, relative to the sum.
+fn values_of_one_sign(memo: &Memo, group: MemoGroupId, column: Option<usize>) -> bool {
+    let properties = &memo.groups()[group.0 as usize].group_properties;
+    let column =
+        column.or_else(|| resolve_column_ref(&ColumnRef::SampleValue, &properties.schema).ok());
+    column.is_some_and(|column| {
+        matches!(
+            properties.column_sign.get(column),
+            Some(ValueSign::NonNegative | ValueSign::NonPositive)
+        )
+    })
 }
 
 /// Whether `expr` changes a column's value by at most its error: `abs`,
@@ -1483,6 +1528,64 @@ mod memo_tests {
         }
     }
 
+    /// A relative error of a sum or an average is the largest of its
+    /// inputs' only when the values have one sign (E1(c), H2): `latency`
+    /// declared non-negative has the contract, `delta` of unknown sign has
+    /// none; the exact sum accumulator build likewise.
+    #[test]
+    fn sums_and_averages_carry_a_relative_error_over_values_of_one_sign() {
+        let mut memo = Memo::new(BTreeMap::from([(
+            SourceColumn {
+                source: "latency".into(),
+                column: "value".into(),
+            },
+            ValueSign::NonNegative,
+        )]));
+        let latency = memo.find_or_add_group(scan_with_job("latency")).unwrap();
+        let delta = memo.find_or_add_group(scan_with_job("delta")).unwrap();
+        let aggregate = |child, measure| {
+            Operator::NonASAP(NonASAPOp::Aggregate {
+                reduction: Reduction::by(vec![2]),
+                measures: vec![measure],
+                output_names: vec![String::new()],
+                filters: vec![None],
+                having: None,
+                child,
+            })
+        };
+        let sum_build = |child| {
+            Operator::ASAP(ASAPOp::SummaryAgg {
+                child,
+                summary_type: FieldDataType::exact(ExactKind::Sum),
+                input: SummaryUpdate::column(ColumnRef::SampleValue),
+                reduction: Reduction::by(vec![2]),
+                filter: None,
+            })
+        };
+        let relative = |consumer: &Operator<MemoGroupId>| {
+            LogicalRequirements::error_propagation(&memo, consumer, AccuracyMetric::Relative)
+                .map(|propagation| propagation.factor_per_input)
+        };
+        for measure in [AggIntent::Sum { col: None }, AggIntent::Avg { col: None }] {
+            assert_eq!(
+                relative(&aggregate(latency, measure.clone())),
+                Some(vec![1.0])
+            );
+            assert_eq!(relative(&aggregate(delta, measure)), None);
+        }
+        assert_eq!(relative(&sum_build(latency)), Some(vec![1.0]));
+        assert_eq!(relative(&sum_build(delta)), None);
+        assert_eq!(
+            LogicalRequirements::error_propagation(
+                &memo,
+                &aggregate(latency, AggIntent::Sum { col: None }),
+                AccuracyMetric::ABSOLUTE
+            ),
+            None,
+            "a sum's absolute error grows with its count"
+        );
+    }
+
     /// Decided 2026-11-07 (E1): constant error contracts. A `Filter` whose
     /// predicate reads only columns copied from a source keeps or drops
     /// whole rows: β = 1 in every metric. Over a readout of a KLL state of
@@ -1595,8 +1698,8 @@ mod memo_tests {
 
     /// A ratio carries relative error with factor 1/(1 − 0.1) on both
     /// inputs and caps its denominator at 0.1; a count reads no value
-    /// (factor 0); a sum has no contract here (#1207 PR 8 adds its sign
-    /// condition).
+    /// (factor 0); a sum over values of unknown sign (`latency` is not
+    /// declared here) has none.
     #[test]
     fn error_contracts_of_a_ratio_a_count_and_a_sum() {
         let mut memo = Memo::default();

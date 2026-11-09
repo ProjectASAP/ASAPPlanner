@@ -91,16 +91,10 @@ fn query_levels(
     cap: f64,
     composed: bool,
 ) -> Vec<RequiredAccuracy> {
-    // The target's failure probability per value: a whole-result δ split
-    // over the values one evaluation returns (none known: no sketch meets
-    // it); 1 without a δ.
-    let per_value = match target.failure_probability {
-        None => 1.0,
-        Some(delta) => target
-            .accuracy_scope
-            .max_values_covered(values_per_evaluation)
-            .map_or(0.0, |values| delta / values.max(1) as f64),
-    };
+    // 1 without a δ.
+    let per_value = target
+        .failure_probability_per_value(values_per_evaluation)
+        .unwrap_or(1.0);
     let level = |max_error, failure_probability| RequiredAccuracy {
         metric,
         max_error,
