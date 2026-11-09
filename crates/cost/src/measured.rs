@@ -1,5 +1,5 @@
 //! The deployment's measured operation costs: the CPU time its runtime pays
-//! per unit of work of each physical operator, which plan selection prices
+//! per unit of work of each physical operator, which plan selection costs
 //! from instead of its formulas.
 //!
 //! The Planner defines the table's structure; the deployment's runtime
@@ -9,15 +9,15 @@
 //! [`CostInputs::measured_operation_costs`]. The planner reads
 //! only this table, never a benchmark file.
 //!
-//! Each [`OperatorCost`] prices one operator kind at one phase (ingestion
+//! Each [`OperatorCost`] costs one operator kind at one phase (ingestion
 //! or query time), for one summary family or aggregate measure: a node's
 //! CPU per computation is `units × ns_per_unit + ns_per_invocation`, its
 //! units being what the operator processes ([`OperatorKind`]). A sketch
 //! entry also applies to the same sketch with other parameters,
 //! interpolated between the two nearest measured sizes ([`lookup`]). A
-//! node without an entry is priced from the formulas, scaled by one
+//! node without an entry is costed from the formulas, scaled by one
 //! calibration factor fitted from the nodes that have one, so measured and
-//! formula-priced nodes stay on one scale. The factor is a global
+//! formula-costed nodes stay on one scale. The factor is a global
 //! heuristic: a partial table can still mis-rank plans, and only a table
 //! covering every operator kind the plans use makes the choice the
 //! measured one (plan selection's module doc, "Measured operation costs").
@@ -25,7 +25,7 @@
 //! A measured time enters [`ResourceUsage`] as CPU operations: `t` ns is
 //! `t · 10⁻⁶ / ms_per_cpu_op` operations of [`ResourceSpeed`], so latency
 //! (operations × `ms_per_cpu_op`) is the measured time, and every cost model
-//! prices it as it prices any operation.
+//! costs it as it costs any operation.
 //!
 //! The table of earlier versions, a JSON array of [`MeasuredOperationCost`]
 //! (one sketch operation each), still loads: each entry becomes the
@@ -49,7 +49,7 @@ use crate::analytical::AnalyticalCostError;
 /// The deployment's measured cost table
 /// ([`CostInputs::measured_operation_costs`]). In JSON, an object
 /// with these fields, or (the format of earlier versions) an array of
-/// [`MeasuredOperationCost`]. Default: empty, every node priced from the
+/// [`MeasuredOperationCost`]. Default: empty, every node costed from the
 /// formulas.
 ///
 /// [`CostInputs::measured_operation_costs`]: crate::CostInputs::measured_operation_costs
@@ -87,7 +87,7 @@ pub struct OperatorCost {
     pub phase: Option<ExecutionTiming>,
     /// For a summary operator over a sketch: the sketch and its parameters,
     /// e.g. `{"Kll": {"k": 200}}`. Other parameters of the same sketch are
-    /// priced by interpolation ([`lookup`]).
+    /// costed by interpolation ([`lookup`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sketch: Option<SketchParams>,
     /// For a summary operator over an exact accumulator: its kind, e.g.
@@ -95,7 +95,7 @@ pub struct OperatorCost {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exact: Option<ExactKind>,
     /// For an `Aggregate`: the measure's `kind`, e.g. `"quantile"` (an
-    /// `AggIntent` in JSON). An aggregate is priced from the table only
+    /// `AggIntent` in JSON). An aggregate is costed from the table only
     /// when each of its measures has an entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measure: Option<String>,
@@ -115,7 +115,7 @@ pub struct OperatorCost {
 }
 
 /// Every physical operator a physical plan DAG can contain, by the name it
-/// has there. The unit each is priced per is the row it reads unless said
+/// has there. The unit each is costed per is the row it reads unless said
 /// otherwise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OperatorKind {
@@ -215,28 +215,28 @@ pub enum StateFamily<'a> {
     Exact(&'a ExactKind),
 }
 
-/// A node's unit price, from its entry or interpolated between two.
+/// A node's unit cost, from its entry or interpolated between two.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct UnitPrice {
+pub struct UnitCost {
     pub ns_per_unit: f64,
     pub ns_per_invocation: f64,
     pub memory_bytes_per_state: Option<f64>,
 }
 
-/// The price of `operator` at `phase` on `family`, if the table has an
+/// The cost of `operator` at `phase` on `family`, if the table has an
 /// entry for them. Entries for the node's own phase win over entries for
 /// both phases. A sketch with exactly an entry's parameters takes that
 /// entry; otherwise, among the entries for the same sketch algorithm, the
 /// two whose sizes (`size_of`: the bytes one state allocates) are nearest
 /// below and above the node's are interpolated linearly in log size, and a
-/// size outside the measured ones takes the nearest entry's price.
+/// size outside the measured ones takes the nearest entry's cost.
 pub fn lookup(
     table: &MeasuredOperationCosts,
     operator: OperatorKind,
     phase: ExecutionTiming,
     family: StateFamily<'_>,
     size_of: impl Fn(&SketchParams) -> f64,
-) -> Option<UnitPrice> {
+) -> Option<UnitCost> {
     let matching = |for_phase: Option<ExecutionTiming>| {
         table
             .operators
@@ -266,10 +266,10 @@ pub fn lookup(
         entries = matching(None);
     }
     let StateFamily::Sketch(params) = family else {
-        return entries.first().map(|entry| price_of(entry));
+        return entries.first().map(|entry| cost_of(entry));
     };
     if let Some(entry) = entries.iter().find(|e| e.sketch.as_ref() == Some(params)) {
-        return Some(price_of(entry));
+        return Some(cost_of(entry));
     }
     let size = |entry: &OperatorCost| size_of(entry.sketch.as_ref().expect("a sketch entry"));
     let target = size_of(params);
@@ -284,9 +284,9 @@ pub fn lookup(
     match (below, above) {
         (Some(low), Some(high)) if size(high) > size(low) => {
             let at = (target.ln() - size(low).ln()) / (size(high).ln() - size(low).ln());
-            let (low, high) = (price_of(low), price_of(high));
+            let (low, high) = (cost_of(low), cost_of(high));
             let mix = |a: f64, b: f64| a + (b - a) * at;
-            Some(UnitPrice {
+            Some(UnitCost {
                 ns_per_unit: mix(low.ns_per_unit, high.ns_per_unit),
                 ns_per_invocation: mix(low.ns_per_invocation, high.ns_per_invocation),
                 memory_bytes_per_state: low
@@ -295,20 +295,20 @@ pub fn lookup(
                     .map(|(a, b)| mix(a, b)),
             })
         }
-        (Some(nearest), _) | (None, Some(nearest)) => Some(price_of(nearest)),
+        (Some(nearest), _) | (None, Some(nearest)) => Some(cost_of(nearest)),
         (None, None) => None,
     }
 }
 
-/// The price of an `Aggregate` at `phase` per input row: the sum over its
+/// The cost of an `Aggregate` at `phase` per input row: the sum over its
 /// measures, when each has an entry (one for its own phase winning over
 /// one for both).
 pub(crate) fn aggregate_lookup(
     table: &MeasuredOperationCosts,
     phase: ExecutionTiming,
     measures: &[AggIntent],
-) -> Option<UnitPrice> {
-    let mut total = UnitPrice {
+) -> Option<UnitCost> {
+    let mut total = UnitCost {
         ns_per_unit: 0.0,
         ns_per_invocation: 0.0,
         memory_bytes_per_state: None,
@@ -337,8 +337,8 @@ fn measure_name(measure: &AggIntent) -> String {
         .unwrap_or_else(|| format!("{measure:?}"))
 }
 
-fn price_of(entry: &OperatorCost) -> UnitPrice {
-    UnitPrice {
+fn cost_of(entry: &OperatorCost) -> UnitCost {
+    UnitCost {
         ns_per_unit: entry.ns_per_unit,
         ns_per_invocation: entry.ns_per_invocation,
         memory_bytes_per_state: entry.memory_bytes_per_state,

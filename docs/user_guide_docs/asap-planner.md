@@ -34,7 +34,7 @@ minutes in a debug build.
 
 ```text
 asap_planner (--workload <file>)... --run-until stage0|stage1_pass1|stage1_pass2|stage2|stage3
-  [--format text|json] [--out <file>] [--sql-catalog-table <json>]...
+  [--format text|json] [--printing-full-candidates] [--out <file>] [--sql-catalog-table <json>]...
   [--cost-inputs <file>] [--deployment-capabilities <file>]
   [--ignore-accuracy-guarantees]
 ```
@@ -43,10 +43,11 @@ asap_planner (--workload <file>)... --run-until stage0|stage1_pass1|stage1_pass2
 | --- | --- |
 | `--workload <file>` | A `PlanningWorkload` JSON file: the queries, their requirements and recurrence, and the data-source facts. Repeat it to plan several files together, including PromQL and SQL files; sources they share must have the same facts. Required. |
 | `--run-until <stage>` | The last stage to run. Every stage up to and including it is printed. Required. |
-| `--format text\|json` | `text` (the default) for reading; `json` for an `asap-stage-pipeline/v1` document. |
+| `--format text\|json` | `text` (the default) for reading; `json` for an `asap-stage-pipeline/v2` document. |
+| `--printing-full-candidates` | Text only: print every candidate, edge and pruned candidate. By default the candidates of a memo group that differ only in θ are folded into one line (their indices, each θ parameter's values, and how many Pass 2 pruned, by cause), the candidates Pass 2 kept are printed in full with their edges, and the pruned lists of Pass 2 and Stage 2 are counts per cause. |
 | `--out <file>` | Write to this file instead of standard output. |
 | `--sql-catalog-table <json>` | One SQL table a SQL workload reads, as `{"name", "columns": [{"name", "type", "nullable"}], "time_index"}`. Repeat it per table. |
-| `--cost-inputs <file>` | The cost model and its prices (`CostInputs` JSON). The files in `tools/dag-viewer/cost-inputs/` are ready to use. Without it, the built-in usage-over-time model is used. Stage 3 prices only usage-over-time models (`aws-fargate-us-east-1.json` is one); a provisioned- or cluster-capacity model ends Stage 3 with an `UnsupportedCostModel` error. |
+| `--cost-inputs <file>` | The cost model and its costs (`CostInputs` JSON). The files in `tools/dag-viewer/cost-inputs/` are ready to use. Without it, the built-in usage-over-time model is used. Stage 3 costs only usage-over-time models (`aws-fargate-us-east-1.json` is one); a provisioned- or cluster-capacity model ends Stage 3 with an `UnsupportedCostModel` error. |
 | `--deployment-capabilities <file>` | What the deployment can do, e.g. `{"raw_data_retained": true, "query_time_results_retained": false}`. Set it to match your deployment. |
 | `--ignore-accuracy-guarantees` | Accept candidates without an accuracy guarantee. By default each query's accuracy requirement is enforced. |
 
@@ -61,10 +62,10 @@ under the stage that failed.
 | `--run-until` | Prints, after the stages before it |
 | --- | --- |
 | `stage0` | The frontends' query DAGs and their memo groups. |
-| `stage1_pass1` | Stage 1 Pass 1: each computation's candidates, and the candidates pruned with their reason. |
-| `stage1_pass2` | Stage 1 Pass 2: the memo after local window composition (a candidate for every legal tumbling-window width), then the memo after the sharing rules, which Stage 2 implements. |
-| `stage2` | Stage 2: the physical candidates and the ones pruned. |
-| `stage3` | Stage 3: the selected plan, its cost per node, each query's accepted accuracy and the search status. |
+| `stage1_pass1` | Stage 1 Pass 1: each computation's candidates. |
+| `stage1_pass2` | Stage 1 Pass 2: the memo after its rules (with a chain group for every legal tumbling-window width), each candidate's logical edges with $\alpha^{\log}$ and why an edge fails, and the candidates Pass 2 eliminated with their causes. |
+| `stage2` | Stage 2: the physical candidates, their physical edges with $\alpha^{\mathrm{phys}}$ and why an edge fails, and the candidates pruned with their reasons. |
+| `stage3` | Stage 3: the selected plan, its cost per node, each query's accepted accuracy, the candidates Stage 3 pruned and the selection MILP's size. |
 
 Every stage sees every legal tumbling-window width at once, so the selected
 plan is the best over all of them.
@@ -73,7 +74,7 @@ plan is the best over all of them.
 
 The example below plans the checked-in
 [range-heavy workload](../../tools/dag-viewer/memo-examples/promql/rangeheavy-t8-t5-1h.json)
-with raw data retained and AWS Fargate prices:
+with raw data retained and AWS Fargate costs:
 
 ```sh
 echo '{"raw_data_retained": true, "query_time_results_retained": false}' > capabilities.json
@@ -105,14 +106,12 @@ With `--format json`, open the document in the
 cargo run --release -p asap-devtools --bin asap_planner -- \
   --workload tools/dag-viewer/workloads/planner-layering/example1.json \
   --run-until stage3 --format json --out plan.json
-python3 -c 'import json; print(json.dumps(json.load(open("plan.json"))["stage3_plan_selection"]["search_report"], indent=2))'
+python3 -c 'import json; print(json.dumps(json.load(open("plan.json"))["stage3_plan_selection"]["cost"], indent=2))'
 ```
 
 Sections of stages that were not run are `null`. In
-`stage3_plan_selection`, check `selected_dag`, `cost`, `search_report` and
-any `error`: a written document alone does not mean planning succeeded.
-A selected plan is proven optimal only when `search_report.status` is
-`optimal`. Costs are model predictions, not measured execution times or a
+`stage3_plan_selection`, check `plan`, `cost` and any `error`: a written
+document alone does not mean planning succeeded. Costs are model predictions, not measured execution times or a
 cloud bill.
 
 ## Troubleshooting

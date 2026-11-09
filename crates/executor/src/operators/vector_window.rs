@@ -119,7 +119,7 @@ pub(super) fn execute<'a>(
                         return Err(invalid("histogram buckets require labels"));
                     };
                     let mut bound = None;
-                    let mut kept = BTreeMap::new();
+                    let mut remaining = BTreeMap::new();
                     let mut seen = std::collections::BTreeSet::new();
                     for (key, value) in entries.iter() {
                         let (Value::Utf8(key), Value::Utf8(value)) = (key, value) else {
@@ -131,12 +131,13 @@ pub(super) fn execute<'a>(
                         if key.as_ref() == "le" {
                             bound = value.parse::<f64>().ok();
                         } else if key.as_ref() != "__name__" && !value.is_empty() {
-                            kept.insert(key.clone(), value.clone());
+                            remaining.insert(key.clone(), value.clone());
                         }
                     }
                     if let Some(bound) = bound {
                         labels_out.push(Value::Map(
-                            kept.into_iter()
+                            remaining
+                                .into_iter()
                                 .map(|(k, v)| (Value::Utf8(k), Value::Utf8(v)))
                                 .collect::<Vec<_>>()
                                 .into(),

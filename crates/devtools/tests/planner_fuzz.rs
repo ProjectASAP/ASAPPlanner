@@ -34,33 +34,6 @@ fn check(relation: Relation, workload: FuzzWorkload, target: usize) -> Outcome {
     )
 }
 
-/// #903: Q1 = `quantile_over_time(0.9, data[5m])` exact; Q2 = Q1 at
-/// ε = 0.01, δ = 0.001 builds a KLL instead of reading Q1's exact result
-/// (0.166 per second against the witness's 0.144). Open bug: flip to
-/// `Holds` when #903 is fixed.
-#[test]
-fn finds_issue_903_looser_accuracy_not_reading_the_exact_result() {
-    let mut workload = seed("issue903.workload.json");
-    workload.queries.truncate(1);
-    match check(Relation::LooserAccuracy, workload, 0) {
-        Outcome::Violated(m) => {
-            let witness = m.witness.expect("a marginal relation has a witness");
-            assert_eq!(witness.derivation, Some(Witness::Same));
-            assert!(
-                (m.related_cost_per_second - 0.166).abs() < 0.005,
-                "{}",
-                m.summary
-            );
-            assert!(
-                (witness.cost_per_second - 0.144).abs() < 0.005,
-                "{}",
-                m.summary
-            );
-        }
-        other => panic!("expected #903's violation, got {other:?}"),
-    }
-}
-
 /// #902: Q3 = p90 per city; the same query for `city = 'city1'` built its
 /// own KLL instead of selecting the group from Q3's result. #943 fixed the
 /// issue's ungrouped case and closed #902; this grouped variant
@@ -149,7 +122,7 @@ fn campaign_writes_summary_coverage_and_drafts() {
         seed: 7,
         cases: 2,
         time_budget_s: 600.0,
-        relations: vec![Relation::LooserAccuracy, Relation::ExactDuplicate],
+        relations: vec![Relation::ExactDuplicate, Relation::OtherRepeatInterval],
         seeds: vec![seed("issue903.workload.json")],
         out_dir: out.clone(),
         max_shrink_attempts: 5,
@@ -170,7 +143,7 @@ fn campaign_writes_summary_coverage_and_drafts() {
     );
     let markdown = std::fs::read_to_string(out.join("summary.md")).expect("summary.md");
     assert!(markdown.contains("## Design-doc reuse patterns"));
-    assert!(markdown.contains("`a-looser-accuracy`"));
+    assert!(markdown.contains("`f-exact-duplicate`"));
     for finding in &summary.findings {
         let draft = std::fs::read_to_string(&finding.draft).expect("the draft");
         assert!(draft.starts_with("# "));
@@ -219,7 +192,7 @@ fn promql(
 }
 
 /// The witness `relation` builds for `workload`'s query, which must build
-/// and price (the check is conclusive).
+/// and cost (the check is conclusive).
 fn witness_of(relation: Relation, workload: FuzzWorkload) -> Witness {
     match check(relation, workload, 0) {
         Outcome::Holds(m) | Outcome::Violated(m) => m
@@ -230,10 +203,10 @@ fn witness_of(relation: Relation, workload: FuzzWorkload) -> Witness {
     }
 }
 
-/// The sketch rollup witness builds and prices for a grouped quantile:
+/// The sketch rollup witness builds and costs for a grouped quantile:
 /// a `SummaryMerge` with `group_by` over the finer per-group KLL.
 #[test]
-fn sketch_rollup_witness_prices_for_a_grouped_quantile() {
+fn sketch_rollup_witness_costs_for_a_grouped_quantile() {
     let q = promql(
         "m_gauge",
         None,
@@ -247,10 +220,10 @@ fn sketch_rollup_witness_prices_for_a_grouped_quantile() {
     );
 }
 
-/// The exact rollup witness builds and prices for a grouped count (a sum
+/// The exact rollup witness builds and costs for a grouped count (a sum
 /// of the finer counts).
 #[test]
-fn exact_rollup_witness_prices_for_a_grouped_count() {
+fn exact_rollup_witness_costs_for_a_grouped_count() {
     let q = promql(
         "m_gauge",
         None,
@@ -262,9 +235,9 @@ fn exact_rollup_witness_prices_for_a_grouped_count() {
     ));
 }
 
-/// The quantile-rank witness builds and prices from the same KLL.
+/// The quantile-rank witness builds and costs from the same KLL.
 #[test]
-fn quantile_rank_witness_prices_from_the_same_sketch() {
+fn quantile_rank_witness_costs_from_the_same_sketch() {
     let q = promql("m_gauge", Some(RangeFunction::QuantileOverTime(0.9)), None);
     assert_eq!(
         witness_of(Relation::OtherQuantileRank, generated(q, true)),
@@ -272,9 +245,9 @@ fn quantile_rank_witness_prices_from_the_same_sketch() {
     );
 }
 
-/// The smaller top-k witness builds and prices over the same input.
+/// The smaller top-k witness builds and costs over the same input.
 #[test]
-fn smaller_topk_witness_prices_over_the_same_input() {
+fn smaller_topk_witness_costs_over_the_same_input() {
     let q = promql(
         "m_counter",
         Some(RangeFunction::Rate),
@@ -287,10 +260,10 @@ fn smaller_topk_witness_prices_over_the_same_input() {
 }
 
 /// (l): a filtered share of a grouped rate reads the rate from q's result
-/// (ASAPWorkloads #12); the plain graft cannot price (its numerator is an
+/// (ASAPWorkloads #12); the plain graft cannot cost (its numerator is an
 /// unplanned raw rate), so the witness planned with the operand must.
 #[test]
-fn ratio_witness_prices_over_the_shared_rate() {
+fn ratio_witness_costs_over_the_shared_rate() {
     let q = promql(
         "m_counter",
         Some(RangeFunction::Rate),
@@ -304,7 +277,7 @@ fn ratio_witness_prices_over_the_shared_rate() {
 
 /// (l), avg as sum / count: the sum is read from q's result.
 #[test]
-fn sum_over_count_witness_prices_over_the_shared_sum() {
+fn sum_over_count_witness_costs_over_the_shared_sum() {
     let q = promql(
         "m_gauge",
         Some(RangeFunction::SumOverTime),
@@ -318,7 +291,7 @@ fn sum_over_count_witness_prices_over_the_shared_sum() {
 
 /// (o): `increase` is q's `rate` times the window.
 #[test]
-fn increase_witness_prices_as_the_scaled_rate() {
+fn increase_witness_costs_as_the_scaled_rate() {
     let q = promql(
         "m_counter",
         Some(RangeFunction::Rate),
@@ -332,7 +305,7 @@ fn increase_witness_prices_as_the_scaled_rate() {
 
 /// (g): a threshold over a grouped minimum reads q's result.
 #[test]
-fn threshold_witness_prices_over_the_result() {
+fn threshold_witness_costs_over_the_result() {
     let q = promql(
         "m_gauge",
         Some(RangeFunction::MaxOverTime),
@@ -344,30 +317,54 @@ fn threshold_witness_prices_over_the_result() {
     ));
 }
 
-/// (m): a longer window lengthens q's tumbling-window chain of exact sums.
-#[test]
-fn longer_window_witness_prices_over_a_lengthened_chain() {
-    let q = promql(
+/// An exact `sum by (labels) (sum_over_time(m_gauge[30m]))` every minute at
+/// phase 0 over 1,000 series sampled every second: reading a chain of
+/// tumbling windows is cheaper than scanning 30 minutes of raw data, so
+/// `W`'s plan reads one.
+fn summed_over_a_chain(labels: &[&str]) -> FuzzWorkload {
+    use asap_devtools::planner_fuzz::generate::generated_workload;
+    use asap_devtools::planner_fuzz::{FuzzQuery, Language};
+    use asap_types::ir::properties::AccuracyTarget;
+    use asap_types::workload::{RepeatedDemand, RepetitionInterval, TimestampMs};
+    let QuerySpec::Promql(mut spec) = promql(
         "m_gauge",
         Some(RangeFunction::SumOverTime),
-        Some((OuterOp::Sum, &["job"])),
+        Some((OuterOp::Sum, labels)),
+    ) else {
+        unreachable!("a PromQL spec")
+    };
+    spec.window_ms = 1_800_000;
+    let mut query = FuzzQuery::generated(
+        QuerySpec::Promql(spec),
+        AccuracyTarget::exact(),
+        60_000,
+        None,
     );
+    query.entry.demand = RepeatedDemand::FixedIntervalAt {
+        interval: RepetitionInterval(60_000),
+        evaluation_phase: TimestampMs(0),
+    };
+    generated_workload(Language::Promql, vec![query], 1_000, 1_000)
+}
+
+/// (m): a longer window is a longer `TimeRange` over the chain `q`'s plan
+/// reads, the same chain.
+#[test]
+fn longer_window_witness_costs_over_the_same_chain() {
     assert!(matches!(
-        witness_of(Relation::LongerWindow, generated(q, false)),
+        witness_of(Relation::LongerWindow, summed_over_a_chain(&["job"])),
         Witness::LongerWindow { rollup: None, .. }
     ));
 }
 
-/// (n): the lengthened chain rolled up to one key fewer.
+/// (n): the longer range over q's chain rolled up to one key fewer.
 #[test]
-fn longer_window_rollup_witness_prices() {
-    let q = promql(
-        "m_gauge",
-        Some(RangeFunction::SumOverTime),
-        Some((OuterOp::Sum, &["job", "region"])),
-    );
+fn longer_window_rollup_witness_costs() {
     assert!(matches!(
-        witness_of(Relation::LongerWindowRollup, generated(q, false)),
+        witness_of(
+            Relation::LongerWindowRollup,
+            summed_over_a_chain(&["job", "region"])
+        ),
         Witness::LongerWindow {
             rollup: Some(_),
             ..
@@ -379,7 +376,7 @@ fn longer_window_rollup_witness_prices() {
 /// frequency L2 reads one UnivMon, from q's own state or from `W ∪ {q'}`
 /// planned with UnivMon only (planner-layering Example 2).
 #[test]
-fn other_frequency_statistic_witness_prices_from_one_univmon() {
+fn other_frequency_statistic_witness_costs_from_one_univmon() {
     use asap_devtools::planner_fuzz::generate::generated_workload;
     use asap_devtools::planner_fuzz::{FuzzQuery, Language};
     use asap_types::ir::properties::AccuracyTarget;
@@ -405,4 +402,24 @@ fn other_frequency_statistic_witness_prices_from_one_univmon() {
         witness_of(Relation::OtherStatistic, w),
         Witness::OtherStatistic { .. } | Witness::UnivMonOnly
     ));
+}
+
+/// `W`'s selected plan, costed outside the search, costs what the search
+/// selected it for: the witness's reference point is on the same footing.
+#[test]
+fn the_selected_plan_costs_what_the_search_selected_it_for() {
+    let mut workload = seed("issue903.workload.json");
+    workload.queries.truncate(1);
+    let mut planner = Planner::new(FuzzSettings::default());
+    let planned = planner.plan(&workload).expect("W plans");
+    let costed = planner
+        .reference_cost(&workload, &planned)
+        .expect("W's plan costs");
+    assert!(
+        (costed.cost_per_second - planned.cost_per_second).abs()
+            <= 1e-9 * planned.cost_per_second.abs(),
+        "{} vs {}",
+        costed.cost_per_second,
+        planned.cost_per_second
+    );
 }

@@ -137,10 +137,10 @@ fn prune_own(
     candidates: &mut Vec<HowToComputeAggregateMeasure>,
     applies: impl Fn(&HowToComputeAggregateMeasure) -> bool,
 ) -> Vec<HowToComputeAggregateMeasure> {
-    let (pruned, kept): (Vec<_>, _) = std::mem::take(candidates)
+    let (pruned, remaining): (Vec<_>, _) = std::mem::take(candidates)
         .into_iter()
         .partition(|choice| *choice != HowToComputeAggregateMeasure::Exact && applies(choice));
-    *candidates = kept;
+    *candidates = remaining;
     if pruned
         .iter()
         .any(|choice| matches!(choice, HowToComputeAggregateMeasure::ExactAccumulator(_)))

@@ -3,7 +3,7 @@
 > **Status: historical.** The DDSketch ratio candidate and its
 > `quantile_input_domain` evidence belonged to the legacy replacement search,
 > which has been removed; Pass 1 does not offer a ratio candidate. The
-> document is kept as a record of the bound and its preconditions. Stage 1
+> document is retained as a record of the bound and its preconditions. Stage 1
 > now composes a ratio of two relative errors with the same bound,
 > `(a + b)/(1 − b)`, without operand domains, and splits a relative target
 > as `1 − (1 + ε)^{−1/n}` per input rather than `ε/(2 + ε)`. It relies on each

@@ -315,7 +315,7 @@ fn avg_min_max_stddev_stdvar_quantile_aggregators() {
 fn sum_without_groups_by_the_complement() {
     // SEMANTICS (issue #39): `without(instance)` = group by all labels EXCEPT
     // instance. The complement can't be enumerated under the open usage-derived
-    // schema, so the excluded label is stored and the kept set is deferred to
+    // schema, so the excluded label is stored and the retained set is deferred to
     // the runtime: the grouping is the exclusion form and the output schema
     // stays OPEN (unlike `by`, which freezes to closed).
     let qe = ok("sum without(instance) (node_filesystem_size_bytes)");
@@ -336,7 +336,7 @@ fn sum_without_groups_by_the_complement() {
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     assert!(
         !qe.schema.clone().closed,
-        "a `without` result keeps an open schema (kept label set is runtime-only)"
+        "a `without` result keeps an open schema (retained label set is runtime-only)"
     );
 }
 
@@ -1531,7 +1531,7 @@ fn absent_keeps_matcher_labels_for_the_synthesized_output() {
     let cols = qe.schema.clone();
     assert!(
         cols.fields.iter().any(|c| c.name == "job"),
-        "matcher label `job` kept, got {:?}",
+        "matcher label `job` retained, got {:?}",
         cols.fields.iter().map(|c| &c.name).collect::<Vec<_>>()
     );
 }
@@ -1761,7 +1761,7 @@ fn info_lowers_to_a_label_enrichment_join() {
 fn info_selector_carries_the_info_side_matchers() {
     // `info(v, {__name__=~".+_info", data=~".+"})` — the selector picks the info
     // metric(s) via `__name__` and constrains the data labels. Regex / `__name__`
-    // matchers are kept symbolically (not run through the single-metric selector
+    // matchers are left symbolically (not run through the single-metric selector
     // path).
     let qe = ok(r#"info(build_info, {__name__=~".+_info", another_data=~".+"})"#);
     let NonASAPOp::PromqlInfoEnrich { selector, .. } = qe.expect_non_asap() else {
@@ -1770,7 +1770,7 @@ fn info_selector_carries_the_info_side_matchers() {
     assert_eq!(
         selector.len(),
         2,
-        "both selector matchers kept: {selector:?}"
+        "both selector matchers retained: {selector:?}"
     );
     assert!(selector
         .iter()
@@ -1882,7 +1882,7 @@ fn count_values_label_colliding_with_a_group_key_is_not_duplicated() {
 #[test]
 fn limitk_and_limit_ratio_lower_to_series_sampling() {
     // `limitk`/`limit_ratio` are series-*sampling* selection — a subset of whole
-    // series kept unchanged (NOT a ranking), so they lower to the dedicated
+    // series left unchanged (NOT a ranking), so they lower to the dedicated
     // `PromqlSeriesSample` node, never `topk`'s `Sort → Limit` (issue #86).
     assert!(matches!(
         ok("limitk(2, http_requests)").expect_non_asap(),
@@ -1975,7 +1975,7 @@ fn label_replace_is_a_relabel_over_the_vector() {
     assert_eq!(metric, "up");
     // The value expression is a `label_replace` fn reading the `src` label.
     assert!(is_fn_named(value, "label_replace"));
-    // Output: the child's columns + the synthesized `host` label; value & ts kept.
+    // Output: the child's columns + the synthesized `host` label; value & ts retained.
     let sch = qe.schema.clone();
     assert!(sch.fields.iter().any(|c| c.name == "host"));
     assert!(sch.fields.iter().any(|c| c.name == "value"));

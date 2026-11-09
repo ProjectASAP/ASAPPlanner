@@ -1,40 +1,18 @@
-//! Display labels for the planning stages' candidates, for the
-//! `asap_planner` viewer document and text
-//! only. Planning never reads them: they
-//! are pure functions of the candidates' planning data (the logical roots
-//! and the physical properties assignment).
+//! Display labels for the planning stages' operators and parameters, for
+//! the `asap_planner` viewer document and text only. Planning never reads
+//! them: they are pure functions of the candidates' planning data.
 
 use serde_json::Value;
 
-use asap_types::ir::schema::SketchAlgorithm;
-use asap_types::stages::HowToComputeAggregateMeasure;
+use asap_types::ir::schema::SketchParams;
+use asap_types::ir::Operator;
 
-/// A Pass 1 per-computation candidate, e.g. "exact", "Sum acc" or "Kll".
-pub fn computation_label(candidate: &HowToComputeAggregateMeasure) -> String {
-    match candidate {
-        HowToComputeAggregateMeasure::Exact => "exact".to_string(),
-        HowToComputeAggregateMeasure::ExactAccumulator(kinds) => {
-            let kinds: Vec<String> = kinds.iter().map(|kind| format!("{kind:?}")).collect();
-            format!("{} acc", kinds.join("/"))
-        }
-        HowToComputeAggregateMeasure::Summary(algorithm) => sketch_name(algorithm),
-    }
-}
-
-/// A sketch algorithm's display name, e.g. "CMS+heap" or "Kll".
-fn sketch_name(algorithm: &SketchAlgorithm) -> String {
-    match algorithm {
-        SketchAlgorithm::CmsWithHeap => "CMS+heap".to_string(),
-        SketchAlgorithm::CountSketchWithHeap => "CountSketch+heap".to_string(),
-        other => format!("{other:?}"),
-    }
-}
-
-/// One node's operator kind with its sketch family and parameters, its
-/// summary query, its time range and its tumbling-window layout, when it has them: e.g.
-/// `SummaryAgg Kll(k=200)`, `SummaryEstimate Quantile(q=0.5)`.
-pub fn node_label(node: &asap_types::ir::flat::FlatNode) -> String {
-    let operator = serde_json::to_value(&node.operator).unwrap_or_default();
+/// An operator's kind with its summary type, its summary query, its time
+/// range and its tumbling-window width, when it has them, without its
+/// inputs: e.g. `SummaryAgg Kll`, `SummaryEstimate Quantile(q=0.5)`,
+/// `TimeRange 600s`.
+pub fn operator_label<C>(operator: &Operator<C>) -> String {
+    let operator = serde_json::to_value(operator.map_children(|_| ())).unwrap_or_default();
     // `{"ASAP": {"SummaryAgg": {...}}}` (or a unit variant's string).
     let (kind, fields) = match operator.as_object().and_then(|o| o.values().next()) {
         Some(Value::Object(inner)) => match inner.iter().next() {
@@ -54,7 +32,22 @@ pub fn node_label(node: &asap_types::ir::flat::FlatNode) -> String {
     label
 }
 
-/// Sketch algorithms with parameters, summary queries and time ranges found
+/// A sketch's parameters θ: e.g. `Kll(k=269)`, `Cms(width=2719, depth=5)`.
+pub fn parameters_label(parameters: &SketchParams) -> String {
+    let value = serde_json::to_value(parameters).unwrap_or_default();
+    let Some((algorithm, fields)) = value.as_object().and_then(|o| o.iter().next()) else {
+        return value.to_string();
+    };
+    let fields: Vec<String> = fields
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect();
+    format!("{algorithm}({})", fields.join(", "))
+}
+
+/// Summary types, summary queries, measures, time ranges and windows found
 /// in an operator's fields (not inside its schemas).
 fn find_details(value: &Value, details: &mut Vec<String>, depth: usize) {
     if depth > 6 || details.len() >= 4 {
@@ -87,17 +80,6 @@ fn find_details(value: &Value, details: &mut Vec<String>, depth: usize) {
     };
     match value {
         Value::Object(fields) => {
-            if let (Some(Value::String(algorithm)), Some(params)) =
-                (fields.get("algorithm"), fields.get("params"))
-            {
-                let params = params
-                    .as_object()
-                    .and_then(|p| p.values().next())
-                    .map(compact)
-                    .unwrap_or_default();
-                details.push(format!("{algorithm}({params})"));
-                return;
-            }
             for (key, field) in fields {
                 match key.as_str() {
                     "schema" | "input_schema" | "output_schema" | "predicates" | "cols" => {}
@@ -120,9 +102,11 @@ fn find_details(value: &Value, details: &mut Vec<String>, depth: usize) {
                             details.push(format!("{kind}({})", params.join(", ")));
                         }
                     }
+                    // A summary type, e.g. `Kll` or `ExactAggregate(Rate)`.
+                    "summary_type" => details.push(summary_type_text(field)),
                     // A time range's length, e.g. `60s`.
                     "range" => details.push(duration_text(field)),
-                    // A window, and a tumbling-window chain's layout.
+                    // A window, and a tumbling-window chain's width.
                     "window" | "tumbling_window_width_ms" => details.push(format!("{key}={field}")),
                     _ => find_details(field, details, depth + 1),
                 }
@@ -134,6 +118,33 @@ fn find_details(value: &Value, details: &mut Vec<String>, depth: usize) {
             }
         }
         _ => {}
+    }
+}
+
+/// A serialized summary type: `Kll` (`{"Sketch": "Kll"}`),
+/// `ExactAggregate(Rate)` (`{"ExactAggregate": ["Rate", "Rate"]}`, the
+/// distinct names), or the JSON of any other value.
+fn summary_type_text(value: &Value) -> String {
+    match value {
+        Value::String(name) => name.clone(),
+        Value::Object(fields) if fields.len() == 1 => {
+            let (kind, inner) = fields.iter().next().expect("one field");
+            let mut names: Vec<String> = match inner {
+                Value::String(name) => vec![name.clone()],
+                Value::Array(items) => items
+                    .iter()
+                    .map(|item| item.as_str().map_or(item.to_string(), str::to_owned))
+                    .collect(),
+                other => vec![other.to_string()],
+            };
+            names.dedup();
+            if kind == "Sketch" {
+                names.join(", ")
+            } else {
+                format!("{kind}({})", names.join(", "))
+            }
+        }
+        other => other.to_string(),
     }
 }
 
