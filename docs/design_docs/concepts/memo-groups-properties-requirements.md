@@ -1593,8 +1593,6 @@ The MILP compares the two plans' cost per second. With much data, plan 2's singl
 | $\rho_\kappa$ | executions of κ per second; for an evaluation grid, times the number of requests covering each grid time. A candidate's run rate in κ counts only the queries of κ that reach it |
 | $h_v$, $\pi_v$ | retained amount and its cost per unit per second |
 | $\operatorname{need}_{\kappa,v,c,i}$ | how much of v's rows this edge reads back: for a time-indexed producer (raw data, a chain, results stored per evaluation time) the reading path's offset plus range |
-| $r_e$, $\sigma_e$ | for an execution e of a query-time Scan: what one run reads back, and its cost per unit per second |
-| $\operatorname{read}_{\kappa,u,c,i}$ | what one run of the edge's consumer reads of u: $\operatorname{need}$ without the range-evaluation span |
 
 $$
 \min\left(
@@ -1602,19 +1600,16 @@ $$
 +\sum_{\kappa,v}\rho_\kappa c_{\kappa,v}x_{\kappa,v}
 +\sum_{\kappa,u,c,i}\rho_\kappa c_{\kappa,u,c,i}\,y_{\kappa,u,c,i}
 +\sum_{v}\pi_v h_v
-+\sum_{e}\sigma_e r_e
 \right),
 \qquad
-h_v\ge\operatorname{need}_{\kappa,v,c,i}\,y_{\kappa,v,c,i}\ \ (\mathrm{R}),
-\qquad
-r_e\ge\operatorname{read}_{\kappa,u,c,i}\,y_{\kappa,u,c,i}\ \ (\mathrm{S}).
+h_v\ge\operatorname{need}_{\kappa,v,c,i}\,y_{\kappa,v,c,i}\ \ (\mathrm{R}).
 $$
 
 Every term is exact: no producer is chosen to stand for others. In the example of Section 3, the edges to A's, B's and C's paths need 5m, 1h + 5m and 1h, so the shared 60 s chain retains 65 windows. A Scan's raw data is a time-indexed producer like any other: its retention is its $h_v$ under the same (R). `@ T` needs the end of the horizon − T + range; with an unbounded horizon that candidate is not offered. Query latency is left for later: a result is taken to be read when its evaluation starts. $h_v$ has no upper bound here: it is minimized, and per-candidate bounds belong to resource budgets, outside this design; a candidate with an unbounded need (a consumer whose reach has no bound) gets no $h_v$ and is not offered materialized.
 
 **Memory held while computing.** A query-time execution holds its output in memory only while it computes: its cost $c_{\kappa,v}$ includes bytes$_v$ × work$_v$ (s) × the memory cost per byte-second, per run. Example: a KLL state of 2 MB whose own work takes 3 ms, run 0.1 times per second, holds 2 MB × 0.003 s × 0.1/s = 600 byte·s per second. Query latency does not enter it. `plan_cost` charges the same term, so the MILP objective equals `plan_cost` of the selected plan.
 
-**Scan reads.** A query-time Scan keeps its retention (offset + range + range-evaluation span) but reads, per execution, the largest offset + range among its selected consumers (no span; $r_e$ under (S), its cost linear in the amount read): a 1 h range query with step 1 s over an instant selector keeps 3,601,000 ms of samples and reads 1 s per step. Stage 3 and `plan_cost` share one function for it. A range query's `@ end()` / `@ start()` subtree runs once per request, in Stage 3 and in `plan_cost` alike.
+**Scan reads.** A query-time Scan keeps its retention (offset + range + range-evaluation span) but reads, per execution, the largest offset + range among its selected consumers (no span). In the MILP an execution of the Scan in context κ is costed reading the most any consumer it may have in κ reads, a constant of the execution, so the objective equals `plan_cost` when that consumer is selected (a variable read amount, linear in the selected consumers, made the MILP of example 3a intractable): a 1 h range query with step 1 s over an instant selector keeps 3,601,000 ms of samples and reads 1 s per step. Stage 3 and `plan_cost` share one function for it. A range query's `@ end()` / `@ start()` subtree runs once per request, in Stage 3 and in `plan_cost` alike.
 
 ### No consumer-count policies
 
