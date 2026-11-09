@@ -58,6 +58,7 @@ fn a_merge_over_a_chain_s_windows_outputs_one_state_per_group() {
         family: StateFamily::Exact(&ExactKind::Sum),
         unchanged_columns: BTreeSet::new(),
         tumbling_windows: 1,
+        chain_tumbling_window_width_ms: Some(60_000),
     };
     let windows = node(Payload::NonASAP(NonASAPOp::TimeRange {
         range: Duration::from_secs(300),
@@ -94,6 +95,78 @@ fn a_merge_over_a_chain_s_windows_outputs_one_state_per_group() {
     );
 }
 
+/// o11y q21's shape, `sum(rate(m[5m] offset 1h))` over a chain of 60 s
+/// windows: a `TimeShift` by 1 h between the chain and the 5m
+/// `TimeRange`, or above the `TimeRange`, changes nothing. The range
+/// selects five windows of 1000 states, and the merge over them reads
+/// 5000 states into 1000, as with no shift (it read 1000, one window).
+#[test]
+fn a_time_shift_over_a_chain_or_its_windows_selects_what_the_range_does() {
+    use asap_types::ir::operator::TimeShift;
+    let settings = CostInputs::default();
+    let data = DataWorkload::default();
+    let chain = node(Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+        child: 0,
+        summary_type: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+        input: SummaryUpdate::column(ColumnRef::SampleValue),
+        reduction: Reduction::PerEntity,
+        filter: None,
+        tumbling_window_width_ms: 60_000,
+    }));
+    let shift = node(Payload::NonASAP(NonASAPOp::TimeShift {
+        shift: TimeShift {
+            offset_ms: 3_600_000,
+            at: None,
+        },
+        child: 0,
+    }));
+    let range = node(Payload::NonASAP(NonASAPOp::TimeRange {
+        range: Duration::from_secs(300),
+        kind: TimeRangeKind::Range,
+        child: 0,
+    }));
+    let merge = node(Payload::ASAP(ASAPOp::SummaryMerge {
+        children: vec![0],
+        group_by: None,
+    }));
+    // The merge's cost detail and output over `path`, costed bottom-up
+    // from the chain's one window of 1000 states.
+    let merge_over = |path: &[&PhysicalASAPDAGNode]| -> (String, EdgeStatistics) {
+        let mut below = ProducerOutput {
+            payload: &chain.payload,
+            output_schema: &chain.output_schema,
+            output: EdgeStatistics {
+                rows: 1_000,
+                bytes: 16_000,
+            },
+            sources: BTreeSet::new(),
+            family: StateFamily::Exact(&ExactKind::Sum),
+            unchanged_columns: BTreeSet::new(),
+            tumbling_windows: 1,
+            chain_tumbling_window_width_ms: Some(60_000),
+        };
+        for &step in path {
+            let usage =
+                node_resource_usage_and_cost(step, &[below], (1, 1.0), None, &data, &settings)
+                    .unwrap();
+            below = produced(step, &usage);
+        }
+        let usage =
+            node_resource_usage_and_cost(&merge, &[below], (1, 1.0), None, &data, &settings)
+                .unwrap();
+        (usage.cost.detail, usage.output)
+    };
+    let direct = merge_over(&[&range]);
+    assert!(
+        direct.0.starts_with("merge 5000 states into 1000;"),
+        "{}",
+        direct.0
+    );
+    for path in [[&shift, &range], [&range, &shift]] {
+        assert_eq!(merge_over(&path), direct);
+    }
+}
+
 /// A query-time node holds its state only
 /// while it computes: bytes × its work per execution × its executions
 /// per second, with no query latency. A KLL state of 2 MB whose own
@@ -120,6 +193,7 @@ fn query_time_memory_is_held_only_while_the_node_computes() {
         family: StateFamily::Exact(&ExactKind::Sum),
         unchanged_columns: BTreeSet::new(),
         tumbling_windows: 1,
+        chain_tumbling_window_width_ms: None,
     };
     let merge = PhysicalASAPDAGNode {
         lifetime: Lifetime::OneEvaluation(StorageMedium::Memory),
