@@ -5,7 +5,7 @@
 > `GlobalSelection`) has been removed. Stage 1 now produces
 > `LogicalCandidate`s, Stage 2 `PhysicalCandidate`s, and Stage 3's
 > `select_plan` the `Selection`; see [the architecture](asap-aware-mapping-architecture.md).
-> The table is kept as a record of the rename.
+> The table is retained as a record of the rename.
 
 This source-only rename follows the input/output/workflow design in #445.
 Candidate generation, ordering, accuracy checks, selection, and runtime behavior
@@ -37,7 +37,7 @@ built, and Stage 3 its retention.
 
 The pre-ASAP and post-ASAP trees became one IR in `asap_types::ir`. Every
 node is an `Rc<OperatorNode>` whose `operator` is `Operator::NonASAP(NonASAPOp)`
-or `Operator::ASAP(ASAPOp)`. Old public names are not kept as aliases.
+or `Operator::ASAP(ASAPOp)`. Old public names are not retained as aliases.
 
 | Old | New |
 |---|---|

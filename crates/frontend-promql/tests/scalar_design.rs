@@ -107,7 +107,7 @@ fn pointwise_functions_are_typed_scalar_projections() {
 }
 
 /// Negation drops the metric name, like Prometheus and like `up * 2` and
-/// `abs(up)`; the rest of the series identity and the time are kept.
+/// `abs(up)`; the rest of the series identity and the time are retained.
 #[test]
 fn unary_minus_drops_the_metric_name() {
     let QueryRoot::Operator(node) = root("-up") else {

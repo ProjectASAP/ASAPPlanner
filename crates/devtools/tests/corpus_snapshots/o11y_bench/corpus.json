@@ -5,7 +5,10 @@
     "language": "promql",
     "repeating_query": {
       "demand": {
-        "fixed_interval": 60000
+        "fixed_interval_at": {
+          "interval": 60000,
+          "evaluation_phase": 0
+        }
       },
       "requirements": {
         "accuracy": {

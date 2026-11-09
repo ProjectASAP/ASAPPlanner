@@ -71,7 +71,7 @@ pub fn worst_latency_ms(usage: &ResourceUsage) -> f64 {
 mod tests {
     use super::*;
 
-    /// Totals that differ only by rounding tie, so the earlier plan is kept;
+    /// Totals that differ only by rounding tie, so the earlier plan is retained;
     /// a real difference is cheaper.
     #[test]
     fn totals_differing_by_rounding_tie() {

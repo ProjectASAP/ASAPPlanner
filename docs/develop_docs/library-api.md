@@ -197,14 +197,14 @@ asap_stage3_plan_selection::select_plan(
 | `PlanningModels::new(evidence)` | Your `&dyn AccuracyEvidence` (measured guarantees; `NoMeasuredGuarantees` has none), with default cost inputs and deployment capabilities; `with_evidence` replaces it; `with_ignore_accuracy_guarantees(true)` gives every query no accuracy target |
 | `PlanningModels::builtin()` | No measured accuracy evidence. `with_cost_inputs(&settings)` sets the deployment's `CostInputs`; `with_deployment_capabilities(&capabilities)` sets its `DeploymentCapabilities` (field `deployment_capabilities`) |
 | `DeploymentCapabilities` (`asap_types::deployment_capabilities`, re-exported as `asap_planner::DeploymentCapabilities`) | What the executor supports: `supported_summaries` (`None`, the default, supports every summary the planner builds; otherwise `SupportedSummary { summary_type: SketchAlgorithm, readouts: Vec<StatisticKind> }` entries; Pass 1 prunes others with `PruneReason::UnsupportedByDeployment`), `raw_data_retained` (default `true`; when `false`, a candidate that scans raw data at query time is pruned by Stage 2, and stored data is refused with `asap_planner::SelectionError::InvalidDeploymentCapabilities`) and `query_time_results_retained` (default `false`; when `true`, Stage 2 offers query-time `AcrossEvaluations` for tumbling-window chains) |
-| `CostInputs` (`asap_cost`) | `cost_model`, `resource_speed` (`ms_per_cpu_op`, `ms_per_scanned_byte`), `non_repeating_query_horizon_seconds` (default 3,600) and `measured_operation_costs` (`MeasuredOperationCosts`, default empty: `operators`, one `OperatorCost { operator, phase, sketch / exact / measure, ns_per_unit, ns_per_invocation, memory_bytes_per_state }` per measured operator kind, phase and family; `ns_per_evaluation` per query request; `provenance` (executor version, machine). A node with an entry is priced from it, a sketch between the two nearest measured sizes; every other node from the formulas times one calibration factor fitted from the measured nodes; each node's `NodeCost::cost_source` says which. The earlier JSON array of `MeasuredOperationCost { sketch, operation, cpu_ns_per_operation }` still loads) |
+| `CostInputs` (`asap_cost`) | `cost_model`, `resource_speed` (`ms_per_cpu_op`, `ms_per_scanned_byte`), `non_repeating_query_horizon_seconds` (default 3,600) and `measured_operation_costs` (`MeasuredOperationCosts`, default empty: `operators`, one `OperatorCost { operator, phase, sketch / exact / measure, ns_per_unit, ns_per_invocation, memory_bytes_per_state }` per measured operator kind, phase and family; `ns_per_evaluation` per query request; `provenance` (executor version, machine). A node with an entry is costed from it, a sketch between the two nearest measured sizes; every other node from the formulas times one calibration factor fitted from the measured nodes; each node's `NodeCost::cost_source` says which. The earlier JSON array of `MeasuredOperationCost { sketch, operation, cpu_ns_per_operation }` still loads) |
 | `CostModel::UsageOverTime(ResourceUnitCost)` | Cost model 1 (default, `ResourceUnitCost::illustrative()`): unit cost × usage per second; the cheapest valid candidate wins |
 | `CostModel::ProvisionedCapacity(ResourceUnitCost)` | Cost model 2: unit cost × peak memory, peak CPU cores and disk; the cheapest valid candidate wins |
 | `CostModel::ClusterCapacity(ClusterLimits)` | Cost model 3: memory, disk and optional CPU cores are hard limits; `ClusterObjective::{LowestLatency, LeastMemory}` chooses among the candidates that fit |
 | `PlanOutput.plan` | The selected plan, one `PhysicalASAPDAG`: `roots` answer the operator queries and `scalar_roots` the standalone scalar queries, in `QueryWorkload::entries()` order; each materialized node carries its `retention_ms`. Its cost is `asap_cost::plan_cost` of it |
 | `PlanningRun` | `pass1_memo`, `logical_asap_candidates`, `physical_asap_candidates`, `selection` (the plan and Stage 3's `Selection`: `accepted_accuracy_per_query`, `pruned_candidates`, `milp_variables`, `milp_constraints`, `milp_construction_ms`, `milp_solve_ms`) and `report` (Pass 2's and Stage 2's counts and each stage's time); `pass1_memo` is kept only with `PlanSearchSettings::inspect` |
 
-Each candidate's `ResourceUsage` holds its usage without prices:
+Each candidate's `ResourceUsage` holds its usage without unit costs:
 `cpu_ops_per_second`, `scanned_bytes_per_second`, `average_memory_bytes`,
 `peak_memory_bytes`, `disk_bytes`, `peak_cpu_cores` and `latency_per_query`.
 The deployment's choice of cost model reads it.
@@ -309,19 +309,19 @@ PromQL metric or SQL table name to `SourceFacts`: `series_count`,
 `metric_type`, `column_signs`, `sample_interval` (PromQL and
 MetricsQL), `stream_norms`, `max_distinct_per_evaluation` and
 `distinct_values_per_label` (distinct values per label or column, which
-plan selection prices a `by (...)` grouping's groups at: the product of its
+plan selection costs a `by (...)` grouping's groups at: the product of its
 keys' counts, at most the declared `series_count` (series or groups of
 rows) and the rows it reads; with a key undeclared, no count is assumed and
-the grouping is priced at the smaller of those two; over several sources a
+the grouping is costed at the smaller of those two; over several sources a
 key's counts add), `distinct_values_per_label_set` (distinct combinations
 a set of dependent labels takes together, e.g.
 `[{"labels": ["service", "endpoint"], "distinct_values": 625}]` when each
-endpoint is in one service: a grouping over one source is priced at the
+endpoint is in one service: a grouping over one source is costed at the
 smallest product of declared set and label counts covering its keys, so
 `by (service, endpoint)` is 625 groups rather than 25 x 625), and `rows_held` (the rows the source holds at rest,
 which bound a scan with no window and data at rest). Every fact is declared: the planner has no
 clock, so a caller drops facts that no longer hold before planning, and
-pricing assumes no default: a scan whose source declares no arrival rate
+costing assumes no default: a scan whose source declares no arrival rate
 (`rows_per_second`, or `series_count` with `sample_interval`) and no
 `rows_held` fails with `AnalyticalCostError::MissingSourceFact`, naming the
 source and the missing fact. Plan

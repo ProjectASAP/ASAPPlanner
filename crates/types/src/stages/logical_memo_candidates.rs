@@ -59,8 +59,10 @@ pub struct PruneCause {
 }
 
 /// Why the edge at the end of a [`PruneCause`]'s path fails, or why the
-/// candidate has no edge at all.
+/// candidate has no edge at all. JSON: the snake_case variant name, e.g.
+/// `{"below_required_accuracy": {...}}` or `"no_consumer"`.
 #[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RootPruneReason {
     /// The producer's guarantee, at the required failure probability,
     /// exceeds the consumer input's required error.

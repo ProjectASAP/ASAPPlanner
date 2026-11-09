@@ -16,7 +16,7 @@
 //!
 //! [`AccuracyGuarantee`] is attached to a finalized, caller-visible value —
 //! [`crate::ir::OperatorNode::guarantee`] on a `SummaryEstimate` evaluation, an
-//! exact accumulator, or a kept pre-ASAP sub-DAG — never to raw summary
+//! exact accumulator, or a retained pre-ASAP sub-DAG — never to raw summary
 //! state (a `SummaryAgg` sketch node carries `None`; its evaluation carries the
 //! guarantee). Its statement is:
 //!
@@ -320,7 +320,7 @@ pub enum CompositionOperator {
 }
 
 /// One entry in a [`AccuracyGuarantee`]'s provenance trail — enough for a
-/// reader to reconstruct *why* the bound is what it is without re-running
+/// consumer to reconstruct *why* the bound is what it is without re-running
 /// the planner. `#[non_exhaustive]` so runtime evidence (issue #239) and
 /// deployment-specific sources can be appended later.
 #[non_exhaustive]
