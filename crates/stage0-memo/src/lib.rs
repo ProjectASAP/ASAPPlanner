@@ -11,19 +11,18 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
-use asap_types::ir::operator::SourceColumn;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{NonASAPOp, Operator, OperatorNode, QueryRoot, SchemaDerivationError};
 use asap_types::stages::{Memo, MemoGroupId, MemoQuery, ValueSign};
 use asap_types::workload::bounds::{series_read, source_name, values_per_result};
-use asap_types::workload::{DataWorkload, PrometheusMetricType};
+use asap_types::workload::{DataWorkload, PrometheusMetricType, SourceFacts};
 
 /// Stage 0: the memo groups of the workload's query roots, query `i`
 /// being `roots[i]` with accuracy target `accuracy_targets[i]` (`None`:
 /// none), every group without candidates. Each query is added with its
 /// $n_q$, the number of values one evaluation returns, which `data` bounds
-/// ([`values_per_result`]); a `Scan`'s column signs are the ones `data`
-/// declares ([`declared_column_signs`]). Fails with the first node that
+/// ([`values_per_result`]); the memo holds the facts `data` declares for
+/// the sources scanned ([`scanned_source_facts`]). Fails with the first node that
 /// breaks the node rules over its children's groups
 /// ([`Memo::find_or_add_group`]); the facade validates the roots first, so
 /// that is a frontend bug.
@@ -37,7 +36,7 @@ pub fn memo_of_queries(
         accuracy_targets.len(),
         "one accuracy target per query"
     );
-    let mut memo = Memo::new(declared_column_signs(roots, data));
+    let mut memo = Memo::new(scanned_source_facts(roots, data));
     let mut group_of_node = GroupOfNode::new();
     for root in roots {
         for node in root.operator_refs() {
@@ -60,15 +59,12 @@ pub fn memo_of_queries(
     Ok(memo)
 }
 
-/// The sign `data` declares for each column of each source the queries
-/// scan ([`SourceFacts::column_signs`](asap_types::workload::SourceFacts::column_signs),
-/// a histogram's or summary's for its series, [`DataWorkload::series_facts`]);
-/// a declared counter's `value` is non-negative without a declaration.
-fn declared_column_signs(
-    roots: &[QueryRoot],
-    data: &DataWorkload,
-) -> BTreeMap<SourceColumn, ValueSign> {
-    let mut signs = BTreeMap::new();
+/// The facts `data` declares for each source the queries scan, by the name
+/// the `Scan` reads ([`DataWorkload::series_facts`]: a histogram's or
+/// summary's series by its family's), a declared counter's `value`
+/// non-negative without a declaration.
+fn scanned_source_facts(roots: &[QueryRoot], data: &DataWorkload) -> BTreeMap<String, SourceFacts> {
+    let mut scanned = BTreeMap::new();
     let mut visited = HashSet::new();
     let mut pending: Vec<&Rc<OperatorNode>> =
         roots.iter().flat_map(QueryRoot::operator_refs).collect();
@@ -84,20 +80,16 @@ fn declared_column_signs(
         let Some((facts, series_type)) = data.series_facts(source) else {
             continue;
         };
-        let column = |name: &str| SourceColumn {
-            source: source.to_owned(),
-            column: name.to_owned(),
-        };
-        for (name, sign) in &facts.column_signs {
-            signs.insert(column(name), *sign);
-        }
+        let mut facts = facts.clone();
         if series_type == Some(PrometheusMetricType::Counter) {
-            signs
-                .entry(column("value"))
+            facts
+                .column_signs
+                .entry("value".to_owned())
                 .or_insert(ValueSign::NonNegative);
         }
+        scanned.insert(source.to_owned(), facts);
     }
-    signs
+    scanned
 }
 
 /// Each node of the queries' DAGs already visited, by address, to its
