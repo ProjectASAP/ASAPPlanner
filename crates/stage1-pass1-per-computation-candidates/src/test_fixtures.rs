@@ -2,12 +2,12 @@
 //! groups through `Memo::find_or_add_group` and `Memo::add_query`, as
 //! Stage 0 does, so no test calls another stage crate.
 
-use asap_types::ir::operator::operator_properties::{Reduction, Source};
+use asap_types::ir::operator::operator_properties::Reduction;
 use asap_types::ir::operator::AggIntent;
-use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::schema::{ColumnId, DataType, Field, Schema};
-use asap_types::ir::{NonASAPOp, Operator, OperatorNode, Predicate, QueryRoot};
+use asap_types::ir::{NonASAPOp, Operator, Predicate, QueryRoot};
 use asap_types::stages::{Memo, MemoGroupId, MemoQuery};
+use asap_types::test_support::{series_schema, time_series_scan};
 
 /// `[ts(0), value(1), labels...]`, time index 0, with `unique_keys`.
 pub fn metric_schema(labels: &[&str], unique_keys: Vec<Vec<ColumnId>>) -> Schema {
@@ -23,31 +23,19 @@ pub fn metric_schema(labels: &[&str], unique_keys: Vec<Vec<ColumnId>>) -> Schema
     Schema::with_time_index(columns, 0, unique_keys)
 }
 
-/// A predicate-free `TimeSeries(metric)` scan with `schema`.
-pub fn scan_operator<C>(metric: &str, schema: Schema) -> Operator<C> {
-    Operator::NonASAP(NonASAPOp::Scan {
-        source: Source::TimeSeries {
-            metric: metric.into(),
-        },
-        predicates: vec![],
-        schema,
-    })
-}
-
 /// The group of `operator`, added as Stage 0 adds it.
 pub fn group(memo: &mut Memo, operator: Operator<MemoGroupId>) -> MemoGroupId {
     memo.find_or_add_group(operator).unwrap()
 }
 
-/// The group of a `TimeSeries(metric)` scan over [`metric_schema`] with its
-/// series identity realized as the planner realizes it before Stage 0
-/// (`with_promql_series_identity`): a closed schema whose last column is
-/// `$promql_series_identity`, keyed by it and the timestamp.
+/// The group of a `TimeSeries(metric)` scan listing `labels`, its series
+/// identity realized as the planner realizes it before Stage 0
+/// (`test_support::series_schema`).
 pub fn scan_group(memo: &mut Memo, metric: &str, labels: &[&str]) -> MemoGroupId {
-    let open =
-        OperatorNode::new_shared(scan_operator(metric, metric_schema(labels, vec![]))).unwrap();
-    let realized = with_promql_series_identity(&open).unwrap();
-    group(memo, scan_operator(metric, realized.schema.clone()))
+    group(
+        memo,
+        time_series_scan(metric, series_schema(labels), vec![]),
+    )
 }
 
 /// The group of an `Aggregate` of `measures` (named by their intents) over

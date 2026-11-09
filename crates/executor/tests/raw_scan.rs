@@ -855,7 +855,6 @@ fn windowed_count_plan(shift_ms: Option<i64>) -> PhysicalASAPDAG {
             input: SummaryUpdate {
                 item: None,
                 weight: SummaryInputExpr::Constant(1.0),
-                weight_domain: Default::default(),
             },
             reduction: Reduction::Reduce(GroupKeys::by(vec![])),
             filter: None,

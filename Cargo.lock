@@ -467,7 +467,6 @@ name = "asap-stage2-physical-optimization"
 version = "0.1.0"
 dependencies = [
  "asap-types",
- "thiserror 2.0.18",
 ]
 
 [[package]]

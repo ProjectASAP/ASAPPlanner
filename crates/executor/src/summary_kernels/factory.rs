@@ -470,18 +470,6 @@ pub fn create_planner_accumulator(
     parameters: Option<&SketchParams>,
     input: &planner_types::ir::schema::SummaryUpdate,
 ) -> Result<Box<dyn AccumulatorUpdater>, String> {
-    if input.item.is_some()
-        && matches!(
-            input.weight_domain,
-            planner_types::ir::schema::WeightDomain::NonNegative {
-                proof:
-                    planner_types::ir::schema::NonNegativeWeightProof::ResetAwareCounterDerivative
-            }
-        )
-    {
-        return Err("window-weighted summaries require typed DAG binding; integer heap updaters cannot consume rates".into());
-    }
-
     crate::capability::validate_summary_kernel(family, input)?;
     if matches!(family, SummaryFamilyType::Sketch(SketchAlgorithm::HydraCms)) {
         return Err(

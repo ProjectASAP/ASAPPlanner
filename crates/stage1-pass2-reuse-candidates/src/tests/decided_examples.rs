@@ -24,7 +24,7 @@ fn quantile_over_time_readouts(
     q: f64,
     algorithms: &[SketchAlgorithm],
 ) -> QuantileReadouts {
-    let result = group(
+    let result = group_with_own_candidate(
         memo,
         Operator::NonASAP(NonASAPOp::Aggregate {
             child: window,
@@ -42,7 +42,7 @@ fn quantile_over_time_readouts(
             summary_input: state,
             query: SketchStatistic::Quantile { q },
         });
-        let id = match try_candidate(memo, result, direct, None) {
+        let id = match add_candidate(memo, result, direct, None) {
             Ok(id) => id,
             Err(CandidateError::OutputDiffersFromGroup { .. }) => {
                 let readout = estimate(memo, state, SketchStatistic::Quantile { q });
@@ -59,7 +59,7 @@ fn quantile_over_time_readouts(
                         .collect(),
                     child: readout,
                 });
-                candidate(memo, result, renamed, None)
+                add_candidate(memo, result, renamed, None).unwrap()
             }
             Err(error) => panic!("{error}"),
         };
@@ -356,7 +356,7 @@ fn e1_a_key_only_filter_keeps_the_ddsketch_readout_admissible() {
         .iter()
         .position(|field| field.name == "job")
         .expect("the result keeps the job label");
-    let filtered = group(
+    let filtered = group_with_own_candidate(
         &mut memo,
         Operator::NonASAP(NonASAPOp::Filter {
             pred: Predicate(equals(job, "api")),
@@ -388,7 +388,7 @@ fn h2_avg_of_readouts_under_a_relative_target_reads_exact_only() {
     let window = range(&mut memo, input, 300);
     let algorithms = [SketchAlgorithm::Kll, SketchAlgorithm::DDSketch];
     let p99 = quantile_over_time_readouts(&mut memo, window, 0.99, &algorithms);
-    let avg = group(
+    let avg = group_with_own_candidate(
         &mut memo,
         Operator::NonASAP(NonASAPOp::Aggregate {
             child: p99.result,
@@ -481,7 +481,7 @@ fn a2_the_metric_rule_cuts_the_readout_edges_and_keeps_the_exact_division() {
     let p90 = quantile_over_time_readouts(&mut memo, window, 0.9, &algorithms);
     let ratio = arithmetic(&mut memo, ArithmeticOpKind::Div, p50.result, p50.result);
     let sum = arithmetic(&mut memo, ArithmeticOpKind::Add, ratio, p90.result);
-    let avg = group(
+    let avg = group_with_own_candidate(
         &mut memo,
         Operator::NonASAP(NonASAPOp::Aggregate {
             child: sum,
