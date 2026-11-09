@@ -1052,10 +1052,10 @@ fn topk_schema_of_build<J: OperatorInput>(
     let complete_item_identity = matches!(
         input.item.as_ref()?,
         SummaryInputExpr::Column(_) | SummaryInputExpr::Tuple(_)
-    ) || child_schema.closed
-        || columns.iter().any(|&index| {
-            child_schema.fields[index].name == crate::ir::schema::PROMQL_SERIES_IDENTITY
-        });
+    ) || crate::ir::schema::topk::item_identity_is_complete(
+        child_schema,
+        columns.iter().copied(),
+    );
     let mut fields: Vec<Field> = state_schema
         .fields
         .iter()
@@ -1072,12 +1072,12 @@ fn topk_schema_of_build<J: OperatorInput>(
     }
     // One row per (partition, item), not one row per partition. Preserve this
     // key through the ranked-row projection used by the logical TopK result.
-    let unique_keys = if complete_item_identity && !fields.is_empty() {
-        vec![(0..fields.len()).collect()]
+    fields.push(Field::plain("topk", DataType::Float64, false));
+    let unique_keys = if complete_item_identity {
+        crate::ir::schema::topk::ranked_rows_unique_keys(fields.len(), fields.len() - 1)
     } else {
         Vec::new()
     };
-    fields.push(Field::plain("topk", DataType::Float64, false));
     Some(Schema {
         fields,
         unique_keys,
