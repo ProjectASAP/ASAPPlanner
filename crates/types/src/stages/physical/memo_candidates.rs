@@ -2,7 +2,7 @@
 //! $\mathcal C$, one per valid $p^{\mathrm{phys}} = (\tau, \ell)$, and
 //! the physical edges $\mathcal E$ with $\alpha^{\log}$ and
 //! $\alpha^{\mathrm{phys}}$ (#1200, #1201). Stage 3 selects among them;
-//! Stage 2 prices nothing.
+//! Stage 2 costs nothing.
 
 use std::collections::HashMap;
 

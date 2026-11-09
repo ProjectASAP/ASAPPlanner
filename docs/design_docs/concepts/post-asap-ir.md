@@ -114,7 +114,7 @@ Materialization ([#509 §Materialization](../proposals/planner-layering.md#mater
 decides, for each sub-DAG, whether its output is materialized, and if so with which
 [`PhysicalProperties`](../../../crates/types/src/physical/properties.rs): a
 timing and a `Lifetime` (#1200). The lifetime is `None` (discarded after its
-reader), `OneEvaluation(medium)` (materialized until every reader of one evaluation
+consumer), `OneEvaluation(medium)` (materialized until every consumer of one evaluation
 finishes) or `AcrossEvaluations(medium)` (materialized for later evaluations), with
 `StorageMedium::Memory` or `StorageMedium::Disk`; an ingestion-time output cannot be materialized
 for `OneEvaluation`. A

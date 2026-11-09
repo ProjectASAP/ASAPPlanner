@@ -38,7 +38,7 @@ cargo run --release -p asap-devtools --bin asap_planner -- \
 ```
 
 The workload file holds the queries, their accuracy requirements and how
-often they run, and the data-source facts plan selection prices from: each
+often they run, and the data-source facts plan selection costs from: each
 source's series count and sample interval, or rows per second. Without the
 fact a scan needs, planning fails with an error that names the source and
 the missing fact.

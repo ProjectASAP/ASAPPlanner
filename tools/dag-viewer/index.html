@@ -70,11 +70,8 @@ h1 { font-family: var(--font-display); font-weight: 600; font-size: 26px; letter
 .panel-head h2 { font-family: var(--font-display); font-weight: 600; font-size: 16px; margin: 0; }
 .rank-panel { position: sticky; top: 12px; }
 .rank { list-style: none; margin: 0; padding: 6px; max-height: calc(100vh - 120px); overflow-y: auto; display: grid; gap: 4px; }
-.rank button { width: 100%; text-align: left; font: inherit; color: inherit; background: transparent; border: 1px solid transparent; border-radius: 8px; padding: 8px 10px; cursor: pointer; display: grid; grid-template-columns: minmax(34px, max-content) minmax(0,1fr) auto; gap: 2px 8px; align-items: baseline; }
-.rank button:hover { background: var(--panel-2); }
-.rank button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
-.rank button[disabled] { cursor: default; color: var(--muted); }
-.rank button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.rank .row { border-radius: 8px; padding: 8px 10px; display: grid; grid-template-columns: max-content minmax(0,1fr) auto; gap: 2px 8px; align-items: baseline; }
+select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .pid { font-family: var(--font-mono); font-weight: 500; white-space: nowrap; }
 .plabel { min-width: 0; overflow-wrap: anywhere; }
 .ptotal { font-family: var(--font-mono); font-variant-numeric: tabular-nums; text-align: right; }
@@ -82,15 +79,10 @@ h1 { font-family: var(--font-display); font-weight: 600; font-size: 26px; letter
 .chip { font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; border-radius: 999px; padding: 1px 8px; white-space: nowrap; }
 .chip.selected { color: var(--ok); background: var(--ok-soft); }
 .chip.invalid { color: var(--bad); background: var(--bad-soft); }
-.chip.costlier { color: var(--warn); background: var(--warn-soft); }
-/* Enumerated DAGs: a row cheaper than the selected plan is red. */
-#enumRows { max-height: 360px; }
-.rank button.cheaper { border-color: var(--bad); background: var(--bad-soft); }
-.chip.cheaper { color: var(--bad); border: 1px solid var(--bad); }
-/* Stage 0, 1 and 2 stack top to bottom, each as wide as the page allows. */
+/* Stage 0 and the plan stack top to bottom, each as wide as the page allows. */
 .lanes { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; min-width: 0; }
 .lane .panel-head { align-items: center; }
-#queryPick, .lane select { font: inherit; font-size: 13px; color: var(--fg); background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; max-width: 100%; min-width: 0; }
+#queryPick { font: inherit; font-size: 13px; color: var(--fg); background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; max-width: 100%; min-width: 0; }
 .lane-meta { padding: 6px 12px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--line); min-height: 30px; overflow-wrap: anywhere; }
 .lane-meta b { color: var(--fg); font-family: var(--font-mono); font-weight: 500; font-variant-numeric: tabular-nums; }
 .cy { height: 560px; width: 100%; }
@@ -140,7 +132,7 @@ tr.clickable:focus-visible td { outline: 2px solid var(--accent); outline-offset
 <div class="wrap">
   <header>
     <h1>ASAPPlanner Stage Viewer</h1>
-    <p class="lede">The planner's stages for one workload: the query-language frontends lower the queries into one logical DAG (Stage 0), Pass 1 and Pass 2 propose logical ASAP candidates (Stage 1), each becomes a physical candidate (Stage 2), and Stage 3 checks every physical candidate, prices the valid ones and selects the cheapest.</p>
+    <p class="lede">The planner's stages for one workload: the query-language frontends lower the queries into one logical DAG (Stage 0), Pass 1 and Pass 2 propose logical ASAP candidates in a memo and Pass 2 prunes those no consumer can use (Stage 1), each remaining candidate becomes physical candidates (Stage 2), and Stage 3 selects the cheapest plan from them.</p>
     <nav class="tabs" id="tabs" aria-label="Example"></nav>
     <div class="toolbar">
       <button class="btn" id="openFile" type="button" title="A stage document is shown; a PlanningWorkload JSON is planned by the local server">Open stage document or workload…</button>
@@ -172,52 +164,35 @@ tr.clickable:focus-visible td { outline: 2px solid var(--accent); outline-offset
 
   <div class="main">
     <section class="panel rank-panel" aria-labelledby="rank-title">
-      <div class="panel-head"><h2 id="rank-title">Stage 3 · plans by cost</h2><span class="eyebrow" id="cost-unit"></span></div>
+      <div class="panel-head"><h2 id="rank-title">Stage 3 · plan selection</h2></div>
       <div class="lane-meta" id="rank-meta"></div>
       <ol class="rank" id="rank"></ol>
     </section>
 
     <div style="display:grid; gap:12px; min-width:0">
       <div class="toolbar"><label><span class="eyebrow">highlight query</span> <select id="queryPick" aria-label="Highlight one query's path"></select></label>
-        <span class="hint-inline">Dims what the query's root does not reach. Click a node to highlight what it reads and what reads it, the background to clear; click a tumbling-window chain to show its tumbling windows.</span></div>
+        <span class="hint-inline">Dims what the query's root does not reach. Click a node to highlight what it reads and what reads it, the background to clear.</span></div>
       <div class="lanes">
         <section class="panel lane" aria-labelledby="lane0-title">
           <div class="panel-head"><div><div class="eyebrow">Stage 0</div><h2 id="lane0-title">Query-language frontends</h2></div></div>
           <div class="lane-meta" id="lane0-meta"></div>
           <div class="cy" id="cy0"></div>
         </section>
-        <section class="panel" id="enumPanel" aria-labelledby="enum-title" hidden>
-          <div class="panel-head"><div><div class="eyebrow">Memo · complete candidate DAGs</div><h2 id="enum-title">Enumerated DAGs</h2></div><span class="eyebrow">click a row to draw it in Stage 1</span></div>
-          <div class="lane-meta" id="enum-meta"></div>
-          <ol class="rank" id="enumRows"></ol>
-        </section>
         <section class="panel lane" aria-labelledby="lane1-title">
-          <div class="panel-head"><div><div class="eyebrow">Stage 1</div><h2 id="lane1-title">Logical ASAP candidate</h2></div>
-            <label><span class="eyebrow" style="display:block">candidate</span><select id="pick1" aria-label="Logical ASAP candidate"></select></label></div>
+          <div class="panel-head"><div><div class="eyebrow">Stage 3 · physical DAG with its costs</div><h2 id="lane1-title">Selected plan</h2></div></div>
           <div class="lane-meta" id="lane1-meta"></div>
           <div class="cy" id="cy1"></div>
         </section>
-        <section class="panel lane" aria-labelledby="lane2-title">
-          <div class="panel-head"><div><div class="eyebrow">Stage 2 · costs from Stage 3</div><h2 id="lane2-title">Physical ASAP candidate</h2></div>
-            <label><span class="eyebrow" style="display:block">candidate</span><select id="pick2" aria-label="Physical ASAP candidate"></select></label></div>
-          <div class="lane-meta" id="lane2-meta"></div>
-          <div class="cy" id="cy2"></div>
-        </section>
         <section class="panel" aria-labelledby="views-title">
-          <div class="panel-head"><div><div class="eyebrow">Selected plan · what a runtime installs</div><h2 id="views-title">Materialized views</h2></div><span class="eyebrow">click a row to select its Stage 2 node</span></div>
+          <div class="panel-head"><div><div class="eyebrow">Selected plan · what a runtime installs</div><h2 id="views-title">Materialized views</h2></div><span class="eyebrow">click a row to select its plan node</span></div>
           <div class="lane-meta" id="views-meta"></div>
           <div class="table-wrap" id="materializedViews"></div>
         </section>
         <section class="panel lane" id="memoView" aria-labelledby="memoView-title" hidden>
-          <div class="panel-head"><div><div class="eyebrow">Stage 0 and Stage 1 · memo after each step</div><h2 id="memoView-title">Memo</h2></div>
+          <div class="panel-head"><div><div class="eyebrow">Stage 0 and Stage 1 · memo after each step, with the edges and pruned candidates of each stage</div><h2 id="memoView-title">Memo</h2></div>
             <nav class="tabs" id="memoTabs" aria-label="Memo step"></nav></div>
           <div class="lane-meta" id="memoView-meta"></div>
           <div class="cy" id="cyMemo"></div>
-        </section>
-        <section class="panel" id="memoPanel" aria-labelledby="memo-title" hidden>
-          <div class="panel-head"><div><div class="eyebrow">Joint search · selected plan</div><h2 id="memo-title">Search metrics and sharing</h2></div></div>
-          <div class="lane-meta" id="memo-meta"></div>
-          <div class="table-wrap" id="memoShared"></div>
         </section>
       </div>
       <div class="legend" aria-label="Legend">
@@ -226,8 +201,8 @@ tr.clickable:focus-visible td { outline: 2px solid var(--accent); outline-offset
         <span><span class="swatch" style="background:var(--cat-summary); border-color:var(--cat-summary-line)"></span>summary operator (build, merge, estimate, finalize)</span>
         <span><span class="swatch" style="background:var(--cat-scalar); border-color:var(--cat-scalar-line); border-style:dashed"></span>standalone scalar query</span>
         <span><span class="swatch" style="background:transparent; border-color:var(--accent); border-width:3px"></span>query root</span>
-        <span><span class="swatch" style="background:var(--time-ingest); border-color:var(--muted)"></span>Stage 2 fill: ingestion time (⏱ in the label)</span>
-        <span><span class="swatch" style="background:var(--time-query); border-color:var(--muted)"></span>Stage 2 fill: query time</span>
+        <span><span class="swatch" style="background:var(--time-ingest); border-color:var(--muted)"></span>plan fill: ingestion time (⏱ in the label)</span>
+        <span><span class="swatch" style="background:var(--time-query); border-color:var(--muted)"></span>plan fill: query time</span>
       </div>
       <section class="panel" aria-labelledby="details-title">
         <div class="panel-head"><h2 id="details-title">Details</h2><span class="eyebrow">click a node or edge</span></div>
@@ -236,7 +211,7 @@ tr.clickable:focus-visible td { outline: 2px solid var(--accent); outline-offset
     </div>
   </div>
 
-  <footer>Documents are written by the <code>asap_planner</code> devtool (<code>asap-stage-pipeline/v1</code>). Statistics in the examples are illustrative, so only each example's ranking is meaningful.</footer>
+  <footer>Documents are written by the <code>asap_planner</code> devtool (<code>asap-stage-pipeline/v2</code>). Statistics in the examples are illustrative, so only the relative costs within an example are meaningful.</footer>
 </div>
 
 <script src="cytoscape.min.js"></script>
@@ -244,7 +219,6 @@ tr.clickable:focus-visible td { outline: 2px solid var(--accent); outline-offset
 <script src="cytoscape-dagre.js"></script>
 <script src="node-style.js"></script>
 <script src="stages.js"></script>
-<script src="enumeration.js"></script>
 <script src="memo.js"></script>
 <script src="app.js"></script>
 <script src="workload-sets.js"></script>

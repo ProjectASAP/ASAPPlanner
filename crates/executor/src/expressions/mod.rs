@@ -22,7 +22,7 @@ pub(crate) fn promql_anchored_regex(pattern: &str) -> Result<regex::Regex, regex
 }
 
 /// `pattern` with each `{` that does not open a `{n}`, `{n,}` or `{n,m}`
-/// repetition escaped; escaped characters are kept as they are.
+/// repetition escaped; escaped characters are retained as they are.
 fn escape_literal_braces(pattern: &str) -> String {
     let mut escaped = String::with_capacity(pattern.len() + 1);
     let mut chars = pattern.chars();

@@ -16,7 +16,7 @@ stage.
     Logical ASAP candidates (Post-ASAP IR, untimed)
             | Stage 2: physical ASAP-aware optimization
             |   materialization: not materialized, at ingestion time,
-            |   or at query time (shared, or kept across evaluations)
+            |   or at query time (shared, or materialized across evaluations)
             v
     Physical ASAP candidates (timed)
             | Stage 3: plan selection

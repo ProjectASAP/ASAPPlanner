@@ -16,7 +16,7 @@ fn workload(query: &str, interval_ms: u64, max_error: f64, metric: &str) -> Valu
     json!({
         "query_workload": {"language": "promql", "query_batch": null, "repeating_queries": [{
             "query": query,
-            "demand": {"fixed_interval": interval_ms},
+            "demand": {"fixed_interval_at": {"interval": interval_ms, "evaluation_phase": 0}},
             "requirements": {"accuracy": {"max_error": max_error, "failure_probability": failure_probability}},
             "predictability": {"predictable": {"known_at": null}},
         }]},
@@ -79,16 +79,13 @@ const SECTIONS: [(&str, &[&str]); 5] = [
     ("stage1_pass1", &["Stage 1 Pass 1 output: Memo"]),
     (
         "stage1_pass2",
-        &[
-            "Stage 1 Pass 2, after local window composition",
-            "Stage 1 Pass 2 output = Stage 2 input: LogicalASAPMemoCandidates",
-        ],
+        &["Stage 1 Pass 2 output = Stage 2 input: LogicalASAPMemoCandidates"],
     ),
     (
         "stage2",
         &["Stage 2 output = Stage 3 input: PhysicalASAPMemoCandidates"],
     ),
-    ("stage3", &["Stage 3 output: Selection"]),
+    ("stage3", &["Stage 3 output: PhysicalASAPDAG and Selection"]),
 ];
 
 /// `--run-until <stage>` prints exactly the sections of every stage up to
@@ -116,13 +113,14 @@ fn run_until_prints_exactly_the_stages_up_to_it() {
     }
 }
 
-/// Pass 2 composes tumbling-window candidates over every legal width, not only
-/// the seed grid: a 5 m quantile within 1% every 60 s gets a mergeable
-/// summary's tumbling-window chain for every width that divides 60 s (in ms), from
-/// 1 ms to 60 s.
+/// Pass 2 adds chain groups at the greatest common divisor of the ranges
+/// and evaluation steps: a 5 m quantile within 1% every 60 s at phase 0
+/// gets its mergeable summary's chain of 60 s tumbling windows only.
 #[test]
-fn pass2_holds_a_tumbling_window_candidate_for_every_width_dividing_the_grid() {
-    let quantile = workload("quantile_over_time(0.5, data[5m])", 60_000, 0.01, "data");
+fn pass2_holds_tumbling_windows_at_the_gcd_of_ranges_and_steps() {
+    let mut quantile = workload("quantile_over_time(0.5, data[5m])", 60_000, 0.01, "data");
+    quantile["query_workload"]["repeating_queries"][0]["demand"] =
+        json!({"fixed_interval_at": {"interval": 60_000, "evaluation_phase": 0}});
     let text = stdout(planner(&quantile, &["--run-until", "stage1_pass2"]));
     let widths: BTreeSet<u64> = text
         .split("tumbling_window_width_ms=")
@@ -132,25 +130,26 @@ fn pass2_holds_a_tumbling_window_candidate_for_every_width_dividing_the_grid() {
             digits.parse().unwrap()
         })
         .collect();
-    let divisors: BTreeSet<u64> = (1..=60_000).filter(|w| 60_000 % w == 0).collect();
-    assert_eq!(widths, divisors);
+    assert_eq!(widths, BTreeSet::from([60_000]));
 }
 
 /// Stage 3 selects among the candidates Stage 2 lists: every candidate a
-/// selected node runs (`nodeN:  C<k>`) is a line of Stage 2's output.
+/// plan node runs (`n<k>:  C<c> = ...`) is a line of Stage 2's output.
 #[test]
 fn stage3_selects_candidates_stage2_lists() {
     let text = stdout(planner(&rate_workload(), &["--run-until", "stage3"]));
-    let (stage2, stage3) = text.split_once("Stage 3 output: Selection").unwrap();
+    let (stage2, stage3) = text
+        .split_once("Stage 3 output: PhysicalASAPDAG and Selection")
+        .unwrap();
     let selected: Vec<&str> = stage3
         .lines()
-        .filter(|line| line.starts_with("node") && line.contains(":  C"))
+        .filter(|line| line.starts_with('n') && line.contains(":  C"))
         .filter_map(|line| line.split_whitespace().nth(1))
         .collect();
     assert!(!selected.is_empty(), "{stage3}");
     for candidate in selected {
         assert!(
-            stage2.contains(&format!("\n    {candidate}:")),
+            stage2.contains(&format!("\n    {candidate} = ")),
             "{candidate} is not in Stage 2's output"
         );
     }
@@ -184,15 +183,7 @@ fn json_sections_of_stages_not_run_are_null() {
 
     let stage3 = document("stage3");
     assert!(stage3["stage2_physical_asap_optimization"].is_object());
-    assert!(stage3["stage3_plan_selection"]["selected_dag"].is_object());
-    assert_eq!(
-        stage3["stage1_logical_asap_optimization"]["candidates"][0]["id"],
-        "L1"
-    );
-    assert_eq!(
-        stage3["stage2_physical_asap_optimization"]["candidates"][0]["id"],
-        "P1"
-    );
+    assert!(stage3["stage3_plan_selection"]["plan"].is_object());
 }
 
 /// A missing `--run-until`, the old `pass1`/`pass2` stage names, and each

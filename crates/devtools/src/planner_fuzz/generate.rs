@@ -165,30 +165,6 @@ pub fn accuracy_ladder() -> [AccuracyTarget; 4] {
     ]
 }
 
-/// The next looser target than `target` on [`accuracy_ladder`], or `None`
-/// at the loosest. A target not on the ladder loosens to ε = 0.1.
-pub fn looser(target: &AccuracyTarget) -> Option<AccuracyTarget> {
-    let ladder = accuracy_ladder();
-    match ladder.iter().position(|t| t == target) {
-        Some(i) if i + 1 < ladder.len() => Some(ladder[i + 1].clone()),
-        Some(_) => None,
-        None if target.max_error < 0.1 => Some(ladder[3].clone()),
-        None => None,
-    }
-}
-
-/// The next tighter target than `target` on [`accuracy_ladder`], or `None`
-/// when it is exact. A target not on the ladder tightens to exact.
-pub fn tighter(target: &AccuracyTarget) -> Option<AccuracyTarget> {
-    let ladder = accuracy_ladder();
-    match ladder.iter().position(|t| t == target) {
-        Some(0) => None,
-        Some(i) => Some(ladder[i - 1].clone()),
-        None if target.is_exact() => None,
-        None => Some(AccuracyTarget::exact()),
-    }
-}
-
 impl PromqlSpec {
     pub fn render(&self) -> String {
         let selector = if self.matchers.is_empty() {
@@ -742,15 +718,5 @@ mod tests {
             "SELECT city, percentile_cont(0.9) WITHIN GROUP (ORDER BY value) AS v FROM metrics \
              WHERE ts > now() - INTERVAL '5' MINUTE AND city = 'NYC' GROUP BY city"
         );
-    }
-
-    /// The ladder loosens and tightens one step at a time.
-    #[test]
-    fn accuracy_ladder_steps() {
-        let ladder = accuracy_ladder();
-        assert_eq!(looser(&ladder[0]), Some(ladder[1].clone()));
-        assert_eq!(looser(&ladder[3]), None);
-        assert_eq!(tighter(&ladder[1]), Some(ladder[0].clone()));
-        assert_eq!(tighter(&ladder[0]), None);
     }
 }

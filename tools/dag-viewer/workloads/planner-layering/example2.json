@@ -8,7 +8,10 @@
       {
         "query": "SELECT COUNT(DISTINCT src_ip) FROM flows WHERE ts >= now() - INTERVAL '1 minute'",
         "demand": {
-          "fixed_interval": 10000
+          "fixed_interval_at": {
+            "interval": 10000,
+            "evaluation_phase": 0
+          }
         },
         "requirements": {
           "accuracy": {
@@ -27,7 +30,10 @@
       {
         "query": "SELECT -SUM(p * LN(p)) FROM (SELECT COUNT(*) * 1.0 / SUM(COUNT(*)) OVER () AS p FROM flows WHERE ts >= now() - INTERVAL '1 minute' GROUP BY src_ip)",
         "demand": {
-          "fixed_interval": 10000
+          "fixed_interval_at": {
+            "interval": 10000,
+            "evaluation_phase": 0
+          }
         },
         "requirements": {
           "accuracy": {
@@ -46,7 +52,10 @@
       {
         "query": "SELECT SQRT(SUM(CAST(c AS DOUBLE) * CAST(c AS DOUBLE))) FROM (SELECT src_ip, COUNT(*) AS c FROM flows WHERE ts >= now() - INTERVAL '1 minute' GROUP BY src_ip)",
         "demand": {
-          "fixed_interval": 10000
+          "fixed_interval_at": {
+            "interval": 10000,
+            "evaluation_phase": 0
+          }
         },
         "requirements": {
           "accuracy": {

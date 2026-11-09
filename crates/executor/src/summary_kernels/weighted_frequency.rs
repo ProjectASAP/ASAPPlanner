@@ -373,7 +373,7 @@ mod tests {
     use super::*;
 
     // Top-k membership equals the old kernel's, which rescored every
-    // candidate after every update and kept the `capacity` best: on small,
+    // candidate after every update and retained the `capacity` best: on small,
     // colliding sketches, an update also moves residents it did not touch,
     // and after every update the retained keys are the reference model's
     // (up to exact ties).
