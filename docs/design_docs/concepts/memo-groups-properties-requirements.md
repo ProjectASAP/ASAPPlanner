@@ -353,9 +353,10 @@ pub struct GroupProperties {
     /// Per output column: its value sign ("Value sign").
     pub column_sign: Vec<ValueSign>,
     /// Whether the result changes with the evaluation time: true under a
-    /// `TimeRange` relative to it (`sum_over_time(m[5m])`), false under a
-    /// fixed `@ T` or with no time at all. A stored result that does not
-    /// depend on it delivers on every context.
+    /// `TimeRange` relative to it (`sum_over_time(m[5m])`) or an expression
+    /// reading it (`time()`, `now()`), false under a fixed `@ T` or with no
+    /// time at all. A stored result that does not depend on it delivers on
+    /// every context.
     pub depends_on_evaluation_time: bool,
     /// What an aggregate group covers: a summary state, a chain, a merge
     /// over a chain's windows, or an exact `Aggregate` result; `None` for
@@ -407,6 +408,9 @@ pub struct Memo {
     pub queries: Vec<MemoQuery>,
     // Private: the groups `find_or_add_group` may return, by expression hash.
     groups_by_expression_hash: HashMap<u64, Vec<MemoGroupId>>,
+    // Private: the sign the data workload declares for each source column it
+    // declares one for; a `Scan`'s `column_sign` reads it ("Value sign").
+    declared_column_signs: BTreeMap<SourceColumn, ValueSign>,
 }
 
 pub struct MemoQuery {
@@ -418,6 +422,8 @@ pub struct MemoQuery {
 }
 
 impl Memo {
+    /// A memo without groups whose Scans read `declared_column_signs`.
+    pub fn new(declared_column_signs: BTreeMap<SourceColumn, ValueSign>) -> Self;
     pub fn groups(&self) -> &[MemoGroup];
     /// Adds a query; its root's groups and those below list it.
     pub fn add_query(&mut self, query: MemoQuery) -> usize;
@@ -604,7 +610,7 @@ Some error contracts hold only for values of a known sign: a relative error of a
 pub enum ValueSign { NonNegative, NonPositive, Unknown }
 ```
 
-A source's signs are declared per column in the data workload's source facts (for example, `latency`'s value is non-negative). A PromQL counter's value is non-negative without a declaration. A column without a declaration is `Unknown`.
+A source's signs are declared per column in the data workload's source facts (for example, `latency`'s value is non-negative). A PromQL counter's value is non-negative without a declaration. A column without a declaration is `Unknown`. `memo_of_queries` collects the declared signs of the sources the queries scan into the memo (`Memo::new`), and `find_or_add_group` reads them for a `Scan`.
 
 | Operator | Output column sign |
 |---|---|
@@ -612,11 +618,14 @@ A source's signs are declared per column in the data workload's source facts (fo
 | `Filter`, `TimeRange`, `TimeShift`, `Sort`, `Limit`, `Dedup`, column `Project` | the input's, unchanged |
 | `abs` | `NonNegative` |
 | negation | flipped: `NonNegative` ↔ `NonPositive` |
-| sum, avg, min, max, quantile, top-k | the input value's sign |
-| count, distinct count, `rate`, `increase` | `NonNegative` |
-| `SummaryAgg`, chain | the state records its input value's sign |
-| `SummaryMerge` | the inputs' sign when they all agree, else `Unknown` |
-| readouts | the state's recorded sign |
+| numeric literal, numeric cast | the literal's sign; the operand's sign |
+| sum, avg, min, max, quantile, top-k, `first_over_time`, `last_over_time` | the input value's sign |
+| count, distinct count, and the other counts and spreads (`count_values`, `changes`, `resets`, `group`, `absent`, `present_over_time`, `stddev`, `stdvar`, frequency L2 norm and entropy) | `NonNegative` |
+| `rate`, `irate`, `increase` | `NonNegative` over a `NonNegative` input (a counter); else `Unknown`, since a decrease reads as a reset |
+| vector comparison, `and`, `unless`; `or`; comparison with `bool` | the left side's value sign; the sides' sign when they agree; `NonNegative` (0 or 1) |
+| `SummaryAgg`, chain | the state records the sign of the values it is updated with (`window_end` is `Unknown`) |
+| `SummaryMerge` | the inputs' sign when they all agree, else `Unknown`; over a chain's windows, the chain's build's |
+| readouts | the state's recorded sign; a distinct count, frequency L2 norm or entropy, and an exact count's finalization: `NonNegative` |
 | any other expression | `Unknown` |
 
 **Example.** `topk(5, sum by (host)(gauge))` over a gauge with no declared sign: the sum's sign is `Unknown`, so Stage 2 prunes the Count-Min heap builds (`CountMinWeightsNotProvenNonNegative`) and the query uses an exact top-k. Over `rate(requests_total[1m])`, the sum is `NonNegative` and the Count-Min builds stay.
