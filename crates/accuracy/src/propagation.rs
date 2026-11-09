@@ -1599,3 +1599,42 @@ pub fn pinned_column(conjunct: &ScalarExpr) -> Option<usize> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use asap_types::ir::schema::{NonNegativeWeightProof, SketchAlgorithm, SummaryInputExpr};
+
+    /// A Count-Min estimate has a bound only over weights proven
+    /// non-negative: an open requirement (`RawDataSamplesOfMetric`) is not a proof.
+    #[test]
+    fn count_min_estimate_has_no_bound_over_an_open_requirement() {
+        let summary_type = FieldDataType::Sketch(SketchAlgorithm::Cms);
+        let query = SketchStatistic::PointCount {
+            key: ColumnRef::SampleValue,
+            value: None,
+        };
+        let with = |weight_domain| SummaryUpdate {
+            item: Some(SummaryInputExpr::Column(ColumnRef::SampleValue)),
+            weight: SummaryInputExpr::Column(ColumnRef::SampleValue),
+            weight_domain,
+        };
+        assert!(!estimate_has_bound(
+            &summary_type,
+            &with(WeightDomain::RawDataSamplesOfMetric { metric: "m".into() }),
+            &query
+        ));
+        assert!(!estimate_has_bound(
+            &summary_type,
+            &with(WeightDomain::UnknownOrSigned),
+            &query
+        ));
+        assert!(estimate_has_bound(
+            &summary_type,
+            &with(WeightDomain::NonNegative {
+                proof: NonNegativeWeightProof::CounterRawDataSamples
+            }),
+            &query
+        ));
+    }
+}

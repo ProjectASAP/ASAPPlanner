@@ -30,4 +30,5 @@ mod sharing_issue_regressions;
 mod sql_cardinality;
 mod sql_frequency;
 mod sql_to_post_asap;
+mod stage1_logical_asap_optimization;
 mod time_range;
