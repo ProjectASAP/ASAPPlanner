@@ -59,6 +59,14 @@ impl AccuracyMetric {
     pub const ABSOLUTE_STREAM_L2: Self = Self::Absolute {
         scale: Some(NormScale::StreamL2),
     };
+    /// Every metric, for a contract or a target read in each of them.
+    pub const ALL: [Self; 5] = [
+        Self::ABSOLUTE,
+        Self::ABSOLUTE_STREAM_L1,
+        Self::ABSOLUTE_STREAM_L2,
+        Self::Relative,
+        Self::Rank,
+    ];
 }
 
 /// The wire name of an [`AccuracyMetric`].

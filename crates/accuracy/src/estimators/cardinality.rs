@@ -32,33 +32,76 @@ use super::*;
 
 /// The smallest `k` `asap_sketchlib`'s KMV estimate `(k-1)/U` is defined for.
 const KMV_MIN_K: u32 = 2;
-/// The largest `k` sizing returns.
-#[cfg(test)]
-const KMV_MAX_K: u32 = 1 << 26;
-
 pub(super) fn guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
     query: &SketchStatistic,
 ) -> Option<AccuracyGuarantee> {
-    match params {
-        SketchParams::Kmv { k } => {
-            // Its relative standard error.
-            let eps = 1.0 / f64::from(k.saturating_sub(2).max(1)).sqrt();
-            Some(super::bounded_guarantee(
-                algorithm,
-                params,
-                query,
-                AccuracyMetric::Relative,
-                eps,
-                ProbabilityExpr::Constant {
-                    value: kmv_failure_probability(*k, eps),
-                },
-                "kmv_exact_below_k_chernoff_v1",
-            ))
-        }
-        _ => None,
+    let SketchParams::Kmv { k } = params else {
+        return None;
+    };
+    // Its relative standard error.
+    let eps = 1.0 / f64::from(k.saturating_sub(2).max(1)).sqrt();
+    Some(kmv_guarantee(
+        algorithm,
+        params,
+        query,
+        eps,
+        kmv_failure_probability(*k, eps),
+    ))
+}
+
+/// The smallest relative error `k` misses with probability at most
+/// `failure_probability` ([`kmv_failure_probability`], by bisection);
+/// `None` when no error up to 1 does.
+pub(super) fn guarantee_at(
+    algorithm: &SketchAlgorithm,
+    params: &SketchParams,
+    query: &SketchStatistic,
+    failure_probability: f64,
+) -> Option<AccuracyGuarantee> {
+    let SketchParams::Kmv { k } = params else {
+        return None;
+    };
+    if kmv_failure_probability(*k, 1.0) > failure_probability {
+        return None;
     }
+    let (mut met, mut missed) = (1.0, 0.0);
+    for _ in 0..60 {
+        let eps = (met + missed) / 2.0;
+        if kmv_failure_probability(*k, eps) <= failure_probability {
+            met = eps;
+        } else {
+            missed = eps;
+        }
+    }
+    Some(kmv_guarantee(
+        algorithm,
+        params,
+        query,
+        met,
+        failure_probability,
+    ))
+}
+
+fn kmv_guarantee(
+    algorithm: &SketchAlgorithm,
+    params: &SketchParams,
+    query: &SketchStatistic,
+    eps: f64,
+    failure_probability: f64,
+) -> AccuracyGuarantee {
+    super::bounded_guarantee(
+        algorithm,
+        params,
+        query,
+        AccuracyMetric::Relative,
+        eps,
+        ProbabilityExpr::Constant {
+            value: failure_probability,
+        },
+        "kmv_exact_below_k_chernoff_v1",
+    )
 }
 
 /// The probability that `asap_sketchlib`'s KMV with `k` misses relative
@@ -77,38 +120,6 @@ pub(crate) fn kmv_failure_probability(k: u32, eps: f64) -> f64 {
     };
     // Rounded up, so rounding never certifies a smaller probability.
     ((over + under) * (1.0 + 1e-12)).min(1.0)
-}
-
-/// The smallest `k` whose KMV failure probability at relative error `eps`
-/// is at most `delta` ([`kmv_failure_probability`]), up to `2^26`; a
-/// degenerate `eps` or `delta` saturates to `2^26`.
-#[cfg(test)]
-pub(crate) fn kmv_k(eps: f64, delta: f64) -> u32 {
-    if !(eps.is_finite() && eps > 0.0 && delta.is_finite() && delta > 0.0) {
-        return KMV_MAX_K;
-    }
-    // The overestimate term alone at most `δ` bounds `k` below; both terms
-    // at most `δ/2` bound it above.
-    let k_at = |ln_inverse: f64| {
-        saturating_ceil(
-            1.0 + (1.0 + eps) * (2.0 + eps) * ln_inverse / (eps * eps),
-            KMV_MIN_K,
-            KMV_MAX_K,
-        )
-    };
-    let (mut lo, mut hi) = (k_at((1.0 / delta).ln()), k_at((2.0 / delta).ln()));
-    if kmv_failure_probability(hi, eps) > delta {
-        return KMV_MAX_K;
-    }
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        if kmv_failure_probability(mid, eps) <= delta {
-            hi = mid;
-        } else {
-            lo = mid + 1;
-        }
-    }
-    hi
 }
 
 #[cfg(test)]

@@ -19,8 +19,3 @@ pub(super) fn guarantee(
         "ddsketch_relative_error_alpha_v1",
     ))
 }
-
-#[cfg(test)]
-pub(super) fn size_params(epsilon: f64) -> SketchParams {
-    SketchParams::DDSketch { alpha: epsilon }
-}

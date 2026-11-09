@@ -1,38 +1,29 @@
 //! `asap-accuracy` — the accuracy rules the planning stages share: the
-//! planner's built-in analytical rules (estimators, composition, guarantee
-//! propagation through a DAG, sizing, budget split and a target's comparison
-//! limit [`target_limit`]), the deployment's measured accuracy ([`AccuracyEvidence`]) and $\alpha^{\log}$
-//! of a logical edge ([`producer_satisfies_logical_requirements`]).
-//!
-//! Estimator models derive theoretical guarantees, composition propagates
-//! them, `propagation` composes them through every node of a DAG, `sizing`
-//! sizes a summary for its target, the budget split sizes each approximate
-//! input of a composition for an equal share of its target, and `evidence`
-//! holds the scoped contracts and statistics the rules consult.
+//! theoretical guarantee of reading a statistic from a summary with given
+//! parameters ([`theoretical_guarantee`], from the per-algorithm estimators),
+//! the deployment's measured accuracy ([`AccuracyEvidence`]), a target's
+//! comparison limit [`target_limit`], and $\alpha^{\log}$ of a logical edge
+//! ([`producer_satisfies_logical_requirements`]). How an error propagates
+//! through an operator is its error contract
+//! (`LogicalRequirements::error_propagation` in `asap-types`), applied per
+//! edge.
 //! See `docs/design_docs/concepts/accuracy-models.md` for the design.
 //!
 //! It depends only on `asap-types`, never on a stage crate, so every stage
 //! can use it.
 
-mod budget;
-pub mod composition;
 pub mod estimators;
-mod evidence;
-mod function_rules;
 mod model;
-pub mod propagation;
 pub mod sizing;
-#[cfg(feature = "test-support")]
-pub mod test_support;
 
-pub use budget::per_input_target;
 pub use estimators::theoretical_guarantee;
-pub(crate) use evidence::PropagationStats;
-pub use model::{producer_satisfies_logical_requirements, AccuracyEvidence, NoMeasuredGuarantees};
+pub use model::{
+    accepted_metrics, producer_satisfies_logical_requirements, readout_metric, AccuracyEvidence,
+    NoMeasuredGuarantees,
+};
 
 use asap_types::ir::properties::{
-    AccuracyError, AccuracyGuarantee, AccuracyMetric, AccuracyTarget, BoundExpr,
-    CompositionOperator, GuaranteeSource, ProbabilityExpr,
+    AccuracyGuarantee, AccuracyMetric, BoundExpr, GuaranteeSource, ProbabilityExpr,
 };
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic};
 
