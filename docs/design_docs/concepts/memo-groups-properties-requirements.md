@@ -1214,7 +1214,7 @@ $$
 \min\sum_{v\in\mathcal C}w_vx_v+\sum_{(u,c,i)\in\mathcal E}c_{u,c,i}\,y_{u,c,i}.
 $$
 
-A cost term goes on the edge exactly when it changes if another producer of the same group is chosen: reading or transferring u's output, and the part of c's work that scales with u's form (its θ, its number of windows). Everything else is in $w_v$: v's own build or ingestion from the logical size of its inputs, its own storage $\pi_v h_v$, and its own output. So no producer has to stand for the others, and every term is exact. Section 5 indexes both terms by execution context.
+A cost term goes on the edge exactly when it changes if another producer of the same group is chosen: reading or transferring u's output, and the part of c's work that scales with u's form (its θ, its number of windows). Everything else is in $w_v$: v's own build or ingestion from the logical size of its inputs (the most any producer v may read, on an admissible edge, outputs; an ingestion-time consumer reads one batch of raw data, also from a Scan materialized at ingestion time), its own storage $\pi_v h_v$, and its own output. So no producer has to stand for the others, and every term is exact. Section 5 indexes both terms by execution context.
 
 #### When the candidate graph has a cycle
 
