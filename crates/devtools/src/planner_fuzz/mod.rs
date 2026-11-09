@@ -34,7 +34,7 @@ pub mod relations;
 pub mod report;
 pub mod shrink;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
@@ -445,25 +445,69 @@ impl Planner {
         todo!("#1207 PR 9: the selected plan's cost (plan_cost) and roots from its PhysicalASAPDAG")
     }
 
-    /// Stage 2 and Stage 3 over the logical plan `roots` of `workload`'s
-    /// queries (one root per query, in order): every materialization
-    /// assignment implemented and priced, the cheapest selected, with the
-    /// same models as [`plan`](Self::plan). Guarantees are composed again
-    /// first, so a derived node carries the guarantee of what it reads, and
-    /// summaries are sized for their consumers as Pass 1 sizes them.
-    /// With `last_root_is_key_filter`, the last root is a `Filter` on
-    /// group-key columns only and keeps its input's guarantee (whole groups
-    /// selected by an exact key keep each remaining row's bound), which
-    /// Stage 1's composition, giving no guarantee to any filter over
-    /// approximate rows, does not know.
-    pub fn price(
-        &self,
-        workload: &FuzzWorkload,
-        roots: &[QueryRoot],
-        last_root_is_key_filter: bool,
-    ) -> Result<Priced, String> {
-        let _ = (workload, roots, last_root_is_key_filter);
-        todo!("#1207 PR 6: price a witness plan through the new Stage 2 and Stage 3")
+    /// The planning stages over the logical plan `roots` of `workload`'s
+    /// queries (one root per query, in order), with the same models as
+    /// [`plan`](Self::plan): the selected plan's cost (`plan_cost`) and the
+    /// cost of the nodes only its last root reads.
+    pub fn price(&self, workload: &FuzzWorkload, roots: &[QueryRoot]) -> Result<Priced, String> {
+        let planning = workload.planning_workload();
+        let entries: Vec<_> = planning.query_workload.entries().collect();
+        let cost_inputs = self.cost_inputs();
+        let deployment = workload.deployment();
+        let models = PlanningModels::builtin()
+            .with_cost_inputs(&cost_inputs)
+            .with_deployment_capabilities(&deployment)
+            .with_ignore_accuracy_guarantees(!self.settings.enforce_accuracy_guarantees);
+        let run = run_search_over(
+            roots.to_vec(),
+            &entries,
+            &workload.data,
+            models,
+            PlanSearchSettings::default(),
+        )
+        .map_err(|e| format!("witness: {e}"))?;
+        let (plan, _) = run
+            .run
+            .selection
+            .as_ref()
+            .map_err(|e| format!("witness selection: {e}"))?;
+        let (cost, _) = asap_cost::plan_cost(plan, &entries, &workload.data, &cost_inputs)
+            .map_err(|(node, error)| format!("witness cost, node {node}: {error}"))?;
+        let cost_per_second = cost
+            .cost_per_second
+            .ok_or("no cost per second (cost model 3)")?;
+        let mut inputs: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        for edge in &plan.edges {
+            inputs.entry(edge.consumer).or_default().push(edge.producer);
+        }
+        let reached = |root| {
+            let mut seen = BTreeSet::new();
+            let mut stack = vec![root];
+            while let Some(node) = stack.pop() {
+                if seen.insert(node) {
+                    stack.extend(inputs.get(&node).into_iter().flatten().copied());
+                }
+            }
+            seen
+        };
+        let reached_by_root: Vec<BTreeSet<_>> = plan.roots.iter().map(|r| reached(*r)).collect();
+        let (last, others) = reached_by_root.split_last().ok_or("no roots")?;
+        let private: Vec<_> = last
+            .iter()
+            .filter(|node| others.iter().all(|set| !set.contains(node)))
+            .filter_map(|node| cost.per_node.get(node))
+            .collect();
+        Ok(Priced {
+            selected: "selected".into(),
+            cost_per_second,
+            derived_root: PrivateNodes {
+                cost_per_second: private.iter().filter_map(|n| n.cost_per_second).sum(),
+                operators: private
+                    .iter()
+                    .map(|n| format!("{:?}", n.operator))
+                    .collect(),
+            },
+        })
     }
 
     /// [`price`](Self::price) of `workload`'s selected logical plan
@@ -478,7 +522,7 @@ impl Planner {
         if let Some(priced) = self.reference_prices.get(&key) {
             return priced.clone();
         }
-        let priced = self.price(workload, roots, false);
+        let priced = self.price(workload, roots);
         self.reference_prices.insert(key, priced.clone());
         priced
     }
