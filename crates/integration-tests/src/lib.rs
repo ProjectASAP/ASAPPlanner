@@ -153,6 +153,23 @@ pub mod planning {
         }
     }
 
+    /// The workload entry of the single query these tests plan: `accuracy`,
+    /// everything else the default.
+    pub fn single_query_entry(
+        accuracy: AccuracyTarget,
+    ) -> asap_types::workload::QueryWorkloadEntry {
+        asap_types::workload::QueryWorkloadEntry {
+            query: Default::default(),
+            requirements: asap_types::workload::QueryRequirements {
+                accuracy,
+                max_latency_ms: None,
+            },
+            predictability: Default::default(),
+            recurrence: Default::default(),
+            range_evaluation: None,
+        }
+    }
+
     /// Every planning stage's output for the single query `root`.
     pub fn run_all_stages(
         root: Rc<OperatorNode>,
@@ -170,16 +187,7 @@ pub mod planning {
         let data = declared_data(&root);
         asap_devtools::planning_stages::run_planning_stages_over(
             vec![QueryRoot::Operator(root)],
-            &[asap_types::workload::QueryWorkloadEntry {
-                query: Default::default(),
-                requirements: asap_types::workload::QueryRequirements {
-                    accuracy,
-                    max_latency_ms: None,
-                },
-                predictability: Default::default(),
-                recurrence: Default::default(),
-                range_evaluation: None,
-            }],
+            &[single_query_entry(accuracy)],
             &data,
             models,
         )
@@ -203,22 +211,7 @@ pub mod planning {
         data: &DataWorkload,
         settings: &asap_cost::CostInputs,
     ) -> f64 {
-        let recurrence: Vec<_> = entries
-            .iter()
-            .map(|entry| entry.recurrence.clone())
-            .collect();
-        let range_evaluations: Vec<_> =
-            entries.iter().map(|entry| entry.range_evaluation).collect();
-        let (cost, _) = asap_cost::plan_cost(
-            plan,
-            &asap_cost::node_map(plan),
-            &recurrence,
-            &range_evaluations,
-            data,
-            settings,
-            1.0,
-        )
-        .unwrap();
+        let (cost, _) = asap_cost::plan_cost(plan, entries, data, settings).unwrap();
         cost.cost_per_second.expect("cost model 1 or 2")
     }
 
