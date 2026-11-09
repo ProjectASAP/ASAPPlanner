@@ -8,7 +8,10 @@
       {
         "query": "SELECT service, COUNT(DISTINCT user_id) AS value FROM http WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY service",
         "demand": {
-          "fixed_interval": 60000
+          "fixed_interval_at": {
+            "interval": 60000,
+            "evaluation_phase": 0
+          }
         },
         "requirements": {
           "accuracy": {
@@ -27,7 +30,10 @@
       {
         "query": "SELECT service, endpoint, COUNT(DISTINCT user_id) AS value FROM http WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY service, endpoint",
         "demand": {
-          "fixed_interval": 60000
+          "fixed_interval_at": {
+            "interval": 60000,
+            "evaluation_phase": 0
+          }
         },
         "requirements": {
           "accuracy": {

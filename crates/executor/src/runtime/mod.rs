@@ -102,9 +102,9 @@ pub(crate) fn execute<'r, V: 'r, S: Clone + PartialEq + Debug + 'r>(
             context: context.clone(),
             queue: VecDeque::new(),
             base: 0,
-            next_reader: 0,
+            next_consumer: 0,
             batches_polled: 0,
-            readers: BTreeMap::new(),
+            consumers: BTreeMap::new(),
             waiters: BTreeMap::new(),
             finished: false,
             failure: None,
@@ -126,9 +126,9 @@ struct Producer<'a, V> {
     context: RunContext,
     queue: VecDeque<SharedValue<V>>,
     base: u64,
-    next_reader: u64,
+    next_consumer: u64,
     batches_polled: usize,
-    readers: BTreeMap<u64, u64>,
+    consumers: BTreeMap<u64, u64>,
     waiters: BTreeMap<u64, Waker>,
     finished: bool,
     failure: Option<Error>,
@@ -136,7 +136,7 @@ struct Producer<'a, V> {
 impl<V> Producer<'_, V> {
     fn trim(&mut self) {
         let minimum = self
-            .readers
+            .consumers
             .values()
             .copied()
             .min()
@@ -148,7 +148,7 @@ impl<V> Producer<'_, V> {
         for (_, waker) in std::mem::take(&mut self.waiters) {
             waker.wake();
         }
-        if self.readers.is_empty() {
+        if self.consumers.is_empty() {
             self.stream = None;
             self.queue.clear();
         }
@@ -156,22 +156,22 @@ impl<V> Producer<'_, V> {
 }
 pub struct Input<'a, V> {
     producer: Rc<RefCell<Producer<'a, V>>>,
-    reader: u64,
+    consumer: u64,
     done: bool,
 }
 impl<'a, V> Input<'a, V> {
     fn subscribe(producer: Rc<RefCell<Producer<'a, V>>>) -> Self {
-        let reader = {
+        let consumer = {
             let mut state = producer.borrow_mut();
-            let id = state.next_reader;
-            state.next_reader += 1;
+            let id = state.next_consumer;
+            state.next_consumer += 1;
             let base = state.base;
-            state.readers.insert(id, base);
+            state.consumers.insert(id, base);
             id
         };
         Self {
             producer,
-            reader,
+            consumer,
             done: false,
         }
     }
@@ -179,8 +179,8 @@ impl<'a, V> Input<'a, V> {
 impl<V> Drop for Input<'_, V> {
     fn drop(&mut self) {
         let mut state = self.producer.borrow_mut();
-        state.readers.remove(&self.reader);
-        state.waiters.remove(&self.reader);
+        state.consumers.remove(&self.consumer);
+        state.waiters.remove(&self.consumer);
         state.trim();
     }
 }
@@ -199,21 +199,21 @@ impl<V> Stream for Input<'_, V> {
             state.stream = None;
             state.queue.clear();
         }
-        let position = state.readers[&this.reader];
+        let position = state.consumers[&this.consumer];
         let index = (position - state.base) as usize;
         if let Some(value) = state.queue.get(index).cloned() {
-            state.readers.insert(this.reader, position + 1);
+            state.consumers.insert(this.consumer, position + 1);
             state.trim();
             return Poll::Ready(Some(Ok(value)));
         }
         if state.finished {
             this.done = true;
-            state.readers.remove(&this.reader);
+            state.consumers.remove(&this.consumer);
             let failure = state.failure.clone();
             state.trim();
             return Poll::Ready(failure.map(Err));
         }
-        state.waiters.insert(this.reader, cx.waker().clone());
+        state.waiters.insert(this.consumer, cx.waker().clone());
         if state.queue.len() >= state.context.control.limits.max_buffered_batches {
             return Poll::Pending;
         }
@@ -241,7 +241,7 @@ impl<V> Stream for Input<'_, V> {
                         _reservation: Rc::new(reservation),
                     };
                     state.queue.push_back(value.clone());
-                    state.readers.insert(this.reader, position + 1);
+                    state.consumers.insert(this.consumer, position + 1);
                     state.trim();
                     Poll::Ready(Some(Ok(value)))
                 }
@@ -250,7 +250,7 @@ impl<V> Stream for Input<'_, V> {
                     state.finished = true;
                     state.stream = None;
                     this.done = true;
-                    state.readers.remove(&this.reader);
+                    state.consumers.remove(&this.consumer);
                     state.trim();
                     Poll::Ready(Some(Err(error)))
                 }
@@ -268,7 +268,7 @@ impl<V> Stream for Input<'_, V> {
                 state.finished = true;
                 state.stream = None;
                 this.done = true;
-                state.readers.remove(&this.reader);
+                state.consumers.remove(&this.consumer);
                 state.trim();
                 Poll::Ready(error.map(Err))
             }

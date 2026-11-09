@@ -35,8 +35,8 @@ pub fn documented_patterns() -> Vec<DocumentedPattern> {
         DocumentedPattern {
             pattern: "Looser accuracy target reads the tighter build (max-sized shared summary; exact meets any ε)",
             doc_reference: "accuracy-models.md \"Sharing across consumers\" L308–368; planner-layering.md Pass 2 summary-capability rule L530–533, L640–641",
-            relation: Some(Relation::LooserAccuracy),
-            note: "",
+            relation: None,
+            note: "the fuzzer plans with accuracy not enforced, so no relation can check an accuracy target",
         },
         DocumentedPattern {
             pattern: "Slice: a filter on a group key over a grouped result or summary",
@@ -105,7 +105,7 @@ pub fn documented_patterns() -> Vec<DocumentedPattern> {
             note: "the merge operator is implemented; the docs name no Pass 2 rule that creates it",
         },
         DocumentedPattern {
-            pattern: "Tumbling windows kept across evaluations when the deployment retains query-time results",
+            pattern: "Tumbling windows materialized across evaluations when the deployment retains query-time results",
             doc_reference: "planner-layering.md Materialization L889–893",
             relation: Some(Relation::ResultsRetained),
             note: "a capability never raises cost",
@@ -192,7 +192,7 @@ pub struct Finding {
     pub shrink_attempts: Option<usize>,
     pub check: Check,
     pub measurement: Measurement,
-    /// The open issue a reader should compare it with, when the relation
+    /// The open issue to compare it with, when the relation
     /// matches one (a guess from the relation, not a proof).
     pub possibly_known_issue: Option<&'static str>,
     pub draft: PathBuf,
@@ -356,7 +356,6 @@ pub fn draft_key(check: &Check, measurement: &Measurement) -> String {
 fn possibly_known_issue(relation: Relation, check: &Check) -> Option<&'static str> {
     let sql = check.workload.language == Language::Sql;
     match relation {
-        Relation::LooserAccuracy => Some("#903"),
         Relation::FilterOnGroupKey if sql => Some("#902"),
         Relation::FilterOnGroupKey => Some("#891"),
         _ => None,
@@ -743,7 +742,7 @@ fn derivation_text(witness: &Witness) -> String {
              plan, planned with `W`"
         ),
         Witness::UnivMonOnly => {
-            "`W ∪ {q'}` planned with UnivMon as the only sketch family, priced with every family"
+            "`W ∪ {q'}` planned with UnivMon as the only sketch family, costed with every family"
                 .into()
         }
         Witness::LongerWindow { window_ms, rollup } => {
@@ -796,9 +795,6 @@ fn write_draft(
         .map(|q| q.text().to_string())
         .unwrap_or_default();
     let title = match check.relation {
-        Relation::LooserAccuracy => {
-            format!("`{q}` at a looser accuracy target does not read the tighter query's result")
-        }
         Relation::FilterOnGroupKey => {
             format!("A query filtered on a group key does not read `{q}`'s grouped result")
         }
@@ -841,7 +837,6 @@ fn write_draft(
         Relation::EquivalentRangeFunction => {
             format!("`{q}` with `rate` and `increase` swapped does not scale its result")
         }
-        Relation::TighterAccuracy => "Tightening an accuracy target lowers the planned cost".into(),
         Relation::AddedQuery => "Adding a query lowers the planned cost".into(),
         Relation::NoRawRetention => "Dropping raw-data retention lowers the planned cost".into(),
         Relation::ResultsRetained => "Retaining query-time results raises the planned cost".into(),
@@ -863,15 +858,10 @@ fn write_draft(
     };
     text.push_str(&format!(
         "Found by `planner_fuzz` (seed {seed}, case {}, relation `{}`), {shrunk}. \
-         Search: {:?}; accuracy guarantees {}.\n\n",
+         Search: {:?}; accuracy not enforced.\n\n",
         finding.case,
         check.relation.name(),
         settings.search,
-        if settings.enforce_accuracy_guarantees {
-            "enforced"
-        } else {
-            "ignored"
-        },
     ));
     text.push_str(&format!(
         "`{base_name}` (save as `base.json`):\n\n```json\n{}\n```\n\n",
@@ -889,8 +879,8 @@ fn write_draft(
     text.push_str(&format!("```json\n{}\n```\n\n", workload_json(&related)));
     text.push_str(&format!(
         "```sh\n{}\n{}\n```\n\n",
-        base.asap_planner_command("base.json", settings),
-        related.asap_planner_command("related.json", settings),
+        base.asap_planner_command("base.json"),
+        related.asap_planner_command("related.json"),
     ));
     text.push_str("| Workload | Selected plan | Cost per second |\n|---|---|---|\n");
     text.push_str(&format!(
@@ -907,7 +897,7 @@ fn write_draft(
                 "Witness: `W`'s plan with `q'` derived by {}",
                 derivation_text(d)
             ),
-            None => "The other side's plan, priced for this workload".into(),
+            None => "The other side's plan, costed for this workload".into(),
         };
         text.push_str(&format!(
             "| {label} | `{}` | {:.6} |\n",
@@ -923,7 +913,7 @@ fn write_draft(
     match witness.and_then(|w| w.derive_cost_per_second.map(|d| (w, d))) {
         Some((w, derive_cost)) => text.push_str(&format!(
             "**Expected:** a candidate for `{related_name}` costing at most about {:.6} per second \
-             (the witness): `W`'s plan ({:.6} as Stage 3 prices it) plus `q'` derived for \
+             (the witness): `W`'s plan ({:.6} as `asap_cost::plan_cost` costs it) plus `q'` derived for \
              {derive_cost:.6}. Of that, the nodes only `q'` reads cost {:.6} ({}).\n\n",
             w.cost_per_second,
             w.base_reference_cost_per_second.unwrap_or_default(),
@@ -939,7 +929,7 @@ fn write_draft(
             check.relation.statement(),
             witness
                 .map(|w| format!(
-                    " The other side's plan prices at {:.6} per second for this workload.",
+                    " The other side's plan costs at {:.6} per second for this workload.",
                     w.cost_per_second
                 ))
                 .unwrap_or_default()
@@ -948,9 +938,10 @@ fn write_draft(
     text.push_str("## Why it happens\n\nNot diagnosed yet. ");
     if marginal {
         text.push_str(
-            "The witness is priced by Stage 2 and Stage 3 (`optimize_physical_asap`, \
-             `select_plan`) with the same models as the search, so the cheaper plan passes \
-             Stage 3's checks, but the search did not select it.",
+            "The witness is costed by `asap_cost::plan_cost` with the same cost inputs as \
+             the search, its nodes from `W`'s plan with the timing, lifetime and parameters \
+             that plan gave them, but the search did not select it. Its accuracy is not \
+             checked: the fuzzer plans with accuracy not enforced.",
         );
         if witness.is_some_and(|w| w.key_filter_keeps_input_guarantee) {
             text.push_str(
@@ -967,8 +958,8 @@ fn write_draft(
         );
         if witness.is_some() {
             text.push_str(
-                " The other side's logical plan, priced for this workload by Stage 2 and \
-                 Stage 3, is that plan.",
+                " The other side's plan, costed for this workload by \
+                 `asap_cost::plan_cost`, is that plan.",
             );
         }
     }
@@ -996,17 +987,12 @@ fn write_draft(
 /// design docs' reuse patterns with each relation's status in this run.
 pub fn summary_markdown(summary: &Summary) -> String {
     let mut text = format!(
-        "# planner_fuzz summary\n\nSeed {}, {} cases, {} checks, {:.0} s. Search {:?}, accuracy guarantees {}.\n\n",
+        "# planner_fuzz summary\n\nSeed {}, {} cases, {} checks, {:.0} s. Search {:?}, accuracy not enforced.\n\n",
         summary.seed,
         summary.cases_run,
         summary.checks_run,
         summary.elapsed_s,
         summary.settings.search,
-        if summary.settings.enforce_accuracy_guarantees {
-            "enforced"
-        } else {
-            "ignored"
-        },
     );
     text.push_str("| Relation | Holds | Violated | Distinct violations | Inconclusive | Crashed |\n|---|---|---|---|---|---|\n");
     for (relation, tally) in &summary.tallies {

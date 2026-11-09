@@ -2130,7 +2130,7 @@ async fn arg_min_lowers_to_its_own_extension_kind() {
 
 #[tokio::test]
 async fn arg_max_payload_preserves_both_column_names() {
-    // Core never resolves an `Extension`'s payload, so both columns are kept
+    // Core never resolves an `Extension`'s payload, so both columns are retained
     // as validated column `ColumnRef`s (with their qualifier) in `payload`,
     // not run through positional `ColumnId` binding -- see
     // `lower_arg_selector`'s doc.
@@ -3190,11 +3190,11 @@ async fn other_time_conditions_stay_scan_predicates() {
             .unwrap_or_else(|e| panic!("{sql}: {e}"));
         assert!(trailing_window(&qe).is_none(), "{sql}: {qe:#?}");
         let scan = scan_of(&qe);
-        let NonASAPOp::Scan { predicates: kept, .. } = op(scan) else {
+        let NonASAPOp::Scan { predicates: remaining, .. } = op(scan) else {
             unreachable!()
         };
         // The conditions stay together as one predicate on the `Scan`.
-        assert_eq!(kept.len(), 1, "{sql}: {scan:#?}");
+        assert_eq!(remaining.len(), 1, "{sql}: {scan:#?}");
     }
 }
 

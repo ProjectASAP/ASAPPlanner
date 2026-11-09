@@ -160,21 +160,21 @@ pub(super) fn execute<'a>(
                 .into_iter()
                 .zip(matchable_rows(&left_keys))
                 .map(|(id, matchable)| {
-                    let kept = matchable && members.contains(&id);
-                    if kept && *require_complete_right {
+                    let remaining = matchable && members.contains(&id);
+                    if remaining && *require_complete_right {
                         covered.insert(id);
                     }
-                    Some(kept)
+                    Some(remaining)
                 })
                 .collect::<arrow::array::BooleanArray>();
             work.checkpoint_rows(left.num_rows()).await?;
             if *require_complete_right && members != covered {
                 return Err(invalid("certified pruning key has no authoritative value"));
             }
-            let kept = left.filter(&keep)?;
-            workspace.grow(kept.memory_bytes())?;
+            let remaining = left.filter(&keep)?;
+            workspace.grow(remaining.memory_bytes())?;
             let _ = output;
-            Ok(kept)
+            Ok(remaining)
         })
         .boxed_local());
     }

@@ -79,7 +79,7 @@ fn arrow_schema(schema: &SchemaRef) -> Arc<ArrowSchema> {
 
 impl Batch {
     /// The batch of `rows` in `schema`, encoded into columns (the rows are
-    /// not kept). For literal rows (`VALUES`, constants, tests); runtimes
+    /// not retained). For literal rows (`VALUES`, constants, tests); runtimes
     /// build batches from columns with [`Self::try_from_columns`]. Bad input
     /// when a row's width or a value's type differs from the schema, or a
     /// summary state differs from its declared family or parameters.
@@ -292,7 +292,7 @@ impl Batch {
     }
 
     /// The rows where `keep` is true (not false or null), in order. Shares
-    /// the state columns; copies only the kept cells of plain columns.
+    /// the state columns; copies only the retained cells of plain columns.
     pub(crate) fn filter(&self, keep: &BooleanArray) -> Result<Self, Error> {
         if keep.true_count() == self.num_rows() && keep.null_count() == 0 {
             return Ok(self.clone());
@@ -308,7 +308,7 @@ impl Batch {
     }
 
     /// This batch with each state column that its rows use less than half
-    /// of reduced to the states they use (exact records kept as records),
+    /// of reduced to the states they use (exact records retained as records),
     /// so a selective filter does not hold every state of its input.
     fn compacted(self) -> Result<Self, Error> {
         let mut arrays = self.record_batch.columns().to_vec();
@@ -458,7 +458,7 @@ impl Batch {
                 continue;
             }
             // Different state columns: one column of the states the rows
-            // reference (each once), exact records kept as records.
+            // reference (each once), exact records retained as records.
             let all_exact = columns.iter().all(|column| {
                 matches!(
                     column.map(|column| column.storage()),
@@ -804,11 +804,11 @@ mod tests {
         let states = batch.state_column(1).unwrap();
         assert_eq!(states.len(), 2);
         assert!(batch.state_column(0).is_none());
-        let kept = batch
+        let remaining = batch
             .filter(&BooleanArray::from(vec![true, false, true]))
             .unwrap();
-        assert!(Arc::ptr_eq(kept.state_column(1).unwrap(), states));
-        let rows = decoded(&kept);
+        assert!(Arc::ptr_eq(remaining.state_column(1).unwrap(), states));
+        let rows = decoded(&remaining);
         assert_eq!(rows.len(), 2);
         assert!(same(&rows[0][1], &state(&shared)) && same(&rows[1][1], &state(&shared)));
     }
@@ -1023,11 +1023,11 @@ mod tests {
         )
         .unwrap();
         let keep = BooleanArray::from((0..10).map(|i| i == 3 || i == 7).collect::<Vec<_>>());
-        let kept = batch.filter(&keep).unwrap();
-        assert_eq!(kept.state_column(1).unwrap().len(), 2);
-        assert!(kept.memory_bytes() < batch.memory_bytes());
+        let remaining = batch.filter(&keep).unwrap();
+        assert_eq!(remaining.state_column(1).unwrap().len(), 2);
+        assert!(remaining.memory_bytes() < batch.memory_bytes());
         // The rows still read their own states.
-        let sums = decoded(&kept)
+        let sums = decoded(&remaining)
             .iter()
             .map(|row| {
                 let Value::Summary { state, .. } = &row[1] else {
@@ -1176,11 +1176,11 @@ mod tests {
         // Each derived state: its pointer slot and its "held outside" bit.
         let pointers =
             |states: usize| states * (std::mem::size_of::<Arc<dyn crate::AggregateCore>>() + 1);
-        // Compaction: 10 of 100 rows kept.
+        // Compaction: 10 of 100 rows retained.
         let keep = BooleanArray::from((0..100).map(|i| i % 10 == 0).collect::<Vec<_>>());
-        let kept = stored.filter(&keep).unwrap();
-        assert_eq!(kept.state_column(0).unwrap().len(), 10);
-        assert_eq!(charged_states(&kept), pointers(10));
+        let remaining = stored.filter(&keep).unwrap();
+        assert_eq!(remaining.state_column(0).unwrap().len(), 10);
+        assert_eq!(charged_states(&remaining), pointers(10));
         // Concat of two different stored columns.
         let other = state_batch(50, false);
         other.mark_states_held_outside_run();
@@ -1204,8 +1204,8 @@ mod tests {
         assert_eq!(charged_states(&stored), 0);
         let record = std::mem::size_of::<crate::summary_kernels::exact::ScalarState>();
         let keep = BooleanArray::from((0..100).map(|i| i % 10 == 0).collect::<Vec<_>>());
-        let kept = stored.filter(&keep).unwrap();
-        assert_eq!(charged_states(&kept), 10 * record);
+        let remaining = stored.filter(&keep).unwrap();
+        assert_eq!(charged_states(&remaining), 10 * record);
         let other = state_batch(50, true);
         other.mark_states_held_outside_run();
         let joined = Batch::concat(&stored.schema().clone(), &[stored, other]).unwrap();
@@ -1229,9 +1229,9 @@ mod tests {
         let (a, b) = (stored(100), stored(100));
         let schema = a.schema().clone();
         let joined = Batch::concat(&schema, &[a, b]).unwrap();
-        let kept = joined.filter(&every_other(200)).unwrap();
-        assert_eq!(kept.state_column(0).unwrap().len(), 20);
-        assert!(charged_states(&kept) <= 20 * (slot + 1));
+        let remaining = joined.filter(&every_other(200)).unwrap();
+        assert_eq!(remaining.state_column(0).unwrap().len(), 20);
+        assert!(charged_states(&remaining) <= 20 * (slot + 1));
         // Compaction, then concat.
         let (a, b) = (stored(100), stored(100));
         let (a, b) = (
@@ -1247,12 +1247,12 @@ mod tests {
         let built = state_batch(50, false);
         let one_built = charged_states(&built) / 50;
         let mixed = Batch::concat(&schema, &[built, stored(100)]).unwrap();
-        let kept = mixed.filter(&every_other(150)).unwrap();
-        assert_eq!(kept.state_column(0).unwrap().len(), 15);
-        let charged = charged_states(&kept);
+        let remaining = mixed.filter(&every_other(150)).unwrap();
+        assert_eq!(remaining.state_column(0).unwrap().len(), 15);
+        let charged = charged_states(&remaining);
         assert!(charged >= 5 * one_built && charged <= 5 * one_built + 15 * (slot + 1));
         let other = stored(100).filter(&every_other(100)).unwrap();
-        let joined = Batch::concat(&schema, &[kept, other]).unwrap();
+        let joined = Batch::concat(&schema, &[remaining, other]).unwrap();
         assert_eq!(joined.state_column(0).unwrap().len(), 25);
         let charged = charged_states(&joined);
         assert!(charged >= 5 * one_built && charged <= 5 * one_built + 25 * (slot + 1));
@@ -1264,10 +1264,10 @@ mod tests {
     fn an_index_past_a_derived_column_is_not_held_outside_the_run() {
         let stored = state_batch(4, false);
         stored.mark_states_held_outside_run();
-        let kept = stored
+        let remaining = stored
             .filter(&BooleanArray::from(vec![true, false, false, false]))
             .unwrap();
-        let column = kept.state_column(0).unwrap();
+        let column = remaining.state_column(0).unwrap();
         assert_eq!(column.len(), 1);
         assert!(column.state_held_outside_run(0));
         assert!(!column.state_held_outside_run(1));

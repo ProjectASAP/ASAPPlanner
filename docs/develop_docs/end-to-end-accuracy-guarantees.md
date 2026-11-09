@@ -22,7 +22,7 @@ aggregate intent and AccuracyTarget
     -> propagate guarantees through the registered composition rule
     -> check the final guarantee against AccuracyTarget
     -> keep legal candidate or record AccuracyError
-    -> Stage 3 prices the valid candidates under the cost model (cost does not prove accuracy)
+    -> Stage 3 costs the valid candidates under the cost model (cost does not prove accuracy)
 ```
 
 For a single summary, the child is exact and propagation leaves the local
