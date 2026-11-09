@@ -53,7 +53,6 @@ fn run_aggregate(
         name: name.into(),
         dtype: FieldDataType::Plain(dtype),
         nullable: false,
-        table: None,
     };
     let input = Arc::new(Schema {
         fields: vec![

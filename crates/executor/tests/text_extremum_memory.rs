@@ -65,7 +65,6 @@ fn text_max_charges_only_the_current_value() {
         name: name.into(),
         dtype: FieldDataType::Plain(dtype),
         nullable: false,
-        table: None,
     };
     let input = Arc::new(Schema {
         fields: vec![field("k", DataType::Int64), field("t", DataType::Utf8)],

@@ -476,7 +476,6 @@ mod tests {
             name: name.into(),
             dtype: FieldDataType::Plain(dtype),
             nullable: true,
-            table: None,
         };
         let schema = Arc::new(Schema {
             fields: vec![
@@ -548,7 +547,6 @@ mod tests {
             name: name.into(),
             dtype: FieldDataType::Plain(dtype),
             nullable: false,
-            table: None,
         };
         let schema = Arc::new(Schema {
             fields: vec![

@@ -40,7 +40,6 @@ fn a_long_subquery_over_many_series_fails_near_the_memory_limit() {
         name: name.into(),
         dtype: FieldDataType::Plain(dtype),
         nullable: false,
-        table: None,
     };
     let input = Arc::new(Schema {
         fields: vec![

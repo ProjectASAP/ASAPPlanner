@@ -954,12 +954,7 @@ fn with_root_estimate(
     estimate: Rc<OperatorNode>,
     dropped: &[String],
 ) -> Result<Rc<OperatorNode>, String> {
-    let Some(NonASAPOp::Project {
-        cols,
-        qualifier,
-        child,
-    }) = root.non_asap()
-    else {
+    let Some(NonASAPOp::Project { cols, child }) = root.non_asap() else {
         return Ok(estimate);
     };
     let mut kept = Vec::new();
@@ -980,7 +975,6 @@ fn with_root_estimate(
     let cols = kept;
     OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
         cols,
-        qualifier: qualifier.clone(),
         child: estimate,
     }))
     .map_err(|e| format!("projection over the new estimate: {e}"))

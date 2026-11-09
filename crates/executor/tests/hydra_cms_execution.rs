@@ -115,7 +115,6 @@ fn summary_agg(update: SummaryUpdate, filter: Option<Predicate<usize>>) -> Physi
                 name: "state".into(),
                 dtype: family(),
                 nullable: false,
-                table: None,
             },
         ]),
     )
