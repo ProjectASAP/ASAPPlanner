@@ -14,8 +14,10 @@ use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
 /// through `TimeShift`s without `@` (`consumers_of` gives a node's own
 /// readers), the most of the shifts' offsets plus the `TimeRange`'s range
 /// plus `span_ms` of that `TimeRange` (a range query's span, for retention;
-/// 0 for one execution's read). A tumbling-window chain reads its newest
-/// window back. Any other reader reads at the evaluation time (its
+/// 0 for one execution's read). A tumbling-window chain `materialized`
+/// across evaluations reads its newest window back; one that is not
+/// builds, in each run, every window its own consumers read, so reads what
+/// they read. Any other reader reads at the evaluation time (its
 /// `span_ms`), except over raw data (`reads_raw_data`), which it reads
 /// whole: `None`, unbounded, as under a `TimeShift` anchored with `@`.
 ///
@@ -25,6 +27,7 @@ pub fn read_back_ms<'a, N: Copy + Ord, C: 'a>(
     operator_of: impl Fn(N) -> &'a Operator<C>,
     consumers_of: impl Fn(N) -> Vec<N>,
     span_ms: impl Fn(N) -> i64,
+    materialized: impl Fn(N) -> bool,
     reads_raw_data: bool,
 ) -> Option<u64> {
     let mut need_ms: i64 = 0;
@@ -52,11 +55,21 @@ pub fn read_back_ms<'a, N: Copy + Ord, C: 'a>(
                 continue;
             }
             Operator::NonASAP(NonASAPOp::TimeShift { .. }) => return None,
-            // A chain builds its newest window from it.
             Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                 tumbling_window_width_ms,
                 ..
-            }) => offset_ms.checked_add(i64::try_from(*tumbling_window_width_ms).ok()?)?,
+            }) => match materialized(consumer) {
+                // It builds its newest window from it.
+                true => offset_ms.checked_add(i64::try_from(*tumbling_window_width_ms).ok()?)?,
+                false => {
+                    pending.extend(
+                        consumers_of(consumer)
+                            .into_iter()
+                            .map(|reader| (reader, offset_ms)),
+                    );
+                    continue;
+                }
+            },
             _ if reads_raw_data => return None,
             _ => offset_ms.checked_add(span_ms(consumer))?,
         };

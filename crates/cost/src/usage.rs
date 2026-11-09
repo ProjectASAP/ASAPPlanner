@@ -385,6 +385,7 @@ fn scan_read_ms(
         |id| &nodes[&id].payload,
         readers,
         |_| 0,
+        |id| matches!(nodes[&id].lifetime, Lifetime::AcrossEvaluations(_)),
         true,
     )
 }
@@ -950,7 +951,8 @@ pub fn node_usage<'a>(
             // One window's states: each input row updates the window its
             // time falls in. At ingestion time the rows of one window
             // arrive at the rate of one second's `input.rows`; at query
-            // time its input holds the rows of every retained window.
+            // time each build reads the rows of the window that just ended,
+            // its input.
             let group_count = groups(reduction)?;
             let rows_per_tumbling_window = match ingestion {
                 true => u64::try_from(
@@ -958,7 +960,7 @@ pub fn node_usage<'a>(
                         .div_ceil(1_000),
                 )
                 .map_err(|_| AnalyticalCostError::Overflow)?,
-                false => input.rows.div_ceil(retained_tumbling_window_count),
+                false => input.rows,
             };
             let input_rows = StateInputRows {
                 rows_per_state: Some(rows_per_tumbling_window.div_ceil(group_count.max(1))),
@@ -1661,7 +1663,7 @@ mod tests {
             kind: TimeRangeKind::Range,
             child: 0,
         }));
-        let read_ms = read_back_ms([1], |_| &instant.payload, |_| vec![], |_| 0, true);
+        let read_ms = read_back_ms([1], |_| &instant.payload, |_| vec![], |_| 0, |_| true, true);
         assert_eq!(read_ms, Some(1_000));
         let usage = node_usage(&scan, &[], (1, 1.0), read_ms, &data, &settings, 1.0).unwrap();
         assert_eq!(usage.output.rows, 1_000);
