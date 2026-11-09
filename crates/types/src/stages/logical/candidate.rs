@@ -84,7 +84,7 @@ pub enum CandidateError {
 pub struct LogicalProperties {
     /// $\boldsymbol\theta_v$, from the algorithm's predefined list; `None` for
     /// an exact operator.
-    parameters: Option<SketchParams>,
+    pub(super) parameters: Option<SketchParams>,
 }
 
 impl LogicalProperties {

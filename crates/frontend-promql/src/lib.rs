@@ -117,11 +117,12 @@ mod tests {
     use std::rc::Rc;
     use std::time::Duration;
 
+    use asap_types::ir::operator::arguments::{AtModifier, TimeShift};
     use asap_types::ir::operator::Source;
-    use asap_types::ir::{NonASAPOp, OperatorNode, TimeRangeKind};
+    use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot, TimeRangeKind};
     use asap_types::workload::{
         BatchEntry, DataArrival, DataWorkload, PlanningWorkload, Query, QueryRequirements,
-        QueryWorkload, SourceFacts, WorkloadError,
+        QueryWorkload, RangeEvaluation, SourceFacts, WorkloadError,
     };
 
     use super::*;
@@ -365,5 +366,47 @@ mod tests {
             r#"max(s{quantile="0.99"}) + s{quantile="0.5"} + avg(g) + sum(s_count) + rate(s_sum[5m])"#
         )
         .is_empty());
+    }
+
+    /// `@ end()` and `@ start()` are lifted above the selector they anchor,
+    /// which is lowered without them (its offset stays): the selector of
+    /// `sum_over_time(data[5m] @ start() offset 1m)` is
+    /// `TimeShift(@ start())` over the selector of
+    /// `sum_over_time(data[5m] offset 1m)`, so the two share it. Instant and
+    /// range-evaluated queries lower alike.
+    #[test]
+    fn at_start_and_at_end_are_lifted_above_the_selector_they_anchor() {
+        let lowered = |query: &str| {
+            let roots = lower_promql_query_workload(&workload(query)).unwrap();
+            let [QueryRoot::Operator(root)] = &roots[..] else {
+                panic!("one operator root");
+            };
+            Rc::clone(root.children()[0])
+        };
+        let pinned = lowered("sum_over_time(data[5m] @ start() offset 1m)");
+        let NonASAPOp::TimeShift { shift, child } = pinned.expect_non_asap() else {
+            panic!("expected the lifted TimeShift, got {pinned:?}");
+        };
+        assert_eq!(
+            *shift,
+            TimeShift {
+                offset_ms: 0,
+                at: Some(AtModifier::Start),
+            }
+        );
+        assert_eq!(*child, lowered("sum_over_time(data[5m] offset 1m)"));
+
+        let mut range_query = workload("sum_over_time(data[5m] @ start() offset 1m)");
+        if let Some(batch) = range_query.query_workload.query_batch.as_mut() {
+            batch[0].range_evaluation = Some(RangeEvaluation {
+                step_ms: 60_000,
+                span_ms: 3_600_000,
+            });
+        }
+        assert_eq!(
+            lower_promql_query_workload(&range_query).unwrap(),
+            lower_promql_query_workload(&workload("sum_over_time(data[5m] @ start() offset 1m)"))
+                .unwrap()
+        );
     }
 }

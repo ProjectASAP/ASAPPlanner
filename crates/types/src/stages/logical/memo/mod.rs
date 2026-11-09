@@ -2,17 +2,21 @@
 //! over its groups; the operations over the whole memo
 //! (concepts doc `memo-groups-properties-requirements.md`, section 3; #1203).
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+mod hash_consing;
 
 use super::group::derive_group_properties;
 use crate::accuracy::AccuracyTarget;
+use crate::ir::operator::arguments::SourceColumn;
 use crate::ir::Operator;
 use crate::ir::QueryRoot;
 use crate::ir::SchemaDerivationError;
 use crate::stages::{
     CandidateError, CandidateForMemoGroup, CandidateForMemoGroupId, LogicalRequirements, MemoGroup,
-    MemoGroupId,
+    MemoGroupId, ValueSign,
 };
+use hash_consing::{expression_hash, same_expression, same_expression_and_logical_properties};
 
 /// The memo, Stage 0's and Stage 1's one type: the memo groups, each with
 /// its candidates ([`MemoGroup::candidates`]: empty after Stage 0), and each
@@ -24,6 +28,13 @@ pub struct Memo {
     groups: Vec<MemoGroup>,
     /// The queries, by index in the workload.
     pub queries: Vec<MemoQuery>,
+    /// The groups [`Self::find_or_add_group`] may return, by
+    /// [`expression_hash`] of their expression: every group whose sharing
+    /// is legal ([`GroupProperties::shareable_when_equal`]).
+    groups_by_expression_hash: HashMap<u64, Vec<MemoGroupId>>,
+    /// The sign the data workload declares for each source column it
+    /// declares one for: a `Scan`'s [`GroupProperties::column_sign`].
+    pub(super) declared_column_signs: BTreeMap<SourceColumn, ValueSign>,
 }
 
 /// One query of the memo: its root over groups, its accuracy target and
@@ -41,6 +52,15 @@ pub struct MemoQuery {
 }
 
 impl Memo {
+    /// A memo without groups whose `Scan`s read `declared_column_signs`
+    /// (an undeclared source column's sign is `Unknown`).
+    pub fn new(declared_column_signs: BTreeMap<SourceColumn, ValueSign>) -> Self {
+        Self {
+            declared_column_signs,
+            ..Self::default()
+        }
+    }
+
     /// The groups, by id.
     pub fn groups(&self) -> &[MemoGroup] {
         &self.groups
@@ -50,34 +70,149 @@ impl Memo {
     /// group below them list it ([`MemoGroup::reached_by_queries`]). Stage 0
     /// adds each query once.
     pub fn add_query(&mut self, query: MemoQuery) -> usize {
-        let _ = query;
-        todo!("#1207 PR 2")
+        let index = self.queries.len();
+        let groups = query.root.operator_refs().into_iter().copied().collect();
+        self.queries.push(query);
+        self.add_queries_below(groups, &[index]);
+        index
     }
 
-    /// Hash-consing: the group with this expression, added if new, with the
-    /// `GroupProperties` [`derive_group_properties`] derives. Fails when the
-    /// expression breaks the node rules (schema derivation, input
-    /// validation, merge check).
+    /// Hash-consing: the group whose expression is `expression`
+    /// (`same_expression`: operator, arguments and input groups), else a
+    /// new group for it, with the `GroupProperties` [`derive_group_properties`]
+    /// derives from its input groups, listed as a parent of each input
+    /// group. A group whose copies may return different rows (an unordered
+    /// `LIMIT`, [`GroupProperties::shareable_when_equal`]) is never returned
+    /// for another expression, so such an expression always gets a new
+    /// group. Fails, leaving the memo unchanged, when the expression breaks
+    /// the node rules (schema derivation, input validation, merge check).
     pub fn find_or_add_group(
         &mut self,
         expression: Operator<MemoGroupId>,
     ) -> Result<MemoGroupId, SchemaDerivationError> {
-        let _group_properties = derive_group_properties(self, &expression)?;
-        todo!("#1207 PR 2: hash-consing over groups")
+        let group_properties = derive_group_properties(self, &expression)?;
+        let hash = expression_hash(&expression);
+        let shareable = group_properties.shareable_when_equal;
+        if shareable {
+            if let Some(&group) = self
+                .groups_by_expression_hash
+                .get(&hash)
+                .and_then(|groups| {
+                    groups.iter().find(|&&group| {
+                        same_expression(&self.groups[group.0 as usize].expression, &expression)
+                    })
+                })
+            {
+                return Ok(group);
+            }
+        }
+        let id = MemoGroupId(
+            u32::try_from(self.groups.len()).expect("a memo has at most u32::MAX groups"),
+        );
+        for &input in expression.children() {
+            add_parent(&mut self.groups[input.0 as usize], id);
+        }
+        self.groups.push(MemoGroup {
+            expression,
+            group_properties,
+            parents: Vec::new(),
+            queries: Vec::new(),
+            candidates: Vec::new(),
+        });
+        if shareable {
+            self.groups_by_expression_hash
+                .entry(hash)
+                .or_default()
+                .push(id);
+        }
+        Ok(id)
     }
 
-    /// Adds `candidate` to `group`'s candidates. Fails when its expression
-    /// breaks the node rules ([`derive_group_properties`]) or its output
-    /// schema or kind differs from the group's.
+    /// Adds `candidate` to `group`'s candidates and returns its id, unless
+    /// the group already has a candidate with the same expression
+    /// (`same_expression`) and logical properties: then that candidate's
+    /// id, and `candidate` is dropped. A new candidate makes `group` a parent
+    /// of each of its input groups, and `group`'s queries reach each input
+    /// group and every group below it.
+    ///
+    /// Fails, leaving the memo unchanged, when the candidate's expression
+    /// breaks the node rules a group's does ([`derive_group_properties`]),
+    /// or when its output schema or kind differs from the group's: then it
+    /// does not compute the group's result.
     pub fn add_candidate(
         &mut self,
         group: MemoGroupId,
         candidate: CandidateForMemoGroup,
     ) -> Result<CandidateForMemoGroupId, CandidateError> {
-        let _output = derive_group_properties(self, &candidate.expression.operator)
+        let output = derive_group_properties(self, &candidate.expression.operator)
             .map_err(CandidateError::Schema)?;
-        let _ = group;
-        todo!("#1207 PR 2")
+        let group_properties = &self.groups[group.0 as usize].group_properties;
+        if output.schema != group_properties.schema
+            || output.result_kind != group_properties.result_kind
+        {
+            return Err(CandidateError::OutputDiffersFromGroup { group });
+        }
+        let candidates = &mut self.groups[group.0 as usize].candidates;
+        if let Some(index_in_group) = candidates
+            .iter()
+            .position(|known| same_expression_and_logical_properties(known, &candidate))
+        {
+            return Ok(CandidateForMemoGroupId {
+                group,
+                index_in_group,
+            });
+        }
+        let input_groups: Vec<MemoGroupId> = candidate
+            .expression
+            .operator
+            .children()
+            .into_iter()
+            .copied()
+            .collect();
+        candidates.push(candidate);
+        let index_in_group = candidates.len() - 1;
+        for &input in &input_groups {
+            add_parent(&mut self.groups[input.0 as usize], group);
+        }
+        let queries = self.groups[group.0 as usize].queries.clone();
+        self.add_queries_below(input_groups, &queries);
+        Ok(CandidateForMemoGroupId {
+            group,
+            index_in_group,
+        })
+    }
+
+    /// Adds `queries` to each of `groups` and every group below them, through
+    /// the groups' expressions and their candidates' input groups. A group
+    /// that has every query already is not walked: every group below it has
+    /// them too.
+    fn add_queries_below(&mut self, groups: Vec<MemoGroupId>, queries: &[usize]) {
+        let mut to_visit = groups;
+        while let Some(group) = to_visit.pop() {
+            let group = &mut self.groups[group.0 as usize];
+            let mut added = false;
+            for &query in queries {
+                if let Err(position) = group.queries.binary_search(&query) {
+                    group.queries.insert(position, query);
+                    added = true;
+                }
+            }
+            if added {
+                to_visit.extend(
+                    group
+                        .expression
+                        .children()
+                        .into_iter()
+                        .chain(
+                            group
+                                .candidates
+                                .iter()
+                                .flat_map(|candidate| candidate.expression.operator.children()),
+                        )
+                        .copied(),
+                );
+            }
+        }
     }
 
     /// The candidate `id`.
@@ -146,6 +281,13 @@ impl Memo {
     }
 }
 
+/// Lists `parent` among `group`'s parents, once.
+fn add_parent(group: &mut MemoGroup, parent: MemoGroupId) {
+    if !group.parents.contains(&parent) {
+        group.parents.push(parent);
+    }
+}
+
 /// The groups some query's root reads, ascending: the groups of the
 /// `queries`' roots that are a query's result or a scalar query's operand.
 pub fn root_groups(queries: &[MemoQuery]) -> BTreeSet<MemoGroupId> {
@@ -162,3 +304,6 @@ pub fn queries_rooted_at(queries: &[MemoQuery], group: MemoGroupId) -> Vec<usize
         .filter(|&query| queries[query].root.operator_refs().contains(&&group))
         .collect()
 }
+
+#[cfg(test)]
+mod tests;

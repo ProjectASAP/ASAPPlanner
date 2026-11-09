@@ -2,6 +2,7 @@
 //! → candidate → candidate input → edge → Stage 1's output).
 
 mod candidate;
+mod column_properties;
 mod edge;
 mod group;
 mod memo;
