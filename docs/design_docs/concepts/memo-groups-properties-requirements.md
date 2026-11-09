@@ -94,7 +94,7 @@ This is the single reference table for property dimensions. Stage descriptions b
 
 | Dimension | Values and meaning | Code reference or target |
 |---|---|---|
-| Parameters θ | The structure of a summary, from a predefined list per algorithm, `parameter_list(algorithm)`: KLL and KMV `k`; DDSketch `alpha`; HLL `precision`; CMS and CountSketch `width` and `depth`; heap variants also `heap_size`; UnivMon its L2 column count and distinct-count heap size. θ is structure only: no field records the error or failure probability a configuration was sized for, and equality is derived over all fields. The lists span today's sizing over ε = 0.1 down to 0.001 (KMV's and UnivMon's distinct-count entries stop at ε = 0.01). Where δ is set by a structural parameter, the list covers the δ levels with it: CMS and CountSketch list each width with depths 5, 7, 10 and 12 (δ = e^−d ≤ 1e-2, 1e-3, 1e-4, 1e-5). UnivMon's list has 40 entries: each of the 7 L2 column counts with each of the 4 distinct-count heap sizes, each of them alone, and the baseline. A heap variant combines each width × depth with heap sizes from the 1-2-5 series 10, 20, 50, …, 10 000, so the smallest heap that holds a top-k's k is at most 2.5× too large. A sketch build's θ must be in its algorithm's list; exact operators have none. Algorithms without an error model (the Hydra algorithms among them) have empty lists, so no build of theirs is a valid candidate until their error models exist (#1228). | `SketchParams` in `crates/types/src/ir/schema/sketch.rs`; `parameter_list` |
+| Parameters θ | The structure of a summary, from a predefined list per algorithm, `parameter_list(algorithm)`: KLL and KMV `k`; DDSketch `alpha`; HLL `precision`; CMS and CountSketch `width` and `depth`; heap variants also `heap_size`; UnivMon its L2 column count and distinct-count heap size. θ is structure only: no field records the error or failure probability a configuration was sized for, and equality is derived over all fields. The lists span today's sizing over ε = 0.1 down to 0.001 (KMV's and UnivMon's distinct-count entries stop at ε = 0.01). Where δ is set by a structural parameter, the list covers the δ levels with it: CMS lists each width with depths 5, 7, 10 and 12 (δ = e^−d ≤ 1e-2, 1e-3, 1e-4, 1e-5). CountSketch reads the median of its rows, each wrong with probability about 1/3, so δ = P(Binomial(d, 1/3) ≥ (d+1)/2), defined for odd d: it lists each width with depths 47, 81, 117 and 155 for the same δ levels. UnivMon's list has 40 entries: each of the 7 L2 column counts with each of the 4 distinct-count heap sizes, each of them alone, and the baseline. A heap variant combines each width × depth with heap sizes from the 1-2-5 series 10, 20, 50, …, 10 000, so the smallest heap that holds a top-k's k is at most 2.5× too large. A sketch build's θ must be in its algorithm's list; exact operators have none. Algorithms without an error model (the Hydra algorithms among them) have empty lists, so no build of theirs is a valid candidate until their error models exist (#1228). | `SketchParams` in `crates/types/src/ir/schema/sketch.rs`; `parameter_list` |
 | Timing | `IngestionTime` or `QueryTime` | `ExecutionTiming` |
 | Lifetime | `None`: discard after the consuming execution; `OneEvaluation`: retain until consumers within that evaluation finish; `AcrossEvaluations`: retain across evaluations in the specified period. A non-`None` lifetime means materialized. | `Lifetime`; #1200 |
 | Storage medium — Extension | `Memory` or `Disk`, carried by a materialized lifetime | `StorageMedium` |
@@ -352,6 +352,11 @@ pub struct GroupProperties {
     pub column_lineage: Vec<ColumnLineage>,
     /// Per output column: its value sign ("Value sign").
     pub column_sign: Vec<ValueSign>,
+    /// Whether the result changes with the evaluation time: true under a
+    /// `TimeRange` relative to it (`sum_over_time(m[5m])`), false under a
+    /// fixed `@ T` or with no time at all. A stored result that does not
+    /// depend on it delivers on every context.
+    pub depends_on_evaluation_time: bool,
     /// What an aggregate group covers: a summary state, a chain, a merge
     /// over a chain's windows, or an exact `Aggregate` result; `None` for
     /// any other group.
@@ -850,13 +855,17 @@ A query reaches a candidate when a path of candidate edges leads from the query'
 
 #### Dead-candidate elimination
 
-A candidate that is not a query output is **dead** when it never had a consumer, or when every edge to a consumer fails: the producer's guarantee misses the input's required accuracy, the metric rule forbids the edge (Section 4), or the consumer is dead. Elimination repeats until nothing changes. Dead candidates get no logical edges and Stage 2 does not expand them; each is recorded with its root causes:
+A candidate that is not a query output is **dead** when it never had a consumer, or when every edge to a consumer fails: the producer's guarantee misses the input's required accuracy, the metric rule forbids the edge (Section 4), or the consumer is dead. Elimination repeats until nothing changes. Dead candidates get no logical edges and Stage 2 does not expand them; each is recorded with its root causes. Pass 2 also records each group's evaluation grid, which `delivers_on` reads for a stored result that is not a chain. Example: X = `sum_over_time(m[5m])` is read by a query every 60 s and by another every 120 s, both at phase 0; X's grid is 60 s @ 0. X materialized across evaluations is stored every 60 s, so it delivers on `Evaluation { 60 s @ 0 }` and `Evaluation { 120 s @ 0 }` but not on `Evaluation { 30 s @ 0 }`. X under `@ T` does not depend on the evaluation time and delivers on every context.
 
 ```rust
 pub struct LogicalASAPMemoCandidates {
     pub memo: Memo,
     pub edges: Vec<LogicalEdge>,
     pub pruned: Vec<PrunedLogicalCandidate>,
+    /// Per group: the grid its result is evaluated on, the coarsest grid
+    /// holding every evaluation time of the queries reaching it; `None`
+    /// when those times are not on one known grid. Pass 2 fills it.
+    pub evaluation_grid_of_group: Vec<Option<EvaluationGrid>>,
 }
 
 /// A candidate eliminated by Pass 2.
@@ -1097,8 +1106,14 @@ impl PhysicalCandidate {
     /// the context lies on its grid; true for ℓ = None, for OneEvaluation in
     /// the same context, and for a materialized time-independent result.
     /// `IngestionPipeline` and `Materialized(v)` contexts are handled the
-    /// same way, with their own schedules.
-    pub fn delivers_on(&self, memo: &Memo, context: &ExecutionContext) -> bool;
+    /// same way, with their own schedules (v's read from `candidates`). A
+    /// result's grid is `evaluation_grid_of_group`; whether it depends on
+    /// the time, `GroupProperties::depends_on_evaluation_time`.
+    pub fn delivers_on(
+        &self,
+        candidates: &PhysicalASAPMemoCandidates,
+        context: &ExecutionContext,
+    ) -> bool;
 }
 /// α^phys: timing and lifetime only (Section 2's table). Alignment is
 /// checked per context in Stage 3 with `delivers_on`.
@@ -1152,7 +1167,7 @@ impl PhysicalASAPMemoCandidates {
 }
 ```
 
-`PhysicalCandidateId` indexes an emitted candidate. A pruned alternative is stored as its `PhysicalCandidate` value, which has no ID, so diagnostics can explain each prune. The admissible-edge accessor returns edge IDs, not the unfiltered producer set from Section 1. `delivers_on` takes a candidate and the memo rather than bare properties because a tumbling grid's width is an argument of the chain operator in the candidate's expression.
+`PhysicalCandidateId` indexes an emitted candidate. A pruned alternative is stored as its `PhysicalCandidate` value, which has no ID, so diagnostics can explain each prune. The admissible-edge accessor returns edge IDs, not the unfiltered producer set from Section 1. `delivers_on` takes a candidate and Stage 2's candidates rather than bare properties because a tumbling grid's width is an argument of the chain operator in the candidate's expression, a stored result's grid is its group's `evaluation_grid_of_group`, and a `Materialized(v)` context's times are v's.
 
 Migration targets include replacing `Materialization` and duplicated physical fields with checked properties, and replacing `ReaderConstraint::{IncompatibleOutputs, AllowedOutputs}` with compatibility and alignment checks. `ReaderConstraint::{MinimumQueryReaders, HighestSharedQueryMaterialization}` are deleted too; see Section 5.
 
