@@ -1069,7 +1069,7 @@ Stage 2 records every alternative it rejects, with one of these reasons; Stage 3
 | Reason | Rejects |
 |---|---|
 | `NoIngestionPipeline` | IngestionTime when the source has no ingestion pipeline |
-| `RawDataNotRetained` | QueryTime over raw rows the deployment does not retain |
+| `RawDataNotRetained` | a Scan of raw rows the deployment does not retain, at QueryTime or AcrossEvaluations |
 | `QueryTimeResultsNotRetained` | QueryTime with ℓ = OneEvaluation or AcrossEvaluations when the deployment retains no query-time results |
 | `InputHasNoBuildableProducer` | a candidate for which some input has no surviving producer that satisfies α^phys |
 | `ReachesNoQueryOutput` | a candidate from which no admissible path leads to a query root |
