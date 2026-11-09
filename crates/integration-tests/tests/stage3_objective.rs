@@ -57,6 +57,16 @@ fn selected_plan_objective_and_plan_cost(
     let models = PlanningModels::builtin()
         .with_cost_inputs(settings)
         .with_deployment_capabilities(&capabilities);
+    selected_plan_objective_and_plan_cost_with(workload, models, settings)
+}
+
+/// The plan Stage 3 selects for `workload` with `models`, whose cost
+/// inputs are `settings`, with the MILP's optimum and its `plan_cost`.
+fn selected_plan_objective_and_plan_cost_with(
+    workload: &PlanningWorkload,
+    models: PlanningModels<'_>,
+    settings: &CostInputs,
+) -> (PhysicalASAPDAG, (f64, f64)) {
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap();
     let roots = lower_promql_roots(workload).unwrap();
@@ -179,4 +189,80 @@ fn offset_windows_without_raw_data_select_installable_plans_costed_for_their_ret
             panic!("{name}: the selected plan does not install: {error:?}")
         });
     }
+}
+
+/// Two windowed quantiles over one metric (1 m and 5 m, every 10 s; 10,000
+/// series every 15 s), accuracy not enforced: the selected plan shares one
+/// query-time scan, whose execution reads the 5 m window once and retains
+/// it ($h_v$, constraint (R)), at most 0.144/s.
+#[test]
+fn the_objective_is_the_plan_cost_on_a_shared_scan() {
+    let w: PlanningWorkload = serde_json::from_value(serde_json::json!({
+        "query_workload": {
+            "language": "promql",
+            "query_batch": null,
+            "repeating_queries": [
+                every_10s("quantile_over_time(0.5, data[1m])"),
+                every_10s("quantile_over_time(0.9, data[5m])"),
+            ],
+        },
+        "data_workload": {
+            "arrival": {"ingesting": {"rows_per_second": 666.67}},
+            "sources": {"data": {"series_count": 10000, "metric_type": "gauge", "sample_interval": 15000}},
+        },
+    }))
+    .unwrap();
+    let models = PlanningModels::builtin().with_ignore_accuracy_guarantees(true);
+    let (_, (objective, plan_cost)) =
+        selected_plan_objective_and_plan_cost_with(&w, models, &CostInputs::default());
+    assert_equal("shared scan", (objective, plan_cost));
+    assert!(plan_cost <= 0.144, "{plan_cost}");
+}
+
+/// The o11y benchmark's q21: `sum(rate(..[5m] offset 1h))`, a 1 h range
+/// query every 60 s. Raw rows it reads may be materialized at ingestion
+/// time behind the offset (a `TimeShift` over the `Scan`); that store
+/// keeps 2 h 5 m of rows (its 1 h 5 m retention and its 1 h offset), which
+/// its `TimeRange` reads 5 m of, in the MILP and in `plan_cost` alike (the MILP's objective was 0.326/s for a
+/// plan `plan_cost` charged 0.0219/s, one second of rows retained).
+#[test]
+fn the_objective_is_the_plan_cost_on_an_offset_range_query() {
+    let source = serde_json::json!({"sample_interval": 1000, "series_count": 1000, "metric_type": "counter"});
+    let w: PlanningWorkload = serde_json::from_value(serde_json::json!({
+        "query_workload": {
+            "language": "promql",
+            "query_batch": null,
+            "repeating_queries": [{
+                "query": "sum(rate(http_requests_total{job=\"order-service\"}[5m] offset 1h))",
+                "demand": {"fixed_interval_at": {"interval": 60000, "evaluation_phase": 0}},
+                "requirements": {"accuracy": {"max_error": 0.01, "failure_probability": 0.001}},
+                "predictability": {"predictable": {"known_at": null}},
+                "range_evaluation": {"step_ms": 60000, "span_ms": 3600000},
+            }],
+        },
+        "data_workload": {
+            "arrival": {"ingesting": {"rows_per_second": 1000.0}},
+            "sources": {"http_requests_total": source},
+        },
+    }))
+    .unwrap();
+    assert_equal(
+        "offset range query",
+        selected_plan_objective_and_plan_cost_with(
+            &w,
+            PlanningModels::builtin(),
+            &CostInputs::default(),
+        )
+        .1,
+    );
+}
+
+/// A query `query` every 10 s at phase 0, within 1 % at δ = 0.01.
+fn every_10s(query: &str) -> serde_json::Value {
+    serde_json::json!({
+        "query": query,
+        "demand": {"fixed_interval_at": {"interval": 10000, "evaluation_phase": 0}},
+        "requirements": {"accuracy": {"max_error": 0.01, "failure_probability": 0.01}},
+        "predictability": {"predictable": {"known_at": null}},
+    })
 }
