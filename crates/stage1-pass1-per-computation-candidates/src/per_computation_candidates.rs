@@ -42,7 +42,8 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use asap_types::ir::operator::operator_properties::{Reduction, Source};
+use asap_types::ir::operator::input::OperatorInput;
+use asap_types::ir::operator::operator_properties::Reduction;
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::scalar::{resolve_column_ref, ColumnRef};
 use asap_types::ir::schema::{
@@ -735,21 +736,13 @@ fn prune_topk_heaps_over_one_row_per_item(
         }
         // A PromQL top-k ranks an instant vector: one row per series or
         // group. (A SQL top-k keeps its heaps.)
-        if !reads_only_time_series(child) {
+        if !child.reads_only_time_series() {
             continue;
         }
         prune_own(&mut target.ways_to_compute, |candidate| {
             matches!(candidate, HowToComputeAggregateMeasure::Summary(family)
                 if family.capability().answers(StatisticKind::TopK))
         });
-    }
-}
-
-/// Whether every scan below `node` reads a time series (PromQL rows).
-fn reads_only_time_series(node: &OperatorNode) -> bool {
-    match node.non_asap() {
-        Some(NonASAPOp::Scan { source, .. }) => matches!(source, Source::TimeSeries { .. }),
-        _ => node.children().iter().all(|c| reads_only_time_series(c)),
     }
 }
 
