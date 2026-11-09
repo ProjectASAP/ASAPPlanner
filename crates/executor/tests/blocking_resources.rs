@@ -20,7 +20,6 @@ fn schema(width: usize) -> SchemaRef {
         closed: false,
         fields: (0..width)
             .map(|i| Field {
-                table: None,
                 name: format!("v{i}"),
                 dtype: FieldDataType::Plain(DataType::Int64),
                 nullable: false,
@@ -193,13 +192,11 @@ fn weighted_summary_build_yields_within_a_batch() {
         closed: false,
         fields: vec![
             Field {
-                table: None,
                 name: "item".into(),
                 dtype: FieldDataType::Plain(DataType::Int64),
                 nullable: false,
             },
             Field {
-                table: None,
                 name: "weight".into(),
                 dtype: FieldDataType::Plain(DataType::Float64),
                 nullable: false,

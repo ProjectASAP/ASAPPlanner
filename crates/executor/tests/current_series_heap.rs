@@ -28,7 +28,6 @@ fn schema() -> Arc<Schema> {
         ]
         .into_iter()
         .map(|(name, dtype)| Field {
-            table: None,
             name: name.into(),
             dtype: FieldDataType::Plain(dtype),
             nullable: false,

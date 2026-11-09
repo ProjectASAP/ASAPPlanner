@@ -8,7 +8,7 @@
 //! live here.
 
 mod candidates;
-mod column_sign;
+pub(crate) mod column_properties;
 mod hash_consing;
 mod logical_memo_candidates;
 mod memo;
@@ -26,7 +26,8 @@ pub use logical_memo_candidates::{
 };
 pub(crate) use memo::MemoGroupAsInput;
 pub use memo::{
-    queries_rooted_at, root_groups, GroupProperties, MemoGroup, MemoGroupId, ValueSign,
+    queries_rooted_at, root_groups, ColumnLineage, GroupProperties, MemoGroup, MemoGroupId,
+    ValueSign,
 };
 pub use per_computation_logical_memo_candidates::{
     ComputationTarget, FusedComputation, HavingEntry, HavingPlacement, HowToComputeAggregateMeasure,

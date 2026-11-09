@@ -180,7 +180,10 @@ pub enum Source {
 
 /// A column of a source (a `Scan`'s metric or table), by name: what the data
 /// workload declares facts about, such as a column's sign
-/// ([`SourceFacts::column_signs`](crate::workload::SourceFacts::column_signs)).
+/// ([`SourceFacts::column_signs`](crate::workload::SourceFacts::column_signs)),
+/// the lineage of a column copied from it
+/// ([`ColumnLineage::SourceColumn`](crate::stages::ColumnLineage::SourceColumn)),
+/// and the key a summary coverage's selection names a column by.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceColumn {
@@ -523,7 +526,7 @@ mod tests {
     use super::*;
     use crate::ir::schema::{DataType, Field, Schema};
 
-    /// A key moves to the input's column of the same name and qualifier; a
+    /// A key moves to the input's column of the same name; a
     /// key that is missing or ambiguous there, or a `without` grouping, has no
     /// partitions over the input.
     #[test]
@@ -542,11 +545,6 @@ mod tests {
         let ambiguous = Schema::new(vec![field("job"), field("job")]);
         assert_eq!(
             Reduction::by(vec![0]).partitions_over(&inner, &ambiguous),
-            None
-        );
-        let qualified = Schema::new(vec![field("job").with_table("t")]);
-        assert_eq!(
-            Reduction::by(vec![0]).partitions_over(&inner, &qualified),
             None
         );
         assert_eq!(
