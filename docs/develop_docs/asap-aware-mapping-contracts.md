@@ -14,7 +14,7 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
 | After | The DAG holds | Timing |
 | --- | --- | --- |
 | Stage 0 (frontends) | `NonASAPOp` nodes only; aggregates carry `AggIntent` measures with each query's `AccuracyTarget` as written | none |
-| Stage 1 (`compose_logical_candidate`, Pass 2 rules) | `ASAPOp` nodes where a candidate chose an exact accumulator or a summary (`SummaryAgg`, `SummaryTumblingWindowChain`, `SummaryMerge`, `SummaryEstimate`, `FinalizeExactAccumulator`); everything else stays `NonASAPOp` | none: Stage 1 never decides when anything runs |
+| Stage 1 (Pass 1 and Pass 2 rules) | `ASAPOp` nodes where a candidate chose an exact accumulator or a summary (`SummaryAgg`, `SummaryTumblingWindowChain`, `SummaryMerge`, `SummaryEstimate`, `FinalizeExactAccumulator`); everything else stays `NonASAPOp` | none: Stage 1 never decides when anything runs |
 | Stage 2 (`generate_physical_asap_memo_candidates`) and Stage 3 (`select_plan`, which builds the plan) | the same operators, with a timing and a `Lifetime` on each summary build | every node of the plan timed from the physical candidate it was built from (`selected_physical_candidate`) |
 
 - Structurally equal sub-DAGs are interned before Stage 1
