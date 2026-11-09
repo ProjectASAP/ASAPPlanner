@@ -3,6 +3,11 @@
 //! constant error contracts, the mean of quantile readouts), each asserting
 //! only the decided structure: the memo's groups and candidates, the
 //! logical edges and Pass 2's pruned list.
+use std::collections::BTreeMap;
+
+use asap_types::ir::operator::operator_properties::SourceColumn;
+use asap_types::stages::ValueSign;
+
 use super::*;
 
 /// The readouts Pass 1 offers one quantile group, per summary type.
@@ -154,19 +159,11 @@ fn e3_an_offset_enters_the_gcd_of_the_widths() {
 /// pruned by the metric rule and every KLL build through it. The readouts
 /// of DDSketch get the levels 0.02 … 0.001 (cap 0.045), so the builds with
 /// alpha 0.1 and 0.05 miss every level they could serve. Chain groups are
-/// added only for the surviving builds.
+/// added only for the surviving builds. `m`'s values are declared
+/// non-negative, the sign DDSketch's guarantee needs.
 #[test]
 fn dead_candidates_are_pruned_and_listed_before_chain_groups() {
-    let mut memo = Memo::default();
-    let input = scan(&mut memo, "m", &["job"]);
-    let window = range(&mut memo, input, 300);
-    let algorithms = [SketchAlgorithm::Kll, SketchAlgorithm::DDSketch];
-    let p99 = quantile_over_time_readouts(&mut memo, window, 0.99, &algorithms);
-    let p50 = quantile_over_time_readouts(&mut memo, window, 0.5, &algorithms);
-    let ratio = arithmetic(&mut memo, ArithmeticOpKind::Div, p99.result, p50.result);
-    let target = AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative);
-    query(&mut memo, ratio, Some(target));
-    let logical = pass2(memo, &[entry(60_000)]);
+    let (logical, p99, p50) = pass2_of_ratio_of_quantiles(ValueSign::NonNegative);
     let memo = &logical.memo;
     let (kll_state, ddsketch_state) = (p99.by_algorithm[0].1, p99.by_algorithm[1].1);
     // Each KLL readout: the metric rule at the ratio, directly.
@@ -243,6 +240,54 @@ fn dead_candidates_are_pruned_and_listed_before_chain_groups() {
         .all(|edge| !pruned.contains(&edge.producer_candidate_id)
             && !pruned.contains(&edge.consumer_candidate_id)));
     let _ = kll_state;
+}
+
+/// The ratio of quantiles of [`dead_candidates_are_pruned_and_listed_before_chain_groups`]
+/// after Pass 2, with `m`'s values declared of sign `sign`, and its p99
+/// and p50.
+fn pass2_of_ratio_of_quantiles(
+    sign: ValueSign,
+) -> (
+    LogicalASAPMemoCandidates,
+    QuantileReadouts,
+    QuantileReadouts,
+) {
+    let mut memo = Memo::new(BTreeMap::from([(
+        SourceColumn {
+            source: "m".into(),
+            column: "value".into(),
+        },
+        sign,
+    )]));
+    let input = scan(&mut memo, "m", &["job"]);
+    let window = range(&mut memo, input, 300);
+    let algorithms = [SketchAlgorithm::Kll, SketchAlgorithm::DDSketch];
+    let p99 = quantile_over_time_readouts(&mut memo, window, 0.99, &algorithms);
+    let p50 = quantile_over_time_readouts(&mut memo, window, 0.5, &algorithms);
+    let ratio = arithmetic(&mut memo, ArithmeticOpKind::Div, p99.result, p50.result);
+    let target = AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative);
+    query(&mut memo, ratio, Some(target));
+    (pass2(memo, &[entry(60_000)]), p99, p50)
+}
+
+/// Decided 2026-11-08 (sign conditions): DDSketch's relative error on a
+/// quantile needs values of one sign. Over values of unknown sign no
+/// DDSketch build meets any readout's requirement.
+#[test]
+fn ddsketch_quantiles_over_values_of_unknown_sign_have_no_guarantee() {
+    let (logical, p99, _) = pass2_of_ratio_of_quantiles(ValueSign::Unknown);
+    let ddsketch_state = p99.by_algorithm[1].1;
+    for index_in_group in 0..parameter_list(SketchAlgorithm::DDSketch).len() {
+        let build = CandidateForMemoGroupId {
+            group: ddsketch_state,
+            index_in_group,
+        };
+        let pruned = pruned_entry(&logical, build).expect("every DDSketch build is pruned");
+        assert!(pruned
+            .causes
+            .iter()
+            .all(|cause| matches!(cause.root, RootPruneReason::BelowRequiredAccuracy { .. })));
+    }
 }
 
 // ── (4) One range-free chain group across ranges and offsets (E2) ─────────
@@ -372,43 +417,55 @@ fn e1_a_key_only_filter_keeps_the_ddsketch_readout_admissible() {
     );
 }
 
-// ── (6) H2: avg over relative errors stays exact-only ─────────────────────
+// ── (6) H2: avg over relative errors needs values of one sign ──────────
 
-/// Decided 2026-11-07 (H2): `avg` has an absolute contract only here; a
-/// relative bound on a mean needs the sign facts of #1207 PR 8. So
-/// `avg(quantile_over_time(0.99, m[5m]))` with a relative target has no
-/// admissible edge from a sketch readout into the `avg`: it reads the
-/// exact quantile only.
+/// Decided 2026-11-07 (H2) and 2026-11-08 (sign facts):
+/// `avg(quantile_over_time(0.99, m[5m]))` with a relative target. A mean
+/// of values with relative errors is off by at most the largest of them
+/// only when the values have one sign. With `m`'s values of unknown sign
+/// the `avg` has no relative contract, so no sketch readout feeds it and it
+/// reads the exact quantile only; with `m` declared non-negative the
+/// DDSketch readout (relative error) feeds it, the KLL readout (rank) does
+/// not.
 #[test]
-fn h2_avg_of_readouts_under_a_relative_target_reads_exact_only() {
-    let mut memo = Memo::default();
-    let input = scan(&mut memo, "m", &["job"]);
-    let window = range(&mut memo, input, 300);
-    let algorithms = [SketchAlgorithm::Kll, SketchAlgorithm::DDSketch];
-    let p99 = quantile_over_time_readouts(&mut memo, window, 0.99, &algorithms);
-    let avg = group_with_own_candidate(
-        &mut memo,
-        Operator::NonASAP(NonASAPOp::Aggregate {
-            child: p99.result,
-            reduction: Reduction::by(vec![]),
-            measures: vec![AggIntent::Avg { col: None }],
-            output_names: vec!["avg".into()],
-            filters: vec![None],
-            having: None,
-        }),
-    );
-    let target = AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative);
-    query(&mut memo, avg, Some(target));
-    let logical = pass2(memo, &[entry(60_000)]);
-    let edges = edges_into(&logical, own_candidate(avg), 0);
-    for (_, _, readout) in &p99.by_algorithm {
+fn h2_avg_of_readouts_under_a_relative_target_needs_values_of_one_sign() {
+    for sign in [ValueSign::Unknown, ValueSign::NonNegative] {
+        let mut memo = Memo::new(BTreeMap::from([(
+            SourceColumn {
+                source: "m".into(),
+                column: "value".into(),
+            },
+            sign,
+        )]));
+        let input = scan(&mut memo, "m", &["job"]);
+        let window = range(&mut memo, input, 300);
+        let algorithms = [SketchAlgorithm::Kll, SketchAlgorithm::DDSketch];
+        let p99 = quantile_over_time_readouts(&mut memo, window, 0.99, &algorithms);
+        let avg = group_with_own_candidate(
+            &mut memo,
+            Operator::NonASAP(NonASAPOp::Aggregate {
+                child: p99.result,
+                reduction: Reduction::by(vec![]),
+                measures: vec![AggIntent::Avg { col: None }],
+                output_names: vec!["avg".into()],
+                filters: vec![None],
+                having: None,
+            }),
+        );
+        let target = AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative);
+        query(&mut memo, avg, Some(target));
+        let logical = pass2(memo, &[entry(60_000)]);
+        let edges = edges_into(&logical, own_candidate(avg), 0);
+        let (kll_readout, ddsketch_readout) = (p99.by_algorithm[0].2, p99.by_algorithm[1].2);
+        assert!(!edges.contains(&(kll_readout, true)), "{sign:?}: {edges:?}");
+        assert_eq!(
+            edges.contains(&(ddsketch_readout, true)),
+            sign == ValueSign::NonNegative,
+            "{sign:?}: {edges:?}"
+        );
         assert!(
-            !edges.contains(&(*readout, true)),
-            "a sketch readout is admissible into avg: {edges:?}"
+            edges.contains(&(own_candidate(p99.result), true)),
+            "the exact quantile stays admissible: {edges:?}"
         );
     }
-    assert!(
-        edges.contains(&(own_candidate(p99.result), true)),
-        "the exact quantile stays admissible: {edges:?}"
-    );
 }

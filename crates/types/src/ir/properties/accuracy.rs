@@ -287,6 +287,20 @@ impl AccuracyTarget {
     pub fn is_exact(&self) -> bool {
         self.max_error == 0.0 && self.failure_probability == Some(0.0)
     }
+
+    /// The target's failure probability per value: split evenly over the
+    /// values its scope covers when one evaluation returns
+    /// `values_per_evaluation` ($n_q$; [`AccuracyScope::max_values_covered`]),
+    /// 0 when that count is not bound (no approximate value meets it).
+    /// `None` when the target sets no failure probability.
+    pub fn failure_probability_per_value(&self, values_per_evaluation: Option<u64>) -> Option<f64> {
+        let delta = self.failure_probability?;
+        Some(
+            self.accuracy_scope
+                .max_values_covered(values_per_evaluation)
+                .map_or(0.0, |values| delta / values.max(1) as f64),
+        )
+    }
 }
 
 /// The metric a query's result is most naturally stated in, from the
