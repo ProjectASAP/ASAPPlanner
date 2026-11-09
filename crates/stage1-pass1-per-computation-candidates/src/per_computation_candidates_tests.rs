@@ -10,7 +10,7 @@ use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
 use asap_types::ir::scalar::{ColumnRef, CompareOpKind, ScalarValue};
 use asap_types::ir::schema::{
     DataType, ExactKind, Field, FieldDataType, Schema, SketchAlgorithm, SketchParams,
-    SketchStatistic, SummaryInputExpr, SummaryUpdate, WeightDomain, PROMQL_SERIES_IDENTITY,
+    SketchStatistic, SummaryInputExpr, SummaryUpdate, PROMQL_SERIES_IDENTITY,
 };
 use asap_types::ir::{
     ASAPOp, BinaryOperator, ExprSemantics, NonASAPOp, Operator, Predicate, ScalarExpr,
@@ -25,9 +25,8 @@ use crate::pass1_memo;
 use crate::per_computation_candidates::{
     computation_candidates_for_intent, computation_targets, PerComputationCandidateError,
 };
-use crate::test_fixtures::{
-    aggregate_group, group, metric_schema, query, scan_group, scan_operator,
-};
+use crate::test_fixtures::{aggregate_group, group, metric_schema, query, scan_group};
+use asap_types::test_support::time_series_scan;
 
 /// A compact printout of every group and its candidates: the expression's
 /// operator, then per candidate its operator, input groups, θ and fused
@@ -309,7 +308,7 @@ fn an_open_per_series_aggregate_offers_no_renamed_readout() {
     let mut memo = Memo::default();
     let scan = group(
         &mut memo,
-        scan_operator("latency", metric_schema(&["job"], vec![])),
+        time_series_scan("latency", metric_schema(&["job"], vec![]), vec![]),
     );
     let rows = group(
         &mut memo,
@@ -718,12 +717,12 @@ fn own_value_having_filters_each_readout() {
     assert_eq!(kinds, ["Aggregate", "Filter", "Filter"]);
 }
 
-// ── Fused heaps, whole-expression top-k, ranked items, raw-data signs ──────
+// ── Fused heaps, whole-expression top-k, ranked items ─────────────────────
 
 /// `topk(5, sum by (job) (sum_over_time(m[5m])))`: the top-k gets heaps
 /// over the range's raw data samples, keyed by `job` (the ranked item),
-/// weighted by the sample value with the open requirement that the samples
-/// of `m` are non-negative (`RawDataSamplesOfMetric`). Each heap build
+/// weighted by the sample value (whether those weights are non-negative is
+/// the state group's `column_sign`, which Stage 2 reads). Each heap build
 /// lists the absorbed sums' groups in `fused_groups`, and the top-k's own
 /// heaps over its one-row-per-item input are pruned.
 #[test]
@@ -760,10 +759,6 @@ fn whole_expression_topk_heaps_read_the_raw_samples() {
             update.item,
             Some(SummaryInputExpr::Column(ColumnRef::Named("job".into())))
         );
-        assert_eq!(
-            update.weight_domain,
-            WeightDomain::RawDataSamplesOfMetric { metric: "m".into() }
-        );
         for build in candidates(&memo, state) {
             let mut fused = build.fused_groups.clone();
             fused.sort();
@@ -776,8 +771,7 @@ fn whole_expression_topk_heaps_read_the_raw_samples() {
     }
 }
 
-/// A top-k over a `count` ranks the counted items with unit weight, proven
-/// non-negative.
+/// A top-k over a `count` ranks the counted items with unit weight.
 #[test]
 fn count_ranked_topk_counts_with_unit_weight() {
     let mut memo = Memo::default();
@@ -800,10 +794,6 @@ fn count_ranked_topk_counts_with_unit_weight() {
     let memo = pass1_memo(memo, None).unwrap();
     let (_, update) = state_group(&memo, SketchAlgorithm::CmsWithHeap);
     assert_eq!(update.weight, SummaryInputExpr::Constant(1.0));
-    assert!(matches!(
-        update.weight_domain,
-        WeightDomain::NonNegative { .. }
-    ));
 }
 
 /// The ranked item over several group keys is their tuple; the top-k's own

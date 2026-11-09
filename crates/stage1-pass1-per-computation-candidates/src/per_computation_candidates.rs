@@ -55,8 +55,8 @@ use asap_types::ir::operator::AggIntent;
 use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
 use asap_types::ir::scalar::{resolve_column_ref, ColumnRef, CompareOpKind, ScalarValue};
 use asap_types::ir::schema::{
-    DataType, EntityIdentity, ExactKind, FieldDataType, NonNegativeWeightProof, Schema,
-    SketchAlgorithm, SketchParams, StatisticKind, SummaryInputExpr, SummaryUpdate, WeightDomain,
+    DataType, EntityIdentity, ExactKind, FieldDataType, Schema, SketchAlgorithm, SketchParams,
+    StatisticKind, SummaryInputExpr, SummaryUpdate,
 };
 use asap_types::ir::{
     ASAPOp, BinaryOperator, ExprSemantics, NonASAPOp, Operator, OperatorResultKind, Predicate,
@@ -73,8 +73,7 @@ use asap_accuracy::sizing::sketch_statistic;
 use asap_types::deployment_capabilities::{summary_supported, SupportedSummary};
 
 use crate::realization::{
-    expression, raw_data_samples_of_metric, realize_keyed_additive_summary_input, schema,
-    summary_candidates,
+    expression, realize_keyed_additive_summary_input, schema, summary_candidates,
 };
 
 /// One measure of an aggregate group with at least one realization besides
@@ -713,23 +712,6 @@ fn whole_expression_input(
     Some((realized.child, input, partitions))
 }
 
-/// `update` with the open requirement that its weights are samples of
-/// `metric` ([`WeightDomain::RawDataSamplesOfMetric`]), when it is a keyed heap
-/// update whose weights are not otherwise proven.
-fn with_raw_data_samples_requirement(
-    mut update: SummaryUpdate,
-    metric: Option<&str>,
-) -> SummaryUpdate {
-    if let Some(metric) = metric {
-        if update.item.is_some() && update.weight_domain == WeightDomain::UnknownOrSigned {
-            update.weight_domain = WeightDomain::RawDataSamplesOfMetric {
-                metric: metric.to_string(),
-            };
-        }
-    }
-    update
-}
-
 /// Adds Pass 1's candidates to `memo` (Stage 0's, without candidates):
 /// every group's own expression, then, for each aggregate group with
 /// `targets`, each way to compute it. A consumer `Filter` group whose
@@ -819,10 +801,6 @@ struct SingleMeasure<'a> {
     reduction: &'a Reduction,
     intent: &'a AggIntent,
     filter: Option<&'a Predicate<MemoGroupId>>,
-    /// The metric whose raw data samples, or plain sums of them, are every
-    /// value the aggregate reads: a heap-sketch weight read from them
-    /// carries the open requirement `WeightDomain::RawDataSamplesOfMetric`.
-    raw_data_samples_of: Option<&'a str>,
 }
 
 /// Adds `ways.result_group`'s candidates that compute it from
@@ -858,13 +836,11 @@ fn add_aggregate_candidates(
             Operator::NonASAP(NonASAPOp::Filter { pred, child: input }),
         )?;
     }
-    let raw_data_samples = raw_data_samples_of_metric(memo, child);
     let measure = |index: usize| SingleMeasure {
         input,
         reduction: &reduction,
         intent: &measures[index],
         filter: filters.get(index).and_then(Option::as_ref),
-        raw_data_samples_of: raw_data_samples.as_deref(),
     };
     let target_of = |index: usize| {
         ways.targets
@@ -974,7 +950,7 @@ fn add_fused_candidate(
                 memo,
                 Operator::ASAP(ASAPOp::SummaryAgg {
                     child: rows,
-                    input: with_raw_data_samples_requirement(update, measure.raw_data_samples_of),
+                    input: update,
                     summary_type: FieldDataType::Sketch(*algorithm),
                     reduction: partitions,
                     filter: None,
@@ -1006,7 +982,6 @@ fn add_fused_candidate(
                 reduction: &partitions,
                 intent: &inner,
                 filter: None,
-                raw_data_samples_of: None,
             };
             let read = measure_input(&inner, memo, rows, None)?;
             let merged = accumulator_build(memo, kind, &inner, &below_inner, read)?;
@@ -1049,16 +1024,13 @@ fn measure_output(
             )?;
             let summary_type = FieldDataType::Sketch(*algorithm);
             let read = measure_input(measure.intent, memo, measure.input, measure.filter)?;
-            let update = with_raw_data_samples_requirement(
-                summary_update(
-                    measure.intent,
-                    &summary_type,
-                    measure.reduction,
-                    schema(memo, measure.input),
-                    read,
-                )?,
-                measure.raw_data_samples_of,
-            );
+            let update = summary_update(
+                measure.intent,
+                &summary_type,
+                measure.reduction,
+                schema(memo, measure.input),
+                read,
+            )?;
             let state = add_state_group(
                 memo,
                 Operator::ASAP(ASAPOp::SummaryAgg {
@@ -1757,23 +1729,14 @@ fn summary_update(
                 item: Some(item),
                 // The ranked value ([`measure_input`]).
                 weight,
-                // Not proven non-negative; selection decides whether CMS is admissible.
-                weight_domain: WeightDomain::UnknownOrSigned,
             }
         }
         (_, Some(SketchAlgorithm::UnivMon)) | (AggIntent::Count, Some(SketchAlgorithm::Cms)) => {
             SummaryUpdate {
                 item: Some(weight),
                 weight: SummaryInputExpr::Constant(1.0),
-                weight_domain: WeightDomain::NonNegative {
-                    proof: NonNegativeWeightProof::UnitCount,
-                },
             }
         }
-        _ => SummaryUpdate {
-            item: None,
-            weight,
-            weight_domain: WeightDomain::UnknownOrSigned,
-        },
+        _ => SummaryUpdate { item: None, weight },
     })
 }
