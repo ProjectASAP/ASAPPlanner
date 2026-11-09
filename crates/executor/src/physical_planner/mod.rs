@@ -3,7 +3,6 @@
 //! A node without a native lowering fails compilation; the deployment runtime
 //! must execute it.
 use crate::operators::{RowWeight, SummaryEvaluation};
-use crate::sources::{scan_windows, time_range_window, view_windows, ScanWindow};
 use crate::summary_kernels::exact::ExactEvaluation;
 use crate::{
     operators::{Expression, Operator, Reduction, SortKey},
@@ -21,7 +20,7 @@ use planner_types::ir::physical_export::{
 };
 use planner_types::ir::scalar::{ColumnRef, CompareOpKind};
 use planner_types::ir::schema::{
-    DataType, FieldDataType, SketchStatistic, SummaryInputExpr, SummaryTypeCapability,
+    DataType, FieldDataType, SketchParams, SketchStatistic, SummaryInputExpr, SummaryTypeCapability,
 };
 // `promql_rows` reads `OperatorNode` through `super::*` only in its
 // test-support helpers.
@@ -88,14 +87,6 @@ fn compile_internal(
     roots: &[NodeId],
 ) -> Result<CompiledPhysicalDAG, Error> {
     preflight_depth(dag)?;
-    if dag.nodes.iter().any(|n| {
-        matches!(
-            n.payload,
-            Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
-        )
-    }) {
-        todo!("#1207 PR 6: run a chain, and a TimeRange or TimeShift over it by window index")
-    }
     // Helper IDs lie above the u32 range; a larger Planner ID could collide.
     if let Some(node) = dag.nodes.iter().find(|n| n.id as u64 > u64::from(u32::MAX)) {
         return Err(invalid(format!("Planner node ID {} exceeds u32", node.id)));
@@ -158,16 +149,15 @@ fn compile_internal(
             }
         }
     }
-    // Each view's and each `Scan`'s window, the DAG indexed once for all:
-    // a materialized tumbling-window chain has a view per tumbling window.
-    let view_windows = view_windows(dag, views.iter().map(|view| view.node_id));
-    let scan_windows = scan_windows(
-        dag,
-        dag.nodes
-            .iter()
-            .filter(|node| matches!(node.payload, Payload::NonASAP(NonASAPOp::Scan { .. })))
-            .map(|node| node.id),
-    );
+    // The consumers of each compiled node, for the windows its reads select.
+    let mut consumers = BTreeMap::<NodeId, Vec<NodeId>>::new();
+    for (&consumer, producers) in &dependencies {
+        if seen.contains(&consumer) && !views_by_node.contains_key(&consumer) {
+            for &producer in producers {
+                consumers.entry(producer).or_default().push(consumer);
+            }
+        }
+    }
     let compile_roots: BTreeSet<NodeId> = roots.iter().copied().collect();
     let mut physical_dag = CompiledPhysicalDAG::new(roots.to_vec());
     for id in ordered {
@@ -176,20 +166,22 @@ fn compile_internal(
         let output = Arc::new(node.output_schema.clone());
         crate::values::validate_schema(&output)?;
         if let Some(view) = views_by_node.get(&id) {
-            // A view read is exact for the window its state summarizes, so
-            // that window must be bounded.
-            let window = view_windows[&view.node_id];
-            if window == ScanWindow::Unbounded {
-                return Err(invalid(format!(
-                    "materialized view {id} summarizes an unbounded window"
-                )));
+            // A chain's rows are read through the `TimeRange`s above it,
+            // which select its windows; any other view's state is read for
+            // the window of data it summarizes. Either is exact, so bounded.
+            let read_window_ms = match node.payload {
+                Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => {
+                    window_read_above(id, &compile_roots, &consumers, &nodes, &dependencies)
+                }
+                _ => window_below(id, &nodes, &dependencies),
             }
+            .ok_or_else(|| invalid(format!("materialized view {id} is read unbounded")))?;
             physical_dag.add_materialized_view(
                 id,
                 compiled::MaterializedViewSlot {
                     view: (*view).clone(),
                     schema: output,
-                    window,
+                    read_window_ms,
                 },
             )?;
         } else if let Payload::NonASAP(NonASAPOp::Scan {
@@ -214,20 +206,17 @@ fn compile_internal(
                 })
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|error| invalid(format!("scan {id}: {error}")))?;
-            // The rows its readers read; a compile root reads them all.
-            let window = match output.time_index {
-                Some(_) if !compile_roots.contains(&id) => {
-                    scan_windows[&(id as PhysicalASAPNodeId)]
-                }
-                _ => ScanWindow::Unbounded,
-            };
+            // The rows its consumers read; a compile root reads them all.
+            let read_window_ms = output.time_index.and_then(|_| {
+                window_read_above(id, &compile_roots, &consumers, &nodes, &dependencies)
+            });
             physical_dag.add_raw_data(
                 id,
                 compiled::RawDataSlot {
                     source: source.clone(),
                     schema: output,
                     predicates,
-                    window,
+                    read_window_ms,
                 },
             )?;
         } else {
@@ -446,6 +435,111 @@ fn compile_internal(
                 }
                 continue;
             }
+            // A chain builds, in an ingestion run, the window of its input
+            // ending at the run's end: one row per key, stamped with that
+            // `window_end`. Older windows are earlier runs', in the store.
+            if let Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                summary_type,
+                input: update,
+                reduction,
+                filter,
+                tumbling_window_width_ms,
+                ..
+            }) = &node.payload
+            {
+                if node.output_state.timing
+                    != planner_types::ir::properties::ExecutionTiming::IngestionTime
+                {
+                    return Err(invalid(format!(
+                        "node {id}: a tumbling-window chain is built in ingestion runs"
+                    )));
+                }
+                crate::capability::validate_ingestion_time_summary(filter.as_ref())
+                    .map_err(Error::Invalid)?;
+                let [input] = schemas.as_slice() else {
+                    return Err(invalid("a tumbling-window chain reads one input"));
+                };
+                let time = input
+                    .time_index
+                    .ok_or_else(|| invalid("a tumbling-window chain reads a time column"))?;
+                let width_ms = i64::try_from(*tumbling_window_width_ms)
+                    .map_err(|_| invalid("tumbling-window width exceeds Int64"))?;
+                // A time series' stale markers are not samples.
+                let below =
+                    node_below_shifts(first_input(id, &dependencies), &nodes, &dependencies);
+                let sample_value = match below.map(|below| &nodes[&below].payload) {
+                    Some(Payload::NonASAP(NonASAPOp::Scan {
+                        source: planner_types::ir::operator::Source::TimeSeries { .. },
+                        ..
+                    })) => Some(named_column(input, &ColumnRef::SampleValue)?),
+                    _ => None,
+                };
+                let window =
+                    Operator::time_range(input.clone(), time, 0, width_ms, sample_value, None)?;
+                let build = match reduction {
+                    PlannerReduction::PerEntity => {
+                        let SummaryInputExpr::Column(value) = &update.weight else {
+                            return Err(invalid(
+                                "per-entity update requires a projected value column",
+                            ));
+                        };
+                        let value = named_column(input, value)?;
+                        let groups = (0..input.fields.len())
+                            .filter(|&column| column != value && column != time)
+                            .collect();
+                        Operator::per_group_summary_build(
+                            input.clone(),
+                            summary_type.clone(),
+                            node.parameters.clone(),
+                            value,
+                            Some(time),
+                            groups,
+                        )?
+                    }
+                    _ => summary_agg_build(
+                        input,
+                        summary_type,
+                        node.parameters.as_ref(),
+                        update,
+                        reduction,
+                    )?,
+                };
+                let build = match filter {
+                    Some(filter) => build.with_row_filter(expression(&filter.0, input)?)?,
+                    None => build,
+                };
+                let compact = build.schema();
+                physical_dag.add(auxiliary, inputs, window)?;
+                physical_dag.add(helper_id(id, 1)?, vec![auxiliary], build)?;
+                physical_dag.add(
+                    id,
+                    vec![helper_id(id, 1)?],
+                    Operator::scope_timestamp(compact, output)?,
+                )?;
+                continue;
+            }
+            // A `TimeShift` with an `@` anchor evaluates its input once, at
+            // the anchor's time minus its offset.
+            if let Payload::NonASAP(NonASAPOp::TimeShift {
+                shift:
+                    planner_types::ir::operator::TimeShift {
+                        offset_ms,
+                        at: Some(at),
+                    },
+                ..
+            }) = &node.payload
+            {
+                let [input] = schemas.as_slice() else {
+                    return Err(invalid("a time shift reads one input"));
+                };
+                physical_dag.add(
+                    id,
+                    inputs,
+                    Operator::evaluate_at(input.clone(), *at, *offset_ms)?
+                        .with_output_schema(output)?,
+                )?;
+                continue;
+            }
             // A closed row must include either all source labels or the explicit
             // complete-label identity. Projected labels alone are insufficient.
             if let Payload::ASAP(ASAPOp::SummaryAgg {
@@ -479,8 +573,12 @@ fn compile_internal(
                         "per-entity summary requires complete source identity",
                     ));
                 }
-                crate::capability::validate_summary_kernel(family, update)
-                    .map_err(Error::Invalid)?;
+                crate::capability::validate_summary_kernel(
+                    family,
+                    node.parameters.as_ref(),
+                    update,
+                )
+                .map_err(Error::Invalid)?;
                 let value = match (frequency_item, &update.weight) {
                     (Some(item), _) => item,
                     (None, SummaryInputExpr::Column(value)) => value,
@@ -501,6 +599,7 @@ fn compile_internal(
                 let build = Operator::per_group_summary_build(
                     input,
                     family.clone(),
+                    node.parameters.clone(),
                     value,
                     Some(coordinate),
                     groups,
@@ -618,8 +717,10 @@ fn compile_internal(
             }) = &node.payload
             {
                 if keys.is_empty() && built_from_relation(&restored[&id]) {
+                    // The merge carries the θ of the states it reads.
+                    let parameters = node.parameters.clone();
                     let operator = compile_node(node, &schemas)
-                        .and_then(Operator::with_emit_empty_global)
+                        .and_then(|merge| merge.with_emit_empty_global(parameters))
                         .map_err(|error| invalid(format!("node {id}: {error}")))?;
                     physical_dag.add(id, inputs, operator)?;
                     continue;
@@ -668,21 +769,21 @@ fn built_from_relation(state: &std::rc::Rc<OperatorNode>) -> bool {
 }
 
 /// The native operator of `id` when it is a `TimeRange` or a `TimeShift`
-/// over a `Scan` (below any stacked `TimeShift`s), of a SQL table or a time
-/// series; `None` for any other node.
+/// without an `@` anchor over a `Scan` of a SQL table or a time series, or
+/// over a tumbling-window chain (below any stacked `TimeShift`s); `None`
+/// for any other node.
 ///
 /// A `TimeRange(w)` over shifts summing to `s` keeps the rows whose time
 /// column lies in `(T - s - w, T - s]` at evaluation time `T`
-/// ([`time_range_window`]), the window a PromQL selector
-/// and a SQL filter against `now()` read; an ingestion run builds the
-/// window ending at its `window_end_ms` ([`Operator::time_range`]). Over a
-/// time series a stale marker is not a row, and an instant window keeps
-/// each series' (each label set's) latest row. A `TimeShift` only moves
-/// the window its `TimeRange` reads (the range above applies its offset),
-/// so it passes the rows through; a shift is meaningful only under a
-/// range, the shape the frontends and Pass 2's tumbling windows build. An
-/// `@` anchor has no lowering, so a range or shift over one gets `None` and
-/// the node fails compilation; an instant window over a table is refused.
+/// ([`time_range_window`]), the window a PromQL selector and a SQL filter
+/// against `now()` read; an ingestion run keeps the window ending at its
+/// `window_end_ms` ([`Operator::time_range`]). Over a time series a stale
+/// marker is not a row, and an instant window keeps each series' (each
+/// label set's) latest row. Over a chain of width `c`, it keeps the windows
+/// whose `window_end` lies there, `w / c` of them: `c` must divide `w` and
+/// `s`, and the window must be a range. A `TimeShift` only moves the window
+/// its `TimeRange` reads (the range above applies its offset), so it passes
+/// the rows through. An instant window over a table is refused.
 fn time_window_operator(
     id: NodeId,
     nodes: &BTreeMap<NodeId, &PhysicalASAPDAGNode>,
@@ -697,11 +798,19 @@ fn time_window_operator(
     let Some(below) = node_below_shifts(below, nodes, dependencies) else {
         return Ok(None);
     };
-    let Payload::NonASAP(NonASAPOp::Scan { source, .. }) = &nodes[&below].payload else {
-        return Ok(None);
+    let chain_width_ms = match &nodes[&below].payload {
+        Payload::NonASAP(NonASAPOp::Scan { .. }) => None,
+        Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            tumbling_window_width_ms,
+            ..
+        }) => Some(
+            i64::try_from(*tumbling_window_width_ms)
+                .map_err(|_| invalid("tumbling-window width exceeds Int64"))?,
+        ),
+        _ => return Ok(None),
     };
     let [input] = input_schemas else {
-        return Err(invalid("a time range or shift over a Scan reads one input"));
+        return Err(invalid("a time range or shift reads one input"));
     };
     let Payload::NonASAP(NonASAPOp::TimeRange { kind, .. }) = &nodes[&id].payload else {
         // A shift passes its rows through.
@@ -713,24 +822,41 @@ fn time_window_operator(
             .collect();
         return Operator::project(input.clone(), columns).map(Some);
     };
-    let ScanWindow::Within {
-        end_offset_ms,
-        width_ms,
-    } = time_range_window(id as PhysicalASAPNodeId, |id| {
-        nodes.get(&(id as NodeId)).map(|node| &node.payload)
-    })
-    else {
+    let Some((end_offset_ms, width_ms)) = time_range_window(id, nodes, dependencies) else {
         return Ok(None);
     };
     let time = input
         .time_index
-        .ok_or_else(|| invalid("a time range needs its source's time column"))?;
-    let (sample_value, latest_per_series) = match (source, kind) {
-        (planner_types::ir::operator::Source::Table { .. }, TimeRangeKind::Range) => (None, None),
-        (planner_types::ir::operator::Source::Table { .. }, TimeRangeKind::Instant) => {
-            return Err(invalid("an instant window over a SQL table is unsupported"))
+        .ok_or_else(|| invalid("a time range needs its input's time column"))?;
+    let (sample_value, latest_per_series) = match (&nodes[&below].payload, kind) {
+        (_, TimeRangeKind::Instant) if chain_width_ms.is_some() => {
+            return Err(invalid("an instant window over a tumbling-window chain"))
         }
-        (planner_types::ir::operator::Source::TimeSeries { .. }, kind) => {
+        (Payload::ASAP(_), TimeRangeKind::Range) => {
+            let chain_width_ms = chain_width_ms.expect("a chain");
+            if width_ms % chain_width_ms != 0 || end_offset_ms % chain_width_ms != 0 {
+                return Err(invalid(format!(
+                    "a window ({end_offset_ms} ms back, {width_ms} ms wide) is not whole \
+                     tumbling windows of {chain_width_ms} ms"
+                )));
+            }
+            (None, None)
+        }
+        (
+            Payload::NonASAP(NonASAPOp::Scan {
+                source: planner_types::ir::operator::Source::Table { .. },
+                ..
+            }),
+            TimeRangeKind::Range,
+        ) => (None, None),
+        (
+            Payload::NonASAP(NonASAPOp::Scan {
+                source: planner_types::ir::operator::Source::Table { .. },
+                ..
+            }),
+            TimeRangeKind::Instant,
+        ) => return Err(invalid("an instant window over a SQL table is unsupported")),
+        (_, kind) => {
             let value = named_column(input, &ColumnRef::SampleValue)?;
             // A series is its label set: every column but its time and value.
             let series = (*kind == TimeRangeKind::Instant).then(|| {
@@ -750,6 +876,109 @@ fn time_window_operator(
         latest_per_series,
     )
     .map(Some)
+}
+
+/// `(s, w)` of the `TimeRange(w)` `id` over `TimeShift`s summing to `s`: it
+/// reads `(T - s - w, T - s]` at evaluation time `T`. `None` when `id` is not
+/// a `TimeRange` or a shift below it has an `@` anchor.
+fn time_range_window(
+    id: NodeId,
+    nodes: &BTreeMap<NodeId, &PhysicalASAPDAGNode>,
+    dependencies: &BTreeMap<NodeId, Vec<NodeId>>,
+) -> Option<(i64, i64)> {
+    let Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) = &nodes.get(&id)?.payload else {
+        return None;
+    };
+    let mut end_offset_ms = 0i64;
+    let mut below = first_input(id, dependencies);
+    while let Some(Payload::NonASAP(NonASAPOp::TimeShift { shift, .. })) = below
+        .and_then(|below| nodes.get(&below))
+        .map(|node| &node.payload)
+    {
+        if shift.at.is_some() {
+            return None;
+        }
+        end_offset_ms = end_offset_ms.saturating_add(shift.offset_ms);
+        below = below.and_then(|below| first_input(below, dependencies));
+    }
+    Some((end_offset_ms, i64::try_from(range.as_millis()).ok()?))
+}
+
+/// The smallest window `(end_offset_ms, width_ms)` holding both.
+fn window_union(a: (i64, i64), b: (i64, i64)) -> (i64, i64) {
+    let end_offset_ms = a.0.min(b.0);
+    let start_back_ms = a.0.saturating_add(a.1).max(b.0.saturating_add(b.1));
+    (end_offset_ms, start_back_ms.saturating_sub(end_offset_ms))
+}
+
+/// The window `(end_offset_ms, width_ms)` back from the evaluation time that
+/// the compiled consumers of `id` read through the `TimeShift`s (without an
+/// `@` anchor) above it: a `TimeRange(w)`, or a chain of width `w` (its
+/// window ending at the evaluation time), over shifts summing to `s` reads
+/// `(s, w)`; several read the smallest window holding all of theirs.
+/// `None` when `id` is a compile root, a root or another consumer reads it
+/// outside a window, or nothing reads it.
+fn window_read_above(
+    id: NodeId,
+    roots: &BTreeSet<NodeId>,
+    consumers: &BTreeMap<NodeId, Vec<NodeId>>,
+    nodes: &BTreeMap<NodeId, &PhysicalASAPDAGNode>,
+    dependencies: &BTreeMap<NodeId, Vec<NodeId>>,
+) -> Option<(i64, i64)> {
+    let mut window: Option<(i64, i64)> = None;
+    let mut pending = vec![(id, 0i64)];
+    while let Some((node, end_offset_ms)) = pending.pop() {
+        if roots.contains(&node) {
+            return None;
+        }
+        for &consumer in consumers.get(&node).into_iter().flatten() {
+            let read = match &nodes[&consumer].payload {
+                Payload::NonASAP(NonASAPOp::TimeShift { shift, .. }) if shift.at.is_none() => {
+                    pending.push((consumer, end_offset_ms.saturating_add(shift.offset_ms)));
+                    continue;
+                }
+                Payload::NonASAP(NonASAPOp::TimeRange { .. }) => {
+                    time_range_window(consumer, nodes, dependencies)?
+                }
+                Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                    tumbling_window_width_ms,
+                    ..
+                }) => (
+                    end_offset_ms,
+                    i64::try_from(*tumbling_window_width_ms).ok()?,
+                ),
+                _ => return None,
+            };
+            window = Some(window.map_or(read, |window| window_union(window, read)));
+        }
+    }
+    window
+}
+
+/// The window `(end_offset_ms, width_ms)` back from the evaluation time of
+/// the data `id`'s state summarizes: the smallest window holding every
+/// `TimeRange` below it. `None` when none is below it, or one is read
+/// through an `@` anchor.
+fn window_below(
+    id: NodeId,
+    nodes: &BTreeMap<NodeId, &PhysicalASAPDAGNode>,
+    dependencies: &BTreeMap<NodeId, Vec<NodeId>>,
+) -> Option<(i64, i64)> {
+    let mut seen = BTreeSet::new();
+    let mut pending = vec![id];
+    let mut window: Option<(i64, i64)> = None;
+    while let Some(node) = pending.pop() {
+        if !seen.insert(node) {
+            continue;
+        }
+        if let Payload::NonASAP(NonASAPOp::TimeRange { .. }) = &nodes[&node].payload {
+            let read = time_range_window(node, nodes, dependencies)?;
+            window = Some(window.map_or(read, |window| window_union(window, read)));
+        } else {
+            pending.extend(dependencies.get(&node).into_iter().flatten().copied());
+        }
+    }
+    window
 }
 
 fn first_input(id: NodeId, dependencies: &BTreeMap<NodeId, Vec<NodeId>>) -> Option<NodeId> {
@@ -796,7 +1025,7 @@ pub(crate) fn below_time_shifts<'a, N, C: 'a>(
 /// lookback)`: it ends `offset` ms before the evaluation time and spans
 /// `lookback` ms. It is the union of the range windows the evaluation
 /// reads, each moved back by the time shifts below its range: one range for
-/// a single build, back-to-back tumbling windows for merged tumbling windows. `None`
+/// a single build or for the windows of a chain it merges. `None`
 /// without a range; an error when the ranges do not form one window.
 fn counter_window(
     id: NodeId,
@@ -1212,7 +1441,8 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                 crate::capability::validate_ingestion_time_summary(filter.as_ref())
                     .map_err(Error::Invalid)?;
             }
-            let build = summary_agg_build(input, family, update, reduction)?;
+            let build =
+                summary_agg_build(input, family, node.parameters.as_ref(), update, reduction)?;
             match filter {
                 Some(filter) => build.with_row_filter(expression(&filter.0, input)?),
                 None => Ok(build),
@@ -1279,6 +1509,7 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
 fn summary_agg_build(
     input: &SchemaRef,
     family: &FieldDataType,
+    parameters: Option<&SketchParams>,
     update: &planner_types::ir::schema::SummaryUpdate,
     reduction: &PlannerReduction,
 ) -> Result<Operator, Error> {
@@ -1286,7 +1517,8 @@ fn summary_agg_build(
         family,
         FieldDataType::Sketch(planner_types::ir::schema::SketchAlgorithm::HydraCms)
     ) {
-        crate::capability::validate_summary_kernel(family, update).map_err(Error::Invalid)?;
+        crate::capability::validate_summary_kernel(family, parameters, update)
+            .map_err(Error::Invalid)?;
         let PlannerReduction::Reduce(keys) = reduction else {
             return Err(invalid("an all-groups summary requires explicit groups"));
         };
@@ -1298,6 +1530,7 @@ fn summary_agg_build(
         return Operator::all_groups_summary_build(
             input.clone(),
             family.clone(),
+            parameters.cloned(),
             named_column(input, item)?,
             row_weight(input, &update.weight)?,
             groups(input, keys)?,
@@ -1309,7 +1542,8 @@ fn summary_agg_build(
         crate::capability::unit_frequency_column(update),
         unkeyed_frequency_family(family),
     ) {
-        crate::capability::validate_summary_kernel(family, update).map_err(Error::Invalid)?;
+        crate::capability::validate_summary_kernel(family, parameters, update)
+            .map_err(Error::Invalid)?;
         let PlannerReduction::Reduce(keys) = reduction else {
             return Err(invalid(
                 "summary construction requires explicit grouping columns",
@@ -1318,6 +1552,7 @@ fn summary_agg_build(
         return Operator::per_group_summary_build(
             input.clone(),
             family.clone(),
+            parameters.cloned(),
             named_column(input, item)?,
             input.time_index,
             groups(input, keys)?,
@@ -1348,12 +1583,14 @@ fn summary_agg_build(
         return Operator::per_group_keyed_summary_build(
             input.clone(),
             family.clone(),
+            parameters.cloned(),
             items,
             row_weight(input, &update.weight)?,
             groups(input, keys)?,
         );
     }
-    crate::capability::validate_summary_kernel(family, update).map_err(Error::Invalid)?;
+    crate::capability::validate_summary_kernel(family, parameters, update)
+        .map_err(Error::Invalid)?;
     let SummaryInputExpr::Column(column) = &update.weight else {
         return Err(invalid(
             "summary update expression must be projected to a column",
@@ -1367,6 +1604,7 @@ fn summary_agg_build(
     Operator::per_group_summary_build(
         input.clone(),
         family.clone(),
+        parameters.cloned(),
         named_column(input, column)?,
         input.time_index,
         groups(input, keys)?,
@@ -1589,12 +1827,42 @@ pub mod test_support {
     use planner_types::physical::{Lifetime, StorageMedium};
     use std::collections::HashMap;
 
+    /// Set θ on every sketch build among `nodes` (`SummaryAgg`,
+    /// `SummaryTumblingWindowChain` of a sketch family): `parameters` when
+    /// given, else the first θ its algorithm lists (`parameter_list`).
+    /// Exact builds keep `None`. For tests of hand-built plans, whose nodes
+    /// carry no θ: pass `&mut dag.nodes`, or `[&mut node]`.
+    pub fn set_build_parameters<'a>(
+        nodes: impl IntoIterator<Item = &'a mut PhysicalASAPDAGNode>,
+        parameters: Option<&SketchParams>,
+    ) {
+        for node in nodes {
+            if let Payload::ASAP(
+                ASAPOp::SummaryAgg {
+                    summary_type: FieldDataType::Sketch(algorithm),
+                    ..
+                }
+                | ASAPOp::SummaryTumblingWindowChain {
+                    summary_type: FieldDataType::Sketch(algorithm),
+                    ..
+                },
+            ) = &node.payload
+            {
+                node.parameters = parameters.cloned().or_else(|| {
+                    planner_types::stages::parameter_list(*algorithm)
+                        .first()
+                        .cloned()
+                });
+            }
+        }
+    }
+
     /// The materialized views at `nodes`, in that order: each node that is
-    /// not a view is marked materialized at ingestion time, and it and every node below it
-    /// run at ingestion time (their outputs and outgoing edges); then every
-    /// view's `retention_ms` is set ([`PhysicalASAPDAG::set_retention`])
-    /// with no tumbling window or range-evaluation span. For tests that bind states at
-    /// those nodes, as a deployment binds its views.
+    /// not a view is marked materialized at ingestion time, and it and
+    /// every node below it run at ingestion time (their outputs and
+    /// outgoing edges); every view without a retention or coverage is
+    /// retained for ever with a coverage of its own. For tests that bind
+    /// states at those nodes, as a deployment binds its views.
     pub fn views_at(
         dag: &mut PhysicalASAPDAG,
         nodes: &[NodeId],
@@ -1631,6 +1899,15 @@ pub mod test_support {
             if marked.contains(&id) {
                 node.lifetime = Lifetime::AcrossEvaluations(StorageMedium::Memory);
             }
+            if matches!(node.lifetime, Lifetime::AcrossEvaluations(_)) {
+                node.retention_ms.get_or_insert(i64::MAX as u64);
+                node.summary_coverage.get_or_insert_with(|| {
+                    planner_types::ir::materialized_view::ViewCoverage::new(
+                        format!("node {id}"),
+                        vec![],
+                    )
+                });
+            }
             if at_ingestion.contains(&id) {
                 node.output_state.timing = ExecutionTiming::IngestionTime;
             }
@@ -1641,7 +1918,7 @@ pub mod test_support {
             }
         }
         let views = dag
-            .set_retention(&HashMap::new(), &HashMap::new())
+            .materialized_views()
             .map_err(|error| invalid(error.to_string()))?;
         nodes
             .iter()

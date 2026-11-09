@@ -56,6 +56,7 @@ fn raw_node(id: usize, payload: NonASAPOp<usize>) -> PhysicalASAPDAGNode {
         parameters: None,
         guarantee: None,
         retention_ms: None,
+        summary_coverage: None,
         selected_physical_candidate: None,
     }
 }
@@ -126,6 +127,7 @@ fn summary_projection_survives_recovery() {
                 parameters: None,
                 guarantee: None,
                 retention_ms: None,
+                summary_coverage: None,
                 selected_physical_candidate: None,
             },
             raw_node(2, scan()),
@@ -155,6 +157,7 @@ fn summary_projection_survives_recovery() {
                 parameters: None,
                 guarantee: None,
                 retention_ms: None,
+                summary_coverage: None,
                 selected_physical_candidate: None,
             },
         ],
@@ -210,8 +213,10 @@ fn summary_projection_survives_recovery() {
         ]],
     )
     .unwrap();
-    let store = InMemoryDataStore::default()
-        .with_materialized_view(0, vec![batch])
+    let mut store = InMemoryDataStore::default();
+    // The view is read for its one-minute window ending at T = 1.
+    store
+        .append_materialized_view(&views[0], (1 - 60_000, 1), vec![batch])
         .unwrap();
     let physical_dag = program.instantiate(Arc::new(store)).unwrap();
     let context = RunContext::new(
@@ -263,6 +268,7 @@ fn summary_merge_without_inputs_is_rejected() {
             parameters: None,
             guarantee: None,
             retention_ms: None,
+            summary_coverage: None,
             selected_physical_candidate: None,
         }],
         edges: vec![],

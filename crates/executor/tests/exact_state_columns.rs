@@ -95,7 +95,8 @@ fn exact_records_merge_and_evaluate_as_kernel_objects_do() {
     ] {
         let family = FieldDataType::ExactAggregate(kind, params);
         let build = || {
-            Operator::per_group_summary_build(input(), family.clone(), 2, Some(1), vec![0]).unwrap()
+            Operator::per_group_summary_build(input(), family.clone(), None, 2, Some(1), vec![0])
+                .unwrap()
         };
         let tumbling_windows =
             [0, 1_000].map(|start| run(build(), vec![tumbling_window_input(start)]).remove(0));

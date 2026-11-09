@@ -9,7 +9,8 @@ use crate::{
 use futures::StreamExt;
 use planner_types::ir::scalar::ColumnRef;
 use planner_types::ir::schema::{
-    DataType, Field as SummaryField, FieldDataType as SummaryFamilyType, Schema, SummaryUpdate,
+    DataType, Field as SummaryField, FieldDataType as SummaryFamilyType, Schema, SketchParams,
+    SummaryUpdate,
 };
 use std::{collections::BTreeMap, sync::Arc};
 pub(crate) mod common;
@@ -111,7 +112,12 @@ enum Kind {
     },
     Project(Vec<Expression>),
     Filter(Expression),
-    /// A `TimeRange` over a `Scan` ([`Operator::time_range`]).
+    /// A `TimeShift` with an `@` anchor ([`Operator::evaluate_at`]).
+    EvaluateAt {
+        at: planner_types::ir::operator::AtModifier,
+        offset_ms: i64,
+    },
+    /// A `TimeRange` over a `Scan` or a chain ([`Operator::time_range`]).
     TimeRange {
         time: usize,
         end_offset_ms: i64,
@@ -156,6 +162,10 @@ enum Kind {
     /// (built by [`Operator::per_group_summary_build`]).
     PerGroupSummaryBuild {
         family: SummaryFamilyType,
+        /// θ of the states: the exported build node's `parameters`; `None`
+        /// for an exact family.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parameters: Option<SketchParams>,
         value: usize,
         time: Option<usize>,
         groups: Vec<usize>,
@@ -167,6 +177,10 @@ enum Kind {
     /// with heap (built by [`Operator::per_group_keyed_summary_build`]).
     PerGroupKeyedSummaryBuild {
         family: SummaryFamilyType,
+        /// θ of the states: the exported build node's `parameters`; `None`
+        /// for an exact family.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parameters: Option<SketchParams>,
         items: Vec<usize>,
         /// What each row adds to its item's count.
         row_weight: RowWeight,
@@ -179,6 +193,10 @@ enum Kind {
     /// HydraCms grid (built by [`Operator::all_groups_summary_build`]).
     AllGroupsSummaryBuild {
         family: SummaryFamilyType,
+        /// θ of the states: the exported build node's `parameters`; `None`
+        /// for an exact family.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parameters: Option<SketchParams>,
         item: usize,
         /// What each row adds to its item's count.
         row_weight: RowWeight,
@@ -199,6 +217,11 @@ enum Kind {
         /// with no groups; `false` (no output row) by default.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         emit_empty_global: bool,
+        /// θ of the merged states, which the empty global state takes: the
+        /// `parameters` of the build node that produced them. `None` for an
+        /// exact family, and without `emit_empty_global`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parameters: Option<SketchParams>,
     },
     Evaluation {
         state: usize,
@@ -216,9 +239,11 @@ pub struct Operator {
 impl Operator {
     pub(crate) fn row_preserving_input(&self) -> Option<usize> {
         match self.kind {
-            Kind::Filter(_) | Kind::Sort { .. } | Kind::Limit { .. } | Kind::SemiJoin { .. } => {
-                Some(0)
-            }
+            Kind::Filter(_)
+            | Kind::Sort { .. }
+            | Kind::Limit { .. }
+            | Kind::SemiJoin { .. }
+            | Kind::EvaluateAt { .. } => Some(0),
             _ => None,
         }
     }
@@ -394,6 +419,7 @@ impl PhysicalOperator<Batch, SchemaRef> for Operator {
             Kind::Project(_) => "Project",
             Kind::Filter(_) => "Filter",
             Kind::TimeRange { .. } => "TimeRange",
+            Kind::EvaluateAt { .. } => "TimeShift",
             Kind::Limit { .. } => "Limit",
             Kind::Sort { .. } => "Sort",
             Kind::Aggregate { .. } => "Aggregate",
@@ -412,6 +438,14 @@ impl PhysicalOperator<Batch, SchemaRef> for Operator {
         current_series::validate_context(self, context)?;
         series_window::validate_context(self, context)?;
         self.evaluation_range(context).map(|_| ())
+    }
+    fn input_context(&self, context: &RunContext) -> Result<RunContext, Error> {
+        match self.kind {
+            Kind::EvaluateAt { at, offset_ms } => {
+                time_range::anchored_context(at, offset_ms, context)
+            }
+            _ => Ok(context.clone()),
+        }
     }
     fn input_schemas(&self) -> Vec<SchemaRef> {
         self.inputs.clone()
@@ -449,6 +483,7 @@ impl PhysicalOperator<Batch, SchemaRef> for Operator {
             | Kind::SeriesRelabel { .. } => series_labels::execute(self, inputs, context),
             Kind::Filter(_) => filter::execute(self, inputs, context),
             Kind::TimeRange { .. } => time_range::execute(self, inputs, context),
+            Kind::EvaluateAt { .. } => time_range::execute_evaluate_at(inputs, context),
             Kind::Limit { .. } => limit::execute(self, inputs, context),
             Kind::Sort { .. } => sort::execute(self, inputs, context),
             Kind::Window { .. } | Kind::Aggregate { .. } => {

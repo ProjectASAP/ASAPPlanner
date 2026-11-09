@@ -1,8 +1,11 @@
-//! A `TimeRange` over a `Scan`: the rows of one window on the time column,
-//! for a SQL table and a time series alike. A time series' stale markers
-//! (the Prometheus end-of-series NaN) are never rows; an ordinary NaN is.
+//! A `TimeRange` over a `Scan` or a tumbling-window chain: the rows of one
+//! window on the time column, for a SQL table, a time series and a chain's
+//! `window_end` alike. A time series' stale markers (the Prometheus
+//! end-of-series NaN) are never rows; an ordinary NaN is. And a `TimeShift`
+//! with an `@` anchor, which evaluates its input at the anchor's time.
 use super::*;
 use arrow::array::Array;
+use planner_types::ir::operator::AtModifier;
 
 impl Operator {
     /// The rows of `input` whose `time` lies in the window of a
@@ -48,6 +51,66 @@ impl Operator {
             output: input,
         })
     }
+}
+
+impl Operator {
+    /// A `TimeShift { offset_ms, at }`: its rows are its input's, which a
+    /// run evaluates once, at the anchor's time minus `offset_ms`
+    /// ([`anchored_context`]).
+    pub fn evaluate_at(input: SchemaRef, at: AtModifier, offset_ms: i64) -> Result<Self, Error> {
+        Ok(Self {
+            kind: Kind::EvaluateAt { at, offset_ms },
+            inputs: vec![input.clone()],
+            output: input,
+        })
+    }
+}
+
+/// The context an `@`-anchored input runs in: a query run evaluated at the
+/// anchor's time minus `offset_ms`. `@ <t>` pins `t`; `@ start()` and `@
+/// end()` the request's bounds ([`RunContext::with_query_range`]), which an
+/// instant query (a run without them) has both at its evaluation time, as
+/// in Prometheus. An ingestion run has no anchor time.
+pub(super) fn anchored_context(
+    at: AtModifier,
+    offset_ms: i64,
+    context: &RunContext,
+) -> Result<RunContext, Error> {
+    let crate::runtime::Scope::Query { evaluation_time_ms } = context.scope else {
+        return Err(invalid(
+            "an @-anchored node is evaluated only at query time",
+        ));
+    };
+    let (start, end) = context
+        .query_range()
+        .unwrap_or((evaluation_time_ms, evaluation_time_ms));
+    let anchor = match at {
+        AtModifier::Timestamp(ms) => ms,
+        AtModifier::Start => start,
+        AtModifier::End => end,
+    };
+    let time = anchor
+        .checked_sub(offset_ms)
+        .ok_or_else(|| invalid("anchored time overflows Int64"))?;
+    Ok(context.at_evaluation_time(time))
+}
+
+/// An `@`-anchored node's rows: its input's, unchanged.
+pub(super) fn execute_evaluate_at<'a>(
+    mut inputs: Vec<Input<'a, Batch>>,
+    context: RunContext,
+) -> Result<OutputStream<'a, Batch>, Error> {
+    let input = inputs
+        .pop()
+        .ok_or_else(|| invalid("anchored input missing"))?;
+    Ok(input
+        .map(move |batch| {
+            if context.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            Ok((*batch?).clone())
+        })
+        .boxed_local())
 }
 
 /// `(start, end]` of a window `width_ms` wide in this run: ending
