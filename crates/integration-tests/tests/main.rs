@@ -5,6 +5,7 @@
 mod physical_common;
 mod planner_layering_common;
 
+mod accuracy_at_query_roots;
 mod aggregate;
 mod binary_op;
 mod crate_graph;
