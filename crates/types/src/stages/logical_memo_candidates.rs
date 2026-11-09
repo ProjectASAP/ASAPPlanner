@@ -88,6 +88,14 @@ pub enum RootPruneReason {
         input: usize,
         k: usize,
     },
+    /// The readout `consumer`, which a query with an accuracy target
+    /// reaches, reads a statistic its producer's summary type has no
+    /// guarantee for in any metric (e.g. a distinct count from UnivMon):
+    /// its error has no bound.
+    NoGuarantee {
+        consumer: CandidateForMemoGroupId,
+        input: usize,
+    },
     /// The readout `consumer` is reached by query `query`, whose target sets
     /// a failure probability over the whole result while the number of
     /// values one evaluation returns ($n_q$) is unknown: no per-value

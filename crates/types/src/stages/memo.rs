@@ -73,6 +73,20 @@ pub struct GroupProperties {
     pub reads_only_time_series: bool,
 }
 
+impl GroupProperties {
+    /// The `column_sign` of a state group's state column (its first field
+    /// that is not plain): the sign of the values its states were updated
+    /// with. `None` for a group without a state column.
+    pub fn state_column_sign(&self) -> Option<ValueSign> {
+        let state = self
+            .schema
+            .fields
+            .iter()
+            .position(|field| !field.is_plain())?;
+        self.column_sign.get(state).copied()
+    }
+}
+
 /// Where an output column's values come from, a group property derived
 /// from the input groups (concepts doc, section 3, "Column lineage"). It
 /// names a column across groups where a schema field's name cannot: two
