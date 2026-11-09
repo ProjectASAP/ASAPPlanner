@@ -6,7 +6,7 @@ This report is for planner developers. It separates three changes: storing repea
 
 ## Reproduction
 
-Use frozen `stage_pipeline` executables; record their SHA-256 hashes. Do not run the four-case comparison concurrently with another benchmark. Both sides use the same input files, AWS pricing, deployment capabilities, enforced accuracy, a 30-second cooperative planning budget, and a 90-second external process timeout. Each case runs sequentially. Whole-process wall time and peak RSS include plan export and validation, so wall time may exceed the cooperative planning budget.
+Use frozen `stage_pipeline` executables; record their SHA-256 hashes. Do not run the four-case comparison concurrently with another benchmark. Both sides use the same input files, AWS costing, deployment capabilities, enforced accuracy, a 30-second cooperative planning budget, and a 90-second external process timeout. Each case runs sequentially. Whole-process wall time and peak RSS include plan export and validation, so wall time may exceed the cooperative planning budget.
 
 ```bash
 python3 tools/benchmark_tumbling_window_search.py summarize BEFORE_BINARY BEFORE_DIR
@@ -23,13 +23,13 @@ python3 tools/benchmark_tumbling_window_search.py run AFTER_BINARY VIEWER_DIR --
 python3 tools/benchmark_tumbling_window_search.py run AFTER_BINARY ASAP_DIR --suite asap --jobs 2
 ```
 
-For an archived 30-workload baseline without input fingerprints, compare only cost and acceptance after checking its original pricing configuration:
+For an archived 30-workload baseline without input fingerprints, compare only cost and acceptance after checking its original costing configuration:
 
 ```bash
 python3 tools/benchmark_tumbling_window_search.py compare OLD_ASAP_DIR ASAP_DIR QUALITY.md --quality-only
 ```
 
-This mode checks serialized workloads, deployment capabilities, accuracy modes, Stage 0 DAGs, and objective/calibration settings. It deliberately excludes planning-time and memory comparisons; the old runner must confirm the pricing profile because historical documents do not serialize it.
+This mode checks serialized workloads, deployment capabilities, accuracy modes, Stage 0 DAGs, and objective/calibration settings. It deliberately excludes planning-time and memory comparisons; the old runner must confirm the costing profile because historical documents do not serialize it.
 
 
 These suites contain the nine viewer workload examples and 30 mixed ASAPQuery workloads, respectively. They check query coverage, enforced accuracy, finite cost, valid cost bounds, no stored-output errors, and no global bound, gap, optimum, or exhaustion claim while tumbling-window widths remain pending. Existing Rust/JavaScript tests remain responsible for DAG structure and installation invariants.
@@ -54,8 +54,8 @@ Record candidate counts, logical compatibility connections, unique producer sets
 Independent correctness checks should cover:
 
 - Producer-list sharing preserves membership, order, and duplicate input positions. Mutating one shared list must not mutate another list. Cached compatibility includes every semantic/configuration field used by the uncached check.
-- Tiny complete-domain problems retain the same feasible assignments and minimum evaluated cost before and after factoring. Include multiple readers, different materializations, duplicate input positions, optional dependencies, and shared upstream producers. Reconstruction must restore every factored operation and preserve costs, accuracy, and query coverage.
-- Terminal unary factoring must not absorb a node with additional consumers, observable materialization/state, unsupported error propagation, or different execution demand. Shared producer work remains charged once; reader-specific work remains per use.
+- Tiny complete-domain problems retain the same feasible assignments and minimum evaluated cost before and after factoring. Include multiple consumers, different materializations, duplicate input positions, optional dependencies, and shared upstream producers. Reconstruction must restore every factored operation and preserve costs, accuracy, and query coverage.
+- Terminal unary factoring must not absorb a node with additional consumers, observable materialization/state, unsupported error propagation, or different execution demand. Shared producer work remains charged once; consumer-specific work remains per use.
 - Progressive tumbling-window-width domains are nested; each round adds `TumblingWindows` candidates to the candidate memo only for newly admitted tumbling-window widths. Each round rebuilds its physical inventory and MILP, so previously considered assignments may be revisited. The domains eventually include the complete legal finite domain when the budget permits. A restricted-domain optimum never becomes a global certificate; timeout preserves the best validated incumbent.
 - The four-case benchmark must show measurable changes on the dense rangeheavy cases. Report cost regressions or incomplete-domain effects explicitly. Full 30-workload and nine-viewer acceptance must pass without relaxing accuracy or latency requirements.
 
@@ -102,9 +102,9 @@ Artifacts: `/mydata/pane-compression-validation/{before,after-final}/results.jso
 
 ### Broader acceptance
 
-The 30 mixed ASAPQuery workloads passed **30/30**, with **270/270** query requirements accepted. Their selected modeled costs match the previous composed-budget binary **exactly in all 30 cases**, including workload 08. Serialized workloads, deployment capabilities, accuracy modes, and Stage 0 DAGs match the archived baseline. Both runners use the same AWS pricing profile and enforced accuracy; this is a quality comparison, not a planning-time comparison.
+The 30 mixed ASAPQuery workloads passed **30/30**, with **270/270** query requirements accepted. Their selected modeled costs match the previous composed-budget binary **exactly in all 30 cases**, including workload 08. Serialized workloads, deployment capabilities, accuracy modes, and Stage 0 DAGs match the archived baseline. Both runners use the same AWS costing profile and enforced accuracy; this is a quality comparison, not a planning-time comparison.
 
-The archived baseline is `/mydata/asap-final-validation/final-workloads-composed-budget/results.json`, using the same before-binary hash listed above. Current results are in `asap-final/results.json`; `asap-quality-comparison.md` contains every case's costs and acceptance counts. Some final interrupted-round reports omit objective/calibration labels; the comparator explicitly marks these unknown and relies on the verified original runner settings rather than interpreting the default calibration value as zero-priced execution.
+The archived baseline is `/mydata/asap-final-validation/final-workloads-composed-budget/results.json`, using the same before-binary hash listed above. Current results are in `asap-final/results.json`; `asap-quality-comparison.md` contains every case's costs and acceptance counts. Some final interrupted-round reports omit objective/calibration labels; the comparator explicitly marks these unknown and relies on the verified original runner settings rather than interpreting the default calibration value as zero-costed execution.
 
 The nine viewer workloads also passed **9/9**, with **40/40** query requirements accepted, including the composed-quantile ratio and SQL rollup examples. Their artifacts are in `viewer-final/results.json`. Broad acceptance uses two concurrent workloads and the same 30-second budget, and may overlap regression tests. Its timings are deliberately excluded from the sequential performance comparison.
 

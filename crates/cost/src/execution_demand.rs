@@ -5,7 +5,7 @@
 //! estimated rates add, and one-off/scheduled demand uses a batch maximum.
 //! Call `schedule_groups` or `evaluation_rate` on the chosen query subset
 //! only; neither enumerates subsets. For retained query-time state pass `None` for each range evaluation
-//! to price once per request, as `computations` does.
+//! to cost once per request, as `computations` does.
 
 use super::analytical::AnalyticalCostError;
 use asap_types::ir::operator::AtModifier;

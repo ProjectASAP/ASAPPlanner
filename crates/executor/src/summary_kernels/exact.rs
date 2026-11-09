@@ -438,7 +438,7 @@ mod tests {
         keyed: Option<HashMap<Vec<String>, ScalarState>>,
     }
 
-    /// The planner prices one exact state at the bytes a column of them
+    /// The planner costs one exact state at the bytes a column of them
     /// holds per group: one `ScalarState`.
     #[test]
     fn the_planner_prices_an_exact_state_at_its_size() {

@@ -19,7 +19,7 @@ asap-stage1-pass2-reuse-candidates -p asap-stage2-physical-optimization -p asap-
 
 - Structurally equal sub-DAGs are interned before Stage 1
   (`cse.rs` in `asap_stage0_memo`), so Stage 1 compares nodes by structure and Pass 2
-  matches readers structurally, never by pointer.
+  matches consumers structurally, never by pointer.
 - Timing is applied with `apply_physical_properties`, which validates
   every data-state edge. A violation is an `ExecutionDataStateError`:
   for example `QueryTimeValueUnderIngestionSummary` (a query-time value
@@ -35,30 +35,27 @@ asap-stage1-pass2-reuse-candidates -p asap-stage2-physical-optimization -p asap-
 ## 2. Stage 1 candidates
 
 - **Targets.** `ComputationTarget` is one measure of one `Aggregate`. Its
-  `ways_to_compute` list the exact option first (`ExactAccumulator` when the intent
-  has a mergeable exact state, else `Exact`), then each `Summary(family)` from
-  `realization::summary_candidates`. Candidates are unranked: Pass 1 never
-  compares cost.
-- **Pruning.** A candidate that cannot meet the target is moved to the
-  inventory's `pruned_ways_to_compute` (with its target) with a `PruneReason` (`RequiresExact`,
-  `NullableAvgInput`, `UnsupportedByDeployment`,
-  `QuantileOutsideUnitInterval`); it is never silently
-  dropped. Pass 1 prunes only what it can prove; accuracy that depends on
-  data facts is left to Stage 3.
+  ways to compute list the exact option first (`ExactAccumulator` when the
+  intent has a mergeable exact state, else `Exact`), then each
+  `Summary(algorithm)` the deployment supports. Candidates are unranked:
+  Pass 1 never compares cost.
+- **Pass 1 adds what it can compute.** A way to compute a measure that
+  cannot exist (a summary the deployment does not support, a top-k heap over
+  one row per item) is not added; there is no Pass 1 pruned list.
+- **One candidate per θ.** A summary state group holds one candidate per
+  θ of its summary type's parameter list; θ is structure only (no ε or δ).
 - **Fused computations.** `FusedComputation { absorbed_targets, ways_to_compute }`
   replaces the targets beneath (the whole-expression top-k, the nested sum).
   It absorbs the target directly beneath and, for a heap over the raw data samples
   beneath a grouped sum of per-series sums or counts, the per-series target
-  too. A whole-workload choice keeps one digit per target; a fused pick with
-  a non-first digit on an absorbed target is skipped, so each plan is
-  enumerated once.
-- **Pass 2.** Each rule adds candidates; none removes a Pass 1 candidate, adds
-  a summary family, or adds a readout. So a deployment that does not support a
-  family never sees it again after Pass 1.
-- **Sizing.** A summary shared by several readers is sized with each
-  parameter's largest value among them. A summary is sized for ε in Stage 1;
-  a δ that depends on data facts (a distinct-count bound, series counts) is
-  left symbolic in its guarantee for Stage 3 to bind.
+  too.
+- **Pass 2.** Each rule adds candidates or groups; none copies a consumer,
+  adds a summary type the deployment does not support, or adds a readout.
+  Each readout gets its required accuracy (`LogicalRequirements`) from the
+  queries reaching it; a candidate no logical edge can use and that is no
+  query output is eliminated (`LogicalASAPMemoCandidates::pruned`, each
+  with one `PruneCause` per failing edge: the eliminated consumers it comes
+  through and its `RootPruneReason`).
 
 ## 3. Accuracy
 
@@ -71,25 +68,18 @@ asap-stage1-pass2-reuse-candidates -p asap-stage2-physical-optimization -p asap-
 - A target with no `accuracy_metric` accepts a guarantee in any metric that
   meets its ε, δ and scope; Stage 3 reports the metric it accepted
   (`AcceptedAccuracy`).
-- An approximate input split across several inputs gets its share through
-  `accuracy::budget::per_input_target`.
+- A consumer passes its required accuracy to each input through its error
+  contract (`LogicalRequirements::error_propagation`); Stage 3's constraint
+  (K) allocates a composed query's error among its readouts.
 - Facts come only from the declared `DataWorkload`; an undeclared fact is
   unknown, never zero.
 
 ## 4. Stage 2
 
-- Only summary builds (`SummaryAgg`, `SummaryTumblingWindowChain`) get materialization
-  options, each a timing and a lifetime (`PhysicalProperties`): not materialized always;
-  materialized at ingestion time, `AcrossEvaluations(Memory)`, when the build is
-  eligible to run as data arrives; materialized at query time for `OneEvaluation(Memory)`
-  when two or more queries read it (reused within one evaluation); materialized at
-  query time `AcrossEvaluations(Memory)` for a tumbling-window chain that
-  builds one new tumbling window per evaluation, when the deployment declares
-  `query_time_results_retained`.
-- One `PhysicalCandidate` per assignment, the all-not-materialized one first
-  (`P<n>`, then `P<n>-m<k>`). An assignment that puts a build at ingestion
-  time over one that is not is not generated. A logical candidate Stage 2
-  cannot implement becomes a `PrunedCandidate` with its reason.
+- Every logical candidate Pass 2 kept is expanded into one
+  `PhysicalCandidate` per valid (timing, lifetime) (`PhysicalProperties`),
+  and every logical edge into physical edges with $\alpha^{\log}$ and
+  $\alpha^{\mathrm{phys}}$.
 - On the memo (`generate_physical_asap_memo_candidates`), every physical
   candidate Stage 2 prunes is recorded in
   `PhysicalASAPMemoCandidates::pruned_candidates` as
@@ -109,21 +99,17 @@ asap-stage1-pass2-reuse-candidates -p asap-stage2-physical-optimization -p asap-
   and `EntryCount` are bad input and fail the whole selection. The facade
   validates the deployment's capabilities before any stage
   (`asap_planner::SelectionError::InvalidDeploymentCapabilities`).
-- Each candidate is then either invalid or valid, recorded as a `Rejection`
-  with its `cause` (`RejectionCause`) and reason: a failed check
-  (`AccuracyTargetMissed`,
-  `CountMinWeightsNotProvenNonNegative`,
-  `NoAccuracyGuarantee`, `LatencyBoundExceeded`, `LatencyOverRepeatInterval`
-  (a repeating query's latency per evaluation is over its repeat interval,
-  checked with or without a latency bound), `OverClusterCapacity` under
-  cost model 3, or `CostNotRepresentable` (its cost overflows)) or a loss under the cost model (`Costlier`, `Slower`,
-  `MoreMemory`, `TiedLostOnEnumerationOrder`). Stage 3 never resizes a summary: a candidate
-  whose Stage 1 sizes miss its composed accuracy target is rejected alone.
-- Usage (`ResourceUsage`) is measured without prices; the `CostModel` in
-  `CostInputs` turns it into a choice. Ties keep enumeration order
-  under every cost model.
-- `Selection.plan` is the selected candidate's roots with the weight
-  requirements Stage 3 confirmed from the data facts.
+- Before its selection MILP, Stage 3 prunes a candidate another
+  dominates (`DominatedBy`) or that cannot be costed (`UsageNotCostable`),
+  recorded in `Selection::pruned_candidates`. The MILP selects executions
+  and edges over execution contexts; constraint (K) bounds each query's
+  composed error at its root. A workload with no plan fails with
+  `ErrorSelectingPlan::NoValidCandidate` (`RejectionCause::Infeasible`).
+- Usage (`ResourceUsage`) is measured without unit costs; the `CostModel` in
+  `CostInputs` turns it into a choice. The selection MILP implements cost
+  model 1 only.
+- Stage 3 builds the plan, a `PhysicalASAPDAG` with each node's θ and
+  retention; its cost is `asap_cost::plan_cost` of the plan.
 
 ## 6. Ownership
 
@@ -131,8 +117,8 @@ asap-stage1-pass2-reuse-candidates -p asap-stage2-physical-optimization -p asap-
 | --- | --- |
 | What a query means | the frontend (Stage 0) |
 | Which computations exist and how each may be computed | Pass 1 |
-| What is shared, split into tumbling windows or reused | Pass 2 |
+| What is shared, read from a chain of tumbling windows or reused | Pass 2 |
 | When each build runs and whether it is kept | Stage 2 |
 | Which plan is valid and which is chosen | Stage 3 |
-| What the executor can build, retain and how it is priced | the deployment, through `PlanningModels` (`DeploymentCapabilities`, `CostInputs`, `AccuracyEvidence`) |
+| What the executor can build, retain and how it is costed | the deployment, through `PlanningModels` (`DeploymentCapabilities`, `CostInputs`, `AccuracyEvidence`) |
 | Running the plan | the executor (`asap-executor`), outside the planner |

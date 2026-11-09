@@ -635,9 +635,9 @@ Stage 3's cost assumes this grouping (`asap_cost::execution_demand::computations
 a stateless ingestion-time node is charged once per refresh window of the
 views above it, not once per view. A runtime that splits a group (for
 example, because its sources seal at different times) computes the same
-states at a higher cost than priced, the same status tumbling window reuse has. A
+states at a higher cost than Stage 3 computed, the same status tumbling window reuse has. A
 runtime that updates states sample by sample passes each sample once
-whatever the windows, so it runs cheaper than priced.
+whatever the windows, so it runs cheaper than Stage 3 computed.
 
 ### Running example
 

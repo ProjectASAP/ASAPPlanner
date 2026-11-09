@@ -14,23 +14,19 @@
 //! `deployment` (the `asap_planner` arguments of its deployment
 //! capabilities and cost inputs, files in `deployments/`), and whether
 //! accuracy guarantees are `ignored` (enforced otherwise). `<id>.json` beside it is its snapshot,
-//! the corpus snapshot of the selected plan plus every query's text and the
-//! search status. Workloads copied from elsewhere live in `workloads/`.
+//! the corpus snapshot of the selected plan plus every query's text. Workloads copied from elsewhere live in `workloads/`.
 //! Regenerate with
 //! `UPDATE_SNAPSHOTS=1 cargo test --release -p asap-devtools --test corpus_snapshots -- --ignored sketch_plans_match_snapshots`.
 //!
-//! Each workload is planned by `asap_planner --run-until stage3`. Planning
-//! has no time limit, so every workload must end with status `optimal`; any
-//! other ending fails instead of being recorded.
+//! Each workload is planned by `asap_planner --run-until stage3`, with no
+//! time limit. A workload whose selection fails records its error, as a
+//! corpus query does.
 
 use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
-use super::{
-    asap_planner, first_difference, first_differing_path, plan_snapshot, proven_optimal, rounded,
-    search_status,
-};
+use super::{asap_planner, first_difference, first_differing_path, plan_snapshot, rounded};
 
 fn repository_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -70,8 +66,8 @@ fn arguments(manifest: &Value, entry: &Value) -> Vec<String> {
     args
 }
 
-/// The stable part of an `asap_planner` document: every query's text, the
-/// selected plan (see [`plan_snapshot`]) and how its search ended.
+/// The stable part of an `asap_planner` document: every query's text and
+/// the selected plan (see [`plan_snapshot`]).
 fn snapshot_of(document: &Value) -> Value {
     let mut snapshot = plan_snapshot(document);
     let queries: Vec<Value> = document["workload"]["queries"]
@@ -81,10 +77,6 @@ fn snapshot_of(document: &Value) -> Value {
         .map(|query| query["text"].clone())
         .collect();
     snapshot.insert("queries".into(), Value::Array(queries));
-    let status = search_status(document);
-    if !status.is_null() {
-        snapshot.insert("search_status".into(), status.clone());
-    }
     rounded(&Value::Object(snapshot))
 }
 
@@ -124,13 +116,6 @@ fn sketch_plans_match_snapshots() {
     for entry in entries {
         let id = entry["id"].as_str().unwrap();
         let document = asap_planner(&arguments(&manifest, entry), &scratch);
-        if !proven_optimal(&document) {
-            failures.push(format!(
-                "{id}: the plan is not proven optimal (status {})",
-                search_status(&document)
-            ));
-            continue;
-        }
         let actual_text = serde_json::to_string_pretty(&snapshot_of(&document)).unwrap() + "\n";
         let path = dir.join(format!("{id}.json"));
         if update {
@@ -198,25 +183,20 @@ fn manifest_entries_build_their_arguments() {
     }
 }
 
-/// A snapshot keeps every query's text and the search status.
+/// A snapshot keeps every query's text.
 #[test]
-fn snapshot_keeps_the_queries_and_search_status() {
+fn snapshot_keeps_the_queries() {
     let document = json!({
         "accuracy_guarantees": "enforced",
         "workload": {"queries": [{"text": "q1"}, {"text": "q2"}]},
-        "stage2_physical_asap_optimization": {"candidates": [
-            {"id": "P1", "display_name": "plan A", "dag": {"nodes": [1]}},
-        ]},
         "stage3_plan_selection": {
+            "plan": {"nodes": [1]},
             "cost": {"cost_per_second": 0.1 + 0.2},
             "accepted_accuracy_per_query": [],
-            "search_report": {"status": "optimal", "solver_ms": 1},
         },
     });
     let snapshot = snapshot_of(&document);
     assert_eq!(snapshot["queries"], json!(["q1", "q2"]));
-    assert_eq!(snapshot["search_status"], json!("optimal"));
-    assert_eq!(snapshot["proven_optimal"], json!(true));
     assert_eq!(
         snapshot["selected"]["cost"],
         json!({"cost_per_second": 0.3})

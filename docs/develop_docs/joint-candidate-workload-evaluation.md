@@ -20,7 +20,7 @@ The report separates local candidate generation, memo expansion, inventory/model
 
 The separate nine-example viewer suite also passed, including SQL rollup and the composed DDS range query (174.52 s total, concurrency two). Zero-budget and refinement-budget reports passed their focused checks. These examples supplement the thirty random mixed workloads.
 
-To reproduce the thirty-workload collection, build `asap_planner` (which replaced `stage_pipeline`), freeze that executable, then run `python3 tools/validate_joint_workloads.py OUTPUT_DIRECTORY FROZEN_EXECUTABLE`. The runner uses the unchanged viewer manifests, enforced guarantees, Fargate prices, and a 90-second external deadline. Full regression and exact-head CI are separate release gates; successful workload coverage alone does not establish release readiness.
+To reproduce the thirty-workload collection, build `asap_planner` (which replaced `stage_pipeline`), freeze that executable, then run `python3 tools/validate_joint_workloads.py OUTPUT_DIRECTORY FROZEN_EXECUTABLE`. The runner uses the unchanged viewer manifests, enforced guarantees, Fargate costs, and a 90-second external deadline. Full regression and exact-head CI are separate release gates; successful workload coverage alone does not establish release readiness.
 
 ## Regression coverage
 
@@ -32,7 +32,7 @@ These are the results of the individual checks, not a claim that a pending workf
 
 ## Historical migration regressions (not final acceptance)
 
-The expanded sharing/scope catalog and subsequent complete pane-width domain introduced regressions. These are retained in `joint-candidate-migration-checkpoints.json`; they are not successful speedup measurements. All rows use seed-862, a requested 30-second planning budget, accuracy enforcement, the Fargate price preset, and no retained raw data. They are successive working-tree snapshots, not a controlled benchmark of the final implementation.
+The expanded sharing/scope catalog and subsequent complete pane-width domain introduced regressions. These are retained in `joint-candidate-migration-checkpoints.json`; they are not successful speedup measurements. All rows use seed-862, a requested 30-second planning budget, accuracy enforcement, the Fargate cost preset, and no retained raw data. They are successive working-tree snapshots, not a controlled benchmark of the final implementation.
 
 | Checkpoint | Physical configurations | Compatible connections | Evaluations | Outcome | Modeled cost/s |
 |---|---:|---:|---:|---|---:|
@@ -41,13 +41,13 @@ The expanded sharing/scope catalog and subsequent complete pane-width domain int
 | First-copy seed, compact adjacency | 464 | 3092 | 1 | Validated incumbent, time limit | 2.3389329896881045e-06 |
 | Complete width domain and cyclic-input cost certificate | 5785 | 147279 | 0 | No incumbent | — |
 
-The oversized shared exact-Sum chain was correctly priced by the final evaluator, but recursive certification over cyclic potential inputs initially gave it a zero local lower bound. The local-interface certificate restores that bound. Complete width enumeration then enlarged the generated graph enough to exhaust the budget before validation. These failures motivated duplicate-generation removal, cooperative generation deadlines, a validated pre-expansion seed, and smaller reader-flow models. None of these failed runs establishes optimality or functional completion.
+The oversized shared exact-Sum chain was correctly costed by the final evaluator, but recursive certification over cyclic potential inputs initially gave it a zero local lower bound. The local-interface certificate restores that bound. Complete width enumeration then enlarged the generated graph enough to exhaust the budget before validation. These failures motivated duplicate-generation removal, cooperative generation deadlines, a validated pre-expansion seed, and smaller consumer-flow models. None of these failed runs establishes optimality or functional completion.
 
 ## Workloads and settings
 
 The exact viewer manifests are `tools/dag-viewer/workloads/random-mixed-seed-862/workload-01.json`, `random-mixed-seed-862-x5/workload-01.json`, and `random-mixed-seed-862-long/workload-01.json`. Each contains nine original PromQL queries. The x5 manifest increases metric cardinality from 10,000 to 50,000 series and total ingestion from 200,000 to 1,000,000 rows/s. The long manifest retains the original cardinality and triples window lengths. These are three representative manifests from the viewer's thirty-workload ASAPQuery collection.
 
-All runs retain the viewer's settings: raw data and query-time results are not retained, AWS Fargate us-east-1 prices, and accuracy guarantees enforced (error target 0.05, failure probability 0.3). No query was rewritten. The separately labeled three-query subset contains original workload-01 queries q03, q04, and q05, including their outer `avg` operators, with unchanged requirements and data facts.
+All runs retain the viewer's settings: raw data and query-time results are not retained, AWS Fargate us-east-1 costs, and accuracy guarantees enforced (error target 0.05, failure probability 0.3). No query was rewritten. The separately labeled three-query subset contains original workload-01 queries q03, q04, and q05, including their outer `avg` operators, with unchanged requirements and data facts.
 
 The external wall deadline is 120 seconds per run. Memo-MILP receives a 120-second internal budget; candidate-connections receives 30 seconds and the route's 128-refinement cap. These differing internal budgets are intentional diagnostic settings, not an equal-budget comparison. The budget is checked between solver/evaluator calls, so a final call can overshoot it. A killed process does not provide a completed plan, even if an internal incumbent existed. An exit code of zero is not sufficient: the devtool can serialize a selection error with `selected: null`.
 
@@ -162,6 +162,6 @@ The diagnostic executable is `stage_pipeline-bounded-baseline`; its SHA-256 and 
 
 ## Verified cause of the subset's extra state cost
 
-The archived bounded-baseline selected DAG confirms two state producers in `joint-plan-3`. Scan 0 exposes `job`, `region`, and `service` plus series identity; PaneChain 1 feeds both the P99 reader (node 3, original q03) and P75 reader (node 25, q05). Scan 12 exposes only `region` plus series identity; a second PaneChain 13 feeds P95 (node 15, q04). Both are DDSketch configurations with alpha 0.05, 100 panes of 1,000 ms, and per-entity state. Each retains 1,179,680,000 bytes and contributes 1.3590971293056488e-6/s to modeled cost.
+The archived bounded-baseline selected DAG confirms two state producers in `joint-plan-3`. Scan 0 exposes `job`, `region`, and `service` plus series identity; PaneChain 1 feeds both the P99 consumer (node 3, original q03) and P75 consumer (node 25, q05). Scan 12 exposes only `region` plus series identity; a second PaneChain 13 feeds P95 (node 15, q04). Both are DDSketch configurations with alpha 0.05, 100 panes of 1,000 ms, and per-entity state. Each retains 1,179,680,000 bytes and contributes 1.3590971293056488e-6/s to modeled cost.
 
-The legacy selected DAG `P6-m3` has only the wider Scan 0 and PaneChain 1. Its single Merge 2 feeds all three quantile readers (nodes 3, 12, and 22). Thus the extra chain, scan, and repeated merge work are directly visible in the selected plans; this is not merely a speculation based on total cost. At that earlier checkpoint, the catalog's exact-schema connections did not provide the conversion needed to reuse the wider state for the region-only consumer. The legacy DAG demonstrates that wider-input reuse occurs, although this export does not identify the particular rule that introduced it. Compact extracted evidence is in `subset-sharing-evidence.json` in the artifact directory.
+The legacy selected DAG `P6-m3` has only the wider Scan 0 and PaneChain 1. Its single Merge 2 feeds all three quantile consumers (nodes 3, 12, and 22). Thus the extra chain, scan, and repeated merge work are directly visible in the selected plans; this is not merely a speculation based on total cost. At that earlier checkpoint, the catalog's exact-schema connections did not provide the conversion needed to reuse the wider state for the region-only consumer. The legacy DAG demonstrates that wider-input reuse occurs, although this export does not identify the particular rule that introduced it. Compact extracted evidence is in `subset-sharing-evidence.json` in the artifact directory.

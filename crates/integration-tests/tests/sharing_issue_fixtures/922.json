@@ -8,7 +8,10 @@
       {
         "query": "SELECT percentile_cont(0.99) WITHIN GROUP (ORDER BY value) AS v FROM metrics WHERE ts > now() - INTERVAL '5' MINUTE",
         "demand": {
-          "fixed_interval": 30000
+          "fixed_interval_at": {
+            "interval": 30000,
+            "evaluation_phase": 0
+          }
         },
         "requirements": {
           "accuracy": {
@@ -27,7 +30,10 @@
       {
         "query": "SELECT percentile_cont(0.99) WITHIN GROUP (ORDER BY value) AS v FROM metrics WHERE ts > now() - INTERVAL '5' MINUTE",
         "demand": {
-          "fixed_interval": 30000
+          "fixed_interval_at": {
+            "interval": 30000,
+            "evaluation_phase": 0
+          }
         },
         "requirements": {
           "accuracy": {
