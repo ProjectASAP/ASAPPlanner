@@ -19,7 +19,10 @@ use asap_types::ir::scalar::{ColumnRef, CompareOpKind, ScalarValue};
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SummaryInputExpr, SummaryUpdate};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr};
-use asap_types::stages::{Memo, MemoGroupId};
+use asap_types::stages::{
+    Memo, MemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateId,
+    PhysicalEdge,
+};
 use asap_types::workload::{
     BatchEntry, DataWorkload, DurationMs, PlanningWorkload, Query, QueryLanguage,
     QueryRequirements, QueryWorkload,
@@ -324,14 +327,67 @@ fn execute(root: &Rc<OperatorNode>, rows: &[Vec<(&str, Value)>]) -> Vec<Vec<Stri
 }
 
 /// SQL `avg` from its `sum` and `count` states: the exact plan and the
-/// plan computing `avg` as `sum` and `count`, to execute. Realizing the
-/// second from Pass 1's memo is #1207 PR 6.
+/// plan computing `avg` as `sum` and `count`, to execute: Stage 3's plan
+/// over the physical candidates without the `avg` group's own expression.
 async fn avg_as_sum_and_count(
     catalog: &SqlCatalog,
     query: &str,
 ) -> (Rc<OperatorNode>, Rc<OperatorNode>) {
-    let _ = (catalog, query);
-    todo!("#1207 PR 6: realize the sum-and-count plan of `avg` from Pass 1's memo")
+    use asap_integration_tests::planning::{declared_data, run_all_stages, single_query_entry};
+    let exact = lower_sql(query, catalog).await.unwrap();
+    let run = run_all_stages(Rc::clone(&exact), accuracy());
+    let physical = run
+        .run
+        .physical_asap_candidates
+        .as_ref()
+        .expect("Stage 2 ran");
+    let avg = root_group(&physical.logical_candidates.memo);
+    let own = |candidate: &PhysicalCandidate| {
+        candidate.logical_candidate_id.group == avg
+            && candidate.logical_candidate_id.index_in_group == 0
+    };
+    let (plan, _) = asap_stage3_plan_selection::select_plan(
+        &without_candidates(physical, own),
+        &[single_query_entry(accuracy())],
+        &declared_data(&exact),
+        &asap_cost::CostInputs::default(),
+    )
+    .expect("a plan computing avg as sum over count");
+    match plan.query_roots().unwrap().as_slice() {
+        [QueryRoot::Operator(quotient)] => (exact, Rc::clone(quotient)),
+        other => panic!("one operator root: {other:?}"),
+    }
+}
+
+/// `physical` without the candidates `excluded` selects, and their edges.
+fn without_candidates(
+    physical: &PhysicalASAPMemoCandidates,
+    excluded: impl Fn(&PhysicalCandidate) -> bool,
+) -> PhysicalASAPMemoCandidates {
+    let mut new_id = Vec::with_capacity(physical.physical_candidates.len());
+    let mut kept = Vec::new();
+    for candidate in &physical.physical_candidates {
+        new_id.push((!excluded(candidate)).then_some(PhysicalCandidateId(kept.len())));
+        if !excluded(candidate) {
+            kept.push(*candidate);
+        }
+    }
+    let edges = physical
+        .edges()
+        .filter_map(|(_, edge)| {
+            Some(PhysicalEdge {
+                producer_candidate_id: new_id[edge.producer_candidate_id.0]?,
+                consumer_candidate_id: new_id[edge.consumer_candidate_id.0]?,
+                ..edge
+            })
+        })
+        .collect();
+    PhysicalASAPMemoCandidates::new(
+        physical.logical_candidates.clone(),
+        kept,
+        edges,
+        physical.pruned_candidates.clone(),
+    )
 }
 
 /// The candidate of `memo`'s root group that is not its own expression

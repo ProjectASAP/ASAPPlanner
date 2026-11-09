@@ -12,8 +12,8 @@
 //!   [`ResourceSpeed`], [`CostModel`] ([`ClusterLimits`],
 //!   [`ClusterObjective`]) and the deployment's [`CostInputs`], with the
 //!   per-node and per-plan costs ([`NodeCost`], [`PlanCost`]).
-//! - Costing a physical plan DAG: [`node_usage`] gives one node's
-//!   [`NodeUsage`]; [`plan_cost`] the whole plan's [`PlanCost`]. Stage 3
+//! - Costing a physical plan DAG: [`node_resource_usage_and_cost`] gives one node's
+//!   [`NodeResourceUsageAndCost`]; [`plan_cost`] the whole plan's [`PlanCost`]. Stage 3
 //!   computes no cost of its own.
 //!
 //! Plan selection (Stage 3, `asap-stage3-plan-selection`) documents how it prices
@@ -28,6 +28,7 @@ pub mod execution_demand;
 mod measured;
 mod operator_statistics;
 mod ranking;
+mod read_back;
 mod resources;
 pub mod state_bytes;
 mod usage;
@@ -40,10 +41,10 @@ pub use measured::{
 };
 pub use operator_statistics::EdgeStatistics;
 pub use ranking::{cheaper, worst_latency_ms, PlanRanking};
+pub use read_back::read_back_ms;
 pub use usage::{
-    maintained_window_ms, node_map, node_usage, plan_cost, query_reach, retained_tumbling_windows,
-    summary_type_name, tumbling_window_retention_ms, tumbling_window_retention_ms_of_plan,
-    tumbling_windows_of, NodeMap, NodeUsage, ProducerOutput,
+    node_resource_usage_and_cost, plan_cost, summary_type_name, NodeResourceUsageAndCost,
+    ProducerOutput,
 };
 
 /// [`PlanCost::source`] when every node is priced from the formulas.

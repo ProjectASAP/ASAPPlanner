@@ -28,9 +28,10 @@ pub trait DataStore {
         context: RunContext,
     ) -> Result<OutputStream<'_, Batch>, Error>;
 
-    /// The stored states of `view` whose intervals tile
-    /// `request.time_range_ms` exactly, in `request.schema` (group columns
-    /// and one state column). Exact: the executor never re-filters them,
+    /// The stored rows of `view` whose time ranges tile
+    /// `request.time_range_ms` exactly, in `request.schema` (a
+    /// `SummaryTumblingWindowChain`'s windows, each `(window_end, keys,
+    /// state)`; any other view's group columns and one state column). Exact: the executor never re-filters them,
     /// so the store never counts an observation twice, never returns
     /// another definition's state, and never treats missing state as
     /// empty; it returns an error instead. The states are the store's: a
@@ -49,13 +50,17 @@ pub struct RawDataRequest<'a> {
     /// `(start, end]` in milliseconds, on the slot's time column.
     ///
     /// - Query run at evaluation time `T`: the smallest range covering
-    ///   every window the `Scan`'s readers read
-    ///   ([`PhysicalASAPDAG::scan_window`](planner_types::ir::physical_export::PhysicalASAPDAG::scan_window));
-    ///   `None` when a reader reads the `Scan` outside a window.
+    ///   every window the `Scan`'s consumers read, from the `TimeRange`,
+    ///   `TimeShift` and `SummaryTumblingWindowChain` nodes above it
+    ///   (`TimeRange(w)` over shifts summing to `s` reads `(T - s - w, T -
+    ///   s]`; a chain of width `w` its window ending at `T - s`); `None`
+    ///   when a consumer reads the `Scan` outside a window. Under a
+    ///   `TimeShift` with an `@` anchor, `T` is the anchor's time.
     /// - Ingestion run: the run's `(window_start_ms, window_end_ms]` when
     ///   the `Scan` is read through windows, else `None`. Each
     ///   `TimeRange(w)` then keeps `(window_end_ms - w, window_end_ms]`,
-    ///   whatever the shifts below it.
+    ///   whatever the shifts below it, and a chain builds its window ending
+    ///   at `window_end_ms`.
     pub time_range_ms: Option<(i64, i64)>,
     /// The slot's columns, the `Scan`'s schema. The store returns rows with
     /// these columns (name, type and nullability), in this order.
@@ -68,14 +73,15 @@ pub struct RawDataRequest<'a> {
 /// What a materialized view slot reads in one run.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterializedViewRequest<'a> {
-    /// `(start, end]` in milliseconds: the interval of data the view's state
-    /// summarizes in this run
-    /// ([`PhysicalASAPDAG::view_window`](planner_types::ir::physical_export::PhysicalASAPDAG::view_window)).
-    /// In a query run at `T` with view window `(T - o - w, T - o]`, it is
-    /// that range; in an ingestion run, `(window_end_ms - w, window_end_ms]`.
+    /// `(start, end]` in milliseconds: the rows the read selects. For a
+    /// chain, the windows the `TimeRange` and `TimeShift` nodes above it
+    /// select (`TimeRange(W)` over shifts summing to `o` selects the windows
+    /// ending in `(T - o - W, T - o]`); for any other view, the interval of
+    /// data its state summarizes, from the `TimeRange`s below it. With that
+    /// window `(T - o - w, T - o]`, a query run at `T` reads that range; an
+    /// ingestion run `(window_end_ms - w, window_end_ms]`.
     pub time_range_ms: (i64, i64),
-    /// The slot's columns, the view node's schema: group columns and one
-    /// state column. The store returns rows with these columns, in this
+    /// The slot's columns, the view node's schema. The store returns rows with these columns, in this
     /// order.
     pub schema: &'a SchemaRef,
 }

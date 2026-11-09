@@ -29,34 +29,95 @@ pub enum SummaryEvaluation {
 }
 
 impl Operator {
-    /// One keyed summary state per group (a CMS or Count Sketch with heap):
-    /// each row adds its `row_weight` to the tuple of its `items` values, in
-    /// its group's state. A weight column must be Float64 or Int64, the
-    /// types the kernel's `f64` weights hold; a NULL weight adds nothing.
+    /// One keyed summary state per group (a CMS or Count Sketch with heap)
+    /// of θ `parameters`: each row adds its `row_weight` to the tuple of its
+    /// `items` values, in its group's state. A weight column must be Float64
+    /// or Int64, the types the kernel's `f64` weights hold; a NULL weight
+    /// adds nothing.
     pub fn per_group_keyed_summary_build(
         input: SchemaRef,
         family: SummaryFamilyType,
+        parameters: Option<SketchParams>,
         items: Vec<usize>,
         row_weight: RowWeight,
         groups: Vec<usize>,
     ) -> Result<Self, Error> {
-        let _ = (input, family, items, row_weight, groups);
-        todo!("#1207 PR 6: the weighted-frequency θ, which the exported node carries")
+        use crate::summary_kernels::weighted_frequency::WeightedFrequency;
+        use planner_types::ir::schema::SketchAlgorithm as A;
+        crate::values::validate_family(&family)?;
+        let SummaryFamilyType::Sketch(algorithm @ (A::CmsWithHeap | A::CountSketchWithHeap)) =
+            &family
+        else {
+            return Err(invalid("keyed sketch required"));
+        };
+        let Some(theta) = &parameters else {
+            return Err(invalid("a keyed sketch needs its parameters θ"));
+        };
+        WeightedFrequency::configuration(algorithm, theta)?;
+        validate_groups(&input, &groups)?;
+        if items.is_empty() {
+            return Err(invalid("keyed summary requires item columns"));
+        }
+        if let RowWeight::Column(weight) = row_weight {
+            if !matches!(
+                plain(&input, weight)?.0,
+                DataType::Float64 | DataType::Int64
+            ) {
+                return Err(invalid("keyed summary weights must be Float64 or Int64"));
+            }
+        }
+        for &item in &items {
+            if !matches!(
+                plain(&input, item)?.0,
+                DataType::Utf8
+                    | DataType::Timestamp
+                    | DataType::Int64
+                    | DataType::Float64
+                    | DataType::Bool
+                    | DataType::Null
+            ) {
+                return Err(invalid("unsupported keyed summary identity type"));
+            }
+        }
+        let mut fields = groups
+            .iter()
+            .map(|&i| input.fields[i].clone())
+            .collect::<Vec<_>>();
+        fields.push(SummaryField {
+            name: "state".into(),
+            dtype: family.clone(),
+            nullable: false,
+        });
+        Ok(Self {
+            kind: Kind::PerGroupKeyedSummaryBuild {
+                family,
+                parameters,
+                items,
+                row_weight,
+                groups,
+                filter: None,
+            },
+            inputs: vec![input],
+            output: schema(fields),
+        })
     }
-    /// One summary state shared by all groups (a HydraCms grid), emitted as
-    /// one row per group that reads its own part of it. Each row adds its
+    /// One summary state shared by all groups (a HydraCms grid sized by θ
+    /// `parameters`, `SketchParams::Hydra(HydraParams::HydraCms { .. })`),
+    /// emitted as one row per group that reads its own part of it. Each row adds its
     /// `row_weight` to its `item` value in its group; a NULL weight adds
     /// nothing. A constant weight is at most `i32::MAX` (asap_sketchlib's
     /// Hydra adds `i32` weights).
     pub fn all_groups_summary_build(
         input: SchemaRef,
         family: SummaryFamilyType,
+        parameters: Option<SketchParams>,
         item: usize,
         row_weight: RowWeight,
         groups: Vec<usize>,
     ) -> Result<Self, Error> {
         crate::values::validate_family(&family)?;
-        crate::factory::create_hydra_cms(&family).map_err(Error::Invalid)?;
+        // The grid's shape only: the grid itself is allocated when it runs.
+        crate::capability::hydra_cms_shape(&family, parameters.as_ref()).map_err(Error::Invalid)?;
         validate_groups(&input, &groups)?;
         if !matches!(
             plain(&input, item)?,
@@ -96,6 +157,7 @@ impl Operator {
         Ok(Self {
             kind: Kind::AllGroupsSummaryBuild {
                 family,
+                parameters,
                 item,
                 row_weight,
                 groups,
@@ -120,22 +182,52 @@ impl Operator {
         }
         Ok(self)
     }
+    /// The `k` heaviest items of each input row's keyed state (a CMS or
+    /// Count Sketch with heap), one output row per item. The state's heap
+    /// capacity is its θ, which the state carries: a state whose heap holds
+    /// fewer than `k` items is refused when it is read.
     pub fn keyed_evaluation(
         input: SchemaRef,
         state: usize,
         k: usize,
         output: SchemaRef,
     ) -> Result<Self, Error> {
-        let _ = (input, state, k, output);
-        todo!("#1207 PR 6: the weighted-frequency capacity of θ, which the exported node carries")
+        use planner_types::ir::schema::SketchAlgorithm as A;
+        let family = &field(&input, state)?.dtype;
+        crate::values::validate_family(family)?;
+        if !matches!(
+            family,
+            SummaryFamilyType::Sketch(A::CmsWithHeap | A::CountSketchWithHeap)
+        ) {
+            return Err(invalid("keyed evaluation requires a keyed summary state"));
+        }
+        if output.fields.len() <= input.fields.len() {
+            return Err(invalid("invalid keyed evaluation shape"));
+        }
+        if state + 1 != input.fields.len()
+            || output.fields[..state] != input.fields[..state]
+            || output.fields.last().unwrap().dtype != SummaryFamilyType::Plain(DataType::Float64)
+        {
+            return Err(invalid(
+                "keyed evaluation must preserve partitions and return a Float64 score",
+            ));
+        }
+        crate::values::validate_schema(&output)?;
+        Ok(Self {
+            kind: Kind::KeyedEvaluation { state, k },
+            inputs: vec![input],
+            output,
+        })
     }
     /// One summary state per group, updated from the value of one input
     /// column per row (`time` orders counter samples): an exact aggregate,
     /// a quantile/distinct sketch, or an unkeyed frequency sketch (UnivMon)
-    /// over that column's values.
+    /// over that column's values. `parameters` is the sketch's θ (`None`
+    /// for an exact aggregate).
     pub fn per_group_summary_build(
         input: SchemaRef,
         family: SummaryFamilyType,
+        parameters: Option<SketchParams>,
         value: usize,
         time: Option<usize>,
         groups: Vec<usize>,
@@ -164,6 +256,7 @@ impl Operator {
         }
         crate::capability::validate_summary_kernel(
             &family,
+            parameters.as_ref(),
             &SummaryUpdate::column(ColumnRef::SampleValue),
         )
         .map_err(Error::Invalid)?;
@@ -179,6 +272,7 @@ impl Operator {
         Ok(Self {
             kind: Kind::PerGroupSummaryBuild {
                 family,
+                parameters,
                 value,
                 time,
                 groups,
@@ -208,6 +302,7 @@ impl Operator {
                 state,
                 groups,
                 emit_empty_global: false,
+                parameters: None,
             },
             inputs: vec![input],
             output: schema(fields),
@@ -216,14 +311,25 @@ impl Operator {
     /// A merge into no groups that outputs one empty state when it has no
     /// input state: the global SQL aggregate a rollup of a relation's
     /// grouped states to no keys stands for, whose one row is NULL over no
-    /// input rows.
-    pub fn with_emit_empty_global(mut self) -> Result<Self, Error> {
+    /// input rows. `parameters` is the merged states' θ, which the empty
+    /// state takes: the exported build node's `parameters` (`None` for an
+    /// exact family).
+    pub fn with_emit_empty_global(
+        mut self,
+        parameters: Option<SketchParams>,
+    ) -> Result<Self, Error> {
         match &mut self.kind {
             Kind::SummaryMerge {
+                state,
                 groups,
                 emit_empty_global,
-                ..
-            } if groups.is_empty() => *emit_empty_global = true,
+                parameters: slot,
+            } if groups.is_empty() => {
+                // An empty state of this family and θ can be built.
+                StateColumnUpdater::new(&self.inputs[0].fields[*state].dtype, parameters.as_ref())?;
+                *emit_empty_global = true;
+                *slot = parameters;
+            }
             _ => {
                 return Err(invalid(
                     "an empty global state needs a merge into no groups",
@@ -348,6 +454,7 @@ pub(super) fn execute<'a>(
     match &operator.kind {
         Kind::PerGroupSummaryBuild {
             family,
+            parameters,
             value,
             time,
             groups,
@@ -357,6 +464,7 @@ pub(super) fn execute<'a>(
                 input,
                 PerGroupBuild {
                     family,
+                    parameters: parameters.as_ref(),
                     value: *value,
                     time: *time,
                     groups,
@@ -372,6 +480,7 @@ pub(super) fn execute<'a>(
         .boxed_local()),
         Kind::PerGroupKeyedSummaryBuild {
             family,
+            parameters,
             items,
             row_weight,
             groups,
@@ -381,6 +490,7 @@ pub(super) fn execute<'a>(
                 input,
                 KeyedBuild {
                     family,
+                    parameters: parameters.as_ref(),
                     items,
                     row_weight: *row_weight,
                     groups,
@@ -395,6 +505,7 @@ pub(super) fn execute<'a>(
         .boxed_local()),
         Kind::AllGroupsSummaryBuild {
             family,
+            parameters,
             item,
             row_weight,
             groups,
@@ -404,6 +515,7 @@ pub(super) fn execute<'a>(
                 input,
                 AllGroupsBuild {
                     family,
+                    parameters: parameters.as_ref(),
                     item: *item,
                     row_weight: *row_weight,
                     groups,
@@ -438,6 +550,7 @@ pub(super) fn execute_merge<'a>(
             state,
             groups,
             emit_empty_global,
+            parameters,
         } = &operator.kind
         else {
             unreachable!()
@@ -446,7 +559,7 @@ pub(super) fn execute_merge<'a>(
             input,
             *state,
             groups,
-            *emit_empty_global,
+            emit_empty_global.then_some(parameters.as_ref()),
             &input_schema,
             &output,
             &context,
@@ -494,6 +607,8 @@ fn grouped_states(
 /// A `PerGroupSummaryBuild`'s parameters.
 struct PerGroupBuild<'a> {
     family: &'a SummaryFamilyType,
+    /// θ (`None` for an exact family).
+    parameters: Option<&'a SketchParams>,
     value: usize,
     time: Option<usize>,
     groups: &'a [usize],
@@ -516,7 +631,7 @@ async fn build_per_group_summary(
         .filter
         .map(|filter| filter.at_evaluation_time(context));
     let mut table = GroupTable::new(build.groups.to_vec());
-    let mut updater = StateColumnUpdater::new(build.family)?;
+    let mut updater = StateColumnUpdater::new(build.family, build.parameters)?;
     let mut work = Cooperative::new(context);
     let mut workspace = Workspace::new(context)?;
     // PromQL aggregation of an empty vector produces no sample.
@@ -591,6 +706,8 @@ async fn build_per_group_summary(
 /// A `PerGroupKeyedSummaryBuild`'s parameters.
 struct KeyedBuild<'a> {
     family: &'a SummaryFamilyType,
+    /// θ.
+    parameters: Option<&'a SketchParams>,
     items: &'a [usize],
     row_weight: RowWeight,
     groups: &'a [usize],
@@ -654,7 +771,7 @@ async fn build_per_group_keyed_summary(
         .filter
         .map(|filter| filter.at_evaluation_time(context));
     let mut table = GroupTable::new(build.groups.to_vec());
-    let mut updater = StateColumnUpdater::new(build.family)?;
+    let mut updater = StateColumnUpdater::new(build.family, build.parameters)?;
     let mut work = Cooperative::new(context);
     let mut workspace = Workspace::new(context)?;
     let mut items = Vec::with_capacity(build.items.len());
@@ -696,6 +813,8 @@ async fn build_per_group_keyed_summary(
 /// An `AllGroupsSummaryBuild`'s parameters.
 struct AllGroupsBuild<'a> {
     family: &'a SummaryFamilyType,
+    /// θ: the Hydra grid's sizes.
+    parameters: Option<&'a SketchParams>,
     item: usize,
     row_weight: RowWeight,
     groups: &'a [usize],
@@ -717,7 +836,8 @@ async fn build_all_groups_summary(
         .map(|filter| filter.at_evaluation_time(context));
     use crate::summary_kernels::HydraCmsGroup;
     use crate::AggregateCore;
-    let mut grid = crate::factory::create_hydra_cms(build.family).map_err(Error::Invalid)?;
+    let mut grid =
+        crate::factory::create_hydra_cms(build.family, build.parameters).map_err(Error::Invalid)?;
     let grid_bytes = grid.approx_memory_bytes();
     let mut workspace = Workspace::new(context)?;
     workspace.set_bytes(grid_bytes)?;
@@ -794,12 +914,13 @@ fn state_indices(batch: &Batch, state: usize) -> Result<(&StateColumn, &UInt32Ar
 }
 
 /// Merge the states of each group across all input rows; with
-/// `emit_empty_global`, one empty state when there is no input state.
+/// `empty_global` (`Some` of the states' θ), one empty state when there is
+/// no input state.
 async fn merge_summary(
     mut input: Input<'_, Batch>,
     state_column: usize,
     groups: &[usize],
-    emit_empty_global: bool,
+    empty_global: Option<Option<&SketchParams>>,
     input_schema: &SchemaRef,
     output: &SchemaRef,
     context: &RunContext,
@@ -827,9 +948,9 @@ async fn merge_summary(
         );
     }
     // A global SQL aggregate's one row over no input rows: one empty state.
-    if entries.is_empty() && emit_empty_global {
+    if let (true, Some(parameters)) = (entries.is_empty(), empty_global) {
         table.add_empty_group()?;
-        let mut updater = StateColumnUpdater::new(family)?;
+        let mut updater = StateColumnUpdater::new(family, parameters)?;
         updater.add_group()?;
         return grouped_states(&table, updater.seal(), input_schema, output);
     }
@@ -1197,6 +1318,13 @@ fn keyed_evaluation(
             .as_any()
             .downcast_ref::<crate::summary_kernels::weighted_frequency::WeightedFrequency>()
             .ok_or_else(|| invalid("weighted frequency typed state required"))?;
+        // The heap capacity is the state's θ.
+        let (_, _, capacity) = summary.shape();
+        if k > capacity {
+            return Err(Error::Invalid(format!(
+                "top-{k} exceeds the state's heap capacity {capacity}"
+            )));
+        }
         for items in summary.rows(k) {
             source_rows.push(row as u32);
             for ((column, value), field) in item_columns

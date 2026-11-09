@@ -79,6 +79,14 @@ impl RunContext {
     pub(crate) fn query_range(&self) -> Option<(i64, i64)> {
         self.query_range
     }
+    /// This run's context, evaluated at `evaluation_time_ms` instead: the
+    /// same limits, cancellation and query range.
+    pub(crate) fn at_evaluation_time(&self, evaluation_time_ms: i64) -> Self {
+        Self {
+            scope: Scope::Query { evaluation_time_ms },
+            ..self.clone()
+        }
+    }
 
     pub fn cancel(&self) {
         self.control.cancelled.set(true);
