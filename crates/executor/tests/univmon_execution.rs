@@ -20,6 +20,16 @@ use planner_types::ir::schema::{
 use planner_types::ir::ASAPOp;
 use std::sync::Arc;
 
+/// θ of `family`.
+fn params() -> Option<planner_types::ir::schema::SketchParams> {
+    Some(planner_types::ir::schema::SketchParams::UnivMon {
+        heap_size: 64,
+        sketch_rows: 5,
+        sketch_cols: 128,
+        layers: 4,
+    })
+}
+
 fn family() -> FieldDataType {
     FieldDataType::Sketch(SketchAlgorithm::UnivMon)
 }
@@ -91,7 +101,7 @@ fn one_univmon_state_answers_distinct_l2_and_entropy() -> Result<(), Error> {
             .map(|value| vec![Value::Float64(value)])
             .collect(),
     )?;
-    let build = Operator::per_group_summary_build(input, family(), 0, None, vec![])?;
+    let build = Operator::per_group_summary_build(input, family(), params(), 0, None, vec![])?;
     let [distinct, l2, entropy] = three_statistics(batch, build)?[..] else {
         unreachable!()
     };
@@ -134,7 +144,7 @@ fn typed_frequency_keys_preserve_identity() -> Result<(), Error> {
                 vec![Value::Null],
             ],
         )?;
-        let build = Operator::per_group_summary_build(input, family(), 0, None, vec![])?;
+        let build = Operator::per_group_summary_build(input, family(), params(), 0, None, vec![])?;
         for (found, expected) in
             three_statistics(batch, build)?
                 .into_iter()
@@ -174,10 +184,11 @@ fn planner_unit_frequency_update_binds_as_a_value_frequency_build() -> Result<()
         }),
         output_state: ExecutionDataState::QUERY_ROWS,
         lifetime: Default::default(),
-        parameters: None,
+        parameters: params(),
         output_schema: (*state).clone(),
         guarantee: None,
         retention_ms: None,
+        summary_coverage: None,
         selected_physical_candidate: None,
     };
     let build = compile_node(&node, std::slice::from_ref(&input))?;
