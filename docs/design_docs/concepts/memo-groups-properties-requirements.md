@@ -150,7 +150,35 @@ and, for a top-k readout, `heap_size` ≥ k. An exact producer has error 0 and s
 | width 272, depth 5 | 0.0100 | 6.7e-3 | yes | no |
 | width 272, depth 10 | 0.0100 | 4.5e-5 | yes | yes |
 
-**Where the guarantee comes from.** `guarantee` is `AccuracyEvidence::measured_guarantee(summary type, θ, statistic)` when the deployment's evidence has a measurement for that configuration, and `theoretical_guarantee` (the algorithm's error formula) otherwise. The source is decided before Pass 2 builds the logical edges, so (K) always has every readout's bound, and nothing is checked again after Stage 3.
+**Where the guarantee comes from.** `guarantee` is `AccuracyEvidence::measured_guarantee(summary type, θ, statistic, δ_r)` when the deployment's evidence has a measurement for that configuration, and `theoretical_guarantee(summary type, θ, statistic, δ_r)` (the algorithm's error formula) otherwise. Each returns the error bound that holds at failure probability δ_r, or `None` when θ cannot fail that rarely (no edge). The bound is compared with ε_r through `target_limit(ε_r)`, which admits only floating-point noise above ε_r. The source is decided before Pass 2 builds the logical edges, so (K) always has every readout's bound, and nothing is checked again after Stage 3.
+
+```rust
+/// The theoretical error bound of reading `statistic` from a state of
+/// `summary_type` with parameters θ at `failure_probability`.
+pub fn theoretical_guarantee(
+    summary_type: &FieldDataType,
+    parameters: &SketchParams,
+    statistic: &SketchStatistic,
+    failure_probability: f64,
+) -> Option<AccuracyGuarantee>;
+
+/// The deployment's measured accuracy, read before the theoretical bound.
+pub trait AccuracyEvidence {
+    fn measured_guarantee(
+        &self,
+        summary_type: &FieldDataType,
+        parameters: &SketchParams,
+        statistic: &SketchStatistic,
+        failure_probability: f64,
+    ) -> Option<AccuracyGuarantee>;
+}
+/// Evidence with no measurement (the default).
+pub struct NoMeasuredGuarantees;
+impl AccuracyEvidence for NoMeasuredGuarantees { … } // always None
+
+/// The largest evaluated error (or failure probability) that meets `limit`.
+pub fn target_limit(limit: f64) -> f64;
+```
 
 **Sign conditions.** Some guarantees hold only for values of a known sign, read from the input group's `column_sign` (Section 3, "Value sign"): DDSketch's relative error on a quantile needs an input column of one sign, `NonNegative` or `NonPositive` (negated, all-negative values are all-positive).
 
@@ -299,7 +327,7 @@ Rules add groups through `find_or_add_group` and candidates through `add_candida
 
 ### Stage 0: groups
 
-`memo_of_queries` in `crates/stage0-memo` builds the groups bottom-up from the queries' nodes: each node's operator, over its children's groups, goes through `Memo::find_or_add_group`, so identical sub-expressions are one group; each query's root is then added with `Memo::add_query`, with the query's accuracy target and $n_q$, the number of values one evaluation returns (Pass 2 turns a whole-result failure probability into a per-value one with it). Stage 0 and Stage 1 share one type, `Memo`: Stage 0 returns it with every group's candidate list empty, and Stage 1 fills the lists.
+`memo_of_queries` in `crates/stage0-memo` builds the groups bottom-up from the queries' nodes: each node's operator, over its children's groups, goes through `Memo::find_or_add_group`, so identical sub-expressions are one group; each query is then added with `Memo::add_query` as a `MemoQuery`: its root, its accuracy target and $n_q$, the number of values one evaluation returns (Pass 2 turns a whole-result failure probability into a per-value one with it). Stage 0 and Stage 1 share one type, `Memo`: Stage 0 returns it with every group's candidate list empty, and Stage 1 fills the lists.
 
 ```rust
 pub struct MemoGroupId(pub u32);
@@ -370,15 +398,24 @@ pub struct Memo {
     // Private: groups are added only through `find_or_add_group`, so the
     // hash-consing index covers every group.
     groups: Vec<MemoGroup>,
-    pub query_roots: Vec<QueryRoot<MemoGroupId>>,
+    /// The queries, by index in the workload.
+    pub queries: Vec<MemoQuery>,
     // Private: the groups `find_or_add_group` may return, by expression hash.
     groups_by_expression_hash: HashMap<u64, Vec<MemoGroupId>>,
 }
 
+pub struct MemoQuery {
+    pub root: QueryRoot<MemoGroupId>,
+    /// A_q; `None` when the query has none (accuracy not enforced).
+    pub accuracy_target: Option<AccuracyTarget>,
+    /// n_q; `None` when the data workload does not bound it.
+    pub values_per_evaluation: Option<u64>,
+}
+
 impl Memo {
     pub fn groups(&self) -> &[MemoGroup];
-    /// Adds a query with this root; its groups and those below list it.
-    pub fn add_query(&mut self, root: QueryRoot<MemoGroupId>) -> usize;
+    /// Adds a query; its root's groups and those below list it.
+    pub fn add_query(&mut self, query: MemoQuery) -> usize;
 }
 ```
 
@@ -690,7 +727,7 @@ pub fn producer_satisfies_logical_requirements(
     producer: CandidateForMemoGroupId,
     consumer: CandidateForMemoGroupId,
     input_index_of_consumer: usize,
-    evidence: &AccuracyEvidence,
+    evidence: &dyn AccuracyEvidence,
 ) -> bool;
 ```
 
