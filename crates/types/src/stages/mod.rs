@@ -26,8 +26,8 @@ pub use logical_memo_candidates::{
 };
 pub(crate) use memo::MemoGroupAsInput;
 pub use memo::{
-    queries_rooted_at, root_groups, ColumnLineage, GroupProperties, MemoGroup, MemoGroupId,
-    ValueSign,
+    queries_rooted_at, reads_only_time_series, root_groups, ColumnLineage, GroupProperties,
+    MemoGroup, MemoGroupId, ValueSign,
 };
 pub use per_computation_logical_memo_candidates::HowToComputeAggregateMeasure;
 pub use physical::{

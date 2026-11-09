@@ -235,7 +235,8 @@ pub fn series_identity_item(
     }
 }
 
-fn reads_only_time_series<I: OperatorInput>(node: &I) -> bool {
+/// Whether every scan below `node` reads a time series (PromQL rows).
+pub(crate) fn reads_only_time_series<I: OperatorInput>(node: &I) -> bool {
     match node.operator() {
         Operator::NonASAP(NonASAPOp::Scan { source, .. }) => {
             matches!(source, Source::TimeSeries { .. })
@@ -254,7 +255,6 @@ mod tests {
     use crate::ir::schema::schema_support::with_promql_series_identity;
     use crate::ir::schema::{
         DataType, Field, FieldDataType, Schema, SketchAlgorithm, SketchStatistic, SummaryUpdate,
-        WeightDomain,
     };
     use crate::ir::{
         ASAPOp, NonASAPOp, Operator, OperatorNode, ProjectItem, ScalarExpr, TimeRangeKind,
@@ -328,7 +328,6 @@ mod tests {
                 input: SummaryUpdate {
                     item: Some(super::series_identity_item(schema_of(&memo, window), &[2])),
                     weight: crate::ir::schema::SummaryInputExpr::Column(ColumnRef::SampleValue),
-                    weight_domain: WeightDomain::UnknownOrSigned,
                 },
                 reduction: Reduction::by(vec![2]),
                 filter: None,

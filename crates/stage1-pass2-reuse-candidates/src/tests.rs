@@ -8,30 +8,31 @@ use std::time::Duration;
 
 use asap_accuracy::NoMeasuredGuarantees;
 use asap_types::ir::operator::operator_properties::{
-    AtModifier, BinaryOpKind, Reduction, Source, TimeShift,
+    AtModifier, BinaryOpKind, Reduction, TimeShift,
 };
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
 use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
 use asap_types::ir::scalar::{ColumnRef, CompareOpKind, ScalarValue};
-use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::schema::{
-    DataType, ExactKind, Field, FieldDataType, Schema, SketchAlgorithm, SketchParams,
-    SketchStatistic, SummaryUpdate,
+    ExactKind, FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic, SummaryUpdate,
 };
 use asap_types::ir::{
-    ASAPOp, BinaryOperator, ExprSemantics, NonASAPOp, Operator, OperatorNode, Predicate,
-    ProjectItem, QueryRoot, ScalarExpr, TimeRangeKind,
+    ASAPOp, BinaryOperator, ExprSemantics, NonASAPOp, Operator, Predicate, ProjectItem, QueryRoot,
+    ScalarExpr, TimeRangeKind,
 };
 use asap_types::stages::{
-    parameter_list, CandidateError, CandidateExpression, CandidateForMemoGroup,
-    CandidateForMemoGroupId, LogicalASAPMemoCandidates, LogicalProperties, LogicalRequirements,
-    Memo, MemoGroupId, MemoQuery, OriginOfCandidateForMemoGroup, PruneCause,
-    PrunedLogicalCandidate, RequiredAccuracy, RootPruneReason,
+    parameter_list, CandidateError, CandidateForMemoGroup, CandidateForMemoGroupId,
+    LogicalASAPMemoCandidates, Memo, MemoGroupId, MemoQuery, OriginOfCandidateForMemoGroup,
+    PruneCause, PrunedLogicalCandidate, RequiredAccuracy, RootPruneReason,
 };
 use asap_types::workload::{
     Predictability, Query, QueryRecurrence, QueryRequirements, QueryWorkloadEntry, RepeatedDemand,
     RepetitionInterval, TimestampMs,
+};
+
+use asap_types::test_support::{
+    add_candidate, group_with_own_candidate, series_schema, time_series_scan,
 };
 
 use crate::generate_logical_asap_memo_candidates;
@@ -41,79 +42,12 @@ mod decided_examples;
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
 
-/// Adds `operator` with `parameters` to `group`, as Pass 1 does.
-fn try_candidate(
-    memo: &mut Memo,
-    group: MemoGroupId,
-    operator: Operator<MemoGroupId>,
-    parameters: Option<SketchParams>,
-) -> Result<CandidateForMemoGroupId, CandidateError> {
-    let expression = CandidateExpression { operator };
-    let logical_properties = LogicalProperties::new(&expression, parameters).unwrap();
-    let input_requirements =
-        vec![LogicalRequirements::default(); expression.operator.children().len()];
-    memo.add_candidate(
-        group,
-        CandidateForMemoGroup {
-            expression,
-            logical_properties,
-            input_requirements,
-            fused_groups: Vec::new(),
-            origin: OriginOfCandidateForMemoGroup::Pass1,
-        },
-    )
-}
-
-fn candidate(
-    memo: &mut Memo,
-    group: MemoGroupId,
-    operator: Operator<MemoGroupId>,
-    parameters: Option<SketchParams>,
-) -> CandidateForMemoGroupId {
-    try_candidate(memo, group, operator, parameters).unwrap()
-}
-
-/// The group of `operator`, with `operator` as its exact candidate.
-fn group(memo: &mut Memo, operator: Operator<MemoGroupId>) -> MemoGroupId {
-    let group = memo.find_or_add_group(operator.clone()).unwrap();
-    candidate(memo, group, operator, None);
-    group
-}
-
-/// `[ts, value, labels...]`, the series identity realized as the planner
-/// realizes it before Stage 0.
-fn series_schema(labels: &[&str]) -> Schema {
-    let mut fields = vec![
-        Field::plain("ts", DataType::Timestamp, false),
-        Field::plain("value", DataType::Float64, false),
-    ];
-    fields.extend(
-        labels
-            .iter()
-            .map(|n| Field::plain(*n, DataType::Utf8, true)),
-    );
-    let open = OperatorNode::new_shared(scan_operator(
-        "m",
-        Schema::with_time_index(fields, 0, vec![]),
-        vec![],
-    ))
-    .unwrap();
-    with_promql_series_identity(&open).unwrap().schema.clone()
-}
-
-fn scan_operator<C>(metric: &str, schema: Schema, predicates: Vec<Predicate<C>>) -> Operator<C> {
-    Operator::NonASAP(NonASAPOp::Scan {
-        source: Source::TimeSeries {
-            metric: metric.into(),
-        },
-        predicates,
-        schema,
-    })
-}
-
 /// A time-series scan of `metric` listing `labels`.
 fn scan(memo: &mut Memo, metric: &str, labels: &[&str]) -> MemoGroupId {
-    group(memo, scan_operator(metric, series_schema(labels), vec![]))
+    group_with_own_candidate(
+        memo,
+        time_series_scan(metric, series_schema(labels), vec![]),
+    )
 }
 
 /// `column = value`, PromQL semantics.
@@ -133,12 +67,15 @@ fn scan_where(
     labels: &[&str],
     matchers: Vec<Predicate<MemoGroupId>>,
 ) -> MemoGroupId {
-    group(memo, scan_operator(metric, series_schema(labels), matchers))
+    group_with_own_candidate(
+        memo,
+        time_series_scan(metric, series_schema(labels), matchers),
+    )
 }
 
 /// `child[seconds]`.
 fn range(memo: &mut Memo, child: MemoGroupId, seconds: u64) -> MemoGroupId {
-    group(
+    group_with_own_candidate(
         memo,
         Operator::NonASAP(NonASAPOp::TimeRange {
             range: Duration::from_secs(seconds),
@@ -150,7 +87,7 @@ fn range(memo: &mut Memo, child: MemoGroupId, seconds: u64) -> MemoGroupId {
 
 /// `child offset <seconds>`, or `child @ at`.
 fn shift(memo: &mut Memo, child: MemoGroupId, seconds: i64, at: Option<AtModifier>) -> MemoGroupId {
-    group(
+    group_with_own_candidate(
         memo,
         Operator::NonASAP(NonASAPOp::TimeShift {
             shift: TimeShift {
@@ -188,7 +125,7 @@ fn sketch_state(
     let operator = build(child, FieldDataType::Sketch(algorithm), reduction);
     let state = memo.find_or_add_group(operator.clone()).unwrap();
     for parameters in parameter_list(algorithm) {
-        candidate(memo, state, operator.clone(), Some(parameters.clone()));
+        add_candidate(memo, state, operator.clone(), Some(parameters.clone())).unwrap();
     }
     state
 }
@@ -203,8 +140,9 @@ fn exact_state(
     kind: ExactKind,
     reduction: Reduction,
 ) -> (MemoGroupId, MemoGroupId) {
-    let state = group(memo, build(window, FieldDataType::exact(kind), reduction));
-    let finalized = group(
+    let state =
+        group_with_own_candidate(memo, build(window, FieldDataType::exact(kind), reduction));
+    let finalized = group_with_own_candidate(
         memo,
         Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child: state }),
     );
@@ -213,7 +151,7 @@ fn exact_state(
 
 /// A readout group of `statistic` over `state`.
 fn estimate(memo: &mut Memo, state: MemoGroupId, statistic: SketchStatistic) -> MemoGroupId {
-    group(
+    group_with_own_candidate(
         memo,
         Operator::ASAP(ASAPOp::SummaryEstimate {
             summary_input: state,
@@ -228,7 +166,7 @@ fn arithmetic(
     lhs: MemoGroupId,
     rhs: MemoGroupId,
 ) -> MemoGroupId {
-    group(
+    group_with_own_candidate(
         memo,
         Operator::NonASAP(NonASAPOp::BinaryOp {
             operator: BinaryOperator {
@@ -591,7 +529,7 @@ fn a_coarse_exact_sum_rolls_up_the_finer_sum() {
     let mut memo = Memo::default();
     let input = scan(&mut memo, "x", &["job", "instance"]);
     let window = range(&mut memo, input, 60);
-    let rate = group(
+    let rate = group_with_own_candidate(
         &mut memo,
         build(
             window,
@@ -599,12 +537,12 @@ fn a_coarse_exact_sum_rolls_up_the_finer_sum() {
             Reduction::PerEntity,
         ),
     );
-    let rows = group(
+    let rows = group_with_own_candidate(
         &mut memo,
         Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child: rate }),
     );
     let sum_by = |memo: &mut Memo, keys: Vec<usize>, name: &str| {
-        group(
+        group_with_own_candidate(
             memo,
             Operator::NonASAP(NonASAPOp::Aggregate {
                 child: rows,
@@ -648,7 +586,7 @@ fn a_smaller_topk_reads_the_largest_topk_of_the_same_input() {
     let mut memo = Memo::default();
     let input = scan(&mut memo, "x", &["job"]);
     let topk = |memo: &mut Memo, k: usize| {
-        group(
+        group_with_own_candidate(
             memo,
             Operator::NonASAP(NonASAPOp::Aggregate {
                 child: input,

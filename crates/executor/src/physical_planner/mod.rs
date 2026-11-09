@@ -1327,14 +1327,6 @@ fn summary_agg_build(
         let PlannerReduction::Reduce(keys) = reduction else {
             return Err(invalid("keyed summary requires explicit partitions"));
         };
-        if matches!(family, FieldDataType::Sketch(kind) if kind == &planner_types::ir::schema::SketchAlgorithm::CmsWithHeap)
-            && !matches!(
-                update.weight_domain,
-                planner_types::ir::schema::WeightDomain::NonNegative { .. }
-            )
-        {
-            return Err(invalid("CMS requires a nonnegative weight contract"));
-        }
         fn columns(
             expr: &SummaryInputExpr,
             input: &SchemaRef,

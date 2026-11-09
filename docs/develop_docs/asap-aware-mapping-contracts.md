@@ -95,8 +95,8 @@ asap-stage1-pass2-reuse-candidates -p asap-stage2-physical-optimization -p asap-
   `PhysicalASAPMemoCandidates::pruned_candidates` as
   `PrunedCandidate<PhysicalCandidate>` with a `PruneReason`: an
   ingestion-time alternative without an ingestion pipeline
-  (`NoIngestionPipeline`), a query-time scan of raw data the deployment does
-  not retain (`RawDataNotRetained`) and a materialized query-time result the
+  (`NoIngestionPipeline`), a scan of raw data the deployment does not retain,
+  at query time or materialized across evaluations (`RawDataNotRetained`) and a materialized query-time result the
   deployment does not retain (`QueryTimeResultsNotRetained`) are not
   generated; a candidate no buildable input or query output can use is
   removed (`InputHasNoBuildableProducer`, `ReachesNoQueryOutput`). The
