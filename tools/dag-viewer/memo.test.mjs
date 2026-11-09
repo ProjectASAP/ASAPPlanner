@@ -1,14 +1,17 @@
 // Node tests of memo.js (no DOM): the `memo` section checks, the per-step
 // diff, a step's elements (groups holding their candidates, collapsed large
-// groups, the selected choice, query dimming) and a candidate's own nodes,
-// over the hand-written fixture test-fixtures/memo-small.json; the elements
-// load into the vendored cytoscape (headless). Run from the repository root:
-// `node --test tools/dag-viewer/memo.test.mjs`.
+// groups, the selected and pruned candidates, query dimming), a candidate's
+// θ and required accuracy, its logical edges, its physical candidates'
+// edges and the pruned candidates of Pass 2, Stage 2 and Stage 3, over
+// test-fixtures/p90-kll.json: the document asap_planner writes for
+// test-fixtures/p90-workload.json under test-fixtures/kll-only-capabilities.json
+// (one p90 query with accuracy enforced; Pass 2 prunes G3's four smallest
+// KLL sketches). The elements load into the vendored cytoscape (headless).
+// Run from the repository root: `node --test tools/dag-viewer/memo.test.mjs`.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
-import { planned, planner } from './test-fixtures/planned.mjs';
 
 const here = new URL('.', import.meta.url);
 const context = vm.createContext({ console: { warn() {} } });
@@ -24,226 +27,187 @@ const cytoscape = (elements) => {
   page.elementsJson = JSON.stringify(elements);
   return vm.runInContext('cytoscape({ headless: true, elements: JSON.parse(elementsJson), layout: { name: "preset" } })', page);
 };
-const fixture = () => JSON.parse(readFileSync(new URL('test-fixtures/memo-small.json', here), 'utf8')).memo;
+const fixtureDoc = () => JSON.parse(readFileSync(new URL('test-fixtures/p90-kll.json', here), 'utf8'));
+const fixture = () => fixtureDoc().memo;
 const nodesOf = (elements) => elements.filter((e) => !('source' in e.data));
 const edgesOf = (elements) => elements.filter((e) => 'source' in e.data);
 const byId = (elements, id) => elements.find((e) => e.data.id === id);
+const PASS2 = 2;
 
 test('the fixture is a valid memo; a document without one has nothing to check', () => {
-  assert.deepEqual(call('validateMemo', fixture(), 2), []);
-  assert.deepEqual(call('validateMemo', undefined, 2), []);
+  assert.deepEqual(call('validateMemo', fixture(), 1), []);
+  assert.deepEqual(call('validateMemo', undefined, 1), []);
 });
 
 test('memo violations are reported', () => {
-  const broken = (edit) => { const memo = fixture(); edit(memo); return call('validateMemo', memo, 2).join('\n'); };
+  const broken = (edit) => { const memo = fixture(); edit(memo); return call('validateMemo', memo, 1).join('\n'); };
   assert.match(broken((m) => { m.steps = []; }), /memo.steps must be a non-empty array/);
   assert.match(broken((m) => { m.steps[1].step = 'stage0'; }), /out of pipeline order or repeated/);
   assert.match(broken((m) => { m.steps[0].step = 'pass3'; }), /step must be one of/);
   assert.match(broken((m) => { m.steps[0].groups[1].id = 0; }), /duplicate group id 0/);
   assert.match(broken((m) => { m.steps[0].groups[2].children = [9]; }), /G2: children and parents must name groups/);
-  assert.match(broken((m) => { m.steps[0].groups[2].queries = [2]; }), /must name workload queries/);
-  assert.match(broken((m) => { m.steps[1].groups[5].candidates[0].origin = 'magic'; }), /unknown origin "magic"/);
-  assert.match(broken((m) => { m.steps[1].groups[5].candidates[1].index = 0; }), /index must be a unique candidate index/);
-  assert.match(broken((m) => { m.steps[1].groups[5].candidate_count = 2; }), /candidate_count must count at least/);
-  assert.match(broken((m) => { m.steps[2].groups[2].candidates_capped = false; }), /candidates_capped/);
-  assert.match(broken((m) => { m.steps[1].groups[2].candidate_count_by_origin = { pass1: 1 }; }), /candidate_count_by_origin/);
-  assert.match(broken((m) => { m.steps[1].groups[2].candidate_count_by_origin = { pass1: 1, tumbling_windows: 1 }; m.steps[1].groups[2].candidates[1].origin = 'rollup'; }), /origin rollup is not counted/);
-  assert.match(broken((m) => { m.steps[1].groups[3].candidates[0].group_of_node = { '1.5': 2 }; }), /group_of_node must map/);
-  assert.match(broken((m) => { delete m.steps[1].groups[3].candidates[0].label; }), /needs a label/);
-  assert.match(broken((m) => { m.steps[1].groups[3].candidates[0].group_of_node = { 0: 4 }; }), /group_of_node must map/);
-  assert.match(broken((m) => { m.nodes.find((n) => n.operator.NonASAP && n.operator.NonASAP.Aggregate).operator.NonASAP.Aggregate.child = 99; }), /memo.nodes: node \d+ reads missing node 99/);
-  assert.match(broken((m) => { delete m.nodes; }), /memo.nodes must be an array/);
-  assert.match(broken((m) => { m.steps[1].groups[3].node = 99; }), /G3: node must index memo.nodes/);
-  assert.match(broken((m) => { m.steps[1].groups[3].candidates[0].node = -1; }), /candidates\[0\]: node must index memo.nodes/);
-  assert.match(broken((m) => { m.steps[1].groups[3].candidates[0].group_of_node = { 99: 2 }; }), /group_of_node must map/);
-  assert.match(broken((m) => { m.selected_choice = { 9: 0 }; }), /9 is not a group of the last step/);
-  assert.match(broken((m) => { m.selected_choice = { 5: 3 }; }), /G5 has no candidate 3/);
-  assert.match(broken((m) => { m.selected_choice = null; }), /without selected_choice_unavailable/);
-  assert.equal(broken((m) => { m.selected_choice = null; m.selected_choice_unavailable = 'no plan selected'; }), '');
+  assert.match(broken((m) => { m.steps[0].groups[2].queries = [1]; }), /must name workload queries/);
+  assert.match(broken((m) => { m.steps[1].groups[3].candidates[0].origin = 'magic'; }), /unknown origin "magic"/);
+  assert.match(broken((m) => { m.steps[1].groups[3].candidates[1].index = 0; }), /index must be a unique candidate index/);
+  assert.match(broken((m) => { m.steps[1].groups[3].candidate_count = 2; }), /candidate_count must count the candidates/);
+  assert.match(broken((m) => { m.steps[1].groups[3].candidate_count_by_origin = { pass1: 6 }; }), /candidate_count_by_origin/);
+  assert.match(broken((m) => { delete m.steps[1].groups[3].candidates[0].label; }), /needs a label and an operator/);
+  assert.match(broken((m) => { delete m.steps[1].groups[3].operator; }), /G3: needs a label and an operator/);
+  assert.match(broken((m) => { m.steps[1].groups[3].candidates[1].fused_groups = [9]; }), /children and fused_groups must name groups/);
+  assert.match(broken((m) => { m.steps[1].groups[3].candidates[1].parameters = 7; }), /parameters must be an object or null/);
+  assert.match(broken((m) => { m.steps[1].groups[3].candidates[1].required_accuracy = []; }), /required_accuracy must hold one/);
+  assert.match(broken((m) => { delete m.steps[PASS2].groups[3].candidates[0].pruned; }), /pruned must be a boolean/);
+  // Pass 2 lists the logical edge from every candidate of the input group.
+  assert.match(broken((m) => { m.steps[PASS2].groups[4].candidates[0].inputs[0].edges.pop(); }), /inputs must list, per input group/);
+  assert.match(broken((m) => { m.steps[PASS2].groups[4].candidates[0].inputs[0].edges[0].producer = 8; }), /inputs must list, per input group/);
+  assert.match(broken((m) => { m.selected_candidates = { 9: [0] }; }), /9 is not a group of the last step/);
+  assert.match(broken((m) => { m.selected_candidates = { 3: [8] }; }), /G3 must list candidate indices of the group/);
+  assert.match(broken((m) => { m.selected_candidates = { 3: 1 }; }), /G3 must list candidate indices of the group/);
+  // A document without a selected plan has no selected_candidates.
+  assert.equal(broken((m) => { delete m.selected_candidates; }), '');
 });
 
 test('each step says what it added over the previous one', () => {
   const memo = fixture();
-  assert.deepEqual(call('memoStepDiff', memo, 0), { groups: 6, groupsAdded: [0, 1, 2, 3, 4, 5], groupsRemoved: [], candidates: 0, candidatesDelta: 0, listedAdded: 0 });
+  assert.deepEqual(call('memoStepDiff', memo, 0), { groups: 3, groupsAdded: [0, 1, 2], groupsRemoved: [], candidates: 0, candidatesDelta: 0, added: 0 });
   const pass1 = call('memoStepDiff', memo, 1);
-  assert.equal(pass1.candidates, 10);
-  assert.equal(pass1.candidatesDelta, 10);
-  assert.equal(pass1.listedAdded, 10);
-  assert.deepEqual(pass1.groupsAdded, []);
-  const pass2 = call('memoStepDiff', memo, 2);
-  // G2 grows from 2 to 20 (18 TumblingWindows and SharedBuild, 11 listed), G3 gains a
-  // rollup, the new tumbling-window-chain group G6 has one.
-  assert.deepEqual(pass2.groupsAdded, [6]);
-  assert.equal(pass2.candidatesDelta, 18 + 1 + 1);
-  assert.equal(pass2.listedAdded, 11 + 1 + 1);
-  assert.equal(call('memoStepText', memo, 0), '6 groups · 0 candidates');
-  assert.equal(call('memoStepText', memo, 2), '7 groups (+1) · 30 candidates (+20) · 13 listed candidates new at this step');
+  assert.equal(pass1.candidates, 12);
+  assert.deepEqual(pass1.groupsAdded, [3, 4]);
+  // Pass 2 adds the tumbling-window chain G5, its range G6 and a merge in G3.
+  const pass2 = call('memoStepDiff', memo, PASS2);
+  assert.deepEqual(pass2.groupsAdded, [5, 6]);
+  assert.equal(pass2.candidatesDelta, 1 + 3 + 1);
+  assert.equal(pass2.added, 5);
+  assert.equal(call('memoStepText', memo, 0), '3 groups · 0 candidates');
+  assert.equal(call('memoStepText', memo, PASS2), '7 groups (+2) · 17 candidates (+5) · 5 candidates new at this step');
 });
 
 test('stage 0 draws one box per group and an edge per child group', () => {
-  const elements = call('memoStepElements', fixture(), 0, { queryIds: ['Q1', 'Q2'] });
-  const groups = nodesOf(elements).filter((e) => e.data.kind === 'group');
-  assert.equal(groups.length, 6);
-  assert.equal(nodesOf(elements).length, 6);
-  assert.deepEqual(edgesOf(elements).map((e) => e.data.id).sort(), ['g1>g0', 'g2>g1', 'g3>g2', 'g4>g1', 'g5>g4']);
-  assert.match(byId(elements, 'g3').data.label, /^G3 · sum by \(job\)\nno candidates yet · root of Q1$/);
-  // Readers sit above what they read.
-  assert.ok(byId(elements, 'g3').position.y < byId(elements, 'g2').position.y);
+  const elements = call('memoStepElements', fixture(), 0, { queryIds: ['q1'] });
+  assert.equal(nodesOf(elements).filter((e) => e.data.kind === 'group').length, 3);
+  assert.deepEqual(edgesOf(elements).map((e) => e.data.id).sort(), ['g1>g0', 'g2>g1']);
+  assert.match(byId(elements, 'g2').data.label, /^G2 · Aggregate quantile\(q=0\.9\)\nno candidates yet · root of q1$/);
+  // Consumers sit above what they read.
   assert.ok(byId(elements, 'g2').position.y < byId(elements, 'g1').position.y);
-  assert.equal(cytoscape(elements).nodes().length, 6);
+  assert.equal(cytoscape(elements).nodes().length, 3);
 });
 
-test('pass 1 puts each candidate inside its group, colored by origin, with an edge to each child group it reads', () => {
-  const elements = call('memoStepElements', fixture(), 1, {});
-  const candidates = nodesOf(elements).filter((e) => e.data.kind === 'candidate');
-  assert.equal(candidates.length, 10);
-  const cms = byId(elements, 'g5c1');
-  assert.equal(cms.data.parent, 'g5');
-  assert.equal(cms.data.color, vm.runInContext('MEMO_ORIGINS.pass1.color', context));
-  assert.match(cms.data.classes || cms.classes, /added/);
-  assert.equal(cms.data.label, '#1 CMS+heap depth 7 width 272\nPass1 · ✚ new');
+test('each candidate sits inside its group, colored by origin, with θ, and an edge to each child group it reads', () => {
+  const elements = call('memoStepElements', fixture(), PASS2, {});
+  const kll = byId(elements, 'g3c5');
+  assert.equal(kll.data.parent, 'g3');
+  assert.equal(kll.data.color, vm.runInContext('MEMO_ORIGINS.pass1.color', context));
+  assert.equal(kll.data.label, '#5 SummaryAgg Kll\nθ Kll(k=1404)\nPass1 · ✓ selected');
+  // A candidate without θ says so on its middle line; a new one is marked.
+  assert.equal(byId(elements, 'g3c7').data.label, '#7 SummaryMerge\n—\nTumblingWindows · ✚ new');
+  assert.match(byId(elements, 'g3c7').classes, /added/);
   assert.equal(call('memoClip', 'abcdef', 4), 'abc…');
-  // The exact topk reads G4, the sketches read the range G1 directly.
-  assert.ok(byId(elements, 'g5c0>g4'));
-  assert.ok(byId(elements, 'g5c1>g1'));
-  // Not the last step: no selection.
-  assert.ok(!elements.some((e) => /chosen/.test(e.classes || '')));
+  assert.ok(byId(elements, 'g3c5>g1'));
+  assert.ok(byId(elements, 'g3c7>g6'));
   const cy = cytoscape(elements);
-  assert.equal(cy.getElementById('g5').children().length, 3);
+  assert.equal(cy.getElementById('g3').children().length, 8);
   assert.equal(cy.edges().length, edgesOf(elements).length);
+});
+
+test("Pass 2's pruned candidates are marked and counted on their group", () => {
+  const elements = call('memoStepElements', fixture(), PASS2, {});
+  assert.deepEqual(nodesOf(elements).filter((e) => /\bpruned\b/.test(e.classes || '')).map((e) => e.data.id), ['g3c0', 'g3c1', 'g3c2', 'g3c3']);
+  assert.match(byId(elements, 'g3c0').data.label, /Pass1 · ✗ pruned$/);
+  assert.match(byId(elements, 'g3').data.label, /^G3 · SummaryAgg Kll\n8 candidates \(4 pruned by Pass 2\)$/);
+  // Pass 1 does not prune.
+  assert.ok(!call('memoStepElements', fixture(), 1, {}).some((e) => /pruned/.test(e.classes || '')));
 });
 
 test('a large group collapses to one count per origin and expands on request', () => {
   const memo = fixture();
-  const collapsed = call('memoStepElements', memo, 2, {});
-  const inG2 = (elements) => nodesOf(elements).filter((e) => e.data.parent === 'g2');
-  assert.deepEqual(inG2(collapsed).map((e) => e.data.label.split('\n')[0]), ['2 Pass1', '9 TumblingWindows', '9 SharedBuild']);
-  assert.match(byId(collapsed, 'g2').data.label, /20 candidates \(13 listed\) · click a count to expand/);
-  // The selected candidate (G2 #2, a TumblingWindows candidate) marks its count.
-  assert.match(byId(collapsed, 'g2otumbling_windows').classes, /chosen/);
-  assert.match(byId(collapsed, 'g2otumbling_windows').data.label, /✚ 6 new · ✓ selected/);
-  assert.ok(byId(collapsed, 'g2otumbling_windows>g6'));
-  assert.ok(byId(collapsed, 'g2opass1>g1'));
-  const open = call('memoStepElements', memo, 2, { expanded: [2] });
-  assert.equal(inG2(open).length, 13);
-  assert.match(byId(open, 'g2').data.label, /click the group to collapse/);
-  assert.match(byId(open, 'g2c2').classes, /chosen/);
-  assert.match(byId(open, 'g2c2>g6').classes, /chosen/);
-  assert.equal(cytoscape(open).getElementById('g2').children().length, 13);
-  // An origin with no listed candidate says so.
-  const capped = fixture();
-  capped.steps[2].groups[2].candidates = capped.steps[2].groups[2].candidates.filter((c) => c.origin !== 'shared_build');
-  assert.equal(byId(call('memoStepElements', capped, 2, { collapseAbove: 4 }), 'g2oshared_build').data.label, '9 SharedBuild\nnone listed');
-  // A threshold above the listed count draws every candidate.
-  assert.equal(inG2(call('memoStepElements', memo, 2, { collapseAbove: 20 })).length, 13);
+  const inG3 = (elements) => nodesOf(elements).filter((e) => e.data.parent === 'g3');
+  const collapsed = call('memoStepElements', memo, PASS2, { collapseAbove: 4 });
+  assert.deepEqual(inG3(collapsed).map((e) => e.data.label), ['7 Pass1\n✗ 4 pruned · ✓ selected', '1 TumblingWindows\n✚ 1 new']);
+  assert.match(byId(collapsed, 'g3').data.label, /click a count to expand/);
+  assert.match(byId(collapsed, 'g3opass1').classes, /chosen/);
+  assert.ok(byId(collapsed, 'g3otumbling_windows>g6'));
+  const open = call('memoStepElements', memo, PASS2, { collapseAbove: 4, expanded: [3] });
+  assert.equal(inG3(open).length, 8);
+  assert.match(byId(open, 'g3').data.label, /click the group to collapse/);
+  assert.equal(cytoscape(open).getElementById('g3').children().length, 8);
 });
 
-test('the selected choice is highlighted on the last step only', () => {
+test('the selected candidates are highlighted on the last step only', () => {
   const memo = fixture();
-  const last = call('memoStepElements', memo, 2, { expanded: [2] });
+  const last = call('memoStepElements', memo, PASS2, {});
   const chosen = nodesOf(last).filter((e) => /\bchosen\b/.test(e.classes)).map((e) => e.data.id).sort();
-  assert.deepEqual(chosen, ['g0c0', 'g1c0', 'g2c2', 'g3c0', 'g4c0', 'g5c1', 'g6c0']);
-  assert.match(byId(last, 'g5c1').data.label, /✓ selected/);
-  memo.selected_choice = null;
-  memo.selected_choice_unavailable = 'no plan selected';
-  assert.ok(!call('memoStepElements', memo, 2, {}).some((e) => /chosen/.test(e.classes || '')));
+  assert.deepEqual(chosen, ['g0c0', 'g1c0', 'g2c1', 'g3c5', 'g4c0']);
+  assert.match(byId(last, 'g3c5>g1').classes, /chosen/);
+  assert.ok(!call('memoStepElements', memo, 1, {}).some((e) => /chosen/.test(e.classes || '')));
+  delete memo.selected_candidates;
+  assert.ok(!call('memoStepElements', memo, PASS2, {}).some((e) => /chosen/.test(e.classes || '')));
 });
 
 test('a collapsed count marks only the selected candidate\'s edges', () => {
   const memo = fixture();
-  // Another listed TumblingWindows candidate of G2 reads G1 instead of G6.
-  const other = memo.steps[2].groups[2].candidates.find((c) => c.index === 3);
-  other.children = [1];
-  other.group_of_node = { [memo.steps[2].groups.find((g) => g.id === 1).node]: 1 };
-  const elements = call('memoStepElements', memo, 2, {});
-  assert.match(byId(elements, 'g2otumbling_windows>g6').classes, /chosen/);
-  assert.equal(byId(elements, 'g2otumbling_windows>g1').classes, '');
-});
-
-test('a selected candidate past the listed prefix is named on its group', () => {
-  const memo = fixture();
-  memo.selected_choice['2'] = 15;
-  assert.deepEqual(call('validateMemo', memo, 2), []);
-  const elements = call('memoStepElements', memo, 2, {});
-  assert.match(byId(elements, 'g2').data.label, /✓ selected #15 \(not listed\)/);
-  assert.ok(!nodesOf(elements).some((e) => e.data.parent === 'g2' && /chosen/.test(e.classes)));
+  // Another Pass1 candidate of G3 reads G6 instead of G1.
+  memo.steps[PASS2].groups[3].candidates[6].children = [6];
+  const elements = call('memoStepElements', memo, PASS2, { collapseAbove: 4 });
+  assert.match(byId(elements, 'g3opass1>g1').classes, /chosen/);
+  assert.equal(byId(elements, 'g3opass1>g6').classes, '');
 });
 
 test('highlighting a query dims the groups it does not reach', () => {
-  const elements = call('memoStepElements', fixture(), 1, {});
-  const dimmed = new Set(call('memoQueryDimmedIds', elements, 1));
-  // Q2 (index 1) reaches G0, G1, G4 and G5; G2 and G3 are Q1's only.
-  assert.ok(dimmed.has('g2') && dimmed.has('g3') && dimmed.has('g2c0') && dimmed.has('g3c1>g2'));
-  assert.ok(!dimmed.has('g5') && !dimmed.has('g5c1') && !dimmed.has('g1') && !dimmed.has('g5c1>g1'));
-  // An edge from a reached group into a dimmed one is dimmed too.
-  assert.ok(dimmed.has('g2c0>g1'));
-});
-
-test("a candidate's own nodes stop at its child groups' nodes", () => {
   const memo = fixture();
-  const accumulator = memo.steps[1].groups[3].candidates[1];
-  const { own, reads } = call('memoCandidateOwnNodes', memo.nodes, accumulator);
-  assert.deepEqual(own.map((n) => n.lines[0]), ['FinalizeExactAccumulator', 'SummaryAgg']);
-  assert.deepEqual(reads, [{ node: Number(Object.keys(accumulator.group_of_node)[0]), group: 2 }]);
-  const cms = call('memoCandidateOwnNodes', memo.nodes, memo.steps[1].groups[5].candidates[1]);
-  assert.deepEqual(cms.own.map((n) => n.lines[0]), ['Project', 'SummaryEstimate', 'SummaryAgg']);
-  assert.deepEqual(cms.reads.map((r) => r.group), [1]);
-  // A group with no child group reads nothing: its whole dag is its own.
-  assert.deepEqual(call('memoCandidateOwnNodes', memo.nodes, memo.steps[1].groups[0].candidates[0]).own.map((n) => n.lines[0]), ['Scan']);
+  memo.steps[PASS2].groups[6].queries = [];
+  const elements = call('memoStepElements', memo, PASS2, {});
+  const dimmed = new Set(call('memoQueryDimmedIds', elements, 0));
+  assert.ok(dimmed.has('g6') && dimmed.has('g6c0') && dimmed.has('g3c7>g6'));
+  assert.ok(!dimmed.has('g3') && !dimmed.has('g3c5') && !dimmed.has('g3c5>g1'));
 });
 
-test('memoNodeDag follows and renumbers a node read through a scalar body', () => {
-  // `vector(scalar(x))`: PromqlVectorFromScalar's body is the scalar itself.
-  const scan = { operator: { NonASAP: { Scan: { predicates: [] } } } };
-  const other = { operator: { NonASAP: { Scan: { predicates: ['other'] } } } };
-  const vector = { operator: { NonASAP: { PromqlVectorFromScalar: { PromqlScalarFromVector: 1 } } } };
-  assert.deepEqual(call('stageLogicalChildren', { PromqlScalarFromVector: 1 }), [1]);
-  const dag = call('memoNodeDag', [other, scan, vector], [2]);
-  assert.equal(dag.nodes.length, 2);
-  assert.deepEqual(dag.nodes[1].operator, { NonASAP: { PromqlVectorFromScalar: { PromqlScalarFromVector: 0 } } });
-  assert.deepEqual(dag.roots, [{ Operator: 1 }]);
+test("a candidate's θ and required accuracy per input", () => {
+  const groups = fixture().steps[PASS2].groups;
+  assert.equal(call('memoParametersText', groups[3].candidates[5].parameters), 'θ Kll(k=1404)');
+  assert.equal(call('memoParametersText', null), null);
+  assert.deepEqual(call('memoRequiredAccuracyTexts', groups[4].candidates[0]), ['G3: rank ≤ 0.01, δ 0.00001']);
+  assert.deepEqual(call('memoRequiredAccuracyTexts', groups[3].candidates[5]), ['G1: none']);
 });
 
-test('a node shared by groups is stored once, and memoNodeDag rebuilds each DAG from the table', () => {
-  const memo = fixture();
-  const keys = memo.nodes.map((n) => JSON.stringify(n));
-  assert.equal(new Set(keys).size, keys.length);
-  // Every step's scan group names the same table node.
-  const scans = memo.steps.map((s) => s.groups.find((g) => g.id === 0).node);
-  assert.equal(new Set(scans).size, 1);
-  // The DAG below the Pass 1 accumulator candidate: its own two nodes over
-  // the DAG of the node it reads from G2, renumbered from 0 with children
-  // before parents.
-  const candidate = memo.steps[1].groups[3].candidates[1];
-  const dag = call('memoNodeDag', memo.nodes, [candidate.node]);
-  const below = call('memoNodeDag', memo.nodes, [Number(Object.keys(candidate.group_of_node)[0])]);
-  assert.equal(dag.nodes.length, below.nodes.length + 2);
-  assert.deepEqual(dag.roots, [{ Operator: dag.nodes.length - 1 }]);
-  assert.deepEqual(call('validateLogicalDag', dag, 'dag', 1), []);
-  dag.nodes.forEach((node, id) => {
-    call('stageLogicalChildren', call('stageOperatorParts', node.operator)[1]).forEach((child) => assert.ok(child < id));
-  });
+test("Pass 2's logical edges into a candidate: each producer of the input group, with α^log and why it is 0", () => {
+  const estimate = fixture().steps[PASS2].groups[4].candidates[0];
+  const [input] = call('memoLogicalEdges', estimate);
+  assert.equal(input.title, 'input G3 · required rank ≤ 0.01, δ 0.00001');
+  assert.equal(input.edges.length, 8);
+  assert.match(input.edges[0], /^✗ #0: α\^log = 0: the producer's guarantee exceeds Rank ≤ 0\.01/);
+  assert.equal(input.edges[5], '✓ #5');
 });
 
-// The memo asap_planner writes for #1005's ratio-of-quantiles query
-// (skipped when asap_planner is not built).
-test('the real example: each step draws its groups and counts its new candidates', { skip: !planner }, () => {
-  const doc = planned('memo-examples/promql/ratio-of-quantiles-5m.json');
-  const memo = doc.memo;
-  assert.deepEqual(call('validateMemo', memo, doc.workload.queries.length), []);
-  const steps = memo.steps.map((s) => s.step);
-  const groupsOf = (step) => memo.steps[steps.indexOf(step)].groups;
-  const stage0 = call('memoStepElements', memo, steps.indexOf('stage0'), {});
-  assert.equal(nodesOf(stage0).filter((e) => e.data.kind === 'group').length, groupsOf('stage0').length);
-  const pass1 = groupsOf('pass1').reduce((n, g) => n + g.candidates.length, 0);
-  assert.equal(call('memoStepDiff', memo, steps.indexOf('pass1')).candidates, pass1);
-  const last = memo.steps.length - 1;
-  const elements = call('memoStepElements', memo, last, {});
-  assert.equal(nodesOf(elements).filter((e) => e.data.kind === 'group').length, memo.steps[last].groups.length);
-  assert.ok(cytoscape(elements).nodes().length >= memo.steps[last].groups.length);
-  // A candidate's boundary node is its child group's own table node.
-  memo.steps.forEach((step) => {
-    const nodeOf = new Map(step.groups.map((g) => [g.id, g.node]));
-    step.groups.forEach((g) => g.candidates.forEach((c) => Object.entries(c.group_of_node).forEach(([node, group]) => assert.equal(Number(node), nodeOf.get(group)))));
-  });
+test("a candidate's physical candidates list each input's physical edges with α^phys, the selected one marked", () => {
+  const doc = fixtureDoc();
+  const physical = call('memoPhysicalCandidates', doc, 4, 0);
+  assert.deepEqual(physical.map((p) => p.title), ['C18 (query_time, None)', 'C19 (query_time, OneEvaluation(Memory))']);
+  // Only edges whose logical edge holds: G3's four kept candidates' physical candidates.
+  assert.deepEqual(physical[1].inputs, [{ title: 'input G3', edges: ['✓ C10', '✓ C11', '✓ C12 · selected', '✓ C13', '✓ C14', '✓ C15', '✓ C16', '✓ C17'] }]);
+  const rejected = doc.stage2_physical_asap_optimization.physical_candidates.find((c) => c.inputs.some((i) => i.edges.some((e) => e.rejection)));
+  const lines = call('memoPhysicalCandidates', doc, rejected.group, rejected.index_in_group).flatMap((p) => p.inputs.flatMap((i) => i.edges));
+  assert.ok(lines.some((line) => /^✗ C\d+: α\^phys = 0: consumer \(/.test(line)), lines.join('\n'));
+  // Pruned by Pass 2: Stage 2 made no physical candidate of it.
+  assert.deepEqual(call('memoPhysicalCandidates', doc, 3, 0), []);
+});
+
+test('the pruned candidates of a group: Pass 2 with its root causes, Stage 2 and Stage 3 with their reasons', () => {
+  const doc = fixtureDoc();
+  const pruned = call('memoPrunedLines', doc, 3);
+  assert.equal(pruned.pass2.length, 4);
+  assert.match(pruned.pass2[0], /^#0: the producer's guarantee exceeds Rank ≤ 0\.01 \(δ 0\.00001\)$/);
+  assert.ok(pruned.stage2.includes('#4 (query_time, AcrossEvaluations(Memory)): query time results not retained'), pruned.stage2.join('\n'));
+  assert.deepEqual(pruned.stage3, []);
+  // A cause traced through eliminated consumers names them; a Stage 3
+  // reason names the physical candidate that dominates it.
+  doc.stage1_logical_asap_optimization.pruned_candidates[0].causes[0].through_pruned_consumers = [{ group: 4, index_in_group: 0 }, { group: 2, index_in_group: 1 }];
+  doc.stage3_plan_selection.pruned_candidates = [
+    { group: 3, index_in_group: 6, properties: { timing: 'query_time', lifetime: 'None' }, reason: { dominated_by: 12 } },
+    { group: 3, index_in_group: 7, properties: { timing: 'query_time', lifetime: 'None' }, reason: 'usage_not_costable' }];
+  const traced = call('memoPrunedLines', doc, 3);
+  assert.match(traced.pass2[0], /^#0: through G4\[0\] → G2\[1\]: the producer's guarantee exceeds/);
+  assert.deepEqual(call('memoPass2Causes', doc, 3, 1).length, 1);
+  assert.deepEqual(call('memoPass2Causes', doc, 3, 5), []);
+  assert.deepEqual(traced.stage3, ['#6 (query_time, None): dominated by C12', '#7 (query_time, None): usage not costable']);
+  assert.deepEqual(call('memoPrunedLines', { memo: doc.memo }, 3), { pass2: [], stage2: [], stage3: [] });
 });

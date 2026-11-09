@@ -218,7 +218,7 @@ impl DataStore for CountingStore {
     ) -> Result<OutputStream<'_, Batch>, Error> {
         self.opened.fetch_add(1, Ordering::SeqCst);
         if self.fail {
-            return Err(Error::Operator("reader failed".into()));
+            return Err(Error::Operator("cursor failed".into()));
         }
         Ok(stream::iter(vec![Batch::try_new(
             request.schema.clone(),
@@ -263,9 +263,9 @@ fn lazy_open_shared_producer_and_cancellation() {
     assert_eq!(opened.load(Ordering::SeqCst), 2);
 }
 // Unsupported predicates fail before opening any cursor; a store without
-// the source and a failing reader fail the run, not as an empty result.
+// the source and a failing source cursor fail the run, not as an empty result.
 #[test]
-fn binding_errors_and_reader_errors_are_not_empty_results() {
+fn binding_errors_and_cursor_errors_are_not_empty_results() {
     let (mut scan, schema, _) = fixture();
     let unbound = bind(
         &plan(scan.clone(), &schema, ExecutionDataState::QUERY_ROWS),
@@ -398,7 +398,7 @@ fn empty_sources_and_three_valued_predicates() {
     }
 }
 
-// A physical candidate can be compiled once without readers and rebound per
+// A physical candidate can be compiled once without source cursors and rebound per
 // run; a run over a store without its table fails.
 #[test]
 fn compile_without_readers_and_rebind_inputs() {

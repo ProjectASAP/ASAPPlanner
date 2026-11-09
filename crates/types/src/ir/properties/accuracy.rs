@@ -456,11 +456,11 @@ fn column_metric(node: &OperatorNode, column: usize) -> Option<AccuracyMetric> {
 }
 
 /// The measure the aggregate `node`'s output `column` holds, or `None` for
-/// a group key, a kept label or `count_values`' synthesized label, as
+/// a group key, a retained label or `count_values`' synthesized label, as
 /// [`aggregate_output_schema`](crate::ir::schema::aggregate_schema::aggregate_output_schema)
 /// lays the columns out. A per-entity reduction replaces its one measure's
 /// input column in place and keeps every other column; a cross-series one
-/// emits its kept labels first, then one column per measure, with a
+/// emits its retained labels first, then one column per measure, with a
 /// `count_values` label (unless an earlier column has its name) before its
 /// count.
 fn aggregate_measure_at<'a>(

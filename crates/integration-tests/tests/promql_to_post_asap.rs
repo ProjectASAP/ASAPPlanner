@@ -54,17 +54,8 @@ fn uses_sketch(node: &OperatorNode, algorithm: &SketchAlgorithm) -> bool {
     }
 }
 
-/// The logical candidates of `root` at `accuracy` that build a sketch of
-/// `algorithm`, each with the `Project`s Stage 1 restores names with skipped.
-fn candidates_using(
-    root: &Rc<OperatorNode>,
-    accuracy: AccuracyTarget,
-    algorithm: SketchAlgorithm,
-) -> Vec<Rc<OperatorNode>> {
-    using(logical_candidates(Rc::clone(root), accuracy), algorithm)
-}
-
-/// [`candidates_using`] with every output accepted whatever its guarantee:
+/// The selected plans building a sketch of `algorithm`, with every output
+/// accepted whatever its guarantee:
 /// a heap-backed Top-K's output has no guarantee, so Pass 1 prunes the
 /// heap these update and execution tests check unless guarantees are
 /// ignored.
@@ -169,6 +160,12 @@ fn value_ranked_topk_over_binary_ratio_finalizes_both_summary_operands() {
         panic!("expected BinaryOp below Sort, got {:?}", binary.operator);
     };
     for operand in [lhs, rhs] {
+        // The by-job sum is either the accumulator's own reduction or an
+        // exact `Aggregate` over the per-series finalized values.
+        let operand = match operand.non_asap() {
+            Some(NonASAPOp::Aggregate { child, .. }) => child,
+            _ => operand,
+        };
         let Some(ASAPOp::FinalizeExactAccumulator { child }) = operand.asap() else {
             panic!(
                 "expected exact accumulator finalization, got {:?}",
@@ -269,7 +266,7 @@ fn execute_topk_reference(plan: &OperatorNode) -> Vec<(String, f64)> {
         panic!("expected summary updates")
     };
     assert_eq!(reduction, &Reduction::by(vec![]));
-    // The fused raw input is the kept non-ASAP sub-DAG itself.
+    // The fused raw input is the retained non-ASAP sub-DAG itself.
     assert!(!child.contains_asap(), "expected fused raw input");
     let Some(NonASAPOp::TimeRange { range, child, .. }) = child.non_asap() else {
         panic!("expected temporal input")
@@ -381,67 +378,79 @@ fn planner_heap_topk_reference_execution_matches_ground_truth() {
 ///
 /// ```text
 /// SummaryEstimate { query: Quantile{0.99} }          → {quantile: Float64}
-/// └─ SummaryAgg { Kll{k:269}, input: SampleValue }   → {state: Sketch(Kll)}
-///    └─ FinalizeExactAccumulator
+/// └─ SummaryAgg { Kll, input: SampleValue }          → {state: Sketch(Kll)}
+///    └─ the rate's group, one candidate: FinalizeExactAccumulator
 ///       └─ SummaryAgg { Rate, input: SampleValue }   → {ts, state: ExactAggregate(Rate), …}
 ///          └─ TimeRange{5m} → Scan                   → {ts, value}
 /// ```
 ///
-/// The nested tree exercises both realizations: the approximate quantile
-/// binds a KLL sketch + evaluation; the per-series `rate` binds the exact
+/// The nested tree exercises both: the approximate quantile reads a KLL
+/// sketch and its estimate; the per-series `rate` reads the exact
 /// counter-reset-aware accumulator (no estimate — its state is the value).
+/// The memo after Pass 2 holds these groups (the rules generate them;
+/// whether Stage 3 selects them is a matter of cost).
 #[test]
 fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
+    use asap_types::stages::{Memo, MemoGroup, MemoGroupId};
     let pre_asap = lower_promql(
         "quantile(0.99, rate(http_requests_total[5m]))",
         AccuracyTarget::max_error(0.01),
     )
     .expect("lowering failed");
-    // The KLL candidate over the per-series Rate accumulator.
-    let root = &candidates_using(
-        &pre_asap,
-        AccuracyTarget::max_error(0.01),
-        SketchAlgorithm::Kll,
-    )
-    .into_iter()
-    .find(|plan| {
-        matches!(plan.asap(), Some(ASAPOp::SummaryEstimate { summary_input, .. })
-                if matches!(summary_input.asap(), Some(ASAPOp::SummaryAgg { child, .. })
-                    if matches!(child.asap(), Some(ASAPOp::FinalizeExactAccumulator { .. }))))
-    })
-    .expect("a KLL over the finalized Rate accumulator");
-
-    // Root: the sketch evaluation, back to a plain row shape.
-    let Some(ASAPOp::SummaryEstimate {
-        summary_input,
-        query,
-    }) = root.asap()
-    else {
-        panic!("expected SummaryEstimate root, got {:?}", root.operator);
+    let run =
+        asap_integration_tests::planning::run_all_stages(pre_asap, AccuracyTarget::max_error(0.01));
+    let memo: &Memo = &run.run.logical_asap_candidates.as_ref().unwrap().memo;
+    let group = |id: &MemoGroupId| -> &MemoGroup { &memo.groups()[id.0 as usize] };
+    // The group of `id`'s finalized exact accumulator: the accumulator group
+    // a `FinalizeExactAccumulator` candidate of `id` reads.
+    let finalized = |id: &MemoGroupId| -> Option<MemoGroupId> {
+        group(id)
+            .candidates
+            .iter()
+            .find_map(|candidate| match &candidate.expression.operator {
+                Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child }) => Some(*child),
+                _ => None,
+            })
     };
-    assert!(matches!(query, SketchStatistic::Quantile { q } if *q == 0.99));
+    // The KLL estimate whose state group reads the rate, which a candidate
+    // computes by finalizing the Rate accumulator.
+    let (estimate, state) = memo
+        .groups()
+        .iter()
+        .find_map(|estimate| match &estimate.expression {
+            Operator::ASAP(ASAPOp::SummaryEstimate {
+                summary_input,
+                query: SketchStatistic::Quantile { q },
+            }) if *q == 0.99 => {
+                let state = group(summary_input);
+                matches!(
+                    &state.expression,
+                    Operator::ASAP(ASAPOp::SummaryAgg { summary_type, child, .. })
+                        if *summary_type == FieldDataType::Sketch(SketchAlgorithm::Kll)
+                            && finalized(child).is_some()
+                )
+                .then_some((estimate, state))
+            }
+            _ => None,
+        })
+        .expect("a KLL over the finalized Rate accumulator");
     assert_eq!(
-        dtype(&root.schema, "quantile"),
+        dtype(&estimate.group_properties.schema, "quantile"),
         &FieldDataType::Plain(DataType::Float64),
         "the summary-state type must not propagate past the estimate"
     );
 
-    // The quantile: KLL committed, k=269 sized for ε=0.01 at 99% confidence.
-    // is an aggregation operator with no `by(...)`: a genuine full
-    // reduction, one output row — not to be confused with the inner rate's
-    // per-entity grouping below, even though both once collapsed to the
-    // same empty `by: []` (issue #163).
-    let Some(ASAPOp::SummaryAgg {
+    // The quantile: a full reduction, one output row, not to be confused
+    // with the inner rate's per-entity grouping below (issue #163).
+    let Operator::ASAP(ASAPOp::SummaryAgg {
         child,
-        summary_type: family,
         input,
         reduction,
         ..
-    }) = summary_input.asap()
+    }) = &state.expression
     else {
-        panic!("expected SummaryAgg, got {:?}", summary_input.operator);
+        unreachable!("matched above");
     };
-    assert_eq!(family, &FieldDataType::Sketch(SketchAlgorithm::Kll));
     assert_eq!(input, &SummaryUpdate::column(ColumnRef::SampleValue));
     assert_eq!(
         reduction,
@@ -449,61 +458,55 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
         "global quantile — no group keys, full reduction"
     );
     assert_eq!(
-        dtype(&summary_input.schema, "state"),
+        dtype(&state.group_properties.schema, "state"),
         &FieldDataType::Sketch(SketchAlgorithm::Kll)
     );
-
-    let Some(ASAPOp::FinalizeExactAccumulator { child }) = child.asap() else {
-        panic!("rate needs a maintenance evaluation");
-    };
-
     // The rate: exact counter-reset-aware accumulator, per-series (labels
-    // and time axis preserved), no estimate wrapper. `rate(...)` has no
-    // grouping concept at all — every entity stays its own summary.
-    let Some(ASAPOp::SummaryAgg {
+    // and time axis preserved), no estimate wrapper.
+    let rate = group(&finalized(child).expect("matched above"));
+    let Operator::ASAP(ASAPOp::SummaryAgg {
         child: leaf,
-        summary_type: family,
+        summary_type,
         reduction,
         ..
-    }) = child.asap()
+    }) = &rate.expression
     else {
         panic!(
             "expected inner SummaryAgg for rate, got {:?}",
-            child.operator
+            rate.expression
         );
     };
     assert_eq!(
-        family,
+        summary_type,
         &FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate)
     );
     assert_eq!(reduction, &Reduction::PerEntity);
     assert_eq!(
-        dtype(&child.schema, "state"),
+        dtype(&rate.group_properties.schema, "state"),
         &FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate)
     );
     assert_eq!(
-        child.schema.time_index,
+        rate.group_properties.schema.time_index,
         Some(0),
         "per-series keeps the time axis"
     );
 
-    // The leaf: unrewritten pass-through — TimeRange marker over the Scan.
-    // The kept leaf is the non-ASAP sub-DAG itself.
-    assert!(
-        !leaf.contains_asap(),
-        "expected kept leaf, got {:?}",
-        leaf.operator
-    );
-    let Some(NonASAPOp::TimeRange {
+    // The leaf: the 5 m TimeRange over the Scan, plain columns only.
+    let leaf = group(leaf);
+    let Operator::NonASAP(NonASAPOp::TimeRange {
         range, child: scan, ..
-    }) = leaf.non_asap()
+    }) = &leaf.expression
     else {
-        panic!("expected TimeRange leaf, got {:?}", leaf.operator);
+        panic!("expected TimeRange leaf, got {:?}", leaf.expression);
     };
     assert_eq!(range.as_secs(), 300);
-    assert!(matches!(scan.non_asap(), Some(NonASAPOp::Scan { .. })));
+    assert!(matches!(
+        group(scan).expression,
+        Operator::NonASAP(NonASAPOp::Scan { .. })
+    ));
     assert!(
-        leaf.schema
+        leaf.group_properties
+            .schema
             .fields
             .iter()
             .all(|f| matches!(f.dtype, FieldDataType::Plain(_))),

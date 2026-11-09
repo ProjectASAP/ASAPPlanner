@@ -4,7 +4,7 @@ use asap_cost::{
     ClusterLimits, ClusterObjective, CostInputs, CostModel, ResourceSpeed, ResourceUnitCost,
 };
 
-/// Cost model 2 with the deployment's own prices and speed; the fields left
+/// Cost model 2 with the deployment's own costs and speed; the fields left
 /// out keep their defaults.
 #[test]
 fn settings_load_from_json_with_defaults_for_omitted_fields() {

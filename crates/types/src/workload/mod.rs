@@ -290,7 +290,7 @@ pub struct RangeEvaluation {
 
 impl RangeEvaluation {
     /// Steps one request evaluates, `span_ms / step_ms + 1`: 61 for a 1 h
-    /// span at 1 min steps. Stage 3 prices each step as one evaluation.
+    /// span at 1 min steps. Stage 3 costs each step as one evaluation.
     pub fn evaluations_per_request(&self) -> u64 {
         self.span_ms / self.step_ms.max(1) + 1
     }
@@ -402,12 +402,12 @@ pub struct QueryWorkloadEntry {
     /// How far ahead it is known: a build may run at ingestion time only for
     /// `Predictable` queries (default: unknown).
     pub predictability: Predictability,
-    /// How often it runs: sets how often each node is priced, and only
+    /// How often it runs: sets how often each node is costed, and only
     /// repeated queries may keep state from ingestion time (default: unknown).
     pub recurrence: QueryRecurrence,
     /// How each run is answered as a range request, one evaluation per
     /// step; `None` (the default) for one evaluation per run. Stage 1 and
-    /// Stage 2 keep tumbling-window widths on its step grid, and Stage 3 prices
+    /// Stage 2 keep tumbling-window widths on its step grid, and Stage 3 costs
     /// [`RangeEvaluation::evaluations_per_request`] evaluations per run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range_evaluation: Option<RangeEvaluation>,
@@ -456,7 +456,7 @@ pub enum DataArrival {
     /// Rows keep arriving while the queries run.
     Ingesting {
         /// Rows (PromQL samples) arriving per second over all sources.
-        /// Plan selection prices a source's scans with its share of it, by
+        /// Plan selection costs a source's scans with its share of it, by
         /// series count when every source declares one, else with all of
         /// it, when the source does not declare both its `series_count` and
         /// its `sample_interval` ([`SourceFacts`]).
@@ -537,7 +537,7 @@ pub struct DataWorkload {
     /// ([`Self::series_facts`]). Counts, norms and bounds (`series_count`,
     /// `stream_norms`, …) differ per series name (a `foo_bucket` has one
     /// series per `le`), so they are read from the series' own entry;
-    /// pricing a source's own arrival rate reads its `series_count` and
+    /// costing a source's own arrival rate reads its `series_count` and
     /// `sample_interval` there together. A source without an entry has no
     /// known facts.
     #[serde(default)]
@@ -551,9 +551,9 @@ pub struct DataWorkload {
 pub struct SourceFacts {
     /// How many series (PromQL) or groups of rows (SQL) the source holds
     /// (default: unknown). Plan selection bounds the values a query returns
-    /// (`G`) by it, to split a whole-result failure probability, and prices
+    /// (`G`) by it, to split a whole-result failure probability, and costs
     /// scans and selectors with it (with `sample_interval`, the source's
-    /// arrival rate). Unknown, pricing bounds a per-series count by the rows
+    /// arrival rate). Unknown, costing bounds a per-series count by the rows
     /// read instead. Must be positive.
     #[serde(default)]
     pub series_count: Option<u64>,
@@ -576,7 +576,7 @@ pub struct SourceFacts {
     /// selector without it fails with
     /// [`WorkloadError::MissingSampleInterval`]. With `series_count`, it
     /// gives the source's own arrival rate, `series_count` samples per
-    /// `sample_interval`, which plan selection prices the source's scans
+    /// `sample_interval`, which plan selection costs the source's scans
     /// and time ranges at.
     #[serde(default)]
     pub sample_interval: Option<DurationMs>,
@@ -600,11 +600,11 @@ pub struct SourceFacts {
     pub max_distinct_per_evaluation: Option<u64>,
     /// How many distinct values each label (PromQL) or column (SQL) of the
     /// source takes, keyed by its name (default: none declared), e.g.
-    /// `{"host": 1000, "job": 10}`. Plan selection prices the groups of a
+    /// `{"host": 1000, "job": 10}`. Plan selection costs the groups of a
     /// `by (k1, k2, ...)` at the product of its keys' counts, at most the
     /// `series_count` (series or groups of rows) of the sources it reads
     /// and the rows it reads per evaluation. No count is assumed for an
-    /// undeclared key: such a grouping is priced at the smaller of those
+    /// undeclared key: such a grouping is costed at the smaller of those
     /// two. When every key of a
     /// grouped result declares a count, their product (at most the series
     /// read) also bounds the values one evaluation returns (`G`), which a
@@ -617,7 +617,7 @@ pub struct SourceFacts {
     /// together, for labels that depend on each other (default: none
     /// declared), e.g. `[{"labels": ["service", "endpoint"],
     /// "distinct_values": 625}]` when each of 625 endpoints is in one of 25
-    /// services. Plan selection prices a grouping at the smallest product
+    /// services. Plan selection costs a grouping at the smallest product
     /// of declared counts whose labels cover its keys
     /// (`SourceFacts::declared_distinct_combinations`), so
     /// `by (service, endpoint)` is 625 groups rather than 25 x 625, and

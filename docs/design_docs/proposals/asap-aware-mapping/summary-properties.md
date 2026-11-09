@@ -144,4 +144,4 @@ registered same-metric additive, relative, and Lipschitz rules and exact
 sum/max/min over approximate inputs. It uses union-bound probabilities
 without assuming independence, preserves unknown statistics as unknown,
 and rejects unsupported composition instead of treating the child as exact.
-Plan selection prices only candidates that satisfy the accuracy requirement.
+Plan selection costs only candidates that satisfy the accuracy requirement.

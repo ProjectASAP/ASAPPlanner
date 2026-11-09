@@ -72,7 +72,7 @@ pub(crate) fn row_chunks(batch: &Batch) -> impl Iterator<Item = Batch> + '_ {
 pub(super) struct CollectedInput {
     /// All the input's rows.
     pub(super) batch: Batch,
-    /// The producer's batch, kept with its reservation.
+    /// The producer's batch, retained with its reservation.
     _held: Option<crate::runtime::SharedValue<Batch>>,
     /// The reservation of a joined copy.
     _reservation: Option<Reservation>,

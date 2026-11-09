@@ -4,7 +4,6 @@
 
 use asap_cost::analytical::AnalyticalCostError;
 use asap_cost::CostModel;
-use asap_types::ir::physical_export::PhysicalASAPNodeId;
 use asap_types::ir::properties::AccuracyMetric;
 use asap_types::stages::{PhysicalCandidate, PrunedCandidate};
 use thiserror::Error;
@@ -17,7 +16,7 @@ pub(crate) const LARGE_PEAK_MEMORY_BYTES: u64 = 1_000_000_000_000;
 /// A warning when `peak_memory_bytes` is over `LARGE_PEAK_MEMORY_BYTES`
 /// and `cost_model` declares no memory capacity (cost models 1 and 2). Under
 /// cost model 3 the cluster's memory is declared and a candidate over it is
-/// rejected ([`RejectionCause::OverClusterCapacity`]), so there is none.
+/// rejected, so there is none.
 pub fn large_peak_memory_warning(peak_memory_bytes: u64, cost_model: &CostModel) -> Option<String> {
     match cost_model {
         CostModel::ClusterCapacity(_) => None,
@@ -42,64 +41,14 @@ pub struct Rejection {
     pub reason: String,
 }
 
-/// Why Stage 3 did not select a candidate. The first five mean the
-/// candidate failed a check and is invalid ([`Self::failed_a_check`]); the
-/// rest mean it was valid and lost under the cost model. JSON: the
-/// snake_case variant name, e.g. `"costlier"`.
+/// Why Stage 3 did not select a candidate. JSON: the snake_case variant
+/// name, e.g. `"infeasible"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RejectionCause {
-    /// A query's accuracy target is not met: its output's guarantee misses
-    /// it and no deployment evidence meets it.
-    AccuracyTargetMissed,
-    /// A query's output has no accuracy guarantee: no analytical rule and
-    /// no deployment evidence supplies one.
-    NoAccuracyGuarantee,
-    /// A query's latency is over its `max_latency_ms` bound.
-    LatencyBoundExceeded,
-    /// A repeating query's latency per evaluation is over its repeat
-    /// interval, so its evaluations cannot keep up; checked whether or not
-    /// it has a latency bound.
-    LatencyOverRepeatInterval,
-    /// Under cost model 3, its usage is over one of the cluster's limits.
-    OverClusterCapacity,
-    /// Its cost overflows the cost model's arithmetic, so it cannot be
-    /// costed.
-    CostNotRepresentable,
-    /// Under cost models 1 and 2, its cost is higher than the selected
-    /// candidate's.
-    Costlier,
-    /// Under cost model 3's `lowest-latency`, it is slower than the
-    /// selected candidate.
-    Slower,
-    /// Under cost model 3's `least-memory`, it uses more memory than the
-    /// selected candidate.
-    MoreMemory,
-    /// It ties with the selected candidate and comes later in enumeration
-    /// order.
-    TiedLostOnEnumerationOrder,
-    /// No plan meets every query's accuracy target, latency bound and the
-    /// catalog's consumer constraints together: the selection MILP is
-    /// infeasible. The reason names a query when it has no plan even alone.
+    /// No plan gives every query output a candidate whose every input has
+    /// an admissible producer: the selection MILP is infeasible.
     Infeasible,
-}
-
-impl RejectionCause {
-    /// Whether the candidate failed a check (accuracy, latency bound,
-    /// repeat interval, cluster capacity or a representable cost) rather
-    /// than losing under the cost model.
-    pub fn failed_a_check(self) -> bool {
-        matches!(
-            self,
-            Self::AccuracyTargetMissed
-                | Self::NoAccuracyGuarantee
-                | Self::LatencyBoundExceeded
-                | Self::LatencyOverRepeatInterval
-                | Self::OverClusterCapacity
-                | Self::Infeasible
-                | Self::CostNotRepresentable
-        )
-    }
 }
 
 /// The accuracy Stage 3 accepted for one query: the metric of the error
@@ -166,12 +115,6 @@ pub enum ErrorSelectingPlan {
         candidate: String,
         roots: usize,
         entries: usize,
-    },
-    #[error("candidate {candidate}, node {node:?}: {error}")]
-    Cost {
-        candidate: String,
-        node: PhysicalASAPNodeId,
-        error: AnalyticalCostError,
     },
     #[error("no valid candidate: {0:?}")]
     NoValidCandidate(Vec<Rejection>),

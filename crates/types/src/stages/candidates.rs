@@ -178,7 +178,7 @@ impl Memo {
                 index_in_group,
             });
         }
-        let input_groups: Vec<MemoGroupId> = candidate
+        let input_group_ids: Vec<MemoGroupId> = candidate
             .expression
             .operator
             .children()
@@ -187,11 +187,11 @@ impl Memo {
             .collect();
         candidates.push(candidate);
         let index_in_group = candidates.len() - 1;
-        for &input in &input_groups {
+        for &input in &input_group_ids {
             add_parent(&mut self.groups[input.0 as usize], group);
         }
         let queries = self.groups[group.0 as usize].queries.clone();
-        self.add_queries_below(input_groups, &queries);
+        self.add_queries_below(input_group_ids, &queries);
         Ok(CandidateForMemoGroupId {
             group,
             index_in_group,
@@ -427,13 +427,15 @@ pub struct CandidateForMemoGroup {
     /// Reuse across appearances is Pass 2's, not fusion (concepts doc §3,
     /// "Fused groups").
     pub fused_groups: Vec<MemoGroupId>,
-    /// Which rule added it. Not in the formulation: kept for
-    /// `stage_pipeline --text` and the viewer (approved 2026-11-05).
+    /// Which rule added it. Not in the formulation: shown by
+    /// `asap_planner` and the viewer (approved 2026-11-05).
     pub origin: OriginOfCandidateForMemoGroup,
 }
 
-/// Which rule added a candidate. Nothing in planning reads it.
+/// Which rule added a candidate. Nothing in planning reads it. JSON: the
+/// snake_case variant name, e.g. `"top_k_reuse"`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OriginOfCandidateForMemoGroup {
     /// Pass 1: exact, exact accumulator, or a summary type.
     Pass1,

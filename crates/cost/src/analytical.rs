@@ -132,7 +132,7 @@ pub(crate) enum PhysicalOperator {
     /// Moves when its input is evaluated (PromQL `offset`): the rows pass
     /// unchanged and nothing is computed.
     TimeShift,
-    /// Keeps the rows of its input inside a time window: priced by the
+    /// Keeps the rows of its input inside a time window: costed by the
     /// rows it keeps.
     TimeRange,
     PromqlRange {
@@ -1517,9 +1517,9 @@ pub enum AnalyticalCostError {
     #[error("an ingestion-time grouping has no window below it, so no fact bounds its groups")]
     IngestionGroupingWithoutWindow,
     /// Bad input: no declared fact bounds what a node reads from `source`
-    /// (`missing` names the facts that would), so pricing refuses rather
+    /// (`missing` names the facts that would), so costing refuses rather
     /// than assume one.
-    #[error("pricing source {source_name} needs {missing}, and none is declared")]
+    #[error("costing source {source_name} needs {missing}, and none is declared")]
     MissingSourceFact {
         source_name: String,
         missing: &'static str,
@@ -1578,7 +1578,7 @@ mod tests {
     }
 
     /// A time shift only moves when its input is evaluated: it costs
-    /// nothing. A time range is priced by the rows it keeps, and keeps no
+    /// nothing. A time range is costed by the rows it keeps, and keeps no
     /// more than it reads.
     #[test]
     fn time_shift_is_free_and_time_range_is_priced_by_the_rows_it_keeps() {

@@ -1,7 +1,7 @@
 //! What a stage removed, and why: one shape for every stage (#1047 P6).
 //! Each stage removes only what its own knowledge rules out (option C):
 //! Stage 2 what cannot be built, run or read by a query output. Stage 0 fails with an
-//! error, Pass 1 records nothing it leaves out (#1205 will show it), and
+//! error, Pass 1 does not add a candidate it cannot compute (there is no list), and
 //! Pass 2 records its eliminated candidates with their own causes
 //! (`PrunedLogicalCandidate`). Stage 3 prunes before
 //! its selection MILP (dominated and uncostable candidates); its
@@ -22,8 +22,10 @@ pub struct PrunedCandidate<C> {
 
 /// Why a stage removed a candidate: first Stage 2's (the physical candidate
 /// cannot be built, run or read by a query output), then Stage 3's, before
-/// its selection MILP.
+/// its selection MILP. JSON: the snake_case variant name, e.g.
+/// `"raw_data_not_retained"`, or `{"dominated_by": 3}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PruneReason {
     /// Stage 2: it runs at ingestion time, and the source has no ingestion
     /// pipeline (its data is at rest or its arrival unknown).

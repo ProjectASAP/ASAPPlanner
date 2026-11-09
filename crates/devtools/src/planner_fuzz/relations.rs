@@ -26,17 +26,14 @@ use asap_types::ir::{
 };
 
 use super::generate::{
-    label_value, looser, tighter, OuterAggregation, OuterOp, PromqlSpec, QuerySpec, RangeFunction,
-    SqlAggregate,
+    label_value, OuterAggregation, OuterOp, PromqlSpec, QuerySpec, RangeFunction, SqlAggregate,
 };
-use super::{FuzzQuery, FuzzWorkload, Language, Planned, Planner, Priced};
+use super::{Costed, FuzzQuery, FuzzWorkload, Language, Planned, Planner};
 
 /// A metamorphic relation the tester checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Relation {
-    /// (a) `q'` = `q` with a looser accuracy target: derived by reading `q`.
-    LooserAccuracy,
     /// (b) `q'` = grouped `q` plus an equality filter on a group key:
     /// derived by a selection (`Filter`) over `q`'s result.
     FilterOnGroupKey,
@@ -84,8 +81,6 @@ pub enum Relation {
     /// (o) `q'` = `q` with `rate` and `increase` swapped: derived by scaling
     /// `q`'s result by the window length.
     EquivalentRangeFunction,
-    /// Tightening a query's accuracy target never lowers cost.
-    TighterAccuracy,
     /// Adding a query never lowers cost.
     AddedQuery,
     /// Dropping raw-data retention never lowers cost.
@@ -104,8 +99,7 @@ pub enum Relation {
 }
 
 impl Relation {
-    pub const ALL: [Relation; 23] = [
-        Relation::LooserAccuracy,
+    pub const ALL: [Relation; 21] = [
         Relation::FilterOnGroupKey,
         Relation::CoarserGrouping,
         Relation::NestedShorterWindow,
@@ -120,7 +114,6 @@ impl Relation {
         Relation::LongerWindow,
         Relation::LongerWindowRollup,
         Relation::EquivalentRangeFunction,
-        Relation::TighterAccuracy,
         Relation::AddedQuery,
         Relation::NoRawRetention,
         Relation::ResultsRetained,
@@ -130,10 +123,9 @@ impl Relation {
         Relation::DisjointCopy,
     ];
 
-    /// The CLI name, e.g. `a-looser-accuracy`.
+    /// The CLI name, e.g. `b-filter-on-group-key`.
     pub fn name(self) -> &'static str {
         match self {
-            Relation::LooserAccuracy => "a-looser-accuracy",
             Relation::FilterOnGroupKey => "b-filter-on-group-key",
             Relation::CoarserGrouping => "c-coarser-grouping",
             Relation::NestedShorterWindow => "d-nested-shorter-window",
@@ -148,7 +140,6 @@ impl Relation {
             Relation::LongerWindow => "m-longer-window",
             Relation::LongerWindowRollup => "n-longer-window-rollup",
             Relation::EquivalentRangeFunction => "o-equivalent-range-function",
-            Relation::TighterAccuracy => "tighter-accuracy",
             Relation::AddedQuery => "added-query",
             Relation::NoRawRetention => "no-raw-retention",
             Relation::ResultsRetained => "results-retained",
@@ -159,7 +150,7 @@ impl Relation {
         }
     }
 
-    /// Parses a CLI name or, for (a) to (o), its letter.
+    /// Parses a CLI name or, for (b) to (o), its letter.
     pub fn parse(text: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|r| {
             r.name() == text
@@ -173,8 +164,7 @@ impl Relation {
     pub fn is_marginal(self) -> bool {
         matches!(
             self,
-            Relation::LooserAccuracy
-                | Relation::FilterOnGroupKey
+            Relation::FilterOnGroupKey
                 | Relation::CoarserGrouping
                 | Relation::NestedShorterWindow
                 | Relation::OtherQuantileRank
@@ -194,16 +184,14 @@ impl Relation {
     /// Whether the relation is checked once per query of the workload
     /// (otherwise once per workload).
     pub fn per_query(self) -> bool {
-        self.is_marginal() || matches!(self, Relation::TighterAccuracy | Relation::RelaxedLatency)
+        self.is_marginal() || matches!(self, Relation::RelaxedLatency)
     }
 
     /// The statement checked, for reports.
     pub fn statement(self) -> &'static str {
         match self {
             r if r.is_marginal() => "cost(W ∪ {q'}) − cost(W) ≤ derive_cost + tolerance",
-            Relation::TighterAccuracy | Relation::AddedQuery | Relation::NoRawRetention => {
-                "cost(W') ≥ cost(W) − tolerance"
-            }
+            Relation::AddedQuery | Relation::NoRawRetention => "cost(W') ≥ cost(W) − tolerance",
             Relation::ResultsRetained | Relation::RelaxedLatency => {
                 "cost(W') ≤ cost(W) + tolerance"
             }
@@ -245,8 +233,8 @@ pub enum Witness {
     /// `q`'s root estimate reading a `SummaryMerge` with `group_by` the
     /// `labels` columns over its state, when the family merges groups.
     SketchRollup { labels: Vec<String> },
-    /// `q`'s `SummaryMerge` over a tumbling-window chain merging only the newest tumbling windows
-    /// covering `window_ms`.
+    /// `q`'s `TimeRange` over its tumbling-window chain at `window_ms`
+    /// instead, over the same chain: the windows a shorter range selects.
     NewestTumblingWindows { window_ms: u64 },
     /// `q`'s topmost quantile estimate (or exact quantile aggregate) at rank
     /// `to` instead of `from`.
@@ -257,9 +245,9 @@ pub enum Witness {
     /// `q`'s root estimate over a `SummaryMerge` of its state and the state
     /// of `W`'s last query (the other selection, added to `W`).
     UnionWithLast,
-    /// `q`'s tumbling-window chain lengthened to cover `window_ms`: every reader of
-    /// the chain in `W`'s plan merges its old newest tumbling windows of the longer
-    /// chain, and `q'` merges all of them, then applies `rollup` when set.
+    /// `q`'s `TimeRange` over its tumbling-window chain at the longer
+    /// `window_ms`, over the same chain (retained as long as the range
+    /// needs), then `rollup` when set.
     LongerWindow {
         window_ms: u64,
         rollup: Option<Box<Witness>>,
@@ -270,7 +258,7 @@ pub enum Witness {
     GraftWithOperand { text: String, operand: String },
     /// `W ∪ {q'}` planned with UnivMon as the only sketch family, so the
     /// planner sizes one UnivMon for both statistics (its summary-capability
-    /// rule), priced with every family.
+    /// rule), costed with every family.
     UnivMonOnly,
 }
 
@@ -304,7 +292,7 @@ pub struct Measurement {
     /// The derived or added query's text, for a relation that adds one.
     pub related_query: Option<String>,
     /// The witness (marginal relations) or the confirming plan (a violated
-    /// monotonicity relation: the other side's logical plan priced for this
+    /// monotonicity relation: the other side's plan costed for this
     /// side).
     pub witness: Option<WitnessReport>,
     /// The bound `related_cost_per_second` was checked against, tolerance
@@ -321,7 +309,7 @@ pub struct WitnessReport {
     pub derivation: Option<Witness>,
     pub cost_per_second: f64,
     pub plan: String,
-    /// Marginal relations: `W`'s selected logical plan priced the same way.
+    /// Marginal relations: `W`'s selected plan costed the same way.
     pub base_reference_cost_per_second: Option<f64>,
     /// `cost_per_second − base_reference_cost_per_second`.
     pub derive_cost_per_second: Option<f64>,
@@ -329,9 +317,7 @@ pub struct WitnessReport {
     /// operators alone) and their operators.
     pub derived_node_cost_per_second: Option<f64>,
     pub derived_operators: Vec<String>,
-    /// Whether the witness's `Filter` on a group key kept its input's
-    /// guarantee, which Stage 1's guarantee composition does not give it
-    /// (so the witness passes Stage 3 only under that rule).
+    /// Whether the witness derives `q'` by a `Filter` on a group key.
     pub key_filter_keeps_input_guarantee: bool,
 }
 
@@ -341,7 +327,7 @@ pub enum Outcome {
     Holds(Measurement),
     Violated(Measurement),
     /// Not applicable to this workload, a side failed to plan, or no
-    /// witness could be built or priced.
+    /// witness could be built or costed.
     Inconclusive {
         reason: String,
     },
@@ -369,13 +355,15 @@ fn shorter_window(window_ms: u64) -> Option<u64> {
 }
 
 fn repeat_interval_ms(query: &FuzzQuery) -> Option<u64> {
-    serde_json::to_value(&query.entry.demand).ok()?["fixed_interval"].as_u64()
+    serde_json::to_value(&query.entry.demand).ok()?["fixed_interval_at"]["interval"].as_u64()
 }
 
 fn with_repeat_interval(query: &FuzzQuery, interval_ms: u64) -> FuzzQuery {
     let mut query = query.clone();
-    query.entry.demand =
-        serde_json::from_value(json!({"fixed_interval": interval_ms})).expect("a fixed interval");
+    query.entry.demand = serde_json::from_value(
+        json!({"fixed_interval_at": {"interval": interval_ms, "evaluation_phase": 0}}),
+    )
+    .expect("a fixed interval");
     query
 }
 
@@ -391,9 +379,6 @@ pub fn derive(relation: Relation, workload: &FuzzWorkload, target: usize) -> Opt
         })
     };
     match relation {
-        Relation::LooserAccuracy => {
-            derived(q.with_accuracy(looser(q.accuracy())?), vec![Witness::Same])
-        }
         Relation::ExactDuplicate => derived(q.clone(), vec![Witness::Same]),
         Relation::OtherRepeatInterval => {
             let interval = repeat_interval_ms(q)?;
@@ -1153,10 +1138,7 @@ pub fn witness_root(
             .map_err(|e| format!("rollup estimate: {e}"))?;
             with_root_estimate(q_root, estimate, &dropped)
         }
-        Witness::NewestTumblingWindows { window_ms } => {
-            let _ = window_ms;
-            todo!("#1207 PR 9: a witness merging the windows a TimeRange over q's chain selects")
-        }
+        Witness::NewestTumblingWindows { window_ms } => chain_window(q_root, *window_ms),
         Witness::QuantileRank { from, to } => {
             let mut done = false;
             rewrite_root(q_root, "quantile estimate", |node| {
@@ -1261,8 +1243,19 @@ pub fn witness_root(
             .map_err(|e| format!("union estimate: {e}"))?;
             with_root_estimate(q_root, estimate, &[])
         }
-        Witness::LongerWindow { .. } | Witness::UnivMonOnly | Witness::GraftWithOperand { .. } => {
-            Err("the derivation changes W's roots: see witness_roots".into())
+        Witness::LongerWindow { window_ms, rollup } => {
+            let long_root = chain_window(q_root, *window_ms)?;
+            match rollup {
+                None => Ok(long_root),
+                Some(rollup) => {
+                    let mut with_long = base_roots.to_vec();
+                    with_long[target] = QueryRoot::Operator(long_root);
+                    witness_root(planner, rollup, base, planned, &with_long, target)
+                }
+            }
+        }
+        Witness::UnivMonOnly | Witness::GraftWithOperand { .. } => {
+            Err("the derivation plans W again: see witness_roots".into())
         }
     }
 }
@@ -1307,18 +1300,42 @@ fn graft(
     })
 }
 
-/// The witness's roots: `W`'s selected logical roots plus `q'`'s root,
-/// with `W`'s roots rewritten when the derivation changes a node they
-/// share ([`Witness::LongerWindow`]).
+/// `q_root` with its `TimeRange` over a tumbling-window chain at
+/// `window_ms`, over the same chain node, and the nodes above it rebuilt.
+fn chain_window(q_root: &Rc<OperatorNode>, window_ms: u64) -> Result<Rc<OperatorNode>, String> {
+    rewrite_root(q_root, "time range over a tumbling-window chain", |node| {
+        let Some(NonASAPOp::TimeRange { range, kind, child }) = node.non_asap() else {
+            return None;
+        };
+        let Some(ASAPOp::SummaryTumblingWindowChain { .. }) = child.asap() else {
+            return None;
+        };
+        let range_ms = u64::try_from(range.as_millis()).ok()?;
+        (range_ms != window_ms).then(|| {
+            with_operator(
+                node,
+                Operator::NonASAP(NonASAPOp::TimeRange {
+                    range: std::time::Duration::from_millis(window_ms),
+                    kind: *kind,
+                    child: child.clone(),
+                }),
+            )
+        })
+    })
+}
+
+/// The witness's roots, `W`'s selected plan's roots plus `q'`'s root, and
+/// the planning whose plan they extend: `planned` (`W`'s), or `W` planned
+/// again for [`Witness::GraftWithOperand`] (with `q`'s sibling operand) and
+/// [`Witness::UnivMonOnly`].
 pub fn witness_roots(
     planner: &mut Planner,
     witness: &Witness,
     base: &FuzzWorkload,
     related: &FuzzWorkload,
-    planned: &Planned,
-    base_roots: &[QueryRoot],
+    planned: &Rc<Planned>,
     target: usize,
-) -> Result<Vec<QueryRoot>, String> {
+) -> Result<(Vec<QueryRoot>, Rc<Planned>), String> {
     if let Witness::GraftWithOperand { text, operand } = witness {
         let mut sibling = base.queries[target].clone();
         sibling.entry.query.0 = operand.clone();
@@ -1327,10 +1344,6 @@ pub fn witness_roots(
         let planned = planner
             .plan(&with_operand)
             .map_err(|e| format!("W with q's sibling operand does not plan: {e}"))?;
-        let roots = planned
-            .logical_roots
-            .clone()
-            .ok_or("the search keeps no logical plan for W with q's sibling operand")?;
         let n = base.queries.len();
         let operator = |roots: &[QueryRoot], i: usize| -> Result<Rc<OperatorNode>, String> {
             roots[i]
@@ -1342,7 +1355,10 @@ pub fn witness_roots(
             operator(&planned.stage0_roots, target)?,
             operator(&planned.stage0_roots, n)?,
         );
-        let (q_root, operand_root) = (operator(&roots, target)?, operator(&roots, n)?);
+        let (q_root, operand_root) = (
+            operator(&planned.roots, target)?,
+            operator(&planned.roots, n)?,
+        );
         let root = graft(
             planner,
             base,
@@ -1350,50 +1366,24 @@ pub fn witness_roots(
             text,
             &[(&lowered_q, &q_root), (&lowered_operand, &operand_root)],
         )?;
-        let mut roots = roots[..n].to_vec();
+        let mut roots = planned.roots[..n].to_vec();
         roots.push(QueryRoot::Operator(root));
-        return Ok(roots);
+        return Ok((roots, planned));
     }
     if let Witness::UnivMonOnly = witness {
         let univmon_only = FuzzWorkload {
             sketch_families: Some(vec![SketchAlgorithm::UnivMon]),
             ..related.clone()
         };
-        return planner
+        let planned = planner
             .plan(&univmon_only)
-            .map_err(|e| format!("W ∪ {{q'}} with UnivMon only does not plan: {e}"))?
-            .logical_roots
-            .clone()
-            .ok_or_else(|| "the search keeps no logical plan with UnivMon only".into());
+            .map_err(|e| format!("W ∪ {{q'}} with UnivMon only does not plan: {e}"))?;
+        return Ok((planned.roots.clone(), planned));
     }
-    let Witness::LongerWindow { window_ms, rollup } = witness else {
-        let root = witness_root(planner, witness, base, planned, base_roots, target)?;
-        let mut roots = base_roots.to_vec();
-        roots.push(QueryRoot::Operator(root));
-        return Ok(roots);
-    };
-    let (mut roots, long_root) = longer_chain_roots(base_roots, target, *window_ms)?;
-    let root = match rollup {
-        None => long_root,
-        Some(rollup) => {
-            let mut with_long = roots.clone();
-            with_long[target] = QueryRoot::Operator(long_root);
-            witness_root(planner, rollup, base, planned, &with_long, target)?
-        }
-    };
+    let root = witness_root(planner, witness, base, planned, &planned.roots, target)?;
+    let mut roots = planned.roots.clone();
     roots.push(QueryRoot::Operator(root));
-    Ok(roots)
-}
-
-/// `W`'s roots with the reading of `q`'s tumbling-window chain lengthened
-/// to cover `window_ms`, and `q`'s root reading the longer window.
-fn longer_chain_roots(
-    base_roots: &[QueryRoot],
-    target: usize,
-    window_ms: u64,
-) -> Result<(Vec<QueryRoot>, Rc<OperatorNode>), String> {
-    let _ = (base_roots, target, window_ms);
-    todo!("#1207 PR 9: lengthen the TimeRange over q's chain, which has no window count")
+    Ok((roots, planned.clone()))
 }
 
 fn planned(
@@ -1427,12 +1417,6 @@ pub fn related_workloads(
     }
     let q = w.queries.get(check.target).ok_or("no query")?;
     let related = match check.relation {
-        Relation::TighterAccuracy => {
-            let Some(tight) = tighter(q.accuracy()) else {
-                return inconclusive("q is exact");
-            };
-            w.with_query_replaced(check.target, q.with_accuracy(tight))
-        }
         Relation::RelaxedLatency => {
             if q.entry.requirements.max_latency_ms.is_none() {
                 return inconclusive("q has no latency bound");
@@ -1478,19 +1462,21 @@ pub fn related_workloads(
     Ok((w.clone(), related, None))
 }
 
-/// The other side's logical plan priced for `workload` (its first
-/// `keep` roots): a plan for `workload` the search could have selected.
+/// The other side's plan costed for `workload` (its first `keep` roots):
+/// a plan for `workload` the search could have selected.
 fn confirming(
     planner: &Planner,
     workload: &FuzzWorkload,
-    roots: Option<&Vec<QueryRoot>>,
+    other: &Planned,
     keep: usize,
 ) -> Option<WitnessReport> {
-    let priced = planner.price(workload, &roots?[..keep]).ok()?;
+    let costed = planner
+        .cost(workload, other, &other.roots[..keep], false)
+        .ok()?;
     Some(WitnessReport {
         derivation: None,
-        cost_per_second: priced.cost_per_second,
-        plan: priced.selected,
+        cost_per_second: costed.cost_per_second,
+        plan: costed.selected,
         base_reference_cost_per_second: None,
         derive_cost_per_second: None,
         derived_node_cost_per_second: None,
@@ -1514,12 +1500,12 @@ fn evaluate_inner(planner: &mut Planner, check: &Check) -> Result<Outcome, Strin
     let (b, r) = (base.cost_per_second, other.cost_per_second);
     let n = w.queries.len();
     let (bound, tolerance, violated, witness) = match check.relation {
-        Relation::TighterAccuracy | Relation::AddedQuery | Relation::NoRawRetention => {
+        Relation::AddedQuery | Relation::NoRawRetention => {
             let tolerance = planner.settings.tolerance(b);
             let violated = r < b - tolerance;
             // The related plan, minus an added query, is a plan for W.
             let witness = violated
-                .then(|| confirming(planner, &w, other.logical_roots.as_ref(), n))
+                .then(|| confirming(planner, &w, &other, n))
                 .flatten();
             (b - tolerance, tolerance, violated, witness)
         }
@@ -1527,7 +1513,7 @@ fn evaluate_inner(planner: &mut Planner, check: &Check) -> Result<Outcome, Strin
             let tolerance = planner.settings.tolerance(b);
             let violated = r > b + tolerance;
             let witness = violated
-                .then(|| confirming(planner, &related, base.logical_roots.as_ref(), n))
+                .then(|| confirming(planner, &related, &base, n))
                 .flatten();
             (b + tolerance, tolerance, violated, witness)
         }
@@ -1566,66 +1552,55 @@ fn evaluate_inner(planner: &mut Planner, check: &Check) -> Result<Outcome, Strin
     })
 }
 
-/// The marginal relation: the cheapest witness that builds and prices,
+/// The marginal relation: the cheapest witness that builds and costs,
 /// against the planner's marginal cost. Violated only when both the
 /// relation (`Δ > derive_cost + tolerance`) and its plain reading (the
 /// witness is cheaper than the planner's `W ∪ {q'}` by more than the
-/// tolerance) fail, so a search that prices `W` below Stage 3's price of
-/// the same plan cannot make a false violation.
+/// tolerance) fail, so a search that costs `W` below `plan_cost` of the
+/// same plan cannot make a false violation.
 fn evaluate_marginal(
     planner: &mut Planner,
     check: &Check,
     base_workload: &FuzzWorkload,
     related: &FuzzWorkload,
     derived: &Derived,
-    base: &Planned,
+    base: &Rc<Planned>,
     with: &Planned,
 ) -> Result<Outcome, String> {
-    let Some(base_roots) = base.logical_roots.clone() else {
-        return inconclusive("the search keeps no logical plan for W");
-    };
     let base_reference = planner
-        .reference_price(base_workload, &base_roots)
-        .or_else(|e| inconclusive(format!("W's plan does not price: {e}")))?;
-    let mut best: Option<(Witness, Priced)> = None;
+        .reference_cost(base_workload, base)
+        .or_else(|e| inconclusive(format!("W's plan does not cost: {e}")))?;
+    let mut best: Option<(Witness, Costed)> = None;
     let mut failures = Vec::new();
     for witness in &derived.witnesses {
-        let priced = witness_roots(
-            planner,
-            witness,
-            base_workload,
-            related,
-            base,
-            &base_roots,
-            check.target,
-        )
-        .and_then(|roots| planner.price(related, &roots));
-        match priced {
-            Ok(priced)
+        let costed = witness_roots(planner, witness, base_workload, related, base, check.target)
+            .and_then(|(roots, source)| planner.cost(related, &source, &roots, true));
+        match costed {
+            Ok(costed)
                 if best
                     .as_ref()
-                    .is_none_or(|(_, b)| priced.cost_per_second < b.cost_per_second) =>
+                    .is_none_or(|(_, b)| costed.cost_per_second < b.cost_per_second) =>
             {
-                best = Some((witness.clone(), priced))
+                best = Some((witness.clone(), costed))
             }
             Ok(_) => {}
             Err(e) => failures.push(e),
         }
     }
-    let Some((witness, priced)) = best else {
+    let Some((witness, costed)) = best else {
         return inconclusive(format!("no witness: {}", failures.join("; ")));
     };
-    let derive_cost = priced.cost_per_second - base_reference.cost_per_second;
+    let derive_cost = costed.cost_per_second - base_reference.cost_per_second;
     let delta = with.cost_per_second - base.cost_per_second;
     let tolerance = planner.settings.tolerance(with.cost_per_second);
     let violated = delta > derive_cost + tolerance
-        && with.cost_per_second > priced.cost_per_second + tolerance;
+        && with.cost_per_second > costed.cost_per_second + tolerance;
     let summary = format!(
         "cost(W ∪ {{q'}}) − cost(W) = {:.6} − {:.6} = {delta:.6}; derive_cost = {:.6} (witness {:.6} − W's plan {:.6}); tolerance {tolerance:.6}",
         with.cost_per_second,
         base.cost_per_second,
         derive_cost,
-        priced.cost_per_second,
+        costed.cost_per_second,
         base_reference.cost_per_second,
     );
     let key_filter = matches!(witness, Witness::Filter { .. });
@@ -1637,15 +1612,15 @@ fn evaluate_marginal(
         related_query: Some(derived.query.text().to_string()),
         witness: Some(WitnessReport {
             derivation: Some(witness),
-            cost_per_second: priced.cost_per_second,
-            plan: priced.selected.clone(),
+            cost_per_second: costed.cost_per_second,
+            plan: costed.selected.clone(),
             base_reference_cost_per_second: Some(base_reference.cost_per_second),
             derive_cost_per_second: Some(derive_cost),
-            derived_node_cost_per_second: Some(priced.derived_root.cost_per_second),
-            derived_operators: priced.derived_root.operators.clone(),
+            derived_node_cost_per_second: Some(costed.derived_root.cost_per_second),
+            derived_operators: costed.derived_root.operators.clone(),
             key_filter_keeps_input_guarantee: key_filter,
         }),
-        bound_per_second: (base.cost_per_second + derive_cost).max(priced.cost_per_second)
+        bound_per_second: (base.cost_per_second + derive_cost).max(costed.cost_per_second)
             + tolerance,
         tolerance_per_second: tolerance,
         summary,
@@ -1837,8 +1812,6 @@ mod tests {
             text(Relation::ExactDuplicate).as_deref(),
             Some(w.queries[0].text())
         );
-        let looser = derive(Relation::LooserAccuracy, &w, 0).unwrap();
-        assert_eq!(looser.query.accuracy().max_error, 0.01);
         let interval = derive(Relation::OtherRepeatInterval, &w, 0).unwrap();
         assert_eq!(repeat_interval_ms(&interval.query), Some(30_000));
     }
@@ -2034,7 +2007,8 @@ mod tests {
         for relation in Relation::ALL {
             assert_eq!(Relation::parse(relation.name()), Some(relation));
         }
-        assert_eq!(Relation::parse("a"), Some(Relation::LooserAccuracy));
+        assert_eq!(Relation::parse("a"), None);
+        assert_eq!(Relation::parse("b"), Some(Relation::FilterOnGroupKey));
         assert_eq!(Relation::parse("k"), Some(Relation::UnionOfSelections));
         assert_eq!(Relation::parse("z"), None);
     }
