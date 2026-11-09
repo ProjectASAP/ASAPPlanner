@@ -385,6 +385,7 @@ fn scan_read_ms(
         |id| &nodes[&id].payload,
         readers,
         |_| 0,
+        |id| matches!(nodes[&id].lifetime, Lifetime::AcrossEvaluations(_)),
         true,
     )
 }
@@ -485,7 +486,8 @@ pub struct NodeUsage<'a> {
 /// `None`: it reads what it retains)
 /// (`maintained_window_ms`). A materialized node keeps what its
 /// `retention_ms` ($h_v$) covers: a tumbling-window chain its windows in
-/// it, a query-time `Scan` its raw rows in it.
+/// it, a query-time `Scan` and raw rows materialized at ingestion time (a
+/// `Scan`, or a `TimeShift` by an offset over one) their raw rows in it.
 #[allow(clippy::too_many_arguments)]
 pub fn node_usage<'a>(
     node: &'a asap_types::ir::physical_export::PhysicalASAPDAGNode,
@@ -539,7 +541,42 @@ pub fn node_usage<'a>(
     // The rows per ms its sources receive, which its scans and time
     // ranges read, when the data declares an arrival rate.
     let rows_per_ms = source_rows_per_ms(&sources, data);
+    // Raw rows materialized at ingestion time: a `Scan`, or a `TimeShift`
+    // by an offset over one, across evaluations. It is a time-indexed store
+    // its consumers read back in, retaining `retention_ms` ($h_v$) of rows.
+    let raw_rows_materialized_at_ingestion = ingestion
+        && matches!(node.lifetime, Lifetime::AcrossEvaluations(_))
+        && match &node.payload {
+            Payload::NonASAP(NonASAPOp::Scan { .. }) => true,
+            Payload::NonASAP(NonASAPOp::TimeShift { shift, .. }) => {
+                shift.at.is_none()
+                    && producers.first().is_some_and(|producer| {
+                        matches!(producer.payload, Payload::NonASAP(NonASAPOp::Scan { .. }))
+                    })
+            }
+            _ => false,
+        };
+    // The raw rows of its sources back `lookback_ms` (every row held
+    // without one): by arrival rate, at most the rows they hold.
+    let retained_raw_rows = |lookback_ms: Option<u64>| -> Option<u64> {
+        let by_rate = rows_per_ms
+            .zip(lookback_ms)
+            .map(|(rows_per_ms, lookback_ms)| (rows_per_ms * lookback_ms as f64).round() as u64);
+        let rows_held: Option<u64> = sources
+            .iter()
+            .map(|source| data.sources.get(*source).and_then(|facts| facts.rows_held))
+            .sum();
+        match (by_rate, rows_held) {
+            (Some(by_rate), Some(rows_held)) => Some(by_rate.min(rows_held)),
+            (by_rate, rows_held) => by_rate.or(rows_held),
+        }
+        .map(|rows| rows.max(1))
+    };
     // The fact a rate needs, named when it is missing.
+    let retained_without_a_bound = |source: &str| AnalyticalCostError::MissingSourceFact {
+        source_name: source.to_string(),
+        missing: "its rows_held (raw data retained without a bound)",
+    };
     let missing_rate = |source: &str| AnalyticalCostError::MissingSourceFact {
         source_name: source.to_string(),
         missing: "an arrival rate (the arrival's rows_per_second, or the \
@@ -684,12 +721,8 @@ pub fn node_usage<'a>(
                     true => node.retention_ms,
                     false => retained_lookback_ms,
                 };
-                if !ingestion || matches!(node.lifetime, Lifetime::AcrossEvaluations(_)) {
-                    let retained_rows = match (by_rate(retained_lookback_ms), rows_held) {
-                        (Some(by_rate), Some(rows_held)) => Some(by_rate.min(rows_held)),
-                        (by_rate, rows_held) => by_rate.or(rows_held),
-                    };
-                    raw_retained_rows = retained_rows.map(|rows| rows.max(1));
+                if !ingestion || raw_rows_materialized_at_ingestion {
+                    raw_retained_rows = retained_raw_rows(retained_lookback_ms);
                 }
                 let by_rate = by_rate(lookback);
                 let rows = match (ingestion, by_rate, rows_held) {
@@ -723,14 +756,9 @@ pub fn node_usage<'a>(
                 );
                 // Raw data materialized at ingestion time: its consumers
                 // read the rows it retains, not one second of them.
-                let out = match (ingestion, node.lifetime) {
-                    (true, Lifetime::AcrossEvaluations(_)) => edge(raw_retained_rows.ok_or(
-                        AnalyticalCostError::MissingSourceFact {
-                            source_name: source.to_string(),
-                            missing: "its rows_held (raw data retained without a bound)",
-                        },
-                    )?)?,
-                    _ => out,
+                let out = match raw_rows_materialized_at_ingestion {
+                    true => edge(raw_retained_rows.ok_or(retained_without_a_bound(source))?)?,
+                    false => out,
                 };
                 (out, estimate, format!("scan {} samples", out.rows))
             }
@@ -823,16 +851,29 @@ pub fn node_usage<'a>(
                 );
                 (out, estimate, format!("limit to {} rows", out.rows))
             }
-            NonASAPOp::TimeShift { .. } => (
-                input,
-                estimate_operator(
-                    PhysicalOperator::TimeShift,
-                    OperatorStatistics::PassThrough {
-                        edges: unary(input),
-                    },
-                ),
-                format!("time shift: pass {} rows, free", input.rows),
-            ),
+            NonASAPOp::TimeShift { .. } => {
+                // Raw rows materialized at ingestion time: like a
+                // materialized `Scan`'s, its consumers read the rows it
+                // retains, not one second of them.
+                let out = match raw_rows_materialized_at_ingestion {
+                    true => {
+                        raw_retained_rows = retained_raw_rows(node.retention_ms);
+                        let source = sources.first().copied().unwrap_or("(none)");
+                        edge(raw_retained_rows.ok_or(retained_without_a_bound(source))?)?
+                    }
+                    false => input,
+                };
+                (
+                    out,
+                    estimate_operator(
+                        PhysicalOperator::TimeShift,
+                        OperatorStatistics::PassThrough {
+                            edges: unary(input),
+                        },
+                    ),
+                    format!("time shift: pass {} rows, free", input.rows),
+                )
+            }
             NonASAPOp::TimeRange { range, .. } if chain_width_ms(producers).is_some() => {
                 // Over a chain, the windows inside the range: one
                 // window's states per window.
@@ -950,7 +991,8 @@ pub fn node_usage<'a>(
             // One window's states: each input row updates the window its
             // time falls in. At ingestion time the rows of one window
             // arrive at the rate of one second's `input.rows`; at query
-            // time its input holds the rows of every retained window.
+            // time each build reads the rows of the window that just ended,
+            // its input.
             let group_count = groups(reduction)?;
             let rows_per_tumbling_window = match ingestion {
                 true => u64::try_from(
@@ -958,7 +1000,7 @@ pub fn node_usage<'a>(
                         .div_ceil(1_000),
                 )
                 .map_err(|_| AnalyticalCostError::Overflow)?,
-                false => input.rows.div_ceil(retained_tumbling_window_count),
+                false => input.rows,
             };
             let input_rows = StateInputRows {
                 rows_per_state: Some(rows_per_tumbling_window.div_ceil(group_count.max(1))),
@@ -1166,8 +1208,8 @@ pub fn node_usage<'a>(
                 .ok_or(AnalyticalCostError::Overflow)?,
             medium,
         ),
-        // Raw data materialized at ingestion time: the rows it retains.
-        (true, Lifetime::AcrossEvaluations(medium), Payload::NonASAP(NonASAPOp::Scan { .. })) => {
+        // Raw rows materialized at ingestion time: the rows it retains.
+        (_, Lifetime::AcrossEvaluations(medium), _) if raw_rows_materialized_at_ingestion => {
             (edge(raw_retained_rows.unwrap_or(out.rows))?.bytes, medium)
         }
         // A whole state materialized across evaluations: it and the one being built.
@@ -1661,7 +1703,7 @@ mod tests {
             kind: TimeRangeKind::Range,
             child: 0,
         }));
-        let read_ms = read_back_ms([1], |_| &instant.payload, |_| vec![], |_| 0, true);
+        let read_ms = read_back_ms([1], |_| &instant.payload, |_| vec![], |_| 0, |_| true, true);
         assert_eq!(read_ms, Some(1_000));
         let usage = node_usage(&scan, &[], (1, 1.0), read_ms, &data, &settings, 1.0).unwrap();
         assert_eq!(usage.output.rows, 1_000);
