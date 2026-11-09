@@ -203,12 +203,8 @@ fn count_min_weights_not_proven_non_negative(
     ) {
         return false;
     }
-    let properties = &memo.groups()[group.0 as usize].group_properties;
-    let weight_sign = properties
-        .schema
-        .fields
-        .iter()
-        .position(|field| !field.is_plain())
-        .map(|state| properties.column_sign[state]);
-    weight_sign != Some(ValueSign::NonNegative)
+    memo.groups()[group.0 as usize]
+        .group_properties
+        .state_column_sign()
+        != Some(ValueSign::NonNegative)
 }

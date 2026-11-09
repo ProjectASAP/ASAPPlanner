@@ -7,11 +7,10 @@
 //! requests_total  [ts, value, host]   a counter: value non-negative
 //! gauge           [ts, value, host]   nothing declared
 //! ```
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 use asap_types::ir::operator::operator_properties::{
-    AtModifier, GroupKeys, JoinKind, Reduction, Source, SourceColumn, TimeShift,
+    AtModifier, GroupKeys, JoinKind, Reduction, Source, TimeShift,
 };
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::scalar::expr_ir::{ArithmeticOpKind, CompareOpKind, ScalarValue};
@@ -34,18 +33,9 @@ const MINUTE_MS: u64 = 60_000;
 /// The memo of every example: `latency.value` declared non-negative, and
 /// `requests_total.value` as Stage 0 declares a counter's.
 fn memo() -> Memo {
-    let non_negative = |source: &str| {
-        (
-            SourceColumn {
-                source: source.into(),
-                column: "value".into(),
-            },
-            NonNegative,
-        )
-    };
-    Memo::new(BTreeMap::from([
-        non_negative("latency"),
-        non_negative("requests_total"),
+    Memo::new(asap_types::test_support::value_signs(&[
+        ("latency", NonNegative),
+        ("requests_total", NonNegative),
     ]))
 }
 
