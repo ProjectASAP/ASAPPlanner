@@ -68,23 +68,15 @@ pub fn planning_stages_text(stages: &PlanningStagesRun) -> String {
         return out;
     }
 
-    let (Some(pass2), Some(logical)) = (
-        &stages.pass2_local_window_composition,
-        &run.logical_asap_candidates,
-    ) else {
+    let Some(logical) = &run.logical_asap_candidates else {
         failure(&mut out);
         return out;
     };
     section(
         &mut out,
-        "Stage 1 Pass 2, after local window composition (tumbling-window candidates)",
-    );
-    write_memo(&mut out, pass2, Some(pass1), true);
-    section(
-        &mut out,
         "Stage 1 Pass 2 output = Stage 2 input: LogicalASAPMemoCandidates",
     );
-    write_memo(&mut out, &logical.memo, Some(pass2), true);
+    write_memo(&mut out, &logical.memo, Some(pass1), true);
     if until == RunUntil::Pass2 {
         return out;
     }

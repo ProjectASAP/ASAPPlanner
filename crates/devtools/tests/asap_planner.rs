@@ -1696,10 +1696,7 @@ fn memo_section_lists_each_step_and_the_selected_choice() {
     let memo = &document["memo"];
     let steps = memo["steps"].as_array().unwrap();
     let names: Vec<_> = steps.iter().map(|s| s["step"].as_str().unwrap()).collect();
-    assert_eq!(
-        names,
-        ["stage0", "pass1", "pass2_local_window_composition", "pass2"]
-    );
+    assert_eq!(names, ["stage0", "pass1", "pass2"]);
     let candidates = |step: &Value| -> u64 {
         step["groups"]
             .as_array()

@@ -1,7 +1,5 @@
 //! Dispatch committed estimator parameters to their accuracy models.
 use super::*;
-#[cfg(test)]
-use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::SummaryTypeCapability;
 
 pub(crate) mod cardinality;
@@ -12,7 +10,6 @@ pub mod hll;
 pub(crate) mod kll;
 pub mod univmon;
 
-#[allow(dead_code)] // Read again for the error bound of each listed θ (`parameter_list`), in #1207 PRs 3–4.
 pub(super) fn sketch_guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
@@ -62,7 +59,11 @@ fn bounded_guarantee(
 /// `summary_type` with parameters `parameters` at failure probability
 /// `failure_probability` (the guarantee's own failure probability): the
 /// algorithm's error formula (concepts doc, section 2, "Where the guarantee
-/// comes from"). `None` when this θ cannot fail that rarely, when the
+/// comes from"). Where one parameter sets both the error and the failure
+/// probability (KLL's and KMV's `k`), the error is the one that holds at
+/// `failure_probability`; where structural parameters set them apart (a
+/// Count-Min's width and depth), the bound holds only when θ fails at most
+/// that rarely. `None` when this θ cannot fail that rarely, when the
 /// summary type does not answer `statistic` (its capability row) or has no
 /// error model (`SummarySample`, `Wavelet`, `StatModel`, and sketch
 /// readouts without a certified bound).
@@ -72,95 +73,26 @@ pub fn theoretical_guarantee(
     statistic: &SketchStatistic,
     failure_probability: f64,
 ) -> Option<AccuracyGuarantee> {
-    match summary_type {
-        FieldDataType::Sketch(_) if SummaryTypeCapability::of(summary_type).answers(statistic) => {
-            let _ = (parameters, failure_probability);
-            todo!("#1207 PR 4: the algorithm's error formula at θ, at failure_probability")
-        }
-        _ => None,
+    let FieldDataType::Sketch(algorithm) = summary_type else {
+        return None;
+    };
+    if !SummaryTypeCapability::of(summary_type).answers(statistic) {
+        return None;
     }
-}
-
-/// Today's sizing: the parameters of algorithm `kind` for error `eps` at failure
-/// probability `delta`. Test-only: the predefined lists (`parameter_list`)
-/// are this sizing over an error grid, which a test keeps equal.
-#[cfg(test)]
-pub(crate) fn size_params(
-    kind: SketchAlgorithm,
-    intent: &AggIntent,
-    eps: f64,
-    delta: f64,
-) -> SketchParams {
-    match kind {
-        SketchAlgorithm::UnivMon => univmon::size_params(intent, eps, delta),
-        SketchAlgorithm::Kll => kll::size_params(eps, delta),
-        SketchAlgorithm::Cms => SketchParams::Cms {
-            width: cms::cms_width(eps),
-            depth: cms::cms_depth(delta),
-        },
-        SketchAlgorithm::Hll => SketchParams::Hll {
-            precision: hll::hll_precision(eps, delta),
-        },
-        SketchAlgorithm::CmsWithHeap => {
-            let k = match intent {
-                AggIntent::TopK { k, .. } => *k,
-                _ => unreachable!("CmsWithHeap is only a TopK candidate"),
-            };
-            SketchParams::CmsWithHeap {
-                width: cms::cms_width(eps),
-                depth: cms::cms_depth(delta),
-                heap_size: topk_capacity(k, eps),
-            }
+    match parameters {
+        SketchParams::Kll { .. } => {
+            kll::guarantee_at(algorithm, parameters, statistic, failure_probability)
         }
-        // Non-preferred candidates (DDSketch / Kmv / CountSketch /
-        // CountSketchWithHeap) are only reachable once a cost model picks
-        // them; sized here so that wiring is local.
-        SketchAlgorithm::DDSketch => ddsketch::size_params(eps),
-        SketchAlgorithm::Kmv => SketchParams::Kmv {
-            k: cardinality::kmv_k(eps, delta),
-        },
-        SketchAlgorithm::CountSketch => {
-            let width = count_sketch::count_sketch_width(eps);
-            SketchParams::CountSketch {
-                width,
-                depth: count_sketch::count_sketch_depth(width, delta),
-            }
+        SketchParams::Kmv { .. } => {
+            cardinality::guarantee_at(algorithm, parameters, statistic, failure_probability)
         }
-        SketchAlgorithm::CountSketchWithHeap => {
-            let k = match intent {
-                AggIntent::TopK { k, .. } => *k,
-                _ => unreachable!("CountSketchWithHeap is only a TopK candidate"),
-            };
-            let width = count_sketch::count_sketch_width(eps);
-            SketchParams::CountSketchWithHeap {
-                width,
-                depth: count_sketch::count_sketch_depth(width, delta),
-                heap_size: topk_capacity(k, eps),
-            }
-        }
-        // Listed, not `_`: a family `asap_sketchlib` adds fails to compile
-        // here until the planner sizes it or lists it as not offered.
-        SketchAlgorithm::CountSketchWithL2Norm
-        | SketchAlgorithm::CmsWithSpaceSaving
-        | SketchAlgorithm::CountSketchWithSpaceSaving
-        | SketchAlgorithm::CmsFold
-        | SketchAlgorithm::CountSketchFold
-        | SketchAlgorithm::HllHip
-        | SketchAlgorithm::KllDynamic
-        | SketchAlgorithm::SpaceSaving
-        | SketchAlgorithm::Elastic
-        | SketchAlgorithm::Coco
-        | SketchAlgorithm::Bloom
-        | SketchAlgorithm::SetAggregator
-        | SketchAlgorithm::UnivMonTwoTier
-        | SketchAlgorithm::UnivMonQ
-        | SketchAlgorithm::HydraCms
-        | SketchAlgorithm::HydraCountSketch
-        | SketchAlgorithm::HydraKll
-        | SketchAlgorithm::HydraHll
-        | SketchAlgorithm::HydraUnivMon => {
-            unreachable!("Pass 1 offers only the families in FAMILY_PREFERENCE, not {kind:?}")
-        }
+        _ => sketch_guarantee(algorithm, parameters, statistic).filter(|guarantee| {
+            guarantee
+                .spec
+                .failure_probability
+                .evaluate()
+                .is_some_and(|own| own <= target_limit(failure_probability))
+        }),
     }
 }
 
@@ -187,128 +119,108 @@ pub(crate) fn binomial_upper_tail(n: u32, p: f64, k: u32) -> f64 {
     (tail * (1.0 + 1e-12)).min(1.0)
 }
 
-/// Accuracy-dependent candidate budget, not a completeness theorem. The
-/// membership model must still certify the selected set independently.
-#[cfg(test)]
-pub(crate) fn topk_capacity(k: usize, eps: f64) -> u32 {
-    u32::try_from(k)
-        .unwrap_or(u32::MAX)
-        .max(saturating_ceil(1.0 / eps, 1, 1 << 26))
-}
-
-/// `⌈x⌉` clamped to `[lo, hi]`; NaN / non-positive x saturate to `hi`
-/// (a degenerate ε means "as accurate as this family goes").
-pub(crate) fn saturating_ceil(x: f64, lo: u32, hi: u32) -> u32 {
-    if !x.is_finite() || x <= 0.0 {
-        return hi;
-    }
-    (x.ceil() as u32).clamp(lo, hi)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Each algorithm's predefined list (`parameter_list`) is today's sizing
-    /// over the error grid ε = 0.1 … 0.001 at failure probability 0.01,
-    /// smallest first, without repeats; KMV's and UnivMon's distinct counts
-    /// stop at ε = 0.01. Count-Min lists each sized width with depths 5, 7,
-    /// 10 and 12, Count Sketch with 47, 81, 117 and 155, and a heap variant
-    /// each of those with
-    /// every heap size of the 1-2-5 series 10 … 10 000. UnivMon's list also
-    /// combines each L2 shape with each distinct-count shape (28 entries).
+    /// Every listed θ has a theoretical guarantee for the statistic its
+    /// algorithm is listed for, at failure probability 0.01, in the
+    /// algorithm's metric; along a list of one structure the error never
+    /// grows (the lists run weakest first).
     #[test]
-    fn parameter_list_is_the_sizing_over_the_error_grid() {
-        use asap_types::ir::operator::agg_intent::{default_cardinality, default_quantile};
+    fn every_listed_parameters_has_a_guarantee_at_one_percent() {
+        use asap_types::ir::scalar::expr_ir::ColumnRef;
         use asap_types::stages::parameter_list;
-        let full_grid = [0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001];
-        let distinct_grid = [0.1, 0.05, 0.02, 0.01];
-        let cms_depths = [5, 7, 10, 12];
-        let count_sketch_depths = [47, 81, 117, 155];
-        let heap_sizes = [10, 20, 50, 100, 200, 500, 1_000, 2_000, 5_000, 10_000];
-        let l2 = AggIntent::FrequencyL2 { col: None };
-        let top_1 = AggIntent::TopK { k: 1 };
-        let quantile = default_quantile(0.5);
-        let distinct = default_cardinality();
-        for (algorithm, intents) in [
-            (SketchAlgorithm::Kll, vec![&quantile]),
-            (SketchAlgorithm::DDSketch, vec![&quantile]),
-            (SketchAlgorithm::Hll, vec![&distinct]),
-            (SketchAlgorithm::Kmv, vec![&distinct]),
-            (SketchAlgorithm::Cms, vec![&distinct]),
-            (SketchAlgorithm::CountSketch, vec![&distinct]),
-            (SketchAlgorithm::CmsWithHeap, vec![&top_1]),
-            (SketchAlgorithm::CountSketchWithHeap, vec![&top_1]),
-            (SketchAlgorithm::UnivMon, vec![&l2, &distinct, &quantile]),
+        let point = SketchStatistic::PointCount {
+            key: ColumnRef::SampleValue,
+            value: Some("1".into()),
+        };
+        for (algorithm, statistic, metric) in [
+            (
+                SketchAlgorithm::Kll,
+                SketchStatistic::Quantile { q: 0.5 },
+                AccuracyMetric::Rank,
+            ),
+            (
+                SketchAlgorithm::DDSketch,
+                SketchStatistic::Quantile { q: 0.5 },
+                AccuracyMetric::Relative,
+            ),
+            (
+                SketchAlgorithm::Kmv,
+                SketchStatistic::Cardinality,
+                AccuracyMetric::Relative,
+            ),
+            (
+                SketchAlgorithm::Cms,
+                point.clone(),
+                AccuracyMetric::ABSOLUTE_STREAM_L1,
+            ),
+            (
+                SketchAlgorithm::CountSketch,
+                point,
+                AccuracyMetric::ABSOLUTE_STREAM_L2,
+            ),
+            (
+                SketchAlgorithm::CmsWithHeap,
+                SketchStatistic::TopK { k: 10 },
+                AccuracyMetric::ABSOLUTE_STREAM_L1,
+            ),
         ] {
-            let mut sized: Vec<SketchParams> = Vec::new();
-            for intent in intents {
-                let grid: &[f64] = match (algorithm, intent) {
-                    (
-                        SketchAlgorithm::Kmv | SketchAlgorithm::UnivMon,
-                        AggIntent::Cardinality { .. },
-                    ) => &distinct_grid,
-                    _ => &full_grid,
-                };
-                for &eps in grid {
-                    let listed: Vec<SketchParams> = match size_params(algorithm, intent, eps, 0.01)
-                    {
-                        SketchParams::Cms { width, .. } => cms_depths
-                            .iter()
-                            .map(|&depth| SketchParams::Cms { width, depth })
-                            .collect(),
-                        SketchParams::CountSketch { width, .. } => count_sketch_depths
-                            .iter()
-                            .map(|&depth| SketchParams::CountSketch { width, depth })
-                            .collect(),
-                        SketchParams::CmsWithHeap { width, .. } => cms_depths
-                            .iter()
-                            .flat_map(|&depth| {
-                                heap_sizes
-                                    .iter()
-                                    .map(move |&heap_size| SketchParams::CmsWithHeap {
-                                        width,
-                                        depth,
-                                        heap_size,
-                                    })
-                            })
-                            .collect(),
-                        SketchParams::CountSketchWithHeap { width, .. } => count_sketch_depths
-                            .iter()
-                            .flat_map(|&depth| {
-                                heap_sizes.iter().map(move |&heap_size| {
-                                    SketchParams::CountSketchWithHeap {
-                                        width,
-                                        depth,
-                                        heap_size,
-                                    }
-                                })
-                            })
-                            .collect(),
-                        other => vec![other],
-                    };
-                    for params in listed {
-                        if !sized.contains(&params) {
-                            sized.push(params);
-                        }
-                    }
-                }
+            let summary_type = FieldDataType::Sketch(algorithm);
+            let errors: Vec<f64> = parameter_list(algorithm)
+                .iter()
+                .map(|parameters| {
+                    let guarantee =
+                        theoretical_guarantee(&summary_type, parameters, &statistic, 0.01)
+                            .unwrap_or_else(|| panic!("{algorithm:?} {parameters:?}"));
+                    assert_eq!(guarantee.spec.accuracy_metric, metric, "{algorithm:?}");
+                    guarantee.spec.error.evaluate().unwrap()
+                })
+                .collect();
+            assert!(!errors.is_empty(), "{algorithm:?}");
+            if matches!(
+                algorithm,
+                SketchAlgorithm::Kll | SketchAlgorithm::DDSketch | SketchAlgorithm::Kmv
+            ) {
+                assert!(
+                    errors.windows(2).all(|pair| pair[1] <= pair[0]),
+                    "{algorithm:?}: {errors:?}"
+                );
             }
-            let list = parameter_list(algorithm);
-            let (listed_sized, combined): (Vec<_>, Vec<_>) =
-                list.iter().partition(|params| sized.contains(params));
-            assert_eq!(
-                format!("{listed_sized:?}"),
-                format!("{:?}", sized.iter().collect::<Vec<_>>()),
-                "{algorithm:?}"
-            );
-            let expected_combined = if algorithm == SketchAlgorithm::UnivMon {
-                28
-            } else {
-                0
-            };
-            assert_eq!(combined.len(), expected_combined, "{algorithm:?}");
         }
+    }
+
+    /// One parameter sets both (KLL's k): its rank error grows as the
+    /// required failure probability shrinks. Separate parameters (CMS width
+    /// and depth): the bound holds only when the depth fails rarely enough.
+    #[test]
+    fn a_guarantee_is_evaluated_at_the_required_failure_probability() {
+        use asap_types::ir::scalar::expr_ir::ColumnRef;
+        let quantile = SketchStatistic::Quantile { q: 0.5 };
+        let kll = FieldDataType::Sketch(SketchAlgorithm::Kll);
+        let k = SketchParams::Kll { k: 547 };
+        let error_at = |delta| {
+            theoretical_guarantee(&kll, &k, &quantile, delta)
+                .unwrap()
+                .spec
+                .error
+                .evaluate()
+                .unwrap()
+        };
+        assert_eq!(error_at(1.0), error_at(0.01));
+        assert!(error_at(1e-6) > error_at(0.01));
+        let cms = FieldDataType::Sketch(SketchAlgorithm::Cms);
+        let point = SketchStatistic::PointCount {
+            key: ColumnRef::SampleValue,
+            value: None,
+        };
+        let depth = |depth| SketchParams::Cms { width: 272, depth };
+        assert!(theoretical_guarantee(&cms, &depth(5), &point, 1e-2).is_some());
+        assert!(theoretical_guarantee(&cms, &depth(5), &point, 1e-4).is_none());
+        assert!(theoretical_guarantee(&cms, &depth(10), &point, 1e-4).is_some());
+        // A statistic the summary type does not answer has no guarantee.
+        assert!(theoretical_guarantee(&kll, &k, &SketchStatistic::Cardinality, 0.01).is_none());
     }
 
     /// Classic HLL's precision grows until its failure probability over the

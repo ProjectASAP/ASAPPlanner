@@ -81,7 +81,7 @@ pub fn parse_classic_failure_statistic(statistic: &str) -> Option<(u8, f64, &str
 /// distinct bound ([`classic_failure_statistic`]). The failure probability
 /// is per output row: each group's estimate fails with at most it. `None`
 /// for a precision outside the contract's.
-#[allow(dead_code)] // Read again in #1207 PR 4, with θ from `LogicalProperties::parameters`.
+#[allow(dead_code)] // Read again in #1207 PR 8: δ of a distinct count over a source's own rows, with θ.
 pub(crate) fn classic_guarantee(
     precision: u8,
     relative_error: Option<f64>,
@@ -244,27 +244,6 @@ pub fn min_precision(
             classic_failure_probability(p, relative_error, max_distinct) <= failure_probability
         })
         .unwrap_or(at_least)
-}
-
-/// Classic HLL's precision for relative error `eps` with failure
-/// probability `delta`, without data (#694). Below `1/ε` distinct items a
-/// single bucket collision already exceeds the error, and the chance of
-/// one is about `N²/(2m)`; a certificate for any bound of at least `1/ε`
-/// therefore needs `m ≥ 1/(2ε²δ)`. This is the smallest such precision at
-/// which [`ClassicHllConfidence`] certifies `delta` at `eps` for every
-/// bound up to `⌈1/ε⌉` (18 when none up to 18 does). Pass 1 then raises
-/// the precision by the same rule ([`min_precision`]) when the source's own
-/// bound or a smaller failure probability needs it.
-#[cfg(test)]
-pub(crate) fn hll_precision(eps: f64, delta: f64) -> u8 {
-    if !(eps.is_finite() && eps > 0.0 && delta.is_finite() && delta > 0.0) {
-        return 18;
-    }
-    let start = saturating_ceil((1.0 / (2.0 * eps * eps * delta.min(1.0))).log2(), 4, 18) as u8;
-    let reference = (1.0 / eps).ceil().min(f64::from(MAX_CONTRACT_DISTINCT)) as u64;
-    (start..=18)
-        .find(|&p| classic_failure_probability(p, eps, reference) <= delta)
-        .unwrap_or(18)
 }
 
 #[cfg(test)]
@@ -455,39 +434,5 @@ mod tests {
         let expected = (65536.0 * (65536.0 / zeroes as f64).ln()) as usize;
         assert_eq!(left.estimate(), expected);
         assert!((expected as f64 - 128.0).abs() / 128.0 <= 0.05);
-    }
-    /// Pass 1 sizes classic HLL from (ε, δ) without data (#694): the
-    /// smallest precision with `m ≥ 1/(2ε²δ)` that the tail formula
-    /// certifies at the target ε, which its guarantee states as its error
-    /// bound.
-    #[test]
-    fn precision_is_sized_from_epsilon_and_delta() {
-        use crate::estimators::size_params;
-        use asap_types::ir::operator::agg_intent::default_cardinality;
-        for (eps, delta, precision) in [(0.05, 0.01, 15), (0.02, 0.01, 17)] {
-            let params = size_params(SketchAlgorithm::Hll, &default_cardinality(), eps, delta);
-            let SketchParams::Hll { precision: sized } = params else {
-                panic!("{params:?}")
-            };
-            assert_eq!(sized, precision);
-        }
-    }
-
-    #[test]
-    fn generic_rse_sizing_does_not_certify_confidence() {
-        use crate::estimators::size_params;
-        use asap_types::ir::operator::agg_intent::default_cardinality;
-        let c = default_cardinality();
-        let params = size_params(SketchAlgorithm::Hll, &c, 0.01, 0.01);
-        let g = sketch_guarantee(
-            &SketchAlgorithm::Hll,
-            &params,
-            &SketchStatistic::Cardinality,
-        )
-        .unwrap();
-        assert_eq!(g.spec.accuracy_metric, AccuracyMetric::Relative);
-        assert_eq!(g.spec.failure_probability.evaluate(), None);
-        assert!(meets(&g, 0.01, None));
-        assert!(!meets(&g, 0.01, Some(0.01)));
     }
 }
