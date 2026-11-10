@@ -1,8 +1,9 @@
-//! Memo scope of aggregate coverage: the IR derives it
-//! ([`crate::ir::properties::aggregate_coverage`]) over memo groups
-//! (`R` = [`MemoGroupId`]) and the memo stores it per group
-//! (`GroupProperties::aggregate_coverage`); here the plan's view of it, a
-//! content id that names no group ([`view_coverage`]).
+//! A memo group's view coverage ([`view_coverage`]): the plan's content id
+//! for the group's aggregate coverage, which names no group. The IR derives
+//! aggregate coverage ([`crate::ir::properties::aggregate_coverage`]) over
+//! memo groups (`R` = [`MemoGroupId`]) and the memo stores it per group
+//! (`GroupProperties::aggregate_coverage`); this file expands the stored
+//! coverage's input groups and hashes the result.
 
 use serde::Serialize;
 

@@ -144,70 +144,63 @@ pub enum CoverageError {
 }
 
 impl<I: OperatorInput> Operator<I> {
-    /// The coverage of what this operator computes over its inputs
-    /// (`coverage_of`, below).
+    /// Coverage of what this operator computes over its inputs: a
+    /// `SummaryAgg`, an exact `Aggregate`, a
+    /// `SummaryTumblingWindowChain` (a build over its input, the timestamp
+    /// column unconstrained), a `TimeRange` or `TimeShift` over a chain (the
+    /// chain's coverage with the windows' interval on the timestamp column),
+    /// a `SummaryMerge`, or a `Filter` that keeps whole states of a grouped
+    /// `SummaryAgg`. So `SummaryMerge(TimeRange(W, TimeShift(o, Chain[w](X))))`
+    /// covers what `SummaryAgg(TimeRange(W, TimeShift(o, X)))` does. A merge
+    /// reads its inputs' stored coverage and fails
+    /// unless every input has the same definition and their selections are
+    /// pairwise disjoint; a family whose merge is idempotent
+    /// ([`MergeInputRule::MayOverlap`] in the family-capability table) may
+    /// also merge overlapping selections, and a counter family
+    /// ([`MergeInputRule::DisjointInTime`]) needs disjoint time windows.
     pub fn aggregate_coverage(&self) -> Result<AggregateCoverage<I::Reference>, CoverageError> {
-        coverage_of(self)
-    }
-}
-
-/// Coverage of what `operator` computes over its inputs: a `SummaryAgg`, an exact `Aggregate`, a
-/// `SummaryTumblingWindowChain` (a build over its input, the timestamp
-/// column unconstrained), a `TimeRange` or `TimeShift` over a chain (the
-/// chain's coverage with the windows' interval on the timestamp column),
-/// a `SummaryMerge`, or a `Filter` that keeps whole states of a grouped
-/// `SummaryAgg`. So `SummaryMerge(TimeRange(W, TimeShift(o, Chain[w](X))))`
-/// covers what `SummaryAgg(TimeRange(W, TimeShift(o, X)))` does. A merge
-/// reads its inputs' stored coverage and fails
-/// unless every input has the same definition and their selections are
-/// pairwise disjoint; a family whose merge is idempotent
-/// ([`MergeInputRule::MayOverlap`] in the family-capability table) may
-/// also merge overlapping selections, and a counter family
-/// ([`MergeInputRule::DisjointInTime`]) needs disjoint time windows.
-fn coverage_of<I: OperatorInput>(
-    operator: &Operator<I>,
-) -> Result<AggregateCoverage<I::Reference>, CoverageError> {
-    let as_built = |op: &ASAPOp<I>| -> ASAPOp<InputOrTemporaryBuild<I>> {
-        op.map_children(|input| InputOrTemporaryBuild::Input(input.clone()))
-    };
-    match operator {
-        Operator::NonASAP(NonASAPOp::Aggregate { child, .. }) => {
-            let top = unlifted(
-                &operator.map_children(|input| InputOrTemporaryBuild::Input(input.clone())),
-            );
-            of_aggregate(&InputOrTemporaryBuild::Input(child.clone()), None, |_| top)
-        }
-        Operator::NonASAP(NonASAPOp::TimeRange { .. } | NonASAPOp::TimeShift { .. })
-            if operator.output_kind() == OperatorResultKind::State =>
-        {
-            of_window_selection(operator)
-        }
-        Operator::NonASAP(_) => match selected_build(operator)? {
-            Some(build) => of_summary_agg(&build),
-            None => Err(CoverageError::NoCoverage),
-        },
-        Operator::ASAP(
-            op @ (ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. }),
-        ) => of_summary_agg(&as_built(op)),
-        Operator::ASAP(ASAPOp::SummaryMerge {
-            children, group_by, ..
-        }) => {
-            let inputs = children
-                .iter()
-                .map(|child| {
-                    child
-                        .aggregate_coverage()
-                        .cloned()
-                        .ok_or(CoverageError::NoCoverage)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let merged = of_merge(&inputs, time_column_of_build_input(&children[0]).as_ref())?;
-            match group_by {
-                None => Ok(merged),
-                Some(keys) => regrouped(merged, &children[0], keys),
+        let as_built = |op: &ASAPOp<I>| -> ASAPOp<InputOrTemporaryBuild<I>> {
+            op.map_children(|input| InputOrTemporaryBuild::Input(input.clone()))
+        };
+        match self {
+            Operator::NonASAP(NonASAPOp::Aggregate { child, .. }) => {
+                let top = unlifted(
+                    &self.map_children(|input| InputOrTemporaryBuild::Input(input.clone())),
+                );
+                of_aggregate(&InputOrTemporaryBuild::Input(child.clone()), None, |_| top)
             }
+            Operator::NonASAP(NonASAPOp::TimeRange { .. } | NonASAPOp::TimeShift { .. })
+                if self.output_kind() == OperatorResultKind::State =>
+            {
+                of_window_selection(self)
+            }
+            Operator::NonASAP(_) => match selected_build(self)? {
+                Some(build) => of_summary_agg(&build),
+                None => Err(CoverageError::NoCoverage),
+            },
+            Operator::ASAP(
+                op @ (ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. }),
+            ) => of_summary_agg(&as_built(op)),
+            Operator::ASAP(ASAPOp::SummaryMerge {
+                children, group_by, ..
+            }) => {
+                let inputs = children
+                    .iter()
+                    .map(|child| {
+                        child
+                            .aggregate_coverage()
+                            .cloned()
+                            .ok_or(CoverageError::NoCoverage)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let merged = of_merge(&inputs, time_column_of_build_input(&children[0]).as_ref())?;
+                match group_by {
+                    None => Ok(merged),
+                    Some(keys) => regrouped(merged, &children[0], keys),
+                }
+            }
+            Operator::ASAP(_) => Err(CoverageError::NoCoverage),
         }
-        Operator::ASAP(_) => Err(CoverageError::NoCoverage),
     }
 }
 
@@ -611,7 +604,7 @@ fn residual<I: OperatorInput>(
             Some((column, constraint)) => {
                 lifted.insert(column, constraint);
             }
-            None => rest.push(conjunct.map_operator_refs(&mut reference_of)),
+            None => rest.push(conjunct.map_operator_refs(&mut OperatorInput::reference)),
         }
     }
     match rest.len() {
@@ -630,17 +623,12 @@ fn combined_with(existing: Option<&Constraint>, constraint: Constraint) -> Optio
     }
 }
 
-/// How a definition names `input`; `None` for a rule's temporary build.
-fn reference_of<I: OperatorInput>(input: &InputOrTemporaryBuild<I>) -> Option<I::Reference> {
-    input.reference()
-}
-
 /// `link`, a liftable operator or an exact `Aggregate` kept whole in a
 /// definition: its main input `None`, every other input its reference.
 fn unlifted<I: OperatorInput>(
     link: &Operator<InputOrTemporaryBuild<I>>,
 ) -> Operator<Option<I::Reference>> {
-    let mut operator = link.map_children(reference_of);
+    let mut operator = link.map_children(OperatorInput::reference);
     match &mut operator {
         Operator::NonASAP(
             NonASAPOp::Filter { child, .. }

@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use super::MemoGroupAsInput;
+use super::group::MemoGroupAsInput;
 use crate::ir::operator::arguments::{BinaryOpKind, JoinKind, PromQLVectorSetOpKind, Reduction};
 use crate::ir::operator::asap::{summary_agg_layout, summary_build};
 use crate::ir::operator::input::OperatorInput;
