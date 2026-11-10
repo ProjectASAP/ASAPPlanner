@@ -6,7 +6,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 mod hash_consing;
 
-use super::group::{check_candidate_expression, derive_group_properties};
+use super::group::{
+    derive_group_properties, validate_expression_over_input_groups, MemoGroupAsInput,
+};
 use crate::accuracy::AccuracyTarget;
 use crate::ir::Operator;
 use crate::ir::QueryRoot;
@@ -88,8 +90,9 @@ impl Memo {
     /// group. A group whose copies may return different rows (an unordered
     /// `LIMIT`, [`GroupProperties::shareable_when_equal`]) is never returned
     /// for another expression, so such an expression always gets a new
-    /// group. Fails, leaving the memo unchanged, when the expression breaks
-    /// the node rules (schema derivation, input validation, merge check).
+    /// group. Fails, leaving the memo unchanged, when the expression is not
+    /// valid over its input groups (its output schema does not derive, an
+    /// input fails validation, or a merge reads states it may not merge).
     pub fn find_or_add_group(
         &mut self,
         expression: Operator<MemoGroupId>,
@@ -97,7 +100,7 @@ impl Memo {
         let serialized = serialized_operator(&expression);
         let hash = expression_hash(&expression, serialized.as_deref());
         // Only shareable groups are listed by hash, and an equal expression
-        // is as shareable as the group it equals, which passed the node rules.
+        // is as shareable as the group it equals, which was validated.
         if let Some((group, _)) = self
             .groups_by_expression_hash
             .get(&hash)
@@ -144,7 +147,8 @@ impl Memo {
     /// group and every group below it.
     ///
     /// Fails, leaving the memo unchanged, when the candidate's expression
-    /// breaks the node rules a group's does ([`check_candidate_expression`]),
+    /// is not valid over its input groups
+    /// ([`validate_expression_over_input_groups`]),
     /// or when its output schema or kind differs from the group's: then it
     /// does not compute the group's result.
     pub fn add_candidate(
@@ -162,9 +166,16 @@ impl Memo {
                 index_in_group,
             });
         }
-        let (schema, result_kind) =
-            check_candidate_expression(self, &candidate.expression.operator)
-                .map_err(CandidateError::Schema)?;
+        let operator = candidate
+            .expression
+            .operator
+            .map_children(|&group_id| MemoGroupAsInput {
+                memo: self,
+                group_id,
+            });
+        let (schema, _) =
+            validate_expression_over_input_groups(&operator).map_err(CandidateError::Schema)?;
+        let result_kind = operator.output_kind();
         let group_properties = &self.groups[group.0 as usize].group_properties;
         if schema != group_properties.schema || result_kind != group_properties.result_kind {
             return Err(CandidateError::OutputDiffersFromGroup { group });

@@ -22,8 +22,8 @@ use asap_types::workload::DataWorkload;
 /// none), every group without candidates. Each query is added with its
 /// $n_q$, the number of values one evaluation returns, which `data` bounds
 /// ([`values_per_result`]); a `Scan`'s column signs are the ones `data`
-/// declares, which the memo holds (`Memo::new`). Fails with the first node that
-/// breaks the node rules over its children's groups
+/// declares, which the memo holds (`Memo::new`). Fails with the first node
+/// whose expression is not valid over its children's groups
 /// ([`Memo::find_or_add_group`]); the facade validates the roots first, so
 /// that is a frontend bug.
 pub fn memo_of_queries(
@@ -496,10 +496,11 @@ mod tests {
         assert!(one_group(literal(f64::INFINITY), literal(f64::INFINITY)));
     }
 
-    /// A frontend node that breaks the node rules (a readout of raw rows
-    /// instead of summary state) makes Stage 0 return the error.
+    /// A frontend node whose expression is not valid over its children's
+    /// groups (a readout of raw rows instead of summary state) makes Stage 0
+    /// return the error.
     #[test]
-    fn memo_of_queries_returns_the_error_of_a_node_that_breaks_the_node_rules() {
+    fn memo_of_queries_returns_the_error_of_a_node_invalid_over_its_input_groups() {
         let readout_of_rows = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryEstimate {
             summary_input: scan(),
             query: SketchStatistic::Quantile { q: 0.5 },

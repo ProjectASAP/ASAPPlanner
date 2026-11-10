@@ -106,11 +106,11 @@ pub enum ValueSign {
     Unknown,
 }
 
-/// The node rules every group and candidate expression must pass, over
-/// its input groups ([`MemoGroupAsInput`]), never a node tree: schema
-/// derivation, input validation and, for a merge, the coverage check.
+/// Whether `operator` is a valid expression over its input groups
+/// ([`MemoGroupAsInput`]), never a node tree: its output schema derives, its
+/// inputs pass validation, and a merge reads only states it may merge.
 /// Returns the output schema and the aggregate coverage.
-fn check_node_rules(
+pub(super) fn validate_expression_over_input_groups(
     operator: &Operator<MemoGroupAsInput<'_>>,
 ) -> Result<(Schema, Option<SummaryCoverage>), SchemaDerivationError> {
     let schema = operator.output_schema()?;
@@ -126,26 +126,16 @@ fn check_node_rules(
     Ok((schema, aggregate_coverage))
 }
 
-/// The output schema and kind of a candidate computing `expression` over
-/// its input groups, once it passes the node rules ([`check_node_rules`]).
-pub(super) fn check_candidate_expression(
-    memo: &Memo,
-    expression: &Operator<MemoGroupId>,
-) -> Result<(Schema, OperatorResultKind), SchemaDerivationError> {
-    let operator = expression.map_children(|&group_id| MemoGroupAsInput { memo, group_id });
-    let (schema, _) = check_node_rules(&operator)?;
-    Ok((schema, operator.output_kind()))
-}
-
 /// The properties of a group computing `expression` over its input
-/// groups, once it passes the node rules ([`check_node_rules`]), reading
-/// each input group's `group_properties` and `expression`.
+/// groups, once it is valid over them
+/// ([`validate_expression_over_input_groups`]), reading each input group's
+/// `group_properties` and `expression`.
 pub(super) fn derive_group_properties(
     memo: &Memo,
     expression: &Operator<MemoGroupId>,
 ) -> Result<GroupProperties, SchemaDerivationError> {
     let operator = expression.map_children(|&group_id| MemoGroupAsInput { memo, group_id });
-    let (schema, aggregate_coverage) = check_node_rules(&operator)?;
+    let (schema, aggregate_coverage) = validate_expression_over_input_groups(&operator)?;
     Ok(GroupProperties {
         column_sign: output_column_sign(&operator, &schema, &memo.source_facts),
         depends_on_evaluation_time: depends_on_evaluation_time(&operator),
