@@ -224,6 +224,7 @@ fn tumbling_window_state(maintenance: &CompiledPhysicalDAG, tumbling_window: i64
             window_start_ms: tumbling_window * TUMBLING_WINDOW_WIDTH_MS,
             window_end_ms: (tumbling_window + 1) * TUMBLING_WINDOW_WIDTH_MS,
         },
+        Limits::default(),
     );
     state[0][0].clone()
 }
@@ -322,7 +323,7 @@ fn five_tumbling_windows_roundtrip_and_shared_merge_runs_once() {
             .err()
             .unwrap();
         assert!(missing.to_string().contains("no rows tiling"), "{missing}");
-        let result = physical_common::execute(&compiled, bind(5), scope);
+        let result = physical_common::execute(&compiled, bind(5), scope, Limits::default());
         let kll_state = summary(&result[0][0]);
         let kll = kll_state
             .as_any()
@@ -524,9 +525,10 @@ fn a_store_keyed_by_definition_and_time_range_answers_the_tumbling_windows() {
     );
     // View `i` holds the tumbling window ending `i` minutes before the evaluation time.
     let by_node = store_at(&fixture.views, 300_000, |i| tumbling_windows[4 - i].clone());
-    let by_node: Vec<Vec<Vec<Value>>> = physical_common::execute(&compiled, by_node, scope)
-        .iter()
-        .map(|batches| batches.iter().flat_map(Batch::to_rows).collect())
-        .collect();
+    let by_node: Vec<Vec<Vec<Value>>> =
+        physical_common::execute(&compiled, by_node, scope, Limits::default())
+            .iter()
+            .map(|batches| batches.iter().flat_map(Batch::to_rows).collect())
+            .collect();
     assert_eq!(format!("{by_definition:?}"), format!("{by_node:?}"));
 }
