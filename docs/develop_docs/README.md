@@ -12,6 +12,7 @@ formats, evidence, and verification workflows.
 - [Accuracy implementation companion](end-to-end-accuracy-guarantees.md)
 - [Metrics-observability corpora](metrics-observability-corpora.md)
 - [Physical compile coverage for deployment computation](physical-compile-coverage.md)
+- [Testing the planner: layers, oracles, tiers and coverage](testing.md)
 - [Planner snapshots](planner-snapshots.md)
 
 Historical records of removed APIs:
