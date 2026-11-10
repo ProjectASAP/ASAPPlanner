@@ -368,9 +368,13 @@ function memoStepElements(memo, s, options) {
       items = split.shown.map((c) => {
         const chosen = chosenIndices.includes(c.index);
         const notes = [MEMO_ORIGINS[c.origin].name, c.added ? '✚ new' : '', c.pruned ? '✗ pruned' : '', chosen ? '✓ selected' : ''].filter(Boolean);
+        // Drilled in, the full θ would clip; show what tells the shown candidates apart.
+        const dims = new Map(memoCandidateDims(c));
+        const theta = split.path.length && split.choices.length
+          ? `θ ${split.choices.map((dim) => `${dim}=${dims.get(dim) ?? 'none'}`).join(', ')}` : memoParametersText(c.parameters);
         return {
           data: { id: `g${group.id}c${c.index}`, kind: 'candidate', groupId: group.id, index: c.index, origin: c.origin, color: MEMO_ORIGINS[c.origin].color,
-            label: `${memoClip(`#${c.index} ${c.label}`, 30)}\n${memoClip(memoParametersText(c.parameters) || '—', 30)}\n${memoClip(notes.join(' · '), 30)}`, queries, w: MEMO_ITEM.width, h: MEMO_ITEM.height },
+            label: `${memoClip(`#${c.index} ${c.label}`, 30)}\n${memoClip(theta || '—', 30)}\n${memoClip(notes.join(' · '), 30)}`, queries, w: MEMO_ITEM.width, h: MEMO_ITEM.height },
           classes: ['memoItem', chosen ? 'chosen' : '', c.added ? 'added' : '', c.pruned ? 'pruned' : ''].filter(Boolean).join(' '),
           children: c.children, chosenChildren: chosen ? c.children : [], chosen,
         };
@@ -581,7 +585,7 @@ function memoViewController() {
     const state = drillOf(group.id);
     const split = memoGroupDrill(group.candidates, state, MEMO_COLLAPSE_ABOVE);
     if (!split.dim) return '';
-    const buttons = split.choices.map((dim) => `<button type="button" data-dim="${esc(dim)}" aria-pressed="${dim === split.dim}">${esc(dim)}</button>`).join(' ');
+    const buttons = split.choices.map((dim) => `<button type="button" class="btn" data-dim="${esc(dim)}" aria-pressed="${dim === split.dim}">${esc(dim)}</button>`).join(' ');
     return `<div class="eyebrow">split by</div><div class="memo-split">${buttons}</div>`;
   }
 

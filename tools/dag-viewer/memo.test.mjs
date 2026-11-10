@@ -143,6 +143,8 @@ test('a large group splits by its first varying dimension; a count drills into i
   const open = call('memoStepElements', memo, PASS2, { collapseAbove: 7, drill: { 3: { path: pass1 } } });
   assert.deepEqual(inG3(open).map((e) => e.data.id), ['g3c0', 'g3c1', 'g3c2', 'g3c3', 'g3c4', 'g3c5', 'g3c6']);
   assert.equal(cytoscape(open).getElementById('g3').children().length, 7);
+  // Drilled in, a candidate shows the dimensions that still tell the shown ones apart.
+  assert.equal(byId(open, 'g3c5').data.label.split('\n')[1], 'θ k=1404');
 });
 
 test('a group splits by the dimension chosen next; a candidate without it counts as "none", last', () => {
