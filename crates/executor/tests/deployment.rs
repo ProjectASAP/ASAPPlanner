@@ -1,8 +1,7 @@
 //! Exercise the public library without a backend server, store, or scheduler.
-use asap_executor::planner::{
-    ir::scalar::ColumnRef,
-    ir::schema::{FieldDataType, SketchAlgorithm, SketchParams, SummaryUpdate},
-};
+use asap_executor::planner::ir::scalar::ColumnRef;
+use asap_executor::planner::ir::schema::FieldDataType;
+use asap_executor::planner::summary_type::{SketchAlgorithm, SketchParams, SummaryUpdate};
 use asap_executor::{factory::create_planner_accumulator, AggregateCore};
 
 fn family(_k: u32) -> FieldDataType {
@@ -23,7 +22,7 @@ fn build(values: &[f64]) -> Box<dyn AggregateCore> {
 }
 fn read(state: &dyn AggregateCore) -> f64 {
     state
-        .estimate(&asap_executor::planner::ir::schema::SketchStatistic::Quantile { q: 0.5 })
+        .estimate(&asap_executor::planner::summary_type::SketchStatistic::Quantile { q: 0.5 })
         .unwrap()
 }
 
@@ -57,7 +56,7 @@ fn invalid_kll_parameters_are_rejected_at_binding() {
 // a packed-wire column-bit budget must not be imposed on this constructor.
 #[test]
 fn native_count_sketch_dimensions_are_not_packed_wire_dimensions() {
-    use asap_executor::planner::ir::schema::SummaryInputExpr;
+    use asap_executor::planner::summary_type::SummaryInputExpr;
     let family = FieldDataType::Sketch(SketchAlgorithm::CountSketchWithHeap);
     let mut update = SummaryUpdate::column(ColumnRef::SampleValue);
     update.item = Some(SummaryInputExpr::Column(ColumnRef::Named("host".into())));
@@ -99,7 +98,7 @@ fn build_weighted_frequency(
     family: &FieldDataType,
     updates: impl IntoIterator<Item = (usize, f64)>,
 ) -> Box<dyn AggregateCore> {
-    use asap_executor::planner::ir::schema::SummaryInputExpr;
+    use asap_executor::planner::summary_type::SummaryInputExpr;
     let mut update = SummaryUpdate::column(ColumnRef::SampleValue);
     update.item = Some(SummaryInputExpr::Column(ColumnRef::Named("host".into())));
     let mut operator = create_planner_accumulator(family, None, &update).unwrap();
@@ -308,7 +307,7 @@ fn factory_and_dag_heap_states_are_interchangeable() {
 // validation, never silently dropped.
 #[test]
 fn count_min_heap_rejects_negative_inputs() {
-    use asap_executor::planner::ir::schema::SummaryInputExpr;
+    use asap_executor::planner::summary_type::SummaryInputExpr;
     let mut update = SummaryUpdate::column(ColumnRef::SampleValue);
     update.item = Some(SummaryInputExpr::Column(ColumnRef::Named("host".into())));
     let family = heap_sketch(SketchAlgorithm::CmsWithHeap, 64, 3, 4);
@@ -374,7 +373,7 @@ fn plain_count_sketch_merge_equals_union_build() {
 // last good sum.
 #[test]
 fn keyed_update_overflow_is_an_error_not_a_panic() {
-    use asap_executor::planner::ir::schema::SummaryInputExpr;
+    use asap_executor::planner::summary_type::SummaryInputExpr;
     let mut update = SummaryUpdate::column(ColumnRef::SampleValue);
     update.item = Some(SummaryInputExpr::Column(ColumnRef::Named("host".into())));
     let family = plain_count_sketch(64, 3);

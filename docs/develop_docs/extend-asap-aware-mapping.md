@@ -13,13 +13,13 @@ A new sketch that Pass 1 can offer for an intent.
 1. **Type.** `SketchAlgorithm` is `asap_sketchlib`'s algorithm enum, so the
    algorithm must exist in the library first; its summary type is
    `FieldDataType::Sketch(algorithm)`. Add its parameters to `SketchParams`
-   (`crates/types/src/ir/schema/sketch.rs`) and its predefined list to
+   (`crates/types/src/summary_type/parameters.rs`) and its predefined list to
    `parameter_list`.
 2. **Capability.** Its row, which inputs it can merge and which statistics
    it answers with the merged error, is the library's family-capability
    table (`SketchAlgorithm::capability`), read unchanged by
    `SummaryTypeCapability::of`
-   (`crates/types/src/ir/schema/summary_type_capability.rs`). Pass 2's sharing,
+   (`crates/types/src/summary_type/capability.rs`). Pass 2's sharing,
    tumbling window and rollup rules read only this table. Which readouts the executor
    evaluates is its own declaration, `EVALUATED_READOUTS`
    (`crates/executor/src/capability.rs`); add the family's readouts there
@@ -29,14 +29,14 @@ A new sketch that Pass 1 can offer for an intent.
    that order, for every intent whose statistic its capability row answers.
    Size it in `asap_accuracy::sizing::default_size_params`.
 4. **Accuracy.** Add its error model under
-   `crates/accuracy/src/estimators/` and return
+   `crates/accuracy/src/guarantee/` and return
    it from `theoretical_guarantee`, evaluated at the required failure
    probability. Without a guarantee, every candidate that uses it is
    rejected.
 5. **Cost.** Give it a state size (the library's `estimated_memory_bytes`
    for the type the executor builds; KLL keeps the planner's own formula)
    and per-operation CPU in `sketch_shape`
-   (`crates/cost/src/state_bytes.rs`), and accept its parameters in
+   (`crates/cost/src/node/state_bytes.rs`), and accept its parameters in
    `crates/cost/src/measured.rs` if deployments measure it.
 6. **Executor.** Wrap the `asap_sketchlib` implementation in
    `crates/executor/src/summary_kernels/` and register it in
@@ -78,14 +78,14 @@ contains the candidate and that Stage 3 prices it.
 ## 3. Add a Stage 2 physical properties option
 
 1. Add the `Lifetime` variant or the valid (timing, lifetime) pair
-   (`crates/types/src/physical/properties.rs`, `PhysicalProperties::new` and
+   (`crates/types/src/stages/physical/properties.rs`, `PhysicalProperties::new` and
    `readable_at`) and its placement in
    `crates/types/src/ir/properties/timing.rs`, with its data-state edge rules.
 2. Offer it in `crates/physical-asap-optimization/src/lib.rs` (the
    `MaterializedOutputCandidate` options), after the existing options so default
    candidate ids stay the same, and gate it on the deployment input that
    allows it.
-3. Price it in `crates/cost/src/usage.rs` (`asap_cost::node_usage`): what it keeps in memory or on
+3. Price it in `crates/cost/src/node/usage.rs` (`asap_cost::node_usage`): what it keeps in memory or on
    disk, and what each evaluation rebuilds.
 
 Tests: Stage 2 unit tests for when the option is offered;

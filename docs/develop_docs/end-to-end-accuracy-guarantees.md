@@ -39,7 +39,7 @@ The main implementation locations are:
 
 | Concern | Location |
 | --- | --- |
-| Guarantee and error vocabulary | `asap_types::ir::properties::guarantee` |
+| Guarantee and error vocabulary | `asap_types::accuracy` |
 | Accuracy model and built-in propagation | `asap_accuracy` |
 | Candidate construction and legality filtering | `asap_aware_mapping::replacement` |
 | Parameter sizing hooks | `asap_aware_mapping::cost_model` |
@@ -205,7 +205,7 @@ satisfy a target with only `error` set, but not one that also sets
 `failure_probability`.
 
 Classic HLL (its linear-counting branch) has an estimator-specific confidence
-bound (`accuracy/estimators/hll.rs`). Its precision is sized from (ε, δ), and
+bound (`accuracy/guarantee/hll.rs`). Its precision is sized from (ε, δ), and
 its failure probability stays symbolic,
 `classic_hll_failure_probability[p=P,eps=ε](max_distinct[source])`, until
 plan selection binds it with the source's

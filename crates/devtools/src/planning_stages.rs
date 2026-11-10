@@ -12,7 +12,7 @@ use asap_plan_selection::select_plan;
 use asap_planner::{
     run_planning, PlanSearchSettings, PlanningModels, PlanningReport, PlanningRun, SelectionError,
 };
-use asap_types::ir::schema::schema_support::with_promql_series_identity;
+use asap_types::ir::schema::series_identity::with_promql_series_identity;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::QueryRoot;
 use asap_types::stages::Memo;

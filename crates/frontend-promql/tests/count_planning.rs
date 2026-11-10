@@ -1,9 +1,10 @@
 //! Query text through summary selection: counts use observations, never value weights.
 use crate::planner_support::selected_dag;
 use crate::support;
-use asap_types::ir::properties::AccuracyTarget;
-use asap_types::ir::schema::{ExactKind, FieldDataType};
+use asap_types::accuracy::AccuracyTarget;
+use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, Operator, OperatorNode};
+use asap_types::summary_type::ExactKind;
 use support::lower_promql;
 
 // Exact series and temporal counts must select a count accumulator, not distinct or sum.

@@ -2,10 +2,9 @@
 //! per input row, from its parameters and the rows it folds.
 
 use asap_types::ir::operator::AggIntent;
-use asap_types::ir::schema::sketch::KLL_MAX_K;
-use asap_types::ir::schema::{
-    DataType, FieldDataType, Schema, SketchParams, EXACT_ACCUMULATOR_STATE_BYTES,
-};
+use asap_types::ir::schema::{DataType, FieldDataType, Schema};
+use asap_types::summary_type::KLL_MAX_K;
+use asap_types::summary_type::{SketchParams, EXACT_ACCUMULATOR_STATE_BYTES};
 
 /// Plain values are 8 bytes, strings 16; summary columns are sized apart.
 pub fn row_bytes(schema: &Schema) -> u64 {
@@ -274,14 +273,14 @@ const DDSKETCH_ASSUMED_VALUE_RANGE: f64 = 1e9;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::ir::schema::SketchAlgorithm;
+    use asap_types::summary_type::SketchAlgorithm;
 
     /// An exact accumulator's state is priced at the executor's per-group
     /// state, 56 bytes for every kind (a counter's state alone is 48), so a
     /// tumbling-window chain of exact sums keeps 56 bytes per tumbling window and group.
     #[test]
     fn exact_state_is_priced_at_the_executors_state_size() {
-        use asap_types::ir::schema::{ExactKind, ExactParams};
+        use asap_types::summary_type::{ExactKind, ExactParams};
         for (kind, params) in [
             (ExactKind::Sum, ExactParams::Sum),
             (ExactKind::Increase, ExactParams::Increase),
@@ -295,7 +294,7 @@ mod tests {
                 (1.0, 56)
             );
         }
-        assert_eq!(asap_types::ir::schema::EXACT_ACCUMULATOR_STATE_BYTES, 56);
+        assert_eq!(asap_types::summary_type::EXACT_ACCUMULATOR_STATE_BYTES, 56);
     }
 
     /// The bytes `asap_sketchlib`'s DDSketch holds after adding `values`.
@@ -434,7 +433,7 @@ mod tests {
         use asap_executor::summary_kernels::HllSketchAccumulator;
         use asap_executor::values::Value;
         use asap_types::ir::scalar::expr_ir::ColumnRef;
-        use asap_types::ir::schema::{
+        use asap_types::summary_type::{
             NonNegativeWeightProof, SummaryInputExpr, SummaryUpdate, WeightDomain,
         };
         use std::mem::{align_of, size_of};

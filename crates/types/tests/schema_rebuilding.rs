@@ -1,9 +1,9 @@
+use asap_types::accuracy::AccuracyGuarantee;
 use asap_types::ir::operator::{AggIntent, Reduction, Source};
-use asap_types::ir::properties::AccuracyGuarantee;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
-use asap_types::ir::schema::{ExactKind, ExactParams, SummaryUpdate};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
+use asap_types::summary_type::{ExactKind, ExactParams, SummaryUpdate};
 use std::rc::Rc;
 
 fn scan(key_type: DataType, name: &str) -> Rc<OperatorNode> {

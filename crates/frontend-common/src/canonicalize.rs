@@ -38,11 +38,9 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::ir::operator::agg_intent::{topk, AggIntent};
+use asap_types::ir::operator::arguments::{GroupKeys, JoinKind, Reduction, WindowFuncKind};
 use asap_types::ir::operator::node::{Operator, OperatorNode};
 use asap_types::ir::operator::non_asap::NonASAPOp;
-use asap_types::ir::operator::operator_properties::{
-    GroupKeys, JoinKind, Reduction, WindowFuncKind,
-};
 use asap_types::ir::scalar::expr_ir::{CompareOpKind, ScalarValue};
 use asap_types::ir::scalar::{ExprSemantics, Predicate, ProjectItem, ScalarExpr, SortKey};
 use asap_types::ir::SchemaDerivationError;
@@ -547,8 +545,8 @@ fn contains_scalar_subquery(expr: &ScalarExpr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::ir::operator::operator_properties::WindowFuncKind;
-    use asap_types::ir::operator::operator_properties::{
+    use asap_types::ir::operator::arguments::WindowFuncKind;
+    use asap_types::ir::operator::arguments::{
         GroupKeys, Source, WindowFrame, WindowFrameBound, WindowFrameOffset, WindowFrameUnits,
     };
     use asap_types::ir::schema::{DataType, Field, Schema};

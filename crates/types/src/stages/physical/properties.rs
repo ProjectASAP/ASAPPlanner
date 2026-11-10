@@ -18,7 +18,7 @@
 //! function of the consumer's own properties
 //! ([`crate::stages::producer_satisfies_physical_requirements`]).
 
-pub use crate::ir::properties::ExecutionTiming;
+use crate::ir::properties::ExecutionTiming;
 
 /// Where a materialized output is stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]

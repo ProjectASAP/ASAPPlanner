@@ -10,15 +10,16 @@ use asap_executor::{
 };
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::operator::{GroupKeys, Reduction};
-use planner_types::ir::physical_export::{PhysicalASAPDAGNode, PhysicalASAPOperatorPayload};
 use planner_types::ir::properties::ExecutionDataState;
 use planner_types::ir::scalar::ColumnRef;
 use planner_types::ir::schema::{DataType, Schema};
-use planner_types::ir::schema::{
-    Field, FieldDataType, NonNegativeWeightProof, SketchAlgorithm, SketchStatistic,
-    SummaryInputExpr, SummaryUpdate, WeightDomain,
-};
+use planner_types::ir::schema::{Field, FieldDataType};
 use planner_types::ir::ASAPOp;
+use planner_types::plan::physical_asap_dag::{PhysicalASAPDAGNode, PhysicalASAPOperatorPayload};
+use planner_types::summary_type::{
+    NonNegativeWeightProof, SketchAlgorithm, SketchStatistic, SummaryInputExpr, SummaryUpdate,
+    WeightDomain,
+};
 use std::sync::Arc;
 
 fn family() -> FieldDataType {

@@ -7,10 +7,10 @@
 //! only; neither enumerates subsets. For retained query-time state pass `None` for each range evaluation
 //! to price once per request, as `computations` does.
 
-use super::analytical::AnalyticalCostError;
-use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
+use crate::node::analytical::AnalyticalCostError;
 use asap_types::ir::properties::ExecutionTiming;
-use asap_types::physical::Lifetime;
+use asap_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPNodeId};
+use asap_types::stages::Lifetime;
 use asap_types::workload::{QueryRecurrence, RangeEvaluation, RepeatedDemand};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 

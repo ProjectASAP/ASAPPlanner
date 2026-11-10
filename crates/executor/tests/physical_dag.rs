@@ -8,15 +8,16 @@ use asap_executor::{
 };
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::operator::Source;
-use planner_types::ir::physical_export::{
-    EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
-    PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
-};
-use planner_types::ir::schema::{DataType, ExactKind, ExactParams, Field, FieldDataType};
+use planner_types::ir::schema::{DataType, Field, FieldDataType};
 use planner_types::ir::ASAPOp;
 use planner_types::ir::BinaryOperator;
 use planner_types::ir::NonASAPOp;
 use planner_types::ir::ScalarExpr;
+use planner_types::plan::physical_asap_dag::{
+    EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
+    PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
+};
+use planner_types::summary_type::{ExactKind, ExactParams};
 use std::sync::Arc;
 fn schema(fields: &[(&str, DataType, bool)]) -> SchemaRef {
     Arc::new(planner_types::ir::schema::Schema {
@@ -340,7 +341,7 @@ fn binding_rejects_unsupported_operations() {
         sum.schema(),
         0,
         asap_executor::operators::SummaryEvaluation::Sketch(
-            planner_types::ir::schema::SketchStatistic::Quantile { q: 0.5 }
+            planner_types::summary_type::SketchStatistic::Quantile { q: 0.5 }
         )
     )
     .is_err());
@@ -350,7 +351,7 @@ fn binding_rejects_unsupported_operations() {
 // KLL is one family example: precomputation changes input sources, not operators.
 #[test]
 fn kll_raw_partial_and_precomputed_are_native_dags() {
-    use planner_types::ir::schema::SketchAlgorithm;
+    use planner_types::summary_type::SketchAlgorithm;
 
     let input = schema(&[("value", DataType::Float64, false)]);
     let family = FieldDataType::Sketch(SketchAlgorithm::Kll);
@@ -438,7 +439,7 @@ fn kll_raw_partial_and_precomputed_are_native_dags() {
                 state.clone(),
                 0,
                 asap_executor::operators::SummaryEvaluation::Sketch(
-                    planner_types::ir::schema::SketchStatistic::Quantile { q: 0.5 },
+                    planner_types::summary_type::SketchStatistic::Quantile { q: 0.5 },
                 ),
             )
             .unwrap(),
@@ -970,7 +971,7 @@ fn weighted_rate_topk_preserves_partitions_fractional_scores_and_evaluation_scop
     }
 }
 fn assert_weighted_rate_topk(count_sketch: bool) {
-    use planner_types::ir::schema::SketchAlgorithm;
+    use planner_types::summary_type::SketchAlgorithm;
 
     let raw = schema(&[
         ("service", DataType::Utf8, false),

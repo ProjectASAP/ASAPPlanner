@@ -9,11 +9,11 @@ use asap_executor::{
 };
 
 use futures::{executor::block_on, StreamExt};
+use planner_types::accuracy::AccuracyTarget;
 use planner_types::ir::operator::maintained_population::PopulationStatistic;
 use planner_types::ir::operator::Source;
-use planner_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
-use planner_types::ir::properties::AccuracyTarget;
 use planner_types::ir::schema::*;
+use planner_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
 
 use planner_types::workload::*;
 use std::{collections::BTreeMap, rc::Rc, sync::Arc};

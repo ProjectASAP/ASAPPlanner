@@ -461,7 +461,7 @@ mod tests {
     /// bound.
     #[test]
     fn precision_is_sized_from_epsilon_and_delta() {
-        use crate::estimators::size_params;
+        use crate::guarantee::size_params;
         use asap_types::ir::operator::agg_intent::default_cardinality;
         for (eps, delta, precision) in [(0.05, 0.01, 15), (0.02, 0.01, 17)] {
             let params = size_params(SketchAlgorithm::Hll, &default_cardinality(), eps, delta);
@@ -474,7 +474,7 @@ mod tests {
 
     #[test]
     fn generic_rse_sizing_does_not_certify_confidence() {
-        use crate::estimators::size_params;
+        use crate::guarantee::size_params;
         use asap_types::ir::operator::agg_intent::default_cardinality;
         let c = default_cardinality();
         let params = size_params(SketchAlgorithm::Hll, &c, 0.01, 0.01);

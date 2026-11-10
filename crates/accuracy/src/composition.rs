@@ -2,7 +2,14 @@
 //! Stage 1 composes each candidate's guarantees with them
 //! (`per_computation_candidates`); a rule that needs a statistic leaves an
 //! `Unknown` leaf named by one of the constants below, which Stage 3 binds.
-use super::*;
+use asap_types::accuracy::{
+    AccuracyError, AccuracyGuarantee, AccuracyMetric, BoundExpr, CompositionOperator,
+    GuaranteeSource, ProbabilityExpr,
+};
+
+#[cfg(test)]
+use crate::requirements::meets;
+use crate::PropagationStats;
 
 /// Rows an exact aggregation folds (per group): bounded by the series
 /// count of the sources the query reads.
@@ -485,7 +492,10 @@ fn exact_division(
 
 /// Whether `guarantee` is a sketch's distinct-count estimate.
 fn estimates_distinct_count(guarantee: &AccuracyGuarantee) -> bool {
-    let cardinality = format!("{:?}", asap_types::ir::schema::SketchStatistic::Cardinality);
+    let cardinality = format!(
+        "{:?}",
+        asap_types::summary_type::SketchStatistic::Cardinality
+    );
     guarantee.provenance.iter().any(|source| {
         matches!(source, GuaranteeSource::SketchEvaluation { query, .. } if *query == cardinality)
     })

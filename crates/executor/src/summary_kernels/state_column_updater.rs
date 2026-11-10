@@ -8,7 +8,8 @@ use super::weighted_frequency::WeightedFrequency;
 use crate::values::{StateColumn, Value};
 use crate::{AggregateCore, Error};
 
-use planner_types::ir::schema::{ExactKind, FieldDataType};
+use planner_types::ir::schema::FieldDataType;
+use planner_types::summary_type::ExactKind;
 use std::sync::Arc;
 
 /// The open summary states of one family, one per group, updated one sample
@@ -78,7 +79,7 @@ impl StateColumnUpdater {
     pub fn new(family: &FieldDataType) -> Result<Self, Error> {
         crate::values::validate_family(family)?;
         let states = match family {
-            FieldDataType::Sketch(planner_types::ir::schema::SketchAlgorithm::HydraCms) => {
+            FieldDataType::Sketch(planner_types::summary_type::SketchAlgorithm::HydraCms) => {
                 GroupStates::Hydra {
                     grid: Box::new(create_hydra_cms(family).map_err(Error::Invalid)?),
                     names: Vec::new(),
@@ -89,8 +90,8 @@ impl StateColumnUpdater {
                 states: Vec::new(),
             },
             FieldDataType::Sketch(
-                planner_types::ir::schema::SketchAlgorithm::CmsWithHeap
-                | planner_types::ir::schema::SketchAlgorithm::CountSketchWithHeap,
+                planner_types::summary_type::SketchAlgorithm::CmsWithHeap
+                | planner_types::summary_type::SketchAlgorithm::CountSketchWithHeap,
             ) => {
                 todo!("#1207 PR 6: the keyed frequency state of θ, which the exported node carries")
             }
@@ -474,7 +475,7 @@ impl StateColumnUpdater {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use planner_types::ir::schema::ExactParams;
+    use planner_types::summary_type::ExactParams;
 
     // An exact updater charges the buffer it holds (its capacity), the
     // same bytes its sealed column charges.

@@ -10,12 +10,12 @@ use asap_executor::{
 };
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::operator::JoinKind;
-use planner_types::ir::physical_export::{PhysicalASAPDAGNode, PhysicalASAPOperatorPayload};
 use planner_types::ir::scalar::CompareOpKind;
 use planner_types::ir::schema::{DataType, Field, FieldDataType};
 use planner_types::ir::NonASAPOp;
 use planner_types::ir::Predicate;
 use planner_types::ir::ScalarExpr;
+use planner_types::plan::physical_asap_dag::{PhysicalASAPDAGNode, PhysicalASAPOperatorPayload};
 use std::sync::Arc;
 
 fn schema(fields: &[(&str, DataType, bool)]) -> SchemaRef {
@@ -556,7 +556,7 @@ fn boolean_truth_tables_agree_between_expression_paths() {
 // Partial/final execution must agree with one build for an uncompacted KLL population.
 #[test]
 fn kll_partial_merge_and_multiple_evaluations_preserve_population() {
-    use planner_types::ir::schema::SketchAlgorithm;
+    use planner_types::summary_type::SketchAlgorithm;
 
     let input = schema(&[("v", DataType::Float64, false)]);
     let family = FieldDataType::Sketch(SketchAlgorithm::Kll);
@@ -603,7 +603,7 @@ fn kll_partial_merge_and_multiple_evaluations_preserve_population() {
                     state.clone(),
                     0,
                     asap_executor::operators::SummaryEvaluation::Sketch(
-                        planner_types::ir::schema::SketchStatistic::Quantile { q },
+                        planner_types::summary_type::SketchStatistic::Quantile { q },
                     ),
                 )
                 .unwrap(),
@@ -643,7 +643,7 @@ fn kll_partial_merge_and_multiple_evaluations_preserve_population() {
 // single-build rank error: 60 tumbling windows of 1000 values at k = 200.
 #[test]
 fn compacted_kll_tumbling_windows_merge_within_the_calibrated_rank_error() {
-    use planner_types::ir::schema::{SketchAlgorithm, SketchStatistic};
+    use planner_types::summary_type::{SketchAlgorithm, SketchStatistic};
     const TUMBLING_WINDOW_COUNT: u64 = 60;
     const ROWS_PER_TUMBLING_WINDOW: u64 = 1000;
     const K: u32 = 200;
@@ -731,7 +731,7 @@ fn compacted_kll_tumbling_windows_merge_within_the_calibrated_rank_error() {
 #[test]
 fn counter_tumbling_windows_merge_in_any_order() {
     use asap_executor::summary_kernels::exact::ExactAccumulator;
-    use planner_types::ir::schema::{ExactKind, ExactParams};
+    use planner_types::summary_type::{ExactKind, ExactParams};
     let input = schema(&[
         ("v", DataType::Float64, false),
         ("t", DataType::Timestamp, false),
@@ -760,7 +760,7 @@ fn counter_tumbling_windows_merge_in_any_order() {
             .as_any()
             .downcast_ref::<ExactAccumulator>()
             .unwrap()
-            .evaluation(planner_types::ir::schema::ExactKind::Increase, None, None)
+            .evaluation(planner_types::summary_type::ExactKind::Increase, None, None)
             .unwrap()
             .unwrap()
     };
@@ -818,7 +818,7 @@ fn zero_column_output_obeys_memory_limit() {
 // Empty exact-state finalization must preserve ordinary global MIN/MAX null semantics.
 #[test]
 fn empty_exact_summary_extrema_agree_with_ordinary_aggregation() {
-    use planner_types::ir::schema::{ExactKind, ExactParams};
+    use planner_types::summary_type::{ExactKind, ExactParams};
 
     let input = schema(&[("v", DataType::Float64, false)]);
     for (kind, params) in [
@@ -1013,10 +1013,10 @@ fn filtered_summary_build_keeps_empty_groups() {
     use asap_executor::physical_planner::compile_node;
     use planner_types::ir::operator::{GroupKeys, Reduction as Plan};
     use planner_types::ir::scalar::ColumnRef;
-    use planner_types::ir::schema::{
+    use planner_types::ir::ASAPOp;
+    use planner_types::summary_type::{
         ExactKind, ExactParams, SketchAlgorithm, SketchStatistic, SummaryUpdate,
     };
-    use planner_types::ir::ASAPOp;
     let (input, rows) = filtered_input();
     let kll = FieldDataType::Sketch(SketchAlgorithm::Kll);
     let count = FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count);
@@ -1085,8 +1085,8 @@ fn filtered_summary_build_is_rejected_at_ingestion_time() {
     use planner_types::ir::operator::{GroupKeys, Reduction as Plan};
     use planner_types::ir::properties::ExecutionDataState;
     use planner_types::ir::scalar::ColumnRef;
-    use planner_types::ir::schema::{ExactKind, ExactParams, SummaryUpdate};
     use planner_types::ir::ASAPOp;
+    use planner_types::summary_type::{ExactKind, ExactParams, SummaryUpdate};
     let (input, _) = filtered_input();
     let family = FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count);
     let build = |filter| {

@@ -33,8 +33,8 @@
 
 // The executor lists the summary types it builds as `SupportedSummary`s, so the
 // type lives with the readout vocabulary in `asap-types`.
-pub use crate::ir::schema::SupportedSummary;
-use crate::ir::schema::{SketchAlgorithm, StatisticKind};
+pub use crate::summary_type::SupportedSummary;
+use crate::summary_type::{SketchAlgorithm, StatisticKind};
 use crate::workload::{DataArrival, DataWorkload};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

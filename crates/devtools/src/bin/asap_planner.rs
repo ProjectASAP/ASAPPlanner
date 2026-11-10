@@ -104,11 +104,11 @@ use asap_devtools::SqlCatalog;
 use asap_frontend_promql::{metric_type_warnings, promql_metric_names};
 use asap_plan_selection::{large_peak_memory_warning, AcceptedAccuracy, Selection};
 use asap_planner::{installable_plan_of, PlanningModels, SelectionError};
+use asap_types::accuracy::{default_metric_for_root, AccuracyTarget};
 use asap_types::deployment_capabilities::DeploymentCapabilities;
 use asap_types::ir::flat::{flatten, FlatDag, FlatNode};
-use asap_types::ir::physical_export::PhysicalASAPDAG;
-use asap_types::ir::properties::{default_metric_for_root, AccuracyTarget};
 use asap_types::ir::QueryRoot;
+use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
 use asap_types::stages::PhysicalASAPMemoCandidates;
 use asap_types::stages::{queries_rooted_at, MemoGroup, MemoGroupId};
 use asap_types::stages::{Memo, OriginOfCandidateForMemoGroup};
@@ -584,7 +584,7 @@ fn arrival_together(earlier: DataArrival, later: DataArrival) -> Option<DataArri
 /// position among that node's installed nodes (`installed_position`: a
 /// tumbling-window chain's tumbling windows, newest first) and their number (`installed_count`).
 fn materialized_views_json(
-    plan: &asap_types::ir::physical_export::PhysicalASAPDAG,
+    plan: &asap_types::plan::physical_asap_dag::PhysicalASAPDAG,
     entries: &[QueryWorkloadEntry],
 ) -> Result<Vec<Value>, String> {
     let (plan, report) = installable_plan_of(plan, None, entries).map_err(|e| e.to_string())?;

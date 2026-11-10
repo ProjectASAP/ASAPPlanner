@@ -9,7 +9,7 @@
 //! selection). The planner does not check whether an executor implements an
 //! operator or summary type, so no reason names it.
 
-use crate::ir::properties::AccuracyMetric;
+use crate::accuracy::AccuracyMetric;
 use crate::stages::{CandidateForMemoGroupId, PhysicalCandidateId, RequiredAccuracy};
 
 /// A candidate eliminated by Pass 2.

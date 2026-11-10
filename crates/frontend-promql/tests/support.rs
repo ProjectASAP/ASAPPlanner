@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use asap_frontend_promql::{lower_promql_query_workload, PromqlError};
-use asap_types::ir::properties::AccuracyTarget;
+use asap_types::accuracy::AccuracyTarget;
 use asap_types::ir::scalar::ScalarValue;
 use asap_types::ir::{NonASAPOp, OperatorNode, ScalarExpr};
 use asap_types::workload::{
@@ -82,7 +82,7 @@ pub fn promql_scalar(node: &ScalarExpr) -> Option<f64> {
 #[allow(dead_code)]
 pub fn physical_asap_dag(
     root: &Rc<OperatorNode>,
-) -> asap_types::ir::physical_export::PhysicalASAPDAG {
+) -> asap_types::plan::physical_asap_dag::PhysicalASAPDAG {
     asap_types::test_support::physical_asap_dag_at_query_time(root).expect("post-ASAP DAG export")
 }
 

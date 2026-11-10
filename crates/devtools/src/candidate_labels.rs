@@ -6,8 +6,8 @@
 
 use serde_json::Value;
 
-use asap_types::ir::schema::SketchAlgorithm;
 use asap_types::stages::HowToComputeAggregateMeasure;
+use asap_types::summary_type::SketchAlgorithm;
 
 /// A Pass 1 per-computation candidate, e.g. "exact", "Sum acc" or "Kll".
 pub fn computation_label(candidate: &HowToComputeAggregateMeasure) -> String {

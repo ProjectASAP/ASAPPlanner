@@ -7,13 +7,14 @@ use asap_types::ir::operator::agg_intent::AggIntent;
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::scalar::column_resolution::resolve_column_ref;
 use asap_types::ir::scalar::expr_ir::ColumnRef;
-use asap_types::ir::schema::{
-    EntityIdentity, Field, FieldDataType, NonNegativeWeightProof, SketchAlgorithm,
-    SummaryInputExpr, SummaryTypeCapability, SummaryUpdate, WeightDomain,
-};
+use asap_types::ir::schema::{Field, FieldDataType};
 use asap_types::ir::{NonASAPOp, OperatorNode};
 #[cfg(test)]
 use asap_types::ir::{Operator, ScalarExpr};
+use asap_types::summary_type::{
+    EntityIdentity, NonNegativeWeightProof, SketchAlgorithm, SummaryInputExpr,
+    SummaryTypeCapability, SummaryUpdate, WeightDomain,
+};
 use std::rc::Rc;
 
 use asap_accuracy::sizing::sketch_statistic;
@@ -316,8 +317,7 @@ mod tests {
         };
         let intent = AggIntent::TopK { k: 5 };
         let family = FieldDataType::Sketch(SketchAlgorithm::CmsWithHeap);
-        let output =
-            Reduction::Reduce(asap_types::ir::operator::operator_properties::GroupKeys::none());
+        let output = Reduction::Reduce(asap_types::ir::operator::arguments::GroupKeys::none());
         assert!(realize_keyed_additive_summary_input(
             &intent,
             &family,

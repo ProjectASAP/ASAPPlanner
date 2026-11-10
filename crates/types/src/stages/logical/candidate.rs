@@ -2,10 +2,10 @@
 //! (concepts doc `memo-groups-properties-requirements.md`, section 3;
 //! #1203).
 
-use crate::ir::schema::SketchParams;
 use crate::ir::Operator;
 use crate::ir::SchemaDerivationError;
 use crate::stages::{LogicalRequirements, MemoGroupId};
+use crate::summary_type::SketchParams;
 
 /// One candidate: position `index_in_group` in group `group`'s candidates
 /// ([`MemoGroup::candidates`](crate::stages::MemoGroup::candidates)).

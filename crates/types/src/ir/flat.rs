@@ -13,9 +13,9 @@ use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::accuracy::AccuracyGuarantee;
 use crate::ir::operator::node::{Operator, OperatorNode, OperatorResultKind};
 use crate::ir::operator::query::QueryRoot;
-use crate::ir::properties::guarantee::AccuracyGuarantee;
 use crate::ir::schema::Schema;
 
 /// Index of a node in [`FlatDag::nodes`].

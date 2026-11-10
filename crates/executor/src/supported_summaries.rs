@@ -4,7 +4,7 @@
 //! summary the executor would reject when it binds the plan.
 
 use crate::capability::EVALUATED_READOUTS;
-use planner_types::ir::schema::SupportedSummary;
+use planner_types::summary_type::SupportedSummary;
 
 /// Every sketch family this executor builds from rows and the statistics it
 /// answers from one state of it (`EVALUATED_READOUTS`). Exact accumulators
@@ -25,13 +25,14 @@ mod tests {
     use crate::capability::validate_sketch_evaluation;
     use crate::factory::create_planner_accumulator;
 
-    use planner_types::ir::operator::operator_properties::{Reduction, Source};
+    use planner_types::ir::operator::arguments::{Reduction, Source};
     use planner_types::ir::scalar::ColumnRef;
-    use planner_types::ir::schema::{
-        DataType, Field, FieldDataType, Schema, SketchAlgorithm, SketchStatistic, StatisticKind,
-        SummaryInputExpr, SummaryTypeCapability, SummaryUpdate,
-    };
+    use planner_types::ir::schema::{DataType, Field, FieldDataType, Schema};
     use planner_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
+    use planner_types::summary_type::{
+        SketchAlgorithm, SketchStatistic, StatisticKind, SummaryInputExpr, SummaryTypeCapability,
+        SummaryUpdate,
+    };
 
     const ALGORITHMS: [SketchAlgorithm; 9] = [
         SketchAlgorithm::UnivMon,
@@ -103,8 +104,8 @@ mod tests {
         match (readout, family) {
             (StatisticKind::TopK, FieldDataType::Sketch(kind)) => matches!(
                 kind,
-                planner_types::ir::schema::SketchAlgorithm::CmsWithHeap
-                    | planner_types::ir::schema::SketchAlgorithm::CountSketchWithHeap
+                planner_types::summary_type::SketchAlgorithm::CmsWithHeap
+                    | planner_types::summary_type::SketchAlgorithm::CountSketchWithHeap
             ),
             _ => {
                 let accepted = validate_sketch_evaluation(family, &statistic(readout)).is_ok();

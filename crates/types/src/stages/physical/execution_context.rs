@@ -4,7 +4,7 @@
 //! the physical candidates.
 
 use super::candidate::PhysicalCandidateId;
-use crate::ir::materialized_view::RefreshWindow;
+use crate::plan::materialized_view::RefreshWindow;
 
 /// Index of an [`ExecutionContext`] in the workload's list of distinct
 /// contexts.

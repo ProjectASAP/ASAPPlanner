@@ -10,15 +10,14 @@ use asap_executor::{
     values::{Batch, SchemaRef, Value},
     AggregateCore, Error,
 };
-use asap_types::ir::materialized_view::MaterializedView;
-use asap_types::ir::operator::operator_properties::TimeShift;
+use asap_types::ir::operator::arguments::TimeShift;
 use asap_types::ir::operator::{GroupKeys, Reduction, Source};
-use asap_types::ir::physical_export::PhysicalASAPDAG;
 use asap_types::ir::scalar::ColumnRef;
-use asap_types::ir::schema::{
-    DataType, Field, FieldDataType, Schema, SketchAlgorithm, SketchStatistic, SummaryUpdate,
-};
+use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot, TimeRangeKind};
+use asap_types::plan::materialized_view::MaterializedView;
+use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
+use asap_types::summary_type::{SketchAlgorithm, SketchStatistic, SummaryUpdate};
 use futures::{executor::block_on, StreamExt};
 use std::{
     rc::Rc,

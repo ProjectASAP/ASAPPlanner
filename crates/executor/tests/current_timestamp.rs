@@ -10,11 +10,11 @@ use asap_executor::{
 };
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::operator::Source;
-use planner_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPDAGNode};
 use planner_types::ir::properties::ExecutionDataState;
 use planner_types::ir::scalar::{ArithmeticOpKind, CompareOpKind, ExprSemantics, ScalarValue};
 use planner_types::ir::schema::{DataType, Field, Schema};
 use planner_types::ir::{NonASAPOp, Predicate, ScalarExpr};
+use planner_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPDAGNode};
 use std::sync::Arc;
 
 const MINUTE_MS: i64 = 60_000;
@@ -55,7 +55,7 @@ fn scan_plan(predicates: Vec<Predicate<usize>>) -> PhysicalASAPDAG {
     PhysicalASAPDAG {
         nodes: vec![PhysicalASAPDAGNode {
             id: 0,
-            payload: planner_types::ir::physical_export::PhysicalASAPOperatorPayload::NonASAP(
+            payload: planner_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload::NonASAP(
                 NonASAPOp::Scan {
                     source: Source::Table {
                         table_ref: "http".into(),

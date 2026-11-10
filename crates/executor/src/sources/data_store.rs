@@ -3,9 +3,9 @@ use crate::{
     values::{Batch, SchemaRef},
     Error,
 };
-use planner_types::ir::materialized_view::MaterializedView;
 use planner_types::ir::operator::Source;
 use planner_types::ir::ScalarExpr;
+use planner_types::plan::materialized_view::MaterializedView;
 
 /// A deployment's raw data and stored materialized views, as one run reads
 /// them. The deployment passes one handle per run, and the handle presents
@@ -50,7 +50,7 @@ pub struct RawDataRequest<'a> {
     ///
     /// - Query run at evaluation time `T`: the smallest range covering
     ///   every window the `Scan`'s readers read
-    ///   ([`PhysicalASAPDAG::scan_window`](planner_types::ir::physical_export::PhysicalASAPDAG::scan_window));
+    ///   ([`PhysicalASAPDAG::scan_window`](planner_types::plan::physical_asap_dag::PhysicalASAPDAG::scan_window));
     ///   `None` when a reader reads the `Scan` outside a window.
     /// - Ingestion run: the run's `(window_start_ms, window_end_ms]` when
     ///   the `Scan` is read through windows, else `None`. Each
@@ -70,7 +70,7 @@ pub struct RawDataRequest<'a> {
 pub struct MaterializedViewRequest<'a> {
     /// `(start, end]` in milliseconds: the interval of data the view's state
     /// summarizes in this run
-    /// ([`PhysicalASAPDAG::view_window`](planner_types::ir::physical_export::PhysicalASAPDAG::view_window)).
+    /// ([`PhysicalASAPDAG::view_window`](planner_types::plan::physical_asap_dag::PhysicalASAPDAG::view_window)).
     /// In a query run at `T` with view window `(T - o - w, T - o]`, it is
     /// that range; in an ingestion run, `(window_end_ms - w, window_end_ms]`.
     pub time_range_ms: (i64, i64),

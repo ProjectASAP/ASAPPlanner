@@ -41,7 +41,7 @@ mod tests {
 
     #[test]
     fn local_guarantee_inverts_frequency_sizing() {
-        use crate::estimators::size_params;
+        use crate::guarantee::size_params;
         let c = asap_types::ir::operator::agg_intent::default_cardinality();
         let params = size_params(SketchAlgorithm::Cms, &c, 0.01, 0.001);
         let g = sketch_guarantee(
@@ -79,7 +79,7 @@ mod tests {
     /// A top-k heap holds `max(k, ⌈1/ε⌉)` entries over a CMS sized as for counts.
     #[test]
     fn topk_heap_capacity_respects_accuracy_and_output_count() {
-        use crate::estimators::size_params;
+        use crate::guarantee::size_params;
         let intent = AggIntent::TopK { k: 25 };
         assert_eq!(
             size_params(SketchAlgorithm::CmsWithHeap, &intent, 0.01, 0.01),

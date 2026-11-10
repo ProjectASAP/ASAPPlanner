@@ -45,7 +45,7 @@
 //! Accuracy guarantees come from the built-in analytical accuracy rules in
 //! `asap-accuracy` (per-family estimators, composition and budget
 //! allocation). They derive a machine-readable
-//! [`AccuracyGuarantee`](asap_types::ir::properties::AccuracyGuarantee)
+//! [`AccuracyGuarantee`](asap_types::accuracy::AccuracyGuarantee)
 //! for every finalized value and propagate it through
 //! approximate-over-approximate compositions under conservative rules (no
 //! independence assumptions, unknown statistics stay unknown). A

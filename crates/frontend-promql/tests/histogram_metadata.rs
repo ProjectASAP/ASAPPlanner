@@ -9,8 +9,8 @@
 //! series.
 
 use crate::support;
+use asap_types::accuracy::AccuracyTarget;
 use asap_types::ir::operator::AggIntent;
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{NonASAPOp, OperatorNode};
 use asap_types::workload::bounds::declared_non_negative;
 use asap_types::workload::{DurationMs, PrometheusMetricType, SourceFacts};

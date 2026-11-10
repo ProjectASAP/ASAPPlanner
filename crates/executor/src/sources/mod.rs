@@ -10,10 +10,10 @@ use crate::{
     Error,
 };
 use futures::{stream, StreamExt};
-use planner_types::ir::materialized_view::MaterializedView;
 use planner_types::ir::operator::Source;
 use planner_types::ir::schema::DataType;
 use planner_types::ir::ScalarExpr;
+use planner_types::plan::materialized_view::MaterializedView;
 use std::sync::Arc;
 
 mod data_store;

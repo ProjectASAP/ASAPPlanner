@@ -1,6 +1,6 @@
 //! Physical ASAP DAG (planner-layering stage 2 output).
 //!
-//! The flattened operators of [`super::flat`], plus the lifetime and
+//! The flattened operators of [`crate::ir::flat`], plus the lifetime and
 //! execution timing (data state) of every node and edge: the only plan
 //! structure, in memory and, serialized, in the plan file. Stage 3 builds it
 //! directly as its last step, one node per selected execution, each with the
@@ -14,17 +14,18 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::flat::NodeId;
-use super::scalar::ScalarExpr;
+use crate::ir::flat::NodeId;
 use crate::ir::operator::asap::ASAPOp;
 use crate::ir::operator::node::{Operator, OperatorNode};
 use crate::ir::operator::non_asap::NonASAPOp;
+use crate::ir::scalar::ScalarExpr;
 
+use crate::accuracy::AccuracyGuarantee;
 use crate::ir::properties::execution_data_state::{ExecutionDataState, ExecutionTiming};
-use crate::ir::properties::guarantee::AccuracyGuarantee;
-use crate::ir::schema::{Schema, SketchParams};
-use crate::physical::{Lifetime, PhysicalPropertiesError};
+use crate::ir::schema::Schema;
 use crate::stages::PhysicalCandidateId;
+use crate::stages::{Lifetime, PhysicalPropertiesError};
+use crate::summary_type::SketchParams;
 
 /// A node's operator, with each child replaced by its node id.
 pub type PhysicalASAPOperatorPayload = Operator<NodeId>;
@@ -554,7 +555,7 @@ pub(crate) fn physical_asap_dag_at_query_time_with_node_ids(
 ) -> Result<(PhysicalASAPDAG, Vec<Rc<OperatorNode>>), PhysicalASAPDAGValidationError> {
     use crate::ir::properties::execution_data_state::DataPrimitive;
     use crate::ir::QueryRoot;
-    let (flat, nodes_by_id) = super::flat::flatten(roots);
+    let (flat, nodes_by_id) = crate::ir::flat::flatten(roots);
     let mut scalar_roots = Vec::new();
     let roots = flat
         .roots
@@ -623,7 +624,7 @@ fn grouping_compatibility<C>(
     producer: &Operator<C>,
     consumer: &Operator<C>,
 ) -> GroupingEdgeCompatibility {
-    use crate::ir::operator::operator_properties::Reduction;
+    use crate::ir::operator::arguments::Reduction;
     let (
         Operator::ASAP(ASAPOp::SummaryAgg {
             reduction: producer,

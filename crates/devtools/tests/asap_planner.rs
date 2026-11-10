@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use asap_types::ir::flat::FlatDag;
-use asap_types::ir::physical_export::PhysicalASAPDAG;
 use asap_types::ir::QueryRoot;
+use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
 use asap_types::workload::PlanningWorkload;
 
 use serde_json::{json, Value};

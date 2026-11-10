@@ -8,7 +8,7 @@ use asap_planner::{
     run_planning, OptimizationInput, OptimizationPass, OptimizeError, PlanOutput,
     Stage1ToStage3Pass,
 };
-use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
+use asap_types::accuracy::{AccuracyMetric, AccuracyTarget};
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::workload::{
     BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query,

@@ -4,7 +4,7 @@
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
-use asap_types::ir::properties::AccuracyTarget;
+use asap_types::accuracy::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::QueryRoot;
 use asap_types::stages::{ComputationTarget, HavingPlacement};
@@ -68,7 +68,7 @@ async fn mixed_key_and_value_having_stays_above() {
 
 /// Whether `node` reads a quantile sketch (KLL or DDSketch) anywhere below it.
 fn reads_quantile_sketch(node: &std::rc::Rc<asap_types::ir::OperatorNode>) -> bool {
-    use asap_types::ir::schema::SketchAlgorithm;
+    use asap_types::summary_type::SketchAlgorithm;
     asap_types::ir::OperatorNode::reachable(node)
         .iter()
         .any(|node| {

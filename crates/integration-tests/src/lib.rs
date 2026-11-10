@@ -13,7 +13,7 @@
 
 pub mod fixtures {
 
-    use asap_types::ir::properties::AccuracyTarget;
+    use asap_types::accuracy::AccuracyTarget;
 
     use asap_types::ir::schema::{DataType, Field, Schema};
     use asap_types::ir::OperatorNode;
@@ -97,8 +97,8 @@ pub mod fixtures {
 
 /// Physical ASAP DAG export helpers for planned candidates.
 pub mod physical_export {
-    use asap_types::ir::physical_export::PhysicalASAPDAG;
     use asap_types::ir::OperatorNode;
+    use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
     use std::rc::Rc;
 
     /// Export the physical DAG of `root`.
@@ -112,9 +112,9 @@ pub mod physical_export {
 /// `run_planning`) for one
 /// query, with the built-in models.
 pub mod planning {
-    use asap_types::ir::physical_export::PhysicalASAPDAG;
-    use asap_types::ir::properties::AccuracyTarget;
+    use asap_types::accuracy::AccuracyTarget;
     use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot};
+    use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
     use asap_types::workload::{DataArrival, DataWorkload, SourceFacts};
     use std::rc::Rc;
 

@@ -13,11 +13,12 @@ use asap_executor::{
 };
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_integration_tests::planning::{logical_candidates_ignoring_guarantees, selected_dag};
-use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
-use asap_types::ir::properties::AccuracyTarget;
+use asap_types::accuracy::AccuracyTarget;
+use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::schema::{DataType, Field, Schema};
-use asap_types::ir::schema::{ExactKind, FieldDataType, SketchAlgorithm};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, Predicate};
+use asap_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload;
+use asap_types::summary_type::{ExactKind, SketchAlgorithm};
 use futures::StreamExt;
 
 fn catalog() -> SqlCatalog {

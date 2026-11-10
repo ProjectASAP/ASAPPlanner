@@ -4,16 +4,15 @@ use crate::pass1::computation_targets::{
     PerComputationCandidateError,
 };
 use crate::stage0::memo_of_queries;
-use asap_types::ir::operator::operator_properties::{Reduction, Source};
+use asap_types::accuracy::AccuracyTarget;
+use asap_types::ir::operator::arguments::{Reduction, Source};
 use asap_types::ir::operator::AggIntent;
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::{ColumnRef, CompareOpKind, ScalarValue};
-use asap_types::ir::schema::{
-    DataType, ExactKind, Field, FieldDataType, Schema, SketchAlgorithm, SummaryUpdate,
-};
+use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use asap_types::ir::{
     ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorNode, Predicate, QueryRoot, ScalarExpr,
 };
+use asap_types::summary_type::{ExactKind, SketchAlgorithm, SummaryUpdate};
 
 use asap_types::stages::{HavingEntry, HavingPlacement, HowToComputeAggregateMeasure};
 use std::rc::Rc;
@@ -691,9 +690,9 @@ fn having_shared_with_a_project_consumer_stays_above() {
 #[test]
 fn without_and_per_entity_having_stays_above() {
     for reduction in [
-        Reduction::Reduce(
-            asap_types::ir::operator::operator_properties::GroupKeys::without(vec![1]),
-        ),
+        Reduction::Reduce(asap_types::ir::operator::arguments::GroupKeys::without(
+            vec![1],
+        )),
         Reduction::PerEntity,
     ] {
         let node = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Aggregate {

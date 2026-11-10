@@ -1,7 +1,14 @@
 //! Dispatch committed estimator parameters to their accuracy models.
-use super::*;
+use asap_types::accuracy::{
+    AccuracyGuarantee, AccuracyMetric, BoundExpr, GuaranteeSource, ProbabilityExpr,
+};
+use asap_types::ir::schema::FieldDataType;
+use asap_types::summary_type::{SketchAlgorithm, SketchParams, SketchStatistic};
+
+#[cfg(test)]
+use crate::requirements::meets;
 use asap_types::ir::operator::AggIntent;
-use asap_types::ir::schema::SummaryTypeCapability;
+use asap_types::summary_type::SummaryTypeCapability;
 
 pub(crate) mod cardinality;
 pub(crate) mod cms;

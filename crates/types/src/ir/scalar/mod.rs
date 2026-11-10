@@ -797,7 +797,7 @@ pub fn element_access_type<C: OperatorInput>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::operator::operator_properties::Source;
+    use crate::ir::operator::arguments::Source;
     use crate::ir::schema::{Field, FieldDataType};
     use crate::ir::{NonASAPOp, OperatorNode};
 

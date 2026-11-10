@@ -2,7 +2,7 @@
 //! $r^{\log}_{c,i}$ (concepts doc `memo-groups-properties-requirements.md`,
 //! section 2).
 
-use crate::ir::properties::AccuracyMetric;
+use crate::accuracy::AccuracyMetric;
 
 /// $r^{\log}_{c,i}$: only what $G_{c,i}$'s identity does not fix. Only a
 /// readout's input (`SummaryEstimate`, `FinalizeExactAccumulator`,

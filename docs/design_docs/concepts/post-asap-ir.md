@@ -112,7 +112,7 @@ Operator nodes carry no physical properties: the logical DAG has no timing
 or lifetime.
 Materialization ([#509 §Materialization](../proposals/planner-layering.md#materialization))
 decides, for each sub-DAG, whether its output is materialized, and if so with which
-[`PhysicalProperties`](../../../crates/types/src/physical/properties.rs): a
+[`PhysicalProperties`](../../../crates/types/src/stages/physical/properties.rs): a
 timing and a `Lifetime` (#1200). The lifetime is `None` (discarded after its
 reader), `OneEvaluation(medium)` (materialized until every reader of one evaluation
 finishes) or `AcrossEvaluations(medium)` (materialized for later evaluations), with
@@ -171,7 +171,7 @@ when every sub-DAG is materialized at ingestion time.
 The pre-ASAP DAG and the post-ASAP DAG are both logical: they describe what is
 computed, not which physical operators execute it. Planning builds and shares
 `OperatorNode` trees;
-[`asap_types::ir::physical_export::compile_physical_asap_dag`](../../../crates/types/src/ir/physical_export.rs)
+[`asap_types::plan::physical_asap_dag::compile_physical_asap_dag`](../../../crates/types/src/plan/physical_asap_dag.rs)
 converts a selected, timed tree into a `PhysicalASAPDAG` with stable node IDs
 and typed edges (`compile_physical_asap_workload` does the same for a batch,
 with one root per query). The plan file a runtime installs,

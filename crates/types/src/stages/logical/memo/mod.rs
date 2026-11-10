@@ -5,7 +5,7 @@
 use std::collections::{BTreeSet, HashSet};
 
 use super::group::derive_group_properties;
-use crate::ir::properties::AccuracyTarget;
+use crate::accuracy::AccuracyTarget;
 use crate::ir::Operator;
 use crate::ir::QueryRoot;
 use crate::ir::SchemaDerivationError;

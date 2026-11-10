@@ -8,7 +8,7 @@ use std::rc::Rc;
 /// with the built-in models.
 pub fn selected_dag(
     root: Rc<OperatorNode>,
-    accuracy: planner_types::ir::properties::AccuracyTarget,
+    accuracy: planner_types::accuracy::AccuracyTarget,
 ) -> Rc<OperatorNode> {
     let run = run_all_stages(root, accuracy);
     let roots = match &run.selection {
@@ -23,7 +23,7 @@ pub fn selected_dag(
 
 fn run_all_stages(
     root: Rc<OperatorNode>,
-    accuracy: planner_types::ir::properties::AccuracyTarget,
+    accuracy: planner_types::accuracy::AccuracyTarget,
 ) -> asap_planner::PlanningRun {
     use planner_types::workload::{DataArrival, DataWorkload};
     let data = DataWorkload {

@@ -2,7 +2,7 @@
 //! which the private corpus also compiles without depending on asap-planner.
 use std::rc::Rc;
 
-use asap_types::ir::properties::AccuracyTarget;
+use asap_types::accuracy::AccuracyTarget;
 use asap_types::ir::OperatorNode;
 
 use crate::support::declared_data;

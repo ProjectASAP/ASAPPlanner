@@ -89,8 +89,9 @@ fn scalar_type_rules_fail_closed() {
 fn state_evaluations_and_passthrough_keep_their_contracts() {
     use asap_types::ir::operator::Reduction;
     use asap_types::ir::scalar::ColumnRef;
-    use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchStatistic, SummaryUpdate};
+    use asap_types::ir::schema::FieldDataType;
     use asap_types::ir::{ASAPOp, Operator, ProjectItem};
+    use asap_types::summary_type::{SketchAlgorithm, SketchStatistic, SummaryUpdate};
     let family = FieldDataType::Sketch(SketchAlgorithm::Kll);
     let state = Rc::new(
         OperatorNode::new(Operator::ASAP(ASAPOp::SummaryAgg {
@@ -136,8 +137,8 @@ fn shared_construction_derives_both_operator_categories() {
     use asap_types::ir::operator::Reduction;
     use asap_types::ir::scalar::ColumnRef;
     use asap_types::ir::schema::FieldDataType;
-    use asap_types::ir::schema::{ExactKind, ExactParams, SummaryUpdate};
     use asap_types::ir::{ASAPOp, Operator, ProjectItem};
+    use asap_types::summary_type::{ExactKind, ExactParams, SummaryUpdate};
 
     let input = scan();
     let state = Rc::new(

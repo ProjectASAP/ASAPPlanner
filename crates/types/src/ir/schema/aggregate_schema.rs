@@ -5,7 +5,7 @@
 //! aggregate result; a PromQL per-series range reduction preserves labels
 //! and produces a Float64 sample value. This module derives schemas, not
 //! aggregate values or summary candidates.
-use crate::ir::operator::operator_properties::*;
+use crate::ir::operator::arguments::*;
 use crate::ir::operator::AggIntent;
 use crate::ir::scalar::ColumnRef;
 use crate::ir::schema::{ColumnId, DataType, Field, FieldDataType, Schema};

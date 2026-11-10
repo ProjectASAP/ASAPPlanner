@@ -8,7 +8,7 @@
 //! `retention_ms` of each materialized view and each query-time `Scan` on
 //! its node, and the query texts.
 //! Everything else a runtime needs is derived from the DAG
-//! (`asap_types::ir::materialized_view`): the views to maintain, with what
+//! (`asap_types::plan::materialized_view`): the views to maintain, with what
 //! each is refreshed from and when ([`InstallablePlan::materialized_views`]),
 //! and how far back each raw-data source is retained for query-time scans
 //! ([`InstallablePlan::raw_data_retention`]). A runtime reads the file with
@@ -27,15 +27,15 @@ use std::collections::{HashMap, HashSet};
 
 use asap_cost::{NodeCostSource, OperatorKind, PlanCost};
 use asap_types::deployment_capabilities::DeploymentCapabilities;
-use asap_types::ir::materialized_view::{
+use asap_types::plan::materialized_view::{
     IngestionRefreshGroup, InstallableDagError, MaterializedView, RawDataRetention,
 };
 
-use asap_types::ir::physical_export::{
+use asap_types::ir::properties::ExecutionTiming;
+use asap_types::plan::physical_asap_dag::{
     PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode, PhysicalASAPDAGValidationError,
     PhysicalASAPNodeId,
 };
-use asap_types::ir::properties::ExecutionTiming;
 
 use asap_types::workload::QueryWorkloadEntry;
 use serde::{Deserialize, Serialize};
@@ -652,7 +652,7 @@ fn report_of(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::ir::schema::{SketchAlgorithm, StatisticKind, SupportedSummary};
+    use asap_types::summary_type::{SketchAlgorithm, StatisticKind, SupportedSummary};
 
     thread_local! {
         /// The plan nodes handed to the executor's compiler by the views'

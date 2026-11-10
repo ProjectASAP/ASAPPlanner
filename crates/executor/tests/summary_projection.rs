@@ -9,15 +9,16 @@ use asap_executor::{
     values::{Batch, Value},
 };
 use futures::{executor::block_on, StreamExt};
-use planner_types::ir::physical_export::{
-    EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
-    PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
-};
 use planner_types::ir::properties::*;
 use planner_types::ir::scalar::ColumnRef;
 use planner_types::ir::schema::{DataType, *};
 use planner_types::ir::NonASAPOp;
 use planner_types::ir::{ASAPOp, TimeRangeKind};
+use planner_types::plan::physical_asap_dag::{
+    EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
+    PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
+};
+use planner_types::summary_type::*;
 use std::{sync::Arc, time::Duration};
 
 /// The raw samples a stored summary is built from: `ts`, `value` and

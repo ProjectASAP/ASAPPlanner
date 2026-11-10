@@ -7,15 +7,15 @@ use asap_executor::{
     values::Batch,
     Error,
 };
-use planner_types::ir::materialized_view::MaterializedView;
 use planner_types::ir::operator::{GroupKeys, Source};
-use planner_types::ir::physical_export::{
-    EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
-    PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
-};
 use planner_types::ir::properties::ExecutionDataState;
 use planner_types::ir::schema::{DataType, FieldDataType, Schema};
 use planner_types::ir::NonASAPOp;
+use planner_types::plan::materialized_view::MaterializedView;
+use planner_types::plan::physical_asap_dag::{
+    EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
+    PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
+};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -133,18 +133,18 @@ fn blocking_inputs_over_a_raw_data_slot_are_finite() {
 // Kernel support must not be mistaken for executable native state/evaluation support.
 #[test]
 fn summary_capability_levels_are_distinct() {
-    use asap_executor::{
-        capability::{validate_native_family, validate_sketch_evaluation, validate_summary_kernel},
-        planner::ir::schema::SketchStatistic,
+    use asap_executor::capability::{
+        validate_native_family, validate_sketch_evaluation, validate_summary_kernel,
     };
+    use asap_executor::planner::summary_type::SketchStatistic;
     use planner_types::ir::scalar::ColumnRef;
-    use planner_types::ir::schema::{SketchAlgorithm, SummaryUpdate};
+    use planner_types::summary_type::{SketchAlgorithm, SummaryUpdate};
     let cms = FieldDataType::Sketch(SketchAlgorithm::Cms);
     let update = SummaryUpdate {
-        item: Some(planner_types::ir::schema::SummaryInputExpr::Column(
+        item: Some(planner_types::summary_type::SummaryInputExpr::Column(
             ColumnRef::Named("host".into()),
         )),
-        weight: planner_types::ir::schema::SummaryInputExpr::Constant(1.0),
+        weight: planner_types::summary_type::SummaryInputExpr::Constant(1.0),
         weight_domain: Default::default(),
     };
     assert!(validate_summary_kernel(&cms, &update).is_ok());

@@ -3,10 +3,10 @@
 //! public API stays as narrow as its production users need. Each forwards
 //! to the crate-private function of the same name.
 
-use crate::ir::materialized_view::RawDataWindow;
 use crate::ir::operator::maintained_population::CurrentSeriesInput;
 use crate::ir::operator::node::Operator;
 use crate::ir::properties::summary_coverage::SummaryCoverage;
+use crate::plan::materialized_view::RawDataWindow;
 
 use crate::ir::schema::Schema;
 use crate::ir::{ASAPOp, NonASAPOp};
@@ -43,19 +43,19 @@ pub fn lookback_ms(window: &RawDataWindow) -> u64 {
     window.lookback_ms()
 }
 
-/// `physical_export::physical_asap_dag_at_query_time_with_node_ids`: `roots`
+/// `physical_asap_dag::physical_asap_dag_at_query_time_with_node_ids`: `roots`
 /// exported with every node at query time, not materialized and without θ,
 /// with each exported node's operator node by node id.
 pub fn physical_asap_dag_at_query_time_with_node_ids(
     roots: &[crate::ir::QueryRoot],
 ) -> Result<
     (
-        crate::ir::physical_export::PhysicalASAPDAG,
+        crate::plan::physical_asap_dag::PhysicalASAPDAG,
         Vec<Rc<OperatorNode>>,
     ),
-    crate::ir::physical_export::PhysicalASAPDAGValidationError,
+    crate::plan::physical_asap_dag::PhysicalASAPDAGValidationError,
 > {
-    crate::ir::physical_export::physical_asap_dag_at_query_time_with_node_ids(roots)
+    crate::plan::physical_asap_dag::physical_asap_dag_at_query_time_with_node_ids(roots)
 }
 
 /// [`physical_asap_dag_at_query_time_with_node_ids`] of the single root `root`, without
@@ -63,8 +63,8 @@ pub fn physical_asap_dag_at_query_time_with_node_ids(
 pub fn physical_asap_dag_at_query_time(
     root: &Rc<OperatorNode>,
 ) -> Result<
-    crate::ir::physical_export::PhysicalASAPDAG,
-    crate::ir::physical_export::PhysicalASAPDAGValidationError,
+    crate::plan::physical_asap_dag::PhysicalASAPDAG,
+    crate::plan::physical_asap_dag::PhysicalASAPDAGValidationError,
 > {
     Ok(
         physical_asap_dag_at_query_time_with_node_ids(&[crate::ir::QueryRoot::Operator(

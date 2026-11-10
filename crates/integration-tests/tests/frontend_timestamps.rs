@@ -2,7 +2,7 @@
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_integration_tests::fixtures::lower_promql_root;
-use asap_types::ir::properties::AccuracyTarget;
+use asap_types::accuracy::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{NonASAPOp, ScalarExpr};
 

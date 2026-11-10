@@ -10,9 +10,10 @@
 //! owned by `binding`, which also validates schemas, expressions and inputs.
 
 use crate::Error;
-use planner_types::ir::schema::{
-    ExactKind, ExactParams, FieldDataType as SummaryFamilyType, SketchAlgorithm, SketchStatistic,
-    StatisticKind, SummaryTypeCapability, SummaryUpdate,
+use planner_types::ir::schema::FieldDataType as SummaryFamilyType;
+use planner_types::summary_type::{
+    ExactKind, ExactParams, SketchAlgorithm, SketchStatistic, StatisticKind, SummaryTypeCapability,
+    SummaryUpdate,
 };
 
 /// Check the same contract used by `create_planner_accumulator` before a plan
@@ -58,7 +59,7 @@ pub fn validate_summary_kernel(
 /// column proven non-negative (a Count-Min point count only overestimates
 /// when no weight is negative).
 fn validate_hydra_cms(family: &SummaryFamilyType, input: &SummaryUpdate) -> Result<(), String> {
-    use planner_types::ir::schema::{NonNegativeWeightProof, SummaryInputExpr, WeightDomain};
+    use planner_types::summary_type::{NonNegativeWeightProof, SummaryInputExpr, WeightDomain};
     hydra_cms_shape(family)?;
     if !matches!(input.item, Some(SummaryInputExpr::Column(_))) {
         return Err("HydraCms requires one item column".into());
@@ -145,9 +146,9 @@ fn valid_matrix(width: u32, depth: u32) -> bool {
 /// occurrence), the update an unkeyed frequency family (HLL, UnivMon) builds
 /// from that column's values.
 pub(crate) fn unit_frequency_column(
-    update: &planner_types::ir::schema::SummaryUpdate,
+    update: &planner_types::summary_type::SummaryUpdate,
 ) -> Option<&planner_types::ir::scalar::ColumnRef> {
-    use planner_types::ir::schema::{NonNegativeWeightProof, SummaryInputExpr, WeightDomain};
+    use planner_types::summary_type::{NonNegativeWeightProof, SummaryInputExpr, WeightDomain};
     match (&update.item, &update.weight, &update.weight_domain) {
         (
             Some(SummaryInputExpr::Column(column)),
@@ -161,7 +162,7 @@ pub(crate) fn unit_frequency_column(
 }
 
 pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
-    use planner_types::ir::schema::SketchAlgorithm as A;
+    use planner_types::summary_type::SketchAlgorithm as A;
     if let SummaryFamilyType::Sketch(kind) = family {
         // Plain Count-Min is native as stored state only: it merges and reads
         // its bare count, but the DAG does not build it from rows. HydraCms
@@ -187,7 +188,7 @@ pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
     }
     crate::capability::validate_summary_kernel(
         family,
-        &planner_types::ir::schema::SummaryUpdate::column(
+        &planner_types::summary_type::SummaryUpdate::column(
             planner_types::ir::scalar::ColumnRef::SampleValue,
         ),
     )
@@ -277,7 +278,7 @@ pub fn validate_exact_evaluation(
     evaluation: &crate::summary_kernels::exact::ExactEvaluation,
 ) -> Result<(), Error> {
     validate_native_family(family)?;
-    use planner_types::ir::schema::ExactKind as E;
+    use planner_types::summary_type::ExactKind as E;
     let supported = matches!(
         family,
         SummaryFamilyType::ExactAggregate(

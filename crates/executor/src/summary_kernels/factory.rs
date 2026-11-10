@@ -6,9 +6,8 @@ use crate::summary_kernels::{
     HydraKllSketchAccumulator,
 };
 use crate::AggregateCore;
-use planner_types::ir::schema::{
-    FieldDataType as SummaryFamilyType, SketchAlgorithm, SketchParams,
-};
+use planner_types::ir::schema::FieldDataType as SummaryFamilyType;
+use planner_types::summary_type::{SketchAlgorithm, SketchParams};
 
 /// Generate the clone-based `AccumulatorUpdater` methods for updaters whose
 /// inner `acc` field implements `Clone + AggregateCore`.
@@ -468,14 +467,14 @@ fn cms_dims(params: &SketchParams) -> (usize, usize) {
 pub fn create_planner_accumulator(
     family: &SummaryFamilyType,
     parameters: Option<&SketchParams>,
-    input: &planner_types::ir::schema::SummaryUpdate,
+    input: &planner_types::summary_type::SummaryUpdate,
 ) -> Result<Box<dyn AccumulatorUpdater>, String> {
     if input.item.is_some()
         && matches!(
             input.weight_domain,
-            planner_types::ir::schema::WeightDomain::NonNegative {
+            planner_types::summary_type::WeightDomain::NonNegative {
                 proof:
-                    planner_types::ir::schema::NonNegativeWeightProof::ResetAwareCounterDerivative
+                    planner_types::summary_type::NonNegativeWeightProof::ResetAwareCounterDerivative
             }
         )
     {
@@ -504,7 +503,7 @@ pub fn create_planner_accumulator(
     };
     let updater: Box<dyn AccumulatorUpdater> = match (kind, params) {
         (SketchAlgorithm::Kll, SketchParams::Kll { k, .. }) => {
-            if *k > planner_types::ir::schema::sketch::KLL_MAX_K {
+            if *k > planner_types::summary_type::KLL_MAX_K {
                 return Err("KLL k exceeds runtime bound".into());
             }
             Box::new(KllAccumulatorUpdater::new(
@@ -727,7 +726,7 @@ mod ddsketch_domain {
             for (q, exact) in expected {
                 let estimate = updater
                     .acc
-                    .estimate(&planner_types::ir::schema::SketchStatistic::Quantile { q })
+                    .estimate(&planner_types::summary_type::SketchStatistic::Quantile { q })
                     .unwrap();
                 assert!(
                     (estimate - exact).abs() <= 0.01 * f64::abs(exact),
@@ -775,7 +774,7 @@ mod tests {
         assert!(updater.update_value(&Value::Utf8("x".into()), 0).is_err());
         let median = updater
             .take_accumulator()
-            .estimate(&planner_types::ir::schema::SketchStatistic::Quantile { q: 0.5 })
+            .estimate(&planner_types::summary_type::SketchStatistic::Quantile { q: 0.5 })
             .unwrap();
         assert_eq!(median, 3.0);
     }
@@ -795,7 +794,7 @@ mod tests {
         }
         let estimate = updater
             .take_accumulator()
-            .estimate(&planner_types::ir::schema::SketchStatistic::Cardinality)
+            .estimate(&planner_types::summary_type::SketchStatistic::Cardinality)
             .unwrap();
         assert_eq!(estimate, 60.0);
     }

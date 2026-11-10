@@ -14,7 +14,7 @@ use asap_planner::{e2e_plan, FrontendInput, UserInput};
 use asap_planner::{PlanOutput, PlanningModels};
 use asap_types::ir::QueryRoot;
 
-use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
+use asap_types::accuracy::{AccuracyMetric, AccuracyTarget};
 use asap_types::ir::schema::{DataType, Field, Schema};
 
 use asap_types::workload::SqlDialect;

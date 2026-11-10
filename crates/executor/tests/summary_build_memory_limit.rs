@@ -3,7 +3,8 @@
 //! adds them, a bounded number of rows at a time.
 use asap_executor::operators::Operator;
 use asap_executor::plan::PhysicalDAG;
-use asap_executor::planner::ir::schema::{DataType, Field, FieldDataType, Schema, SketchAlgorithm};
+use asap_executor::planner::ir::schema::{DataType, Field, FieldDataType, Schema};
+use asap_executor::planner::summary_type::SketchAlgorithm;
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::values::{Batch, Value};
 use asap_executor::Error;

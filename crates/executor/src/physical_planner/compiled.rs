@@ -1,7 +1,7 @@
 //! Reader-independent physical computation and checked deployment instantiation.
 use super::*;
 use crate::sources::{DataStore, Scan};
-use planner_types::ir::materialized_view::MaterializedView;
+use planner_types::plan::materialized_view::MaterializedView;
 
 #[derive(Clone)]
 #[cfg_attr(any(test, feature = "test-support"), derive(serde::Serialize))]

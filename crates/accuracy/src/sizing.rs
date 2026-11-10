@@ -3,7 +3,7 @@
 
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::scalar::ColumnRef;
-use asap_types::ir::schema::{SketchAlgorithm, SketchParams, SketchStatistic};
+use asap_types::summary_type::{SketchAlgorithm, SketchParams, SketchStatistic};
 
 /// The statistic a summary is read for to answer `intent`, or `None` when
 /// no sketch statistic serves the intent.
@@ -36,7 +36,7 @@ pub(crate) fn default_size_params(
     eps: f64,
     delta: f64,
 ) -> SketchParams {
-    crate::estimators::size_params(kind, intent, eps, delta)
+    crate::guarantee::size_params(kind, intent, eps, delta)
 }
 
 #[cfg(test)]

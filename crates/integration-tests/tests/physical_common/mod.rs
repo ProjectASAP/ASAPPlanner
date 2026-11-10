@@ -53,8 +53,8 @@ pub fn execute_raw_rows_at(
     evaluation_time_ms: i64,
 ) -> Vec<Vec<asap_executor::values::Value>> {
     use asap_executor::physical_planner::compile;
-    use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
     use asap_types::ir::NonASAPOp;
+    use asap_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload;
     let wire = asap_types::test_support::physical_asap_dag_at_query_time(root).unwrap();
     let (source, schema) = wire
         .nodes
@@ -93,14 +93,14 @@ pub fn execute_raw_rows_at(
 /// `rows(source, schema)` in that `Scan`'s schema.
 #[allow(dead_code)]
 pub fn raw_data_store(
-    dag: &asap_types::ir::physical_export::PhysicalASAPDAG,
+    dag: &asap_types::plan::physical_asap_dag::PhysicalASAPDAG,
     mut rows: impl FnMut(
         &asap_types::ir::operator::Source,
         &asap_executor::values::SchemaRef,
     ) -> Vec<Vec<asap_executor::values::Value>>,
 ) -> InMemoryDataStore {
-    use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
     use asap_types::ir::NonASAPOp;
+    use asap_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload;
     let mut store = InMemoryDataStore::default();
     let mut bound = Vec::new();
     for node in &dag.nodes {

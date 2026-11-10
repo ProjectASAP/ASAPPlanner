@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use good_lp::{Constraint, Variable};
 
-use asap_types::ir::properties::AccuracyMetric;
+use asap_types::accuracy::AccuracyMetric;
 use asap_types::stages::{
     ExecutionContextId, PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalEdgeId,
 };

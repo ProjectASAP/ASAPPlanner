@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use asap_types::ir::properties::AccuracyTarget;
+use asap_types::accuracy::AccuracyTarget;
 
 use super::{FuzzQuery, FuzzWorkload, Language};
 

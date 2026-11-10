@@ -5,7 +5,8 @@ use asap_executor::arrow::array::{DictionaryArray, UInt32Array};
 use asap_executor::arrow::datatypes::UInt32Type;
 use asap_executor::operators::{Operator, SortKey};
 use asap_executor::plan::PhysicalDAG;
-use asap_executor::planner::ir::schema::{DataType, Field, FieldDataType, Schema, SketchAlgorithm};
+use asap_executor::planner::ir::schema::{DataType, Field, FieldDataType, Schema};
+use asap_executor::planner::summary_type::SketchAlgorithm;
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::values::{Batch, BatchColumn};
 use asap_executor::{Error, StateColumnUpdater};
@@ -276,7 +277,7 @@ impl asap_executor::sources::DataStore for StoredTumblingWindows {
     }
     fn read_materialized_view(
         &self,
-        _: &asap_executor::planner::ir::materialized_view::MaterializedView,
+        _: &asap_executor::planner::plan::materialized_view::MaterializedView,
         _: &asap_executor::sources::MaterializedViewRequest,
         _: RunContext,
     ) -> Result<asap_executor::runtime::OutputStream<'_, Batch>, Error> {
@@ -293,16 +294,16 @@ impl asap_executor::sources::DataStore for StoredTumblingWindows {
 /// `latency` (`Scan` node 2, `TimeRange` node 3).
 fn merge_over_a_stored_tumbling_window(
     schema: &Schema,
-) -> asap_executor::planner::ir::physical_export::PhysicalASAPDAG {
+) -> asap_executor::planner::plan::physical_asap_dag::PhysicalASAPDAG {
     use asap_executor::planner::ir::operator::{GroupKeys, Reduction, Source};
-    use asap_executor::planner::ir::physical_export::{
+    use asap_executor::planner::ir::properties::ExecutionDataState;
+    use asap_executor::planner::ir::scalar::ColumnRef;
+    use asap_executor::planner::ir::{ASAPOp, NonASAPOp, TimeRangeKind};
+    use asap_executor::planner::plan::physical_asap_dag::{
         EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge,
         PhysicalASAPDAGNode, PhysicalASAPOperatorPayload as Payload, WindowEdgeCompatibility,
     };
-    use asap_executor::planner::ir::properties::ExecutionDataState;
-    use asap_executor::planner::ir::scalar::ColumnRef;
-    use asap_executor::planner::ir::schema::SummaryUpdate;
-    use asap_executor::planner::ir::{ASAPOp, NonASAPOp, TimeRangeKind};
+    use asap_executor::planner::summary_type::SummaryUpdate;
     let samples = Schema::with_time_index(
         vec![
             Field::plain("series", DataType::Utf8, false),

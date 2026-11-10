@@ -6,6 +6,7 @@ mod candidate;
 mod edge;
 mod execution_context;
 mod memo_candidates;
+mod properties;
 
 pub use candidate::{
     producer_satisfies_physical_requirements, PhysicalCandidate, PhysicalCandidateId,
@@ -13,3 +14,4 @@ pub use candidate::{
 pub use edge::{PhysicalEdge, PhysicalEdgeId};
 pub use execution_context::{EvaluationGrid, ExecutionContext, ExecutionContextId};
 pub use memo_candidates::{output_references, PhysicalASAPMemoCandidates};
+pub use properties::{Lifetime, PhysicalProperties, PhysicalPropertiesError, StorageMedium};

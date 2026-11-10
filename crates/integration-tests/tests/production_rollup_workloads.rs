@@ -9,7 +9,7 @@ use asap_executor::physical_planner::promql_rows;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_planner::{run_planning, PlanSearchSettings, PlanningModels, PlanningRun};
-use asap_types::ir::properties::{AccuracyMetric, AccuracyScope, AccuracyTarget};
+use asap_types::accuracy::{AccuracyMetric, AccuracyScope, AccuracyTarget};
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 use asap_types::workload::{

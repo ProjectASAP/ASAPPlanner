@@ -13,11 +13,11 @@ use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::sources::InMemoryDataStore;
 use asap_executor::values::{Batch, Value};
 use asap_integration_tests::fixtures::lower_promql;
+use asap_types::accuracy::AccuracyTarget;
 use asap_types::ir::operator::{Reduction, Source};
-use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{Schema, PROMQL_SERIES_IDENTITY};
 use asap_types::ir::{NonASAPOp, OperatorNode};
+use asap_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload;
 use futures::{executor::block_on, StreamExt};
 
 /// One raw data sample: every label of its series, its time and value.

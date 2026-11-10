@@ -1,4 +1,4 @@
-use asap_types::ir::physical_export::WindowEdgeCompatibility;
+use asap_types::plan::physical_asap_dag::WindowEdgeCompatibility;
 
 // The renamed window-edge compatibility still reads and emits the deployed
 // wire value. (Tumbling-window coverage names are checked in physical-asap-optimization.)

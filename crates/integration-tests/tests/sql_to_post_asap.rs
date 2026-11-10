@@ -22,10 +22,10 @@ use std::rc::Rc;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_integration_tests::physical_export::physical_asap_dag;
 use asap_integration_tests::planning::logical_candidates_ignoring_guarantees;
-use asap_types::ir::physical_export::{PhysicalASAPNodeId, PhysicalASAPOperatorPayload};
-use asap_types::ir::properties::AccuracyTarget;
+use asap_types::accuracy::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, Predicate};
+use asap_types::plan::physical_asap_dag::{PhysicalASAPNodeId, PhysicalASAPOperatorPayload};
 
 /// [`realize`] with every output accepted whatever its guarantee: a value
 /// filter over an estimate has no guarantee, so Pass 1 prunes the summary

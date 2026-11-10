@@ -1,7 +1,8 @@
 //! Candidate scope: each logical candidate's physical alternatives, one per
 //! valid $p^{\mathrm{phys}} = (\tau, \ell)$ (#1200).
 
-use crate::physical::{ExecutionTiming, PhysicalProperties};
+use crate::ir::properties::ExecutionTiming;
+use crate::stages::PhysicalProperties;
 use crate::stages::{CandidateForMemoGroupId, ExecutionContext, PhysicalASAPMemoCandidates};
 
 /// Index into [`PhysicalASAPMemoCandidates::physical_candidates`].

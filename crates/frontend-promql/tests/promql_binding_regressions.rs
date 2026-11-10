@@ -1,5 +1,5 @@
 use crate::support;
-use asap_types::ir::properties::AccuracyTarget;
+use asap_types::accuracy::AccuracyTarget;
 use support::lower_promql;
 
 /// Prometheus treats these quantile parameters as valid queries returning special values.

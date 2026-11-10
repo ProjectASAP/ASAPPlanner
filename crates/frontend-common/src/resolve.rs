@@ -111,7 +111,7 @@ fn resolve(
         if child.schema.closed {
             return Ok(child);
         }
-        asap_types::ir::schema::schema_support::with_promql_series_identity(&child)
+        asap_types::ir::schema::series_identity::with_promql_series_identity(&child)
             .map_err(|e| SchemaDerivationError::InvalidScalarSignature(e).into())
     };
     match tree {

@@ -8,15 +8,15 @@ use asap_executor::{
 };
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::operator::BinaryOpKind;
-use planner_types::ir::physical_export::{
-    EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
-    PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
-};
 use planner_types::ir::properties::ExecutionDataState;
 use planner_types::ir::scalar::ArithmeticOpKind;
 use planner_types::ir::schema::{DataType, Field, FieldDataType};
 use planner_types::ir::ASAPOp;
 use planner_types::ir::BinaryOperator;
+use planner_types::plan::physical_asap_dag::{
+    EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
+    PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
+};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 fn schema() -> SchemaRef {
@@ -329,6 +329,7 @@ fn stored_series_evaluations_support_filters_and_sets() {
     use planner_types::ir::properties::*;
     use planner_types::ir::scalar::ColumnRef;
     use planner_types::ir::schema::*;
+    use planner_types::summary_type::*;
 
     use planner_types::ir::operator::PromQLVectorSetOpKind;
     use planner_types::ir::scalar::CompareOpKind;

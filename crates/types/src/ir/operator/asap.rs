@@ -8,11 +8,12 @@ use serde::{Deserialize, Serialize};
 
 use super::input::{InputOrTemporaryBuild, OperatorInput};
 use super::node::{Operator, OperatorNode, OperatorResultKind};
+use crate::ir::operator::arguments::Reduction;
 use crate::ir::operator::maintained_population::{MaintainedPopulation, PopulationStatistic};
-use crate::ir::operator::operator_properties::Reduction;
-use crate::ir::schema::sketch::{SketchStatistic, SummaryUpdate};
-use crate::ir::schema::{ColumnId, DataType, Field, FieldDataType, Schema, SummaryTypeCapability};
+use crate::ir::schema::{ColumnId, DataType, Field, FieldDataType, Schema};
 use crate::ir::SchemaDerivationError;
+use crate::summary_type::SummaryTypeCapability;
+use crate::summary_type::{SketchStatistic, SummaryUpdate};
 
 /// Why an ASAP operator cannot be used yet.
 pub const UNIMPLEMENTED_ASAP_OP: &str =
@@ -602,10 +603,10 @@ impl<I: OperatorInput> ASAPOp<I> {
             ));
         }
         fn check(
-            expr: &crate::ir::schema::SummaryInputExpr,
+            expr: &crate::summary_type::SummaryInputExpr,
             schema: &Schema,
         ) -> Result<(), SchemaDerivationError> {
-            use crate::ir::schema::SummaryInputExpr;
+            use crate::summary_type::SummaryInputExpr;
             match expr {
                 SummaryInputExpr::Column(col) => {
                     crate::ir::scalar::resolve_column_ref(col, schema).map_err(|e| {
@@ -740,7 +741,7 @@ fn finalized_schema<J: OperatorInput>(
     {
         {
             use crate::ir::operator::AggIntent;
-            use crate::ir::schema::{ExactKind, SummaryInputExpr};
+            use crate::summary_type::{ExactKind, SummaryInputExpr};
             let column = match &input.weight {
                 SummaryInputExpr::Column(col) => Some(
                     crate::ir::scalar::column_resolution::resolve_column_ref(col, source.schema())
@@ -834,8 +835,8 @@ fn regrouped_schema(input: &Schema, keys: &[ColumnId]) -> Result<Schema, SchemaD
 }
 
 /// The plain value an exact accumulator finalizes to.
-fn finalized_data_type(kind: &crate::ir::schema::sketch::ExactKind) -> DataType {
-    use crate::ir::schema::sketch::ExactKind;
+fn finalized_data_type(kind: &crate::summary_type::ExactKind) -> DataType {
+    use crate::summary_type::ExactKind;
     match kind {
         ExactKind::Count => DataType::Int64,
         _ => DataType::Float64,
@@ -914,7 +915,7 @@ fn topk_schema_of_build<J: OperatorInput>(
     build: &ASAPOp<J>,
     state_schema: &Schema,
 ) -> Option<Schema> {
-    use crate::ir::schema::SummaryInputExpr;
+    use crate::summary_type::SummaryInputExpr;
     let (ASAPOp::SummaryAgg { child, input, .. }
     | ASAPOp::SummaryTumblingWindowChain { child, input, .. }) = build
     else {
@@ -933,7 +934,7 @@ fn topk_schema_of_build<J: OperatorInput>(
                 _ => None,
             })
             .collect::<Option<Vec<_>>>()?,
-        SummaryInputExpr::EntityIdentity(crate::ir::schema::EntityIdentity::PromqlLabelSet {
+        SummaryInputExpr::EntityIdentity(crate::summary_type::EntityIdentity::PromqlLabelSet {
             excluding,
         }) => {
             let excluded: Vec<_> = excluding.iter().filter_map(resolve).collect();
@@ -1027,7 +1028,7 @@ fn quantile_may_be_empty<I: OperatorInput>(state: &I) -> bool {
             }
             let global = matches!(reduction, Reduction::Reduce(by) if by.keys().is_empty());
             let nullable = match &input.weight {
-                crate::ir::schema::sketch::SummaryInputExpr::Column(column) => {
+                crate::summary_type::SummaryInputExpr::Column(column) => {
                     crate::ir::scalar::resolve_column_ref(column, child.schema())
                         .ok()
                         .and_then(|index| child.schema().fields.get(index))

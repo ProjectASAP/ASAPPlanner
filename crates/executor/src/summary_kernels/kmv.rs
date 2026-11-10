@@ -6,7 +6,7 @@
 use crate::summary_kernels::factory::AccumulatorUpdater;
 use crate::{AggregateCore, KernelError};
 use asap_sketchlib::{DataInput, Kmv};
-use planner_types::ir::schema::SketchStatistic;
+use planner_types::summary_type::SketchStatistic;
 
 /// The smallest `k` the estimate `(k - 1) / U(k)` is defined for.
 pub const KMV_MIN_K: u32 = 2;

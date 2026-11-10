@@ -2,10 +2,10 @@
 //! candidates it pruned and the selection MILP's size and time; and each
 //! rejected candidate and why.
 
-use asap_cost::analytical::AnalyticalCostError;
+use asap_cost::node::analytical::AnalyticalCostError;
 use asap_cost::CostModel;
-use asap_types::ir::physical_export::PhysicalASAPNodeId;
-use asap_types::ir::properties::AccuracyMetric;
+use asap_types::accuracy::AccuracyMetric;
+use asap_types::plan::physical_asap_dag::PhysicalASAPNodeId;
 use asap_types::stages::{PhysicalCandidate, PrunedCandidate};
 use thiserror::Error;
 

@@ -3,7 +3,7 @@
 //! A requirement and a guarantee share one outer shape, [`AccuracySpec`]:
 //! an error metric, an error ε, a failure probability δ and a scope. A
 //! requirement ([`AccuracyTarget`]) holds concrete numbers and may leave its
-//! metric unset; a guarantee ([`crate::ir::properties::AccuracyGuarantee`])
+//! metric unset; a guarantee ([`crate::accuracy::AccuracyGuarantee`])
 //! always states its metric and holds symbolic expressions that plan
 //! selection binds. A target without a metric accepts a guarantee in any
 //! metric that meets its ε, δ and scope.
@@ -174,7 +174,7 @@ impl AccuracyScope {
 }
 
 /// The outer shape of an accuracy guarantee
-/// ([`crate::ir::properties::AccuracyGuarantee`]):
+/// ([`crate::accuracy::AccuracyGuarantee`]):
 /// `Pr[err_metric(estimate, truth) > error] ≤ failure_probability` over the
 /// values `accuracy_scope` names. An [`AccuracyTarget`] has the same fields, with
 /// concrete numbers, an optional metric and `max_error` for `error`: a target
@@ -367,7 +367,7 @@ fn node_metric(node: &OperatorNode) -> Option<AccuracyMetric> {
 /// select, order or rename rows, down to an aggregate's measure. A group
 /// key or any other expression is absolute.
 fn column_metric(node: &OperatorNode, column: usize) -> Option<AccuracyMetric> {
-    use crate::ir::operator::operator_properties::JoinKind;
+    use crate::ir::operator::arguments::JoinKind;
     let Operator::NonASAP(op) = &node.operator else {
         return Some(AccuracyMetric::ABSOLUTE);
     };
@@ -443,12 +443,12 @@ fn column_metric(node: &OperatorNode, column: usize) -> Option<AccuracyMetric> {
 /// count.
 fn aggregate_measure_at<'a>(
     node: &OperatorNode,
-    reduction: &crate::ir::operator::operator_properties::Reduction,
+    reduction: &crate::ir::operator::arguments::Reduction,
     measures: &'a [AggIntent],
     child: &OperatorNode,
     column: usize,
 ) -> Option<&'a AggIntent> {
-    use crate::ir::operator::operator_properties::Reduction;
+    use crate::ir::operator::arguments::Reduction;
     use crate::ir::scalar::{resolve_column_ref, ColumnRef};
     let fields = &node.schema.fields;
     match reduction {
@@ -667,7 +667,7 @@ mod tests {
     /// metrics, or any other expression, is absolute.
     #[test]
     fn root_metric_looks_through_a_null_guard_to_its_statistic() {
-        use crate::ir::operator::operator_properties::JoinKind;
+        use crate::ir::operator::arguments::JoinKind;
         use crate::ir::scalar::{CompareOpKind, ScalarValue};
         use crate::ir::{Predicate, ProjectItem};
         let QueryRoot::Operator(l2) = aggregate(vec![AggIntent::FrequencyL2 { col: None }]) else {

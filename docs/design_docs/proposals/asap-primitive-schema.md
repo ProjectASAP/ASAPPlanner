@@ -94,7 +94,7 @@ Based on our requirement, each field should contain the following information.
      | `FrequencyL2`, `FrequencyEntropy` | `Sketch`: `UnivMon` | `SummaryEstimate(FrequencyL2 \| FrequencyEntropy)` |
      | `Sum`, `Count`, `Min`, `Max`, `Rate`, `IRate`, `Increase` (exact) | `ExactAggregate(ExactKind, …)` | `FinalizeExactAccumulator` |
 
-     The sketch candidates are `summary_candidates(intent)` in `crates/logical-asap-optimization/src/pass1/realization.rs`; exact accumulators come from Pass 1's `ExactAccumulator` candidates in `pass1/computation_targets.rs`; the evaluations are `SketchStatistic` ([§6.5](#65-update-input-and-evaluations-irschemasketchrs-iroperatormaintained_populationrs)).
+     The sketch candidates are `summary_candidates(intent)` in `crates/logical-asap-optimization/src/pass1/realization.rs`; exact accumulators come from Pass 1's `ExactAccumulator` candidates in `pass1/computation_targets.rs`; the evaluations are `SketchStatistic` ([§6.5](#65-update-input-and-evaluations-summary_typestatisticrs-iroperatormaintained_populationrs)).
 
    - **Time window aggregation intents**: whether states built over smaller windows can answer a larger one. This depends on how the family combines states:
      - **Merge** (`SummaryMerge`, §5.6): states over disjoint tumbling windows combine into the state of their union, e.g. two 1-minute KLL states answer a 2-minute quantile. Requires a mergeable family.
@@ -1144,7 +1144,7 @@ pub enum DataType {
 }
 ```
 
-### 6.4 Summary algorithms and parameters (`crates/types/src/ir/schema/sketch.rs`)
+### 6.4 Summary algorithms and parameters (`crates/types/src/summary_type/parameters.rs`)
 
 ```rust
 /// Which exact accumulator. None of them has parameters, so `ExactParams`
@@ -1205,7 +1205,7 @@ pub enum WaveletKind   { Haar }         pub enum WaveletParams   { Haar { coeffi
 pub enum StatModelKind { Parametric }   pub enum StatModelParams { Parametric { family: String } }
 ```
 
-### 6.5 Update input and evaluations (`ir/schema/sketch.rs`, `ir/operator/maintained_population.rs`)
+### 6.5 Update input and evaluations (`summary_type/statistic.rs`, `ir/operator/maintained_population.rs`)
 
 This part of the code answers two questions about summary state:
 
@@ -1309,7 +1309,7 @@ pub struct CurrentSeriesInput {
 }
 ```
 
-A finalized value's accuracy statement is `AccuracyGuarantee` (`ir/properties/guarantee.rs`): a `spec` (`AccuracySpec`) with `accuracy_metric` (which error is measured, e.g. rank error), `error` (the error bound), `failure_probability` (the chance the bound does not hold) and `accuracy_scope` (which output values one statement covers), plus `provenance` (which estimates the bound came from). It is attached to evaluation and finalized nodes, and to `MaintainPopulation` nodes (whose population is exact); never to sketch or accumulator state.
+A finalized value's accuracy statement is `AccuracyGuarantee` (`accuracy/guarantee.rs`): a `spec` (`AccuracySpec`) with `accuracy_metric` (which error is measured, e.g. rank error), `error` (the error bound), `failure_probability` (the chance the bound does not hold) and `accuracy_scope` (which output values one statement covers), plus `provenance` (which estimates the bound came from). It is attached to evaluation and finalized nodes, and to `MaintainPopulation` nodes (whose population is exact); never to sketch or accumulator state.
 
 ### 6.6 Summary coverage (`crates/types/src/ir/properties/summary_coverage.rs`)
 

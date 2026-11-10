@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use planner_types::ir::operator::asap::ASAPOp;
 use planner_types::ir::operator::node::Operator;
 use planner_types::ir::operator::non_asap::NonASAPOp;
-use planner_types::ir::physical_export::{
+use planner_types::plan::physical_asap_dag::{
     PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload,
 };
 

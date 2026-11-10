@@ -3,8 +3,8 @@
 use std::rc::Rc;
 
 use super::MemoGroupId;
-use crate::ir::schema::{ExactKind, SketchAlgorithm};
 use crate::ir::{OperatorNode, Predicate};
+use crate::summary_type::{ExactKind, SketchAlgorithm};
 
 /// How one Pass 1 target is computed: exact or a summary.
 ///

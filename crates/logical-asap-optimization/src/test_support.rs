@@ -9,7 +9,7 @@ pub use crate::pass1::computation_targets::{
     generate_per_computation_candidates, PerComputationCandidates,
 };
 
-use asap_types::ir::properties::AccuracyTarget;
+use asap_types::accuracy::AccuracyTarget;
 use asap_types::ir::OperatorNode;
 use asap_types::workload::{
     BatchEntry, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query, QueryLanguage,
@@ -20,7 +20,7 @@ use asap_types::workload::{
 /// `relative_error` over `source` is left as, for Stage 3 tests that bind
 /// it. The estimator keeps the format crate-private.
 pub fn hll_classic_failure_statistic(precision: u8, relative_error: f64, source: &str) -> String {
-    asap_accuracy::estimators::hll::classic_failure_statistic(precision, relative_error, source)
+    asap_accuracy::guarantee::hll::classic_failure_statistic(precision, relative_error, source)
 }
 
 pub fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
@@ -63,7 +63,7 @@ pub fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
 use std::time::Duration;
 
 use asap_types::ir::operator::agg_intent::AggIntent;
-use asap_types::ir::operator::operator_properties::{GroupKeys, Reduction, Source};
+use asap_types::ir::operator::arguments::{GroupKeys, Reduction, Source};
 use asap_types::ir::schema::{ColumnId, DataType, Field, Schema};
 use asap_types::ir::{NonASAPOp, Predicate, ScalarExpr, TimeRangeKind};
 

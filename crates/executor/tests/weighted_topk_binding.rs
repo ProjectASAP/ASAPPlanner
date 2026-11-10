@@ -1,5 +1,6 @@
 //! Planner output binds directly to the shared runtime over raw counter samples.
 use planner_types::ir::schema::*;
+use planner_types::summary_type::*;
 
 #[test]
 fn rate_updates_cannot_enter_integer_heap_factory() {

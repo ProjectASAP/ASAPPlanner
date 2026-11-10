@@ -6,23 +6,24 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use asap_types::ir::operator::operator_properties::{BinaryOpKind, JoinKind, Reduction, Source};
-use asap_types::ir::operator::tumbling_window_chain::merged_chain;
-use asap_types::ir::operator::AggIntent;
-use asap_types::ir::properties::guarantee::{
+use asap_types::accuracy::{
     AccuracyGuarantee, AccuracyMetric, BoundExpr, CompositionOperator, GuaranteeSource,
     ProbabilityExpr,
 };
+use asap_types::ir::operator::arguments::{BinaryOpKind, JoinKind, Reduction, Source};
+use asap_types::ir::operator::tumbling_window_chain::merged_chain;
+use asap_types::ir::operator::AggIntent;
 use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
 use asap_types::ir::scalar::{resolve_column_ref, ColumnRef, CompareOpKind, ScalarValue};
+use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::schema::{DataType, Schema};
-use asap_types::ir::schema::{
-    ExactKind, FieldDataType, MergedError, NonNegativeWeightProof, SketchAlgorithm,
-    SketchStatistic, SummaryInputExpr, SummaryTypeCapability, SummaryUpdate, WeightDomain,
-};
 use asap_types::ir::{
     ASAPOp, BinaryOperator, NonASAPOp, Operator, OperatorNode, ProjectItem, QueryRoot, ScalarExpr,
     SchemaDerivationError,
+};
+use asap_types::summary_type::{
+    ExactKind, MergedError, NonNegativeWeightProof, SketchAlgorithm, SketchStatistic,
+    SummaryInputExpr, SummaryTypeCapability, SummaryUpdate, WeightDomain,
 };
 
 use crate::composition::{
@@ -310,7 +311,7 @@ fn selected_group_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
 /// failure probability per point ([`AccuracyScope::PerValue`]). Plan
 /// selection states it over a whole result of `G` points as `G·δ`.
 ///
-/// [`AccuracyScope::PerValue`]: asap_types::ir::properties::AccuracyScope::PerValue
+/// [`AccuracyScope::PerValue`]: asap_types::accuracy::AccuracyScope::PerValue
 pub fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
     if let Some(guarantee) = selected_group_guarantee(node) {
         return Some(guarantee);
@@ -1522,10 +1523,10 @@ fn interpolation_guarantee(
         }
         _ => return None,
     };
-    guarantee.spec.error = asap_types::ir::properties::BoundExpr::Product {
+    guarantee.spec.error = asap_types::accuracy::BoundExpr::Product {
         factors: vec![
             guarantee.spec.error,
-            asap_types::ir::properties::BoundExpr::Unknown {
+            asap_types::accuracy::BoundExpr::Unknown {
                 statistic: raw_data_samples_sign_statistic(&metric),
             },
         ],

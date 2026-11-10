@@ -3,7 +3,7 @@
 //! its expression, found or added by [`Memo::find_or_add_group`], so
 //! identical sub-expressions are one group. Stage 1 starts from these groups.
 
-use asap_types::ir::properties::AccuracyTarget;
+use asap_types::accuracy::AccuracyTarget;
 use asap_types::ir::{QueryRoot, SchemaDerivationError};
 use asap_types::stages::Memo;
 use asap_types::workload::DataWorkload;

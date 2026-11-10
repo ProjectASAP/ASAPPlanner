@@ -7,7 +7,7 @@ use asap_planner::{
     InstallablePlan, InstallablePlanError, MaterializedViewRefresh, INSTALLABLE_PLAN_WIRE_VERSION,
 };
 use asap_types::ir::operator::Source;
-use asap_types::ir::physical_export::PhysicalASAPDAG;
+use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
 
 use asap_types::ir::{NonASAPOp, Operator};
 

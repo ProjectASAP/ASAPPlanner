@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::input::OperatorInput;
 use super::node::{Operator, OperatorNode, OperatorResultKind};
 use crate::ir::operator::agg_intent::AggIntent;
-use crate::ir::operator::operator_properties::{
+use crate::ir::operator::arguments::{
     BinaryOpKind, GroupKeys, InfoMatcher, JoinKind, Reduction, RelationalSetOpKind, SampleKind,
     Source, TimeShift, VectorMatch, WindowFrame, WindowFrameUnits, WindowFuncKind,
 };
@@ -1334,7 +1334,7 @@ pub fn any_measure_filtered(filters: &[Option<Predicate>]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::operator::operator_properties::{
+    use crate::ir::operator::arguments::{
         AtModifier, VectorMatchKind, WindowFrameBound, WindowFrameOffset, WindowFrameUnits,
     };
     use crate::ir::scalar::expr_ir::{ArithmeticOpKind, CompareOpKind, ScalarValue};

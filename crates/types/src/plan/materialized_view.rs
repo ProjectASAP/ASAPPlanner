@@ -69,16 +69,16 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::physical_export::{
+use super::physical_asap_dag::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPDAGValidationError, PhysicalASAPNodeId,
 };
+use crate::ir::operator::arguments::Source;
 use crate::ir::operator::asap::ASAPOp;
 use crate::ir::operator::node::{Operator, OperatorNode};
 use crate::ir::operator::non_asap::NonASAPOp;
-use crate::ir::operator::operator_properties::Source;
 use crate::ir::properties::execution_data_state::ExecutionTiming;
 use crate::ir::properties::summary_coverage::{CoverageError, SelectionBox, SummaryCoverage};
-use crate::physical::Lifetime;
+use crate::stages::Lifetime;
 
 /// One materialized view of a DAG: what its stored state is, what it is
 /// refreshed from, when, and for how long it is retained.

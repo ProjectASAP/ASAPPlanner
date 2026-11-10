@@ -5,9 +5,9 @@
 use asap_executor::operators::{Operator, RowWeight};
 use asap_executor::plan::PhysicalDAG;
 use asap_executor::planner::ir::scalar::ColumnRef;
-use asap_executor::planner::ir::schema::{
-    DataType, ExactKind, ExactParams, Field, FieldDataType, Schema, SketchAlgorithm, SketchParams,
-    SketchStatistic,
+use asap_executor::planner::ir::schema::{DataType, Field, FieldDataType, Schema};
+use asap_executor::planner::summary_type::{
+    ExactKind, ExactParams, SketchAlgorithm, SketchParams, SketchStatistic,
 };
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::summary_kernels::weighted_frequency::WeightedFrequency;
@@ -152,7 +152,7 @@ fn fingerprint(state: &dyn AggregateCore) -> String {
         // Its heaps' internal order depends on hash-map iteration, so even
         // two merges of the same states differ in which heavy hitters they
         // keep, and so in their distinct count: compare its other answers.
-        use asap_executor::planner::ir::schema::SketchStatistic as Q;
+        use asap_executor::planner::summary_type::SketchStatistic as Q;
         let count = Q::PointCount {
             key: ColumnRef::SampleValue,
             value: None,

@@ -3,7 +3,7 @@
 //! [`ExecutionTiming`] says when a node's value is produced (ingestion vs.
 //! query time); [`ExecutionDataState`] pairs it with the [`DataPrimitive`]
 //! the edge carries (raw values vs. summary state). A node's timing comes
-//! from the [`crate::physical::PhysicalProperties`] of the physical candidate
+//! from the [`crate::stages::PhysicalProperties`] of the physical candidate
 //! it realizes.
 
 /// When a post-ASAP value is produced.

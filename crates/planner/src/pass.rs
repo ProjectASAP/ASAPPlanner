@@ -23,7 +23,7 @@ use asap_accuracy::{AccuracyEvidence, NoMeasuredGuarantees};
 use asap_cost::CostInputs;
 use asap_logical_asap_optimization::PerComputationCandidateError;
 use asap_types::deployment_capabilities::DeploymentCapabilities;
-use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPDAGValidationError};
+use asap_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPDAGValidationError};
 
 static DEFAULT_COST_INPUTS: std::sync::LazyLock<CostInputs> =
     std::sync::LazyLock::new(CostInputs::default);

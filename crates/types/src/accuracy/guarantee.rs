@@ -52,8 +52,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ir::properties::AccuracyTarget;
-pub use crate::ir::properties::{AccuracyMetric, AccuracyScope, AccuracySpec, NormScale};
+use super::target::{AccuracyMetric, AccuracyScope, AccuracySpec, AccuracyTarget};
 
 /// A symbolic, serializable error-bound expression. Non-negative real
 /// arithmetic only — there is no subtraction, so a bound can never be

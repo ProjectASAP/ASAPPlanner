@@ -11,18 +11,17 @@ use crate::{
     values::{Batch, SchemaRef},
     Error,
 };
-use planner_types::ir::materialized_view::MaterializedView;
 use planner_types::ir::operator::{
     agg_has_exact_per_entity_kernel, AggIntent, GroupKeys, Reduction as PlannerReduction,
 };
-use planner_types::ir::physical_export::{
+use planner_types::ir::scalar::{ColumnRef, CompareOpKind};
+use planner_types::ir::schema::{DataType, FieldDataType};
+use planner_types::plan::materialized_view::MaterializedView;
+use planner_types::plan::physical_asap_dag::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
     PhysicalASAPOperatorPayload as Payload,
 };
-use planner_types::ir::scalar::{ColumnRef, CompareOpKind};
-use planner_types::ir::schema::{
-    DataType, FieldDataType, SketchStatistic, SummaryInputExpr, SummaryTypeCapability,
-};
+use planner_types::summary_type::{SketchStatistic, SummaryInputExpr, SummaryTypeCapability};
 // `promql_rows` reads `OperatorNode` through `super::*` only in its
 // test-support helpers.
 #[cfg_attr(not(any(test, feature = "test-support")), allow(unused_imports))]
@@ -114,10 +113,10 @@ fn compile_internal(
         (
             edge.consumer,
             match edge.role {
-                planner_types::ir::physical_export::EdgeRole::Left => 0,
-                planner_types::ir::physical_export::EdgeRole::Input => 1,
-                planner_types::ir::physical_export::EdgeRole::Right => 2,
-                planner_types::ir::physical_export::EdgeRole::ScalarRef => 3,
+                planner_types::plan::physical_asap_dag::EdgeRole::Left => 0,
+                planner_types::plan::physical_asap_dag::EdgeRole::Input => 1,
+                planner_types::plan::physical_asap_dag::EdgeRole::Right => 2,
+                planner_types::plan::physical_asap_dag::EdgeRole::ScalarRef => 3,
             },
         )
     });
@@ -1001,7 +1000,7 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
     match &node.payload {
         Payload::ASAP(ASAPOp::FinalizeExactAccumulator { .. }) => {
             let state = summary_column(input)?;
-            use planner_types::ir::schema::ExactKind as E;
+            use planner_types::summary_type::ExactKind as E;
             let statistic = match &input.fields[state].dtype {
                 FieldDataType::ExactAggregate(kind, _) => match kind {
                     E::Sum | E::Count | E::Min | E::Max | E::Rate | E::Increase => *kind,
@@ -1279,12 +1278,12 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
 fn summary_agg_build(
     input: &SchemaRef,
     family: &FieldDataType,
-    update: &planner_types::ir::schema::SummaryUpdate,
+    update: &planner_types::summary_type::SummaryUpdate,
     reduction: &PlannerReduction,
 ) -> Result<Operator, Error> {
     if matches!(
         family,
-        FieldDataType::Sketch(planner_types::ir::schema::SketchAlgorithm::HydraCms)
+        FieldDataType::Sketch(planner_types::summary_type::SketchAlgorithm::HydraCms)
     ) {
         crate::capability::validate_summary_kernel(family, update).map_err(Error::Invalid)?;
         let PlannerReduction::Reduce(keys) = reduction else {
@@ -1327,10 +1326,10 @@ fn summary_agg_build(
         let PlannerReduction::Reduce(keys) = reduction else {
             return Err(invalid("keyed summary requires explicit partitions"));
         };
-        if matches!(family, FieldDataType::Sketch(kind) if kind == &planner_types::ir::schema::SketchAlgorithm::CmsWithHeap)
+        if matches!(family, FieldDataType::Sketch(kind) if kind == &planner_types::summary_type::SketchAlgorithm::CmsWithHeap)
             && !matches!(
                 update.weight_domain,
-                planner_types::ir::schema::WeightDomain::NonNegative { .. }
+                planner_types::summary_type::WeightDomain::NonNegative { .. }
             )
         {
             return Err(invalid("CMS requires a nonnegative weight contract"));
@@ -1398,8 +1397,8 @@ fn row_weight(input: &SchemaRef, weight: &SummaryInputExpr) -> Result<RowWeight,
 fn unkeyed_frequency_family(family: &FieldDataType) -> bool {
     matches!(family, FieldDataType::Sketch(kind) if matches!(
         kind,
-        planner_types::ir::schema::SketchAlgorithm::UnivMon
-            | planner_types::ir::schema::SketchAlgorithm::Hll
+        planner_types::summary_type::SketchAlgorithm::UnivMon
+            | planner_types::summary_type::SketchAlgorithm::Hll
     ))
 }
 fn summary_column(input: &SchemaRef) -> Result<usize, Error> {
@@ -1594,7 +1593,7 @@ mod compilation_tests {
 #[cfg(feature = "test-support")]
 pub mod test_support {
     use super::*;
-    use planner_types::physical::{Lifetime, StorageMedium};
+    use planner_types::stages::{Lifetime, StorageMedium};
     use std::collections::HashMap;
 
     /// The materialized views at `nodes`, in that order: each node that is
@@ -1622,7 +1621,7 @@ pub mod test_support {
                 nodes.contains(&(node.id as NodeId))
                     && !matches!(
                         node.lifetime,
-                        planner_types::physical::Lifetime::AcrossEvaluations(_)
+                        planner_types::stages::Lifetime::AcrossEvaluations(_)
                     )
             })
             .map(|node| node.id as NodeId)

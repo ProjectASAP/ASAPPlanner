@@ -11,7 +11,7 @@ use std::rc::Rc;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_integration_tests::physical_export::physical_asap_dag;
 use asap_integration_tests::planning::selected_dag;
-use asap_types::ir::properties::AccuracyTarget;
+use asap_types::accuracy::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
 

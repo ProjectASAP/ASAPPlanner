@@ -13,9 +13,9 @@ use asap_logical_asap_optimization::{pass1_memo, Pass1Error, PerComputationCandi
 use asap_physical_asap_optimization::generate_physical_asap_memo_candidates;
 use asap_plan_selection::{select_plan, ErrorSelectingPlan, Selection};
 use asap_types::deployment_capabilities::DeploymentCapabilitiesError;
-use asap_types::ir::physical_export::PhysicalASAPDAG;
-use asap_types::ir::schema::schema_support::with_promql_series_identity;
+use asap_types::ir::schema::series_identity::with_promql_series_identity;
 use asap_types::ir::QueryRoot;
+use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
 use asap_types::stages::{LogicalASAPMemoCandidates, Memo, PhysicalASAPMemoCandidates};
 use asap_types::workload::{DataWorkload, QueryLanguage, QueryWorkloadEntry};
 

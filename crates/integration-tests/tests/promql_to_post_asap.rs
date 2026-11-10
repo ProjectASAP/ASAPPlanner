@@ -13,16 +13,17 @@ use asap_integration_tests::physical_export::physical_asap_dag;
 use asap_integration_tests::planning::{
     logical_candidates, logical_candidates_ignoring_guarantees,
 };
-use asap_types::ir::operator::operator_properties::Reduction;
+use asap_types::ir::operator::arguments::Reduction;
 
-use asap_types::ir::properties::AccuracyTarget;
+use asap_types::accuracy::AccuracyTarget;
 use asap_types::ir::scalar::expr_ir::ColumnRef;
 use asap_types::ir::schema::DataType;
-use asap_types::ir::schema::{
-    EntityIdentity, ExactKind, ExactParams, FieldDataType, Schema, SketchAlgorithm,
-    SketchStatistic, SummaryInputExpr, SummaryUpdate,
-};
+use asap_types::ir::schema::{FieldDataType, Schema};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
+use asap_types::summary_type::{
+    EntityIdentity, ExactKind, ExactParams, SketchAlgorithm, SketchStatistic, SummaryInputExpr,
+    SummaryUpdate,
+};
 
 /// The first logical candidate (Stage 1, in enumeration order) of `root` as
 /// a query at `accuracy` that uses an ASAP operator, or the plain exact one

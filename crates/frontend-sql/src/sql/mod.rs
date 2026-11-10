@@ -59,7 +59,7 @@ use asap_frontend_common::{
 };
 use asap_sql_function_catalog::{AggSemantic, Arity, RewriteKind};
 use asap_types::ir::operator::agg_intent::AggIntent;
-use asap_types::ir::operator::operator_properties::{
+use asap_types::ir::operator::arguments::{
     GroupKeys, Reduction, Source, WindowFrame, WindowFrameBound, WindowFrameOffset,
     WindowFrameUnits,
 };

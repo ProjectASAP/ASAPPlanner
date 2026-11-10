@@ -42,10 +42,10 @@ use serde_json::{json, Value};
 
 use asap_cost::CostInputs;
 use asap_planner::{PlanSearchSettings, PlanningModels};
+use asap_types::accuracy::AccuracyTarget;
 use asap_types::deployment_capabilities::DeploymentCapabilities;
-use asap_types::ir::properties::AccuracyTarget;
-use asap_types::ir::schema::sketch::SketchAlgorithm;
 use asap_types::ir::QueryRoot;
+use asap_types::summary_type::SketchAlgorithm;
 use asap_types::workload::{
     DataArrival, DataWorkload, PlanningWorkload, QueryLanguage, QueryWorkload, RepeatingEntry,
     SqlDialect,

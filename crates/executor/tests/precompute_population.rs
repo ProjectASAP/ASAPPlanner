@@ -7,14 +7,15 @@ use asap_executor::{
 };
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::operator::{GroupKeys, Reduction};
-use planner_types::ir::physical_export::{
-    EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
-    PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
-};
 use planner_types::ir::properties::*;
 use planner_types::ir::scalar::ColumnRef;
 use planner_types::ir::schema::{DataType, *};
 use planner_types::ir::ASAPOp;
+use planner_types::plan::physical_asap_dag::{
+    EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
+    PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
+};
+use planner_types::summary_type::*;
 use std::sync::Arc;
 
 fn logical_schema(family: FieldDataType) -> Schema {
@@ -55,8 +56,8 @@ fn view_over_samples(family: FieldDataType, scan: usize) -> [PhysicalASAPDAGNode
     };
     [
         PhysicalASAPDAGNode {
-            lifetime: planner_types::physical::Lifetime::AcrossEvaluations(
-                planner_types::physical::StorageMedium::Memory,
+            lifetime: planner_types::stages::Lifetime::AcrossEvaluations(
+                planner_types::stages::StorageMedium::Memory,
             ),
             ..node(
                 0,
@@ -132,8 +133,8 @@ fn try_state_dag(
                 group_by: None,
             }),
             output_state: ExecutionDataState::INGESTION_SUMMARY,
-            lifetime: planner_types::physical::Lifetime::AcrossEvaluations(
-                planner_types::physical::StorageMedium::Memory,
+            lifetime: planner_types::stages::Lifetime::AcrossEvaluations(
+                planner_types::stages::StorageMedium::Memory,
             ),
             parameters: None,
             output_schema: logical_schema(family.clone()),
@@ -167,8 +168,8 @@ fn try_state_dag(
                 child: read_id,
             }),
             output_state: ExecutionDataState::INGESTION_SUMMARY,
-            lifetime: planner_types::physical::Lifetime::AcrossEvaluations(
-                planner_types::physical::StorageMedium::Memory,
+            lifetime: planner_types::stages::Lifetime::AcrossEvaluations(
+                planner_types::stages::StorageMedium::Memory,
             ),
             parameters: None,
             output_schema: logical_schema(target),
@@ -234,8 +235,8 @@ fn ingestion_context(limits: Limits) -> RunContext {
 fn sum_state(value: f64) -> Arc<dyn asap_executor::AggregateCore> {
     let mut state = asap_executor::summary_kernels::exact::ExactAccumulator::new(
         planner_types::ir::schema::FieldDataType::ExactAggregate(
-            planner_types::ir::schema::ExactKind::Sum,
-            planner_types::ir::schema::ExactParams::Sum,
+            planner_types::summary_type::ExactKind::Sum,
+            planner_types::summary_type::ExactParams::Sum,
         ),
         false,
     )

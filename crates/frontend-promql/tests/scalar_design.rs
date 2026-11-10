@@ -1,6 +1,6 @@
 //! Scalar expressions never become constant-wrapper operators.
 use crate::support;
-use asap_types::ir::properties::AccuracyTarget;
+use asap_types::accuracy::AccuracyTarget;
 use asap_types::ir::scalar::{ArithmeticOpKind, CompareOpKind, ScalarValue};
 use asap_types::ir::{NonASAPOp, QueryRoot, ScalarExpr};
 

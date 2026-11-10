@@ -20,9 +20,9 @@ use asap_planner::{
 };
 
 use asap_types::ir::operator::Source;
-use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::NonASAPOp;
+use asap_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload;
 use futures::{executor::block_on, StreamExt};
 
 const MINUTE_MS: i64 = 60_000;
@@ -167,7 +167,7 @@ fn expected_distinct_users() -> BTreeMap<String, String> {
 /// its key names and `table` bound as `http`: the batches of each id's
 /// output.
 fn run_bound(
-    dag: &asap_types::ir::physical_export::PhysicalASAPDAG,
+    dag: &asap_types::plan::physical_asap_dag::PhysicalASAPDAG,
     inputs: BTreeMap<u64, Batch>,
     table: &Batch,
     ids: &[u64],

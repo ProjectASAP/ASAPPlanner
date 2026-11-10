@@ -9,15 +9,16 @@ use asap_executor::{
 };
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::operator::{GroupKeys, Reduction};
-use planner_types::ir::physical_export::{
-    PhysicalASAPDAGNode, PhysicalASAPOperatorPayload as Payload,
-};
 use planner_types::ir::properties::*;
 use planner_types::ir::scalar::{ColumnRef, CompareOpKind, ScalarValue};
 use planner_types::ir::schema::DataType;
 use planner_types::ir::schema::*;
 use planner_types::ir::{ASAPOp, ExprSemantics, Predicate, ScalarExpr};
-use planner_types::physical::Lifetime;
+use planner_types::plan::physical_asap_dag::{
+    PhysicalASAPDAGNode, PhysicalASAPOperatorPayload as Payload,
+};
+use planner_types::stages::Lifetime;
+use planner_types::summary_type::*;
 use std::{collections::BTreeMap, sync::Arc};
 
 const WIDTH: u32 = 64;

@@ -15,11 +15,11 @@ use asap_types::ir::operator::{
     TimeShift, WindowFuncKind,
 };
 use asap_types::ir::scalar::{ArithmeticOpKind, ColumnRef, ScalarValue};
-use asap_types::ir::schema::sketch::{SketchStatistic, SummaryUpdate};
 use asap_types::ir::schema::{DataType, FieldDataType, Schema};
 use asap_types::ir::{
     ASAPOp, BinaryOperator, NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr, TimeRangeKind,
 };
+use asap_types::summary_type::{SketchStatistic, SummaryUpdate};
 
 /// One instance of every `NonASAPOp` variant, children elided. The
 /// exhaustive match fails to compile when a variant is added, until a sample

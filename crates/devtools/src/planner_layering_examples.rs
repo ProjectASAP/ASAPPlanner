@@ -2,7 +2,7 @@
 //! (`docs/design_docs/proposals/planner-layering.md`), shared by
 //! `tools/dag-viewer/workloads/planner-layering/` and the planner-layering acceptance tests.
 
-use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
+use asap_types::accuracy::{AccuracyMetric, AccuracyTarget};
 use asap_types::workload::{
     BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability,
     PrometheusMetricType, Query, QueryLanguage, QueryRequirements, QueryWorkload, RepeatedDemand,

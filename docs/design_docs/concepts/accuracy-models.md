@@ -377,13 +377,15 @@ The `asap_accuracy` crate separates these responsibilities:
 
 ```text
 accuracy/src/
-├── lib.rs              # Public interfaces and unified entry point (satisfies, per-input targets)
-├── model.rs            # AccuracyEvidence and producer_satisfies_logical_requirements (α^log)
-├── evidence.rs         # Evidence and source contracts
+├── lib.rs              # Re-exports: the public interfaces
+├── evidence.rs         # AccuracyEvidence: the deployment's measured accuracy
+├── requirements.rs     # producer_satisfies_logical_requirements (α^log), target_limit
+├── error_propagation.rs # ErrorPropagation: a consumer's output error from its inputs'
+├── propagation_stats.rs # Evidence and source contracts
 ├── composition.rs      # Error propagation across computations
 ├── budget.rs           # Splitting a query's accuracy budget across approximate inputs
 ├── function_rules.rs   # Error composition of scalar functions over approximate inputs
-└── estimators/
+└── guarantee/
     ├── mod.rs          # Family/evaluation dispatch and source-contract integration
     ├── kll.rs
     ├── ddsketch.rs
@@ -414,5 +416,5 @@ guarantees (`AccuracyEvidence`) carry the same obligation to justify
 metrics, assumptions and propagation.
 
 For implementation details, see the [accuracy crate](../../../crates/accuracy/src/lib.rs),
-[guarantee representation](../../../crates/types/src/ir/properties/guarantee.rs), and
+[guarantee representation](../../../crates/types/src/accuracy/guarantee.rs), and
 [accuracy propagation companion](../../develop_docs/end-to-end-accuracy-guarantees.md).

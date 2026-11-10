@@ -1,7 +1,7 @@
 # Analytical resource cost model
 
 > Status: implemented model with explicit support limits. The
-> [analytical estimator](../../../../crates/cost/src/analytical.rs)
+> [analytical estimator](../../../../crates/cost/src/node/analytical.rs)
 > is what Stage 3 measures resource usage with. The physical-plan adapter and
 > the legacy `CostModel` described below have been removed; Stage 3's cost
 > models 1–3 replace them.

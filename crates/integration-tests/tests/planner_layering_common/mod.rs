@@ -19,11 +19,12 @@ use asap_cost::CostInputs;
 use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
 use asap_types::deployment_capabilities::DeploymentCapabilities;
 use asap_types::ir::flat::{flatten, FlatDag, NodeId};
-use asap_types::ir::physical_export::PhysicalASAPDAG;
 use asap_types::ir::properties::ExecutionTiming;
-use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic};
+use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot};
-use asap_types::physical::Lifetime;
+use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
+use asap_types::stages::Lifetime;
+use asap_types::summary_type::{SketchAlgorithm, SketchParams, SketchStatistic};
 use asap_types::workload::{PlanningWorkload, QueryRecurrence, RepeatedDemand};
 
 pub use asap_devtools::planner_layering_examples::*;
@@ -317,7 +318,7 @@ pub fn computations(dag: &PhysicalASAPDAG) -> BTreeMap<NodeId, u64> {
     let materialized_nodes: BTreeSet<_> = dag
         .nodes
         .iter()
-        .filter(|n| n.lifetime != asap_types::physical::Lifetime::None)
+        .filter(|n| n.lifetime != asap_types::stages::Lifetime::None)
         .map(|n| n.id)
         .collect();
     // Each walk's start and, for a consumer refreshed at ingestion, its

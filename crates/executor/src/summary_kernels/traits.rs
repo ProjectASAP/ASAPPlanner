@@ -1,4 +1,4 @@
-use planner_types::ir::schema::SketchStatistic;
+use planner_types::summary_type::SketchStatistic;
 
 pub type KernelError = Box<dyn std::error::Error + Send + Sync>;
 

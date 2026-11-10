@@ -11,9 +11,10 @@ use asap_executor::{
     values::{Batch, Value},
 };
 use futures::{executor::block_on, StreamExt};
-use planner_types::ir::physical_export::PhysicalASAPOperatorPayload;
-use planner_types::ir::properties::AccuracyTarget;
+use planner_types::accuracy::AccuracyTarget;
 use planner_types::ir::schema::{DataType, *};
+use planner_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload;
+use planner_types::summary_type::*;
 use std::{collections::BTreeMap, sync::Arc};
 
 fn schema() -> Arc<Schema> {

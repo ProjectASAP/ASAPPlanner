@@ -19,7 +19,7 @@
 //! have. Which readouts an executor evaluates is its own declaration
 //! (`DeploymentCapabilities::supported_summaries`), not this table's.
 
-use super::sketch::{ExactKind, SketchAlgorithm, SketchStatistic};
+use super::{ExactKind, SketchAlgorithm, SketchStatistic};
 use crate::ir::schema::FieldDataType;
 pub use asap_sketchlib::{MergedError, StatisticKind};
 
@@ -186,7 +186,7 @@ impl SummaryTypeCapability {
 mod tests {
     use super::*;
     use crate::ir::scalar::expr_ir::ColumnRef;
-    use crate::ir::schema::ExactParams;
+    use crate::summary_type::ExactParams;
 
     fn total() -> SketchStatistic {
         SketchStatistic::PointCount {

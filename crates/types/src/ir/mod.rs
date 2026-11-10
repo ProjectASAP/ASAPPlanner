@@ -12,5 +12,3 @@ pub use scalar::{ExprSemantics, Predicate, ProjectItem, ScalarExpr, SortKey};
 pub use schema::error::SchemaDerivationError;
 
 pub mod flat;
-pub mod materialized_view;
-pub mod physical_export;

@@ -1,7 +1,7 @@
 //! Each operator's local error propagation: the linear bound $g_c$ on a
 //! consumer's output error from its inputs' errors (concepts doc, section 4).
 
-use asap_types::ir::properties::AccuracyMetric;
+use asap_types::accuracy::AccuracyMetric;
 use asap_types::ir::Operator;
 use asap_types::stages::MemoGroupId;
 

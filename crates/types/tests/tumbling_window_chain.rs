@@ -3,11 +3,11 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use asap_types::ir::operator::operator_properties::{Reduction, Source};
+use asap_types::ir::operator::arguments::{Reduction, Source};
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
-use asap_types::ir::schema::{SketchAlgorithm, SummaryUpdate};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, TimeRangeKind};
+use asap_types::summary_type::{SketchAlgorithm, SummaryUpdate};
 
 const MINUTE: u64 = 60_000;
 

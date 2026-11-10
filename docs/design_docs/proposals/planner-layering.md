@@ -156,7 +156,7 @@ ASAPPlanner relies on the assumptions below.
 
 ### ASAPPlanner System Overview: Planning Stages
 
-ASAPPlanner takes a [query workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload/mod.rs), a [data workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload/mod.rs#L384) and the deployment's
+ASAPPlanner takes a [query workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload/query.rs), a [data workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload/data.rs) and the deployment's
 inputs (TODO: define this data structure, issue [#525](https://github.com/ProjectASAP/ASAPPlanner/issues/525)), and returns one optimal physical plan. It decides what is computed, how it is computed, and which plan is best. The deployment only supplies data and query inputs and
 executes the plan: it provides its empirical cost model, empirical accuracy
 model and capabilities, but never optimize queries.

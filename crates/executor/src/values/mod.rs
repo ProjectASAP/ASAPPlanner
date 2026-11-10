@@ -214,7 +214,7 @@ pub(super) fn validate_state(
 
     validate_family(family)?;
     let valid = match family {
-        SummaryFamilyType::Sketch(planner_types::ir::schema::SketchAlgorithm::HydraCms) => {
+        SummaryFamilyType::Sketch(planner_types::summary_type::SketchAlgorithm::HydraCms) => {
             let shape = crate::capability::hydra_cms_shape(family).map_err(Error::Invalid)?;
             state
                 .as_any()
@@ -281,7 +281,7 @@ pub(crate) fn plain(schema: &SchemaRef, column: usize) -> Result<(&DataType, boo
 mod weighted_state_tests {
     use super::*;
     use crate::summary_kernels::weighted_frequency::{FrequencyAlgorithm, WeightedFrequency};
-    use planner_types::ir::schema::SketchAlgorithm;
+    use planner_types::summary_type::SketchAlgorithm;
 
     // A state cannot acquire a different family or shape merely by relabeling its batch.
     #[test]

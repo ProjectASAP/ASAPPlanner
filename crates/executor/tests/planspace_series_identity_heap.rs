@@ -6,7 +6,7 @@ use common::selected_dag;
 use planner_types::ir::OperatorNode;
 
 use asap_executor::physical_planner::promql_rows::SERIES_IDENTITY_COLUMN;
-use planner_types::ir::properties::AccuracyTarget;
+use planner_types::accuracy::AccuracyTarget;
 use planner_types::workload::{
     BatchEntry, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query, QueryLanguage,
     QueryRequirements, QueryWorkload,

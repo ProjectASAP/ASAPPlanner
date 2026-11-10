@@ -182,7 +182,7 @@ fn campaign_writes_summary_coverage_and_drafts() {
 fn generated(spec: QuerySpec, approximate: bool) -> FuzzWorkload {
     use asap_devtools::planner_fuzz::generate::generated_workload;
     use asap_devtools::planner_fuzz::{FuzzQuery, Language};
-    use asap_types::ir::properties::AccuracyTarget;
+    use asap_types::accuracy::AccuracyTarget;
     let language = match spec {
         QuerySpec::Promql(_) => Language::Promql,
         QuerySpec::Sql(_) => Language::Sql,
@@ -382,7 +382,7 @@ fn longer_window_rollup_witness_prices() {
 fn other_frequency_statistic_witness_prices_from_one_univmon() {
     use asap_devtools::planner_fuzz::generate::generated_workload;
     use asap_devtools::planner_fuzz::{FuzzQuery, Language};
-    use asap_types::ir::properties::AccuracyTarget;
+    use asap_types::accuracy::AccuracyTarget;
     let l2 = QuerySpec::Sql(SqlSpec {
         table: "metrics".into(),
         aggregate: SqlAggregate::FrequencyL2("src_ip".into()),

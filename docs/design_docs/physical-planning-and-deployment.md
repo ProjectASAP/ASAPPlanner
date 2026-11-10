@@ -620,7 +620,7 @@ The refresh window is derived from the DAG alone (time ranges, shifts and tumbli
 widths), like the views and their retention. Sealing, lateness, threading and
 the alignment of the window grid stay the deployment's.
 
-Stage 3's cost assumes this grouping (`asap_cost::execution_demand::computations`):
+Stage 3's cost assumes this grouping (`asap_cost::plan::execution_demand::computations`):
 a stateless ingestion-time node is charged once per refresh window of the
 views above it, not once per view. A runtime that splits a group (for
 example, because its sources seal at different times) computes the same

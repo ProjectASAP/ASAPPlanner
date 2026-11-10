@@ -25,7 +25,7 @@
 //! [`CostInputs::measured_operation_costs`]: asap_cost::CostInputs::measured_operation_costs
 
 use asap_cost::{MeasuredOperationCost, SummaryOperation};
-use asap_types::ir::schema::SketchParams;
+use asap_types::summary_type::SketchParams;
 use serde_json::Value;
 
 /// A sketch-bench row that gave no entries, and why.

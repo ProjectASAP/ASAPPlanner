@@ -8,12 +8,12 @@ use asap_executor::sources::InMemoryDataStore;
 use asap_executor::values::{Batch, Value};
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::operator::{Source, TimeShift};
-use planner_types::ir::physical_export::PhysicalASAPDAG;
 use planner_types::ir::scalar::{CompareOpKind, ScalarValue};
 use planner_types::ir::schema::{DataType, Field, Schema, PROMQL_SERIES_IDENTITY};
 use planner_types::ir::{
     ExprSemantics, NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr, TimeRangeKind,
 };
+use planner_types::plan::physical_asap_dag::PhysicalASAPDAG;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;

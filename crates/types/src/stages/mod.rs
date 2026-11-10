@@ -24,8 +24,9 @@ pub use per_computation_logical_memo_candidates::{
 };
 pub use physical::{
     output_references, producer_satisfies_physical_requirements, EvaluationGrid, ExecutionContext,
-    ExecutionContextId, PhysicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateId,
-    PhysicalEdge, PhysicalEdgeId,
+    ExecutionContextId, Lifetime, PhysicalASAPMemoCandidates, PhysicalCandidate,
+    PhysicalCandidateId, PhysicalEdge, PhysicalEdgeId, PhysicalProperties, PhysicalPropertiesError,
+    StorageMedium,
 };
 pub use pruning::{
     PruneCause, PruneReason, PrunedCandidate, PrunedLogicalCandidate, RootPruneReason,

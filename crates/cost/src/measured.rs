@@ -38,13 +38,13 @@
 use std::mem::discriminant;
 
 use asap_types::ir::operator::AggIntent;
-use asap_types::ir::physical_export::PhysicalASAPOperatorPayload as Payload;
 use asap_types::ir::properties::ExecutionTiming;
-use asap_types::ir::schema::{ExactKind, SketchParams};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
+use asap_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload as Payload;
+use asap_types::summary_type::{ExactKind, SketchParams};
 use serde::{Deserialize, Serialize};
 
-use crate::analytical::AnalyticalCostError;
+use crate::node::analytical::AnalyticalCostError;
 
 /// The deployment's measured cost table
 /// ([`CostInputs::measured_operation_costs`]). In JSON, an object

@@ -96,10 +96,10 @@ impl std::fmt::Debug for WeightedFrequency {
 
 impl WeightedFrequency {
     pub(crate) fn configuration(
-        algorithm: &planner_types::ir::schema::SketchAlgorithm,
-        params: &planner_types::ir::schema::SketchParams,
+        algorithm: &planner_types::summary_type::SketchAlgorithm,
+        params: &planner_types::summary_type::SketchParams,
     ) -> Result<(FrequencyAlgorithm, usize, usize, usize), Error> {
-        use planner_types::ir::schema::{SketchAlgorithm as A, SketchParams as P};
+        use planner_types::summary_type::{SketchAlgorithm as A, SketchParams as P};
         let (algorithm, width, depth, capacity) = match (algorithm, params) {
             (
                 A::CmsWithHeap,

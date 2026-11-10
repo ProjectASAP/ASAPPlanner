@@ -2,7 +2,7 @@
 //! and, below a 0.01 failure probability, that calibration scaled by the
 //! Gaussian quantile ratio `z(1 − δ/2) / z(1 − 0.01/2)`.
 use super::*;
-use asap_types::ir::schema::sketch::KLL_MAX_K;
+use asap_types::summary_type::KLL_MAX_K;
 
 pub(super) fn guarantee(
     algorithm: &SketchAlgorithm,
@@ -148,7 +148,7 @@ mod tests {
 
     #[test]
     fn local_guarantee_inverts_rank_sizing() {
-        use crate::estimators::size_params;
+        use crate::guarantee::size_params;
         use asap_types::ir::operator::agg_intent::default_quantile;
         let q = default_quantile(0.99);
         let params = size_params(SketchAlgorithm::Kll, &q, 0.01, 0.01);
@@ -221,7 +221,7 @@ mod tests {
     /// KLL `k` inverts the rank-error fit: ε = 0.01 → 269, ε = 0.05 → 52.
     #[test]
     fn accuracy_target_drives_kll_k() {
-        use crate::estimators::size_params;
+        use crate::guarantee::size_params;
         use asap_types::ir::operator::agg_intent::default_quantile;
         let q = default_quantile(0.99);
         assert_eq!(
@@ -237,7 +237,7 @@ mod tests {
     /// A zero ε saturates KLL `k` to the tightest buildable value.
     #[test]
     fn degenerate_epsilon_saturates_to_tightest_kll_params() {
-        use crate::estimators::size_params;
+        use crate::guarantee::size_params;
         use asap_types::ir::operator::agg_intent::default_quantile;
         assert_eq!(
             size_params(SketchAlgorithm::Kll, &default_quantile(0.99), 0.0, 0.01),

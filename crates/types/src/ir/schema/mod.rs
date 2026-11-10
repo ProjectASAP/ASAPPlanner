@@ -15,25 +15,17 @@
 
 pub mod aggregate_schema;
 pub mod error;
-pub mod schema_support;
-pub mod sketch;
-mod sketch_parameter_lists;
-pub mod summary_type_capability;
+pub mod series_identity;
 pub mod topk;
 
 pub use aggregate_schema::aggregate_output_schema;
-pub use sketch::{
-    EntityIdentity, ExactKind, ExactParams, HydraParams, NonNegativeWeightProof, SamplingKind,
-    SamplingParams, SketchAlgorithm, SketchParams, SketchStatistic, StatModelKind, StatModelParams,
-    SummaryInputExpr, SummaryUpdate, WaveletKind, WaveletParams, WeightDomain,
-    EXACT_ACCUMULATOR_STATE_BYTES,
-};
-pub use sketch_parameter_lists::parameter_list;
-pub use summary_type_capability::{
-    MergeInputRule, MergedError, StatisticKind, SummaryTypeCapability, SupportedSummary,
-};
 
 use serde::{Deserialize, Serialize};
+
+use crate::summary_type::{
+    ExactKind, ExactParams, SamplingKind, SamplingParams, SketchAlgorithm, StatModelKind,
+    StatModelParams, WaveletKind, WaveletParams,
+};
 
 /// Zero-based position of a column in a particular operator's input or output.
 ///

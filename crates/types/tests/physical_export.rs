@@ -1,13 +1,13 @@
 //! A plan with its nodes' physical properties exports as a PhysicalASAPDAG
 //! that keeps them.
 use asap_types::ir::operator::{Reduction, Source};
-use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPDAGValidationError};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
-use asap_types::ir::schema::{ExactKind, ExactParams, SummaryUpdate};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot};
-use asap_types::physical::{Lifetime, PhysicalPropertiesError, StorageMedium};
+use asap_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPDAGValidationError};
+use asap_types::stages::{Lifetime, PhysicalPropertiesError, StorageMedium};
+use asap_types::summary_type::{ExactKind, ExactParams, SummaryUpdate};
 use std::rc::Rc;
 
 /// Scan(t) → SummaryAgg(sum by key) → FinalizeExactAccumulator, untimed.
@@ -99,7 +99,7 @@ fn scalar_roots_export_in_batch_order_and_reference_nodes() {
         .position(|node| {
             matches!(
                 node.payload,
-                asap_types::ir::physical_export::PhysicalASAPOperatorPayload::ASAP(
+                asap_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload::ASAP(
                     ASAPOp::SummaryAgg { .. }
                 )
             )
@@ -150,9 +150,9 @@ fn scalar_roots_export_in_batch_order_and_reference_nodes() {
 /// `ScalarRef` edge to it, as cost lowering reads it once.
 #[test]
 fn a_reference_read_twice_is_one_scalar_ref_edge() {
-    use asap_types::ir::physical_export::EdgeRole;
     use asap_types::ir::scalar::ArithmeticOpKind;
     use asap_types::ir::{ExprSemantics, ProjectItem, ScalarExpr};
+    use asap_types::plan::physical_asap_dag::EdgeRole;
     let series = |metric: &str| {
         OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
             source: Source::TimeSeries {
@@ -195,9 +195,9 @@ fn a_reference_read_twice_is_one_scalar_ref_edge() {
 #[test]
 fn swapped_edge_roles_are_rejected() {
     use asap_types::ir::operator::JoinKind;
-    use asap_types::ir::physical_export::EdgeRole;
     use asap_types::ir::scalar::ScalarValue;
     use asap_types::ir::{Predicate, ScalarExpr};
+    use asap_types::plan::physical_asap_dag::EdgeRole;
     let scan = |table: &str| {
         OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
             source: Source::Table {
@@ -245,7 +245,7 @@ fn an_empty_batch_is_an_error() {
 /// Node-id-keyed bindings serialize in numeric id order.
 #[test]
 fn physical_node_ids_serialize_in_deterministic_binding_order() {
-    use asap_types::ir::physical_export::PhysicalASAPNodeId;
+    use asap_types::plan::physical_asap_dag::PhysicalASAPNodeId;
     let mut bindings = std::collections::BTreeMap::<PhysicalASAPNodeId, &str>::new();
     bindings.insert(10, "materialization-10");
     bindings.insert(2, "query-2");
@@ -259,7 +259,7 @@ fn physical_node_ids_serialize_in_deterministic_binding_order() {
 /// `(2,700,000, 3,300,000]`, and reaches 900,000 ms back.
 #[test]
 fn a_raw_data_window_ends_its_offset_before_the_evaluation() {
-    let window = asap_types::ir::materialized_view::RawDataWindow::new(
+    let window = asap_types::plan::materialized_view::RawDataWindow::new(
         Source::TimeSeries {
             metric: "latency".into(),
         },
@@ -274,11 +274,11 @@ fn a_raw_data_window_ends_its_offset_before_the_evaluation() {
 /// preserves repeated input occurrences, rather than treating edges as a set.
 #[test]
 fn high_fan_in_edges_preserve_multiplicity_without_order_dependence() {
-    use asap_types::ir::physical_export::{
+    use asap_types::ir::properties::ExecutionDataState;
+    use asap_types::plan::physical_asap_dag::{
         EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge,
         PhysicalASAPDAGNode, WindowEdgeCompatibility,
     };
-    use asap_types::ir::properties::ExecutionDataState;
     let schema = Schema::new(vec![Field::plain("value", DataType::Float64, false)]);
     let count = 20_000;
     let mut nodes: Vec<_> = (0..count)

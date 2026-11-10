@@ -72,7 +72,7 @@ use asap_frontend_common::{
     UnresolvedOp as Unresolved, UnresolvedPredicate, UnresolvedScalar as Scalar, UnresolvedSortKey,
 };
 use asap_types::ir::operator::agg_intent::{topk, AggIntent, TimeFunc};
-use asap_types::ir::operator::operator_properties::{
+use asap_types::ir::operator::arguments::{
     AtModifier, BinaryOpKind, GroupKeys, GroupSide, PromQLVectorSetOpKind, Reduction, Source,
     TimeShift, VectorGrouping, VectorMatch, VectorMatchKind,
 };

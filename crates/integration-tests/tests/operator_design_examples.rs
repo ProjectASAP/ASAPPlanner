@@ -3,9 +3,10 @@
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::scalar::ColumnRef;
+use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::schema::{DataType, Field, Schema};
-use asap_types::ir::schema::{ExactKind, ExactParams, FieldDataType, SummaryUpdate};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
+use asap_types::summary_type::{ExactKind, ExactParams, SummaryUpdate};
 use std::rc::Rc;
 
 fn catalog() -> SqlCatalog {
@@ -124,7 +125,7 @@ async fn sql_scalar_subquery_retains_its_cardinality_contract() {
         assert!(wire
             .edges
             .iter()
-            .any(|e| e.role == asap_types::ir::physical_export::EdgeRole::ScalarRef));
+            .any(|e| e.role == asap_types::plan::physical_asap_dag::EdgeRole::ScalarRef));
     }
 }
 
@@ -159,7 +160,7 @@ async fn sql_sum_example_executes_with_sql_null_semantics() {
         .find(|node| {
             matches!(
                 &node.payload,
-                asap_types::ir::physical_export::PhysicalASAPOperatorPayload::NonASAP(
+                asap_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload::NonASAP(
                     asap_types::ir::NonASAPOp::Scan { .. }
                 )
             )

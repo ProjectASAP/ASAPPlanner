@@ -4,7 +4,7 @@ use crate::values::arrow_columns::ColumnDepth;
 use crate::values::StateColumn;
 use crate::StateColumnUpdater;
 use arrow::array::{Array, BooleanArray, Float64Array, TimestampMillisecondArray, UInt32Array};
-use planner_types::ir::schema::{MergeInputRule, SummaryTypeCapability};
+use planner_types::summary_type::{MergeInputRule, SummaryTypeCapability};
 use std::num::NonZeroU32;
 
 /// What each input row adds to its item's count in a keyed summary build
@@ -24,7 +24,7 @@ pub enum RowWeight {
 /// A summary evaluation: a sketch query, or an exact evaluation with typed parameters.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SummaryEvaluation {
-    Sketch(planner_types::ir::schema::SketchStatistic),
+    Sketch(planner_types::summary_type::SketchStatistic),
     Exact(crate::summary_kernels::exact::ExactEvaluation),
 }
 
@@ -155,8 +155,8 @@ impl Operator {
             && matches!(
                 family,
                 SummaryFamilyType::ExactAggregate(
-                    planner_types::ir::schema::ExactKind::Rate
-                        | planner_types::ir::schema::ExactKind::Increase,
+                    planner_types::summary_type::ExactKind::Rate
+                        | planner_types::summary_type::ExactKind::Increase,
                     _
                 )
             )
@@ -252,7 +252,7 @@ impl Operator {
         let mut fields = input.fields.clone();
         let result_type = if matches!(
             fields[state].dtype,
-            SummaryFamilyType::ExactAggregate(planner_types::ir::schema::ExactKind::Count, _)
+            SummaryFamilyType::ExactAggregate(planner_types::summary_type::ExactKind::Count, _)
         ) || integral_count(family, &query)
         {
             DataType::Int64
@@ -265,8 +265,8 @@ impl Operator {
             && matches!(
                 fields[state].dtype,
                 SummaryFamilyType::ExactAggregate(
-                    planner_types::ir::schema::ExactKind::Min
-                        | planner_types::ir::schema::ExactKind::Max,
+                    planner_types::summary_type::ExactKind::Min
+                        | planner_types::summary_type::ExactKind::Max,
                     _
                 )
             );
@@ -284,7 +284,7 @@ impl Operator {
 /// distinct count as an integer item); a distinct count (KMV, HLL) also
 /// takes Utf8, and UnivMon Utf8 and Bool.
 fn accepts_update_type(family: &SummaryFamilyType, dtype: &DataType) -> bool {
-    use planner_types::ir::schema::{ExactKind, SketchAlgorithm as A};
+    use planner_types::summary_type::{ExactKind, SketchAlgorithm as A};
     let SummaryFamilyType::Sketch(kind) = family else {
         return *dtype == DataType::Float64
             || matches!(
@@ -309,7 +309,7 @@ impl Operator {
         let Kind::Evaluation {
             state,
             query:
-                SummaryEvaluation::Sketch(planner_types::ir::schema::SketchStatistic::Cardinality),
+                SummaryEvaluation::Sketch(planner_types::summary_type::SketchStatistic::Cardinality),
         } = &self.kind
         else {
             return Err(invalid(
@@ -329,10 +329,10 @@ impl Operator {
 /// non-integral total rather than rounding it.
 fn integral_count(family: &SummaryFamilyType, query: &SummaryEvaluation) -> bool {
     matches!(family, SummaryFamilyType::Sketch(kind)
-        if kind == &planner_types::ir::schema::SketchAlgorithm::Cms)
+        if kind == &planner_types::summary_type::SketchAlgorithm::Cms)
         && matches!(
             query,
-            SummaryEvaluation::Sketch(planner_types::ir::schema::SketchStatistic::PointCount {
+            SummaryEvaluation::Sketch(planner_types::summary_type::SketchStatistic::PointCount {
                 value: None,
                 ..
             })
@@ -1081,8 +1081,8 @@ fn evaluate_states(
         };
         if !matches!(
             evaluation.statistic,
-            planner_types::ir::schema::ExactKind::Rate
-                | planner_types::ir::schema::ExactKind::Increase
+            planner_types::summary_type::ExactKind::Rate
+                | planner_types::summary_type::ExactKind::Increase
         ) {
             return false;
         }
@@ -1134,7 +1134,8 @@ fn evaluate_states(
                     let value = summary
                         .estimate(query)
                         .map_err(|e| Error::Operator(e.to_string()))?;
-                    if integral && *query == planner_types::ir::schema::SketchStatistic::Cardinality
+                    if integral
+                        && *query == planner_types::summary_type::SketchStatistic::Cardinality
                     {
                         // A distinct count is a whole number: the estimate
                         // rounded to the nearest one.

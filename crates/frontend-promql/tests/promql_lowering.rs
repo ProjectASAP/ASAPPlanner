@@ -3,8 +3,8 @@
 use std::rc::Rc;
 use std::time::Duration;
 
+use asap_types::accuracy::AccuracyTarget;
 use asap_types::ir::operator::{AggIntent, BinaryOpKind, Reduction, Source};
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::{ArithmeticOpKind, CompareOpKind, ScalarValue};
 use asap_types::ir::{
     BinaryOperator, ExprSemantics, NonASAPOp, OperatorNode, ScalarExpr, TimeRangeKind,

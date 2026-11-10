@@ -120,8 +120,8 @@ pub(crate) fn ranked_row_projection<I: OperatorInput>(
 pub fn series_identity_item(
     schema: &crate::ir::schema::Schema,
     partitions: &[ColumnId],
-) -> crate::ir::schema::SummaryInputExpr {
-    use crate::ir::schema::SummaryInputExpr;
+) -> crate::summary_type::SummaryInputExpr {
+    use crate::summary_type::SummaryInputExpr;
     let mut items: Vec<_> = schema
         .fields
         .iter()

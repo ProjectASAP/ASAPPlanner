@@ -2,7 +2,7 @@
 //! `HyperLogLogImpl`, at a precision chosen at run time.
 use crate::{AggregateCore, KernelError};
 use asap_sketchlib::DataInput;
-use planner_types::ir::schema::SketchStatistic;
+use planner_types::summary_type::SketchStatistic;
 use registers::Registers;
 
 /// The precisions a state can be built at.

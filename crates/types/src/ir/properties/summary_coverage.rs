@@ -19,17 +19,17 @@ use std::ops::Bound;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::ir::operator::arguments::Reduction;
 use crate::ir::operator::asap::{selected_from, summary_agg_schema, ASAPOp};
 use crate::ir::operator::input::{InputOrTemporaryBuild, OperatorInput};
 use crate::ir::operator::node::{Operator, OperatorResultKind};
 use crate::ir::operator::non_asap::{NonASAPOp, TimeRangeKind};
-use crate::ir::operator::operator_properties::Reduction;
 use crate::ir::scalar::expr_ir::{CompareOpKind, ScalarValue};
 use crate::ir::scalar::{Predicate, ScalarExpr};
-use crate::ir::schema::summary_type_capability::{MergeInputRule, SummaryTypeCapability};
 use crate::ir::schema::{ColumnId, Schema};
 use crate::ir::SchemaDerivationError;
 use crate::stages::{MemoGroupAsInput, MemoGroupId};
+use crate::summary_type::{MergeInputRule, SummaryTypeCapability};
 
 /// What a summary state computes, with every lifted selection removed.
 #[derive(Debug, Clone, PartialEq)]

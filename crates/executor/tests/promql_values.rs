@@ -204,7 +204,8 @@ fn compile_exact_evaluation(
 ) -> Result<Computation, Error> {
     use asap_executor::operators::SummaryEvaluation;
     use asap_executor::summary_kernels::exact::ExactEvaluation;
-    use planner_types::ir::schema::{ExactKind, FieldDataType};
+    use planner_types::ir::schema::FieldDataType;
+    use planner_types::summary_type::ExactKind;
     let FieldDataType::ExactAggregate(statistic, _) = family else {
         return Err(Error::Invalid(
             "exact evaluation requires an exact family".into(),
@@ -523,6 +524,7 @@ fn scalar_broadcast_rejects_colliding_result_labels_after_recovery() {
 fn exact_state_evaluations_recover_and_finalize_tumbling_windows() {
     use asap_executor::factory::create_planner_accumulator;
     use planner_types::ir::schema::*;
+    use planner_types::summary_type::*;
 
     use std::sync::Arc;
     for (kind, params, expected) in [
@@ -574,6 +576,7 @@ fn exact_state_evaluations_recover_and_finalize_tumbling_windows() {
 fn recovered_exact_counter_uses_window_and_omits_insufficient_samples() {
     use asap_executor::factory::create_planner_accumulator;
     use planner_types::ir::schema::*;
+    use planner_types::summary_type::*;
 
     use std::sync::Arc;
     for (kind, params, expected) in [

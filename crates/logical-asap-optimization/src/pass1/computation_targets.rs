@@ -42,14 +42,15 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use asap_types::ir::operator::operator_properties::{Reduction, Source};
+use asap_types::ir::operator::arguments::{Reduction, Source};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::scalar::{resolve_column_ref, ColumnRef};
-use asap_types::ir::schema::{
-    ExactKind, FieldDataType, SketchAlgorithm, StatisticKind, SummaryInputExpr, SummaryUpdate,
-};
+use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{
     NonASAPOp, OperatorNode, OperatorResultKind, Predicate, QueryRoot, SchemaDerivationError,
+};
+use asap_types::summary_type::{
+    ExactKind, SketchAlgorithm, StatisticKind, SummaryInputExpr, SummaryUpdate,
 };
 use thiserror::Error;
 
@@ -815,12 +816,12 @@ pub(super) fn whole_expression_input(
 mod tests {
 
     use super::*;
-    use asap_types::ir::operator::operator_properties::{BinaryOpKind, JoinKind};
-    use asap_types::ir::properties::{AccuracyGuarantee, AccuracyTarget};
+    use asap_types::accuracy::{AccuracyGuarantee, AccuracyTarget};
+    use asap_types::ir::operator::arguments::{BinaryOpKind, JoinKind};
     use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
     use asap_types::ir::scalar::{CompareOpKind, ScalarValue};
-    use asap_types::ir::schema::{NonNegativeWeightProof, WeightDomain};
     use asap_types::ir::{BinaryOperator, ExprSemantics, Operator, ProjectItem, ScalarExpr};
+    use asap_types::summary_type::{NonNegativeWeightProof, WeightDomain};
 
     use asap_accuracy::propagation::raw_data_samples_of_metric;
 
@@ -830,9 +831,9 @@ mod tests {
         composed_guarantee, estimate_has_bound, scalar_guarantee, source_distinct_guarantee,
         QUOTIENT_OPERAND_DOMAINS,
     };
-    use asap_types::ir::properties::guarantee::{AccuracyMetric, BoundExpr, ProbabilityExpr};
+    use asap_types::accuracy::{AccuracyMetric, BoundExpr, ProbabilityExpr};
 
-    use asap_types::ir::schema::SketchStatistic;
+    use asap_types::summary_type::SketchStatistic;
     /// Approximate count keeps one exact option, its accumulator, beside the
     /// universal summary; plain exact execution is not offered.
     #[test]
@@ -861,7 +862,7 @@ mod tests {
         for choice in &choices {
             if let HowToComputeAggregateMeasure::Summary(algorithm) = choice {
                 assert!(
-                    asap_types::ir::schema::SummaryTypeCapability::of(&FieldDataType::Sketch(
+                    asap_types::summary_type::SummaryTypeCapability::of(&FieldDataType::Sketch(
                         *algorithm
                     ))
                     .answers(&total),
@@ -875,7 +876,7 @@ mod tests {
     mod guarantee_composition {
         use super::*;
         use crate::test_support::lower_promql;
-        use asap_types::ir::properties::AccuracyTarget;
+        use asap_types::accuracy::AccuracyTarget;
 
         fn with_bound(metric: AccuracyMetric, bound: f64, delta: f64) -> AccuracyGuarantee {
             AccuracyGuarantee::new(
@@ -1404,7 +1405,7 @@ mod tests {
         );
         // Per-series state ranks each series' identity, which the rows carry
         // as a column; a query over aggregated rows is planned over labels.
-        let root = asap_types::ir::schema::schema_support::with_promql_series_identity(&root)
+        let root = asap_types::ir::schema::series_identity::with_promql_series_identity(&root)
             .unwrap_or(root);
         generate_per_computation_candidates(
             &crate::stage0::memo_of_queries(
@@ -1672,7 +1673,7 @@ mod tests {
         assert_eq!(
             symbolic.spec.failure_probability,
             ProbabilityExpr::Unknown {
-                statistic: asap_accuracy::estimators::hll::classic_failure_statistic(15, 0.05, "a")
+                statistic: asap_accuracy::guarantee::hll::classic_failure_statistic(15, 0.05, "a")
             }
         );
         for (query, over) in [("a * on() b", "a join"), ("a * 2", "computed rows")] {

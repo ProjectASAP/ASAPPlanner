@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use super::asap::ASAPOp;
 use super::input::OperatorInput;
 use super::non_asap::NonASAPOp;
-use crate::ir::properties::guarantee::AccuracyGuarantee;
+use crate::accuracy::AccuracyGuarantee;
 use crate::ir::schema::Schema;
 use crate::ir::SchemaDerivationError;
 

@@ -15,15 +15,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use asap_types::ir::operator::agg_intent::AggIntent;
-use asap_types::ir::operator::operator_properties::Reduction;
+use asap_types::ir::operator::arguments::Reduction;
 use asap_types::ir::scalar::{ColumnRef, CompareOpKind, ScalarValue};
-use asap_types::ir::schema::sketch::{SketchAlgorithm, SketchStatistic};
-use asap_types::ir::schema::summary_type_capability::SummaryTypeCapability;
 use asap_types::ir::schema::{DataType, FieldDataType};
 use asap_types::ir::{
     ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorNode, Predicate, ProjectItem, QueryRoot,
     ScalarExpr,
 };
+use asap_types::summary_type::SummaryTypeCapability;
+use asap_types::summary_type::{SketchAlgorithm, SketchStatistic};
 
 use super::generate::{
     label_value, looser, tighter, OuterAggregation, OuterOp, PromqlSpec, QuerySpec, RangeFunction,
@@ -1786,7 +1786,7 @@ pub fn disjoint_copy(workload: &FuzzWorkload) -> Option<FuzzWorkload> {
 mod tests {
     use super::*;
     use crate::planner_fuzz::generate::{generated_workload, SqlSpec};
-    use asap_types::ir::properties::AccuracyTarget;
+    use asap_types::accuracy::AccuracyTarget;
 
     fn promql(spec: PromqlSpec, accuracy: AccuracyTarget) -> FuzzWorkload {
         generated_workload(

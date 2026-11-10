@@ -4,15 +4,14 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 
-use crate::ir::operator::operator_properties::{
-    BinaryOpKind, PromQLVectorSetOpKind, RelationalSetOpKind,
-};
+use crate::ir::operator::arguments::{BinaryOpKind, PromQLVectorSetOpKind, RelationalSetOpKind};
 use crate::ir::operator::{AggIntent, GroupKeys, Reduction, Source};
-use crate::ir::physical_export::PhysicalASAPOperatorPayload as Payload;
-use crate::ir::schema::{Schema, SketchStatistic};
+use crate::ir::schema::Schema;
 use crate::ir::{
     ASAPOp, NonASAPOp, Operator, OperatorNode, OperatorResultKind, QueryRoot, ScalarExpr,
 };
+use crate::plan::physical_asap_dag::PhysicalASAPOperatorPayload as Payload;
+use crate::summary_type::SketchStatistic;
 use crate::workload::{DataWorkload, PrometheusMetricType};
 
 /// A scan source's name: its PromQL metric or SQL table.
@@ -392,7 +391,7 @@ fn at_most_one_row(node: &OperatorNode) -> bool {
         Operator::NonASAP(NonASAPOp::Join {
             kind, left, right, ..
         }) => {
-            use crate::ir::operator::operator_properties::JoinKind;
+            use crate::ir::operator::arguments::JoinKind;
             match kind {
                 JoinKind::Semi | JoinKind::Anti => at_most_one_row(left),
                 JoinKind::Full => false,
@@ -475,7 +474,7 @@ pub fn source_rows_per_ms(sources: &BTreeSet<&str>, data: &DataWorkload) -> Opti
 /// declared label set never bounds values it does not describe.
 /// `producers` are each producer's output schema and unchanged columns.
 pub fn unchanged_source_columns<'a>(
-    node: &'a crate::ir::physical_export::PhysicalASAPDAGNode,
+    node: &'a crate::plan::physical_asap_dag::PhysicalASAPDAGNode,
     producers: &[(&'a Schema, &BTreeSet<&'a str>)],
 ) -> BTreeSet<&'a str> {
     let output_names = || node.output_schema.fields.iter().map(|f| f.name.as_str());
