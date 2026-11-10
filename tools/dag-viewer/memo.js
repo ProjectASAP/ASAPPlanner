@@ -165,7 +165,7 @@ function memoPhysicalGrid(doc, group, index) {
 // filled cell when a physical variant is there (green at ingestion time,
 // orange at query time), a crossed grey one when Stage 2 pruned it, an
 // empty one when there is none, a dark outline when the plan uses it.
-const MEMO_GRID = { width: 150, height: 26 };
+const MEMO_GRID = { width: 158, height: 26 };
 function memoGridImage(grid) {
   const cw = 34;
   const ch = 10;
