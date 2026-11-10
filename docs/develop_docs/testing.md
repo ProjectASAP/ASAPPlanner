@@ -15,7 +15,7 @@ planner's own costing.
 |---|---|---|---|
 | Rule unit tests | one rule over a minimal memo: the candidates, edges or prune causes it adds | a one- or two-query workload planned up to the stage under test through the production frontends and Stage 0 | each stage crate's tests |
 | Contracts | invariants of every stage's output (below) | every workload of the corpus registry | `crates/integration-tests/tests/contracts.rs` |
-| Oracles | the planner's cost or answers against a computation that does not use the planner's costing | canonical shapes and small synthetic data sets | `crates/integration-tests` |
+| Oracles | the planner's cost or answers against a computation that does not use the planner's costing | canonical shapes and small synthetic data sets | `crates/integration-tests/tests/{cost_oracle,execution_oracle}.rs` |
 | Metamorphic relations | how the cost of two related workloads must compare | `planner_fuzz` with fixed seeds | `crates/devtools/tests/planner_fuzz.rs`, the `planner_fuzz` bin |
 | Regressions | one bug stays fixed | one minimal workload per issue | next to the code the bug was in, or `crates/integration-tests` |
 | Snapshots | the full selected plan and its cost do not change unexplained | the corpus registry | `crates/devtools/tests/corpus_snapshots.rs`, [planner snapshots](planner-snapshots.md) |
@@ -79,6 +79,20 @@ The canonical cost shapes are a `Scan`, a chain built at ingestion time, a
 offset range query, o11y q21) and a `SummaryMerge` of selected windows. A
 hand-computed test states each count it uses in its doc comment (for q21:
 61 evaluations per 60 s, 5 windows of 1,000 states selected per evaluation).
+It costs the selected plan with cost inputs that charge only CPU
+operations, or only retained bytes, so each node's expected cost is a count
+times one unit; the per-operation work (one operation per row, state or
+accumulator) is the cost model's and is stated in the test, the counts are
+what the oracle checks.
+
+The execution oracle runs the plan as a runtime does: each materialized
+view (a chain) is refreshed once per window its retention keeps, in an
+ingestion run over that window's samples, then the query run reads them.
+Its synthetic data is 200 series of one gauge, one sample per second for
+30 minutes, values uniform in [0, 100) from a fixed seed; an approximate
+query is checked over all 200 values (at most δ × 200 may be off). A
+query shape the executor cannot run yet is ignored with the executor
+issue that adds it, not reshaped.
 
 ### Metamorphic relations
 
