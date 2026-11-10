@@ -271,13 +271,13 @@ class PlanRowTests(unittest.TestCase):
         """An accuracy target reads as its ε, δ, metric and scope."""
         text = lambda target: self.js.call("accuracyText", target)
         self.assertEqual(text({"max_error": 0.0, "failure_probability": 0.0, "accuracy_scope": "whole_result"}), "exact")
-        self.assertEqual(text({"max_error": 0.01, "accuracy_scope": "whole_result"}), "ε=0.01 (metric not set)")
+        self.assertEqual(text({"max_error": 0.01, "accuracy_scope": "whole_result"}), "ε=0.01 (error metric not set)")
         self.assertEqual(text({"accuracy_metric": "rank", "max_error": 0.01, "failure_probability": 0.001, "accuracy_scope": "whole_result"}), "ε=0.01, δ=0.001 (rank)")
-        self.assertEqual(self.js.call("accuracyText", {"max_error": 0.01}, "relative"), "ε=0.01 (metric not set; default relative)")
+        self.assertEqual(self.js.call("accuracyText", {"max_error": 0.01}, "relative"), "ε=0.01 (error metric not set; default relative)")
         self.assertEqual(text(None), "")
         self.assertEqual(text({"accuracy_metric": "relative", "max_error": 0.05, "failure_probability": 0.05, "accuracy_scope": "per_value"}), "ε=0.05, δ=0.05 (relative; per value)")
         self.assertEqual(text({"accuracy_metric": "relative", "max_error": 0.05, "failure_probability": 0.05, "accuracy_scope": {"groups_with_record_share_at_least": 0.05}}), "ε=0.05, δ=0.05 (relative; groups ≥ 5% of records)")
-        self.assertEqual(text({"max_error": 0.05, "accuracy_scope": {"groups_with_record_share_at_least": 0.01}}), "ε=0.05 (metric not set; groups ≥ 1% of records)")
+        self.assertEqual(text({"max_error": 0.05, "accuracy_scope": {"groups_with_record_share_at_least": 0.01}}), "ε=0.05 (error metric not set; groups ≥ 1% of records)")
 
     def test_counts_line_counts_each_stages_candidates(self):
         """The counts line counts the Pass 2 memo's candidates, the physical

@@ -165,6 +165,12 @@ tr.clickable:focus-visible td { outline: 2px solid var(--accent); outline-offset
       <div class="eyebrow">Query workload</div>
       <div class="queries" id="queries"><span class="status">Pick an example or a workload set, or open a stage document or a workload.</span></div>
     </div>
+    <section class="panel lane" aria-labelledby="lane0-title">
+      <div class="panel-head"><div><div class="eyebrow">the queries as one logical DAG</div><h2 id="lane0-title">Input</h2></div></div>
+      <div class="lane-meta" id="lane0-meta"></div>
+      <div class="zoom" data-for="cy0"><button type="button" class="btn" data-zoom="in" aria-label="Zoom in">+</button><button type="button" class="btn" data-zoom="out" aria-label="Zoom out">−</button><button type="button" class="btn" data-zoom="fit" aria-label="Fit the whole graph">⌂</button></div>
+      <div class="cy" id="cy0"></div>
+    </section>
     <section class="panel" aria-labelledby="data-title">
       <div class="panel-head"><h2 id="data-title">Data workload</h2><span class="eyebrow" id="dataArrival"></span></div>
       <div class="table-wrap" id="dataSources"><span class="status">The document declares no data workload.</span></div>
@@ -182,12 +188,6 @@ tr.clickable:focus-visible td { outline: 2px solid var(--accent); outline-offset
       <div class="toolbar"><label><span class="eyebrow">highlight query</span> <select id="queryPick" aria-label="Highlight one query's path"></select></label>
         <span class="hint-inline">Dims what the query's root does not reach. Click a node to highlight what it reads and what reads it, the background to clear.</span></div>
       <div class="lanes">
-        <section class="panel lane" aria-labelledby="lane0-title">
-          <div class="panel-head"><div><div class="eyebrow">the queries as one logical DAG</div><h2 id="lane0-title">Stage 0</h2></div></div>
-          <div class="lane-meta" id="lane0-meta"></div>
-          <div class="zoom" data-for="cy0"><button type="button" class="btn" data-zoom="in" aria-label="Zoom in">+</button><button type="button" class="btn" data-zoom="out" aria-label="Zoom out">−</button><button type="button" class="btn" data-zoom="fit" aria-label="Fit the whole graph">⌂</button></div>
-          <div class="cy" id="cy0"></div>
-        </section>
         <section class="panel lane" aria-labelledby="lane1-title">
           <div class="panel-head"><div><div class="eyebrow">Stage 3 · physical DAG with its costs</div><h2 id="lane1-title">Selected plan</h2></div></div>
           <div class="lane-meta" id="lane1-meta"></div>
@@ -203,7 +203,8 @@ tr.clickable:focus-visible td { outline: 2px solid var(--accent); outline-offset
           <div class="panel-head"><div><div class="eyebrow">Stage 0 and Stage 1 · memo after each step, with the edges and pruned candidates of each stage</div><h2 id="memoView-title">Memo</h2></div>
             <div class="toolbar"><nav class="tabs" id="memoTabs" aria-label="Memo step"></nav>
               <label class="status"><input type="checkbox" id="memoShowPruned" /> show pruned candidates</label>
-              <label class="status"><input type="checkbox" id="memoShowPhysical" checked /> show Stage 2 variants</label></div></div>
+              <label class="status"><input type="checkbox" id="memoShowPhysical" checked /> show Stage 2 variants</label>
+              <label class="status" title="Last tab only: the groups and candidates the selected plan uses"><input type="checkbox" id="memoPlanOnly" /> selected plan only</label></div></div>
           <div class="lane-meta" id="memoView-meta"></div>
           <div class="lane-meta how-to">
             <b>How to read it</b>

@@ -289,7 +289,7 @@ function validateStagePipeline(doc) {
 
 // A query's accuracy target (`AccuracyTarget` JSON: `accuracy_metric`,
 // `max_error`, `failure_probability`, `accuracy_scope`) as one line, e.g. "ε=0.01, δ=0.001
-// (rank)", "ε=0.01 (metric not set; default relative)" or "ε=0.05, δ=0.05
+// (rank)", "ε=0.01 (error metric not set; default relative)" or "ε=0.05, δ=0.05
 // (relative; groups ≥ 5% of records)"; "exact" for zero error with
 // certainty; "" for a malformed target. `defaultMetric` is the query's default
 // metric the document shows for a target without one. The scope is shown
@@ -299,7 +299,7 @@ function accuracyText(target, defaultMetric) {
   if (target.max_error === 0 && target.failure_probability === 0) return 'exact';
   const delta = target.failure_probability !== undefined && target.failure_probability !== null
     ? `, δ=${target.failure_probability}` : '';
-  const metric = target.accuracy_metric || `metric not set${defaultMetric ? `; default ${defaultMetric}` : ''}`;
+  const metric = target.accuracy_metric || `error metric not set${defaultMetric ? `; default ${defaultMetric}` : ''}`;
   const scope = scopeText(target.accuracy_scope);
   return `ε=${target.max_error}${delta} (${metric}${scope ? `; ${scope}` : ''})`;
 }

@@ -120,6 +120,14 @@ test("Pass 2's pruned candidates are marked and counted on their group", () => {
   assert.ok(!call('memoStepElements', fixture(), 1, {}).some((e) => /pruned/.test(e.classes || '')));
 });
 
+test('selected plan only leaves the plan\'s candidates and their groups, on the last step only', () => {
+  const elements = call('memoStepElements', fixture(), PASS2, { selectedOnly: true });
+  assert.deepEqual(nodesOf(elements).map((e) => e.data.id).sort(), ['g0', 'g0c0', 'g1', 'g1c0', 'g2', 'g2c1', 'g3', 'g3c5', 'g4', 'g4c0']);
+  assert.ok(edgesOf(elements).every((e) => !/g[56]/.test(e.data.target)));
+  // Earlier steps have no plan to filter by.
+  assert.equal(call('memoStepElements', fixture(), 1, { selectedOnly: true }).length, call('memoStepElements', fixture(), 1, {}).length);
+});
+
 test('hiding pruned candidates leaves out them, groups with none left, and the edges into those groups', () => {
   const memo = fixture();
   memo.steps[PASS2].groups[4].candidates[0].pruned = true;

@@ -32,7 +32,7 @@ To run it, see [RUNNING.md](RUNNING.md).
   server, the rows say they need it. `#workload-sets` in the URL opens the
   section.
 - **Planner inputs** (blue bar), what the planner was given:
-  - **Query workload** with each query's accuracy (`metric not set` when
+  - **Query workload** with each query's accuracy (`error metric not set` when
     the workload names no error metric), latency, recurrence,
     predictability and range evaluation;
   - **Data workload**: the arrival and one row per declared source with
@@ -50,8 +50,8 @@ To run it, see [RUNNING.md](RUNNING.md).
   Stage 3 pruned) and a line with Stage 3's outcome (plan selected, or why
   not), why Stage 1 or Stage 2 failed when it did, the selection's
   warnings, and the search with its MILP's size and times.
-- **Two lanes**, stacked top to bottom so each is as wide as the page:
-  Stage 0 and Stage 3's plan, with each plan node's timing (also its fill:
+- **Two lanes**, each as wide as the page: **Input**, the queries as one
+  logical DAG (Stage 0's output, drawn with the inputs), and Stage 3's plan, with each plan node's timing (also its fill:
   green at ingestion time, orange at query time) and Stage 3 cost (`× n`
   when a node that is not materialized is computed once per consumer).
   Each lane is the whole workload's DAG, so a node shared by several queries
@@ -76,7 +76,9 @@ To run it, see [RUNNING.md](RUNNING.md).
   Pass 2 pruned) and the queries it is the root of; its candidates sit
   inside it, bordered by origin, marked `✚ new` when the step added them
   and `✗ pruned` (dashed) when Pass 2 pruned them; those (and a group left
-  with none) are hidden until **show pruned candidates** is ticked. A group with more than
+  with none) are hidden until **show pruned candidates** is ticked; on the
+  last tab, **selected plan only** leaves just the candidates the plan uses
+  and their groups. A group with more than
   12 candidates is split into counts by its first dimension that varies:
   origin, sketch family, each θ field (e.g. `k`, `depth`, `width`), then
   tumbling-window width. Clicking a count drills into it, splitting again

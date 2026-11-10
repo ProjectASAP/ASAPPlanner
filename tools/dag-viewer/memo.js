@@ -385,7 +385,7 @@ function memoGroupDrill(candidates, state, collapseAbove) {
 // query ids). The selected plan's candidates are marked at the last step
 // only; Pass 2's eliminated candidates are marked `pruned`.
 function memoStepElements(memo, s, options) {
-  const { drill = {}, collapseAbove = MEMO_COLLAPSE_ABOVE, queryIds = [], hidePruned = false, physical = null } = options || {};
+  const { drill = {}, collapseAbove = MEMO_COLLAPSE_ABOVE, queryIds = [], hidePruned = false, physical = null, selectedOnly = false } = options || {};
   // With `physical` (the document, at the Pass 2 step), each candidate shows
   // its Stage 2 variants (memoPhysicalGrid) under its label.
   const itemHeight = MEMO_ITEM.height + (physical ? MEMO_GRID.height + 4 : 0);
@@ -397,9 +397,12 @@ function memoStepElements(memo, s, options) {
   const nodes = [];
   const edges = [];
   const edgeIds = new Set();
-  // With `hidePruned`, Pass 2's pruned candidates are left out, and so is a
-  // group whose candidates were all pruned, with the edges into it.
-  const shownOf = (group) => (hidePruned ? group.candidates.filter((c) => !c.pruned) : group.candidates);
+  // With `hidePruned`, Pass 2's pruned candidates are left out; with
+  // `selectedOnly` (last step, with a plan), every candidate the plan does
+  // not use. A group left with none is left out, with the edges into it.
+  const planOnly = selectedOnly && last && !!memo.selected_candidates;
+  const shownOf = (group) => group.candidates.filter((c) => (!hidePruned || !c.pruned)
+    && (!planOnly || (selected[String(group.id)] || []).includes(c.index)));
   const hidden = new Set(step.groups.filter((g) => g.candidates.length && !shownOf(g).length).map((g) => g.id));
   const edge = (source, child, chosen, queries) => {
     if (hidden.has(child)) return;
@@ -587,7 +590,8 @@ function memoViewController() {
   function draw() {
     if (cy) { cy.destroy(); cy = null; }
     elements = memoStepElements(memo, stepIndex, { drill: drill[stepIndex], queryIds, hidePruned: !($('memoShowPruned') || {}).checked,
-      physical: memo.steps[stepIndex].step === 'pass2' && doc.stage2_physical_asap_optimization && ($('memoShowPhysical') || {}).checked ? doc : null });
+      physical: memo.steps[stepIndex].step === 'pass2' && doc.stage2_physical_asap_optimization && ($('memoShowPhysical') || {}).checked ? doc : null,
+      selectedOnly: !!($('memoPlanOnly') || {}).checked });
     cy = cytoscape({
       container: $('cyMemo'), elements, style: style(), layout: { name: 'preset', fit: true, padding: 16 },
       wheelSensitivity: 0.25, minZoom: 0.05, maxZoom: 2.5, boxSelectionEnabled: false,
@@ -718,7 +722,7 @@ function memoViewController() {
       <details><summary>Candidate operator (JSON)</summary><pre>${esc(JSON.stringify(candidate.operator, null, 2))}</pre></details>`;
   }
 
-  ['memoShowPruned', 'memoShowPhysical'].forEach((id) => { if (typeof document !== 'undefined' && $(id)) $(id).addEventListener('change', () => { if (memo) draw(); }); });
+  ['memoShowPruned', 'memoShowPhysical', 'memoPlanOnly'].forEach((id) => { if (typeof document !== 'undefined' && $(id)) $(id).addEventListener('change', () => { if (memo) draw(); }); });
 
   function selectStep(i) {
     stepIndex = i;
