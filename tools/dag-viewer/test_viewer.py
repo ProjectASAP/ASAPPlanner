@@ -691,7 +691,7 @@ function __el(id) {
     __on: {}, addEventListener(type, fn) { this.__on[type] = fn; }, setAttribute() {}, click() {}, querySelectorAll() { return []; } };
   return __els[id];
 }
-var document = { getElementById: __el, documentElement: {}, body: { classList: { add() {}, remove() {} } }, addEventListener() {} };
+var document = { getElementById: __el, querySelectorAll() { return []; }, documentElement: {}, body: { classList: { add() {}, remove() {} } }, addEventListener() {} };
 var window = { matchMedia() { return { addEventListener() {} }; } };
 var location = { hash: '', search: '', pathname: '/' };
 var history = { replaceState(a, b, h) { location.hash = h; } };

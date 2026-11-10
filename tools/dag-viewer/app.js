@@ -54,13 +54,14 @@
     const cy = cytoscape({
       container: $('cy' + i), elements, style: style(),
       layout: { name: window.cytoscapeDagre ? 'dagre' : 'breadthfirst', rankDir: 'BT', nodeSep: 18, rankSep: 34, padding: 14, directed: true },
-      wheelSensitivity: 0.25, minZoom: 0.2, maxZoom: 1.3, boxSelectionEnabled: false,
+      wheelSensitivity: 0.25, minZoom: 0.2, maxZoom: 2.5, boxSelectionEnabled: false,
     });
     cy.on('tap', 'node', (e) => tapNode(e.target.data(), i));
     cy.on('tap', 'edge', (e) => showEdge(e.target.data(), i));
     // A tap on the background clears a node's highlight back to the query's.
     cy.on('tap', (e) => { if (e.target === cy || typeof e.target.isNode !== 'function') dim(i, queryKeep(i)); });
     cys[i] = cy;
+    fitGraph(cy);
     dim(i, queryKeep(i));
   }
 
@@ -343,6 +344,15 @@
   try { if (localStorage.getItem('dagViewerTheme') === 'dark') setTheme(true); } catch (e) { /* storage blocked */ }
   $('themeToggle').addEventListener('click', () => setTheme(document.documentElement.dataset.theme !== 'dark'));
   $('details').innerHTML = HINT;
+
+  // Zoom in, zoom out and fit buttons over each graph.
+  const graphOf = { cy0: () => cys[0], cy1: () => cys[1], cyMemo: () => window.MemoView && window.MemoView.graph() };
+  document.querySelectorAll('.zoom').forEach((bar) => bar.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
+    const cy = graphOf[bar.dataset.for]();
+    if (!cy) return;
+    if (b.dataset.zoom === 'fit') { fitGraph(cy); return; }
+    cy.zoom({ level: cy.zoom() * (b.dataset.zoom === 'in' ? 1.3 : 1 / 1.3), renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 } });
+  })));
 
   window.StageViewer = { planWorkload };
 

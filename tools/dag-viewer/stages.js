@@ -764,3 +764,11 @@ function planningWorkloadQueries(workload) {
 function isPlanningWorkload(value) {
   return !!value && typeof value === 'object' && !isStagePipelineDocument(value) && !!value.query_workload && typeof value.query_workload === 'object';
 }
+
+// Fits graph `cy` in its box, at most at 1.3× so that a small graph is not
+// blown up; the zoom buttons' home and the first drawing use it.
+function fitGraph(cy) {
+  if (!cy || typeof cy.fit !== 'function') return;
+  cy.fit(undefined, 16);
+  if (cy.zoom() > 1.3) { cy.zoom(1.3); cy.center(); }
+}

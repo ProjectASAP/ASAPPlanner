@@ -86,6 +86,10 @@ select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .lane-meta { padding: 6px 12px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--line); min-height: 30px; overflow-wrap: anywhere; }
 .lane-meta b { color: var(--fg); font-family: var(--font-mono); font-weight: 500; font-variant-numeric: tabular-nums; }
 .cy { height: 560px; width: 100%; }
+.how-to ul { margin: 4px 0 0; padding-left: 18px; display: grid; gap: 2px; }
+.how-to b { font-family: var(--font-body); font-weight: 600; }
+.zoom { position: relative; height: 0; z-index: 2; display: flex; justify-content: flex-end; gap: 4px; padding-right: 8px; }
+.zoom .btn { margin-top: 8px; width: 30px; height: 28px; padding: 0; }
 .legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--muted); padding: 2px 2px; }
 .swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -2px; margin-right: 5px; border: 1.5px solid; }
 .details { padding: 12px; display: grid; gap: 10px; }
@@ -181,11 +185,13 @@ tr.clickable:focus-visible td { outline: 2px solid var(--accent); outline-offset
         <section class="panel lane" aria-labelledby="lane0-title">
           <div class="panel-head"><div><div class="eyebrow">the queries as one logical DAG</div><h2 id="lane0-title">Stage 0</h2></div></div>
           <div class="lane-meta" id="lane0-meta"></div>
+          <div class="zoom" data-for="cy0"><button type="button" class="btn" data-zoom="in" aria-label="Zoom in">+</button><button type="button" class="btn" data-zoom="out" aria-label="Zoom out">−</button><button type="button" class="btn" data-zoom="fit" aria-label="Fit the whole graph">⌂</button></div>
           <div class="cy" id="cy0"></div>
         </section>
         <section class="panel lane" aria-labelledby="lane1-title">
           <div class="panel-head"><div><div class="eyebrow">Stage 3 · physical DAG with its costs</div><h2 id="lane1-title">Selected plan</h2></div></div>
           <div class="lane-meta" id="lane1-meta"></div>
+          <div class="zoom" data-for="cy1"><button type="button" class="btn" data-zoom="in" aria-label="Zoom in">+</button><button type="button" class="btn" data-zoom="out" aria-label="Zoom out">−</button><button type="button" class="btn" data-zoom="fit" aria-label="Fit the whole graph">⌂</button></div>
           <div class="cy" id="cy1"></div>
         </section>
         <section class="panel" aria-labelledby="views-title">
@@ -199,7 +205,17 @@ tr.clickable:focus-visible td { outline: 2px solid var(--accent); outline-offset
               <label class="status"><input type="checkbox" id="memoShowPruned" /> show pruned candidates</label>
               <label class="status"><input type="checkbox" id="memoShowPhysical" checked /> show Stage 2 variants</label></div></div>
           <div class="lane-meta" id="memoView-meta"></div>
-          <div class="lane-meta"><b>How to read it:</b> a big box is a <b>group</b>, one sub-result (an e-class); the small boxes in it are its <b>candidates</b>, interchangeable ways to compute that result (e-nodes), bordered by origin; an <b>arrow</b> points to the group a candidate reads as input, drawn once from the group when all its candidates read the same groups. On the Pass 2 tab (with <b>show Stage 2 variants</b>), the grid in a candidate is Stage 2's physical variants of it: rows when it is computed (ingest, query), columns how long it is kept (not kept, one run, across runs); filled when there is one (green ingest, orange query), crossed when Stage 2 pruned it, outlined dark when the plan uses it.</div>
+          <div class="lane-meta how-to">
+            <b>How to read it</b>
+            <ul>
+              <li><b>Big box</b> (a group): one intermediate result, e.g. "the p50 of the last 10 minutes".</li>
+              <li><b>Small boxes inside</b> (candidates): different ways to compute that same result. Border colour shows which rule added it.</li>
+              <li><b>Arrow</b>: the candidate reads its input from the group it points to.</li>
+              <li><b>Green</b>: the selected plan uses it. <b>Red dashed</b>: pruned (shown only with "show pruned candidates").</li>
+              <li><b>Small grid</b> (Pass 2 tab): how Stage 2 can run the candidate. Rows: computed at ingest or at query time. Columns: result not kept, kept for one query run, kept across runs. Filled = possible, crossed = ruled out, dark outline = used by the plan.</li>
+            </ul>
+          </div>
+          <div class="zoom" data-for="cyMemo"><button type="button" class="btn" data-zoom="in" aria-label="Zoom in">+</button><button type="button" class="btn" data-zoom="out" aria-label="Zoom out">−</button><button type="button" class="btn" data-zoom="fit" aria-label="Fit the whole graph">⌂</button></div>
           <div class="cy" id="cyMemo"></div>
         </section>
       </div>

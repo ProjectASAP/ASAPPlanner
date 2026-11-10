@@ -592,6 +592,7 @@ function memoViewController() {
       container: $('cyMemo'), elements, style: style(), layout: { name: 'preset', fit: true, padding: 16 },
       wheelSensitivity: 0.25, minZoom: 0.05, maxZoom: 2.5, boxSelectionEnabled: false,
     });
+    fitGraph(cy);
     cy.on('tap', 'node', (e) => tap(e.target.data()));
     cy.on('tap', (e) => { if (e.target === cy || typeof e.target.isNode !== 'function') $('details').innerHTML = HINT; });
     dim();
@@ -740,7 +741,7 @@ function memoViewController() {
   function highlightQuery(id) { highlighted = id; dim(); }
   function restyle() { if (cy) cy.style(style()); }
 
-  return { show, highlightQuery, restyle, selectStep };
+  return { show, highlightQuery, restyle, selectStep, graph: () => cy };
 }
 
 if (typeof window !== 'undefined' && typeof document !== 'undefined' && document.getElementById) window.MemoView = memoViewController();

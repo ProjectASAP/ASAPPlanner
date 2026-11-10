@@ -106,6 +106,8 @@ To run it, see [RUNNING.md](RUNNING.md).
   it Stage 2 and Stage 3 pruned.
 - **Theme**: light by default; **Dark theme** (top right) switches it and is remembered
   in the browser.
+- **Zoom**: each graph has `+`, `−` and `⌂` (fit the whole graph) buttons
+  in its top right corner; a small graph is drawn at most at 1.3×.
 - **Details**: click a node for its operator, the queries reaching it,
   timing, lifetime, output schema, guarantee and Stage 3 cost; click
   an edge for its schema and data state.
