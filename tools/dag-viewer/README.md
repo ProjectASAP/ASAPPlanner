@@ -82,7 +82,11 @@ To run it, see [RUNNING.md](RUNNING.md).
   back one level, and the group's details offer the other varying
   dimensions to split by instead. An arrow goes from a candidate (or count) to
   each group it reads, or once from the group when all its candidates read the
-  same groups; a line above the drawing says how to read it. Each candidate box shows its parameters θ. On the last
+  same groups; a line above the drawing says how to read it. Each candidate box shows its parameters θ and, on the Pass 2 tab, a grid of
+  its Stage 2 physical variants: rows by timing (ingest, query), columns by
+  lifetime (not kept, one run, across runs), filled green or orange when one
+  is there, crossed when Stage 2 pruned it, outlined dark when the plan uses
+  it; the candidate's details show the same grid with the `C<id>`s. On the last
   tab the selected plan's candidates are filled green with `✓ selected` (a
   group may have several, one per execution context). Clicking a group
   shows its operator, children, parents, queries, its candidates with θ,

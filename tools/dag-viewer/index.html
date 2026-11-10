@@ -110,6 +110,11 @@ pre { font-family: var(--font-mono); font-size: 12px; background: var(--panel-2)
 footer { color: var(--muted); font-size: 12px; max-width: 100ch; }
 @media (max-width: 820px) { .main { grid-template-columns: minmax(0, 1fr); } .rank-panel { position: static; } .rank { max-height: 340px; } .cy { height: 460px; } }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+.physical-grid { border-collapse: collapse; margin: 4px 0 8px; font-size: 12px; }
+.physical-grid th, .physical-grid td { border: 1px solid var(--line); padding: 2px 6px; text-align: left; font-weight: 500; }
+.physical-grid td.ingestion_time { background: var(--time-ingest); }
+.physical-grid td.query_time { background: var(--time-query); }
+.physical-grid td.selected { outline: 2px solid var(--ok); outline-offset: -2px; }
 .title-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .btn { font: inherit; font-size: 13px; padding: 5px 11px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); cursor: pointer; }
@@ -195,7 +200,7 @@ tr.clickable:focus-visible td { outline: 2px solid var(--accent); outline-offset
             <div class="toolbar"><nav class="tabs" id="memoTabs" aria-label="Memo step"></nav>
               <label class="status"><input type="checkbox" id="memoShowPruned" /> show pruned candidates</label></div></div>
           <div class="lane-meta" id="memoView-meta"></div>
-          <div class="lane-meta"><b>How to read it:</b> a big box is a <b>group</b>, one sub-result (an e-class); the small boxes in it are its <b>candidates</b>, interchangeable ways to compute that result (e-nodes), bordered by origin; an <b>arrow</b> points to the group a candidate reads as input, drawn once from the group when all its candidates read the same groups.</div>
+          <div class="lane-meta"><b>How to read it:</b> a big box is a <b>group</b>, one sub-result (an e-class); the small boxes in it are its <b>candidates</b>, interchangeable ways to compute that result (e-nodes), bordered by origin; an <b>arrow</b> points to the group a candidate reads as input, drawn once from the group when all its candidates read the same groups. On the Pass 2 tab, the grid in a candidate is Stage 2's physical variants of it: rows when it is computed (ingest, query), columns how long it is kept (not kept, one run, across runs); filled when there is one (green ingest, orange query), crossed when Stage 2 pruned it, outlined dark when the plan uses it.</div>
           <div class="cy" id="cyMemo"></div>
         </section>
       </div>

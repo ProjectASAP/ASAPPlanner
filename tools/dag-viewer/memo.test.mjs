@@ -215,6 +215,21 @@ test("Pass 2's logical edges into a candidate: each producer of the input group,
   assert.equal(input.edges[5], '✓ #5');
 });
 
+test("a candidate's physical variants as a timing × lifetime grid: which exist, which Stage 2 pruned, which the plan uses", () => {
+  const cell = (ids, pruned, selected) => ({ ids, pruned, selected });
+  const none = cell([], false, false);
+  assert.deepEqual(call('memoPhysicalGrid', fixtureDoc(), 3, 5), [[none, none, none], [cell([12], false, true), cell([13], false, false), cell([], true, false)]]);
+  // The Scan: both timings; the plan reads it at query time, not kept.
+  assert.deepEqual(call('memoPhysicalGrid', fixtureDoc(), 0, 0), [[cell([2], false, false), none, cell([3], false, false)], [cell([0], false, true), cell([1], false, false), cell([], true, false)]]);
+  assert.equal(call('memoPhysicalGrid', { memo: fixture() }, 0, 0), null);
+  // Drawn under each kept candidate's label with `physical`, not under a pruned one.
+  const elements = call('memoStepElements', fixture(), PASS2, { physical: fixtureDoc() });
+  assert.match(byId(elements, 'g3c5').data.grid, /^data:image\/svg\+xml;utf8,/);
+  assert.match(byId(elements, 'g3c5').classes, /withGrid/);
+  assert.equal(byId(elements, 'g3c0').data.grid, undefined);
+  assert.ok(byId(elements, 'g3c5').data.h > byId(call('memoStepElements', fixture(), PASS2, {}), 'g3c5').data.h);
+});
+
 test("a candidate's physical candidates list each input's physical edges with α^phys, the selected one marked", () => {
   const doc = fixtureDoc();
   const physical = call('memoPhysicalCandidates', doc, 4, 0);
