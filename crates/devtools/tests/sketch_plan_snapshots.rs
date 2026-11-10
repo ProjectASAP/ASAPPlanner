@@ -9,7 +9,8 @@
 //! sizes, sharing, timing, lifetime or cost shows up as a snapshot
 //! diff.
 //!
-//! `tests/sketch_plan_snapshots/manifest.json` lists each workload by id:
+//! `tests/sketch_plan_snapshots/manifest.json` lists each workload by id
+//! (read by `asap_devtools::corpus_registry::sketch_plans`):
 //! its `workload` file relative to the repository root, SQL `tables`,
 //! `deployment` (the `asap_planner` arguments of its deployment
 //! capabilities and cost inputs, files in `deployments/`), and whether
@@ -26,44 +27,12 @@ use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
-use super::{asap_planner, first_difference, first_differing_path, plan_snapshot, rounded};
+use asap_devtools::corpus_registry;
 
-fn repository_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
+use super::{asap_planner, first_difference, first_differing_path, plan_snapshot, rounded};
 
 fn snapshots_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/sketch_plan_snapshots")
-}
-
-/// The `asap_planner` arguments for `entry` under `manifest`'s deployments.
-fn arguments(manifest: &Value, entry: &Value) -> Vec<String> {
-    let path = |key: &str| repository_root().join(entry[key].as_str().unwrap());
-    let mut args = Vec::new();
-    args.extend([
-        "--workload".to_owned(),
-        path("workload").display().to_string(),
-    ]);
-    if entry.get("tables").is_some() {
-        let tables: Vec<Value> =
-            serde_json::from_str(&std::fs::read_to_string(path("tables")).unwrap()).unwrap();
-        for table in tables {
-            args.extend(["--sql-catalog-table".to_owned(), table.to_string()]);
-        }
-    }
-    let deployment = entry["deployment"].as_str().unwrap();
-    let deployment: Vec<String> =
-        serde_json::from_value(manifest["deployments"][deployment].clone())
-            .unwrap_or_else(|_| panic!("{entry}: unknown deployment {deployment}"));
-    args.extend(deployment);
-    match entry["accuracy_guarantees"].as_str() {
-        None | Some("enforced") => {}
-        Some("ignored") => args.push("--ignore-accuracy-guarantees".to_owned()),
-        Some(other) => {
-            panic!("{entry}: accuracy_guarantees must be enforced or ignored, not {other}")
-        }
-    }
-    args
 }
 
 /// The stable part of an `asap_planner` document: every query's text and
@@ -97,10 +66,12 @@ fn sketch_plans_match_snapshots() {
         std::env::temp_dir().join(format!("sketch_plan_snapshots_{}", std::process::id()));
     std::fs::create_dir_all(&scratch).unwrap();
     let dir = snapshots_dir();
-    let manifest: Value =
-        serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
-    let entries = manifest["workloads"].as_array().unwrap();
-    let ids: Vec<&str> = entries.iter().map(|e| e["id"].as_str().unwrap()).collect();
+    // The registry's sketch plan workloads, read from `manifest.json`.
+    let workloads = corpus_registry::sketch_plans().unwrap();
+    let ids: Vec<&str> = workloads
+        .iter()
+        .map(|w| w.id.strip_prefix("sketch_plans/").unwrap())
+        .collect();
     let mut failures = Vec::new();
 
     // A snapshot whose workload left the manifest would otherwise go stale.
@@ -113,9 +84,8 @@ fn sketch_plans_match_snapshots() {
         }
     }
 
-    for entry in entries {
-        let id = entry["id"].as_str().unwrap();
-        let document = asap_planner(&arguments(&manifest, entry), &scratch);
+    for (workload, id) in workloads.iter().zip(&ids) {
+        let document = asap_planner(&workload.asap_planner_args(&scratch).unwrap(), &scratch);
         let actual_text = serde_json::to_string_pretty(&snapshot_of(&document)).unwrap() + "\n";
         let path = dir.join(format!("{id}.json"));
         if update {
@@ -158,27 +128,38 @@ fn sketch_plans_match_snapshots() {
     );
 }
 
-/// Each manifest entry names a known deployment and an existing input, and
-/// builds its arguments.
+/// Each manifest entry loads into the registry with its deployment's cost
+/// inputs and capabilities and its accuracy setting.
 #[test]
-fn manifest_entries_build_their_arguments() {
+fn manifest_entries_load_with_their_deployments() {
     let manifest: Value = serde_json::from_str(
         &std::fs::read_to_string(snapshots_dir().join("manifest.json")).unwrap(),
     )
     .unwrap();
-    for entry in manifest["workloads"].as_array().unwrap() {
-        for key in ["workload", "tables"] {
-            if let Some(path) = entry[key].as_str() {
-                assert!(repository_root().join(path).is_file(), "{entry}: no {path}");
-            }
-        }
-        let args = arguments(&manifest, entry);
-        for path in args.iter().skip(2).filter(|arg| arg.ends_with(".json")) {
-            assert!(repository_root().join(path).is_file(), "{entry}: no {path}");
-        }
+    let entries = manifest["workloads"].as_array().unwrap();
+    let workloads = corpus_registry::sketch_plans().unwrap();
+    assert_eq!(workloads.len(), entries.len());
+    for (entry, workload) in entries.iter().zip(&workloads) {
         assert_eq!(
-            args.iter().any(|a| a == "--ignore-accuracy-guarantees"),
+            workload.id,
+            format!("sketch_plans/{}", entry["id"].as_str().unwrap())
+        );
+        assert_eq!(
+            workload.ignore_accuracy_guarantees,
             entry["accuracy_guarantees"] == json!("ignored")
+        );
+        // Both deployments keep no query-time results; only `raw_retained` keeps raw data.
+        assert_eq!(
+            workload.deployment_capabilities.raw_data_retained,
+            entry["deployment"] == json!("raw_retained"),
+            "{}",
+            workload.id
+        );
+        assert_ne!(
+            workload.cost_inputs,
+            asap_cost::CostInputs::default(),
+            "{}",
+            workload.id
         );
     }
 }

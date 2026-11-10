@@ -12,6 +12,8 @@
 //! only) or [`asap_frontend_sql`] (DataFusion only) — so it never compiles the
 //! other's parser.
 //!
+//! [`corpus_registry`] lists every in-repo workload the contracts,
+//! snapshots and oracles plan, and plans one through the production path.
 //! [`planning_stages`] and [`planner_layering_examples`] hold the one
 //! pipeline and the #509 example workloads that `asap_planner` and the
 //! planner-layering acceptance tests share; [`candidate_labels`] names the
@@ -23,6 +25,7 @@
 
 pub mod candidate_labels;
 pub mod corpora;
+pub mod corpus_registry;
 pub mod planner_fuzz;
 pub mod planner_layering_examples;
 pub mod planning_stages;

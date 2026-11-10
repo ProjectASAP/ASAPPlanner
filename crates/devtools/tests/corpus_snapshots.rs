@@ -5,9 +5,10 @@
 //! with the committed one, and any change fails until the snapshot is
 //! regenerated and the change explained in the PR.
 //!
-//! Each `tests/corpus_snapshots/<corpus>/corpus.json` declares the shared
-//! planning inputs and the queries by stable id; `<id>.json` beside it is
-//! that query's snapshot. Regenerate with
+//! `tests/corpus_snapshots/o11y_bench/corpus.json` declares the shared
+//! planning inputs and the queries by stable id; the corpus registry
+//! (`asap_devtools::corpus_registry::o11y_bench`) reads it, one workload per
+//! query, and `<id>.json` beside it is that query's snapshot. Regenerate with
 //! `UPDATE_SNAPSHOTS=1 cargo test --release -p asap-devtools --test corpus_snapshots -- --ignored`.
 //!
 //! Each query is planned by `asap_planner --run-until stage3`: one exact
@@ -26,6 +27,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use asap_devtools::corpus_registry;
 use serde_json::{json, Map, Value};
 
 #[path = "sketch_plan_snapshots.rs"]
@@ -38,28 +40,6 @@ static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn corpora_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus_snapshots")
-}
-
-/// `query`'s one-query workload under `corpus`'s shared inputs.
-fn workload(corpus: &Value, query: &str) -> Value {
-    let mut entry = corpus["query_workload"]["repeating_query"].clone();
-    entry["query"] = json!(query);
-    json!({
-        "query_workload": {
-            "language": corpus["query_workload"]["language"],
-            "repeating_queries": [entry],
-        },
-        "data_workload": corpus["data_workload"],
-    })
-}
-
-/// Runs `asap_planner` on `workload`; panics (a planner crash) on failure.
-fn plan(workload: &Value, args: &[String], scratch: &Path) -> Value {
-    let input = scratch.join("workload.json");
-    std::fs::write(&input, workload.to_string()).unwrap();
-    let mut input_args = vec!["--workload".to_owned(), input.display().to_string()];
-    input_args.extend_from_slice(args);
-    asap_planner(&input_args, scratch)
 }
 
 /// Runs `asap_planner --run-until stage3 --format json` with `args`, which
@@ -216,67 +196,49 @@ fn corpus_plans_match_snapshots() {
     std::fs::create_dir_all(&scratch).unwrap();
     let mut failures = Vec::new();
 
-    let mut corpora: Vec<_> = std::fs::read_dir(corpora_dir())
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
+    // The registry's o11y benchmark workloads, one per checked query.
+    let name = "o11y_bench";
+    let dir = corpora_dir().join(name);
+    let _ = std::fs::remove_dir_all(regenerated.join(name));
+    let workloads = corpus_registry::o11y_bench().unwrap();
+    let ids: Vec<&str> = workloads
+        .iter()
+        .map(|w| w.id.strip_prefix("o11y_bench/").unwrap())
         .collect();
-    corpora.sort();
-    for dir in corpora {
-        let name = dir.file_name().unwrap().to_string_lossy().into_owned();
-        let _ = std::fs::remove_dir_all(regenerated.join(&name));
-        let corpus: Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.join("corpus.json")).unwrap())
-                .unwrap();
-        let args: Vec<String> =
-            serde_json::from_value(corpus["asap_planner_args"].clone()).unwrap();
-        // A query with a `skip_reason` is not planned.
-        let queries: Vec<&Value> = corpus["queries"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|q| q.get("skip_reason").is_none())
-            .collect();
-        let ids: Vec<&str> = queries.iter().map(|q| q["id"].as_str().unwrap()).collect();
 
-        // A snapshot whose query left the manifest, or became known-slow,
-        // would otherwise go stale unseen.
-        for entry in std::fs::read_dir(&dir).unwrap() {
-            let file = entry.unwrap().file_name().to_string_lossy().into_owned();
-            if let Some(id) = file.strip_suffix(".json") {
-                if id != "corpus" && !ids.contains(&id) {
-                    failures.push(format!("{name}/{file}: no checked query with id {id}"));
-                }
+    // A snapshot whose query left the manifest, or became known-slow,
+    // would otherwise go stale unseen.
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let file = entry.unwrap().file_name().to_string_lossy().into_owned();
+        if let Some(id) = file.strip_suffix(".json") {
+            if id != "corpus" && !ids.contains(&id) {
+                failures.push(format!("{name}/{file}: no checked query with id {id}"));
             }
         }
+    }
 
-        for query in queries {
-            let id = query["id"].as_str().unwrap();
-            let document = plan(
-                &workload(&corpus, query["query"].as_str().unwrap()),
-                &args,
-                &scratch,
-            );
-            let actual = serde_json::to_string_pretty(&snapshot_of(&document)).unwrap() + "\n";
-            let path = dir.join(format!("{id}.json"));
-            if update {
-                std::fs::write(&path, &actual).unwrap();
-                continue;
-            }
-            let expected = std::fs::read_to_string(&path).unwrap_or_default();
-            if expected != actual {
-                let out = regenerated.join(&name);
-                std::fs::create_dir_all(&out).unwrap();
-                std::fs::write(out.join(format!("{id}.json")), &actual).unwrap();
-                std::fs::write(
-                    out.join(format!("{id}.document.json")),
-                    serde_json::to_string_pretty(&document).unwrap(),
-                )
-                .unwrap();
-                failures.push(format!(
-                    "{name}/{id}: plan changed at {}",
-                    first_difference(&expected, &actual)
-                ));
-            }
+    for (workload, id) in workloads.iter().zip(&ids) {
+        let document = asap_planner(&workload.asap_planner_args(&scratch).unwrap(), &scratch);
+        let actual = serde_json::to_string_pretty(&snapshot_of(&document)).unwrap() + "\n";
+        let path = dir.join(format!("{id}.json"));
+        if update {
+            std::fs::write(&path, &actual).unwrap();
+            continue;
+        }
+        let expected = std::fs::read_to_string(&path).unwrap_or_default();
+        if expected != actual {
+            let out = regenerated.join(name);
+            std::fs::create_dir_all(&out).unwrap();
+            std::fs::write(out.join(format!("{id}.json")), &actual).unwrap();
+            std::fs::write(
+                out.join(format!("{id}.document.json")),
+                serde_json::to_string_pretty(&document).unwrap(),
+            )
+            .unwrap();
+            failures.push(format!(
+                "{name}/{id}: plan changed at {}",
+                first_difference(&expected, &actual)
+            ));
         }
     }
     std::fs::remove_dir_all(&scratch).unwrap();
