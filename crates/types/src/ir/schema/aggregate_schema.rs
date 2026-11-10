@@ -318,6 +318,101 @@ fn without_output_schema(
 mod tests {
     use super::*;
 
+    /// `[ts, value, job, host]`, the time series schema the layout tests read.
+    fn series() -> Schema {
+        Schema::with_time_index(
+            vec![
+                col("ts", DataType::Timestamp, false),
+                col("value", DataType::Float64, false),
+                col("job", DataType::Utf8, false),
+                col("host", DataType::Utf8, false),
+            ],
+            0,
+            vec![],
+        )
+    }
+
+    /// Each output column's source, and one source per column of
+    /// `aggregate_output_schema`'s output.
+    fn columns(reduction: Reduction, measures: &[AggIntent]) -> Vec<OutputColumnSource> {
+        let sources = aggregate_output_columns(&series(), &reduction, measures).unwrap();
+        let schema = aggregate_output_schema(&series(), &reduction, measures, &[]).unwrap();
+        assert_eq!(sources.len(), schema.fields.len());
+        sources
+    }
+
+    /// `sum by (job)`: the key, then the measure.
+    #[test]
+    fn a_by_aggregate_keeps_its_keys_then_its_measures() {
+        use OutputColumnSource::*;
+        assert_eq!(
+            columns(Reduction::by(vec![2]), &[AggIntent::Sum { col: None }]),
+            vec![InputColumn(2), Measure(0)]
+        );
+    }
+
+    /// `sum without (host)`: every label but `host`, then the measure.
+    #[test]
+    fn a_without_aggregate_keeps_the_other_labels_then_its_measures() {
+        use OutputColumnSource::*;
+        assert_eq!(
+            columns(
+                Reduction::Reduce(GroupKeys::without(vec![3])),
+                &[AggIntent::Sum { col: None }]
+            ),
+            vec![InputColumn(2), Measure(0)]
+        );
+    }
+
+    /// `count_values by (job) ("version", v)` adds the `version` label before
+    /// the count; `count_values without (host)` adds none, like its schema.
+    #[test]
+    fn count_values_adds_its_label_only_by_keys() {
+        use OutputColumnSource::*;
+        let count_values = AggIntent::CountValues {
+            label: "version".into(),
+        };
+        assert_eq!(
+            columns(Reduction::by(vec![2]), std::slice::from_ref(&count_values)),
+            vec![InputColumn(2), AddedLabel, Measure(0)]
+        );
+        assert_eq!(
+            columns(
+                Reduction::Reduce(GroupKeys::without(vec![3])),
+                &[count_values]
+            ),
+            vec![InputColumn(2), Measure(0)]
+        );
+    }
+
+    /// `absent(m{job="a", host="b"})` adds one label per matcher before its
+    /// value.
+    #[test]
+    fn absent_adds_its_labels_before_its_value() {
+        use OutputColumnSource::*;
+        let absent = AggIntent::Absent {
+            labels: std::collections::BTreeMap::from([
+                ("host".to_string(), "b".to_string()),
+                ("job".to_string(), "a".to_string()),
+            ]),
+        };
+        assert_eq!(
+            columns(Reduction::by(vec![]), &[absent]),
+            vec![AddedLabel, AddedLabel, Measure(0)]
+        );
+    }
+
+    /// A per-entity reduction keeps every input column, the value replaced
+    /// by the measure.
+    #[test]
+    fn a_per_entity_reduction_replaces_the_value_by_the_measure() {
+        use OutputColumnSource::*;
+        assert_eq!(
+            columns(Reduction::PerEntity, &[AggIntent::Rate]),
+            vec![InputColumn(0), Measure(0), InputColumn(2), InputColumn(3)]
+        );
+    }
+
     fn col(name: &str, dtype: DataType, nullable: bool) -> Field {
         Field::plain(name, dtype, nullable)
     }

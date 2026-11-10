@@ -8,9 +8,8 @@ use crate::ir::scalar::expr_ir::ColumnRef;
 use crate::ir::schema::{DataType, Field, FieldDataType, Schema};
 use crate::ir::ASAPOp;
 use crate::ir::NonASAPOp;
-use crate::stages::{
-    CandidateExpression, LogicalProperties, MemoGroupAsInput, OriginOfCandidateForMemoGroup,
-};
+use crate::stages::logical::MemoGroupAsInput;
+use crate::stages::{CandidateExpression, LogicalProperties, OriginOfCandidateForMemoGroup};
 use crate::summary_type::{SketchAlgorithm, SketchParams, SketchStatistic, SummaryUpdate};
 
 /// `Scan metric[1m]`: `[ts, value]`.

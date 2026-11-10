@@ -1,6 +1,7 @@
 //! The logical side: Stage 0's and Stage 1's memo, by scope (memo → group
 //! → candidate → candidate input → edge → Stage 1's output).
 
+mod aggregate_coverage;
 mod candidate;
 mod column_properties;
 mod edge;
