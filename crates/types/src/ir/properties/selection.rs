@@ -134,6 +134,11 @@ pub enum Constraint {
     /// | PromQL `m[5m] @ 1700000000` | `Excluded(FixedValue(Timestamp(1_699_999_700_000)))` | `Included(FixedValue(Timestamp(1_700_000_000_000)))` |
     /// | SQL `WHERE ts >= '2026-11-01'` | `Included(FixedValue(Timestamp(..)))` | `Unbounded` |
     /// | SQL `WHERE price > 10` (column `price`) | `Excluded(FixedValue(Float64(10.0)))` | `Unbounded` |
+    ///
+    /// A full-range interval `(Unbounded, Unbounded)` is still a
+    /// constraint, not the absence of one: it keeps every ordered value and
+    /// excludes the rows whose value is NULL or NaN. A column with no
+    /// constraint in a box keeps every row.
     Interval {
         #[serde(with = "limit_bound")]
         lower: Bound<IntervalConstraintLimit>,

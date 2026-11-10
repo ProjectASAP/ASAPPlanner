@@ -120,23 +120,6 @@ pub enum CoverageError {
     RegroupedBuild { reason: String },
 }
 
-impl AggregateCoverage {
-    /// A stable identity of `definition`: the 128-bit FNV-1a hash, in hex,
-    /// of its input group and unlifted operators. Two equal definitions
-    /// (the equality a merge requires) of one memo get equal ids, so a
-    /// summary store can key states by this id and a concrete selection.
-    pub(crate) fn definition_id(&self) -> String {
-        const OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
-        const PRIME: u128 = 0x0000000001000000000000000000013b;
-        let mut hash = OFFSET;
-        for byte in format!("{:?}", self.definition).bytes() {
-            hash ^= u128::from(byte);
-            hash = hash.wrapping_mul(PRIME);
-        }
-        format!("{hash:032x}")
-    }
-}
-
 /// Coverage of what a memo group computes with `operator` over its
 /// input groups: a `SummaryAgg`, an exact `Aggregate`, a
 /// `SummaryTumblingWindowChain` (a build over its input, the timestamp
@@ -375,7 +358,7 @@ fn regrouped(
             reason: error.to_string(),
         }
     })?;
-    // A direct build's definition, so its definition id is the same.
+    // A direct build's definition, so it is `==` to one.
     let mut definition = merged.definition.clone();
     definition.unlifted_operators[0] = Operator::ASAP(ASAPOp::SummaryAgg {
         child: None,

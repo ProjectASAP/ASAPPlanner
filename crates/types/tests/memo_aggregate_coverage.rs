@@ -26,7 +26,6 @@ use asap_types::stages::{
     MemoGroupId, OriginOfCandidateForMemoGroup,
 };
 use asap_types::summary_type::{ExactKind, MergeInputRule, SketchAlgorithm, SummaryUpdate};
-use asap_types::test_support::definition_id;
 use asap_types::test_support::memo_fixtures::{filter, range, scan, shift, state};
 use asap_types::workload::DataWorkload;
 
@@ -183,7 +182,7 @@ fn a_summary_agg_over_a_job_filter_lifts_it_into_the_selection() {
     assert_eq!(selection.columns()[&ts()], last_minute());
 }
 
-/// G7 has G4's definition and id and a disjoint selection, so
+/// G7 has G4's definition (`==`) and a disjoint selection, so
 /// `SummaryMerge(G4, G7)` is a valid group covering job ∈ {api, web}.
 #[test]
 fn states_with_equal_definitions_and_disjoint_selections_merge() {
@@ -194,10 +193,6 @@ fn states_with_equal_definitions_and_disjoint_selections_merge() {
     assert_eq!(
         coverage(&memo, g4).definition(),
         coverage(&memo, g7).definition()
-    );
-    assert_eq!(
-        definition_id(coverage(&memo, g4)),
-        definition_id(coverage(&memo, g7))
     );
     let merged = memo.find_or_add_group(merge(vec![g4, g7])).unwrap();
     let coverage = coverage(&memo, merged);

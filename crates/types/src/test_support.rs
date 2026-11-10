@@ -9,17 +9,11 @@ pub mod memo_fixtures;
 use crate::ir::operator::maintained_population::CurrentSeriesInput;
 use crate::ir::operator::node::Operator;
 use crate::plan::materialized_view::RawDataWindow;
-use crate::stages::AggregateCoverage;
 
 use crate::ir::schema::Schema;
 use crate::ir::{ASAPOp, NonASAPOp};
 use crate::ir::{OperatorNode, SchemaDerivationError};
 use std::rc::Rc;
-
-/// `AggregateCoverage::definition_id`.
-pub fn definition_id(coverage: &AggregateCoverage) -> String {
-    coverage.definition_id()
-}
 
 /// `Operator::output_schema`.
 pub fn output_schema(operator: &Operator) -> Result<Schema, SchemaDerivationError> {

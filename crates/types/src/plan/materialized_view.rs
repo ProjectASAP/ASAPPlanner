@@ -78,8 +78,8 @@ use crate::ir::operator::node::{Operator, OperatorNode};
 use crate::ir::operator::non_asap::NonASAPOp;
 use crate::ir::properties::execution_data_state::ExecutionTiming;
 use crate::ir::properties::selection::SelectionBox;
+use crate::stages::CoverageError;
 use crate::stages::Lifetime;
-use crate::stages::{AggregateCoverage, CoverageError};
 
 /// One materialized view of a DAG: what its stored state is, what it is
 /// refreshed from, when, and for how long it is retained.
@@ -121,15 +121,20 @@ impl MaterializedView {
 }
 
 /// A view's aggregate coverage
-/// ([`AggregateCoverage`], `docs/design_docs/proposals/asap-primitive-schema.md`
+/// ([`AggregateCoverage`](crate::stages::AggregateCoverage), `docs/design_docs/proposals/asap-primitive-schema.md`
 /// §4.2): what it computes and which rows went in.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewCoverage {
-    /// `AggregateCoverage::definition_id`: equal on every node, plan and
-    /// process that computes the same thing, whatever its selection; a
-    /// rollup to a coarser grouping computes something else and has its
-    /// own.
+    /// The plan-scope content id of what the view computes: its memo
+    /// coverage's `AggregateDefinition` with every input group expanded
+    /// recursively to its expression, down to the `Scan`s, holding no
+    /// memo group or plan node ids, canonically serialized and hashed.
+    /// Equal across plans and processes that compute the same thing,
+    /// whatever the selection, and different when they do not (a rollup to
+    /// a coarser grouping computes something else and has its own). Inside
+    /// one memo, coverages compare by `AggregateDefinition` `==` instead
+    /// and need no id.
     pub(crate) definition_id: String,
     /// The rows that went in: a union of boxes of value sets, value ranges
     /// and time relative to the evaluation time. A merge's is the union of
@@ -139,7 +144,7 @@ pub struct ViewCoverage {
 
 #[cfg(any(test, feature = "test-support"))]
 impl ViewCoverage {
-    /// `AggregateCoverage::definition_id`.
+    /// The plan-scope content id of what the view computes.
     pub fn definition_id(&self) -> &str {
         &self.definition_id
     }
@@ -601,7 +606,7 @@ impl PhysicalASAPDAG {
             self.operator_nodes()?
         };
         let mut derived = Vec::new();
-        let mut coverage_by_node: HashMap<PhysicalASAPNodeId, AggregateCoverage> = HashMap::new();
+        let mut coverage_by_node: HashMap<PhysicalASAPNodeId, ViewCoverage> = HashMap::new();
         for &id in index.children_first.iter().filter(|id| views.contains(id)) {
             let node = index.nodes[&id];
             let (inputs, scans) = index.inputs_of_view(id, &views)?;
@@ -642,10 +647,7 @@ impl PhysicalASAPDAG {
                 } else {
                     MaterializedViewRefresh::OnFirstRead
                 },
-                coverage: ViewCoverage {
-                    definition_id: coverage.definition_id(),
-                    selection: coverage.selection,
-                },
+                coverage,
                 inputs,
                 retention_ms: node.retention_ms.unwrap_or(0),
             };
@@ -926,16 +928,18 @@ impl<'a> ViewIndex<'a> {
 }
 
 /// The coverage of view `id` (IR `ir`), refreshed from `inputs`: the
-/// coverage its memo group stores, which the realized plan will carry.
+/// selection its memo group's `aggregate_coverage` stores, which the
+/// realized plan will carry, and the content id of that coverage's
+/// definition expanded to the `Scan`s ([`ViewCoverage::definition_id`]).
 /// Coverage is derived only in the memo, never on node trees.
 fn coverage_of(
     id: PhysicalASAPNodeId,
     inputs: &MaterializedViewInputs,
     ir: &HashMap<PhysicalASAPNodeId, Rc<OperatorNode>>,
-    coverage_by_node: &HashMap<PhysicalASAPNodeId, AggregateCoverage>,
-) -> Result<AggregateCoverage, CoverageError> {
+    coverage_by_node: &HashMap<PhysicalASAPNodeId, ViewCoverage>,
+) -> Result<ViewCoverage, CoverageError> {
     let _ = (id, inputs, ir, coverage_by_node);
     todo!(
-        "#1207 PR 6: the view's coverage from its memo group's GroupProperties::aggregate_coverage"
+        "#1207 PR 6: the view's coverage from its memo group's aggregate_coverage, with definition_id the content id of the expanded definition"
     )
 }

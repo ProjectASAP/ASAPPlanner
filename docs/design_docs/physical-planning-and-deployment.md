@@ -540,7 +540,7 @@ pub struct MaterializedViewRequest<'a> {
 
 | | `read_raw_data` | `read_materialized_view` |
 | --- | --- | --- |
-| Keyed by | `Source` | `MaterializedView` (its coverage: `definition_id` and selection) |
+| Keyed by | `Source` | `MaterializedView` (its coverage: the content id `definition_id` and selection) |
 | Time range | optional, a hint | always given, exact |
 | Predicates | a hint | none |
 | Executor re-filters | yes | no |
@@ -663,7 +663,13 @@ Query at T = 12:05 over (12:00, 12:05]:
 ```
 
 The deployment matches a view to stored states by its coverage
-(`definition_id` and selection). At execution time it checks their actual
+(`definition_id` and selection). Identity has two scopes: the memo compares
+coverages by `AggregateDefinition` `==` (its definitions hold memo group ids)
+and needs no id; the plan carries `definition_id`, a content id of what the
+view computes: its definition with every input group expanded recursively to
+its expression down to the `Scan`s, with no group or node ids, canonically
+serialized and hashed. It is equal across plans and processes that compute the
+same thing and different when they do not. At execution time it checks their actual
 coverage, revisions and readiness. A compiled plan cannot establish future
 readiness. The deployment does not replace `NativeKllMerge`, choose another
 sketch, or maintain different windows: such changes require replanning.
@@ -682,7 +688,8 @@ sketch, or maintain different windows: such changes require replanning.
 | Where does retention live? | On the materialized-view node of the exported DAG | — |
 
 Mapping the materialized-views extension's terms: its `query()` is the sub-DAG
-under the view's node, and `coverage.definition_id` identifies that sub-DAG.
+under the view's node, and `coverage.definition_id`, the content id of that
+sub-DAG's expanded definition, identifies it.
 Its readiness is the summary store's status, which the deployment owns. Its
 `mv_dependencies` build graph is `MaterializedView.inputs`.
 
@@ -741,7 +748,7 @@ operator/runtime fixtures:
 | Test | Contract exercised |
 | --- | --- |
 | `kll_tumbling_window_execution::five_tumbling_windows_roundtrip_and_shared_merge_runs_once` | One-minute tumbling window refreshes from raw data → five materialized view slots → shared native merge → p50/p99; counts every sample once, checks adjacent aligned windows and instruments one merge start per run |
-| `kll_tumbling_window_execution::a_store_keyed_by_definition_and_time_range_answers_the_tumbling_windows` | A store that finds states only by `(definition_id, time range)` answers the five-tumbling-window query: the tumbling windows share one definition and request the five ranges that tile the window |
+| `kll_tumbling_window_execution::a_store_keyed_by_definition_and_time_range_answers_the_tumbling_windows` | A store that finds states only by `(definition_id, time range)` (the content id is an opaque string to the store) answers the five-tumbling-window query: the tumbling windows share one definition and request the five ranges that tile the window |
 | `runtime_install::tumbling_windows_of_one_refresh_window_read_each_raw_window_once` | A KLL chain and a DDSketch chain of 10 s tumbling windows over one `Scan` are one refresh group: each tumbling window window is read from raw data once, in one ingestion run that builds both tumbling windows; each state equals that of a run of its view alone, and both queries answer as the query-time reference |
 | `kll_tumbling_window_execution::tumbling_windows_reject_parameters_schema_and_missing_binding` | Parameter relabelling, incompatible schemas and missing views fail explicitly |
 | `precompute_candidates::grouped_rate_can_be_materialized_before_or_after_grouped_sum` | Stored Rate state and stored Sum state answer like query time; summing counters before Rate does not |

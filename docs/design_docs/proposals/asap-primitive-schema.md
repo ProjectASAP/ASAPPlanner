@@ -266,8 +266,6 @@ impl AggregateCoverage {
     pub(crate) fn derive_from_inputs(
         operator: &Operator<MemoGroupAsInput<'_>>,
     ) -> Result<Self, CoverageError>;
-    /// A hash of the definition: equal definitions of one memo get equal ids.
-    pub(crate) fn definition_id(&self) -> String;
 }
 ```
 
@@ -299,7 +297,7 @@ G4.aggregate_coverage = AggregateCoverage {
 }
 ```
 
-**Case 2, G7: the same definition, a disjoint selection.** The walk over G6 and G5 lifts `job = "web"` and the same minute, so G7's definition is G4's (`input_group: Some(G1)`, `unlifted_operators: [SummaryAgg[KLL]]`) and its `definition_id()` is the same; its selection is `{ job ∈ {web}, ts ∈ (t − 60 s, t] }`. The two selections are disjoint, so `SummaryMerge(G4, G7)` is a valid candidate (and group), covering `{ job ∈ {api, web}, ts ∈ (t − 60 s, t] }`.
+**Case 2, G7: the same definition, a disjoint selection.** The walk over G6 and G5 lifts `job = "web"` and the same minute, so G7's definition is G4's (`input_group: Some(G1)`, `unlifted_operators: [SummaryAgg[KLL]]`) (`==`); its selection is `{ job ∈ {web}, ts ∈ (t − 60 s, t] }`. The two selections are disjoint, so `SummaryMerge(G4, G7)` is a valid candidate (and group), covering `{ job ∈ {api, web}, ts ∈ (t − 60 s, t] }`.
 
 **Case 3, G10: `a + b > 10` cannot be lifted.** It spans two columns, so it is no selection. At G8 the walk lifts `job = "api"` and keeps the rest:
 
@@ -320,7 +318,7 @@ Its definition differs from G4's, so G10 cannot merge with G4, even though both 
 - `input_group`: the group the definition reads, below everything the walk passed (`None` when the walk lifted a predicate out of a `Scan`).
 - `unlifted_operators`: what the state computes over `input_group`, top down from the `SummaryAgg`, each operator with only the conditions that stayed. Each operator's main input is `None`; any other group it reads, such as the group of a scalar subquery in a `Filter`'s condition, is `Some(group)`.
 - `selection`: which output rows of that computation the state took, as a union of boxes.
-- `definition_id()`: a hash of the definition, the key a summary store files states under together with a concrete selection.
+- Identity, in two scopes. In the memo, coverages compare by `AggregateDefinition` `==` (it holds `MemoGroupId`s); nothing in the memo needs an id. The plan carries `ViewCoverage::definition_id`, a content id: the definition with every input group expanded recursively to its expression down to the `Scan`s, with no group or node ids, canonically serialized and hashed. It is equal across plans and processes that compute the same thing and different when they do not, and it is the key a summary store files states under together with a concrete selection.
 
 ##### The definition
 
@@ -1454,7 +1452,6 @@ impl AggregateCoverage {
     pub(crate) fn derive_from_inputs(
         operator: &Operator<MemoGroupAsInput<'_>>,
     ) -> Result<Self, CoverageError>;
-    pub(crate) fn definition_id(&self) -> String;
 }
 ```
 
