@@ -10,12 +10,14 @@ use crate::ir::operator::arguments::{BinaryOpKind, JoinKind, PromQLVectorSetOpKi
 use crate::ir::operator::asap::{summary_agg_layout, summary_build};
 use crate::ir::operator::input::OperatorInput;
 use crate::ir::operator::AggIntent;
-use crate::ir::scalar::expr_ir::ScalarValue;
+use crate::ir::scalar::expr_ir::{ArithmeticOpKind, ScalarValue};
 use crate::ir::scalar::{resolve_column_ref, ColumnRef, ProjectItem, ScalarExpr};
 use crate::ir::schema::aggregate_schema::{aggregate_output, OutputColumnSource};
 use crate::ir::schema::{FieldDataType, Schema};
 use crate::ir::{ASAPOp, NonASAPOp, Operator};
-use crate::summary_type::{ExactKind, SketchStatistic, SummaryInputExpr, SummaryUpdate};
+use crate::summary_type::{
+    ExactKind, SketchStatistic, SummaryInputExpr, SummaryTypeCapability, SummaryUpdate,
+};
 use crate::workload::bounds::source_name;
 use crate::workload::{series_facts, PrometheusMetricType, SourceFacts};
 
@@ -26,8 +28,11 @@ use crate::workload::{series_facts, PrometheusMetricType, SourceFacts};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ValueSign {
+    /// Every non-NaN value is ≥ 0.
     NonNegative,
+    /// Every non-NaN value is ≤ 0.
     NonPositive,
+    /// Neither is known.
     Unknown,
 }
 
@@ -88,7 +93,15 @@ fn non_asap_signs(
                 })
                 .collect()
         }
-        Values { .. } | PromqlVectorFromScalar(_) => unknown(),
+        Values { .. } => unknown(),
+        // The scalar's value, every other column `Unknown`.
+        PromqlVectorFromScalar(expr) => {
+            let mut signs = unknown();
+            if let Ok(value) = resolve_column_ref(&ColumnRef::SampleValue, output) {
+                signs[value] = expression_sign(expr, &[]);
+            }
+            signs
+        }
         Filter { child, .. }
         | Sort { child, .. }
         | Limit { child, .. }
@@ -157,7 +170,7 @@ fn non_asap_signs(
                     ) => signs[value],
                     BinaryOpKind::Set(PromQLVectorSetOpKind::Or) => agree(signs[value], rhs_value),
                     BinaryOpKind::CompareBool(_) => NonNegative,
-                    BinaryOpKind::Arithmetic(_) => Unknown,
+                    BinaryOpKind::Arithmetic(op) => arithmetic_sign(op, signs[value], rhs_value),
                 };
             }
             signs.resize(output.fields.len(), Unknown);
@@ -230,14 +243,26 @@ fn asap_signs(op: &ASAPOp<Input<'_>>, output: &Schema) -> Vec<ValueSign> {
         SummaryEstimate {
             summary_input,
             query,
-        } => readout_signs(summary_input, output, |state| match query {
-            SketchStatistic::Cardinality
-            | SketchStatistic::FrequencyL2
-            | SketchStatistic::FrequencyEntropy => NonNegative,
-            SketchStatistic::Quantile { .. }
-            | SketchStatistic::PointCount { .. }
-            | SketchStatistic::TopK { .. } => state,
-        }),
+        } => {
+            // The summary type of the state read, for whether its counts keep
+            // the weights' sign.
+            let flips = summary_input
+                .schema()
+                .fields
+                .iter()
+                .find(|field| !field.is_plain())
+                .is_some_and(|state| SummaryTypeCapability::estimates_may_flip_sign(&state.dtype));
+            readout_signs(summary_input, output, |state| match query {
+                SketchStatistic::Cardinality
+                | SketchStatistic::FrequencyL2
+                | SketchStatistic::FrequencyEntropy => NonNegative,
+                SketchStatistic::Quantile { q } => quantile_sign(*q, state),
+                SketchStatistic::PointCount { .. } | SketchStatistic::TopK { .. } if flips => {
+                    Unknown
+                }
+                SketchStatistic::PointCount { .. } | SketchStatistic::TopK { .. } => state,
+            })
+        }
         FinalizeExactAccumulator { child } => {
             let counts = child.schema().fields.iter().any(|field| {
                 matches!(
@@ -270,8 +295,8 @@ fn project_signs<C>(cols: &[ProjectItem<C>], input: &[ValueSign]) -> Vec<ValueSi
 }
 
 /// `abs` is non-negative, a negation flips its operand's sign, a numeric
-/// cast keeps it and a numeric literal has its own; any other expression is
-/// `Unknown`.
+/// cast keeps it, a numeric literal has its own, and arithmetic follows
+/// [`arithmetic_sign`]; any other expression is `Unknown`.
 fn expression_sign<C>(expr: &ScalarExpr<C>, input: &[ValueSign]) -> ValueSign {
     match expr {
         ScalarExpr::Column(column) => input.get(*column).copied().unwrap_or(Unknown),
@@ -279,6 +304,13 @@ fn expression_sign<C>(expr: &ScalarExpr<C>, input: &[ValueSign]) -> ValueSign {
         ScalarExpr::Literal(ScalarValue::Int64(value)) => sign_of_number(*value as f64),
         ScalarExpr::Negative { expr, .. } => flipped(expression_sign(expr, input)),
         ScalarExpr::Cast { expr, .. } => expression_sign(expr, input),
+        ScalarExpr::Arithmetic {
+            op, left, right, ..
+        } => arithmetic_sign(
+            op,
+            expression_sign(left, input),
+            expression_sign(right, input),
+        ),
         // PromQL's `abs(v)` lowers to `promql_abs`, SQL's to `abs`.
         ScalarExpr::FunctionCall { name, .. }
             if name.eq_ignore_ascii_case("abs") || name == "promql_abs" =>
@@ -352,13 +384,8 @@ fn measure_sign(measure: &AggIntent, input: ValueSign) -> ValueSign {
         | FrequencyL2 { .. }
         | FrequencyEntropy { .. }
         | Math(crate::ir::operator::MathFunc::Abs) => NonNegative,
-        Sum { .. }
-        | Avg { .. }
-        | Min { .. }
-        | Max { .. }
-        | Quantile { .. }
-        | LastOverTime
-        | FirstOverTime => input,
+        Sum { .. } | Avg { .. } | Min { .. } | Max { .. } | LastOverTime | FirstOverTime => input,
+        Quantile { q, .. } => quantile_sign(*q, input),
         // A counter's rate and increase are non-negative; over a value of
         // another sign a decrease reads as a reset, so no sign is known.
         Rate | IRate | Increase if input == NonNegative => NonNegative,
@@ -407,6 +434,33 @@ fn readout_signs(
         .zip(&input.fields)
         .map(|(sign, field)| if field.is_plain() { sign } else { value(sign) })
         .collect()
+}
+
+/// The sign of `left op right`: a sum of two values of one sign has that
+/// sign; a product or quotient of two values of one sign is non-negative,
+/// of opposite signs non-positive; any other operator, or an operand of
+/// unknown sign, gives `Unknown`. PromQL's vector arithmetic and scalar
+/// expressions both read it.
+fn arithmetic_sign(op: &ArithmeticOpKind, left: ValueSign, right: ValueSign) -> ValueSign {
+    match (op, left, right) {
+        (ArithmeticOpKind::Add, NonNegative, NonNegative) => NonNegative,
+        (ArithmeticOpKind::Add, NonPositive, NonPositive) => NonPositive,
+        (ArithmeticOpKind::Mul | ArithmeticOpKind::Div, NonNegative, NonNegative)
+        | (ArithmeticOpKind::Mul | ArithmeticOpKind::Div, NonPositive, NonPositive) => NonNegative,
+        (ArithmeticOpKind::Mul | ArithmeticOpKind::Div, NonNegative, NonPositive)
+        | (ArithmeticOpKind::Mul | ArithmeticOpKind::Div, NonPositive, NonNegative) => NonPositive,
+        _ => Unknown,
+    }
+}
+
+/// A quantile's sign: the input's for 0 ≤ q ≤ 1; PromQL gives ±Inf
+/// outside it, so `Unknown`.
+fn quantile_sign(q: f64, input: ValueSign) -> ValueSign {
+    if (0.0..=1.0).contains(&q) {
+        input
+    } else {
+        Unknown
+    }
 }
 
 /// Per column, the inputs' sign if they all agree, else `Unknown`.

@@ -10,14 +10,17 @@
 //! ```
 use std::collections::{BTreeMap, BTreeSet};
 
-use asap_types::ir::operator::arguments::{AtModifier, GroupKeys, JoinKind, Reduction, Source};
+use asap_types::ir::operator::arguments::{
+    AtModifier, BinaryOpKind, GroupKeys, JoinKind, Reduction, Source,
+};
 use asap_types::ir::operator::AggIntent;
 
 use asap_types::ir::scalar::expr_ir::{ArithmeticOpKind, CompareOpKind, ScalarValue};
-use asap_types::ir::scalar::ProjectItem;
+use asap_types::ir::scalar::{ColumnRef, ProjectItem};
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use asap_types::ir::{
-    ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorResultKind, Predicate, ScalarExpr,
+    ASAPOp, BinaryOperator, ExprSemantics, NonASAPOp, Operator, OperatorResultKind, Predicate,
+    ScalarExpr,
 };
 use asap_types::stages::{Memo, MemoGroupId, ValueSign};
 use asap_types::summary_type::{SketchAlgorithm, SketchStatistic};
@@ -144,7 +147,8 @@ fn readout(query: SketchStatistic, state: MemoGroupId) -> Operator<MemoGroupId> 
 /// | G6 | `Project(abs(value))(G2)` | value `NonNegative` |
 /// | G7 | `Project(-value)(G1)` | value `NonPositive` (flipped) |
 /// | G8 | `Project(-value)(G7)` | value `NonNegative` (flipped back) |
-/// | G9 | `Project(value * 2)(G1)` | value `Unknown` (another expression) |
+/// | G9 | `Project(value * 2)(G1)` | value `NonNegative` (same signs multiply) |
+/// | G10 | `Project(value - value)(G1)` | value `Unknown` (a difference) |
 #[test]
 fn scans_read_declared_signs_and_row_operators_keep_or_set_them() {
     let mut memo = memo();
@@ -192,6 +196,18 @@ fn scans_read_declared_signs_and_row_operators_keep_or_set_them() {
             g1,
         ),
     );
+    let g10 = add(
+        &mut memo,
+        map_value(
+            ScalarExpr::Arithmetic {
+                op: ArithmeticOpKind::Sub,
+                left: value(),
+                right: value(),
+                semantics: ExprSemantics::Promql,
+            },
+            g1,
+        ),
+    );
     let declared = [Unknown, NonNegative, Unknown];
     assert_eq!(signs(&memo, g1), declared);
     assert_eq!(signs(&memo, g2), [Unknown; 3]);
@@ -202,7 +218,8 @@ fn scans_read_declared_signs_and_row_operators_keep_or_set_them() {
         (g6, NonNegative),
         (g7, NonPositive),
         (g8, NonNegative),
-        (g9, Unknown),
+        (g9, NonNegative),
+        (g10, Unknown),
     ] {
         assert_eq!(signs(&memo, group), [Unknown, value, Unknown], "{group:?}");
     }
@@ -554,4 +571,218 @@ fn group_properties_come_from_input_groups() {
         .any(|field| field.name == "quantile"
             && field.dtype == FieldDataType::Plain(DataType::Float64)));
     assert!(properties(g4).shareable_when_equal);
+}
+
+/// A point count read from a Count Sketch is a median of signed counters,
+/// which can be negative over non-negative weights: `Unknown`; one read
+/// from a Count-Min state, an overestimate of a sum of non-negative
+/// weights, keeps the weights' sign.
+#[test]
+fn a_count_sketch_point_count_has_no_sign_a_count_min_one_keeps_it() {
+    let mut memo = memo();
+    let g1 = add(&mut memo, series("latency"));
+    let g2 = add(&mut memo, range(MINUTE_MS, g1));
+    let point_count = |memo: &mut Memo, algorithm| {
+        let state = add(memo, state(FieldDataType::Sketch(algorithm), g2));
+        add(
+            memo,
+            readout(
+                SketchStatistic::PointCount {
+                    key: ColumnRef::Named("host".into()),
+                    value: Some("a".into()),
+                },
+                state,
+            ),
+        )
+    };
+    let count_sketch = point_count(&mut memo, SketchAlgorithm::CountSketch);
+    let count_min = point_count(&mut memo, SketchAlgorithm::Cms);
+    // [ts, count, host]: the count is the state's column.
+    let value = |group: MemoGroupId| {
+        let schema = &memo.groups()[group.0 as usize].group_properties.schema;
+        signs(&memo, group)[schema.column_id("count").unwrap()]
+    };
+    assert_eq!(value(count_sketch), Unknown);
+    assert_eq!(value(count_min), NonNegative);
+}
+
+/// PromQL's `quantile(φ, v)` with φ outside [0, 1] is ±Inf, so a quantile
+/// keeps its input's sign only for 0 ≤ φ ≤ 1, as a measure and as a
+/// sketch readout.
+#[test]
+fn a_quantile_outside_the_unit_interval_has_no_sign() {
+    let mut memo = memo();
+    let g1 = add(&mut memo, series("latency"));
+    let quantile = |memo: &mut Memo, q| {
+        add(
+            memo,
+            aggregate(
+                by_host(),
+                AggIntent::Quantile {
+                    col: Some(VALUE),
+                    q,
+                },
+                g1,
+            ),
+        )
+    };
+    let inside = quantile(&mut memo, 0.5);
+    let below = quantile(&mut memo, -0.5);
+    let g2 = add(&mut memo, range(MINUTE_MS, g1));
+    let kll = add(
+        &mut memo,
+        state(FieldDataType::Sketch(SketchAlgorithm::Kll), g2),
+    );
+    let read = add(
+        &mut memo,
+        readout(SketchStatistic::Quantile { q: 1.5 }, kll),
+    );
+    let value = |group: MemoGroupId| *signs(&memo, group).last().unwrap();
+    assert_eq!(value(inside), NonNegative);
+    assert_eq!(value(below), Unknown);
+    assert_eq!(value(read), Unknown);
+}
+
+fn arithmetic(op: ArithmeticOpKind, lhs: MemoGroupId, rhs: MemoGroupId) -> Operator<MemoGroupId> {
+    Operator::NonASAP(NonASAPOp::BinaryOp {
+        operator: BinaryOperator {
+            checked_relative_division: false,
+            checked_finite_division: false,
+            kind: BinaryOpKind::Arithmetic(op),
+            vector_match: None,
+        },
+        return_bool: false,
+        lhs,
+        rhs,
+    })
+}
+
+/// Arithmetic between two vectors: a sum of non-negatives, and a product or
+/// quotient of same-signed values, is non-negative; a difference has no
+/// sign. A `vector(s)` value has `s`'s sign:
+///
+/// | Group | Expression | value sign |
+/// |---|---|---|
+/// | G3 | `quantile_over_time(0.9, G2)`, G2 = `latency[1h]` | `NonNegative` |
+/// | G4 | `quantile_over_time(0.5, G2)` | `NonNegative` |
+/// | G5 | `G3 / G4` | `NonNegative` (was `Unknown`) |
+/// | G6 | `G3 + G4` | `NonNegative` |
+/// | G7 | `G3 - G4` | `Unknown` |
+/// | G8 | `vector(1000)` | `NonNegative` (was `Unknown`) |
+/// | G9 | `vector(-1)` | `NonPositive` |
+/// | G10 | `G3 * G8` | `NonNegative` |
+/// | G11 | `G3 * G9` | `NonPositive` |
+/// | G12 | `G9 * G9` | `NonNegative` |
+#[test]
+fn vector_arithmetic_follows_its_operands_signs() {
+    let mut memo = memo();
+    let g1 = add(&mut memo, series("latency"));
+    let g2 = add(&mut memo, range(60 * MINUTE_MS, g1));
+    let quantile = |q| AggIntent::Quantile {
+        col: Some(VALUE),
+        q,
+    };
+    let g3 = add(
+        &mut memo,
+        aggregate(Reduction::PerEntity, quantile(0.9), g2),
+    );
+    let g4 = add(
+        &mut memo,
+        aggregate(Reduction::PerEntity, quantile(0.5), g2),
+    );
+    let g5 = add(&mut memo, arithmetic(ArithmeticOpKind::Div, g3, g4));
+    let g6 = add(&mut memo, arithmetic(ArithmeticOpKind::Add, g3, g4));
+    let g7 = add(&mut memo, arithmetic(ArithmeticOpKind::Sub, g3, g4));
+    let vector = |s: f64| {
+        Operator::NonASAP(NonASAPOp::PromqlVectorFromScalar(ScalarExpr::Literal(
+            ScalarValue::Float64(s),
+        )))
+    };
+    let g8 = add(&mut memo, vector(1000.0));
+    let g9 = add(&mut memo, vector(-1.0));
+    let g10 = add(&mut memo, arithmetic(ArithmeticOpKind::Mul, g3, g8));
+    let g11 = add(&mut memo, arithmetic(ArithmeticOpKind::Mul, g3, g9));
+    let g12 = add(&mut memo, arithmetic(ArithmeticOpKind::Mul, g9, g9));
+    let value = |memo: &Memo, group: MemoGroupId| {
+        let schema = &memo.groups()[group.0 as usize].group_properties.schema;
+        signs(memo, group)[schema.column_id("value").unwrap()]
+    };
+    for (group, sign) in [
+        (g3, NonNegative),
+        (g4, NonNegative),
+        (g5, NonNegative),
+        (g6, NonNegative),
+        (g7, Unknown),
+        (g8, NonNegative),
+        (g9, NonPositive),
+        (g10, NonNegative),
+        (g11, NonPositive),
+        (g12, NonNegative),
+    ] {
+        assert_eq!(value(&memo, group), sign, "{group:?}");
+    }
+}
+
+/// A vector-scalar operation lowers to a `Project` of an arithmetic
+/// expression (PromQL `x / 1000`, `x * 8`), as does SQL's `value * 8`; the
+/// expression's sign follows the same rule as vector arithmetic:
+///
+/// | Group | Expression | value sign |
+/// |---|---|---|
+/// | G2 | `G1 / 1000`, G1 = `Scan latency` (PromQL) | `NonNegative` (was `Unknown`) |
+/// | G3 | `G1 * 8` (PromQL) | `NonNegative` (was `Unknown`) |
+/// | G4 | `SELECT value * 8 FROM G1` (SQL) | `NonNegative` (was `Unknown`) |
+/// | G5 | `G1 - G1` | `Unknown` |
+/// | G6 | `G1 * -8` | `NonPositive` |
+#[test]
+fn scalar_arithmetic_follows_its_operands_signs() {
+    let mut memo = memo();
+    let g1 = add(&mut memo, series("latency"));
+    let expr = |op, right: ScalarExpr<MemoGroupId>, semantics| ScalarExpr::Arithmetic {
+        op,
+        left: Box::new(ScalarExpr::Column(VALUE)),
+        right: Box::new(right),
+        semantics,
+    };
+    let number = |n: f64| ScalarExpr::Literal(ScalarValue::Float64(n));
+    let promql = ExprSemantics::Promql;
+    let g2 = add(
+        &mut memo,
+        map_value(expr(ArithmeticOpKind::Div, number(1000.0), promql), g1),
+    );
+    let g3 = add(
+        &mut memo,
+        map_value(expr(ArithmeticOpKind::Mul, number(8.0), promql), g1),
+    );
+    let g4 = add(
+        &mut memo,
+        map_value(
+            expr(
+                ArithmeticOpKind::Mul,
+                ScalarExpr::Literal(ScalarValue::Int64(8)),
+                ExprSemantics::Sql,
+            ),
+            g1,
+        ),
+    );
+    let g5 = add(
+        &mut memo,
+        map_value(
+            expr(ArithmeticOpKind::Sub, ScalarExpr::Column(VALUE), promql),
+            g1,
+        ),
+    );
+    let g6 = add(
+        &mut memo,
+        map_value(expr(ArithmeticOpKind::Mul, number(-8.0), promql), g1),
+    );
+    for (group, value) in [
+        (g2, NonNegative),
+        (g3, NonNegative),
+        (g4, NonNegative),
+        (g5, Unknown),
+        (g6, NonPositive),
+    ] {
+        assert_eq!(signs(&memo, group), [Unknown, value, Unknown], "{group:?}");
+    }
 }

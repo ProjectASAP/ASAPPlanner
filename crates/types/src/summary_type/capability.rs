@@ -110,6 +110,30 @@ impl SummaryTypeCapability {
         ) && !Self::shares_one_state_across_groups(summary_type)
     }
 
+    /// Whether a point count or top-k read from a state of `summary_type`
+    /// may have a sign the weights it was updated with do not: a median of
+    /// signed counters (Count Sketch, UnivMon and their variants) can be
+    /// negative over non-negative weights; an overestimating counter
+    /// (Count-Min) or an exact count cannot.
+    pub fn estimates_may_flip_sign(summary_type: &FieldDataType) -> bool {
+        use SketchAlgorithm as A;
+        matches!(
+            summary_type,
+            FieldDataType::Sketch(
+                A::CountSketch
+                    | A::CountSketchFold
+                    | A::CountSketchWithHeap
+                    | A::CountSketchWithL2Norm
+                    | A::CountSketchWithSpaceSaving
+                    | A::HydraCountSketch
+                    | A::UnivMon
+                    | A::UnivMonQ
+                    | A::UnivMonTwoTier
+                    | A::HydraUnivMon
+            )
+        )
+    }
+
     /// Whether `summary_type` is a Hydra algorithm: one structure shared by
     /// every group, not one state per group.
     pub fn shares_one_state_across_groups(summary_type: &FieldDataType) -> bool {
