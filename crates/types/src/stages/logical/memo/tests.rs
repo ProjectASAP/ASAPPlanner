@@ -9,7 +9,7 @@ use crate::ir::scalar::expr_ir::{CompareOpKind, ScalarValue};
 use crate::ir::scalar::{ProjectItem, SortKey};
 use crate::ir::schema::{DataType, Field, FieldDataType, Schema};
 use crate::ir::{ExprSemantics, NonASAPOp, Predicate, ScalarExpr};
-use crate::stages::logical::MemoGroupAsInput;
+use crate::stages::logical::group::MemoGroupAsInput;
 use crate::stages::{CandidateExpression, LogicalProperties, OriginOfCandidateForMemoGroup};
 use crate::summary_type::{SketchAlgorithm, SketchParams, SketchStatistic};
 use crate::test_support::memo_fixtures::{aggregate_where, readout, scan, state};

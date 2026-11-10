@@ -1,5 +1,5 @@
 //! How the derivation rules read an operator's inputs: one trait, so the
-//! same rules (output schema and kind, input validation, sharing, summary
+//! same rules (output schema and kind, input validation, sharing, aggregate
 //! coverage) derive a front-end node's schema and a memo group's
 //! `GroupProperties` (concepts doc `memo-groups-properties-requirements.md`,
 //! section 3).

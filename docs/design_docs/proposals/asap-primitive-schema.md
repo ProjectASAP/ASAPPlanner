@@ -513,7 +513,7 @@ This section walks through each summary operator with one small example. For eac
 |---|---|
 | **What comes out?** | the output schema the planner derives (`output_schema()`) |
 | **When is it rejected?** | the checks the planner runs when it builds the node |
-| **What is its coverage?** | `coverage()` of the output (§4.2) |
+| **What is its coverage?** | the aggregate coverage of the output (§4.2), derived by `Operator::aggregate_coverage` |
 | **State or value?** | whether the output is summary state or a readable value |
 
 **How to read the diagrams.** Data flows from bottom to top, along the `▲` arrows. Each edge is labelled with the schema it carries, written `Kind: field Type, …`.
@@ -523,7 +523,7 @@ This section walks through each summary operator with one small example. For eac
 | `[ Op ]` | operator whose output is a value (`Relation`) |
 | `[[ Op ]]` | operator whose output is summary state (`State`) |
 | `( next operator )` | whatever consumes the result |
-| `selection: …` next to a node | the `selection` part of that node's `coverage()` |
+| `selection: …` next to a node | the `selection` part of that node's aggregate coverage |
 
 All examples read a table, so values are `Relation`. For PromQL series they would be `InstantVector`. A *closed schema* lists every column of the table. For readability, a filter on a table is drawn as a `Filter` over the `Scan`; the frontend folds it into `Scan.predicates`, which gives the same coverage (§4.2.2).
 
@@ -556,7 +556,7 @@ With an error target, the planner answers the quantile from a KLL sketch with `k
                          │
                   [ Scan t ]
 
-coverage() of the SummaryAgg
+aggregate coverage of the SummaryAgg
 ┌──────────────────────────────────────────────────────────────────┐
 │ definition: this SummaryAgg over Scan t   (the Filter removed)   │
 │ selection:  region ∈ {us},  latency ∈ (−∞, 10000)                │
@@ -639,7 +639,7 @@ The planner answers `SUM` with an exact `Sum` accumulator: a `SummaryAgg` builds
                          │
                   [ Scan t ]
 
-coverage() of the SummaryAgg
+aggregate coverage of the SummaryAgg
 ┌──────────────────────────────────────────────────┐
 │ definition: this SummaryAgg over Scan t          │
 │ selection:  everything (no filter)               │
@@ -966,13 +966,11 @@ MemoGroup.group_properties.aggregate_coverage: AggregateCoverage   §6.6
 | §6.5 Update input and evaluations | `SummaryUpdate`, `SketchStatistic`, `MaintainedPopulation`, `PopulationStatistic` | fields of the `ASAPOp` variants in §6.2 |
 | §6.6 Aggregate coverage | `AggregateCoverage`, `AggregateDefinition`, `SelectionBox`, `Constraint` | `GroupProperties::aggregate_coverage` of aggregate memo groups |
 
-**Example: the p99 latency state of §5.1.** The `SummaryAgg` node (§6.1) holds `ASAPOp::SummaryAgg` (§6.2) with `summary_type = Sketch(Kll)` (§6.3, §6.4) and `input = SummaryUpdate::column(latency)` (§6.5); its candidate's θ is `Kll { k: 200 }`. Its `schema` (§6.3) is `(job Utf8, state Sketch(Kll))`: the `state` field has the same type as `summary_type`. A `SummaryEstimate` above it holds `query = Quantile { q: 0.99 }` (§6.5), and its node carries the `guarantee` of the evaluation. `coverage()` on the `SummaryAgg` node returns a `AggregateCoverage` (§6.6).
+**Example: the p99 latency state of §5.1.** The `SummaryAgg` node (§6.1) holds `ASAPOp::SummaryAgg` (§6.2) with `summary_type = Sketch(Kll)` (§6.3, §6.4) and `input = SummaryUpdate::column(latency)` (§6.5); its candidate's θ is `Kll { k: 200 }`. Its `schema` (§6.3) is `(job Utf8, state Sketch(Kll))`: the `state` field has the same type as `summary_type`. A `SummaryEstimate` above it holds `query = Quantile { q: 0.99 }` (§6.5), and its node carries the `guarantee` of the evaluation. `Operator::aggregate_coverage` over the `SummaryAgg` returns an `AggregateCoverage` (§6.6), which the memo stores in the group's `GroupProperties::aggregate_coverage`.
 
 ### 6.1 DAG node (`crates/types/src/ir/operator/node.rs`)
 
-Every operator in a DAG is wrapped in an `OperatorNode`. `coverage()` is explained in §6.6.
-
-Shown as of #646. On `main` today the node still has a declared `pub coverage: Option<AggregateCoverage>` field (with `with_coverage()` and `requires_coverage()`); #646 replaces it with the derived `coverage()` below.
+Every operator in a DAG is wrapped in an `OperatorNode`. A node stores no coverage: coverage is derived by the IR rule `Operator::aggregate_coverage` over `OperatorInput` and stored per memo group in `GroupProperties::aggregate_coverage` (§6.6).
 
 ```rust
 /// One node of the DAG. Immutable and shared through `Rc`.
@@ -987,17 +985,6 @@ pub struct OperatorNode {
     /// The accuracy statement of the output, once known. `None` does not
     /// mean exact.
     pub guarantee: Option<AccuracyGuarantee>,
-    /// Cache for `coverage()`. Filled on first use, never serialized,
-    /// ignored by equality, emptied on clone. Not a source of truth:
-    /// coverage can always be derived again.
-    coverage_cache: CoverageCache,
-}
-
-impl OperatorNode {
-    /// The node's coverage (§4.2), derived on first use and then cached.
-    /// `Some` for a `SummaryAgg` and a valid `SummaryMerge`; `None` for every
-    /// other node.
-    pub fn coverage(&self) -> Option<&AggregateCoverage>;
 }
 ```
 
@@ -1375,7 +1362,7 @@ pub struct CurrentSeriesInput {
 
 A finalized value's accuracy statement is `AccuracyGuarantee` (`accuracy/guarantee.rs`): a `spec` (`AccuracySpec`) with `accuracy_metric` (which error is measured, e.g. rank error), `error` (the error bound), `failure_probability` (the chance the bound does not hold) and `accuracy_scope` (which output values one statement covers), plus `provenance` (which estimates the bound came from). It is attached to evaluation and finalized nodes, and to `MaintainPopulation` nodes (whose population is exact); never to sketch or accumulator state.
 
-### 6.6 Aggregate coverage (`crates/types/src/ir/properties/aggregate_coverage.rs`; selection algebra in `crates/types/src/ir/properties/selection.rs`; the plan's content id in `crates/types/src/stages/logical/aggregate_coverage.rs`)
+### 6.6 Aggregate coverage (`crates/types/src/ir/properties/aggregate_coverage.rs`; selection algebra in `crates/types/src/ir/properties/selection.rs`; the plan's content id in `crates/types/src/stages/logical/view_coverage.rs`)
 
 The code for §4. `AggregateDefinition` is shown in §4.2.2.
 
@@ -1450,7 +1437,7 @@ impl<I: OperatorInput> Operator<I> {
     /// `InputsOverlap { required }` (inputs not proven disjoint, or disjoint
     /// in time for counter states, as the family's `MergeInputRule`
     /// requires); for a rollup, also `NotAGroupKey` (a `group_by` column is
-    /// not a group key of the inputs' build), `FamilyCannotRegroup` (counter
+    /// not a group key of the inputs' build), `SummaryTypeCannotRegroup` (counter
     /// states, a family without a merge, or a Hydra) or `RegroupedBuild`
     /// (the coarse build it stands for does not derive).
     pub fn aggregate_coverage(&self) -> Result<AggregateCoverage<I::Reference>, CoverageError>;
