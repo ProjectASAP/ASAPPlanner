@@ -1,4 +1,4 @@
-//! Hydra over Count-Min Sketch (`HydraKind::HydraCms`) over `asap_sketchlib::Hydra`.
+//! Hydra over Count-Min Sketch (`SketchAlgorithm::HydraCms`) over `asap_sketchlib::Hydra`.
 //!
 //! One `shared_rows × shared_columns` grid of Count-Min cells serves every
 //! group: a group hashes to one cell per row, and that cell's Count-Min
@@ -10,7 +10,7 @@
 //! does not offer, so it is not answered here.
 use crate::{AggregateCore, KernelError};
 use asap_sketchlib::{input::HydraCounter, CountMinSketch, DataInput, FastPath, Hydra, Vector2D};
-use planner_types::ir::schema::SketchStatistic;
+use planner_types::summary_type::SketchStatistic;
 use std::sync::Arc;
 
 /// The single Hydra key column: a group's whole label tuple is one

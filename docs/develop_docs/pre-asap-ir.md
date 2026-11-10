@@ -33,8 +33,6 @@ pub struct OperatorNode {
     pub result_kind: OperatorResultKind,      // Relation | InstantVector | RangeVector | State | Scalar
     pub schema: Schema,                       // output schema, derived at construction
     pub guarantee: Option<AccuracyGuarantee>, // None until accuracy assessment establishes one
-    pub timing: Option<ExecutionTiming>,      // None until a materialization assignment is applied
-    pub materialization: Materialization,     // NotMaterialized until Stage 2 assigns one
 }
 ```
 
@@ -47,12 +45,11 @@ pub struct OperatorNode {
   derived (a column reference out of range, a reserved ASAP operator). ASAP planning may
   retain a more specific schema through `OperatorNode::with_schema`.
 - `guarantee` is `None` until accuracy assessment establishes one; `None` never means exact.
-- `timing` is `None` in every front-end DAG and every candidate. It is written by
-  `ir::timing::apply_materialization_timings` (see the Post-ASAP IR document); export rejects an
-  untimed node.
-- `materialization` is `NotMaterialized` in every front-end DAG. Stage 2 writes it, with
-  `timing`, through `ir::timing::apply_materialization_timings` from its materialization
-  assignment.
+- A node has no physical properties (timing, lifetime): a logical candidate has only its
+  logical properties (#1200). Physical stages keep each node's `PhysicalProperties` in a
+  `PhysicalPropertiesAssignment` keyed by node; `ir::timing::apply_physical_properties`
+  completes Stage 2's assignment over every node (see the Post-ASAP IR document), and
+  export reads it.
 
 `OperatorNode::children()` returns the operator's inputs in field order followed by the
 operator nodes its scalar expressions read (see "Scalar expressions"). Every DAG traversal —

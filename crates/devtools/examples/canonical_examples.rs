@@ -6,7 +6,6 @@
 use asap_devtools::corpora::{bgp_catalog, dqc_catalog};
 use asap_devtools::lower_promql_with_sample_interval;
 use asap_frontend_sql::lower_sql_dialect;
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 
 #[tokio::main]
@@ -35,7 +34,7 @@ async fn main() {
     ];
     for (label, q) in promql_examples {
         println!("=== {label} === promql> {q}");
-        match lower_promql_with_sample_interval(q, AccuracyTarget::exact(), 1_000) {
+        match lower_promql_with_sample_interval(q, 1_000) {
             Ok(qe) => println!("{qe:#?}"),
             Err(e) => println!("ERR: {e}"),
         }
@@ -63,14 +62,7 @@ async fn main() {
             &packets
         };
         println!("=== {label} === sql> {q}");
-        match lower_sql_dialect(
-            q,
-            catalog,
-            SqlDialect::DataFusionSQL,
-            AccuracyTarget::exact(),
-        )
-        .await
-        {
+        match lower_sql_dialect(q, catalog, SqlDialect::DataFusionSQL).await {
             Ok(qe) => println!("{qe:#?}"),
             Err(e) => println!("ERR: {e}"),
         }

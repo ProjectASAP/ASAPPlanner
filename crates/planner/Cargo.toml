@@ -31,21 +31,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 
-[features]
-# `test_support::query_time_reference`, for a runtime's correctness tests.
-# It reads `asap-types`' test-only DAG helpers.
-test-support = ["asap-types/test-support"]
-
 [dev-dependencies]
-# The reference pricer over fixed candidate plans.
-asap-plan-selection = { path = "../plan-selection", features = ["reference-pricer"] }
-# The tests compare installed plans with `test_support::query_time_reference`.
-asap-planner = { path = ".", features = ["test-support"] }
-asap-physical-asap-optimization = { path = "../physical-asap-optimization", features = ["test-support"] }
+asap-plan-selection = { path = "../plan-selection" }
+asap-physical-asap-optimization = { path = "../physical-asap-optimization" }
 # Pass 1's target list (`per_computation_candidates`) for the tests.
 asap-logical-asap-optimization = { path = "../logical-asap-optimization", features = ["test-support"] }
-# The deployment accuracy model tests implement `AccuracyModel`.
 asap-accuracy = { path = "../accuracy", features = ["test-support"] }
+# Tests read a plan's roots as IR (`PhysicalASAPDAG::query_roots`).
+asap-types = { path = "../types", features = ["test-support"] }
 # The SQL frontend plans through DataFusion, which is async; `e2e_plan` is
 # therefore async and its tests need a runtime.
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }

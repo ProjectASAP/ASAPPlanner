@@ -12,9 +12,9 @@ use arrow::array::{DictionaryArray, Float64Array, TimestampMillisecondArray};
 use arrow::datatypes::UInt32Type;
 use asap_executor::physical_planner::compile;
 use asap_executor::planner::ir::operator::Source;
-use asap_executor::planner::ir::physical_export::PhysicalASAPOperatorPayload as Payload;
 use asap_executor::planner::ir::schema::PROMQL_SERIES_IDENTITY;
 use asap_executor::planner::ir::NonASAPOp;
+use asap_executor::planner::plan::physical_asap_dag::PhysicalASAPOperatorPayload as Payload;
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::values::{Batch, BatchColumn};
 use asap_planner::{

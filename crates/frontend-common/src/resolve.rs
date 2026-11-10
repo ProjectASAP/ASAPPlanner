@@ -111,7 +111,7 @@ fn resolve(
         if child.schema.closed {
             return Ok(child);
         }
-        asap_types::ir::schema::schema_support::with_promql_series_identity(&child)
+        asap_types::ir::schema::series_identity::with_promql_series_identity(&child)
             .map_err(|e| SchemaDerivationError::InvalidScalarSignature(e).into())
     };
     match tree {
@@ -628,9 +628,7 @@ fn resolve_agg_intent(
             .transpose()
     };
     Ok(match intent {
-        AggIntent::Count { accuracy } => AggIntent::Count {
-            accuracy: accuracy.clone(),
-        },
+        AggIntent::Count => AggIntent::Count,
         AggIntent::PearsonCorr { left, right } => AggIntent::PearsonCorr {
             left: resolve_column_ref(left, schema)?,
             right: resolve_column_ref(right, schema)?,
@@ -647,34 +645,19 @@ fn resolve_agg_intent(
             col: col(c)?,
             population: *population,
         },
-        AggIntent::Quantile {
-            col: c,
-            q,
-            accuracy,
-        } => AggIntent::Quantile {
+        AggIntent::Quantile { col: c, q } => AggIntent::Quantile {
             col: col(c)?,
             q: *q,
-            accuracy: accuracy.clone(),
         },
-        AggIntent::TopK { k, accuracy } => AggIntent::TopK {
-            k: *k,
-            accuracy: accuracy.clone(),
-        },
-        AggIntent::Cardinality { cols, accuracy } => AggIntent::Cardinality {
+        AggIntent::TopK { k } => AggIntent::TopK { k: *k },
+        AggIntent::Cardinality { cols } => AggIntent::Cardinality {
             cols: cols
                 .iter()
                 .map(|c| resolve_column_ref(c, schema))
                 .collect::<Result<_, _>>()?,
-            accuracy: accuracy.clone(),
         },
-        AggIntent::FrequencyL2 { col: c, accuracy } => AggIntent::FrequencyL2 {
-            col: col(c)?,
-            accuracy: accuracy.clone(),
-        },
-        AggIntent::FrequencyEntropy { col: c, accuracy } => AggIntent::FrequencyEntropy {
-            col: col(c)?,
-            accuracy: accuracy.clone(),
-        },
+        AggIntent::FrequencyL2 { col: c } => AggIntent::FrequencyL2 { col: col(c)? },
+        AggIntent::FrequencyEntropy { col: c } => AggIntent::FrequencyEntropy { col: col(c)? },
         AggIntent::Rate => AggIntent::Rate,
         AggIntent::IRate => AggIntent::IRate,
         AggIntent::Increase => AggIntent::Increase,
@@ -853,7 +836,7 @@ mod tests {
     use asap_types::ir::operator::{
         BinaryOpKind, JoinKind, PromQLVectorSetOpKind, Source, VectorMatch,
     };
-    use asap_types::ir::properties::AccuracyTarget;
+
     use asap_types::ir::scalar::{CompareOpKind, ScalarValue};
     use asap_types::ir::schema::{DataType, Field};
     use asap_types::ir::BinaryOperator;
@@ -936,18 +919,13 @@ mod tests {
         };
         let intent = AggIntent::Cardinality {
             cols: vec![qualified("b"), qualified("a")],
-            accuracy: AccuracyTarget::exact(),
         };
         assert_eq!(
             resolve_agg_intent(&intent, &schema).unwrap(),
-            AggIntent::Cardinality {
-                cols: vec![1, 0],
-                accuracy: AccuracyTarget::exact(),
-            }
+            AggIntent::Cardinality { cols: vec![1, 0] }
         );
         let missing = AggIntent::Cardinality {
             cols: vec![qualified("a"), ColumnRef::Named("missing".into())],
-            accuracy: AccuracyTarget::exact(),
         };
         assert!(resolve_agg_intent(&missing, &schema).is_err());
     }

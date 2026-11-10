@@ -144,7 +144,7 @@ fn compile_aggregate(
     let reduction = match intent {
         AggIntent::Sum { .. } => Reduction::Sum(1),
         AggIntent::Avg { .. } => Reduction::Avg(1),
-        AggIntent::Count { .. } => Reduction::Count,
+        AggIntent::Count => Reduction::Count,
         AggIntent::Min { .. } => Reduction::Min(1),
         AggIntent::Max { .. } => Reduction::Max(1),
         _ => return Err(Error::Invalid("unsupported vector aggregate".into())),
@@ -204,7 +204,8 @@ fn compile_exact_evaluation(
 ) -> Result<Computation, Error> {
     use asap_executor::operators::SummaryEvaluation;
     use asap_executor::summary_kernels::exact::ExactEvaluation;
-    use planner_types::ir::schema::{ExactKind, FieldDataType};
+    use planner_types::ir::schema::FieldDataType;
+    use planner_types::summary_type::ExactKind;
     let FieldDataType::ExactAggregate(statistic, _) = family else {
         return Err(Error::Invalid(
             "exact evaluation requires an exact family".into(),
@@ -328,9 +329,7 @@ fn grouping_preserves_unenumerated_labels_and_empty_label_semantics() {
     equal_rows(
         run(
             compile_aggregate(
-                &AggIntent::Count {
-                    accuracy: planner_types::ir::properties::AccuracyTarget::exact(),
-                },
+                &AggIntent::Count,
                 &GroupKeys::by(vec![ColumnRef::Named("job".into())]),
             )
             .unwrap(),
@@ -525,6 +524,7 @@ fn scalar_broadcast_rejects_colliding_result_labels_after_recovery() {
 fn exact_state_evaluations_recover_and_finalize_tumbling_windows() {
     use asap_executor::factory::create_planner_accumulator;
     use planner_types::ir::schema::*;
+    use planner_types::summary_type::*;
 
     use std::sync::Arc;
     for (kind, params, expected) in [
@@ -540,8 +540,8 @@ fn exact_state_evaluations_recover_and_finalize_tumbling_windows() {
                 .map(|samples| {
                     let mut state = create_planner_accumulator(
                         &family,
+                        None,
                         &SummaryUpdate::column(ColumnRef::SampleValue),
-                        &GroupingStrategy::PerSubpopulationInstance,
                     )
                     .unwrap();
                     for sample in samples {
@@ -576,6 +576,7 @@ fn exact_state_evaluations_recover_and_finalize_tumbling_windows() {
 fn recovered_exact_counter_uses_window_and_omits_insufficient_samples() {
     use asap_executor::factory::create_planner_accumulator;
     use planner_types::ir::schema::*;
+    use planner_types::summary_type::*;
 
     use std::sync::Arc;
     for (kind, params, expected) in [
@@ -588,8 +589,8 @@ fn recovered_exact_counter_uses_window_and_omits_insufficient_samples() {
             .map(|count| {
                 let mut state = create_planner_accumulator(
                     &family,
+                    None,
                     &SummaryUpdate::column(ColumnRef::SampleValue),
-                    &GroupingStrategy::PerSubpopulationInstance,
                 )
                 .unwrap();
                 state.update_single(100., -50_000).unwrap();

@@ -9,7 +9,7 @@ document shows:
 - **Stage 1**, the logical candidates of the memo and the selected plan's
   logical DAG (`L1`);
 - **Stage 2**, the selected plan as an executable physical DAG (`P1`), with
-  each node's timing and materialization, and the physical candidates Stage 2
+  each node's timing and lifetime, and the physical candidates Stage 2
   pruned;
 - **Stage 3**, the selected plan's cost, the accuracy it accepted per query,
   its materialized views and the search report.
@@ -78,7 +78,7 @@ To run it, see [RUNNING.md](RUNNING.md).
   candidates are filled green with `✓ selected`. Clicking a candidate or a
   group shows its nodes, children, parents and queries in the details.
 - **Details**: click a node for its operator, the queries reaching it,
-  timing, materialization, output schema, guarantee and Stage 3 cost; click
+  timing, lifetime, output schema, guarantee and Stage 3 cost; click
   an edge for its schema and data state.
 
 Other documents open with **Open stage document or workload…**, by dropping

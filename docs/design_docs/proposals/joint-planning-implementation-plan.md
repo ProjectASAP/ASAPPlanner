@@ -12,18 +12,18 @@ Preserve supported accuracy semantics, physical eligibility, cost objectives, sc
 
 | Scope | Current implementation | Responsibility |
 | --- | --- | --- |
-| Logical identity | `logical-asap-optimization/src/stage0.rs`; `types/src/stages/` | `DagOfLogicalMemoGroups`, `MemoGroup` (`asap_types::stages`; built by `generate_dag_of_logical_memo_groups`), stable initial query/group references. |
+| Logical identity | `logical-asap-optimization/src/stage0.rs`; `types/src/stages/` | `DagOfLogicalMemoGroups`, `MemoGroup` (`asap_types::stages`; built by `memo_of_queries`), stable initial query/group references. |
 | Computation and sharing rules | `logical-asap-optimization/src/pass2/memo/{candidates,rules,state_groups,shared_configurations,window_candidates}` | Populate groups, retain local candidates, expose shared states and compatible rewrites. |
-| Physical legality | `physical-asap-optimization` | Executable operators, timing, materialization eligibility, and `PhysicalWorkloadPlan`. |
-| Candidate dependency inventory | `physical-asap-optimization/src/catalog`; `types/src/stages/physical` | Local `PhysicalCandidate`, `ProducerRequirement` (`asap_types::stages`), compatible producers, structural pruning, the selected DAG (`DagOfSelectedCandidates`, one node per run of a candidate), and reconstruction. Stage 2 makes no execution-scope copies; today's Stage 3 engine makes its own (`plan-selection/src/search/candidates/scopes.rs`). |
+| Physical legality | `physical-asap-optimization` | Executable operators, timing and materialization eligibility. |
+| Candidate dependency inventory | `physical-asap-optimization/src/catalog`; `types/src/stages/physical` | Local `PhysicalCandidate`, `ProducerRequirement` (`asap_types::stages`), compatible producers, structural pruning; Stage 3 builds the selected plan (`PhysicalASAPDAG`) directly. Stage 2 makes no execution-scope copies; today's Stage 3 engine makes its own (`plan-selection/src/search/candidates/scopes.rs`). |
 | Solver | `plan-selection/src/search/milp` | Activation, producer/root assignment, reachability, acyclicity, resource constraints, and solver warm starts. |
 | Search and validation | `plan-selection/src/search/refinement` | Actual evaluator checks, sound cuts, objective-specific ranking, and certified component splitting. |
-| Pricing support | `plan-selection/src/search/costing` | Certified local bounds and consistent calibration. Production execution demand is owned by `cost/src/execution_demand.rs`; the search demand reference is test-only. |
+| Pricing support | `plan-selection/src/search/costing` | Certified local bounds and consistent calibration. Production execution demand is owned by `cost/src/plan/execution_demand.rs`; the search demand reference is test-only. |
 | Pipeline and lifecycle | `plan-selection/src/search/{pipeline,route}` | Initial groups, generation accounting, seed/full search budgets, archives, reports, and selected workload outputs. |
 
-`PhysicalCandidate` is a local selectable computation. `PhysicalWorkloadPlan` is a complete Stage 2 workload DAG; they are not interchangeable. Physical candidate configuration in selection invokes the authoritative Stage 2 legality code rather than duplicating its rules. Logical rules do not depend on the solver crate.
+`PhysicalCandidate` is a local selectable computation; the plan (`PhysicalASAPDAG`) is the complete workload DAG Stage 3 builds; they are not interchangeable. Physical candidate configuration in selection invokes the authoritative Stage 2 legality code rather than duplicating its rules. Logical rules do not depend on the solver crate.
 
-Pass 1 has one entry, `generate_per_computation_logical_memo_candidates`, which populates the already-created memo groups (its target list, `PerComputationCandidates`, is a crate-private working form). This is not a second workload selector. Pass 2 can add intermediate state groups and consumer candidates; sharing a component does not merge distinct requested results:
+Pass 1 has one entry, `pass1_memo`, which populates the already-created memo groups (its target list, `PerComputationCandidates`, is a crate-private working form). This is not a second workload selector. Pass 2 can add intermediate state groups and consumer candidates; sharing a component does not merge distinct requested results:
 
 ```text
 G95 = { ExactP95, LocalKLLQuantileP95, EstimateP95(G_KLL) }

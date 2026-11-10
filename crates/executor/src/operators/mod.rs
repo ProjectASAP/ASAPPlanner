@@ -9,8 +9,9 @@ use crate::{
 use futures::StreamExt;
 use planner_types::ir::scalar::ColumnRef;
 use planner_types::ir::schema::{
-    DataType, Field as SummaryField, FieldDataType as SummaryFamilyType, Schema, SummaryUpdate,
+    DataType, Field as SummaryField, FieldDataType as SummaryFamilyType, Schema,
 };
+use planner_types::summary_type::SummaryUpdate;
 use std::{collections::BTreeMap, sync::Arc};
 pub(crate) mod common;
 use crate::expressions::ordered;
@@ -228,8 +229,8 @@ impl Operator {
             self.kind,
             Kind::Evaluation {
                 query: SummaryEvaluation::Exact(crate::summary_kernels::exact::ExactEvaluation {
-                    statistic: planner_types::ir::schema::ExactKind::Rate
-                        | planner_types::ir::schema::ExactKind::Increase,
+                    statistic: planner_types::summary_type::ExactKind::Rate
+                        | planner_types::summary_type::ExactKind::Increase,
                     ..
                 }),
                 ..

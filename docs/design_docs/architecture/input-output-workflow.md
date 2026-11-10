@@ -18,7 +18,7 @@ selected.
 | `PlanningWorkload.query_workload` | Query language and one-time/repeating query workloads | Yes |
 | `PlanningWorkload.data_workload` | How the data arrives, and facts about each source | No implicit default. Set `None` when unavailable; a PromQL query with a bare instant selector needs a nonzero `sample_interval` on the metric it reads. |
 | Frontend-specific dependencies (outside `PlanningWorkload`) | `SqlCatalog` for SQL | `SqlCatalog` is required for SQL lowering |
-| `PlanningModels` | Accuracy model and evidence, `CostInputs` (cost model 1, 2 or 3, resource speed, measured operation costs), `DeploymentCapabilities` | `PlanningModels::builtin()` uses `BuiltinAccuracyModel`, no evidence, cost model 1 with illustrative unit costs, and a deployment that supports everything |
+| `PlanningModels` | Accuracy evidence (`AccuracyEvidence`), `CostInputs` (cost model 1, 2 or 3, resource speed, measured operation costs), `DeploymentCapabilities` | `PlanningModels::builtin()` uses no evidence, cost model 1 with illustrative unit costs, and a deployment that supports everything |
 
 Frontend lowering (Stage 0) and Stages 1–3 run inside the workflow; they are
 not additional inputs. See [Inputs](#inputs) for the nested workload fields
@@ -28,7 +28,7 @@ and [frontend dependencies](#frontend-specific-dependencies).
 
 | Output | Fields or contents | Meaning |
 |---|---|---|
-| `PlanOutput` | `plans`: one `QueryPlan { entry_index, root }` per query; `selection`: Stage 3's `Selection` (`selected_dag`, `nodes_with_proven_non_negative_weights`, `cost`, `accepted_accuracy_per_query`, `pruned_candidates`, `search_report`), set by the default pass `Stage1ToStage3Pass`; `tumbling_window_retention_ms`: how long each kept tumbling-window chain keeps its tumbling windows; standalone scalar queries in `scalar_roots` and `scalar_plans` | The selected plan; `physical_asap_dag()` exports it as one `PhysicalASAPDAG` |
+| `PlanOutput` | `plan`: the selected plan, one `PhysicalASAPDAG` (its roots in entry order, standalone scalar queries in `scalar_roots`) | The plan installed on the executor; Stage 3's `Selection` report is `run_planning`'s |
 | `PlanningRun` (from `asap_planner::run_planning`) | Every stage's output: Pass 1's per-computation candidates, the selected round's Pass 2 and Stage 2 outputs (with Stage 2's pruned candidates), the selection, the selected plan, the memo after each step and a report per tumbling-window-width round | For callers that inspect or display the alternatives |
 
 The selected plan is a planning artifact. ASAPPlanner does **not** deploy
@@ -196,7 +196,7 @@ enum DataArrival {
 struct SourceFacts {
     series_count: Option<u64>,
     metric_type: Option<PrometheusMetricType>,
-    values_non_negative: bool,
+    column_signs: BTreeMap<String, ValueSign>,
     sample_interval: Option<DurationMs>,
     stream_norms: Option<StreamNorms>,
     max_distinct_per_evaluation: Option<u64>,
@@ -215,8 +215,8 @@ struct LabelSetDistinctValues {
 | `arrival` | Present; may be `Unknown` | Distinguishes data at rest, ingesting data, and mixed data. Ingestion-time builds are possible only for ingesting or mixed data. |
 | `rows_per_second` | With `Ingesting`/`Mixed` | Rows arriving per second over all sources, used to price scans and continuous maintenance. It must be finite and non-negative. A source with no `series_count` + `sample_interval` of its own is priced at its series share of it when every source declares `series_count`, else at all of it. |
 | `series_count` | Optional | Series in the source. Plan selection bounds a query's number of values `G`, and its input row count, by the series counts of the sources it reads (each branch of an `or` counted); unknown, they stay unbound. |
-| `metric_type` | Optional | Declared Prometheus type (`PrometheusMetricType`): `counter`, `gauge`, `histogram`, `native_histogram` or `summary`; a counter proves samples non-negative. Never inferred from a name. A `histogram` or `summary` is keyed by its family name `foo` and supplies its series (`DataWorkload::series_facts`): `foo_bucket` (histogram) or `foo` (summary, per-series quantiles read as values), and the counters `foo_sum` and `foo_count`; any other name is looked up as is. The family entry's `metric_type`, `values_non_negative` and `sample_interval` apply to its series; counts, norms and bounds are read per series name. `histogram_quantile` reads float input as classic buckets, declared `histogram` or undeclared, and rejects a `native_histogram` or `summary`; any query reading a `native_histogram` is rejected. `rate`, `increase` or `irate` over a metric declared a gauge, and `sum`, `avg`, `quantile`, `stddev` or `stdvar` across a summary's quantile series, still plan, with a warning from the PromQL frontend (`metric_type_warnings`), which `asap_planner` reports. |
-| `values_non_negative` | Optional; default `false` | Declares every sample non-negative, for a gauge as well as a counter. It is the sign a relative-error bound needs to carry through `sum` and `avg` (a per-series DDSketch quantile under `avg by`, say); without it, and for a gauge, that bound is unknown. |
+| `metric_type` | Optional | Declared Prometheus type (`PrometheusMetricType`): `counter`, `gauge`, `histogram`, `native_histogram` or `summary`; a counter proves samples non-negative. Never inferred from a name. A `histogram` or `summary` is keyed by its family name `foo` and supplies its series (`DataWorkload::series_facts`): `foo_bucket` (histogram) or `foo` (summary, per-series quantiles read as values), and the counters `foo_sum` and `foo_count`; any other name is looked up as is. The family entry's `metric_type`, `column_signs` and `sample_interval` apply to its series; counts, norms and bounds are read per series name. `histogram_quantile` reads float input as classic buckets, declared `histogram` or undeclared, and rejects a `native_histogram` or `summary`; any query reading a `native_histogram` is rejected. `rate`, `increase` or `irate` over a metric declared a gauge, and `sum`, `avg`, `quantile`, `stddev` or `stdvar` across a summary's quantile series, still plan, with a warning from the PromQL frontend (`metric_type_warnings`), which `asap_planner` reports. |
+| `column_signs` | Optional; default none | The sign of each column's values (`non_negative`, `non_positive` or `unknown`), keyed by column name, e.g. `{"value": "non_negative"}` for a latency gauge. A `Scan`'s `column_sign` reads it; error contracts that need values of one sign (a relative error through `sum` or `avg`, DDSketch's relative error, Count-Min's estimates) read that. An undeclared column is `unknown`, except a PromQL counter's value. |
 | `sample_interval` | PromQL and MetricsQL; nonzero | How often each series of the metric is sampled. Bare instant selectors over it use it as their selection horizon; without it, such a query fails to lower. |
 | `stream_norms`, `max_distinct_per_evaluation` | Optional | Bounds that Count-Min/Count Sketch and HLL/UnivMon guarantees are bound with. |
 | `distinct_values_per_label` | Optional; default empty; each count nonzero | Distinct values each label (PromQL) or column (SQL) takes, e.g. `{"host": 1000, "job": 10}`. Plan selection prices a `by (k1, k2, ...)` aggregate or summary, and a partitioned sort or limit, at the product of its keys' counts, at most the `series_count` (series, or groups of rows) of the sources it reads and the rows it reads per evaluation. Over several sources a key's counts add. No count is assumed for a key some source read does not declare: the grouping is priced at the smaller of that `series_count` and those rows. Each count must be an upper bound, counting a missing label (or a NULL) as one more value: when every key of a grouped result declares one, their product (at most the series read) also bounds `G`, which sizes per-group sketches for a whole-result target; otherwise `G` keeps its series bound, or none for SQL. |
@@ -248,15 +248,14 @@ They are explicit frontend function arguments, not one generic
 ### Planning evidence inputs
 
 **A model is planning logic; evidence is a scoped fact used by that logic.**
-For example, `BuiltinAccuracyModel` knows how to combine error bounds, while
-an operand-domain contract tells it whether a particular product or quotient
-of absolute-error estimates has a bound. The former can be provided by a built-in default; the
+For example, the accuracy rules know how to combine error bounds, while a
+deployment's measurement (`AccuracyEvidence`) says what error a particular
+summary configuration has. The former can be provided by a built-in default; the
 latter cannot be fabricated by one.
 
 | Input | Where it enters / default | Why it matters |
 |---|---|---|
-| Accuracy model | `PlanningModels` (`AccuracyModel`; `BuiltinAccuracyModel` by default) | Composes candidate guarantees and checks them against requested accuracy. The model does not itself provide missing data-domain facts. |
-| Accuracy/domain evidence | `PlanningModels` (`AccuracyEvidenceProvider`; `NoAccuracyEvidence` by default) | Input ranges, nonempty populations and similar facts can certify or rule out particular approximations. Missing facts remain unknown. |
+| Accuracy evidence | `PlanningModels` (`AccuracyEvidence`; none by default) | Measured guarantees per summary configuration, read before the theoretical guarantee. Missing measurements leave the theoretical guarantee. |
 | Cost model | `CostInputs.cost_model` (cost model 1 by default) | Turns each valid candidate's resource usage into a choice. The illustrative unit costs are not a measured deployment cost. |
 | Measured cost evidence | `CostInputs.measured_operation_costs` | Measured CPU time per unit of each operator kind, at ingestion or query time, replaces the formulas for the nodes it prices (a sketch interpolated between measured sizes); the other nodes' formulas are scaled by one calibration factor fitted from the measured ones. |
 | Runtime capabilities | `DeploymentCapabilities` (`supported_summaries`, `raw_data_retained`, `query_time_results_retained`) | Prevents choosing a summary, raw-data scan or kept state the intended executor cannot provide. |
@@ -279,21 +278,12 @@ candidate whose output has no guarantee for an approximate target.
 
 ### `PlanOutput`
 
-`PlanOutput` holds the selected plan and Stage 3's record of the selection:
-
-* `plans`: one plan root per query, in `QueryWorkload::entries()` order;
-* `selection.selected_dag`: the selected plan as a `DagOfSelectedCandidates`:
-  the physical candidate each node runs (one node per run, so a candidate
-  run twice is two nodes), the edge feeding each input of each node, and the
-  node producing each query output;
-* `selection.cost`: the selected plan's resource usage and, under cost
-  models 1 and 2, its cost per second;
-* `selection.accepted_accuracy_per_query`: per query, the accuracy metric
-  Stage 3 accepted;
-* `selection.pruned_candidates`: the candidates Stage 3 ruled out;
-* `selection.search_report`: how the search ended (`Optimal`: the MILP
-  runs to proven optimality, with no time limit), its lower bound, the
-  MILP's size and its times.
+`PlanOutput` holds the selected plan, `plan`: one `PhysicalASAPDAG`, whose
+`roots` answer the operator queries and `scalar_roots` the standalone scalar
+queries, in `QueryWorkload::entries()` order. Its cost is
+`asap_cost::plan_cost` of it. Stage 3's own report, `Selection`
+(`accepted_accuracy_per_query`, `pruned_candidates` and the selection MILP's
+size and times), is `run_planning`'s, beside the plan.
 
 Planner selects because it now has the inputs a backend used to own: the
 deployment declares its cost model, measurements and capabilities, and every
@@ -305,7 +295,7 @@ alternative stays visible in `PlanningRun`.
 PlanningWorkload + frontend dependencies + PlanningModels
     -> Stage 0: frontend lowering, one root per normalized query entry
     -> Stage 1: Pass 1 per-computation candidates, Pass 2 sharing, tumbling windows, reuse
-    -> Stage 2: one physical candidate per materialization assignment
+    -> Stage 2: one physical candidate per physical properties assignment
     -> Stage 3: check, measure and select
     -> PlanOutput
 ```

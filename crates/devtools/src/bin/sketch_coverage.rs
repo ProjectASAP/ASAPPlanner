@@ -1,31 +1,25 @@
-// cargo run -p asap-devtools --bin sketch_coverage -- --sample-interval-ms <ms> [--max-error <f64>]
+// cargo run -p asap-devtools --bin sketch_coverage -- --sample-interval-ms <ms>
 //
 // Lowers every query in every corpus we have (mirrors `variant_coverage`'s
-// corpus list exactly, so the two reports are directly comparable) with an
-// *approximate* `AccuracyTarget`, runs Pass 1 of logical ASAP-aware
-// optimization (`generate_per_computation_logical_memo_candidates`, every
-// summary supported, no accuracy pruning) over each query, and
+// corpus list exactly, so the two reports are directly comparable), runs
+// Pass 1 of logical ASAP-aware optimization (`pass1_memo`, every summary
+// supported) over each query, and
 // reports which summary candidates Pass 1 offers for it, plus the fraction of
 // lowered queries with at least one.
 //
 // `--sample-interval-ms <ms>` is the sample interval declared for every
 // metric a query reads, which its bare instant selectors look back.
-// `--max-error <f64>` (ε, default 0.01) sets the `AccuracyTarget` every query in
-// every corpus lowers with. Without an approximate target, Pass 1 offers no
-// summary candidate.
 
-use asap_accuracy::{IgnoreAccuracyGuarantees, NoAccuracyEvidence};
 use asap_devtools::corpora::{
     bgp_catalog, dqc_catalog, netflow_catalog, parse_sample_interval, promql_lines, sql_statements,
 };
 use asap_devtools::{lower_promql_with_sample_interval, SqlCatalog};
 use asap_frontend_sql::lower_sql_dialect;
-use asap_logical_asap_optimization::generate_dag_of_logical_memo_groups;
-use asap_logical_asap_optimization::generate_per_computation_logical_memo_candidates;
-use asap_types::ir::properties::AccuracyTarget;
+use asap_logical_asap_optimization::memo_of_queries;
+use asap_logical_asap_optimization::pass1_memo;
 use asap_types::ir::schema::FieldDataType;
-use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
-use asap_types::workload::{DataWorkload, SqlDialect};
+use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
+use asap_types::workload::SqlDialect;
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
@@ -47,27 +41,23 @@ fn pct(n: usize, total: usize) -> String {
     }
 }
 
-/// Run Pass 1 over each of one corpus's already-lowered queries (each
-/// lowered with `accuracy`) and collect the summary candidates it offers
+/// Run Pass 1 over each of one corpus's already-lowered queries and collect the summary candidates it offers
 /// for any of the query's targets.
 fn analyze_corpus(
     name: &'static str,
     roots: Vec<(String, Rc<OperatorNode>)>,
     failed: usize,
-    accuracy: &AccuracyTarget,
 ) -> CorpusCoverage {
     let lowered = roots.len();
     let mut rejected = 0;
     let mut summaries = Vec::new();
     for (id, root) in roots {
-        let Ok(pass1) = generate_per_computation_logical_memo_candidates(
-            generate_dag_of_logical_memo_groups(&[QueryRoot::Operator(root)]),
-            std::slice::from_ref(accuracy),
-            &IgnoreAccuracyGuarantees,
-            &NoAccuracyEvidence,
-            &DataWorkload::default(),
-            None,
-        ) else {
+        let Ok(memo) = memo_of_queries(&[QueryRoot::Operator(root)], &[None], &Default::default())
+        else {
+            rejected += 1;
+            continue;
+        };
+        let Ok(pass1) = pass1_memo(memo, None) else {
             rejected += 1;
             continue;
         };
@@ -76,9 +66,9 @@ fn analyze_corpus(
         // excluded. A way to compute a measure that Pass 1 offers but cannot
         // compose into a candidate is not counted.
         let mut offered = BTreeSet::new();
-        for candidate in pass1.memo.candidates.iter().flatten() {
+        for candidate in pass1.groups().iter().flat_map(|group| &group.candidates) {
             if candidate.fused_groups.is_empty() {
-                summary_families(&candidate.root_node, &mut offered);
+                summary_family(&candidate.expression.operator, &mut offered);
             }
         }
         summaries.push((id, offered));
@@ -92,19 +82,16 @@ fn analyze_corpus(
     }
 }
 
-/// Adds the family of every summary `node` and its descendants build to
-/// `families`.
-fn summary_families(node: &OperatorNode, families: &mut BTreeSet<String>) {
-    if let Some(
-        ASAPOp::SummaryAgg { family, .. } | ASAPOp::SummaryTumblingWindowChain { family, .. },
-    ) = node.asap()
+/// Adds the family of the summary `operator` builds, if any, to `families`.
+fn summary_family<C>(operator: &Operator<C>, families: &mut BTreeSet<String>) {
+    if let Operator::ASAP(
+        ASAPOp::SummaryAgg { summary_type, .. }
+        | ASAPOp::SummaryTumblingWindowChain { summary_type, .. },
+    ) = operator
     {
-        if let FieldDataType::Sketch(kind, _) = family {
-            families.insert(format!("{:?}", kind.algorithm()));
+        if let FieldDataType::Sketch(kind) = summary_type {
+            families.insert(format!("{:?}", kind));
         }
-    }
-    for child in node.children() {
-        summary_families(child, families);
     }
 }
 
@@ -133,24 +120,9 @@ fn report(r: &CorpusCoverage) {
     println!();
 }
 
-fn parse_max_error() -> f64 {
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        if arg == "--max-error" {
-            let raw = args.next().expect("--max-error requires a value");
-            return raw
-                .parse()
-                .unwrap_or_else(|_| panic!("--max-error must be a float, got {raw:?}"));
-        }
-    }
-    0.01
-}
-
 #[tokio::main]
 async fn main() {
-    let max_error = parse_max_error();
     let interval_ms = parse_sample_interval();
-    let accuracy = AccuracyTarget::max_error(max_error);
     let mut results = Vec::new();
 
     // ── PromQL corpora — same set as `variant_coverage` ──
@@ -182,12 +154,12 @@ async fn main() {
         let mut roots = Vec::new();
         let mut failed = 0;
         for (i, q) in promql_lines(corpus).enumerate() {
-            match lower_promql_with_sample_interval(q, accuracy.clone(), interval_ms) {
+            match lower_promql_with_sample_interval(q, interval_ms) {
                 Ok(qe) => roots.push((format!("q{i}"), qe)),
                 Err(_) => failed += 1,
             }
         }
-        results.push(analyze_corpus(name, roots, failed, &accuracy));
+        results.push(analyze_corpus(name, roots, failed));
     }
 
     // ── SQL corpora ──
@@ -217,12 +189,12 @@ async fn main() {
         let mut roots = Vec::new();
         let mut failed = 0;
         for (i, q) in sql_statements(corpus).into_iter().enumerate() {
-            match lower_sql_dialect(&q, &catalog, dialect.clone(), accuracy.clone()).await {
+            match lower_sql_dialect(&q, &catalog, dialect.clone()).await {
                 Ok(qe) => roots.push((format!("q{i}"), qe)),
                 Err(_) => failed += 1,
             }
         }
-        results.push(analyze_corpus(name, roots, failed, &accuracy));
+        results.push(analyze_corpus(name, roots, failed));
     }
 
     for r in &results {
@@ -234,7 +206,7 @@ async fn main() {
     let total_rejected: usize = results.iter().map(|r| r.rejected).sum();
     let total_covered: usize = results.iter().map(covered).sum();
 
-    println!("=== global (max_error = {max_error}) ===");
+    println!("=== global ===");
     println!(
         "total lowered: {total_lowered}, total failed: {total_failed}, rejected by Pass 1: {total_rejected}"
     );

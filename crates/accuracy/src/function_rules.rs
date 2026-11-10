@@ -1,8 +1,8 @@
 //! The accuracy composition rule of each exact function applied to an
 //! approximate input, shared by Pass 1's guarantee composition and the
 //! accuracy algebra.
+use asap_types::accuracy::CompositionOperator;
 use asap_types::ir::operator::AggIntent;
-use asap_types::ir::properties::CompositionOperator;
 
 /// The composition operator that propagates an approximate input's guarantee
 /// through `intent`; `None` for a function with no registered rule over

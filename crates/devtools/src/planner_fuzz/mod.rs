@@ -8,8 +8,7 @@
 //! target, a filter on a group key, a coarser grouping, ...), it builds a
 //! *witness*: `W`'s selected logical plan plus `q'` derived from `q`'s
 //! node by one operator. Stage 2 and Stage 3 implement and price the
-//! witness exactly as they price any candidate
-//! ([`optimize_physical_asap`], the reference pricer), and the relation
+//! witness exactly as they price any candidate, and the relation
 //!
 //! ```text
 //! cost(W ∪ {q'}) − cost(W) ≤ derive_cost + tolerance,
@@ -35,27 +34,24 @@ pub mod relations;
 pub mod report;
 pub mod shrink;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use asap_cost::CostInputs;
-use asap_logical_asap_optimization::DeploymentCapabilities;
-use asap_physical_asap_optimization::optimize_physical_asap;
 use asap_planner::{PlanSearchSettings, PlanningModels};
-use asap_types::ir::properties::AccuracyTarget;
-use asap_types::ir::schema::sketch::SketchAlgorithm;
+use asap_types::accuracy::AccuracyTarget;
+use asap_types::deployment_capabilities::DeploymentCapabilities;
 use asap_types::ir::QueryRoot;
+use asap_types::summary_type::SketchAlgorithm;
 use asap_types::workload::{
     DataArrival, DataWorkload, PlanningWorkload, QueryLanguage, QueryWorkload, RepeatingEntry,
     SqlDialect,
 };
 
-use crate::planning_stages::{
-    lower_promql_roots, lower_sql_roots, run_planning_stages_over, run_search_over, sql_catalog,
-};
+use crate::planning_stages::{lower_promql_roots, lower_sql_roots, run_search_over, sql_catalog};
 use generate::QuerySpec;
 
 /// The language of a fuzz workload: one per workload, as one
@@ -172,7 +168,10 @@ impl FuzzWorkload {
             }
         }
         if rows_per_second > 0.0 {
-            self.data.arrival = DataArrival::Ingesting { rows_per_second };
+            self.data.arrival = DataArrival::Ingesting {
+                rows_per_second,
+                max_out_of_order_ms: None,
+            };
         }
     }
 
@@ -208,7 +207,7 @@ impl FuzzWorkload {
                     .filter(|supported| {
                         self.sketch_families
                             .as_ref()
-                            .is_none_or(|only| only.contains(&supported.family))
+                            .is_none_or(|only| only.contains(&supported.summary_type))
                     })
                     .collect(),
             ),
@@ -219,17 +218,9 @@ impl FuzzWorkload {
 
     /// The `asap_planner` invocation (a bash command) that plans this
     /// workload, saved as `workload_file`, with `settings`' accuracy
-    /// guarantees. `asap_planner` has no exhaustive search, so under
-    /// `--search exhaustive` the command starts with a comment saying it
-    /// may not reproduce. Its output document is `<workload_file stem>.out.json`.
+    /// guarantees. Its output document is `<workload_file stem>.out.json`.
     pub fn asap_planner_command(&self, workload_file: &str, settings: &FuzzSettings) -> String {
         let mut command = String::new();
-        if matches!(settings.search, SearchKind::Exhaustive) {
-            command.push_str(
-                "# asap_planner runs the candidate-connection search, not the \
-                 exhaustive one; it may not reproduce this.\n",
-            );
-        }
         command.push_str(&format!(
             "cargo run -p asap-devtools --bin asap_planner -- --workload {workload_file} \
              --run-until stage3 --format json"
@@ -314,13 +305,7 @@ pub fn read_seed_file(path: &std::path::Path) -> Result<FuzzWorkload, String> {
 pub enum SearchKind {
     /// Joint candidate-connection planning, the facade's search.
     CandidateConnections,
-    /// Every generated candidate (`--exhaustive`), up to
-    /// [`EXHAUSTIVE_MAX_COMBINATIONS`].
-    Exhaustive,
 }
-
-/// `--exhaustive`'s default evaluated-assignment budget.
-pub const EXHAUSTIVE_MAX_COMBINATIONS: usize = 10_000;
 
 /// How the tester plans and judges.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -368,7 +353,7 @@ pub struct Planned {
 }
 
 /// A plan priced by Stage 2 and Stage 3 outside the search: the cheapest
-/// materialization assignment of given logical roots.
+/// physical properties assignment of given logical roots.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Priced {
     pub selected: String,
@@ -443,70 +428,21 @@ impl Planner {
             .with_deployment_capabilities(&deployment)
             .with_ignore_accuracy_guarantees(!self.settings.enforce_accuracy_guarantees);
         let run = match self.settings.search {
-            SearchKind::Exhaustive => run_planning_stages_over(
-                roots.clone(),
-                &entries,
-                &data,
-                Some(EXHAUSTIVE_MAX_COMBINATIONS),
-                models,
-            ),
             SearchKind::CandidateConnections => run_search_over(
                 roots.clone(),
                 &entries,
                 &data,
                 models,
                 PlanSearchSettings::default(),
-                None,
             ),
         }
         .map_err(|e| e.to_string())?;
-        match &run.reference {
-            // The reference pricer's selection among the enumerated plans.
-            Some(reference) => {
-                let selection = reference
-                    .selection
-                    .as_ref()
-                    .map_err(|e| format!("selection: {e}"))?;
-                let cost_per_second = selection.costs[&selection.selected]
-                    .cost_per_second
-                    .ok_or("no cost per second (cost model 3)")?;
-                let from_logical = reference
-                    .physical
-                    .iter()
-                    .find(|p| p.id == selection.selected)
-                    .map(|p| p.from_logical.clone());
-                let logical_roots = from_logical.and_then(|id| {
-                    reference
-                        .choices
-                        .iter()
-                        .find(|c| c.id == id)
-                        .and_then(|c| c.roots.as_ref().ok().cloned())
-                });
-                Ok(Planned {
-                    selected: selection.selected.clone(),
-                    cost_per_second,
-                    stage0_roots: roots,
-                    logical_roots,
-                })
-            }
-            None => {
-                let selection = run
-                    .run
-                    .selection
-                    .as_ref()
-                    .map_err(|e| format!("selection: {e}"))?;
-                let cost_per_second = selection
-                    .cost
-                    .cost_per_second
-                    .ok_or("no cost per second (cost model 3)")?;
-                Ok(Planned {
-                    selected: "selected".into(),
-                    cost_per_second,
-                    stage0_roots: roots,
-                    logical_roots: run.run.selected_plan.clone(),
-                })
-            }
-        }
+        let (_plan, _selection) = run
+            .run
+            .selection
+            .as_ref()
+            .map_err(|e| format!("selection: {e}"))?;
+        todo!("#1207 PR 9: the selected plan's cost (plan_cost) and roots from its PhysicalASAPDAG")
     }
 
     /// Stage 2 and Stage 3 over the logical plan `roots` of `workload`'s
@@ -514,7 +450,7 @@ impl Planner {
     /// assignment implemented and priced, the cheapest selected, with the
     /// same models as [`plan`](Self::plan). Guarantees are composed again
     /// first, so a derived node carries the guarantee of what it reads, and
-    /// summaries are sized for their readers as Pass 1 sizes them.
+    /// summaries are sized for their consumers as Pass 1 sizes them.
     /// With `last_root_is_key_filter`, the last root is a `Filter` on
     /// group-key columns only and keeps its input's guarantee (whole groups
     /// selected by an exact key keep each remaining row's bound), which
@@ -526,93 +462,8 @@ impl Planner {
         roots: &[QueryRoot],
         last_root_is_key_filter: bool,
     ) -> Result<Priced, String> {
-        for root in roots {
-            root.validate_structure()
-                .map_err(|e| format!("witness validation: {e}"))?;
-        }
-        let mut roots = asap_accuracy::propagation::recompose_guarantees(roots)
-            .map_err(|e| format!("witness guarantees: {e}"))?;
-        let planning = workload.planning_workload();
-        let entries: Vec<_> = planning.query_workload.entries().collect();
-        // A witness is built outside the memo: size its summaries as Pass 1
-        // sizes a candidate for these readers, which Stage 3 only checks.
-        let targets: Vec<_> = entries
-            .iter()
-            .map(|entry| entry.requirements.accuracy.clone())
-            .collect();
-        roots = asap_accuracy::sizing::with_summaries_sized_for_targets(
-            &roots,
-            &targets,
-            &workload.data,
-        )
-        .map_err(|e| format!("witness sizing: {e}"))?;
-        if let (true, Some(last)) = (last_root_is_key_filter, roots.last_mut()) {
-            let filter = last.as_operator().ok_or("a scalar root")?;
-            let input = filter.operator.children()[0].guarantee.clone();
-            *last = QueryRoot::Operator(Rc::new((**filter).clone().with_guarantee(input)));
-        }
-        let cost_inputs = self.cost_inputs();
-        let deployment = workload.deployment();
-        let models = PlanningModels::builtin()
-            .with_cost_inputs(&cost_inputs)
-            .with_deployment_capabilities(&deployment)
-            .with_ignore_accuracy_guarantees(!self.settings.enforce_accuracy_guarantees);
-        let mut candidates = optimize_physical_asap(
-            "witness",
-            &roots,
-            &entries,
-            &workload.data,
-            deployment.query_time_results_retained,
-        )
-        .map_err(|e| format!("witness Stage 2: {e}"))?;
-        for (index, candidate) in candidates.iter_mut().enumerate() {
-            candidate.id = format!("witness-m{index}");
-        }
-        let selection =
-            crate::memo_pricing::reference_select(&candidates, &entries, &workload.data, models)
-                .map_err(|e| format!("witness Stage 3: {e}"))?;
-        let cost = &selection.costs[&selection.selected];
-        let cost_per_second = cost
-            .cost_per_second
-            .ok_or("no cost per second (cost model 3)")?;
-        let candidate = candidates
-            .iter()
-            .find(|c| c.id == selection.selected)
-            .expect("the selected candidate is offered");
-        let dag = &candidate.dag;
-        let mut inputs: BTreeMap<_, Vec<_>> = BTreeMap::new();
-        for edge in &dag.edges {
-            inputs.entry(edge.consumer).or_default().push(edge.producer);
-        }
-        let reached = |root| {
-            let mut seen = BTreeSet::new();
-            let mut stack = vec![root];
-            while let Some(node) = stack.pop() {
-                if seen.insert(node) {
-                    stack.extend(inputs.get(&node).into_iter().flatten().copied());
-                }
-            }
-            seen
-        };
-        let reached_by_root: Vec<BTreeSet<_>> = dag.roots.iter().map(|r| reached(*r)).collect();
-        let (last, others) = reached_by_root.split_last().ok_or("no roots")?;
-        let private: Vec<_> = last
-            .iter()
-            .filter(|node| others.iter().all(|set| !set.contains(node)))
-            .filter_map(|node| cost.per_node.get(node))
-            .collect();
-        let derived_root = PrivateNodes {
-            cost_per_second: private.iter().filter_map(|n| n.cost_per_second).sum(),
-            operators: private
-                .iter()
-                .map(|n| format!("{:?}", n.operator))
-                .collect(),
-        };
-        Ok(Priced {
-            selected: selection.selected.clone(),
-            cost_per_second,
-            derived_root,
-        })
+        let _ = (workload, roots, last_root_is_key_filter);
+        todo!("#1207 PR 6: price a witness plan through the new Stage 2 and Stage 3")
     }
 
     /// [`price`](Self::price) of `workload`'s selected logical plan

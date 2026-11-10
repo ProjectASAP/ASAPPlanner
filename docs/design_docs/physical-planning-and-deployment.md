@@ -39,22 +39,21 @@ The Logical Post-ASAP DAG is preceded by the Pre-ASAP DAG, the
 language-independent query semantics before summary selection. Both are
 logical `OperatorNode` DAGs. `compile_physical_asap_dag` exports the selected
 DAG as a `PhysicalASAPDAG`, which is the Physical Plan Compiler's input. Its per-node execution phase (ingestion or query time) is
-decided by a `MaterializationAssignment`, as the layer contract below states.
+decided by a `PhysicalPropertiesAssignment`, as the layer contract below states.
 
 ### Layer contract
 
 1. **Logical Post-ASAP** (`CandidateLogicalASAPDAGs`) decides what to compute: summary
    families, readouts and sharing. It does not decide placement; timing that a
    realization strategy writes while building a candidate is provisional.
-2. **Materialization** (Stage 2, #509) chooses `NotMaterialized`,
-   `MatAtIngestion(medium)`, `MatAtQuery(medium)` or
-   `MatAtQueryKeptAcrossEvaluations(medium)` for each sub-DAG whose
-   output may be stored (a `SummaryAgg` or a `MaintainPopulation`) and records
-   it in a `MaterializationAssignment`. `apply_materialization_timings` writes
-   every node's `ExecutionTiming` and `Materialization`: a `MatAtIngestion`
-   state and all of its inputs run at ingestion time; readouts, other
-   consumers, and the other states run at query time. The default assignment
-   is `NotMaterialized` everywhere; `PlanOutput::physical_asap_dag` applies it
+2. **Materialization** (Stage 2, #509) chooses, for each sub-DAG whose
+   output may be stored (a `SummaryAgg` or a `MaintainPopulation`), whether
+   it is materialized and with which timing and `Lifetime` (`None`,
+   `OneEvaluation(medium)` or `AcrossEvaluations(medium)`), and records it in
+   a `PhysicalPropertiesAssignment`. `apply_physical_properties` writes every
+   node's `ExecutionTiming` and `Lifetime`: a state materialized at ingestion time and
+   all of its inputs run at ingestion time; readouts, other consumers, and the
+   other states run at query time. The default assignment materializes nothing; `PlanOutput::physical_asap_dag` applies it
    only to nodes the optimization pass left untimed (a pass's own timing, such
    as Stage 3's ingestion-time tumbling windows, is kept).
 3. **Physical compile** (executor) reads the plan's materialized views: each
@@ -97,7 +96,7 @@ and a feasible candidate that loses on cost. Absence is not a cost comparison.
 
 For `sum by(job)(rate(m[1m]))`, Rate remains per series before grouped Sum.
 `CandidateLogicalASAPDAGs` offers one such candidate, with a per-series Rate state and a grouped
-Sum state. Its materialization assignment places it: an ingestion-time Sum state
+Sum state. Its physical properties assignment places it: an ingestion-time Sum state
 finalizes Rate and builds Sum within a bounded precompute run; a query-time Sum
 over an ingestion-time Rate state leaves the Rate readout and Sum in the query DAG. Storing a
 value requires its exact evaluation window, revision, readiness and serving
@@ -113,7 +112,7 @@ Planner's candidate space decides what to compute, not placement. For an
 instant-vector PromQL TopK, Planner resolves rows that carry the complete series
 identity and lists the current-series heap realizations per root with the other
 candidates, unranked. Precompute or query-time placement of Rate and grouped Sum
-is not a separate Planner candidate: the materialization assignment sets
+is not a separate Planner candidate: the physical properties assignment sets
 each node's timing, and the physical compiler reads it.
 
 This is the target ownership contract. A backend path that still reconstructs
@@ -473,8 +472,8 @@ These derivations are methods on `PhysicalASAPDAG` in `asap-types`, so a
 runtime needs no dependency on the planner crate.
 
 A **materialized view** is a node whose output is kept across evaluations
-(`MatAtIngestion` or `MatAtQueryKeptAcrossEvaluations`). A `MatAtQuery` node is
-not a view: its output is discarded after one evaluation. Everything a runtime
+(lifetime `AcrossEvaluations`, at ingestion or at query time). A node materialized for
+`OneEvaluation` is not a view: its output is discarded after one evaluation. Everything a runtime
 needs that the DAG determines is derived from the DAG, so the plan file has no
 second copy to keep consistent. Stage 3's selection report is returned beside
 the plan, not inside it.
@@ -621,7 +620,7 @@ The refresh window is derived from the DAG alone (time ranges, shifts and tumbli
 widths), like the views and their retention. Sealing, lateness, threading and
 the alignment of the window grid stay the deployment's.
 
-Stage 3's cost assumes this grouping (`asap_cost::execution_demand::computations`):
+Stage 3's cost assumes this grouping (`asap_cost::plan::execution_demand::computations`):
 a stateless ingestion-time node is charged once per refresh window of the
 views above it, not once per view. A runtime that splits a group (for
 example, because its sources seal at different times) computes the same

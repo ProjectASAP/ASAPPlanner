@@ -29,9 +29,9 @@ pub fn decode_series_identity(encoded: &str) -> Result<BTreeMap<String, String>,
 }
 
 /// Resolve the row representation before candidate search; see
-/// [`planner_types::ir::schema::schema_support::with_promql_series_identity`].
+/// [`planner_types::ir::schema::series_identity::with_promql_series_identity`].
 pub fn with_series_identity(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, Error> {
-    planner_types::ir::schema::schema_support::with_promql_series_identity(root).map_err(invalid)
+    planner_types::ir::schema::series_identity::with_promql_series_identity(root).map_err(invalid)
 }
 
 /// Construct source rows only from full identities. The named label columns

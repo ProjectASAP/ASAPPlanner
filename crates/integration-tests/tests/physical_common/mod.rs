@@ -33,40 +33,6 @@ pub fn execute(
     })
 }
 
-#[allow(dead_code)]
-pub fn compile_physical_asap_dag(
-    root: &std::rc::Rc<asap_types::ir::OperatorNode>,
-) -> Result<asap_types::ir::physical_export::PhysicalASAPDAG, Box<dyn std::error::Error>> {
-    compile_with(root, &asap_types::ir::MaterializationAssignment::default())
-}
-
-/// As [`compile_physical_asap_dag`], with every sub-DAG `MatAtIngestion`
-/// where the DAG allows it.
-#[allow(dead_code)] // Not every test binary sharing this module stores states at ingestion.
-pub fn compile_at_ingestion_physical_asap_dag(
-    root: &std::rc::Rc<asap_types::ir::OperatorNode>,
-) -> Result<asap_types::ir::physical_export::PhysicalASAPDAG, Box<dyn std::error::Error>> {
-    compile_with(
-        root,
-        &asap_types::ir::MaterializationAssignment::with_default(
-            asap_types::physical::Materialization::MatAtIngestion(
-                asap_types::physical::Medium::Memory,
-            ),
-        ),
-    )
-}
-
-fn compile_with(
-    root: &std::rc::Rc<asap_types::ir::OperatorNode>,
-    assignment: &asap_types::ir::MaterializationAssignment,
-) -> Result<asap_types::ir::physical_export::PhysicalASAPDAG, Box<dyn std::error::Error>> {
-    let root =
-        asap_types::ir::apply_materialization_timings(root, assignment, &mut Default::default())?;
-    Ok(asap_types::ir::physical_export::compile_physical_asap_dag(
-        &root,
-    )?)
-}
-
 /// Execute a relational DAG at query time against an in-memory connector
 /// for its one scan, scan predicates included; checks that no memory stays
 /// reserved afterwards.
@@ -87,9 +53,9 @@ pub fn execute_raw_rows_at(
     evaluation_time_ms: i64,
 ) -> Vec<Vec<asap_executor::values::Value>> {
     use asap_executor::physical_planner::compile;
-    use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
     use asap_types::ir::NonASAPOp;
-    let wire = compile_physical_asap_dag(root).unwrap();
+    use asap_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload;
+    let wire = asap_types::test_support::physical_asap_dag_at_query_time(root).unwrap();
     let (source, schema) = wire
         .nodes
         .iter()
@@ -127,14 +93,14 @@ pub fn execute_raw_rows_at(
 /// `rows(source, schema)` in that `Scan`'s schema.
 #[allow(dead_code)]
 pub fn raw_data_store(
-    dag: &asap_types::ir::physical_export::PhysicalASAPDAG,
+    dag: &asap_types::plan::physical_asap_dag::PhysicalASAPDAG,
     mut rows: impl FnMut(
         &asap_types::ir::operator::Source,
         &asap_executor::values::SchemaRef,
     ) -> Vec<Vec<asap_executor::values::Value>>,
 ) -> InMemoryDataStore {
-    use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
     use asap_types::ir::NonASAPOp;
+    use asap_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload;
     let mut store = InMemoryDataStore::default();
     let mut bound = Vec::new();
     for node in &dag.nodes {

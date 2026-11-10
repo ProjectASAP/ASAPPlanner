@@ -50,12 +50,12 @@ time, both kept. Not materializing it is the no-window plan, so it is not a
 separate option.
 
 **Today:** Pass 2 builds tumbling windows (`SummaryTumblingWindowChain`), and physical
-ASAP-aware optimization enumerates `NotMaterialized`, `MatAtIngestion` and
-`MatAtQuery` (state reused within one evaluation) for every summary build.
+ASAP-aware optimization enumerates `Lifetime::None`, ingestion-time `AcrossEvaluations` and
+`OneEvaluation` (state reused within one evaluation) for every summary build.
 B1 and B2 exist. B3 (tumbling windows built at query time and kept across
 evaluations) is offered when the deployment declares
 `query_time_results_retained` in its `deployment_capabilities`: Stage 2 then
-adds `MatAtQueryKeptAcrossEvaluations` for a tumbling-window chain that builds
+adds query-time `AcrossEvaluations` for a tumbling-window chain that builds
 one new tumbling window per evaluation. Pattern A's shared EH needs window segments shared across
 queries (#628, #634), so A1–A3 do not exist yet. B3's
 4 kept tumbling windows plus the newest cost 436.59 per second under cost model 1,
@@ -63,12 +63,12 @@ between B2 (3.611) and B1 (654.54).
 
 ## Invariants and tests
 
-**Reading materialization.** The physical DAG records each node's
-`Materialization` (#667). Tests read it through
-`planner_layering_common::materialization(p, node)` without the storage
-medium (`MatAtIngestion`, `MatAtQuery`, `NotMaterialized`), and the kept
+**Reading physical properties.** The physical DAG records each node's
+timing and `Lifetime` (#667, #1200). Tests read them through
+`planner_layering_common::materializing(p, node)` without the lifetime length or
+storage medium (`MaterializedAtIngestion`, `MaterializedAtQueryTime`, `NotMaterialized`), and the materialized
 event-time span through `retention_ms(p, node)`. The IR does not record
-retention, so the adapter derives it the way plan selection prices kept
+retention, so the adapter derives it the way plan selection prices materialized
 state: a chain of `N` tumbling windows of width `w` keeps `N·w`, plus one tumbling window while
 maintained at ingestion time; a whole-window build keeps its window, plus
 the next one at ingestion time; each plus the offset of the shifts below
@@ -89,7 +89,7 @@ it.
 | The shared EH yields exactly A1, A2, A3 | `stage2_physical_asap_optimization_a_shared_eh_has_three_materialization_options` | ignored: the shared EH (#628, #634) |
 | At rest, A2 is not generated; A1 and A3 remain | `stage2_physical_asap_optimization_a_at_rest_drops_the_ingestion_time_option` | ignored: the shared EH (#628, #634) |
 | A materialized EH is one build node read by all five queries, priced once | `stage2_physical_asap_optimization_a_materialized_eh_is_built_once_for_all_consumers` | ignored: the shared EH (#628, #634) |
-| A3 costs strictly more than A1 (five builds instead of one: a `NotMaterialized` node is charged per consuming query) | `stage3_plan_selection_a_rebuilding_per_query_costs_more_than_building_once` | ignored: the shared EH (#628, #634) |
+| A3 costs strictly more than A1 (five builds instead of one: a `Lifetime::None` node is charged per consuming query) | `stage3_plan_selection_a_rebuilding_per_query_costs_more_than_building_once` | ignored: the shared EH (#628, #634) |
 | As given, A1 is the cheapest of the three | `stage3_plan_selection_a_once_adhoc_prefers_the_query_time_eh` | ignored: the shared EH (#628, #634) |
 | Monthly, A2's cost relative to A1 drops: cost(A2)/cost(A1) monthly < as given | `stage3_plan_selection_a_monthly_amortizes_ingestion_time_maintenance` | ignored: the shared EH (#628, #634) |
 
@@ -127,11 +127,11 @@ it.
 
 1. **Charging A3 (decided).** A3 is one logical EH node that is not
    materialized, so it is rebuilt by each of its five consumers. Plan
-   selection charges a `NotMaterialized` node once per consuming query
+   selection charges a `Lifetime::None` node once per consuming query
    (`NodeCost::multiplier`) and a materialized node once; physical ASAP-aware
    optimization does not duplicate the node. So A3 costs five EH builds and
    A1 one, as the tests require. The A3 tests stay ignored only because the
-   shared EH and its materialization options do not exist yet.
+   shared EH and its physical properties options do not exist yet.
 2. **Recurrence input (resolved).** Materialization depends on
    `recurrence`, `predictability` and `arrival`: `optimize_physical_asap`
    takes the workload entries (`QueryWorkloadEntry`: recurrence,

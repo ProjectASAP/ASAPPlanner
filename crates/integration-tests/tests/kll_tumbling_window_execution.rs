@@ -10,21 +10,14 @@ use asap_executor::{
     values::{Batch, SchemaRef, Value},
     AggregateCore, Error,
 };
-use asap_types::ir::materialized_view::MaterializedView;
-use asap_types::ir::operator::operator_properties::TimeShift;
+use asap_types::ir::operator::arguments::TimeShift;
 use asap_types::ir::operator::{GroupKeys, Reduction, Source};
-use asap_types::ir::physical_export::{
-    compile_physical_asap_workload_with_node_ids, PhysicalASAPDAG,
-};
 use asap_types::ir::scalar::ColumnRef;
-use asap_types::ir::schema::{
-    DataType, Field, FieldDataType, GroupingStrategy, Schema, SketchAlgorithm, SketchKind,
-    SketchParams, SketchStatistic, SummaryUpdate,
-};
-use asap_types::ir::{
-    apply_materialization_timings_to_roots, ASAPOp, MaterializationAssignment, NonASAPOp,
-    OperatorNode, QueryRoot, TimeRangeKind,
-};
+use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
+use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot, TimeRangeKind};
+use asap_types::plan::materialized_view::MaterializedView;
+use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
+use asap_types::summary_type::{SketchAlgorithm, SketchStatistic, SummaryUpdate};
 use futures::{executor::block_on, StreamExt};
 use std::{
     rc::Rc,
@@ -36,17 +29,8 @@ use std::{
 
 const TUMBLING_WINDOW_WIDTH_MS: i64 = 60_000;
 
-fn family(k: u32) -> FieldDataType {
-    FieldDataType::Sketch(
-        SketchKind::new(
-            SketchAlgorithm::Kll,
-            SketchParams::Kll {
-                k,
-                failure_probability: None,
-            },
-        ),
-        Default::default(),
-    )
+fn family(_k: u32) -> FieldDataType {
+    FieldDataType::Sketch(SketchAlgorithm::Kll)
 }
 /// `t(ts, value)`, time index `ts`.
 fn table_schema() -> Schema {
@@ -101,17 +85,15 @@ fn fixture() -> Fixture {
             }));
             new(asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
                 child: range,
-                family: family(200),
+                summary_type: family(200),
                 input: SummaryUpdate::column(ColumnRef::Named("value".into())),
                 reduction: Reduction::Reduce(GroupKeys::default()),
-                grouping: GroupingStrategy::PerSubpopulationInstance,
                 filter: None,
             }))
         })
         .collect();
     let merge = new(asap_types::ir::Operator::ASAP(ASAPOp::SummaryMerge {
         children: tumbling_windows.clone(),
-        newest_tumbling_windows: None,
         group_by: None,
     }));
     let estimate = |q| {
@@ -120,20 +102,17 @@ fn fixture() -> Fixture {
             query: SketchStatistic::Quantile { q },
         }))
     };
-    let roots = apply_materialization_timings_to_roots(
-        &[
-            QueryRoot::Operator(estimate(0.5)),
-            QueryRoot::Operator(estimate(0.99)),
-        ],
-        &MaterializationAssignment::default(),
-    )
-    .unwrap();
-    let compiled = compile_physical_asap_workload_with_node_ids(&roots).unwrap();
+    let roots = [
+        QueryRoot::Operator(estimate(0.5)),
+        QueryRoot::Operator(estimate(0.99)),
+    ];
+    let (dag, operator_node_of_id) =
+        asap_types::test_support::physical_asap_dag_at_query_time_with_node_ids(&roots).unwrap();
     let mut tumbling_window_ids = vec![0; 5];
     let (mut merge, mut p50, mut p99) = (0, 0, 0);
-    for node in &compiled.dag.nodes {
+    for node in &dag.nodes {
         let id = node.id as u64;
-        match &compiled.node_ids.operator_node(node.id).unwrap().operator {
+        match &operator_node_of_id[node.id].operator {
             asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg { child, .. }) => {
                 let shift = match child.children()[0].non_asap() {
                     Some(NonASAPOp::TimeShift { shift, .. }) => shift.offset_ms,
@@ -152,7 +131,7 @@ fn fixture() -> Fixture {
             _ => {}
         }
     }
-    let mut dag = compiled.dag;
+    let mut dag = dag;
     let views = views_at(&mut dag, &tumbling_window_ids).unwrap();
     Fixture {
         dag,

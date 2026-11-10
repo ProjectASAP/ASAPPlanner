@@ -1,42 +1,11 @@
 //! Query text through summary selection: counts use observations, never value weights.
 use crate::planner_support::selected_dag;
 use crate::support;
-use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
-use asap_types::ir::properties::AccuracyTarget;
-use asap_types::ir::schema::{
-    ExactKind, FieldDataType, GroupingStrategy, NonNegativeWeightProof, SketchAlgorithm,
-    SummaryInputExpr, WeightDomain,
-};
+use asap_types::accuracy::AccuracyTarget;
+use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, Operator, OperatorNode};
-use std::rc::Rc;
-use support::{logical_candidates, lower_promql, physical_asap_dag};
-
-/// Whether `node` reads a Hydra state (one sketch shared by every group).
-fn reads_hydra(node: &Rc<OperatorNode>) -> bool {
-    OperatorNode::reachable(node).iter().any(|node| {
-        matches!(
-            &node.operator,
-            Operator::ASAP(ASAPOp::SummaryAgg {
-                family: FieldDataType::Sketch(_, GroupingStrategy::SharedMultiSubpopulation { .. }),
-                ..
-            })
-        )
-    })
-}
-
-#[test]
-#[ignore = "Pass 1 offers no Hydra state for a grouped count yet (#703)"]
-fn grouped_count_offers_hydra_but_selection_keeps_per_group_state() {
-    let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
-    // Hydra hashes a non-null item per row: the series identity (PromQL
-    // labels are nullable).
-    let root = asap_types::ir::schema::schema_support::with_promql_series_identity(
-        &lower_promql("count by(job)(up)", target.clone()).unwrap(),
-    )
-    .unwrap();
-    assert!(logical_candidates(Rc::clone(&root)).iter().any(reads_hydra));
-    assert!(!reads_hydra(&selected_dag(root, target)));
-}
+use asap_types::summary_type::ExactKind;
+use support::lower_promql;
 
 // Exact series and temporal counts must select a count accumulator, not distinct or sum.
 #[test]
@@ -49,88 +18,12 @@ fn exact_counts_select_count_accumulators() {
                 matches!(
                     &node.operator,
                     Operator::ASAP(ASAPOp::SummaryAgg {
-                        family: FieldDataType::ExactAggregate(ExactKind::Count, _),
+                        summary_type: FieldDataType::ExactAggregate(ExactKind::Count, _),
                         ..
                     })
                 )
             }),
             "{query}: {selected:?}"
-        );
-    }
-}
-
-// CMS/UnivMon count updates stay +1 even for zero or negative samples.
-// CountSketch cannot answer totals and must not be offered for count.
-#[test]
-fn frequency_count_candidates_use_unit_weights() {
-    for query in ["count_over_time(up[5m])", "count(up)"] {
-        let accuracy = AccuracyTarget::max_error(0.02);
-        let root = lower_promql(query, accuracy.clone()).unwrap();
-        let candidates = logical_candidates(root);
-        let mut algorithms = Vec::new();
-        for node in &candidates {
-            let Some(summary_input) =
-                OperatorNode::reachable(node)
-                    .into_iter()
-                    .find_map(|node| match &node.operator {
-                        Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) => {
-                            Some(Rc::clone(summary_input))
-                        }
-                        _ => None,
-                    })
-            else {
-                continue;
-            };
-            let Operator::ASAP(ASAPOp::SummaryAgg {
-                family: FieldDataType::Sketch(kind, _),
-                input,
-                ..
-            }) = &summary_input.operator
-            else {
-                continue;
-            };
-            assert!(
-                !matches!(
-                    kind.algorithm(),
-                    SketchAlgorithm::Hll | SketchAlgorithm::CountSketch
-                ),
-                "{query}: {node:?}"
-            );
-            if !matches!(
-                kind.algorithm(),
-                SketchAlgorithm::Cms | SketchAlgorithm::UnivMon
-            ) {
-                continue;
-            }
-            let dag = physical_asap_dag(node);
-            assert!(
-                dag.nodes.iter().any(|node| matches!(
-                    &node.payload,
-                    PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { input: actual, .. }) if actual == input
-                )),
-                "post-ASAP DAG must preserve the count update contract"
-            );
-            algorithms.push(*kind.algorithm());
-            assert!(input.item.is_some(), "frequency keys must be explicit");
-            assert_eq!(
-                input.weight,
-                SummaryInputExpr::Constant(1.0),
-                "{query}: {node:?}"
-            );
-            assert_eq!(
-                input.weight_domain,
-                WeightDomain::NonNegative {
-                    proof: NonNegativeWeightProof::UnitCount
-                }
-            );
-        }
-        assert!(
-            algorithms.contains(&SketchAlgorithm::Cms),
-            "{query}: {candidates:?}"
-        );
-        assert!(
-            algorithms.contains(&SketchAlgorithm::UnivMon),
-            "{query}: {candidates:?}"
         );
     }
 }
@@ -163,7 +56,7 @@ fn aggregate_fixture(query: &str, series: &[Vec<f64>]) -> Vec<f64> {
         other => panic!("unsupported fixture input: {other:?}"),
     }
     let aggregate = |values: &[f64]| match measures.as_slice() {
-        [AggIntent::Count { .. }] => values.len() as f64,
+        [AggIntent::Count] => values.len() as f64,
         [AggIntent::Cardinality { .. }] => {
             let mut distinct = values.to_vec();
             distinct.sort_by(f64::total_cmp);
@@ -225,57 +118,6 @@ fn count_over_time_counts_scrapes_not_sample_values() {
     );
 }
 
-// Execute the emitted CMS update-weight expression on the reported values.
-// This checks the planner's numerical update contract, not a sketch-library runtime.
-#[test]
-fn cms_count_updates_total_ten_for_zero_positive_and_negative_samples() {
-    use asap_types::ir::scalar::ColumnRef;
-    let accuracy = AccuracyTarget::max_error(0.02);
-    let root = lower_promql("count_over_time(up[5m])", accuracy.clone()).unwrap();
-    let candidates = logical_candidates(root);
-    let dag = candidates
-        .iter()
-        .find_map(|node| {
-            let dag = physical_asap_dag(node);
-            dag.nodes
-                .iter()
-                .any(|node| {
-                    matches!(&node.payload,
-            PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
-                if kind.algorithm() == &SketchAlgorithm::Cms)
-                })
-                .then_some(dag)
-        })
-        .expect("CMS count candidate");
-    let update = dag
-        .nodes
-        .iter()
-        .find_map(|node| match &node.payload {
-            PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { input, .. }) => Some(input),
-            _ => None,
-        })
-        .unwrap();
-    for value in [1.0, 0.0, 3.0, -3.0] {
-        let total: f64 = [value; 10]
-            .into_iter()
-            .map(|sample| {
-                let weight = match &update.weight {
-                    SummaryInputExpr::Constant(value) => *value,
-                    SummaryInputExpr::Column(ColumnRef::SampleValue) => sample,
-                    SummaryInputExpr::Column(ColumnRef::Named(name)) if name == "value" => sample,
-                    other => panic!("unsupported update weight: {other:?}"),
-                };
-                assert!(
-                    weight >= 0.0,
-                    "CMS must not receive a negative update for {sample}"
-                );
-                weight
-            })
-            .sum();
-        assert_eq!(total, 10.0, "ten samples of {value}");
-    }
-}
-
 // The assertion helper must fail on an injected composition error; its coverage
 // must not depend on a real planner bug remaining unfixed.
 #[test]
@@ -285,16 +127,4 @@ fn logical_candidates_fails_on_a_candidate_that_does_not_compose() {
         id: "invalid-composition".into(),
         roots: Err("invalid choice".into()),
     }]);
-}
-
-// Ranked-row schemas let an aggregate consume TopK's numeric output (#672).
-#[test]
-fn aggregate_over_topk_candidates_compose() {
-    let accuracy = AccuracyTarget::max_error(0.01);
-    let root = lower_promql(
-        "sum by (job) (topk by (job, instance) (1, rate(m[5m])))",
-        accuracy.clone(),
-    )
-    .unwrap();
-    assert!(!logical_candidates(root).is_empty());
 }

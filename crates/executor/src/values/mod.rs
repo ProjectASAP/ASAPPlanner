@@ -210,33 +210,11 @@ pub(super) fn validate_state(
     family: &SummaryFamilyType,
     state: &dyn AggregateCore,
 ) -> Result<(), Error> {
-    use crate::summary_kernels::{
-        count_min_sketch::CountMinSketchAccumulator, datasketches_kll::DatasketchesKLLAccumulator,
-        dd_sketch::DDSketchAccumulator, exact::ExactAccumulator, hll_sketch::HllSketchAccumulator,
-        kmv::KmvAccumulator, univmon::UnivMonAccumulator,
-    };
-    use planner_types::ir::schema::SketchParams;
+    use crate::summary_kernels::exact::ExactAccumulator;
+
     validate_family(family)?;
     let valid = match family {
-        SummaryFamilyType::Sketch(kind, _)
-            if matches!(
-                kind.params(),
-                SketchParams::CmsWithHeap { .. } | SketchParams::CountSketchWithHeap { .. }
-            ) =>
-        {
-            use crate::summary_kernels::weighted_frequency::WeightedFrequency;
-            let (algorithm, width, depth, capacity) = WeightedFrequency::configuration(kind)?;
-            state
-                .as_any()
-                .downcast_ref::<WeightedFrequency>()
-                .is_some_and(|state| {
-                    state.algorithm() == algorithm && state.shape() == (width, depth, capacity)
-                })
-        }
-        SummaryFamilyType::Sketch(_, grouping)
-            if grouping
-                != &planner_types::ir::schema::GroupingStrategy::PerSubpopulationInstance =>
-        {
+        SummaryFamilyType::Sketch(planner_types::summary_type::SketchAlgorithm::HydraCms) => {
             let shape = crate::capability::hydra_cms_shape(family).map_err(Error::Invalid)?;
             state
                 .as_any()
@@ -247,49 +225,9 @@ pub(super) fn validate_state(
             .as_any()
             .downcast_ref::<ExactAccumulator>()
             .is_some_and(|s| s.family() == family && !s.is_keyed()),
-        SummaryFamilyType::Sketch(kind, _) => match kind.params() {
-            SketchParams::Kll { k, .. } => state
-                .as_any()
-                .downcast_ref::<DatasketchesKLLAccumulator>()
-                .is_some_and(|s| s.inner.k() == *k as usize),
-            SketchParams::DDSketch { alpha } => state
-                .as_any()
-                .downcast_ref::<DDSketchAccumulator>()
-                .is_some_and(|s| s.inner.alpha() == *alpha),
-            SketchParams::Hll { precision, .. } => state
-                .as_any()
-                .downcast_ref::<HllSketchAccumulator>()
-                .is_some_and(|s| s.precision() == *precision),
-            SketchParams::Kmv { k, .. } => state
-                .as_any()
-                .downcast_ref::<KmvAccumulator>()
-                .is_some_and(|s| s.inner.k == *k as usize),
-            SketchParams::UnivMon {
-                heap_size,
-                sketch_rows,
-                sketch_cols,
-                layers,
-                ..
-            } => state
-                .as_any()
-                .downcast_ref::<UnivMonAccumulator>()
-                .is_some_and(|s| {
-                    s.dimensions()
-                        == (
-                            *heap_size as usize,
-                            *sketch_rows as usize,
-                            *sketch_cols as usize,
-                            usize::from(*layers),
-                        )
-                }),
-            SketchParams::Cms { width, depth } => state
-                .as_any()
-                .downcast_ref::<CountMinSketchAccumulator>()
-                .is_some_and(|s| {
-                    (s.inner.rows(), s.inner.cols()) == (*depth as usize, *width as usize)
-                }),
-            _ => false,
-        },
+        SummaryFamilyType::Sketch(..) => {
+            todo!("#1207 PR 6: compare the state with θ, which the exported node carries")
+        }
         _ => false,
     };
     if valid {
@@ -343,50 +281,20 @@ pub(crate) fn plain(schema: &SchemaRef, column: usize) -> Result<(&DataType, boo
 mod weighted_state_tests {
     use super::*;
     use crate::summary_kernels::weighted_frequency::{FrequencyAlgorithm, WeightedFrequency};
-    use planner_types::ir::schema::{SketchAlgorithm, SketchKind, SketchParams};
+    use planner_types::summary_type::SketchAlgorithm;
 
     // A state cannot acquire a different family or shape merely by relabeling its batch.
     #[test]
     fn weighted_state_family_and_shape_must_match() {
-        let cms = SummaryFamilyType::Sketch(
-            SketchKind::new(
-                SketchAlgorithm::CmsWithHeap,
-                SketchParams::CmsWithHeap {
-                    width: 32,
-                    depth: 5,
-                    heap_size: 8,
-                },
-            ),
-            Default::default(),
-        );
-        let cs = SummaryFamilyType::Sketch(
-            SketchKind::new(
-                SketchAlgorithm::CountSketchWithHeap,
-                SketchParams::CountSketchWithHeap {
-                    width: 32,
-                    depth: 5,
-                    heap_size: 8,
-                },
-            ),
-            Default::default(),
-        );
+        let cms = SummaryFamilyType::Sketch(SketchAlgorithm::CmsWithHeap);
+        let cs = SummaryFamilyType::Sketch(SketchAlgorithm::CountSketchWithHeap);
         let state = WeightedFrequency::new(FrequencyAlgorithm::CountSketch, 32, 5, 8).unwrap();
         assert!(validate_state(&cs, &state).is_ok());
         assert!(validate_state(&cms, &state).is_err());
         let wrong_shape =
             WeightedFrequency::new(FrequencyAlgorithm::CountSketch, 64, 5, 8).unwrap();
         assert!(validate_state(&cs, &wrong_shape).is_err());
-        let even_depth = SummaryFamilyType::Sketch(
-            SketchKind::new(
-                SketchAlgorithm::CountSketchWithHeap,
-                SketchParams::CountSketchWithHeap {
-                    width: 32,
-                    depth: 4,
-                    heap_size: 8,
-                },
-            ),
-            Default::default(),
-        );
+        let even_depth = SummaryFamilyType::Sketch(SketchAlgorithm::CountSketchWithHeap);
         assert!(validate_family(&even_depth).is_err());
     }
 }

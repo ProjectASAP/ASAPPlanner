@@ -8,12 +8,12 @@
 //!
 //! Stored-state encodings belong to deployments. Full plan acceptance is
 //! owned by `binding`, which also validates schemas, expressions and inputs.
-use crate::summary_kernels::hll_sketch::HLL_PRECISIONS;
-use crate::summary_kernels::weighted_frequency::{self, FrequencyAlgorithm};
+
 use crate::Error;
-use planner_types::ir::schema::{
-    ExactKind, ExactParams, FamilyCapability, FieldDataType as SummaryFamilyType, GroupingStrategy,
-    SketchAlgorithm, SketchParams, SketchStatistic, StatisticKind, SummaryUpdate,
+use planner_types::ir::schema::FieldDataType as SummaryFamilyType;
+use planner_types::summary_type::{
+    ExactKind, ExactParams, SketchAlgorithm, SketchStatistic, StatisticKind, SummaryTypeCapability,
+    SummaryUpdate,
 };
 
 /// Check the same contract used by `create_planner_accumulator` before a plan
@@ -21,10 +21,9 @@ use planner_types::ir::schema::{
 pub fn validate_summary_kernel(
     family: &SummaryFamilyType,
     input: &SummaryUpdate,
-    grouping: &GroupingStrategy,
 ) -> Result<(), String> {
-    if grouping != &GroupingStrategy::PerSubpopulationInstance {
-        return validate_hydra_cms(family, input, grouping);
+    if SummaryTypeCapability::shares_one_state_across_groups(family) {
+        return validate_hydra_cms(family, input);
     }
     let keyed = match family {
         SummaryFamilyType::ExactAggregate(kind, params) => {
@@ -43,80 +42,8 @@ pub fn validate_summary_kernel(
             }
             input.item.is_some()
         }
-        SummaryFamilyType::Sketch(kind, layout) => {
-            if layout != grouping {
-                return Err("Planner family and operator grouping disagree".into());
-            }
-            use SketchAlgorithm as A;
-            use SketchParams as P;
-            match (kind.algorithm(), kind.params()) {
-                // `asap_sketchlib` silently caps a larger `k`.
-                (A::Kll, P::Kll { k, .. })
-                    if (8..=planner_types::ir::schema::sketch::KLL_MAX_K).contains(k) =>
-                {
-                    false
-                }
-                (A::DDSketch, P::DDSketch { alpha })
-                    if alpha.is_finite() && *alpha > 0.0 && *alpha < 1.0 =>
-                {
-                    false
-                }
-                (A::Hll, P::Hll { precision, .. }) if HLL_PRECISIONS.contains(precision) => false,
-                (A::Kmv, P::Kmv { k, .. }) if *k >= crate::summary_kernels::kmv::KMV_MIN_K => false,
-                (A::Cms, P::Cms { width, depth }) if valid_matrix(*width, *depth) => true,
-                // The kernel's shape rules (an odd depth, for the median).
-                (A::CountSketch, P::CountSketch { width, depth })
-                    if valid_matrix(*width, *depth)
-                        && weighted_frequency::check_shape(
-                            FrequencyAlgorithm::CountSketch,
-                            *width as usize,
-                            *depth as usize,
-                        )
-                        .is_ok() =>
-                {
-                    true
-                }
-                (
-                    A::CmsWithHeap,
-                    P::CmsWithHeap {
-                        width,
-                        depth,
-                        heap_size,
-                    },
-                )
-                | (
-                    A::CountSketchWithHeap,
-                    P::CountSketchWithHeap {
-                        width,
-                        depth,
-                        heap_size,
-                    },
-                ) if valid_matrix(*width, *depth) && *heap_size > 0 => true,
-                (
-                    A::UnivMon,
-                    P::UnivMon {
-                        heap_size,
-                        sketch_rows,
-                        sketch_cols,
-                        layers,
-                        ..
-                    },
-                ) if crate::summary_kernels::univmon::check_shape(
-                    *heap_size as usize,
-                    *sketch_rows as usize,
-                    *sketch_cols as usize,
-                    usize::from(*layers),
-                )
-                .is_ok() =>
-                {
-                    false
-                }
-                _ => {
-                    return Err(format!(
-                        "unsupported kernel or invalid parameters: {kind:?}"
-                    ))
-                }
-            }
+        SummaryFamilyType::Sketch(_) => {
+            todo!("#1207 PR 6: check θ, which the exported node carries")
         }
         _ => return Err(format!("unsupported summary kernel {family:?}")),
     };
@@ -126,20 +53,13 @@ pub fn validate_summary_kernel(
     Ok(())
 }
 
-/// The only shared grouping with a kernel: Hydra over Count-Min. Each update
+/// The only Hydra algorithm with a kernel: Hydra over Count-Min. Each update
 /// adds one item column's value to its group, with weight 1 (a row count,
 /// `UnitCount`), a positive integer constant (`PositiveConstant`) or a weight
 /// column proven non-negative (a Count-Min point count only overestimates
 /// when no weight is negative).
-fn validate_hydra_cms(
-    family: &SummaryFamilyType,
-    input: &SummaryUpdate,
-    grouping: &GroupingStrategy,
-) -> Result<(), String> {
-    use planner_types::ir::schema::{NonNegativeWeightProof, SummaryInputExpr, WeightDomain};
-    if !matches!(family, SummaryFamilyType::Sketch(_, layout) if layout == grouping) {
-        return Err("Planner family and operator grouping disagree".into());
-    }
+fn validate_hydra_cms(family: &SummaryFamilyType, input: &SummaryUpdate) -> Result<(), String> {
+    use planner_types::summary_type::{NonNegativeWeightProof, SummaryInputExpr, WeightDomain};
     hydra_cms_shape(family)?;
     if !matches!(input.item, Some(SummaryInputExpr::Column(_))) {
         return Err("HydraCms requires one item column".into());
@@ -182,47 +102,14 @@ pub(crate) fn constant_row_weight(weight: f64) -> Result<std::num::NonZeroU32, S
     }
 }
 
-/// `(shared_rows, shared_columns, width, depth)` of a HydraCms family. The
-/// family is the per-group Count-Min it emulates, with the Hydra's own width
-/// and depth.
+/// `(shared_rows, shared_columns, width, depth)` of a HydraCms state.
 pub(crate) fn hydra_cms_shape(
     family: &SummaryFamilyType,
 ) -> Result<(usize, usize, usize, usize), String> {
-    use planner_types::ir::schema::{HydraKind, HydraParams};
-    let SummaryFamilyType::Sketch(
-        kind,
-        GroupingStrategy::SharedMultiSubpopulation {
-            kind: HydraKind::HydraCms,
-            params:
-                HydraParams::HydraCms {
-                    width,
-                    depth,
-                    shared_rows,
-                    shared_columns,
-                },
-        },
-    ) = family
-    else {
-        return Err("a shared-grouping (Hydra) family has no registered kernel".into());
+    let SummaryFamilyType::Sketch(SketchAlgorithm::HydraCms) = family else {
+        return Err("a Hydra algorithm other than HydraCms has no registered kernel".into());
     };
-    if kind.algorithm() != &SketchAlgorithm::Cms
-        || kind.params()
-            != &(SketchParams::Cms {
-                width: *width,
-                depth: *depth,
-            })
-    {
-        return Err("HydraCms family must be Count-Min with the Hydra width and depth".into());
-    }
-    if !valid_matrix(*width, *depth) || !valid_matrix(*shared_columns, *shared_rows) {
-        return Err("invalid HydraCms dimensions".into());
-    }
-    Ok((
-        *shared_rows as usize,
-        *shared_columns as usize,
-        *width as usize,
-        *depth as usize,
-    ))
+    todo!("#1207 PR 6: the Hydra grid's sizes are θ, which the exported node carries")
 }
 
 /// A filtered `SummaryAgg` never runs at ingestion time. An ingestion-time
@@ -230,7 +117,7 @@ pub(crate) fn hydra_cms_shape(
 /// none of the query's columns for the filter predicate to read, so only a
 /// query-time build can apply it. The ingestion-time compiler and the
 /// binding of any ingestion-timed `SummaryAgg` apply this check. The planner
-/// applies the same rule: Stage 2 never offers `MatAtIngestion` for a
+/// applies the same rule: Stage 2 never offers materializing at ingestion time for a
 /// filtered build (`IngestionPruneReason::Filtered`), and materialization
 /// timing rejects an explicit one (`FilteredSummaryAtIngestion`). This check
 /// guards plans that did not come from the planner.
@@ -243,6 +130,7 @@ pub fn validate_ingestion_time_summary<C>(
     }
 }
 
+#[allow(dead_code)] // Used again in #1207 PR 6, with θ from the exported node.
 fn valid_matrix(width: u32, depth: u32) -> bool {
     // Construction uses the kernel's native row hashing, so no encoded-size
     // limit applies here.
@@ -258,9 +146,9 @@ fn valid_matrix(width: u32, depth: u32) -> bool {
 /// occurrence), the update an unkeyed frequency family (HLL, UnivMon) builds
 /// from that column's values.
 pub(crate) fn unit_frequency_column(
-    update: &planner_types::ir::schema::SummaryUpdate,
+    update: &planner_types::summary_type::SummaryUpdate,
 ) -> Option<&planner_types::ir::scalar::ColumnRef> {
-    use planner_types::ir::schema::{NonNegativeWeightProof, SummaryInputExpr, WeightDomain};
+    use planner_types::summary_type::{NonNegativeWeightProof, SummaryInputExpr, WeightDomain};
     match (&update.item, &update.weight, &update.weight_domain) {
         (
             Some(SummaryInputExpr::Column(column)),
@@ -274,41 +162,24 @@ pub(crate) fn unit_frequency_column(
 }
 
 pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
-    use planner_types::ir::schema::SketchAlgorithm as A;
-    if let SummaryFamilyType::Sketch(kind, grouping) = family {
+    use planner_types::summary_type::SketchAlgorithm as A;
+    if let SummaryFamilyType::Sketch(kind) = family {
         // Plain Count-Min is native as stored state only: it merges and reads
         // its bare count, but the DAG does not build it from rows. HydraCms
         // is built by the all-groups summary build.
-        if let (A::Cms, SketchParams::Cms { width, depth }) = (kind.algorithm(), kind.params()) {
-            if grouping != &GroupingStrategy::PerSubpopulationInstance {
-                return hydra_cms_shape(family).map(|_| ()).map_err(Error::Invalid);
-            }
-            return if valid_matrix(*width, *depth) {
-                Ok(())
-            } else {
-                Err(Error::Invalid(
-                    "invalid Count-Min dimensions or grouping strategy".into(),
-                ))
-            };
+        if let A::HydraCms = kind {
+            return hydra_cms_shape(family).map(|_| ()).map_err(Error::Invalid);
         }
-        if matches!(kind.algorithm(), A::CmsWithHeap | A::CountSketchWithHeap) {
-            let (_, width, depth, _) = weighted_frequency::WeightedFrequency::configuration(kind)?;
-            return if valid_matrix(width as u32, depth as u32) && grouping == &Default::default() {
-                Ok(())
-            } else {
-                Err(Error::Invalid(
-                    "invalid weighted frequency dimensions or grouping strategy".into(),
-                ))
-            };
+        if let A::Cms = kind {
+            todo!("#1207 PR 6: check the Count-Min θ, which the exported node carries")
+        }
+        if matches!(kind, A::CmsWithHeap | A::CountSketchWithHeap) {
+            todo!("#1207 PR 6: check the weighted-frequency θ, which the exported node carries")
         }
     }
     match family {
         SummaryFamilyType::ExactAggregate(..) => {}
-        SummaryFamilyType::Sketch(kind, _)
-            if matches!(
-                kind.algorithm(),
-                A::Kll | A::DDSketch | A::Hll | A::Kmv | A::UnivMon
-            ) => {}
+        SummaryFamilyType::Sketch(A::Kll | A::DDSketch | A::Hll | A::Kmv | A::UnivMon) => {}
         _ => {
             return Err(Error::Invalid(
                 "summary family has no native DAG state implementation".into(),
@@ -317,10 +188,9 @@ pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
     }
     crate::capability::validate_summary_kernel(
         family,
-        &planner_types::ir::schema::SummaryUpdate::column(
+        &planner_types::summary_type::SummaryUpdate::column(
             planner_types::ir::scalar::ColumnRef::SampleValue,
         ),
-        &Default::default(),
     )
     .map_err(Error::Invalid)
 }
@@ -354,16 +224,11 @@ pub(crate) const EVALUATED_READOUTS: &[(SketchAlgorithm, &[StatisticKind])] = &[
 /// Whether the executor reads `readout` from a state of `family` whose
 /// family-capability table row answers it.
 fn evaluates(family: &SummaryFamilyType, readout: StatisticKind) -> bool {
-    use planner_types::ir::schema::HydraKind;
     match family {
-        SummaryFamilyType::Sketch(kind, GroupingStrategy::PerSubpopulationInstance) => {
-            EVALUATED_READOUTS
-                .iter()
-                .any(|(family, readouts)| family == kind.algorithm() && readouts.contains(&readout))
-        }
-        SummaryFamilyType::Sketch(_, GroupingStrategy::SharedMultiSubpopulation { kind, .. }) => {
-            matches!(kind, HydraKind::HydraCms | HydraKind::HydraKll)
-        }
+        SummaryFamilyType::Sketch(SketchAlgorithm::HydraCms | SketchAlgorithm::HydraKll) => true,
+        SummaryFamilyType::Sketch(kind) => EVALUATED_READOUTS
+            .iter()
+            .any(|(family, readouts)| family == kind && readouts.contains(&readout)),
         _ => false,
     }
 }
@@ -381,16 +246,7 @@ pub fn validate_sketch_evaluation(
     // HydraCms answers a group's item frequency. A group's total needs a
     // group-mass query asap_sketchlib's Hydra lacks.
     if readout == StatisticKind::Total
-        && matches!(
-            family,
-            SummaryFamilyType::Sketch(
-                _,
-                GroupingStrategy::SharedMultiSubpopulation {
-                    kind: planner_types::ir::schema::HydraKind::HydraCms,
-                    ..
-                }
-            )
-        )
+        && matches!(family, SummaryFamilyType::Sketch(SketchAlgorithm::HydraCms))
     {
         return Err(Error::Invalid(
             "HydraCms does not answer a group total: asap_sketchlib's Hydra has no group-mass \
@@ -399,7 +255,7 @@ pub fn validate_sketch_evaluation(
         ));
     }
     if readout == StatisticKind::TopK
-        || !FamilyCapability::of(family).answers(query)
+        || !SummaryTypeCapability::of(family).answers(query)
         || !evaluates(family, readout)
     {
         return Err(Error::Invalid(
@@ -422,7 +278,7 @@ pub fn validate_exact_evaluation(
     evaluation: &crate::summary_kernels::exact::ExactEvaluation,
 ) -> Result<(), Error> {
     validate_native_family(family)?;
-    use planner_types::ir::schema::ExactKind as E;
+    use planner_types::summary_type::ExactKind as E;
     let supported = matches!(
         family,
         SummaryFamilyType::ExactAggregate(

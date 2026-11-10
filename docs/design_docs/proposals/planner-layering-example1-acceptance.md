@@ -19,7 +19,7 @@ whose expectation needs a feature that is not in the stack yet is
 |---|---|---|
 | Query-language frontends | 1 workload `LogicalDAG` | same |
 | Logical ASAP-aware optimization | Pass 1 (3) × identical-expression rule (2) × window-composition rule (3 × 3) = **54** | Pass 1 (3), each with 2 identical-expression candidates and 6 window-composition candidates (Q1's rate and Q2's option in six 10-s tumbling windows, alone or both, each also with a shared scan) = **27**. Sliding windows are not implemented. |
-| Physical ASAP-aware optimization | Materialization options per window form = **156** | Physical operator implementation, plus materialization: each logical candidate with every sub-DAG `NotMaterialized` (27: the doc's Raw plans, with tumbling windows rebuilt at every refresh), each tumbling-window chain also `MatAtIngestion(Memory)` (30 more), and each shared input built once per evaluation, `MatAtQuery(Memory)`, with every tumbling-window chain at query time (15 more) = **72** |
+| Physical ASAP-aware optimization | Physical properties options per window form = **156** | Physical operator implementation, plus materialization: each logical candidate with every sub-DAG `Lifetime::None` (27: the doc's Raw plans, with tumbling windows rebuilt at every refresh), each tumbling-window chain also `(IngestionTime, AcrossEvaluations(Memory))` (30 more), and each shared input built once per evaluation, `(QueryTime, OneEvaluation(Memory))`, with every tumbling-window chain at query time (15 more) = **72** |
 | Plan selection | 1 plan | 1 plan |
 
 Every MVP candidate is one of the doc's candidates: in logical ASAP-aware
@@ -100,26 +100,26 @@ The three whole-window candidates without a shared input:
 
 | Id | From | Q2 physical operators | Materialization |
 |---|---|---|---|
-| P1 | L1 | sort (partition by job) → limit 10 | all `NotMaterialized` |
-| P10 | L10 | CMS + heap build → top-10 estimate | all `NotMaterialized` |
-| P19 | L19 | CountSketch + heap build → top-10 estimate | all `NotMaterialized` |
+| P1 | L1 | sort (partition by job) → limit 10 | all `Lifetime::None` |
+| P10 | L10 | CMS + heap build → top-10 estimate | all `Lifetime::None` |
+| P19 | L19 | CountSketch + heap build → top-10 estimate | all `Lifetime::None` |
 
 Q1 is the same in all three: scan → range → rate accumulator → sum
 accumulator, each finalized.
 
 Invariants:
 
-* Every logical candidate keeps its all-`NotMaterialized` physical candidate,
+* Every logical candidate keeps its all-`Lifetime::None` physical candidate,
   and none is pruned, so no candidate is dropped before plan selection. A
   logical candidate with `n` tumbling-window chains has 2ⁿ physical candidates: each
-  chain `NotMaterialized` or `MatAtIngestion(Memory)` (ids `P<n>-m<k>`).
+  chain `Lifetime::None` or `(IngestionTime, AcrossEvaluations(Memory))` (ids `P<n>-m<k>`).
   Only tumbling-window chains are placed at ingestion time; Q1's rate tumbling windows may be,
   because continuously ingesting PromQL data is taken to arrive in time
   order per series. A logical candidate with a shared input has one more:
   the highest node both queries read (the scan, or the time range above
-  it) `MatAtQuery(Memory)`, with every chain at query time. A chain at
+  it) `(QueryTime, OneEvaluation(Memory))`, with every chain at query time. A chain at
   ingestion time leaves one query reading the input at query time, so
-  the input stays `NotMaterialized` there.
+  the input stays `Lifetime::None` there.
 * Each physical candidate keeps its logical Q2 option and input sharing.
 * Exact top-*k* is implemented as a sort followed by a limit: each job's
   series sorted by the ranked value, descending, then a `Project` that
@@ -128,7 +128,7 @@ Invariants:
   returns each job's `k` heaviest series, and a `Project` to `[job, topk_10]`
   followed by each ranked series' identity. There is no merge node, because
   there are no window summaries.
-* In the whole-window candidates, every node is `NotMaterialized` and runs
+* In the whole-window candidates, every node is `Lifetime::None` and runs
   at query time.
 
 ## Plan selection: 1 plan
@@ -137,7 +137,7 @@ Invariants:
 |---|---|---|
 | P3-m1 | selected | all exact over one time range built once per evaluation for both queries, at 4.38 per second (cost model 1) |
 | P2-m1 | valid · costlier | all exact over one scan built once per evaluation, at 4.78 per second: each query still reads its own 1 m time range |
-| P1, P2, P3 | valid · costlier | all exact at 7.01 per second, with separate inputs (P1) or a `NotMaterialized` shared scan (P2) or scan and range (P3), charged once per query; they tie with each other up to rounding |
+| P1, P2, P3 | valid · costlier | all exact at 7.01 per second, with separate inputs (P1) or a `Lifetime::None` shared scan (P2) or scan and range (P3), charged once per query; they tie with each other up to rounding |
 | P10 | invalid | Count-Min + heap: a top-*k* output has no guarantee (a heap's bound is per item frequency, not top-*k* membership), and the deployment has no evidence that it meets the target |
 | P19 | invalid | CountSketch + heap: the same reason |
 
@@ -155,7 +155,7 @@ Invariants:
   reason, and marked invalid or valid but costlier.
 * Only valid candidates are priced. Each valid candidate's cost has one entry
   per DAG node, and `cost_per_second` is their sum. A materialized node is charged
-  once. A `NotMaterialized` node is charged once per consumer that reads it
+  once. A `Lifetime::None` node is charged once per consumer that reads it
   (its multiplier), where a consumer is a query or a materialized node and
   a read stops at materialized nodes.
   `stage3_plan_selection_charging_helper_*` check the helper on a hand-built candidate with a
@@ -185,13 +185,13 @@ per evaluation, within its 100 ms.
    deployment evidence every heap candidate is invalid and the exact plan is
    selected.
 4. **Physical ASAP-aware optimization is materialization in the doc's
-   example.** Example 1 lists only window-form and materialization options.
+   example.** Example 1 lists only window-form and physical properties options.
    The planner also reads "physical operator implementation" from the
    physical ASAP-aware optimization section ("TopK as a sort followed by a
    limit"), and enumerates materialization for summary builds and shared
-   inputs: each tumbling-window chain is `NotMaterialized` or `MatAtIngestion(Memory)`,
-   and the highest node both queries read is `NotMaterialized` or
-   `MatAtQuery(Memory)`.
+   inputs: each tumbling-window chain is `Lifetime::None` or `(IngestionTime, AcrossEvaluations(Memory))`,
+   and the highest node both queries read is `Lifetime::None` or
+   `(QueryTime, OneEvaluation(Memory))`.
 5. **Where exact top-*k* becomes sort + limit.** The Pass 1 diagram draws
    exact Q2 as "sort + limit 10 per job", but the frontend emits
    `Aggregate{[TopK]}` and the physical ASAP-aware optimization section calls
@@ -201,9 +201,9 @@ per evaluation, within its 100 ms.
    column" without naming the inner sketch. The test assumes `HydraCms`.
 7. **"Shared summary charged once"** does not apply literally: the doc says
    no summary is shared in Example 1. Plan selection charges a
-   `NotMaterialized` node once per consuming query and a materialized one
-   once; the tests check that rule. A `NotMaterialized` shared input
-   therefore saves nothing here; built once per evaluation (`MatAtQuery`),
+   `Lifetime::None` node once per consuming query and a materialized one
+   once; the tests check that rule. A `Lifetime::None` shared input
+   therefore saves nothing here; built once per evaluation (`OneEvaluation`),
    it is read once, and that candidate (the doc's "Raw with a shared
    input") is selected.
 8. **Latency.** The doc says an exact top 10 rebuilt at every refresh "may

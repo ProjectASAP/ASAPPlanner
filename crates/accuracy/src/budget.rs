@@ -14,7 +14,7 @@
 //! step's slack. A lone approximate denominator over an exact numerator is
 //! sized for the whole target, so its quotient's bound `ε/(1 − ε)` misses
 //! it. Only equal splits are made.
-use super::*;
+use asap_types::accuracy::{AccuracyMetric, AccuracyTarget};
 
 /// The target of one of `approximate_inputs` approximate inputs that
 /// compose into a value with `target`, split equally in `metric`'s

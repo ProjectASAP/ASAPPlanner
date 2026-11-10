@@ -20,7 +20,7 @@
 use std::rc::Rc;
 
 use crate::support;
-use asap_types::ir::properties::AccuracyTarget;
+use asap_types::accuracy::AccuracyTarget;
 use asap_types::ir::OperatorNode;
 use support::lower_promql;
 

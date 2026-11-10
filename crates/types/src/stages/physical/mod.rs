@@ -1,18 +1,17 @@
-//! The Stage 2 → Stage 3 boundary: the physical candidates Stage 2 builds
-//! from the memo and Stage 3 selects from (#1047, #1054).
+//! The Stage 2 → Stage 3 boundary: the physical candidates and edges Stage 2
+//! builds from the memo and Stage 3 selects from (#1047, #1054, #1200, #1201),
+//! by scope (execution context → candidate → edge → Stage 2's output).
 
-mod graph;
+mod candidate;
+mod edge;
+mod execution_context;
 mod memo_candidates;
-mod producers;
+mod properties;
 
-pub use graph::{
-    DagOfSelectedCandidates, PhysicalCandidateId, ReaderConstraint, SelectedEdge, SelectedNodeId,
+pub use candidate::{
+    producer_satisfies_physical_requirements, PhysicalCandidate, PhysicalCandidateId,
 };
-pub use memo_candidates::{
-    output_references, CandidateForMemoGroupId, OperatorNodeOfCandidateForMemoGroup,
-    OperatorNodeOfCandidateForMemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidate,
-    PhysicalCandidateKey,
-};
-#[cfg(any(test, feature = "test-support"))]
-pub use producers::{producer_storage_metrics, ProducerStorageMetrics};
-pub use producers::{ProducerCandidates, ProducerSetInterner};
+pub use edge::{PhysicalEdge, PhysicalEdgeId};
+pub use execution_context::{EvaluationGrid, ExecutionContext, ExecutionContextId};
+pub use memo_candidates::{output_references, PhysicalASAPMemoCandidates};
+pub use properties::{Lifetime, PhysicalProperties, PhysicalPropertiesError, StorageMedium};

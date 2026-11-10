@@ -19,7 +19,6 @@ use std::rc::Rc;
 
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog, SqlError as LoweringError};
 use asap_types::ir::operator::{AggIntent, GroupKeys};
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{ColumnId, DataType, Field, Schema};
 use asap_types::ir::{NonASAPOp, OperatorNode};
 use asap_types::workload::SqlDialect;
@@ -166,13 +165,7 @@ fn queries() -> Vec<&'static str> {
 }
 
 async fn lower(q: &str) -> Result<Rc<OperatorNode>, LoweringError> {
-    lower_sql_dialect(
-        q,
-        &catalog(),
-        SqlDialect::ClickhouseSQL,
-        AccuracyTarget::exact(),
-    )
-    .await
+    lower_sql_dialect(q, &catalog(), SqlDialect::ClickhouseSQL).await
 }
 
 /// Every ClickBench query lowers end to end. A query that stops lowering
@@ -251,7 +244,7 @@ async fn top_search_phrases_canonicalize_to_top_k() {
     let (keys, inner) = first_aggregate(child).expect("q13 expected a per-phrase Aggregate");
     assert_eq!(*keys, GroupKeys::by(vec![column("SearchPhrase")]));
     assert!(
-        matches!(inner.as_slice(), [AggIntent::Count { .. }]),
+        matches!(inner.as_slice(), [AggIntent::Count]),
         "q13 expected a per-phrase Count, got {inner:?}"
     );
 }

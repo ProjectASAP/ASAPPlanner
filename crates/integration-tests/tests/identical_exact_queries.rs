@@ -35,11 +35,11 @@ fn cost(w: &FuzzWorkload) -> f64 {
         &w.data,
         models,
         PlanSearchSettings::default(),
-        None,
     )
     .unwrap();
-    let selection = run.run.selection.as_ref().unwrap();
-    let value = selection.cost.cost_per_second.unwrap();
+    let (plan, _) = run.run.selection.as_ref().unwrap();
+    let value =
+        asap_integration_tests::planning::plan_cost_per_second(plan, &entries, &w.data, &settings);
     println!("cost={value}");
     value
 }

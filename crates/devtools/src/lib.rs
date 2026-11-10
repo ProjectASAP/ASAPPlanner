@@ -23,7 +23,6 @@
 
 pub mod candidate_labels;
 pub mod corpora;
-pub mod memo_pricing;
 pub mod planner_fuzz;
 pub mod planner_layering_examples;
 pub mod planning_stages;
@@ -40,7 +39,6 @@ pub use asap_frontend_sql::{lower_sql, SqlCatalog, SqlError};
 /// default.
 pub fn lower_promql_with_sample_interval(
     query: &str,
-    accuracy: asap_types::ir::properties::AccuracyTarget,
     interval_ms: u64,
 ) -> Result<std::rc::Rc<asap_types::ir::OperatorNode>, PromqlError> {
     use asap_types::workload::{
@@ -53,10 +51,7 @@ pub fn lower_promql_with_sample_interval(
             language: asap_types::workload::QueryLanguage::PromQL,
             query_batch: Some(vec![BatchEntry {
                 query: Query(query.into()),
-                requirements: QueryRequirements {
-                    accuracy,
-                    ..Default::default()
-                },
+                requirements: QueryRequirements::default(),
                 predictability: Predictability::Unknown,
                 invocations: 1,
                 execute_at: None,

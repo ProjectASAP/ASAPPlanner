@@ -10,9 +10,9 @@ use std::sync::Arc;
 use asap_executor::sources::InMemoryDataStore;
 use asap_executor::values::{Batch, Value};
 use asap_types::ir::operator::Source;
-use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
 use asap_types::ir::schema::{DataType, FieldDataType, Schema, PROMQL_SERIES_IDENTITY};
 use asap_types::ir::NonASAPOp;
+use asap_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
 
 /// One raw data sample as it arrives, e.g. one Prometheus Remote Write sample.
 #[derive(Debug, Clone, PartialEq)]

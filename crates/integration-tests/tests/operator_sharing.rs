@@ -11,7 +11,7 @@ use std::rc::Rc;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_integration_tests::physical_export::physical_asap_dag;
 use asap_integration_tests::planning::selected_dag;
-use asap_types::ir::properties::AccuracyTarget;
+use asap_types::accuracy::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
 
@@ -47,7 +47,7 @@ fn catalog() -> SqlCatalog {
 
 /// Lower `sql` and take the logical DAG the planner pipeline selects.
 async fn plan(sql: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
-    let pre = lower_sql(sql, &catalog(), accuracy.clone())
+    let pre = lower_sql(sql, &catalog())
         .await
         .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"));
     selected_dag(pre, accuracy)

@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use asap_frontend_metricsql::{lower_metricsql_query_workload, MetricsqlError};
 use asap_types::ir::operator::AggIntent;
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot, TimeRangeKind};
 use asap_types::workload::{
     BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Query, QueryLanguage,
@@ -12,11 +11,8 @@ use asap_types::workload::{
 
 const INTERVAL: Duration = Duration::from_secs(15);
 
-fn lower_metricsql(
-    query: &str,
-    accuracy: AccuracyTarget,
-) -> Result<std::rc::Rc<OperatorNode>, MetricsqlError> {
-    asap_frontend_metricsql::test_support::lower_metricsql(query, accuracy, INTERVAL)
+fn lower_metricsql(query: &str) -> Result<std::rc::Rc<OperatorNode>, MetricsqlError> {
+    asap_frontend_metricsql::test_support::lower_metricsql(query, INTERVAL)
 }
 
 fn workload(language: QueryLanguage, query: &str) -> PlanningWorkload {
@@ -62,12 +58,12 @@ fn time_range_under_aggregate(node: &OperatorNode) -> (Duration, TimeRangeKind) 
 /// `count(v)` counts series; it is not a distinct count of sample values.
 #[test]
 fn count_counts_series() {
-    let node = lower_metricsql("count(up)", AccuracyTarget::exact()).unwrap();
+    let node = lower_metricsql("count(up)").unwrap();
     let NonASAPOp::Aggregate { measures, .. } = node.expect_non_asap() else {
         panic!("expected an aggregate, got {node:?}");
     };
     assert!(
-        matches!(measures.as_slice(), [AggIntent::Count { .. }]),
+        matches!(measures.as_slice(), [AggIntent::Count]),
         "{measures:?}"
     );
 }
@@ -82,25 +78,25 @@ fn rollups_without_an_explicit_range_are_rejected() {
         "max_over_time(m)",
         "default_rollup(m)",
     ] {
-        let error = lower_metricsql(query, AccuracyTarget::exact()).unwrap_err();
+        let error = lower_metricsql(query).unwrap_err();
         assert!(
             matches!(&error, MetricsqlError::UnsupportedFeature(message) if message.contains("evaluation step")),
             "{query}: {error:?}"
         );
     }
-    assert!(lower_metricsql("rate(m[5m])", AccuracyTarget::exact()).is_ok());
+    assert!(lower_metricsql("rate(m[5m])").is_ok());
 }
 
 /// A bare instant selector reads the latest sample within the sample
 /// interval, as in PromQL; an explicit range keeps its own window.
 #[test]
 fn instant_selectors_look_back_one_sample_interval() {
-    let node = lower_metricsql("sum(up)", AccuracyTarget::exact()).unwrap();
+    let node = lower_metricsql("sum(up)").unwrap();
     assert_eq!(
         time_range_under_aggregate(&node),
         (INTERVAL, TimeRangeKind::Instant)
     );
-    let node = lower_metricsql("rate(m[5m])", AccuracyTarget::exact()).unwrap();
+    let node = lower_metricsql("rate(m[5m])").unwrap();
     assert_eq!(
         time_range_under_aggregate(&node),
         (Duration::from_secs(300), TimeRangeKind::Range)
@@ -131,6 +127,7 @@ fn workload_lowering_uses_the_declared_sample_interval() {
     let mut other_metric = workload(QueryLanguage::MetricsQL, "sum(up) + sum(down)");
     other_metric.data_workload.as_mut().unwrap().arrival = DataArrival::Ingesting {
         rows_per_second: 1.0,
+        max_out_of_order_ms: None,
     };
     for workload in [missing, other_metric] {
         assert!(matches!(

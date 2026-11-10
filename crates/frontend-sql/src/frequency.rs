@@ -4,8 +4,8 @@
 //! unit counts. [`recognize_frequency_idioms`] names them as
 //! `FrequencyL2` / `FrequencyEntropy` intents, so Pass 1 can offer exact and
 //! summary candidates (UnivMon among them) for each. It preserves the
-//! output schema, the predicates below the grouping, the query's accuracy
-//! target, SQL's NULL result on empty input (decided by an exact population
+//! output schema, the predicates below the grouping, SQL's NULL result on
+//! empty input (decided by an exact population
 //! count, never by an estimate) and the entropy unit: the IR's entropy is in
 //! bits, the SQL idiom's `LN` gives nats. Integer products and nullable
 //! keys are refused, because SQL integer overflow and NULL groups are
@@ -14,7 +14,6 @@ use asap_types::ir::operator::non_asap::any_measure_filtered;
 use asap_types::ir::operator::{
     AggIntent, GroupKeys, JoinKind, Reduction, WindowFrameBound, WindowFrameOffset, WindowFuncKind,
 };
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::{ArithmeticOpKind, CompareOpKind, ScalarValue};
 use asap_types::ir::schema::DataType;
 use asap_types::ir::{
@@ -146,25 +145,18 @@ fn frequency_l2_rewrite(root: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
     ) {
         return None;
     }
-    let (key, accuracy, input) = grouped_unit_count(&inner)?;
+    let (key, input) = grouped_unit_count(&inner)?;
     sql_frequency_result(
         root,
         input,
-        AggIntent::FrequencyL2 {
-            col: Some(key),
-            // The count's target; Stage 1 sizes the norm's summary for it as
-            // a relative error.
-            accuracy,
-        },
+        AggIntent::FrequencyL2 { col: Some(key) },
         "frequency_l2",
         ScalarExpr::Column(0),
     )
 }
 
 // Both frequency rules require a complete, unfiltered count per non-NULL identity.
-fn grouped_unit_count(
-    node: &Rc<OperatorNode>,
-) -> Option<(usize, AccuracyTarget, Rc<OperatorNode>)> {
+fn grouped_unit_count(node: &Rc<OperatorNode>) -> Option<(usize, Rc<OperatorNode>)> {
     let NonASAPOp::Aggregate {
         reduction: Reduction::Reduce(keys),
         measures,
@@ -179,7 +171,7 @@ fn grouped_unit_count(
     let [key] = keys.keys() else {
         return None;
     };
-    let [AggIntent::Count { accuracy }] = measures.as_slice() else {
+    let [AggIntent::Count] = measures.as_slice() else {
         return None;
     };
     let field = child.schema.fields.get(*key)?;
@@ -193,7 +185,7 @@ fn grouped_unit_count(
     {
         return None;
     }
-    Some((*key, accuracy.clone(), Rc::clone(child)))
+    Some((*key, Rc::clone(child)))
 }
 
 fn probability_term(product: &ScalarExpr) -> Option<&ScalarExpr> {
@@ -307,7 +299,7 @@ fn frequency_entropy_rewrite(root: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>
     ) {
         return None;
     }
-    let (key, accuracy, input) = grouped_unit_count(child)?;
+    let (key, input) = grouped_unit_count(child)?;
     let nats = ScalarExpr::Arithmetic {
         op: ArithmeticOpKind::Mul,
         left: Box::new(ScalarExpr::Column(0)),
@@ -329,12 +321,7 @@ fn frequency_entropy_rewrite(root: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>
     sql_frequency_result(
         root,
         input,
-        AggIntent::FrequencyEntropy {
-            col: Some(key),
-            // The count's target; Stage 1 sizes the entropy's summary for it
-            // as an absolute error in bits.
-            accuracy,
-        },
+        AggIntent::FrequencyEntropy { col: Some(key) },
         "frequency_entropy",
         nats,
     )
@@ -364,12 +351,7 @@ fn sql_frequency_result(
         .ok()
     };
     let statistic = aggregate(measure, name)?;
-    let count = aggregate(
-        AggIntent::Count {
-            accuracy: AccuracyTarget::exact(),
-        },
-        "population_count",
-    )?;
+    let count = aggregate(AggIntent::Count, "population_count")?;
     let child = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Join {
         kind: JoinKind::Cross,
         pred: Predicate(ScalarExpr::Literal(ScalarValue::Boolean(true))),

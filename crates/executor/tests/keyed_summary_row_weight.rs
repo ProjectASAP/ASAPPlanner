@@ -10,14 +10,15 @@ use asap_executor::{
 };
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::operator::{GroupKeys, Reduction};
-use planner_types::ir::physical_export::{
-    PhysicalASAPDAGNode, PhysicalASAPOperatorPayload as Payload,
-};
 use planner_types::ir::properties::ExecutionDataState;
 use planner_types::ir::scalar::ColumnRef;
 use planner_types::ir::schema::*;
 use planner_types::ir::ASAPOp;
-use planner_types::physical::Materialization;
+use planner_types::plan::physical_asap_dag::{
+    PhysicalASAPDAGNode, PhysicalASAPOperatorPayload as Payload,
+};
+use planner_types::stages::Lifetime;
+use planner_types::summary_type::*;
 use std::sync::Arc;
 
 /// `(job, service)` rows: jobs are the groups, services the items.
@@ -31,17 +32,7 @@ const ROWS: [(&str, &str); 6] = [
 ];
 
 fn heap_family() -> FieldDataType {
-    FieldDataType::Sketch(
-        SketchKind::new(
-            SketchAlgorithm::CmsWithHeap,
-            SketchParams::CmsWithHeap {
-                width: 1024,
-                depth: 3,
-                heap_size: 8,
-            },
-        ),
-        GroupingStrategy::PerSubpopulationInstance,
-    )
+    FieldDataType::Sketch(SketchAlgorithm::CmsWithHeap)
 }
 
 fn schema(fields: Vec<Field>) -> SchemaRef {
@@ -144,7 +135,7 @@ fn query_time_count_heap_binds_a_constant_row_weight() {
         id: 1,
         payload: Payload::ASAP(ASAPOp::SummaryAgg {
             child: 0,
-            family: heap_family(),
+            summary_type: heap_family(),
             input: SummaryUpdate {
                 item: Some(SummaryInputExpr::Tuple(vec![SummaryInputExpr::Column(
                     ColumnRef::Named("service".into()),
@@ -155,11 +146,11 @@ fn query_time_count_heap_binds_a_constant_row_weight() {
                 },
             },
             reduction: Reduction::Reduce(GroupKeys::by(vec![0])),
-            grouping: GroupingStrategy::PerSubpopulationInstance,
             filter: None,
         }),
         output_state: ExecutionDataState::QUERY_ROWS,
-        materialization: Materialization::NotMaterialized,
+        lifetime: Lifetime::None,
+        parameters: None,
         output_schema: (*schema(vec![
             Field::plain("job", DataType::Utf8, false),
             Field {
@@ -172,6 +163,7 @@ fn query_time_count_heap_binds_a_constant_row_weight() {
         .clone(),
         guarantee: None,
         retention_ms: None,
+        selected_physical_candidate: None,
     };
     let build = compile_node(&node, std::slice::from_ref(&input)).unwrap();
     let wire = serde_json::to_value(&build).unwrap();
@@ -247,17 +239,7 @@ fn int64_weight_column_equals_float64_column() {
         ),
         counts(limit as f64)
     );
-    let count_sketch = FieldDataType::Sketch(
-        SketchKind::new(
-            SketchAlgorithm::CountSketchWithHeap,
-            SketchParams::CountSketchWithHeap {
-                width: 1024,
-                depth: 3,
-                heap_size: 8,
-            },
-        ),
-        GroupingStrategy::PerSubpopulationInstance,
-    );
+    let count_sketch = FieldDataType::Sketch(SketchAlgorithm::CountSketchWithHeap);
     let signed = Operator::per_group_keyed_summary_build(
         int64.clone(),
         count_sketch,

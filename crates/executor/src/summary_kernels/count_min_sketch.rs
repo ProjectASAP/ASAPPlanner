@@ -1,7 +1,7 @@
 //! Count-Min Sketch frequency summary over `asap_sketchlib::CountMinF64`.
 use crate::{AggregateCore, KernelError};
 use asap_sketchlib::{CountMinF64, CountMinSketch, DataInput};
-use planner_types::ir::schema::SketchStatistic;
+use planner_types::summary_type::SketchStatistic;
 
 #[derive(Debug, Clone)]
 pub struct CountMinSketchAccumulator {

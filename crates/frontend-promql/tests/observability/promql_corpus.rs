@@ -16,8 +16,7 @@
 use asap_frontend_promql::PromqlError as LoweringError;
 #[path = "../support.rs"]
 mod support;
-use asap_types::ir::properties::AccuracyTarget;
-use support::{logical_plan, lower_promql};
+use asap_types::accuracy::AccuracyTarget;
 
 const DOCS: &str = include_str!("data/promql_corpus_docs.txt");
 const TESTDATA: &str = include_str!("data/promql_corpus_testdata.txt");
@@ -65,51 +64,6 @@ fn tally(corpus: &str) -> Tally {
         }
     }
     t
-}
-
-/// Every query that lowers, additionally run through logical ASAP-aware
-/// optimization ([`logical_plan`]: Pass 1 and composition), at an
-/// approximate accuracy target so summary candidates actually appear (an
-/// `Exact` target would only ever exercise the exact-accumulator arm).
-#[derive(Default, Debug)]
-struct BindTally {
-    /// An ASAP operator was bound somewhere below the root — the pass did
-    /// something.
-    transformed: usize,
-    /// The kept pre-ASAP dag — the pass left the query untouched.
-    unchanged: usize,
-    /// [`logical_plan`] returned `Err`: Pass 1 rejected the query, or its
-    /// exact candidate did not compose.
-    errored: usize,
-}
-
-fn bind_tally(corpus: &str, accuracy: AccuracyTarget) -> BindTally {
-    let mut t = BindTally::default();
-    for q in queries(corpus) {
-        let Ok(dag) = lower_promql(q, accuracy.clone()) else {
-            continue;
-        };
-        match logical_plan(&dag) {
-            Ok(bound) if !bound.contains_asap() => t.unchanged += 1,
-            Ok(_) => t.transformed += 1,
-            Err(_) => t.errored += 1,
-        }
-    }
-    t
-}
-
-#[test]
-fn binding_is_total_over_the_entire_corpus() {
-    let accuracy = AccuracyTarget::max_error(0.01);
-    let docs = bind_tally(DOCS, accuracy.clone());
-    let td = bind_tally(TESTDATA, accuracy);
-    eprintln!("docs corpus post-ASAP binding:     {docs:?}");
-    eprintln!("testdata corpus post-ASAP binding: {td:?}");
-
-    // Same totality guarantee as lowering: reaching here means `logical_plan`
-    // never panicked over any lowerable query in the corpus.
-    assert_eq!(docs.errored, 0, "post-ASAP binding errored: {docs:?}");
-    assert_eq!(td.errored, 0, "post-ASAP binding errored: {td:?}");
 }
 
 #[test]

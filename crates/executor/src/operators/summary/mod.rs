@@ -4,7 +4,7 @@ use crate::values::arrow_columns::ColumnDepth;
 use crate::values::StateColumn;
 use crate::StateColumnUpdater;
 use arrow::array::{Array, BooleanArray, Float64Array, TimestampMillisecondArray, UInt32Array};
-use planner_types::ir::schema::{FamilyCapability, MergeInputRule};
+use planner_types::summary_type::{MergeInputRule, SummaryTypeCapability};
 use std::num::NonZeroU32;
 
 /// What each input row adds to its item's count in a keyed summary build
@@ -24,7 +24,7 @@ pub enum RowWeight {
 /// A summary evaluation: a sketch query, or an exact evaluation with typed parameters.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SummaryEvaluation {
-    Sketch(planner_types::ir::schema::SketchStatistic),
+    Sketch(planner_types::summary_type::SketchStatistic),
     Exact(crate::summary_kernels::exact::ExactEvaluation),
 }
 
@@ -40,58 +40,8 @@ impl Operator {
         row_weight: RowWeight,
         groups: Vec<usize>,
     ) -> Result<Self, Error> {
-        use crate::summary_kernels::weighted_frequency::WeightedFrequency;
-        crate::values::validate_family(&family)?;
-        let SummaryFamilyType::Sketch(kind, _) = &family else {
-            return Err(invalid("keyed sketch required"));
-        };
-        WeightedFrequency::configuration(kind)?;
-        validate_groups(&input, &groups)?;
-        if items.is_empty() {
-            return Err(invalid("keyed summary requires item columns"));
-        }
-        if let RowWeight::Column(weight) = row_weight {
-            if !matches!(
-                plain(&input, weight)?.0,
-                DataType::Float64 | DataType::Int64
-            ) {
-                return Err(invalid("keyed summary weights must be Float64 or Int64"));
-            }
-        }
-        for &item in &items {
-            if !matches!(
-                plain(&input, item)?.0,
-                DataType::Utf8
-                    | DataType::Timestamp
-                    | DataType::Int64
-                    | DataType::Float64
-                    | DataType::Bool
-                    | DataType::Null
-            ) {
-                return Err(invalid("unsupported keyed summary identity type"));
-            }
-        }
-        let mut fields = groups
-            .iter()
-            .map(|&i| input.fields[i].clone())
-            .collect::<Vec<_>>();
-        fields.push(SummaryField {
-            name: "state".into(),
-            dtype: family.clone(),
-            nullable: false,
-            table: None,
-        });
-        Ok(Self {
-            kind: Kind::PerGroupKeyedSummaryBuild {
-                family,
-                items,
-                row_weight,
-                groups,
-                filter: None,
-            },
-            inputs: vec![input],
-            output: schema(fields),
-        })
+        let _ = (input, family, items, row_weight, groups);
+        todo!("#1207 PR 6: the weighted-frequency θ, which the exported node carries")
     }
     /// One summary state shared by all groups (a HydraCms grid), emitted as
     /// one row per group that reads its own part of it. Each row adds its
@@ -177,29 +127,8 @@ impl Operator {
         k: usize,
         output: SchemaRef,
     ) -> Result<Self, Error> {
-        use crate::summary_kernels::weighted_frequency::WeightedFrequency;
-        crate::values::validate_family(&field(&input, state)?.dtype)?;
-        let SummaryFamilyType::Sketch(kind, _) = &field(&input, state)?.dtype else {
-            return Err(invalid("keyed evaluation requires summary state"));
-        };
-        let (_, _, _, capacity) = WeightedFrequency::configuration(kind)?;
-        if k > capacity || output.fields.len() <= input.fields.len() {
-            return Err(invalid("invalid keyed evaluation shape or capacity"));
-        }
-        if state + 1 != input.fields.len()
-            || output.fields[..state] != input.fields[..state]
-            || output.fields.last().unwrap().dtype != SummaryFamilyType::Plain(DataType::Float64)
-        {
-            return Err(invalid(
-                "keyed evaluation must preserve partitions and return a Float64 score",
-            ));
-        }
-        crate::values::validate_schema(&output)?;
-        Ok(Self {
-            kind: Kind::KeyedEvaluation { state, k },
-            inputs: vec![input],
-            output,
-        })
+        let _ = (input, state, k, output);
+        todo!("#1207 PR 6: the weighted-frequency capacity of θ, which the exported node carries")
     }
     /// One summary state per group, updated from the value of one input
     /// column per row (`time` orders counter samples): an exact aggregate,
@@ -226,8 +155,8 @@ impl Operator {
             && matches!(
                 family,
                 SummaryFamilyType::ExactAggregate(
-                    planner_types::ir::schema::ExactKind::Rate
-                        | planner_types::ir::schema::ExactKind::Increase,
+                    planner_types::summary_type::ExactKind::Rate
+                        | planner_types::summary_type::ExactKind::Increase,
                     _
                 )
             )
@@ -237,7 +166,6 @@ impl Operator {
         crate::capability::validate_summary_kernel(
             &family,
             &SummaryUpdate::column(ColumnRef::SampleValue),
-            &Default::default(),
         )
         .map_err(Error::Invalid)?;
         let mut fields = groups
@@ -324,7 +252,7 @@ impl Operator {
         let mut fields = input.fields.clone();
         let result_type = if matches!(
             fields[state].dtype,
-            SummaryFamilyType::ExactAggregate(planner_types::ir::schema::ExactKind::Count, _)
+            SummaryFamilyType::ExactAggregate(planner_types::summary_type::ExactKind::Count, _)
         ) || integral_count(family, &query)
         {
             DataType::Int64
@@ -337,8 +265,8 @@ impl Operator {
             && matches!(
                 fields[state].dtype,
                 SummaryFamilyType::ExactAggregate(
-                    planner_types::ir::schema::ExactKind::Min
-                        | planner_types::ir::schema::ExactKind::Max,
+                    planner_types::summary_type::ExactKind::Min
+                        | planner_types::summary_type::ExactKind::Max,
                     _
                 )
             );
@@ -356,8 +284,8 @@ impl Operator {
 /// distinct count as an integer item); a distinct count (KMV, HLL) also
 /// takes Utf8, and UnivMon Utf8 and Bool.
 fn accepts_update_type(family: &SummaryFamilyType, dtype: &DataType) -> bool {
-    use planner_types::ir::schema::{ExactKind, SketchAlgorithm as A};
-    let SummaryFamilyType::Sketch(kind, _) = family else {
+    use planner_types::summary_type::{ExactKind, SketchAlgorithm as A};
+    let SummaryFamilyType::Sketch(kind) = family else {
         return *dtype == DataType::Float64
             || matches!(
                 family,
@@ -366,8 +294,8 @@ fn accepts_update_type(family: &SummaryFamilyType, dtype: &DataType) -> bool {
     };
     match dtype {
         DataType::Float64 | DataType::Int64 => true,
-        DataType::Utf8 => matches!(kind.algorithm(), A::Kmv | A::Hll | A::UnivMon),
-        DataType::Bool => kind.algorithm() == &A::UnivMon,
+        DataType::Utf8 => matches!(kind, A::Kmv | A::Hll | A::UnivMon),
+        DataType::Bool => kind == &A::UnivMon,
         _ => false,
     }
 }
@@ -381,7 +309,7 @@ impl Operator {
         let Kind::Evaluation {
             state,
             query:
-                SummaryEvaluation::Sketch(planner_types::ir::schema::SketchStatistic::Cardinality),
+                SummaryEvaluation::Sketch(planner_types::summary_type::SketchStatistic::Cardinality),
         } = &self.kind
         else {
             return Err(invalid(
@@ -400,11 +328,11 @@ impl Operator {
 /// output is Int64 and whose updates have unit weight; execution rejects a
 /// non-integral total rather than rounding it.
 fn integral_count(family: &SummaryFamilyType, query: &SummaryEvaluation) -> bool {
-    matches!(family, SummaryFamilyType::Sketch(kind, _)
-        if kind.algorithm() == &planner_types::ir::schema::SketchAlgorithm::Cms)
+    matches!(family, SummaryFamilyType::Sketch(kind)
+        if kind == &planner_types::summary_type::SketchAlgorithm::Cms)
         && matches!(
             query,
-            SummaryEvaluation::Sketch(planner_types::ir::schema::SketchStatistic::PointCount {
+            SummaryEvaluation::Sketch(planner_types::summary_type::SketchStatistic::PointCount {
                 value: None,
                 ..
             })
@@ -917,7 +845,7 @@ async fn merge_summary(
     };
     // Counter states join consecutive windows pairwise, which is exact only
     // in time order: order the inputs by their window start.
-    if FamilyCapability::of(family).merge_inputs == Some(MergeInputRule::DisjointInTime) {
+    if SummaryTypeCapability::of(family).merge_inputs == Some(MergeInputRule::DisjointInTime) {
         entries.sort_by_cached_key(|&entry| {
             let (states, index) = state_of(entry);
             match states.storage() {
@@ -1153,8 +1081,8 @@ fn evaluate_states(
         };
         if !matches!(
             evaluation.statistic,
-            planner_types::ir::schema::ExactKind::Rate
-                | planner_types::ir::schema::ExactKind::Increase
+            planner_types::summary_type::ExactKind::Rate
+                | planner_types::summary_type::ExactKind::Increase
         ) {
             return false;
         }
@@ -1206,7 +1134,8 @@ fn evaluate_states(
                     let value = summary
                         .estimate(query)
                         .map_err(|e| Error::Operator(e.to_string()))?;
-                    if integral && *query == planner_types::ir::schema::SketchStatistic::Cardinality
+                    if integral
+                        && *query == planner_types::summary_type::SketchStatistic::Cardinality
                     {
                         // A distinct count is a whole number: the estimate
                         // rounded to the nearest one.

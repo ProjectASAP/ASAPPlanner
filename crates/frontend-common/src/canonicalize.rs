@@ -1,7 +1,7 @@
 //! Post-lowering canonicalization of the operator DAG.
 //!
 //! Rewrites equivalent spellings of a query into one shape, so that common
-//! sub-DAG sharing (Stage 0 hash-consing, `cse` in `asap_logical_asap_optimization`) can match
+//! sub-DAG sharing (hash-consing, `Memo::find_or_add_group`) can match
 //! them by structural equality, whichever front end produced them.
 //!
 //! ## Heavy-hitter promotion
@@ -38,12 +38,9 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::ir::operator::agg_intent::{topk, AggIntent};
+use asap_types::ir::operator::arguments::{GroupKeys, JoinKind, Reduction, WindowFuncKind};
 use asap_types::ir::operator::node::{Operator, OperatorNode};
 use asap_types::ir::operator::non_asap::NonASAPOp;
-use asap_types::ir::operator::operator_properties::{
-    GroupKeys, JoinKind, Reduction, WindowFuncKind,
-};
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::expr_ir::{CompareOpKind, ScalarValue};
 use asap_types::ir::scalar::{ExprSemantics, Predicate, ProjectItem, ScalarExpr, SortKey};
 use asap_types::ir::SchemaDerivationError;
@@ -277,19 +274,12 @@ fn try_promote_additive_top_ranking(
     {
         return Ok(None);
     }
-    // Count ranks unit updates; a direct Sum ranks weighted updates.
-    let accuracy = match ranked_agg {
-        AggIntent::Count { accuracy } => accuracy.clone(),
-        AggIntent::Sum { .. } => AccuracyTarget::exact(),
-        _ => unreachable!("additive ranking gate admitted a non-additive measure"),
-    };
-
     // Outer heavy-hitter `TopK`, grouped by the ranking's partition (empty for
     // a global `ORDER BY … LIMIT k`; the `by` labels for a partitioned `topk
     // by`), over the unchanged inner additive aggregate.
     OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Aggregate {
         reduction: Reduction::by(partition),
-        measures: vec![AggIntent::TopK { k: *k, accuracy }],
+        measures: vec![AggIntent::TopK { k: *k }],
         output_names: Vec::new(),
         filters: vec![],
         having: None,
@@ -555,8 +545,8 @@ fn contains_scalar_subquery(expr: &ScalarExpr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::ir::operator::operator_properties::WindowFuncKind;
-    use asap_types::ir::operator::operator_properties::{
+    use asap_types::ir::operator::arguments::WindowFuncKind;
+    use asap_types::ir::operator::arguments::{
         GroupKeys, Source, WindowFrame, WindowFrameBound, WindowFrameOffset, WindowFrameUnits,
     };
     use asap_types::ir::schema::{DataType, Field, Schema};
@@ -597,9 +587,7 @@ mod tests {
     }
 
     fn count() -> AggIntent {
-        AggIntent::Count {
-            accuracy: AccuracyTarget::exact(),
-        }
+        AggIntent::Count
     }
 
     /// `Aggregate{ by: [1], [Count] }` over the scan — output cols `[service, count]`.
@@ -672,7 +660,7 @@ mod tests {
             return false;
         };
         matches!(measures.as_slice(), [AggIntent::TopK { k: 5, .. }])
-            && matches!(self::measures(child), [AggIntent::Count { .. }])
+            && matches!(self::measures(child), [AggIntent::Count])
     }
 
     #[test]

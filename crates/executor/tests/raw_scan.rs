@@ -8,16 +8,17 @@ use asap_executor::{
     Error,
 };
 use futures::{executor::block_on, stream, StreamExt};
-use planner_types::ir::materialized_view::MaterializedView;
 use planner_types::ir::operator::{GroupKeys, Source};
-use planner_types::ir::physical_export::{
-    EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
-    PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
-};
 use planner_types::ir::properties::*;
 use planner_types::ir::schema::{DataType, Field, *};
 use planner_types::ir::NonASAPOp;
 use planner_types::ir::Predicate;
+use planner_types::plan::materialized_view::MaterializedView;
+use planner_types::plan::physical_asap_dag::{
+    EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
+    PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
+};
+use planner_types::summary_type::*;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -84,10 +85,12 @@ fn plan(
         id,
         payload,
         output_state: state,
-        materialization: Default::default(),
+        lifetime: Default::default(),
+        parameters: None,
         output_schema: (**schema).clone(),
         guarantee: None,
         retention_ms: None,
+        selected_physical_candidate: None,
     };
     let edge = |producer, consumer| {
         PhysicalASAPDAGEdge::new(
@@ -504,10 +507,12 @@ fn windowed_plan(shift_ms: Option<i64>) -> PhysicalASAPDAG {
         id,
         payload: PhysicalASAPOperatorPayload::NonASAP(payload),
         output_state: state,
-        materialization: Default::default(),
+        lifetime: Default::default(),
+        parameters: None,
         output_schema: schema.clone(),
         guarantee: None,
         retention_ms: None,
+        selected_physical_candidate: None,
     };
     let edge = |producer, consumer| {
         PhysicalASAPDAGEdge::new(
@@ -837,24 +842,25 @@ fn windowed_count_plan(shift_ms: Option<i64>) -> PhysicalASAPDAG {
             id,
             payload,
             output_state,
-            materialization: Default::default(),
+            lifetime: Default::default(),
+            parameters: None,
             output_schema: output_schema.clone(),
             guarantee: None,
             retention_ms: None,
+            selected_physical_candidate: None,
         }
     };
     dag.nodes.push(node(
         3,
         PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
             child: 2,
-            family,
+            summary_type: family,
             input: SummaryUpdate {
                 item: None,
                 weight: SummaryInputExpr::Constant(1.0),
                 weight_domain: Default::default(),
             },
             reduction: Reduction::Reduce(GroupKeys::by(vec![])),
-            grouping: GroupingStrategy::default(),
             filter: None,
         }),
         &state,

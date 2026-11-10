@@ -7,14 +7,15 @@ use asap_executor::{
 };
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::operator::{GroupKeys, Reduction};
-use planner_types::ir::physical_export::{
-    EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
-    PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
-};
 use planner_types::ir::properties::*;
 use planner_types::ir::scalar::ColumnRef;
 use planner_types::ir::schema::{DataType, *};
 use planner_types::ir::ASAPOp;
+use planner_types::plan::physical_asap_dag::{
+    EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
+    PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
+};
+use planner_types::summary_type::*;
 use std::sync::Arc;
 
 fn logical_schema(family: FieldDataType) -> Schema {
@@ -30,14 +31,10 @@ fn logical_schema(family: FieldDataType) -> Schema {
         time_index: None,
     }
 }
-/// The stored state at node 0 (`MatAtIngestion`): a global `family`
+/// The stored state at node 0 (materialized at ingestion time): a global `family`
 /// `SummaryAgg` over a minute of raw `m` samples (`Scan` node `scan`,
 /// `TimeRange` node `scan + 1`).
-fn view_over_samples(
-    family: FieldDataType,
-    grouping: GroupingStrategy,
-    scan: usize,
-) -> [PhysicalASAPDAGNode; 3] {
+fn view_over_samples(family: FieldDataType, scan: usize) -> [PhysicalASAPDAGNode; 3] {
     let samples = Schema::with_time_index(
         vec![
             Field::plain("time", DataType::Timestamp, false),
@@ -50,23 +47,24 @@ fn view_over_samples(
         id,
         payload,
         output_state,
-        materialization: Default::default(),
+        lifetime: Default::default(),
+        parameters: None,
         output_schema,
         guarantee: None,
         retention_ms: None,
+        selected_physical_candidate: None,
     };
     [
         PhysicalASAPDAGNode {
-            materialization: planner_types::physical::Materialization::MatAtIngestion(
-                planner_types::physical::Medium::Memory,
+            lifetime: planner_types::stages::Lifetime::AcrossEvaluations(
+                planner_types::stages::StorageMedium::Memory,
             ),
             ..node(
                 0,
                 PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
-                    family: family.clone(),
+                    summary_type: family.clone(),
                     input: SummaryUpdate::column(ColumnRef::SampleValue),
                     reduction: Reduction::Reduce(GroupKeys::by(vec![])),
-                    grouping,
                     filter: None,
                     child: scan + 1,
                 }),
@@ -125,24 +123,24 @@ fn try_state_dag(
     merge: bool,
 ) -> Result<CompiledPhysicalDAG, asap_executor::Error> {
     let scan = 2 + usize::from(merge) + usize::from(target.is_some());
-    let [view, scan_node, range_node] =
-        view_over_samples(family.clone(), GroupingStrategy::default(), scan);
+    let [view, scan_node, range_node] = view_over_samples(family.clone(), scan);
     let mut nodes = vec![view];
     if merge {
         nodes.push(PhysicalASAPDAGNode {
             id: 1,
             payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge {
                 children: vec![0],
-                newest_tumbling_windows: None,
                 group_by: None,
             }),
             output_state: ExecutionDataState::INGESTION_SUMMARY,
-            materialization: planner_types::physical::Materialization::MatAtIngestion(
-                planner_types::physical::Medium::Memory,
+            lifetime: planner_types::stages::Lifetime::AcrossEvaluations(
+                planner_types::stages::StorageMedium::Memory,
             ),
+            parameters: None,
             output_schema: logical_schema(family.clone()),
             guarantee: None,
             retention_ms: None,
+            selected_physical_candidate: None,
         });
     }
     let read_id = nodes.len();
@@ -152,29 +150,32 @@ fn try_state_dag(
             child: read_id - 1,
         }),
         output_state: ExecutionDataState::INGESTION_ROWS,
-        materialization: Default::default(),
+        lifetime: Default::default(),
+        parameters: None,
         output_schema: logical_schema(FieldDataType::Plain(DataType::Float64)),
         guarantee: None,
         retention_ms: None,
+        selected_physical_candidate: None,
     });
     if let Some(target) = target {
         nodes.push(PhysicalASAPDAGNode {
             id: nodes.len(),
             payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
-                family: target.clone(),
+                summary_type: target.clone(),
                 input: SummaryUpdate::column(ColumnRef::SampleValue),
                 reduction: Reduction::by(vec![]),
-                grouping: GroupingStrategy::default(),
                 filter: None,
                 child: read_id,
             }),
             output_state: ExecutionDataState::INGESTION_SUMMARY,
-            materialization: planner_types::physical::Materialization::MatAtIngestion(
-                planner_types::physical::Medium::Memory,
+            lifetime: planner_types::stages::Lifetime::AcrossEvaluations(
+                planner_types::stages::StorageMedium::Memory,
             ),
+            parameters: None,
             output_schema: logical_schema(target),
             guarantee: None,
             retention_ms: None,
+            selected_physical_candidate: None,
         });
     }
     let root = nodes.last().unwrap().id;
@@ -234,8 +235,8 @@ fn ingestion_context(limits: Limits) -> RunContext {
 fn sum_state(value: f64) -> Arc<dyn asap_executor::AggregateCore> {
     let mut state = asap_executor::summary_kernels::exact::ExactAccumulator::new(
         planner_types::ir::schema::FieldDataType::ExactAggregate(
-            planner_types::ir::schema::ExactKind::Sum,
-            planner_types::ir::schema::ExactParams::Sum,
+            planner_types::summary_type::ExactKind::Sum,
+            planner_types::summary_type::ExactParams::Sum,
         ),
         false,
     )
@@ -286,13 +287,7 @@ fn explicit_merge_changes_tumbling_window_cardinality() {
 #[test]
 fn precompute_rejects_nonfinite_and_out_of_range_dds_updates() {
     let source = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
-    let target = FieldDataType::Sketch(
-        SketchKind::new(
-            SketchAlgorithm::DDSketch,
-            SketchParams::DDSketch { alpha: 0.01 },
-        ),
-        GroupingStrategy::default(),
-    );
+    let target = FieldDataType::Sketch(SketchAlgorithm::DDSketch);
     let program = state_dag(source.clone(), Some(target), false);
     for value in [20., -20., 0.] {
         assert!(

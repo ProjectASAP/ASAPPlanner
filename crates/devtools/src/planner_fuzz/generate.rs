@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use asap_types::ir::properties::AccuracyTarget;
+use asap_types::accuracy::AccuracyTarget;
 
 use super::{FuzzQuery, FuzzWorkload, Language};
 
@@ -376,7 +376,7 @@ pub fn source_facts(
     let mut facts = json!({
         "series_count": series_count,
         "sample_interval": sample_interval_ms,
-        "values_non_negative": true,
+        "column_signs": {"value": "non_negative"},
         "distinct_values_per_label": distinct,
     });
     if let Some(metric_type) = metric_type {

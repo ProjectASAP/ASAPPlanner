@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::fixtures::metric_schema;
+use asap_types::accuracy::AccuracyTarget;
 use asap_types::ir::operator::Source;
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::{CompareOpKind, ScalarValue};
 use asap_types::ir::{
     ExprSemantics, NonASAPOp, OperatorNode, Predicate, ScalarExpr, TimeRangeKind,

@@ -31,8 +31,8 @@ use asap_frontend_promql::PromqlError as LoweringError;
 mod support;
 use std::rc::Rc;
 
+use asap_types::accuracy::AccuracyTarget;
 use asap_types::ir::operator::{AggIntent, BinaryOpKind, Reduction};
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::CompareOpKind;
 use asap_types::ir::{BinaryOperator, NonASAPOp, OperatorNode};
 use support::lower_promql;

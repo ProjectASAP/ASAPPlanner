@@ -71,6 +71,7 @@ pub(super) fn evaluate(
             ScalarValue::Utf8(value) => Value::Utf8(value.clone().into()),
             ScalarValue::Boolean(value) => Value::Bool(*value),
             ScalarValue::Null => Value::Null,
+            ScalarValue::Timestamp(ms) => Value::Timestamp(*ms),
         }),
         ScalarExpr::Cast { expr, to, .. } => {
             let value = evaluate(expr, row, schema, evaluation_time_ms, regexes)?;

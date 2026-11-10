@@ -224,7 +224,7 @@ function stageDag(dag, physical) {
       const [kind, body] = stageOperatorParts(node.payload);
       return {
         id: node.id, kind, body, schema: node.output_schema, guarantee: node.guarantee,
-        materialization: node.materialization, timing: node.output_state ? node.output_state.timing : undefined, raw: node,
+        lifetime: node.lifetime, timing: node.output_state ? node.output_state.timing : undefined, raw: node,
       };
     });
     const edges = dag.edges.map((edge) => ({ producer: edge.producer, consumer: edge.consumer, raw: edge }));
@@ -241,8 +241,7 @@ function stageDag(dag, physical) {
     const [kind, body] = stageOperatorParts(node.operator);
     stageLogicalChildren(body).forEach((producer) => edges.push({ producer, consumer: id, raw: null }));
     return {
-      id, kind, body, schema: node.schema, guarantee: node.guarantee,
-      materialization: node.materialization, timing: node.timing === null ? undefined : node.timing, raw: node,
+      id, kind, body, schema: node.schema, guarantee: node.guarantee, raw: node,
     };
   });
   const queries = dag.roots.map((root) => ('Scalar' in root ? { scalar: root.Scalar } : { node: root.Operator }));
@@ -321,7 +320,6 @@ function uniqueIds(list, where, errors) {
 // it is not priced.
 const FAILED_CHECK_CAUSES = [
   'accuracy_target_missed',
-  'count_min_weights_not_proven_non_negative',
   'no_accuracy_guarantee', 'latency_bound_exceeded', 'latency_over_repeat_interval',
   'over_cluster_capacity', 'infeasible', 'cost_not_representable',
 ];
@@ -1036,7 +1034,7 @@ function dataWorkloadView(dataWorkload, queries) {
     name,
     series: typeof facts.series_count === 'number' ? facts.series_count : '—',
     type: facts.metric_type || '—',
-    nonNegative: facts.values_non_negative ? 'yes' : String(facts.metric_type).toLowerCase() === 'counter' ? 'yes (counter)' : '—',
+    nonNegative: (facts.column_signs || {}).value === 'non_negative' ? 'yes' : String(facts.metric_type).toLowerCase() === 'counter' ? 'yes (counter)' : '—',
     sampleInterval: facts.sample_interval === undefined || facts.sample_interval === null ? '—' : durationText(facts.sample_interval),
     streamNorms: norms(facts.stream_norms),
     maxDistinct: typeof facts.max_distinct_per_evaluation === 'number' ? facts.max_distinct_per_evaluation : '—',
@@ -1079,7 +1077,7 @@ function materializedViewRows(doc) {
       definition: output.coverage.definition_id,
       kind: summary ? `${kind} · ${summary}` : kind,
       tumblingWindow,
-      refresh: output.refresh === 'at_ingestion' ? 'at ingestion' : 'on first read (kept across evaluations)',
+      refresh: output.refresh === 'at_ingestion' ? 'at ingestion' : 'on first read (materialized across evaluations)',
       inputs: `${output.inputs.raw_data_windows.length} raw-data window(s)` +
         (output.inputs.materialized_views.length ? `, views ${output.inputs.materialized_views.join(', ')}` : ''),
       retention: durationText(output.retention_ms),
@@ -1171,7 +1169,7 @@ function usageText(usage) {
 function deploymentText(capabilities) {
   if (!capabilities || typeof capabilities !== 'object') return '';
   const summaries = Array.isArray(capabilities.supported_summaries)
-    ? `summaries: ${capabilities.supported_summaries.map((s) => `${s.family} (${(s.readouts || []).join(', ')})`).join(', ')}`
+    ? `summaries: ${capabilities.supported_summaries.map((s) => `${s.summary_type} (${(s.readouts || []).join(', ')})`).join(', ')}`
     : 'every summary the planner builds';
   return [capabilities.raw_data_retained === false ? 'raw data not retained' : 'raw data retained',
     capabilities.query_time_results_retained ? 'query-time results retained' : 'query-time results not retained', summaries].join(' · ');

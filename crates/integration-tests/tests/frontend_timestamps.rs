@@ -2,7 +2,7 @@
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_integration_tests::fixtures::lower_promql_root;
-use asap_types::ir::properties::AccuracyTarget;
+use asap_types::accuracy::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{NonASAPOp, ScalarExpr};
 
@@ -20,7 +20,7 @@ async fn promql_eval_time_and_sql_current_timestamp_remain_distinct() {
         "expected a bare evaluation-time scalar, got {promql:?}"
     );
     assert_eq!(
-        ScalarExpr::EvalTimestamp
+        ScalarExpr::<std::rc::Rc<asap_types::ir::OperatorNode>>::EvalTimestamp
             .scalar_type(&Schema::default())
             .unwrap()
             .0,
@@ -31,13 +31,9 @@ async fn promql_eval_time_and_sql_current_timestamp_remain_distinct() {
         "metrics",
         Schema::new(vec![Field::plain("value", DataType::Float64, false)]),
     );
-    let sql = lower_sql(
-        "SELECT CURRENT_TIMESTAMP FROM metrics",
-        &catalog,
-        AccuracyTarget::exact(),
-    )
-    .await
-    .expect("lower SQL CURRENT_TIMESTAMP");
+    let sql = lower_sql("SELECT CURRENT_TIMESTAMP FROM metrics", &catalog)
+        .await
+        .expect("lower SQL CURRENT_TIMESTAMP");
     let Some(NonASAPOp::Project { cols, child, .. }) = sql.non_asap() else {
         panic!("expected SQL projection, got {sql:?}");
     };

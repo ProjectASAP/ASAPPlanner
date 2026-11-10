@@ -3,6 +3,7 @@
 //! A node without a native lowering fails compilation; the deployment runtime
 //! must execute it.
 use crate::operators::{RowWeight, SummaryEvaluation};
+use crate::sources::{scan_windows, time_range_window, view_windows, ScanWindow};
 use crate::summary_kernels::exact::ExactEvaluation;
 use crate::{
     operators::{Expression, Operator, Reduction, SortKey},
@@ -10,18 +11,17 @@ use crate::{
     values::{Batch, SchemaRef},
     Error,
 };
-use planner_types::ir::materialized_view::MaterializedView;
 use planner_types::ir::operator::{
     agg_has_exact_per_entity_kernel, AggIntent, GroupKeys, Reduction as PlannerReduction,
 };
-use planner_types::ir::physical_export::{
-    time_range_window, PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
-    PhysicalASAPOperatorPayload as Payload, ScanWindow,
-};
 use planner_types::ir::scalar::{ColumnRef, CompareOpKind};
-use planner_types::ir::schema::{
-    DataType, FamilyCapability, FieldDataType, SketchStatistic, SummaryInputExpr,
+use planner_types::ir::schema::{DataType, FieldDataType};
+use planner_types::plan::materialized_view::MaterializedView;
+use planner_types::plan::physical_asap_dag::{
+    PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
+    PhysicalASAPOperatorPayload as Payload,
 };
+use planner_types::summary_type::{SketchStatistic, SummaryInputExpr, SummaryTypeCapability};
 // `promql_rows` reads `OperatorNode` through `super::*` only in its
 // test-support helpers.
 #[cfg_attr(not(any(test, feature = "test-support")), allow(unused_imports))]
@@ -87,19 +87,13 @@ fn compile_internal(
     roots: &[NodeId],
 ) -> Result<CompiledPhysicalDAG, Error> {
     preflight_depth(dag)?;
-    // A tumbling-window chain stands for its tumbling windows; the deployment binds each tumbling window's
-    // raw input, so it runs only once expanded.
-    if let Some(node) = dag.nodes.iter().find(|n| {
+    if dag.nodes.iter().any(|n| {
         matches!(
             n.payload,
             Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
         )
     }) {
-        return Err(invalid(format!(
-            "node {}: a SummaryTumblingWindowChain runs as its tumbling windows; expand it with \
-             `asap_types::ir::operator::tumbling_window_chain::expand_tumbling_window_chains` before compiling",
-            node.id
-        )));
+        todo!("#1207 PR 6: run a chain, and a TimeRange or TimeShift over it by window index")
     }
     // Helper IDs lie above the u32 range; a larger Planner ID could collide.
     if let Some(node) = dag.nodes.iter().find(|n| n.id as u64 > u64::from(u32::MAX)) {
@@ -119,10 +113,10 @@ fn compile_internal(
         (
             edge.consumer,
             match edge.role {
-                planner_types::ir::physical_export::EdgeRole::Left => 0,
-                planner_types::ir::physical_export::EdgeRole::Input => 1,
-                planner_types::ir::physical_export::EdgeRole::Right => 2,
-                planner_types::ir::physical_export::EdgeRole::ScalarRef => 3,
+                planner_types::plan::physical_asap_dag::EdgeRole::Left => 0,
+                planner_types::plan::physical_asap_dag::EdgeRole::Input => 1,
+                planner_types::plan::physical_asap_dag::EdgeRole::Right => 2,
+                planner_types::plan::physical_asap_dag::EdgeRole::ScalarRef => 3,
             },
         )
     });
@@ -165,13 +159,13 @@ fn compile_internal(
     }
     // Each view's and each `Scan`'s window, the DAG indexed once for all:
     // a materialized tumbling-window chain has a view per tumbling window.
-    let view_windows = dag.view_windows(views.iter().map(|view| view.node_id));
-    let scan_windows = dag.scan_windows(
+    let view_windows = view_windows(dag, views.iter().map(|view| view.node_id));
+    let scan_windows = scan_windows(
+        dag,
         dag.nodes
             .iter()
             .filter(|node| matches!(node.payload, Payload::NonASAP(NonASAPOp::Scan { .. })))
             .map(|node| node.id),
-        &Default::default(),
     );
     let compile_roots: BTreeSet<NodeId> = roots.iter().copied().collect();
     let mut physical_dag = CompiledPhysicalDAG::new(roots.to_vec());
@@ -383,7 +377,7 @@ fn compile_internal(
                     )));
                 }
                 let reduction = match measure {
-                    AggIntent::Count { .. } => Reduction::Count,
+                    AggIntent::Count => Reduction::Count,
                     AggIntent::Sum { .. } => Reduction::Sum(value),
                     AggIntent::Avg { .. } => Reduction::Avg(value),
                     AggIntent::Min { .. } => Reduction::Min(value),
@@ -454,10 +448,9 @@ fn compile_internal(
             // A closed row must include either all source labels or the explicit
             // complete-label identity. Projected labels alone are insufficient.
             if let Payload::ASAP(ASAPOp::SummaryAgg {
-                family,
+                summary_type: family,
                 input: update,
                 reduction: PlannerReduction::PerEntity,
-                grouping,
                 filter: None,
                 ..
             }) = &node.payload
@@ -485,7 +478,7 @@ fn compile_internal(
                         "per-entity summary requires complete source identity",
                     ));
                 }
-                crate::capability::validate_summary_kernel(family, update, grouping)
+                crate::capability::validate_summary_kernel(family, update)
                     .map_err(Error::Invalid)?;
                 let value = match (frequency_item, &update.weight) {
                     (Some(item), _) => item,
@@ -661,17 +654,15 @@ fn compile_internal(
 /// Whether every summary state `state` merges was built from a relation's
 /// rows (a SQL table's), where a global aggregate has a row over no input
 /// row; not from a PromQL vector's, where it has none.
-fn built_from_relation(state: &OperatorNode) -> bool {
+fn built_from_relation(state: &std::rc::Rc<OperatorNode>) -> bool {
     match state.asap() {
-        Some(ASAPOp::SummaryMerge { children, .. }) => {
-            children.iter().all(|child| built_from_relation(child))
-        }
+        Some(ASAPOp::SummaryMerge { children, .. }) => children.iter().all(built_from_relation),
         Some(
             ASAPOp::SummaryAgg { child, .. } | ASAPOp::SummaryTumblingWindowChain { child, .. },
         ) => child.result_kind == planner_types::ir::OperatorResultKind::Relation,
         // A filter keeping whole states reads them from their build.
         _ => planner_types::ir::operator::asap::selected_from(state)
-            .is_some_and(|states| built_from_relation(states)),
+            .is_some_and(|states| built_from_relation(&states)),
     }
 }
 
@@ -887,7 +878,7 @@ fn temporal_evaluation_drops_name(node: &PhysicalASAPDAGNode) -> bool {
 /// one only when the family-capability table gives the family a sound merge.
 pub(crate) fn require_sound_merge(input: &SchemaRef) -> Result<(), Error> {
     let state = &input.fields[summary_column(input)?].dtype;
-    if FamilyCapability::of(state).merge_inputs.is_none() {
+    if SummaryTypeCapability::of(state).merge_inputs.is_none() {
         return Err(invalid(format!(
             "summary merge over {state:?} is unsupported: the family has no sound merge"
         )));
@@ -1009,7 +1000,7 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
     match &node.payload {
         Payload::ASAP(ASAPOp::FinalizeExactAccumulator { .. }) => {
             let state = summary_column(input)?;
-            use planner_types::ir::schema::ExactKind as E;
+            use planner_types::summary_type::ExactKind as E;
             let statistic = match &input.fields[state].dtype {
                 FieldDataType::ExactAggregate(kind, _) => match kind {
                     E::Sum | E::Count | E::Min | E::Max | E::Rate | E::Increase => *kind,
@@ -1145,7 +1136,7 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                                 .unwrap_or_else(|| named_column(input, &ColumnRef::SampleValue))
                         };
                         let m = match m {
-                            AggIntent::Count { .. } => Reduction::Count,
+                            AggIntent::Count => Reduction::Count,
                             AggIntent::Cardinality { cols, .. } => {
                                 Reduction::Cardinality(if cols.is_empty() {
                                     vec![column(None)?]
@@ -1208,10 +1199,9 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
             _ => Err(invalid("value operation has no native implementation")),
         },
         Payload::ASAP(ASAPOp::SummaryAgg {
-            family,
+            summary_type: family,
             input: update,
             reduction,
-            grouping,
             filter,
             ..
         }) => {
@@ -1221,7 +1211,7 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                 crate::capability::validate_ingestion_time_summary(filter.as_ref())
                     .map_err(Error::Invalid)?;
             }
-            let build = summary_agg_build(input, family, update, reduction, grouping)?;
+            let build = summary_agg_build(input, family, update, reduction)?;
             match filter {
                 Some(filter) => build.with_row_filter(expression(&filter.0, input)?),
                 None => Ok(build),
@@ -1236,9 +1226,9 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                 // share one state.
                 Some(keys) => {
                     let family = &input.fields[state].dtype;
-                    if !FamilyCapability::merges_groups(family) {
+                    if !SummaryTypeCapability::merges_groups(family) {
                         return Err(invalid(format!(
-                            "a rollup of {family:?} states: the family cannot merge different groups"
+                            "a rollup of {family:?} states: the summary type cannot merge different groups"
                         )));
                     }
                     keys.clone()
@@ -1288,13 +1278,14 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
 fn summary_agg_build(
     input: &SchemaRef,
     family: &FieldDataType,
-    update: &planner_types::ir::schema::SummaryUpdate,
+    update: &planner_types::summary_type::SummaryUpdate,
     reduction: &PlannerReduction,
-    grouping: &planner_types::ir::schema::GroupingStrategy,
 ) -> Result<Operator, Error> {
-    if grouping != &planner_types::ir::schema::GroupingStrategy::PerSubpopulationInstance {
-        crate::capability::validate_summary_kernel(family, update, grouping)
-            .map_err(Error::Invalid)?;
+    if matches!(
+        family,
+        FieldDataType::Sketch(planner_types::summary_type::SketchAlgorithm::HydraCms)
+    ) {
+        crate::capability::validate_summary_kernel(family, update).map_err(Error::Invalid)?;
         let PlannerReduction::Reduce(keys) = reduction else {
             return Err(invalid("an all-groups summary requires explicit groups"));
         };
@@ -1317,8 +1308,7 @@ fn summary_agg_build(
         crate::capability::unit_frequency_column(update),
         unkeyed_frequency_family(family),
     ) {
-        crate::capability::validate_summary_kernel(family, update, grouping)
-            .map_err(Error::Invalid)?;
+        crate::capability::validate_summary_kernel(family, update).map_err(Error::Invalid)?;
         let PlannerReduction::Reduce(keys) = reduction else {
             return Err(invalid(
                 "summary construction requires explicit grouping columns",
@@ -1336,10 +1326,10 @@ fn summary_agg_build(
         let PlannerReduction::Reduce(keys) = reduction else {
             return Err(invalid("keyed summary requires explicit partitions"));
         };
-        if matches!(family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &planner_types::ir::schema::SketchAlgorithm::CmsWithHeap)
+        if matches!(family, FieldDataType::Sketch(kind) if kind == &planner_types::summary_type::SketchAlgorithm::CmsWithHeap)
             && !matches!(
                 update.weight_domain,
-                planner_types::ir::schema::WeightDomain::NonNegative { .. }
+                planner_types::summary_type::WeightDomain::NonNegative { .. }
             )
         {
             return Err(invalid("CMS requires a nonnegative weight contract"));
@@ -1370,7 +1360,7 @@ fn summary_agg_build(
             groups(input, keys)?,
         );
     }
-    crate::capability::validate_summary_kernel(family, update, grouping).map_err(Error::Invalid)?;
+    crate::capability::validate_summary_kernel(family, update).map_err(Error::Invalid)?;
     let SummaryInputExpr::Column(column) = &update.weight else {
         return Err(invalid(
             "summary update expression must be projected to a column",
@@ -1405,10 +1395,10 @@ fn row_weight(input: &SchemaRef, weight: &SummaryInputExpr) -> Result<RowWeight,
 /// Families whose state counts values of one column without keyed items:
 /// their unit-frequency update builds over that column.
 fn unkeyed_frequency_family(family: &FieldDataType) -> bool {
-    matches!(family, FieldDataType::Sketch(kind, _) if matches!(
-        kind.algorithm(),
-        planner_types::ir::schema::SketchAlgorithm::UnivMon
-            | planner_types::ir::schema::SketchAlgorithm::Hll
+    matches!(family, FieldDataType::Sketch(kind) if matches!(
+        kind,
+        planner_types::summary_type::SketchAlgorithm::UnivMon
+            | planner_types::summary_type::SketchAlgorithm::Hll
     ))
 }
 fn summary_column(input: &SchemaRef) -> Result<usize, Error> {
@@ -1579,7 +1569,6 @@ fn local_scalar(expr: &ScalarExpr<PhysicalASAPNodeId>) -> Result<ScalarExpr, Err
 #[cfg(test)]
 mod compilation_tests {
     use super::*;
-    use std::time::{Duration, Instant};
 
     fn empty_dag() -> PhysicalASAPDAG {
         PhysicalASAPDAG {
@@ -1598,130 +1587,17 @@ mod compilation_tests {
             Err(Error::Invalid(_))
         ));
     }
-
-    /// `window_count` one-minute windows over one table `Scan`, the `i`-th
-    /// shifted `i` minutes back, each window a root (the shape of a
-    /// tumbling-window-expanded DAG), with the roots' node ids.
-    fn shifted_windows_over_one_scan(window_count: i64) -> (PhysicalASAPDAG, Vec<NodeId>) {
-        use planner_types::ir::operator::{Source, TimeShift};
-        use planner_types::ir::physical_export::compile_physical_asap_workload;
-        use planner_types::ir::schema::{Field, Schema};
-        use planner_types::ir::{
-            apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
-            Operator, QueryRoot,
-        };
-        let minute_ms = 60_000;
-        let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
-            source: Source::Table {
-                table_ref: "t".into(),
-            },
-            predicates: vec![],
-            schema: Schema::with_time_index(
-                vec![
-                    Field::plain("ts", DataType::Timestamp, false),
-                    Field::plain("value", DataType::Float64, false),
-                ],
-                0,
-                vec![],
-            ),
-        }))
-        .unwrap();
-        let windows: Vec<_> = (0..window_count)
-            .map(|i| {
-                let shifted = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeShift {
-                    shift: TimeShift {
-                        offset_ms: i * minute_ms,
-                        at: None,
-                    },
-                    child: std::rc::Rc::clone(&scan),
-                }))
-                .unwrap();
-                OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
-                    range: Duration::from_millis(minute_ms as u64),
-                    kind: TimeRangeKind::Range,
-                    child: shifted,
-                }))
-                .unwrap()
-            })
-            .collect();
-        // One timing cache, so every window reads the one `Scan`. The cache is
-        // keyed by node address, so `windows` stays alive while it runs.
-        let mut cache = NodeToTimedNodeCache::new();
-        let roots: Vec<_> = windows
-            .iter()
-            .map(|window| {
-                let timed = apply_materialization_timings(
-                    window,
-                    &MaterializationAssignment::default(),
-                    &mut cache,
-                )
-                .unwrap();
-                QueryRoot::Operator(timed)
-            })
-            .collect();
-        let dag = compile_physical_asap_workload(&roots).unwrap();
-        let roots = dag.roots.iter().map(|&id| id as NodeId).collect();
-        (dag, roots)
-    }
-
-    /// Three one-minute windows shifted 0, 1 and 2 minutes back over one
-    /// `Scan`: the `Scan` reads the union `(T - 3m, T]`, and each window's
-    /// `TimeRange` ends its shift before `T` and is one minute wide.
-    #[test]
-    fn shifted_windows_over_one_scan_compile_to_their_windows() {
-        let (dag, roots) = shifted_windows_over_one_scan(3);
-        let compiled = serde_json::to_value(compile(&dag, &[], &roots).unwrap()).unwrap();
-        let nodes = compiled["nodes"].as_object().unwrap();
-        let scan_windows: Vec<_> = nodes
-            .values()
-            .filter_map(|node| node.get("RawData"))
-            .map(|slot| slot["window"].clone())
-            .collect();
-        assert_eq!(
-            scan_windows,
-            [serde_json::json!({"Within": {"end_offset_ms": 0, "width_ms": 180_000}})]
-        );
-        let mut time_ranges: Vec<(i64, i64)> = nodes
-            .values()
-            .filter_map(|node| node.pointer("/Operator/operator/kind/TimeRange"))
-            .map(|kind| {
-                (
-                    kind["end_offset_ms"].as_i64().unwrap(),
-                    kind["width_ms"].as_i64().unwrap(),
-                )
-            })
-            .collect();
-        time_ranges.sort();
-        assert_eq!(
-            time_ranges,
-            [(0, 60_000), (60_000, 60_000), (120_000, 60_000)]
-        );
-    }
-
-    /// 20,000 shifted windows over one `Scan` compile in linear time. A
-    /// search over every node per window, and over every root per reader of
-    /// the `Scan`, made the compile quadratic in the number of windows
-    /// (#993): in a debug build, 10,000 windows compiled in 5.4 s and 20,000
-    /// in over 10 s before, 1.4 s and 3.1 s after.
-    #[test]
-    #[ignore = "slow: run by hand"]
-    fn many_windows_over_one_scan_compile_in_linear_time() {
-        let (dag, roots) = shifted_windows_over_one_scan(20_000);
-        let started = Instant::now();
-        compile(&dag, &[], &roots).unwrap();
-        eprintln!("compiled 20,000 windows in {:?}", started.elapsed());
-    }
 }
 
 /// Helpers for the Planner's own tests (`test-support`).
 #[cfg(feature = "test-support")]
 pub mod test_support {
     use super::*;
-    use planner_types::physical::{Materialization, Medium};
+    use planner_types::stages::{Lifetime, StorageMedium};
     use std::collections::HashMap;
 
     /// The materialized views at `nodes`, in that order: each node that is
-    /// not a view is marked `MatAtIngestion`, and it and every node below it
+    /// not a view is marked materialized at ingestion time, and it and every node below it
     /// run at ingestion time (their outputs and outgoing edges); then every
     /// view's `retention_ms` is set ([`PhysicalASAPDAG::set_retention`])
     /// with no tumbling window or range-evaluation span. For tests that bind states at
@@ -1743,7 +1619,10 @@ pub mod test_support {
             .iter()
             .filter(|node| {
                 nodes.contains(&(node.id as NodeId))
-                    && !planner_types::test_support::is_materialized_view(node.materialization)
+                    && !matches!(
+                        node.lifetime,
+                        planner_types::stages::Lifetime::AcrossEvaluations(_)
+                    )
             })
             .map(|node| node.id as NodeId)
             .collect();
@@ -1757,7 +1636,7 @@ pub mod test_support {
         for node in &mut dag.nodes {
             let id = node.id as NodeId;
             if marked.contains(&id) {
-                node.materialization = Materialization::MatAtIngestion(Medium::Memory);
+                node.lifetime = Lifetime::AcrossEvaluations(StorageMedium::Memory);
             }
             if at_ingestion.contains(&id) {
                 node.output_state.timing = ExecutionTiming::IngestionTime;

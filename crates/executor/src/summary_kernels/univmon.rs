@@ -3,7 +3,7 @@
 use crate::AggregateCore;
 use asap_sketchlib::{DataInput, UnivMon};
 use planner_types::ir::scalar::ColumnRef;
-use planner_types::ir::schema::SketchStatistic;
+use planner_types::summary_type::SketchStatistic;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 

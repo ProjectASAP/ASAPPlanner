@@ -1,8 +1,6 @@
 //! End-to-end coverage for the library facade (#429) and for plugging a
 //! different optimization pass into it (#430).
 
-use std::rc::Rc;
-
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_planner::PlanningModels;
 use asap_planner::{e2e_plan, FrontendInput, PlanError, UserInput, UserInputError};
@@ -10,7 +8,7 @@ use asap_planner::{
     run_planning, OptimizationInput, OptimizationPass, OptimizeError, PlanOutput,
     Stage1ToStage3Pass,
 };
-use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
+use asap_types::accuracy::{AccuracyMetric, AccuracyTarget};
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::workload::{
     BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query,
@@ -102,12 +100,12 @@ async fn plans_every_query_in_entry_order() {
     );
 
     let output = e2e_plan(input).await.expect("workload plans");
-    assert_eq!(output.plans.len(), 2);
-    assert_eq!(output.entry_indices(), vec![0, 1]);
+    assert_eq!(output.plan.roots.len(), 2);
+    assert!(output.plan.scalar_roots.is_empty());
 }
 
-/// The facade selects what the planning stages select over the frontends'
-/// roots ([`run_planning`]), and reports that selection.
+/// The facade returns the plan the planning stages build over the frontends'
+/// roots ([`run_planning`]).
 #[tokio::test]
 async fn facade_plans_match_run_planning() {
     let workload = sql_workload(
@@ -134,14 +132,9 @@ async fn facade_plans_match_run_planning() {
     let mut targets = Vec::new();
     for (index, entry) in workload.query_workload.entries().enumerate() {
         let accuracy = entry.requirements.accuracy.clone();
-        let expr = lower_sql_dialect(
-            &entry.query.0,
-            &catalog,
-            SqlDialect::DataFusionSQL,
-            accuracy.clone(),
-        )
-        .await
-        .expect("lowers");
+        let expr = lower_sql_dialect(&entry.query.0, &catalog, SqlDialect::DataFusionSQL)
+            .await
+            .expect("lowers");
         roots.push((index, expr.into()));
         targets.push(Some(accuracy));
     }
@@ -163,16 +156,8 @@ async fn facade_plans_match_run_planning() {
         asap_planner::PlanSearchSettings::default(),
     )
     .unwrap();
-    let selection = run.selection.as_ref().expect("a candidate is selected");
-    // Separate searches have different timings. The facade must preserve
-    // the chosen execution, cost, and guarantees.
-    let facade = output.selection.as_ref().expect("facade reports selection");
-    assert_eq!(facade.cost, selection.cost);
-    assert_eq!(
-        facade.accepted_accuracy_per_query,
-        selection.accepted_accuracy_per_query
-    );
-    assert_eq!(&output.roots(), run.selected_plan.as_ref().unwrap());
+    let (plan, _selection) = run.selection.as_ref().expect("a candidate is selected");
+    assert_eq!(&output.plan, plan);
 }
 
 /// A repeating SQL query reaches the optimizer, not only `query_batch` entries.
@@ -199,11 +184,10 @@ async fn lowers_repeating_sql_entries_too() {
 
     let output = e2e_plan(input).await.expect("workload plans");
     assert_eq!(
-        output.len(),
+        output.plan.roots.len(),
         2,
         "batch entry and repeating entry both planned"
     );
-    assert_eq!(output.entry_indices(), vec![0, 1]);
 }
 
 /// A caller-supplied pass replaces the shipped algorithm entirely: the trait is
@@ -247,10 +231,10 @@ async fn runs_a_caller_supplied_pass_instead_of_the_shipped_one() {
     assert_eq!(detail, "saw 1 entry/entries");
 }
 
-/// The harness catches a pass that mislabels which query a plan belongs to,
-/// rather than letting the mislabelled plan reach a deployment.
+/// The harness catches a pass whose plan answers fewer queries than the
+/// workload has, rather than letting the plan reach a deployment.
 #[tokio::test]
-async fn harness_rejects_a_pass_that_mislabels_entry_indices() {
+async fn harness_rejects_a_pass_that_drops_a_query() {
     struct Mangling;
 
     impl OptimizationPass for Mangling {
@@ -259,9 +243,7 @@ async fn harness_rejects_a_pass_that_mislabels_entry_indices() {
         }
         fn optimize(&self, input: OptimizationInput<'_>) -> Result<PlanOutput, OptimizeError> {
             let mut output = Stage1ToStage3Pass.optimize(input)?;
-            for plan in output.plans.iter_mut() {
-                plan.entry_index += 1;
-            }
+            output.plan.roots.pop();
             Ok(output)
         }
     }
@@ -309,7 +291,7 @@ async fn rejects_a_frontend_that_does_not_match_the_workload_language() {
     ));
 }
 
-/// A repeating PromQL query yields one plan carrying its selected DAG root.
+/// A repeating PromQL query yields a plan with one root.
 #[tokio::test]
 async fn each_plan_carries_its_selected_root() {
     let workload = PlanningWorkload {
@@ -329,6 +311,7 @@ async fn each_plan_carries_its_selected_root() {
         data_workload: Some(DataWorkload {
             arrival: DataArrival::Ingesting {
                 rows_per_second: 1_000.0,
+                max_out_of_order_ms: None,
             },
             ..Default::default()
         }),
@@ -336,10 +319,7 @@ async fn each_plan_carries_its_selected_root() {
     let input = UserInput::new(&workload, FrontendInput::Promql, PlanningModels::builtin());
 
     let output = e2e_plan(input).await.expect("workload plans");
-    assert_eq!(output.plans.len(), 1);
-    assert_eq!(output.plans[0].entry_index, 0);
-    let _: &Rc<_> = &output.plans[0].root;
-    assert_eq!(output.operator_roots().len(), 1);
+    assert_eq!(output.plan.roots.len(), 1);
 }
 
 /// Scalar-only and mixed workloads preserve entry bindings without wrapper nodes.
@@ -372,25 +352,15 @@ async fn scalar_roots_survive_planning_in_workload_order() {
         ))
         .await
         .unwrap();
-        assert_eq!(
-            output.entry_indices(),
-            (0..queries.len()).collect::<Vec<_>>()
-        );
-        assert!(matches!(
-            output.roots()[0],
-            asap_types::ir::QueryRoot::Scalar(_)
-        ));
-        assert_eq!(output.roots().len(), queries.len());
+        let roots = output.plan.query_roots().unwrap();
+        assert!(matches!(roots[0], asap_types::ir::QueryRoot::Scalar(_)));
+        assert_eq!(roots.len(), queries.len());
         if queries.len() == 3 {
-            assert_eq!(output.plans[0].entry_index, 1);
-            let asap_types::ir::QueryRoot::Scalar(expr) = &output.roots()[2] else {
+            assert!(matches!(roots[1], asap_types::ir::QueryRoot::Operator(_)));
+            let asap_types::ir::QueryRoot::Scalar(expr) = &roots[2] else {
                 panic!()
             };
             assert_eq!(expr.operator_refs().len(), 1);
-            assert!(Rc::ptr_eq(
-                expr.operator_refs()[0],
-                &output.scalar_plans[0].root
-            ));
         }
     }
 }

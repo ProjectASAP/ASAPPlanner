@@ -4,18 +4,16 @@
 //! constant of the same name.
 use std::rc::Rc;
 
-use asap_types::ir::operator::operator_properties::Reduction;
+use asap_types::accuracy::AccuracyGuarantee;
+use asap_types::ir::operator::arguments::Reduction;
 use asap_types::ir::operator::AggIntent;
-use asap_types::ir::properties::guarantee::AccuracyGuarantee;
-use asap_types::ir::properties::AccuracyTarget;
-use asap_types::ir::schema::{
-    FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic, SummaryUpdate,
-};
+use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{OperatorNode, ScalarExpr};
+use asap_types::summary_type::{SketchAlgorithm, SketchParams, SketchStatistic, SummaryUpdate};
 
 use crate::composition::StreamNorm;
-pub use crate::evidence::PropagationStats;
 use crate::propagation;
+pub use crate::propagation_stats::PropagationStats;
 
 /// [`propagation::composed_guarantee`].
 pub fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
@@ -72,32 +70,19 @@ pub fn source_distinct_guarantee(
     propagation::source_distinct_guarantee(family, query, input)
 }
 
-/// `crate::satisfies`.
-pub fn satisfies(guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool {
-    crate::satisfies(guarantee, target)
-}
-
-/// `crate::estimators::local_guarantee`.
-pub fn local_guarantee(
-    family: &FieldDataType,
-    query: &SketchStatistic,
-) -> Option<AccuracyGuarantee> {
-    crate::estimators::local_guarantee(family, query)
-}
-
-/// `crate::estimators::cms::cms_width`.
+/// `crate::guarantee::cms::cms_width`.
 pub fn cms_width(eps: f64) -> u32 {
-    crate::estimators::cms::cms_width(eps)
+    crate::guarantee::cms::cms_width(eps)
 }
 
-/// `crate::estimators::cms::cms_depth`.
+/// `crate::guarantee::cms::cms_depth`.
 pub fn cms_depth(delta: f64) -> u32 {
-    crate::estimators::cms::cms_depth(delta)
+    crate::guarantee::cms::cms_depth(delta)
 }
 
-/// `crate::estimators::kll::kll_rank_error_99`.
+/// `crate::guarantee::kll::kll_rank_error_99`.
 pub fn kll_rank_error_99(k: u32) -> f64 {
-    crate::estimators::kll::kll_rank_error_99(k)
+    crate::guarantee::kll::kll_rank_error_99(k)
 }
 
 /// `crate::sizing::default_size_params`.
@@ -109,9 +94,6 @@ pub fn default_size_params(
 ) -> SketchParams {
     crate::sizing::default_size_params(kind, intent, eps, delta)
 }
-
-/// `crate::sizing::DEFAULT_DELTA`.
-pub const DEFAULT_DELTA: f64 = crate::sizing::DEFAULT_DELTA;
 
 /// `crate::composition::QUOTIENT_OPERAND_DOMAINS`.
 pub const QUOTIENT_OPERAND_DOMAINS: &str = crate::composition::QUOTIENT_OPERAND_DOMAINS;

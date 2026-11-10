@@ -23,7 +23,6 @@
 //! which is the same narrowing sidra's own catalog file makes.
 
 use asap_frontend_sql::{lower_sql, SqlCatalog, SqlError as LoweringError};
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, Schema};
 
 const CORPUS: &str = include_str!("data/tpch_deequ_queries.sql");
@@ -85,7 +84,7 @@ async fn lowers_the_warehouse_ingestion_check_set() {
     let mut rejected = Vec::new();
     let mut lowered = 0;
     for (id, query) in queries {
-        match lower_sql(query, &cat, AccuracyTarget::exact()).await {
+        match lower_sql(query, &cat).await {
             Ok(_) => lowered += 1,
             Err(LoweringError::UnsupportedAggregate(reason)) => rejected.push((id, reason)),
             Err(error) => panic!("unexpected failure for U-{id}: {error}"),

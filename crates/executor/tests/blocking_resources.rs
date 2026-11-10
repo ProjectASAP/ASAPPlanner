@@ -186,7 +186,7 @@ fn cooperative_sort_preserves_ties_across_chunks() {
 // The integrated weighted-summary path obeys the same cooperative cancellation contract.
 #[test]
 fn weighted_summary_build_yields_within_a_batch() {
-    use planner_types::ir::schema::{SketchAlgorithm, SketchKind, SketchParams};
+    use planner_types::summary_type::SketchAlgorithm;
 
     let input = Arc::new(planner_types::ir::schema::Schema {
         unique_keys: vec![],
@@ -222,17 +222,7 @@ fn weighted_summary_build_yields_within_a_batch() {
             Operator::source(input.clone(), vec![batch]).unwrap(),
         )
         .unwrap();
-    let family = FieldDataType::Sketch(
-        SketchKind::new(
-            SketchAlgorithm::CmsWithHeap,
-            SketchParams::CmsWithHeap {
-                width: 64,
-                depth: 3,
-                heap_size: 8,
-            },
-        ),
-        Default::default(),
-    );
+    let family = FieldDataType::Sketch(SketchAlgorithm::CmsWithHeap);
     let operator = Operator::per_group_keyed_summary_build(
         input,
         family,

@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::fixtures::metric_schema;
+use asap_types::accuracy::AccuracyTarget;
 use asap_types::ir::operator::{AggIntent, Reduction, Source};
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{NonASAPOp, OperatorNode, TimeRangeKind};
 
 fn lower(q: &str) -> Rc<OperatorNode> {
@@ -83,13 +83,7 @@ fn q06_sum_by_job() {
 fn q07_count_is_row_count() {
     assert_eq!(
         lower("count(http_requests_total)"),
-        agg(
-            vec![],
-            AggIntent::Count {
-                accuracy: AccuracyTarget::exact()
-            },
-            scan("http_requests_total", &[]),
-        ),
+        agg(vec![], AggIntent::Count, scan("http_requests_total", &[]),),
     );
 }
 
@@ -184,11 +178,7 @@ fn q10_quantile_cross_series() {
         lower("quantile(0.99, http_requests_total)"),
         agg(
             vec![],
-            AggIntent::Quantile {
-                col: None,
-                q: 0.99,
-                accuracy: AccuracyTarget::exact()
-            },
+            AggIntent::Quantile { col: None, q: 0.99 },
             scan("http_requests_total", &[]),
         ),
     );

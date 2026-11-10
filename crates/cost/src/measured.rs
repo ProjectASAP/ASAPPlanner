@@ -3,9 +3,9 @@
 //! from instead of its formulas.
 //!
 //! The Planner defines the table's structure; the deployment's runtime
-//! measures the numbers (e.g. ASAPQuery-backend's `measure_costs`, or
-//! sketch-bench's `rqe_atomic_costs.json` converted by `asap-devtools`'
-//! `convert_rqe_atomic_costs`) and puts the table in
+//! measures the numbers (e.g. sketch-bench's `rqe_atomic_costs.json`
+//! converted by `asap-devtools`' `convert_rqe_atomic_costs`) and puts the
+//! table in
 //! [`CostInputs::measured_operation_costs`]. The planner reads
 //! only this table, never a benchmark file.
 //!
@@ -38,13 +38,13 @@
 use std::mem::discriminant;
 
 use asap_types::ir::operator::AggIntent;
-use asap_types::ir::physical_export::PhysicalASAPOperatorPayload as Payload;
 use asap_types::ir::properties::ExecutionTiming;
-use asap_types::ir::schema::{ExactKind, SketchParams};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
+use asap_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload as Payload;
+use asap_types::summary_type::{ExactKind, SketchParams};
 use serde::{Deserialize, Serialize};
 
-use crate::analytical::AnalyticalCostError;
+use crate::node::analytical::AnalyticalCostError;
 
 /// The deployment's measured cost table
 /// ([`CostInputs::measured_operation_costs`]). In JSON, an object
@@ -503,14 +503,14 @@ struct TableFields {
     provenance: Option<CostTableProvenance>,
 }
 
-/// Which prices one node's CPU operations came from. A node is one operator
+/// Which costs one node's CPU operations came from. A node is one operator
 /// node of the candidate's physical plan DAG (`PhysicalASAPDAG`), keyed by
 /// its `PhysicalASAPNodeId` in [`PlanCost::per_node`]; not a machine.
 ///
 /// [`PlanCost::per_node`]: crate::PlanCost::per_node
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum NodePriceSource {
+pub enum NodeCostSource {
     /// Plan selection's formulas (`analytical_cost` and the sketch shapes),
     /// scaled by the calibration factor when the table has entries.
     Analytical,

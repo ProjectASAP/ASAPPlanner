@@ -1,16 +1,19 @@
 //! ASAP operators: summary-state construction, state operations and evaluations.
-//! The summary family, kind/algorithm and parameters are committed here.
+//! The summary type (family and algorithm) is an operator argument; θ is a
+//! candidate's logical property.
 
 use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 
-use super::node::{OperatorNode, OperatorResultKind};
+use super::input::{InputOrTemporaryBuild, OperatorInput};
+use super::node::{Operator, OperatorNode, OperatorResultKind};
+use crate::ir::operator::arguments::Reduction;
 use crate::ir::operator::maintained_population::{MaintainedPopulation, PopulationStatistic};
-use crate::ir::operator::operator_properties::Reduction;
-use crate::ir::schema::sketch::{GroupingStrategy, SketchStatistic, SummaryUpdate};
-use crate::ir::schema::{ColumnId, DataType, FamilyCapability, Field, FieldDataType, Schema};
+use crate::ir::schema::{ColumnId, DataType, Field, FieldDataType, Schema};
 use crate::ir::SchemaDerivationError;
+use crate::summary_type::SummaryTypeCapability;
+use crate::summary_type::{SketchStatistic, SummaryUpdate};
 
 /// Why an ASAP operator cannot be used yet.
 pub const UNIMPLEMENTED_ASAP_OP: &str =
@@ -21,15 +24,14 @@ pub const UNIMPLEMENTED_ASAP_OP: &str =
 #[serde(bound(deserialize = "C: Deserialize<'de>"))]
 pub enum ASAPOp<C = Rc<OperatorNode>> {
     /// Summary aggregation. Output: grouping columns + one field carrying
-    /// partial summary state per group, typed `family`.
+    /// partial summary state per group, typed `summary_type`.
     SummaryAgg {
         child: C,
-        /// Which summary family realizes this aggregation. Never
+        /// The summary type (family and algorithm) of the state. Never
         /// `FieldDataType::Plain`.
-        family: FieldDataType,
+        summary_type: FieldDataType,
         input: SummaryUpdate,
         reduction: Reduction,
-        grouping: GroupingStrategy,
         #[serde(default)]
         filter: Option<crate::ir::scalar::Predicate<C>>,
     },
@@ -55,21 +57,12 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
         evaluation: PopulationStatistic,
     },
     /// Merge compatible partial states of one family: every input state of
-    /// a group, including each tumbling window of a [`SummaryTumblingWindowChain`](ASAPOp::SummaryTumblingWindowChain),
-    /// into one state per group.
+    /// a group into one state per group, or, with `group_by`, regrouped.
+    /// Over a time-indexed state (a `TimeRange` over a
+    /// [`SummaryTumblingWindowChain`](ASAPOp::SummaryTumblingWindowChain)), the windows it
+    /// selects; there is no window-selection field.
     SummaryMerge {
         children: Vec<C>,
-        /// Merge only the newest `n` tumbling windows of the one `SummaryTumblingWindowChain` this
-        /// merge reads, `1 ≤ n <` its `tumbling_window_count`: the state of one build
-        /// over the newest `n · tumbling_window_width_ms` of the chain's window, so a
-        /// query over a shorter window reads a chain kept for a longer one.
-        /// `None` merges every input state.
-        #[serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            alias = "newest_panes"
-        )]
-        newest_tumbling_windows: Option<u32>,
         /// A rollup (regrouping merge): the input's plain columns the
         /// merged states are keyed by, in output order. Every input state
         /// whose values in these columns match goes into one output state,
@@ -78,33 +71,26 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         group_by: Option<Vec<ColumnId>>,
     },
-    /// A tumbling-window summary (#509 Pass 2, window-composition
-    /// rule): the `SummaryAgg` with these `family`, `input`, `reduction`,
-    /// `grouping` and `filter`, built over each of `tumbling_window_count` back-to-back
-    /// range windows of `tumbling_window_width_ms` that end at `child`'s evaluation
-    /// time, newest first. `child` is the input a range selector would
-    /// read, so tumbling window `i` covers `(-(i+1)·w, -i·w]` relative to it. Output:
-    /// the `SummaryAgg` schema, one state per group and tumbling window; a
-    /// `SummaryMerge` over the chain gives the state of one build over the
-    /// whole `tumbling_window_count · tumbling_window_width_ms` window
-    /// (`whole_window_build`).
-    /// One compact node whatever the tumbling-window count: costs and guarantees come
-    /// from formulas, and the executor expands the tumbling windows
-    /// (`expand_tumbling_window_chains`).
+    /// A chain of tumbling windows (concepts doc, section 3, "Chain
+    /// groups"): the `SummaryAgg` with these `summary_type`, `input`,
+    /// `reduction` and `filter`, built over each window
+    /// `(k·w, (k+1)·w]` of `child`, `w` = `tumbling_window_width_ms`, on a
+    /// grid anchored at the epoch. Each window is built when it ends. Output:
+    /// one row per window, (window end, keys, state), a state with a time
+    /// index. It has no range and no window count: a `TimeRange` (and
+    /// `TimeShift`) over it selects the windows a query reads, and how many
+    /// windows it retains is $h_v$, a Stage 3 choice.
     // Written as `PaneChain` before #1163; the aliases read those documents.
     #[serde(alias = "PaneChain")]
     SummaryTumblingWindowChain {
         child: C,
-        family: FieldDataType,
+        summary_type: FieldDataType,
         input: SummaryUpdate,
         reduction: Reduction,
-        grouping: GroupingStrategy,
         #[serde(default)]
         filter: Option<crate::ir::scalar::Predicate<C>>,
         #[serde(alias = "pane_width_ms")]
         tumbling_window_width_ms: u64,
-        #[serde(alias = "pane_count")]
-        tumbling_window_count: u32,
     },
     // ── Reserved: migrated but unimplemented ──
     SummarySubtract {
@@ -119,7 +105,7 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
         outer: C,
         inner: C,
         key: ColumnId,
-        family: FieldDataType,
+        summary_type: FieldDataType,
     },
     Extension {
         child: C,
@@ -158,41 +144,35 @@ impl<C> ASAPOp<C> {
         match self {
             SummaryAgg {
                 child,
-                family,
+                summary_type: family,
                 input,
                 reduction,
-                grouping,
                 filter,
             } => SummaryAgg {
                 child: f(child),
-                family: family.clone(),
+                summary_type: family.clone(),
                 input: input.clone(),
                 reduction: reduction.clone(),
-                grouping: grouping.clone(),
                 filter: filter
                     .as_ref()
                     .map(|p| crate::ir::scalar::Predicate(p.0.map_operator_refs(&mut f))),
             },
             SummaryTumblingWindowChain {
                 child,
-                family,
+                summary_type: family,
                 input,
                 reduction,
-                grouping,
                 filter,
                 tumbling_window_width_ms,
-                tumbling_window_count,
             } => SummaryTumblingWindowChain {
                 child: f(child),
-                family: family.clone(),
+                summary_type: family.clone(),
                 input: input.clone(),
                 reduction: reduction.clone(),
-                grouping: grouping.clone(),
                 filter: filter
                     .as_ref()
                     .map(|p| crate::ir::scalar::Predicate(p.0.map_operator_refs(&mut f))),
                 tumbling_window_width_ms: *tumbling_window_width_ms,
-                tumbling_window_count: *tumbling_window_count,
             },
             SummaryEstimate {
                 summary_input,
@@ -210,13 +190,8 @@ impl<C> ASAPOp<C> {
                 child: f(child),
                 evaluation: evaluation.clone(),
             },
-            SummaryMerge {
-                children,
-                newest_tumbling_windows,
-                group_by,
-            } => SummaryMerge {
+            SummaryMerge { children, group_by } => SummaryMerge {
                 children: children.iter().map(&mut f).collect(),
-                newest_tumbling_windows: *newest_tumbling_windows,
                 group_by: group_by.clone(),
             },
             SummarySubtract { left, right } => SummarySubtract {
@@ -231,12 +206,12 @@ impl<C> ASAPOp<C> {
                 outer,
                 inner,
                 key,
-                family,
+                summary_type: family,
             } => SummaryJoin {
                 outer: f(outer),
                 inner: f(inner),
                 key: *key,
-                family: family.clone(),
+                summary_type: family.clone(),
             },
             Extension { child, name } => Extension {
                 child: f(child),
@@ -263,7 +238,7 @@ impl<C> ASAPOp<C> {
     }
 }
 
-impl ASAPOp {
+impl<I: OperatorInput> ASAPOp<I> {
     fn unimplemented() -> SchemaDerivationError {
         SchemaDerivationError::InvalidScalarSignature(UNIMPLEMENTED_ASAP_OP.into())
     }
@@ -271,12 +246,21 @@ impl ASAPOp {
     /// The summary state this operator produces, if it produces state.
     pub fn produced_state(&self) -> Option<&FieldDataType> {
         match self {
-            ASAPOp::SummaryAgg { family, .. }
-            | ASAPOp::SummaryTumblingWindowChain { family, .. }
-            | ASAPOp::SummaryJoin { family, .. } => Some(family),
+            ASAPOp::SummaryAgg {
+                summary_type: family,
+                ..
+            }
+            | ASAPOp::SummaryTumblingWindowChain {
+                summary_type: family,
+                ..
+            }
+            | ASAPOp::SummaryJoin {
+                summary_type: family,
+                ..
+            } => Some(family),
             ASAPOp::SummaryMerge { children, .. } => children.first().and_then(|child| {
                 child
-                    .schema
+                    .schema()
                     .fields
                     .iter()
                     .find(|field| !field.is_plain())
@@ -295,38 +279,21 @@ impl ASAPOp {
         Ok(match self {
             SummaryAgg {
                 child,
-                family,
+                summary_type: family,
                 reduction,
                 ..
             }
             | SummaryTumblingWindowChain {
                 child,
-                family,
+                summary_type: family,
                 reduction,
                 ..
-            } => {
-                let mut schema = crate::ir::schema::aggregate_schema::aggregate_output_schema(
-                    &child.schema,
-                    reduction,
-                    &[crate::ir::operator::AggIntent::Sum { col: None }],
-                    &[],
-                )?;
-                let index = match reduction {
-                    Reduction::PerEntity => crate::ir::scalar::resolve_column_ref(
-                        &crate::ir::scalar::ColumnRef::SampleValue,
-                        &schema,
-                    )
-                    .map_err(|e| SchemaDerivationError::InvalidScalarSignature(e.to_string()))?,
-                    Reduction::Reduce(_) => schema.fields.len() - 1,
-                };
-                schema.fields[index] = Field::new("state", family.clone(), false);
-                schema
-            }
+            } => summary_agg_schema(child.schema(), family, reduction)?,
             SummaryEstimate {
                 summary_input,
                 query,
             } => {
-                let input = &summary_input.schema;
+                let input = summary_input.schema();
                 let (name, mut dtype) = match query {
                     SketchStatistic::Quantile { .. } => ("quantile", DataType::Float64),
                     SketchStatistic::Cardinality => ("cardinality", DataType::Int64),
@@ -336,7 +303,7 @@ impl ASAPOp {
                     SketchStatistic::TopK { .. } => ("topk", DataType::Utf8),
                 };
                 if matches!(
-                    summary_input.summary_build(),
+                    summary_build(summary_input),
                     Some(
                         SummaryAgg {
                             reduction: Reduction::PerEntity,
@@ -367,107 +334,29 @@ impl ASAPOp {
             }
             FinalizeExactAccumulator { child } => {
                 // A rollup finalizes as the coarse build it stands for.
-                if let Some(build) = rolled_up_build(child) {
-                    return FinalizeExactAccumulator { child: build }.output_schema();
+                if let Some((build, schema)) = rolled_up_build(child) {
+                    return finalized_schema(Some(&build), &schema);
                 }
-                // Merged tumbling windows finalize as one build over their window.
                 if super::tumbling_window_chain::merged_chain(child).is_some() {
-                    return FinalizeExactAccumulator {
-                        child: Rc::new(super::tumbling_window_chain::merged_window_build(child)?),
-                    }
-                    .output_schema();
+                    todo!("#1207 PR 1: finalize the windows a TimeRange over a chain selects as one build over that TimeRange")
                 }
-                let value_result = if let Some(ASAPOp::SummaryAgg {
-                    child: source,
-                    family: FieldDataType::ExactAggregate(kind, _),
-                    input,
-                    reduction,
-                    filter,
-                    ..
-                }) = child.summary_build()
-                {
-                    {
-                        use crate::ir::operator::AggIntent;
-                        use crate::ir::schema::{ExactKind, SummaryInputExpr};
-                        let column = match &input.weight {
-                            SummaryInputExpr::Column(col) => Some(
-                                crate::ir::scalar::column_resolution::resolve_column_ref(
-                                    col,
-                                    &source.schema,
-                                )
-                                .map_err(|e| {
-                                    SchemaDerivationError::InvalidScalarSignature(e.to_string())
-                                })?,
-                            ),
-                            _ => None,
-                        };
-                        let measure = match kind {
-                            ExactKind::Sum => Some(AggIntent::Sum { col: column }),
-                            ExactKind::Min => Some(AggIntent::Min { col: column }),
-                            ExactKind::Max => Some(AggIntent::Max { col: column }),
-                            ExactKind::Count => Some(AggIntent::Count {
-                                accuracy: crate::ir::properties::AccuracyTarget::exact(),
-                            }),
-                            ExactKind::Rate => Some(AggIntent::Rate),
-                            ExactKind::IRate => Some(AggIntent::IRate),
-                            ExactKind::Increase => Some(AggIntent::Increase),
-                        };
-                        measure
-                            .map(|measure| {
-                                crate::ir::NonASAPOp::Aggregate {
-                                    child: Rc::clone(source),
-                                    reduction: reduction.clone(),
-                                    measures: vec![measure],
-                                    output_names: vec![],
-                                    // A filtered SUM/MIN/MAX is NULL for a
-                                    // group without a matching row.
-                                    filters: vec![filter.clone()],
-                                    having: None,
-                                }
-                                .output_schema()
-                            })
-                            .transpose()?
-                            .and_then(|s| match reduction {
-                                Reduction::PerEntity => {
-                                    s.column_id("value").and_then(|i| s.fields.get(i).cloned())
-                                }
-                                Reduction::Reduce(_) => s.fields.last().cloned(),
-                            })
-                    }
-                } else {
-                    None
-                };
-                let mut out = child.schema.clone();
-                for f in &mut out.fields {
-                    if let FieldDataType::ExactAggregate(kind, _) = &f.dtype {
-                        if let Some(result) = &value_result {
-                            // The finalized value replaces the aggregate it
-                            // realizes, so it takes that aggregate's column.
-                            f.name = result.name.clone();
-                            f.dtype = result.dtype.clone();
-                            f.nullable = result.nullable;
-                        } else {
-                            f.dtype = FieldDataType::Plain(finalized_data_type(kind));
-                        }
-                    }
-                }
-                out
+                finalized_schema(summary_build(child).as_ref(), child.schema())?
             }
-            MaintainPopulation { child, .. } => child.schema.clone(),
+            MaintainPopulation { child, .. } => child.schema().clone(),
             EvaluatePopulation { child, evaluation } => {
                 use crate::ir::operator::maintained_population::PopulationInput;
                 use crate::ir::operator::{AggIntent, GroupKeys};
-                let Some(MaintainPopulation {
+                let Operator::ASAP(MaintainPopulation {
                     child: source,
                     population,
-                }) = child.asap()
+                }) = child.operator()
                 else {
                     return Err(SchemaDerivationError::InvalidScalarSignature(
                         "population evaluation requires maintained membership".into(),
                     ));
                 };
                 if matches!(evaluation, PopulationStatistic::TopK { .. }) {
-                    source.schema.clone()
+                    source.schema().clone()
                 } else {
                     let (keys, column) = match &population.input {
                         PopulationInput::Rows {
@@ -480,7 +369,7 @@ impl ASAPOp {
                                 .grouping
                                 .iter()
                                 .map(|name| {
-                                    source.schema.column_id(name).ok_or_else(|| {
+                                    source.schema().column_id(name).ok_or_else(|| {
                                         SchemaDerivationError::InvalidScalarSignature(
                                             "population grouping column is absent".into(),
                                         )
@@ -497,15 +386,12 @@ impl ASAPOp {
                             )
                         }
                     };
-                    let accuracy = crate::ir::properties::AccuracyTarget::exact();
                     let measure = match evaluation {
-                        PopulationStatistic::Quantile { q } => AggIntent::Quantile {
-                            q: *q,
-                            col: column,
-                            accuracy,
-                        },
+                        PopulationStatistic::Quantile { q } => {
+                            AggIntent::Quantile { q: *q, col: column }
+                        }
                         PopulationStatistic::Sum => AggIntent::Sum { col: column },
-                        PopulationStatistic::Count => AggIntent::Count { accuracy },
+                        PopulationStatistic::Count => AggIntent::Count,
                         PopulationStatistic::Average => AggIntent::Avg { col: column },
                         PopulationStatistic::TopK { .. } => unreachable!(),
                     };
@@ -524,7 +410,7 @@ impl ASAPOp {
                 children, group_by, ..
             } => {
                 self.validate_inputs()?;
-                let input = &children[0].schema;
+                let input = children[0].schema();
                 match group_by {
                     None => input.clone(),
                     Some(keys) => regrouped_schema(input, keys)?,
@@ -558,46 +444,18 @@ impl ASAPOp {
     /// Local input-contract checks.
     pub(crate) fn validate_inputs(&self) -> Result<(), SchemaDerivationError> {
         use ASAPOp::*;
-        let needs_state = |node: &OperatorNode, what: &str| {
-            if node.result_kind != OperatorResultKind::State {
+        let needs_state = |node: &I, what: &str| {
+            if node.result_kind() != OperatorResultKind::State {
                 Err(SchemaDerivationError::InvalidScalarSignature(format!(
                     "{what} requires summary state as input, got {:?}",
-                    node.result_kind
+                    node.result_kind()
                 )))
             } else {
                 Ok(())
             }
         };
         match self {
-            SummaryMerge {
-                children,
-                newest_tumbling_windows,
-                group_by,
-            } => {
-                if newest_tumbling_windows.is_some() && group_by.is_some() {
-                    return Err(SchemaDerivationError::InvalidScalarSignature(
-                        "a rollup merges every input state, not the newest tumbling windows".into(),
-                    ));
-                }
-                if let Some(n) = newest_tumbling_windows {
-                    let tumbling_window_count = match children.as_slice() {
-                        [chain] => match chain.asap() {
-                            Some(SummaryTumblingWindowChain {
-                                tumbling_window_count,
-                                ..
-                            }) => Some(*tumbling_window_count),
-                            _ => None,
-                        },
-                        _ => None,
-                    };
-                    if !tumbling_window_count.is_some_and(|count| (1..count).contains(n)) {
-                        return Err(SchemaDerivationError::InvalidScalarSignature(
-                            "a merge of the newest tumbling windows reads one tumbling-window chain, and fewer \
-                             tumbling windows than it has"
-                                .into(),
-                        ));
-                    }
-                }
+            SummaryMerge { children, .. } => {
                 let Some(first) = children.first() else {
                     return Err(SchemaDerivationError::InvalidScalarSignature(
                         "summary merge requires at least one state input".into(),
@@ -606,7 +464,7 @@ impl ASAPOp {
                 // Matching state parameters and grouping positions are necessary;
                 // matching names alone cannot prove two states compatible.
                 if first
-                    .schema
+                    .schema()
                     .fields
                     .iter()
                     .filter(|field| !field.is_plain())
@@ -619,7 +477,7 @@ impl ASAPOp {
                 }
                 for child in children {
                     needs_state(child, "SummaryMerge")?;
-                    if child.schema != first.schema {
+                    if child.schema() != first.schema() {
                         return Err(SchemaDerivationError::InvalidScalarSignature(
                             "summary merge inputs must have identical state and grouping schemas"
                                 .into(),
@@ -636,18 +494,18 @@ impl ASAPOp {
                 query,
             } => {
                 needs_state(summary_input, "SummaryEstimate")?;
-                // The family-capability table is the one source of which
-                // statistic a state's family answers.
+                // The capability table is the one source of which statistic
+                // a summary type answers.
                 let states: Vec<_> = summary_input
-                    .schema
+                    .schema()
                     .fields
                     .iter()
                     .filter(|f| !f.is_plain())
                     .collect();
                 let valid = match states.as_slice() {
                     [field] => match &field.dtype {
-                        family @ FieldDataType::Sketch(..) => {
-                            FamilyCapability::of(family).answers(query)
+                        summary_type @ FieldDataType::Sketch(..) => {
+                            SummaryTypeCapability::of(summary_type).answers(query)
                         }
                         _ => false,
                     },
@@ -655,7 +513,7 @@ impl ASAPOp {
                 };
                 if !valid {
                     return Err(SchemaDerivationError::InvalidScalarSignature(
-                        "evaluation does not match its summary family".into(),
+                        "evaluation does not match its summary type".into(),
                     ));
                 }
                 Ok(())
@@ -663,7 +521,7 @@ impl ASAPOp {
             FinalizeExactAccumulator { child } => {
                 needs_state(child, "FinalizeExactAccumulator")?;
                 if child
-                    .schema
+                    .schema()
                     .fields
                     .iter()
                     .all(|f| !matches!(f.dtype, FieldDataType::ExactAggregate(..)))
@@ -676,7 +534,7 @@ impl ASAPOp {
             }
             EvaluatePopulation { child, evaluation } => {
                 needs_state(child, "EvaluatePopulation")?;
-                if !matches!(child.asap(), Some(MaintainPopulation { population, .. }) if population.supports(evaluation))
+                if !matches!(child.operator(), Operator::ASAP(MaintainPopulation { population, .. }) if population.supports(evaluation))
                 {
                     return Err(SchemaDerivationError::InvalidScalarSignature(
                         "population evaluation requires compatible maintained membership".into(),
@@ -687,23 +545,22 @@ impl ASAPOp {
             SummaryTumblingWindowChain {
                 child,
                 tumbling_window_width_ms,
-                tumbling_window_count,
                 ..
             } => {
-                if *tumbling_window_width_ms == 0 || *tumbling_window_count == 0 {
+                if *tumbling_window_width_ms == 0 {
                     return Err(SchemaDerivationError::InvalidScalarSignature(
-                        "a tumbling-window chain needs a positive tumbling-window width and tumbling-window count".into(),
+                        "a tumbling-window chain needs a positive tumbling-window width".into(),
                     ));
                 }
                 // The chain is the range selector: it reads the series the
                 // selector would, or a SQL table's rows for a trailing window.
                 if !matches!(
-                    child.result_kind,
+                    child.result_kind(),
                     OperatorResultKind::InstantVector | OperatorResultKind::Relation
                 ) {
                     return Err(SchemaDerivationError::InvalidScalarSignature(format!(
                         "a tumbling-window chain reads an instant vector or a relation, got {:?}",
-                        child.result_kind
+                        child.result_kind()
                     )));
                 }
                 self.summary_agg_inputs()
@@ -725,14 +582,14 @@ impl ASAPOp {
     fn summary_agg_inputs(&self) -> Result<(), SchemaDerivationError> {
         let (ASAPOp::SummaryAgg {
             child,
-            family,
+            summary_type: family,
             input,
             filter,
             ..
         }
         | ASAPOp::SummaryTumblingWindowChain {
             child,
-            family,
+            summary_type: family,
             input,
             filter,
             ..
@@ -740,16 +597,16 @@ impl ASAPOp {
         else {
             unreachable!("called on a summary build");
         };
-        if family.is_plain() || child.result_kind == OperatorResultKind::State {
+        if family.is_plain() || child.result_kind() == OperatorResultKind::State {
             return Err(SchemaDerivationError::InvalidScalarSignature(
                 "summary aggregation requires values and produces a state family".into(),
             ));
         }
         fn check(
-            expr: &crate::ir::schema::SummaryInputExpr,
+            expr: &crate::summary_type::SummaryInputExpr,
             schema: &Schema,
         ) -> Result<(), SchemaDerivationError> {
-            use crate::ir::schema::SummaryInputExpr;
+            use crate::summary_type::SummaryInputExpr;
             match expr {
                 SummaryInputExpr::Column(col) => {
                     crate::ir::scalar::resolve_column_ref(col, schema).map_err(|e| {
@@ -765,12 +622,12 @@ impl ASAPOp {
             }
             Ok(())
         }
-        check(&input.weight, &child.schema)?;
+        check(&input.weight, child.schema())?;
         if let Some(item) = &input.item {
-            check(item, &child.schema)?;
+            check(item, child.schema())?;
         }
         if let Some(filter) = filter {
-            if filter.0.scalar_type(&child.schema)?.0 != DataType::Bool {
+            if filter.0.scalar_type(child.schema())?.0 != DataType::Bool {
                 return Err(SchemaDerivationError::InvalidScalarSignature(
                     "summary filter must be boolean".into(),
                 ));
@@ -781,57 +638,168 @@ impl ASAPOp {
 }
 
 /// The build a rollup (a `SummaryMerge` with `group_by` of one input)
-/// stands for: the input's build (one build over a merged chain's window)
-/// grouped by the input columns the rollup's keys name. `None` for any
-/// other node, or a rollup whose build does not derive.
-fn rolled_up_build(state: &OperatorNode) -> Option<Rc<OperatorNode>> {
-    let ASAPOp::SummaryMerge {
+/// stands for, with its schema: the input's build (one build over a merged
+/// chain's window) grouped by the input columns the rollup's keys name.
+/// `None` for any other input, or a rollup whose build does not derive.
+fn rolled_up_build<I: OperatorInput>(
+    state: &I,
+) -> Option<(ASAPOp<InputOrTemporaryBuild<I>>, Schema)> {
+    let Operator::ASAP(ASAPOp::SummaryMerge {
         children,
         group_by: Some(keys),
         ..
-    } = state.asap()?
+    }) = state.operator()
     else {
         return None;
     };
     let [input] = children.as_slice() else {
         return None;
     };
-    let input = selected_from(input).unwrap_or(input);
-    let build = match input.asap()? {
-        ASAPOp::SummaryAgg { .. } => (**input).clone(),
-        _ if super::tumbling_window_chain::merged_chain(input).is_some() => {
-            super::tumbling_window_chain::merged_window_build(input).ok()?
+    let input = selected_from(input).unwrap_or_else(|| input.clone());
+    let build = match input.operator() {
+        Operator::ASAP(op @ ASAPOp::SummaryAgg { .. }) => {
+            op.map_children(|child| InputOrTemporaryBuild::Input(child.clone()))
+        }
+        _ if super::tumbling_window_chain::merged_chain(&input).is_some() => {
+            todo!("#1207 PR 1: roll up the windows a TimeRange over a chain selects as one build over that TimeRange")
         }
         _ => return None,
     };
     let ASAPOp::SummaryAgg {
         child,
-        family,
+        summary_type: family,
         input: update,
         reduction,
-        grouping,
         filter,
-    } = build.asap()?
+    } = build
     else {
         return None;
     };
     let mapped = keys
         .iter()
-        .map(|&key| match reduction {
+        .map(|&key| match &reduction {
             Reduction::Reduce(by) if !by.is_without() => by.keys().get(key).copied(),
             Reduction::PerEntity => Some(key),
             Reduction::Reduce(_) => None,
         })
         .collect::<Option<Vec<_>>>()?;
-    OperatorNode::new_shared(super::node::Operator::ASAP(ASAPOp::SummaryAgg {
-        child: Rc::clone(child),
-        family: family.clone(),
-        input: update.clone(),
-        reduction: Reduction::by(mapped),
-        grouping: grouping.clone(),
-        filter: filter.clone(),
-    }))
-    .ok()
+    let reduction = Reduction::by(mapped);
+    let schema = summary_agg_schema(child.schema(), &family, &reduction).ok()?;
+    Some((
+        ASAPOp::SummaryAgg {
+            child,
+            summary_type: family,
+            input: update,
+            reduction,
+            filter,
+        },
+        schema,
+    ))
+}
+
+/// The schema of a `SummaryAgg` (or `SummaryTumblingWindowChain`) of
+/// `summary_type` by `reduction` over rows of schema `child`: the reduction's
+/// output columns, its value column replaced by the state.
+pub(crate) fn summary_agg_schema(
+    child: &Schema,
+    summary_type: &FieldDataType,
+    reduction: &Reduction,
+) -> Result<Schema, SchemaDerivationError> {
+    let mut schema = crate::ir::schema::aggregate_schema::aggregate_output_schema(
+        child,
+        reduction,
+        &[crate::ir::operator::AggIntent::Sum { col: None }],
+        &[],
+    )?;
+    let index = match reduction {
+        Reduction::PerEntity => crate::ir::scalar::resolve_column_ref(
+            &crate::ir::scalar::ColumnRef::SampleValue,
+            &schema,
+        )
+        .map_err(|e| SchemaDerivationError::InvalidScalarSignature(e.to_string()))?,
+        Reduction::Reduce(_) => schema.fields.len() - 1,
+    };
+    schema.fields[index] = Field::new("state", summary_type.clone(), false);
+    Ok(schema)
+}
+
+/// The schema `FinalizeExactAccumulator` derives over state of
+/// `state_schema` that `build` (the state's `SummaryAgg`, if any) builds:
+/// each exact aggregate replaced by the value it finalizes to.
+fn finalized_schema<J: OperatorInput>(
+    build: Option<&ASAPOp<J>>,
+    state_schema: &Schema,
+) -> Result<Schema, SchemaDerivationError> {
+    let value_result = if let Some(ASAPOp::SummaryAgg {
+        child: source,
+        summary_type: FieldDataType::ExactAggregate(kind, _),
+        input,
+        reduction,
+        filter,
+        ..
+    }) = build
+    {
+        {
+            use crate::ir::operator::AggIntent;
+            use crate::summary_type::{ExactKind, SummaryInputExpr};
+            let column = match &input.weight {
+                SummaryInputExpr::Column(col) => Some(
+                    crate::ir::scalar::column_resolution::resolve_column_ref(col, source.schema())
+                        .map_err(|e| {
+                            SchemaDerivationError::InvalidScalarSignature(e.to_string())
+                        })?,
+                ),
+                _ => None,
+            };
+            let measure = match kind {
+                ExactKind::Sum => Some(AggIntent::Sum { col: column }),
+                ExactKind::Min => Some(AggIntent::Min { col: column }),
+                ExactKind::Max => Some(AggIntent::Max { col: column }),
+                ExactKind::Count => Some(AggIntent::Count),
+                ExactKind::Rate => Some(AggIntent::Rate),
+                ExactKind::IRate => Some(AggIntent::IRate),
+                ExactKind::Increase => Some(AggIntent::Increase),
+            };
+            measure
+                .map(|measure| {
+                    crate::ir::NonASAPOp::Aggregate {
+                        child: source.clone(),
+                        reduction: reduction.clone(),
+                        measures: vec![measure],
+                        output_names: vec![],
+                        // A filtered SUM/MIN/MAX is NULL for a
+                        // group without a matching row.
+                        filters: vec![filter.clone()],
+                        having: None,
+                    }
+                    .output_schema()
+                })
+                .transpose()?
+                .and_then(|s| match reduction {
+                    Reduction::PerEntity => {
+                        s.column_id("value").and_then(|i| s.fields.get(i).cloned())
+                    }
+                    Reduction::Reduce(_) => s.fields.last().cloned(),
+                })
+        }
+    } else {
+        None
+    };
+    let mut out = state_schema.clone();
+    for f in &mut out.fields {
+        if let FieldDataType::ExactAggregate(kind, _) = &f.dtype {
+            if let Some(result) = &value_result {
+                // The finalized value replaces the aggregate it
+                // realizes, so it takes that aggregate's column.
+                f.name = result.name.clone();
+                f.dtype = result.dtype.clone();
+                f.nullable = result.nullable;
+            } else {
+                f.dtype = FieldDataType::Plain(finalized_data_type(kind));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The schema of a regrouping `SummaryMerge` over states of schema `input`:
@@ -867,8 +835,8 @@ fn regrouped_schema(input: &Schema, keys: &[ColumnId]) -> Result<Schema, SchemaD
 }
 
 /// The plain value an exact accumulator finalizes to.
-fn finalized_data_type(kind: &crate::ir::schema::sketch::ExactKind) -> DataType {
-    use crate::ir::schema::sketch::ExactKind;
+fn finalized_data_type(kind: &crate::summary_type::ExactKind) -> DataType {
+    use crate::summary_type::ExactKind;
     match kind {
         ExactKind::Count => DataType::Int64,
         _ => DataType::Float64,
@@ -877,11 +845,11 @@ fn finalized_data_type(kind: &crate::ir::schema::sketch::ExactKind) -> DataType 
 
 /// The states `node` selects from when it is a `Filter` that keeps whole
 /// summary states by their plain columns (its output is state); `None` for
-/// any other node.
-pub fn selected_from(node: &OperatorNode) -> Option<&Rc<OperatorNode>> {
-    match node.non_asap() {
-        Some(crate::ir::NonASAPOp::Filter { child, .. })
-            if node.result_kind == OperatorResultKind::State =>
+/// any other input.
+pub fn selected_from<I: OperatorInput>(node: &I) -> Option<I> {
+    match node.operator() {
+        Operator::NonASAP(crate::ir::NonASAPOp::Filter { child, .. })
+            if node.result_kind() == OperatorResultKind::State =>
         {
             Some(child)
         }
@@ -889,18 +857,38 @@ pub fn selected_from(node: &OperatorNode) -> Option<&Rc<OperatorNode>> {
     }
 }
 
+/// The build whose state this summary state carries: a `SummaryAgg` or
+/// `SummaryTumblingWindowChain` itself, or the first input's build under
+/// `SummaryMerge`s (merged inputs have one definition, which summary
+/// coverage checks). `None` under a regrouping merge, whose states no build
+/// carries (its coverage's definition is the build it stands for), and for
+/// any other input.
+pub fn summary_build<I: OperatorInput>(state: &I) -> Option<ASAPOp<I>> {
+    match state.operator() {
+        Operator::ASAP(
+            op @ (ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. }),
+        ) => Some(op),
+        Operator::ASAP(ASAPOp::SummaryMerge {
+            children,
+            group_by: None,
+            ..
+        }) => summary_build(children.first()?),
+        _ => None,
+    }
+}
+
 /// The category of the values a evaluation of `state` produces: the category
 /// of the relational input the state was built from.
-fn source_kind(node: &OperatorNode) -> OperatorResultKind {
+fn source_kind<I: OperatorInput>(node: &I) -> OperatorResultKind {
     if let Some(states) = selected_from(node) {
-        return source_kind(states);
+        return source_kind(&states);
     }
-    match &node.operator {
-        super::node::Operator::ASAP(op) => match op.children().first() {
-            Some(child) => source_kind(child),
+    match node.operator() {
+        Operator::ASAP(op) => match op.children().first() {
+            Some(child) => source_kind(*child),
             None => OperatorResultKind::Relation,
         },
-        super::node::Operator::NonASAP(_) => match node.result_kind {
+        Operator::NonASAP(_) => match node.result_kind() {
             OperatorResultKind::RangeVector => OperatorResultKind::InstantVector,
             OperatorResultKind::State => OperatorResultKind::Relation,
             other => other,
@@ -914,21 +902,28 @@ fn source_kind(node: &OperatorNode) -> OperatorResultKind {
 /// series identity), then the estimated weight, `topk` (Float64). `None`
 /// when `state` is not a keyed build whose item columns resolve in its
 /// input.
-fn topk_estimate_schema(state: &OperatorNode) -> Option<Schema> {
-    use crate::ir::schema::SummaryInputExpr;
+fn topk_estimate_schema<I: OperatorInput>(state: &I) -> Option<Schema> {
     // A rollup reads items as the coarse build it stands for.
-    let rolled_up = rolled_up_build(state);
-    let build = match &rolled_up {
-        Some(build) => build.asap(),
-        None => state.summary_build(),
-    };
-    let (Some(ASAPOp::SummaryAgg { child, input, .. })
-    | Some(ASAPOp::SummaryTumblingWindowChain { child, input, .. })) = build
+    match rolled_up_build(state) {
+        Some((build, _)) => topk_schema_of_build(&build, state.schema()),
+        None => topk_schema_of_build(&summary_build(state)?, state.schema()),
+    }
+}
+
+/// [`topk_estimate_schema`] of state of `state_schema` built by `build`.
+fn topk_schema_of_build<J: OperatorInput>(
+    build: &ASAPOp<J>,
+    state_schema: &Schema,
+) -> Option<Schema> {
+    use crate::summary_type::SummaryInputExpr;
+    let (ASAPOp::SummaryAgg { child, input, .. }
+    | ASAPOp::SummaryTumblingWindowChain { child, input, .. }) = build
     else {
         return None;
     };
+    let child_schema = child.schema();
     let resolve = |column: &crate::ir::scalar::ColumnRef| {
-        crate::ir::scalar::resolve_column_ref(column, &child.schema).ok()
+        crate::ir::scalar::resolve_column_ref(column, child_schema).ok()
     };
     let columns = match input.item.as_ref()? {
         SummaryInputExpr::Column(column) => vec![resolve(column)?],
@@ -939,14 +934,14 @@ fn topk_estimate_schema(state: &OperatorNode) -> Option<Schema> {
                 _ => None,
             })
             .collect::<Option<Vec<_>>>()?,
-        SummaryInputExpr::EntityIdentity(crate::ir::schema::EntityIdentity::PromqlLabelSet {
+        SummaryInputExpr::EntityIdentity(crate::summary_type::EntityIdentity::PromqlLabelSet {
             excluding,
         }) => {
             let excluded: Vec<_> = excluding.iter().filter_map(resolve).collect();
             let value = resolve(&crate::ir::scalar::ColumnRef::SampleValue);
-            (0..child.schema.fields.len())
+            (0..child_schema.fields.len())
                 .filter(|index| {
-                    Some(*index) != child.schema.time_index
+                    Some(*index) != child_schema.time_index
                         && Some(*index) != value
                         && !excluded.contains(index)
                 })
@@ -960,12 +955,11 @@ fn topk_estimate_schema(state: &OperatorNode) -> Option<Schema> {
     let complete_item_identity = matches!(
         input.item.as_ref()?,
         SummaryInputExpr::Column(_) | SummaryInputExpr::Tuple(_)
-    ) || child.schema.closed
+    ) || child_schema.closed
         || columns.iter().any(|&index| {
-            child.schema.fields[index].name == crate::ir::schema::PROMQL_SERIES_IDENTITY
+            child_schema.fields[index].name == crate::ir::schema::PROMQL_SERIES_IDENTITY
         });
-    let mut fields: Vec<Field> = state
-        .schema
+    let mut fields: Vec<Field> = state_schema
         .fields
         .iter()
         .filter(|field| field.is_plain())
@@ -974,9 +968,9 @@ fn topk_estimate_schema(state: &OperatorNode) -> Option<Schema> {
     for index in columns {
         if !fields
             .iter()
-            .any(|field| field.name == child.schema.fields[index].name)
+            .any(|field| field.name == child_schema.fields[index].name)
         {
-            fields.push(child.schema.fields[index].clone());
+            fields.push(child_schema.fields[index].clone());
         }
     }
     // One row per (partition, item), not one row per partition. Preserve this
@@ -990,7 +984,7 @@ fn topk_estimate_schema(state: &OperatorNode) -> Option<Schema> {
     Some(Schema {
         fields,
         unique_keys,
-        ..state.schema.clone()
+        ..state_schema.clone()
     })
 }
 
@@ -999,18 +993,18 @@ fn topk_estimate_schema(state: &OperatorNode) -> Option<Schema> {
 /// through `SummaryMerge`) is filtered, or, over a relation, is global (zero
 /// rows give one empty state) or summarizes a nullable column (a group of
 /// NULLs gives an empty state).
-fn quantile_may_be_empty(state: &OperatorNode) -> bool {
-    match state.asap() {
-        Some(ASAPOp::SummaryMerge {
+fn quantile_may_be_empty<I: OperatorInput>(state: &I) -> bool {
+    match state.operator() {
+        Operator::ASAP(ASAPOp::SummaryMerge {
             children, group_by, ..
         }) => {
             // A global rollup must also represent the empty input population,
             // even when every existing grouped state is nonempty.
             (source_kind(state) == OperatorResultKind::Relation
                 && group_by.as_ref().is_some_and(Vec::is_empty))
-                || children.iter().any(|child| quantile_may_be_empty(child))
+                || children.iter().any(quantile_may_be_empty)
         }
-        Some(
+        Operator::ASAP(
             ASAPOp::SummaryAgg {
                 child,
                 input,
@@ -1029,15 +1023,15 @@ fn quantile_may_be_empty(state: &OperatorNode) -> bool {
             if filter.is_some() {
                 return true;
             }
-            if child.result_kind != OperatorResultKind::Relation {
+            if child.result_kind() != OperatorResultKind::Relation {
                 return false;
             }
             let global = matches!(reduction, Reduction::Reduce(by) if by.keys().is_empty());
             let nullable = match &input.weight {
-                crate::ir::schema::sketch::SummaryInputExpr::Column(column) => {
-                    crate::ir::scalar::resolve_column_ref(column, &child.schema)
+                crate::summary_type::SummaryInputExpr::Column(column) => {
+                    crate::ir::scalar::resolve_column_ref(column, child.schema())
                         .ok()
-                        .and_then(|index| child.schema.fields.get(index))
+                        .and_then(|index| child.schema().fields.get(index))
                         .is_some_and(|field| field.nullable)
                 }
                 _ => false,
@@ -1045,6 +1039,6 @@ fn quantile_may_be_empty(state: &OperatorNode) -> bool {
             global || nullable
         }
         // Selecting whole states empties none of them.
-        _ => selected_from(state).is_some_and(|states| quantile_may_be_empty(states)),
+        _ => selected_from(state).is_some_and(|states| quantile_may_be_empty(&states)),
     }
 }

@@ -4,7 +4,7 @@
 //! (`asap_types::stages::LogicalASAPMemoCandidates`) that Stage 2 implements.
 //!
 //! Identical-sub-DAG sharing over the logical DAG (Stage 0, the `stage0`
-//! module, behind [`generate_dag_of_logical_memo_groups`]) runs before the
+//! module, behind [`memo_of_queries`]) runs before the
 //! stages; Stage 1 adds the ASAP-aware sharing that is invisible at the
 //! logical level (Pass 2, the `asap_aware_cse` module), e.g.
 //! `Quantile(x, 0.99)` and `Quantile(x, 0.95)` reading one built sketch.
@@ -13,8 +13,7 @@
 //! (`asap-accuracy`). It depends on no other stage crate, and no other
 //! stage crate depends on it except in their tests (CI checks the crate
 //! graph): the stage-boundary types (its input
-//! `DagOfLogicalMemoGroups`, Pass 1's `PerComputationLogicalMemoCandidates`
-//! and Pass 2's `LogicalASAPMemoCandidates`) are in `asap_types::stages`, and
+//! `Memo`, Pass 1's `Memo` and Pass 2's `LogicalASAPMemoCandidates`) are in `asap_types::stages`, and
 //! the planner facade calls each stage in turn. It depends on no
 //! query-language frontend either, except with the `test-support` feature,
 //! whose test helpers (`test_support`) lower PromQL test queries through
@@ -33,35 +32,29 @@
 //! re-exports the internals other crates' tests call.
 //!
 //! - `stage0` — Stage 0: hash-consing the workload's logical DAG into memo
-//!   groups (`stage0::cse`), behind [`generate_dag_of_logical_memo_groups`].
-//! - `pass1::per_computation_candidates` — Pass 1: per-computation candidate
+//!   groups through `Memo::find_or_add_group`, behind [`memo_of_queries`].
+//! - `pass1::computation_targets` — Pass 1: per-computation candidate
 //!   generation and composition, behind
-//!   [`generate_per_computation_logical_memo_candidates`].
-//! - `pass2::asap_aware_cse` and `pass2::memo` — Pass 2: ASAP-aware
-//!   common-subexpression elimination and the memo rules, behind
+//!   [`pass1_memo`].
+//! - `pass2::memo` — Pass 2: the rules over groups, behind
 //!   [`generate_logical_asap_memo_candidates`].
 //! - `pass1::realization` — the summary families that can serve an aggregate
 //!   intent, the intent's accuracy target and `(ε, δ)` budget, and default
 //!   sketch sizing, shared by Pass 1 and Pass 2.
-//! - `deployment_capabilities` — the deployment's supported summaries
-//!   ([`DeploymentCapabilities`]).
 //!
 //! Accuracy guarantees come from the built-in analytical accuracy rules in
 //! `asap-accuracy` (per-family estimators, composition and budget
 //! allocation). They derive a machine-readable
-//! [`AccuracyGuarantee`](asap_types::ir::properties::AccuracyGuarantee)
+//! [`AccuracyGuarantee`](asap_types::accuracy::AccuracyGuarantee)
 //! for every finalized value and propagate it through
 //! approximate-over-approximate compositions under conservative rules (no
 //! independence assumptions, unknown statistics stay unknown). A
 //! composition with no rule leaves the guarantee `None` and keeps the
-//! candidate. Pass 1 takes the deployment's `AccuracyModel` and evidence
-//! only to prune summaries no query reading them can use (when they cannot
-//! accept an output without its guarantee) and sizes every summary for its
-//! readers; plan selection (Stage 3) checks each selected candidate's
-//! guarantee against its query's `AccuracyTarget` and never resizes.
+//! candidate. Pass 1 prunes nothing for accuracy; Pass 2 gives each readout
+//! its required accuracy and eliminates the candidates no query can use,
+//! with the deployment's measured accuracy (`AccuracyEvidence`) read before
+//! each summary's theoretical guarantee.
 
-/// The deployment's capabilities: supported summaries and what it retains.
-mod deployment_capabilities;
 mod pass1;
 mod pass2;
 /// Stage 0: the memo groups of the workload's query roots.
@@ -75,28 +68,15 @@ pub mod test_support;
 // developer tools. Every other item is crate-private; the ones other crates'
 // tests call are re-exported by `test_support`.
 
-pub use deployment_capabilities::{
-    DeploymentCapabilities, DeploymentCapabilitiesError, SupportedSummary,
-};
-// Stage 0: the memo groups of the workload's query roots
-// (`asap_types::stages::DagOfLogicalMemoGroups`).
-pub use stage0::generate_dag_of_logical_memo_groups;
+// Stage 0: the memo groups of the workload's query roots, without
+// candidates (`asap_types::stages::Memo`).
+pub use stage0::memo_of_queries;
 // Pass 1: its entry and its errors. Its output and the types the output
 // holds are in `asap_types::stages`.
-pub use pass1::{
-    generate_per_computation_logical_memo_candidates, PerComputationCandidateError,
-    PerComputationLogicalMemoCandidatesError,
-};
+pub use pass1::{pass1_memo, Pass1Error, PerComputationCandidateError};
 // Pass 2: its entry and its error.
-pub use pass1::memo_population::CandidatePopulationError;
-pub use pass2::logical_memo_candidates::{
+pub use pass2::memo::rules::Pass2RuleError;
+pub use pass2::{
     generate_logical_asap_memo_candidates, pass2_after_local_window_composition,
     pass2_local_window_composition,
-};
-pub use pass2::memo::state_groups::Pass2RuleError;
-// The CandidateLogicalASAPDAGs a memo stands for (developer tools'
-// reference pricing).
-pub use pass2::memo::enumeration::{
-    build_logical_asap_dags_from_chosen_candidates, enumerate, AllChosenCandidatesPerMemoGroup,
-    ChosenCandidatePerMemoGroup, ErrorBuildingLogicalASAPDagsFromChosenCandidates,
 };

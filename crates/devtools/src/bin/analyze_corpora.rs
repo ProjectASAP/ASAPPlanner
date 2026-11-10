@@ -9,7 +9,6 @@ use asap_devtools::corpora::{
 };
 use asap_devtools::{lower_promql_with_sample_interval, SqlCatalog};
 use asap_frontend_sql::lower_sql_dialect;
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 use serde::Serialize;
 use serde_json::Value;
@@ -124,7 +123,7 @@ fn run_corpus(name: &str, source: &str, interval_ms: u64) -> CorpusResult {
     for (index, expression) in promql_lines(source).enumerate() {
         let normalized_expression = normalize(expression);
         let structural_shape = structural_shape(expression);
-        match lower_promql_with_sample_interval(expression, AccuracyTarget::exact(), interval_ms) {
+        match lower_promql_with_sample_interval(expression, interval_ms) {
             Ok(ir) => result.lowered.push(DumpRecord {
                 corpus: name.to_string(),
                 query_number: index + 1,
@@ -392,14 +391,7 @@ async fn run_sql_corpora(out_dir: PathBuf) {
         for (index, expression) in queries.into_iter().enumerate() {
             let normalized_expression = normalize(&expression);
             let structural_shape = structural_shape(&expression);
-            match lower_sql_dialect(
-                &expression,
-                &catalog,
-                dialect.clone(),
-                AccuracyTarget::exact(),
-            )
-            .await
-            {
+            match lower_sql_dialect(&expression, &catalog, dialect.clone()).await {
                 Ok(ir) => lowered.push(DumpRecord {
                     corpus: name.to_string(),
                     query_number: index + 1,

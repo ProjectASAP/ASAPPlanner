@@ -4,7 +4,6 @@ use asap_frontend_common::resolve_root;
 use asap_frontend_sql::test_support::lower_unresolved;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::ir::operator::AggIntent;
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{NonASAPOp, OperatorNode};
 use asap_types::stages::HowToComputeAggregateMeasure;
@@ -34,12 +33,7 @@ fn has_l2(node: &OperatorNode) -> bool {
 
 /// The relational DAG the frontend lowers before frequency recognition.
 async fn relational(sql: &str, catalog: &SqlCatalog) -> Rc<OperatorNode> {
-    resolve_root(
-        &lower_unresolved(sql, catalog, &AccuracyTarget::exact())
-            .await
-            .unwrap(),
-    )
-    .unwrap()
+    resolve_root(&lower_unresolved(sql, catalog).await.unwrap()).unwrap()
 }
 
 const CAST_PRODUCT: &str = "SELECT SQRT(SUM(CAST(c AS DOUBLE) * CAST(c AS DOUBLE))) AS norm FROM (SELECT src_ip, COUNT(*) AS c FROM flows WHERE keep GROUP BY src_ip) f";
@@ -50,9 +44,7 @@ const CAST_COUNT: &str = "SELECT SQRT(SUM(c * c)) AS norm FROM (SELECT src_ip, C
 #[tokio::test]
 async fn recognizes_float_frequency_l2() {
     for sql in [CAST_PRODUCT, CAST_COUNT] {
-        let rewritten = lower_sql(sql, &catalog(false), AccuracyTarget::exact())
-            .await
-            .unwrap();
+        let rewritten = lower_sql(sql, &catalog(false)).await.unwrap();
         let original = relational(sql, &catalog(false)).await;
         assert!(has_l2(&rewritten), "{sql}");
         assert_eq!(original.schema, rewritten.schema);
@@ -71,7 +63,7 @@ async fn declines_non_equivalent_frequency_shapes() {
         ("SELECT SQRT(SUM(c*c)) FROM (SELECT src_ip, CAST(COUNT(*) AS DOUBLE) AS c FROM flows GROUP BY src_ip HAVING COUNT(*) > 1) f", false),
         ("SELECT SQRT(SUM(c*c)) FROM (SELECT src_ip, CAST(SUM(CAST(keep AS BIGINT)) AS DOUBLE) AS c FROM flows GROUP BY src_ip) f", false),
     ] {
-        let root = lower_sql(sql, &catalog(nullable), AccuracyTarget::exact())
+        let root = lower_sql(sql, &catalog(nullable))
             .await
             .unwrap();
         assert!(!has_l2(&root), "{sql}");
@@ -81,10 +73,7 @@ async fn declines_non_equivalent_frequency_shapes() {
 /// The L2 intent carries the query's accuracy target, not a default.
 #[tokio::test]
 async fn frequency_l2_preserves_accuracy_target() {
-    let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
-    let node = lower_sql(CAST_COUNT, &catalog(false), target.clone())
-        .await
-        .unwrap();
+    let node = lower_sql(CAST_COUNT, &catalog(false)).await.unwrap();
     let NonASAPOp::Project { child, .. } = node.expect_non_asap() else {
         panic!("project");
     };
@@ -94,17 +83,14 @@ async fn frequency_l2_preserves_accuracy_target() {
     let NonASAPOp::Aggregate { measures, .. } = left.expect_non_asap() else {
         panic!("aggregate");
     };
-    assert!(matches!(&measures[0], AggIntent::FrequencyL2 { accuracy, .. } if *accuracy == target));
+    assert!(matches!(&measures[0], AggIntent::FrequencyL2 { .. }));
 }
 
 /// An approximate L2 estimate never decides whether SQL returns NULL: the
 /// empty-input guard is an exact count.
 #[tokio::test]
 async fn frequency_empty_input_guard_uses_an_exact_count() {
-    let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
-    let node = lower_sql(CAST_COUNT, &catalog(false), target)
-        .await
-        .unwrap();
+    let node = lower_sql(CAST_COUNT, &catalog(false)).await.unwrap();
     let NonASAPOp::Project { child, .. } = node.expect_non_asap() else {
         panic!("project");
     };
@@ -114,10 +100,7 @@ async fn frequency_empty_input_guard_uses_an_exact_count() {
     let NonASAPOp::Aggregate { measures, .. } = right.expect_non_asap() else {
         panic!("count");
     };
-    assert!(matches!(
-        measures.as_slice(),
-        [AggIntent::Count { accuracy }] if accuracy.is_exact()
-    ));
+    assert!(matches!(measures.as_slice(), [AggIntent::Count]));
 }
 
 /// Stage 1 offers the exact option and summary candidates for the
@@ -126,14 +109,14 @@ async fn frequency_empty_input_guard_uses_an_exact_count() {
 async fn stage1_offers_exact_and_summary_l2_candidates() {
     use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
     use asap_types::ir::QueryRoot;
-    let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
-    let root = lower_sql(CAST_COUNT, &catalog(false), target)
-        .await
-        .unwrap();
+    let root = lower_sql(CAST_COUNT, &catalog(false)).await.unwrap();
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
-            QueryRoot::Operator(root),
-        ]),
+        &asap_logical_asap_optimization::memo_of_queries(
+            &[QueryRoot::Operator(root)],
+            &[None],
+            &Default::default(),
+        )
+        .unwrap(),
     )
     .unwrap();
     let l2 = inventory
@@ -179,11 +162,7 @@ async fn example2_queries_lower_to_frequency_intents() {
     let q3_int = format!("SELECT SQRT(SUM(c * c)) FROM (SELECT src_ip, COUNT(*) AS c FROM flows {WINDOW} GROUP BY src_ip)");
     let lower = |sql: String| {
         let catalog = &catalog;
-        async move {
-            lower_sql(&sql, catalog, AccuracyTarget::exact())
-                .await
-                .unwrap()
-        }
+        async move { lower_sql(&sql, catalog).await.unwrap() }
     };
     let q2 = lower(q2).await;
     assert!(

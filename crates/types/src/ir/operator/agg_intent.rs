@@ -1,14 +1,13 @@
 //! The pre-ASAP aggregation-intent vocabulary — "what to compute, not how".
 //!
-//! This IR carries intent ("compute a quantile to ε=0.01 accuracy"); the
-//! choice between `HashAgg` / `SortAgg` / `SketchAgg(KLL{k=200})` is a
+//! This IR carries intent ("compute a quantile"); an accuracy target belongs
+//! to the query, not to a measure. The choice between `HashAgg` / `SortAgg` / `SketchAgg(KLL{k=200})` is a
 //! post-ASAP cost-aware decision, not encoded here.
 //!
 //! `AggIntent::TopK` is a first-class *intent*: "the k most frequent keys by
-//! value, to accuracy ε." Like `Quantile`, the exact-vs-approximate
-//! realisation — an exact heap / sort+limit when `accuracy: Exact`, a
-//! heavy-hitter sketch when approximate — is a post-ASAP cost-aware decision,
-//! not encoded here. The semantic distinction that *is* made at lowering is
+//! value." Like `Quantile`, the exact-vs-approximate realisation — an exact
+//! heap / sort+limit or a heavy-hitter sketch — is a post-ASAP cost-aware
+//! decision, not encoded here. The semantic distinction that *is* made at lowering is
 //! intent vs operator: a heavy-hitter aggregate becomes `TopK`, whereas a
 //! generic `ORDER BY value LIMIT k` stays as the `NonASAPOp::Sort + Limit`
 //! operator pair.
@@ -16,14 +15,13 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::ir::properties::AccuracyTarget;
 use crate::ir::schema::{ColumnId, DataType, Field, FieldDataType};
 
 /// "What to compute" — the vocabulary the planner pivots on.
 ///
 /// Grouping for `TopK` rides on the enclosing `NonASAPOp::Aggregate`'s `reduction`
 /// (positional `ColumnId`s), like every other aggregate; the intent itself
-/// carries only `k` + the accuracy target.
+/// carries only `k`.
 ///
 /// The single-column reducers (`Sum` / `Min` / `Max` / `Avg` / `StdDev` /
 /// `Variance` / `Quantile`) carry `col: Option<C>` — the input
@@ -45,9 +43,7 @@ use crate::ir::schema::{ColumnId, DataType, Field, FieldDataType};
 #[serde(bound(serialize = "C: Serialize", deserialize = "C: Deserialize<'de>"))]
 pub enum AggIntent<C = ColumnId> {
     // ── Data-model-agnostic ──────────────────────────────────────────────
-    Count {
-        accuracy: AccuracyTarget,
-    },
+    Count,
     Sum {
         col: Option<C>,
     },
@@ -85,16 +81,14 @@ pub enum AggIntent<C = ColumnId> {
         col: Option<C>,
         #[serde(with = "crate::serde_f64")]
         q: f64,
-        accuracy: AccuracyTarget,
     },
-    /// Heavy-hitter top-k to the given accuracy. The group-by keys live on
+    /// Heavy-hitter top-k. The group-by keys live on
     /// the enclosing `Aggregate.by`.
     //
     // Unlike `Quantile`/`Cardinality`, `TopK` ranks by the *aggregate output*
     // rather than a base column, so it carries no `col` — see #13 / #25.
     TopK {
         k: usize,
-        accuracy: AccuracyTarget,
     },
     /// Distinct count over `cols`, in argument order. One column is SQL
     /// `COUNT(DISTINCT col)`; several count distinct *tuples*
@@ -103,17 +97,14 @@ pub enum AggIntent<C = ColumnId> {
     /// and `distinct_over_time` leave it so.
     Cardinality {
         cols: Vec<C>,
-        accuracy: AccuracyTarget,
     },
     /// L2 norm of the frequency vector of distinct input values.
     FrequencyL2 {
         col: Option<C>,
-        accuracy: AccuracyTarget,
     },
     /// Shannon entropy in bits of the frequency distribution of input values.
     FrequencyEntropy {
         col: Option<C>,
-        accuracy: AccuracyTarget,
     },
 
     // ── Time-series streaming derivatives ────────────────────────────────
@@ -491,7 +482,7 @@ impl<C: Clone> AggIntent<C> {
     /// locate it without an alias lookup.
     pub(crate) fn output_column(&self, input: &Field) -> Field {
         match self {
-            AggIntent::Count { .. } => col("count", DataType::Int64, false),
+            AggIntent::Count => col("count", DataType::Int64, false),
             AggIntent::Sum { .. } => col("sum", input.dtype.clone(), false),
             AggIntent::Min { .. } => col("min", input.dtype.clone(), input.nullable),
             AggIntent::Max { .. } => col("max", input.dtype.clone(), input.nullable),
@@ -613,7 +604,7 @@ pub mod topk {
     impl Ranking {
         pub fn from_aggregate(aggregate: &AggIntent) -> Self {
             match aggregate {
-                AggIntent::Count { .. } => Self::Frequency,
+                AggIntent::Count => Self::Frequency,
                 AggIntent::Sum { .. } => Self::WeightedSum,
                 _ => Self::NonAdditive,
             }
@@ -633,7 +624,7 @@ pub mod topk {
 pub fn agg_has_exact_per_entity_kernel(op: &AggIntent) -> bool {
     matches!(
         op,
-        AggIntent::Count { .. }
+        AggIntent::Count
             | AggIntent::Sum { .. }
             | AggIntent::Avg { .. }
             | AggIntent::Min { .. }
@@ -648,19 +639,12 @@ pub fn agg_has_exact_per_entity_kernel(op: &AggIntent) -> bool {
 /// Default `Cardinality` intent over the sample value — HLL standard error at
 /// precision p=14.
 pub fn default_cardinality() -> AggIntent {
-    AggIntent::Cardinality {
-        cols: vec![],
-        accuracy: AccuracyTarget::max_error(1.04 / ((1u64 << 14) as f64).sqrt()),
-    }
+    AggIntent::Cardinality { cols: vec![] }
 }
 
 /// Default `Quantile` intent over the sample value at φ = `q`, `accuracy = ε 0.01`.
 pub fn default_quantile(q: f64) -> AggIntent {
-    AggIntent::Quantile {
-        col: None,
-        q,
-        accuracy: AccuracyTarget::max_error(0.01),
-    }
+    AggIntent::Quantile { col: None, q }
 }
 
 #[cfg(test)]
@@ -689,10 +673,7 @@ mod tests {
     // output shape as the one-column form — the count of distinct tuples.
     #[test]
     fn distinct_tuple_cardinality_contract() {
-        let intent = AggIntent::Cardinality {
-            cols: vec![2, 5],
-            accuracy: AccuracyTarget::max_error(0.01),
-        };
+        let intent = AggIntent::Cardinality { cols: vec![2, 5] };
         assert_eq!(intent.input_cols(), vec![2, 5]);
         let output = intent.output_column(&c("x", DataType::Float64));
         assert_eq!(output.name, "cardinality");
@@ -702,14 +683,7 @@ mod tests {
     #[test]
     fn output_column_names_are_intent_keyed() {
         let v = c("value", DataType::Float64);
-        assert_eq!(
-            AggIntent::<ColumnId>::Count {
-                accuracy: AccuracyTarget::exact()
-            }
-            .output_column(&v)
-            .name,
-            "count"
-        );
+        assert_eq!(AggIntent::<ColumnId>::Count.output_column(&v).name, "count");
         assert_eq!(
             AggIntent::<ColumnId>::Sum { col: None }
                 .output_column(&v)
@@ -717,13 +691,9 @@ mod tests {
             "sum"
         );
         assert_eq!(
-            AggIntent::<ColumnId>::Quantile {
-                col: None,
-                q: 0.99,
-                accuracy: AccuracyTarget::max_error(0.01)
-            }
-            .output_column(&v)
-            .name,
+            AggIntent::<ColumnId>::Quantile { col: None, q: 0.99 }
+                .output_column(&v)
+                .name,
             "quantile_0_99"
         );
     }
@@ -752,12 +722,7 @@ mod tests {
     #[test]
     fn topk_ranking_classifies_aggregate_inputs() {
         use topk::Ranking::*;
-        assert_eq!(
-            topk::Ranking::from_aggregate(&AggIntent::Count {
-                accuracy: AccuracyTarget::exact()
-            }),
-            Frequency
-        );
+        assert_eq!(topk::Ranking::from_aggregate(&AggIntent::Count), Frequency);
         assert_eq!(
             topk::Ranking::from_aggregate(&AggIntent::Sum { col: None }),
             WeightedSum
@@ -785,38 +750,20 @@ mod tests {
                 .is_empty(),
             "empty = PromQL sample value"
         );
-        assert!(AggIntent::<ColumnId>::Count {
-            accuracy: AccuracyTarget::exact()
-        }
-        .input_cols()
-        .is_empty());
+        assert!(AggIntent::<ColumnId>::Count.input_cols().is_empty());
     }
 
     #[test]
     fn agg_intent_serde_roundtrip() {
         for v in [
-            AggIntent::Quantile {
-                col: None,
-                q: 0.99,
-                accuracy: AccuracyTarget::max_error(0.01),
-            },
+            AggIntent::Quantile { col: None, q: 0.99 },
             AggIntent::Quantile {
                 col: Some(3),
                 q: 0.99,
-                accuracy: AccuracyTarget::max_error(0.01),
             },
-            AggIntent::Cardinality {
-                cols: vec![2],
-                accuracy: AccuracyTarget::exact(),
-            },
-            AggIntent::Cardinality {
-                cols: vec![2, 3],
-                accuracy: AccuracyTarget::exact(),
-            },
-            AggIntent::TopK {
-                k: 10,
-                accuracy: AccuracyTarget::max_error(0.01),
-            },
+            AggIntent::Cardinality { cols: vec![2] },
+            AggIntent::Cardinality { cols: vec![2, 3] },
+            AggIntent::TopK { k: 10 },
         ] {
             let json = serde_json::to_string(&v).unwrap();
             let back: AggIntent = serde_json::from_str(&json).unwrap();
@@ -828,9 +775,9 @@ mod tests {
     #[test]
     fn cardinality_rejects_legacy_col_payloads() {
         for payload in [
-            r#"{"kind":"cardinality","col":2,"accuracy":{"accuracy_metric":"absolute","max_error":0.0,"failure_probability":0.0,"accuracy_scope":"whole_result"}}"#,
-            r#"{"kind":"cardinality","col":null,"accuracy":{"accuracy_metric":"absolute","max_error":0.0,"failure_probability":0.0,"accuracy_scope":"whole_result"}}"#,
-            r#"{"kind":"cardinality","col":2,"cols":[1],"accuracy":{"accuracy_metric":"absolute","max_error":0.0,"failure_probability":0.0,"accuracy_scope":"whole_result"}}"#,
+            r#"{"kind":"cardinality","col":2}"#,
+            r#"{"kind":"cardinality","col":null}"#,
+            r#"{"kind":"cardinality","col":2,"cols":[1]}"#,
         ] {
             assert!(
                 serde_json::from_str::<AggIntent>(payload).is_err(),

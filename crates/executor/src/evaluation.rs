@@ -1,7 +1,7 @@
 //! Evaluations over merged exact summary states.
 use crate::summary_kernels::exact::ExactAccumulator;
 use crate::AggregateCore;
-use planner_types::ir::schema::ExactKind;
+use planner_types::summary_type::ExactKind;
 use std::sync::Arc;
 
 fn merge_exact_states(
@@ -58,7 +58,8 @@ pub fn exact_evaluation(
 #[cfg(test)]
 mod counter_tests {
     use super::*;
-    use planner_types::ir::schema::{ExactParams, FieldDataType as SummaryFamilyType};
+    use planner_types::ir::schema::FieldDataType as SummaryFamilyType;
+    use planner_types::summary_type::ExactParams;
 
     fn counter(kind: ExactKind, params: ExactParams, keyed: bool) -> ExactAccumulator {
         ExactAccumulator::new(SummaryFamilyType::ExactAggregate(kind, params), keyed).unwrap()

@@ -2,7 +2,7 @@
 //! (`docs/design_docs/proposals/planner-layering.md`), shared by
 //! `tools/dag-viewer/workloads/planner-layering/` and the planner-layering acceptance tests.
 
-use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
+use asap_types::accuracy::{AccuracyMetric, AccuracyTarget};
 use asap_types::workload::{
     BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability,
     PrometheusMetricType, Query, QueryLanguage, QueryRequirements, QueryWorkload, RepeatedDemand,
@@ -72,6 +72,7 @@ pub fn example1() -> PlanningWorkload {
             let mut data = shared_data_workload(
                 DataArrival::Ingesting {
                     rows_per_second: SHARED_ROWS_PER_SECOND,
+                    max_out_of_order_ms: None,
                 },
                 EXAMPLE1_METRIC,
             );
@@ -141,6 +142,7 @@ pub fn example2() -> (PlanningWorkload, asap_frontend_sql::SqlCatalog) {
         data_workload: Some(DataWorkload {
             arrival: DataArrival::Ingesting {
                 rows_per_second: 1_000_000.0 / 15.0,
+                max_out_of_order_ms: None,
             },
             sources: [(
                 "flows".to_string(),
@@ -305,6 +307,7 @@ pub fn pattern_b() -> PlanningWorkload {
         data_workload: Some(shared_data_workload(
             DataArrival::Ingesting {
                 rows_per_second: SHARED_ROWS_PER_SECOND,
+                max_out_of_order_ms: None,
             },
             PATTERN_METRIC,
         )),
@@ -322,9 +325,11 @@ mod tests {
             DataArrival::AtRest,
             DataArrival::Ingesting {
                 rows_per_second: SHARED_ROWS_PER_SECOND,
+                max_out_of_order_ms: None,
             },
             DataArrival::Mixed {
                 rows_per_second: SHARED_ROWS_PER_SECOND,
+                max_out_of_order_ms: None,
             },
         ] {
             shared_data_workload(arrival, PATTERN_METRIC)

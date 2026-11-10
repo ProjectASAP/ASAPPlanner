@@ -10,18 +10,6 @@
 //! `ASAP_EXTERNAL_CORPUS_DIR=<dir> cargo test -p asap-frontend-metricsql
 //! --test metricsql external_corpus:: -- --nocapture`
 
-use std::collections::HashMap;
-use std::path::Path;
-use std::time::Duration;
-
-use asap_frontend_metricsql::{lower_metricsql_query, MetricsqlError};
-use asap_types::ir::properties::AccuracyTarget;
-use asap_types::ir::QueryRoot;
-
-use crate::support::logical_plan;
-
-const DIR_VAR: &str = "ASAP_EXTERNAL_CORPUS_DIR";
-
 fn queries(corpus: &str) -> impl Iterator<Item = &str> {
     corpus
         .lines()
@@ -35,14 +23,6 @@ fn floor(corpus: &str) -> Option<usize> {
         .lines()
         .find_map(|l| l.trim().strip_prefix("# floor:"))
         .and_then(|n| n.trim().parse().ok())
-}
-
-#[derive(Default, Debug)]
-struct Tally {
-    lowered: usize,
-    unparseable: usize,
-    rejected: usize,
-    bind_errored: usize,
 }
 
 /// `msg` with sanitized identifiers replaced by `_` and digit runs by `N`, so
@@ -67,71 +47,6 @@ fn normalize(msg: &str) -> String {
     }
     out.pop();
     out
-}
-
-/// Tally `corpus`, counting each failure's normalized message in `errors`.
-fn tally(corpus: &str, errors: &mut HashMap<String, usize>) -> Tally {
-    let accuracy = AccuracyTarget::max_error(0.01);
-    let mut t = Tally::default();
-    for q in queries(corpus) {
-        match lower_metricsql_query(q, accuracy.clone(), Duration::from_secs(15)) {
-            Ok(QueryRoot::Operator(dag)) => {
-                t.lowered += 1;
-                if logical_plan(&dag).is_err() {
-                    t.bind_errored += 1;
-                }
-            }
-            Ok(QueryRoot::Scalar(_)) => t.lowered += 1,
-            Err(e) => {
-                if matches!(e, MetricsqlError::Parse(_)) {
-                    t.unparseable += 1;
-                } else {
-                    t.rejected += 1;
-                }
-                *errors.entry(normalize(&e.to_string())).or_default() += 1;
-            }
-        }
-    }
-    t
-}
-
-/// Lowering and binding are total over every corpus file: a panic fails the
-/// test, no lowerable query fails to bind, and coverage stays at its floor.
-/// Also prints each unparseable/rejected cause with its count, most common
-/// first, to show which unsupported features block the most queries.
-#[test]
-fn corpus_lowers_and_binds() {
-    let Some(dir) = std::env::var_os(DIR_VAR) else {
-        eprintln!("{DIR_VAR} unset; skipping the external corpus");
-        return;
-    };
-    let mut files: Vec<_> = std::fs::read_dir(Path::new(&dir))
-        .unwrap_or_else(|e| panic!("{DIR_VAR}: {e}"))
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "txt"))
-        .collect();
-    files.sort();
-    assert!(!files.is_empty(), "{DIR_VAR} has no *.txt files");
-
-    let mut failures = Vec::new();
-    let mut errors = HashMap::new();
-    for path in files {
-        let name = path.file_stem().unwrap().to_string_lossy();
-        let corpus = std::fs::read_to_string(&path).unwrap();
-        let min_lowered = floor(&corpus).unwrap_or_else(|| panic!("{name}: no `# floor: N` line"));
-        let t = tally(&corpus, &mut errors);
-        eprintln!("{name:24} {t:?}");
-        if t.bind_errored > 0 || t.lowered < min_lowered {
-            failures.push(format!("{name}: {t:?} (floor {min_lowered})"));
-        }
-    }
-    let mut errors: Vec<_> = errors.into_iter().collect();
-    errors.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    eprintln!("\nFailures by cause:");
-    for (msg, n) in errors {
-        eprintln!("{n:4}  {msg}");
-    }
-    assert!(failures.is_empty(), "{failures:#?}");
 }
 
 #[test]

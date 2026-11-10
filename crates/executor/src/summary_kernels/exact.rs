@@ -1,7 +1,8 @@
 //! Exact summary state identified by Planner family, independent of keyed layout.
 use super::increase::IncreaseAccumulator;
 use crate::AggregateCore;
-use planner_types::ir::schema::{ExactKind, ExactParams, FieldDataType as SummaryFamilyType};
+use planner_types::ir::schema::FieldDataType as SummaryFamilyType;
+use planner_types::summary_type::{ExactKind, ExactParams};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -444,7 +445,7 @@ mod tests {
     fn the_planner_prices_an_exact_state_at_its_size() {
         assert_eq!(
             std::mem::size_of::<ScalarState>() as u64,
-            planner_types::ir::schema::EXACT_ACCUMULATOR_STATE_BYTES
+            planner_types::summary_type::EXACT_ACCUMULATOR_STATE_BYTES
         );
     }
 

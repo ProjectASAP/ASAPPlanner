@@ -104,7 +104,6 @@ pub fn lower_promql_query_workload(
         .map(|entry| {
             let root = promql::PromqlLowerer::lower_query(
                 &entry.query.0,
-                &entry.requirements.accuracy.clone(),
                 &sample_interval_of,
                 &metric_type_of,
             )?;
@@ -252,6 +251,7 @@ mod tests {
             Some(DataArrival::Unknown),
             Some(DataArrival::Ingesting {
                 rows_per_second: 1.0,
+                max_out_of_order_ms: None,
             }),
             None,
         ];

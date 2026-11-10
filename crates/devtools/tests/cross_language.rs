@@ -15,7 +15,6 @@
 
 use asap_devtools::{lower_promql_with_sample_interval, lower_sql, SqlCatalog};
 use asap_types::ir::operator::{AggIntent, GroupKeys};
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{NonASAPOp, OperatorNode};
 use std::rc::Rc;
@@ -42,13 +41,13 @@ fn catalog() -> SqlCatalog {
 }
 
 async fn sql(q: &str) -> Rc<OperatorNode> {
-    lower_sql(q, &catalog(), AccuracyTarget::exact())
+    lower_sql(q, &catalog())
         .await
         .unwrap_or_else(|e| panic!("SQL {q:?} failed to lower: {e:?}"))
 }
 
 fn promql(q: &str) -> Rc<OperatorNode> {
-    lower_promql_with_sample_interval(q, AccuracyTarget::exact(), 1_000)
+    lower_promql_with_sample_interval(q, 1_000)
         .unwrap_or_else(|e| panic!("PromQL {q:?} failed to lower: {e:?}"))
 }
 
@@ -75,8 +74,7 @@ fn heavy_hitter(qe: &OperatorNode) -> Option<(usize, GroupKeys)> {
     else {
         return None;
     };
-    matches!(inner.as_slice(), [AggIntent::Count { .. }])
-        .then(|| (*k, reduction.expect_reduce().clone()))
+    matches!(inner.as_slice(), [AggIntent::Count]).then(|| (*k, reduction.expect_reduce().clone()))
 }
 
 #[tokio::test]

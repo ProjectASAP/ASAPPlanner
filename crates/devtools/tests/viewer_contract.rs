@@ -15,11 +15,11 @@ use asap_types::ir::operator::{
     TimeShift, WindowFuncKind,
 };
 use asap_types::ir::scalar::{ArithmeticOpKind, ColumnRef, ScalarValue};
-use asap_types::ir::schema::sketch::{GroupingStrategy, SketchStatistic, SummaryUpdate};
 use asap_types::ir::schema::{DataType, FieldDataType, Schema};
 use asap_types::ir::{
     ASAPOp, BinaryOperator, NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr, TimeRangeKind,
 };
+use asap_types::summary_type::{SketchStatistic, SummaryUpdate};
 
 /// One instance of every `NonASAPOp` variant, children elided. The
 /// exhaustive match fails to compile when a variant is added, until a sample
@@ -171,10 +171,9 @@ fn asap_samples() -> Vec<ASAPOp<()>> {
     let samples = vec![
         ASAPOp::SummaryAgg {
             child: (),
-            family: family.clone(),
+            summary_type: family.clone(),
             input: SummaryUpdate::column(ColumnRef::SampleValue),
             reduction: Reduction::by(vec![]),
-            grouping: GroupingStrategy::default(),
             filter: None,
         },
         ASAPOp::SummaryEstimate {
@@ -200,18 +199,15 @@ fn asap_samples() -> Vec<ASAPOp<()>> {
         },
         ASAPOp::SummaryMerge {
             children: vec![],
-            newest_tumbling_windows: None,
             group_by: None,
         },
         ASAPOp::SummaryTumblingWindowChain {
             child: (),
-            family: family.clone(),
+            summary_type: family.clone(),
             input: SummaryUpdate::column(ColumnRef::SampleValue),
             reduction: Reduction::by(vec![]),
-            grouping: GroupingStrategy::default(),
             filter: None,
             tumbling_window_width_ms: 60_000,
-            tumbling_window_count: 5,
         },
         ASAPOp::SummarySubtract {
             left: (),
@@ -225,7 +221,7 @@ fn asap_samples() -> Vec<ASAPOp<()>> {
             outer: (),
             inner: (),
             key: 0,
-            family,
+            summary_type: family,
         },
         ASAPOp::Extension {
             child: (),
@@ -345,7 +341,6 @@ fn viewer_knows_every_view_refresh_and_rejection_cause() {
 
     let causes = [
         C::AccuracyTargetMissed,
-        C::CountMinWeightsNotProvenNonNegative,
         C::NoAccuracyGuarantee,
         C::LatencyBoundExceeded,
         C::LatencyOverRepeatInterval,
@@ -360,7 +355,6 @@ fn viewer_knows_every_view_refresh_and_rejection_cause() {
     for cause in causes {
         match cause {
             C::AccuracyTargetMissed
-            | C::CountMinWeightsNotProvenNonNegative
             | C::NoAccuracyGuarantee
             | C::LatencyBoundExceeded
             | C::LatencyOverRepeatInterval

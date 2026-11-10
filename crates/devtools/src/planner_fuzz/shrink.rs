@@ -1,7 +1,7 @@
 //! Greedy shrinking of a violated check: drop queries and simplify
 //! expressions while the violation still reproduces.
 
-use asap_types::ir::properties::AccuracyTarget;
+use asap_types::accuracy::AccuracyTarget;
 
 use super::generate::{
     OuterOp, QuerySpec, RangeFunction, SqlAggregate, COUNTER_METRIC, GAUGE_METRIC,

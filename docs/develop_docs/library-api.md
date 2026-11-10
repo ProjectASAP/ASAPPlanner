@@ -27,8 +27,8 @@ Inside this workspace, depend on the frontend you need, the stage crates
 (`asap-logical-asap-optimization` for Stage 1, `asap-physical-asap-optimization`
 for Stage 2, `asap-plan-selection` for Stage 3), `asap-planner` for the facade that
 runs the stages, `asap-cost` for the cost model and its inputs (`CostInputs`),
-`asap-accuracy` for the accuracy model (`AccuracyModel`,
-`AccuracyEvidenceProvider`), and `asap-types`, or on `asap-planner`, which wraps every frontend and
+`asap-accuracy` for the accuracy rules and the deployment's measured
+accuracy (`AccuracyEvidence`), and `asap-types`, or on `asap-planner`, which wraps every frontend and
 the planning stages. External users can use Git dependencies pinned to a
 compatible revision; use the same revision across these crates, and pick a
 revision at least as new as the APIs you call. Replace `REV` below with a
@@ -112,7 +112,7 @@ use asap_types::workload::{
     BatchEntry, DataWorkload, DurationMs, Query,
     PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
 };
-use asap_types::ir::properties::AccuracyTarget;
+use asap_types::accuracy::AccuracyTarget;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workload = PlanningWorkload {
@@ -187,26 +187,21 @@ asap_plan_selection::select_plan(
     physical: &PhysicalASAPMemoCandidates,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
-    accuracy_checks: &AccuracyCheckInputs<'_>,   // accuracy model and evidence
     cost_inputs: &CostInputs,
-    realizer: &dyn AssignmentRealizer,           // Stage 2's, e.g. Stage2AssignmentRealizer
-) -> Result<Selection, ErrorSelectingPlan>
+) -> Result<(PhysicalASAPDAG, Selection), ErrorSelectingPlan>
 ```
 
 | Input or output | Meaning |
 | --- | --- |
-| `PlanningModels::new(accuracy, evidence)` | Your `&dyn AccuracyModel` and `&dyn AccuracyEvidenceProvider`, with default cost inputs and deployment capabilities; `with_accuracy` and `with_evidence` replace one of them |
-| `PlanningModels::builtin()` | Built-in accuracy model (`BuiltinAccuracyModel`) and no extra evidence (`NoAccuracyEvidence`). `with_cost_inputs(&settings)` sets the deployment's `CostInputs`; `with_deployment_capabilities(&capabilities)` sets its `DeploymentCapabilities` (field `deployment_capabilities`) |
-| `DeploymentCapabilities` (`asap_logical_asap_optimization`, re-exported as `asap_planner::DeploymentCapabilities`) | What the executor supports: `supported_summaries` (`None`, the default, supports every summary the planner builds; otherwise `SupportedSummary { family: SketchAlgorithm, readouts: Vec<StatisticKind> }` entries; Pass 1 prunes others with `PruneReason::UnsupportedByDeployment`), `raw_data_retained` (default `true`; when `false`, a candidate that scans raw data at query time is pruned by Stage 2, and stored data is refused with `asap_planner::SelectionError::InvalidDeploymentCapabilities`) and `query_time_results_retained` (default `false`; when `true`, Stage 2 offers `MatAtQueryKeptAcrossEvaluations` for tumbling windows) |
-| `CostInputs` (`asap_cost`) | `cost_model`, `resource_speed` (`ms_per_cpu_op`, `ms_per_scanned_byte`), `non_repeating_query_horizon_seconds` (default 3,600) and `measured_operation_costs` (`MeasuredOperationCosts`, default empty: `operators`, one `OperatorCost { operator, phase, sketch / exact / measure, ns_per_unit, ns_per_invocation, memory_bytes_per_state }` per measured operator kind, phase and family; `ns_per_evaluation` per query request; `provenance` (executor version, machine). A node with an entry is priced from it, a sketch between the two nearest measured sizes; every other node from the formulas times one calibration factor fitted from the measured nodes; each node's `NodeCost::price_source` says which. The earlier JSON array of `MeasuredOperationCost { sketch, operation, cpu_ns_per_operation }` still loads) |
+| `PlanningModels::new(evidence)` | Your `&dyn AccuracyEvidence` (measured guarantees; `NoMeasuredGuarantees` has none), with default cost inputs and deployment capabilities; `with_evidence` replaces it; `with_ignore_accuracy_guarantees(true)` gives every query no accuracy target |
+| `PlanningModels::builtin()` | No measured accuracy evidence. `with_cost_inputs(&settings)` sets the deployment's `CostInputs`; `with_deployment_capabilities(&capabilities)` sets its `DeploymentCapabilities` (field `deployment_capabilities`) |
+| `DeploymentCapabilities` (`asap_logical_asap_optimization`, re-exported as `asap_planner::DeploymentCapabilities`) | What the executor supports: `supported_summaries` (`None`, the default, supports every summary the planner builds; otherwise `SupportedSummary { summary_type: SketchAlgorithm, readouts: Vec<StatisticKind> }` entries; Pass 1 prunes others with `PruneReason::UnsupportedByDeployment`), `raw_data_retained` (default `true`; when `false`, a candidate that scans raw data at query time is pruned by Stage 2, and stored data is refused with `asap_planner::SelectionError::InvalidDeploymentCapabilities`) and `query_time_results_retained` (default `false`; when `true`, Stage 2 offers query-time `AcrossEvaluations` for tumbling-window chains) |
+| `CostInputs` (`asap_cost`) | `cost_model`, `resource_speed` (`ms_per_cpu_op`, `ms_per_scanned_byte`), `non_repeating_query_horizon_seconds` (default 3,600) and `measured_operation_costs` (`MeasuredOperationCosts`, default empty: `operators`, one `OperatorCost { operator, phase, sketch / exact / measure, ns_per_unit, ns_per_invocation, memory_bytes_per_state }` per measured operator kind, phase and family; `ns_per_evaluation` per query request; `provenance` (executor version, machine). A node with an entry is priced from it, a sketch between the two nearest measured sizes; every other node from the formulas times one calibration factor fitted from the measured nodes; each node's `NodeCost::cost_source` says which. The earlier JSON array of `MeasuredOperationCost { sketch, operation, cpu_ns_per_operation }` still loads) |
 | `CostModel::UsageOverTime(ResourceUnitCost)` | Cost model 1 (default, `ResourceUnitCost::illustrative()`): unit cost × usage per second; the cheapest valid candidate wins |
 | `CostModel::ProvisionedCapacity(ResourceUnitCost)` | Cost model 2: unit cost × peak memory, peak CPU cores and disk; the cheapest valid candidate wins |
 | `CostModel::ClusterCapacity(ClusterLimits)` | Cost model 3: memory, disk and optional CPU cores are hard limits; `ClusterObjective::{LowestLatency, LeastMemory}` chooses among the candidates that fit |
-| `PlanOutput.plans` | One `QueryPlan { entry_index, root }` per query, in `QueryWorkload::entries()` order |
-| `PlanOutput.selection` | `Some` with Stage 3's `Selection` under the default pass: `selected_dag`, `nodes_with_proven_non_negative_weights`, `cost` (the selected plan's `PlanCost` with its `ResourceUsage` and `cost_per_second`, `None` under cost model 3), `accepted_accuracy_per_query`, `pruned_candidates` and `search_report` |
-| `PlanOutput.tumbling_window_retention_ms` | For each tumbling-window chain the selected plan keeps beyond one evaluation, by node id, how long its tumbling windows are kept (`RealizedPlan::tumbling_window_retention_ms`) |
-| `PlanningRun` | `per_computation_candidates`, `logical_asap_candidates`, `physical_asap_candidates`, `selection`, `selected_physical_plan` (`RealizedPlan`), `selected_plan` (the roots to run) and `report` (Pass 2's and Stage 2's counts and each stage's time); `per_computation_candidates` is kept only with `PlanSearchSettings::inspect`; `asap_planner::selected_chosen_candidates` reads the selected plan as one candidate per group of `logical_asap_candidates.memo` |
-| `PlanOutput::physical_asap_dag()` | The planned queries as one `PhysicalASAPDAG`, timed with the default `MaterializationAssignment` (see [Export](#export)) |
+| `PlanOutput.plan` | The selected plan, one `PhysicalASAPDAG`: `roots` answer the operator queries and `scalar_roots` the standalone scalar queries, in `QueryWorkload::entries()` order; each materialized node carries its `retention_ms`. Its cost is `asap_cost::plan_cost` of it |
+| `PlanningRun` | `pass1_memo`, `logical_asap_candidates`, `physical_asap_candidates`, `selection` (the plan and Stage 3's `Selection`: `accepted_accuracy_per_query`, `pruned_candidates`, `milp_variables`, `milp_constraints`, `milp_construction_ms`, `milp_solve_ms`) and `report` (Pass 2's and Stage 2's counts and each stage's time); `pass1_memo` is kept only with `PlanSearchSettings::inspect` |
 
 Each candidate's `ResourceUsage` holds its usage without prices:
 `cpu_ops_per_second`, `scanned_bytes_per_second`, `average_memory_bytes`,
@@ -218,7 +213,7 @@ dependencies):
 
 ```rust
 use asap_planner::{e2e_plan, FrontendInput, PlanningModels, UserInput};
-use asap_types::ir::properties::AccuracyTarget;
+use asap_types::accuracy::AccuracyTarget;
 use asap_types::workload::{
     BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, PrometheusMetricType,
     Query, QueryLanguage, QueryRequirements, QueryWorkload, SourceFacts,
@@ -310,7 +305,7 @@ query's window comes from its text (range and offset). These facts are separate:
 `DataWorkload` holds `arrival` (`DataArrival`: `AtRest`, `Ingesting` or
 `Mixed` with `rows_per_second`, or `Unknown`) and `sources`, a map from
 PromQL metric or SQL table name to `SourceFacts`: `series_count`,
-`metric_type`, `values_non_negative`, `sample_interval` (PromQL and
+`metric_type`, `column_signs`, `sample_interval` (PromQL and
 MetricsQL), `stream_norms`, `max_distinct_per_evaluation` and
 `distinct_values_per_label` (distinct values per label or column, which
 plan selection prices a `by (...)` grouping's groups at: the product of its
@@ -360,9 +355,9 @@ optional also does not guarantee every planning operation can succeed without it
 
 | Function/type | Purpose |
 | --- | --- |
-| `asap_types::ir::apply_materialization_timings(&root, &assignment, &mut NodeToTimedNodeCache::new())` | Write execution timing into every node from a `MaterializationAssignment` (default: all query time) and validate the data-state edges; `PlanOutput::physical_asap_dag()` applies the default to a planned workload |
-| `asap_types::ir::physical_export::compile_physical_asap_dag(&timed_root)` | Export a timed DAG as a `PhysicalASAPDAG`; rejects an untimed node; `compile_physical_asap_workload(&roots)` exports a batch with one root per query; `.validate()` checks it explicitly |
-| `PhysicalASAPDAG::materialized_views()` and `.raw_data_retention()` (`asap_types::ir::materialized_view`) | What a runtime keeps for an installed DAG, derived from the DAG and the `retention_ms` installation sets: each materialized view (refresh mode, coverage, inputs, the node's `retention_ms`) and how far back each raw-data source is kept for query-time scans (each query-time `Scan`'s `retention_ms`) |
+| `asap_types::ir::apply_physical_properties(&root, &assignment)` | Complete a `PhysicalPropertiesAssignment` (default: all query time) into the physical properties of every node and validate the data-state edges; `apply_physical_properties_to_roots` does it for a workload; `PlanOutput::physical_asap_dag()` applies the pass's `physical_properties` to a planned workload |
+| `asap_types::plan::physical_asap_dag::compile_physical_asap_dag(&root, &timed)` | Export a DAG as a `PhysicalASAPDAG`, each node with its properties from the completed assignment `timed`; rejects a node it does not list; `compile_physical_asap_workload(&roots, &timed)` exports a batch with one root per query; `.validate()` checks it explicitly |
+| `PhysicalASAPDAG::materialized_views()` and `.raw_data_retention()` (`asap_types::plan::materialized_view`) | What a runtime keeps for an installed DAG, derived from the DAG and the `retention_ms` installation sets: each materialized view (refresh mode, coverage, inputs, the node's `retention_ms`) and how far back each raw-data source is kept for query-time scans (each query-time `Scan`'s `retention_ms`) |
 
 Choose the export matching your intended handoff: an untimed semantic DAG is not
 interchangeable with a versioned execution contract. Preserve

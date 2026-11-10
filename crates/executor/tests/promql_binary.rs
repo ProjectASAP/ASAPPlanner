@@ -8,15 +8,15 @@ use asap_executor::{
 };
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::operator::BinaryOpKind;
-use planner_types::ir::physical_export::{
-    EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
-    PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
-};
 use planner_types::ir::properties::ExecutionDataState;
 use planner_types::ir::scalar::ArithmeticOpKind;
 use planner_types::ir::schema::{DataType, Field, FieldDataType};
 use planner_types::ir::ASAPOp;
 use planner_types::ir::BinaryOperator;
+use planner_types::plan::physical_asap_dag::{
+    EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
+    PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
+};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 fn schema() -> SchemaRef {
@@ -81,10 +81,12 @@ fn program_for_bool(operator: BinaryOperator, return_bool: bool) -> Operator {
             rhs: 1,
         }),
         output_state: ExecutionDataState::QUERY_ROWS,
-        materialization: Default::default(),
+        lifetime: Default::default(),
+        parameters: None,
         output_schema: (*schema).clone(),
         guarantee: None,
         retention_ms: None,
+        selected_physical_candidate: None,
     };
     compile_node(&node, &[schema.clone(), schema]).unwrap()
 }
@@ -327,6 +329,7 @@ fn stored_series_evaluations_support_filters_and_sets() {
     use planner_types::ir::properties::*;
     use planner_types::ir::scalar::ColumnRef;
     use planner_types::ir::schema::*;
+    use planner_types::summary_type::*;
 
     use planner_types::ir::operator::PromQLVectorSetOpKind;
     use planner_types::ir::scalar::CompareOpKind;
@@ -372,10 +375,9 @@ fn stored_series_evaluations_support_filters_and_sets() {
                         payload: match id {
                             0 | 1 => PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
                                 child: 6,
-                                family: family.clone(),
+                                summary_type: family.clone(),
                                 input: SummaryUpdate::column(ColumnRef::SampleValue),
                                 reduction: Reduction::Reduce(GroupKeys::by(vec![0])),
-                                grouping: GroupingStrategy::PerSubpopulationInstance,
                                 filter: None,
                             }),
                             5 => PhysicalASAPOperatorPayload::NonASAP(
@@ -416,7 +418,8 @@ fn stored_series_evaluations_support_filters_and_sets() {
                             5 | 6 => ExecutionDataState::QUERY_ROWS,
                             _ => ExecutionDataState::QUERY_ROWS,
                         },
-                        materialization: Default::default(),
+                        lifetime: Default::default(),
+                        parameters: None,
                         output_schema: match id {
                             0 | 1 => (*state_schema).clone(),
                             5 | 6 => sample_schema(),
@@ -424,6 +427,7 @@ fn stored_series_evaluations_support_filters_and_sets() {
                         },
                         guarantee: None,
                         retention_ms: None,
+                        selected_physical_candidate: None,
                     })
                     .collect::<Vec<_>>();
             let edges = [

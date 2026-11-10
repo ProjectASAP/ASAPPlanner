@@ -15,8 +15,8 @@
 // is filed.
 //
 // `--relations` takes relation names or the letters a–o (default: all);
-// `--search` is `candidate-connections` (the default search) or
-// `exhaustive`; `--ignore-accuracy-guarantees` accepts every output
+// `--search` is `candidate-connections` (the default search);
+// `--ignore-accuracy-guarantees` accepts every output
 // regardless of its accuracy guarantee (guarantees are enforced by
 // default, as `plan_installable` does). A relation is violated when it misses by more
 // than max(`--relative-tolerance` (default 0.01) × cost,
@@ -33,7 +33,7 @@ use asap_devtools::planner_fuzz::report::{run_campaign, serve, Campaign, WorkerR
 use asap_devtools::planner_fuzz::{read_seed_file, FuzzSettings, SearchKind};
 
 const USAGE: &str = "usage: planner_fuzz --seed <u64> --cases <n> --time-budget-s <s> \
-[--relations <name|letter>,...] [--search candidate-connections|exhaustive] \
+[--relations <name|letter>,...] [--search candidate-connections] \
 [--seed-workload <file>]... [--ignore-accuracy-guarantees] [--relative-tolerance <f64>] \
 [--absolute-tolerance <f64>] [--max-shrink-attempts <n>] [--case-timeout-s <s>] --out <dir>";
 
@@ -94,7 +94,6 @@ fn run(args: Vec<String>) -> Result<(), String> {
             "--search" => {
                 settings.search = match value()?.as_str() {
                     "candidate-connections" => SearchKind::CandidateConnections,
-                    "exhaustive" => SearchKind::Exhaustive,
                     other => return Err(format!("unknown search {other}")),
                 }
             }

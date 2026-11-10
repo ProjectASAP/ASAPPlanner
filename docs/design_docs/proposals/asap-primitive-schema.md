@@ -68,16 +68,18 @@ Based on our requirement, each field should contain the following information.
 1. **What type of the ASAP Primitive is.** The field's type is a [`FieldDataType`](#63-schema-and-field-types-cratestypessrcirschemamodrs) (`crates/types/src/ir/schema/mod.rs`). A column is either a raw value or a summary state:
 
    - **Raw value**: `Plain(DataType)`, e.g., a number or a string.
-   - **Summary state**: described from coarse to fine by three levels:
+   - **Summary state**: described from coarse to fine by these terms:
 
-   | Level | Code | Values | KLL example |
+   | Term | Code | Values | KLL example |
    |---|---|---|---|
    | Family | `FieldDataType` variant | `ExactAggregate`, `Sketch`, `SummarySample`, `Wavelet`, `StatModel` | `Sketch` |
-   | Algorithm | `SketchAlgorithm` (other families: `ExactKind`, `SamplingKind`, …) | `Kll`, `Cms`, `Hll`, `DDSketch`, … | `Kll` |
-   | Parameters | `SketchParams` (other families: `ExactParams`, `SamplingParams`, …) | per algorithm | `Kll { k: 200 }` |
+   | Algorithm | `SketchAlgorithm` (other families: `ExactKind`, `SamplingKind`, …) | `Kll`, `Cms`, `Hll`, `DDSketch`, `HydraKll`, … | `Kll` |
+   | Summary type | family and algorithm: one `FieldDataType` value, the column's type | `FieldDataType::Sketch(SketchAlgorithm)`, … | `Sketch(Kll)` |
+   | Parameters θ | `SketchParams` (other families: `ExactParams`, `SamplingParams`, …), on the candidate's `LogicalProperties`, not in the type | per algorithm, from `parameter_list(algorithm)` | `Kll { k: 547 }` |
 
-   - For a sketch, algorithm and parameters are bundled as one `SketchKind` ([§6.4](#64-summary-family-parameters-cratestypessrcirschemasketchrs)). A sketch also records its `GroupingStrategy`: one instance per group, or one shared structure (Hydra) for all groups.
-   - So a quantile KLL sketch with `k = 200`, one instance per group, has the type `Sketch(SketchKind { Kll, Kll { k: 200 } }, PerSubpopulationInstance)`. Which statistics a family answers is the family-capability table's (`FamilyCapability`), not part of the type.
+   - The summary type is the operator's `summary_type` argument (`SummaryAgg`, the chain). θ is structure only (sizes, no sized-for error fields) and lives on the candidate, so builds that differ only in θ are candidates of one memo group.
+   - A shared multi-subpopulation structure (Hydra) is an algorithm of its own (`HydraKll`, `HydraCms`, `HydraCountSketch`, …), not a separate grouping dimension.
+   - So a quantile KLL sketch with `k = 547` has the type `Sketch(Kll)` and θ `Kll { k: 547 }`. Which statistics a summary type answers is its row of the capability table (`SummaryTypeCapability`), not part of the type.
 
 2. **What query intent the summarized ASAP Primitive can support.** This is not stored in the field: it follows from the type in item 1. There are two kinds of intent:
 
@@ -92,7 +94,7 @@ Based on our requirement, each field should contain the following information.
      | `FrequencyL2`, `FrequencyEntropy` | `Sketch`: `UnivMon` | `SummaryEstimate(FrequencyL2 \| FrequencyEntropy)` |
      | `Sum`, `Count`, `Min`, `Max`, `Rate`, `IRate`, `Increase` (exact) | `ExactAggregate(ExactKind, …)` | `FinalizeExactAccumulator` |
 
-     The sketch candidates are `summary_candidates(intent)` in `crates/logical-asap-optimization/src/pass1/realization.rs`; exact accumulators come from Pass 1's `ExactAccumulator` candidates in `pass1/per_computation_candidates.rs`; the evaluations are `SketchStatistic` ([§6.5](#65-update-input-and-evaluations-irschemasketchrs-iroperatormaintained_populationrs)).
+     The sketch candidates are `summary_candidates(intent)` in `crates/logical-asap-optimization/src/pass1/realization.rs`; exact accumulators come from Pass 1's `ExactAccumulator` candidates in `pass1/computation_targets.rs`; the evaluations are `SketchStatistic` ([§6.5](#65-update-input-and-evaluations-summary_typestatisticrs-iroperatormaintained_populationrs)).
 
    - **Time window aggregation intents**: whether states built over smaller windows can answer a larger one. This depends on how the family combines states:
      - **Merge** (`SummaryMerge`, §5.6): states over disjoint tumbling windows combine into the state of their union, e.g. two 1-minute KLL states answer a 2-minute quantile. Requires a mergeable family.
@@ -296,7 +298,7 @@ In the worked example, `latency < 100` and `region = 'us'` move into `selection`
 
 **When two definitions are equal.** Merging (§5.6) requires equal definitions.
 
-- They must have the same structure. Planning details are ignored: `timing`, `guarantee` and `coverage_cache`. So a tumbling window built at ingestion time can merge with one built at query time.
+- They must have the same structure. Planning details are ignored: `guarantee` and `coverage_cache`. Operator nodes carry no timing (#1200), so a tumbling window built at ingestion time can merge with one built at query time.
 - `SummaryUpdate.weight_domain` is compared too. It is computed from the rest, so it differs only if something is wrong.
 - States over different tables never merge: a KLL over `m1` and one over `m2` have different definitions. To combine tables, put a `UNION ALL` with a column that marks the source table below one `SummaryAgg`; that column can then be used in `selection` or in the grouping.
 
@@ -665,11 +667,11 @@ With an exact target, the planner can keep all latencies per job in one maintain
 
 - **Implemented.** All children must be state with exactly one state field and identical schemas.
 - **Coverage.** It also requires equal `definition`s and selections that do not overlap, and computes the merged coverage.
-- **Newest tumbling windows:** an optional `newest_tumbling_windows: n` merges only the newest `n` tumbling windows of the one `SummaryTumblingWindowChain` the merge reads (`1 ≤ n <` its tumbling-window count). Its coverage is one build over the time range those tumbling windows cover, so one chain kept for the longest window serves every query whose window, on the same tumbling windows, ends at the same time and is shorter.
-- **Rollup:** an optional `group_by` field, so one operator does both merge and rollup. It lists the input's group columns the output is keyed by; `None` keeps the input's groups. A rollup merges every input state, so it does not take `newest_tumbling_windows`; it reads a merge of the newest tumbling windows instead:
+- **Chain windows:** a merge over a `TimeRange` (and `TimeShift`s) over a `SummaryTumblingWindowChain` merges the windows that range selects; there is no window-selection field. Its coverage is that of one build over the same `TimeRange` and `TimeShift`s, so one chain serves every query over the same input whose range and offset lie on its windows.
+- **Rollup:** an optional `group_by` field, so one operator does both merge and rollup. It lists the input's group columns the output is keyed by; `None` keeps the input's groups. A rollup merges every input state:
 
 ```rust
-SummaryMerge { children: Vec<C>, newest_tumbling_windows: Option<u32>, group_by: Option<Vec<ColumnId>> }
+SummaryMerge { children: Vec<C>, group_by: Option<Vec<ColumnId>> }
 ```
 
 **Example A: time tumbling windows.** p99 of each series of metric `m` over the last 2 minutes:
@@ -822,7 +824,7 @@ input groups                       output groups
 | Question | Answer |
 |---|---|
 | What comes out? | the children's schema; with `group_by`, its columns in order, then the state column. A `group_by` of no columns over a SQL relation's states stands for a global SQL aggregate, which has one row over no input rows: it outputs one state, empty when there is no input state |
-| When is it rejected? | no children; a child is not state; the schemas differ (e.g. different sketch parameters); the definitions differ (different column, filters or source); the selections may overlap (#646; with #592, only where the family does not allow it); the family cannot merge at all (#592); a `group_by` column is not a group key of the children's build, appears twice, or is the state or time column; `group_by` over a family that cannot merge different groups (counter states, `IRate`, Theta, Hydra); `group_by` together with `newest_tumbling_windows` |
+| When is it rejected? | no children; a child is not state; the schemas differ (e.g. different sketch parameters); the definitions differ (different column, filters or source); the selections may overlap (#646; with #592, only where the family does not allow it); the family cannot merge at all (#592); a `group_by` column is not a group key of the children's build, appears twice, or is the state or time column; `group_by` over a family that cannot merge different groups (counter states, `IRate`, Theta, Hydra) |
 | What is its coverage? | the shared `definition` (with `group_by`, the same build grouped by the columns `group_by` names), and the union of the children's selections. Two boxes join when they differ in only one dimension and their union is again one constraint, as in the paper's one range per column: touching time windows (`(−2m, −1m]` and `(−1m, 0]` give `(−2m, 0]`), touching value ranges (`latency < 100` and `latency >= 100` give `latency ∈ (−∞, ∞)`, which still excludes NULL), or value sets of one column (`{us}` and `{eu}` give `{us, eu}`). Gaps stay as separate boxes |
 | State or value? | state in, state out |
 
@@ -877,15 +879,15 @@ Every struct field and enum-variant field below has a comment saying what it hol
 OperatorNode                                         §6.1
 ├── operator: Operator::ASAP(ASAPOp)                 §6.2
 │     ├── SummaryAgg
-│     │     ├── family: FieldDataType ───────────┐   §6.3 → §6.4
+│     │     ├── summary_type: FieldDataType ─────┐   §6.3 → §6.4
 │     │     └── input:  SummaryUpdate            │   §6.5  (what each row adds)
 │     ├── SummaryEstimate.query: SketchStatistic │   §6.5  (what is read out)
 │     ├── MaintainPopulation.population          │   §6.5
 │     └── EvaluatePopulation.evaluation          │   §6.5
 ├── schema: Schema                               │   §6.3
 │     └── fields[i].dtype: FieldDataType ◀───────┘   §6.3  (the same type: the output
-│           └── Sketch(SketchKind, GroupingStrategy)        `state` field has type `family`)
-│                 └── algorithm, params              §6.4
+│           └── Sketch(SketchAlgorithm)              `state` field has type `summary_type`)
+│                 (θ, `SketchParams`, is on the candidate)  §6.4
 ├── guarantee: AccuracyGuarantee                       §6.5  (accuracy of an evaluation)
 └── coverage() → SummaryCoverage                     §6.6
       └── definition: OperatorNode   (again a node, so the same structure)
@@ -895,12 +897,12 @@ OperatorNode                                         §6.1
 |---|---|---|
 | §6.1 DAG node | `OperatorNode` | the DAG itself |
 | §6.2 ASAP operators | `ASAPOp` | `OperatorNode.operator` |
-| §6.3 Schema and field types | `Schema`, `Field`, `FieldDataType` | every node's `schema`; `SummaryAgg.family` |
-| §6.4 Summary-family parameters | `SketchKind`, `SketchParams`, `GroupingStrategy`, exact/sample/wavelet/model params | the payload of each non-plain `FieldDataType` variant |
+| §6.3 Schema and field types | `Schema`, `Field`, `FieldDataType` | every node's `schema`; `SummaryAgg.summary_type` |
+| §6.4 Summary algorithms and parameters | `SketchAlgorithm`, `SketchParams`, `HydraParams`, exact/sample/wavelet/model kinds and params | the payload of each non-plain `FieldDataType` variant; θ on a candidate's `LogicalProperties` |
 | §6.5 Update input and evaluations | `SummaryUpdate`, `SketchStatistic`, `MaintainedPopulation`, `PopulationStatistic` | fields of the `ASAPOp` variants in §6.2 |
 | §6.6 Summary coverage | `SummaryCoverage`, `SelectionBox`, `Constraint` | `OperatorNode::coverage()` on summary nodes |
 
-**Example: the p99 latency state of §5.1.** The `SummaryAgg` node (§6.1) holds `ASAPOp::SummaryAgg` (§6.2) with `family = Sketch(SketchKind::new(Kll, Kll { k: 200 }), PerSubpopulationInstance)` (§6.3, §6.4) and `input = SummaryUpdate::column(latency)` (§6.5). Its `schema` (§6.3) is `(job Utf8, state Sketch(KLL k=200))`: the `state` field has the same type as `family`. A `SummaryEstimate` above it holds `query = Quantile { q: 0.99 }` (§6.5), and its node carries the `guarantee` of the evaluation. `coverage()` on the `SummaryAgg` node returns a `SummaryCoverage` (§6.6).
+**Example: the p99 latency state of §5.1.** The `SummaryAgg` node (§6.1) holds `ASAPOp::SummaryAgg` (§6.2) with `summary_type = Sketch(Kll)` (§6.3, §6.4) and `input = SummaryUpdate::column(latency)` (§6.5); its candidate's θ is `Kll { k: 200 }`. Its `schema` (§6.3) is `(job Utf8, state Sketch(Kll))`: the `state` field has the same type as `summary_type`. A `SummaryEstimate` above it holds `query = Quantile { q: 0.99 }` (§6.5), and its node carries the `guarantee` of the evaluation. `coverage()` on the `SummaryAgg` node returns a `SummaryCoverage` (§6.6).
 
 ### 6.1 DAG node (`crates/types/src/ir/operator/node.rs`)
 
@@ -921,9 +923,6 @@ pub struct OperatorNode {
     /// The accuracy statement of the output, once known. `None` does not
     /// mean exact.
     pub guarantee: Option<AccuracyGuarantee>,
-    /// When the node runs: `IngestionTime` or `QueryTime`. `None` until
-    /// planning assigns it.
-    pub timing: Option<ExecutionTiming>,
     /// Cache for `coverage()`. Filled on first use, never serialized,
     /// ignored by equality, emptied on clone. Not a source of truth:
     /// coverage can always be derived again.
@@ -951,14 +950,12 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
         /// The input rows.
         child: C,
         /// The summary type of the output `state` field. Never `Plain`.
-        family: FieldDataType,
+        summary_type: FieldDataType,
         /// What each input row adds to the state (item and weight).
         input: SummaryUpdate,
         /// The grouping: `Reduce(by columns)`, or `PerEntity` for one state per
         /// input series without grouping.
         reduction: Reduction,
-        /// Whether each group gets its own sketch or all groups share one.
-        grouping: GroupingStrategy,
         /// Rows to include, applied before updating the state. `None`: all rows.
         filter: Option<Predicate<C>>,
     },
@@ -988,9 +985,6 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
     SummaryMerge {
         /// The states to merge; all have the same schema.
         children: Vec<C>,
-        /// Merge only the newest `n` tumbling windows of the one `SummaryTumblingWindowChain` read;
-        /// `None` merges every input state. Not with `group_by`.
-        newest_tumbling_windows: Option<u32>,
         /// A rollup: the input's group columns the merged states are keyed
         /// by, in output order; every input state whose values in them match
         /// goes into one output state. `None` keeps the input's groups.
@@ -1009,7 +1003,7 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
         outer: C,               // one input state
         inner: C,               // the other input state
         key: ColumnId,          // the join key column
-        family: FieldDataType,  // the summary type of the result
+        summary_type: FieldDataType,  // the summary type of the result
     },
     Extension {
         child: C,               // the input
@@ -1032,7 +1026,7 @@ impl ASAPOp {
     /// Whether the operator is reserved and cannot be built yet: Subtract,
     /// Delete, Join, Extension.
     pub fn is_unimplemented(&self) -> bool;
-    /// The summary type this operator outputs: `family` for SummaryAgg and
+    /// The summary type this operator outputs: `summary_type` for SummaryAgg and
     /// SummaryJoin, the inputs' state type for SummaryMerge, `None` otherwise.
     pub fn produced_state(&self) -> Option<&FieldDataType>;
     /// The output schema, derived from the operator and its inputs. An error
@@ -1111,15 +1105,16 @@ impl Field<FieldDataType> {
     pub fn is_plain(&self) -> bool;
 }
 
-/// A column's type: a plain value, or summary state of one family (§3).
+/// A column's type: a plain value, or summary state of one summary type
+/// (family and algorithm, §3).
 pub enum FieldDataType {
     /// A readable value of this type.
     Plain(DataType),
     /// Exact accumulator state: which accumulator, and its parameters.
     ExactAggregate(ExactKind, ExactParams),
-    /// Sketch state: the chosen sketch (algorithm, parameters), and
-    /// whether each group has its own sketch or all groups share one.
-    Sketch(SketchKind, GroupingStrategy),
+    /// Sketch state of one algorithm; θ is not part of the type. The
+    /// `Hydra*` algorithms share one structure across all groups.
+    Sketch(SketchAlgorithm),
     /// Summary sample state: the sampling method, and its parameters.
     #[serde(rename = "Sample")]
     SummarySample(SamplingKind, SamplingParams),
@@ -1149,7 +1144,7 @@ pub enum DataType {
 }
 ```
 
-### 6.4 Summary-family parameters (`crates/types/src/ir/schema/sketch.rs`)
+### 6.4 Summary algorithms and parameters (`crates/types/src/summary_type/parameters.rs`)
 
 ```rust
 /// Which exact accumulator. None of them has parameters, so `ExactParams`
@@ -1157,28 +1152,15 @@ pub enum DataType {
 pub enum ExactKind   { Sum, Count, Min, Max, Increase, Rate, IRate }
 pub enum ExactParams { Sum, Count, Min, Max, Increase, Rate, IRate }
 
-/// A chosen sketch. Built only through `new`, so the two fields always agree.
-/// Which statistics it answers is its family's row of the family-capability
-/// table (`FamilyCapability`).
-pub struct SketchKind {
-    /// Which sketch algorithm.
-    algorithm: SketchAlgorithm,
-    /// That algorithm's size parameters; must match `algorithm`.
-    params: SketchParams,
-}
-impl SketchKind {
-    /// The only constructor. Panics if `params` belong to a different
-    /// algorithm.
-    pub fn new(algorithm: SketchAlgorithm, params: SketchParams) -> Self;
-    /// The sketch algorithm.
-    pub fn algorithm(&self) -> &SketchAlgorithm;
-    /// The algorithm's size parameters.
-    pub fn params(&self) -> &SketchParams;
-}
-// Theta is not offered as a candidate until asap_sketchlib has a Theta sketch.
-pub enum SketchAlgorithm { UnivMon, Kll, Cms, Hll, DDSketch, CmsWithHeap, Kmv, Theta, CountSketch, CountSketchWithHeap }
+/// `asap_sketchlib`'s algorithm enum, the Hydra algorithms (`HydraKll`,
+/// `HydraCms`, `HydraCountSketch`, …) included. Which statistics each
+/// answers is its row of the capability table (`SummaryTypeCapability`).
+pub use asap_sketchlib::SketchAlgorithm;
 
-/// Size parameters of each algorithm. Larger values: more memory, less error.
+/// θ: the structure of each algorithm, from its predefined list
+/// (`parameter_list`). Larger values: more memory, less error. No field
+/// records what error a configuration was sized for; equality compares
+/// every field.
 pub enum SketchParams {
     /// `layers`: number of sampling levels. Each level has a Count Sketch of
     /// `sketch_rows` hash rows × `sketch_cols` counters, and a heap of the
@@ -1196,24 +1178,15 @@ pub enum SketchParams {
     CmsWithHeap { width: u32, depth: u32, heap_size: u32 },
     /// `k`: number of smallest hash values kept.
     Kmv { k: u32 },
-    /// `k`: number of hash values kept (nominal entries).
-    Theta { k: u32 },
     /// `width`: counters per row. `depth`: number of hash rows.
     CountSketch { width: u32, depth: u32 },
     /// Count Sketch `width` × `depth`, plus a heap of the `heap_size` heaviest items.
     CountSketchWithHeap { width: u32, depth: u32, heap_size: u32 },
+    /// θ of a `Hydra*` algorithm.
+    Hydra(HydraParams),
 }
 
-/// How a grouped sketch is laid out across the `by` groups. Independent of the family.
-pub enum GroupingStrategy {
-    /// One separate sketch per group. The default.
-    PerSubpopulationInstance,
-    /// One shared structure for all groups (Hydra). `kind`: which shared
-    /// structure. `params`: its sizes.
-    SharedMultiSubpopulation { kind: HydraKind, params: HydraParams },
-}
-pub enum HydraKind { HydraKll /* experimental, no error bound */, HydraCms, HydraCountSketch }
-/// Sizes of the shared structure.
+/// Sizes of a Hydra structure, one shared by all groups.
 pub enum HydraParams {
     /// `k`: KLL `k` each group sees. `shared_buckets`: size of the one structure
     /// shared by all groups.
@@ -1224,11 +1197,6 @@ pub enum HydraParams {
     /// Same fields as `HydraCms`, for Count Sketch.
     HydraCountSketch { width: u32, depth: u32, shared_rows: u32, shared_columns: u32 },
 }
-/// The shared (Hydra) version of an algorithm, if one with a known error
-/// bound exists: `Cms` → `HydraCms`, `CountSketch` → `HydraCountSketch`;
-/// `None` for all others.
-pub fn hydra_kind_for(a: &SketchAlgorithm) -> Option<HydraKind>;
-
 /// `size`: number of rows kept in the reservoir.
 pub enum SamplingKind  { Reservoir }    pub enum SamplingParams  { Reservoir { size: u32 } }
 /// `coefficients`: number of wavelet coefficients kept.
@@ -1237,7 +1205,7 @@ pub enum WaveletKind   { Haar }         pub enum WaveletParams   { Haar { coeffi
 pub enum StatModelKind { Parametric }   pub enum StatModelParams { Parametric { family: String } }
 ```
 
-### 6.5 Update input and evaluations (`ir/schema/sketch.rs`, `ir/operator/maintained_population.rs`)
+### 6.5 Update input and evaluations (`summary_type/statistic.rs`, `ir/operator/maintained_population.rs`)
 
 This part of the code answers two questions about summary state:
 
@@ -1341,7 +1309,7 @@ pub struct CurrentSeriesInput {
 }
 ```
 
-A finalized value's accuracy statement is `AccuracyGuarantee` (`ir/properties/guarantee.rs`): a `spec` (`AccuracySpec`) with `accuracy_metric` (which error is measured, e.g. rank error), `error` (the error bound), `failure_probability` (the chance the bound does not hold) and `accuracy_scope` (which output values one statement covers), plus `provenance` (which estimates the bound came from). It is attached to evaluation and finalized nodes, and to `MaintainPopulation` nodes (whose population is exact); never to sketch or accumulator state.
+A finalized value's accuracy statement is `AccuracyGuarantee` (`accuracy/guarantee.rs`): a `spec` (`AccuracySpec`) with `accuracy_metric` (which error is measured, e.g. rank error), `error` (the error bound), `failure_probability` (the chance the bound does not hold) and `accuracy_scope` (which output values one statement covers), plus `provenance` (which estimates the bound came from). It is attached to evaluation and finalized nodes, and to `MaintainPopulation` nodes (whose population is exact); never to sketch or accumulator state.
 
 ### 6.6 Summary coverage (`crates/types/src/ir/properties/summary_coverage.rs`)
 
@@ -1361,11 +1329,9 @@ pub struct SummaryCoverage {
 pub struct SelectionBox {
     /// One constraint per restricted column. A column not in the map is
     /// unrestricted.
+    /// The timestamp column is one of them; there is no separate time
+    /// field.
     pub columns: BTreeMap<ColumnIdentity, Constraint>,
-    /// The time window relative to the evaluation time, in ms, e.g.
-    /// `(Excluded(-120000), Included(-60000))` for `(−2m, −1m]`.
-    /// `None`: no time restriction.
-    pub relative_time: Option<(Bound<i64>, Bound<i64>)>,
 }
 
 /// Names a column across nodes, independent of its position.
@@ -1384,10 +1350,31 @@ pub enum Constraint {
     NotIn(Vec<ScalarValue>),
     /// The value lies between `lower` and `upper`. Each end is `Included`,
     /// `Excluded` or `Unbounded`.
-    Interval { lower: Bound<ScalarValue>, upper: Bound<ScalarValue> },
+    Interval { lower: Bound<IntervalConstraintLimit>, upper: Bound<IntervalConstraintLimit> },
     // HashPartition { columns, of, index }: added with its first producer.
 }
 
+/// An end of an interval. Limits compare only within one variant.
+pub enum IntervalConstraintLimit {
+    /// A constant, e.g. `Float64(10.0)` or `Timestamp(ms since the epoch)`.
+    FixedValue(ScalarValue),
+    /// The evaluation time t of a repeatedly evaluated query plus this
+    /// many ms; only on the timestamp column.
+    EvaluationTimePlusMs(i64),
+}
+```
+
+A PromQL range `m[r]` evaluated at t reads the samples in (t − r, t]: left-open, right-closed.
+
+| Query fragment | `lower` | `upper` |
+|---|---|---|
+| PromQL `m[5m]` | `Excluded(EvaluationTimePlusMs(-300_000))` | `Included(EvaluationTimePlusMs(0))` |
+| PromQL `m[5m] offset 1h` | `Excluded(EvaluationTimePlusMs(-3_900_000))` | `Included(EvaluationTimePlusMs(-3_600_000))` |
+| PromQL `m[5m] @ 1700000000` | `Excluded(FixedValue(Timestamp(1_699_999_700_000)))` | `Included(FixedValue(Timestamp(1_700_000_000_000)))` |
+| SQL `WHERE ts >= '2026-11-01'` | `Included(FixedValue(Timestamp(..)))` | `Unbounded` |
+| SQL `WHERE price > 10` | `Excluded(FixedValue(Float64(10.0)))` | `Unbounded` |
+
+```rust
 impl SummaryCoverage {
     /// Computes the coverage of a summary node from its sub-DAG (§4.2.2).
     /// Errors: `NotSummary` for a node that is not a `SummaryAgg`,

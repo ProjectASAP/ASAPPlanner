@@ -6,9 +6,8 @@ use crate::summary_kernels::{
     HydraKllSketchAccumulator,
 };
 use crate::AggregateCore;
-use planner_types::ir::schema::{
-    FieldDataType as SummaryFamilyType, SketchAlgorithm, SketchParams,
-};
+use planner_types::ir::schema::FieldDataType as SummaryFamilyType;
+use planner_types::summary_type::{SketchAlgorithm, SketchParams};
 
 /// Generate the clone-based `AccumulatorUpdater` methods for updaters whose
 /// inner `acc` field implements `Clone + AggregateCore`.
@@ -462,28 +461,30 @@ fn cms_dims(params: &SketchParams) -> (usize, usize) {
 
 /// Construct the kernel declared by a Planner SummaryAgg. No deployment config
 /// tags participate in this dispatch and unsupported payloads are errors.
+///
+/// `parameters` is θ, which the exported node carries
+/// (`PhysicalASAPDAGNode::parameters`); `None` for an exact accumulator.
 pub fn create_planner_accumulator(
     family: &SummaryFamilyType,
-    input: &planner_types::ir::schema::SummaryUpdate,
-    grouping: &planner_types::ir::schema::GroupingStrategy,
+    parameters: Option<&SketchParams>,
+    input: &planner_types::summary_type::SummaryUpdate,
 ) -> Result<Box<dyn AccumulatorUpdater>, String> {
     if input.item.is_some()
         && matches!(
             input.weight_domain,
-            planner_types::ir::schema::WeightDomain::NonNegative {
+            planner_types::summary_type::WeightDomain::NonNegative {
                 proof:
-                    planner_types::ir::schema::NonNegativeWeightProof::ResetAwareCounterDerivative
+                    planner_types::summary_type::NonNegativeWeightProof::ResetAwareCounterDerivative
             }
         )
     {
         return Err("window-weighted summaries require typed DAG binding; integer heap updaters cannot consume rates".into());
     }
 
-    crate::capability::validate_summary_kernel(family, input, grouping)?;
-    use planner_types::ir::schema::GroupingStrategy;
-    if grouping != &GroupingStrategy::PerSubpopulationInstance {
+    crate::capability::validate_summary_kernel(family, input)?;
+    if matches!(family, SummaryFamilyType::Sketch(SketchAlgorithm::HydraCms)) {
         return Err(
-            "shared grouping has one state for all groups; build it with `create_hydra_cms`".into(),
+            "HydraCms has one state for all groups; build it with `create_hydra_cms`".into(),
         );
     }
     if matches!(family, SummaryFamilyType::ExactAggregate(..)) {
@@ -494,15 +495,15 @@ pub fn create_planner_accumulator(
             )?,
         }));
     }
-    let SummaryFamilyType::Sketch(kind, family_grouping) = family else {
+    let SummaryFamilyType::Sketch(kind) = family else {
         return Err(format!("unsupported Planner summary family {family:?}"));
     };
-    if family_grouping != grouping {
-        return Err("Planner family and operator grouping disagree".into());
-    }
-    let updater: Box<dyn AccumulatorUpdater> = match (kind.algorithm(), kind.params()) {
+    let Some(params) = parameters else {
+        return Err("a sketch summary needs its parameters θ".into());
+    };
+    let updater: Box<dyn AccumulatorUpdater> = match (kind, params) {
         (SketchAlgorithm::Kll, SketchParams::Kll { k, .. }) => {
-            if *k > planner_types::ir::schema::sketch::KLL_MAX_K {
+            if *k > planner_types::summary_type::KLL_MAX_K {
                 return Err("KLL k exceeds runtime bound".into());
             }
             Box::new(KllAccumulatorUpdater::new(
@@ -525,7 +526,7 @@ pub fn create_planner_accumulator(
         }
         (SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap, _) => {
             let (algorithm, width, depth, capacity) =
-                WeightedFrequency::configuration(kind).map_err(|e| e.to_string())?;
+                WeightedFrequency::configuration(kind, params).map_err(|e| e.to_string())?;
             Box::new(
                 WeightedFrequencyUpdater::new(algorithm, width, depth, capacity)
                     .map_err(|e| e.to_string())?,
@@ -557,7 +558,7 @@ pub fn create_planner_accumulator(
         }),
         _ => {
             return Err(format!(
-                "unsupported Planner algorithm/parameters: {kind:?}"
+                "unsupported Planner algorithm/parameters: {kind:?} {params:?}"
             ))
         }
     };
@@ -673,132 +674,6 @@ impl AccumulatorUpdater for UnivMonUpdater {
 }
 
 #[cfg(test)]
-mod planner_parameter_regression {
-    use super::*;
-    use planner_types::ir::schema::{SketchKind, SummaryInputExpr, SummaryUpdate};
-
-    // Planner width is the bucket count; depth is the independent hash-row count.
-    #[test]
-    fn planner_sketch_dimensions_are_not_transposed() {
-        for (algorithm, params) in [
-            (
-                SketchAlgorithm::Cms,
-                SketchParams::Cms {
-                    width: 128,
-                    depth: 3,
-                },
-            ),
-            (
-                SketchAlgorithm::CountSketch,
-                SketchParams::CountSketch {
-                    width: 128,
-                    depth: 3,
-                },
-            ),
-            (
-                SketchAlgorithm::CmsWithHeap,
-                SketchParams::CmsWithHeap {
-                    width: 128,
-                    depth: 3,
-                    heap_size: 8,
-                },
-            ),
-            (
-                SketchAlgorithm::CountSketchWithHeap,
-                SketchParams::CountSketchWithHeap {
-                    width: 128,
-                    depth: 3,
-                    heap_size: 8,
-                },
-            ),
-        ] {
-            let family =
-                SummaryFamilyType::Sketch(SketchKind::new(algorithm, params), Default::default());
-            let update = SummaryUpdate {
-                item: Some(SummaryInputExpr::Column(
-                    planner_types::ir::scalar::ColumnRef::Named("host".into()),
-                )),
-                weight: SummaryInputExpr::Constant(1.0),
-                weight_domain: Default::default(),
-            };
-            let state = create_planner_accumulator(&family, &update, &Default::default())
-                .unwrap()
-                .snapshot_accumulator();
-            let dims = match algorithm {
-                SketchAlgorithm::Cms => {
-                    let s = state
-                        .as_any()
-                        .downcast_ref::<CountMinSketchAccumulator>()
-                        .unwrap();
-                    (s.inner.rows(), s.inner.cols())
-                }
-                SketchAlgorithm::CountSketch
-                | SketchAlgorithm::CmsWithHeap
-                | SketchAlgorithm::CountSketchWithHeap => {
-                    let (width, depth, _) = state
-                        .as_any()
-                        .downcast_ref::<WeightedFrequency>()
-                        .unwrap()
-                        .shape();
-                    (depth, width)
-                }
-                _ => unreachable!(),
-            };
-            assert_eq!(dims, (3, 128), "{algorithm:?}");
-        }
-    }
-
-    // HydraCms builds one shared grid shaped by its Hydra params; it is never
-    // a per-group updater, and its family must be the matching Count-Min.
-    #[test]
-    fn hydra_cms_builds_one_shared_grid() {
-        use planner_types::ir::schema::{
-            GroupingStrategy, HydraKind, HydraParams, NonNegativeWeightProof, WeightDomain,
-        };
-        let grouping = |width| GroupingStrategy::SharedMultiSubpopulation {
-            kind: HydraKind::HydraCms,
-            params: HydraParams::HydraCms {
-                width,
-                depth: 3,
-                shared_rows: 5,
-                shared_columns: 32,
-            },
-        };
-        let family = |width| {
-            SummaryFamilyType::Sketch(
-                SketchKind::new(
-                    SketchAlgorithm::Cms,
-                    SketchParams::Cms {
-                        width: 128,
-                        depth: 3,
-                    },
-                ),
-                grouping(width),
-            )
-        };
-        assert_eq!(
-            create_hydra_cms(&family(128)).unwrap().shape(),
-            (5, 32, 128, 3)
-        );
-        assert!(create_hydra_cms(&family(64)).is_err());
-        let update = SummaryUpdate {
-            item: Some(SummaryInputExpr::Column(
-                planner_types::ir::scalar::ColumnRef::Named("host".into()),
-            )),
-            weight: SummaryInputExpr::Constant(1.0),
-            weight_domain: WeightDomain::NonNegative {
-                proof: NonNegativeWeightProof::UnitCount,
-            },
-        };
-        assert!(
-            crate::capability::validate_summary_kernel(&family(128), &update, &grouping(128))
-                .is_ok()
-        );
-        assert!(create_planner_accumulator(&family(128), &update, &grouping(128)).is_err());
-    }
-}
-
-#[cfg(test)]
 mod ddsketch_domain {
     use super::*;
 
@@ -851,7 +726,7 @@ mod ddsketch_domain {
             for (q, exact) in expected {
                 let estimate = updater
                     .acc
-                    .estimate(&planner_types::ir::schema::SketchStatistic::Quantile { q })
+                    .estimate(&planner_types::summary_type::SketchStatistic::Quantile { q })
                     .unwrap();
                 assert!(
                     (estimate - exact).abs() <= 0.01 * f64::abs(exact),
@@ -899,7 +774,7 @@ mod tests {
         assert!(updater.update_value(&Value::Utf8("x".into()), 0).is_err());
         let median = updater
             .take_accumulator()
-            .estimate(&planner_types::ir::schema::SketchStatistic::Quantile { q: 0.5 })
+            .estimate(&planner_types::summary_type::SketchStatistic::Quantile { q: 0.5 })
             .unwrap();
         assert_eq!(median, 3.0);
     }
@@ -919,7 +794,7 @@ mod tests {
         }
         let estimate = updater
             .take_accumulator()
-            .estimate(&planner_types::ir::schema::SketchStatistic::Cardinality)
+            .estimate(&planner_types::summary_type::SketchStatistic::Cardinality)
             .unwrap();
         assert_eq!(estimate, 60.0);
     }

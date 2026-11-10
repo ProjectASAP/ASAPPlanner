@@ -133,7 +133,7 @@
             }
           },
           "id": 0,
-          "materialization": "NotMaterialized",
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -274,7 +274,7 @@
             }
           },
           "id": 1,
-          "materialization": "NotMaterialized",
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [

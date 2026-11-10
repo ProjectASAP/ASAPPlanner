@@ -8,13 +8,12 @@ use asap_executor::sources::InMemoryDataStore;
 use asap_executor::values::{Batch, Value};
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::operator::{Source, TimeShift};
-use planner_types::ir::physical_export::{compile_physical_asap_dag, PhysicalASAPDAG};
 use planner_types::ir::scalar::{CompareOpKind, ScalarValue};
 use planner_types::ir::schema::{DataType, Field, Schema, PROMQL_SERIES_IDENTITY};
 use planner_types::ir::{
-    apply_materialization_timings, ExprSemantics, MaterializationAssignment, NodeToTimedNodeCache,
-    NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr, TimeRangeKind,
+    ExprSemantics, NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr, TimeRangeKind,
 };
+use planner_types::plan::physical_asap_dag::PhysicalASAPDAG;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -84,13 +83,7 @@ fn window_over_rows(
         child,
     }))
     .unwrap();
-    let timed = apply_materialization_timings(
-        &range,
-        &MaterializationAssignment::default(),
-        &mut NodeToTimedNodeCache::new(),
-    )
-    .unwrap();
-    compile_physical_asap_dag(&timed).unwrap()
+    planner_types::test_support::physical_asap_dag_at_query_time(&range).unwrap()
 }
 
 /// `(instance, ts, value)` samples of `latency_ms` as a store's raw data.

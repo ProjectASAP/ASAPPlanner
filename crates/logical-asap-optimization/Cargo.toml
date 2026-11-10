@@ -21,7 +21,7 @@ asap-frontend-promql = { path = "../frontend-promql", optional = true }
 
 [features]
 # The test helpers (`test_support`) the later stage crates' tests share.
-test-support = ["dep:asap-frontend-promql"]
+test-support = ["dep:asap-frontend-promql", "asap-types/test-support"]
 
 [dev-dependencies]
 asap-types = { path = "../types", features = ["test-support"] }

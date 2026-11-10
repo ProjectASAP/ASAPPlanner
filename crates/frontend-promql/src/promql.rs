@@ -72,14 +72,13 @@ use asap_frontend_common::{
     UnresolvedOp as Unresolved, UnresolvedPredicate, UnresolvedScalar as Scalar, UnresolvedSortKey,
 };
 use asap_types::ir::operator::agg_intent::{topk, AggIntent, TimeFunc};
-use asap_types::ir::operator::operator_properties::{
+use asap_types::ir::operator::arguments::{
     AtModifier, BinaryOpKind, GroupKeys, GroupSide, PromQLVectorSetOpKind, Reduction, Source,
     TimeShift, VectorGrouping, VectorMatch, VectorMatchKind,
 };
 use asap_types::ir::{BinaryOperator, ExprSemantics, TimeRangeKind};
 
 use asap_types::ir::operator::{InfoMatcher, SampleKind};
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
 use asap_types::workload::{PrometheusMetricType, WorkloadError};
 
@@ -92,8 +91,6 @@ type Result<T> = std::result::Result<T, LoweringError>;
 
 /// Parses and lowers (→ the canonical, unresolved DAG) a PromQL query string.
 pub(crate) struct PromqlLowerer<'a> {
-    /// The target threaded onto every approximate intent.
-    accuracy: AccuracyTarget,
     /// What a bare instant selector over a metric looks back; `None` when
     /// the metric declares no sample interval.
     sample_interval_of: &'a dyn Fn(&str) -> Option<Duration>,
@@ -138,7 +135,6 @@ impl PromqlLowerer<'_> {
     /// checked by [`check_histogram_quantile_input`].
     pub(crate) fn lower_query(
         query: &str,
-        accuracy: &AccuracyTarget,
         sample_interval_of: &dyn Fn(&str) -> Option<Duration>,
         metric_type_of: &dyn Fn(&str) -> Option<PrometheusMetricType>,
     ) -> Result<asap_types::ir::QueryRoot> {
@@ -146,10 +142,7 @@ impl PromqlLowerer<'_> {
         check_depth(&ast, MAX_DEPTH)?;
         let mut metrics = Vec::new();
         collect_metric_names(&ast, &mut metrics);
-        let lowerer = PromqlLowerer {
-            accuracy: accuracy.clone(),
-            sample_interval_of,
-        };
+        let lowerer = PromqlLowerer { sample_interval_of };
         if metrics
             .iter()
             .any(|metric| metric_type_of(metric) == Some(PrometheusMetricType::NativeHistogram))
@@ -402,7 +395,6 @@ impl PromqlLowerer<'_> {
                 AggIntent::Quantile {
                     col: None,
                     q: num_arg(call, 0)?,
-                    accuracy: self.accuracy.clone(),
                 },
                 1,
             ))),
@@ -418,21 +410,10 @@ impl PromqlLowerer<'_> {
                 col: None,
                 population: true,
             }),
-            "count_over_time" => at0(AggIntent::Count {
-                accuracy: self.accuracy.clone(),
-            }),
-            "distinct_over_time" => at0(AggIntent::Cardinality {
-                cols: vec![],
-                accuracy: self.accuracy.clone(),
-            }),
-            "entropy_over_time" => at0(AggIntent::FrequencyEntropy {
-                col: None,
-                accuracy: self.accuracy.clone(),
-            }),
-            "l2_over_time" => at0(AggIntent::FrequencyL2 {
-                col: None,
-                accuracy: self.accuracy.clone(),
-            }),
+            "count_over_time" => at0(AggIntent::Count),
+            "distinct_over_time" => at0(AggIntent::Cardinality { cols: vec![] }),
+            "entropy_over_time" => at0(AggIntent::FrequencyEntropy { col: None }),
+            "l2_over_time" => at0(AggIntent::FrequencyL2 { col: None }),
             // Counter-derivative range functions (issue #44). Each has its own
             // intent — `changes` (value-change count) and `resets` (counter-reset
             // count) are NOT sample counts, so they are not aliased to
@@ -536,9 +517,7 @@ impl PromqlLowerer<'_> {
             }
         } else if op == token::T_COUNT {
             // Counts vector elements regardless of their sample values.
-            Outer::Reduce(AggIntent::Count {
-                accuracy: self.accuracy.clone(),
-            })
+            Outer::Reduce(AggIntent::Count)
         } else if op == token::T_SUM {
             Outer::Reduce(AggIntent::Sum { col: None })
         } else if op == token::T_GROUP {
@@ -581,7 +560,6 @@ impl PromqlLowerer<'_> {
             Outer::Reduce(AggIntent::Quantile {
                 col: None,
                 q: num_param(agg)?,
-                accuracy: self.accuracy.clone(),
             })
         } else {
             return Err(LoweringError::UnsupportedAggregateOp(format!(
@@ -632,7 +610,7 @@ impl PromqlLowerer<'_> {
                             ) || (matches!(reduction, Reduction::PerEntity)
                                 && matches!(
                                     measures.as_slice(),
-                                    [AggIntent::Sum { .. } | AggIntent::Count { .. }]
+                                    [AggIntent::Sum { .. } | AggIntent::Count]
                                 )))
                 );
                 let direct_counter_ranking = matches!(&child, Unresolved::Aggregate {
@@ -644,10 +622,7 @@ impl PromqlLowerer<'_> {
                 if descending && (weighted_group_ranking || direct_counter_ranking) {
                     return Ok(outer_aggregate(
                         keys,
-                        AggIntent::TopK {
-                            k: k as usize,
-                            accuracy: self.accuracy.clone(),
-                        },
+                        AggIntent::TopK { k: k as usize },
                         child,
                     ));
                 }
@@ -1089,7 +1064,7 @@ impl PromqlLowerer<'_> {
                 // operator pair. The descending-plus-measure rule is shared with the
                 // canonicalize-pass promotion so the two cannot drift (issue #38).
                 let measure = match func {
-                    Some(AggIntent::Count { .. }) => topk::Ranking::Frequency,
+                    Some(AggIntent::Count) => topk::Ranking::Frequency,
                     Some(AggIntent::Sum { .. }) => topk::Ranking::WeightedSum,
                     _ => topk::Ranking::NonAdditive,
                 };
@@ -1119,10 +1094,7 @@ impl PromqlLowerer<'_> {
                         // A ranking always reduces (a `by`-empty TopK ranks the
                         // whole input into one ordering, never per-entity).
                         reduction: Reduction::Reduce(keys.into()),
-                        measures: vec![AggIntent::TopK {
-                            k: k as usize,
-                            accuracy: self.accuracy.clone(),
-                        }],
+                        measures: vec![AggIntent::TopK { k: k as usize }],
                         output_names: vec![],
                         filters: vec![],
                         having: None,

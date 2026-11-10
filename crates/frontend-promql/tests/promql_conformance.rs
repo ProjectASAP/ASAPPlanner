@@ -37,11 +37,11 @@ use std::time::Duration;
 
 use crate::support;
 use asap_frontend_promql::PromqlError as LoweringError;
+use asap_types::accuracy::AccuracyTarget;
 use asap_types::ir::operator::{
     AggIntent, AtModifier, BinaryOpKind, PromQLVectorSetOpKind, Reduction, SampleKind, Source,
     TimeFunc,
 };
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::{ArithmeticOpKind, CompareOpKind, ScalarValue};
 use asap_types::ir::schema::DataType;
 use asap_types::ir::{
@@ -289,10 +289,7 @@ fn sum_by_groups_via_positional_aggregate() {
 
 #[test]
 fn count_is_row_count() {
-    assert!(has(&ok("count(up)"), |i| matches!(
-        i,
-        AggIntent::Count { .. }
-    )));
+    assert!(has(&ok("count(up)"), |i| matches!(i, AggIntent::Count)));
 }
 
 #[test]
@@ -425,7 +422,7 @@ fn over_time_functions_reduce_over_time_range() {
             "max" => matches!(i, AggIntent::Max { .. }),
             "min" => matches!(i, AggIntent::Min { .. }),
             "sum" => matches!(i, AggIntent::Sum { .. }),
-            "count" => matches!(i, AggIntent::Count { .. }),
+            "count" => matches!(i, AggIntent::Count),
             _ => unreachable!(),
         });
         assert!(matched, "{q}: missing {want} intent");
@@ -582,28 +579,14 @@ fn double_unary_negation_nests() {
     assert!(negates_via_scalar(child));
 }
 
+/// `count` lowers to a `Count` measure, not a distinct count.
 #[test]
-fn count_maps_to_count_and_inherits_accuracy() {
-    // Counts preserve the workload accuracy target without counting distinct values.
-    let exact = lower_promql("count by (job) (up)", AccuracyTarget::exact()).unwrap();
+fn count_maps_to_count() {
+    let lowered = lower_promql("count by (job) (up)", AccuracyTarget::exact()).unwrap();
     assert!(
-        has(&exact, |i| matches!(
-            i,
-            AggIntent::Count { accuracy } if accuracy.is_exact()
-        )),
-        "Count must stay exact under an exact target, got {:?}",
-        intents(&exact)
-    );
-
-    let approx = lower_promql("count by (job) (up)", AccuracyTarget::max_error(0.01)).unwrap();
-    assert!(
-        has(&approx, |i| matches!(
-            i,
-            AggIntent::Count { accuracy } if (accuracy.max_error - 0.01).abs() < 1e-9
-                && accuracy.accuracy_metric.is_none()
-        )),
-        "Count must carry the approximate target, got {:?}",
-        intents(&approx)
+        has(&lowered, |i| matches!(i, AggIntent::Count)),
+        "got {:?}",
+        intents(&lowered)
     );
 }
 
@@ -1939,7 +1922,7 @@ fn limitk_by_carries_the_grouping_and_composes_in_a_set_op() {
     // the PromqlSeriesSample must be preserved under the set op (it must lower, not reject).
     assert!(has(
         &ok("count(limitk(2, http_requests) and http_requests)"),
-        |i| matches!(i, AggIntent::Count { .. })
+        |i| matches!(i, AggIntent::Count)
     ));
 }
 

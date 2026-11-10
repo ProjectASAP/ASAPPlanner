@@ -1,5 +1,5 @@
 use super::*;
-use planner_types::ir::physical_export::PhysicalASAPNodeId;
+use planner_types::plan::physical_asap_dag::PhysicalASAPNodeId;
 use std::collections::BTreeMap;
 
 /// An immutable in-memory [`DataStore`], for tests and examples: raw tables

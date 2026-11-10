@@ -39,7 +39,7 @@ The main implementation locations are:
 
 | Concern | Location |
 | --- | --- |
-| Guarantee and error vocabulary | `asap_types::ir::properties::guarantee` |
+| Guarantee and error vocabulary | `asap_types::accuracy` |
 | Accuracy model and built-in propagation | `asap_accuracy` |
 | Candidate construction and legality filtering | `asap_aware_mapping::replacement` |
 | Parameter sizing hooks | `asap_aware_mapping::cost_model` |
@@ -52,23 +52,26 @@ Read the sections below when changing one of those contracts.
 Accuracy reasoning and allocation are separate from cost modeling:
 
 ```rust
-trait AccuracyModel {
-    fn local_guarantee(/* family, query, parameters */)
-        -> Option<AccuracyGuarantee>;
+/// The theoretical error bound of reading `statistic` from a state of
+/// `summary_type` with parameters θ at `failure_probability`: the
+/// algorithm's error formula. `None` when θ cannot fail that rarely.
+pub fn theoretical_guarantee(
+    summary_type: &FieldDataType,
+    parameters: &SketchParams,
+    statistic: &SketchStatistic,
+    failure_probability: f64,
+) -> Option<AccuracyGuarantee>;
 
-    fn propagate(
+/// The deployment's measured error bound for the same configuration, read
+/// first when present; `NoMeasuredGuarantees` has none.
+pub trait AccuracyEvidence {
+    fn measured_guarantee(
         &self,
-        op: &CompositionOperator,
-        inputs: &[AccuracyGuarantee],
-        local: Option<&AccuracyGuarantee>,
-        stats: &PropagationStats,
-    ) -> Result<AccuracyGuarantee, AccuracyError>;
-
-    fn satisfies(
-        &self,
-        guarantee: &AccuracyGuarantee,
-        target: &AccuracyTarget,
-    ) -> bool;
+        summary_type: &FieldDataType,
+        parameters: &SketchParams,
+        statistic: &SketchStatistic,
+        failure_probability: f64,
+    ) -> Option<AccuracyGuarantee>;
 }
 ```
 
@@ -174,9 +177,7 @@ against the DataSketches maximum-rank-error characterization
 `2.446 / k^0.9433` at a per-trial failure probability of 0.01, not against this
 single-sided fit or its δ scaling.
 
-A KLL shared by readers with different failure probabilities is sized at the
-smallest one. Each reader's `k` is first resized to it at no larger rank
-error (`kll::shared_k`), and the largest is kept. See
+See
 [Apache DataSketches KLL accuracy](https://datasketches.apache.org/docs/KLL/KLLAccuracyAndSize.html)
 and its
 [C++ contract pinned at `a9b42755072b`](https://github.com/apache/datasketches-cpp/blob/a9b42755072b079fd90b29b9851adc121015c58e/kll/include/kll_sketch.hpp).
@@ -204,7 +205,7 @@ satisfy a target with only `error` set, but not one that also sets
 `failure_probability`.
 
 Classic HLL (its linear-counting branch) has an estimator-specific confidence
-bound (`accuracy/estimators/hll.rs`). Its precision is sized from (ε, δ), and
+bound (`accuracy/guarantee/hll.rs`). Its precision is sized from (ε, δ), and
 its failure probability stays symbolic,
 `classic_hll_failure_probability[p=P,eps=ε](max_distinct[source])`, until
 plan selection binds it with the source's
@@ -259,9 +260,9 @@ with probability at most `1/3`. Zero or even depth has no modeled guarantee.
 
 ASAPPlanner contains the guarantee algebra and parameter-derived contracts.
 Planner is not a query executor. Data- or runtime-dependent evidence enters
-through an `AccuracyEvidenceProvider`, is exposed to propagation as typed
-`PropagationStats`, and is recorded in provenance. `NoAccuracyEvidence` is the
-default: it supplies no missing facts. Guarantee derivation remains conservative.
+through `AccuracyEvidence` (measured guarantees) or the data workload's
+declared facts, is exposed to propagation as typed `PropagationStats`, and
+is recorded in provenance. The default evidence has no measurements. Guarantee derivation remains conservative.
 
 ### TopK membership
 

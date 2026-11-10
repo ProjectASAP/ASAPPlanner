@@ -9,15 +9,16 @@ use asap_executor::{
 };
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::operator::{GroupKeys, Reduction};
-use planner_types::ir::physical_export::{
-    PhysicalASAPDAGNode, PhysicalASAPOperatorPayload as Payload,
-};
 use planner_types::ir::properties::*;
 use planner_types::ir::scalar::{ColumnRef, CompareOpKind, ScalarValue};
 use planner_types::ir::schema::DataType;
 use planner_types::ir::schema::*;
 use planner_types::ir::{ASAPOp, ExprSemantics, Predicate, ScalarExpr};
-use planner_types::physical::Materialization;
+use planner_types::plan::physical_asap_dag::{
+    PhysicalASAPDAGNode, PhysicalASAPOperatorPayload as Payload,
+};
+use planner_types::stages::Lifetime;
+use planner_types::summary_type::*;
 use std::{collections::BTreeMap, sync::Arc};
 
 const WIDTH: u32 = 64;
@@ -36,29 +37,8 @@ const ROWS: [(&str, &str, f64); 9] = [
     ("db", "vacuum", 2.),
 ];
 
-fn grouping() -> GroupingStrategy {
-    GroupingStrategy::SharedMultiSubpopulation {
-        kind: HydraKind::HydraCms,
-        params: HydraParams::HydraCms {
-            width: WIDTH,
-            depth: 3,
-            shared_rows: 3,
-            shared_columns: SHARED_COLUMNS,
-        },
-    }
-}
-
 fn family() -> FieldDataType {
-    FieldDataType::Sketch(
-        SketchKind::new(
-            SketchAlgorithm::Cms,
-            SketchParams::Cms {
-                width: WIDTH,
-                depth: 3,
-            },
-        ),
-        grouping(),
-    )
+    FieldDataType::Sketch(SketchAlgorithm::HydraCms)
 }
 
 fn schema(fields: Vec<Field>) -> Schema {
@@ -75,10 +55,12 @@ fn node(id: usize, payload: Payload, output: Schema) -> PhysicalASAPDAGNode {
         id,
         payload,
         output_state: ExecutionDataState::QUERY_ROWS,
-        materialization: Materialization::NotMaterialized,
+        lifetime: Lifetime::None,
+        parameters: None,
         output_schema: output,
         guarantee: None,
         retention_ms: None,
+        selected_physical_candidate: None,
     }
 }
 
@@ -123,10 +105,9 @@ fn summary_agg(update: SummaryUpdate, filter: Option<Predicate<usize>>) -> Physi
         1,
         Payload::ASAP(ASAPOp::SummaryAgg {
             child: 0,
-            family: family(),
+            summary_type: family(),
             input: update,
             reduction: Reduction::Reduce(GroupKeys::by(vec![0])),
-            grouping: grouping(),
             filter,
         }),
         schema(vec![
@@ -205,7 +186,6 @@ fn try_run(
                 2,
                 Payload::ASAP(ASAPOp::SummaryMerge {
                     children: vec![1],
-                    newest_tumbling_windows: None,
                     group_by: None,
                 }),
                 (*state).clone(),
@@ -420,7 +400,7 @@ fn constant_weight_above_i32_is_refused_at_validation() {
         },
         ..unit_count()
     };
-    let error = asap_executor::capability::validate_summary_kernel(&family(), &update, &grouping())
+    let error = asap_executor::capability::validate_summary_kernel(&family(), &update)
         .expect_err("validation accepted a constant above i32::MAX");
     assert!(
         error.contains("HydraCms") && error.contains("i32::MAX"),

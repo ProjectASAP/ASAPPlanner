@@ -5,10 +5,7 @@
 mod time_series;
 
 mod columnar_batches;
-mod deployment_accuracy_model;
 mod e2e_plan;
-mod per_sample_updater;
 mod runtime_install;
-mod sql_per_group_topk;
 mod sql_table_scans;
 mod summary_sharing;

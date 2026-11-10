@@ -1,7 +1,7 @@
 //! DDSketch quantile summary over `asap_sketchlib::DdSketch`.
 use crate::{AggregateCore, KernelError};
 use asap_sketchlib::DdSketch;
-use planner_types::ir::schema::SketchStatistic;
+use planner_types::summary_type::SketchStatistic;
 
 #[derive(Debug, Clone)]
 pub struct DDSketchAccumulator {

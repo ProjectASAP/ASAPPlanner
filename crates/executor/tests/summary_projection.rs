@@ -9,15 +9,16 @@ use asap_executor::{
     values::{Batch, Value},
 };
 use futures::{executor::block_on, StreamExt};
-use planner_types::ir::physical_export::{
-    EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
-    PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
-};
 use planner_types::ir::properties::*;
 use planner_types::ir::scalar::ColumnRef;
 use planner_types::ir::schema::{DataType, *};
 use planner_types::ir::NonASAPOp;
 use planner_types::ir::{ASAPOp, TimeRangeKind};
+use planner_types::plan::physical_asap_dag::{
+    EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
+    PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
+};
+use planner_types::summary_type::*;
 use std::{sync::Arc, time::Duration};
 
 /// The raw samples a stored summary is built from: `ts`, `value` and
@@ -52,9 +53,11 @@ fn raw_node(id: usize, payload: NonASAPOp<usize>) -> PhysicalASAPDAGNode {
         payload: PhysicalASAPOperatorPayload::NonASAP(payload),
         output_schema: sample_schema(),
         output_state: ExecutionDataState::QUERY_ROWS,
-        materialization: Default::default(),
+        lifetime: Default::default(),
+        parameters: None,
         guarantee: None,
         retention_ms: None,
+        selected_physical_candidate: None,
     }
 }
 
@@ -113,19 +116,20 @@ fn summary_projection_survives_recovery() {
                 id: 0,
                 payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
                     child: 3,
-                    family: family.clone(),
+                    summary_type: family.clone(),
                     input: SummaryUpdate::column(ColumnRef::SampleValue),
                     reduction: planner_types::ir::operator::Reduction::Reduce(
                         planner_types::ir::operator::GroupKeys::by(vec![2]),
                     ),
-                    grouping: GroupingStrategy::PerSubpopulationInstance,
                     filter: None,
                 }),
                 output_schema: (*schema).clone(),
                 output_state: ExecutionDataState::INGESTION_SUMMARY,
-                materialization: Default::default(),
+                lifetime: Default::default(),
+                parameters: None,
                 guarantee: None,
                 retention_ms: None,
+                selected_physical_candidate: None,
             },
             raw_node(2, scan()),
             raw_node(
@@ -151,9 +155,11 @@ fn summary_projection_survives_recovery() {
                 }),
                 output_schema: output.clone(),
                 output_state: ExecutionDataState::INGESTION_SUMMARY,
-                materialization: Default::default(),
+                lifetime: Default::default(),
+                parameters: None,
                 guarantee: None,
                 retention_ms: None,
+                selected_physical_candidate: None,
             },
         ],
         edges: vec![
@@ -191,8 +197,8 @@ fn summary_projection_survives_recovery() {
     assert_eq!(*program.output_schema(1).unwrap(), output);
     let mut accumulator = create_planner_accumulator(
         &family,
+        None,
         &SummaryUpdate::column(ColumnRef::SampleValue),
-        &GroupingStrategy::PerSubpopulationInstance,
     )
     .unwrap();
     accumulator.update_single(7., 1).unwrap();
@@ -254,14 +260,15 @@ fn summary_merge_without_inputs_is_rejected() {
             id: 0,
             payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge {
                 children: vec![],
-                newest_tumbling_windows: None,
                 group_by: None,
             }),
             output_schema: schema,
             output_state: ExecutionDataState::INGESTION_SUMMARY,
-            materialization: Default::default(),
+            lifetime: Default::default(),
+            parameters: None,
             guarantee: None,
             retention_ms: None,
+            selected_physical_candidate: None,
         }],
         edges: vec![],
         roots: vec![0],

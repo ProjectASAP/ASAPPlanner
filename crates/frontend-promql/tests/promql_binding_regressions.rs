@@ -1,5 +1,5 @@
 use crate::support;
-use asap_types::ir::properties::AccuracyTarget;
+use asap_types::accuracy::AccuracyTarget;
 use support::lower_promql;
 
 /// Prometheus treats these quantile parameters as valid queries returning special values.
@@ -38,5 +38,5 @@ fn count_is_row_count_not_distinct_sample_value_count() {
     let NonASAPOp::Aggregate { measures, .. } = tree.expect_non_asap() else {
         panic!("expected aggregate")
     };
-    assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Count]));
 }

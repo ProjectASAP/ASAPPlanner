@@ -14,13 +14,13 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
 | After | The DAG holds | Timing |
 | --- | --- | --- |
 | Stage 0 (frontends) | `NonASAPOp` nodes only; aggregates carry `AggIntent` measures with each query's `AccuracyTarget` as written | none |
-| Stage 1 (`compose_logical_candidate`, Pass 2 rules) | `ASAPOp` nodes where a candidate chose an exact accumulator or a summary (`SummaryAgg`, `SummaryTumblingWindowChain`, `SummaryMerge`, `SummaryEstimate`, `FinalizeExactAccumulator`); everything else stays `NonASAPOp` | none: Stage 1 never decides when anything runs |
-| Stage 2 (`generate_physical_asap_memo_candidates`; a selected plan built by `Stage2AssignmentRealizer`) | the same operators, with a `Materialization` on each summary build | every node timed from the candidate's `MaterializationAssignment` |
+| Stage 1 (Pass 1 and Pass 2 rules) | `ASAPOp` nodes where a candidate chose an exact accumulator or a summary (`SummaryAgg`, `SummaryTumblingWindowChain`, `SummaryMerge`, `SummaryEstimate`, `FinalizeExactAccumulator`); everything else stays `NonASAPOp` | none: Stage 1 never decides when anything runs |
+| Stage 2 (`generate_physical_asap_memo_candidates`) and Stage 3 (`select_plan`, which builds the plan) | the same operators, with a timing and a `Lifetime` on each summary build | every node of the plan timed from the physical candidate it was built from (`selected_physical_candidate`) |
 
 - Structurally equal sub-DAGs are interned before Stage 1
   (`stage0/cse.rs` in `asap_logical_asap_optimization`), so Stage 1 compares nodes by structure and Pass 2
   matches readers structurally, never by pointer.
-- Timing is applied with `apply_materialization_timings`, which validates
+- Timing is applied with `apply_physical_properties`, which validates
   every data-state edge. A violation is an `ExecutionDataStateError`:
   for example `QueryTimeValueUnderIngestionSummary` (a query-time value
   beneath an ingestion-time build), `ConflictingTiming` (one shared node
@@ -62,11 +62,12 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
 
 ## 3. Accuracy
 
-- `AccuracyModel` is the extension point: `local_guarantee` (a family's
-  guarantee over exact input), `propagate` (composition through an operator)
-  and `satisfies` (a guarantee against a target). It fails closed: no rule, or
-  a missing input guarantee, means no guarantee, and the candidate is
-  rejected rather than assumed accurate.
+- A summary's guarantee is the deployment's measurement
+  (`AccuracyEvidence::measured_guarantee`) when there is one, else its
+  algorithm's error formula (`theoretical_guarantee`); Pass 2 compares it
+  with each readout's `RequiredAccuracy`
+  (`producer_satisfies_logical_requirements`). It fails closed: no rule
+  means no guarantee, and the edge is not admissible.
 - A target with no `accuracy_metric` accepts a guarantee in any metric that
   meets its ε, δ and scope; Stage 3 reports the metric it accepted
   (`AcceptedAccuracy`).
@@ -78,27 +79,29 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
 ## 4. Stage 2
 
 - Only summary builds (`SummaryAgg`, `SummaryTumblingWindowChain`) get materialization
-  options: `NotMaterialized` always; `MatAtIngestion(Memory)` when the build
-  is eligible to run as data arrives; `MatAtQuery(Memory)` when two or more
-  queries read it (reused within one evaluation);
-  `MatAtQueryKeptAcrossEvaluations(Memory)` for a tumbling-window chain that
+  options, each a timing and a lifetime (`PhysicalProperties`): not materialized always;
+  materialized at ingestion time, `AcrossEvaluations(Memory)`, when the build is
+  eligible to run as data arrives; materialized at query time for `OneEvaluation(Memory)`
+  when two or more queries read it (reused within one evaluation); materialized at
+  query time `AcrossEvaluations(Memory)` for a tumbling-window chain that
   builds one new tumbling window per evaluation, when the deployment declares
   `query_time_results_retained`.
-- One `PhysicalCandidate` per assignment, the all-`NotMaterialized` one first
+- One `PhysicalCandidate` per assignment, the all-not-materialized one first
   (`P<n>`, then `P<n>-m<k>`). An assignment that puts a build at ingestion
   time over one that is not is not generated. A logical candidate Stage 2
   cannot implement becomes a `PrunedCandidate` with its reason.
 - On the memo (`generate_physical_asap_memo_candidates`), every physical
   candidate Stage 2 prunes is recorded in
   `PhysicalASAPMemoCandidates::pruned_candidates` as
-  `PrunedCandidate<PhysicalCandidateKey>` with a `PruneReason`: an exact
-  per-entity `Aggregate` the executor cannot run
-  (`PerEntityAggregateNotExecutable`) and, without raw data retained, a
-  query-time scan of raw data (`RawDataNotRetained`) are not generated; a
-  candidate no buildable input, query output or reader count can use is
-  removed (`InputHasNoBuildableProducer`, `ReachesNoQueryOutput`,
-  `TooFewQueryReaders`). Stage 2 emits one candidate per operator node,
-  timing and materialization; it makes no execution-scope copies.
+  `PrunedCandidate<PhysicalCandidate>` with a `PruneReason`: an
+  ingestion-time alternative without an ingestion pipeline
+  (`NoIngestionPipeline`), a query-time scan of raw data the deployment does
+  not retain (`RawDataNotRetained`) and a materialized query-time result the
+  deployment does not retain (`QueryTimeResultsNotRetained`) are not
+  generated; a candidate no buildable input or query output can use is
+  removed (`InputHasNoBuildableProducer`, `ReachesNoQueryOutput`). The
+  planner does not check executor support. Stage 2 emits one candidate per operator node,
+  timing and lifetime; it makes no execution-scope copies.
 
 ## 5. Stage 3
 
@@ -131,5 +134,5 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
 | What is shared, split into tumbling windows or reused | Pass 2 |
 | When each build runs and whether it is kept | Stage 2 |
 | Which plan is valid and which is chosen | Stage 3 |
-| What the executor can build, retain and how it is priced | the deployment, through `PlanningModels` (`DeploymentCapabilities`, `CostInputs`, `AccuracyModel`) |
+| What the executor can build, retain and how it is priced | the deployment, through `PlanningModels` (`DeploymentCapabilities`, `CostInputs`, `AccuracyEvidence`) |
 | Running the plan | the executor (`asap-executor`), outside the planner |

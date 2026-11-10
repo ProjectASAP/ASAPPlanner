@@ -3,9 +3,8 @@
 //! kernel objects (states read back from rows).
 use asap_executor::operators::{Operator, SummaryEvaluation};
 use asap_executor::plan::PhysicalDAG;
-use asap_executor::planner::ir::schema::{
-    DataType, ExactKind, ExactParams, Field, FieldDataType, Schema,
-};
+use asap_executor::planner::ir::schema::{DataType, Field, FieldDataType, Schema};
+use asap_executor::planner::summary_type::{ExactKind, ExactParams};
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::summary_kernels::exact::ExactEvaluation;
 use asap_executor::values::{Batch, SchemaRef, Value};

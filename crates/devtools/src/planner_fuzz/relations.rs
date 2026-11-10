@@ -15,15 +15,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use asap_types::ir::operator::agg_intent::AggIntent;
-use asap_types::ir::operator::operator_properties::Reduction;
+use asap_types::ir::operator::arguments::Reduction;
 use asap_types::ir::scalar::{ColumnRef, CompareOpKind, ScalarValue};
-use asap_types::ir::schema::family_capability::FamilyCapability;
-use asap_types::ir::schema::sketch::{SketchAlgorithm, SketchStatistic};
 use asap_types::ir::schema::{DataType, FieldDataType};
 use asap_types::ir::{
     ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorNode, Predicate, ProjectItem, QueryRoot,
     ScalarExpr,
 };
+use asap_types::summary_type::SummaryTypeCapability;
+use asap_types::summary_type::{SketchAlgorithm, SketchStatistic};
 
 use super::generate::{
     label_value, looser, tighter, OuterAggregation, OuterOp, PromqlSpec, QuerySpec, RangeFunction,
@@ -987,11 +987,18 @@ fn with_root_estimate(
 }
 
 /// The family of the build whose state `state` carries.
-fn state_family(state: &OperatorNode) -> Result<FieldDataType, String> {
+fn state_family(state: &Rc<OperatorNode>) -> Result<FieldDataType, String> {
     match state.summary_build() {
         Some(
-            ASAPOp::SummaryAgg { family, .. } | ASAPOp::SummaryTumblingWindowChain { family, .. },
-        ) => Ok(family.clone()),
+            ASAPOp::SummaryAgg {
+                summary_type: family,
+                ..
+            }
+            | ASAPOp::SummaryTumblingWindowChain {
+                summary_type: family,
+                ..
+            },
+        ) => Ok(family),
         _ => Err("q's estimate reads no single summary build".into()),
     }
 }
@@ -1118,7 +1125,7 @@ pub fn witness_root(
         Witness::SketchRollup { labels } => {
             let (state, query) = root_estimate(q_root)?;
             let family = state_family(&state)?;
-            if !FamilyCapability::merges_groups(&family) {
+            if !SummaryTypeCapability::merges_groups(&family) {
                 return Err(format!("q's family {family:?} does not merge groups"));
             }
             let group_by = labels
@@ -1142,7 +1149,6 @@ pub fn witness_root(
                 .collect();
             let merge = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
                 children: vec![state],
-                newest_tumbling_windows: None,
                 group_by: Some(group_by),
             }))
             .map_err(|e| format!("rollup merge: {e}"))?;
@@ -1153,45 +1159,10 @@ pub fn witness_root(
             .map_err(|e| format!("rollup estimate: {e}"))?;
             with_root_estimate(q_root, estimate, &dropped)
         }
-        Witness::NewestTumblingWindows { window_ms } => rewrite_root(
-            q_root,
-            "summary merge over a tumbling-window chain",
-            |node| {
-                let Some(ASAPOp::SummaryMerge {
-                    children,
-                    newest_tumbling_windows: None,
-                    group_by,
-                }) = node.asap()
-                else {
-                    return None;
-                };
-                let [chain] = children.as_slice() else {
-                    return None;
-                };
-                let Some(ASAPOp::SummaryTumblingWindowChain {
-                    tumbling_window_width_ms,
-                    tumbling_window_count,
-                    ..
-                }) = chain.asap()
-                else {
-                    return None;
-                };
-                let tumbling_windows = window_ms / tumbling_window_width_ms;
-                (window_ms % tumbling_window_width_ms == 0
-                    && tumbling_windows >= 1
-                    && (tumbling_windows as u32) < *tumbling_window_count)
-                    .then(|| {
-                        with_operator(
-                            node,
-                            Operator::ASAP(ASAPOp::SummaryMerge {
-                                children: children.clone(),
-                                newest_tumbling_windows: Some(tumbling_windows as u32),
-                                group_by: group_by.clone(),
-                            }),
-                        )
-                    })
-            },
-        ),
+        Witness::NewestTumblingWindows { window_ms } => {
+            let _ = window_ms;
+            todo!("#1207 PR 9: a witness merging the windows a TimeRange over q's chain selects")
+        }
         Witness::QuantileRank { from, to } => {
             let mut done = false;
             rewrite_root(q_root, "quantile estimate", |node| {
@@ -1226,9 +1197,9 @@ pub fn witness_root(
             })
         }
         Witness::OtherStatistic { statistic } => {
-            let answers = |state: &OperatorNode| -> Result<(), String> {
+            let answers = |state: &Rc<OperatorNode>| -> Result<(), String> {
                 let family = state_family(state)?;
-                if FamilyCapability::of(&family).answers(statistic) {
+                if SummaryTypeCapability::of(&family).answers(statistic) {
                     Ok(())
                 } else {
                     Err(format!(
@@ -1278,7 +1249,7 @@ pub fn witness_root(
                 return Err("both selections read one state".into());
             }
             let family = state_family(&state)?;
-            if FamilyCapability::of(&family).merge_inputs.is_none() {
+            if SummaryTypeCapability::of(&family).merge_inputs.is_none() {
                 return Err(format!("q's family {family:?} has no merge"));
             }
             // The merge's coverage check refuses states of different
@@ -1286,7 +1257,6 @@ pub fn witness_root(
             // selections.
             let merge = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
                 children: vec![state, other_state],
-                newest_tumbling_windows: None,
                 group_by: None,
             }))
             .map_err(|e| format!("union merge: {e}"))?;
@@ -1421,130 +1391,15 @@ pub fn witness_roots(
     Ok(roots)
 }
 
-/// The first node under `node` (depth first, `node` included) that `pred`
-/// accepts.
-fn find_first(
-    node: &Rc<OperatorNode>,
-    pred: &dyn Fn(&OperatorNode) -> bool,
-) -> Option<Rc<OperatorNode>> {
-    if pred(node) {
-        return Some(node.clone());
-    }
-    node.operator
-        .children()
-        .into_iter()
-        .find_map(|child| find_first(child, pred))
-}
-
-/// The distinct nodes under `node` (`node` included) that `pred` accepts.
-fn collect(
-    node: &Rc<OperatorNode>,
-    pred: &dyn Fn(&OperatorNode) -> bool,
-    found: &mut Vec<Rc<OperatorNode>>,
-) {
-    if found.iter().any(|f| Rc::ptr_eq(f, node)) {
-        return;
-    }
-    if pred(node) {
-        found.push(node.clone());
-    }
-    for child in node.operator.children() {
-        collect(child, pred, found);
-    }
-}
-
-/// `W`'s roots with the tumbling-window chain `q` merges whole lengthened to cover
-/// `window_ms`, every merge of it reading its old newest tumbling windows of the
-/// longer chain; and `q`'s root merging the whole longer chain.
+/// `W`'s roots with the reading of `q`'s tumbling-window chain lengthened
+/// to cover `window_ms`, and `q`'s root reading the longer window.
 fn longer_chain_roots(
     base_roots: &[QueryRoot],
     target: usize,
     window_ms: u64,
 ) -> Result<(Vec<QueryRoot>, Rc<OperatorNode>), String> {
-    let q_root = base_roots[target]
-        .as_operator()
-        .ok_or("q is a scalar query")?;
-    let whole_chain_merge = |node: &OperatorNode| {
-        matches!(
-            node.asap(),
-            Some(ASAPOp::SummaryMerge { children, newest_tumbling_windows: None, .. })
-                if matches!(children.as_slice(), [chain] if matches!(chain.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. })))
-        )
-    };
-    let merge = find_first(q_root, &whole_chain_merge)
-        .ok_or("q's plan has no summary merge over a tumbling-window chain")?;
-    // Lengthening one of several chains (say, an SQL idiom's exact row
-    // count beside its statistic) would leave the others at q's window.
-    let mut merges = Vec::new();
-    collect(q_root, &whole_chain_merge, &mut merges);
-    if merges.len() > 1 {
-        return Err(format!(
-            "q's plan merges {} tumbling-window chains whole",
-            merges.len()
-        ));
-    }
-    let Some(ASAPOp::SummaryMerge { children, .. }) = merge.asap() else {
-        unreachable!("found a merge");
-    };
-    let chain = children[0].clone();
-    let mut operator = chain.operator.clone();
-    let Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
-        tumbling_window_width_ms,
-        tumbling_window_count,
-        ..
-    }) = &mut operator
-    else {
-        unreachable!("found a tumbling-window chain");
-    };
-    let old_count = *tumbling_window_count;
-    if !window_ms.is_multiple_of(*tumbling_window_width_ms)
-        || window_ms / *tumbling_window_width_ms <= old_count as u64
-    {
-        return Err(format!(
-            "q's chain of {old_count} tumbling windows of {tumbling_window_width_ms} ms does not extend to {window_ms} ms"
-        ));
-    }
-    *tumbling_window_count = (window_ms / *tumbling_window_width_ms) as u32;
-    let long_chain = with_operator(&chain, operator);
-    let reread = |node: &Rc<OperatorNode>, whole: bool| {
-        let Some(ASAPOp::SummaryMerge {
-            children,
-            newest_tumbling_windows,
-            group_by,
-        }) = node.asap()
-        else {
-            return None;
-        };
-        let [child] = children.as_slice() else {
-            return None;
-        };
-        Rc::ptr_eq(child, &chain).then(|| {
-            with_operator(
-                node,
-                Operator::ASAP(ASAPOp::SummaryMerge {
-                    children: vec![long_chain.clone()],
-                    newest_tumbling_windows: if whole {
-                        None
-                    } else {
-                        Some(newest_tumbling_windows.unwrap_or(old_count))
-                    },
-                    group_by: group_by.clone(),
-                }),
-            )
-        })
-    };
-    let mut cache = HashMap::new();
-    let roots = base_roots
-        .iter()
-        .map(|root| match root.as_operator() {
-            Some(node) => {
-                rewrite(node, &mut |n| reread(n, false), &mut cache).map(QueryRoot::Operator)
-            }
-            None => Ok(root.clone()),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let long_root = rewrite(q_root, &mut |n| reread(n, true), &mut HashMap::new())?;
-    Ok((roots, long_root))
+    let _ = (base_roots, target, window_ms);
+    todo!("#1207 PR 9: lengthen the TimeRange over q's chain, which has no window count")
 }
 
 fn planned(
@@ -1908,16 +1763,20 @@ pub fn disjoint_copy(workload: &FuzzWorkload) -> Option<FuzzWorkload> {
     both.data.sources.extend(copy.data.sources);
     both.tables.extend(copy.tables);
     both.data.arrival = match workload.data.arrival {
-        asap_types::workload::DataArrival::Ingesting { rows_per_second } => {
-            asap_types::workload::DataArrival::Ingesting {
-                rows_per_second: 2.0 * rows_per_second,
-            }
-        }
-        asap_types::workload::DataArrival::Mixed { rows_per_second } => {
-            asap_types::workload::DataArrival::Mixed {
-                rows_per_second: 2.0 * rows_per_second,
-            }
-        }
+        asap_types::workload::DataArrival::Ingesting {
+            rows_per_second,
+            max_out_of_order_ms,
+        } => asap_types::workload::DataArrival::Ingesting {
+            rows_per_second: 2.0 * rows_per_second,
+            max_out_of_order_ms,
+        },
+        asap_types::workload::DataArrival::Mixed {
+            rows_per_second,
+            max_out_of_order_ms,
+        } => asap_types::workload::DataArrival::Mixed {
+            rows_per_second: 2.0 * rows_per_second,
+            max_out_of_order_ms,
+        },
         other => other,
     };
     Some(both)
@@ -1927,7 +1786,7 @@ pub fn disjoint_copy(workload: &FuzzWorkload) -> Option<FuzzWorkload> {
 mod tests {
     use super::*;
     use crate::planner_fuzz::generate::{generated_workload, SqlSpec};
-    use asap_types::ir::properties::AccuracyTarget;
+    use asap_types::accuracy::AccuracyTarget;
 
     fn promql(spec: PromqlSpec, accuracy: AccuracyTarget) -> FuzzWorkload {
         generated_workload(

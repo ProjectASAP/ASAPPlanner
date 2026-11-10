@@ -55,7 +55,7 @@
       "http": {
         "series_count": 10000,
         "sample_interval": 5,
-        "values_non_negative": true,
+        "column_signs": {"value": "non_negative"},
         "max_distinct_per_evaluation": 1000000
       }
     }

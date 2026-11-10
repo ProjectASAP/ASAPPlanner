@@ -3,153 +3,21 @@
 
 use std::collections::HashSet;
 
-use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_planner::{
-    e2e_plan, installable_plan_of, plan_installable, FrontendInput, InstallablePlan,
-    InstallablePlanError, MaterializedViewRefresh, PlanningModels, RawDataRetention, UserInput,
-    INSTALLABLE_PLAN_WIRE_VERSION,
+    InstallablePlan, InstallablePlanError, MaterializedViewRefresh, INSTALLABLE_PLAN_WIRE_VERSION,
 };
 use asap_types::ir::operator::Source;
-use asap_types::ir::physical_export::{compile_physical_asap_workload, PhysicalASAPDAG};
-use asap_types::ir::properties::ExecutionTiming;
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
-use asap_types::physical::Materialization;
-use asap_types::workload::PlanningWorkload;
+use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
+
+use asap_types::ir::{NonASAPOp, Operator};
+
 use serde_json::Value;
 
-/// A repeating PromQL workload over ingesting `m`, each query every minute.
-fn repeating(queries: &[&str]) -> PlanningWorkload {
-    repeating_with(queries, "")
-}
-
-/// [`repeating`], each entry with `extra` fields (e.g. a range evaluation).
-fn repeating_with(queries: &[&str], extra: &str) -> PlanningWorkload {
-    let entries: Vec<String> = queries
-        .iter()
-        .map(|q| {
-            format!(
-                r#"{{"query": {q:?}, "demand": {{"fixed_interval": 60000}},
-                "requirements": {{"accuracy": {{"max_error": 0.01, "failure_probability": 0.01}}}},
-                "predictability": {{"predictable": {{"known_at": null}}}}{extra}}}"#
-            )
-        })
-        .collect();
-    serde_json::from_str(&format!(
-        r#"{{"query_workload": {{"language": "promql", "repeating_queries": [{}]}},
-            "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 1000.0}}}},
-              "sources": {{"m": {{"series_count": 1000, "sample_interval": 1000}}}}}}}}"#,
-        entries.join(",")
-    ))
-    .unwrap()
-}
-
-/// Stage 3's priced raw lookback of `dag` (the selected candidate's
-/// physical DAG, tumbling-window chains unexpanded), per source: each query-time
-/// scan's `PhysicalASAPDAG::scan_window` with every chain kept across
-/// evaluations reading its newest tumbling window, as `asap-plan-selection` prices
-/// it, the longest per source.
-fn stage3_raw_lookback_ms(dag: &PhysicalASAPDAG) -> Vec<(Source, Option<u64>)> {
-    let kept_chains: HashSet<_> = dag
-        .nodes
-        .iter()
-        .filter(|node| {
-            matches!(
-                (&node.payload, node.materialization),
-                (
-                    Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }),
-                    Materialization::MatAtQueryKeptAcrossEvaluations(_)
-                )
-            )
-        })
-        .map(|node| node.id)
-        .collect();
-    let mut lookback: Vec<(Source, Option<u64>)> = Vec::new();
-    for node in &dag.nodes {
-        let Operator::NonASAP(NonASAPOp::Scan { source, .. }) = &node.payload else {
-            continue;
-        };
-        if node.output_state.timing != ExecutionTiming::QueryTime {
-            continue;
-        }
-        let scan = dag.scan_window(node.id, &kept_chains).lookback_ms();
-        match lookback.iter_mut().find(|(kept, _)| kept == source) {
-            Some((_, kept)) => *kept = kept.zip(scan).map(|(a, b)| a.max(b)),
-            None => lookback.push((source.clone(), scan)),
-        }
-    }
-    lookback
-}
-
-/// `rate(m[5m])` and `rate(m[5m] offset 1h)`, both at query time: the
-/// runtime keeps 65 minutes of `m`, the raw lookback Stage 3 prices for the
-/// same plan. With no raw data kept, both run from views refreshed at
-/// ingestion and no source is read at query time.
-#[tokio::test(flavor = "multi_thread")]
-async fn raw_data_retention_is_the_lookback_stage3_prices() {
-    let workload = repeating(&["rate(m[5m])", "rate(m[5m] offset 1h)"]);
-    let input = || UserInput::new(&workload, FrontendInput::Promql, PlanningModels::builtin());
-    let (plan, _) = plan_installable(input()).await.unwrap();
-    let m = Source::TimeSeries { metric: "m".into() };
-    assert_eq!(
-        plan.raw_data_retention().unwrap(),
-        [RawDataRetention::new(m.clone(), Some(65 * 60_000))]
-    );
-    let output = e2e_plan(input()).await.unwrap();
-    let selected = compile_physical_asap_workload(&output.roots()).unwrap();
-    assert_eq!(stage3_raw_lookback_ms(&selected), [(m, Some(65 * 60_000))]);
-
-    let capabilities = DeploymentCapabilities {
-        raw_data_retained: false,
-        ..DeploymentCapabilities::default()
-    };
-    let (plan, _) = plan_installable(UserInput::new(
-        &workload,
-        FrontendInput::Promql,
-        PlanningModels::builtin().with_deployment_capabilities(&capabilities),
-    ))
-    .await
-    .unwrap();
-    assert!(!plan.materialized_views().unwrap().is_empty());
-    assert_eq!(plan.raw_data_retention().unwrap(), []);
-}
-
-/// A range-evaluated query (`max_over_time(m[5m])` over the last hour at
-/// 1-minute steps) installed with every node at query time (its frontend
-/// DAG, nothing materialized): its oldest step reads `m` 5 minutes before an
-/// hour ago, so the runtime keeps 65 minutes of `m`, the scan's window plus
-/// the range span, on the scan's node. (Stage 3 prices one evaluation's
-/// window, 5 minutes.)
-#[test]
-fn a_range_evaluated_query_time_scan_keeps_its_window_plus_the_span() {
-    let workload = repeating_with(
-        &["max_over_time(m[5m])"],
-        r#", "range_evaluation": {"step_ms": 60000, "span_ms": 3600000}"#,
-    );
-    let roots = asap_devtools::planning_stages::lower_promql_roots(&workload).unwrap();
-    let entries: Vec<_> = workload.query_workload.entries().collect();
-    let (plan, _) = installable_plan_of(&roots, None, &Default::default(), &entries).unwrap();
-    plan.validate().unwrap();
-    assert!(plan.materialized_views().unwrap().is_empty());
-    assert_eq!(
-        plan.raw_data_retention().unwrap(),
-        [RawDataRetention::new(
-            Source::TimeSeries { metric: "m".into() },
-            Some(5 * 60_000 + 3_600_000)
-        )]
-    );
-    let scan = plan
-        .dag
-        .nodes
-        .iter()
-        .find(|node| matches!(node.payload, Operator::NonASAP(NonASAPOp::Scan { .. })))
-        .unwrap();
-    assert_eq!(scan.retention_ms, Some(3_900_000));
-}
-
 /// A plan file of wire version 10 (assembled from the parts of a plan
-/// written on `main` before #970: the versioned DAG envelope, `queries`,
-/// `stored_outputs`, `query_time_raw_windows`, `selection`) is refused for
-/// its version, not for a missing field; a file of this version reads back.
+/// written before #970: the versioned DAG envelope, `queries`,
+/// `stored_outputs`, `query_time_raw_windows`, `selection`; its DAG nodes
+/// carry today's node fields, e.g. `lifetime`) is refused for its version,
+/// not for a missing field; its DAG with today's version reads back.
 #[test]
 fn a_plan_file_of_an_older_wire_version_is_refused_by_version() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

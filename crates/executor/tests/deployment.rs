@@ -1,29 +1,17 @@
 //! Exercise the public library without a backend server, store, or scheduler.
-use asap_executor::planner::{
-    ir::scalar::ColumnRef,
-    ir::schema::{
-        FieldDataType, GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryUpdate,
-    },
-};
+use asap_executor::planner::ir::scalar::ColumnRef;
+use asap_executor::planner::ir::schema::FieldDataType;
+use asap_executor::planner::summary_type::{SketchAlgorithm, SketchParams, SummaryUpdate};
 use asap_executor::{factory::create_planner_accumulator, AggregateCore};
 
-fn family(k: u32) -> FieldDataType {
-    FieldDataType::Sketch(
-        SketchKind::new(
-            SketchAlgorithm::Kll,
-            SketchParams::Kll {
-                k,
-                failure_probability: None,
-            },
-        ),
-        GroupingStrategy::PerSubpopulationInstance,
-    )
+fn family(_k: u32) -> FieldDataType {
+    FieldDataType::Sketch(SketchAlgorithm::Kll)
 }
 fn build(values: &[f64]) -> Box<dyn AggregateCore> {
     let mut operator = create_planner_accumulator(
         &family(512),
+        None,
         &SummaryUpdate::column(ColumnRef::SampleValue),
-        &Default::default(),
     )
     .unwrap();
     for (at, value) in values.iter().enumerate() {
@@ -34,7 +22,7 @@ fn build(values: &[f64]) -> Box<dyn AggregateCore> {
 }
 fn read(state: &dyn AggregateCore) -> f64 {
     state
-        .estimate(&asap_executor::planner::ir::schema::SketchStatistic::Quantile { q: 0.5 })
+        .estimate(&asap_executor::planner::summary_type::SketchStatistic::Quantile { q: 0.5 })
         .unwrap()
 }
 
@@ -58,8 +46,8 @@ fn raw_partial_and_fully_precomputed_use_the_same_kernels() {
 fn invalid_kll_parameters_are_rejected_at_binding() {
     let result = create_planner_accumulator(
         &family(0),
+        None,
         &SummaryUpdate::column(ColumnRef::SampleValue),
-        &Default::default(),
     );
     assert!(result.is_err());
 }
@@ -68,21 +56,11 @@ fn invalid_kll_parameters_are_rejected_at_binding() {
 // a packed-wire column-bit budget must not be imposed on this constructor.
 #[test]
 fn native_count_sketch_dimensions_are_not_packed_wire_dimensions() {
-    use asap_executor::planner::ir::schema::SummaryInputExpr;
-    let family = FieldDataType::Sketch(
-        SketchKind::new(
-            SketchAlgorithm::CountSketchWithHeap,
-            SketchParams::CountSketchWithHeap {
-                width: 1200,
-                depth: 55,
-                heap_size: 3,
-            },
-        ),
-        Default::default(),
-    );
+    use asap_executor::planner::summary_type::SummaryInputExpr;
+    let family = FieldDataType::Sketch(SketchAlgorithm::CountSketchWithHeap);
     let mut update = SummaryUpdate::column(ColumnRef::SampleValue);
     update.item = Some(SummaryInputExpr::Column(ColumnRef::Named("host".into())));
-    let mut operator = create_planner_accumulator(&family, &update, &Default::default()).unwrap();
+    let mut operator = create_planner_accumulator(&family, None, &update).unwrap();
     operator
         .update_keyed(&["a".to_string()], 7.0, 1000)
         .unwrap();
@@ -99,14 +77,8 @@ fn native_count_sketch_dimensions_are_not_packed_wire_dimensions() {
     );
 }
 
-fn plain_count_sketch(width: u32, depth: u32) -> FieldDataType {
-    FieldDataType::Sketch(
-        SketchKind::new(
-            SketchAlgorithm::CountSketch,
-            SketchParams::CountSketch { width, depth },
-        ),
-        Default::default(),
-    )
+fn plain_count_sketch(_width: u32, _depth: u32) -> FieldDataType {
+    FieldDataType::Sketch(SketchAlgorithm::CountSketch)
 }
 
 fn host(i: usize) -> [String; 1] {
@@ -126,10 +98,10 @@ fn build_weighted_frequency(
     family: &FieldDataType,
     updates: impl IntoIterator<Item = (usize, f64)>,
 ) -> Box<dyn AggregateCore> {
-    use asap_executor::planner::ir::schema::SummaryInputExpr;
+    use asap_executor::planner::summary_type::SummaryInputExpr;
     let mut update = SummaryUpdate::column(ColumnRef::SampleValue);
     update.item = Some(SummaryInputExpr::Column(ColumnRef::Named("host".into())));
-    let mut operator = create_planner_accumulator(family, &update, &Default::default()).unwrap();
+    let mut operator = create_planner_accumulator(family, None, &update).unwrap();
     for (at, (i, weight)) in updates.into_iter().enumerate() {
         operator.validate_single_input(weight).unwrap();
         operator.update_keyed(&host(i), weight, at as i64).unwrap();
@@ -221,7 +193,7 @@ fn heap_sketch(
     depth: u32,
     heap_size: u32,
 ) -> FieldDataType {
-    let params = match algorithm {
+    let _params = match algorithm {
         SketchAlgorithm::CmsWithHeap => SketchParams::CmsWithHeap {
             width,
             depth,
@@ -233,7 +205,7 @@ fn heap_sketch(
             heap_size,
         },
     };
-    FieldDataType::Sketch(SketchKind::new(algorithm, params), Default::default())
+    FieldDataType::Sketch(algorithm)
 }
 
 // The factory's top-k sketches use the same per-row-seeded kernel: past 20
@@ -335,11 +307,11 @@ fn factory_and_dag_heap_states_are_interchangeable() {
 // validation, never silently dropped.
 #[test]
 fn count_min_heap_rejects_negative_inputs() {
-    use asap_executor::planner::ir::schema::SummaryInputExpr;
+    use asap_executor::planner::summary_type::SummaryInputExpr;
     let mut update = SummaryUpdate::column(ColumnRef::SampleValue);
     update.item = Some(SummaryInputExpr::Column(ColumnRef::Named("host".into())));
     let family = heap_sketch(SketchAlgorithm::CmsWithHeap, 64, 3, 4);
-    let operator = create_planner_accumulator(&family, &update, &Default::default()).unwrap();
+    let operator = create_planner_accumulator(&family, None, &update).unwrap();
     assert!(operator.validate_single_input(-1.0).is_err());
     assert!(operator.validate_single_input(0.5).is_ok());
 }
@@ -401,11 +373,11 @@ fn plain_count_sketch_merge_equals_union_build() {
 // last good sum.
 #[test]
 fn keyed_update_overflow_is_an_error_not_a_panic() {
-    use asap_executor::planner::ir::schema::SummaryInputExpr;
+    use asap_executor::planner::summary_type::SummaryInputExpr;
     let mut update = SummaryUpdate::column(ColumnRef::SampleValue);
     update.item = Some(SummaryInputExpr::Column(ColumnRef::Named("host".into())));
     let family = plain_count_sketch(64, 3);
-    let mut operator = create_planner_accumulator(&family, &update, &Default::default()).unwrap();
+    let mut operator = create_planner_accumulator(&family, None, &update).unwrap();
     operator.validate_single_input(f64::MAX).unwrap();
     operator.update_keyed(&host(0), f64::MAX, 0).unwrap();
     let error = operator.update_keyed(&host(0), f64::MAX, 1).unwrap_err();

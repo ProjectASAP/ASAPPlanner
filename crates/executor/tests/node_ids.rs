@@ -1,7 +1,6 @@
 //! Compilation rejects Planner node IDs outside the range its helper IDs avoid.
-use crate::common;
+
 use asap_executor::physical_planner::compile;
-use common::compile_physical_asap_dag;
 use planner_types::ir::scalar::ScalarValue;
 use planner_types::ir::schema::{DataType, Field, Schema};
 use planner_types::ir::{NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr};
@@ -20,7 +19,7 @@ fn node_ids_above_u32_are_rejected() {
         child: values,
     }))
     .unwrap();
-    let mut dag = compile_physical_asap_dag(&filter).unwrap();
+    let mut dag = planner_types::test_support::physical_asap_dag_at_query_time(&filter).unwrap();
     let root = dag.roots[0] as u64;
     assert!(compile(&dag, &[], &[root]).is_ok());
 

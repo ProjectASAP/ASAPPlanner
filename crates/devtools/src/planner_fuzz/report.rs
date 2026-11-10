@@ -81,7 +81,7 @@ pub fn documented_patterns() -> Vec<DocumentedPattern> {
             note: "the operator follows q's own: topk, bottomk, max, quantile(0.5) or a threshold `> 0` (ASAPWorkloads #4, #12, #17, #18)",
         },
         DocumentedPattern {
-            pattern: "Summary capability: another statistic the family answers from one build (FamilyCapability::answers)",
+            pattern: "Summary capability: another statistic the family answers from one build (SummaryTypeCapability::answers)",
             doc_reference: "planner-layering.md Pass 2 rule table L586, examples L611–617, Example 2 L1306–1370",
             relation: Some(Relation::OtherStatistic),
             note: "UnivMon's count, distinct count, L2 and entropy (ASAPWorkloads #57, #107–#108); the witness reads q's own state, or is W ∪ {q'} planned with UnivMon as the only family",

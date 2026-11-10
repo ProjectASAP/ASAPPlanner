@@ -25,7 +25,7 @@
 //! [`CostInputs::measured_operation_costs`]: asap_cost::CostInputs::measured_operation_costs
 
 use asap_cost::{MeasuredOperationCost, SummaryOperation};
-use asap_types::ir::schema::SketchParams;
+use asap_types::summary_type::SketchParams;
 use serde_json::Value;
 
 /// A sketch-bench row that gave no entries, and why.
@@ -135,10 +135,7 @@ fn sketch_params(sketch_name: &str, params: &Value) -> Result<Option<SketchParam
     let sketch = if sketch_name.starts_with("hydra-") || sketch_name.starts_with("exact-") {
         return Ok(None);
     } else if sketch_name.starts_with("kll") {
-        SketchParams::Kll {
-            k: integer("k")?,
-            failure_probability: None,
-        }
+        SketchParams::Kll { k: integer("k")? }
     } else if sketch_name.starts_with("dd") {
         SketchParams::DDSketch {
             alpha: params["alpha"]
@@ -148,13 +145,9 @@ fn sketch_params(sketch_name: &str, params: &Value) -> Result<Option<SketchParam
     } else if sketch_name == "hll" {
         SketchParams::Hll {
             precision: u8::try_from(integer("lg_k")?).map_err(|e| e.to_string())?,
-            relative_error: None,
         }
     } else if sketch_name == "kmv" {
-        SketchParams::Kmv {
-            k: integer("k")?,
-            relative_error: None,
-        }
+        SketchParams::Kmv { k: integer("k")? }
     } else if sketch_name.starts_with("cms") && with_heap {
         SketchParams::CmsWithHeap {
             width: integer("cols")?,
@@ -209,10 +202,7 @@ mod tests {
              "insert_cpu_secs": 1.0e-6, "merge_cpu_secs": 1.0e-6, "query_cpu_secs": 1.0e-6}
         ]);
         let converted = convert_rqe_atomic_costs(&sample).unwrap();
-        let kll = SketchParams::Kll {
-            k: 200,
-            failure_probability: None,
-        };
+        let kll = SketchParams::Kll { k: 200 };
         let cms = SketchParams::CmsWithHeap {
             width: 1024,
             depth: 3,

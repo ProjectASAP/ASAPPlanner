@@ -10,12 +10,12 @@ use asap_executor::{
 };
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::operator::JoinKind;
-use planner_types::ir::physical_export::{PhysicalASAPDAGNode, PhysicalASAPOperatorPayload};
 use planner_types::ir::scalar::CompareOpKind;
 use planner_types::ir::schema::{DataType, Field, FieldDataType};
 use planner_types::ir::NonASAPOp;
 use planner_types::ir::Predicate;
 use planner_types::ir::ScalarExpr;
+use planner_types::plan::physical_asap_dag::{PhysicalASAPDAGNode, PhysicalASAPOperatorPayload};
 use std::sync::Arc;
 
 fn schema(fields: &[(&str, DataType, bool)]) -> SchemaRef {
@@ -385,10 +385,12 @@ fn global_extrema_bind_with_planner_derived_schema() {
                 child: 0,
             }),
             output_state: ExecutionDataState::QUERY_ROWS,
-            materialization: Default::default(),
+            lifetime: Default::default(),
+            parameters: None,
             output_schema: (*output).clone(),
             guarantee: None,
             retention_ms: None,
+            selected_physical_candidate: None,
         };
         let operator = compile_node(&node, std::slice::from_ref(&input))
             .expect("global extremum should bind to its Planner schema");
@@ -554,19 +556,10 @@ fn boolean_truth_tables_agree_between_expression_paths() {
 // Partial/final execution must agree with one build for an uncompacted KLL population.
 #[test]
 fn kll_partial_merge_and_multiple_evaluations_preserve_population() {
-    use planner_types::ir::schema::{SketchAlgorithm, SketchKind, SketchParams};
+    use planner_types::summary_type::SketchAlgorithm;
 
     let input = schema(&[("v", DataType::Float64, false)]);
-    let family = FieldDataType::Sketch(
-        SketchKind::new(
-            SketchAlgorithm::Kll,
-            SketchParams::Kll {
-                k: 512,
-                failure_probability: None,
-            },
-        ),
-        Default::default(),
-    );
+    let family = FieldDataType::Sketch(SketchAlgorithm::Kll);
     let mut dag = PhysicalDAG::default();
     for (id, range) in [(0, 0..64), (1, 64..128), (2, 0..128)] {
         let rows = range.map(|n| vec![Value::Float64(n as f64)]).collect();
@@ -610,7 +603,7 @@ fn kll_partial_merge_and_multiple_evaluations_preserve_population() {
                     state.clone(),
                     0,
                     asap_executor::operators::SummaryEvaluation::Sketch(
-                        planner_types::ir::schema::SketchStatistic::Quantile { q },
+                        planner_types::summary_type::SketchStatistic::Quantile { q },
                     ),
                 )
                 .unwrap(),
@@ -650,7 +643,7 @@ fn kll_partial_merge_and_multiple_evaluations_preserve_population() {
 // single-build rank error: 60 tumbling windows of 1000 values at k = 200.
 #[test]
 fn compacted_kll_tumbling_windows_merge_within_the_calibrated_rank_error() {
-    use planner_types::ir::schema::{SketchAlgorithm, SketchKind, SketchParams, SketchStatistic};
+    use planner_types::summary_type::{SketchAlgorithm, SketchStatistic};
     const TUMBLING_WINDOW_COUNT: u64 = 60;
     const ROWS_PER_TUMBLING_WINDOW: u64 = 1000;
     const K: u32 = 200;
@@ -659,16 +652,7 @@ fn compacted_kll_tumbling_windows_merge_within_the_calibrated_rank_error() {
     let bound = 2.296 / f64::from(K).powf(0.9723);
     let n = (TUMBLING_WINDOW_COUNT * ROWS_PER_TUMBLING_WINDOW) as f64;
     let input = schema(&[("v", DataType::Float64, false)]);
-    let family = FieldDataType::Sketch(
-        SketchKind::new(
-            SketchAlgorithm::Kll,
-            SketchParams::Kll {
-                k: K,
-                failure_probability: None,
-            },
-        ),
-        Default::default(),
-    );
+    let family = FieldDataType::Sketch(SketchAlgorithm::Kll);
     let build = || {
         Operator::per_group_summary_build(input.clone(), family.clone(), 0, None, vec![]).unwrap()
     };
@@ -747,7 +731,7 @@ fn compacted_kll_tumbling_windows_merge_within_the_calibrated_rank_error() {
 #[test]
 fn counter_tumbling_windows_merge_in_any_order() {
     use asap_executor::summary_kernels::exact::ExactAccumulator;
-    use planner_types::ir::schema::{ExactKind, ExactParams};
+    use planner_types::summary_type::{ExactKind, ExactParams};
     let input = schema(&[
         ("v", DataType::Float64, false),
         ("t", DataType::Timestamp, false),
@@ -776,7 +760,7 @@ fn counter_tumbling_windows_merge_in_any_order() {
             .as_any()
             .downcast_ref::<ExactAccumulator>()
             .unwrap()
-            .evaluation(planner_types::ir::schema::ExactKind::Increase, None, None)
+            .evaluation(planner_types::summary_type::ExactKind::Increase, None, None)
             .unwrap()
             .unwrap()
     };
@@ -834,7 +818,7 @@ fn zero_column_output_obeys_memory_limit() {
 // Empty exact-state finalization must preserve ordinary global MIN/MAX null semantics.
 #[test]
 fn empty_exact_summary_extrema_agree_with_ordinary_aggregation() {
-    use planner_types::ir::schema::{ExactKind, ExactParams};
+    use planner_types::summary_type::{ExactKind, ExactParams};
 
     let input = schema(&[("v", DataType::Float64, false)]);
     for (kind, params) in [
@@ -935,7 +919,8 @@ fn planner_node(
         id: 1,
         payload,
         output_state: planner_types::ir::properties::ExecutionDataState::QUERY_ROWS,
-        materialization: Default::default(),
+        lifetime: Default::default(),
+        parameters: None,
         output_schema: planner_types::ir::schema::Schema::new(
             fields
                 .iter()
@@ -949,6 +934,7 @@ fn planner_node(
         ),
         guarantee: None,
         retention_ms: None,
+        selected_physical_candidate: None,
     }
 }
 
@@ -964,20 +950,16 @@ fn round_trip(operator: Operator) -> Operator {
 fn measure_filters_keep_groups_without_matching_rows() {
     use asap_executor::physical_planner::compile_node;
     use planner_types::ir::operator::{AggIntent, GroupKeys, Reduction as Plan};
-    use planner_types::ir::properties::AccuracyTarget;
+
     let (input, rows) = filtered_input();
     let plain = |t: DataType| FieldDataType::Plain(t);
     let node = planner_node(
         PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Aggregate {
             reduction: Plan::Reduce(GroupKeys::by(vec![0])),
             measures: vec![
-                AggIntent::Count {
-                    accuracy: AccuracyTarget::exact(),
-                },
+                AggIntent::Count,
                 AggIntent::Sum { col: Some(1) },
-                AggIntent::Count {
-                    accuracy: AccuracyTarget::exact(),
-                },
+                AggIntent::Count,
             ],
             output_names: vec!["c".into(), "s".into(), "all".into()],
             filters: vec![keep(), keep(), None],
@@ -1031,22 +1013,12 @@ fn filtered_summary_build_keeps_empty_groups() {
     use asap_executor::physical_planner::compile_node;
     use planner_types::ir::operator::{GroupKeys, Reduction as Plan};
     use planner_types::ir::scalar::ColumnRef;
-    use planner_types::ir::schema::{
-        ExactKind, ExactParams, SketchAlgorithm, SketchKind, SketchParams, SketchStatistic,
-        SummaryUpdate,
-    };
     use planner_types::ir::ASAPOp;
+    use planner_types::summary_type::{
+        ExactKind, ExactParams, SketchAlgorithm, SketchStatistic, SummaryUpdate,
+    };
     let (input, rows) = filtered_input();
-    let kll = FieldDataType::Sketch(
-        SketchKind::new(
-            SketchAlgorithm::Kll,
-            SketchParams::Kll {
-                k: 200,
-                failure_probability: None,
-            },
-        ),
-        Default::default(),
-    );
+    let kll = FieldDataType::Sketch(SketchAlgorithm::Kll);
     let count = FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count);
     let cases = [
         (
@@ -1069,10 +1041,9 @@ fn filtered_summary_build_keeps_empty_groups() {
         let build = planner_node(
             PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
                 child: 0,
-                family: family.clone(),
+                summary_type: family.clone(),
                 input: SummaryUpdate::column(ColumnRef::Named("x".into())),
                 reduction: Plan::Reduce(GroupKeys::by(vec![0])),
-                grouping: Default::default(),
                 filter: keep(),
             }),
             &[
@@ -1114,18 +1085,17 @@ fn filtered_summary_build_is_rejected_at_ingestion_time() {
     use planner_types::ir::operator::{GroupKeys, Reduction as Plan};
     use planner_types::ir::properties::ExecutionDataState;
     use planner_types::ir::scalar::ColumnRef;
-    use planner_types::ir::schema::{ExactKind, ExactParams, SummaryUpdate};
     use planner_types::ir::ASAPOp;
+    use planner_types::summary_type::{ExactKind, ExactParams, SummaryUpdate};
     let (input, _) = filtered_input();
     let family = FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count);
     let build = |filter| {
         let mut node = planner_node(
             PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
                 child: 0,
-                family: family.clone(),
+                summary_type: family.clone(),
                 input: SummaryUpdate::column(ColumnRef::Named("x".into())),
                 reduction: Plan::Reduce(GroupKeys::by(vec![0])),
-                grouping: Default::default(),
                 filter,
             }),
             &[
@@ -1192,10 +1162,12 @@ fn exact_aggregate_node(
             child: 0,
         }),
         output_state: ExecutionDataState::QUERY_ROWS,
-        materialization: Default::default(),
+        lifetime: Default::default(),
+        parameters: None,
         output_schema: (*schema(&[(name, dtype, false)])).clone(),
         guarantee: None,
         retention_ms: None,
+        selected_physical_candidate: None,
     }
 }
 
@@ -1205,7 +1177,7 @@ fn exact_aggregate_node(
 fn exact_frequency_intents_execute_typed_keys_and_empty_input() {
     use asap_executor::physical_planner::compile_node;
     use planner_types::ir::operator::AggIntent;
-    use planner_types::ir::properties::AccuracyTarget;
+
     for (dtype, values) in [
         (
             DataType::Utf8,
@@ -1227,18 +1199,12 @@ fn exact_frequency_intents_execute_typed_keys_and_empty_input() {
         let input = schema(&[("key", dtype, true)]);
         for (measure, name, expected) in [
             (
-                AggIntent::FrequencyL2 {
-                    col: Some(0),
-                    accuracy: AccuracyTarget::exact(),
-                },
+                AggIntent::FrequencyL2 { col: Some(0) },
                 "frequency_l2",
                 8.0_f64.sqrt(),
             ),
             (
-                AggIntent::FrequencyEntropy {
-                    col: Some(0),
-                    accuracy: AccuracyTarget::exact(),
-                },
+                AggIntent::FrequencyEntropy { col: Some(0) },
                 "frequency_entropy",
                 1.0,
             ),
@@ -1340,20 +1306,14 @@ fn exact_frequency_rejects_non_finite_identities() {
 fn exact_cardinality_binds_and_executes_typed_tuples() {
     use asap_executor::physical_planner::compile_node;
     use planner_types::ir::operator::AggIntent;
-    use planner_types::ir::properties::AccuracyTarget;
+
     let input = schema(&[
         ("key", DataType::Int64, true),
         ("tag", DataType::Utf8, true),
     ]);
     for (cols, expected) in [(vec![0], 2), (vec![0, 1], 3)] {
-        let node = exact_aggregate_node(
-            AggIntent::Cardinality {
-                cols,
-                accuracy: AccuracyTarget::exact(),
-            },
-            "distinct",
-            DataType::Int64,
-        );
+        let node =
+            exact_aggregate_node(AggIntent::Cardinality { cols }, "distinct", DataType::Int64);
         let operator =
             compile_node(&node, std::slice::from_ref(&input)).expect("exact distinct intent binds");
         let rows = vec![

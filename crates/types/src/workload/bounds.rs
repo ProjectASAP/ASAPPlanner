@@ -4,15 +4,14 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 
-use crate::ir::operator::operator_properties::{
-    BinaryOpKind, PromQLVectorSetOpKind, RelationalSetOpKind,
-};
+use crate::ir::operator::arguments::{BinaryOpKind, PromQLVectorSetOpKind, RelationalSetOpKind};
 use crate::ir::operator::{AggIntent, GroupKeys, Reduction, Source};
-use crate::ir::physical_export::PhysicalASAPOperatorPayload as Payload;
-use crate::ir::schema::{Schema, SketchStatistic, WeightDomain};
+use crate::ir::schema::Schema;
 use crate::ir::{
     ASAPOp, NonASAPOp, Operator, OperatorNode, OperatorResultKind, QueryRoot, ScalarExpr,
 };
+use crate::plan::physical_asap_dag::PhysicalASAPOperatorPayload as Payload;
+use crate::summary_type::SketchStatistic;
 use crate::workload::{DataWorkload, PrometheusMetricType};
 
 /// A scan source's name: its PromQL metric or SQL table.
@@ -208,7 +207,11 @@ fn declared_group_bound(node: &OperatorNode, data: &DataWorkload) -> Option<u64>
         ) => grouped(reduction, child),
         // A merge's children are states of one definition: its first
         // build's grouping stands for all of them.
-        Operator::ASAP(ASAPOp::SummaryMerge { .. }) => match node.summary_build() {
+        Operator::ASAP(ASAPOp::SummaryMerge {
+            children,
+            group_by: None,
+            ..
+        }) => match children.first().and_then(|first| first.summary_build()) {
             Some(
                 ASAPOp::SummaryAgg {
                     reduction, child, ..
@@ -216,7 +219,7 @@ fn declared_group_bound(node: &OperatorNode, data: &DataWorkload) -> Option<u64>
                 | ASAPOp::SummaryTumblingWindowChain {
                     reduction, child, ..
                 },
-            ) => grouped(reduction, child),
+            ) => grouped(&reduction, &child),
             _ => None,
         },
         Operator::ASAP(ASAPOp::SummaryEstimate {
@@ -365,11 +368,11 @@ fn at_most_one_row(node: &OperatorNode) -> bool {
             ..
         }) => keys.is_empty(),
         // A merge gives one state per group, whatever the tumbling windows it merges.
-        Operator::ASAP(ASAPOp::SummaryMerge { .. }) => matches!(
-            node.summary_build(),
+        Operator::ASAP(ASAPOp::SummaryMerge { children, .. }) => matches!(
+            children.first().and_then(|first| first.summary_build()),
             Some(
                 ASAPOp::SummaryAgg { reduction, .. } | ASAPOp::SummaryTumblingWindowChain { reduction, .. }
-            ) if global(reduction)
+            ) if global(&reduction)
         ),
         Operator::ASAP(ASAPOp::SummaryEstimate {
             summary_input,
@@ -388,7 +391,7 @@ fn at_most_one_row(node: &OperatorNode) -> bool {
         Operator::NonASAP(NonASAPOp::Join {
             kind, left, right, ..
         }) => {
-            use crate::ir::operator::operator_properties::JoinKind;
+            use crate::ir::operator::arguments::JoinKind;
             match kind {
                 JoinKind::Semi | JoinKind::Anti => at_most_one_row(left),
                 JoinKind::Full => false,
@@ -402,25 +405,14 @@ fn at_most_one_row(node: &OperatorNode) -> bool {
     }
 }
 
-/// `domain` with an open requirement answered from `data`'s declared source
-/// facts (`WeightDomain::confirmed`): samples are proven when the metric is
-/// declared a counter or non-negative, a counter derivative only when it is
-/// declared a counter; unknown otherwise. No type is inferred from a name.
-pub fn confirmed_weights(domain: &WeightDomain, data: &DataWorkload) -> WeightDomain {
-    domain.confirmed(
-        |metric| declared_counter(data, metric),
-        |metric| declared_non_negative(data, metric),
-    )
-}
-
 /// Whether `data` declares every sample of `metric` non-negative: the
-/// metric is declared a counter, or a metric (a gauge, say) with
-/// [`SourceFacts::values_non_negative`](crate::workload::SourceFacts::values_non_negative).
+/// metric is declared a counter, or its `value` column is declared
+/// non-negative ([`SourceFacts::column_signs`](crate::workload::SourceFacts::column_signs)).
 pub fn declared_non_negative(data: &DataWorkload, metric: &str) -> bool {
     declared_counter(data, metric)
-        || data
-            .series_facts(metric)
-            .is_some_and(|(facts, _)| facts.values_non_negative)
+        || data.series_facts(metric).is_some_and(|(facts, _)| {
+            facts.column_signs.get("value") == Some(&crate::stages::ValueSign::NonNegative)
+        })
 }
 
 /// Whether `data` declares `metric` a counter, itself or as the `_sum` or
@@ -430,72 +422,6 @@ pub fn declared_non_negative(data: &DataWorkload, metric: &str) -> bool {
 fn declared_counter(data: &DataWorkload, metric: &str) -> bool {
     data.series_facts(metric)
         .is_some_and(|(_, series_type)| series_type == Some(PrometheusMetricType::Counter))
-}
-
-/// `roots` with every open [`WeightDomain::RawDataSamplesOfMetric`] requirement
-/// replaced by its answer from `data` ([`confirmed_weights`]): the form of a
-/// selected plan the executor runs, which reads no data workload. The same
-/// `Rc` where nothing changes.
-pub fn with_confirmed_weights(roots: &[QueryRoot], data: &DataWorkload) -> Vec<QueryRoot> {
-    with_confirmed_weights_at(roots, data, &|_| true)
-}
-
-/// [`with_confirmed_weights`] at the summaries `confirm_at` names only: the
-/// selected plan with the weight proofs Stage 3 made for its candidates
-/// applied (`Selection::nodes_with_proven_non_negative_weights`).
-pub fn with_confirmed_weights_at(
-    roots: &[QueryRoot],
-    data: &DataWorkload,
-    confirm_at: &dyn Fn(&Rc<OperatorNode>) -> bool,
-) -> Vec<QueryRoot> {
-    fn confirm(
-        node: &Rc<OperatorNode>,
-        data: &DataWorkload,
-        confirm_at: &dyn Fn(&Rc<OperatorNode>) -> bool,
-        cache: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
-    ) -> Rc<OperatorNode> {
-        if let Some(done) = cache.get(&Rc::as_ptr(node)) {
-            return Rc::clone(done);
-        }
-        let mut changed = false;
-        let mut operator = node.operator.map_children(|child| {
-            let rebuilt = confirm(child, data, confirm_at, cache);
-            changed |= !Rc::ptr_eq(&rebuilt, child);
-            rebuilt
-        });
-        if let Operator::ASAP(
-            ASAPOp::SummaryAgg { input, .. } | ASAPOp::SummaryTumblingWindowChain { input, .. },
-        ) = &mut operator
-        {
-            let confirmed = confirmed_weights(&input.weight_domain, data);
-            if confirmed != input.weight_domain && confirm_at(node) {
-                input.weight_domain = confirmed;
-                changed = true;
-            }
-        }
-        let rebuilt = if changed {
-            Rc::new(
-                OperatorNode::with_schema(operator, node.schema.clone())
-                    .with_guarantee(node.guarantee.clone())
-                    .with_timing(node.timing)
-                    .with_materialization(node.materialization),
-            )
-        } else {
-            Rc::clone(node)
-        };
-        cache.insert(Rc::as_ptr(node), Rc::clone(&rebuilt));
-        rebuilt
-    }
-    let mut cache = HashMap::new();
-    roots
-        .iter()
-        .map(|root| match root {
-            QueryRoot::Operator(n) => QueryRoot::Operator(confirm(n, data, confirm_at, &mut cache)),
-            QueryRoot::Scalar(expr) => QueryRoot::Scalar(
-                expr.map_operator_refs(&mut |n| confirm(n, data, confirm_at, &mut cache)),
-            ),
-        })
-        .collect()
 }
 
 /// Rows per millisecond the sources in `sources` receive together, each
@@ -548,7 +474,7 @@ pub fn source_rows_per_ms(sources: &BTreeSet<&str>, data: &DataWorkload) -> Opti
 /// declared label set never bounds values it does not describe.
 /// `producers` are each producer's output schema and unchanged columns.
 pub fn unchanged_source_columns<'a>(
-    node: &'a crate::ir::physical_export::PhysicalASAPDAGNode,
+    node: &'a crate::plan::physical_asap_dag::PhysicalASAPDAGNode,
     producers: &[(&'a Schema, &BTreeSet<&'a str>)],
 ) -> BTreeSet<&'a str> {
     let output_names = || node.output_schema.fields.iter().map(|f| f.name.as_str());
@@ -760,6 +686,7 @@ mod tests {
         let data = DataWorkload {
             arrival: DataArrival::Ingesting {
                 rows_per_second: 4_000.0,
+                max_out_of_order_ms: None,
             },
             sources: [("a", Some(100)), ("b", Some(300)), ("c", None)]
                 .into_iter()

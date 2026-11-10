@@ -1,6 +1,9 @@
 # Sharing Operators Between Pre-ASAP IR and Post-ASAP IR
 
 > Status: proposal, not implemented. Audience: planner designers and architects.
+> Note: since #1200, operator nodes carry no `timing`; physical stages keep each
+> node's timing and lifetime in a `PhysicalPropertiesAssignment`, and
+> `validate_execution_timing` no longer exists. The `timing` text below predates that.
 > Addresses [#468](https://github.com/ProjectASAP/ASAPPlanner/issues/468).
 > Companion: [Decoupling operators from scalar expressions](decoupling_op_and_expr.md).
 

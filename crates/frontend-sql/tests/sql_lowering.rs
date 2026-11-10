@@ -16,7 +16,6 @@ use asap_types::ir::operator::{
     AggIntent, GroupKeys, JoinKind, Reduction, Source, WindowFrameBound, WindowFrameOffset,
     WindowFrameUnits, WindowFuncKind,
 };
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::{ColumnRef, CompareOpKind, ScalarValue};
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use asap_types::ir::{ExprSemantics, NonASAPOp, OperatorNode, ScalarExpr};
@@ -52,7 +51,7 @@ fn catalog() -> SqlCatalog {
 }
 
 async fn lower(sql: &str) -> Rc<OperatorNode> {
-    lower_sql(sql, &catalog(), AccuracyTarget::exact())
+    lower_sql(sql, &catalog())
         .await
         .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"))
 }
@@ -64,7 +63,7 @@ fn op(node: &OperatorNode) -> &NonASAPOp {
 
 #[tokio::test]
 async fn planning_subquery_bridge_rejects_a_relation_without_vector_conversion() {
-    let result = lower_sql("SELECT max(value) FROM (SELECT asap_promql_subquery(21600000, 60000) AS value FROM (SELECT sum(bytes) AS value FROM metrics))", &catalog(), AccuracyTarget::exact()).await;
+    let result = lower_sql("SELECT max(value) FROM (SELECT asap_promql_subquery(21600000, 60000) AS value FROM (SELECT sum(bytes) AS value FROM metrics))", &catalog()).await;
     assert!(result.is_err());
 }
 
@@ -98,7 +97,6 @@ async fn planning_relation_bridges_reject_ambiguous_shapes() {
     let missing_alias = lower_sql(
         "SELECT asap_promql_subquery(300000, 60000) FROM metrics",
         &catalog(),
-        AccuracyTarget::exact(),
     )
     .await
     .unwrap_err();
@@ -107,7 +105,6 @@ async fn planning_relation_bridges_reject_ambiguous_shapes() {
     let histogram_with_extra_column = lower_sql(
         "SELECT service, asap_histogram_quantile(0.95) AS value FROM metrics",
         &catalog(),
-        AccuracyTarget::exact(),
     )
     .await
     .unwrap_err();
@@ -118,7 +115,6 @@ async fn planning_relation_bridges_reject_ambiguous_shapes() {
     let invalid_q = lower_sql(
         "SELECT asap_histogram_quantile(1.5) AS value FROM metrics",
         &catalog(),
-        AccuracyTarget::exact(),
     )
     .await
     .unwrap_err();
@@ -314,7 +310,7 @@ async fn count_ranked_topk_is_heavy_hitter() {
     let (inner_by, inner_measures) = find_aggregate(child).expect("expected inner Count aggregate");
     assert_eq!(inner_by, &vec![1], "inner Count grouped by service → col 1");
     assert!(
-        matches!(inner_measures.as_slice(), [AggIntent::Count { .. }]),
+        matches!(inner_measures.as_slice(), [AggIntent::Count]),
         "inner aggregate is the explicit Count, got {inner_measures:?}"
     );
 }
@@ -366,12 +362,12 @@ async fn filtered_count_ranking_is_not_a_heavy_hitter() {
          GROUP BY service ORDER BY c DESC LIMIT 10",
         "SELECT service, COUNT(bytes) AS c FROM metrics GROUP BY service ORDER BY c DESC LIMIT 10",
     ] {
-        let qe = lower_sql(sql, &catalog, AccuracyTarget::exact())
+        let qe = lower_sql(sql, &catalog)
             .await
             .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"));
         let (_, measures) = find_aggregate(&qe).expect("expected an Aggregate");
         assert!(
-            matches!(measures.as_slice(), [AggIntent::Count { .. }]),
+            matches!(measures.as_slice(), [AggIntent::Count]),
             "{sql}: the filtered Count must stay, got {measures:?}"
         );
         let NonASAPOp::Aggregate { filters, .. } = op(find_aggregate_node(&qe).unwrap()) else {
@@ -404,12 +400,7 @@ async fn non_count_ranked_limit_keeps_the_aggregate() {
 async fn distinct_value_reducer_is_rejected_not_dropped() {
     // The canonical intent algebra has no distinct-Sum; SUM(DISTINCT x) must
     // be rejected, not silently lowered as SUM(x).
-    let res = lower_sql(
-        "SELECT SUM(DISTINCT bytes) FROM metrics",
-        &catalog(),
-        AccuracyTarget::exact(),
-    )
-    .await;
+    let res = lower_sql("SELECT SUM(DISTINCT bytes) FROM metrics", &catalog()).await;
     assert!(res.is_err(), "SUM(DISTINCT ...) should be rejected");
 }
 
@@ -438,7 +429,7 @@ async fn count_star_is_count_intent() {
     let qe = lower("SELECT COUNT(*) FROM metrics").await;
     let (by, measures) = find_aggregate(&qe).expect("expected an Aggregate");
     assert!(by.is_empty());
-    assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Count]));
 }
 
 #[tokio::test]
@@ -737,7 +728,6 @@ async fn a_multi_column_in_subquery_is_rejected() {
     let err = lower_sql(
         "SELECT service FROM metrics WHERE service IN (SELECT service, region FROM hosts)",
         &catalog(),
-        AccuracyTarget::exact(),
     )
     .await
     .expect_err("IN must select one column");
@@ -962,7 +952,6 @@ async fn groups_frame_is_rejected() {
         "SELECT service, SUM(latency) OVER (PARTITION BY service ORDER BY ts \
          GROUPS BETWEEN 2 PRECEDING AND CURRENT ROW) FROM metrics",
         &catalog(),
-        AccuracyTarget::exact(),
     )
     .await
     .expect_err("GROUPS frame unit must be rejected");
@@ -1167,7 +1156,6 @@ async fn a_correlated_in_subquery_is_rejected() {
         "SELECT service FROM metrics m WHERE service IN \
          (SELECT h.service FROM hosts h WHERE h.region = m.service)",
         &catalog(),
-        AccuracyTarget::exact(),
     )
     .await
     .expect_err("correlated IN needs both a key match and a correlation");
@@ -1179,7 +1167,7 @@ async fn a_correlated_in_subquery_is_rejected() {
 /// The name-based tree, before `resolve_root`.
 async fn lower_unresolved(sql: &str) -> UnresolvedOp {
     let catalog = catalog();
-    asap_frontend_sql::test_support::lower_unresolved(sql, &catalog, &AccuracyTarget::exact())
+    asap_frontend_sql::test_support::lower_unresolved(sql, &catalog)
         .await
         .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"))
 }
@@ -1452,27 +1440,6 @@ async fn median_is_the_same_intent_as_an_explicit_half_percentile() {
 }
 
 #[tokio::test]
-async fn median_threads_the_accuracy_target() {
-    // The `approx_` prefix does not decide: the AccuracyTarget does.
-    let qe = lower_sql(
-        "SELECT approx_median(latency) FROM metrics",
-        &catalog(),
-        AccuracyTarget::max_error(0.01),
-    )
-    .await
-    .expect("approx_median should lower");
-    let (_, measures) = find_aggregate(&qe).expect("expected an Aggregate");
-    assert!(
-        matches!(
-            measures.as_slice(),
-            [AggIntent::Quantile { accuracy, .. }]
-                if (accuracy.max_error - 0.01).abs() < 1e-12
-        ),
-        "median must carry the workload's accuracy target, got {measures:?}"
-    );
-}
-
-#[tokio::test]
 async fn median_over_an_expression_binds_the_derived_column() {
     // Was rejected when filed (#111); supported since #110 materialized the
     // expression. What must still hold is the #115 rule: never `col: None`.
@@ -1708,7 +1675,6 @@ async fn grouping_function_is_rejected() {
     let err = lower_sql(
         "SELECT service, SUM(bytes), GROUPING(service) FROM metrics GROUP BY ROLLUP(service)",
         &catalog(),
-        AccuracyTarget::exact(),
     )
     .await
     .expect_err("GROUPING() must be rejected while __grouping_id is dropped");
@@ -1722,7 +1688,6 @@ async fn a_non_column_key_inside_a_grouping_set_is_rejected() {
     let err = lower_sql(
         "SELECT date_trunc('minute', ts) AS m, SUM(bytes) FROM metrics GROUP BY ROLLUP(m)",
         &catalog(),
-        AccuracyTarget::exact(),
     )
     .await
     .expect_err("expression key inside ROLLUP must be rejected");
@@ -1766,7 +1731,6 @@ async fn an_ambiguous_passthrough_column_is_rejected_only_when_projecting() {
         "SELECT m.service, h.service, SUM(m.bytes) FROM metrics m \
          JOIN hosts h ON m.service = h.service GROUP BY m.service, h.service",
         &catalog(),
-        AccuracyTarget::exact(),
     )
     .await;
     assert!(
@@ -1778,7 +1742,6 @@ async fn an_ambiguous_passthrough_column_is_rejected_only_when_projecting() {
         "SELECT m.service, h.service, SUM(m.bytes * 2) FROM metrics m \
          JOIN hosts h ON m.service = h.service GROUP BY m.service, h.service",
         &catalog(),
-        AccuracyTarget::exact(),
     )
     .await
     .expect_err("ambiguous passthrough must be rejected, not silently resolved");
@@ -1798,13 +1761,9 @@ async fn array_agg_is_deliberately_rejected() {
     // feed the sketch path.
     //
     // This test exists so the rejection reads as a decision rather than a gap.
-    let err = lower_sql(
-        "SELECT array_agg(service) FROM metrics",
-        &catalog(),
-        AccuracyTarget::exact(),
-    )
-    .await
-    .expect_err("array_agg must not lower to an intent");
+    let err = lower_sql("SELECT array_agg(service) FROM metrics", &catalog())
+        .await
+        .expect_err("array_agg must not lower to an intent");
     assert!(
         format!("{err}").contains("unsupported aggregate: array_agg"),
         "expected a clean UnsupportedAggregate, got {err}"
@@ -1829,7 +1788,6 @@ async fn clickhouse_identifiers_keep_their_case() {
         "SELECT RegionID, COUNT(DISTINCT UserID) FROM hits GROUP BY RegionID",
         &hits,
         SqlDialect::ClickhouseSQL,
-        AccuracyTarget::exact(),
     )
     .await
     .unwrap_or_else(|e| panic!("mixed-case ClickHouse columns must resolve: {e}"));
@@ -1840,14 +1798,9 @@ async fn clickhouse_identifiers_keep_their_case() {
         "expected COUNT(DISTINCT UserID) over column 1, got {measures:?}"
     );
 
-    let err = lower_sql_dialect(
-        "SELECT userid FROM hits",
-        &hits,
-        SqlDialect::ClickhouseSQL,
-        AccuracyTarget::exact(),
-    )
-    .await
-    .expect_err("ClickHouse must not match `userid` to `UserID`");
+    let err = lower_sql_dialect("SELECT userid FROM hits", &hits, SqlDialect::ClickhouseSQL)
+        .await
+        .expect_err("ClickHouse must not match `userid` to `UserID`");
     assert!(
         format!("{err}").contains("userid"),
         "unexpected error: {err}"
@@ -1860,14 +1813,9 @@ async fn clickhouse_identifiers_keep_their_case() {
 // uniqExact from #221) ───────────────────────────────────────────────────
 
 async fn lower_clickhouse(sql: &str) -> Rc<OperatorNode> {
-    lower_sql_dialect(
-        sql,
-        &catalog(),
-        SqlDialect::ClickhouseSQL,
-        AccuracyTarget::exact(),
-    )
-    .await
-    .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"))
+    lower_sql_dialect(sql, &catalog(), SqlDialect::ClickhouseSQL)
+        .await
+        .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"))
 }
 
 fn temporal_aggregate(node: &OperatorNode) -> (&AggIntent, std::time::Duration, &OperatorNode) {
@@ -1923,14 +1871,9 @@ async fn temporal_aggregate_rejects_non_timestamp_and_non_positive_window() {
         "SELECT asap_rate(latency, ts, 0) FROM metrics",
         "SELECT asap_rate(latency, ts, bytes) FROM metrics",
     ] {
-        let err = lower_sql_dialect(
-            sql,
-            &catalog(),
-            SqlDialect::ClickhouseSQL,
-            AccuracyTarget::exact(),
-        )
-        .await
-        .expect_err("invalid temporal arguments must fail closed");
+        let err = lower_sql_dialect(sql, &catalog(), SqlDialect::ClickhouseSQL)
+            .await
+            .expect_err("invalid temporal arguments must fail closed");
         assert!(
             format!("{err}").contains("timestamp argument")
                 || format!("{err}").contains("window_ms"),
@@ -1945,7 +1888,6 @@ async fn temporal_aggregate_rejects_mixed_reducers() {
         "SELECT asap_rate(latency, ts, 300000), sum(bytes) FROM metrics",
         &catalog(),
         SqlDialect::ClickhouseSQL,
-        AccuracyTarget::exact(),
     )
     .await
     .expect_err("one child cannot carry temporal and ordinary aggregate semantics");
@@ -1958,7 +1900,6 @@ async fn last_fails_closed_until_an_executable_summary_exists() {
         "SELECT service, asap_last(latency, ts, 300000) FROM metrics GROUP BY service",
         &catalog(),
         SqlDialect::ClickhouseSQL,
-        AccuracyTarget::exact(),
     )
     .await
     .expect_err("last must not be advertised without an executable physical summary");
@@ -1984,14 +1925,9 @@ async fn temporal_grouping_requires_the_complete_declared_series_identity() {
         "SELECT asap_rate(value, ts, 300000) FROM samples",
         "SELECT service, asap_rate(value, ts, 300000) FROM samples GROUP BY service",
     ] {
-        let err = lower_sql_dialect(
-            sql,
-            &multi_series,
-            SqlDialect::ClickhouseSQL,
-            AccuracyTarget::exact(),
-        )
-        .await
-        .expect_err("partial identity must not merge counter series");
+        let err = lower_sql_dialect(sql, &multi_series, SqlDialect::ClickhouseSQL)
+            .await
+            .expect_err("partial identity must not merge counter series");
         assert!(format!("{err}").contains("declared series identity"));
     }
 
@@ -2000,7 +1936,6 @@ async fn temporal_grouping_requires_the_complete_declared_series_identity() {
          FROM samples GROUP BY service, instance",
         &multi_series,
         SqlDialect::ClickhouseSQL,
-        AccuracyTarget::exact(),
     )
     .await
     .expect("the complete declared series identity is safe");
@@ -2021,7 +1956,6 @@ async fn temporal_grouping_requires_the_complete_declared_series_identity() {
         "SELECT service, asap_rate(value, ts, 300000) FROM samples GROUP BY service",
         &row_id_only,
         SqlDialect::ClickhouseSQL,
-        AccuracyTarget::exact(),
     )
     .await
     .expect_err("a row key without time does not prove a series identity");
@@ -2035,14 +1969,9 @@ async fn temporal_grouping_rejects_value_time_and_duplicate_resolved_columns() {
         "SELECT m.service, asap_rate(m.latency, m.ts, 300000) \
          FROM metrics m GROUP BY m.service, service",
     ] {
-        let err = lower_sql_dialect(
-            sql,
-            &catalog(),
-            SqlDialect::ClickhouseSQL,
-            AccuracyTarget::exact(),
-        )
-        .await
-        .expect_err("unsafe or duplicate resolved grouping must fail closed");
+        let err = lower_sql_dialect(sql, &catalog(), SqlDialect::ClickhouseSQL)
+            .await
+            .expect_err("unsafe or duplicate resolved grouping must fail closed");
         let message = format!("{err}");
         assert!(
             message.contains("timestamp or value")
@@ -2231,7 +2160,6 @@ async fn arg_max_rejects_a_non_column_argument() {
         "SELECT argMax(service, latency * 2) FROM metrics",
         &catalog(),
         SqlDialect::ClickhouseSQL,
-        AccuracyTarget::exact(),
     )
     .await
     .expect_err("argMax over a non-column expression must be rejected");
@@ -2370,7 +2298,7 @@ async fn count_null_semantics_become_a_measure_filter() {
         "SELECT count(value) FROM samples",
         "SELECT count(value + 1) FROM samples",
     ] {
-        let qe = lower_sql(sql, &catalog, AccuracyTarget::exact())
+        let qe = lower_sql(sql, &catalog)
             .await
             .unwrap_or_else(|error| panic!("{sql}: {error}"));
         assert!(
@@ -2383,7 +2311,7 @@ async fn count_null_semantics_become_a_measure_filter() {
         "SELECT count(NULL) FROM samples",
         "SELECT count(nullable_value + 1) FROM samples",
     ] {
-        let qe = lower_sql(sql, &catalog, AccuracyTarget::exact())
+        let qe = lower_sql(sql, &catalog)
             .await
             .unwrap_or_else(|error| panic!("{sql}: {error}"));
         let [Some(Predicate(cond))] = aggregate_filters(&qe) else {
@@ -2398,7 +2326,6 @@ async fn count_null_semantics_become_a_measure_filter() {
     let qe = lower_sql(
         "SELECT count(*), count(nullable_value) FROM samples",
         &catalog,
-        AccuracyTarget::exact(),
     )
     .await
     .unwrap();
@@ -2406,7 +2333,6 @@ async fn count_null_semantics_become_a_measure_filter() {
     let error = lower_sql(
         "SELECT count(nullable_value) FROM samples GROUP BY ROLLUP(value)",
         &catalog,
-        AccuracyTarget::exact(),
     )
     .await
     .unwrap_err();
@@ -2435,7 +2361,6 @@ async fn grouped_map_column_preserves_map_type() {
         "SELECT labels, max(value) AS value FROM raw_samples GROUP BY labels ORDER BY labels",
         &catalog,
         SqlDialect::ClickhouseSQL,
-        AccuracyTarget::exact(),
     )
     .await
     .unwrap();
@@ -2464,7 +2389,6 @@ async fn clickhouse_modulo_uses_native_arithmetic_types_and_nullability() {
             &format!("SELECT {call} AS value FROM numbers"),
             &catalog,
             SqlDialect::ClickhouseSQL,
-            AccuracyTarget::exact(),
         )
         .await
         .unwrap();
@@ -2472,7 +2396,6 @@ async fn clickhouse_modulo_uses_native_arithmetic_types_and_nullability() {
             &format!("SELECT {native} AS value FROM numbers"),
             &catalog,
             SqlDialect::ClickhouseSQL,
-            AccuracyTarget::exact(),
         )
         .await
         .unwrap();
@@ -2483,7 +2406,6 @@ async fn clickhouse_modulo_uses_native_arithmetic_types_and_nullability() {
         "SELECT modulo(n, 3) AS value FROM numbers",
         &catalog,
         SqlDialect::ClickhouseSQL,
-        AccuracyTarget::exact(),
     )
     .await
     .unwrap()
@@ -2519,14 +2441,9 @@ async fn original_o11y_map_queries_lower_with_typed_results() {
         include_str!("data/o11y_q09.sql"),
         include_str!("data/o11y_q12.sql"),
     ] {
-        let query = lower_sql_dialect(
-            sql,
-            &catalog,
-            SqlDialect::ClickhouseSQL,
-            AccuracyTarget::exact(),
-        )
-        .await
-        .unwrap_or_else(|e| panic!("{sql}: {e}"));
+        let query = lower_sql_dialect(sql, &catalog, SqlDialect::ClickhouseSQL)
+            .await
+            .unwrap_or_else(|e| panic!("{sql}: {e}"));
         let schema = &query.schema;
         assert!(
             schema
@@ -2551,14 +2468,9 @@ async fn clickhouse_modulo_preserves_projection_names_and_outer_references() {
             "modulo(bytes, 3)",
         ),
     ] {
-        let query = lower_sql_dialect(
-            sql,
-            &catalog(),
-            SqlDialect::ClickhouseSQL,
-            AccuracyTarget::exact(),
-        )
-        .await
-        .unwrap();
+        let query = lower_sql_dialect(sql, &catalog(), SqlDialect::ClickhouseSQL)
+            .await
+            .unwrap();
         assert_eq!(query.schema.fields[0].name, name);
     }
 }
@@ -2585,7 +2497,6 @@ async fn clickhouse_map_access_keeps_generated_names_and_rejects_variant_coercio
         "SELECT labels['job'] FROM t",
         &catalog,
         SqlDialect::ClickhouseSQL,
-        AccuracyTarget::exact(),
     )
     .await
     .unwrap();
@@ -2597,15 +2508,13 @@ async fn clickhouse_map_access_keeps_generated_names_and_rejects_variant_coercio
         "SELECT map()['a'] FROM t",
         &catalog,
         SqlDialect::ClickhouseSQL,
-        AccuracyTarget::exact(),
     )
     .await
     .is_err());
     assert!(lower_sql_dialect(
         "SELECT map('a', integer, 'b', floating) FROM t",
         &catalog,
-        SqlDialect::ClickhouseSQL,
-        AccuracyTarget::exact()
+        SqlDialect::ClickhouseSQL
     )
     .await
     .is_err());
@@ -2633,14 +2542,9 @@ async fn arg_selector_result_schema_tracks_selected_argument() {
             true,
         ),
     ] {
-        let query = lower_sql_dialect(
-            sql,
-            &catalog,
-            SqlDialect::ClickhouseSQL,
-            AccuracyTarget::exact(),
-        )
-        .await
-        .unwrap();
+        let query = lower_sql_dialect(sql, &catalog, SqlDialect::ClickhouseSQL)
+            .await
+            .unwrap();
         let schema = &query.schema;
         assert_eq!(schema.fields[0].dtype, dtype);
         assert_eq!(schema.fields[0].nullable, nullable);
@@ -2667,14 +2571,9 @@ async fn clickhouse_list_element_uses_canonical_typed_access() {
         ("SELECT arrayElement(samples, -1) AS selected FROM t", false),
         ("SELECT samples[index] AS selected FROM t", true),
     ] {
-        let query = lower_sql_dialect(
-            sql,
-            &catalog,
-            SqlDialect::ClickhouseSQL,
-            AccuracyTarget::exact(),
-        )
-        .await
-        .unwrap();
+        let query = lower_sql_dialect(sql, &catalog, SqlDialect::ClickhouseSQL)
+            .await
+            .unwrap();
         let output = &query.schema;
         assert_eq!(output.fields[0].dtype, DataType::Int64);
         assert_eq!(output.fields[0].nullable, nullable);
@@ -2683,14 +2582,9 @@ async fn clickhouse_list_element_uses_canonical_typed_access() {
     }
     for sql in ["SELECT samples[0] FROM t", "SELECT samples['bad'] FROM t"] {
         assert!(
-            lower_sql_dialect(
-                sql,
-                &catalog,
-                SqlDialect::ClickhouseSQL,
-                AccuracyTarget::exact()
-            )
-            .await
-            .is_err(),
+            lower_sql_dialect(sql, &catalog, SqlDialect::ClickhouseSQL)
+                .await
+                .is_err(),
             "{sql}"
         );
     }
@@ -2726,14 +2620,9 @@ async fn clickhouse_tuple_element_preserves_declared_field_metadata() {
             true,
         ),
     ] {
-        let query = lower_sql_dialect(
-            sql,
-            &catalog,
-            SqlDialect::ClickhouseSQL,
-            AccuracyTarget::exact(),
-        )
-        .await
-        .unwrap();
+        let query = lower_sql_dialect(sql, &catalog, SqlDialect::ClickhouseSQL)
+            .await
+            .unwrap();
         let output = &query.schema;
         assert_eq!(output.fields[0].dtype, dtype);
         assert_eq!(output.fields[0].nullable, nullable);
@@ -2744,14 +2633,9 @@ async fn clickhouse_tuple_element_preserves_declared_field_metadata() {
     for selector in ["0", "-1", "3", "'missing'", "index"] {
         let sql = format!("SELECT tupleElement(sample, {selector}) FROM t");
         assert!(
-            lower_sql_dialect(
-                &sql,
-                &catalog,
-                SqlDialect::ClickhouseSQL,
-                AccuracyTarget::exact()
-            )
-            .await
-            .is_err(),
+            lower_sql_dialect(&sql, &catalog, SqlDialect::ClickhouseSQL)
+                .await
+                .is_err(),
             "{sql}"
         );
     }
@@ -2778,13 +2662,9 @@ async fn composite_distinct_counts_tuples() {
             Field::plain("b", DataType::Int64, false),
         ]),
     );
-    let composite = lower_sql(
-        "SELECT COUNT(DISTINCT a, b) FROM t",
-        &cat,
-        AccuracyTarget::exact(),
-    )
-    .await
-    .unwrap();
+    let composite = lower_sql("SELECT COUNT(DISTINCT a, b) FROM t", &cat)
+        .await
+        .unwrap();
     let NonASAPOp::Aggregate { measures, .. } =
         op(find_aggregate_node(&composite).expect("expected an Aggregate"))
     else {
@@ -2795,13 +2675,9 @@ async fn composite_distinct_counts_tuples() {
         "{measures:?}"
     );
 
-    let single = lower_sql(
-        "SELECT COUNT(DISTINCT a) FROM t",
-        &cat,
-        AccuracyTarget::exact(),
-    )
-    .await
-    .unwrap();
+    let single = lower_sql("SELECT COUNT(DISTINCT a) FROM t", &cat)
+        .await
+        .unwrap();
     let NonASAPOp::Aggregate { measures, .. } =
         op(find_aggregate_node(&single).expect("expected an Aggregate"))
     else {
@@ -2824,13 +2700,9 @@ async fn composite_distinct_rejects_expression_arguments() {
             Field::plain("b", DataType::Int64, false),
         ]),
     );
-    let error = lower_sql(
-        "SELECT COUNT(DISTINCT a, b + 1) FROM t",
-        &cat,
-        AccuracyTarget::exact(),
-    )
-    .await
-    .unwrap_err();
+    let error = lower_sql("SELECT COUNT(DISTINCT a, b + 1) FROM t", &cat)
+        .await
+        .unwrap_err();
     assert!(
         matches!(&error, LoweringError::UnsupportedAggregate(reason)
             if reason.contains("non-column expression")),
@@ -2853,7 +2725,7 @@ async fn distinct_with_derived_sibling() {
         "SELECT count(DISTINCT a, b), sum(b + 1) FROM t",
         "SELECT count(DISTINCT a, b), corr(a,b) FROM t",
     ] {
-        let result = lower_sql(sql, &catalog, AccuracyTarget::exact()).await;
+        let result = lower_sql(sql, &catalog).await;
         assert!(result.is_ok(), "{sql}: {result:?}");
     }
 }
@@ -2886,7 +2758,7 @@ async fn conditional_count_lowers_to_a_filtered_measure() {
     assert!(
         matches!(
             measures.as_slice(),
-            [AggIntent::Count { .. }, AggIntent::Sum { col: Some(3) }]
+            [AggIntent::Count, AggIntent::Sum { col: Some(3) }]
         ),
         "{measures:?}"
     );
@@ -2938,7 +2810,7 @@ async fn count_of_a_nullable_expression_filters_nulls() {
     assert!(
         matches!(
             find_aggregate(&qe).unwrap().1.as_slice(),
-            [AggIntent::Count { .. }]
+            [AggIntent::Count]
         ),
         "still a row count"
     );
@@ -2977,7 +2849,6 @@ async fn measure_filter_inside_a_rollup_is_rejected() {
     let err = lower_sql(
         "SELECT service, count(*) FILTER (WHERE latency > 1.0) FROM metrics GROUP BY ROLLUP(service)",
         &catalog(),
-        AccuracyTarget::exact(),
     )
     .await
     .unwrap_err();
@@ -2985,7 +2856,7 @@ async fn measure_filter_inside_a_rollup_is_rejected() {
 }
 
 async fn lower_err(sql: &str) -> String {
-    lower_sql(sql, &catalog(), AccuracyTarget::exact())
+    lower_sql(sql, &catalog())
         .await
         .err()
         .unwrap_or_else(|| panic!("expected {sql:?} to be rejected"))
@@ -3137,7 +3008,6 @@ async fn duration_in_a_case_branch_is_rejected_as_a_duration() {
     let err = asap_frontend_sql::lower_sql(
         "SELECT CASE WHEN true THEN INTERVAL '1 day' ELSE d - d END FROM t",
         &catalog,
-        AccuracyTarget::exact(),
     )
     .await
     .unwrap_err()
@@ -3285,7 +3155,7 @@ async fn other_time_conditions_stay_scan_predicates() {
              WHERE ts >= now() - INTERVAL '5 minutes' AND ts < now() - INTERVAL '1 minute'",
         "SELECT COUNT(*) FROM events WHERE ts >= now() - INTERVAL '5 minutes'",
     ] {
-        let qe = lower_sql(sql, &catalog, AccuracyTarget::exact())
+        let qe = lower_sql(sql, &catalog)
             .await
             .unwrap_or_else(|e| panic!("{sql}: {e}"));
         assert!(trailing_window(&qe).is_none(), "{sql}: {qe:#?}");

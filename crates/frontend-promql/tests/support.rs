@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use asap_frontend_promql::{lower_promql_query_workload, PromqlError};
-use asap_types::ir::properties::AccuracyTarget;
+use asap_types::accuracy::AccuracyTarget;
 use asap_types::ir::scalar::ScalarValue;
 use asap_types::ir::{NonASAPOp, OperatorNode, ScalarExpr};
 use asap_types::workload::{
@@ -76,24 +76,14 @@ pub fn promql_scalar(node: &ScalarExpr) -> Option<f64> {
     }
 }
 
-/// Time `root` under the default materialization assignment (every summary
+/// Time `root` under the default physical properties assignment (every summary
 /// at query time) and export the physical DAG — export needs every node
 /// timed first.
 #[allow(dead_code)]
 pub fn physical_asap_dag(
     root: &Rc<OperatorNode>,
-) -> asap_types::ir::physical_export::PhysicalASAPDAG {
-    use asap_types::ir::{
-        apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
-    };
-    let timed = apply_materialization_timings(
-        root,
-        &MaterializationAssignment::default(),
-        &mut NodeToTimedNodeCache::new(),
-    )
-    .expect("default materialization timings");
-    asap_types::ir::physical_export::compile_physical_asap_dag(&timed)
-        .expect("post-ASAP DAG export")
+) -> asap_types::plan::physical_asap_dag::PhysicalASAPDAG {
+    asap_types::test_support::physical_asap_dag_at_query_time(root).expect("post-ASAP DAG export")
 }
 
 #[allow(dead_code)]
@@ -141,48 +131,10 @@ pub fn declared_data(root: &Rc<OperatorNode>) -> DataWorkload {
     DataWorkload {
         arrival: asap_types::workload::DataArrival::Ingesting {
             rows_per_second: 1_000.0,
+            max_out_of_order_ms: None,
         },
         sources,
     }
-}
-
-/// Local computation candidates for frontend binding tests. Other computations
-/// keep their default choices; a timed MILP archive is not a candidate catalog.
-#[allow(dead_code)]
-pub fn logical_candidates(root: Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
-    local_computation_candidates(root).expect("generated computation candidates compose")
-}
-
-fn local_computation_candidates(root: Rc<OperatorNode>) -> Result<Vec<Rc<OperatorNode>>, String> {
-    use asap_logical_asap_optimization::test_support::{
-        compose_logical_candidate, generate_per_computation_candidates,
-    };
-    use asap_types::ir::QueryRoot;
-    let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
-            QueryRoot::Operator(root),
-        ]),
-    )
-    .map_err(|error| error.to_string())?;
-    let mut choices = vec![vec![0; inventory.targets.len()]];
-    for (index, target) in inventory.targets.iter().enumerate() {
-        for choice in 1..target.choice_count() {
-            let mut selected = vec![0; inventory.targets.len()];
-            selected[index] = choice;
-            choices.push(selected);
-        }
-    }
-    choices
-        .into_iter()
-        .map(|choice| {
-            let mut roots = compose_logical_candidate(&inventory, &choice)
-                .map_err(|error| error.to_string())?;
-            match roots.remove(0) {
-                QueryRoot::Operator(root) => Ok(root),
-                QueryRoot::Scalar(_) => Err("expected an operator root".into()),
-            }
-        })
-        .collect()
 }
 
 /// A composed logical candidate, or why it does not compose.
@@ -210,16 +162,4 @@ pub fn require_composed_operator_candidates(
             }
         })
         .collect()
-}
-
-/// One generated ASAP candidate, or the exact computation if no local rule
-/// applies. Corpus coverage tests exercise binding, not cost-based selection.
-#[allow(dead_code)]
-pub fn logical_plan(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, String> {
-    let candidates = local_computation_candidates(Rc::clone(root))?;
-    Ok(candidates
-        .iter()
-        .find(|node| node.contains_asap())
-        .unwrap_or(&candidates[0])
-        .clone())
 }

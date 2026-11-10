@@ -106,7 +106,7 @@ derive_cost = cost(witness) − cost(W's plan)
 never from a guess:
 
 1. Stage 2 and Stage 3 implement and price the witness the same way they price
-   any candidate. Each materialization assignment goes through
+   any candidate. Each physical properties assignment goes through
    `optimize_physical_asap` and `select_plan`, using the same cost model,
    deployment capabilities and accuracy checks as the search. The cheapest assignment is kept.
 2. `W`'s selected logical plan is priced the same way. This gives the witness
@@ -137,7 +137,7 @@ Two rules decide whether a check counts:
 | `e-other-quantile-rank` | `q` at another rank | `q`'s estimate (or exact quantile aggregate) at the other rank, same input |
 | `f-exact-duplicate` | `q` | reading `q`'s node |
 | `g-outer-over-result` | an operator over `q`, by `q`'s outer operator: `topk(3, q)` (sum), `bottomk(3, q)` (count), `max(q)` (max), `quantile(0.5, q)` (avg), `q > 0` (min, quantile) | the operator's lowering grafted onto `q`'s node |
-| `h-other-statistic` | SQL, ungrouped: another frequency statistic of `q`'s column (distinct count → row count, L2 → distinct count, entropy → L2) | a `SummaryEstimate` of it from `q`'s state, when its family answers it (`FamilyCapability::answers`); or `W ∪ {q'}` planned with UnivMon as the only sketch family, priced with every family |
+| `h-other-statistic` | SQL, ungrouped: another frequency statistic of `q`'s column (distinct count → row count, L2 → distinct count, entropy → L2) | a `SummaryEstimate` of it from `q`'s state, when its family answers it (`SummaryTypeCapability::answers`); or `W ∪ {q'}` planned with UnivMon as the only sketch family, priced with every family |
 | `i-other-repeat-interval` | `q` at a longer repeat interval | reading `q`'s node |
 | `j-smaller-topk` | `q`'s top-k at k = 3 | `q`'s `Limit` / `TopK` at 3 over the same input |
 | `k-union-of-selections` | `q` over `label =~ "v1\|v2"`, with `q`'s `v2` twin added to `W` | `SummaryMerge` of the two states, then `q`'s estimate |
@@ -204,7 +204,7 @@ status column, "conclusive" means the check either held or was violated.
 | Another quantile rank from the same sketch | planner-layering.md L631–634, L804–817 | `e-other-quantile-rank` | VIOLATED (39 of 465), exact percentiles only: new draft (unshared exact aggregates) |
 | Identical expressions (common-subexpression elimination) | planner-layering.md rule table L583–585, Algorithm 2 L655–658 | `f-exact-duplicate` | VIOLATED (92 of 2,915), exact query-time aggregates: new draft |
 | A query over another query's result (top-k over a shared sum) | joint-planning-search.md L177–187; planner-layering.md L583–585 | `g-outer-over-result` | holds (552 conclusive checks). With the operator following q's (ASAPWorkloads #4, #12, #17, #18): VIOLATED (6 of 49), `topk(3, …)` over an exact instant sum and `… > 0` over an approximate quantile |
-| Summary capability: another statistic the family answers (`FamilyCapability::answers`) | planner-layering.md rule table L586, L611–617, Example 2 L1306–1370 | `h-other-statistic` | KLL and KMV answer one statistic, so h now checks SQL frequency statistics of a high-cardinality column (planner-layering Example 2; ASAPWorkloads #57, #107–#108): holds (5 conclusive checks) |
+| Summary capability: another statistic the family answers (`SummaryTypeCapability::answers`) | planner-layering.md rule table L586, L611–617, Example 2 L1306–1370 | `h-other-statistic` | KLL and KMV answer one statistic, so h now checks SQL frequency statistics of a high-cardinality column (planner-layering Example 2; ASAPWorkloads #57, #107–#108): holds (5 conclusive checks) |
 | gcd tumbling-window grid across repeat intervals | planner-layering.md L791–809 | `i-other-repeat-interval` | VIOLATED (49 of 2,717): new draft; compare #731 |
 | Exact top-k reuse (smaller k) | planner-layering.md rule table L589; joint-planning-search.md L325 | `j-smaller-topk` | holds (62 conclusive checks) |
 | Merge of disjoint selections | asap-primitive-schema.md §4.2 L194–232, §5.6 Example B L721–752 | `k-union-of-selections` | never conclusive: Stage 1 composes no guarantee for the merged estimate |

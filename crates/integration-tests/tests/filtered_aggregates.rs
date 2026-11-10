@@ -1,7 +1,6 @@
 //! Filtered aggregates (`FILTER (WHERE …)`, a per-measure filter, or a
 //! filtered `SummaryAgg`) execute with SQL semantics: a row that fails the
 //! filter contributes nothing, but its group is kept.
-use crate::physical_common;
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -14,11 +13,12 @@ use asap_executor::{
 };
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_integration_tests::planning::{logical_candidates_ignoring_guarantees, selected_dag};
-use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
-use asap_types::ir::properties::AccuracyTarget;
+use asap_types::accuracy::AccuracyTarget;
+use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::schema::{DataType, Field, Schema};
-use asap_types::ir::schema::{ExactKind, FieldDataType, SketchAlgorithm};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, Predicate};
+use asap_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload;
+use asap_types::summary_type::{ExactKind, SketchAlgorithm};
 use futures::StreamExt;
 
 fn catalog() -> SqlCatalog {
@@ -57,7 +57,7 @@ fn rows() -> Vec<Vec<Value>> {
 
 /// Run the logical DAG `root` over [`rows`]; rows come back shown and sorted.
 fn execute(root: &Rc<OperatorNode>) -> Vec<String> {
-    let dag = physical_common::compile_physical_asap_dag(root).unwrap();
+    let dag = asap_types::test_support::physical_asap_dag_at_query_time(root).unwrap();
     let scan = dag
         .nodes
         .iter()
@@ -113,16 +113,13 @@ fn execute(root: &Rc<OperatorNode>) -> Vec<String> {
     out
 }
 
-async fn lower(sql: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
-    lower_sql(sql, &catalog(), accuracy).await.unwrap()
+async fn lower(sql: &str) -> Rc<OperatorNode> {
+    lower_sql(sql, &catalog()).await.unwrap()
 }
 
 /// The selected plan for an exact `sql`, through all three stages.
 async fn exact_plan(sql: &str) -> Rc<OperatorNode> {
-    selected_dag(
-        lower(sql, AccuracyTarget::exact()).await,
-        AccuracyTarget::exact(),
-    )
+    selected_dag(lower(sql).await, AccuracyTarget::exact())
 }
 
 /// `COUNT(*) FILTER (WHERE x > 0) GROUP BY g` counts the matching rows per
@@ -155,20 +152,18 @@ async fn exact_count_of_nullable_column_skips_nulls() {
 fn with_summary_filter(root: &Rc<OperatorNode>, filter: &Predicate) -> Rc<OperatorNode> {
     if let Operator::ASAP(ASAPOp::SummaryAgg {
         child,
-        family,
+        summary_type: family,
         input,
         reduction,
-        grouping,
         filter: None,
     }) = &root.operator
     {
         return Rc::new(
             OperatorNode::new(Operator::ASAP(ASAPOp::SummaryAgg {
                 child: child.clone(),
-                family: family.clone(),
+                summary_type: family.clone(),
                 input: input.clone(),
                 reduction: reduction.clone(),
-                grouping: grouping.clone(),
                 filter: Some(filter.clone()),
             }))
             .unwrap(),
@@ -182,7 +177,7 @@ fn with_summary_filter(root: &Rc<OperatorNode>, filter: &Predicate) -> Rc<Operat
 
 /// The predicate of the filtered aggregate in `sql`, and its input schema.
 async fn measure_filter(sql: &str) -> (Predicate, Schema) {
-    OperatorNode::reachable(&lower(sql, AccuracyTarget::exact()).await)
+    OperatorNode::reachable(&lower(sql).await)
         .into_iter()
         .find_map(|n| match n.non_asap() {
             Some(NonASAPOp::Aggregate { filters, child, .. }) => {
@@ -205,7 +200,7 @@ async fn hand_filtered(
 ) -> Vec<Rc<OperatorNode>> {
     let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
     let mut result = vec![];
-    for root in logical_candidates_ignoring_guarantees(lower(sql, target.clone()).await, target) {
+    for root in logical_candidates_ignoring_guarantees(lower(sql).await, target) {
         let builds: Vec<_> = OperatorNode::reachable(&root)
             .into_iter()
             .filter(|n| matches!(n.asap(), Some(ASAPOp::SummaryAgg { .. })))
@@ -214,7 +209,7 @@ async fn hand_filtered(
             continue;
         };
         let Some(ASAPOp::SummaryAgg {
-            family: actual,
+            summary_type: actual,
             child,
             ..
         }) = build.asap()
@@ -259,7 +254,7 @@ async fn hand_filtered_kll_compiles_and_executes() {
     .await;
     let roots = hand_filtered(
         "SELECT g, approx_percentile_cont(x, 0.5) AS q FROM events GROUP BY g",
-        |f| matches!(f, FieldDataType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::Kll),
+        |f| matches!(f, FieldDataType::Sketch(kind) if kind == &SketchAlgorithm::Kll),
         &filter,
     )
     .await;
@@ -273,15 +268,16 @@ async fn hand_filtered_kll_compiles_and_executes() {
 /// [`hand_filtered`]).
 async fn kll_candidates(sql: &str) -> Vec<Rc<OperatorNode>> {
     let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
-    let roots: Vec<_> = logical_candidates_ignoring_guarantees(lower(sql, target.clone()).await, target)
-        .into_iter()
-        .filter(|root| {
-            OperatorNode::reachable(root).iter().any(|n| {
-                matches!(n.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
-                    if kind.algorithm() == &SketchAlgorithm::Kll)
-            })
+    let roots: Vec<_> =
+        logical_candidates_ignoring_guarantees(lower(sql).await, target)
+            .into_iter()
+            .filter(|root| {
+                OperatorNode::reachable(root).iter().any(|n| {
+            matches!(n.asap(), Some(ASAPOp::SummaryAgg { summary_type: FieldDataType::Sketch(kind), .. })
+                    if kind == &SketchAlgorithm::Kll)
         })
-        .collect();
+            })
+            .collect();
     assert!(!roots.is_empty(), "no KLL candidate for {sql}");
     roots
 }

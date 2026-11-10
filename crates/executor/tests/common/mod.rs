@@ -1,82 +1,35 @@
 #![allow(dead_code)]
-use planner_types::ir::physical_export::PhysicalASAPDAG;
-use planner_types::ir::{
-    apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache, OperatorNode,
-    QueryRoot,
-};
-use std::rc::Rc;
 
-pub fn compile_physical_asap_dag(
-    root: &Rc<OperatorNode>,
-) -> Result<PhysicalASAPDAG, Box<dyn std::error::Error>> {
-    let root = apply_materialization_timings(
-        root,
-        &MaterializationAssignment::default(),
-        &mut NodeToTimedNodeCache::default(),
-    )?;
-    Ok(planner_types::ir::physical_export::compile_physical_asap_dag(&root)?)
-}
+use planner_types::ir::{OperatorNode, QueryRoot};
+use std::rc::Rc;
 
 /// The logical DAG the planner pipeline (`asap_planner::run_planning`) selects for the
 /// single query `root` at `accuracy`, over a continuously ingested source,
 /// with the built-in models.
 pub fn selected_dag(
     root: Rc<OperatorNode>,
-    accuracy: planner_types::ir::properties::AccuracyTarget,
+    accuracy: planner_types::accuracy::AccuracyTarget,
 ) -> Rc<OperatorNode> {
     let run = run_all_stages(root, accuracy);
-    let [QueryRoot::Operator(selected)] = run
-        .selected_plan
-        .as_deref()
-        .unwrap_or_else(|| panic!("a plan is selected: {:?}", run.selection))
-    else {
+    let roots = match &run.selection {
+        Ok((plan, _)) => plan.query_roots().unwrap(),
+        Err(error) => panic!("a plan is selected: {error}"),
+    };
+    let [QueryRoot::Operator(selected)] = roots.as_slice() else {
         panic!("one operator root");
     };
     Rc::clone(selected)
 }
 
-/// Exercise each local implementation rule directly, keeping the other
-/// computations at their default choice. A bounded solver archive need not
-/// contain every algorithm that executor binding tests need to exercise.
-pub fn computation_candidates(root: Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
-    use asap_logical_asap_optimization::test_support::{
-        compose_logical_candidate, generate_per_computation_candidates,
-    };
-    let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
-            QueryRoot::Operator(root),
-        ]),
-    )
-    .expect("Pass 1 accepts the query");
-    let mut choices = vec![vec![0; inventory.targets.len()]];
-    for (index, target) in inventory.targets.iter().enumerate() {
-        for choice in 1..target.choice_count() {
-            let mut selected = vec![0; inventory.targets.len()];
-            selected[index] = choice;
-            choices.push(selected);
-        }
-    }
-    choices
-        .into_iter()
-        .map(|choice| {
-            let mut roots = compose_logical_candidate(&inventory, &choice)
-                .expect("a generated computation candidate composes");
-            match roots.remove(0) {
-                QueryRoot::Operator(root) => root,
-                QueryRoot::Scalar(_) => panic!("one operator root"),
-            }
-        })
-        .collect()
-}
-
 fn run_all_stages(
     root: Rc<OperatorNode>,
-    accuracy: planner_types::ir::properties::AccuracyTarget,
+    accuracy: planner_types::accuracy::AccuracyTarget,
 ) -> asap_planner::PlanningRun {
     use planner_types::workload::{DataArrival, DataWorkload};
     let data = DataWorkload {
         arrival: DataArrival::Ingesting {
             rows_per_second: 1_000.0,
+            max_out_of_order_ms: None,
         },
         ..Default::default()
     };

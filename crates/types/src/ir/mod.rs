@@ -12,11 +12,3 @@ pub use scalar::{ExprSemantics, Predicate, ProjectItem, ScalarExpr, SortKey};
 pub use schema::error::SchemaDerivationError;
 
 pub mod flat;
-pub mod materialized_view;
-pub mod physical_export;
-pub use properties::timing::{
-    apply_materialization_timings, apply_materialization_timings_to_roots, data_state,
-    is_filtered_build, timing_under_consumer, MaterializationAssignment, NodeToTimedNodeCache,
-};
-#[cfg(any(test, feature = "test-support"))]
-pub use properties::timing::{planned_data_state, validate_at_ingestion};

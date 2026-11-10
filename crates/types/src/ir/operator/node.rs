@@ -1,7 +1,9 @@
 //! The unified operator node: one node type before and after ASAP
 //! optimization. A node is an operator plus the common planning properties
-//! every traversal needs (output category and schema, accuracy guarantee,
-//! execution timing).
+//! every traversal needs (output category and schema, accuracy guarantee).
+//! Physical properties (timing, lifetime, schedule) are not on the node:
+//! each physical candidate holds its own
+//! ([`crate::stages::PhysicalCandidate::properties`]).
 
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -9,13 +11,11 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 
 use super::asap::ASAPOp;
+use super::input::OperatorInput;
 use super::non_asap::NonASAPOp;
-use crate::ir::properties::execution_data_state::ExecutionTiming;
-use crate::ir::properties::guarantee::AccuracyGuarantee;
-use crate::ir::properties::summary_coverage::{NodeToSummaryCoverageCache, SummaryCoverage};
+use crate::accuracy::AccuracyGuarantee;
 use crate::ir::schema::Schema;
 use crate::ir::SchemaDerivationError;
-use crate::physical::materialization::Materialization;
 
 /// The output category of an operator, derived from the operation and its
 /// inputs. Matching column schemas do not make categories interchangeable.
@@ -62,7 +62,9 @@ impl<C> Operator<C> {
     }
 }
 
-impl Operator {
+/// The derivation rules, one set for every kind of input
+/// ([`OperatorInput`]): front-end node trees and memo groups.
+impl<I: OperatorInput> Operator<I> {
     pub(crate) fn output_schema(&self) -> Result<Schema, SchemaDerivationError> {
         match self {
             Operator::NonASAP(op) => op.output_schema(),
@@ -83,6 +85,16 @@ impl Operator {
             Operator::ASAP(op) => op.validate_inputs(),
         }
     }
+
+    /// Whether two equal copies of this operator over the same inputs return
+    /// the same rows, so they may be one group: an ASAP operator, or a
+    /// non-ASAP one [`NonASAPOp::is_shareable_when_equal`].
+    pub(crate) fn is_shareable_when_equal(&self) -> bool {
+        match self {
+            Operator::NonASAP(op) => op.is_shareable_when_equal(),
+            Operator::ASAP(_) => true,
+        }
+    }
 }
 
 /// A node of the logical DAG. Nodes are immutable and shared through `Rc`;
@@ -91,19 +103,13 @@ impl Operator {
 ///
 /// `schema` and `result_kind` are derived from `operator` and its children
 /// at construction and retained. `guarantee` is `None` until accuracy
-/// assessment establishes one (`None` never means exact). `timing` is `None`
-/// until a materialization assignment is applied; export rejects an executable
-/// node without one. `materialization` is the option that assignment chose
-/// for this node (`NotMaterialized` until then, and for every node whose
-/// output is not stored).
+/// assessment establishes one (`None` never means exact).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OperatorNode {
     pub operator: Operator,
     pub result_kind: OperatorResultKind,
     pub schema: Schema,
     pub guarantee: Option<AccuracyGuarantee>,
-    pub timing: Option<ExecutionTiming>,
-    pub materialization: Materialization,
 }
 
 impl OperatorNode {
@@ -112,9 +118,7 @@ impl OperatorNode {
     /// ASAP operator, ...).
     pub fn new(operator: Operator) -> Result<Self, SchemaDerivationError> {
         let schema = operator.output_schema()?;
-        let node = Self::with_schema(operator, schema);
-        node.check_merge(&mut NodeToSummaryCoverageCache::new())?;
-        Ok(node)
+        Ok(Self::with_schema(operator, schema))
     }
 
     /// Build a node with caller-supplied output names and qualifiers. For
@@ -127,8 +131,6 @@ impl OperatorNode {
             result_kind,
             schema,
             guarantee: None,
-            timing: None,
-            materialization: Materialization::NotMaterialized,
         }
     }
 
@@ -144,55 +146,10 @@ impl OperatorNode {
         self
     }
 
-    pub fn with_timing(mut self, timing: Option<ExecutionTiming>) -> Self {
-        self.timing = timing;
-        self
-    }
-
-    pub fn with_materialization(mut self, materialization: Materialization) -> Self {
-        self.materialization = materialization;
-        self
-    }
-
-    /// What this summary state covers; `None` for a node that is not a
-    /// `SummaryAgg` or a valid `SummaryMerge`. Derived on each call, since
-    /// the public fields can be edited in place.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn coverage(&self) -> Option<SummaryCoverage> {
-        SummaryCoverage::derive(self).ok()
-    }
-
-    /// The build whose state this summary-state node carries: a
-    /// `SummaryAgg` or `SummaryTumblingWindowChain` itself, or the first input's build under
-    /// `SummaryMerge`s (merged inputs have one definition, which
-    /// `coverage` checks). `None` under a regrouping
-    /// merge, whose states no build in the DAG carries (its coverage's
-    /// `definition` is the build it stands for), and for any other node.
-    pub fn summary_build(&self) -> Option<&ASAPOp> {
-        match self.asap()? {
-            op @ (ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. }) => {
-                Some(op)
-            }
-            ASAPOp::SummaryMerge {
-                children,
-                group_by: None,
-                ..
-            } => children.first()?.summary_build(),
-            _ => None,
-        }
-    }
-
-    /// A `SummaryMerge` is valid only over inputs with the same definition
-    /// and disjoint selections. `cache` holds the coverage already derived
-    /// for nodes of the DAG being validated.
-    fn check_merge(
-        &self,
-        cache: &mut NodeToSummaryCoverageCache,
-    ) -> Result<(), SchemaDerivationError> {
-        if matches!(self.asap(), Some(ASAPOp::SummaryMerge { .. })) {
-            SummaryCoverage::derive_cached(self, cache)?;
-        }
-        Ok(())
+    /// The build whose state this summary-state node carries
+    /// ([`summary_build`](super::asap::summary_build)).
+    pub fn summary_build(self: &Rc<Self>) -> Option<ASAPOp> {
+        super::asap::summary_build(self)
     }
 
     pub fn non_asap(&self) -> Option<&NonASAPOp> {
@@ -237,8 +194,7 @@ impl OperatorNode {
     /// the old derived schema are retained, for either operator category. A
     /// change in output arity with such overrides needs an explicit new
     /// naming assignment.
-    /// `guarantee`, `timing` and `materialization` depend on the inputs and
-    /// are cleared.
+    /// `guarantee` depends on the inputs and is cleared.
     pub fn with_new_children(
         &self,
         f: impl FnMut(&Rc<OperatorNode>) -> Rc<OperatorNode>,
@@ -302,39 +258,12 @@ impl OperatorNode {
         out
     }
 
-    /// Validate assigned phases without imposing any particular runtime implementation.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn validate_execution_timing(self: &Rc<Self>) -> Result<(), SchemaDerivationError> {
-        self.validate_structure()?;
-        for node in Self::reachable(self) {
-            let timing = node.timing.ok_or_else(|| {
-                SchemaDerivationError::InvalidScalarSignature(
-                    "execution timing is unassigned".into(),
-                )
-            })?;
-            if timing == crate::ir::properties::ExecutionTiming::IngestionTime
-                && node.children().iter().any(|child| {
-                    child.timing != Some(crate::ir::properties::ExecutionTiming::IngestionTime)
-                })
-            {
-                return Err(SchemaDerivationError::InvalidScalarSignature(
-                    "ingestion-time operation depends on a query-time or unassigned input".into(),
-                ));
-            }
-        }
-        Ok(())
-    }
-
     /// Validate the whole DAG reachable from this node: every operator's
     /// input contract, scalar typing against the owning operator's input
     /// schema, and agreement between each retained schema and the one
     /// derived from the operator. Both operator categories may override field
     /// names and qualifiers; all structural metadata must match derivation.
-    /// `timing` may be `None`.
     pub fn validate_structure(self: &Rc<Self>) -> Result<(), SchemaDerivationError> {
-        // Each summary state's coverage is derived once, not once per merge
-        // above it; `reachable` keeps every node alive while it is used.
-        let mut coverage = NodeToSummaryCoverageCache::new();
         for node in Self::reachable(self) {
             if node.schema.time_index.is_some_and(|i| {
                 node.schema.fields.get(i).is_none_or(|f| {
@@ -352,7 +281,6 @@ impl OperatorNode {
                 ));
             }
             node.operator.validate_inputs()?;
-            node.check_merge(&mut coverage)?;
             if node.result_kind != node.operator.output_kind() {
                 return Err(SchemaDerivationError::InvalidScalarSignature(
                     "retained result kind disagrees with operation".into(),

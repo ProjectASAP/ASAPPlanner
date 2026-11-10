@@ -609,9 +609,8 @@ impl Batch {
 mod tests {
     use super::*;
     use crate::summary_kernels::DDSketchAccumulator;
-    use planner_types::ir::schema::{
-        DataType, Field, Schema, SketchAlgorithm, SketchKind, SketchParams,
-    };
+    use planner_types::ir::schema::{DataType, Field, Schema};
+    use planner_types::summary_type::SketchAlgorithm;
 
     fn field(name: &str, dtype: DataType, nullable: bool) -> Field {
         Field {
@@ -774,13 +773,7 @@ mod tests {
     }
 
     fn dd_family() -> FieldDataType {
-        FieldDataType::Sketch(
-            SketchKind::new(
-                SketchAlgorithm::DDSketch,
-                SketchParams::DDSketch { alpha: 0.01 },
-            ),
-            Default::default(),
-        )
+        FieldDataType::Sketch(SketchAlgorithm::DDSketch)
     }
 
     // Rows sharing a state keep sharing one state; filtering rows shares the
@@ -861,7 +854,7 @@ mod tests {
     #[test]
     fn a_batch_from_columns_holds_sealed_states_and_labels() {
         use crate::StateColumnUpdater;
-        use planner_types::ir::schema::{ExactKind, ExactParams};
+        use planner_types::summary_type::{ExactKind, ExactParams};
         let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
         let mut updater = StateColumnUpdater::new(&family).unwrap();
         updater.ensure_groups(2).unwrap();
@@ -908,7 +901,7 @@ mod tests {
                 .as_any()
                 .downcast_ref::<crate::summary_kernels::exact::ExactAccumulator>()
                 .unwrap()
-                .evaluation(planner_types::ir::schema::ExactKind::Sum, None, None)
+                .evaluation(planner_types::summary_type::ExactKind::Sum, None, None)
                 .unwrap()
                 .unwrap()
         };
@@ -1004,7 +997,7 @@ mod tests {
     #[test]
     fn a_selective_filter_compacts_its_state_column() {
         use crate::StateColumnUpdater;
-        use planner_types::ir::schema::{ExactKind, ExactParams};
+        use planner_types::summary_type::{ExactKind, ExactParams};
         let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
         let mut updater = StateColumnUpdater::new(&family).unwrap();
         updater.ensure_groups(10).unwrap();
@@ -1051,7 +1044,7 @@ mod tests {
                     .as_any()
                     .downcast_ref::<crate::summary_kernels::exact::ExactAccumulator>()
                     .unwrap()
-                    .evaluation(planner_types::ir::schema::ExactKind::Sum, None, None)
+                    .evaluation(planner_types::summary_type::ExactKind::Sum, None, None)
                     .unwrap()
                     .unwrap()
             })
@@ -1064,7 +1057,7 @@ mod tests {
     #[test]
     fn concat_of_different_exact_columns_keeps_records() {
         use crate::StateColumnUpdater;
-        use planner_types::ir::schema::{ExactKind, ExactParams};
+        use planner_types::summary_type::{ExactKind, ExactParams};
         let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
         let schema = Arc::new(Schema {
             fields: vec![Field {
@@ -1122,7 +1115,7 @@ mod tests {
                     .as_any()
                     .downcast_ref::<crate::summary_kernels::exact::ExactAccumulator>()
                     .unwrap()
-                    .evaluation(planner_types::ir::schema::ExactKind::Sum, None, None)
+                    .evaluation(planner_types::summary_type::ExactKind::Sum, None, None)
                     .unwrap()
                     .unwrap()
             })
@@ -1134,22 +1127,11 @@ mod tests {
     /// exact sums.
     fn state_batch(count: u32, exact: bool) -> Batch {
         use crate::StateColumnUpdater;
-        use planner_types::ir::schema::{
-            ExactKind, ExactParams, SketchAlgorithm, SketchKind, SketchParams,
-        };
+        use planner_types::summary_type::{ExactKind, ExactParams, SketchAlgorithm};
         let family = if exact {
             FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
         } else {
-            FieldDataType::Sketch(
-                SketchKind::new(
-                    SketchAlgorithm::Kll,
-                    SketchParams::Kll {
-                        k: 200,
-                        failure_probability: None,
-                    },
-                ),
-                Default::default(),
-            )
+            FieldDataType::Sketch(SketchAlgorithm::Kll)
         };
         let mut updater = StateColumnUpdater::new(&family).unwrap();
         updater.ensure_groups(count as usize).unwrap();

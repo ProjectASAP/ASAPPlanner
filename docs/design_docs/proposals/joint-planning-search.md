@@ -125,17 +125,17 @@ G_KLL += MergeLatest15(G_tumbling_windows)
 
 Non-summary query-time materialization must be a query output or have a selected immediate consumer used by only one query; the materialized node itself must have multiple query readers. These connection-dependent constraints match Stage 2's highest-shared-node rule and are enforced in MILP. Summary-state eligibility remains separate.
 
-Physical rules provide executable operators, configurations, and materialization assignments for the generated computations. For example, a supported tumbling window implementation can maintain state at ingestion and merge it at evaluation. This introduces two timing decisions within the same query, rather than one materialization choice for the whole query. Eligibility that depends on consumers is checked against the selected connections; considering every potential consumer at once could incorrectly reject a useful candidate.
+Physical rules provide executable operators, configurations, and physical properties assignments for the generated computations. For example, a supported tumbling window implementation can maintain state at ingestion and merge it at evaluation. This introduces two timing decisions within the same query, rather than one materialization choice for the whole query. Eligibility that depends on consumers is checked against the selected connections; considering every potential consumer at once could incorrectly reject a useful candidate.
 
 For the running example, assume evaluations occur at aligned minute boundaries and the deployment supports ingestion-time tumbling window maintenance. Stage 2 can expand the state groups as follows; `s` is a generated KLL capacity:
 
 ```text
-Group     Physical candidate     Computation                 Materialization
-G_tumbling_windows   P_ingest(s)             Maintain aligned 1m tumbling windows   MatAtIngestion(Memory)
-G_KLL     K_merge(s)              MergeLatest15(G_tumbling_windows)      MatAtQuery(Memory)
-G_KLL     K_build(s)              BuildKLL(G_input, 15m)      MatAtQuery(Memory)
-G95       E95                    EstimateQuantile(.95, G_KLL) NotMaterialized
-G99       E99                    EstimateQuantile(.99, G_KLL) NotMaterialized
+Group     Physical candidate     Computation                 (timing, lifetime)
+G_tumbling_windows   P_ingest(s)             Maintain aligned 1m tumbling windows   (IngestionTime, AcrossEvaluations(Memory))
+G_KLL     K_merge(s)              MergeLatest15(G_tumbling_windows)      (QueryTime, OneEvaluation(Memory))
+G_KLL     K_build(s)              BuildKLL(G_input, 15m)      (QueryTime, OneEvaluation(Memory))
+G95       E95                    EstimateQuantile(.95, G_KLL) (QueryTime, None)
+G99       E99                    EstimateQuantile(.99, G_KLL) (QueryTime, None)
 ```
 
 `P_ingest(s)` retains the tumbling windows needed to cover the 15m window. `K_merge(s)` constructs window state from those tumbling windows at evaluation; `K_build(s)` instead builds window state from available raw input. Each candidate records its input requirements and costs. The estimators can use either compatible state candidate. Exact and local KLL candidates from Pass 1 also receive supported physical implementations and remain available. Stage 2 has generated choices; it has not yet selected a build or connected an estimator to it.
@@ -189,7 +189,7 @@ The following cases make the accounting concrete. Let `B` be the cost of one who
 | Repeated common evaluations | Both queries evaluate together `n` times; state is discarded after each evaluation. | `n × (B + E95 + E99)`. Selecting one candidate does not mean building only once over the entire horizon. |
 | Different evaluation timestamps | Q1 evaluates every minute; Q2 every five minutes on the same grid. Both use a 15m window. | Over 15 evaluation ticks, a shareable query-local build executes 15 times, with 15 P95 extractions and 3 P99 extractions: `15B + 15E95 + 3E99`. This assumes sharing at the three common timestamps; an earlier window state cannot automatically answer a later window. |
 | Ingestion-maintained tumbling windows | One tumbling-window chain feeds a shared query-time merge and both estimators. | Ingestion updates and tumbling-window retention are charged once for the chain. Add `n × (M + E95 + E99)` for `n` common evaluations, plus query-local merge memory. |
-| State retained across evaluations | An eligible tumbling-window-chain candidate uses `MatAtQueryKeptAcrossEvaluations(Memory)`. | Charge initial construction, required refresh/update work, retained memory/storage over its lifetime, and evaluation work. Reuse does not eliminate freshness maintenance; generate this case only when supported. |
+| State retained across evaluations | An eligible tumbling-window-chain candidate uses `(QueryTime, AcrossEvaluations(Memory))`. | Charge initial construction, required refresh/update work, retained memory/storage over its lifetime, and evaluation work. Reuse does not eliminate freshness maintenance; generate this case only when supported. |
 | Multiple selected candidates in one group | Some consumers use a small KLL state and others a separate large state. | Charge each selected state's build/update and retention, then each consumer's local work. Equal group identity does not collapse two physical candidates into one charge. |
 | Shared raw-data retention | Two consumers need 5m and 15m of the same raw source and compatible retention scope. | Both consumers connect to `Retain15m` in `G_raw[d]`. Charge that candidate once; reads and intermediate KLL state have separate owners. |
 | Per-request overhead | Two requests share computation but still require separate response handling. | Report fixed overhead as `Σ_q N_q × h_q`; omit this constant from the optimization objective but retain its applicable resource usage. Decision-dependent overhead stays in the optimization model. |
