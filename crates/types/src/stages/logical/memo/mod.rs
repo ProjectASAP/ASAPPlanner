@@ -8,11 +8,11 @@ mod hash_consing;
 
 use super::group::{
     derive_group_properties, validate_expression_over_input_groups, MemoGroupAsInput,
+    MemoGroupError,
 };
 use crate::accuracy::AccuracyTarget;
 use crate::ir::Operator;
 use crate::ir::QueryRoot;
-use crate::ir::SchemaDerivationError;
 use crate::stages::{
     CandidateError, CandidateForMemoGroup, CandidateForMemoGroupId, LogicalRequirements, MemoGroup,
     MemoGroupId,
@@ -105,7 +105,7 @@ impl Memo {
     pub fn find_or_add_group(
         &mut self,
         expression: Operator<MemoGroupId>,
-    ) -> Result<MemoGroupId, SchemaDerivationError> {
+    ) -> Result<MemoGroupId, MemoGroupError> {
         let serialized = serialized_expression(&expression);
         let hash = expression_hash(&serialized);
         // Only shareable groups are listed by hash, and an equal expression

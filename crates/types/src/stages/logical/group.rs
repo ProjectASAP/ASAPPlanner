@@ -3,10 +3,10 @@
 
 use std::collections::BTreeSet;
 
+use super::aggregate_coverage::{aggregate_coverage, AggregateCoverage, CoverageError};
 use super::column_properties::{column_signs, ValueSign};
 use crate::ir::operator::arguments::{AtModifier, Source, TimeShift};
 use crate::ir::operator::input::OperatorInput;
-use crate::ir::properties::AggregateCoverage;
 use crate::ir::schema::Schema;
 use crate::ir::ASAPOp;
 use crate::ir::SchemaDerivationError;
@@ -75,13 +75,28 @@ pub struct GroupProperties {
     /// What an aggregate group covers: a summary state, a chain, a
     /// `TimeRange`/`TimeShift` over a chain or a merge over one, or an exact
     /// `Aggregate` result; `None` for any other group.
-    pub aggregate_coverage: Option<AggregateCoverage<MemoGroupId>>,
+    pub aggregate_coverage: Option<AggregateCoverage>,
     /// Whether two equal expressions return the same rows for the same
     /// input rows, so they may be one group (not an unordered `LIMIT`).
     pub shareable_when_equal: bool,
     /// The sources the `Scan`s below this group read: a `Scan`'s own, else
     /// the union over its input groups.
     pub scanned_sources: BTreeSet<Source>,
+}
+
+/// Why an expression is not valid over its input groups: what
+/// [`Memo::find_or_add_group`] and, wrapped in
+/// [`CandidateError::NotValidOverInputGroups`](crate::stages::CandidateError::NotValidOverInputGroups),
+/// [`Memo::add_candidate`] return. The memo is unchanged.
+#[derive(Debug, thiserror::Error)]
+pub enum MemoGroupError {
+    /// Its output schema does not derive, or an input fails validation.
+    #[error(transparent)]
+    Schema(#[from] SchemaDerivationError),
+    /// A merge reads states it may not merge (different definitions, or
+    /// selections not proven to relate as the family's merge requires).
+    #[error("invalid aggregate coverage: {0}")]
+    Coverage(#[from] CoverageError),
 }
 
 /// Whether `operator` is a valid expression over its input groups
@@ -91,12 +106,12 @@ pub struct GroupProperties {
 /// derived.
 pub(super) fn validate_expression_over_input_groups(
     operator: &Operator<MemoGroupAsInput<'_>>,
-) -> Result<(Schema, Option<AggregateCoverage<MemoGroupId>>), SchemaDerivationError> {
+) -> Result<(Schema, Option<AggregateCoverage>), MemoGroupError> {
     let schema = operator.output_schema()?;
     operator.validate_inputs()?;
     // A merge is valid only over states of one definition it may merge.
     let merge_coverage = match operator {
-        Operator::ASAP(ASAPOp::SummaryMerge { .. }) => Some(operator.aggregate_coverage()?),
+        Operator::ASAP(ASAPOp::SummaryMerge { .. }) => Some(aggregate_coverage(operator)?),
         _ => None,
     };
     Ok((schema, merge_coverage))
@@ -109,10 +124,10 @@ pub(super) fn validate_expression_over_input_groups(
 pub(super) fn derive_group_properties(
     memo: &Memo,
     expression: &Operator<MemoGroupId>,
-) -> Result<GroupProperties, SchemaDerivationError> {
+) -> Result<GroupProperties, MemoGroupError> {
     let operator = expression.map_children(|&group_id| MemoGroupAsInput { memo, group_id });
     let (schema, merge_coverage) = validate_expression_over_input_groups(&operator)?;
-    let aggregate_coverage = merge_coverage.or_else(|| operator.aggregate_coverage().ok());
+    let aggregate_coverage = merge_coverage.or_else(|| aggregate_coverage(&operator).ok());
     Ok(GroupProperties {
         column_signs: column_signs(&operator, &schema, &memo.source_facts),
         depends_on_evaluation_time: depends_on_evaluation_time(&operator),
@@ -190,16 +205,6 @@ impl OperatorInput for MemoGroupAsInput<'_> {
             memo: self.memo,
             group_id,
         })
-    }
-
-    type Reference = MemoGroupId;
-
-    fn reference(&self) -> Option<MemoGroupId> {
-        Some(self.group_id)
-    }
-
-    fn aggregate_coverage(&self) -> Option<&AggregateCoverage<MemoGroupId>> {
-        self.group().group_properties.aggregate_coverage.as_ref()
     }
 
     fn scanned_sources(&self) -> BTreeSet<Source> {

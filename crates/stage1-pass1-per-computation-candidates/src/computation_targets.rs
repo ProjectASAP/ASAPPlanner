@@ -49,6 +49,7 @@ use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{
     NonASAPOp, OperatorNode, OperatorResultKind, Predicate, QueryRoot, SchemaDerivationError,
 };
+use asap_types::stages::MemoGroupError;
 use asap_types::summary_type::{
     ExactKind, SketchAlgorithm, StatisticKind, SummaryInputExpr, SummaryUpdate,
 };
@@ -229,6 +230,10 @@ fn absorbed_targets(targets: &[ComputationTarget]) -> impl Iterator<Item = usize
 pub enum PerComputationCandidateError {
     #[error(transparent)]
     Structure(#[from] SchemaDerivationError),
+    /// A node of a query is not a valid group over its children's groups
+    /// (Stage 0, `Memo::find_or_add_group`).
+    #[error(transparent)]
+    MemoGroup(#[from] MemoGroupError),
     #[error("logical candidate input already contains ASAP operators")]
     ContainsAsap,
     #[error("choice must name one listed candidate per target")]

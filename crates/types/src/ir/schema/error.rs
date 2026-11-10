@@ -16,6 +16,4 @@ pub enum SchemaDerivationError {
     EmptyConcat,
     #[error("invalid per-series sample column: {0}")]
     InvalidSampleColumn(String),
-    #[error("invalid aggregate coverage: {0}")]
-    Coverage(#[from] crate::ir::properties::CoverageError),
 }

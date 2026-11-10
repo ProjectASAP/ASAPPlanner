@@ -12,8 +12,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use asap_types::accuracy::AccuracyTarget;
-use asap_types::ir::{OperatorNode, QueryRoot, SchemaDerivationError};
-use asap_types::stages::{Memo, MemoGroupId, MemoQuery};
+use asap_types::ir::{OperatorNode, QueryRoot};
+use asap_types::stages::{Memo, MemoGroupError, MemoGroupId, MemoQuery};
 use asap_types::workload::bounds::{series_read, values_per_result};
 use asap_types::workload::DataWorkload;
 
@@ -30,7 +30,7 @@ pub fn memo_of_queries(
     roots: &[QueryRoot],
     accuracy_targets: &[Option<AccuracyTarget>],
     data: &DataWorkload,
-) -> Result<Memo, SchemaDerivationError> {
+) -> Result<Memo, MemoGroupError> {
     assert_eq!(
         roots.len(),
         accuracy_targets.len(),
@@ -74,7 +74,7 @@ fn group_of(
     memo: &mut Memo,
     group_of_node: &mut GroupOfNode,
     node: &Rc<OperatorNode>,
-) -> Result<MemoGroupId, SchemaDerivationError> {
+) -> Result<MemoGroupId, MemoGroupError> {
     if let Some(&group) = group_of_node.get(&Rc::as_ptr(node)) {
         return Ok(group);
     }
@@ -153,7 +153,7 @@ mod tests {
 
     /// The memo of `roots`, one query per root, without accuracy targets
     /// or data facts.
-    fn memo_of_roots(roots: &[QueryRoot]) -> Result<Memo, SchemaDerivationError> {
+    fn memo_of_roots(roots: &[QueryRoot]) -> Result<Memo, MemoGroupError> {
         memo_of_queries(roots, &vec![None; roots.len()], &DataWorkload::default())
     }
 

@@ -110,7 +110,7 @@ pub struct PhysicalASAPDAGNode {
 }
 
 /// A view's aggregate coverage
-/// ([`AggregateCoverage`](crate::ir::properties::AggregateCoverage), `docs/design_docs/proposals/asap-primitive-schema.md`
+/// ([`AggregateCoverage`](crate::stages::AggregateCoverage), `docs/design_docs/proposals/asap-primitive-schema.md`
 /// §4.2): what it computes and which rows went in.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
