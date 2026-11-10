@@ -1,6 +1,7 @@
 //! `asap_planner` writes valid stage documents: each stage's output over
 //! #509's examples and ad-hoc workloads, the deployment and cost inputs it
 //! plans with, and the inputs it refuses.
+use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -1810,8 +1811,7 @@ fn the_text_memo_after_pass_2_prints_every_group_with_its_properties() {
             "{properties}"
         );
         assert!(
-            properties.contains("evaluated every")
-                || properties.contains("no known evaluation grid"),
+            properties.contains("every ") || properties.contains("no known evaluation grid"),
             "{properties}"
         );
     }
@@ -1943,8 +1943,9 @@ fn the_text_folds_candidates_that_differ_only_in_theta() {
 /// group-properties line, no per-producer edge rows, no `α^` rejection
 /// reasons. Every section starts with a legend; each non-root memo group
 /// names the groups that read it and every group the queries reaching it;
-/// Stage 2 prints each physical candidate once, under its logical
-/// candidate, with `★` on exactly the plan's candidates.
+/// a pruned Pass 2 candidate lists no inputs; Stage 2 prints each physical
+/// candidate once, under its logical candidate, with `★` on exactly the
+/// candidates the plan's nodes run.
 #[test]
 fn the_default_text_is_the_terse_form_and_verbose_adds_the_details() {
     let file = TempFile::json(&two_windowed_quantiles_within_1_percent());
@@ -1989,27 +1990,29 @@ fn the_default_text_is_the_terse_form_and_verbose_adds_the_details() {
         .unwrap()
         .parse()
         .unwrap();
-    assert_eq!(candidates.len(), count, "each physical candidate once");
-    for (index, line) in candidates.iter().enumerate() {
-        assert!(
-            line.starts_with(&format!("    C{index} ")),
-            "in id order: {line}"
-        );
-    }
-    let starred: Vec<String> = candidates
+    let name = |line: &&str| line.split_whitespace().next().unwrap().to_owned();
+    let listed: BTreeSet<String> = candidates.iter().map(name).collect();
+    assert_eq!(listed.len(), count, "each physical candidate once");
+    assert_eq!(listed, (0..count).map(|id| format!("C{id}")).collect());
+    let starred: BTreeSet<String> = candidates
         .iter()
         .filter(|line| line.ends_with('★'))
-        .map(|line| line.split_whitespace().next().unwrap().to_owned())
+        .map(name)
         .collect();
-    let plan_nodes = sections[5]
+    // `n<k>:  C<c> = ...`: the candidate each plan node runs.
+    let in_plan: BTreeSet<String> = sections[5]
         .lines()
-        .filter(|line| line.starts_with('n'))
-        .count();
-    assert_eq!(starred.len(), plan_nodes, "★ on the plan's candidates");
-    for candidate in &starred {
-        assert!(
-            sections[5].contains(&format!(" {candidate} = ")),
-            "{candidate} is a plan node's candidate"
-        );
+        .filter(|line| line.starts_with('n') && line.contains(":  C"))
+        .filter_map(|line| line.split_whitespace().nth(1).map(str::to_owned))
+        .collect();
+    assert!(!in_plan.is_empty());
+    assert_eq!(starred, in_plan, "★ on exactly the plan's candidates");
+
+    let pass2_lines: Vec<&str> = pass2.lines().collect();
+    for (index, line) in pass2_lines.iter().enumerate() {
+        if line.trim_start().starts_with('[') && line.contains(" pruned ") {
+            let next = pass2_lines.get(index + 1).copied().unwrap_or_default();
+            assert!(!next.trim_start().starts_with("input "), "{line}\n{next}");
+        }
     }
 }
