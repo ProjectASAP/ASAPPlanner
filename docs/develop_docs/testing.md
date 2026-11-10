@@ -15,7 +15,7 @@ planner's own costing.
 |---|---|---|---|
 | Rule unit tests | one rule over a minimal memo: the candidates, edges or prune causes it adds | a one- or two-query workload planned up to the stage under test through the production frontends and Stage 0 | each stage crate's tests |
 | Contracts | invariants of every stage's output (below) | every workload of the corpus registry | `crates/integration-tests/tests/contracts.rs` |
-| Oracles | the planner's cost or answers against a computation that does not use the planner's costing | canonical shapes and small synthetic data sets | `crates/integration-tests` |
+| Oracles | the planner's cost or answers against a computation that does not use the planner's costing | canonical shapes and small synthetic data sets | `crates/integration-tests/tests/{cost_oracle,execution_oracle}.rs` |
 | Metamorphic relations | how the cost of two related workloads must compare | `planner_fuzz` with fixed seeds | `crates/devtools/tests/planner_fuzz.rs`, the `planner_fuzz` bin |
 | Regressions | one bug stays fixed | one minimal workload per issue | next to the code the bug was in, or `crates/integration-tests` |
 | Snapshots | the full selected plan and its cost do not change unexplained | the corpus registry | `crates/devtools/tests/corpus_snapshots.rs`, [planner snapshots](planner-snapshots.md) |
@@ -116,6 +116,24 @@ The canonical cost shapes are a `Scan`, a chain built at ingestion time, a
 offset range query, o11y q21) and a `SummaryMerge` of selected windows. A
 hand-computed test states each count it uses in its doc comment (for q21:
 61 evaluations per 60 s, 5 windows of 1,000 states selected per evaluation).
+It costs the selected plan with cost inputs that charge only CPU
+operations, or only retained bytes, so each node's expected cost is a count
+times one unit; the per-operation work (one operation per row, state or
+accumulator) is the cost model's and is stated in the test, the counts are
+what the oracle checks.
+
+The execution oracle runs the plan as a runtime does: each materialized
+view (a chain) is refreshed once per window its retention keeps, in an
+ingestion run over that window's samples, then the query run reads them.
+Its synthetic data is 200 series of one gauge, one sample per second for
+30 minutes, each value uniform in [0, 100) from a fixed seed plus 10 times
+the minute it falls in, so a plan that reads the wrong windows moves its
+answer far outside ε; an approximate query is checked over all 200 values
+(at most δ × 200 may be off), and two answers for one series fail. The
+query run is bound raw data only when the deployment keeps it, so a plan
+that scans raw data on a deployment without it fails. A
+query shape the executor cannot run yet is ignored with the executor
+issue that adds it, not reshaped.
 
 ### Metamorphic relations
 
@@ -252,13 +270,13 @@ Tokens:
 | sum | S3+X `planner/tests/runtime_install.rs::an_instant_selector_reads_the_latest_sample_per_series` | S3+X `integration-tests/tests/filtered_aggregates.rs::exact_filtered_sum_is_null_for_groups_without_matches` | L `frontend-metricsql/tests/lowering.rs::selector_range_aggregate_and_call_share_the_canonical_shape`; exec gap |
 | avg | S3 `integration-tests/tests/joint_search_equivalence.rs::composed_quantile_and_sum_outputs_are_validated_together`; Xd (lowered) `integration-tests/tests/per_series_exact_execution.rs::exact_per_series_range_functions_execute` (avg_over_time) | S3+X `integration-tests/tests/stage1_logical_asap_optimization.rs::sql_avg_from_sum_and_count_executes_as_avg` | gap (only a test that rejects `avg(foo, bar)`) |
 | count | S3 `planner/tests/e2e_plan.rs::each_plan_carries_its_selected_root` (count_over_time); Xd (lowered) `integration-tests/tests/per_series_exact_execution.rs::exact_per_series_range_functions_execute` | S3+X `integration-tests/tests/filtered_aggregates.rs::exact_filtered_count_keeps_groups_without_matches` | L `frontend-metricsql/tests/lowering_semantics.rs::count_counts_series`; exec gap |
-| min / max | S3 `devtools/tests/asap_planner.rs::a_counter_function_over_a_declared_gauge_plans_with_a_warning` (max_over_time), `devtools/tests/planner_fuzz.rs::threshold_witness_costs_over_the_result` (min by); Xd (lowered) `integration-tests/tests/per_series_exact_execution.rs::exact_per_series_range_functions_execute` | S3 `integration-tests/tests/independent_plan_seed.rs::percentile_and_max_over_one_scan_cost_no_more_than_separate_plans`; Xd (hand-built) `executor/tests/physical_semantics.rs::global_extrema_bind_with_planner_derived_schema` | gap |
-| quantile | S3 `planner/tests/runtime_install.rs::the_plan_carries_stage3s_predicted_usage`; Xd (lowered) `integration-tests/tests/per_series_exact_execution.rs::quantile_bounds_follow_promql` (exact only; `planner/tests/columnar_batches.rs` runs a KLL build but checks no answer) | S3+X `integration-tests/tests/filtered_aggregates.rs::kll_quantile_of_all_null_group_is_null` (KLL plan; answers on trivial groups only, no ε check) | L `frontend-metricsql/tests/lowering.rs::supported_parameterized_functions_require_their_exact_arity`; exec gap |
+| min / max | S3 `devtools/tests/asap_planner.rs::a_counter_function_over_a_declared_gauge_plans_with_a_warning` (max_over_time), `devtools/tests/planner_fuzz.rs::threshold_witness_costs_over_the_result` (min by); Xd (lowered) `integration-tests/tests/per_series_exact_execution.rs::exact_per_series_range_functions_execute`; S3+X `integration-tests/tests/execution_oracle.rs::an_exact_max_over_chain_windows_equals_the_window_maximum` (max_over_time over a chain) | S3 `integration-tests/tests/independent_plan_seed.rs::percentile_and_max_over_one_scan_cost_no_more_than_separate_plans`; Xd (hand-built) `executor/tests/physical_semantics.rs::global_extrema_bind_with_planner_derived_schema` | gap |
+| quantile | S3 `planner/tests/runtime_install.rs::the_plan_carries_stage3s_predicted_usage`; Xd (lowered) `integration-tests/tests/per_series_exact_execution.rs::quantile_bounds_follow_promql` (exact only; `planner/tests/columnar_batches.rs` runs a KLL build but checks no answer); S3+X `integration-tests/tests/execution_oracle.rs::an_approximate_quantile_is_within_its_rank_error_for_all_but_delta_of_the_series` (sketch chain, rank ε; `::an_approximate_quantile_is_within_its_relative_error_for_all_but_delta_of_the_series`, relative ε) | S3+X `integration-tests/tests/filtered_aggregates.rs::kll_quantile_of_all_null_group_is_null` (KLL plan; answers on trivial groups only, no ε check) | L `frontend-metricsql/tests/lowering.rs::supported_parameterized_functions_require_their_exact_arity`; exec gap |
 | topk / bottomk | topk: S3 `devtools/tests/asap_planner.rs::example1_document_validates_its_stage_dags`; Xd (lowered) `executor/tests/current_series_heap.rs::population_fixture_compiles_with_dynamic_identity`. Heap-sketch answers are checked only in `integration-tests/tests/promql_to_post_asap.rs::planner_heap_topk_reference_execution_matches_ground_truth` [ign], by an evaluator inside the test, not the executor. bottomk: L only `devtools/tests/cross_language.rs::ascending_count_ranked_topk_stays_generic_in_both_languages` | ORDER BY value … LIMIT: S3 `integration-tests/tests/sql_to_post_asap.rs::sql_relational_parents_retain_summary_bound_aggregate`. Top-k by count (heavy hitter) stops at Pass 1: `integration-tests/tests/per_computation_candidates_sql.rs::topk_heap_over_an_int64_key_counts_raw_rows`. Xd (hand-built) `executor/tests/physical_semantics.rs::limit_offset_fetch_matrix` | gap |
 | distinct count | L `frontend-promql/tests/promql_lowering.rs::distinct_over_time_lowers_to_cardinality_over_nested_windows`; S3 gap; exec gap | S3+X `planner/tests/sql_table_scans.rs::ingestion_time_tumbling_windows_built_from_table_rows_answer_exactly` | gap |
 | rate / increase | S3 `devtools/tests/asap_planner.rs::example1_document_validates_its_stage_dags` (rate), `integration-tests/tests/promql_to_post_asap.rs::value_ranked_topk_over_binary_ratio_finalizes_both_summary_operands` (increase); Xd (hand-built) `executor/tests/promql_values.rs::recovered_exact_counter_uses_window_and_omits_insufficient_samples` | n/a | L `frontend-metricsql/tests/lowering.rs::selector_range_aggregate_and_call_share_the_canonical_shape`; exec gap |
 | binary op | S3 `integration-tests/tests/promql_to_post_asap.rs::promql_binary_arithmetic_preserves_nested_structure_and_vector_matching`; Xd (hand-built) `executor/tests/promql_binary.rs::compiled_binary_matches_series_and_preserves_checked_division` | S3 `devtools/tests/asap_planner.rs::example2_plans_the_sql_workload` (entropy and L2 arithmetic); Xd (lowered) `integration-tests/tests/sql_frequency.rs::recognized_sql_l2_executes_exactly` | gap (`sum(up) + sum(down)` appears only as an error case) |
-| offset | S3 `integration-tests/tests/milp_objective.rs::the_milp_objective_is_the_plan_cost_on_an_offset_range_query`; Xd (hand-built) `executor/tests/time_series_window.rs::a_shifted_range_window_ends_its_offset_before_the_evaluation` | n/a (shifted `ts` window predicate: gap) | gap |
+| offset | S3 `integration-tests/tests/milp_objective.rs::the_milp_objective_is_the_plan_cost_on_an_offset_range_query`; Xd (hand-built) `executor/tests/time_series_window.rs::a_shifted_range_window_ends_its_offset_before_the_evaluation`; S3+X `integration-tests/tests/execution_oracle.rs::an_exact_sum_over_shifted_chain_windows_equals_the_shifted_window_sum` | n/a (shifted `ts` window predicate: gap) | gap |
 | `@` modifier | L `integration-tests/tests/nested.rs::q40_at_modifier_absolute`. Stage 2 unit test on a hand-built memo: `stage2-physical-optimization/src/catalog/tests.rs::an_at_t_subtree_is_offered_ingestion_time`. S3 gap. Xd (hand-built) `executor/tests/tumbling_window_chain.rs::a_time_shift_at_end_evaluates_its_input_at_the_requests_end` | n/a | gap |
 | subquery | S3 only [ign]: `devtools/tests/corpus_snapshots/o11y_bench/q05.json` (and q06, q11) via `devtools/tests/corpus_snapshots.rs::corpus_plans_match_snapshots`. L `integration-tests/tests/nested.rs::q27_nested_subquery_prometheus_docs_example`. Xd (hand-built; memory limit only) `executor/tests/series_window_memory_limit.rs::a_long_subquery_over_many_series_fails_near_the_memory_limit` | derived table: S3 `integration-tests/tests/sql_to_post_asap.rs::sql_relational_parents_retain_summary_bound_aggregate`; Xd (lowered) `integration-tests/tests/sql_frequency.rs::recognized_sql_entropy_executes_in_nats` | gap |
 
@@ -274,16 +292,16 @@ PromQL:
 
 | operator | range, exact | range, ε | repeating, exact | repeating, ε |
 |---|---|---|---|---|
-| sum | gap | S3 `integration-tests/tests/milp_objective.rs::the_milp_objective_is_the_plan_cost_on_an_offset_range_query` | S3 `integration-tests/tests/sharing_issue_regressions.rs::nested_exact_sum_reuses_newest_tumbling_windows` | S3+X `planner/tests/runtime_install.rs::an_instant_selector_reads_the_latest_sample_per_series` (rank 0.01) |
+| sum | gap | S3 `integration-tests/tests/milp_objective.rs::the_milp_objective_is_the_plan_cost_on_an_offset_range_query` | S3+X `integration-tests/tests/execution_oracle.rs::an_exact_sum_over_chain_windows_equals_the_sum_of_the_window` | S3+X `planner/tests/runtime_install.rs::an_instant_selector_reads_the_latest_sample_per_series` (rank 0.01) |
 | avg | gap | gap | S3 [ign] `integration-tests/tests/sharing_issue_regressions.rs::exact_coarse_sum_reuses_fine_sum` (avg_over_time) | S3 `integration-tests/tests/joint_search_equivalence.rs::composed_quantile_and_sum_outputs_are_validated_together` |
 | count | gap | gap | S3 `devtools/tests/planner_fuzz.rs::exact_rollup_witness_costs_for_a_grouped_count` | S3 `planner/tests/e2e_plan.rs::each_plan_carries_its_selected_root` (count_over_time) |
-| min / max | gap | S3 [ign] `devtools/tests/corpus_snapshots.rs::corpus_plans_match_snapshots` (q11, max_over_time) | S3 `devtools/tests/planner_fuzz.rs::threshold_witness_costs_over_the_result` (min by over max_over_time) | gap |
-| quantile | gap | S3 [ign] `devtools/tests/corpus_snapshots.rs::corpus_plans_match_snapshots` (q02, `histogram_quantile` only) | gap | S3 `integration-tests/tests/accuracy_at_query_roots.rs::a_whole_result_failure_probability_is_divided_over_the_values` |
+| min / max | gap | S3 [ign] `devtools/tests/corpus_snapshots.rs::corpus_plans_match_snapshots` (q11, max_over_time) | S3+X `integration-tests/tests/execution_oracle.rs::an_exact_max_over_chain_windows_equals_the_window_maximum` | gap |
+| quantile | gap | S3 [ign] `devtools/tests/corpus_snapshots.rs::corpus_plans_match_snapshots` (q02, `histogram_quantile` only) | gap | S3+X `integration-tests/tests/execution_oracle.rs::an_approximate_quantile_is_within_its_rank_error_for_all_but_delta_of_the_series` |
 | topk | gap | gap | S3 `integration-tests/tests/sharing_issue_regressions.rs::duplicate_exact_topk_shares_work` | S3 `integration-tests/tests/joint_search_equivalence.rs::fused_top_k_preserves_its_independently_requested_inner_sum` |
 | distinct count | gap | gap | gap | gap |
 | rate / increase | gap | S3 `integration-tests/tests/milp_objective.rs::the_milp_objective_is_the_plan_cost_on_an_offset_range_query` | S3 `devtools/tests/asap_planner_acceptance.rs::stage3_selects_candidates_stage2_lists` | S3 `planner/tests/summary_sharing.rs::identical_ungrouped_queries_share_their_producers` |
 | binary op | gap | S3 [ign] `devtools/tests/corpus_snapshots.rs::corpus_plans_match_snapshots` (q19, increase ratio) | S3 `integration-tests/tests/production_rollup_workloads.rs::production_binary_queries_use_joint_prices_with_mixed_schedules` | S3 `integration-tests/tests/accuracy_at_query_roots.rs::each_query_meets_its_target_at_its_root` (quantile ratio) |
-| offset | L `frontend-promql/src/lib.rs::tests::at_start_and_at_end_are_lifted_above_the_selector_they_anchor` | S3 `integration-tests/tests/milp_objective.rs::the_milp_objective_is_the_plan_cost_on_an_offset_range_query` | gap | gap |
+| offset | L `frontend-promql/src/lib.rs::tests::at_start_and_at_end_are_lifted_above_the_selector_they_anchor` | S3 `integration-tests/tests/milp_objective.rs::the_milp_objective_is_the_plan_cost_on_an_offset_range_query` | S3+X `integration-tests/tests/execution_oracle.rs::an_exact_sum_over_shifted_chain_windows_equals_the_shifted_window_sum` | gap |
 
 SQL has no range queries (no test sets `range_evaluation`, and the SQL
 frontend does not read it):
@@ -298,8 +316,8 @@ frontend does not read it):
 | topk (ORDER BY … LIMIT) | gap | gap |
 | distinct count | gap | S3+X `planner/tests/sql_table_scans.rs::ingestion_time_tumbling_windows_built_from_table_rows_answer_exactly` |
 
-No range query has an exact target or is executed; only one PromQL
-cell and two SQL ones reach S3+X.
+No range query has an exact target or is executed (the q21 range query's
+cost is hand-computed: `integration-tests/tests/cost_oracle.rs::a_time_range_over_a_shifted_chain_merges_every_selected_window`).
 
 ### Time shape
 
@@ -392,9 +410,9 @@ The 11 ignored tests:
 ### Notable gaps
 
 1. MetricSQL is never planned. No test sends a `metricsql` workload or `FrontendInput::Metricsql` to `e2e_plan` or `plan_installable`, even though the facade supports it. Only sum, count, quantile and rate are lowered.
-2. Few planner-selected plans are executed with answers checked (`X`). PromQL has only `sum` (`runtime_install`). SQL has sum, count, avg, quantile (KLL) and distinct count. PromQL quantile, topk, rate, binary operations, offset, `@` and subquery are never executed from a Stage 3 plan.
-3. No PromQL plan built on a sketch (KLL, DDSketch, CMS heap) has its answers checked by the executor. The heap check is ignored and uses an evaluator written inside the test. `columnar_batches` runs a KLL build without checking an answer.
-4. Range queries (`range_evaluation`) have one non-ignored test, which checks cost only (`milp_objective`). There is no SQL range query, and no range query is ever executed.
+2. Few planner-selected plans are executed with answers checked (`X`). PromQL has sum, sum_over_time, max_over_time, quantile_over_time (a sketch chain) and offset over a chain, at one evaluation time (`runtime_install`, `execution_oracle`). SQL has sum, count, avg, quantile (KLL) and distinct count. PromQL topk, rate, binary operations, `@` and subquery are never executed from a Stage 3 plan.
+3. The only PromQL sketch plans whose answers the executor checks are the quantile sketch chains of `execution_oracle` (rank and relative ε). No CMS heap or top-k sketch plan is executed: the heap check is ignored and uses an evaluator written inside the test. `columnar_batches` runs a KLL build without checking an answer.
+4. Range queries (`range_evaluation`) have two non-ignored tests, which check cost only (`milp_objective` and the q21 hand-computed cost in `cost_oracle`). There is no SQL range query, and no range query is ever executed.
 5. Out-of-order data appears in a single Stage 2 unit test on a hand-built memo. No test in either language sets `max_out_of_order_ms` through the pipeline or executes late samples.
 6. The `@` modifier is not planned past Stage 2 from query text. Subqueries reach Stage 3 only in the ignored corpus snapshots. Neither is executed except by operator-level tests (`Xd`, hand-built).
 7. The corpus snapshots (14 `o11y_bench` queries: subquery, offset, histogram_quantile, range_evaluation) and the sketch plan snapshots (10 workloads) are `#[ignore]` and do not run by default.

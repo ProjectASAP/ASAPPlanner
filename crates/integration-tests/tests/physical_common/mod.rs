@@ -7,20 +7,19 @@ use asap_executor::{
 use futures::{executor::block_on, StreamExt};
 use std::sync::Arc;
 
-/// Run `plan` against `store` and collect each root's batches.
+/// Run `plan` against `store` within `limits` and collect each root's
+/// batches.
 #[allow(dead_code)]
 pub fn execute(
     plan: &CompiledPhysicalDAG,
     store: InMemoryDataStore,
     scope: Scope,
+    limits: Limits,
 ) -> Vec<Vec<Batch>> {
     let dag = plan.instantiate(Arc::new(store)).unwrap();
     block_on(async {
         let streams = dag
-            .execute(
-                plan.roots(),
-                RunContext::new(scope, Limits::default()).unwrap(),
-            )
+            .execute(plan.roots(), RunContext::new(scope, limits).unwrap())
             .unwrap();
         futures::future::join_all(streams.into_iter().map(|mut stream| async move {
             let mut batches = Vec::new();
