@@ -86,7 +86,7 @@ pub enum PruneReason {
     /// candidates, once each candidate's allowed consumers are applied.
     ReachesNoQueryOutput,
     /// Stage 2: a Count-Min build (`Cms`, `CmsWithHeap`, `HydraCms`) whose
-    /// weight column's `column_sign` is not `NonNegative`: its estimates are
+    /// weight column's `column_signs` is not `NonNegative`: its estimates are
     /// bounds only for non-negative weights.
     CountMinWeightsNotProvenNonNegative,
     /// Stage 3: the candidate it names, in the same memo group with the

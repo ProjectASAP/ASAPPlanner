@@ -96,14 +96,13 @@ mod tests {
 
     use asap_types::accuracy::AccuracyTarget;
     use asap_types::ir::operator::agg_intent::AggIntent;
-    use asap_types::ir::operator::arguments::{BinaryOpKind, GroupKeys, Reduction, Source};
+    use asap_types::ir::operator::arguments::{BinaryOpKind, Reduction, Source};
     use asap_types::ir::operator::asap::ASAPOp;
     use asap_types::ir::scalar::expr_ir::{ColumnRef, CompareOpKind};
     use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
     use asap_types::ir::{BinaryOperator, NonASAPOp, Operator, ScalarExpr};
     use asap_types::stages::ValueSign;
     use asap_types::summary_type::{SketchAlgorithm, SketchStatistic, SummaryUpdate};
-    use asap_types::workload::PrometheusMetricType;
 
     fn node(op: NonASAPOp) -> Rc<OperatorNode> {
         OperatorNode::new_shared(Operator::NonASAP(op)).unwrap()
@@ -172,12 +171,6 @@ mod tests {
         }
     }
 
-    /// Whether queries 0 and 1 of `[a, b]` are one group.
-    fn one_group(a: Rc<OperatorNode>, b: Rc<OperatorNode>) -> bool {
-        let memo = memo_of(vec![a, b]);
-        root(&memo, 0) == root(&memo, 1)
-    }
-
     /// Two queries sharing a sub-expression read one group for it, and
     /// every group lists the queries that reach it and the groups that
     /// read it.
@@ -236,78 +229,6 @@ mod tests {
         let p50 = quantile_agg(vec![1], Some(2), 0.5);
         let memo = memo_of(vec![compare(Rc::clone(&p50), p50)]);
         assert_eq!(memo.groups().len(), 3);
-    }
-
-    /// Aggregates that differ in a column, a quantile or a filter are
-    /// different groups.
-    #[test]
-    fn aggregates_that_differ_in_an_argument_are_different_groups() {
-        use asap_types::ir::scalar::ScalarValue;
-        use asap_types::ir::Predicate;
-        assert!(!one_group(
-            quantile_agg(vec![1], Some(2), 0.5),
-            quantile_agg(vec![1], Some(3), 0.5)
-        ));
-        assert!(!one_group(
-            quantile_agg(vec![], Some(2), 0.5),
-            quantile_agg(vec![], Some(2), 0.9)
-        ));
-        let filtered = node(NonASAPOp::Aggregate {
-            reduction: Reduction::by(vec![1]),
-            measures: vec![AggIntent::Quantile {
-                col: Some(2),
-                q: 0.5,
-            }],
-            output_names: vec![],
-            filters: vec![Some(Predicate(ScalarExpr::Compare {
-                left: Box::new(ScalarExpr::Column(3)),
-                op: CompareOpKind::Gt,
-                right: Box::new(ScalarExpr::Literal(ScalarValue::Float64(1.0))),
-                semantics: asap_types::ir::ExprSemantics::Sql,
-            }))],
-            having: None,
-            child: scan(),
-        });
-        assert!(!one_group(quantile_agg(vec![1], Some(2), 0.5), filtered));
-    }
-
-    /// Equal nodes without a unique key are one group when they return the
-    /// same rows each time: a keyless scan, a global aggregate, a `without`
-    /// aggregate.
-    #[test]
-    fn equal_keyless_nodes_that_return_the_same_rows_are_one_group() {
-        let table_scan = || {
-            node(NonASAPOp::Scan {
-                source: Source::Table {
-                    table_ref: "metrics".into(),
-                },
-                predicates: vec![],
-                schema: Schema::with_time_index(
-                    vec![
-                        Field::plain("ts", DataType::Timestamp, false),
-                        Field::plain("value", DataType::Float64, true),
-                    ],
-                    0,
-                    vec![],
-                ),
-            })
-        };
-        assert!(one_group(table_scan(), table_scan()));
-        assert!(one_group(
-            quantile_agg(vec![], Some(2), 0.9),
-            quantile_agg(vec![], Some(2), 0.9)
-        ));
-        let without = || {
-            node(NonASAPOp::Aggregate {
-                reduction: Reduction::Reduce(GroupKeys::without(vec![0])),
-                measures: vec![AggIntent::Count],
-                output_names: vec![],
-                filters: vec![],
-                having: None,
-                child: scan(),
-            })
-        };
-        assert!(one_group(without(), without()));
     }
 
     /// Queries that differ only in their accuracy target are one group: the
@@ -401,101 +322,6 @@ mod tests {
         assert_eq!(memo.groups().len(), 4);
     }
 
-    /// `DISTINCT` on every column returns the same rows each time and is one
-    /// group; a `Dedup` on some columns keeps an unspecified row per key.
-    #[test]
-    fn dedup_is_one_group_only_on_every_column() {
-        let dedup = |cols: Vec<usize>| {
-            node(NonASAPOp::Dedup {
-                cols,
-                child: scan(),
-            })
-        };
-        assert!(one_group(dedup(vec![]), dedup(vec![])));
-        assert!(!one_group(dedup(vec![1]), dedup(vec![1])));
-    }
-
-    fn unordered_limit(child: Rc<OperatorNode>) -> Rc<OperatorNode> {
-        node(NonASAPOp::Limit {
-            n: Some(10),
-            offset: 0,
-            partition_by: GroupKeys::default(),
-            child,
-        })
-    }
-
-    /// Two unordered `LIMIT 10`s may return different rows: two groups, and
-    /// so are equal parents over them.
-    #[test]
-    fn unordered_limits_and_their_parents_are_different_groups() {
-        assert!(!one_group(unordered_limit(scan()), unordered_limit(scan())));
-        let distinct_over_limit = || {
-            node(NonASAPOp::Dedup {
-                cols: vec![],
-                child: unordered_limit(scan()),
-            })
-        };
-        assert!(!one_group(distinct_over_limit(), distinct_over_limit()));
-    }
-
-    /// A `LIMIT` over a `Sort` with the same partitions keeps the first rows
-    /// of a fixed order (one group); over a `Sort` partitioned differently,
-    /// which rows come first depends on input order (two groups).
-    #[test]
-    fn limits_over_a_sort_with_their_partitions_are_one_group() {
-        let limit = |sort_partitions: GroupKeys| {
-            node(NonASAPOp::Limit {
-                n: Some(10),
-                offset: 0,
-                partition_by: GroupKeys::default(),
-                child: node(NonASAPOp::Sort {
-                    keys: vec![asap_types::ir::scalar::SortKey {
-                        expr: ScalarExpr::Column(2),
-                        ascending: false,
-                        nulls_first: false,
-                    }],
-                    partition_by: sort_partitions,
-                    child: scan(),
-                }),
-            })
-        };
-        assert!(one_group(
-            limit(GroupKeys::default()),
-            limit(GroupKeys::default())
-        ));
-        assert!(!one_group(
-            limit(GroupKeys::by(vec![1])),
-            limit(GroupKeys::by(vec![1]))
-        ));
-    }
-
-    /// A projection emitting the literal `value`.
-    fn literal(value: f64) -> Rc<OperatorNode> {
-        node(NonASAPOp::Project {
-            cols: vec![asap_types::ir::ProjectItem {
-                alias: Some("v".into()),
-                expr: ScalarExpr::literal_f64(value),
-            }],
-            qualifier: None,
-            child: scan(),
-        })
-    }
-
-    /// Signed zeros and different non-finite literals are different groups;
-    /// JSON's `null` for non-finite floats never decides equality.
-    #[test]
-    fn signed_zero_and_non_finite_literals_are_different_groups() {
-        for (a, b) in [
-            (0.0, -0.0),
-            (-0.0, 0.0),
-            (f64::INFINITY, f64::NEG_INFINITY),
-            (f64::NAN, f64::NAN),
-        ] {
-            assert!(!one_group(literal(a), literal(b)), "{a} and {b}");
-        }
-        assert!(one_group(literal(f64::INFINITY), literal(f64::INFINITY)));
-    }
-
     /// A frontend node whose expression is not valid over its children's
     /// groups (a readout of raw rows instead of summary state) makes Stage 0
     /// return the error.
@@ -556,59 +382,28 @@ mod tests {
         );
     }
 
-    /// A `Scan`'s column signs are the data workload's declared ones: `m`
-    /// declares `latency` non-negative, the counter `requests_total`'s
-    /// `value` is non-negative without a declaration, and every other
-    /// column is `Unknown`.
+    /// `memo_of_queries` passes the data workload's facts to the memo: `m`
+    /// declares `latency` non-negative, which its `Scan` group's signs read.
     #[test]
     fn a_scan_reads_the_declared_column_signs() {
-        let counter = node(NonASAPOp::Scan {
-            source: Source::TimeSeries {
-                metric: "requests_total".into(),
-            },
-            predicates: vec![],
-            schema: Schema::with_time_index(
-                vec![
-                    Field::plain("ts", DataType::Timestamp, false),
-                    Field::plain("value", DataType::Float64, false),
-                ],
-                0,
-                vec![],
-            ),
-        });
         let data = DataWorkload {
-            sources: BTreeMap::from([
-                (
-                    "m".to_owned(),
-                    asap_types::workload::SourceFacts {
-                        column_signs: BTreeMap::from([(
-                            "latency".to_owned(),
-                            ValueSign::NonNegative,
-                        )]),
-                        ..Default::default()
-                    },
-                ),
-                (
-                    "requests_total".to_owned(),
-                    asap_types::workload::SourceFacts {
-                        metric_type: Some(PrometheusMetricType::Counter),
-                        ..Default::default()
-                    },
-                ),
-            ]),
+            sources: BTreeMap::from([(
+                "m".to_owned(),
+                asap_types::workload::SourceFacts {
+                    column_signs: BTreeMap::from([("latency".to_owned(), ValueSign::NonNegative)]),
+                    ..Default::default()
+                },
+            )]),
             ..Default::default()
         };
-        let roots = [QueryRoot::Operator(scan()), QueryRoot::Operator(counter)];
-        let memo = memo_of_queries(&roots, &[None, None], &data).unwrap();
+        let memo = memo_of_queries(&[QueryRoot::Operator(scan())], &[None], &data).unwrap();
         use ValueSign::{NonNegative, Unknown};
-        let signs = |query| {
-            &memo.groups()[root(&memo, query).0 as usize]
-                .group_properties
-                .column_sign
-        };
         // [ts, service, value, latency]
-        assert_eq!(signs(0), &[Unknown, Unknown, Unknown, NonNegative]);
-        // [ts, value]
-        assert_eq!(signs(1), &[Unknown, NonNegative]);
+        assert_eq!(
+            memo.groups()[root(&memo, 0).0 as usize]
+                .group_properties
+                .column_signs,
+            [Unknown, Unknown, Unknown, NonNegative]
+        );
     }
 }

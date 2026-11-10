@@ -110,6 +110,7 @@ mod tests {
         producer_satisfies_physical_requirements, CandidateForMemoGroupId, ExecutionContext,
         Lifetime, PhysicalProperties,
     };
+    use crate::workload::DataWorkload;
 
     use crate::plan::materialized_view::RefreshWindow;
 
@@ -163,7 +164,7 @@ mod tests {
     /// 5 minutes, each with its own expression as its one candidate. Built
     /// through `find_or_add_group` and `add_candidate`.
     fn memo() -> Memo {
-        let mut memo = Memo::default();
+        let mut memo = Memo::new(&DataWorkload::default());
         let scan = memo
             .find_or_add_group(Operator::NonASAP(NonASAPOp::Scan {
                 source: Source::TimeSeries {
@@ -284,7 +285,7 @@ mod tests {
     /// the one evaluation its result belongs to. Neither reads the memo.
     #[test]
     fn delivers_on_by_lifetime_without_windows() {
-        let candidates = candidates(Memo::default(), vec![]);
+        let candidates = candidates(Memo::new(&DataWorkload::default()), vec![]);
         let unmaterialized = candidate(BUILD, QueryTime, Lifetime::None);
         let one_evaluation = candidate(BUILD, QueryTime, Lifetime::OneEvaluation(MEMORY));
         let materialized = ExecutionContext::Materialized(PhysicalCandidateId(0));

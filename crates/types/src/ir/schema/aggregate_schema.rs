@@ -12,14 +12,18 @@ use crate::ir::schema::{ColumnId, DataType, Field, FieldDataType, Schema};
 use crate::ir::SchemaDerivationError;
 
 /// Where one output column of an aggregate comes from: an input column it
-/// keeps, a measure's value, or a label column the measure adds
-/// (`count_values`' and `absent`'s). `sum by (job) (x)` →
-/// `[InputColumn(job), Measure(0)]`. The one layout the output schema
+/// keeps, a measure's value (with the input column the schema types it by,
+/// the measure's own or the probe value column), or a label column the
+/// measure adds (`count_values`' and `absent`'s). `sum by (job) (x)` →
+/// `[InputColumn(job), Measure { index: 0, input_column: Some(value) }]`. The one layout the output schema
 /// ([`aggregate_output_schema`]) and the group properties read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputColumnSource {
     InputColumn(ColumnId),
-    Measure(usize),
+    Measure {
+        index: usize,
+        input_column: Option<ColumnId>,
+    },
     AddedLabel,
 }
 /// Output schema of a *per-series* window/range reduction (`rate`/`increase`,
@@ -49,7 +53,10 @@ fn per_series_reduction_schema(
     let mut sources: Vec<OutputColumnSource> = (0..columns.len())
         .map(OutputColumnSource::InputColumn)
         .collect();
-    sources[vi] = OutputColumnSource::Measure(0);
+    sources[vi] = OutputColumnSource::Measure {
+        index: 0,
+        input_column: Some(vi),
+    };
     {
         let mut out = agg.output_column(&columns[vi]);
         out.name = "value".into();
@@ -104,7 +111,7 @@ pub fn aggregate_output_columns(
 }
 
 /// [`aggregate_output_schema`] and [`aggregate_output_columns`] in one pass.
-fn aggregate_output(
+pub(crate) fn aggregate_output(
     in_schema: &Schema,
     reduction: &Reduction,
     measures: &[AggIntent],
@@ -174,7 +181,10 @@ fn aggregate_output(
                 cnt.name = name.clone();
             }
             out_cols.push(cnt);
-            sources.push(OutputColumnSource::Measure(i));
+            sources.push(OutputColumnSource::Measure {
+                index: i,
+                input_column: value_col_idx,
+            });
             continue;
         }
         // `absent(v)` emits its synthesized labels as `Utf8` columns before
@@ -190,11 +200,8 @@ fn aggregate_output(
         // Only the output *type* is read from here, so the leading column is
         // enough for the multi-column intents: `Cardinality` and `PearsonCorr`
         // both have a fixed output type that ignores it.
-        let in_col = intent
-            .input_cols()
-            .first()
-            .and_then(|id| in_schema.fields.get(*id))
-            .unwrap_or(&probe);
+        let in_col =
+            measure_input_column(in_schema, intent).map_or(&probe, |id| &in_schema.fields[id]);
         let mut out = intent.output_column(in_col);
         // A global extremum emits NULL for an empty input, even if its input
         // column is non-nullable. Grouped extrema only emit existing groups.
@@ -212,7 +219,10 @@ fn aggregate_output(
             out.name = name.clone();
         }
         out_cols.push(out);
-        sources.push(OutputColumnSource::Measure(i));
+        sources.push(OutputColumnSource::Measure {
+            index: i,
+            input_column: measure_input_column(in_schema, intent).or(value_col_idx),
+        });
     }
     // `count_values` groups by (by-keys ∪ the synthesized value label), so the
     // by-keys alone are not a unique key — be conservative and claim none.
@@ -236,6 +246,17 @@ fn aggregate_output(
         },
         sources,
     ))
+}
+
+/// The input column a measure's output is typed by when it names one: its
+/// leading input column (the multi-column intents' output type ignores the
+/// rest).
+fn measure_input_column(in_schema: &Schema, intent: &AggIntent) -> Option<ColumnId> {
+    intent
+        .input_cols()
+        .first()
+        .copied()
+        .filter(|&id| id < in_schema.fields.len())
 }
 
 /// Output schema of a `without(excluded)` aggregate: the kept labels (every
@@ -282,11 +303,8 @@ fn without_output_schema(
         // Only the output *type* is read from here, so the leading column is
         // enough for the multi-column intents: `Cardinality` and `PearsonCorr`
         // both have a fixed output type that ignores it.
-        let in_col = intent
-            .input_cols()
-            .first()
-            .and_then(|id| in_schema.fields.get(*id))
-            .unwrap_or(&probe);
+        let in_col =
+            measure_input_column(in_schema, intent).map_or(&probe, |id| &in_schema.fields[id]);
         let mut out = intent.output_column(in_col);
         if let Some((arg, _)) = intent
             .arg_selector_columns(in_schema)
@@ -299,7 +317,11 @@ fn without_output_schema(
             out.name = name.clone();
         }
         out_cols.push(out);
-        sources.push(OutputColumnSource::Measure(i));
+        sources.push(OutputColumnSource::Measure {
+            index: i,
+            input_column: measure_input_column(in_schema, intent)
+                .or_else(|| in_schema.column_id("value")),
+        });
     }
     Ok((
         Schema {
@@ -347,7 +369,13 @@ mod tests {
         use OutputColumnSource::*;
         assert_eq!(
             columns(Reduction::by(vec![2]), &[AggIntent::Sum { col: None }]),
-            vec![InputColumn(2), Measure(0)]
+            vec![
+                InputColumn(2),
+                Measure {
+                    index: 0,
+                    input_column: Some(1)
+                }
+            ]
         );
     }
 
@@ -360,7 +388,13 @@ mod tests {
                 Reduction::Reduce(GroupKeys::without(vec![3])),
                 &[AggIntent::Sum { col: None }]
             ),
-            vec![InputColumn(2), Measure(0)]
+            vec![
+                InputColumn(2),
+                Measure {
+                    index: 0,
+                    input_column: Some(1)
+                }
+            ]
         );
     }
 
@@ -374,14 +408,27 @@ mod tests {
         };
         assert_eq!(
             columns(Reduction::by(vec![2]), std::slice::from_ref(&count_values)),
-            vec![InputColumn(2), AddedLabel, Measure(0)]
+            vec![
+                InputColumn(2),
+                AddedLabel,
+                Measure {
+                    index: 0,
+                    input_column: Some(1)
+                }
+            ]
         );
         assert_eq!(
             columns(
                 Reduction::Reduce(GroupKeys::without(vec![3])),
                 &[count_values]
             ),
-            vec![InputColumn(2), Measure(0)]
+            vec![
+                InputColumn(2),
+                Measure {
+                    index: 0,
+                    input_column: Some(1)
+                }
+            ]
         );
     }
 
@@ -398,7 +445,14 @@ mod tests {
         };
         assert_eq!(
             columns(Reduction::by(vec![]), &[absent]),
-            vec![AddedLabel, AddedLabel, Measure(0)]
+            vec![
+                AddedLabel,
+                AddedLabel,
+                Measure {
+                    index: 0,
+                    input_column: Some(1)
+                }
+            ]
         );
     }
 
@@ -409,7 +463,15 @@ mod tests {
         use OutputColumnSource::*;
         assert_eq!(
             columns(Reduction::PerEntity, &[AggIntent::Rate]),
-            vec![InputColumn(0), Measure(0), InputColumn(2), InputColumn(3)]
+            vec![
+                InputColumn(0),
+                Measure {
+                    index: 0,
+                    input_column: Some(1)
+                },
+                InputColumn(2),
+                InputColumn(3)
+            ]
         );
     }
 

@@ -26,7 +26,7 @@ use hash_consing::{
 /// The memo, Stage 0's and Stage 1's one type: the memo groups, each with
 /// its candidates ([`MemoGroup::candidates`]: empty after Stage 0), and each
 /// query's root over them.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Memo {
     /// The groups, by id ([`Self::groups`]); added only through
     /// [`Self::find_or_add_group`].
@@ -35,7 +35,7 @@ pub struct Memo {
     pub queries: Vec<MemoQuery>,
     /// The groups [`Self::find_or_add_group`] may return, by
     /// [`expression_hash`] of their expression: every group whose sharing
-    /// is legal ([`GroupProperties::shareable_when_equal`]).
+    /// is legal ([`GroupProperties::shareable_when_equal`](crate::stages::GroupProperties::shareable_when_equal)).
     groups_by_expression_hash: HashMap<u64, Vec<(MemoGroupId, Option<String>)>>,
     /// The data workload's facts per source (`DataWorkload::sources`), fixed
     /// at construction: a `Scan` group's column signs read them.
@@ -59,11 +59,13 @@ pub struct MemoQuery {
 impl Memo {
     /// A memo without groups over the sources `data` describes: a `Scan`
     /// group's column signs are the ones `data` declares for its source
-    /// (`GroupProperties::column_sign`).
+    /// (`GroupProperties::column_signs`).
     pub fn new(data: &DataWorkload) -> Self {
         Self {
+            groups: Vec::new(),
+            queries: Vec::new(),
+            groups_by_expression_hash: HashMap::new(),
             source_facts: data.sources.clone(),
-            ..Self::default()
         }
     }
 
@@ -85,10 +87,10 @@ impl Memo {
 
     /// Hash-consing: the group whose expression is `expression`
     /// (`same_expression`: operator, arguments and input groups), else a
-    /// new group for it, with the `GroupProperties` [`derive_group_properties`]
+    /// new group for it, with the `GroupProperties` `derive_group_properties`
     /// derives from its input groups, listed as a parent of each input
     /// group. A group whose copies may return different rows (an unordered
-    /// `LIMIT`, [`GroupProperties::shareable_when_equal`]) is never returned
+    /// `LIMIT`, [`GroupProperties::shareable_when_equal`](crate::stages::GroupProperties::shareable_when_equal)) is never returned
     /// for another expression, so such an expression always gets a new
     /// group. Fails, leaving the memo unchanged, when the expression is not
     /// valid over its input groups (its output schema does not derive, an
@@ -148,7 +150,7 @@ impl Memo {
     ///
     /// Fails, leaving the memo unchanged, when the candidate's expression
     /// is not valid over its input groups
-    /// ([`validate_expression_over_input_groups`]),
+    /// (`validate_expression_over_input_groups`),
     /// or when its output schema or kind differs from the group's: then it
     /// does not compute the group's result.
     pub fn add_candidate(
@@ -173,8 +175,8 @@ impl Memo {
                 memo: self,
                 group_id,
             });
-        let (schema, _) =
-            validate_expression_over_input_groups(&operator).map_err(CandidateError::Schema)?;
+        let schema = validate_expression_over_input_groups(&operator)
+            .map_err(CandidateError::NotValidOverInputGroups)?;
         let result_kind = operator.output_kind();
         let group_properties = &self.groups[group.0 as usize].group_properties;
         if schema != group_properties.schema || result_kind != group_properties.result_kind {

@@ -6,7 +6,7 @@
 
 use crate::ir::operator::maintained_population::CurrentSeriesInput;
 use crate::ir::operator::node::Operator;
-use crate::ir::properties::summary_coverage::SummaryCoverage;
+use crate::ir::properties::aggregate_coverage::AggregateCoverage;
 use crate::plan::materialized_view::RawDataWindow;
 
 use crate::ir::schema::Schema;
@@ -14,8 +14,8 @@ use crate::ir::{ASAPOp, NonASAPOp};
 use crate::ir::{OperatorNode, SchemaDerivationError};
 use std::rc::Rc;
 
-/// `SummaryCoverage::definition_id`.
-pub fn definition_id(coverage: &SummaryCoverage) -> String {
+/// `AggregateCoverage::definition_id`.
+pub fn definition_id(coverage: &AggregateCoverage) -> String {
     coverage.definition_id()
 }
 

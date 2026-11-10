@@ -5,8 +5,8 @@ use std::collections::BTreeSet;
 
 use super::column_properties::output_column_sign;
 use crate::ir::operator::arguments::{AtModifier, Source, TimeShift};
-use crate::ir::operator::input::{scanned_sources, OperatorInput};
-use crate::ir::properties::summary_coverage::SummaryCoverage;
+use crate::ir::operator::input::{sources_scanned_by, OperatorInput};
+use crate::ir::properties::aggregate_coverage::AggregateCoverage;
 use crate::ir::schema::Schema;
 use crate::ir::ASAPOp;
 use crate::ir::SchemaDerivationError;
@@ -64,7 +64,7 @@ pub struct GroupProperties {
     pub result_kind: OperatorResultKind,
     /// Per output column, in schema order: the sign of its values, from the
     /// input groups' and, for a `Scan`, the declared ones.
-    pub column_sign: Vec<ValueSign>,
+    pub column_signs: Vec<ValueSign>,
     /// Whether the result changes with the evaluation time: true for a
     /// group under a `TimeRange` relative to the evaluation time
     /// (`sum_over_time(m[5m])`) or reading it (`time()`, `now()`), false
@@ -75,23 +75,13 @@ pub struct GroupProperties {
     /// What an aggregate group covers: a summary state, a chain, a
     /// `TimeRange`/`TimeShift` over a chain or a merge over one, or an exact
     /// `Aggregate` result; `None` for any other group.
-    pub aggregate_coverage: Option<SummaryCoverage>,
+    pub aggregate_coverage: Option<AggregateCoverage>,
     /// Whether two equal expressions return the same rows for the same
     /// input rows, so they may be one group (not an unordered `LIMIT`).
     pub shareable_when_equal: bool,
     /// The sources the `Scan`s below this group read: a `Scan`'s own, else
     /// the union over its input groups.
     pub scanned_sources: BTreeSet<Source>,
-}
-
-impl GroupProperties {
-    /// Whether every scanned source is a time series (PromQL rows): a
-    /// PromQL top-k ranks one row per series.
-    pub fn scans_only_time_series(&self) -> bool {
-        self.scanned_sources
-            .iter()
-            .all(|source| matches!(source, Source::TimeSeries { .. }))
-    }
 }
 
 /// The sign of one column's values, a group property derived from the
@@ -109,21 +99,17 @@ pub enum ValueSign {
 /// Whether `operator` is a valid expression over its input groups
 /// ([`MemoGroupAsInput`]), never a node tree: its output schema derives, its
 /// inputs pass validation, and a merge reads only states it may merge.
-/// Returns the output schema and the aggregate coverage.
+/// Returns the output schema.
 pub(super) fn validate_expression_over_input_groups(
     operator: &Operator<MemoGroupAsInput<'_>>,
-) -> Result<(Schema, Option<SummaryCoverage>), SchemaDerivationError> {
+) -> Result<Schema, SchemaDerivationError> {
     let schema = operator.output_schema()?;
     operator.validate_inputs()?;
-    let aggregate_coverage = match SummaryCoverage::derive_from_inputs(operator) {
-        Ok(coverage) => Some(coverage),
-        // A merge is valid only over states of one definition it may merge.
-        Err(error) if matches!(operator, Operator::ASAP(ASAPOp::SummaryMerge { .. })) => {
-            return Err(error.into())
-        }
-        Err(_) => None,
-    };
-    Ok((schema, aggregate_coverage))
+    // A merge is valid only over states of one definition it may merge.
+    if matches!(operator, Operator::ASAP(ASAPOp::SummaryMerge { .. })) {
+        AggregateCoverage::derive_from_inputs(operator)?;
+    }
+    Ok(schema)
 }
 
 /// The properties of a group computing `expression` over its input
@@ -135,17 +121,16 @@ pub(super) fn derive_group_properties(
     expression: &Operator<MemoGroupId>,
 ) -> Result<GroupProperties, SchemaDerivationError> {
     let operator = expression.map_children(|&group_id| MemoGroupAsInput { memo, group_id });
-    let (schema, aggregate_coverage) = validate_expression_over_input_groups(&operator)?;
+    let schema = validate_expression_over_input_groups(&operator)?;
+    let aggregate_coverage = AggregateCoverage::derive_from_inputs(&operator).ok();
     Ok(GroupProperties {
-        column_sign: output_column_sign(&operator, &schema, &memo.source_facts),
+        column_signs: output_column_sign(&operator, &schema, &memo.source_facts),
         depends_on_evaluation_time: depends_on_evaluation_time(&operator),
         schema,
         result_kind: operator.output_kind(),
         aggregate_coverage,
         shareable_when_equal: operator.is_shareable_when_equal(),
-        scanned_sources: scanned_sources(&operator, |input| {
-            input.group_properties().scanned_sources.clone()
-        }),
+        scanned_sources: sources_scanned_by(&operator),
     })
 }
 
@@ -176,19 +161,19 @@ fn depends_on_evaluation_time(operator: &Operator<MemoGroupAsInput<'_>>) -> bool
         ) => filter.iter().any(|pred| reads_evaluation_time(&pred.0)),
         Operator::ASAP(_) => false,
     };
-    reads_it || operator.children().into_iter().any(depends_on_it)
-}
-
-fn depends_on_it(input: &MemoGroupAsInput<'_>) -> bool {
-    input.group_properties().depends_on_evaluation_time
+    reads_it
+        || operator
+            .children()
+            .into_iter()
+            .any(|input| input.group_properties().depends_on_evaluation_time)
 }
 
 /// A memo group read as an operator's input: its `group_properties` and
 /// its `expression`, whose inputs are read the same way.
 #[derive(Clone, Copy)]
-pub(crate) struct MemoGroupAsInput<'m> {
-    pub(crate) memo: &'m Memo,
-    pub(crate) group_id: MemoGroupId,
+pub(super) struct MemoGroupAsInput<'m> {
+    pub(super) memo: &'m Memo,
+    pub(super) group_id: MemoGroupId,
 }
 
 impl<'m> MemoGroupAsInput<'m> {
@@ -196,7 +181,7 @@ impl<'m> MemoGroupAsInput<'m> {
         &self.memo.groups()[self.group_id.0 as usize]
     }
 
-    pub(crate) fn group_properties(&self) -> &'m GroupProperties {
+    pub(super) fn group_properties(&self) -> &'m GroupProperties {
         &self.group().group_properties
     }
 }
@@ -217,7 +202,11 @@ impl OperatorInput for MemoGroupAsInput<'_> {
         })
     }
 
-    fn aggregate_coverage(&self) -> Option<&SummaryCoverage> {
+    fn aggregate_coverage(&self) -> Option<&AggregateCoverage> {
         self.group().group_properties.aggregate_coverage.as_ref()
+    }
+
+    fn scanned_sources(&self) -> BTreeSet<Source> {
+        self.group().group_properties.scanned_sources.clone()
     }
 }

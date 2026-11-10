@@ -10,7 +10,7 @@ use std::rc::Rc;
 use super::arguments::Source;
 use super::node::{Operator, OperatorNode, OperatorResultKind};
 use super::non_asap::NonASAPOp;
-use crate::ir::properties::summary_coverage::SummaryCoverage;
+use crate::ir::properties::aggregate_coverage::AggregateCoverage;
 use crate::ir::schema::Schema;
 use crate::ir::SchemaDerivationError;
 
@@ -22,25 +22,32 @@ pub trait OperatorInput: Sized + Clone {
     fn operator(&self) -> Operator<Self>;
     /// What the input covers when it is an aggregate group in the memo;
     /// `None` for any other input.
-    fn aggregate_coverage(&self) -> Option<&SummaryCoverage>;
+    fn aggregate_coverage(&self) -> Option<&AggregateCoverage>;
+    /// The sources the `Scan`s at or below the input read
+    /// (`sources_scanned_by` of its operator): a memo group's stored
+    /// `GroupProperties::scanned_sources`, recomputed for a node tree.
+    fn scanned_sources(&self) -> BTreeSet<Source>;
 }
 
 /// The sources the `Scan`s at or below `operator` read: a `Scan`'s own,
-/// else the union over its inputs, `sources_of(input)` for each. A memo
-/// group stores it (`GroupProperties::scanned_sources`); a node tree
-/// recomputes it.
-pub(crate) fn scanned_sources<I>(
-    operator: &Operator<I>,
-    sources_of: impl Fn(&I) -> BTreeSet<Source>,
-) -> BTreeSet<Source> {
+/// else the union over its inputs' ([`OperatorInput::scanned_sources`]).
+pub(crate) fn sources_scanned_by<I: OperatorInput>(operator: &Operator<I>) -> BTreeSet<Source> {
     match operator {
         Operator::NonASAP(NonASAPOp::Scan { source, .. }) => BTreeSet::from([source.clone()]),
         operator => operator
             .children()
             .into_iter()
-            .flat_map(sources_of)
+            .flat_map(OperatorInput::scanned_sources)
             .collect(),
     }
+}
+
+/// Whether every source in `sources` is a time series (PromQL rows): a
+/// PromQL top-k ranks one row per series.
+pub fn scans_only_time_series(sources: &BTreeSet<Source>) -> bool {
+    sources
+        .iter()
+        .all(|source| matches!(source, Source::TimeSeries { .. }))
 }
 
 /// A front-end node tree. Node trees carry no summary coverage.
@@ -57,8 +64,12 @@ impl OperatorInput for Rc<OperatorNode> {
         self.operator.clone()
     }
 
-    fn aggregate_coverage(&self) -> Option<&SummaryCoverage> {
+    fn aggregate_coverage(&self) -> Option<&AggregateCoverage> {
         None
+    }
+
+    fn scanned_sources(&self) -> BTreeSet<Source> {
+        sources_scanned_by(&self.operator)
     }
 }
 
@@ -129,10 +140,17 @@ impl<I: OperatorInput> OperatorInput for InputOrTemporaryBuild<I> {
         }
     }
 
-    fn aggregate_coverage(&self) -> Option<&SummaryCoverage> {
+    fn aggregate_coverage(&self) -> Option<&AggregateCoverage> {
         match self {
             Self::Input(input) => input.aggregate_coverage(),
             Self::TemporaryBuild(_) => None,
+        }
+    }
+
+    fn scanned_sources(&self) -> BTreeSet<Source> {
+        match self {
+            Self::Input(input) => input.scanned_sources(),
+            Self::TemporaryBuild(_) => sources_scanned_by(&self.operator()),
         }
     }
 }

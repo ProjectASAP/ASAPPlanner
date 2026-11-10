@@ -1,5 +1,6 @@
-//! What a summary state covers: `definition` (what it computes) and
-//! `selection` (which output rows of that computation it took). Design:
+//! Aggregate coverage: what an aggregate (a summary state or an exact
+//! `Aggregate`) covers: `definition` (what it computes) and `selection` (which
+//! output rows of that computation it took). Design:
 //! `docs/design_docs/proposals/asap-primitive-schema.md` §4.2, after
 //! Goldstein & Larson's view matching.
 //!
@@ -13,14 +14,15 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::ir::operator::node::Operator;
-use crate::ir::scalar::expr_ir::ScalarValue;
+use crate::ir::scalar::expr_ir::{CompareOpKind, ScalarValue};
+use crate::ir::scalar::ScalarExpr;
 use crate::ir::schema::ColumnId;
 use crate::stages::MemoGroupId;
 use crate::summary_type::MergeInputRule;
 
-/// What a summary state computes, with every lifted selection removed.
+/// What an aggregate computes, with every lifted selection removed.
 #[derive(Debug, Clone, PartialEq)]
-pub struct SummaryStateDefinition {
+pub struct AggregateDefinition {
     /// The group the unlifted operators read: the first input under the
     /// SummaryAgg that is not Filter / range TimeRange / TimeShift without @
     /// / direct-column Project. `None` when that input is a `Scan` with a
@@ -38,15 +40,15 @@ pub struct SummaryStateDefinition {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct SummaryCoverage {
-    pub(crate) definition: SummaryStateDefinition,
+pub struct AggregateCoverage {
+    pub(crate) definition: AggregateDefinition,
     /// Union of boxes over the output rows of the unlifted operators' input.
     pub(crate) selection: Vec<SelectionBox>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
-impl SummaryCoverage {
-    pub fn definition(&self) -> &SummaryStateDefinition {
+impl AggregateCoverage {
+    pub fn definition(&self) -> &AggregateDefinition {
         &self.definition
     }
 
@@ -227,7 +229,7 @@ pub enum CoverageError {
     /// interval on the timestamp column. A caller bug, or bad input when it
     /// is a merge's input.
     #[error("coverage is derived only for aggregates and one time interval over a chain")]
-    NotSummary,
+    NoCoverage,
     /// A `SummaryMerge` without inputs: bad input.
     #[error("summary merge requires at least one input")]
     EmptyMerge,
@@ -262,7 +264,7 @@ pub enum CoverageError {
     RegroupedBuild { reason: String },
 }
 
-impl SummaryCoverage {
+impl AggregateCoverage {
     /// A stable identity of `definition`: the 128-bit FNV-1a hash, in hex,
     /// of its input group and unlifted operators. Two equal definitions
     /// (the equality a merge requires) of one memo get equal ids, so a
@@ -279,15 +281,91 @@ impl SummaryCoverage {
     }
 }
 
+/// `column = v`, `!=`, `<`, `<=`, `>`, `>=`, `[NOT] IN (...)` and `OR` of
+/// equalities on one column, with non-null literals.
+pub(crate) fn constraint_of<C>(expr: &ScalarExpr<C>) -> Option<(ColumnId, Constraint)> {
+    let literal = |e: &ScalarExpr<C>| match e {
+        ScalarExpr::Literal(v) if *v != ScalarValue::Null => Some(v.clone()),
+        _ => None,
+    };
+    match expr {
+        ScalarExpr::Compare {
+            left, op, right, ..
+        } => {
+            let (column, value, op) = match (left.as_ref(), right.as_ref()) {
+                (ScalarExpr::Column(c), r) => (*c, literal(r)?, op.clone()),
+                (l, ScalarExpr::Column(c)) => (*c, literal(l)?, flip(op)?),
+                _ => return None,
+            };
+            let constraint = match op {
+                CompareOpKind::Eq => Constraint::In(vec![value]),
+                CompareOpKind::Ne => Constraint::NotIn(vec![value]),
+                CompareOpKind::Lt => interval(Bound::Unbounded, Bound::Excluded(value)),
+                CompareOpKind::Le => interval(Bound::Unbounded, Bound::Included(value)),
+                CompareOpKind::Gt => interval(Bound::Excluded(value), Bound::Unbounded),
+                CompareOpKind::Ge => interval(Bound::Included(value), Bound::Unbounded),
+                _ => return None,
+            };
+            Some((column, constraint))
+        }
+        ScalarExpr::InList {
+            expr,
+            list,
+            negated,
+        } => {
+            let ScalarExpr::Column(column) = expr.as_ref() else {
+                return None;
+            };
+            let values = list.iter().map(literal).collect::<Option<Vec<_>>>()?;
+            let values = dedup(values);
+            Some((
+                *column,
+                if *negated {
+                    Constraint::NotIn(values)
+                } else {
+                    Constraint::In(values)
+                },
+            ))
+        }
+        ScalarExpr::BoolOr(disjuncts) => {
+            let mut column = None;
+            let mut values = Vec::new();
+            for disjunct in disjuncts {
+                let (c, Constraint::In(v)) = constraint_of(disjunct)? else {
+                    return None;
+                };
+                if column.replace(c).is_some_and(|prev| prev != c) {
+                    return None;
+                }
+                values.extend(v);
+            }
+            Some((column?, Constraint::In(dedup(values))))
+        }
+        _ => None,
+    }
+}
+
+fn flip(op: &CompareOpKind) -> Option<CompareOpKind> {
+    Some(match op {
+        CompareOpKind::Eq => CompareOpKind::Eq,
+        CompareOpKind::Ne => CompareOpKind::Ne,
+        CompareOpKind::Lt => CompareOpKind::Gt,
+        CompareOpKind::Le => CompareOpKind::Ge,
+        CompareOpKind::Gt => CompareOpKind::Lt,
+        CompareOpKind::Ge => CompareOpKind::Le,
+        _ => return None,
+    })
+}
+
 /// An interval between two fixed values.
-pub(crate) fn interval(lower: Bound<ScalarValue>, upper: Bound<ScalarValue>) -> Constraint {
+fn interval(lower: Bound<ScalarValue>, upper: Bound<ScalarValue>) -> Constraint {
     Constraint::Interval {
         lower: lower.map(IntervalConstraintLimit::FixedValue),
         upper: upper.map(IntervalConstraintLimit::FixedValue),
     }
 }
 
-pub(crate) fn dedup(values: Vec<ScalarValue>) -> Vec<ScalarValue> {
+fn dedup(values: Vec<ScalarValue>) -> Vec<ScalarValue> {
     let mut out: Vec<ScalarValue> = Vec::new();
     for v in values {
         if !out.contains(&v) {
@@ -586,6 +664,7 @@ fn touching<T: Clone>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::scalar::ExprSemantics;
 
     use IntervalConstraintLimit::{EvaluationTimePlusMs, FixedValue};
 
@@ -633,6 +712,27 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<Constraint>(json).unwrap(),
             constraint
+        );
+    }
+
+    /// SQL `price > 10` lifts to `(FixedValue(10), ∞)`.
+    #[test]
+    fn a_value_comparison_is_an_interval_between_fixed_values() {
+        let price_gt_10: ScalarExpr<()> = ScalarExpr::Compare {
+            left: Box::new(ScalarExpr::Column(0)),
+            op: CompareOpKind::Gt,
+            right: Box::new(ScalarExpr::Literal(ScalarValue::Float64(10.0))),
+            semantics: ExprSemantics::Sql,
+        };
+        assert_eq!(
+            constraint_of(&price_gt_10),
+            Some((
+                0,
+                Constraint::Interval {
+                    lower: Bound::Excluded(FixedValue(ScalarValue::Float64(10.0))),
+                    upper: Bound::Unbounded,
+                }
+            ))
         );
     }
 }

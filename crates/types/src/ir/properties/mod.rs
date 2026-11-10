@@ -3,8 +3,9 @@
 //!
 //! - [`execution_data_state`] — when a node's value is produced
 //!   ([`ExecutionTiming`]) and what its edge carries ([`ExecutionDataState`]).
-//! - [`summary_coverage`] — what a summary state covers.
+//! - [`aggregate_coverage`] — what an aggregate (a summary state or an exact
+//!   `Aggregate`) covers.
+pub mod aggregate_coverage;
 pub mod execution_data_state;
-pub mod summary_coverage;
 
 pub use execution_data_state::{DataPrimitive, ExecutionDataState, ExecutionTiming};

@@ -76,8 +76,8 @@ use crate::ir::operator::arguments::Source;
 use crate::ir::operator::asap::ASAPOp;
 use crate::ir::operator::node::{Operator, OperatorNode};
 use crate::ir::operator::non_asap::NonASAPOp;
+use crate::ir::properties::aggregate_coverage::{AggregateCoverage, CoverageError, SelectionBox};
 use crate::ir::properties::execution_data_state::ExecutionTiming;
-use crate::ir::properties::summary_coverage::{CoverageError, SelectionBox, SummaryCoverage};
 use crate::stages::Lifetime;
 
 /// One materialized view of a DAG: what its stored state is, what it is
@@ -120,12 +120,12 @@ impl MaterializedView {
 }
 
 /// A view's summary coverage
-/// ([`SummaryCoverage`], `docs/design_docs/proposals/asap-primitive-schema.md`
+/// ([`AggregateCoverage`], `docs/design_docs/proposals/asap-primitive-schema.md`
 /// §4.2): what it computes and which rows went in.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewCoverage {
-    /// `SummaryCoverage::definition_id`: equal on every node, plan and
+    /// `AggregateCoverage::definition_id`: equal on every node, plan and
     /// process that computes the same thing, whatever its selection; a
     /// rollup to a coarser grouping computes something else and has its
     /// own.
@@ -138,7 +138,7 @@ pub struct ViewCoverage {
 
 #[cfg(any(test, feature = "test-support"))]
 impl ViewCoverage {
-    /// `SummaryCoverage::definition_id`.
+    /// `AggregateCoverage::definition_id`.
     pub fn definition_id(&self) -> &str {
         &self.definition_id
     }
@@ -600,7 +600,7 @@ impl PhysicalASAPDAG {
             self.operator_nodes()?
         };
         let mut derived = Vec::new();
-        let mut coverage_by_node: HashMap<PhysicalASAPNodeId, SummaryCoverage> = HashMap::new();
+        let mut coverage_by_node: HashMap<PhysicalASAPNodeId, AggregateCoverage> = HashMap::new();
         for &id in index.children_first.iter().filter(|id| views.contains(id)) {
             let node = index.nodes[&id];
             let (inputs, scans) = index.inputs_of_view(id, &views)?;
@@ -931,8 +931,8 @@ fn coverage_of(
     id: PhysicalASAPNodeId,
     inputs: &MaterializedViewInputs,
     ir: &HashMap<PhysicalASAPNodeId, Rc<OperatorNode>>,
-    coverage_by_node: &HashMap<PhysicalASAPNodeId, SummaryCoverage>,
-) -> Result<SummaryCoverage, CoverageError> {
+    coverage_by_node: &HashMap<PhysicalASAPNodeId, AggregateCoverage>,
+) -> Result<AggregateCoverage, CoverageError> {
     let _ = (id, inputs, ir, coverage_by_node);
     todo!(
         "#1207 PR 6: the view's coverage from its memo group's GroupProperties::aggregate_coverage"

@@ -1,4 +1,4 @@
-//! The memo expressions `memo_group_properties` and `memo_summary_coverage`
+//! The memo expressions `memo_group_properties` and `memo_aggregate_coverage`
 //! build their examples from.
 use std::time::Duration;
 

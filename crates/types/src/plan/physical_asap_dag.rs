@@ -258,7 +258,7 @@ impl PhysicalASAPDAG {
     /// Every node of this DAG as IR, by node id, with its exported
     /// guarantee (an operator node has no physical properties): what a caller derives
     /// IR properties of a plan file's node from, such as its
-    /// [`SummaryCoverage`](crate::ir::properties::summary_coverage::SummaryCoverage).
+    /// [`AggregateCoverage`](crate::ir::properties::aggregate_coverage::AggregateCoverage).
     /// Shared inputs stay shared. Validates the DAG first.
     pub(crate) fn operator_nodes(
         &self,

@@ -57,7 +57,7 @@ pub use asap_stage3_plan_selection::{
     AcceptedAccuracy, ErrorSelectingPlan, RejectionCause, Selection,
 };
 pub use asap_types::deployment_capabilities::{DeploymentCapabilities, SupportedSummary};
-pub use asap_types::ir::properties::summary_coverage::{
+pub use asap_types::ir::properties::aggregate_coverage::{
     ColumnIdentity, Constraint, IntervalConstraintLimit, SelectionBox,
 };
 pub use asap_types::ir::properties::ExecutionTiming;

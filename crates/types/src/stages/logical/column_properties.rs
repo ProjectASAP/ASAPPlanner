@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use super::{MemoGroupAsInput, ValueSign};
 use crate::ir::operator::arguments::{BinaryOpKind, JoinKind, PromQLVectorSetOpKind, Reduction};
-use crate::ir::operator::asap::{summary_agg_columns, summary_agg_schema, summary_build};
+use crate::ir::operator::asap::{summary_agg_layout, summary_build};
 use crate::ir::operator::input::OperatorInput;
 use crate::ir::operator::AggIntent;
 use crate::ir::scalar::expr_ir::ScalarValue;
@@ -23,8 +23,8 @@ use ValueSign::{NonNegative, NonPositive, Unknown};
 type Input<'m> = MemoGroupAsInput<'m>;
 
 /// The sign of each column of `output`, the output schema of `operator`,
-/// from its input groups' `column_sign` and, for a `Scan`, `source_facts`.
-pub(crate) fn output_column_sign(
+/// from its input groups' `column_signs` and, for a `Scan`, `source_facts`.
+pub(super) fn output_column_sign(
     operator: &Operator<Input<'_>>,
     output: &Schema,
     source_facts: &BTreeMap<String, SourceFacts>,
@@ -43,7 +43,7 @@ pub(crate) fn output_column_sign(
 }
 
 fn signs_of(input: &Input<'_>) -> Vec<ValueSign> {
-    input.group_properties().column_sign.clone()
+    input.group_properties().column_signs.clone()
 }
 
 fn non_asap_signs(
@@ -158,10 +158,12 @@ fn asap_signs(op: &ASAPOp<Input<'_>>, output: &Schema) -> Vec<ValueSign> {
     match op {
         SummaryAgg {
             child,
+            summary_type,
             input,
             reduction,
             ..
-        } => state_signs(child, input, reduction, output),
+        } => state_signs(child, summary_type, input, reduction)
+            .map_or_else(|| vec![Unknown; output.fields.len()], |(_, signs)| signs),
         // The build's layout without its own time column, after the
         // computed `window_end` (column 0).
         SummaryTumblingWindowChain {
@@ -170,16 +172,15 @@ fn asap_signs(op: &ASAPOp<Input<'_>>, output: &Schema) -> Vec<ValueSign> {
             input,
             reduction,
             ..
-        } => match summary_agg_schema(child.schema(), summary_type, reduction) {
-            Ok(build) => {
-                let mut signs = state_signs(child, input, reduction, &build);
+        } => match state_signs(child, summary_type, input, reduction) {
+            Some((build, mut signs)) => {
                 if let Some(time) = build.time_index {
                     signs.remove(time);
                 }
                 signs.insert(0, Unknown);
                 signs
             }
-            Err(_) => vec![Unknown; output.fields.len()],
+            None => vec![Unknown; output.fields.len()],
         },
         SummaryMerge { children, group_by } => {
             // The windows a `TimeRange` over a chain selects merge into the
@@ -187,12 +188,14 @@ fn asap_signs(op: &ASAPOp<Input<'_>>, output: &Schema) -> Vec<ValueSign> {
             if let (None, [child]) = (group_by, children.as_slice()) {
                 if let Some(SummaryTumblingWindowChain {
                     child,
+                    summary_type,
                     input,
                     reduction,
                     ..
                 }) = summary_build(child)
                 {
-                    return state_signs(&child, &input, &reduction, output);
+                    return state_signs(&child, &summary_type, &input, &reduction)
+                        .map_or_else(|| vec![Unknown; output.fields.len()], |(_, signs)| signs);
                 }
             }
             let merged = agreed(&children.iter().map(signs_of).collect::<Vec<_>>());
@@ -275,9 +278,8 @@ fn expression_sign<C>(expr: &ScalarExpr<C>, input: &[ValueSign]) -> ValueSign {
 
 /// An aggregate's, by where each output column comes from
 /// ([`aggregate_output_columns`]): a kept input column keeps its sign, a
-/// measure's value has [`measure_sign`] of its input value's (its first
-/// input column, else the column `aggregate_output_schema` types it by), and
-/// a label a measure adds is `Unknown`.
+/// measure's value has [`measure_sign`] of its input column's, and a label
+/// a measure adds is `Unknown`.
 fn aggregate_signs(
     child: &Input<'_>,
     reduction: &Reduction,
@@ -287,48 +289,33 @@ fn aggregate_signs(
     let Ok(sources) = aggregate_output_columns(child.schema(), reduction, measures) else {
         return vec![Unknown; output.fields.len()];
     };
-    let input = signs_of(child);
-    signs_from_sources(child, &sources, |index, value| {
-        let measure = &measures[index];
-        let value = measure.input_cols().first().copied().or(value);
-        measure_sign(
-            measure,
-            value
-                .and_then(|value| input.get(value).copied())
-                .unwrap_or(Unknown),
-        )
+    signs_from_sources(child, &sources, |index, input| {
+        measure_sign(&measures[index], input)
     })
 }
 
 /// The sign of each output column from `sources`: an input column keeps
-/// its sign, measure `index` has `measure(index, value)`, where `value` is
-/// the column `aggregate_output_schema` types a measure without an input
-/// column by (the sample value, else the first column not kept), and an
-/// added label is `Unknown`.
+/// its sign, measure `index` has `measure(index, the sign of its input
+/// column)`, and an added label is `Unknown`.
 fn signs_from_sources(
     child: &Input<'_>,
     sources: &[OutputColumnSource],
-    measure: impl Fn(usize, Option<usize>) -> ValueSign,
+    measure: impl Fn(usize, ValueSign) -> ValueSign,
 ) -> Vec<ValueSign> {
-    let input = signs_of(child);
-    let schema = child.schema();
-    let kept: Vec<usize> = sources
-        .iter()
-        .filter_map(|source| match source {
-            OutputColumnSource::InputColumn(column) => Some(*column),
-            _ => None,
-        })
-        .collect();
-    let value = resolve_column_ref(&ColumnRef::SampleValue, schema)
-        .ok()
-        .or_else(|| (0..schema.fields.len()).find(|column| !kept.contains(column)));
+    let input = &child.group_properties().column_signs;
+    let sign_of = |column: Option<usize>| {
+        column
+            .and_then(|column| input.get(column).copied())
+            .unwrap_or(Unknown)
+    };
     sources
         .iter()
         .map(|source| match source {
-            OutputColumnSource::InputColumn(column) => {
-                input.get(*column).copied().unwrap_or(Unknown)
-            }
-            OutputColumnSource::Measure(index) => measure(*index, value),
+            OutputColumnSource::InputColumn(column) => sign_of(Some(*column)),
+            OutputColumnSource::Measure {
+                index,
+                input_column,
+            } => measure(*index, sign_of(*input_column)),
             OutputColumnSource::AddedLabel => Unknown,
         })
         .collect()
@@ -366,18 +353,17 @@ fn measure_sign(measure: &AggIntent, input: ValueSign) -> ValueSign {
     }
 }
 
-/// A summary state's, in its layout ([`summary_agg_columns`]): its key
-/// columns keep their input's sign and its state column records the sign of
-/// the values it is updated with.
+/// A summary state's schema and signs, in its layout
+/// ([`summary_agg_layout`]): its key columns keep their input's sign and its
+/// state column records the sign of the values it is updated with; `None`
+/// when the layout does not derive.
 fn state_signs(
     child: &Input<'_>,
+    summary_type: &FieldDataType,
     update: &SummaryUpdate,
     reduction: &Reduction,
-    state_schema: &Schema,
-) -> Vec<ValueSign> {
-    let Ok(sources) = summary_agg_columns(child.schema(), reduction) else {
-        return vec![Unknown; state_schema.fields.len()];
-    };
+) -> Option<(Schema, Vec<ValueSign>)> {
+    let (schema, sources) = summary_agg_layout(child.schema(), summary_type, reduction).ok()?;
     let updated_with = match &update.weight {
         SummaryInputExpr::Column(column) => resolve_column_ref(column, child.schema())
             .ok()
@@ -386,7 +372,8 @@ fn state_signs(
         SummaryInputExpr::Constant(value) => sign_of_number(*value),
         SummaryInputExpr::Tuple(_) | SummaryInputExpr::EntityIdentity(_) => Unknown,
     };
-    signs_from_sources(child, &sources, |_, _| updated_with)
+    let signs = signs_from_sources(child, &sources, |_, _| updated_with);
+    Some((schema, signs))
 }
 
 /// A readout of summary state: the state's plain columns keep their sign

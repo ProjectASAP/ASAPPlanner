@@ -15,7 +15,7 @@ pub use candidate::{
     LogicalProperties, LogicalPropertiesError, OriginOfCandidateForMemoGroup,
 };
 pub use edge::LogicalEdge;
-pub(crate) use group::MemoGroupAsInput;
+use group::MemoGroupAsInput;
 pub use group::{GroupProperties, MemoGroup, MemoGroupId, ValueSign};
 pub use memo::{queries_rooted_at, root_groups, Memo, MemoQuery};
 pub use memo_candidates::LogicalASAPMemoCandidates;

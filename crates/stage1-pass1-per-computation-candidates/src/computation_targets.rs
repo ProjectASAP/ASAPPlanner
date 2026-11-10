@@ -43,6 +43,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::ir::operator::arguments::Reduction;
+use asap_types::ir::operator::input::scans_only_time_series;
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::scalar::{resolve_column_ref, ColumnRef};
 use asap_types::ir::schema::FieldDataType;
@@ -737,10 +738,11 @@ fn prune_topk_heaps_over_one_row_per_item(
         // A PromQL top-k ranks an instant vector: one row per series or
         // group. (A SQL top-k keeps its heaps.) The aggregate scans what its
         // input does.
-        if !memo.groups()[target.aggregate_group.0 as usize]
-            .group_properties
-            .scans_only_time_series()
-        {
+        if !scans_only_time_series(
+            &memo.groups()[target.aggregate_group.0 as usize]
+                .group_properties
+                .scanned_sources,
+        ) {
             continue;
         }
         prune_own(&mut target.ways_to_compute, |candidate| {

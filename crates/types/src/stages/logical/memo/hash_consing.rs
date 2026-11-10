@@ -1,5 +1,5 @@
 //! The one equality that makes two expressions one memo group, and two
-//! candidates of a group one candidate: [`same_expression`] (operator,
+//! candidates of a group one candidate: [`same_serialized_expression`] (operator,
 //! arguments and input groups). [`Memo::find_or_add_group`] looks a group up
 //! by it, Stage 0 included, and [`Memo::add_candidate`] finds a duplicate by
 //! it. Parameters θ are not an argument of any operator (they are a
@@ -22,17 +22,6 @@ fn operator_and_arguments(expression: &Operator<MemoGroupId>) -> Operator<()> {
     expression.map_children(|_| ())
 }
 
-/// Whether `left` and `right` are one expression: equal operators and
-/// arguments ([`same_value`]) over the same input groups at the same
-/// positions.
-pub(super) fn same_expression(left: &Operator<MemoGroupId>, right: &Operator<MemoGroupId>) -> bool {
-    left.children() == right.children()
-        && same_value(
-            &operator_and_arguments(left),
-            &operator_and_arguments(right),
-        )
-}
-
 /// The canonical JSON of `expression`'s operator and arguments, serialized
 /// once per expression: what [`expression_hash`] hashes and
 /// [`same_serialized_expression`] compares; `None` when it does not
@@ -41,7 +30,7 @@ pub(super) fn serialized_operator(expression: &Operator<MemoGroupId>) -> Option<
     serde_json::to_string(&operator_and_arguments(expression)).ok()
 }
 
-/// A hash consistent with [`same_expression`], used only to narrow the
+/// A hash consistent with [`same_serialized_expression`], used only to narrow the
 /// groups compared: SipHash over `serialized`, the expression's
 /// [`serialized_operator`], then the input groups. A non-finite `f64`
 /// serializes as `null`, which only widens one bucket;
@@ -53,8 +42,10 @@ pub(super) fn expression_hash(expression: &Operator<MemoGroupId>, serialized: Op
     hasher.finish()
 }
 
-/// [`same_expression`] with each side's [`serialized_operator`] computed
-/// already.
+/// Whether `left` and `right` are one expression: equal operators and
+/// arguments, by typed equality confirmed by equal serializations (each
+/// side's [`serialized_operator`], computed once by the caller), over the
+/// same input groups at the same positions.
 pub(super) fn same_serialized_expression(
     (left, left_serialized): (&Operator<MemoGroupId>, Option<&str>),
     (right, right_serialized): (&Operator<MemoGroupId>, Option<&str>),
@@ -63,6 +54,14 @@ pub(super) fn same_serialized_expression(
         && operator_and_arguments(left) == operator_and_arguments(right)
         && left_serialized.is_some()
         && left_serialized == right_serialized
+}
+
+/// [`same_serialized_expression`], serializing both sides.
+fn same_expression(left: &Operator<MemoGroupId>, right: &Operator<MemoGroupId>) -> bool {
+    same_serialized_expression(
+        (left, serialized_operator(left).as_deref()),
+        (right, serialized_operator(right).as_deref()),
+    )
 }
 
 /// Typed equality, confirmed by equal serializations: numeric `PartialEq`

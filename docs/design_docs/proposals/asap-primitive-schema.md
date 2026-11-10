@@ -117,7 +117,7 @@ A node in the physical data will represent the data or summary instance, so a no
 | How is it computed? | by the planner, from the memo group's input groups, in one walk that yields both the definition and the selection | §4.2.2 |
 | How expensive is it? | proportional to the few operators directly under the `SummaryAgg`, not to the whole sub-DAG; derived once per memo group | §4.2.3 |
 | What uses it? | merge (in #646), rollup; slice, reuse (planned); subtract (reserved) | §5.6, §5.7 |
-| Where is it in the code? | `GroupProperties::aggregate_coverage`, `SummaryCoverage::derive_from_inputs` | §6.6 |
+| Where is it in the code? | `GroupProperties::aggregate_coverage`, `AggregateCoverage::derive_from_inputs` | §6.6 |
 | What is left out? | the deployment and runtime implementation, e.g. SDS | §4.3 |
 
 **Why coverage is not part of the schema.**
@@ -237,11 +237,11 @@ Formally, a state means `family(input(σ(C)))` for each group of `G`, where `C` 
 
 #### 4.2.2 Deriving the definition and the selection
 
-Coverage is derived for memo groups, never declared and never computed on operator-node trees. When `Memo::find_or_add_group` creates an aggregate group (a summary state or an exact `Aggregate`), `SummaryCoverage::derive_from_inputs` walks down from the group's `SummaryAgg` or `Aggregate` through its input groups' `expression`s in the memo and stores the result once in the group's `GroupProperties::aggregate_coverage`. One walk produces both parts: every filter condition either moves into the `selection` or stays in the `definition`. A `SummaryMerge` group reads its input groups' stored coverage; it is a valid group only when their definitions are equal and their selections are disjoint (disjoint in time, for counter states).
+Coverage is derived for memo groups, never declared and never computed on operator-node trees. When `Memo::find_or_add_group` creates an aggregate group (a summary state or an exact `Aggregate`), `AggregateCoverage::derive_from_inputs` walks down from the group's `SummaryAgg` or `Aggregate` through its input groups' `expression`s in the memo and stores the result once in the group's `GroupProperties::aggregate_coverage`. One walk produces both parts: every filter condition either moves into the `selection` or stays in the `definition`. A `SummaryMerge` group reads its input groups' stored coverage; it is a valid group only when their definitions are equal and their selections are disjoint (disjoint in time, for counter states).
 
 ```rust
 /// What a summary state computes, with every lifted selection removed.
-pub struct SummaryStateDefinition {
+pub struct AggregateDefinition {
     /// The group the unlifted operators read: the first input under the
     /// SummaryAgg or Aggregate that is not Filter / range TimeRange /
     /// TimeShift / direct-column Project. `None` when that input is a `Scan` with a
@@ -256,13 +256,13 @@ pub struct SummaryStateDefinition {
     pub unlifted_operators: Vec<Operator<Option<MemoGroupId>>>,
 }
 
-pub struct SummaryCoverage {
-    pub(crate) definition: SummaryStateDefinition,
+pub struct AggregateCoverage {
+    pub(crate) definition: AggregateDefinition,
     /// Union of boxes over the output rows of the unlifted operators' input.
     pub(crate) selection: Vec<SelectionBox>,
 }
 
-impl SummaryCoverage {
+impl AggregateCoverage {
     pub(crate) fn derive_from_inputs(
         operator: &Operator<MemoGroupAsInput<'_>>,
     ) -> Result<Self, CoverageError>;
@@ -290,8 +290,8 @@ G8  Filter(job = "api" ∧ a + b > 10)(G1);  G9 TimeRange[1m](G8);  G10 SummaryA
 | 4 | G1 | `Scan latency` | not liftable, no predicate to lift: the walk stops; G1 is the `input_group` |
 
 ```text
-G4.aggregate_coverage = SummaryCoverage {
-    definition: SummaryStateDefinition {
+G4.aggregate_coverage = AggregateCoverage {
+    definition: AggregateDefinition {
         input_group: Some(G1),
         unlifted_operators: [SummaryAgg[KLL]],
     },
@@ -304,8 +304,8 @@ G4.aggregate_coverage = SummaryCoverage {
 **Case 3, G10: `a + b > 10` cannot be lifted.** It spans two columns, so it is no selection. At G8 the walk lifts `job = "api"` and keeps the rest:
 
 ```text
-G10.aggregate_coverage = SummaryCoverage {
-    definition: SummaryStateDefinition {
+G10.aggregate_coverage = AggregateCoverage {
+    definition: AggregateDefinition {
         input_group: Some(G1),
         unlifted_operators: [SummaryAgg[KLL], Filter(a + b > 10)],
     },
@@ -331,7 +331,7 @@ The `definition` is what remains of the operators the walk passed, with every co
 | a `Filter` whose conditions all move into `selection` | removed |
 | a `Filter` with some conditions that stay | kept, with only the conditions that stay; a scalar subquery among them names its group |
 | `SummaryAgg.filter` | trimmed the same way |
-| the one range `TimeRange`, and every `TimeShift` (with or without `@`), when they become one interval on the timestamp column | removed |
+| the one range `TimeRange`, and every `TimeShift` (an offset or `@ T`; not `@ start()` or `@ end()`, which stay unlifted), when they become one interval on the timestamp column | removed |
 | a `TimeShift` with no range `TimeRange`, two or more range `TimeRange`s, two `@`s, or an interval that does not combine with a timestamp condition already lifted | unchanged: no time is taken out |
 | a direct-column `Project` | unchanged |
 | a `Scan` with a predicate that moves into `selection` (a PromQL label matcher) | the last operator, with only the predicates that stay; `input_group` is `None` |
@@ -391,7 +391,7 @@ So the `selection` is `latency ∈ (−∞, 100)`, `r ∈ {us}`. A PromQL exampl
 | Operator it must pass | Can it pass? | Why | Example |
 |---|---|---|---|
 | another `Filter` (also `Scan.predicates`, `SummaryAgg.filter`) | yes | filters only drop rows, so their order does not matter | `region = 'us'` below `Filter(value < 100)` ✓ |
-| `TimeRange` (range) or `TimeShift` (with or without `@`) | yes | they choose a time window, but do not change any row's values | `region = 'us'` below `TimeRange(1m)` ✓ |
+| `TimeRange` (range) or `TimeShift` (an offset or `@ T`; `@ start()` and `@ end()` are not lifted) | yes | they choose a time window, but do not change any row's values | `region = 'us'` below `TimeRange(1m)` ✓ |
 | `Project` | only if its column is passed through unchanged (a rename is fine) | the column must still be there, with the same values, above the `Project` | `Project [job, region AS r]`: `region = 'us'` ✓, it becomes `r = 'us'`. `Project [job, value * 2 AS v2]`: `value > 5` ✗, `value` is gone |
 | `Aggregate` (later) | only if it uses group columns | a group column has one value per group, so filtering before or after grouping keeps the same groups | below `SUM(value) by job`: `job = 'api'` ✓; `value > 5` ✗, it changes the sums |
 | `rate`, a window function, or an instant `TimeRange` (later) | only if it uses series labels | a label is the same for every sample of a series | below `rate(...)`: `job = 'api'` ✓; `value > 5` ✗, dropping raw samples changes the rate. Below an instant selector: `job = 'api'` ✓; `value > 5` ✗, the latest sample with value > 5 is not the latest sample |
@@ -951,8 +951,8 @@ OperatorNode                                         §6.1
 │                 (θ, `SketchParams`, is on the candidate)  §6.4
 └── guarantee: AccuracyGuarantee                       §6.5  (accuracy of an evaluation)
 
-MemoGroup.group_properties.aggregate_coverage: SummaryCoverage   §6.6
-      └── definition: SummaryStateDefinition { input_group, unlifted_operators }
+MemoGroup.group_properties.aggregate_coverage: AggregateCoverage   §6.6
+      └── definition: AggregateDefinition { input_group, unlifted_operators }
 ```
 
 | Subsection | Defines | Used by |
@@ -962,15 +962,15 @@ MemoGroup.group_properties.aggregate_coverage: SummaryCoverage   §6.6
 | §6.3 Schema and field types | `Schema`, `Field`, `FieldDataType` | every node's `schema`; `SummaryAgg.summary_type` |
 | §6.4 Summary algorithms and parameters | `SketchAlgorithm`, `SketchParams`, `HydraParams`, exact/sample/wavelet/model kinds and params | the payload of each non-plain `FieldDataType` variant; θ on a candidate's `LogicalProperties` |
 | §6.5 Update input and evaluations | `SummaryUpdate`, `SketchStatistic`, `MaintainedPopulation`, `PopulationStatistic` | fields of the `ASAPOp` variants in §6.2 |
-| §6.6 Summary coverage | `SummaryCoverage`, `SummaryStateDefinition`, `SelectionBox`, `Constraint` | `GroupProperties::aggregate_coverage` of summary-state memo groups |
+| §6.6 Summary coverage | `AggregateCoverage`, `AggregateDefinition`, `SelectionBox`, `Constraint` | `GroupProperties::aggregate_coverage` of summary-state memo groups |
 
-**Example: the p99 latency state of §5.1.** The `SummaryAgg` node (§6.1) holds `ASAPOp::SummaryAgg` (§6.2) with `summary_type = Sketch(Kll)` (§6.3, §6.4) and `input = SummaryUpdate::column(latency)` (§6.5); its candidate's θ is `Kll { k: 200 }`. Its `schema` (§6.3) is `(job Utf8, state Sketch(Kll))`: the `state` field has the same type as `summary_type`. A `SummaryEstimate` above it holds `query = Quantile { q: 0.99 }` (§6.5), and its node carries the `guarantee` of the evaluation. `coverage()` on the `SummaryAgg` node returns a `SummaryCoverage` (§6.6).
+**Example: the p99 latency state of §5.1.** The `SummaryAgg` node (§6.1) holds `ASAPOp::SummaryAgg` (§6.2) with `summary_type = Sketch(Kll)` (§6.3, §6.4) and `input = SummaryUpdate::column(latency)` (§6.5); its candidate's θ is `Kll { k: 200 }`. Its `schema` (§6.3) is `(job Utf8, state Sketch(Kll))`: the `state` field has the same type as `summary_type`. A `SummaryEstimate` above it holds `query = Quantile { q: 0.99 }` (§6.5), and its node carries the `guarantee` of the evaluation. `coverage()` on the `SummaryAgg` node returns a `AggregateCoverage` (§6.6).
 
 ### 6.1 DAG node (`crates/types/src/ir/operator/node.rs`)
 
 Every operator in a DAG is wrapped in an `OperatorNode`. `coverage()` is explained in §6.6.
 
-Shown as of #646. On `main` today the node still has a declared `pub coverage: Option<SummaryCoverage>` field (with `with_coverage()` and `requires_coverage()`); #646 replaces it with the derived `coverage()` below.
+Shown as of #646. On `main` today the node still has a declared `pub coverage: Option<AggregateCoverage>` field (with `with_coverage()` and `requires_coverage()`); #646 replaces it with the derived `coverage()` below.
 
 ```rust
 /// One node of the DAG. Immutable and shared through `Rc`.
@@ -995,7 +995,7 @@ impl OperatorNode {
     /// The node's coverage (§4.2), derived on first use and then cached.
     /// `Some` for a `SummaryAgg` and a valid `SummaryMerge`; `None` for every
     /// other node.
-    pub fn coverage(&self) -> Option<&SummaryCoverage>;
+    pub fn coverage(&self) -> Option<&AggregateCoverage>;
 }
 ```
 
@@ -1373,15 +1373,15 @@ pub struct CurrentSeriesInput {
 
 A finalized value's accuracy statement is `AccuracyGuarantee` (`accuracy/guarantee.rs`): a `spec` (`AccuracySpec`) with `accuracy_metric` (which error is measured, e.g. rank error), `error` (the error bound), `failure_probability` (the chance the bound does not hold) and `accuracy_scope` (which output values one statement covers), plus `provenance` (which estimates the bound came from). It is attached to evaluation and finalized nodes, and to `MaintainPopulation` nodes (whose population is exact); never to sketch or accumulator state.
 
-### 6.6 Summary coverage (`crates/types/src/ir/properties/summary_coverage.rs`)
+### 6.6 Summary coverage (`crates/types/src/ir/properties/aggregate_coverage.rs`)
 
-The code for §4. `SummaryStateDefinition` is shown in §4.2.2.
+The code for §4. `AggregateDefinition` is shown in §4.2.2.
 
 ```rust
-pub struct SummaryCoverage {
+pub struct AggregateCoverage {
     /// What the state computes: its input group and the operators the walk
     /// did not lift (§4.2.2).
-    pub(crate) definition: SummaryStateDefinition,
+    pub(crate) definition: AggregateDefinition,
     /// Which rows went in: a union of boxes. A row is in the state if it is
     /// in at least one box.
     pub(crate) selection: Vec<SelectionBox>,
@@ -1437,9 +1437,9 @@ A PromQL range `m[r]` evaluated at t reads the samples in (t − r, t]: left-ope
 | SQL `WHERE price > 10` | `Excluded(FixedValue(Float64(10.0)))` | `Unbounded` |
 
 ```rust
-impl SummaryCoverage {
+impl AggregateCoverage {
     /// The coverage of a summary-state group computed by `operator` over its
-    /// input groups (§4.2.2). Errors: `NotSummary` for an operator that is
+    /// input groups (§4.2.2). Errors: `NoCoverage` for an operator that is
     /// not a `SummaryAgg`, `SummaryTumblingWindowChain`, `SummaryMerge` or a
     /// `Filter` keeping whole states; `TumblingWindowChainExpansion` for a `SummaryTumblingWindowChain`
     /// that does not expand to one build over its whole window; for a

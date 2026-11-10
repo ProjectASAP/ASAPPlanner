@@ -1,6 +1,7 @@
-//! `column_sign` and `depends_on_evaluation_time`, derived once per memo
-//! group from its input groups (concepts doc, section 3, "Value sign" and
-//! `GroupProperties`). Every example reads one of three sources:
+//! `column_signs`, `depends_on_evaluation_time` and `scanned_sources`,
+//! derived once per memo group from its input groups (concepts doc, section
+//! 3, "Value sign" and `GroupProperties`; `aggregate_coverage` is in
+//! `memo_aggregate_coverage.rs`). Every example reads one of three sources:
 //!
 //! ```text
 //! latency         [ts, value, host]   value declared non-negative
@@ -10,6 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use asap_types::ir::operator::arguments::{AtModifier, GroupKeys, JoinKind, Reduction, Source};
+use asap_types::ir::operator::input::scans_only_time_series;
 use asap_types::ir::operator::AggIntent;
 
 use crate::memo_fixtures::{filter, range, scan, shift, state};
@@ -59,7 +61,9 @@ fn add(memo: &mut Memo, expression: Operator<MemoGroupId>) -> MemoGroupId {
 }
 
 fn signs(memo: &Memo, group: MemoGroupId) -> &[ValueSign] {
-    &memo.groups()[group.0 as usize].group_properties.column_sign
+    &memo.groups()[group.0 as usize]
+        .group_properties
+        .column_signs
 }
 
 fn depends(memo: &Memo, group: MemoGroupId) -> bool {
@@ -131,7 +135,7 @@ fn readout(query: SketchStatistic, state: MemoGroupId) -> Operator<MemoGroupId> 
 
 /// Rows of the per-operator table that keep or set a column's sign:
 ///
-/// | Group | Expression | `column_sign` |
+/// | Group | Expression | `column_signs` |
 /// |---|---|---|
 /// | G1 | `Scan latency` | `[Unknown, NonNegative, Unknown]` (declared) |
 /// | G2 | `Scan gauge` | `[Unknown, Unknown, Unknown]` (nothing declared) |
@@ -208,7 +212,7 @@ fn scans_read_declared_signs_and_row_operators_keep_or_set_them() {
 /// Aggregates: keys keep their sign, sum / max keep the value's, counts are
 /// non-negative, and a rate is non-negative over a non-negative value only:
 ///
-/// | Group | Expression | `column_sign` |
+/// | Group | Expression | `column_signs` |
 /// |---|---|---|
 /// | G2 | `sum by (host)(G1)`, G1 = `Scan latency` | `[Unknown, NonNegative]` |
 /// | G3 | `max by (host)(G1)` | `[Unknown, NonNegative]` |
@@ -262,7 +266,7 @@ fn aggregates_keep_their_keys_and_derive_their_values() {
 /// keeps the sign its inputs agree on, and a readout reads the state's, a
 /// count-like statistic being non-negative whatever the values:
 ///
-/// | Group | Expression | `column_sign` |
+/// | Group | Expression | `column_signs` |
 /// |---|---|---|
 /// | G3 | `SummaryAgg[KLL](G2)`, G2 = `latency[1m]` | state `NonNegative` |
 /// | G6 | `SummaryAgg[KLL](G5)`, G5 = `(latency offset 1m)[1m]` | state `NonNegative` |
@@ -471,7 +475,7 @@ fn a_group_scans_the_sources_of_the_scans_below_it() {
             metric: "latency".into()
         }])
     );
-    let reads = |group: MemoGroupId| properties(group).scans_only_time_series();
+    let reads = |group: MemoGroupId| scans_only_time_series(&properties(group).scanned_sources);
     assert!(reads(series));
     assert!(reads(window));
     assert!(!reads(requests));
@@ -497,8 +501,8 @@ fn count_values_without_has_one_sign_per_output_column() {
         ),
     );
     let group = &memo.groups()[g2.0 as usize].group_properties;
-    assert_eq!(group.column_sign.len(), group.schema.fields.len());
-    assert_eq!(group.column_sign.last(), Some(&NonNegative));
+    assert_eq!(group.column_signs.len(), group.schema.fields.len());
+    assert_eq!(group.column_signs.last(), Some(&NonNegative));
 }
 
 /// A group's properties come from its operator and its input groups'
@@ -506,7 +510,7 @@ fn count_values_without_has_one_sign_per_output_column() {
 /// readout's value column, and whether equal copies may be one group.
 #[test]
 fn group_properties_come_from_input_groups() {
-    let mut memo = Memo::default();
+    let mut memo = Memo::new(&DataWorkload::default());
     let g1 = memo
         .find_or_add_group(scan(
             "latency",

@@ -114,7 +114,7 @@ pub struct SourceFacts {
     pub metric_type: Option<PrometheusMetricType>,
     /// The declared sign of each column's values, keyed by column name
     /// (default: none declared), e.g. `{"value": "non_negative"}` for a
-    /// latency gauge. A `Scan`'s `column_sign` reads it; an undeclared
+    /// latency gauge. A `Scan`'s `column_signs` reads it; an undeclared
     /// column is `Unknown`, except a PromQL counter's value, which is
     /// non-negative without a declaration. The deployment must ensure it.
     /// Omitted from JSON when empty.

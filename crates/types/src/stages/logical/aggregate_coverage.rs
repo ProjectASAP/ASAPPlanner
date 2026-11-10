@@ -1,4 +1,4 @@
-//! Aggregate coverage, a group property: [`SummaryCoverage`] derived once
+//! Aggregate coverage, a group property: [`AggregateCoverage`] derived once
 //! for each aggregate memo group from its input groups.
 //!
 //! It is derived for a summary state or an exact `Aggregate`, never
@@ -18,22 +18,22 @@ use std::ops::Bound;
 
 use super::MemoGroupAsInput;
 use crate::ir::operator::arguments::{AtModifier, Reduction};
-use crate::ir::operator::asap::{selected_from, summary_agg_schema, ASAPOp};
+use crate::ir::operator::asap::{selected_from, summary_agg_layout, ASAPOp};
 use crate::ir::operator::input::{InputOrTemporaryBuild, OperatorInput};
 use crate::ir::operator::node::{Operator, OperatorResultKind};
 use crate::ir::operator::non_asap::{NonASAPOp, TimeRangeKind};
-use crate::ir::properties::summary_coverage::{
-    dedup, interval, union, ColumnIdentity, Constraint, CoverageError, IntervalConstraintLimit,
-    SelectionBox, SummaryCoverage, SummaryStateDefinition,
+use crate::ir::properties::aggregate_coverage::{
+    constraint_of, union, AggregateCoverage, AggregateDefinition, ColumnIdentity, Constraint,
+    CoverageError, IntervalConstraintLimit, SelectionBox,
 };
-use crate::ir::scalar::expr_ir::{CompareOpKind, ScalarValue};
+use crate::ir::scalar::expr_ir::ScalarValue;
 use crate::ir::scalar::{Predicate, ScalarExpr};
 use crate::ir::schema::{ColumnId, Schema};
 use crate::ir::SchemaDerivationError;
 use crate::stages::MemoGroupId;
 use crate::summary_type::{MergeInputRule, SummaryTypeCapability};
 
-impl SummaryCoverage {
+impl AggregateCoverage {
     /// Coverage of what a memo group computes with `operator` over its
     /// input groups: a `SummaryAgg`, an exact `Aggregate`, a
     /// `SummaryTumblingWindowChain` (a build over its input, the timestamp
@@ -48,7 +48,7 @@ impl SummaryCoverage {
     /// ([`MergeInputRule::MayOverlap`] in the family-capability table) may
     /// also merge overlapping selections, and a counter family
     /// ([`MergeInputRule::DisjointInTime`]) needs disjoint time windows.
-    pub(crate) fn derive_from_inputs<'m>(
+    pub(super) fn derive_from_inputs<'m>(
         operator: &Operator<MemoGroupAsInput<'m>>,
     ) -> Result<Self, CoverageError> {
         let as_built = |op: &ASAPOp<MemoGroupAsInput<'m>>| -> ASAPOp<GroupInput<'m>> {
@@ -67,7 +67,7 @@ impl SummaryCoverage {
             }
             Operator::NonASAP(_) => match selected_build(operator)? {
                 Some(build) => of_summary_agg(&build),
-                None => Err(CoverageError::NotSummary),
+                None => Err(CoverageError::NoCoverage),
             },
             Operator::ASAP(
                 op @ (ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. }),
@@ -81,7 +81,7 @@ impl SummaryCoverage {
                         child
                             .aggregate_coverage()
                             .cloned()
-                            .ok_or(CoverageError::NotSummary)
+                            .ok_or(CoverageError::NoCoverage)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let merged = of_merge(&inputs, time_column_of_build_input(&children[0]).as_ref())?;
@@ -90,7 +90,7 @@ impl SummaryCoverage {
                     Some(keys) => regrouped(merged, &children[0], keys),
                 }
             }
-            Operator::ASAP(_) => Err(CoverageError::NotSummary),
+            Operator::ASAP(_) => Err(CoverageError::NoCoverage),
         }
     }
 }
@@ -124,10 +124,10 @@ fn selected_build<'m>(
         filter,
     }) = states.operator()
     else {
-        return Err(CoverageError::NotSummary);
+        return Err(CoverageError::NoCoverage);
     };
     if by.is_without() {
-        return Err(CoverageError::NotSummary);
+        return Err(CoverageError::NoCoverage);
     }
     // Each state key column is the input column of the same name it groups by.
     let mut unmapped = None;
@@ -154,7 +154,7 @@ fn selected_build<'m>(
     })
     .map_err(regrouped_build)?;
     let reduction = Reduction::Reduce(by);
-    summary_agg_schema(rows.schema(), &family, &reduction).map_err(regrouped_build)?;
+    summary_agg_layout(rows.schema(), &family, &reduction).map_err(regrouped_build)?;
     Ok(Some(ASAPOp::SummaryAgg {
         child: rows,
         summary_type: family,
@@ -167,9 +167,9 @@ fn selected_build<'m>(
 /// The coverage of a merge of states covering `inputs`, whose builds read
 /// rows with timestamp column `time_column`.
 fn of_merge(
-    inputs: &[SummaryCoverage],
+    inputs: &[AggregateCoverage],
     time_column: Option<&ColumnIdentity>,
-) -> Result<SummaryCoverage, CoverageError> {
+) -> Result<AggregateCoverage, CoverageError> {
     let first = inputs.first().ok_or(CoverageError::EmptyMerge)?;
     if inputs
         .iter()
@@ -211,7 +211,7 @@ fn of_merge(
     {
         return Err(CoverageError::InputsOverlap { required });
     }
-    Ok(SummaryCoverage {
+    Ok(AggregateCoverage {
         definition: first.definition.clone(),
         selection: union(inputs.iter().flat_map(|c| c.selection.clone()).collect()),
     })
@@ -224,10 +224,10 @@ fn of_merge(
 /// of one build, so their rows are disjoint. A counter family merges only
 /// time-disjoint windows, never different groups at one time.
 fn regrouped(
-    merged: SummaryCoverage,
+    merged: AggregateCoverage,
     first: &MemoGroupAsInput<'_>,
     keys: &[ColumnId],
-) -> Result<SummaryCoverage, CoverageError> {
+) -> Result<AggregateCoverage, CoverageError> {
     let Some(Operator::ASAP(ASAPOp::SummaryAgg {
         summary_type: family,
         input,
@@ -236,13 +236,13 @@ fn regrouped(
         ..
     })) = merged.definition.unlifted_operators.first()
     else {
-        return Err(CoverageError::NotSummary);
+        return Err(CoverageError::NoCoverage);
     };
     if !SummaryTypeCapability::merges_groups(family) {
         return Err(CoverageError::SummaryTypeCannotRegroup);
     }
     let state = first.schema();
-    let rows = build_input_schema(first).ok_or(CoverageError::NotSummary)?;
+    let rows = build_input_schema(first).ok_or(CoverageError::NoCoverage)?;
     // The build's input column each key of the state names.
     let mapped = keys
         .iter()
@@ -268,7 +268,7 @@ fn regrouped(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let reduction = Reduction::by(mapped);
-    summary_agg_schema(&rows, family, &reduction).map_err(|error| {
+    summary_agg_layout(&rows, family, &reduction).map_err(|error| {
         CoverageError::RegroupedBuild {
             reason: error.to_string(),
         }
@@ -282,7 +282,7 @@ fn regrouped(
         reduction,
         filter: filter.clone(),
     });
-    Ok(SummaryCoverage {
+    Ok(AggregateCoverage {
         definition,
         selection: merged.selection,
     })
@@ -317,7 +317,7 @@ fn time_column_of_build_input<I: OperatorInput>(state: &I) -> Option<ColumnIdent
 /// The coverage of `build`, a `SummaryAgg` or `SummaryTumblingWindowChain`
 /// over memo groups (or over an input a rule built over them): a chain
 /// covers what its `SummaryAgg` over the same input would.
-fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, CoverageError> {
+fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<AggregateCoverage, CoverageError> {
     let (ASAPOp::SummaryAgg {
         child,
         summary_type: family,
@@ -355,7 +355,7 @@ fn of_aggregate(
     child: &GroupInput<'_>,
     filter: Option<&Predicate<GroupInput<'_>>>,
     unlifted_top: impl FnOnce(Option<Predicate<Option<MemoGroupId>>>) -> Operator<Option<MemoGroupId>>,
-) -> Result<SummaryCoverage, CoverageError> {
+) -> Result<AggregateCoverage, CoverageError> {
     // The operators a predicate can be lifted through, top to bottom, and
     // the first input below them. A subquery's group stays named in the
     // residual of the operator that reads it.
@@ -466,8 +466,8 @@ fn of_aggregate(
             .filter_map(|(column, constraint)| Some((column_identity(top, column)?, constraint)))
             .collect(),
     };
-    Ok(SummaryCoverage {
-        definition: SummaryStateDefinition {
+    Ok(AggregateCoverage {
+        definition: AggregateDefinition {
             input_group,
             unlifted_operators,
         },
@@ -624,7 +624,7 @@ fn time_constraint<C>(links: &[Operator<C>]) -> Option<Constraint> {
 /// select on the timestamp column of the chain's input, in every box.
 fn of_window_selection(
     selection: &Operator<MemoGroupAsInput<'_>>,
-) -> Result<SummaryCoverage, CoverageError> {
+) -> Result<AggregateCoverage, CoverageError> {
     let mut links = vec![selection.clone()];
     let mut below = *selection.children()[0];
     while let Some(child) = selected_from(&below) {
@@ -643,132 +643,26 @@ fn of_window_selection(
             Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
         )
     {
-        return Err(CoverageError::NotSummary);
+        return Err(CoverageError::NoCoverage);
     }
     let chain = below
         .aggregate_coverage()
-        .ok_or(CoverageError::NotSummary)?;
-    let time_column = time_column_of_build_input(&below).ok_or(CoverageError::NotSummary)?;
-    let constraint = time_constraint(&links).ok_or(CoverageError::NotSummary)?;
+        .ok_or(CoverageError::NoCoverage)?;
+    let time_column = time_column_of_build_input(&below).ok_or(CoverageError::NoCoverage)?;
+    let constraint = time_constraint(&links).ok_or(CoverageError::NoCoverage)?;
     let selection = chain
         .selection
         .iter()
         .map(|selection_box| {
             let mut columns = selection_box.columns.clone();
             let combined = combined_with(columns.get(&time_column), constraint.clone())
-                .ok_or(CoverageError::NotSummary)?;
+                .ok_or(CoverageError::NoCoverage)?;
             columns.insert(time_column.clone(), combined);
             Ok(SelectionBox { columns })
         })
         .collect::<Result<_, _>>()?;
-    Ok(SummaryCoverage {
+    Ok(AggregateCoverage {
         definition: chain.definition.clone(),
         selection,
     })
-}
-
-/// `column = v`, `!=`, `<`, `<=`, `>`, `>=`, `[NOT] IN (...)` and `OR` of
-/// equalities on one column, with non-null literals.
-fn constraint_of<C>(expr: &ScalarExpr<C>) -> Option<(ColumnId, Constraint)> {
-    let literal = |e: &ScalarExpr<C>| match e {
-        ScalarExpr::Literal(v) if *v != ScalarValue::Null => Some(v.clone()),
-        _ => None,
-    };
-    match expr {
-        ScalarExpr::Compare {
-            left, op, right, ..
-        } => {
-            let (column, value, op) = match (left.as_ref(), right.as_ref()) {
-                (ScalarExpr::Column(c), r) => (*c, literal(r)?, op.clone()),
-                (l, ScalarExpr::Column(c)) => (*c, literal(l)?, flip(op)?),
-                _ => return None,
-            };
-            let constraint = match op {
-                CompareOpKind::Eq => Constraint::In(vec![value]),
-                CompareOpKind::Ne => Constraint::NotIn(vec![value]),
-                CompareOpKind::Lt => interval(Bound::Unbounded, Bound::Excluded(value)),
-                CompareOpKind::Le => interval(Bound::Unbounded, Bound::Included(value)),
-                CompareOpKind::Gt => interval(Bound::Excluded(value), Bound::Unbounded),
-                CompareOpKind::Ge => interval(Bound::Included(value), Bound::Unbounded),
-                _ => return None,
-            };
-            Some((column, constraint))
-        }
-        ScalarExpr::InList {
-            expr,
-            list,
-            negated,
-        } => {
-            let ScalarExpr::Column(column) = expr.as_ref() else {
-                return None;
-            };
-            let values = list.iter().map(literal).collect::<Option<Vec<_>>>()?;
-            let values = dedup(values);
-            Some((
-                *column,
-                if *negated {
-                    Constraint::NotIn(values)
-                } else {
-                    Constraint::In(values)
-                },
-            ))
-        }
-        ScalarExpr::BoolOr(disjuncts) => {
-            let mut column = None;
-            let mut values = Vec::new();
-            for disjunct in disjuncts {
-                let (c, Constraint::In(v)) = constraint_of(disjunct)? else {
-                    return None;
-                };
-                if column.replace(c).is_some_and(|prev| prev != c) {
-                    return None;
-                }
-                values.extend(v);
-            }
-            Some((column?, Constraint::In(dedup(values))))
-        }
-        _ => None,
-    }
-}
-
-fn flip(op: &CompareOpKind) -> Option<CompareOpKind> {
-    Some(match op {
-        CompareOpKind::Eq => CompareOpKind::Eq,
-        CompareOpKind::Ne => CompareOpKind::Ne,
-        CompareOpKind::Lt => CompareOpKind::Gt,
-        CompareOpKind::Le => CompareOpKind::Ge,
-        CompareOpKind::Gt => CompareOpKind::Lt,
-        CompareOpKind::Ge => CompareOpKind::Le,
-        _ => return None,
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    use crate::ir::scalar::ExprSemantics;
-
-    use IntervalConstraintLimit::FixedValue;
-
-    /// SQL `price > 10` lifts to `(FixedValue(10), ∞)`.
-    #[test]
-    fn a_value_comparison_is_an_interval_between_fixed_values() {
-        let price_gt_10: ScalarExpr<()> = ScalarExpr::Compare {
-            left: Box::new(ScalarExpr::Column(0)),
-            op: CompareOpKind::Gt,
-            right: Box::new(ScalarExpr::Literal(ScalarValue::Float64(10.0))),
-            semantics: ExprSemantics::Sql,
-        };
-        assert_eq!(
-            constraint_of(&price_gt_10),
-            Some((
-                0,
-                Constraint::Interval {
-                    lower: Bound::Excluded(FixedValue(ScalarValue::Float64(10.0))),
-                    upper: Bound::Unbounded,
-                }
-            ))
-        );
-    }
 }

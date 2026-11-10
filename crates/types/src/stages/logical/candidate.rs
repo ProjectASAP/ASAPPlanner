@@ -69,7 +69,7 @@ pub enum CandidateError {
     /// output schema does not derive, an input fails validation, or a merge
     /// reads states it may not merge): a bug in the rule that built it.
     #[error("the candidate's expression is not valid over its input groups: {0}")]
-    Schema(SchemaDerivationError),
+    NotValidOverInputGroups(SchemaDerivationError),
     /// Its output schema or output kind differs from the group's: it does
     /// not compute the group's result (a bug in the rule that built it).
     #[error("the candidate's output differs from group {group:?}'s")]

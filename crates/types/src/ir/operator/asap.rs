@@ -12,7 +12,8 @@ use super::non_asap::NonASAPOp;
 use super::tumbling_window_chain::is_time_indexed_state;
 use crate::ir::operator::arguments::Reduction;
 use crate::ir::operator::maintained_population::{MaintainedPopulation, PopulationStatistic};
-use crate::ir::schema::{ColumnId, DataType, Field, FieldDataType, Schema};
+use crate::ir::schema::aggregate_schema::aggregate_output;
+use crate::ir::schema::{ColumnId, DataType, Field, FieldDataType, OutputColumnSource, Schema};
 use crate::ir::SchemaDerivationError;
 use crate::summary_type::SummaryTypeCapability;
 use crate::summary_type::{SketchStatistic, SummaryUpdate};
@@ -285,7 +286,7 @@ impl<I: OperatorInput> ASAPOp<I> {
                 summary_type: family,
                 reduction,
                 ..
-            } => summary_agg_schema(child.schema(), family, reduction)?,
+            } => summary_agg_layout(child.schema(), family, reduction)?.0,
             SummaryTumblingWindowChain {
                 child,
                 summary_type: family,
@@ -427,7 +428,7 @@ impl<I: OperatorInput> ASAPOp<I> {
                             reduction,
                             ..
                         }),
-                    ) => summary_agg_schema(child.schema(), &summary_type, &reduction)?,
+                    ) => summary_agg_layout(child.schema(), &summary_type, &reduction)?.0,
                     (None, _) => input.clone(),
                 }
             }
@@ -721,7 +722,7 @@ fn rolled_up_build<I: OperatorInput>(
         })
         .collect::<Option<Vec<_>>>()?;
     let reduction = Reduction::by(mapped);
-    let schema = summary_agg_schema(child.schema(), &summary_type, &reduction).ok()?;
+    let (schema, _) = summary_agg_layout(child.schema(), &summary_type, &reduction).ok()?;
     Some((
         ASAPOp::SummaryAgg {
             child,
@@ -735,43 +736,31 @@ fn rolled_up_build<I: OperatorInput>(
 }
 
 /// The schema of a `SummaryAgg` (or `SummaryTumblingWindowChain`) of
-/// `summary_type` by `reduction` over rows of schema `child`: the reduction's
-/// output columns, its value column replaced by the state.
-pub(crate) fn summary_agg_schema(
+/// `summary_type` by `reduction` over rows of schema `child`, and where each
+/// of its columns comes from: the reduction's output columns, its one
+/// measure's value column replaced by the state
+/// (`OutputColumnSource::Measure`).
+pub(crate) fn summary_agg_layout(
     child: &Schema,
     summary_type: &FieldDataType,
     reduction: &Reduction,
-) -> Result<Schema, SchemaDerivationError> {
-    let mut schema = crate::ir::schema::aggregate_schema::aggregate_output_schema(
+) -> Result<(Schema, Vec<OutputColumnSource>), SchemaDerivationError> {
+    let (mut schema, sources) = aggregate_output(
         child,
         reduction,
         &[crate::ir::operator::AggIntent::Sum { col: None }],
         &[],
     )?;
-    let index = match reduction {
-        Reduction::PerEntity => crate::ir::scalar::resolve_column_ref(
-            &crate::ir::scalar::ColumnRef::SampleValue,
-            &schema,
-        )
-        .map_err(|e| SchemaDerivationError::InvalidScalarSignature(e.to_string()))?,
-        Reduction::Reduce(_) => schema.fields.len() - 1,
-    };
+    let index = sources
+        .iter()
+        .position(|source| matches!(source, OutputColumnSource::Measure { .. }))
+        .ok_or_else(|| {
+            SchemaDerivationError::InvalidScalarSignature(
+                "a summary state has no value column".into(),
+            )
+        })?;
     schema.fields[index] = Field::new("state", summary_type.clone(), false);
-    Ok(schema)
-}
-
-/// Where each column of [`summary_agg_schema`]'s output comes from: the
-/// aggregate layout of `reduction` with the state in the one measure's place
-/// (`OutputColumnSource::Measure(0)`).
-pub(crate) fn summary_agg_columns(
-    child: &Schema,
-    reduction: &Reduction,
-) -> Result<Vec<crate::ir::schema::OutputColumnSource>, SchemaDerivationError> {
-    crate::ir::schema::aggregate_output_columns(
-        child,
-        reduction,
-        &[crate::ir::operator::AggIntent::Sum { col: None }],
-    )
+    Ok((schema, sources))
 }
 
 /// The schema of a `SummaryTumblingWindowChain` of `summary_type` by `reduction`
@@ -785,7 +774,7 @@ fn chain_schema(
     summary_type: &FieldDataType,
     reduction: &Reduction,
 ) -> Result<Schema, SchemaDerivationError> {
-    let mut schema = summary_agg_schema(child, summary_type, reduction)?;
+    let (mut schema, _) = summary_agg_layout(child, summary_type, reduction)?;
     let time = child
         .time_index
         .and_then(|index| child.fields.get(index))
