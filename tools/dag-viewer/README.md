@@ -72,7 +72,8 @@ To run it, see [RUNNING.md](RUNNING.md).
   group is a box `G<id> · <label>` with its candidate count (and how many
   Pass 2 pruned) and the queries it is the root of; its candidates sit
   inside it, bordered by origin, marked `✚ new` when the step added them
-  and `✗ pruned` (dashed) when Pass 2 pruned them. A group with more than
+  and `✗ pruned` (dashed) when Pass 2 pruned them; those (and a group left
+  with none) are hidden until **show pruned candidates** is ticked. A group with more than
   12 candidates is split into counts by its first dimension that varies:
   origin, sketch family, each θ field (e.g. `k`, `depth`, `width`), then
   tumbling-window width. Clicking a count drills into it, splitting again
@@ -96,7 +97,7 @@ To run it, see [RUNNING.md](RUNNING.md).
   physical edges per input (`✓ C<producer>`, or `✗ C<producer>: α^phys =
   0: …`; `selected` when the plan uses it), and the physical candidates of
   it Stage 2 and Stage 3 pruned.
-- **Theme**: light by default; **Dark theme** switches it and is remembered
+- **Theme**: light by default; **Dark theme** (top right) switches it and is remembered
   in the browser.
 - **Details**: click a node for its operator, the queries reaching it,
   timing, lifetime, output schema, guarantee and Stage 3 cost; click
