@@ -3,15 +3,14 @@
 //! [`run_stages_until`] for `asap_planner`.
 
 use asap_frontend_sql::SqlCatalog;
-use asap_logical_asap_optimization::{
-    memo_of_queries, pass1_memo, pass2_after_local_window_composition,
-    pass2_local_window_composition, Pass1Error,
-};
-use asap_physical_asap_optimization::generate_physical_asap_memo_candidates;
-use asap_plan_selection::select_plan;
 use asap_planner::{
     run_planning, PlanSearchSettings, PlanningModels, PlanningReport, PlanningRun, SelectionError,
 };
+use asap_stage0_memo::memo_of_queries;
+use asap_stage1_pass1_per_computation_candidates::{pass1_memo, Pass1Error};
+use asap_stage1_pass2_reuse_candidates::generate_logical_asap_memo_candidates;
+use asap_stage2_physical_optimization::generate_physical_asap_memo_candidates;
+use asap_stage3_plan_selection::select_plan;
 use asap_types::ir::schema::series_identity::with_promql_series_identity;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::QueryRoot;
@@ -70,9 +69,6 @@ pub struct PlanningStagesRun {
     /// Stage 0's memo groups (the roots hash-consed), without candidates;
     /// built by `run_stages_until` only (`asap_planner` prints them).
     pub stage0_memo_groups: Option<Memo>,
-    /// Stage 1 Pass 2's memo after local window composition (rule 1), before
-    /// the other rules; `None` before Pass 2.
-    pub pass2_local_window_composition: Option<Memo>,
     /// The stages' outputs: Pass 1, Pass 2, Stage 2 and the selection.
     pub run: PlanningRun,
 }
@@ -201,7 +197,6 @@ pub fn run_search_over(
     Ok(PlanningStagesRun {
         run_until: RunUntil::Stage3,
         stage0_memo_groups: None,
-        pass2_local_window_composition: None,
         stage0_query_language_frontends: roots,
         run,
     })
@@ -232,7 +227,6 @@ pub fn run_stages_until(
     let mut stages = PlanningStagesRun {
         run_until: until,
         stage0_memo_groups: Some(stage0_dag.clone()),
-        pass2_local_window_composition: None,
         stage0_query_language_frontends: roots.clone(),
         run: PlanningRun {
             pass1_memo: None,
@@ -273,15 +267,7 @@ pub fn run_stages_until(
     if until == RunUntil::Pass1 {
         return Ok(stages);
     }
-    let composed = match pass2_local_window_composition(pass1, entries) {
-        Ok(composed) => composed,
-        Err(error) => {
-            run.selection = Err(SelectionError::LogicalASAPCandidates(error.to_string()));
-            return Ok(stages);
-        }
-    };
-    stages.pass2_local_window_composition = Some(composed.clone());
-    let logical = match pass2_after_local_window_composition(composed, models.evidence) {
+    let logical = match generate_logical_asap_memo_candidates(pass1, entries, models.evidence) {
         Ok(logical) => logical,
         Err(error) => {
             run.selection = Err(SelectionError::LogicalASAPCandidates(error.to_string()));

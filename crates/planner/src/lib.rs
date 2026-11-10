@@ -8,7 +8,7 @@
 //! The default pass, [`Stage1ToStage3Pass`], orchestrates the stages
 //! ([`run_planning`]): Stage 0, Pass 1, Pass 2, Stage 2
 //! (`generate_physical_asap_memo_candidates`) and Stage 3
-//! (`asap_plan_selection::select_plan`), which builds the selected plan.
+//! (`asap_stage3_plan_selection::select_plan`), which builds the selected plan.
 //! The stages never call each other.
 //!
 //! [`e2e_plan`] runs both steps. [`plan_installable`] runs them for a
@@ -25,11 +25,13 @@ use asap_frontend_metricsql::{lower_metricsql_query_workload, MetricsqlError};
 use asap_frontend_promql::{lower_promql_query_workload, PromqlError};
 use asap_frontend_sql::{lower_sql_dialect, SqlError};
 
+mod models;
 mod pass;
 mod run;
+pub use models::PlanningModels;
 pub use pass::{
     optimize, OptimizationInput, OptimizationInputError, OptimizationPass, OptimizeError,
-    PassNameConflict, PassRegistry, PlanOutput, PlanningModels,
+    PassNameConflict, PassRegistry, PlanOutput,
 };
 pub use run::{
     run_planning, PlanSearchSettings, PlanningReport, PlanningRun, SelectionError,
@@ -51,7 +53,9 @@ pub use asap_cost::{
     ResourceSpeed, ResourceUnitCost, SummaryOperation,
 };
 pub use asap_frontend_sql::SqlCatalog;
-pub use asap_plan_selection::{AcceptedAccuracy, ErrorSelectingPlan, RejectionCause, Selection};
+pub use asap_stage3_plan_selection::{
+    AcceptedAccuracy, ErrorSelectingPlan, RejectionCause, Selection,
+};
 pub use asap_types::deployment_capabilities::{DeploymentCapabilities, SupportedSummary};
 pub use asap_types::ir::properties::summary_coverage::{
     ColumnIdentity, Constraint, IntervalConstraintLimit, SelectionBox,

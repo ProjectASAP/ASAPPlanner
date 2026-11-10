@@ -24,8 +24,8 @@ A new sketch that Pass 1 can offer for an intent.
    evaluates is its own declaration, `EVALUATED_READOUTS`
    (`crates/executor/src/capability.rs`); add the family's readouts there
    once the executor answers them.
-3. **Offer and size.** Place it in `realization::FAMILY_PREFERENCE`
-   (`crates/logical-asap-optimization`): `summary_candidates` offers it, in
+3. **Offer and size.** Place it in `summary_realization::FAMILY_PREFERENCE`
+   (`crates/stage1-pass1-per-computation-candidates`): `summary_candidates` offers it, in
    that order, for every intent whose statistic its capability row answers.
    Size it in `asap_accuracy::sizing::default_size_params`.
 4. **Accuracy.** Add its error model under
@@ -44,7 +44,7 @@ A new sketch that Pass 1 can offer for an intent.
    not with a local copy.
 7. **Labels.** Name it in `asap_devtools::candidate_labels`.
 
-Tests: a Pass 1 test in `crates/logical-asap-optimization/tests/per_computation_candidates.rs`
+Tests: a Pass 1 test in `crates/stage1-pass1-per-computation-candidates/src/per_computation_candidates_tests.rs`
 that the intent gets the new candidate (and that a deployment without it
 prunes it with `UnsupportedByDeployment`); an estimator test beside the
 estimator; an execution test in `crates/integration-tests/tests/` such as
@@ -55,14 +55,14 @@ estimator; an execution test in `crates/integration-tests/tests/` such as
 A new way for computations of one Pass 1 candidate to share, split or reuse
 work.
 
-1. Add a memo rule under `crates/logical-asap-optimization/src/pass2/memo/rules/`
+1. Add a memo rule under `crates/stage1-pass2-reuse-candidates/src/memo/rules/`
    (for example `rollup.rs` or `topk.rs`): it adds candidates (and, when it
    needs them, groups) to the memo groups it implements, keeping every
    existing candidate. Read summary families only through
    `SummaryTypeCapability`. Shared rewrite helpers live in
    `pass2/asap_aware_cse.rs`.
-2. Declare it in `pass2/memo/rules.rs` and call it from `apply_sharing_rules`
-   (`pass2.rs`), after the
+2. Declare it in `rules.rs` and call it from `generate_logical_asap_memo_candidates`
+   (`stage1-pass2-reuse-candidates/src/lib.rs`), after the
    existing rules.
 3. Add its row to the Pass 2 rule table of the
    [design](../design_docs/proposals/planner-layering.md).
@@ -81,7 +81,7 @@ contains the candidate and that Stage 3 prices it.
    (`crates/types/src/stages/physical/properties.rs`, `PhysicalProperties::new` and
    `readable_at`) and its placement in
    `crates/types/src/ir/properties/timing.rs`, with its data-state edge rules.
-2. Offer it in `crates/physical-asap-optimization/src/lib.rs` (the
+2. Offer it in `crates/stage2-physical-optimization/src/lib.rs` (the
    `MaterializedOutputCandidate` options), after the existing options so default
    candidate ids stay the same, and gate it on the deployment input that
    allows it.

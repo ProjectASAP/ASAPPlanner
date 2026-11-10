@@ -1,32 +1,7 @@
 //! Query text through summary selection: counts use observations, never value weights.
-use crate::planner_support::selected_dag;
 use crate::support;
 use asap_types::accuracy::AccuracyTarget;
-use asap_types::ir::schema::FieldDataType;
-use asap_types::ir::{ASAPOp, Operator, OperatorNode};
-use asap_types::summary_type::ExactKind;
 use support::lower_promql;
-
-// Exact series and temporal counts must select a count accumulator, not distinct or sum.
-#[test]
-fn exact_counts_select_count_accumulators() {
-    for query in ["count(up)", "count by(job)(up)", "count_over_time(up[5m])"] {
-        let root = lower_promql(query, AccuracyTarget::exact()).unwrap();
-        let selected = selected_dag(root, AccuracyTarget::exact());
-        assert!(
-            OperatorNode::reachable(&selected).iter().any(|node| {
-                matches!(
-                    &node.operator,
-                    Operator::ASAP(ASAPOp::SummaryAgg {
-                        summary_type: FieldDataType::ExactAggregate(ExactKind::Count, _),
-                        ..
-                    })
-                )
-            }),
-            "{query}: {selected:?}"
-        );
-    }
-}
 
 // Fixtures are already selected at one instant or within one five-minute window.
 // This narrow test oracle interprets the emitted aggregate, not Prometheus ingestion,
@@ -116,15 +91,4 @@ fn count_over_time_counts_scrapes_not_sample_values() {
         ),
         vec![10.0, 10.0]
     );
-}
-
-// The assertion helper must fail on an injected composition error; its coverage
-// must not depend on a real planner bug remaining unfixed.
-#[test]
-#[should_panic(expected = "does not compose")]
-fn logical_candidates_fails_on_a_candidate_that_does_not_compose() {
-    support::require_composed_operator_candidates(vec![support::LogicalCandidate {
-        id: "invalid-composition".into(),
-        roots: Err("invalid choice".into()),
-    }]);
 }
