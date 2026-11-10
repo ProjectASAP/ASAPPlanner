@@ -25,12 +25,18 @@ use crate::workload::{series_facts, PrometheusMetricType, SourceFacts};
 /// input groups like lineage (concepts doc, section 3, "Value sign"); a
 /// `Scan`'s are declared per column in the data workload's source facts.
 /// Error contracts that hold only for values of one sign read it.
+///
+/// A sign is the IEEE 754 sign bit, so `-0.0` is `NonPositive` and `+0.0`
+/// `NonNegative`; with it the rules are exact: a product or quotient has
+/// the XOR of its operands' sign bits, a sum of two values with one sign
+/// bit keeps it, a negation flips it and `abs` clears it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ValueSign {
-    /// Every non-NaN value is ≥ 0.
+    /// Every non-NaN value has its sign bit clear (`+0.0`, positive,
+    /// `+inf`).
     NonNegative,
-    /// Every non-NaN value is ≤ 0.
+    /// Every non-NaN value has its sign bit set (`-0.0`, negative, `-inf`).
     NonPositive,
     /// Neither is known.
     Unknown,
@@ -243,26 +249,20 @@ fn asap_signs(op: &ASAPOp<Input<'_>>, output: &Schema) -> Vec<ValueSign> {
         SummaryEstimate {
             summary_input,
             query,
-        } => {
-            // The summary type of the state read, for whether its counts keep
-            // the weights' sign.
-            let flips = summary_input
-                .schema()
-                .fields
-                .iter()
-                .find(|field| !field.is_plain())
-                .is_some_and(|state| SummaryTypeCapability::estimates_may_flip_sign(&state.dtype));
-            readout_signs(summary_input, output, |state| match query {
-                SketchStatistic::Cardinality
-                | SketchStatistic::FrequencyL2
-                | SketchStatistic::FrequencyEntropy => NonNegative,
-                SketchStatistic::Quantile { q } => quantile_sign(*q, state),
-                SketchStatistic::PointCount { .. } | SketchStatistic::TopK { .. } if flips => {
-                    Unknown
-                }
-                SketchStatistic::PointCount { .. } | SketchStatistic::TopK { .. } => state,
-            })
-        }
+        } => readout_signs(summary_input, output, |state, summary_type| match query {
+            SketchStatistic::Cardinality
+            | SketchStatistic::FrequencyL2
+            | SketchStatistic::FrequencyEntropy => NonNegative,
+            SketchStatistic::Quantile { q } => quantile_sign(*q, state),
+            // A count read from a state whose counts may flip the weights'
+            // sign has none.
+            SketchStatistic::PointCount { .. } | SketchStatistic::TopK { .. }
+                if SummaryTypeCapability::point_counts_may_flip_sign(summary_type) =>
+            {
+                Unknown
+            }
+            SketchStatistic::PointCount { .. } | SketchStatistic::TopK { .. } => state,
+        }),
         FinalizeExactAccumulator { child } => {
             let counts = child.schema().fields.iter().any(|field| {
                 matches!(
@@ -273,7 +273,7 @@ fn asap_signs(op: &ASAPOp<Input<'_>>, output: &Schema) -> Vec<ValueSign> {
             readout_signs(
                 child,
                 output,
-                |state| if counts { NonNegative } else { state },
+                |state, _| if counts { NonNegative } else { state },
             )
         }
         MaintainPopulation { child, .. } => signs_of(child),
@@ -417,13 +417,14 @@ fn state_signs(
 }
 
 /// A readout of summary state: the state's plain columns keep their sign
-/// in place, and the value read out has `value(the state's recorded sign)`.
+/// in place, and the value read out has `value(the state's recorded sign,
+/// the state column's type)`.
 /// `Unknown` everywhere when the output does not keep the state's layout (a
 /// top-k's rows).
 fn readout_signs(
     state: &Input<'_>,
     output: &Schema,
-    value: impl Fn(ValueSign) -> ValueSign,
+    value: impl Fn(ValueSign, &FieldDataType) -> ValueSign,
 ) -> Vec<ValueSign> {
     let input = state.schema();
     if input.fields.len() != output.fields.len() {
@@ -432,7 +433,13 @@ fn readout_signs(
     signs_of(state)
         .into_iter()
         .zip(&input.fields)
-        .map(|(sign, field)| if field.is_plain() { sign } else { value(sign) })
+        .map(|(sign, field)| {
+            if field.is_plain() {
+                sign
+            } else {
+                value(sign, &field.dtype)
+            }
+        })
         .collect()
 }
 
@@ -495,12 +502,13 @@ fn flipped(sign: ValueSign) -> ValueSign {
     }
 }
 
+/// The sign of a number: its sign bit; `Unknown` for NaN.
 fn sign_of_number(value: f64) -> ValueSign {
-    if value >= 0.0 {
-        NonNegative
-    } else if value < 0.0 {
+    if value.is_nan() {
+        Unknown
+    } else if value.is_sign_negative() {
         NonPositive
     } else {
-        Unknown
+        NonNegative
     }
 }

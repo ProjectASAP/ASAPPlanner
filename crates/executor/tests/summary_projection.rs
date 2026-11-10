@@ -58,6 +58,7 @@ fn raw_node(id: usize, payload: NonASAPOp<usize>) -> PhysicalASAPDAGNode {
         guarantee: None,
         retention_ms: None,
         selected_physical_candidate: None,
+        view_coverage: None,
     }
 }
 
@@ -130,6 +131,7 @@ fn summary_projection_survives_recovery() {
                 guarantee: None,
                 retention_ms: None,
                 selected_physical_candidate: None,
+                view_coverage: None,
             },
             raw_node(2, scan()),
             raw_node(
@@ -160,6 +162,7 @@ fn summary_projection_survives_recovery() {
                 guarantee: None,
                 retention_ms: None,
                 selected_physical_candidate: None,
+                view_coverage: None,
             },
         ],
         edges: vec![
@@ -269,6 +272,7 @@ fn summary_merge_without_inputs_is_rejected() {
             guarantee: None,
             retention_ms: None,
             selected_physical_candidate: None,
+            view_coverage: None,
         }],
         edges: vec![],
         roots: vec![0],

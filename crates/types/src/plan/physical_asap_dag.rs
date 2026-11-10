@@ -9,14 +9,18 @@
 //! (#509 Assumption 8): it does not change lifetime or timing.
 
 use std::collections::{HashMap, HashSet};
+#[cfg(any(test, feature = "test-support"))]
 use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use super::materialized_view::ViewCoverage;
 use crate::ir::flat::NodeId;
 use crate::ir::operator::asap::ASAPOp;
-use crate::ir::operator::node::{Operator, OperatorNode};
+use crate::ir::operator::node::Operator;
+#[cfg(any(test, feature = "test-support"))]
+use crate::ir::operator::node::OperatorNode;
 use crate::ir::operator::non_asap::NonASAPOp;
 use crate::ir::scalar::ScalarExpr;
 
@@ -95,6 +99,14 @@ pub struct PhysicalASAPDAGNode {
     /// built by a custom pass.
     #[serde(skip)]
     pub selected_physical_candidate: Option<PhysicalCandidateId>,
+    /// For a materialized view (lifetime `AcrossEvaluations`), what it
+    /// stores: its memo group's aggregate coverage, carried into the plan
+    /// as a [`ViewCoverage`] (the selection, and the plan-scope content id
+    /// of the definition, [`ViewCoverage::definition_id`]). Set when the
+    /// plan is built from the memo, where the node's group is known; `None`
+    /// on every other node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_coverage: Option<ViewCoverage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -256,11 +268,11 @@ impl PhysicalASAPDAG {
     }
 
     /// Every node of this DAG as IR, by node id, with its exported
-    /// guarantee (an operator node has no physical properties): what a caller derives
-    /// IR properties of a plan file's node from, such as its
-    /// [`AggregateCoverage`](crate::stages::AggregateCoverage).
-    /// Shared inputs stay shared. Validates the DAG first.
-    pub(crate) fn operator_nodes(
+    /// guarantee (an operator node has no physical properties): what
+    /// [`Self::query_roots`] reads. Shared inputs stay shared. Validates the
+    /// DAG first.
+    #[cfg(any(test, feature = "test-support"))]
+    fn operator_nodes(
         &self,
     ) -> Result<HashMap<PhysicalASAPNodeId, Rc<OperatorNode>>, PhysicalASAPDAGValidationError> {
         self.validate()?;
@@ -607,6 +619,7 @@ pub(crate) fn physical_asap_dag_at_query_time_with_node_ids(
             guarantee: flat_node.guarantee,
             retention_ms: None,
             selected_physical_candidate: None,
+            view_coverage: None,
         });
     }
     let dag = PhysicalASAPDAG {

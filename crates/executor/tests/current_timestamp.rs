@@ -71,6 +71,7 @@ fn scan_plan(predicates: Vec<Predicate<usize>>) -> PhysicalASAPDAG {
             guarantee: None,
             retention_ms: None,
             selected_physical_candidate: None,
+            view_coverage: None,
         }],
         edges: vec![],
         roots: vec![0],

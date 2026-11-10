@@ -318,7 +318,7 @@ Its definition differs from G4's, so G10 cannot merge with G4, even though both 
 - `input_group`: the group the definition reads, below everything the walk passed (`None` when the walk lifted a predicate out of a `Scan`).
 - `unlifted_operators`: what the state computes over `input_group`, top down from the `SummaryAgg`, each operator with only the conditions that stayed. Each operator's main input is `None`; any other group it reads, such as the group of a scalar subquery in a `Filter`'s condition, is `Some(group)`.
 - `selection`: which output rows of that computation the state took, as a union of boxes.
-- Identity, in two scopes. In the memo, coverages compare by `AggregateDefinition` `==` (it holds `MemoGroupId`s); nothing in the memo needs an id. The plan carries `ViewCoverage::definition_id`, a content id: the definition with every input group expanded recursively to its expression down to the `Scan`s, with no group or node ids, canonically serialized and hashed. It is equal across plans and processes that compute the same thing and different when they do not, and it is the key a summary store files states under together with a concrete selection.
+- Identity, in two scopes. In the memo, coverages compare by `AggregateDefinition` `==` (it holds `MemoGroupId`s); nothing in the memo needs an id. The plan carries the view's content id, [`ViewCoverage::definition_id`](../../../crates/types/src/plan/materialized_view.rs) (defined there), on the view's plan node (`PhysicalASAPDAGNode::view_coverage`); a summary store files states under it together with a concrete selection.
 
 ##### The definition
 

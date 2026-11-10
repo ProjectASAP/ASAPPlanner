@@ -164,6 +164,7 @@ fn query_time_count_heap_binds_a_constant_row_weight() {
         guarantee: None,
         retention_ms: None,
         selected_physical_candidate: None,
+        view_coverage: None,
     };
     let build = compile_node(&node, std::slice::from_ref(&input)).unwrap();
     let wire = serde_json::to_value(&build).unwrap();

@@ -665,10 +665,10 @@ fn arithmetic(op: ArithmeticOpKind, lhs: MemoGroupId, rhs: MemoGroupId) -> Opera
 /// |---|---|---|
 /// | G3 | `quantile_over_time(0.9, G2)`, G2 = `latency[1h]` | `NonNegative` |
 /// | G4 | `quantile_over_time(0.5, G2)` | `NonNegative` |
-/// | G5 | `G3 / G4` | `NonNegative` (was `Unknown`) |
+/// | G5 | `G3 / G4` | `NonNegative` |
 /// | G6 | `G3 + G4` | `NonNegative` |
 /// | G7 | `G3 - G4` | `Unknown` |
-/// | G8 | `vector(1000)` | `NonNegative` (was `Unknown`) |
+/// | G8 | `vector(1000)` | `NonNegative` |
 /// | G9 | `vector(-1)` | `NonPositive` |
 /// | G10 | `G3 * G8` | `NonNegative` |
 /// | G11 | `G3 * G9` | `NonPositive` |
@@ -729,11 +729,12 @@ fn vector_arithmetic_follows_its_operands_signs() {
 ///
 /// | Group | Expression | value sign |
 /// |---|---|---|
-/// | G2 | `G1 / 1000`, G1 = `Scan latency` (PromQL) | `NonNegative` (was `Unknown`) |
-/// | G3 | `G1 * 8` (PromQL) | `NonNegative` (was `Unknown`) |
-/// | G4 | `SELECT value * 8 FROM G1` (SQL) | `NonNegative` (was `Unknown`) |
+/// | G2 | `G1 / 1000`, G1 = `Scan latency` (PromQL) | `NonNegative` |
+/// | G3 | `G1 * 8` (PromQL) | `NonNegative` |
+/// | G4 | `SELECT value * 8 FROM G1` (SQL) | `NonNegative` |
 /// | G5 | `G1 - G1` | `Unknown` |
 /// | G6 | `G1 * -8` | `NonPositive` |
+/// | G7 | `G1 / -0` | `NonPositive` (`-0` has its sign bit set: the quotient is `-inf`, `-0` or NaN) |
 #[test]
 fn scalar_arithmetic_follows_its_operands_signs() {
     let mut memo = memo();
@@ -776,12 +777,17 @@ fn scalar_arithmetic_follows_its_operands_signs() {
         &mut memo,
         map_value(expr(ArithmeticOpKind::Mul, number(-8.0), promql), g1),
     );
+    let g7 = add(
+        &mut memo,
+        map_value(expr(ArithmeticOpKind::Div, number(-0.0), promql), g1),
+    );
     for (group, value) in [
         (g2, NonNegative),
         (g3, NonNegative),
         (g4, NonNegative),
         (g5, Unknown),
         (g6, NonPositive),
+        (g7, NonPositive),
     ] {
         assert_eq!(signs(&memo, group), [Unknown, value, Unknown], "{group:?}");
     }

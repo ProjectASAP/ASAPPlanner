@@ -87,6 +87,7 @@ fn program_for_bool(operator: BinaryOperator, return_bool: bool) -> Operator {
         guarantee: None,
         retention_ms: None,
         selected_physical_candidate: None,
+        view_coverage: None,
     };
     compile_node(&node, &[schema.clone(), schema]).unwrap()
 }
@@ -428,6 +429,7 @@ fn stored_series_evaluations_support_filters_and_sets() {
                         guarantee: None,
                         retention_ms: None,
                         selected_physical_candidate: None,
+                        view_coverage: None,
                     })
                     .collect::<Vec<_>>();
             let edges = [
