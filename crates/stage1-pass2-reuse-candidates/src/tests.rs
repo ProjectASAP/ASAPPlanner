@@ -27,8 +27,8 @@ use asap_types::stages::{
     PruneCause, PrunedLogicalCandidate, RequiredAccuracy, RootPruneReason,
 };
 use asap_types::workload::{
-    Predictability, Query, QueryRecurrence, QueryRequirements, QueryWorkloadEntry, RepeatedDemand,
-    RepetitionInterval, TimestampMs,
+    DemandEstimate, Predictability, Query, QueryRecurrence, QueryRequirements, QueryWorkloadEntry,
+    Rate, RepeatedDemand, RepetitionInterval, TimestampMs,
 };
 
 use asap_types::test_support::{
@@ -904,13 +904,15 @@ fn no_chain_without_a_merge_an_anchor_or_a_grid() {
     for root in [irate_root, pinned_root, no_grid_root] {
         query(&mut memo, root, None);
     }
-    let without_phase = QueryWorkloadEntry {
-        recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(
-            60_000,
-        ))),
+    let no_grid_entry = QueryWorkloadEntry {
+        recurrence: QueryRecurrence::Repeated(RepeatedDemand::EstimatedRate(DemandEstimate {
+            expected_rate: Rate(1.0 / 60.0),
+            observed_at: None,
+            valid_for: None,
+        })),
         ..entry(60_000)
     };
-    let logical = pass2(memo, &[entry(60_000), entry(60_000), without_phase]);
+    let logical = pass2(memo, &[entry(60_000), entry(60_000), no_grid_entry]);
     for state in [irate, pinned, no_grid] {
         assert!(
             chain_widths_serving(&logical.memo, state).is_empty(),
@@ -1002,13 +1004,15 @@ fn a_groups_evaluation_grid_is_the_gcd_of_its_queries_grids() {
     query(&mut memo, a, None);
     query(&mut memo, a, None);
     query(&mut memo, other, None);
-    let without_phase = QueryWorkloadEntry {
-        recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(
-            60_000,
-        ))),
+    let no_grid_entry = QueryWorkloadEntry {
+        recurrence: QueryRecurrence::Repeated(RepeatedDemand::EstimatedRate(DemandEstimate {
+            expected_rate: Rate(1.0 / 60.0),
+            observed_at: None,
+            valid_for: None,
+        })),
         ..entry(60_000)
     };
-    let logical = pass2(memo, &[entry(60_000), entry(120_000), without_phase]);
+    let logical = pass2(memo, &[entry(60_000), entry(120_000), no_grid_entry]);
     let grid = |group: MemoGroupId| logical.evaluation_grid_of_group[group.0 as usize];
     assert_eq!(grid(window).map(|g| g.period_ms), Some(60_000));
     assert_eq!(grid(other), None);

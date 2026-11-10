@@ -713,9 +713,9 @@ function queryScheduleText(query) {
   const [kind, body] = typeof recurrence === 'string' ? [recurrence, null]
     : recurrence && typeof recurrence === 'object' ? Object.entries(recurrence)[0] || [null, null] : [null, null];
   if (kind === 'repeated') {
-    // `fixed_interval` (ms) or `fixed_interval_at` (`interval` and `evaluation_phase`, ms).
+    // `fixed_interval_at` (`interval` and `evaluation_phase`, ms).
     const at = body && typeof body === 'object' ? body.fixed_interval_at : undefined;
-    const interval = at ? at.interval : body && typeof body === 'object' ? body.fixed_interval : undefined;
+    const interval = at ? at.interval : undefined;
     const phase = at && at.evaluation_phase ? ` at phase ${durationText(at.evaluation_phase)}` : '';
     parts.push(typeof interval === 'number' ? `every ${durationText(interval)}${phase}` : `repeated: ${compactWire(body)}`);
   } else if (kind === 'one_time') {
@@ -766,9 +766,9 @@ function planningWorkloadQueries(workload) {
   }));
   const repeating = (qw.repeating_queries || []).map((entry) => {
     const demand = entry.demand || {};
-    // `fixed_interval` (ms) or `fixed_interval_at` (`interval` and `evaluation_phase`, ms).
+    // `fixed_interval_at` (`interval` and `evaluation_phase`, ms).
     const at = typeof demand === 'object' ? demand.fixed_interval_at : undefined;
-    const interval = at ? at.interval : typeof demand === 'object' ? demand.fixed_interval : undefined;
+    const interval = at ? at.interval : undefined;
     const phase = at && at.evaluation_phase ? ` at phase ${durationText(at.evaluation_phase)}` : '';
     return { text: entry.query, runs: typeof interval === 'number' ? `every ${durationText(interval)}${phase}` : compactWire(demand), accuracy: accuracy(entry.requirements) };
   });

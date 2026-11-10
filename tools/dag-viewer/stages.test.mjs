@@ -115,10 +115,9 @@ test('the search header names the search and the MILP\'s size and times', () => 
   assert.equal(call('searchText', {}), '');
 });
 
-test('queries show a fixed interval with or without a phase', () => {
+test('queries show a fixed interval and its phase', () => {
   assert.equal(call('queryScheduleText', fixture().workload.queries[0]), 'every 1 min · predictable');
   assert.equal(call('queryScheduleText', { recurrence: { repeated: { fixed_interval_at: { interval: 60000, evaluation_phase: 15000 } } } }), 'every 1 min at phase 15 s');
-  assert.equal(call('queryScheduleText', { recurrence: { repeated: { fixed_interval: 10000 } } }), 'every 10 s');
 });
 
 test('Stage 2 and Stage 3 pruning reasons read as words; dominated_by names its physical candidate', () => {
