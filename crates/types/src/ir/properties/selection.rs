@@ -1,7 +1,8 @@
 //! The selection algebra of aggregate coverage (a memo group's coverage
 //! `selection`, in `crate::stages`): which output rows of a computation a
 //! state took, as a union of boxes ([`SelectionBox`]), each a
-//! [`Constraint`] per column ([`ColumnIdentity`]): value sets and intervals,
+//! [`Constraint`] per column, named by its source column ([`SourceColumn`]):
+//! value sets and intervals,
 //! with interval limits relative to the evaluation time
 //! ([`IntervalConstraintLimit`]). A predicate conjunct becomes a constraint
 //! through `constraint_of`.
@@ -10,6 +11,8 @@ use std::collections::BTreeMap;
 use std::ops::Bound;
 
 use serde::{Deserialize, Serialize};
+
+use crate::ir::operator::arguments::SourceColumn;
 
 use crate::ir::scalar::expr_ir::{CompareOpKind, ScalarValue};
 use crate::ir::scalar::ScalarExpr;
@@ -24,24 +27,24 @@ use crate::ir::schema::ColumnId;
 #[serde(deny_unknown_fields)]
 pub struct SelectionBox {
     #[serde(with = "columns_as_list")]
-    pub(crate) columns: BTreeMap<ColumnIdentity, Constraint>,
+    pub(crate) columns: BTreeMap<SourceColumn, Constraint>,
 }
 
 /// `SelectionBox::columns` as a list of `{column, constraint}`.
 mod columns_as_list {
-    use super::{ColumnIdentity, Constraint};
+    use super::{Constraint, SourceColumn};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::collections::BTreeMap;
 
     #[derive(Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Entry {
-        column: ColumnIdentity,
+        column: SourceColumn,
         constraint: Constraint,
     }
 
     pub(super) fn serialize<S: Serializer>(
-        columns: &BTreeMap<ColumnIdentity, Constraint>,
+        columns: &BTreeMap<SourceColumn, Constraint>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         let entries: Vec<Entry> = columns
@@ -56,7 +59,7 @@ mod columns_as_list {
 
     pub(super) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
-    ) -> Result<BTreeMap<ColumnIdentity, Constraint>, D::Error> {
+    ) -> Result<BTreeMap<SourceColumn, Constraint>, D::Error> {
         let entries = Vec::<Entry>::deserialize(deserializer)?;
         Ok(entries
             .into_iter()
@@ -90,26 +93,6 @@ impl<T> From<WireBound<T>> for Bound<T> {
             WireBound::Included(v) => Bound::Included(v),
             WireBound::Excluded(v) => Bound::Excluded(v),
             WireBound::Unbounded => Bound::Unbounded,
-        }
-    }
-}
-
-/// A column of the definition child's output, by `(table, name)`. A
-/// `Project` below renames its columns and sets their table to its
-/// qualifier (none by default).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ColumnIdentity {
-    pub(crate) table: Option<String>,
-    pub(crate) name: String,
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl ColumnIdentity {
-    pub fn new(table: Option<String>, name: impl Into<String>) -> Self {
-        Self {
-            table,
-            name: name.into(),
         }
     }
 }
@@ -463,12 +446,12 @@ impl Constraint {
 
 #[cfg(any(test, feature = "test-support"))]
 impl SelectionBox {
-    pub fn new(columns: BTreeMap<ColumnIdentity, Constraint>) -> Self {
+    pub fn new(columns: BTreeMap<SourceColumn, Constraint>) -> Self {
         Self { columns }
     }
 
     /// The per-column constraints.
-    pub fn columns(&self) -> &BTreeMap<ColumnIdentity, Constraint> {
+    pub fn columns(&self) -> &BTreeMap<SourceColumn, Constraint> {
         &self.columns
     }
 }
@@ -566,6 +549,7 @@ fn touching<T: Clone>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::operator::arguments::Source;
     use crate::ir::scalar::ExprSemantics;
 
     use IntervalConstraintLimit::{EvaluationTimePlusMs, FixedValue};
@@ -590,7 +574,10 @@ mod tests {
         };
         assert!(!last_5m.disjoint(&at));
         assert_eq!(last_5m.intersect(&at), None);
-        let column = ColumnIdentity::new(None, "ts");
+        let column = SourceColumn {
+            source: Source::TimeSeries { metric: "m".into() },
+            column: "ts".into(),
+        };
         let one = |constraint: Constraint| SelectionBox {
             columns: BTreeMap::from([(column.clone(), constraint)]),
         };

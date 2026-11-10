@@ -42,7 +42,6 @@ fn non_asap_samples() -> Vec<NonASAPOp<()>> {
         },
         NonASAPOp::Project {
             cols: vec![],
-            qualifier: None,
             child: (),
         },
         NonASAPOp::Aggregate {

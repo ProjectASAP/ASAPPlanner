@@ -617,7 +617,6 @@ mod tests {
             name: name.into(),
             dtype: FieldDataType::Plain(dtype),
             nullable,
-            table: None,
         }
     }
 
@@ -663,13 +662,11 @@ mod tests {
                 name: "a".into(),
                 dtype: DataType::Int64,
                 nullable: false,
-                table: None,
             },
             Field::<DataType> {
                 name: "b".into(),
                 dtype: DataType::Utf8,
                 nullable: true,
-                table: None,
             },
         ];
         let labels = DataType::Map {
@@ -787,7 +784,6 @@ mod tests {
                     name: "state".into(),
                     dtype: dd_family(),
                     nullable: false,
-                    table: None,
                 },
             ],
             time_index: None,
@@ -869,7 +865,6 @@ mod tests {
                     name: "state".into(),
                     dtype: family.clone(),
                     nullable: false,
-                    table: None,
                 },
             ],
             time_index: None,
@@ -1011,7 +1006,6 @@ mod tests {
                     name: "state".into(),
                     dtype: family,
                     nullable: false,
-                    table: None,
                 },
             ],
             time_index: None,
@@ -1064,7 +1058,6 @@ mod tests {
                 name: "state".into(),
                 dtype: family.clone(),
                 nullable: false,
-                table: None,
             }],
             time_index: None,
             unique_keys: vec![],
@@ -1143,7 +1136,6 @@ mod tests {
                 name: "state".into(),
                 dtype: family,
                 nullable: false,
-                table: None,
             }],
             time_index: None,
             unique_keys: vec![],

@@ -222,6 +222,7 @@ mod tests {
             },
             predicates: vec![],
             schema: None,
+            qualifier: None,
         }
     }
 

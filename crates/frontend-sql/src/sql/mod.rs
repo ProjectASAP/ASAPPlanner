@@ -528,7 +528,7 @@ impl<'a> SqlLowerer<'a> {
         self.scan_source(&table, &table)
     }
 
-    /// A `Scan` over catalog table `table`, with its columns qualified by
+    /// A `Scan` over catalog table `table`, its columns qualified by
     /// `qualifier` (the table name, or an alias from a `SubqueryAlias`) so
     /// `Qualified` column refs resolve to the right side across a join.
     fn scan_source(&self, table: &str, qualifier: &str) -> Result<Unresolved, LoweringError> {
@@ -537,24 +537,17 @@ impl<'a> SqlLowerer<'a> {
             .tables
             .get(table)
             .ok_or_else(|| LoweringError::TableNotFound(table.to_string()))?;
-        let qualified = Schema {
-            fields: schema
-                .fields
-                .iter()
-                .cloned()
-                .map(|c| c.with_table(qualifier))
-                .collect(),
-            time_index: schema.time_index,
-            unique_keys: schema.unique_keys.clone(),
-            // Catalog-backed: the table's columns are fully declared → closed.
-            closed: true,
-        };
         Ok(Unresolved::Scan {
             source: Source::Table {
                 table_ref: table.to_string(),
             },
             predicates: vec![],
-            schema: Some(qualified),
+            schema: Some(Schema {
+                // Catalog-backed: the table's columns are fully declared → closed.
+                closed: true,
+                ..schema.clone()
+            }),
+            qualifier: Some(qualifier.to_string()),
         })
     }
 
@@ -1929,12 +1922,14 @@ fn filter_or_fold(pred: Scalar, child: Unresolved) -> Unresolved {
             source,
             mut predicates,
             schema,
+            qualifier,
         } => {
             predicates.push(Predicate(pred));
             Unresolved::Scan {
                 source,
                 predicates,
                 schema,
+                qualifier,
             }
         }
         other => Unresolved::Filter {

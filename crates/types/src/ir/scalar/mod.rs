@@ -905,7 +905,6 @@ mod tests {
                 alias: Some("result".into()),
                 expr,
             }],
-            qualifier: None,
             child: OperatorNode::new_shared(crate::ir::Operator::NonASAP(NonASAPOp::Scan {
                 source: Source::Table {
                     table_ref: "t".into(),

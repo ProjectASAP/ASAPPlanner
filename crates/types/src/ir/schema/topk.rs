@@ -56,6 +56,16 @@ pub fn ranked_column<I: OperatorInput>(child: &I) -> Result<ColumnId, ResolveErr
     }
 }
 
+/// The name of a top-k aggregate's ranked value column: the aggregate's
+/// first output name if it gives a non-empty one, else `topk_{k}`.
+pub(crate) fn topk_output_name(k: usize, output_names: &[String]) -> String {
+    output_names
+        .first()
+        .filter(|name| !name.is_empty())
+        .cloned()
+        .unwrap_or_else(|| format!("topk_{k}"))
+}
+
 /// Ordered projection of ranked rows: partition keys, ranked value, then
 /// item identity. TopK retains rows; partition keys alone are not unique.
 pub(crate) fn ranked_row_projection<I: OperatorInput>(

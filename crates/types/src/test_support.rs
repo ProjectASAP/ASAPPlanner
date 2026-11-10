@@ -84,16 +84,10 @@ pub fn population_over_selector(
 ) -> Rc<OperatorNode> {
     use crate::ir::operator::arguments::Source;
     use crate::ir::operator::maintained_population::*;
-    if let Some(NonASAPOp::Project {
-        cols,
-        qualifier,
-        child,
-    }) = root.non_asap()
-    {
+    if let Some(NonASAPOp::Project { cols, child }) = root.non_asap() {
         let child = population_over_selector(child, statistic.clone(), grouping);
         let project = Operator::NonASAP(NonASAPOp::Project {
             cols: cols.clone(),
-            qualifier: qualifier.clone(),
             child,
         });
         return Rc::new(OperatorNode::with_schema(project, root.schema.clone()));

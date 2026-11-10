@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 
 use super::aggregate_coverage::{aggregate_coverage, AggregateCoverage, CoverageError};
-use super::column_properties::{column_signs, ValueSign};
+use super::column_properties::{column_lineage_and_signs, ColumnLineage, ValueSign};
 use crate::ir::operator::arguments::{AtModifier, Source, TimeShift};
 use crate::ir::operator::input::OperatorInput;
 use crate::ir::schema::Schema;
@@ -60,8 +60,13 @@ impl MemoGroup {
 /// operator nodes.
 #[derive(Debug, Clone)]
 pub struct GroupProperties {
+    /// Fields: name, type, nullability; no table qualifier.
     pub schema: Schema,
     pub result_kind: OperatorResultKind,
+    /// Per output column, in schema order: the source column its values are
+    /// copied from, or `Computed` (concepts doc, "Column lineage"), from the
+    /// input groups' and, for a `Scan`, its source's columns.
+    pub column_lineage: Vec<ColumnLineage>,
     /// Per output column, in schema order: the sign of its values, from the
     /// input groups' and, for a `Scan`, the declared ones.
     pub column_signs: Vec<ValueSign>,
@@ -128,8 +133,11 @@ pub(super) fn derive_group_properties(
     let operator = expression.map_children(|&group_id| MemoGroupAsInput { memo, group_id });
     let (schema, merge_coverage) = validate_expression_over_input_groups(&operator)?;
     let aggregate_coverage = merge_coverage.or_else(|| aggregate_coverage(&operator).ok());
+    let (column_lineage, column_signs) =
+        column_lineage_and_signs(&operator, &schema, &memo.source_facts);
     Ok(GroupProperties {
-        column_signs: column_signs(&operator, &schema, &memo.source_facts),
+        column_lineage,
+        column_signs,
         depends_on_evaluation_time: depends_on_evaluation_time(&operator),
         schema,
         result_kind: operator.output_kind(),

@@ -25,7 +25,6 @@ fn schema(fields: &[(&str, DataType, bool)]) -> SchemaRef {
         fields: fields
             .iter()
             .map(|(name, dtype, nullable)| Field {
-                table: None,
                 name: (*name).into(),
                 dtype: FieldDataType::Plain(dtype.clone()),
                 nullable: *nullable,
@@ -926,7 +925,6 @@ fn planner_node(
             fields
                 .iter()
                 .map(|(name, dtype, nullable)| Field {
-                    table: None,
                     name: (*name).into(),
                     dtype: dtype.clone(),
                     nullable: *nullable,

@@ -32,7 +32,6 @@ fn project_first_column(input: MemoGroupId) -> Operator<MemoGroupId> {
             alias: None,
             expr: crate::ir::ScalarExpr::Column(0),
         }],
-        qualifier: None,
         child: input,
     })
 }
@@ -562,7 +561,6 @@ fn literal(value: f64) -> impl FnOnce(&mut Memo) -> MemoGroupId {
                 alias: Some("v".into()),
                 expr: ScalarExpr::Literal(ScalarValue::Float64(value)),
             }],
-            qualifier: None,
             child,
         })
     })

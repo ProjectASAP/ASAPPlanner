@@ -336,7 +336,7 @@ fn sql_frequency_result(
     name: &str,
     value: ScalarExpr,
 ) -> Option<Rc<OperatorNode>> {
-    let NonASAPOp::Project { qualifier, .. } = root.non_asap()? else {
+    let NonASAPOp::Project { .. } = root.non_asap()? else {
         return None;
     };
     let aggregate = |measure, name: &str| {
@@ -380,7 +380,6 @@ fn sql_frequency_result(
                 else_expr: Some(Box::new(value)),
             },
         }],
-        qualifier: qualifier.clone(),
         child,
     }))
     .ok()?;

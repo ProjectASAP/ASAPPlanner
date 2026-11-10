@@ -158,7 +158,6 @@ fn planner_unit_frequency_update_binds_as_a_value_frequency_build() -> Result<()
         false,
     )]));
     let state = Arc::new(Schema::new(vec![Field {
-        table: None,
         name: "state".into(),
         dtype: family(),
         nullable: false,
