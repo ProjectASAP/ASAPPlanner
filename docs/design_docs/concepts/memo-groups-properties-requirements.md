@@ -540,7 +540,7 @@ Removing the one-field `CandidateExpression` wrapper is possible but not adopted
 
 #### Column lineage
 
-Its key is decided in PR 2b (`SourceColumn` was removed in #1230). Every output column of a group has a **lineage**: the source column its values are copied from, or none when the column is computed. It is a group property, derived once from the input groups' lineage (as optd's column-reference property is), and it replaces the table qualifier that schema fields carried. A schema field keeps only its name, type and nullability; a front end resolves a qualified name such as `f.src` with its own binding scope while it lowers the query, and the IR never needs the qualifier again.
+Its key is not decided yet: the `SourceColumn` type it named was removed. Every output column of a group has a **lineage**: the source column its values are copied from, or none when the column is computed. It is a group property, derived once from the input groups' lineage (as optd's column-reference property is), and it replaces the table qualifier that schema fields carried. A schema field keeps only its name, type and nullability; a front end resolves a qualified name such as `f.src` with its own binding scope while it lowers the query, and the IR never needs the qualifier again.
 
 ```rust
 pub struct GroupProperties {
