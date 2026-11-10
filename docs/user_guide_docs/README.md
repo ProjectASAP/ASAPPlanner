@@ -5,4 +5,4 @@ result.
 
 - [Run and inspect a query](run-a-query.md)
 - [Plan a workload with asap_planner](asap-planner.md)
-- [See how ASAPPlanner plans a workload: the Stage Viewer](stage-viewer.md)
+- [See how ASAPPlanner plans a workload: the Plan Viewer](plan-viewer.md)

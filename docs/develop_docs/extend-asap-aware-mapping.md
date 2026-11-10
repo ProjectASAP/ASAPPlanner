@@ -105,7 +105,7 @@ tests in `planner_layering_example4.rs`.
   a stage function takes only the field it reads (Stage 2 takes
   `query_time_results_retained: bool`, not the whole struct).
 - Expose it in `asap_planner` and in the
-  [Stage Viewer guide](../user_guide_docs/stage-viewer.md).
+  [Plan Viewer guide](../user_guide_docs/plan-viewer.md).
 
 Tests: a Stage 3 unit test that the check rejects exactly the candidates it
 should, and a `crates/devtools/tests/asap_planner.rs` test for the flag.

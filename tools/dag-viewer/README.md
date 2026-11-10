@@ -1,4 +1,4 @@
-# ASAPPlanner Stage Viewer
+# ASAPPlanner Plan Viewer
 
 A browser view of what the planner does with one workload, read from an
 `asap-stage-pipeline/v2` document written by the `asap_planner` devtool

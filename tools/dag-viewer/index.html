@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>ASAPPlanner Stage Viewer</title>
+<title>ASAPPlanner Plan Viewer</title>
 <style>
 :root {
   --bg: #f3f4f7;
@@ -139,7 +139,7 @@ tr.clickable:focus-visible td { outline: 2px solid var(--accent); outline-offset
 <body>
 <div class="wrap">
   <header>
-    <div class="title-row"><h1>ASAPPlanner Stage Viewer</h1>
+    <div class="title-row"><h1>ASAPPlanner Plan Viewer</h1>
       <button class="btn" id="themeToggle" type="button" aria-pressed="false">Dark theme</button></div>
     <p class="lede">The planner's stages for one workload: the query-language frontends lower the queries into one logical DAG (Stage 0), Pass 1 and Pass 2 propose logical ASAP candidates in a memo and Pass 2 prunes those no consumer can use (Stage 1), each remaining candidate becomes physical candidates (Stage 2), and Stage 3 selects the cheapest plan from them.</p>
     <nav class="tabs" id="tabs" aria-label="Example"></nav>

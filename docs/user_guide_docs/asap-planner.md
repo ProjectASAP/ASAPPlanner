@@ -2,7 +2,7 @@
 
 `asap_planner` runs the planner's stages on a workload, up to the stage you
 choose, and prints what each stage produced: as text, or as a JSON document
-for the [Stage Viewer](stage-viewer.md). It reports candidates, selection,
+for the [Plan Viewer](plan-viewer.md). It reports candidates, selection,
 modeled costs and accuracy checks; it does not deploy or execute the plan.
 
 ## Build and run
@@ -100,7 +100,7 @@ SQL examples. To try a single query, write a one-query workload file.
 ## Inspect the result
 
 With `--format json`, open the document in the
-[Stage Viewer](stage-viewer.md), or read Stage 3 directly:
+[Plan Viewer](plan-viewer.md), or read Stage 3 directly:
 
 ```sh
 cargo run --release -p asap-devtools --bin asap_planner -- \

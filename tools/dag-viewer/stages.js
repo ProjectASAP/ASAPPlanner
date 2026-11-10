@@ -1,4 +1,4 @@
-// DOM-free logic of the Stage Viewer: checking an `asap-stage-pipeline/v2`
+// DOM-free logic of the Plan Viewer: checking an `asap-stage-pipeline/v2`
 // document (written by the `asap_planner` devtool), the selected plan's row,
 // and each drawn DAG (Stage 0's and Stage 3's plan) as cytoscape elements
 // with readable labels.

@@ -1,4 +1,4 @@
-// The Memo view of the Stage Viewer: the document's optional `memo` section
+// The Memo view of the Plan Viewer: the document's optional `memo` section
 // (written by `asap_planner`) drawn after each memo step, one tab per
 // step. Each memo group is a box holding its candidates; an edge goes from
 // a candidate to each input group it reads. The functions up to

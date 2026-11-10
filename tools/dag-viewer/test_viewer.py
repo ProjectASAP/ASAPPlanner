@@ -1,4 +1,4 @@
-"""Tests for the ASAPPlanner Stage Viewer: the stage-document functions in
+"""Tests for the ASAPPlanner Plan Viewer: the stage-document functions in
 stages.js and the page itself (app.js) run in V8 through py_mini_racer with
 a stub DOM, plus the page's files and the example list.
 

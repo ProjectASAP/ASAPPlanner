@@ -1,4 +1,4 @@
-// ASAPPlanner Stage Viewer: an asap-stage-pipeline/v2 document as Stage 3's
+// ASAPPlanner Plan Viewer: an asap-stage-pipeline/v2 document as Stage 3's
 // outcome (the selected plan or its error) beside two DAG lanes stacked top
 // to bottom (Stage 0, then Stage 3's plan), details below. Each lane shows
 // the whole workload. Document checks, the plan row and node labels live in
@@ -354,7 +354,7 @@
     cy.zoom({ level: cy.zoom() * (b.dataset.zoom === 'in' ? 1.3 : 1 / 1.3), renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 } });
   })));
 
-  window.StageViewer = { planWorkload };
+  window.PlanViewer = { planWorkload };
 
   // `?doc=<path>` opens one document; otherwise the examples listed in
   // examples.json, starting from `#<id>` or the first.
