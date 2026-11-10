@@ -28,7 +28,7 @@ asap-stage1-pass2-reuse-candidates -p asap-stage2-physical-optimization -p asap-
   or `IllegalChildDataState`. These are internal errors in a candidate the
   stages built, not bad user input.
 - A summary build's `AggregateCoverage` (which rows and time range its state
-  represents) is derived, never declared; a merge's inputs must be disjoint
+  represents) is a memo-group property, derived by the memo, never declared; a merge's inputs must be disjoint
   as its family's `MergeInputRule` requires, or coverage fails
   (`InputsOverlap`).
 

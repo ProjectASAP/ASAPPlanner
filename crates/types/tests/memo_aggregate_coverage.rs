@@ -14,16 +14,14 @@ use asap_types::ir::operator::arguments::{AtModifier, Reduction};
 use asap_types::ir::operator::AggIntent;
 
 use asap_types::ir::properties::selection::{ColumnIdentity, Constraint, IntervalConstraintLimit};
-use asap_types::ir::properties::{AggregateCoverage, CoverageError};
 use asap_types::ir::scalar::expr_ir::{ArithmeticOpKind, CompareOpKind, ScalarValue};
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
-use asap_types::ir::{
-    ASAPOp, ExprSemantics, NonASAPOp, Operator, Predicate, ScalarExpr, SchemaDerivationError,
-};
+use asap_types::ir::{ASAPOp, ExprSemantics, NonASAPOp, Operator, Predicate, ScalarExpr};
 use asap_types::stages::{
-    view_coverage, CandidateExpression, CandidateForMemoGroup, LogicalProperties,
-    LogicalRequirements, Memo, MemoGroupId, OriginOfCandidateForMemoGroup,
+    view_coverage, AggregateCoverage, CandidateExpression, CandidateForMemoGroup, CoverageError,
+    LogicalProperties, LogicalRequirements, Memo, MemoGroupError, MemoGroupId,
+    OriginOfCandidateForMemoGroup,
 };
 use asap_types::summary_type::{ExactKind, MergeInputRule, SketchAlgorithm, SummaryUpdate};
 use asap_types::test_support::memo_fixtures::{filter, range, scan, shift, state};
@@ -112,7 +110,7 @@ fn kll_of_last_minute_where(
     memo.find_or_add_group(kll(last_minute)).unwrap()
 }
 
-fn coverage(memo: &Memo, group: MemoGroupId) -> &AggregateCoverage<MemoGroupId> {
+fn coverage(memo: &Memo, group: MemoGroupId) -> &AggregateCoverage {
     memo.groups()[group.0 as usize]
         .group_properties
         .aggregate_coverage
@@ -216,11 +214,9 @@ fn states_with_overlapping_selections_do_not_merge() {
     let groups = memo.groups().len();
     assert!(matches!(
         memo.find_or_add_group(merge(vec![g4, g4])),
-        Err(SchemaDerivationError::Coverage(
-            CoverageError::InputsOverlap {
-                required: MergeInputRule::Disjoint
-            }
-        ))
+        Err(MemoGroupError::Coverage(CoverageError::InputsOverlap {
+            required: MergeInputRule::Disjoint
+        }))
     ));
     assert_eq!(memo.groups().len(), groups);
 }
@@ -252,9 +248,7 @@ fn a_filter_that_is_no_selection_stays_unlifted() {
     );
     assert!(matches!(
         memo.find_or_add_group(merge(vec![g4, g10])),
-        Err(SchemaDerivationError::Coverage(
-            CoverageError::DefinitionMismatch
-        ))
+        Err(MemoGroupError::Coverage(CoverageError::DefinitionMismatch))
     ));
 }
 
@@ -536,11 +530,9 @@ fn counter_states_merge_over_windows_disjoint_in_time() {
     assert_eq!(time_of(&memo, g7), relative(-10 * MINUTE_MS, 0));
     assert!(matches!(
         memo.find_or_add_group(merge(vec![g3, g3])),
-        Err(SchemaDerivationError::Coverage(
-            CoverageError::InputsOverlap {
-                required: MergeInputRule::DisjointInTime
-            }
-        ))
+        Err(MemoGroupError::Coverage(CoverageError::InputsOverlap {
+            required: MergeInputRule::DisjointInTime
+        }))
     ));
     let g8 = memo.find_or_add_group(kll(g2)).unwrap();
     let g9 = memo.find_or_add_group(kll(g5)).unwrap();

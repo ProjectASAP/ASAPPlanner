@@ -1,6 +1,6 @@
 //! How the derivation rules read an operator's inputs: one trait, so the
-//! same rules (output schema and kind, input validation, sharing, aggregate
-//! coverage) derive a front-end node's schema and a memo group's
+//! same rules (output schema and kind, input validation, sharing) derive a
+//! front-end node's schema and a memo group's
 //! `GroupProperties` (concepts doc `memo-groups-properties-requirements.md`,
 //! section 3).
 
@@ -10,7 +10,6 @@ use std::rc::Rc;
 use super::arguments::Source;
 use super::node::{Operator, OperatorNode, OperatorResultKind};
 use super::non_asap::NonASAPOp;
-use crate::ir::properties::AggregateCoverage;
 use crate::ir::schema::Schema;
 use crate::ir::SchemaDerivationError;
 
@@ -20,22 +19,13 @@ pub trait OperatorInput: Sized + Clone {
     fn result_kind(&self) -> OperatorResultKind;
     /// The input's own operator, its children as inputs again.
     fn operator(&self) -> Operator<Self>;
-    /// How an aggregate's definition names this input
-    /// ([`AggregateCoverage`]): a memo group's id in the memo.
-    type Reference: Clone + PartialEq;
-    /// This input's reference; `None` for a build a rule constructs only
-    /// while it derives, which has none.
-    fn reference(&self) -> Option<Self::Reference>;
-    /// What the input covers when its coverage is stored (an aggregate
-    /// group in the memo); `None` for any other input.
-    fn aggregate_coverage(&self) -> Option<&AggregateCoverage<Self::Reference>>;
     /// The sources the `Scan`s at or below the input read
     /// (`Operator::scanned_sources` of its operator): a memo group's stored
     /// `GroupProperties::scanned_sources`, recomputed for a node tree.
     fn scanned_sources(&self) -> BTreeSet<Source>;
 }
 
-/// A front-end node tree. Node trees store no aggregate coverage.
+/// A front-end node tree.
 impl OperatorInput for Rc<OperatorNode> {
     fn schema(&self) -> &Schema {
         &self.schema
@@ -47,18 +37,6 @@ impl OperatorInput for Rc<OperatorNode> {
 
     fn operator(&self) -> Operator<Self> {
         self.operator.clone()
-    }
-
-    /// A node tree is named by nothing: no definition over a node tree is
-    /// stored or compared.
-    type Reference = ();
-
-    fn reference(&self) -> Option<()> {
-        Some(())
-    }
-
-    fn aggregate_coverage(&self) -> Option<&AggregateCoverage<()>> {
-        None
     }
 
     fn scanned_sources(&self) -> BTreeSet<Source> {
@@ -130,22 +108,6 @@ impl<I: OperatorInput> OperatorInput for InputOrTemporaryBuild<I> {
                 .operator()
                 .map_children(|child| Self::Input(child.clone())),
             Self::TemporaryBuild(build) => build.operator.clone(),
-        }
-    }
-
-    type Reference = I::Reference;
-
-    fn reference(&self) -> Option<I::Reference> {
-        match self {
-            Self::Input(input) => input.reference(),
-            Self::TemporaryBuild(_) => None,
-        }
-    }
-
-    fn aggregate_coverage(&self) -> Option<&AggregateCoverage<I::Reference>> {
-        match self {
-            Self::Input(input) => input.aggregate_coverage(),
-            Self::TemporaryBuild(_) => None,
         }
     }
 

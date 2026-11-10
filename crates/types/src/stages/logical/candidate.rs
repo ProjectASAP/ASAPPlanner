@@ -5,8 +5,7 @@
 use crate::ir::operator::asap::summary_type_of_operator;
 use crate::ir::schema::FieldDataType;
 use crate::ir::Operator;
-use crate::ir::SchemaDerivationError;
-use crate::stages::{LogicalRequirements, MemoGroupId};
+use crate::stages::{LogicalRequirements, MemoGroupError, MemoGroupId};
 use crate::summary_type::{parameter_list, SketchParams};
 
 /// One candidate: position `index_in_group` in group `group`'s candidates
@@ -69,7 +68,7 @@ pub enum CandidateError {
     /// output schema does not derive, an input fails validation, or a merge
     /// reads states it may not merge): a bug in the rule that built it.
     #[error("the candidate's expression is not valid over its input groups: {0}")]
-    NotValidOverInputGroups(SchemaDerivationError),
+    NotValidOverInputGroups(MemoGroupError),
     /// Its output schema or output kind differs from the group's: it does
     /// not compute the group's result (a bug in the rule that built it).
     #[error("the candidate's output differs from group {group:?}'s")]

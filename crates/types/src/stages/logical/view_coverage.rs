@@ -1,9 +1,9 @@
 //! A memo group's view coverage ([`view_coverage`]): the plan's content id
-//! for the group's aggregate coverage, which names no group. The IR derives
-//! aggregate coverage ([`crate::ir::properties::aggregate_coverage`]) over
-//! memo groups (`R` = [`MemoGroupId`]) and the memo stores it per group
-//! (`GroupProperties::aggregate_coverage`); this file expands the stored
-//! coverage's input groups and hashes the result.
+//! for the group's aggregate coverage, which names no group. The memo
+//! derives aggregate coverage ([`super::aggregate_coverage`]) over memo
+//! groups and stores it per group (`GroupProperties::aggregate_coverage`);
+//! this file expands the stored coverage's input groups and hashes the
+//! result.
 
 use serde::Serialize;
 
@@ -24,14 +24,32 @@ pub fn view_coverage(memo: &Memo, group: MemoGroupId) -> Option<ViewCoverage> {
     let coverage = memo.groups()[group.0 as usize]
         .group_properties
         .aggregate_coverage
-        .clone()?;
-    let expanded = coverage.map_references(|input| expanded(memo, input));
+        .as_ref()?;
+    let definition = &coverage.definition;
+    let expanded_definition = ExpandedDefinition {
+        input: definition.input.map(|input| expanded(memo, input)),
+        unlifted_operators: definition
+            .unlifted_operators
+            .iter()
+            .map(|operator| operator.map_children(|input| input.map(|input| expanded(memo, input))))
+            .collect(),
+    };
     let serialized =
-        serde_json::to_string(&expanded.definition).expect("an expanded definition serializes");
+        serde_json::to_string(&expanded_definition).expect("an expanded definition serializes");
     Some(ViewCoverage {
         definition_id: fnv1a_128_hex(&serialized),
-        selection: expanded.selection,
+        selection: coverage.selection.clone(),
     })
+}
+
+/// An aggregate definition
+/// ([`AggregateDefinition`](super::AggregateDefinition)) with its input
+/// groups expanded ([`expanded`]): the fields in the same order, so it
+/// serializes as the definition would with each group replaced.
+#[derive(Serialize)]
+struct ExpandedDefinition {
+    input: Option<ExpandedExpression>,
+    unlifted_operators: Vec<Operator<Option<ExpandedExpression>>>,
 }
 
 /// What a memo group computes with no ids: its expression over its input

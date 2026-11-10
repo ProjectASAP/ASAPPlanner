@@ -117,7 +117,7 @@ A node in the physical data will represent the data or summary instance, so a no
 | How is it computed? | by the planner, from the memo group's input groups, in one walk that yields both the definition and the selection | §4.2.2 |
 | How expensive is it? | proportional to the few operators directly under the `SummaryAgg`, not to the whole sub-DAG; derived once per memo group | §4.2.3 |
 | What uses it? | merge (in #646), rollup; slice, reuse (planned); subtract (reserved) | §5.6, §5.7 |
-| Where is it in the code? | `GroupProperties::aggregate_coverage`, `Operator::aggregate_coverage` | §6.6 |
+| Where is it in the code? | `GroupProperties::aggregate_coverage`, derived in `stages/logical/aggregate_coverage.rs` | §6.6 |
 | What is left out? | the deployment and runtime implementation, e.g. SDS | §4.3 |
 
 **Why coverage is not part of the schema.**
@@ -237,40 +237,37 @@ Formally, a state means `family(input(σ(C)))` for each group of `G`, where `C` 
 
 #### 4.2.2 Deriving the definition and the selection
 
-Coverage is an IR property, derived like an output schema and never declared: `Operator::aggregate_coverage` (`crates/types/src/ir/properties/aggregate_coverage.rs`) walks down from a `SummaryAgg` or `Aggregate` through its inputs' operators, generic over how a definition names an input (`OperatorInput::Reference`). The memo derives it once, when `Memo::find_or_add_group` creates an aggregate group (a summary state or an exact `Aggregate`), over the input groups' `expression`s (`R` = `MemoGroupId`), and stores it in the group's `GroupProperties::aggregate_coverage`; node trees store none. One walk produces both parts: every filter condition either moves into the `selection` or stays in the `definition`. A `SummaryMerge` group reads its input groups' stored coverage; it is a valid group only when their definitions are equal and their selections are disjoint (disjoint in time, for counter states).
+Coverage is a memo-group property, derived like an output schema and never declared; its types and derivation are in `crates/types/src/stages/logical/aggregate_coverage.rs`. The memo derives it once, when `Memo::find_or_add_group` creates an aggregate group (a summary state or an exact `Aggregate`): `aggregate_coverage` walks down from the group's `SummaryAgg` or `Aggregate` through its input groups' `expression`s, and the result, its inputs named by `MemoGroupId`, is stored in the group's `GroupProperties::aggregate_coverage`. Node trees have none. One walk produces both parts: every filter condition either moves into the `selection` or stays in the `definition`. A `SummaryMerge` group reads its input groups' stored coverage; it is a valid group only when their definitions are equal and their selections are disjoint (disjoint in time, for counter states).
 
 ```rust
-/// What a summary state computes, with every lifted selection removed;
-/// `R` names an input (a memo group's id in the memo).
-pub struct AggregateDefinition<R> {
+/// What a summary state computes, with every lifted selection removed,
+/// its inputs named by memo group.
+pub struct AggregateDefinition {
     /// The input the unlifted operators read: the first input under the
     /// SummaryAgg or Aggregate that is not Filter / range TimeRange /
     /// TimeShift / direct-column Project. `None` when that input is a `Scan` with a
     /// liftable predicate (a PromQL label matcher): it is lifted too, and the
     /// `Scan` with the rest of its predicates is the last unlifted operator.
-    pub input: Option<R>,
+    pub input: Option<MemoGroupId>,
     /// The operators not lifted into the selection, listed top down from the
     /// SummaryAgg, each with only its residual arguments. `None` marks an
     /// operator's main input (the next unlifted operator, or `input`);
-    /// `Some(r)` is another input it reads, such as the input a scalar
+    /// `Some(g)` is another input it reads, such as the input a scalar
     /// subquery in a Filter reads.
-    pub unlifted_operators: Vec<Operator<Option<R>>>,
+    pub unlifted_operators: Vec<Operator<Option<MemoGroupId>>>,
 }
 
-pub struct AggregateCoverage<R> {
-    pub(crate) definition: AggregateDefinition<R>,
+pub struct AggregateCoverage {
+    pub(crate) definition: AggregateDefinition,
     /// Union of boxes over the output rows of the unlifted operators' input.
     pub(crate) selection: Vec<SelectionBox>,
 }
 
-impl<R: Clone> AggregateCoverage<R> {
-    /// The same coverage with each input reference `r` replaced by `f(r)`.
-    pub fn map_references<S>(self, f: impl FnMut(R) -> S) -> AggregateCoverage<S>;
-}
-
-impl<I: OperatorInput> Operator<I> {
-    pub fn aggregate_coverage(&self) -> Result<AggregateCoverage<I::Reference>, CoverageError>;
-}
+/// The coverage of what a memo group computes with `operator` over its
+/// input groups, reading their stored coverage for a merge.
+pub(super) fn aggregate_coverage(
+    operator: &Operator<MemoGroupAsInput<'_>>,
+) -> Result<AggregateCoverage, CoverageError>;
 ```
 
 **Worked example.** Three queries over the series `latency` (labels `job`, `a`, `b`), each a KLL state over the last minute:
@@ -322,7 +319,7 @@ Its definition differs from G4's, so G10 cannot merge with G4, even though both 
 - `input`: the group the definition reads, below everything the walk passed (`None` when the walk lifted a predicate out of a `Scan`).
 - `unlifted_operators`: what the state computes over `input`, top down from the `SummaryAgg`, each operator with only the conditions that stayed. Each operator's main input is `None`; any other group it reads, such as the group of a scalar subquery in a `Filter`'s condition, is `Some(group)`.
 - `selection`: which output rows of that computation the state took, as a union of boxes.
-- Identity, in two scopes. In the memo, coverages compare by `AggregateDefinition` `==` (it holds `MemoGroupId`s); nothing in the memo needs an id. The plan carries the view's content id, [`ViewCoverage::definition_id`](../../../crates/types/src/plan/physical_asap_dag.rs) (defined there), on the view's plan node (`PhysicalASAPDAGNode::view_coverage`), made by `view_coverage(memo, group)`, which expands the memo's coverage (`map_references` to each input group's expression, down to the `Scan`s) rather than re-deriving it; a summary store files states under it together with a concrete selection.
+- Identity, in two scopes. In the memo, coverages compare by `AggregateDefinition` `==` (it holds `MemoGroupId`s); nothing in the memo needs an id. The plan carries the view's content id, [`ViewCoverage::definition_id`](../../../crates/types/src/plan/physical_asap_dag.rs) (defined there), on the view's plan node (`PhysicalASAPDAGNode::view_coverage`), made by `view_coverage(memo, group)`, which expands the memo's coverage (each input group to its expression, down to the `Scan`s) rather than re-deriving it; a summary store files states under it together with a concrete selection.
 
 ##### The definition
 
@@ -513,7 +510,7 @@ This section walks through each summary operator with one small example. For eac
 |---|---|
 | **What comes out?** | the output schema the planner derives (`output_schema()`) |
 | **When is it rejected?** | the checks the planner runs when it builds the node |
-| **What is its coverage?** | the aggregate coverage of the output (§4.2), derived by `Operator::aggregate_coverage` |
+| **What is its coverage?** | the aggregate coverage of the output (§4.2), derived by the memo per group |
 | **State or value?** | whether the output is summary state or a readable value |
 
 **How to read the diagrams.** Data flows from bottom to top, along the `▲` arrows. Each edge is labelled with the schema it carries, written `Kind: field Type, …`.
@@ -966,11 +963,11 @@ MemoGroup.group_properties.aggregate_coverage: AggregateCoverage   §6.6
 | §6.5 Update input and evaluations | `SummaryUpdate`, `SketchStatistic`, `MaintainedPopulation`, `PopulationStatistic` | fields of the `ASAPOp` variants in §6.2 |
 | §6.6 Aggregate coverage | `AggregateCoverage`, `AggregateDefinition`, `SelectionBox`, `Constraint` | `GroupProperties::aggregate_coverage` of aggregate memo groups |
 
-**Example: the p99 latency state of §5.1.** The `SummaryAgg` node (§6.1) holds `ASAPOp::SummaryAgg` (§6.2) with `summary_type = Sketch(Kll)` (§6.3, §6.4) and `input = SummaryUpdate::column(latency)` (§6.5); its candidate's θ is `Kll { k: 200 }`. Its `schema` (§6.3) is `(job Utf8, state Sketch(Kll))`: the `state` field has the same type as `summary_type`. A `SummaryEstimate` above it holds `query = Quantile { q: 0.99 }` (§6.5), and its node carries the `guarantee` of the evaluation. `Operator::aggregate_coverage` over the `SummaryAgg` returns an `AggregateCoverage` (§6.6), which the memo stores in the group's `GroupProperties::aggregate_coverage`.
+**Example: the p99 latency state of §5.1.** The `SummaryAgg` node (§6.1) holds `ASAPOp::SummaryAgg` (§6.2) with `summary_type = Sketch(Kll)` (§6.3, §6.4) and `input = SummaryUpdate::column(latency)` (§6.5); its candidate's θ is `Kll { k: 200 }`. Its `schema` (§6.3) is `(job Utf8, state Sketch(Kll))`: the `state` field has the same type as `summary_type`. A `SummaryEstimate` above it holds `query = Quantile { q: 0.99 }` (§6.5), and its node carries the `guarantee` of the evaluation. The memo derives the `SummaryAgg` group's `AggregateCoverage` (§6.6) and stores it in the group's `GroupProperties::aggregate_coverage`.
 
 ### 6.1 DAG node (`crates/types/src/ir/operator/node.rs`)
 
-Every operator in a DAG is wrapped in an `OperatorNode`. A node stores no coverage: coverage is derived by the IR rule `Operator::aggregate_coverage` over `OperatorInput` and stored per memo group in `GroupProperties::aggregate_coverage` (§6.6).
+Every operator in a DAG is wrapped in an `OperatorNode`. A node stores no coverage: coverage is a memo-group property, derived over the input groups and stored in `GroupProperties::aggregate_coverage` (§6.6).
 
 ```rust
 /// One node of the DAG. Immutable and shared through `Rc`.
@@ -1362,15 +1359,15 @@ pub struct CurrentSeriesInput {
 
 A finalized value's accuracy statement is `AccuracyGuarantee` (`accuracy/guarantee.rs`): a `spec` (`AccuracySpec`) with `accuracy_metric` (which error is measured, e.g. rank error), `error` (the error bound), `failure_probability` (the chance the bound does not hold) and `accuracy_scope` (which output values one statement covers), plus `provenance` (which estimates the bound came from). It is attached to evaluation and finalized nodes, and to `MaintainPopulation` nodes (whose population is exact); never to sketch or accumulator state.
 
-### 6.6 Aggregate coverage (`crates/types/src/ir/properties/aggregate_coverage.rs`; selection algebra in `crates/types/src/ir/properties/selection.rs`; the plan's content id in `crates/types/src/stages/logical/view_coverage.rs`)
+### 6.6 Aggregate coverage (`crates/types/src/stages/logical/aggregate_coverage.rs`; selection algebra in `crates/types/src/ir/properties/selection.rs`; the plan's content id in `crates/types/src/stages/logical/view_coverage.rs`)
 
 The code for §4. `AggregateDefinition` is shown in §4.2.2.
 
 ```rust
-pub struct AggregateCoverage<R> {
+pub struct AggregateCoverage {
     /// What the state computes: its input and the operators the walk did
     /// not lift (§4.2.2).
-    pub(crate) definition: AggregateDefinition<R>,
+    pub(crate) definition: AggregateDefinition,
     /// Which rows went in: a union of boxes. A row is in the state if it is
     /// in at least one box.
     pub(crate) selection: Vec<SelectionBox>,
@@ -1426,29 +1423,37 @@ A PromQL range `m[r]` evaluated at t reads the samples in (t − r, t]: left-ope
 | SQL `WHERE price > 10` | `Excluded(FixedValue(Float64(10.0)))` | `Unbounded` |
 
 ```rust
-impl<I: OperatorInput> Operator<I> {
-    /// The coverage of what this operator computes over its inputs
-    /// (§4.2.2). Errors: `NoCoverage` for an operator that is
-    /// not a `SummaryAgg`, `SummaryTumblingWindowChain`, `SummaryMerge` or a
-    /// `Filter` keeping whole states; `TumblingWindowChainExpansion` for a `SummaryTumblingWindowChain`
-    /// that does not expand to one build over its whole window; for a
-    /// merge, an input's own error, `EmptyMerge` (no inputs),
-    /// `DefinitionMismatch` (inputs compute different things) or
-    /// `InputsOverlap { required }` (inputs not proven disjoint, or disjoint
-    /// in time for counter states, as the family's `MergeInputRule`
-    /// requires); for a rollup, also `NotAGroupKey` (a `group_by` column is
-    /// not a group key of the inputs' build), `SummaryTypeCannotRegroup` (counter
-    /// states, a family without a merge, or a Hydra) or `RegroupedBuild`
-    /// (the coarse build it stands for does not derive).
-    pub fn aggregate_coverage(&self) -> Result<AggregateCoverage<I::Reference>, CoverageError>;
+/// The coverage of what a memo group computes with `operator` over its
+/// input groups (§4.2.2). Errors: `NoCoverage` for an operator that is
+/// not a `SummaryAgg`, `SummaryTumblingWindowChain`, `SummaryMerge` or a
+/// `Filter` keeping whole states; `TumblingWindowChainExpansion` for a `SummaryTumblingWindowChain`
+/// that does not expand to one build over its whole window; for a
+/// merge, an input's own error, `EmptyMerge` (no inputs),
+/// `DefinitionMismatch` (inputs compute different things) or
+/// `InputsOverlap { required }` (inputs not proven disjoint, or disjoint
+/// in time for counter states, as the family's `MergeInputRule`
+/// requires); for a rollup, also `NotAGroupKey` (a `group_by` column is
+/// not a group key of the inputs' build), `SummaryTypeCannotRegroup` (counter
+/// states, a family without a merge, or a Hydra) or `RegroupedBuild`
+/// (the coarse build it stands for does not derive).
+pub(super) fn aggregate_coverage(
+    operator: &Operator<MemoGroupAsInput<'_>>,
+) -> Result<AggregateCoverage, CoverageError>;
+
+/// Why an expression is not valid over its input groups: what
+/// `find_or_add_group` returns, and `add_candidate` wraps in
+/// `CandidateError::NotValidOverInputGroups`.
+pub enum MemoGroupError {
+    Schema(SchemaDerivationError),
+    Coverage(CoverageError),
 }
 
 /// The plan-scope coverage of `group`: the content id of its expanded
 /// definition and its selection; `None` for a group without aggregate
 /// coverage. Each input group is expanded to its expression, recursively
-/// down to the `Scan`s (`map_references`), so the id names no group.
+/// down to the `Scan`s, so the id names no group.
 pub fn view_coverage(memo: &Memo, group: MemoGroupId) -> Option<ViewCoverage>;
 ```
 
-- `find_or_add_group` and `add_candidate` reject an invalid `SummaryMerge` (different definitions, or selections that may overlap, per the family's `MergeInputRule`). Operator-node trees have no coverage and no merge check.
+- `find_or_add_group` and `add_candidate` reject an invalid `SummaryMerge` (different definitions, or selections that may overlap, per the family's `MergeInputRule`) with `MemoGroupError::Coverage`. Operator-node trees have no coverage and no merge check.
 - A `SummaryAgg` always has coverage: what cannot go into `selection` stays in `definition`.

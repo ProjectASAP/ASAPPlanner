@@ -1,6 +1,6 @@
-//! The selection algebra of aggregate coverage
-//! ([`AggregateCoverage`](super::AggregateCoverage)'s `selection`): which output rows of a
-//! computation a state took, as a union of boxes ([`SelectionBox`]), each a
+//! The selection algebra of aggregate coverage (a memo group's coverage
+//! `selection`, in `crate::stages`): which output rows of a computation a
+//! state took, as a union of boxes ([`SelectionBox`]), each a
 //! [`Constraint`] per column ([`ColumnIdentity`]): value sets and intervals,
 //! with interval limits relative to the evaluation time
 //! ([`IntervalConstraintLimit`]). A predicate conjunct becomes a constraint
