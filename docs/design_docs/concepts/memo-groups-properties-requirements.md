@@ -376,7 +376,7 @@ pub struct GroupProperties {
     /// What an aggregate group covers: a summary state, a chain, a
     /// `TimeRange`/`TimeShift` over a chain or a merge over one, or an exact
     /// `Aggregate` result; `None` for any other group.
-    pub aggregate_coverage: Option<AggregateCoverage>,
+    pub aggregate_coverage: Option<AggregateCoverage<MemoGroupId>>,
     /// Whether two equal expressions return the same rows for the same
     /// input rows, so they may be one group (not an unordered `LIMIT`).
     pub shareable_when_equal: bool,
@@ -385,40 +385,48 @@ pub struct GroupProperties {
     pub scanned_sources: BTreeSet<Source>,
 }
 
-// crates/types/src/stages/logical/aggregate_coverage.rs
+// crates/types/src/ir/properties/aggregate_coverage.rs
 /// What an aggregate computes, with every lifted selection removed.
-pub struct AggregateDefinition {
-    /// The group the unlifted operators read: the first input under the
+/// `R` is how it names an input: a memo group's id in the memo.
+pub struct AggregateDefinition<R> {
+    /// The input the unlifted operators read: the first input under the
     /// `SummaryAgg` or exact `Aggregate` that is not a `Filter`, a range
     /// `TimeRange`, a `TimeShift` without `@ start()`/`@ end()` or a
     /// direct-column `Project`. `None` when that input is a `Scan` with a
     /// liftable predicate (a PromQL label matcher): it is lifted too, and the
     /// `Scan` with the rest of its predicates is the last unlifted operator,
     /// so states over one source with different matchers may merge.
-    pub input_group: Option<MemoGroupId>,
+    pub input: Option<R>,
     /// The operators not lifted into the selection, listed top down from the
     /// `SummaryAgg` or `Aggregate`, each with only its residual arguments. `None` marks an
-    /// operator's main input (the next unlifted operator, or input_group);
-    /// `Some(g)` is another input group it reads, such as the group a scalar
-    /// subquery in a Filter reads. Two states may merge only if input_group
+    /// operator's main input (the next unlifted operator, or `input`);
+    /// `Some(r)` is another input it reads, such as the input a scalar
+    /// subquery in a Filter reads. Two states may merge only if `input`
     /// and these operators are equal.
-    pub unlifted_operators: Vec<Operator<Option<MemoGroupId>>>,
+    pub unlifted_operators: Vec<Operator<Option<R>>>,
 }
 
-pub struct AggregateCoverage {
-    pub(crate) definition: AggregateDefinition,
+/// What an aggregate covers, its inputs named by `R`.
+pub struct AggregateCoverage<R> {
+    pub(crate) definition: AggregateDefinition<R>,
     /// Union of boxes over the output rows of the unlifted operators' input.
     pub(crate) selection: Vec<SelectionBox>,
 }
 
-/// The coverage of what a memo group computes with `operator` over its
-/// input groups; `CoverageError::NoCoverage` when it is no aggregate (or a
-/// `TimeRange`/`TimeShift` over a chain whose windows are not one interval
-/// on the timestamp column), and the merge errors (`EmptyMerge`,
-/// `DefinitionMismatch`, `InputsOverlap`, …) for an invalid merge.
-pub(super) fn aggregate_coverage(
-    operator: &Operator<MemoGroupAsInput<'_>>,
-) -> Result<AggregateCoverage, CoverageError>;
+impl<R: Clone> AggregateCoverage<R> {
+    /// The same coverage with each input reference `r` replaced by `f(r)`.
+    pub fn map_references<S>(self, f: impl FnMut(R) -> S) -> AggregateCoverage<S>;
+}
+
+impl<I: OperatorInput> Operator<I> {
+    /// The coverage of what this operator computes over its inputs;
+    /// `CoverageError::NoCoverage` when it is no aggregate (or a
+    /// `TimeRange`/`TimeShift` over a chain whose windows are not one
+    /// interval on the timestamp column), and the merge errors
+    /// (`EmptyMerge`, `DefinitionMismatch`, `InputsOverlap`, …) for an
+    /// invalid merge.
+    pub fn aggregate_coverage(&self) -> Result<AggregateCoverage<I::Reference>, CoverageError>;
+}
 
 // crates/types/src/stages/logical/memo/mod.rs
 pub struct Memo {
@@ -463,6 +471,11 @@ impl Memo {
     /// group below them list it (`MemoGroup::reached_by_queries`). Stage 0
     /// adds each query once.
     pub fn add_query(&mut self, query: MemoQuery) -> usize;
+    /// The groups some query's root reads, ascending: the groups of the
+    /// queries' roots that are a query's result or a scalar query's operand.
+    pub fn root_groups(&self) -> BTreeSet<MemoGroupId>;
+    /// The queries whose root reads `group`, ascending.
+    pub fn queries_rooted_at(&self, group: MemoGroupId) -> Vec<usize>;
 }
 ```
 
@@ -479,15 +492,22 @@ pub trait OperatorInput: Sized + Clone {
     fn result_kind(&self) -> OperatorResultKind;
     /// The input's own operator, its children as inputs again.
     fn operator(&self) -> Operator<Self>;
-    /// What the input covers when it is an aggregate group in the memo;
-    /// `None` for any other input.
-    fn aggregate_coverage(&self) -> Option<&AggregateCoverage>;
+    /// How an aggregate's definition names this input
+    /// (`AggregateCoverage`): a memo group's id in the memo.
+    type Reference: Clone + PartialEq;
+    /// This input's reference; `None` for a build a rule constructs only
+    /// while it derives, which has none.
+    fn reference(&self) -> Option<Self::Reference>;
+    /// What the input covers when its coverage is stored (an aggregate
+    /// group in the memo); `None` for any other input.
+    fn aggregate_coverage(&self) -> Option<&AggregateCoverage<Self::Reference>>;
     /// The sources the `Scan`s at or below the input read
-    /// (`sources_scanned_by` of its operator): a memo group's stored
+    /// (`Operator::scanned_sources` of its operator): a memo group's stored
     /// `GroupProperties::scanned_sources`, recomputed for a node tree.
     fn scanned_sources(&self) -> BTreeSet<Source>;
 }
-/// A front-end node tree. Node trees carry no aggregate coverage.
+/// A front-end node tree (`Reference = ()`). Node trees store no aggregate
+/// coverage.
 impl OperatorInput for Rc<OperatorNode> { … }
 
 // crates/types/src/stages/logical/group.rs
@@ -497,10 +517,15 @@ pub(super) struct MemoGroupAsInput<'m> {
     pub(super) memo: &'m Memo,
     pub(super) group_id: MemoGroupId,
 }
+/// `Reference = MemoGroupId`; its stored coverage is
+/// `GroupProperties::aggregate_coverage`.
 impl OperatorInput for MemoGroupAsInput<'_> { … }
 
 // The existing rules, generic over the input; existing names kept.
 impl<I: OperatorInput> Operator<I> {
+    /// The sources the `Scan`s at or below this operator read: a `Scan`'s
+    /// own, else the union over its inputs'.
+    pub(crate) fn scanned_sources(&self) -> BTreeSet<Source>;
     pub(crate) fn output_schema(&self) -> Result<Schema, SchemaDerivationError>;
     pub(crate) fn output_kind(&self) -> OperatorResultKind;
     pub(crate) fn validate_inputs(&self) -> Result<(), SchemaDerivationError>;
@@ -512,7 +537,7 @@ impl<I: OperatorInput> Operator<I> {
 /// for a merge, the coverage its check derived.
 pub(super) fn validate_expression_over_input_groups(
     operator: &Operator<MemoGroupAsInput<'_>>,
-) -> Result<(Schema, Option<AggregateCoverage>), SchemaDerivationError>;
+) -> Result<(Schema, Option<AggregateCoverage<MemoGroupId>>), SchemaDerivationError>;
 /// The properties of a group computing `expression` over its input
 /// groups, once it is valid over them.
 pub(super) fn derive_group_properties(
@@ -521,14 +546,14 @@ pub(super) fn derive_group_properties(
 ) -> Result<GroupProperties, SchemaDerivationError>;
 ```
 
-Aggregate coverage exists only in the memo: a node tree has none, and `AggregateCoverage` has no type parameter. Identity has two scopes. In the memo, coverages compare by `AggregateDefinition` `==` (it holds `MemoGroupId`s); nothing in the memo needs an id. The plan carries `ViewCoverage::definition_id` (`crates/types/src/plan/materialized_view.rs`), a content id of what the view computes: its definition with every input group expanded recursively to its expression down to the `Scan`s, with no group or node ids, canonically serialized and hashed, so it is equal across plans and processes that compute the same thing and different when they do not.
+Aggregate coverage is an IR property, derived like an output schema (`Operator::aggregate_coverage`), generic over how a definition names an input (`OperatorInput::Reference`). The memo derives it over its groups (`R` = `MemoGroupId`) and stores it per group; a node tree stores none. Identity has two scopes. In the memo, coverages compare by `AggregateDefinition` `==` (it holds `MemoGroupId`s); nothing in the memo needs an id. The plan carries `ViewCoverage::definition_id` on a materialized view's node (`PhysicalASAPDAGNode::view_coverage`, `crates/types/src/plan/physical_asap_dag.rs`), a content id of what the view computes: `stages::view_coverage(memo, group)` expands the memo's coverage (`map_references`, every input group to its expression, recursively down to the `Scan`s, with no group or node ids), serializes it canonically and hashes it, so it is equal across plans and processes that compute the same thing and different when they do not. The plan does not re-derive coverage.
 
 A group is its expression: one operator, with its arguments, over input groups. Hash-consing compares and hashes the expression directly, so two expressions are one group when their operators and arguments are equal and their input groups are the same. θ is not an operator argument, so builds that differ only in θ share one group. An expression whose copies may return different rows (an unordered `LIMIT`) always gets a new group.
 
 Everything that was computed on operator-node trees is computed on groups. `find_or_add_group` derives `GroupProperties` once, when the group is created, with `derive_group_properties`: the rules that check operator nodes (schema derivation, input validation, merge check: `validate_expression_over_input_groups`), applied to the expression over `MemoGroupAsInput`s, which read only the input groups' `expression` and `group_properties`, never a node tree:
 
 - `schema` and `result_kind` from the operator and its input groups' schemas and result kinds; a scalar subquery reads the referenced group's schema.
-- `aggregate_coverage`, for a summary state or an exact `Aggregate` result: walking down from the SummaryAgg or Aggregate through the input groups' expressions while each is a Filter, a TimeRange, a TimeShift (an offset or `@ T`; `TimeShift { at: End | Start }` is not lifted, see below) or a direct-column Project, lifting their predicates into the selection; a TimeRange or TimeShift becomes an interval on the timestamp column (below). The group below them is the definition's `input_group`. A Scan's predicates (PromQL label matchers, SQL filters, including absolute timestamp filters) are lifted too; the Scan with its residual predicates is then the last unlifted operator and `input_group` is `None`. The operators not lifted, each with its residual arguments, are `unlifted_operators`. A chain `SummaryTumblingWindowChain[w](X)` has the definition of a build over X and leaves the timestamp column unconstrained; a `TimeRange` or `TimeShift` over a chain constrains it as over raw rows. A merge's coverage comes from its inputs' stored coverage; a merge is valid only over inputs with equal definitions and disjoint selections, or over one time-indexed state. So the coverage of `SummaryMerge(TimeRange(TimeShift(Chain[w](X))))` equals that of `SummaryAgg(TimeRange(TimeShift(X)))`, and `add_candidate` accepts the merge in the original state group.
+- `aggregate_coverage`, for a summary state or an exact `Aggregate` result: walking down from the SummaryAgg or Aggregate through the input groups' expressions while each is a Filter, a TimeRange, a TimeShift (an offset or `@ T`; `TimeShift { at: End | Start }` is not lifted, see below) or a direct-column Project, lifting their predicates into the selection; a TimeRange or TimeShift becomes an interval on the timestamp column (below). The group below them is the definition's `input`. A Scan's predicates (PromQL label matchers, SQL filters, including absolute timestamp filters) are lifted too; the Scan with its residual predicates is then the last unlifted operator and `input` is `None`. The operators not lifted, each with its residual arguments, are `unlifted_operators`. A chain `SummaryTumblingWindowChain[w](X)` has the definition of a build over X and leaves the timestamp column unconstrained; a `TimeRange` or `TimeShift` over a chain constrains it as over raw rows. A merge's coverage comes from its inputs' stored coverage; a merge is valid only over inputs with equal definitions and disjoint selections, or over one time-indexed state. So the coverage of `SummaryMerge(TimeRange(TimeShift(Chain[w](X))))` equals that of `SummaryAgg(TimeRange(TimeShift(X)))`, and `add_candidate` accepts the merge in the original state group.
 - The checks that read an input's operator (a merge over a time-indexed state reads a `TimeRange` over a chain; a selected build) read the input group's `expression`.
 - `shareable_when_equal`: a `LIMIT` is shareable over a `Sort` with the same partitions (the input group's `expression`); a `Dedup` on every column (the input group's schema).
 - `column_signs` and, once added, `column_lineage` (below), per output column.
@@ -550,7 +575,7 @@ pub struct GroupProperties {
     pub column_lineage: Vec<ColumnLineage>,
     /// One entry per output column, in schema order (Value sign, below).
     pub column_signs: Vec<ValueSign>,
-    pub aggregate_coverage: Option<AggregateCoverage>,
+    pub aggregate_coverage: Option<AggregateCoverage<MemoGroupId>>,
     pub shareable_when_equal: bool,
     pub scanned_sources: BTreeSet<Source>,
 }
@@ -672,18 +697,23 @@ Some error contracts hold only for values of a known sign: a relative error of a
 
 ```rust
 // crates/types/src/stages/logical/column_properties.rs
-/// GroupProperties::column_signs holds one per output column.
+/// GroupProperties::column_signs holds one per output column. A sign is
+/// the IEEE 754 sign bit, so `-0.0` is `NonPositive` and `+0.0`
+/// `NonNegative`; with it the rules are exact: a product or quotient has
+/// the XOR of its operands' sign bits, a sum of two values with one sign
+/// bit keeps it, a negation flips it and `abs` clears it.
 pub enum ValueSign {
-    /// Every non-NaN value is ≥ 0.
+    /// Every non-NaN value has its sign bit clear (`+0.0`, positive,
+    /// `+inf`).
     NonNegative,
-    /// Every non-NaN value is ≤ 0.
+    /// Every non-NaN value has its sign bit set (`-0.0`, negative, `-inf`).
     NonPositive,
     /// Neither is known.
     Unknown,
 }
 ```
 
-A NaN does not break either sign: `NonNegative` means every non-NaN value is ≥ 0.
+A NaN does not break either sign: `NonNegative` means every non-NaN value has its sign bit clear, `NonPositive` that it is set. So `x / -0` over a non-negative `x` is `NonPositive` (its result is `-inf`, `-0` or NaN).
 
 A source's signs are declared per column in the data workload's source facts (for example, `latency`'s value is non-negative). A PromQL counter's value is non-negative without a declaration. A column without a declaration is `Unknown`. `Memo::new(data)` stores the data workload's source facts at construction, and `find_or_add_group` reads their signs for a `Scan` (a histogram's or summary's series reads its family's).
 
@@ -694,8 +724,8 @@ A source's signs are declared per column in the data workload's source facts (fo
 | `Join`; `SetOp`, `Concat`; label rewrite (`label_replace`); SQL window function | the left input's columns then the right's (a semi or anti join: the left's only); per column, the inputs' sign when they all agree, else `Unknown`; the input's, the written label `Unknown`; the input's, the window value `Unknown` |
 | `abs` | `NonNegative` |
 | negation | flipped: `NonNegative` ↔ `NonPositive` |
-| numeric literal, numeric cast | the literal's sign; the operand's sign |
-| arithmetic, scalar (`x / 1000`, SQL `value * 8`) or vector (`a / b`), one rule | `+`: both `NonNegative` → `NonNegative`, both `NonPositive` → `NonPositive`; `*` and `/`: same sign → `NonNegative`, opposite → `NonPositive`; `-`, `%`, `^`, `atan2`, or an operand of `Unknown` sign → `Unknown` |
+| numeric literal, numeric cast | the literal's sign bit (`-0.0`: `NonPositive`; NaN: `Unknown`); the operand's sign |
+| arithmetic, scalar (`x / 1000`, SQL `value * 8`) or vector (`a / b`), one rule | `+`: both `NonNegative` → `NonNegative`, both `NonPositive` → `NonPositive`; `*` and `/`: same sign → `NonNegative`, opposite → `NonPositive` (the result's sign bit is the XOR of the operands'); `-`, `%`, `^`, `atan2`, or an operand of `Unknown` sign → `Unknown` |
 | `vector(s)` | the sign of the expression `s` (`vector(1000)`: `NonNegative`) |
 | sum, avg, min, max, top-k, `first_over_time`, `last_over_time`; quantile with 0 ≤ q ≤ 1 | the input value's sign; a quantile with q outside [0, 1]: `Unknown` |
 | count, distinct count, and the other counts and spreads (`count_values`, `changes`, `resets`, `group`, `absent`, `absent_over_time`, `present_over_time`, `stddev`, `stdvar`, frequency L2 norm and entropy) | `NonNegative` |
@@ -703,7 +733,7 @@ A source's signs are declared per column in the data workload's source facts (fo
 | vector comparison, `and`, `unless`; `or`; comparison with `bool` | the left side's value sign; the sides' sign when they agree; `NonNegative` (0 or 1) |
 | `SummaryAgg`, chain | the state records the sign of the values it is updated with (a constant weight: its sign; a tuple or entity identity: `Unknown`); keys keep theirs (`window_end` is `Unknown`) |
 | `SummaryMerge` | the inputs' sign when they all agree, else `Unknown`; over a chain's windows, the chain's build's |
-| readouts | the state's recorded sign; a distinct count, frequency L2 norm or entropy, and an exact count's finalization: `NonNegative`; a quantile with q outside [0, 1]: `Unknown`; a point count or top-k of a Count Sketch or UnivMon (and their variants, `SummaryTypeCapability::estimates_may_flip_sign`): `Unknown`, since a median of signed counters can be negative over non-negative weights (Count-Min keeps the state's sign); a readout whose output does not keep the state's layout: `Unknown` |
+| readouts | the state's recorded sign; a distinct count, frequency L2 norm or entropy, and an exact count's finalization: `NonNegative`; a quantile with q outside [0, 1]: `Unknown`; a point count or top-k of a Count Sketch or UnivMon (and their variants, `SummaryTypeCapability::point_counts_may_flip_sign`): `Unknown`, since a median of signed counters can be negative over non-negative weights (Count-Min keeps the state's sign); a readout whose output does not keep the state's layout: `Unknown` |
 | any other expression | `Unknown` |
 
 **Example.** `topk(5, sum by (host)(gauge))` over a gauge with no declared sign: the sum's sign is `Unknown`, so Stage 2 prunes the Count-Min heap builds (`CountMinWeightsNotProvenNonNegative`) and the query uses an exact top-k. Over `rate(requests_total[1m])`, the sum is `NonNegative` and the Count-Min builds stay.
@@ -1364,15 +1394,19 @@ pub struct PhysicalASAPDAGNode {
     /// How long the node's time-indexed rows are retained (h_v); set on
     /// materialized nodes.
     pub retention_ms: Option<u64>,
-    // A materialized view's coverage is not a node field: the plan derives
-    // it per view (`MaterializedView::coverage`, a `ViewCoverage`: the
-    // content `definition_id` and the selection) from the node's memo
-    // group's `aggregate_coverage`.
     /// The physical candidate the node was built from: in-memory provenance
     /// for validation and tools, not part of the plan file; None for a plan
     /// built by a custom pass.
     #[serde(skip)]
     pub selected_physical_candidate: Option<PhysicalCandidateId>,
+    /// For a materialized view (lifetime `AcrossEvaluations`), what it
+    /// stores: its memo group's aggregate coverage, carried into the plan
+    /// as a `ViewCoverage` (the selection, and the plan-scope content id
+    /// of the definition, `ViewCoverage::definition_id`). Set when the
+    /// plan is built from the memo, where the node's group is known; `None`
+    /// on every other node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_coverage: Option<ViewCoverage>,
 }
 
 /// What Stage 3 reports about its own run, beside the plan.
