@@ -31,6 +31,9 @@
 
 // Memo steps in pipeline order; a step production does not run is omitted.
 const MEMO_STEPS = ['stage0', 'pass1', 'pass2'];
+// Each step's name in the viewer (the document's titles are longer).
+const MEMO_STEP_NAMES = { stage0: 'Stage 0', pass1: 'Stage 1 · Pass 1', pass2: 'Stage 1 · Pass 2' };
+const memoStepName = (step) => MEMO_STEP_NAMES[step.step] || step.title;
 
 // `OriginOfCandidateForMemoGroup` (snake_case in the document), its Rust name, and the
 // border color of its candidates (mid tones, readable in both themes).
@@ -584,7 +587,7 @@ function memoViewController() {
   function draw() {
     if (cy) { cy.destroy(); cy = null; }
     elements = memoStepElements(memo, stepIndex, { drill: drill[stepIndex], queryIds, hidePruned: !($('memoShowPruned') || {}).checked,
-      physical: memo.steps[stepIndex].step === 'pass2' && doc.stage2_physical_asap_optimization ? doc : null });
+      physical: memo.steps[stepIndex].step === 'pass2' && doc.stage2_physical_asap_optimization && ($('memoShowPhysical') || {}).checked ? doc : null });
     cy = cytoscape({
       container: $('cyMemo'), elements, style: style(), layout: { name: 'preset', fit: true, padding: 16 },
       wheelSensitivity: 0.25, minZoom: 0.05, maxZoom: 2.5, boxSelectionEnabled: false,
@@ -595,10 +598,10 @@ function memoViewController() {
     const step = memo.steps[stepIndex];
     const selected = memo.selected_candidates;
     const last = stepIndex === memo.steps.length - 1;
-    $('memoView-meta').innerHTML = `<b>${esc(step.title)}</b> · ${esc(memoStepText(memo, stepIndex))}`
+    $('memoView-meta').innerHTML = `<b>${esc(memoStepName(step))}</b> · ${esc(memoStepText(memo, stepIndex))}`
       + (last ? (selected ? ` · selected plan's candidates highlighted (${Object.keys(selected).length} groups)` : ' · no plan selected')
         : ' · the selected plan\'s candidates are shown on the last tab');
-    $('memoTabs').innerHTML = memo.steps.map((st, i) => `<button type="button" data-step="${i}" aria-pressed="${i === stepIndex}">${esc(st.title)}</button>`).join('');
+    $('memoTabs').innerHTML = memo.steps.map((st, i) => `<button type="button" data-step="${i}" aria-pressed="${i === stepIndex}">${esc(memoStepName(st))}</button>`).join('');
     $('memoTabs').querySelectorAll('button').forEach((b) => b.addEventListener('click', () => selectStep(Number(b.dataset.step))));
   }
 
@@ -668,7 +671,7 @@ function memoViewController() {
   function showGroup(group) {
     const origins = Object.entries(group.candidate_count_by_origin).map(([o, n]) => `${n} ${MEMO_ORIGINS[o].name}`).join(', ');
     const pruned = memoPrunedLines(doc, group.id);
-    $('details').innerHTML = `<h3>Memo group G${esc(group.id)} <span class="eyebrow">${esc(memo.steps[stepIndex].title)}</span></h3>${splitButtons(group)}${kv([
+    $('details').innerHTML = `<h3>Memo group G${esc(group.id)} <span class="eyebrow">${esc(memoStepName(memo.steps[stepIndex]))}</span></h3>${splitButtons(group)}${kv([
       ['label', group.label], ['operator', stageNodeLines(group.operator).join(' · ')],
       ['reads', groupList(group.children)], ['read by', groupList(group.parents)],
       ['queries reaching it', queryList(group.queries)], ['root of', queryList(group.roots_of)],
@@ -699,7 +702,7 @@ function memoViewController() {
     const physicalHtml = physical.map((p) => `<div><b>${esc(p.title)}</b>${edgeLists(p.inputs)}</div>`).join('');
     const ofCandidate = (lines) => lines.filter((line) => line.startsWith(`#${candidate.index} `));
     const pruned = memoPrunedLines(doc, group.id);
-    $('details').innerHTML = `<h3>Candidate #${esc(candidate.index)} of G${esc(group.id)} <span class="eyebrow">${esc(memo.steps[stepIndex].title)}</span></h3>${kv([
+    $('details').innerHTML = `<h3>Candidate #${esc(candidate.index)} of G${esc(group.id)} <span class="eyebrow">${esc(memoStepName(memo.steps[stepIndex]))}</span></h3>${kv([
       ['label', candidate.label], ['origin', MEMO_ORIGINS[candidate.origin].name],
       ['added at this step', candidate.added ? 'yes' : 'no'],
       ['parameters θ', memoParametersText(candidate.parameters) || 'none'],
@@ -714,7 +717,7 @@ function memoViewController() {
       <details><summary>Candidate operator (JSON)</summary><pre>${esc(JSON.stringify(candidate.operator, null, 2))}</pre></details>`;
   }
 
-  if (typeof document !== 'undefined' && $('memoShowPruned')) $('memoShowPruned').addEventListener('change', () => { if (memo) draw(); });
+  ['memoShowPruned', 'memoShowPhysical'].forEach((id) => { if (typeof document !== 'undefined' && $(id)) $(id).addEventListener('change', () => { if (memo) draw(); }); });
 
   function selectStep(i) {
     stepIndex = i;

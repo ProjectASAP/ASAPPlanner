@@ -54,7 +54,7 @@
     const cy = cytoscape({
       container: $('cy' + i), elements, style: style(),
       layout: { name: window.cytoscapeDagre ? 'dagre' : 'breadthfirst', rankDir: 'BT', nodeSep: 18, rankSep: 34, padding: 14, directed: true },
-      wheelSensitivity: 0.25, minZoom: 0.2, maxZoom: 2.5, boxSelectionEnabled: false,
+      wheelSensitivity: 0.25, minZoom: 0.2, maxZoom: 1.3, boxSelectionEnabled: false,
     });
     cy.on('tap', 'node', (e) => tapNode(e.target.data(), i));
     cy.on('tap', 'edge', (e) => showEdge(e.target.data(), i));
@@ -139,16 +139,6 @@
     return cost.cost_per_second === null ? 'no cost (cost model 3)' : `cost <b>${fmtCost(cost.cost_per_second)}</b> per second`;
   }
 
-  // Stage 3's outcome: one row for the selected plan or selection's error.
-  function renderPlanRow() {
-    const row = selectedPlanRow(doc);
-    $('rank').innerHTML = row ? `<li><div class="row">
-        <span class="pid">plan</span><span class="plabel">${row.status === 'selected' ? 'the selected plan' : 'no plan selected'}</span>
-        <span class="ptotal">${row.total === null ? '—' : fmtCost(row.total)}</span>
-        <span class="pstatus">${row.status === 'selected' ? '<span class="chip selected">✓ selected</span>' : `<span class="chip invalid">no plan</span><span>${esc(row.reason)}</span>`}` +
-        `${row.accepted ? `<span class="accepted">${esc(row.accepted)}</span>` : ''}</span></div></li>` : '<li class="status">Stage 3 did not run.</li>';
-  }
-
   // Draw Stage 3's plan in lane 1 with its node costs, or say why there is none.
   function renderPlan() {
     const stage3 = doc.stage3_plan_selection;
@@ -191,12 +181,14 @@
       return `<div class="query"><span class="qid">${esc(q.id)} · ${esc(q.language)}</span><code>${esc(q.text)}</code>${req ? `<span class="req">${esc(req)}</span>` : ''}</div>`;
     }).join('');
     $('counts').textContent = candidateCountsText(doc);
-    $('rank-meta').textContent = [planHeader(doc), accuracyGuaranteesText(doc), searchText(doc)].filter(Boolean).join(' · ');
+    // Stage 3's outcome, failures and warnings, and how it searched.
+    const stage3 = doc.stage3_plan_selection;
+    $('outcome').textContent = [stage3.plan ? 'plan selected' : `no plan selected${stage3.error ? `: ${stage3.error}` : ''}`,
+      planHeader(doc), searchText(doc)].filter(Boolean).join(' · ');
     renderDataWorkload();
 
     render(0, doc.stage0_query_language_frontends.dag, false, null);
     $('lane0-meta').innerHTML = `${doc.stage0_query_language_frontends.dag.nodes.length} nodes · roots for ${queryIds.map((q) => `<b>${esc(q)}</b>`).join(', ')}`;
-    renderPlanRow();
     renderPlan();
     renderMaterializedViews();
     if (window.MemoView) window.MemoView.show(doc, queryIds);
@@ -207,16 +199,15 @@
   // The run's data workload beside the queries: one row per source with the
   // facts it declares, and the queries whose text names it.
   function renderDataWorkload() {
+    $('deployment').innerHTML = settingsRows(doc).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
     const dataWorkload = doc.workload.data_workload;
     if (!dataWorkload) {
       $('dataArrival').textContent = '';
-      $('deployment').textContent = doc.deployment_capabilities ? `Deployment: ${deploymentText(doc.deployment_capabilities)}` : '';
       $('dataSources').innerHTML = '<span class="status">The document declares no data workload.</span>';
       return;
     }
     const view = dataWorkloadView(dataWorkload, doc.workload.queries);
     $('dataArrival').textContent = `arrival: ${view.arrival}`;
-    $('deployment').textContent = doc.deployment_capabilities ? `Deployment: ${deploymentText(doc.deployment_capabilities)}` : '';
     $('dataSources').innerHTML = view.rows.length
       ? table(['source', 'series', 'type', 'non-negative', 'sample interval', 'stream norms', 'distinct bound', 'distinct values per label', 'distinct values per label set', 'read by'],
         view.rows.map((r) => `<tr><td>${esc(r.name)}</td><td>${esc(r.series)}</td><td>${esc(r.type)}</td><td>${esc(r.nonNegative)}</td><td>${esc(r.sampleInterval)}</td><td>${esc(r.streamNorms)}</td><td>${esc(r.maxDistinct)}</td><td class="wrap">${esc(r.distinctValuesPerLabel)}</td><td class="wrap">${esc(r.distinctValuesPerLabelSet)}</td><td class="wrap">${esc(r.readBy.join(', ') || '—')}</td></tr>`).join(''))

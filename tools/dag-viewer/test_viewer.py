@@ -262,17 +262,9 @@ class PlanRowTests(unittest.TestCase):
         self.js = stages_js()
         self.doc = example1()
 
-    def test_the_selected_plan_row_shows_its_cost_and_accepted_accuracy(self):
-        """The row shows the plan's cost per second and what Stage 3 accepted per query."""
-        row = self.js.call("selectedPlanRow", self.doc)
-        self.assertEqual(row, {"status": "selected", "total": self.doc["stage3_plan_selection"]["cost"]["cost_per_second"],
-                               "accepted": "q1: accepted exact; q2: accepted exact", "reason": None})
-
-    def test_a_failed_selection_row_shows_the_error(self):
-        """Without a plan the row shows selection's error, as does the header."""
+    def test_a_failed_selection_shows_the_error(self):
+        """Without a plan the outcome line shows selection's error."""
         self.doc["stage3_plan_selection"] = {"plan": None, "error": "no data workload", "materialized_views": []}
-        self.assertEqual(self.js.call("selectedPlanRow", self.doc),
-                         {"status": "no plan", "total": None, "accepted": None, "reason": "no data workload"})
         self.assertEqual(self.js.call("planHeader", self.doc), "selection failed: no data workload")
 
     def test_accuracy_text_reads_the_target_json(self):
@@ -432,15 +424,16 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(len(self.doc["stage3_plan_selection"]["plan"]["roots"]), 2)
 
     def test_guarantees_are_enforced_by_default_and_the_header_says_which(self):
-        """The header says whether the run enforced accuracy guarantees
+        """The settings say whether the run enforced accuracy guarantees
         (the default) or ignored them."""
+        guarantees = lambda doc: dict(self.js.call("settingsRows", doc))["accuracy guarantees"]
         self.assertEqual(self.doc["accuracy_guarantees"], "enforced")
-        self.assertEqual(self.js.call("accuracyGuaranteesText", self.doc), "accuracy guarantees enforced")
+        self.assertEqual(guarantees(self.doc), "enforced")
         ignored = planned(promql_workload(["sum(rate(a[1m]))", "topk(5, rate(b[1m]))"], ["a", "b"]), ignore_accuracy_guarantees=True)
         self.assertEqual(ignored["accuracy_guarantees"], "ignored")
         self.assertEqual(self.js.call("validateStagePipeline", ignored), [])
-        self.assertTrue(self.js.call("accuracyGuaranteesText", ignored).startswith("accuracy guarantees ignored"))
-        self.assertEqual(self.js.call("accuracyGuaranteesText", {}), "")
+        self.assertTrue(guarantees(ignored).startswith("ignored"))
+        self.assertEqual(guarantees({}), "not recorded")
 
     def test_header_names_the_search_and_its_milp(self):
         """The header names the candidate-connection search and its MILP's
@@ -546,8 +539,12 @@ class WorkloadViewTests(unittest.TestCase):
         """The usage and deployment lines read the plan's cost and capabilities."""
         cost = self.doc["stage3_plan_selection"]["cost"]
         self.assertIn("peak cores", self.js.call("usageText", cost["usage"]))
-        self.assertEqual(self.js.call("deploymentText", NO_RAW_DATA), "raw data not retained · query-time results not retained · every summary the planner builds")
-        self.assertTrue(self.js.call("deploymentText", self.doc["deployment_capabilities"]).startswith("raw data retained · "))
+        no_raw = dict(self.js.call("settingsRows", {"deployment_capabilities": NO_RAW_DATA}))
+        self.assertEqual([no_raw["raw data"], no_raw["query-time results"], no_raw["summaries"]], ["not retained", "not retained", "every summary the planner builds"])
+        rows = dict(self.js.call("settingsRows", self.doc))
+        self.assertEqual(rows["raw data"], "retained")
+        self.assertTrue(rows["summaries"].startswith("Cms (Total), "))
+        self.assertEqual(rows["cost model"], cost["source"])
 
     def test_planning_workload_queries_read_the_workload_json(self):
         """A PlanningWorkload is recognised and its queries listed."""
@@ -753,14 +750,13 @@ class AppTests(unittest.TestCase):
         row with its cost and accepted accuracy, the counts and the header."""
         js = self.page("?doc=examples/e1.json", {"examples/e1.json": json.dumps(example1())})
         self.assertIn("Candidates per stage", js.eval("__els.counts.textContent"))
-        self.assertIn("✓ selected", self.text(js, "rank"))
-        self.assertIn("accepted exact", self.text(js, "rank"))
         lane = self.text(js, "lane1-meta")
         self.assertRegex(lane, r"^\d+ nodes · cost [\d.]+ per second · q1: accepted exact")
         self.assertIn("Stage 3 usage: CPU", lane)
-        rank_meta = js.eval("__els['rank-meta'].textContent")
-        self.assertIn("accuracy guarantees enforced", rank_meta)
-        self.assertIn("candidate-connection search · MILP", rank_meta)
+        outcome = js.eval("__els.outcome.textContent")
+        self.assertTrue(outcome.startswith("plan selected · "))
+        self.assertIn("candidate-connection search · MILP", outcome)
+        self.assertIn("accuracy guaranteesenforced", self.text(js, "deployment"))
         self.assertEqual(len(lane_nodes(self.ev(js, "__rendered.cy1"))), len(example1()["stage3_plan_selection"]["plan"]["nodes"]))
         self.assertGreater(len(self.ev(js, "__rendered.cy0")), 0)
 
@@ -770,9 +766,8 @@ class AppTests(unittest.TestCase):
         doc = example1()
         doc["stage3_plan_selection"] = {"plan": None, "error": "no valid candidate", "materialized_views": []}
         js = self.page("?doc=d.json", {"d.json": json.dumps(doc)})
-        self.assertIn("no planno valid candidate", self.text(js, "rank"))
         self.assertEqual(js.eval("__els['lane1-meta'].textContent"), "no plan: no valid candidate")
-        self.assertIn("selection failed: no valid candidate", js.eval("__els['rank-meta'].textContent"))
+        self.assertTrue(js.eval("__els.outcome.textContent").startswith("no plan selected: no valid candidate"))
         self.assertFalse(js.eval("'cy1' in __rendered"))
         self.assertGreater(len(self.ev(js, "__rendered.cy0")), 0)
         self.assertEqual(js.eval("__els['views-meta'].textContent"), "no plan selected")
@@ -781,7 +776,7 @@ class AppTests(unittest.TestCase):
         """A Stage 1 failure still draws Stage 0 and shows the error."""
         doc = planned(json.loads(EXAMPLE3A.read_text()), NO_RAW_DATA)
         js = self.page("?doc=d.json", {"d.json": json.dumps(doc)})
-        self.assertIn("Stage 1 failed: deployment capabilities", js.eval("__els['rank-meta'].textContent"))
+        self.assertIn("Stage 1 failed: deployment capabilities", js.eval("__els.outcome.textContent"))
         self.assertGreater(len(self.ev(js, "__rendered.cy0")), 0)
 
     def test_examples_become_tabs_and_the_hash_picks_one(self):
@@ -808,7 +803,7 @@ class AppTests(unittest.TestCase):
         js = self.page("?doc=s.json", {"s.json": json.dumps(doc)})
         self.assertIn("q1, q2", self.text(js, "dataSources"))
         self.assertIn("ingesting", js.eval("__els.dataArrival.textContent"))
-        self.assertIn("raw data retained", js.eval("__els.deployment.textContent"))
+        self.assertIn("raw dataretained", self.text(js, "deployment"))
         self.assertIn("every 10 s · predictable", self.text(js, "queries"))
         self.assertIn(f"no installable plan: {doc['stage3_plan_selection']['materialized_views_error']}", self.text(js, "views-meta"))
 
@@ -882,14 +877,14 @@ class AppTests(unittest.TestCase):
         js = self.page("?doc=e1.json", {"e1.json": json.dumps(doc)})
         self.assertTrue(js.eval("__els.memoView.hidden"))
         self.assertFalse(js.eval("'cyMemo' in __rendered"))
-        self.assertIn("✓ selected", self.text(js, "rank"))
+        self.assertTrue(js.eval("__els.outcome.textContent").startswith("plan selected"))
 
     def test_the_memo_view_has_a_tab_per_step_and_opens_on_the_last(self):
         """The memo view has a tab per step and opens on the last."""
         js = self.memo_page()
         self.assertFalse(js.eval("__els.memoView.hidden"))
         tabs = js.eval("__els.memoTabs.innerHTML")
-        self.assertEqual(re.findall(r">([^<]+)</button>", tabs), ["Stage 0, the frontends' DAG hash-consed", "Stage 1, Pass 1", "Stage 1, Pass 2"])
+        self.assertEqual(re.findall(r">([^<]+)</button>", tabs), ["Stage 0", "Stage 1 · Pass 1", "Stage 1 · Pass 2"])
         self.assertIn('data-step="2" aria-pressed="true"', tabs)
         meta = self.text(js, "memoView-meta")
         self.assertIn("7 groups (+2) · 17 candidates (+5)", meta)

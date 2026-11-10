@@ -31,22 +31,25 @@ To run it, see [RUNNING.md](RUNNING.md).
   (deployment capabilities, cost model, accuracy guarantees). Without the
   server, the rows say they need it. `#workload-sets` in the URL opens the
   section.
-- **Query workload** with each query's accuracy, latency, recurrence,
-  predictability and range evaluation, and a line that counts the
-  candidates at each stage: the Pass 2 memo's logical candidates and how
+- **Planner inputs** (blue bar), what the planner was given:
+  - **Query workload** with each query's accuracy (`metric not set` when
+    the workload names no error metric), latency, recurrence,
+    predictability and range evaluation;
+  - **Data workload**: the arrival and one row per declared source with
+    exactly the facts it declares (series count, metric type, non-negative
+    values, sample interval, stream norms, distinct bound, distinct values
+    per label, distinct values per label set) and the queries whose text
+    names it;
+  - **Deployment and planner settings**: the deployment capabilities (raw
+    data and query-time results retained or not, the summaries it
+    supports), whether accuracy guarantees were enforced or ignored, and
+    the cost model Stage 3 priced the plan with (`cost.source`).
+- **Planner output** (green bar), everything below: a line that counts the
+  candidates at each stage (the Pass 2 memo's logical candidates and how
   many Pass 2 pruned, the physical candidates and how many Stage 2 and
-  Stage 3 pruned, and whether a plan was selected.
-- **Data workload** beside it: the arrival and one row per declared source
-  with exactly the facts it declares (series count, metric type,
-  non-negative values, sample interval, stream norms, distinct bound,
-  distinct values per label, distinct values per label set) and the queries
-  whose text names it, plus the deployment capabilities the run planned
-  with.
-- **Stage 3 · plan selection**: one row, the selected plan with its cost
-  per second and the accuracy Stage 3 accepted per query, or why no plan
-  was selected. The header says why Stage 1 or Stage 2 failed when it did,
-  shows the selection's warnings, says whether accuracy guarantees were
-  enforced or ignored, and names the search with its MILP's size and times.
+  Stage 3 pruned) and a line with Stage 3's outcome (plan selected, or why
+  not), why Stage 1 or Stage 2 failed when it did, the selection's
+  warnings, and the search with its MILP's size and times.
 - **Two lanes**, stacked top to bottom so each is as wide as the page:
   Stage 0 and Stage 3's plan, with each plan node's timing (also its fill:
   green at ingestion time, orange at query time) and Stage 3 cost (`× n`
@@ -68,7 +71,7 @@ To run it, see [RUNNING.md](RUNNING.md).
   is not installable says why instead. Clicking a row selects its node in
   the plan lane.
 - **Memo**: the memo after each planner step, one tab per step (`Stage 0`,
-  `Stage 1, Pass 1`, `Stage 1, Pass 2`), opening on the last. Each memo
+  `Stage 1 · Pass 1`, `Stage 1 · Pass 2`), opening on the last. Each memo
   group is a box `G<id> · <label>` with its candidate count (and how many
   Pass 2 pruned) and the queries it is the root of; its candidates sit
   inside it, bordered by origin, marked `✚ new` when the step added them
@@ -82,7 +85,7 @@ To run it, see [RUNNING.md](RUNNING.md).
   back one level, and the group's details offer the other varying
   dimensions to split by instead. An arrow goes from a candidate (or count) to
   each group it reads, or once from the group when all its candidates read the
-  same groups; a line above the drawing says how to read it. Each candidate box shows its parameters θ and, on the Pass 2 tab, a grid of
+  same groups; a line above the drawing says how to read it. Each candidate box shows its parameters θ and, on the Pass 2 tab with **show Stage 2 variants** ticked (the default), a grid of
   its Stage 2 physical variants: rows by timing (ingest, query), columns by
   lifetime (not kept, one run, across runs), filled green or orange when one
   is there, crossed when Stage 2 pruned it, outlined dark when the plan uses

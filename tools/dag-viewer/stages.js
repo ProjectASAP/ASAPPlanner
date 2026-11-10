@@ -322,19 +322,7 @@ function acceptedText(queries) {
   return parts.length ? parts.join('; ') : null;
 }
 
-// Stage 3's outcome as the plan list's one row: the selected plan with its
-// cost per second (null when not costed or under cost model 3) and the
-// accuracy it accepted, or selection's error; null when Stage 3 did not run.
-function selectedPlanRow(doc) {
-  const stage3 = doc.stage3_plan_selection || {};
-  if (stage3.plan) {
-    return { status: 'selected', total: stage3.cost ? stage3.cost.cost_per_second : null, accepted: acceptedText(stage3.accepted_accuracy_per_query), reason: null };
-  }
-  if (stage3.error) return { status: 'no plan', total: null, accepted: null, reason: stage3.error };
-  return null;
-}
-
-// The plan list's header: why Stage 1 (Pass 1 or Pass 2) or Stage 2 failed,
+// The outcome line's failures and warnings: why Stage 1 (Pass 1 or Pass 2) or Stage 2 failed,
 // why selection failed, and the selection's warnings (e.g. a very large
 // peak memory with no declared memory capacity); "" when there is none.
 function planHeader(doc) {
@@ -362,16 +350,8 @@ function candidateCountsText(doc) {
     + ` → ${(doc.stage3_plan_selection || {}).plan ? 'plan selected' : 'no plan selected'}`;
 }
 
-// Whether Stage 3 checked accuracy guarantees (`accuracy_guarantees`), for
-// the plan list's header; "" for a document that does not say.
+// Whether Stage 3 checked accuracy guarantees (`accuracy_guarantees`).
 const ACCURACY_GUARANTEE_MODES = ['ignored', 'enforced'];
-function accuracyGuaranteesText(doc) {
-  return {
-    ignored: 'accuracy guarantees ignored: every output accepted, candidates compared on cost alone',
-    enforced: 'accuracy guarantees enforced',
-  }[doc.accuracy_guarantees] || '';
-}
-
 // The search behind the document and the size and times of Stage 3's
 // selection MILP, for the plan list's header, e.g. "candidate-connection
 // search · MILP 88 variables, 126 constraints · construction 1 ms, solve
@@ -743,18 +723,22 @@ function usageText(usage) {
     `${n(usage.peak_cpu_cores)} peak cores`].concat(latency ? [`latency ${latency}`] : []).join(' · ');
 }
 
-// The run's deployment capabilities (`DeploymentCapabilities` JSON) as one
-// line: "raw data not retained · query-time results not retained · every
-// summary the planner builds".
-function deploymentText(capabilities) {
-  if (!capabilities || typeof capabilities !== 'object') return '';
-  const summaries = Array.isArray(capabilities.supported_summaries)
-    ? `summaries: ${capabilities.supported_summaries.map((s) => `${s.summary_type} (${(s.readouts || []).join(', ')})`).join(', ')}`
-    : 'every summary the planner builds';
-  return [capabilities.raw_data_retained === false ? 'raw data not retained' : 'raw data retained',
-    capabilities.query_time_results_retained ? 'query-time results retained' : 'query-time results not retained', summaries].join(' · ');
+// The planner's inputs besides the workload, as [name, value] rows: the
+// deployment's capabilities, whether Stage 3 enforced accuracy guarantees,
+// and the cost model Stage 3 priced the plan with.
+function settingsRows(doc) {
+  const c = doc.deployment_capabilities;
+  const cost = (doc.stage3_plan_selection || {}).cost;
+  const rows = c ? [
+    ['raw data', c.raw_data_retained === false ? 'not retained' : 'retained'],
+    ['query-time results', c.query_time_results_retained ? 'retained' : 'not retained'],
+    ['summaries', Array.isArray(c.supported_summaries)
+      ? c.supported_summaries.map((x) => `${x.summary_type} (${(x.readouts || []).join(', ')})`).join(', ') : 'every summary the planner builds'],
+  ] : [['deployment', 'not recorded']];
+  rows.push(['accuracy guarantees', { ignored: 'ignored: every output accepted, candidates compared on cost alone', enforced: 'enforced' }[doc.accuracy_guarantees] || 'not recorded']);
+  rows.push(['cost model', cost && cost.source ? cost.source : 'not recorded (no plan was costed)']);
+  return rows;
 }
-
 // The queries of a `PlanningWorkload` JSON, batch then repeating (the
 // planner's entry order): each query's text, how often it runs and its
 // accuracy target as text.
