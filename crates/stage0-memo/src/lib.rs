@@ -8,11 +8,10 @@
 //! where the one expression equality is; no other stage crate depends on
 //! it, and the planner facade calls it first.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 use asap_types::accuracy::AccuracyTarget;
-use asap_types::ir::operator::SourceColumn;
 use asap_types::ir::{NonASAPOp, Operator, OperatorNode, QueryRoot, SchemaDerivationError};
 use asap_types::stages::{Memo, MemoGroupId, MemoQuery, ValueSign};
 use asap_types::workload::bounds::{series_read, source_name, values_per_result};
@@ -23,7 +22,8 @@ use asap_types::workload::{DataWorkload, PrometheusMetricType};
 /// none), every group without candidates. Each query is added with its
 /// $n_q$, the number of values one evaluation returns, which `data` bounds
 /// ([`values_per_result`]); a `Scan`'s column signs are the ones `data`
-/// declares ([`declared_column_signs`]). Fails with the first node that
+/// declares ([`declared_column_signs`]), declared to the memo as the walk
+/// reaches the source's first `Scan`. Fails with the first node that
 /// breaks the node rules over its children's groups
 /// ([`Memo::find_or_add_group`]); the facade validates the roots first, so
 /// that is a frontend bug.
@@ -37,11 +37,11 @@ pub fn memo_of_queries(
         accuracy_targets.len(),
         "one accuracy target per query"
     );
-    let mut memo = Memo::new(declared_column_signs(roots, data));
+    let mut memo = Memo::default();
     let mut group_of_node = GroupOfNode::new();
     for root in roots {
         for node in root.operator_refs() {
-            group_of(&mut memo, &mut group_of_node, node)?;
+            group_of(&mut memo, &mut group_of_node, node, data)?;
         }
     }
     let group = |node: &Rc<OperatorNode>| group_of_node[&Rc::as_ptr(node)];
@@ -64,42 +64,19 @@ pub fn memo_of_queries(
     Ok(memo)
 }
 
-/// The sign `data` declares for each column of each source the queries
-/// scan ([`SourceFacts::column_signs`](asap_types::workload::SourceFacts::column_signs),
+/// The sign `data` declares for each column of `source`, by column name
+/// ([`SourceFacts::column_signs`](asap_types::workload::SourceFacts::column_signs),
 /// a histogram's or summary's for its series, [`DataWorkload::series_facts`]);
 /// a declared counter's `value` is non-negative without a declaration.
-fn declared_column_signs(
-    roots: &[QueryRoot],
-    data: &DataWorkload,
-) -> BTreeMap<SourceColumn, ValueSign> {
-    let mut signs = BTreeMap::new();
-    let mut visited = HashSet::new();
-    let mut pending: Vec<&Rc<OperatorNode>> =
-        roots.iter().flat_map(QueryRoot::operator_refs).collect();
-    while let Some(node) = pending.pop() {
-        if !visited.insert(Rc::as_ptr(node)) {
-            continue;
-        }
-        pending.extend(node.children());
-        let Operator::NonASAP(NonASAPOp::Scan { source, .. }) = &node.operator else {
-            continue;
-        };
-        let source = source_name(source);
-        let Some((facts, series_type)) = data.series_facts(source) else {
-            continue;
-        };
-        let column = |name: &str| SourceColumn {
-            source: source.to_owned(),
-            column: name.to_owned(),
-        };
-        for (name, sign) in &facts.column_signs {
-            signs.insert(column(name), *sign);
-        }
-        if series_type == Some(PrometheusMetricType::Counter) {
-            signs
-                .entry(column("value"))
-                .or_insert(ValueSign::NonNegative);
-        }
+fn declared_column_signs(source: &str, data: &DataWorkload) -> BTreeMap<String, ValueSign> {
+    let Some((facts, series_type)) = data.series_facts(source) else {
+        return BTreeMap::new();
+    };
+    let mut signs = facts.column_signs.clone();
+    if series_type == Some(PrometheusMetricType::Counter) {
+        signs
+            .entry("value".to_owned())
+            .or_insert(ValueSign::NonNegative);
     }
     signs
 }
@@ -111,16 +88,23 @@ type GroupOfNode = HashMap<*const OperatorNode, MemoGroupId>;
 
 /// The group of `node`: its operator over its children's groups (each
 /// found or added first), found or added by [`Memo::find_or_add_group`].
+/// A `Scan`'s source has its column signs declared to `memo` first
+/// ([`declared_column_signs`]).
 fn group_of(
     memo: &mut Memo,
     group_of_node: &mut GroupOfNode,
     node: &Rc<OperatorNode>,
+    data: &DataWorkload,
 ) -> Result<MemoGroupId, SchemaDerivationError> {
     if let Some(&group) = group_of_node.get(&Rc::as_ptr(node)) {
         return Ok(group);
     }
     for child in node.children() {
-        group_of(memo, group_of_node, child)?;
+        group_of(memo, group_of_node, child, data)?;
+    }
+    if let Operator::NonASAP(NonASAPOp::Scan { source, .. }) = &node.operator {
+        let source = source_name(source);
+        memo.declare_column_signs(source, declared_column_signs(source, data));
     }
     let expression = node
         .operator

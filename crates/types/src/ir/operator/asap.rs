@@ -760,6 +760,20 @@ pub(crate) fn summary_agg_schema(
     Ok(schema)
 }
 
+/// Where each column of [`summary_agg_schema`]'s output comes from: the
+/// aggregate layout of `reduction` with the state in the one measure's place
+/// (`OutputColumnSource::Measure(0)`).
+pub(crate) fn summary_agg_columns(
+    child: &Schema,
+    reduction: &Reduction,
+) -> Result<Vec<crate::ir::schema::OutputColumnSource>, SchemaDerivationError> {
+    crate::ir::schema::aggregate_output_columns(
+        child,
+        reduction,
+        &[crate::ir::operator::AggIntent::Sum { col: None }],
+    )
+}
+
 /// The schema of a `SummaryTumblingWindowChain` of `summary_type` by `reduction`
 /// over rows of schema `child`: a state with a time index, one row per
 /// window and key, (window_end, keys…, state). `window_end` (column 0, the

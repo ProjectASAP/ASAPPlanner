@@ -95,19 +95,16 @@ pub enum ValueSign {
     Unknown,
 }
 
-/// The properties of a group, or a candidate, computing `expression` over
-/// its input groups: the rules that check operator nodes, reading each
-/// input group's `group_properties` and `expression`
-/// ([`MemoGroupAsInput`]), never a node tree. Fails when the expression
-/// breaks them (schema derivation, input validation, merge check).
-pub(super) fn derive_group_properties(
-    memo: &Memo,
-    expression: &Operator<MemoGroupId>,
-) -> Result<GroupProperties, SchemaDerivationError> {
-    let operator = expression.map_children(|&group_id| MemoGroupAsInput { memo, group_id });
+/// The node rules every group and candidate expression must pass, over
+/// its input groups ([`MemoGroupAsInput`]), never a node tree: schema
+/// derivation, input validation and, for a merge, the coverage check.
+/// Returns the output schema and the aggregate coverage.
+fn check_node_rules(
+    operator: &Operator<MemoGroupAsInput<'_>>,
+) -> Result<(Schema, Option<SummaryCoverage>), SchemaDerivationError> {
     let schema = operator.output_schema()?;
     operator.validate_inputs()?;
-    let aggregate_coverage = match SummaryCoverage::derive_from_inputs(&operator) {
+    let aggregate_coverage = match SummaryCoverage::derive_from_inputs(operator) {
         Ok(coverage) => Some(coverage),
         // A merge is valid only over states of one definition it may merge.
         Err(error) if matches!(operator, Operator::ASAP(ASAPOp::SummaryMerge { .. })) => {
@@ -115,6 +112,29 @@ pub(super) fn derive_group_properties(
         }
         Err(_) => None,
     };
+    Ok((schema, aggregate_coverage))
+}
+
+/// The output schema and kind of a candidate computing `expression` over
+/// its input groups, once it passes the node rules ([`check_node_rules`]).
+pub(super) fn check_candidate_expression(
+    memo: &Memo,
+    expression: &Operator<MemoGroupId>,
+) -> Result<(Schema, OperatorResultKind), SchemaDerivationError> {
+    let operator = expression.map_children(|&group_id| MemoGroupAsInput { memo, group_id });
+    let (schema, _) = check_node_rules(&operator)?;
+    Ok((schema, operator.output_kind()))
+}
+
+/// The properties of a group computing `expression` over its input
+/// groups, once it passes the node rules ([`check_node_rules`]), reading
+/// each input group's `group_properties` and `expression`.
+pub(super) fn derive_group_properties(
+    memo: &Memo,
+    expression: &Operator<MemoGroupId>,
+) -> Result<GroupProperties, SchemaDerivationError> {
+    let operator = expression.map_children(|&group_id| MemoGroupAsInput { memo, group_id });
+    let (schema, aggregate_coverage) = check_node_rules(&operator)?;
     Ok(GroupProperties {
         column_sign: output_column_sign(&operator, &schema, &memo.declared_column_signs),
         depends_on_evaluation_time: depends_on_evaluation_time(&operator),
@@ -137,8 +157,8 @@ fn depends_on_evaluation_time(operator: &Operator<MemoGroupAsInput<'_>>) -> bool
             ScalarExpr::EvalTimestamp | ScalarExpr::CurrentTimestamp
         ) || expr.children().into_iter().any(reads_evaluation_time)
     }
-    match operator {
-        Operator::NonASAP(NonASAPOp::TimeRange { .. }) => true,
+    let reads_it = match operator {
+        Operator::NonASAP(NonASAPOp::TimeRange { .. }) => return true,
         Operator::NonASAP(NonASAPOp::TimeShift {
             shift:
                 TimeShift {
@@ -146,19 +166,14 @@ fn depends_on_evaluation_time(operator: &Operator<MemoGroupAsInput<'_>>) -> bool
                     ..
                 },
             ..
-        }) => false,
-        Operator::NonASAP(op) => {
-            op.scalar_exprs().into_iter().any(reads_evaluation_time)
-                || operator.children().into_iter().any(depends_on_it)
-        }
+        }) => return false,
+        Operator::NonASAP(op) => op.scalar_exprs().into_iter().any(reads_evaluation_time),
         Operator::ASAP(
             ASAPOp::SummaryAgg { filter, .. } | ASAPOp::SummaryTumblingWindowChain { filter, .. },
-        ) => {
-            filter.iter().any(|pred| reads_evaluation_time(&pred.0))
-                || operator.children().into_iter().any(depends_on_it)
-        }
-        Operator::ASAP(_) => operator.children().into_iter().any(depends_on_it),
-    }
+        ) => filter.iter().any(|pred| reads_evaluation_time(&pred.0)),
+        Operator::ASAP(_) => false,
+    };
+    reads_it || operator.children().into_iter().any(depends_on_it)
 }
 
 fn depends_on_it(input: &MemoGroupAsInput<'_>) -> bool {

@@ -6,9 +6,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 mod hash_consing;
 
-use super::group::derive_group_properties;
+use super::group::{check_candidate_expression, derive_group_properties};
 use crate::accuracy::AccuracyTarget;
-use crate::ir::operator::arguments::SourceColumn;
 use crate::ir::Operator;
 use crate::ir::QueryRoot;
 use crate::ir::SchemaDerivationError;
@@ -16,7 +15,10 @@ use crate::stages::{
     CandidateError, CandidateForMemoGroup, CandidateForMemoGroupId, LogicalRequirements, MemoGroup,
     MemoGroupId, ValueSign,
 };
-use hash_consing::{expression_hash, same_expression, same_expression_and_logical_properties};
+use hash_consing::{
+    expression_hash, same_expression_and_logical_properties, same_serialized_expression,
+    serialized_operator,
+};
 
 /// The memo, Stage 0's and Stage 1's one type: the memo groups, each with
 /// its candidates ([`MemoGroup::candidates`]: empty after Stage 0), and each
@@ -31,10 +33,11 @@ pub struct Memo {
     /// The groups [`Self::find_or_add_group`] may return, by
     /// [`expression_hash`] of their expression: every group whose sharing
     /// is legal ([`GroupProperties::shareable_when_equal`]).
-    groups_by_expression_hash: HashMap<u64, Vec<MemoGroupId>>,
+    groups_by_expression_hash: HashMap<u64, Vec<(MemoGroupId, Option<String>)>>,
     /// The sign the data workload declares for each source column it
-    /// declares one for: a `Scan`'s [`GroupProperties::column_sign`].
-    pub(super) declared_column_signs: BTreeMap<SourceColumn, ValueSign>,
+    /// declares one for, by source, then column name: a `Scan`'s
+    /// [`GroupProperties::column_sign`].
+    pub(super) declared_column_signs: BTreeMap<String, BTreeMap<String, ValueSign>>,
 }
 
 /// One query of the memo: its root over groups, its accuracy target and
@@ -52,13 +55,17 @@ pub struct MemoQuery {
 }
 
 impl Memo {
-    /// A memo without groups whose `Scan`s read `declared_column_signs`
-    /// (an undeclared source column's sign is `Unknown`).
-    pub fn new(declared_column_signs: BTreeMap<SourceColumn, ValueSign>) -> Self {
-        Self {
-            declared_column_signs,
-            ..Self::default()
-        }
+    /// Declares the sign of each column of `source` its data declares
+    /// (`column_signs`, by column name), which every `Scan` of `source`
+    /// added afterwards reads; an undeclared source column's sign is
+    /// `Unknown`. Stage 0 declares each source before its first `Scan`.
+    pub fn declare_column_signs(
+        &mut self,
+        source: &str,
+        column_signs: BTreeMap<String, ValueSign>,
+    ) {
+        self.declared_column_signs
+            .insert(source.to_owned(), column_signs);
     }
 
     /// The groups, by id.
@@ -90,22 +97,26 @@ impl Memo {
         &mut self,
         expression: Operator<MemoGroupId>,
     ) -> Result<MemoGroupId, SchemaDerivationError> {
-        let group_properties = derive_group_properties(self, &expression)?;
-        let hash = expression_hash(&expression);
-        let shareable = group_properties.shareable_when_equal;
-        if shareable {
-            if let Some(&group) = self
-                .groups_by_expression_hash
-                .get(&hash)
-                .and_then(|groups| {
-                    groups.iter().find(|&&group| {
-                        same_expression(&self.groups[group.0 as usize].expression, &expression)
-                    })
+        let serialized = serialized_operator(&expression);
+        let hash = expression_hash(&expression, serialized.as_deref());
+        // Only shareable groups are listed by hash, and an equal expression
+        // is as shareable as the group it equals, which passed the node rules.
+        if let Some((group, _)) = self
+            .groups_by_expression_hash
+            .get(&hash)
+            .and_then(|groups| {
+                groups.iter().find(|(group, known)| {
+                    same_serialized_expression(
+                        (&self.groups[group.0 as usize].expression, known.as_deref()),
+                        (&expression, serialized.as_deref()),
+                    )
                 })
-            {
-                return Ok(group);
-            }
+            })
+        {
+            return Ok(*group);
         }
+        let group_properties = derive_group_properties(self, &expression)?;
+        let shareable = group_properties.shareable_when_equal;
         let id = MemoGroupId(
             u32::try_from(self.groups.len()).expect("a memo has at most u32::MAX groups"),
         );
@@ -123,7 +134,7 @@ impl Memo {
             self.groups_by_expression_hash
                 .entry(hash)
                 .or_default()
-                .push(id);
+                .push((id, serialized));
         }
         Ok(id)
     }
@@ -136,7 +147,7 @@ impl Memo {
     /// group and every group below it.
     ///
     /// Fails, leaving the memo unchanged, when the candidate's expression
-    /// breaks the node rules a group's does ([`derive_group_properties`]),
+    /// breaks the node rules a group's does ([`check_candidate_expression`]),
     /// or when its output schema or kind differs from the group's: then it
     /// does not compute the group's result.
     pub fn add_candidate(
@@ -144,16 +155,8 @@ impl Memo {
         group: MemoGroupId,
         candidate: CandidateForMemoGroup,
     ) -> Result<CandidateForMemoGroupId, CandidateError> {
-        let output = derive_group_properties(self, &candidate.expression.operator)
-            .map_err(CandidateError::Schema)?;
-        let group_properties = &self.groups[group.0 as usize].group_properties;
-        if output.schema != group_properties.schema
-            || output.result_kind != group_properties.result_kind
-        {
-            return Err(CandidateError::OutputDiffersFromGroup { group });
-        }
-        let candidates = &mut self.groups[group.0 as usize].candidates;
-        if let Some(index_in_group) = candidates
+        if let Some(index_in_group) = self.groups[group.0 as usize]
+            .candidates
             .iter()
             .position(|known| same_expression_and_logical_properties(known, &candidate))
         {
@@ -162,6 +165,14 @@ impl Memo {
                 index_in_group,
             });
         }
+        let (schema, result_kind) =
+            check_candidate_expression(self, &candidate.expression.operator)
+                .map_err(CandidateError::Schema)?;
+        let group_properties = &self.groups[group.0 as usize].group_properties;
+        if schema != group_properties.schema || result_kind != group_properties.result_kind {
+            return Err(CandidateError::OutputDiffersFromGroup { group });
+        }
+        let candidates = &mut self.groups[group.0 as usize].candidates;
         let input_groups: Vec<MemoGroupId> = candidate
             .expression
             .operator

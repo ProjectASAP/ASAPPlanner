@@ -6,15 +6,13 @@
 use std::collections::BTreeMap;
 
 use super::{MemoGroupAsInput, ValueSign};
-use crate::ir::operator::arguments::{
-    BinaryOpKind, JoinKind, PromQLVectorSetOpKind, Reduction, SourceColumn,
-};
-use crate::ir::operator::asap::{summary_agg_schema, summary_build};
+use crate::ir::operator::arguments::{BinaryOpKind, JoinKind, PromQLVectorSetOpKind, Reduction};
+use crate::ir::operator::asap::{summary_agg_columns, summary_agg_schema, summary_build};
 use crate::ir::operator::input::OperatorInput;
 use crate::ir::operator::AggIntent;
 use crate::ir::scalar::expr_ir::ScalarValue;
 use crate::ir::scalar::{resolve_column_ref, ColumnRef, ProjectItem, ScalarExpr};
-use crate::ir::schema::{FieldDataType, Schema};
+use crate::ir::schema::{aggregate_output_columns, FieldDataType, OutputColumnSource, Schema};
 use crate::ir::{ASAPOp, NonASAPOp, Operator};
 use crate::summary_type::{ExactKind, SketchStatistic, SummaryInputExpr, SummaryUpdate};
 use crate::workload::bounds::source_name;
@@ -28,7 +26,7 @@ type Input<'m> = MemoGroupAsInput<'m>;
 pub(crate) fn output_column_sign(
     operator: &Operator<Input<'_>>,
     output: &Schema,
-    declared: &BTreeMap<SourceColumn, ValueSign>,
+    declared: &BTreeMap<String, BTreeMap<String, ValueSign>>,
 ) -> Vec<ValueSign> {
     let signs = match operator {
         Operator::NonASAP(op) => non_asap_signs(op, output, declared),
@@ -50,22 +48,24 @@ fn signs_of(input: &Input<'_>) -> Vec<ValueSign> {
 fn non_asap_signs(
     op: &NonASAPOp<Input<'_>>,
     output: &Schema,
-    declared: &BTreeMap<SourceColumn, ValueSign>,
+    declared: &BTreeMap<String, BTreeMap<String, ValueSign>>,
 ) -> Vec<ValueSign> {
     use NonASAPOp::*;
     let unknown = || vec![Unknown; output.fields.len()];
     match op {
-        Scan { source, schema, .. } => schema
-            .fields
-            .iter()
-            .map(|field| {
-                let column = SourceColumn {
-                    source: source_name(source).to_owned(),
-                    column: field.name.clone(),
-                };
-                declared.get(&column).copied().unwrap_or(Unknown)
-            })
-            .collect(),
+        Scan { source, schema, .. } => {
+            let declared = declared.get(source_name(source));
+            schema
+                .fields
+                .iter()
+                .map(|field| {
+                    declared
+                        .and_then(|columns| columns.get(&field.name))
+                        .copied()
+                        .unwrap_or(Unknown)
+                })
+                .collect()
+        }
         Values { .. } | PromqlVectorFromScalar(_) => unknown(),
         Filter { child, .. }
         | Sort { child, .. }
@@ -264,65 +264,65 @@ fn expression_sign<C>(expr: &ScalarExpr<C>, input: &[ValueSign]) -> ValueSign {
     }
 }
 
-/// An aggregate's, in `aggregate_output_schema`'s layout: a per-entity
-/// reduction keeps its input's columns in place, its value replaced by the
-/// measure's; a `by` reduction lists its keys, then its measures; a
-/// `without` reduction the input's other label columns, then its measures.
+/// An aggregate's, by where each output column comes from
+/// ([`aggregate_output_columns`]): a kept input column keeps its sign, a
+/// measure's value has [`measure_sign`] of its input value's (its first
+/// input column, else the column `aggregate_output_schema` types it by), and
+/// a label a measure adds is `Unknown`.
 fn aggregate_signs(
     child: &Input<'_>,
     reduction: &Reduction,
     measures: &[AggIntent],
     output: &Schema,
 ) -> Vec<ValueSign> {
+    let Ok(sources) = aggregate_output_columns(child.schema(), reduction, measures) else {
+        return vec![Unknown; output.fields.len()];
+    };
+    let input = signs_of(child);
+    signs_from_sources(child, &sources, |index, value| {
+        let measure = &measures[index];
+        let value = measure.input_cols().first().copied().or(value);
+        measure_sign(
+            measure,
+            value
+                .and_then(|value| input.get(value).copied())
+                .unwrap_or(Unknown),
+        )
+    })
+}
+
+/// The sign of each output column from `sources`: an input column keeps
+/// its sign, measure `index` has `measure(index, value)`, where `value` is
+/// the column `aggregate_output_schema` types a measure without an input
+/// column by (the sample value, else the first column not kept), and an
+/// added label is `Unknown`.
+fn signs_from_sources(
+    child: &Input<'_>,
+    sources: &[OutputColumnSource],
+    measure: impl Fn(usize, Option<usize>) -> ValueSign,
+) -> Vec<ValueSign> {
     let input = signs_of(child);
     let schema = child.schema();
-    let sample_value = resolve_column_ref(&ColumnRef::SampleValue, schema).ok();
-    let value_of = |measure: &AggIntent| measure.input_cols().first().copied().or(sample_value);
-    let keys: Vec<ValueSign> = match reduction {
-        Reduction::PerEntity => {
-            let mut signs = input.clone();
-            if let Some(measure) = measures.first() {
-                if let Some(value) = value_of(measure).filter(|&value| value < signs.len()) {
-                    signs[value] = measure_sign(measure, input[value]);
-                }
-            }
-            return signs;
-        }
-        Reduction::Reduce(by) if by.is_without() => (0..schema.fields.len())
-            .filter(|&column| {
-                schema.time_index != Some(column)
-                    && sample_value != Some(column)
-                    && !by.keys().contains(&column)
-            })
-            .map(|column| input[column])
-            .collect(),
-        Reduction::Reduce(by) => by
-            .keys()
-            .iter()
-            .map(|&key| input.get(key).copied().unwrap_or(Unknown))
-            .collect(),
-    };
-    let measured: Vec<ValueSign> = measures
+    let kept: Vec<usize> = sources
         .iter()
-        .flat_map(|measure| {
-            let sign = measure_sign(
-                measure,
-                value_of(measure)
-                    .and_then(|value| input.get(value).copied())
-                    .unwrap_or(Unknown),
-            );
-            // `count_values` and `absent` add label columns before their value.
-            let labels = match measure {
-                AggIntent::CountValues { label } => {
-                    usize::from(!output.fields[..keys.len()].iter().any(|f| f.name == *label))
-                }
-                AggIntent::Absent { labels } => labels.len(),
-                _ => 0,
-            };
-            std::iter::repeat_n(Unknown, labels).chain([sign])
+        .filter_map(|source| match source {
+            OutputColumnSource::InputColumn(column) => Some(*column),
+            _ => None,
         })
         .collect();
-    keys.into_iter().chain(measured).collect()
+    let value = resolve_column_ref(&ColumnRef::SampleValue, schema)
+        .ok()
+        .or_else(|| (0..schema.fields.len()).find(|column| !kept.contains(column)));
+    sources
+        .iter()
+        .map(|source| match source {
+            OutputColumnSource::InputColumn(column) => {
+                input.get(*column).copied().unwrap_or(Unknown)
+            }
+            OutputColumnSource::Measure(index) => measure(*index, value),
+            OutputColumnSource::AddedLabel => Unknown,
+        })
+        .collect()
 }
 
 /// The sign of `measure`'s value over an input value of sign `input`.
@@ -357,21 +357,18 @@ fn measure_sign(measure: &AggIntent, input: ValueSign) -> ValueSign {
     }
 }
 
-/// A summary state's, in `state_schema`'s layout (an aggregate of one
-/// measure): its key columns keep their input's sign and its state column
-/// records the sign of the values it is updated with.
+/// A summary state's, in its layout ([`summary_agg_columns`]): its key
+/// columns keep their input's sign and its state column records the sign of
+/// the values it is updated with.
 fn state_signs(
     child: &Input<'_>,
     update: &SummaryUpdate,
     reduction: &Reduction,
     state_schema: &Schema,
 ) -> Vec<ValueSign> {
-    let mut signs = aggregate_signs(
-        child,
-        reduction,
-        &[AggIntent::Sum { col: None }],
-        state_schema,
-    );
+    let Ok(sources) = summary_agg_columns(child.schema(), reduction) else {
+        return vec![Unknown; state_schema.fields.len()];
+    };
     let updated_with = match &update.weight {
         SummaryInputExpr::Column(column) => resolve_column_ref(column, child.schema())
             .ok()
@@ -380,10 +377,7 @@ fn state_signs(
         SummaryInputExpr::Constant(value) => sign_of_number(*value),
         SummaryInputExpr::Tuple(_) | SummaryInputExpr::EntityIdentity(_) => Unknown,
     };
-    if let Some(state) = state_schema.fields.iter().position(|f| !f.is_plain()) {
-        signs[state] = updated_with;
-    }
-    signs
+    signs_from_sources(child, &sources, |_, _| updated_with)
 }
 
 /// A readout of summary state: the state's plain columns keep their sign

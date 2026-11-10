@@ -9,10 +9,11 @@
 //! G8  Filter(job = "api" ∧ a + b > 10)(G1);  G9 TimeRange[1m](G8);  G10 SummaryAgg[KLL](G9)
 //! ```
 use std::ops::Bound;
-use std::time::Duration;
 
-use asap_types::ir::operator::arguments::{AtModifier, GroupKeys, Reduction, Source, TimeShift};
+use asap_types::ir::operator::arguments::{AtModifier, Reduction};
 use asap_types::ir::operator::AggIntent;
+
+use crate::memo_fixtures::{filter, range, scan, shift, state};
 use asap_types::ir::properties::summary_coverage::{
     ColumnIdentity, Constraint, CoverageError, IntervalConstraintLimit, SummaryCoverage,
 };
@@ -20,16 +21,13 @@ use asap_types::ir::scalar::expr_ir::{ArithmeticOpKind, CompareOpKind, ScalarVal
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use asap_types::ir::{
-    ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorResultKind, Predicate, ScalarExpr,
-    SchemaDerivationError, TimeRangeKind,
+    ASAPOp, ExprSemantics, NonASAPOp, Operator, Predicate, ScalarExpr, SchemaDerivationError,
 };
 use asap_types::stages::{
     CandidateExpression, CandidateForMemoGroup, LogicalProperties, LogicalRequirements, Memo,
     MemoGroupId, OriginOfCandidateForMemoGroup,
 };
-use asap_types::summary_type::{
-    ExactKind, MergeInputRule, SketchAlgorithm, SketchStatistic, SummaryUpdate,
-};
+use asap_types::summary_type::{ExactKind, MergeInputRule, SketchAlgorithm, SummaryUpdate};
 use asap_types::test_support::definition_id;
 
 const TS: usize = 0;
@@ -40,24 +38,16 @@ const MINUTE_MS: i64 = 60_000;
 const HOUR_MS: i64 = 60 * MINUTE_MS;
 
 /// `Scan latency{predicates}`: `[ts, value, job, a, b]`.
-fn scan(predicates: Vec<ScalarExpr<MemoGroupId>>) -> Operator<MemoGroupId> {
-    Operator::NonASAP(NonASAPOp::Scan {
-        source: Source::TimeSeries {
-            metric: "latency".into(),
-        },
-        predicates: predicates.into_iter().map(Predicate).collect(),
-        schema: Schema::with_time_index(
-            vec![
-                Field::plain("ts", DataType::Timestamp, false),
-                Field::plain("value", DataType::Float64, false),
-                Field::plain("job", DataType::Utf8, false),
-                Field::plain("a", DataType::Float64, false),
-                Field::plain("b", DataType::Float64, false),
-            ],
-            0,
-            vec![],
-        ),
-    })
+fn latency(predicates: Vec<ScalarExpr<MemoGroupId>>) -> Operator<MemoGroupId> {
+    scan(
+        "latency",
+        &[
+            ("job", DataType::Utf8),
+            ("a", DataType::Float64),
+            ("b", DataType::Float64),
+        ],
+        predicates,
+    )
 }
 
 fn job_is(job: &str) -> ScalarExpr<MemoGroupId> {
@@ -82,40 +72,6 @@ fn a_plus_b_above_10() -> ScalarExpr<MemoGroupId> {
         right: Box::new(ScalarExpr::Literal(ScalarValue::Float64(10.0))),
         semantics: ExprSemantics::Sql,
     }
-}
-
-fn filter(pred: ScalarExpr<MemoGroupId>, child: MemoGroupId) -> Operator<MemoGroupId> {
-    Operator::NonASAP(NonASAPOp::Filter {
-        pred: Predicate(pred),
-        child,
-    })
-}
-
-/// `TimeShift(offset_ms, at)`: PromQL `offset` and `@`.
-fn shift(offset_ms: i64, at: Option<AtModifier>, child: MemoGroupId) -> Operator<MemoGroupId> {
-    Operator::NonASAP(NonASAPOp::TimeShift {
-        shift: TimeShift { offset_ms, at },
-        child,
-    })
-}
-
-fn range(width_ms: i64, child: MemoGroupId) -> Operator<MemoGroupId> {
-    Operator::NonASAP(NonASAPOp::TimeRange {
-        range: Duration::from_millis(width_ms as u64),
-        kind: TimeRangeKind::Range,
-        child,
-    })
-}
-
-/// `SummaryAgg[summary_type]` of the sample value per series.
-fn state(summary_type: FieldDataType, child: MemoGroupId) -> Operator<MemoGroupId> {
-    Operator::ASAP(ASAPOp::SummaryAgg {
-        child,
-        summary_type,
-        input: SummaryUpdate::column(ColumnRef::SampleValue),
-        reduction: Reduction::PerEntity,
-        filter: None,
-    })
 }
 
 fn kll_summary_type() -> FieldDataType {
@@ -204,58 +160,12 @@ fn time_of(memo: &Memo, group: MemoGroupId) -> Constraint {
     selection.columns()[&ts()].clone()
 }
 
-/// A group's properties come from its operator and its input groups'
-/// properties: the scan's schema, the state's kind and state column, the
-/// readout's value column, and whether equal copies may be one group.
-#[test]
-fn group_properties_come_from_input_groups() {
-    let mut memo = Memo::default();
-    let g1 = memo.find_or_add_group(scan(vec![])).unwrap();
-    let g4 = kll_of_last_minute_where(&mut memo, g1, job_is("api"));
-    let readout = memo
-        .find_or_add_group(Operator::ASAP(ASAPOp::SummaryEstimate {
-            summary_input: g4,
-            query: SketchStatistic::Quantile { q: 0.99 },
-        }))
-        .unwrap();
-    let limit = memo
-        .find_or_add_group(Operator::NonASAP(NonASAPOp::Limit {
-            n: Some(1),
-            offset: 0,
-            partition_by: GroupKeys::default(),
-            child: g1,
-        }))
-        .unwrap();
-    let properties = |group: MemoGroupId| &memo.groups()[group.0 as usize].group_properties;
-    assert_eq!(properties(g1).schema.fields.len(), 5);
-    assert_eq!(properties(g1).aggregate_coverage, None);
-    assert_eq!(properties(g4).result_kind, OperatorResultKind::State);
-    assert!(properties(g4)
-        .schema
-        .fields
-        .iter()
-        .any(|field| field.name == "state" && !field.is_plain()));
-    assert!(properties(g4).aggregate_coverage.is_some());
-    assert_eq!(
-        properties(readout).result_kind,
-        OperatorResultKind::InstantVector
-    );
-    assert!(properties(readout)
-        .schema
-        .fields
-        .iter()
-        .any(|field| field.name == "quantile"
-            && field.dtype == FieldDataType::Plain(DataType::Float64)));
-    assert!(properties(g4).shareable_when_equal);
-    assert!(!properties(limit).shareable_when_equal);
-}
-
 /// G4: `job = "api"` and the minute are lifted; the definition is the KLL
 /// over G1.
 #[test]
 fn a_summary_agg_over_a_job_filter_lifts_it_into_the_selection() {
     let mut memo = Memo::default();
-    let g1 = memo.find_or_add_group(scan(vec![])).unwrap();
+    let g1 = memo.find_or_add_group(latency(vec![])).unwrap();
     let g4 = kll_of_last_minute_where(&mut memo, g1, job_is("api"));
     let coverage = coverage(&memo, g4);
     assert_eq!(coverage.definition().input_group, Some(g1));
@@ -278,7 +188,7 @@ fn a_summary_agg_over_a_job_filter_lifts_it_into_the_selection() {
 #[test]
 fn states_with_equal_definitions_and_disjoint_selections_merge() {
     let mut memo = Memo::default();
-    let g1 = memo.find_or_add_group(scan(vec![])).unwrap();
+    let g1 = memo.find_or_add_group(latency(vec![])).unwrap();
     let g4 = kll_of_last_minute_where(&mut memo, g1, job_is("api"));
     let g7 = kll_of_last_minute_where(&mut memo, g1, job_is("web"));
     assert_eq!(
@@ -306,7 +216,7 @@ fn states_with_equal_definitions_and_disjoint_selections_merge() {
 #[test]
 fn states_with_overlapping_selections_do_not_merge() {
     let mut memo = Memo::default();
-    let g1 = memo.find_or_add_group(scan(vec![])).unwrap();
+    let g1 = memo.find_or_add_group(latency(vec![])).unwrap();
     let g4 = kll_of_last_minute_where(&mut memo, g1, job_is("api"));
     let groups = memo.groups().len();
     assert!(matches!(
@@ -325,7 +235,7 @@ fn states_with_overlapping_selections_do_not_merge() {
 #[test]
 fn a_filter_that_is_no_selection_stays_unlifted() {
     let mut memo = Memo::default();
-    let g1 = memo.find_or_add_group(scan(vec![])).unwrap();
+    let g1 = memo.find_or_add_group(latency(vec![])).unwrap();
     let g4 = kll_of_last_minute_where(&mut memo, g1, job_is("api"));
     let g10 = kll_of_last_minute_where(
         &mut memo,
@@ -369,7 +279,7 @@ fn a_above(threshold: MemoGroupId) -> ScalarExpr<MemoGroupId> {
 #[test]
 fn states_whose_definitions_read_the_same_subquery_merge() {
     let mut memo = Memo::default();
-    let g1 = memo.find_or_add_group(scan(vec![])).unwrap();
+    let g1 = memo.find_or_add_group(latency(vec![])).unwrap();
     let threshold = memo
         .find_or_add_group(Operator::NonASAP(NonASAPOp::Values {
             rows: vec![vec![ScalarExpr::Literal(ScalarValue::Float64(10.0))]],
@@ -409,7 +319,7 @@ fn states_whose_definitions_read_the_same_subquery_merge() {
 fn scan_predicates_lift_and_their_states_merge() {
     let mut memo = Memo::default();
     let state_of_job = |memo: &mut Memo, job: &str| {
-        let series = memo.find_or_add_group(scan(vec![job_is(job)])).unwrap();
+        let series = memo.find_or_add_group(latency(vec![job_is(job)])).unwrap();
         let last_minute = memo.find_or_add_group(range(MINUTE_MS, series)).unwrap();
         memo.find_or_add_group(kll(last_minute)).unwrap()
     };
@@ -419,7 +329,7 @@ fn scan_predicates_lift_and_their_states_merge() {
     assert_eq!(definition.input_group, None);
     assert_eq!(
         definition.unlifted_operators,
-        vec![kll_unlifted(), scan(vec![]).map_children(|_| None)]
+        vec![kll_unlifted(), latency(vec![]).map_children(|_| None)]
     );
     assert_eq!(
         coverage(&memo, api).selection()[0].columns()[&ColumnIdentity::new(None, "job")],
@@ -447,7 +357,7 @@ fn scan_predicates_lift_and_their_states_merge() {
 #[test]
 fn a_merge_over_a_chains_windows_covers_the_direct_build() {
     let mut memo = Memo::default();
-    let g1 = memo.find_or_add_group(scan(vec![])).unwrap();
+    let g1 = memo.find_or_add_group(latency(vec![])).unwrap();
     let g2 = memo.find_or_add_group(shift(HOUR_MS, None, g1)).unwrap();
     let g3 = memo.find_or_add_group(range(5 * MINUTE_MS, g2)).unwrap();
     let g4 = memo.find_or_add_group(kll(g3)).unwrap();
@@ -490,7 +400,7 @@ fn a_merge_over_a_chains_windows_covers_the_direct_build() {
 #[test]
 fn time_range_and_shifts_lift_into_one_interval_on_the_timestamp_column() {
     let mut memo = Memo::default();
-    let g1 = memo.find_or_add_group(scan(vec![])).unwrap();
+    let g1 = memo.find_or_add_group(latency(vec![])).unwrap();
     let plain = kll_over_last_5m(&mut memo, g1);
     let offset = kll_over_last_5m_of(&mut memo, shift(HOUR_MS, None, g1));
     let at_t = kll_over_last_5m_of(
@@ -540,7 +450,7 @@ fn kll_over_last_5m_of(memo: &mut Memo, expression: Operator<MemoGroupId>) -> Me
 #[test]
 fn at_end_and_at_start_share_the_subtree_they_anchor_and_stay_unlifted() {
     let mut memo = Memo::default();
-    let g1 = memo.find_or_add_group(scan(vec![])).unwrap();
+    let g1 = memo.find_or_add_group(latency(vec![])).unwrap();
     let g2 = memo.find_or_add_group(range(5 * MINUTE_MS, g1)).unwrap();
     let g3 = memo.find_or_add_group(kll(g2)).unwrap();
     assert_eq!(time_of(&memo, g3), relative(-5 * MINUTE_MS, 0));
@@ -571,7 +481,7 @@ fn value_and_absolute_timestamp_filters_lift_with_fixed_value_limits() {
         semantics: ExprSemantics::Sql,
     };
     let mut memo = Memo::default();
-    let g1 = memo.find_or_add_group(scan(vec![])).unwrap();
+    let g1 = memo.find_or_add_group(latency(vec![])).unwrap();
     let g2 = memo
         .find_or_add_group(filter(
             ScalarExpr::BoolAnd(vec![
@@ -619,7 +529,7 @@ fn value_and_absolute_timestamp_filters_lift_with_fixed_value_limits() {
 fn counter_states_merge_over_windows_disjoint_in_time() {
     let increase = || FieldDataType::exact(ExactKind::Increase);
     let mut memo = Memo::default();
-    let g1 = memo.find_or_add_group(scan(vec![])).unwrap();
+    let g1 = memo.find_or_add_group(latency(vec![])).unwrap();
     let g2 = memo.find_or_add_group(range(5 * MINUTE_MS, g1)).unwrap();
     let g3 = memo.find_or_add_group(state(increase(), g2)).unwrap();
     let g4 = memo
@@ -660,7 +570,7 @@ fn an_exact_aggregate_has_coverage() {
         })
     };
     let mut memo = Memo::default();
-    let g1 = memo.find_or_add_group(scan(vec![])).unwrap();
+    let g1 = memo.find_or_add_group(latency(vec![])).unwrap();
     let g2 = memo.find_or_add_group(filter(job_is("api"), g1)).unwrap();
     let g3 = memo.find_or_add_group(range(MINUTE_MS, g2)).unwrap();
     let g4 = memo.find_or_add_group(sum_by_job(g3)).unwrap();

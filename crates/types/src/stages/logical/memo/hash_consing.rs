@@ -33,17 +33,36 @@ pub(super) fn same_expression(left: &Operator<MemoGroupId>, right: &Operator<Mem
         )
 }
 
+/// The canonical JSON of `expression`'s operator and arguments, serialized
+/// once per expression: what [`expression_hash`] hashes and
+/// [`same_serialized_expression`] compares; `None` when it does not
+/// serialize.
+pub(super) fn serialized_operator(expression: &Operator<MemoGroupId>) -> Option<String> {
+    serde_json::to_string(&operator_and_arguments(expression)).ok()
+}
+
 /// A hash consistent with [`same_expression`], used only to narrow the
-/// groups compared: SipHash over the canonical JSON of the operator and its
-/// arguments, then the input groups. A non-finite `f64` serializes as
-/// `null`, which only widens one bucket; [`same_expression`] decides.
-pub(super) fn expression_hash(expression: &Operator<MemoGroupId>) -> u64 {
+/// groups compared: SipHash over `serialized`, the expression's
+/// [`serialized_operator`], then the input groups. A non-finite `f64`
+/// serializes as `null`, which only widens one bucket;
+/// [`same_serialized_expression`] decides.
+pub(super) fn expression_hash(expression: &Operator<MemoGroupId>, serialized: Option<&str>) -> u64 {
     let mut hasher = DefaultHasher::new();
-    serde_json::to_string(&operator_and_arguments(expression))
-        .unwrap_or_default()
-        .hash(&mut hasher);
+    serialized.unwrap_or_default().hash(&mut hasher);
     expression.children().hash(&mut hasher);
     hasher.finish()
+}
+
+/// [`same_expression`] with each side's [`serialized_operator`] computed
+/// already.
+pub(super) fn same_serialized_expression(
+    (left, left_serialized): (&Operator<MemoGroupId>, Option<&str>),
+    (right, right_serialized): (&Operator<MemoGroupId>, Option<&str>),
+) -> bool {
+    left.children() == right.children()
+        && operator_and_arguments(left) == operator_and_arguments(right)
+        && left_serialized.is_some()
+        && left_serialized == right_serialized
 }
 
 /// Typed equality, confirmed by equal serializations: numeric `PartialEq`

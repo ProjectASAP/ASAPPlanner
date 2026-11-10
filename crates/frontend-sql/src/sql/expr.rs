@@ -1,16 +1,17 @@
 use std::rc::Rc;
 
-use datafusion::arrow::datatypes::{DataType as ArrowDataType, TimeUnit};
+use datafusion::arrow::datatypes::DataType as ArrowDataType;
 use datafusion::logical_expr::utils::{split_binary, split_conjunction};
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 
 use asap_frontend_common::UnresolvedScalar as Unresolved;
 use asap_types::ir::scalar::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
+use asap_types::ir::schema::DataType;
 use asap_types::ir::ExprSemantics;
 
 use crate::error::SqlError as LoweringError;
 
-use super::types::{cast_target, scalar_value_to_asap};
+use super::types::{cast_target, dtype_to_arrow, scalar_value_to_asap};
 use super::SqlLowerer;
 
 impl SqlLowerer<'_> {
@@ -153,9 +154,7 @@ impl SqlLowerer<'_> {
                     unreachable!()
                 };
                 let to = match c.field.data_type() {
-                    ArrowDataType::Timestamp(..) => {
-                        ArrowDataType::Timestamp(TimeUnit::Millisecond, None)
-                    }
+                    ArrowDataType::Timestamp(..) => dtype_to_arrow(&DataType::Timestamp),
                     other => other.clone(),
                 };
                 match sv.cast_to(&to) {

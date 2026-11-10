@@ -2,6 +2,7 @@
 //! its own copy of every dependency, which outgrew CI's disk.
 //! One file: `cargo test -p asap-types --test types <file>::`.
 
+mod memo_fixtures;
 mod memo_group_properties;
 mod memo_summary_coverage;
 mod physical_export;

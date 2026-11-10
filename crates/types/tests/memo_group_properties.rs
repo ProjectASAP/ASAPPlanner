@@ -8,44 +8,35 @@
 //! gauge           [ts, value, host]   nothing declared
 //! ```
 use std::collections::BTreeMap;
-use std::time::Duration;
 
-use asap_types::ir::operator::arguments::{
-    AtModifier, GroupKeys, JoinKind, Reduction, Source, SourceColumn, TimeShift,
-};
+use asap_types::ir::operator::arguments::{AtModifier, GroupKeys, JoinKind, Reduction, Source};
 use asap_types::ir::operator::AggIntent;
+
+use crate::memo_fixtures::{filter, range, scan, shift, state};
 use asap_types::ir::scalar::expr_ir::{ArithmeticOpKind, CompareOpKind, ScalarValue};
-use asap_types::ir::scalar::{ColumnRef, ProjectItem};
+use asap_types::ir::scalar::ProjectItem;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use asap_types::ir::{
-    ASAPOp, ExprSemantics, NonASAPOp, Operator, Predicate, ScalarExpr, TimeRangeKind,
+    ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorResultKind, Predicate, ScalarExpr,
 };
 use asap_types::stages::{Memo, MemoGroupId, ValueSign};
-use asap_types::summary_type::{SketchAlgorithm, SketchStatistic, SummaryUpdate};
+use asap_types::summary_type::{SketchAlgorithm, SketchStatistic};
 
 use ValueSign::{NonNegative, NonPositive, Unknown};
 
 const TS: usize = 0;
 const VALUE: usize = 1;
 const HOST: usize = 2;
-const MINUTE_MS: u64 = 60_000;
+const MINUTE_MS: i64 = 60_000;
 
 /// The memo of every example: `latency.value` declared non-negative, and
 /// `requests_total.value` as Stage 0 declares a counter's.
 fn memo() -> Memo {
-    let non_negative = |source: &str| {
-        (
-            SourceColumn {
-                source: source.into(),
-                column: "value".into(),
-            },
-            NonNegative,
-        )
-    };
-    Memo::new(BTreeMap::from([
-        non_negative("latency"),
-        non_negative("requests_total"),
-    ]))
+    let mut memo = Memo::default();
+    for source in ["latency", "requests_total"] {
+        memo.declare_column_signs(source, BTreeMap::from([("value".into(), NonNegative)]));
+    }
+    memo
 }
 
 fn add(memo: &mut Memo, expression: Operator<MemoGroupId>) -> MemoGroupId {
@@ -63,40 +54,8 @@ fn depends(memo: &Memo, group: MemoGroupId) -> bool {
 }
 
 /// `Scan metric`: `[ts, value, host]`.
-fn scan(metric: &str) -> Operator<MemoGroupId> {
-    Operator::NonASAP(NonASAPOp::Scan {
-        source: Source::TimeSeries {
-            metric: metric.into(),
-        },
-        predicates: vec![],
-        schema: Schema::with_time_index(
-            vec![
-                Field::plain("ts", DataType::Timestamp, false),
-                Field::plain("value", DataType::Float64, false),
-                Field::plain("host", DataType::Utf8, false),
-            ],
-            0,
-            vec![],
-        ),
-    })
-}
-
-fn range(child: MemoGroupId) -> Operator<MemoGroupId> {
-    Operator::NonASAP(NonASAPOp::TimeRange {
-        range: Duration::from_millis(MINUTE_MS),
-        kind: TimeRangeKind::Range,
-        child,
-    })
-}
-
-fn shift(at: Option<AtModifier>, child: MemoGroupId) -> Operator<MemoGroupId> {
-    Operator::NonASAP(NonASAPOp::TimeShift {
-        shift: TimeShift {
-            offset_ms: 60_000,
-            at,
-        },
-        child,
-    })
+fn series(metric: &str) -> Operator<MemoGroupId> {
+    scan(metric, &[("host", DataType::Utf8)], vec![])
 }
 
 fn compare(
@@ -110,13 +69,6 @@ fn compare(
         right: Box::new(right),
         semantics: ExprSemantics::Sql,
     }
-}
-
-fn filter(pred: ScalarExpr<MemoGroupId>, child: MemoGroupId) -> Operator<MemoGroupId> {
-    Operator::NonASAP(NonASAPOp::Filter {
-        pred: Predicate(pred),
-        child,
-    })
 }
 
 /// `Project(ts, expr AS value, host)`.
@@ -155,16 +107,6 @@ fn by_host() -> Reduction {
     Reduction::by(vec![HOST])
 }
 
-fn state(algorithm: SketchAlgorithm, child: MemoGroupId) -> Operator<MemoGroupId> {
-    Operator::ASAP(ASAPOp::SummaryAgg {
-        child,
-        summary_type: FieldDataType::Sketch(algorithm),
-        input: SummaryUpdate::column(ColumnRef::SampleValue),
-        reduction: Reduction::PerEntity,
-        filter: None,
-    })
-}
-
 fn readout(query: SketchStatistic, state: MemoGroupId) -> Operator<MemoGroupId> {
     Operator::ASAP(ASAPOp::SummaryEstimate {
         summary_input: state,
@@ -188,8 +130,8 @@ fn readout(query: SketchStatistic, state: MemoGroupId) -> Operator<MemoGroupId> 
 #[test]
 fn scans_read_declared_signs_and_row_operators_keep_or_set_them() {
     let mut memo = memo();
-    let g1 = add(&mut memo, scan("latency"));
-    let g2 = add(&mut memo, scan("gauge"));
+    let g1 = add(&mut memo, series("latency"));
+    let g2 = add(&mut memo, series("gauge"));
     let g3 = add(
         &mut memo,
         filter(
@@ -201,8 +143,8 @@ fn scans_read_declared_signs_and_row_operators_keep_or_set_them() {
             g1,
         ),
     );
-    let g4 = add(&mut memo, range(g3));
-    let g5 = add(&mut memo, shift(None, g4));
+    let g4 = add(&mut memo, range(MINUTE_MS, g3));
+    let g5 = add(&mut memo, shift(MINUTE_MS, None, g4));
     let value = || Box::new(ScalarExpr::Column(VALUE));
     let negated = || ScalarExpr::Negative {
         expr: value(),
@@ -263,27 +205,27 @@ fn scans_read_declared_signs_and_row_operators_keep_or_set_them() {
 #[test]
 fn aggregates_keep_their_keys_and_derive_their_values() {
     let mut memo = memo();
-    let g1 = add(&mut memo, scan("latency"));
+    let g1 = add(&mut memo, series("latency"));
     let sum = || AggIntent::Sum { col: Some(VALUE) };
     let g2 = add(&mut memo, aggregate(by_host(), sum(), g1));
     let g3 = add(
         &mut memo,
         aggregate(by_host(), AggIntent::Max { col: Some(VALUE) }, g1),
     );
-    let g4 = add(&mut memo, scan("gauge"));
+    let g4 = add(&mut memo, series("gauge"));
     let g5 = add(&mut memo, aggregate(by_host(), sum(), g4));
     let g6 = add(&mut memo, aggregate(by_host(), AggIntent::Count, g4));
     let g7 = add(
         &mut memo,
         aggregate(by_host(), AggIntent::Cardinality { cols: vec![VALUE] }, g4),
     );
-    let requests = add(&mut memo, scan("requests_total"));
-    let g8 = add(&mut memo, range(requests));
+    let requests = add(&mut memo, series("requests_total"));
+    let g8 = add(&mut memo, range(MINUTE_MS, requests));
     let g9 = add(
         &mut memo,
         aggregate(Reduction::PerEntity, AggIntent::Rate, g8),
     );
-    let g10 = add(&mut memo, range(g4));
+    let g10 = add(&mut memo, range(MINUTE_MS, g4));
     let g11 = add(
         &mut memo,
         aggregate(Reduction::PerEntity, AggIntent::Rate, g10),
@@ -316,12 +258,18 @@ fn aggregates_keep_their_keys_and_derive_their_values() {
 #[test]
 fn states_record_their_input_sign_and_readouts_read_it() {
     let mut memo = memo();
-    let g1 = add(&mut memo, scan("latency"));
-    let g2 = add(&mut memo, range(g1));
-    let g3 = add(&mut memo, state(SketchAlgorithm::Kll, g2));
-    let g4 = add(&mut memo, shift(None, g1));
-    let g5 = add(&mut memo, range(g4));
-    let g6 = add(&mut memo, state(SketchAlgorithm::Kll, g5));
+    let g1 = add(&mut memo, series("latency"));
+    let g2 = add(&mut memo, range(MINUTE_MS, g1));
+    let g3 = add(
+        &mut memo,
+        state(FieldDataType::Sketch(SketchAlgorithm::Kll), g2),
+    );
+    let g4 = add(&mut memo, shift(MINUTE_MS, None, g1));
+    let g5 = add(&mut memo, range(MINUTE_MS, g4));
+    let g6 = add(
+        &mut memo,
+        state(FieldDataType::Sketch(SketchAlgorithm::Kll), g5),
+    );
     let g7 = add(
         &mut memo,
         Operator::ASAP(ASAPOp::SummaryMerge {
@@ -333,9 +281,12 @@ fn states_record_their_input_sign_and_readouts_read_it() {
         &mut memo,
         readout(SketchStatistic::Quantile { q: 0.99 }, g7),
     );
-    let g9 = add(&mut memo, scan("gauge"));
-    let g10 = add(&mut memo, range(g9));
-    let g11 = add(&mut memo, state(SketchAlgorithm::Hll, g10));
+    let g9 = add(&mut memo, series("gauge"));
+    let g10 = add(&mut memo, range(MINUTE_MS, g9));
+    let g11 = add(
+        &mut memo,
+        state(FieldDataType::Sketch(SketchAlgorithm::Hll), g10),
+    );
     let g12 = add(&mut memo, readout(SketchStatistic::Cardinality, g11));
     // [ts, state, host]
     for group in [g3, g6, g7] {
@@ -368,11 +319,11 @@ fn a_top_k_ranks_values_of_its_inputs_sign() {
         )
     };
     let sum = AggIntent::Sum { col: Some(VALUE) };
-    let gauge = add(&mut memo, scan("gauge"));
+    let gauge = add(&mut memo, series("gauge"));
     let gauge_sum = add(&mut memo, aggregate(by_host(), sum.clone(), gauge));
     let gauge_top = top_5(&mut memo, gauge_sum);
-    let requests = add(&mut memo, scan("requests_total"));
-    let ranged = add(&mut memo, range(requests));
+    let requests = add(&mut memo, series("requests_total"));
+    let ranged = add(&mut memo, range(MINUTE_MS, requests));
     let rate = add(
         &mut memo,
         aggregate(Reduction::PerEntity, AggIntent::Rate, ranged),
@@ -409,19 +360,29 @@ fn a_top_k_ranks_values_of_its_inputs_sign() {
 #[test]
 fn a_result_depends_on_the_evaluation_time_under_a_time_range_or_now() {
     let mut memo = memo();
-    let g1 = add(&mut memo, scan("latency"));
+    let g1 = add(&mut memo, series("latency"));
     let g2 = add(
         &mut memo,
         aggregate(by_host(), AggIntent::Sum { col: Some(VALUE) }, g1),
     );
-    let g3 = add(&mut memo, range(g1));
-    let g4 = add(&mut memo, state(SketchAlgorithm::Kll, g3));
+    let g3 = add(&mut memo, range(MINUTE_MS, g1));
+    let g4 = add(
+        &mut memo,
+        state(FieldDataType::Sketch(SketchAlgorithm::Kll), g3),
+    );
     let g5 = add(
         &mut memo,
-        shift(Some(AtModifier::Timestamp(1_700_000_000_000)), g3),
+        shift(
+            MINUTE_MS,
+            Some(AtModifier::Timestamp(1_700_000_000_000)),
+            g3,
+        ),
     );
-    let g6 = add(&mut memo, state(SketchAlgorithm::Kll, g5));
-    let g7 = add(&mut memo, shift(Some(AtModifier::End), g3));
+    let g6 = add(
+        &mut memo,
+        state(FieldDataType::Sketch(SketchAlgorithm::Kll), g5),
+    );
+    let g7 = add(&mut memo, shift(MINUTE_MS, Some(AtModifier::End), g3));
     let g8 = add(
         &mut memo,
         filter(
@@ -454,8 +415,8 @@ fn a_result_depends_on_the_evaluation_time_under_a_time_range_or_now() {
 #[test]
 fn a_group_reads_only_time_series_when_every_scan_below_reads_one() {
     let mut memo = memo();
-    let series = add(&mut memo, scan("latency"));
-    let window = add(&mut memo, range(series));
+    let series = add(&mut memo, series("latency"));
+    let window = add(&mut memo, range(MINUTE_MS, series));
     let table = |name: &str| {
         Operator::NonASAP(NonASAPOp::Scan {
             source: Source::Table {
@@ -488,4 +449,83 @@ fn a_group_reads_only_time_series_when_every_scan_below_reads_one() {
     assert!(reads(window));
     assert!(!reads(requests));
     assert!(!reads(join));
+}
+
+/// `count_values without (host) ("version", latency)`: a `without`
+/// aggregate's layout adds no label column for `count_values`
+/// (`aggregate_output_schema`), so the group has one sign per output
+/// column, the count's non-negative.
+#[test]
+fn count_values_without_has_one_sign_per_output_column() {
+    let mut memo = memo();
+    let g1 = add(&mut memo, series("latency"));
+    let g2 = add(
+        &mut memo,
+        aggregate(
+            Reduction::Reduce(GroupKeys::without(vec![HOST])),
+            AggIntent::CountValues {
+                label: "version".into(),
+            },
+            g1,
+        ),
+    );
+    let group = &memo.groups()[g2.0 as usize].group_properties;
+    assert_eq!(group.column_sign.len(), group.schema.fields.len());
+    assert_eq!(group.column_sign.last(), Some(&NonNegative));
+}
+
+/// A group's properties come from its operator and its input groups'
+/// properties: the scan's schema, the state's kind and state column, the
+/// readout's value column, and whether equal copies may be one group.
+#[test]
+fn group_properties_come_from_input_groups() {
+    let mut memo = Memo::default();
+    let g1 = memo
+        .find_or_add_group(scan(
+            "latency",
+            &[
+                ("job", DataType::Utf8),
+                ("a", DataType::Float64),
+                ("b", DataType::Float64),
+            ],
+            vec![],
+        ))
+        .unwrap();
+    let api = compare(
+        ScalarExpr::Column(2),
+        CompareOpKind::Eq,
+        ScalarExpr::Literal(ScalarValue::Utf8("api".into())),
+    );
+    let g2 = memo.find_or_add_group(filter(api, g1)).unwrap();
+    let g3 = memo.find_or_add_group(range(MINUTE_MS, g2)).unwrap();
+    let g4 = memo
+        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g3))
+        .unwrap();
+    let readout = memo
+        .find_or_add_group(Operator::ASAP(ASAPOp::SummaryEstimate {
+            summary_input: g4,
+            query: SketchStatistic::Quantile { q: 0.99 },
+        }))
+        .unwrap();
+    let properties = |group: MemoGroupId| &memo.groups()[group.0 as usize].group_properties;
+    assert_eq!(properties(g1).schema.fields.len(), 5);
+    assert_eq!(properties(g1).aggregate_coverage, None);
+    assert_eq!(properties(g4).result_kind, OperatorResultKind::State);
+    assert!(properties(g4)
+        .schema
+        .fields
+        .iter()
+        .any(|field| field.name == "state" && !field.is_plain()));
+    assert!(properties(g4).aggregate_coverage.is_some());
+    assert_eq!(
+        properties(readout).result_kind,
+        OperatorResultKind::InstantVector
+    );
+    assert!(properties(readout)
+        .schema
+        .fields
+        .iter()
+        .any(|field| field.name == "quantile"
+            && field.dtype == FieldDataType::Plain(DataType::Float64)));
+    assert!(properties(g4).shareable_when_equal);
 }

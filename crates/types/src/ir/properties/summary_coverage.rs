@@ -317,27 +317,9 @@ impl SummaryCoverage {
                 Some(build) => of_summary_agg(&build),
                 None => Err(CoverageError::NotSummary),
             },
-            Operator::ASAP(op @ ASAPOp::SummaryAgg { .. }) => of_summary_agg(&as_built(op)),
-            Operator::ASAP(op @ ASAPOp::SummaryTumblingWindowChain { .. }) => {
-                let ASAPOp::SummaryTumblingWindowChain {
-                    child,
-                    summary_type,
-                    input,
-                    reduction,
-                    filter,
-                    ..
-                } = as_built(op)
-                else {
-                    unreachable!("matched a chain");
-                };
-                of_summary_agg(&ASAPOp::SummaryAgg {
-                    child,
-                    summary_type,
-                    input,
-                    reduction,
-                    filter,
-                })
-            }
+            Operator::ASAP(
+                op @ (ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. }),
+            ) => of_summary_agg(&as_built(op)),
             Operator::ASAP(ASAPOp::SummaryMerge {
                 children, group_by, ..
             }) => {
@@ -591,18 +573,27 @@ fn time_column_of_build_input<I: OperatorInput>(state: &I) -> Option<ColumnIdent
     column_identity(&rows, rows.time_index?)
 }
 
-/// The coverage of `build`, a `SummaryAgg` over memo groups (or over an
-/// input a rule built over them).
+/// The coverage of `build`, a `SummaryAgg` or `SummaryTumblingWindowChain`
+/// over memo groups (or over an input a rule built over them): a chain
+/// covers what its `SummaryAgg` over the same input would.
 fn of_summary_agg(build: &ASAPOp<GroupInput<'_>>) -> Result<SummaryCoverage, CoverageError> {
-    let ASAPOp::SummaryAgg {
+    let (ASAPOp::SummaryAgg {
         child,
         summary_type: family,
         input,
         reduction,
         filter,
-    } = build
+    }
+    | ASAPOp::SummaryTumblingWindowChain {
+        child,
+        summary_type: family,
+        input,
+        reduction,
+        filter,
+        ..
+    }) = build
     else {
-        unreachable!("called on a SummaryAgg");
+        unreachable!("called on a SummaryAgg or a chain");
     };
     of_aggregate(child, filter.as_ref(), |residual_filter| {
         Operator::ASAP(ASAPOp::SummaryAgg {
@@ -699,11 +690,7 @@ fn of_aggregate(
         let column = chain[depth].children()[0].schema().time_index?;
         let column = column_at_top(column, &chain[..=depth])?;
         column_identity(top, column)?;
-        let combined = match lifted.get(&column) {
-            Some(existing) => existing.intersect(&constraint)?,
-            None => constraint,
-        };
-        Some((column, combined))
+        Some((column, combined_with(lifted.get(&column), constraint)?))
     });
     let lift_time = time.is_some();
     lifted.extend(time);
@@ -763,11 +750,7 @@ fn residual(
         let lift = constraint_of(conjunct).and_then(|(column, constraint)| {
             let column = column_at_top(column, above)?;
             column_identity(top, column)?;
-            let combined = match lifted.get(&column) {
-                Some(existing) => existing.intersect(&constraint)?,
-                None => constraint,
-            };
-            Some((column, combined))
+            Some((column, combined_with(lifted.get(&column), constraint)?))
         });
         match lift {
             Some((column, constraint)) => {
@@ -780,6 +763,15 @@ fn residual(
         0 => None,
         1 => rest.pop().map(Predicate),
         _ => Some(Predicate(ScalarExpr::BoolAnd(rest))),
+    }
+}
+
+/// `constraint` combined with what is lifted on its column already
+/// (`existing`); `None` when the two do not combine.
+fn combined_with(existing: Option<&Constraint>, constraint: Constraint) -> Option<Constraint> {
+    match existing {
+        Some(existing) => existing.intersect(&constraint),
+        None => Some(constraint),
     }
 }
 
@@ -894,17 +886,23 @@ fn of_window_selection(
 ) -> Result<SummaryCoverage, CoverageError> {
     let mut links = vec![selection.clone()];
     let mut below = *selection.children()[0];
-    loop {
-        match below.operator() {
-            link @ Operator::NonASAP(
-                NonASAPOp::TimeRange { child, .. } | NonASAPOp::TimeShift { child, .. },
-            ) => {
-                below = child;
-                links.push(link);
-            }
-            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => break,
-            _ => return Err(CoverageError::NotSummary),
-        }
+    while let Some(child) = selected_from(&below) {
+        links.push(below.operator());
+        below = child;
+    }
+    let only_time_selections = links.iter().all(|link| {
+        matches!(
+            link,
+            Operator::NonASAP(NonASAPOp::TimeRange { .. } | NonASAPOp::TimeShift { .. })
+        )
+    });
+    if !only_time_selections
+        || !matches!(
+            below.operator(),
+            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+        )
+    {
+        return Err(CoverageError::NotSummary);
     }
     let chain = below
         .aggregate_coverage()
@@ -916,14 +914,9 @@ fn of_window_selection(
         .iter()
         .map(|selection_box| {
             let mut columns = selection_box.columns.clone();
-            let combined = match columns.get(&time_column) {
-                Some(existing) => existing.intersect(&constraint),
-                None => Some(constraint.clone()),
-            };
-            columns.insert(
-                time_column.clone(),
-                combined.ok_or(CoverageError::NotSummary)?,
-            );
+            let combined = combined_with(columns.get(&time_column), constraint.clone())
+                .ok_or(CoverageError::NotSummary)?;
+            columns.insert(time_column.clone(), combined);
             Ok(SelectionBox { columns })
         })
         .collect::<Result<_, _>>()?;
