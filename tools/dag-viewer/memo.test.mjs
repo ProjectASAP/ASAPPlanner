@@ -120,6 +120,15 @@ test("Pass 2's pruned candidates are marked and counted on their group", () => {
   assert.ok(!call('memoStepElements', fixture(), 1, {}).some((e) => /pruned/.test(e.classes || '')));
 });
 
+test('hiding pruned candidates leaves out them, groups with none left, and the edges into those groups', () => {
+  const memo = fixture();
+  memo.steps[PASS2].groups[4].candidates[0].pruned = true;
+  const elements = call('memoStepElements', memo, PASS2, { hidePruned: true });
+  assert.deepEqual(nodesOf(elements).filter((e) => e.data.parent === 'g3').map((e) => e.data.id), ['g3c4', 'g3c5', 'g3c6', 'g3c7']);
+  assert.match(byId(elements, 'g3').data.label, /\(4 pruned by Pass 2, hidden\)/);
+  assert.ok(!byId(elements, 'g4') && !elements.some((e) => e.data.target === 'g4'));
+});
+
 test('a candidate\'s dimensions are its origin, sketch family, θ fields and window width', () => {
   const step = fixture().steps[PASS2];
   assert.deepEqual(call('memoCandidateDims', step.groups[3].candidates[5]), [['origin', 'Pass1'], ['sketch', 'Kll'], ['k', '1404']]);

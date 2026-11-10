@@ -854,9 +854,20 @@ class AppTests(unittest.TestCase):
         js = self.page("?doc=bad.json", {"bad.json": json.dumps({"format": "nope"})})
         self.assertIn("Could not load", js.eval("__els.queries.innerHTML"))
 
-    def memo_page(self, doc=None):
-        """The p90 fixture document (or `doc`) on the page."""
-        return self.page("?doc=m.json", {"m.json": json.dumps(doc or p90_kll())})
+    def memo_page(self, doc=None, show_pruned=True):
+        """The p90 fixture document (or `doc`) on the page, with Pass 2's
+        pruned candidates shown unless `show_pruned` is false."""
+        js = self.page("?doc=m.json", {"m.json": json.dumps(doc or p90_kll())})
+        if show_pruned:
+            js.eval("__els.memoShowPruned.checked = true; __els.memoShowPruned.__on.change()")
+        return js
+
+    def test_the_memo_view_hides_pruned_candidates_until_asked(self):
+        """Pass 2's pruned candidates are hidden until the box is ticked."""
+        js = self.memo_page(show_pruned=False)
+        self.assertEqual(self.memo_ids(js, "g3"), ["g3c4", "g3c5", "g3c6", "g3c7"])
+        js.eval("__els.memoShowPruned.checked = true; __els.memoShowPruned.__on.change()")
+        self.assertEqual(len(self.memo_ids(js, "g3")), 8)
 
     def tap_memo(self, js, element_id):
         js.eval(f"__taps['cyMemo node']({{ target: {{ data() {{ return __rendered.cyMemo.find((e) => e.data.id === {json.dumps(element_id)}).data; }} }} }})")

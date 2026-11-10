@@ -110,6 +110,7 @@ pre { font-family: var(--font-mono); font-size: 12px; background: var(--panel-2)
 footer { color: var(--muted); font-size: 12px; max-width: 100ch; }
 @media (max-width: 820px) { .main { grid-template-columns: minmax(0, 1fr); } .rank-panel { position: static; } .rank { max-height: 340px; } .cy { height: 460px; } }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+.title-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .btn { font: inherit; font-size: 13px; padding: 5px 11px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); cursor: pointer; }
 .btn:hover { background: var(--panel-2); }
@@ -131,14 +132,14 @@ tr.clickable:focus-visible td { outline: 2px solid var(--accent); outline-offset
 <body>
 <div class="wrap">
   <header>
-    <h1>ASAPPlanner Stage Viewer</h1>
+    <div class="title-row"><h1>ASAPPlanner Stage Viewer</h1>
+      <button class="btn" id="themeToggle" type="button" aria-pressed="false">Dark theme</button></div>
     <p class="lede">The planner's stages for one workload: the query-language frontends lower the queries into one logical DAG (Stage 0), Pass 1 and Pass 2 propose logical ASAP candidates in a memo and Pass 2 prunes those no consumer can use (Stage 1), each remaining candidate becomes physical candidates (Stage 2), and Stage 3 selects the cheapest plan from them.</p>
     <nav class="tabs" id="tabs" aria-label="Example"></nav>
     <div class="toolbar">
       <button class="btn" id="openFile" type="button" title="A stage document is shown; a PlanningWorkload JSON is planned by the local server">Open stage document or workload…</button>
       <input id="fileInput" type="file" accept="application/json" hidden />
       <button class="btn" id="setsToggle" type="button" aria-pressed="false" hidden>Workload sets</button>
-      <button class="btn" id="themeToggle" type="button" aria-pressed="false">Dark theme</button>
       <span class="status" id="docName"></span>
     </div>
     <section class="panel" id="workloadSets" aria-labelledby="sets-title" hidden>
@@ -191,7 +192,8 @@ tr.clickable:focus-visible td { outline: 2px solid var(--accent); outline-offset
         </section>
         <section class="panel lane" id="memoView" aria-labelledby="memoView-title" hidden>
           <div class="panel-head"><div><div class="eyebrow">Stage 0 and Stage 1 · memo after each step, with the edges and pruned candidates of each stage</div><h2 id="memoView-title">Memo</h2></div>
-            <nav class="tabs" id="memoTabs" aria-label="Memo step"></nav></div>
+            <div class="toolbar"><nav class="tabs" id="memoTabs" aria-label="Memo step"></nav>
+              <label class="status"><input type="checkbox" id="memoShowPruned" /> show pruned candidates</label></div></div>
           <div class="lane-meta" id="memoView-meta"></div>
           <div class="lane-meta"><b>How to read it:</b> a big box is a <b>group</b>, one sub-result (an e-class); the small boxes in it are its <b>candidates</b>, interchangeable ways to compute that result (e-nodes), bordered by origin; an <b>arrow</b> points to the group a candidate reads as input, drawn once from the group when all its candidates read the same groups.</div>
           <div class="cy" id="cyMemo"></div>
