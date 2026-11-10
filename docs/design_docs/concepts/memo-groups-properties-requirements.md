@@ -183,7 +183,7 @@ impl AccuracyEvidence for NoMeasuredGuarantees { … } // always None
 pub fn target_limit(limit: f64) -> f64;
 ```
 
-**Sign conditions.** Some guarantees hold only for values of a known sign, read from the input group's `column_sign` (Section 3, "Value sign"): DDSketch's relative error on a quantile needs an input column of one sign, `NonNegative` or `NonPositive` (negated, all-negative values are all-positive).
+**Sign conditions.** Some guarantees hold only for values of a known sign, read from the input group's `column_signs` (Section 3, "Value sign"): DDSketch's relative error on a quantile needs an input column of one sign, `NonNegative` or `NonPositive` (negated, all-negative values are all-positive).
 
 **A readout's error is its requirement.** A readout candidate's output error is (ε_r, δ_r), a node property: every producer it may read meets it. Constraint (K) composes these errors to the query root (Section 4). Which requirements a readout group gets is Pass 2's choice (Section 4, "Readout requirements"): one per requirement level, each its own readout candidate.
 
@@ -230,7 +230,7 @@ An evaluation context κ is a grid of evaluation times, derived from the workloa
 | A time-dependent result series with ℓ = AcrossEvaluations, computed on grid $g$ | every evaluation time of κ (shifted by the reading path's `TimeShift`s) lies on $g$ |
 | A time-independent result with ℓ = AcrossEvaluations | Always |
 
-The evaluation grid is `QueryRecurrence::evaluation_grid_ms(range_evaluation)` in `crates/types/src/workload/mod.rs`, which Pass 2's chain widths and `delivers_on` both use. One-off queries are supported: each is a context of its own recurrence, run `invocations` times.
+The evaluation grid is `QueryRecurrence::evaluation_grid_ms(range_evaluation)` in `crates/types/src/workload/query.rs`, which Pass 2's chain widths and `delivers_on` both use. One-off queries are supported: each is a context of its own recurrence, run `invocations` times.
 
 ### Invalid combinations
 
@@ -295,7 +295,7 @@ Alternative orders worth measuring: $\tau$ first, when most sources lack an inge
 
 Every quantity the optimizer uses is one of three kinds, and is stored where its dependencies are:
 
-- a **node property** depends only on one candidate (θ, τ, ℓ, a readout's error) or one group (schema, lineage, `column_sign`);
+- a **node property** depends only on one candidate (θ, τ, ℓ, a readout's error) or one group (schema, lineage, `column_signs`);
 - an **input requirement** depends only on the consumer's input (`RequiredAccuracy`; the physical requirement, derived from the consumer's timing);
 - a **pair quantity** depends on both producer and consumer, so it lives on the edge (u, c, i); when it also depends on the execution context, on (edge, κ).
 
@@ -306,7 +306,7 @@ Each quantity is computed once, at the earliest stage that knows everything it d
 | Quantity | Kind | Depends on | Computed at | Value |
 |---|---|---|---|---|
 | θ_u | node property | u | Pass 1 | alpha = 0.01 |
-| `column_sign` of the build's input | group property | the input group | Stage 0 | `NonNegative` |
+| `column_signs` of the build's input | group property | the input group | Stage 0 | `NonNegative` |
 | `RequiredAccuracy` of r's input; r's output error | input requirement; node property | r | Pass 2 | relative, 0.01, 1e-2 |
 | α^log_{u,r,0} | pair | u, r | Pass 2 | 1: DDSketch's guarantee for p50 at alpha 0.01 is relative 0.01 at δ = 0, and the input is non-negative |
 | α^phys_{u,r,0} | pair | τ_u, ℓ_u, τ_r | Stage 2 | 1 for u at query time with ℓ = None and r at query time |
@@ -330,135 +330,173 @@ Rules add groups through `find_or_add_group` and candidates through `add_candida
 
 ### Stage 0: groups
 
-`memo_of_queries` in `crates/stage0-memo` builds the groups bottom-up from the queries' nodes: each node's operator, over its children's groups, goes through `Memo::find_or_add_group`, so identical sub-expressions are one group; each query is then added with `Memo::add_query` as a `MemoQuery`: its root, its accuracy target and $n_q$, the number of values one evaluation returns (Pass 2 turns a whole-result failure probability into a per-value one with it). Stage 0 and Stage 1 share one type, `Memo`: Stage 0 returns it with every group's candidate list empty, and Stage 1 fills the lists.
+`memo_of_queries` in `crates/stage0-memo` starts from `Memo::new(data)`, which stores the data workload's source facts (`DataWorkload::sources`) at construction, and builds the groups bottom-up from the queries' nodes: each node's operator, over its children's groups, goes through `Memo::find_or_add_group`, so identical sub-expressions are one group; each query is then added with `Memo::add_query` as a `MemoQuery`: its root, its accuracy target and $n_q$, the number of values one evaluation returns (Pass 2 turns a whole-result failure probability into a per-value one with it). Stage 0 and Stage 1 share one type, `Memo`: Stage 0 returns it with every group's candidate list empty, and Stage 1 fills the lists.
 
 ```rust
+// crates/types/src/stages/logical/group.rs
 pub struct MemoGroupId(pub u32);
 
 pub struct MemoGroup {
-    /// What it computes: one operator with its arguments. Each `MemoGroupId`
-    /// in it is an input group, never this group's own id.
+    /// What it computes: one operator, with its arguments. Each
+    /// `MemoGroupId` in it is an input group, never this group's own id. θ
+    /// is no argument of an operator, so it is not part of a group.
     pub expression: Operator<MemoGroupId>,
-    /// Derived once when the group is created, from its input groups'
-    /// `expression` and `group_properties` (optd/TiDB-style); never changes.
+    /// Derived once when the group is created, from its input groups; never
+    /// changes.
     pub group_properties: GroupProperties,
-    pub parents: Vec<MemoGroupId>,
-    pub queries: Vec<usize>,
-    // Empty after Stage 0; populated by Stage 1.
+    /// The groups that read it (`parent_groups()`) through their expression
+    /// or a candidate's: kept up to date by `find_or_add_group` and
+    /// `add_candidate`.
+    pub(super) parents: Vec<MemoGroupId>,
+    /// The queries whose roots reach it (`reached_by_queries()`), ascending:
+    /// kept up to date by `add_query` and `add_candidate`.
+    pub(super) queries: Vec<usize>,
+    /// Its candidates: empty after Stage 0, filled by Stage 1.
     pub candidates: Vec<CandidateForMemoGroup>,
+}
+
+impl MemoGroup {
+    pub fn parent_groups(&self) -> &[MemoGroupId];
+    pub fn reached_by_queries(&self) -> &[usize];
 }
 
 pub struct GroupProperties {
     pub schema: Schema,
     pub result_kind: OperatorResultKind,
-    /// Per output column: its source column or Computed ("Column lineage").
-    pub column_lineage: Vec<ColumnLineage>,
-    /// Per output column: its value sign ("Value sign").
-    pub column_sign: Vec<ValueSign>,
-    /// Whether the result changes with the evaluation time: true under a
-    /// `TimeRange` relative to it (`sum_over_time(m[5m])`) or an expression
-    /// reading it (`time()`, `now()`), false under a fixed `@ T` or with no
-    /// time at all. A stored result that does not depend on it delivers on
-    /// every context.
+    /// Per output column, in schema order: the sign of its values, from the
+    /// input groups' and, for a `Scan`, the declared ones ("Value sign").
+    pub column_signs: Vec<ValueSign>,
+    /// Whether the result changes with the evaluation time: true for a
+    /// group under a `TimeRange` relative to the evaluation time
+    /// (`sum_over_time(m[5m])`) or reading it (`time()`, `now()`), false
+    /// for one under a fixed `@ T` or reading no time. A result that does
+    /// not depend on it is the same at every evaluation, so a stored copy
+    /// delivers on every grid.
     pub depends_on_evaluation_time: bool,
-    /// What an aggregate group covers: a summary state, a chain, a merge
-    /// over a chain's windows, or an exact `Aggregate` result; `None` for
-    /// any other group.
-    pub aggregate_coverage: Option<SummaryCoverage>,
+    /// What an aggregate group covers: a summary state, a chain, a
+    /// `TimeRange`/`TimeShift` over a chain or a merge over one, or an exact
+    /// `Aggregate` result; `None` for any other group.
+    pub aggregate_coverage: Option<AggregateCoverage>,
     /// Whether two equal expressions return the same rows for the same
     /// input rows, so they may be one group (not an unordered `LIMIT`).
     pub shareable_when_equal: bool,
-    /// Whether every `Scan` below reads a time series (PromQL rows). A
-    /// PromQL top-k ranks one row per series; a counter state reads in
-    /// time order.
-    pub reads_only_time_series: bool,
+    /// The sources the `Scan`s below this group read: a `Scan`'s own, else
+    /// the union over its input groups.
+    pub scanned_sources: BTreeSet<Source>,
 }
 
-/// What a summary state or exact aggregate computes, with every lifted
-/// selection removed.
-pub struct SummaryStateDefinition {
-    /// The group the operators below read: the first input under the
-    /// SummaryAgg (or Aggregate) that is not Filter / TimeRange / TimeShift
-    /// / direct-column Project. `None` only when a Scan's predicates are
-    /// lifted; the Scan, with its residual predicates, is then the last
-    /// unlifted operator.
+// crates/types/src/stages/logical/aggregate_coverage.rs
+/// What an aggregate computes, with every lifted selection removed.
+pub struct AggregateDefinition {
+    /// The group the unlifted operators read: the first input under the
+    /// `SummaryAgg` or exact `Aggregate` that is not a `Filter`, a range
+    /// `TimeRange`, a `TimeShift` without `@ start()`/`@ end()` or a
+    /// direct-column `Project`. `None` when that input is a `Scan` with a
+    /// liftable predicate (a PromQL label matcher): it is lifted too, and the
+    /// `Scan` with the rest of its predicates is the last unlifted operator,
+    /// so states over one source with different matchers may merge.
     pub input_group: Option<MemoGroupId>,
-    /// The operators not lifted into the selection, listed top down from
-    /// the SummaryAgg (or Aggregate), each with only its residual arguments. `None` marks
-    /// an operator's main input (the next unlifted operator, or input_group);
+    /// The operators not lifted into the selection, listed top down from the
+    /// `SummaryAgg` or `Aggregate`, each with only its residual arguments. `None` marks an
+    /// operator's main input (the next unlifted operator, or input_group);
     /// `Some(g)` is another input group it reads, such as the group a scalar
     /// subquery in a Filter reads. Two states may merge only if input_group
     /// and these operators are equal.
     pub unlifted_operators: Vec<Operator<Option<MemoGroupId>>>,
 }
 
-pub struct SummaryCoverage {
-    pub(crate) definition: SummaryStateDefinition,
-    /// Union of boxes over the output rows of the operators' input.
+pub struct AggregateCoverage {
+    pub(crate) definition: AggregateDefinition,
+    /// Union of boxes over the output rows of the unlifted operators' input.
     pub(crate) selection: Vec<SelectionBox>,
 }
 
-impl SummaryCoverage {
-    pub(crate) fn derive_from_inputs(
-        operator: &Operator<MemoGroupAsInput<'_>>,
-    ) -> Result<Self, CoverageError>;
-    /// A hash of the `SummaryStateDefinition`; equal definitions in one
-    /// memo get equal ids.
-    pub(crate) fn definition_id(&self) -> String;
-}
+/// The coverage of what a memo group computes with `operator` over its
+/// input groups; `CoverageError::NoCoverage` when it is no aggregate (or a
+/// `TimeRange`/`TimeShift` over a chain whose windows are not one interval
+/// on the timestamp column), and the merge errors (`EmptyMerge`,
+/// `DefinitionMismatch`, `InputsOverlap`, …) for an invalid merge.
+pub(super) fn aggregate_coverage(
+    operator: &Operator<MemoGroupAsInput<'_>>,
+) -> Result<AggregateCoverage, CoverageError>;
 
+// crates/types/src/stages/logical/memo/mod.rs
 pub struct Memo {
-    // Private: groups are added only through `find_or_add_group`, so the
-    // hash-consing index covers every group.
+    /// The groups, by id (`groups()`); added only through
+    /// `find_or_add_group`.
     groups: Vec<MemoGroup>,
-    /// The queries, by index in the workload.
-    pub queries: Vec<MemoQuery>,
-    // Private: the groups `find_or_add_group` may return, by expression hash.
-    groups_by_expression_hash: HashMap<u64, Vec<MemoGroupId>>,
-    // Private: the data workload's facts of each source the queries scan, by
-    // the name the Scan reads (a counter's `value` non-negative): a `Scan`'s
-    // `column_sign` ("Value sign") and the distinct bound of
-    // `max_distinct_per_evaluation`.
-    source_facts: BTreeMap<String, SourceFacts>,
+    /// The queries, by index in the workload (`queries()`); added only
+    /// through `add_query`.
+    queries: Vec<MemoQuery>,
+    /// The groups `find_or_add_group` may return, by `expression_hash` of
+    /// their expression: every group whose sharing is legal
+    /// (`GroupProperties::shareable_when_equal`).
+    groups_by_expression_hash: HashMap<u64, Vec<(MemoGroupId, String)>>,
+    /// The data workload's facts per source (`DataWorkload::sources`), fixed
+    /// at construction: a `Scan` group's column signs read them.
+    pub(super) source_facts: BTreeMap<String, SourceFacts>,
 }
 
+/// One query of the memo: its root over groups, its accuracy target and
+/// $n_q$.
 pub struct MemoQuery {
     pub root: QueryRoot<MemoGroupId>,
-    /// A_q; `None` when the query has none (accuracy not enforced).
+    /// $A_q$; `None` for a query without one (every query when accuracy is
+    /// not enforced).
     pub accuracy_target: Option<AccuracyTarget>,
-    /// n_q; `None` when the data workload does not bound it.
-    pub values_per_evaluation: Option<u64>,
+    /// $n_q$, the number of values one evaluation returns; `None` when the
+    /// data workload does not bound it. Pass 2 turns a whole-result failure
+    /// probability into a per-value one with it.
+    pub number_of_values_per_query_evaluation: Option<u64>,
 }
 
 impl Memo {
-    /// A memo without groups over the sources `source_facts` describes.
-    pub fn new(source_facts: BTreeMap<String, SourceFacts>) -> Self;
-    /// The most distinct items one distinct-count summary over `group`'s rows
-    /// counts in one evaluation: the sum of the scanned sources' declared
-    /// `max_distinct_per_evaluation`; `None` when one has none.
-    pub fn max_distinct_per_evaluation(&self, group: MemoGroupId) -> Option<u64>;
+    /// A memo without groups over the sources `data` describes: a `Scan`
+    /// group's column signs are the ones `data` declares for its source
+    /// (`GroupProperties::column_signs`).
+    pub fn new(data: &DataWorkload) -> Self;
+    /// The groups, by id.
     pub fn groups(&self) -> &[MemoGroup];
-    /// Adds a query; its root's groups and those below list it.
+    /// The queries, by index in the workload.
+    pub fn queries(&self) -> &[MemoQuery];
+    /// Adds `query` and returns its index: its root's groups and every
+    /// group below them list it (`MemoGroup::reached_by_queries`). Stage 0
+    /// adds each query once.
     pub fn add_query(&mut self, query: MemoQuery) -> usize;
 }
 ```
+
+Not yet in the code: `Memo::max_distinct_per_evaluation(group)`, the most distinct items one distinct-count summary over `group`'s rows counts in one evaluation, the sum of the scanned sources' declared `max_distinct_per_evaluation` (`None` when one has none), and `GroupProperties::column_lineage` (Column lineage, below).
 
 How the definition and selection are derived, with examples: `docs/design_docs/proposals/asap-primitive-schema.md` §4.2.2.
 
 The rules read an operator's inputs through one trait, so the same rules derive a front-end node's schema and a group's `GroupProperties`:
 
 ```rust
-pub(crate) trait OperatorInput: Sized {
+// crates/types/src/ir/operator/input.rs
+pub trait OperatorInput: Sized + Clone {
     fn schema(&self) -> &Schema;
     fn result_kind(&self) -> OperatorResultKind;
     /// The input's own operator, its children as inputs again.
     fn operator(&self) -> Operator<Self>;
-    fn aggregate_coverage(&self) -> Option<&SummaryCoverage>;
+    /// What the input covers when it is an aggregate group in the memo;
+    /// `None` for any other input.
+    fn aggregate_coverage(&self) -> Option<&AggregateCoverage>;
+    /// The sources the `Scan`s at or below the input read
+    /// (`sources_scanned_by` of its operator): a memo group's stored
+    /// `GroupProperties::scanned_sources`, recomputed for a node tree.
+    fn scanned_sources(&self) -> BTreeSet<Source>;
 }
-// Front-end node trees; aggregate_coverage is None.
+/// A front-end node tree. Node trees carry no aggregate coverage.
 impl OperatorInput for Rc<OperatorNode> { … }
-/// A memo group read as an input: its group_properties and expression.
-pub(crate) struct MemoGroupAsInput<'m> { memo: &'m Memo, group_id: MemoGroupId }
+
+// crates/types/src/stages/logical/group.rs
+/// A memo group read as an operator's input: its `group_properties` and
+/// its `expression`, whose inputs are read the same way.
+pub(super) struct MemoGroupAsInput<'m> {
+    pub(super) memo: &'m Memo,
+    pub(super) group_id: MemoGroupId,
+}
 impl OperatorInput for MemoGroupAsInput<'_> { … }
 
 // The existing rules, generic over the input; existing names kept.
@@ -468,24 +506,33 @@ impl<I: OperatorInput> Operator<I> {
     pub(crate) fn validate_inputs(&self) -> Result<(), SchemaDerivationError>;
     pub(crate) fn is_shareable_when_equal(&self) -> bool;
 }
-fn derive_group_properties(
+/// Whether `operator` is a valid expression over its input groups, never a
+/// node tree: its output schema derives, its inputs pass validation, and a
+/// merge reads only states it may merge. Returns the output schema and,
+/// for a merge, the coverage its check derived.
+pub(super) fn validate_expression_over_input_groups(
+    operator: &Operator<MemoGroupAsInput<'_>>,
+) -> Result<(Schema, Option<AggregateCoverage>), SchemaDerivationError>;
+/// The properties of a group computing `expression` over its input
+/// groups, once it is valid over them.
+pub(super) fn derive_group_properties(
     memo: &Memo,
     expression: &Operator<MemoGroupId>,
 ) -> Result<GroupProperties, SchemaDerivationError>;
 ```
 
-Aggregate coverage exists only in the memo: a node tree has none, and `SummaryCoverage` has no type parameter. The executor reads only `definition_id` from the plan.
+Aggregate coverage exists only in the memo: a node tree has none, and `AggregateCoverage` has no type parameter. Identity has two scopes. In the memo, coverages compare by `AggregateDefinition` `==` (it holds `MemoGroupId`s); nothing in the memo needs an id. The plan carries `ViewCoverage::definition_id` (`crates/types/src/plan/materialized_view.rs`), a content id of what the view computes: its definition with every input group expanded recursively to its expression down to the `Scan`s, with no group or node ids, canonically serialized and hashed, so it is equal across plans and processes that compute the same thing and different when they do not.
 
 A group is its expression: one operator, with its arguments, over input groups. Hash-consing compares and hashes the expression directly, so two expressions are one group when their operators and arguments are equal and their input groups are the same. θ is not an operator argument, so builds that differ only in θ share one group. An expression whose copies may return different rows (an unordered `LIMIT`) always gets a new group.
 
-Everything that was computed on operator-node trees is computed on groups. `find_or_add_group` derives `GroupProperties` once, when the group is created, with `derive_group_properties`: the rules that check operator nodes (schema derivation, input validation, merge check), applied to the expression over `MemoGroupAsInput`s, which read only the input groups' `expression` and `group_properties`, never a node tree:
+Everything that was computed on operator-node trees is computed on groups. `find_or_add_group` derives `GroupProperties` once, when the group is created, with `derive_group_properties`: the rules that check operator nodes (schema derivation, input validation, merge check: `validate_expression_over_input_groups`), applied to the expression over `MemoGroupAsInput`s, which read only the input groups' `expression` and `group_properties`, never a node tree:
 
 - `schema` and `result_kind` from the operator and its input groups' schemas and result kinds; a scalar subquery reads the referenced group's schema.
 - `aggregate_coverage`, for a summary state or an exact `Aggregate` result: walking down from the SummaryAgg or Aggregate through the input groups' expressions while each is a Filter, a TimeRange, a TimeShift (an offset or `@ T`; `TimeShift { at: End | Start }` is not lifted, see below) or a direct-column Project, lifting their predicates into the selection; a TimeRange or TimeShift becomes an interval on the timestamp column (below). The group below them is the definition's `input_group`. A Scan's predicates (PromQL label matchers, SQL filters, including absolute timestamp filters) are lifted too; the Scan with its residual predicates is then the last unlifted operator and `input_group` is `None`. The operators not lifted, each with its residual arguments, are `unlifted_operators`. A chain `SummaryTumblingWindowChain[w](X)` has the definition of a build over X and leaves the timestamp column unconstrained; a `TimeRange` or `TimeShift` over a chain constrains it as over raw rows. A merge's coverage comes from its inputs' stored coverage; a merge is valid only over inputs with equal definitions and disjoint selections, or over one time-indexed state. So the coverage of `SummaryMerge(TimeRange(TimeShift(Chain[w](X))))` equals that of `SummaryAgg(TimeRange(TimeShift(X)))`, and `add_candidate` accepts the merge in the original state group.
 - The checks that read an input's operator (a merge over a time-indexed state reads a `TimeRange` over a chain; a selected build) read the input group's `expression`.
 - `shareable_when_equal`: a `LIMIT` is shareable over a `Sort` with the same partitions (the input group's `expression`); a `Dedup` on every column (the input group's schema).
-- `column_lineage` and `column_sign` (below), per output column.
-- `reads_only_time_series`: a `Scan` of a `Source::TimeSeries` reads one; any other operator does when all its input groups do. A node tree computes the same rule through its children (`OperatorInput::reads_only_time_series`), so the rule is written once.
+- `column_signs` and, once added, `column_lineage` (below), per output column.
+- `scanned_sources`: a `Scan`'s own source; any other operator's is the union over its input groups'. A node tree computes the same rule through its children (`OperatorInput::scanned_sources`), so the rule is written once. A rule that needs time-series rows (a PromQL top-k ranks one row per series; a counter state reads in time order) checks that every scanned source `Source::is_time_series`.
 
 `add_candidate` derives a candidate's properties with the same `derive_group_properties` and requires its schema and result kind to equal the group's. `OperatorNode` recursively contains chosen child nodes and therefore describes a fixed plan fragment; `Operator<MemoGroupId>` contains input group IDs and leaves their implementations open. A candidate needs its own expression because a group may offer several ways to compute the same result.
 
@@ -493,7 +540,7 @@ Removing the one-field `CandidateExpression` wrapper is possible but not adopted
 
 #### Column lineage
 
-Every output column of a group has a **lineage**: the source column its values are copied from, or none when the column is computed. It is a group property, derived once from the input groups' lineage (as optd's column-reference property is), and it replaces the table qualifier that schema fields carried. A schema field keeps only its name, type and nullability; a front end resolves a qualified name such as `f.src` with its own binding scope while it lowers the query, and the IR never needs the qualifier again.
+Its key is decided in PR 2b (`SourceColumn` was removed in #1230). Every output column of a group has a **lineage**: the source column its values are copied from, or none when the column is computed. It is a group property, derived once from the input groups' lineage (as optd's column-reference property is), and it replaces the table qualifier that schema fields carried. A schema field keeps only its name, type and nullability; a front end resolves a qualified name such as `f.src` with its own binding scope while it lowers the query, and the IR never needs the qualifier again.
 
 ```rust
 pub struct GroupProperties {
@@ -502,10 +549,10 @@ pub struct GroupProperties {
     /// One entry per output column, in schema order.
     pub column_lineage: Vec<ColumnLineage>,
     /// One entry per output column, in schema order (Value sign, below).
-    pub column_sign: Vec<ValueSign>,
-    pub aggregate_coverage: Option<SummaryCoverage>,
+    pub column_signs: Vec<ValueSign>,
+    pub aggregate_coverage: Option<AggregateCoverage>,
     pub shareable_when_equal: bool,
-    pub reads_only_time_series: bool,
+    pub scanned_sources: BTreeSet<Source>,
 }
 
 /// A column of a source (a Scan's table or metric), by name.
@@ -580,7 +627,7 @@ A range-evaluated query evaluates its expression at every step t of [start, end]
 Lineage and sign (Value sign, below) are derived together, by one per-operator column layout: an output column that copies an input column keeps its lineage and sign; a computed one is `Computed`, with the sign the operator's rule gives.
 
 **What reads it:**
-- **Summary coverage.** A selection constrains columns keyed by their `SourceColumn` lineage, not by (qualifier, name). A predicate on a `Computed` column is not lifted; it stays in `unlifted_operators`. A merge's group keys must have equal lineage.
+- **Aggregate coverage.** A selection constrains columns keyed by their `SourceColumn` lineage, not by (qualifier, name). A predicate on a `Computed` column is not lifted; it stays in `unlifted_operators`. A merge's group keys must have equal lineage.
 - **Candidate checks.** `add_candidate` compares a candidate's schema with its group's exactly: names, types, nullability, order. There is no qualifier to compare, so a readout renamed to the group's column name matches.
 
 **Example 1: a SQL aggregate and its summary candidate.**
@@ -624,33 +671,46 @@ After the join, `region` may exist on both sides. The front end resolves `s.regi
 Some error contracts hold only for values of a known sign: a relative error of a sum or average, DDSketch's relative error on a quantile, and Count-Min's estimates, which need non-negative weights. Each output column of a group has a sign, a group property derived once from the input groups, like lineage:
 
 ```rust
-/// GroupProperties::column_sign holds one per output column.
-pub enum ValueSign { NonNegative, NonPositive, Unknown }
+// crates/types/src/stages/logical/column_properties.rs
+/// GroupProperties::column_signs holds one per output column.
+pub enum ValueSign {
+    /// Every non-NaN value is ≥ 0.
+    NonNegative,
+    /// Every non-NaN value is ≤ 0.
+    NonPositive,
+    /// Neither is known.
+    Unknown,
+}
 ```
 
-A source's signs are declared per column in the data workload's source facts (for example, `latency`'s value is non-negative). A PromQL counter's value is non-negative without a declaration. A column without a declaration is `Unknown`. `memo_of_queries` collects the facts of the sources the queries scan into the memo (`Memo::new`), and `find_or_add_group` reads their signs for a `Scan`.
+A NaN does not break either sign: `NonNegative` means every non-NaN value is ≥ 0.
+
+A source's signs are declared per column in the data workload's source facts (for example, `latency`'s value is non-negative). A PromQL counter's value is non-negative without a declaration. A column without a declaration is `Unknown`. `Memo::new(data)` stores the data workload's source facts at construction, and `find_or_add_group` reads their signs for a `Scan` (a histogram's or summary's series reads its family's).
 
 | Operator | Output column sign |
 |---|---|
 | `Scan` | the declared sign of each source column; `Unknown` when none is declared |
 | `Filter`, `TimeRange`, `TimeShift`, `Sort`, `Limit`, `Dedup`, column `Project` | the input's, unchanged |
+| `Join`; `SetOp`, `Concat`; label rewrite (`label_replace`); SQL window function | the left input's columns then the right's (a semi or anti join: the left's only); per column, the inputs' sign when they all agree, else `Unknown`; the input's, the written label `Unknown`; the input's, the window value `Unknown` |
 | `abs` | `NonNegative` |
 | negation | flipped: `NonNegative` ↔ `NonPositive` |
 | numeric literal, numeric cast | the literal's sign; the operand's sign |
-| sum, avg, min, max, quantile, top-k, `first_over_time`, `last_over_time` | the input value's sign |
-| count, distinct count, and the other counts and spreads (`count_values`, `changes`, `resets`, `group`, `absent`, `present_over_time`, `stddev`, `stdvar`, frequency L2 norm and entropy) | `NonNegative` |
+| arithmetic, scalar (`x / 1000`, SQL `value * 8`) or vector (`a / b`), one rule | `+`: both `NonNegative` → `NonNegative`, both `NonPositive` → `NonPositive`; `*` and `/`: same sign → `NonNegative`, opposite → `NonPositive`; `-`, `%`, `^`, `atan2`, or an operand of `Unknown` sign → `Unknown` |
+| `vector(s)` | the sign of the expression `s` (`vector(1000)`: `NonNegative`) |
+| sum, avg, min, max, top-k, `first_over_time`, `last_over_time`; quantile with 0 ≤ q ≤ 1 | the input value's sign; a quantile with q outside [0, 1]: `Unknown` |
+| count, distinct count, and the other counts and spreads (`count_values`, `changes`, `resets`, `group`, `absent`, `absent_over_time`, `present_over_time`, `stddev`, `stdvar`, frequency L2 norm and entropy) | `NonNegative` |
 | `rate`, `irate`, `increase` | `NonNegative` over a `NonNegative` input (a counter); else `Unknown`, since a decrease reads as a reset |
 | vector comparison, `and`, `unless`; `or`; comparison with `bool` | the left side's value sign; the sides' sign when they agree; `NonNegative` (0 or 1) |
-| `SummaryAgg`, chain | the state records the sign of the values it is updated with (`window_end` is `Unknown`) |
+| `SummaryAgg`, chain | the state records the sign of the values it is updated with (a constant weight: its sign; a tuple or entity identity: `Unknown`); keys keep theirs (`window_end` is `Unknown`) |
 | `SummaryMerge` | the inputs' sign when they all agree, else `Unknown`; over a chain's windows, the chain's build's |
-| readouts | the state's recorded sign; a distinct count, frequency L2 norm or entropy, and an exact count's finalization: `NonNegative` |
+| readouts | the state's recorded sign; a distinct count, frequency L2 norm or entropy, and an exact count's finalization: `NonNegative`; a quantile with q outside [0, 1]: `Unknown`; a point count or top-k of a Count Sketch or UnivMon (and their variants, `SummaryTypeCapability::estimates_may_flip_sign`): `Unknown`, since a median of signed counters can be negative over non-negative weights (Count-Min keeps the state's sign); a readout whose output does not keep the state's layout: `Unknown` |
 | any other expression | `Unknown` |
 
 **Example.** `topk(5, sum by (host)(gauge))` over a gauge with no declared sign: the sum's sign is `Unknown`, so Stage 2 prunes the Count-Min heap builds (`CountMinWeightsNotProvenNonNegative`) and the query uses an exact top-k. Over `rate(requests_total[1m])`, the sum is `NonNegative` and the Count-Min builds stay.
 
 ### Stage 1, Pass 1: initial candidates
 
-Implementation locations: `crates/logical-asap-optimization/src/pass1/per_computation_candidates.rs` and `memo_population.rs`. The #1203 target gives every intermediate result its own group; candidates contain one operator rather than private operator chains.
+Implementation locations: `crates/stage1-pass1-per-computation-candidates/src/lib.rs` (`pass1_memo`) and `computation_targets.rs`; the memo methods below are in `crates/types/src/stages/logical/memo/mod.rs`. The #1203 target gives every intermediate result its own group; candidates contain one operator rather than private operator chains.
 
 | Alternative | Added representation |
 |---|---|
@@ -670,8 +730,10 @@ pub struct CandidateForMemoGroupId {
 
 impl Memo {
     /// The group of `expression` (operator, arguments and input groups),
-    /// added if new. Fails when the expression breaks the node rules
-    /// (schema derivation, input validation, merge check).
+    /// added if new. Fails, leaving the memo unchanged, when the expression
+    /// is not valid over its input groups
+    /// (`validate_expression_over_input_groups`: schema derivation, input
+    /// validation, merge check).
     pub fn find_or_add_group(
         &mut self,
         expression: Operator<MemoGroupId>,
@@ -679,7 +741,8 @@ impl Memo {
 
     /// Adds `candidate` to `group`, or returns the id of the candidate there
     /// with the same expression and logical properties. The candidate's
-    /// expression is checked by the same node rules as a group's, and its
+    /// expression is checked by `validate_expression_over_input_groups`, as
+    /// a group's is, and its
     /// output schema and kind must equal the group's; a rejected candidate
     /// leaves the memo unchanged.
     pub fn add_candidate(
@@ -694,7 +757,7 @@ impl Memo {
     /// input group. The only way to change a candidate's r^log: Pass 2 sets
     /// a readout's required accuracy after the rules have run. Panics when
     /// the vector does not have one entry per input group.
-    pub fn set_input_requirements(
+    pub fn set_candidate_input_requirements(
         &mut self,
         id: CandidateForMemoGroupId,
         input_requirements: Vec<LogicalRequirements>,
@@ -702,9 +765,10 @@ impl Memo {
 }
 
 pub enum CandidateError {
-    /// The candidate's expression fails the node rules (schema derivation,
-    /// input validation, merge check).
-    Schema(SchemaDerivationError),
+    /// The candidate's expression is not valid over its input groups (its
+    /// output schema does not derive, an input fails validation, or a merge
+    /// reads states it may not merge): a bug in the rule that built it.
+    NotValidOverInputGroups(SchemaDerivationError),
     /// Its output schema or output kind differs from the group's: it does
     /// not compute the group's result.
     OutputDiffersFromGroup { group: MemoGroupId },
@@ -718,7 +782,7 @@ pub struct CandidateForMemoGroup {
     pub expression: CandidateExpression,
     pub logical_properties: LogicalProperties,
     /// r^log_{c,i}, one per input group; changed only through
-    /// `Memo::set_input_requirements`.
+    /// `Memo::set_candidate_input_requirements`.
     pub input_requirements: Vec<LogicalRequirements>,
     /// The groups of the operators this candidate fuses: a sub-DAG pattern
     /// of several operators, in one appearance of the sub-expression,
@@ -783,7 +847,7 @@ Pass 2 (`crates/stage1-pass2-reuse-candidates`) runs these steps in order:
 |---|---|---|
 | 1. Rollup from the finest common group | Adds candidates that compute a coarser group from a finer one, and synthesizes one finest common group per cluster of equal definitions | Its candidates are new consumers that later steps must see |
 | 2. Top-k reuse | Reads a compatible larger top-k result with an exact-input requirement | Same reason |
-| 3. Reach, caps and readout requirements | Computes which queries reach each candidate along candidate edges, the validity and pruning caps (Section 4), and each readout group's requirement levels: one readout candidate per level, its `RequiredAccuracy` written with `Memo::set_input_requirements` | Needs every consumer added by steps 1 and 2 |
+| 3. Reach, caps and readout requirements | Computes which queries reach each candidate along candidate edges, the validity and pruning caps (Section 4), and each readout group's requirement levels: one readout candidate per level, its `RequiredAccuracy` written with `Memo::set_candidate_input_requirements` | Needs every consumer added by steps 1 and 2 |
 | 4. Dead-candidate elimination | Removes candidates no query can use, transitively, and records the root cause of each | Needs the requirements; keeps step 5 from building windows for dead candidates |
 | 5. Chain groups | Adds tumbling-window chain groups and the merges that read them, with widths from the queries that reach each state group, then repeats step 4 over the memo with the chains | Needs the reach of step 3, including rollup consumers, and only the survivors of step 4; the repeat prunes a merge whose θ serves no consumer |
 | 6. Logical edges | Records every (producer, consumer, input) and whether it satisfies the input's logical requirement | Runs on the final memo |
@@ -878,7 +942,7 @@ With many pairs and queries ③ is cheapest; with few pairs ① or ② can be. A
 
 #### Reach, caps and readout requirements
 
-A query reaches a candidate when a path of candidate edges leads from the query's output group to it; this is the reach $a_{q,v}$, computed top down after steps 1 and 2 so that rollup consumers count. Section 4 defines the caps from it, and which requirement levels each readout group gets ("Readout requirements"). Pass 1's readout candidate takes the first level and `add_candidate` adds one readout candidate per further level; `Memo::set_input_requirements` writes each one's `RequiredAccuracy`, and nothing else changes a candidate's r^log. Two readout candidates with the same expression and different requirements are different candidates.
+A query reaches a candidate when a path of candidate edges leads from the query's output group to it; this is the reach $a_{q,v}$, computed top down after steps 1 and 2 so that rollup consumers count. Section 4 defines the caps from it, and which requirement levels each readout group gets ("Readout requirements"). Pass 1's readout candidate takes the first level and `add_candidate` adds one readout candidate per further level; `Memo::set_candidate_input_requirements` writes each one's `RequiredAccuracy`, and nothing else changes a candidate's r^log. Two readout candidates with the same expression and different requirements are different candidates.
 
 #### Dead-candidate elimination
 
@@ -1061,12 +1125,12 @@ A candidate that carries a θ without building (a merge, or a `Filter`, `TimeRan
 
 ### Stage 2: physical alternatives
 
-`enumerate_candidate_configurations` in `crates/stage2-physical-optimization/src/catalog/configurations.rs` expands each logical candidate that survived Pass 2 using the dimensions and checks in Section 2. It offers τ = IngestionTime only to a candidate that is time-independent (its output does not depend on the evaluation time t, as a chain's does not) or that is an input of one. It offers ℓ = AcrossEvaluations to chains and to the candidates of any group evaluated on a known grid: a time-independent result is materialized as is, a time-dependent one per evaluation time, as a time-indexed result series. Values not offered are not recorded. It creates no new logical candidates. Each logical edge is expanded between the relevant physical alternatives.
+`enumerate_candidate_configurations` in `crates/stage2-physical-optimization` expands each logical candidate that survived Pass 2 using the dimensions and checks in Section 2. It offers τ = IngestionTime only to a candidate that is time-independent (its output does not depend on the evaluation time t, as a chain's does not) or that is an input of one. It offers ℓ = AcrossEvaluations to chains and to the candidates of any group evaluated on a known grid: a time-independent result is materialized as is, a time-dependent one per evaluation time, as a time-indexed result series. Values not offered are not recorded. It creates no new logical candidates. Each logical edge is expanded between the relevant physical alternatives.
 
 Stage 2 reads the logical candidates, the data workload (per-source arrival, below) and the deployment's capabilities:
 
 ```rust
-// crates/stage2-physical-optimization/src/catalog/mod.rs
+// crates/stage2-physical-optimization/src/lib.rs
 pub fn generate_physical_asap_memo_candidates(
     logical: &LogicalASAPMemoCandidates,
     data: &DataWorkload,
@@ -1077,7 +1141,7 @@ pub fn generate_physical_asap_memo_candidates(
 #### Data arrival
 
 ```rust
-// crates/types/src/workload/mod.rs
+// crates/types/src/workload/data.rs
 pub enum DataArrival {
     /// Every row is already stored; no build runs at ingestion time.
     AtRest,
@@ -1107,12 +1171,12 @@ Stage 2 records every alternative it rejects, with one of these reasons; Stage 3
 | `QueryTimeResultsNotRetained` | (QueryTime, AcrossEvaluations) when the deployment retains no query-time results; (QueryTime, OneEvaluation) is kept, since it lives within one evaluation |
 | `InputHasNoBuildableProducer` | a candidate for which some input has no surviving producer that satisfies α^phys |
 | `ReachesNoQueryOutput` | a candidate from which no admissible path leads to a query root |
-| `CountMinWeightsNotProvenNonNegative` | a Count-Min build (`Cms`, `CmsWithHeap`, `HydraCms`) whose weight column's `column_sign` is not `NonNegative`: its estimates are bounds only for non-negative weights |
+| `CountMinWeightsNotProvenNonNegative` | a Count-Min build (`Cms`, `CmsWithHeap`, `HydraCms`) whose weight column's `column_signs` is not `NonNegative`: its estimates are bounds only for non-negative weights |
 
 These are the only reasons. The planner does not check executor support, so no reason names it.
 
 ```rust
-// crates/types/src/physical/properties.rs
+// crates/types/src/ir/properties/execution_data_state.rs
 pub enum ExecutionTiming {
     IngestionTime,
     QueryTime,
@@ -1300,8 +1364,10 @@ pub struct PhysicalASAPDAGNode {
     /// How long the node's time-indexed rows are retained (h_v); set on
     /// materialized nodes.
     pub retention_ms: Option<u64>,
-    /// Set only on AcrossEvaluations nodes.
-    pub summary_coverage: Option<SummaryCoverage>,
+    // A materialized view's coverage is not a node field: the plan derives
+    // it per view (`MaterializedView::coverage`, a `ViewCoverage`: the
+    // content `definition_id` and the selection) from the node's memo
+    // group's `aggregate_coverage`.
     /// The physical candidate the node was built from: in-memory provenance
     /// for validation and tools, not part of the plan file; None for a plan
     /// built by a custom pass.
@@ -1364,7 +1430,7 @@ $$
 | avg aggregate, absolute error | β = 1 |
 | Ratio, relative error | Requires nonzero true denominator and denominator relative error below one; bound given below |
 | Product, relative error | (1 + b) for the left operand and 1 for the right, whose relative error is capped at b: $(1+x)(1+y)-1\le(1+b)x+y$ when $y\le b$ |
-| sum / avg, relative error | β = 1 when the input column's `column_sign` is `NonNegative` or `NonPositive` (all values of one sign); no contract when it is `Unknown` |
+| sum / avg, relative error | β = 1 when the input column's `column_signs` is `NonNegative` or `NonPositive` (all values of one sign); no contract when it is `Unknown` |
 
 A constant contract is unconditional: it needs no row count or sign. A filter does not automatically preserve every accuracy guarantee; a `Filter` that compares an approximate value (an alert threshold such as `quantile_over_time(…) > 0.5`) has no contract. Group counts may need metadata beyond the expression syntax. Each factor must follow from the operator's error contract.
 
@@ -1613,7 +1679,7 @@ Every term is exact: no producer is chosen to stand for others. In the example o
 
 ### No consumer-count policies
 
-Today's `ReaderConstraint` (`crates/types/src/stages/physical/graph.rs`) is deleted with all four variants. `IncompatibleOutputs` and `AllowedOutputs` are replaced by the alignment check of Section 2. `MinimumQueryReaders` (keep a candidate only if enough queries reach it) and `HighestSharedQueryMaterialization` (materialize where sharing stops) are left to the cost model: materializing for one query, or below the point where sharing stops, costs more and is not chosen. There is no constraint (J).
+`ReaderConstraint` (formerly `crates/types/src/stages/physical/graph.rs`) is deleted with all four variants. `IncompatibleOutputs` and `AllowedOutputs` are replaced by the alignment check of Section 2. `MinimumQueryReaders` (keep a candidate only if enough queries reach it) and `HighestSharedQueryMaterialization` (materialize where sharing stops) are left to the cost model: materializing for one query, or below the point where sharing stops, costs more and is not chosen. There is no constraint (J).
 
 ### Out of this design
 
