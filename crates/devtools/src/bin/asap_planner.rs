@@ -8,7 +8,7 @@
 // `--run-until` (`stage0`, `stage1_pass1`, `stage1_pass2`, `stage2` or
 // `stage3`) and writes each stage's output, as text (`--format text`, the default;
 // `asap_devtools::planning_stages_text`) or as an `asap-stage-pipeline/v2`
-// document for the Stage Viewer (`--format json`), to `--out` or standard
+// document for the Plan Viewer (`--format json`), to `--out` or standard
 // output. The text is terse by default (a legend per stage, folded θ
 // variants, producer ids per input, pruned counts per cause); `--verbose`
 // prints every candidate, edge with its reason, group's properties and
