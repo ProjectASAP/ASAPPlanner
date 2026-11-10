@@ -11,8 +11,9 @@ regenerated and the change is explained.
 
 `crates/devtools/tests/corpus_snapshots/<corpus>/`:
 
-- `corpus.json`: the inputs shared by the corpus's queries (`asap_planner_args`,
-  the repeating-query entry and the `data_workload`), and the queries, each
+- `corpus.json`: the inputs shared by the corpus's queries (the
+  repeating-query entry and the `data_workload`; every query is planned on
+  the default deployment), and the queries, each
   with a stable `id`. Each query is planned on its own. A query with a
   `skip_reason` entry (saying why) is skipped and has no snapshot.
 - `<id>.json`: that query's snapshot, pretty-printed with sorted keys.

@@ -47,7 +47,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use asap_cost::{plan_cost, CostInputs};
-use asap_planner::{PlanSearchSettings, PlanningModels};
+use asap_planner::PlanSearchSettings;
 use asap_types::deployment_capabilities::DeploymentCapabilities;
 use asap_types::ir::flat::flatten;
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId};
@@ -57,11 +57,12 @@ use asap_types::ir::schema::sketch::SketchAlgorithm;
 use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot};
 use asap_types::physical::{Lifetime, StorageMedium};
 use asap_types::workload::{
-    DataArrival, DataWorkload, PlanningWorkload, QueryLanguage, QueryWorkload, QueryWorkloadEntry,
+    DataWorkload, PlanningWorkload, QueryLanguage, QueryWorkload, QueryWorkloadEntry,
     RepeatingEntry, SqlDialect,
 };
 
-use crate::planning_stages::{lower_promql_roots, lower_sql_roots, run_search_over, sql_catalog};
+use crate::corpus_registry::arrival_from_sources;
+use crate::planning_stages::{lower_workload, planning_models, run_search_over, sql_catalog};
 use generate::QuerySpec;
 
 /// The language of a fuzz workload: one per workload, as one
@@ -165,23 +166,10 @@ impl FuzzWorkload {
     }
 
     /// Sets the ingesting arrival rate to the sum of the sources' own rates
-    /// (`series_count` per `sample_interval`), when every source declares
-    /// one.
+    /// ([`arrival_from_sources`]), when every source declares one.
     pub fn set_arrival_from_sources(&mut self) {
-        let mut rows_per_second = 0.0;
-        for facts in self.data.sources.values() {
-            match (facts.series_count, facts.sample_interval) {
-                (Some(series), Some(interval)) if interval.0 > 0 => {
-                    rows_per_second += series as f64 * 1_000.0 / interval.0 as f64
-                }
-                _ => return,
-            }
-        }
-        if rows_per_second > 0.0 {
-            self.data.arrival = DataArrival::Ingesting {
-                rows_per_second,
-                max_out_of_order_ms: None,
-            };
+        if let Some(arrival) = arrival_from_sources(&self.data) {
+            self.data.arrival = arrival;
         }
     }
 
@@ -479,14 +467,8 @@ impl Planner {
 
     /// The frontends' roots of `workload`, one per query.
     pub fn lower(&self, workload: &FuzzWorkload) -> Result<Vec<QueryRoot>, String> {
-        let planning = workload.planning_workload();
-        match workload.language {
-            Language::Promql => lower_promql_roots(&planning),
-            Language::Sql => {
-                let tables: Vec<String> = workload.tables.iter().map(Value::to_string).collect();
-                lower_sql_roots(&planning, &sql_catalog(&tables)?.0)
-            }
-        }
+        let tables: Vec<String> = workload.tables.iter().map(Value::to_string).collect();
+        lower_workload(&workload.planning_workload(), &sql_catalog(&tables)?.0)
     }
 
     /// `workload` planned by the configured search, with accuracy not
@@ -508,10 +490,7 @@ impl Planner {
         let data = workload.data.clone();
         let cost_inputs = self.cost_inputs();
         let deployment = workload.deployment();
-        let models = PlanningModels::builtin()
-            .with_cost_inputs(&cost_inputs)
-            .with_deployment_capabilities(&deployment)
-            .with_ignore_accuracy_guarantees(true);
+        let models = planning_models(&deployment, &cost_inputs, true);
         let run = match self.settings.search {
             SearchKind::CandidateConnections => run_search_over(
                 roots.clone(),
