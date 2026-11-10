@@ -1,6 +1,6 @@
 # Memo groups, properties and requirements
 
-This document explains how the optimizer represents alternatives, checks whether they can be composed, and selects an executable plan. It follows the optimization problem formulation (paper, "Optimization Problem Formulation") for the baseline model and labels additional design work **Extension (#1207)**.
+This document explains how the optimizer represents alternatives, checks whether they can be composed, and selects an executable plan. It follows the optimization problem formulation (paper, "Optimization Problem Formulation") for the baseline model and labels additional design work **Extension**.
 
 The Rust blocks are interface sketches, not compilable code. Paths name today's code; issue numbers name the work that changes it.
 
@@ -94,9 +94,9 @@ This is the single reference table for property dimensions. Stage descriptions b
 
 | Dimension | Values and meaning | Code reference or target |
 |---|---|---|
-| Parameters θ | The structure of a summary, from a predefined list per algorithm, `parameter_list(algorithm)`: KLL and KMV `k`; DDSketch `alpha`; HLL `precision`; CMS and CountSketch `width` and `depth`; heap variants also `heap_size`; UnivMon its L2 column count and distinct-count heap size. θ is structure only: no field records the error or failure probability a configuration was sized for, and equality is derived over all fields. The lists span today's sizing over ε = 0.1 down to 0.001 (KMV's and UnivMon's distinct-count entries stop at ε = 0.01). Where δ is set by a structural parameter, the list covers the δ levels with it: CMS lists each width with depths 5, 7, 10 and 12 (δ = e^−d ≤ 1e-2, 1e-3, 1e-4, 1e-5). CountSketch reads the median of its rows, each wrong with probability about 1/3, so δ = P(Binomial(d, 1/3) ≥ (d+1)/2), defined for odd d: it lists each width with depths 47, 81, 117 and 155 for the same δ levels. UnivMon's list has 40 entries: each of the 7 L2 column counts with each of the 4 distinct-count heap sizes, each of them alone, and the baseline. A heap variant combines each width × depth with heap sizes from the 1-2-5 series 10, 20, 50, …, 10 000, so the smallest heap that holds a top-k's k is at most 2.5× too large. A sketch build's θ must be in its algorithm's list; exact operators have none. A candidate that passes states on without building them (`SummaryMerge`, and a `Filter`, `TimeRange` or `TimeShift` over states) carries the θ of the states it reads: Pass 2 adds one such candidate per θ among its input group's candidates, and its input edges connect only to producers with the same θ (Section 3, "Logical edges"). So every candidate of a sketch state group has a θ, and a readout's guarantee is that of its producer's θ. Algorithms without an error model (the Hydra algorithms among them) have empty lists, so no build of theirs is a valid candidate until their error models exist (#1228). | `SketchParams` in `crates/types/src/summary_type/parameters.rs`; `parameter_list` in `parameter_lists.rs` |
+| Parameters θ | The structure of a summary, from a predefined list per algorithm, `parameter_list(algorithm)`: KLL and KMV `k`; DDSketch `alpha`; HLL `precision`; CMS and CountSketch `width` and `depth`; heap variants also `heap_size`; UnivMon its L2 column count and distinct-count heap size. θ is structure only: no field records the error or failure probability a configuration was sized for, and equality is derived over all fields. The lists span today's sizing over ε = 0.1 down to 0.001 (KMV's and UnivMon's distinct-count entries stop at ε = 0.01). Where δ is set by a structural parameter, the list covers the δ levels with it: CMS lists each width with depths 5, 7, 10 and 12 (δ = e^−d ≤ 1e-2, 1e-3, 1e-4, 1e-5). CountSketch reads the median of its rows, each wrong with probability about 1/3, so δ = P(Binomial(d, 1/3) ≥ (d+1)/2), defined for odd d: it lists each width with depths 47, 81, 117 and 155 for the same δ levels. UnivMon's list has 40 entries: each of the 7 L2 column counts with each of the 4 distinct-count heap sizes, each of them alone, and the baseline. A heap variant combines each width × depth with heap sizes from the 1-2-5 series 10, 20, 50, …, 10 000, so the smallest heap that holds a top-k's k is at most 2.5× too large. A sketch build's θ must be in its algorithm's list; exact operators have none. A candidate that passes states on without building them (`SummaryMerge`, and a `Filter`, `TimeRange` or `TimeShift` over states) carries the θ of the states it reads: Pass 2 adds one such candidate per θ among its input group's candidates, and its input edges connect only to producers with the same θ (Section 3, "Logical edges"). So every candidate of a sketch state group has a θ, and a readout's guarantee is that of its producer's θ. Algorithms without an error model (the Hydra algorithms among them) have empty lists, so no build of theirs is a valid candidate until their error models exist. | `SketchParams` in `crates/types/src/summary_type/parameters.rs`; `parameter_list` in `parameter_lists.rs` |
 | Timing | `IngestionTime` or `QueryTime` | `ExecutionTiming` |
-| Lifetime | `None`: discard after the consuming execution; `OneEvaluation`: retain until consumers within that evaluation finish; `AcrossEvaluations`: retain across evaluations in the specified period. A non-`None` lifetime means materialized. | `Lifetime`; #1200 |
+| Lifetime | `None`: discard after the consuming execution; `OneEvaluation`: retain until consumers within that evaluation finish; `AcrossEvaluations`: retain across evaluations in the specified period. A non-`None` lifetime means materialized. | `Lifetime` |
 | Storage medium — Extension | `Memory` or `Disk`, carried by a materialized lifetime | `StorageMedium` |
 
 An error guarantee is not a property: it depends on the summary type, θ and the statistic a readout reads, and is checked on the edge from a state candidate (a build, or a merge with the θ it carries) to a readout (below). It has an error metric, a bound, and a failure probability; exact computation introduces no approximation error.
@@ -710,7 +710,7 @@ A source's signs are declared per column in the data workload's source facts (fo
 
 ### Stage 1, Pass 1: initial candidates
 
-Implementation locations: `crates/stage1-pass1-per-computation-candidates/src/lib.rs` (`pass1_memo`) and `computation_targets.rs`; the memo methods below are in `crates/types/src/stages/logical/memo/mod.rs`. The #1203 target gives every intermediate result its own group; candidates contain one operator rather than private operator chains.
+Implementation locations: `crates/stage1-pass1-per-computation-candidates/src/lib.rs` (`pass1_memo`) and `computation_targets.rs`; the memo methods below are in `crates/types/src/stages/logical/memo/mod.rs`. Every intermediate result is its own group; candidates contain one operator rather than private operator chains.
 
 | Alternative | Added representation |
 |---|---|
@@ -1400,7 +1400,7 @@ The plan's cost is `plan_cost(&plan)`; `Selection` does not repeat it. Validatio
 
 The executor keeps one time-indexed, append-only store with retention for every materialized node with a time index: raw data (a Scan, or a `TimeShift` by an offset over one, materialized at ingestion time), chain states, and results stored per evaluation time. Each is read only through `TimeRange` and `TimeShift` nodes, which select its rows by time, and rows older than the node's `retention_ms` are dropped. A `TimeShift { at: End | Start }` node evaluates its child once per request. Summary operators are constructed with their θ; a summary node without θ is an error.
 
-## 4. Accuracy and safe pruning — Extension (#1207)
+## 4. Accuracy and safe pruning — Extension
 
 The formulation checks logical requirements per edge. This extension also checks composed accuracy at each query root. This section gives the error model, how readouts get their requirements, and the MILP encoding; error is not a property dimension.
 
@@ -1581,7 +1581,7 @@ A zero factor gives no pruning restriction for that query. If a factor depends o
 
 For example, with relative error 0.05 at a ratio, each operand's cap is 0.05 / 1.111 = 0.045 and the denominator's is min(0.1, 0.045) = 0.045, so the readouts get the levels 0.02 and tighter. Root checks still couple all contributing errors and determine feasibility.
 
-## 5. Execution contexts and other selection extensions — #1207
+## 5. Execution contexts and other selection extensions — Extension
 
 These extensions go beyond constraints (A)–(I) and the formulation's fixed-cost assumption. They are separated here so that the baseline reads on its own.
 
