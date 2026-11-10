@@ -109,8 +109,8 @@ use asap_accuracy::{accepted_metrics, AccuracyEvidence};
 use asap_cost::{CostInputs, PlanCost};
 use asap_devtools::candidate_labels::operator_label;
 use asap_devtools::planning_stages::{
-    lower_promql_roots, lower_sql_roots, run_stages_until, sql_catalog, PlanningStagesError,
-    PlanningStagesRun, RunUntil,
+    lower_workload, planning_models, run_stages_until, sql_catalog, with_executor_summaries,
+    PlanningStagesError, PlanningStagesRun, RunUntil,
 };
 use asap_devtools::planning_stages_text::{
     column_lineage_text, edges_per_input, logical_edges_into, physical_edge_rejection,
@@ -118,7 +118,7 @@ use asap_devtools::planning_stages_text::{
 };
 use asap_devtools::SqlCatalog;
 use asap_frontend_promql::{metric_type_warnings, promql_metric_names};
-use asap_planner::{installable_plan_of, PlanningModels, SelectionError};
+use asap_planner::{installable_plan_of, SelectionError};
 use asap_stage3_plan_selection::{large_peak_memory_warning, AcceptedAccuracy, Selection};
 use asap_types::deployment_capabilities::DeploymentCapabilities;
 use asap_types::ir::flat::{flatten, FlatDag};
@@ -224,15 +224,12 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     }
     let (catalog, table_names) = sql_catalog(&tables)?;
     let (described, roots, entries, data) = lowered_together(&workloads, &catalog, &table_names)?;
-    // Plan with the executor's summary families when the deployment declares none.
-    if deployment_capabilities.supported_summaries.is_none() {
-        deployment_capabilities.supported_summaries =
-            Some(asap_executor::supported_summary_families());
-    }
-    let models = PlanningModels::builtin()
-        .with_cost_inputs(&cost_inputs)
-        .with_deployment_capabilities(&deployment_capabilities)
-        .with_ignore_accuracy_guarantees(ignore_accuracy_guarantees);
+    let deployment_capabilities = with_executor_summaries(deployment_capabilities);
+    let models = planning_models(
+        &deployment_capabilities,
+        &cost_inputs,
+        ignore_accuracy_guarantees,
+    );
     let evidence = models.evidence;
     let result = run_stages_until(roots.clone(), &entries, &data, models, run_until);
     // The selected plan's cost, as `plan_installable` reports it.
@@ -498,10 +495,7 @@ type Lowered = (
 /// `workload` lowered by its language's frontend (SQL over `catalog`); its
 /// data workload is empty when it declares none.
 fn lowered(workload: &PlanningWorkload, catalog: &SqlCatalog) -> Result<Lowered, String> {
-    let roots = match workload.query_workload.language {
-        QueryLanguage::PromQL => lower_promql_roots(workload)?,
-        _ => lower_sql_roots(workload, catalog)?,
-    };
+    let roots = lower_workload(workload, catalog)?;
     let entries = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap_or_default();
     Ok((workload_queries(workload), roots, entries, data))

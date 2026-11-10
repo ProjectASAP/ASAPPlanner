@@ -2,6 +2,7 @@
 //! search for the planner-layering acceptance tests, and
 //! [`run_stages_until`] for `asap_planner`.
 
+use asap_cost::CostInputs;
 use asap_frontend_sql::SqlCatalog;
 use asap_planner::{
     run_planning, PlanSearchSettings, PlanningModels, PlanningReport, PlanningRun, SelectionError,
@@ -11,11 +12,12 @@ use asap_stage1_pass1_per_computation_candidates::pass1_memo;
 use asap_stage1_pass2_reuse_candidates::generate_logical_asap_memo_candidates;
 use asap_stage2_physical_optimization::generate_physical_asap_memo_candidates;
 use asap_stage3_plan_selection::select_plan;
+use asap_types::deployment_capabilities::DeploymentCapabilities;
 use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::QueryRoot;
 use asap_types::stages::Memo;
-use asap_types::workload::{DataWorkload, PlanningWorkload, QueryWorkloadEntry};
+use asap_types::workload::{DataWorkload, PlanningWorkload, QueryLanguage, QueryWorkloadEntry};
 use serde_json::Value;
 
 /// The last stage a run runs (`asap_planner --run-until`); the run's
@@ -115,6 +117,44 @@ pub fn lower_sql_roots(
                 .map_err(|e| format!("lowering: {e}"))
         })
         .collect()
+}
+
+/// `workload` lowered by its language's frontend (SQL over `catalog`), one
+/// root per query in workload order, each PromQL series' identity as a
+/// column. A language with no frontend here (MetricsQL, Elastic DSL) is an
+/// error.
+pub fn lower_workload(
+    workload: &PlanningWorkload,
+    catalog: &SqlCatalog,
+) -> Result<Vec<QueryRoot>, String> {
+    match &workload.query_workload.language {
+        QueryLanguage::PromQL => lower_promql_roots(workload),
+        QueryLanguage::SQL(_) | QueryLanguage::DataFusion => lower_sql_roots(workload, catalog),
+        other => Err(format!("unsupported query language {other:?}")),
+    }
+}
+
+/// `capabilities` as `asap_planner` plans with them: the executor's summary
+/// families when the deployment declares none.
+pub fn with_executor_summaries(mut capabilities: DeploymentCapabilities) -> DeploymentCapabilities {
+    if capabilities.supported_summaries.is_none() {
+        capabilities.supported_summaries = Some(asap_executor::supported_summary_families());
+    }
+    capabilities
+}
+
+/// The models `asap_planner` plans with: the built-in accuracy evidence, the
+/// deployment's cost inputs and capabilities (see
+/// [`with_executor_summaries`]), and whether accuracy is enforced.
+pub fn planning_models<'a>(
+    capabilities: &'a DeploymentCapabilities,
+    cost_inputs: &'a CostInputs,
+    ignore_accuracy_guarantees: bool,
+) -> PlanningModels<'a> {
+    PlanningModels::builtin()
+        .with_cost_inputs(cost_inputs)
+        .with_deployment_capabilities(capabilities)
+        .with_ignore_accuracy_guarantees(ignore_accuracy_guarantees)
 }
 
 /// Why [`run_planning_stages`] produced no run.

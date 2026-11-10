@@ -33,7 +33,12 @@ chain rule over `quantile_over_time(0.9, m[5m])` every 60 s adds one
 `SummaryTumblingWindowChain` group with width 60 s; the test checks that
 group and its candidates, not the plan.
 
-Build inputs only through the production frontends and Stage 0. A test that
+Build inputs only through the production frontends and Stage 0:
+`corpus_registry::repeating_promql_workload` writes a small workload and
+`corpus_registry::plan_workload(.., until)` plans it up to the stage under
+test with `asap_planner`'s own lowering and planning models
+(`planning_stages::lower_workload`, `planning_models`), and Stage 3 through
+the facade's `run_planning`. A test that
 assembles IR by hand can drop what the frontend adds (for example the
 series identity column) and then pass on a memo no user can produce.
 
@@ -130,6 +135,12 @@ behavior, not the issue number.
 One list of in-repo workloads, each with the deployment it is planned for
 (capabilities, cost inputs, whether accuracy is enforced), read by the
 contracts, the snapshots and the oracles:
+`asap_devtools::corpus_registry::corpus_workloads()`, ids
+`<source>/<name>` (e.g. `o11y_bench/q21`). `CorpusWorkload::plan(until)`
+plans one as `asap_planner --run-until <until>` does, and
+`CorpusWorkload::asap_planner_args` writes its inputs for the CLI.
+The ids' source prefixes are `corpus_registry::SOURCES`; `planner_fuzz`'s
+tests read their seeds from the registry (`fuzz_seed_workloads`).
 
 | Source | Workloads |
 |---|---|
