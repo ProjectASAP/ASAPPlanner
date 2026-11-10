@@ -22,6 +22,7 @@ use crate::ir::schema::topk::{ranked_row_projection, topk_output_name};
 use crate::ir::schema::{FieldDataType, Schema};
 use crate::ir::{ASAPOp, NonASAPOp, Operator};
 use crate::workload::bounds::source_name;
+use crate::workload::SourceFacts;
 
 use ValueSign::{NonNegative, NonPositive, Unknown};
 
@@ -71,15 +72,15 @@ pub(crate) fn columns_of_group(group: &MemoGroupAsInput<'_>) -> Vec<ColumnProper
 
 /// The lineage and sign of each column of `output`, the output schema of
 /// `operator`, from its inputs' columns (`columns_of`) and, for a `Scan`,
-/// the `declared` signs of its source's columns.
+/// the signs `source_facts` declares for its source's columns.
 pub(crate) fn output_column_properties<I: OperatorInput>(
     operator: &Operator<I>,
     output: &Schema,
-    declared: &BTreeMap<SourceColumn, ValueSign>,
+    source_facts: &BTreeMap<String, SourceFacts>,
     columns_of: &dyn Fn(&I) -> Vec<ColumnProperties>,
 ) -> Vec<ColumnProperties> {
     let columns = match operator {
-        Operator::NonASAP(op) => non_asap_columns(op, output, declared, columns_of),
+        Operator::NonASAP(op) => non_asap_columns(op, output, source_facts, columns_of),
         Operator::ASAP(op) => asap_columns(op, output, columns_of),
     };
     debug_assert_eq!(
@@ -94,7 +95,7 @@ pub(crate) fn output_column_properties<I: OperatorInput>(
 fn non_asap_columns<I: OperatorInput>(
     op: &NonASAPOp<I>,
     output: &Schema,
-    declared: &BTreeMap<SourceColumn, ValueSign>,
+    source_facts: &BTreeMap<String, SourceFacts>,
     columns_of: &dyn Fn(&I) -> Vec<ColumnProperties>,
 ) -> Vec<ColumnProperties> {
     use NonASAPOp::*;
@@ -109,7 +110,11 @@ fn non_asap_columns<I: OperatorInput>(
                     column: field.name.clone(),
                 };
                 ColumnProperties {
-                    sign: declared.get(&column).copied().unwrap_or(Unknown),
+                    sign: source_facts
+                        .get(&column.source)
+                        .and_then(|facts| facts.column_signs.get(&column.column))
+                        .copied()
+                        .unwrap_or(Unknown),
                     lineage: ColumnLineage::SourceColumn(column),
                 }
             })

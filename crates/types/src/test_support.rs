@@ -146,6 +146,23 @@ pub fn population_over_selector(
 /// `[ts, value, labels...]`, time index 0, with the series identity realized
 /// as the planner realizes it before Stage 0 (`with_promql_series_identity`):
 /// a closed schema whose last column is `$promql_series_identity`.
+/// Source facts declaring each `source`'s `value` column of sign `sign`,
+/// for [`Memo::new`].
+pub fn value_signs(
+    signs: &[(&str, crate::stages::ValueSign)],
+) -> std::collections::BTreeMap<String, crate::workload::SourceFacts> {
+    signs
+        .iter()
+        .map(|&(source, sign)| {
+            let facts = crate::workload::SourceFacts {
+                column_signs: [("value".to_string(), sign)].into(),
+                ..crate::workload::SourceFacts::default()
+            };
+            (source.to_string(), facts)
+        })
+        .collect()
+}
+
 pub fn series_schema(labels: &[&str]) -> Schema {
     let mut fields = vec![
         Field::plain("ts", DataType::Timestamp, false),
