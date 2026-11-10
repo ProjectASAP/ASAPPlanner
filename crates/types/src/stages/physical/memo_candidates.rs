@@ -110,6 +110,7 @@ mod tests {
         producer_satisfies_physical_requirements, CandidateForMemoGroupId, ExecutionContext,
         Lifetime, PhysicalProperties,
     };
+    use crate::workload::DataWorkload;
 
     use crate::plan::materialized_view::RefreshWindow;
 
@@ -161,9 +162,9 @@ mod tests {
     /// Group 1, KLL states over the scan group 0, groups 2 and 3, chains
     /// of KLL states over it 5 s and 10 s wide, and group 4, the scan's last
     /// 5 minutes, each with its own expression as its one candidate. Built
-    /// through `find_or_add_group` and `add_candidate` (#1207 PR 2).
+    /// through `find_or_add_group` and `add_candidate`.
     fn memo() -> Memo {
-        let mut memo = Memo::default();
+        let mut memo = Memo::new(&DataWorkload::default());
         let scan = memo
             .find_or_add_group(Operator::NonASAP(NonASAPOp::Scan {
                 source: Source::TimeSeries {
@@ -284,7 +285,7 @@ mod tests {
     /// the one evaluation its result belongs to. Neither reads the memo.
     #[test]
     fn delivers_on_by_lifetime_without_windows() {
-        let candidates = candidates(Memo::default(), vec![]);
+        let candidates = candidates(Memo::new(&DataWorkload::default()), vec![]);
         let unmaterialized = candidate(BUILD, QueryTime, Lifetime::None);
         let one_evaluation = candidate(BUILD, QueryTime, Lifetime::OneEvaluation(MEMORY));
         let materialized = ExecutionContext::Materialized(PhysicalCandidateId(0));
@@ -310,7 +311,6 @@ mod tests {
     /// width) and phase. With phases 0 and 5 s every 10 s, only w = 5 s
     /// serves both.
     #[test]
-    #[ignore = "filled in by #1207 PR 2 (#1230)"]
     fn delivers_on_a_chain_when_its_width_divides_the_context_times() {
         let candidates = candidates(memo(), vec![None; 5]);
         let across_5s = candidate(WINDOWS_5S, QueryTime, Lifetime::AcrossEvaluations(MEMORY));
@@ -349,7 +349,6 @@ mod tests {
     /// evaluated on 60 s @ 0, so it serves both but not a 30 s grid or
     /// another phase. Without a known grid it serves none.
     #[test]
-    #[ignore = "filled in by #1207 PR 2 (#1230)"]
     fn delivers_on_a_stored_result_on_its_group_grid() {
         let grid_60s = Some(EvaluationGrid {
             period_ms: 60_000,

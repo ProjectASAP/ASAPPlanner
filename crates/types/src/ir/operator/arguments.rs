@@ -170,12 +170,20 @@ impl<'de, C: Deserialize<'de>> Deserialize<'de> for GroupKeys<C> {
 /// The leaf data source of a `Scan`. The schema itself rides on the
 /// `Scan.schema` field (built by the schema resolver); `Source` carries only the leaf's
 /// identity.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Source {
     /// Time-series leaf — PromQL / DC lifecycle. Produces `(ts, value, *labels)`.
     TimeSeries { metric: String },
     /// Tabular leaf — asap-fusion / future OLAP. Columns ride on `Scan.schema`.
     Table { table_ref: String },
+}
+
+impl Source {
+    /// Whether it is a time series (PromQL rows): a PromQL top-k over rows
+    /// that scan only time series ranks one row per series.
+    pub fn is_time_series(&self) -> bool {
+        matches!(self, Self::TimeSeries { .. })
+    }
 }
 
 /// Operator on the query-level `BinaryOp` node. Reuses the scalar IR's

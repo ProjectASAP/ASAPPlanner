@@ -55,7 +55,8 @@
 //! | `m{f}` / `m{f}[w]` | `TimeRange{ingestion, Instant, Scan{predicates}}` / `TimeRange{w, Range, Scan}` |
 //! | `a OP b` | `BinaryOp{vector_match}` |
 //! | `expr[r:res]` | `PromqlSubquery{r, res}` |
-//! | `<selector> offset <d>` / `<selector> @ <ts>`/`start()`/`end()` | `TimeShift{shift}` over the selector's `Scan` — pass-through schema; a ranged selector shifts under its `TimeRange` (issue #40) |
+//! | `<selector> offset <d>` / `<selector> @ <ts>` | `TimeShift{shift}` over the selector's `Scan` — pass-through schema; a ranged selector shifts under its `TimeRange` (issue #40) |
+//! | `<selector> @ start()`/`end()` (also a subquery's) | `TimeShift{at: Start \| End}` above the selector `X`, lowered without the `@` (its offset stays in `X`), so `X` is the group of the same selector without `@` |
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -234,14 +235,16 @@ impl PromqlLowerer<'_> {
                 };
                 // `offset`/`@` move the whole subquery, including its step grid.
                 let shift = time_shift(sq.offset.as_ref(), sq.at.as_ref())?;
-                Ok(if shift.is_identity() {
-                    subquery
-                } else {
-                    Unresolved::TimeShift {
-                        shift,
-                        child: Rc::new(subquery),
+                Ok(anchored(shift, |shift| {
+                    if shift.is_identity() {
+                        subquery
+                    } else {
+                        Unresolved::TimeShift {
+                            shift,
+                            child: Rc::new(subquery),
+                        }
                     }
-                })
+                }))
             }
             Expr::VectorSelector(vs) => {
                 let (metric, matchers, shift) = vs_parts(vs)?;
@@ -249,11 +252,13 @@ impl PromqlLowerer<'_> {
             }
             Expr::MatrixSelector(ms) => {
                 let (metric, matchers, shift) = vs_parts(&ms.vs)?;
-                Ok(Unresolved::TimeRange {
-                    range: ms.range,
-                    kind: TimeRangeKind::Range,
-                    child: Rc::new(filtered_source(metric, matchers, shift)),
-                })
+                Ok(selector(
+                    metric,
+                    matchers,
+                    shift,
+                    ms.range,
+                    TimeRangeKind::Range,
+                ))
             }
             // Scalar-typed, dispatched above; kept for exhaustiveness. String
             // literals only appear as function args (`label_replace`, …), so a
@@ -1120,11 +1125,13 @@ impl PromqlLowerer<'_> {
         intent: AggIntent<ColumnRef>,
     ) -> Result<Unresolved> {
         let child = match inner.window {
-            Some(w) => Unresolved::TimeRange {
-                range: w,
-                kind: TimeRangeKind::Range,
-                child: Rc::new(filtered_source(inner.metric, inner.matchers, inner.shift)),
-            },
+            Some(w) => selector(
+                inner.metric,
+                inner.matchers,
+                inner.shift,
+                w,
+                TimeRangeKind::Range,
+            ),
             None => self.instant_source(inner.metric, inner.matchers, inner.shift)?,
         };
         let reduction = reduction_for(&keys, inner.window.is_some() || intent.is_per_series());
@@ -1150,11 +1157,52 @@ impl PromqlLowerer<'_> {
         shift: TimeShift,
     ) -> Result<Unresolved> {
         let interval = self.sample_interval(&metric)?;
-        Ok(Unresolved::TimeRange {
-            range: interval,
-            kind: TimeRangeKind::Instant,
-            child: Rc::new(filtered_source(metric, matchers, shift)),
-        })
+        Ok(selector(
+            metric,
+            matchers,
+            shift,
+            interval,
+            TimeRangeKind::Instant,
+        ))
+    }
+}
+
+/// A selector over `metric`: the `TimeRange` of `range` and `kind` over its
+/// filtered `Scan`, shifted by `shift` ([`anchored`]).
+fn selector(
+    metric: String,
+    matchers: Vec<Scalar>,
+    shift: TimeShift,
+    range: Duration,
+    kind: TimeRangeKind,
+) -> Unresolved {
+    anchored(shift, |shift| Unresolved::TimeRange {
+        range,
+        kind,
+        child: Rc::new(filtered_source(metric, matchers, shift)),
+    })
+}
+
+/// The subtree `lower` builds with `shift`, its `@ start()` / `@ end()`
+/// lifted above it: `lower` gets `shift` without them (only the offset and
+/// an `@ <ts>` stay in the subtree), and `TimeShift { at: Start | End }`
+/// reads its result. The subtree is then the group of the same expression
+/// without `@`, shared with any query over it; in a range query it runs
+/// once per request, at the request's end (or start), and in an instant
+/// query both are the evaluation time.
+fn anchored(shift: TimeShift, lower: impl FnOnce(TimeShift) -> Unresolved) -> Unresolved {
+    match shift.at {
+        Some(at @ (AtModifier::Start | AtModifier::End)) => Unresolved::TimeShift {
+            shift: TimeShift {
+                offset_ms: 0,
+                at: Some(at),
+            },
+            child: Rc::new(lower(TimeShift {
+                offset_ms: shift.offset_ms,
+                at: None,
+            })),
+        },
+        _ => lower(shift),
     }
 }
 

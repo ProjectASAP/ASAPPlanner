@@ -391,6 +391,7 @@ fn global_extrema_bind_with_planner_derived_schema() {
             guarantee: None,
             retention_ms: None,
             selected_physical_candidate: None,
+            view_coverage: None,
         };
         let operator = compile_node(&node, std::slice::from_ref(&input))
             .expect("global extremum should bind to its Planner schema");
@@ -935,6 +936,7 @@ fn planner_node(
         guarantee: None,
         retention_ms: None,
         selected_physical_candidate: None,
+        view_coverage: None,
     }
 }
 
@@ -1168,6 +1170,7 @@ fn exact_aggregate_node(
         guarantee: None,
         retention_ms: None,
         selected_physical_candidate: None,
+        view_coverage: None,
     }
 }
 

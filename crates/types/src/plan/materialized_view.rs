@@ -64,20 +64,19 @@
 //! it once.
 
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::physical_asap_dag::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPDAGValidationError, PhysicalASAPNodeId,
+    ViewCoverage,
 };
 use crate::ir::operator::arguments::Source;
 use crate::ir::operator::asap::ASAPOp;
-use crate::ir::operator::node::{Operator, OperatorNode};
+use crate::ir::operator::node::Operator;
 use crate::ir::operator::non_asap::NonASAPOp;
 use crate::ir::properties::execution_data_state::ExecutionTiming;
-use crate::ir::properties::summary_coverage::{CoverageError, SelectionBox, SummaryCoverage};
 use crate::stages::Lifetime;
 
 /// One materialized view of a DAG: what its stored state is, what it is
@@ -89,7 +88,7 @@ pub struct MaterializedView {
     pub node_id: PhysicalASAPNodeId,
     /// Which run refreshes it.
     pub(crate) refresh: MaterializedViewRefresh,
-    /// What the stored state is: the node's summary coverage.
+    /// What the stored state is: the node's aggregate coverage.
     pub(crate) coverage: ViewCoverage,
     /// What its refresh reads.
     pub inputs: MaterializedViewInputs,
@@ -116,36 +115,6 @@ impl MaterializedView {
     /// What the stored state is.
     pub fn coverage(&self) -> &ViewCoverage {
         &self.coverage
-    }
-}
-
-/// A view's summary coverage
-/// ([`SummaryCoverage`], `docs/design_docs/proposals/asap-primitive-schema.md`
-/// §4.2): what it computes and which rows went in.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ViewCoverage {
-    /// `SummaryCoverage::definition_id`: equal on every node, plan and
-    /// process that computes the same thing, whatever its selection; a
-    /// rollup to a coarser grouping computes something else and has its
-    /// own.
-    pub(crate) definition_id: String,
-    /// The rows that went in: a union of boxes of value sets, value ranges
-    /// and time relative to the evaluation time. A merge's is the union of
-    /// its inputs'.
-    pub(crate) selection: Vec<SelectionBox>,
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl ViewCoverage {
-    /// `SummaryCoverage::definition_id`.
-    pub fn definition_id(&self) -> &str {
-        &self.definition_id
-    }
-
-    /// The rows that went in.
-    pub fn selection(&self) -> &[SelectionBox] {
-        &self.selection
     }
 }
 
@@ -349,7 +318,7 @@ pub enum InstallableDagError {
     ViewReadsUnwindowedSource { node_id: PhysicalASAPNodeId },
     /// Unsatisfiable request: view `node_id` is not a summary state with a
     /// coverage (`reason`), so a runtime cannot say what it stores.
-    #[error("materialized view {node_id} has no summary coverage: {reason}")]
+    #[error("materialized view {node_id} has no aggregate coverage: {reason}")]
     ViewWithoutCoverage {
         node_id: PhysicalASAPNodeId,
         reason: String,
@@ -593,14 +562,7 @@ impl PhysicalASAPDAG {
             .filter(|node| matches!(node.lifetime, Lifetime::AcrossEvaluations(_)))
             .map(|node| node.id)
             .collect();
-        // The IR of each node, which coverage is derived from.
-        let ir = if views.is_empty() {
-            HashMap::new()
-        } else {
-            self.operator_nodes()?
-        };
         let mut derived = Vec::new();
-        let mut coverage_by_node: HashMap<PhysicalASAPNodeId, SummaryCoverage> = HashMap::new();
         for &id in index.children_first.iter().filter(|id| views.contains(id)) {
             let node = index.nodes[&id];
             let (inputs, scans) = index.inputs_of_view(id, &views)?;
@@ -627,13 +589,12 @@ impl PhysicalASAPDAG {
                     );
                 }
             }
-            let coverage = coverage_of(id, &inputs, &ir, &coverage_by_node).map_err(|error| {
+            let coverage = node.view_coverage.clone().ok_or_else(|| {
                 InstallableDagError::ViewWithoutCoverage {
                     node_id: id,
-                    reason: error.to_string(),
+                    reason: "the plan node carries no view_coverage".into(),
                 }
             })?;
-            coverage_by_node.insert(id, coverage.clone());
             let view = MaterializedView {
                 node_id: id,
                 refresh: if refreshed_at_ingestion {
@@ -641,10 +602,7 @@ impl PhysicalASAPDAG {
                 } else {
                     MaterializedViewRefresh::OnFirstRead
                 },
-                coverage: ViewCoverage {
-                    definition_id: coverage.definition_id(),
-                    selection: coverage.selection,
-                },
+                coverage,
                 inputs,
                 retention_ms: node.retention_ms.unwrap_or(0),
             };
@@ -922,19 +880,4 @@ impl<'a> ViewIndex<'a> {
         };
         Ok((inputs, scans))
     }
-}
-
-/// The coverage of view `id` (IR `ir`), refreshed from `inputs`: the
-/// coverage its memo group stores, which the realized plan will carry.
-/// Coverage is derived only in the memo, never on node trees.
-fn coverage_of(
-    id: PhysicalASAPNodeId,
-    inputs: &MaterializedViewInputs,
-    ir: &HashMap<PhysicalASAPNodeId, Rc<OperatorNode>>,
-    coverage_by_node: &HashMap<PhysicalASAPNodeId, SummaryCoverage>,
-) -> Result<SummaryCoverage, CoverageError> {
-    let _ = (id, inputs, ir, coverage_by_node);
-    todo!(
-        "#1207 PR 6: the view's coverage from its memo group's GroupProperties::aggregate_coverage"
-    )
 }

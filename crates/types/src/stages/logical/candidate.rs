@@ -65,10 +65,11 @@ pub struct CandidateExpression {
 /// A candidate [`Memo::add_candidate`](crate::stages::Memo::add_candidate) rejects; the memo is unchanged.
 #[derive(Debug, thiserror::Error)]
 pub enum CandidateError {
-    /// The candidate's expression fails the node rules (schema derivation,
-    /// input validation, merge check): a bug in the rule that built it.
-    #[error("the candidate's expression breaks the node rules: {0}")]
-    Schema(SchemaDerivationError),
+    /// The candidate's expression is not valid over its input groups (its
+    /// output schema does not derive, an input fails validation, or a merge
+    /// reads states it may not merge): a bug in the rule that built it.
+    #[error("the candidate's expression is not valid over its input groups: {0}")]
+    NotValidOverInputGroups(SchemaDerivationError),
     /// Its output schema or output kind differs from the group's: it does
     /// not compute the group's result (a bug in the rule that built it).
     #[error("the candidate's output differs from group {group:?}'s")]
@@ -84,7 +85,7 @@ pub enum CandidateError {
 pub struct LogicalProperties {
     /// $\boldsymbol\theta_v$, from the algorithm's predefined list; `None` for
     /// an exact operator.
-    parameters: Option<SketchParams>,
+    pub(super) parameters: Option<SketchParams>,
 }
 
 impl LogicalProperties {

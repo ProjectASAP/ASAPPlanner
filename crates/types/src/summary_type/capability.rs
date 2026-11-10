@@ -110,6 +110,52 @@ impl SummaryTypeCapability {
         ) && !Self::shares_one_state_across_groups(summary_type)
     }
 
+    /// Whether a point count or top-k read from a state of `summary_type`
+    /// may have a sign the weights it was updated with do not: a median of
+    /// signed counters (Count Sketch, UnivMon and their variants) can be
+    /// negative over non-negative weights; an overestimating counter
+    /// (Count-Min) or an exact count cannot. Every algorithm is listed, so
+    /// one `asap_sketchlib` adds fails to compile here until it is placed.
+    /// `asap_sketchlib`'s `experimental` algorithms are not listed: the
+    /// planner does not build it with that feature, as `parameter_list`
+    /// does not.
+    pub(crate) fn point_counts_may_flip_sign(summary_type: &FieldDataType) -> bool {
+        use SketchAlgorithm as A;
+        let FieldDataType::Sketch(algorithm) = summary_type else {
+            return false;
+        };
+        match algorithm {
+            A::CountSketch
+            | A::CountSketchFold
+            | A::CountSketchWithHeap
+            | A::CountSketchWithL2Norm
+            | A::CountSketchWithSpaceSaving
+            | A::HydraCountSketch
+            | A::UnivMon
+            | A::UnivMonQ
+            | A::UnivMonTwoTier
+            | A::HydraUnivMon => true,
+            A::Cms
+            | A::CmsWithHeap
+            | A::CmsWithSpaceSaving
+            | A::CmsFold
+            | A::HydraCms
+            | A::Hll
+            | A::HllHip
+            | A::Kmv
+            | A::Kll
+            | A::KllDynamic
+            | A::HydraKll
+            | A::HydraHll
+            | A::DDSketch
+            | A::SpaceSaving
+            | A::Elastic
+            | A::Coco
+            | A::Bloom
+            | A::SetAggregator => false,
+        }
+    }
+
     /// Whether `summary_type` is a Hydra algorithm: one structure shared by
     /// every group, not one state per group.
     pub fn shares_one_state_across_groups(summary_type: &FieldDataType) -> bool {

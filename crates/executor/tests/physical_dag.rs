@@ -537,6 +537,7 @@ fn bind_physical_asap_dag_before_execution() {
         guarantee: None,
         retention_ms: None,
         selected_physical_candidate: None,
+        view_coverage: None,
     };
     let mut dag = PhysicalASAPDAG {
         nodes: vec![
@@ -699,6 +700,7 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
         guarantee: None,
         retention_ms: None,
         selected_physical_candidate: None,
+        view_coverage: None,
     };
     let edge = |producer, consumer, role, schema: &asap_executor::values::SchemaRef| {
         PhysicalASAPDAGEdge::new(
@@ -1120,6 +1122,7 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
         guarantee: None,
         retention_ms: None,
         selected_physical_candidate: None,
+        view_coverage: None,
     };
     let edge = |producer, consumer| {
         PhysicalASAPDAGEdge::new(
@@ -1222,6 +1225,7 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
                 right: 1,
             }),
             selected_physical_candidate: None,
+            view_coverage: None,
         };
         let join = if certified {
             Operator::certified_semi_join(schema.clone(), schema.clone(), vec![(0, 0)]).unwrap()
@@ -1329,6 +1333,7 @@ fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
             rhs: 1,
         }),
         selected_physical_candidate: None,
+        view_coverage: None,
     };
     let binary = compile_node(&node, &[input.clone(), input.clone()]).unwrap();
     for (right, expected) in [

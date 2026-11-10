@@ -10,6 +10,22 @@ use crate::ir::operator::AggIntent;
 use crate::ir::scalar::ColumnRef;
 use crate::ir::schema::{ColumnId, DataType, Field, FieldDataType, Schema};
 use crate::ir::SchemaDerivationError;
+
+/// Where one output column of an aggregate comes from: an input column it
+/// keeps, a measure's value (with the input column the schema types it by,
+/// the measure's own or the probe value column), or a label column the
+/// measure adds (`count_values`' and `absent`'s). `sum by (job) (x)` →
+/// `[InputColumn(job), Measure { index: 0, input_column: Some(value) }]`. The one layout the output schema
+/// ([`aggregate_output_schema`]) and the group properties read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutputColumnSource {
+    InputColumn(ColumnId),
+    Measure {
+        index: usize,
+        input_column: Option<ColumnId>,
+    },
+    AddedLabel,
+}
 /// Output schema of a *per-series* window/range reduction (`rate`/`increase`,
 /// or an `*_over_time` reducer under a time `Window`). Such a reduction emits
 /// one value per series, so every label column of `input` is preserved and only
@@ -18,7 +34,7 @@ use crate::ir::SchemaDerivationError;
 fn per_series_reduction_schema(
     input: &Schema,
     agg: &AggIntent,
-) -> Result<Schema, SchemaDerivationError> {
+) -> Result<(Schema, Vec<OutputColumnSource>), SchemaDerivationError> {
     let vi = if let Some(index) = agg.input_cols().first() {
         *index
     } else {
@@ -34,6 +50,13 @@ fn per_series_reduction_schema(
         )));
     }
     let mut columns = input.fields.clone();
+    let mut sources: Vec<OutputColumnSource> = (0..columns.len())
+        .map(OutputColumnSource::InputColumn)
+        .collect();
+    sources[vi] = OutputColumnSource::Measure {
+        index: 0,
+        input_column: Some(vi),
+    };
     {
         let mut out = agg.output_column(&columns[vi]);
         out.name = "value".into();
@@ -44,14 +67,17 @@ fn per_series_reduction_schema(
         out.dtype = FieldDataType::Plain(DataType::Float64);
         columns[vi] = out;
     }
-    Ok(Schema {
-        fields: columns,
-        time_index: input.time_index,
-        unique_keys: input.unique_keys.clone(),
-        // Per-series reduction is label-preserving: it inherits its input's
-        // completeness (an open scan stays open; a closed one stays closed).
-        closed: input.closed,
-    })
+    Ok((
+        Schema {
+            fields: columns,
+            time_index: input.time_index,
+            unique_keys: input.unique_keys.clone(),
+            // Per-series reduction is label-preserving: it inherits its input's
+            // completeness (an open scan stays open; a closed one stays closed).
+            closed: input.closed,
+        },
+        sources,
+    ))
 }
 
 /// The output schema of an `Aggregate { reduction, measures }` over `in_schema` —
@@ -71,6 +97,17 @@ pub fn aggregate_output_schema(
     measures: &[AggIntent],
     output_names: &[String],
 ) -> Result<Schema, SchemaDerivationError> {
+    Ok(aggregate_output(in_schema, reduction, measures, output_names)?.0)
+}
+
+/// [`aggregate_output_schema`] and where each of its columns comes from
+/// ([`OutputColumnSource`]), in one pass.
+pub(crate) fn aggregate_output(
+    in_schema: &Schema,
+    reduction: &Reduction,
+    measures: &[AggIntent],
+    output_names: &[String],
+) -> Result<(Schema, Vec<OutputColumnSource>), SchemaDerivationError> {
     let by = match reduction {
         Reduction::PerEntity => {
             debug_assert_eq!(
@@ -93,6 +130,7 @@ pub fn aggregate_output_schema(
     }
 
     let mut out_cols: Vec<Field> = Vec::with_capacity(by.len() + measures.len());
+    let mut sources: Vec<OutputColumnSource> = Vec::with_capacity(by.len() + measures.len());
     for &id in by.keys() {
         let c = in_schema
             .fields
@@ -102,6 +140,7 @@ pub fn aggregate_output_schema(
                 in_schema.fields.len(),
             ))?;
         out_cols.push(c.clone());
+        sources.push(OutputColumnSource::InputColumn(id));
     }
     let value_col_idx = crate::ir::scalar::column_resolution::resolve_column_ref(
         &ColumnRef::SampleValue,
@@ -126,12 +165,17 @@ pub fn aggregate_output_schema(
         if let AggIntent::CountValues { label } = intent {
             if !out_cols.iter().any(|c| c.name == *label) {
                 out_cols.push(Field::plain(label.clone(), DataType::Utf8, false));
+                sources.push(OutputColumnSource::AddedLabel);
             }
             let mut cnt = intent.output_column(&probe);
             if let Some(name) = output_names.get(i).filter(|s| !s.is_empty()) {
                 cnt.name = name.clone();
             }
             out_cols.push(cnt);
+            sources.push(OutputColumnSource::Measure {
+                index: i,
+                input_column: value_col_idx,
+            });
             continue;
         }
         // `absent(v)` emits its synthesized labels as `Utf8` columns before
@@ -142,15 +186,13 @@ pub fn aggregate_output_schema(
                     .keys()
                     .map(|name| Field::plain(name.clone(), DataType::Utf8, false)),
             );
+            sources.extend(labels.keys().map(|_| OutputColumnSource::AddedLabel));
         }
         // Only the output *type* is read from here, so the leading column is
         // enough for the multi-column intents: `Cardinality` and `PearsonCorr`
         // both have a fixed output type that ignores it.
-        let in_col = intent
-            .input_cols()
-            .first()
-            .and_then(|id| in_schema.fields.get(*id))
-            .unwrap_or(&probe);
+        let input_column = measure_input_column(in_schema, intent);
+        let in_col = input_column.map_or(&probe, |id| &in_schema.fields[id]);
         let mut out = intent.output_column(in_col);
         // A global extremum emits NULL for an empty input, even if its input
         // column is non-nullable. Grouped extrema only emit existing groups.
@@ -168,6 +210,10 @@ pub fn aggregate_output_schema(
             out.name = name.clone();
         }
         out_cols.push(out);
+        sources.push(OutputColumnSource::Measure {
+            index: i,
+            input_column: input_column.or(value_col_idx),
+        });
     }
     // `count_values` groups by (by-keys ∪ the synthesized value label), so the
     // by-keys alone are not a unique key — be conservative and claim none.
@@ -179,15 +225,29 @@ pub fn aggregate_output_schema(
     } else {
         vec![(0..by.len()).collect()]
     };
-    Ok(Schema {
-        fields: out_cols,
-        time_index: None,
-        unique_keys,
-        // A cross-series aggregate enumerates exactly `by ++ measures`, so its output
-        // is closed even over an open input — this is where an open schema
-        // freezes to closed.
-        closed: true,
-    })
+    Ok((
+        Schema {
+            fields: out_cols,
+            time_index: None,
+            unique_keys,
+            // A cross-series aggregate enumerates exactly `by ++ measures`, so its output
+            // is closed even over an open input — this is where an open schema
+            // freezes to closed.
+            closed: true,
+        },
+        sources,
+    ))
+}
+
+/// The input column a measure's output is typed by when it names one: its
+/// leading input column (the multi-column intents' output type ignores the
+/// rest).
+fn measure_input_column(in_schema: &Schema, intent: &AggIntent) -> Option<ColumnId> {
+    intent
+        .input_cols()
+        .first()
+        .copied()
+        .filter(|&id| id < in_schema.fields.len())
 }
 
 /// Output schema of a `without(excluded)` aggregate: the kept labels (every
@@ -201,7 +261,7 @@ fn without_output_schema(
     excluded: &[ColumnId],
     measures: &[AggIntent],
     output_names: &[String],
-) -> Result<Schema, SchemaDerivationError> {
+) -> Result<(Schema, Vec<OutputColumnSource>), SchemaDerivationError> {
     for &id in excluded {
         if id >= in_schema.fields.len() {
             return Err(SchemaDerivationError::InvalidGroupByColumn(
@@ -211,6 +271,7 @@ fn without_output_schema(
         }
     }
     let mut out_cols: Vec<Field> = Vec::new();
+    let mut sources: Vec<OutputColumnSource> = Vec::new();
     for (i, col) in in_schema.fields.iter().enumerate() {
         let is_time = in_schema.time_index == Some(i);
         let is_value = crate::ir::scalar::column_resolution::resolve_column_ref(
@@ -221,6 +282,7 @@ fn without_output_schema(
             == Some(i);
         if !is_time && !is_value && !excluded.contains(&i) {
             out_cols.push(col.clone());
+            sources.push(OutputColumnSource::InputColumn(i));
         }
     }
     let probe = in_schema
@@ -232,11 +294,8 @@ fn without_output_schema(
         // Only the output *type* is read from here, so the leading column is
         // enough for the multi-column intents: `Cardinality` and `PearsonCorr`
         // both have a fixed output type that ignores it.
-        let in_col = intent
-            .input_cols()
-            .first()
-            .and_then(|id| in_schema.fields.get(*id))
-            .unwrap_or(&probe);
+        let input_column = measure_input_column(in_schema, intent);
+        let in_col = input_column.map_or(&probe, |id| &in_schema.fields[id]);
         let mut out = intent.output_column(in_col);
         if let Some((arg, _)) = intent
             .arg_selector_columns(in_schema)
@@ -249,20 +308,161 @@ fn without_output_schema(
             out.name = name.clone();
         }
         out_cols.push(out);
+        sources.push(OutputColumnSource::Measure {
+            index: i,
+            input_column: input_column.or_else(|| in_schema.column_id("value")),
+        });
     }
-    Ok(Schema {
-        fields: out_cols,
-        time_index: None,
-        unique_keys: Vec::new(),
-        // The kept label set is runtime-only, so — unlike `by` — this does not
-        // freeze the open schema to closed.
-        closed: false,
-    })
+    Ok((
+        Schema {
+            fields: out_cols,
+            time_index: None,
+            unique_keys: Vec::new(),
+            // The kept label set is runtime-only, so — unlike `by` — this does not
+            // freeze the open schema to closed.
+            closed: false,
+        },
+        sources,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `[ts, value, job, host]`, the time series schema the layout tests read.
+    fn series() -> Schema {
+        Schema::with_time_index(
+            vec![
+                col("ts", DataType::Timestamp, false),
+                col("value", DataType::Float64, false),
+                col("job", DataType::Utf8, false),
+                col("host", DataType::Utf8, false),
+            ],
+            0,
+            vec![],
+        )
+    }
+
+    /// Each output column's source, and one source per column of
+    /// `aggregate_output_schema`'s output.
+    fn columns(reduction: Reduction, measures: &[AggIntent]) -> Vec<OutputColumnSource> {
+        let (schema, sources) = aggregate_output(&series(), &reduction, measures, &[]).unwrap();
+        assert_eq!(sources.len(), schema.fields.len());
+        sources
+    }
+
+    /// `sum by (job)`: the key, then the measure.
+    #[test]
+    fn a_by_aggregate_keeps_its_keys_then_its_measures() {
+        use OutputColumnSource::*;
+        assert_eq!(
+            columns(Reduction::by(vec![2]), &[AggIntent::Sum { col: None }]),
+            vec![
+                InputColumn(2),
+                Measure {
+                    index: 0,
+                    input_column: Some(1)
+                }
+            ]
+        );
+    }
+
+    /// `sum without (host)`: every label but `host`, then the measure.
+    #[test]
+    fn a_without_aggregate_keeps_the_other_labels_then_its_measures() {
+        use OutputColumnSource::*;
+        assert_eq!(
+            columns(
+                Reduction::Reduce(GroupKeys::without(vec![3])),
+                &[AggIntent::Sum { col: None }]
+            ),
+            vec![
+                InputColumn(2),
+                Measure {
+                    index: 0,
+                    input_column: Some(1)
+                }
+            ]
+        );
+    }
+
+    /// `count_values by (job) ("version", v)` adds the `version` label before
+    /// the count; `count_values without (host)` adds none, like its schema.
+    #[test]
+    fn count_values_adds_its_label_only_by_keys() {
+        use OutputColumnSource::*;
+        let count_values = AggIntent::CountValues {
+            label: "version".into(),
+        };
+        assert_eq!(
+            columns(Reduction::by(vec![2]), std::slice::from_ref(&count_values)),
+            vec![
+                InputColumn(2),
+                AddedLabel,
+                Measure {
+                    index: 0,
+                    input_column: Some(1)
+                }
+            ]
+        );
+        assert_eq!(
+            columns(
+                Reduction::Reduce(GroupKeys::without(vec![3])),
+                &[count_values]
+            ),
+            vec![
+                InputColumn(2),
+                Measure {
+                    index: 0,
+                    input_column: Some(1)
+                }
+            ]
+        );
+    }
+
+    /// `absent(m{job="a", host="b"})` adds one label per matcher before its
+    /// value.
+    #[test]
+    fn absent_adds_its_labels_before_its_value() {
+        use OutputColumnSource::*;
+        let absent = AggIntent::Absent {
+            labels: std::collections::BTreeMap::from([
+                ("host".to_string(), "b".to_string()),
+                ("job".to_string(), "a".to_string()),
+            ]),
+        };
+        assert_eq!(
+            columns(Reduction::by(vec![]), &[absent]),
+            vec![
+                AddedLabel,
+                AddedLabel,
+                Measure {
+                    index: 0,
+                    input_column: Some(1)
+                }
+            ]
+        );
+    }
+
+    /// A per-entity reduction keeps every input column, the value replaced
+    /// by the measure.
+    #[test]
+    fn a_per_entity_reduction_replaces_the_value_by_the_measure() {
+        use OutputColumnSource::*;
+        assert_eq!(
+            columns(Reduction::PerEntity, &[AggIntent::Rate]),
+            vec![
+                InputColumn(0),
+                Measure {
+                    index: 0,
+                    input_column: Some(1)
+                },
+                InputColumn(2),
+                InputColumn(3)
+            ]
+        );
+    }
 
     fn col(name: &str, dtype: DataType, nullable: bool) -> Field {
         Field::plain(name, dtype, nullable)

@@ -12,9 +12,8 @@ mod per_computation_logical_memo_candidates;
 mod physical;
 mod pruning;
 
-pub(crate) use logical::MemoGroupAsInput;
 pub use logical::{
-    queries_rooted_at, root_groups, CandidateError, CandidateExpression, CandidateForMemoGroup,
+    view_coverage, CandidateError, CandidateExpression, CandidateForMemoGroup,
     CandidateForMemoGroupId, GroupProperties, LogicalASAPMemoCandidates, LogicalEdge,
     LogicalProperties, LogicalPropertiesError, LogicalRequirements, Memo, MemoGroup, MemoGroupId,
     MemoQuery, OriginOfCandidateForMemoGroup, RequiredAccuracy, ValueSign,

@@ -9,6 +9,7 @@
 //! (#509 Assumption 8): it does not change lifetime or timing.
 
 use std::collections::{HashMap, HashSet};
+#[cfg(any(test, feature = "test-support"))]
 use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
@@ -16,12 +17,15 @@ use thiserror::Error;
 
 use crate::ir::flat::NodeId;
 use crate::ir::operator::asap::ASAPOp;
-use crate::ir::operator::node::{Operator, OperatorNode};
+use crate::ir::operator::node::Operator;
+#[cfg(any(test, feature = "test-support"))]
+use crate::ir::operator::node::OperatorNode;
 use crate::ir::operator::non_asap::NonASAPOp;
 use crate::ir::scalar::ScalarExpr;
 
 use crate::accuracy::AccuracyGuarantee;
 use crate::ir::properties::execution_data_state::{ExecutionDataState, ExecutionTiming};
+use crate::ir::properties::selection::SelectionBox;
 use crate::ir::schema::Schema;
 use crate::stages::PhysicalCandidateId;
 use crate::stages::{Lifetime, PhysicalPropertiesError};
@@ -95,6 +99,50 @@ pub struct PhysicalASAPDAGNode {
     /// built by a custom pass.
     #[serde(skip)]
     pub selected_physical_candidate: Option<PhysicalCandidateId>,
+    /// For a materialized view (lifetime `AcrossEvaluations`), what it
+    /// stores: its memo group's aggregate coverage, carried into the plan
+    /// as a [`ViewCoverage`] (the selection, and the plan-scope content id
+    /// of the definition, [`ViewCoverage::definition_id`]). Set when the
+    /// plan is built from the memo, where the node's group is known; `None`
+    /// on every other node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_coverage: Option<ViewCoverage>,
+}
+
+/// A view's aggregate coverage
+/// ([`AggregateCoverage`](crate::ir::properties::AggregateCoverage), `docs/design_docs/proposals/asap-primitive-schema.md`
+/// §4.2): what it computes and which rows went in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewCoverage {
+    /// The plan-scope content id of what the view computes: its memo
+    /// coverage's `AggregateDefinition` with every input group expanded
+    /// recursively to its expression, down to the `Scan`s, holding no
+    /// memo group or plan node ids, canonically serialized and hashed
+    /// (`stages::view_coverage`).
+    /// Equal across plans and processes that compute the same thing,
+    /// whatever the selection, and different when they do not (a rollup to
+    /// a coarser grouping computes something else and has its own). Inside
+    /// one memo, coverages compare by `AggregateDefinition` `==` instead
+    /// and need no id.
+    pub(crate) definition_id: String,
+    /// The rows that went in: a union of boxes of value sets, value ranges
+    /// and time relative to the evaluation time. A merge's is the union of
+    /// its inputs'.
+    pub(crate) selection: Vec<SelectionBox>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl ViewCoverage {
+    /// The plan-scope content id of what the view computes.
+    pub fn definition_id(&self) -> &str {
+        &self.definition_id
+    }
+
+    /// The rows that went in.
+    pub fn selection(&self) -> &[SelectionBox] {
+        &self.selection
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -256,11 +304,11 @@ impl PhysicalASAPDAG {
     }
 
     /// Every node of this DAG as IR, by node id, with its exported
-    /// guarantee (an operator node has no physical properties): what a caller derives
-    /// IR properties of a plan file's node from, such as its
-    /// [`SummaryCoverage`](crate::ir::properties::summary_coverage::SummaryCoverage).
-    /// Shared inputs stay shared. Validates the DAG first.
-    pub(crate) fn operator_nodes(
+    /// guarantee (an operator node has no physical properties): what
+    /// [`Self::query_roots`] reads. Shared inputs stay shared. Validates the
+    /// DAG first.
+    #[cfg(any(test, feature = "test-support"))]
+    fn operator_nodes(
         &self,
     ) -> Result<HashMap<PhysicalASAPNodeId, Rc<OperatorNode>>, PhysicalASAPDAGValidationError> {
         self.validate()?;
@@ -607,6 +655,7 @@ pub(crate) fn physical_asap_dag_at_query_time_with_node_ids(
             guarantee: flat_node.guarantee,
             retention_ms: None,
             selected_physical_candidate: None,
+            view_coverage: None,
         });
     }
     let dag = PhysicalASAPDAG {

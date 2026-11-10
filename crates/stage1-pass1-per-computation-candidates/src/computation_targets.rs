@@ -348,7 +348,7 @@ pub fn generate_per_computation_candidates(
     // a group several queries read is one node.
     let node = |g: &MemoGroupId| Rc::clone(&logical_nodes[g.0 as usize]);
     let roots: Vec<QueryRoot> = memo
-        .queries
+        .queries()
         .iter()
         .map(|query| match &query.root {
             QueryRoot::Operator(g) => QueryRoot::Operator(node(g)),
@@ -461,7 +461,7 @@ pub fn generate_per_computation_candidates(
         }
     }
     add_whole_expression_targets(&mut targets, &logical_nodes);
-    prune_topk_heaps_over_one_row_per_item(&mut targets, &logical_nodes);
+    prune_topk_heaps_over_one_row_per_item(memo, &mut targets, &logical_nodes);
     add_nested_sum_targets(&mut targets, &logical_nodes);
     close_absorptions(&mut targets);
     Ok(PerComputationCandidates {
@@ -718,13 +718,13 @@ fn add_whole_expression_targets(
 /// one row per item, so exact is no costlier; a fused whole-expression
 /// heap ([`add_whole_expression_targets`]) has already moved out of them.
 fn prune_topk_heaps_over_one_row_per_item(
+    memo: &Memo,
     targets: &mut [ComputationTarget],
     logical_nodes: &[Rc<OperatorNode>],
 ) {
     for target in targets.iter_mut() {
-        let Some(NonASAPOp::Aggregate {
-            measures, child, ..
-        }) = logical_nodes[target.aggregate_group.0 as usize].non_asap()
+        let Some(NonASAPOp::Aggregate { measures, .. }) =
+            logical_nodes[target.aggregate_group.0 as usize].non_asap()
         else {
             continue;
         };
@@ -735,22 +735,20 @@ fn prune_topk_heaps_over_one_row_per_item(
             continue;
         }
         // A PromQL top-k ranks an instant vector: one row per series or
-        // group. (A SQL top-k keeps its heaps.)
-        if !reads_only_time_series(child) {
+        // group. (A SQL top-k keeps its heaps.) The aggregate scans what its
+        // input does.
+        if !memo.groups()[target.aggregate_group.0 as usize]
+            .group_properties
+            .scanned_sources
+            .iter()
+            .all(Source::is_time_series)
+        {
             continue;
         }
         prune_own(&mut target.ways_to_compute, |candidate| {
             matches!(candidate, HowToComputeAggregateMeasure::Summary(family)
                 if family.capability().answers(StatisticKind::TopK))
         });
-    }
-}
-
-/// Whether every scan below `node` reads a time series (PromQL rows).
-fn reads_only_time_series(node: &OperatorNode) -> bool {
-    match node.non_asap() {
-        Some(NonASAPOp::Scan { source, .. }) => matches!(source, Source::TimeSeries { .. }),
-        _ => node.children().iter().all(|c| reads_only_time_series(c)),
     }
 }
 

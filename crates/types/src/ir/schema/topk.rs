@@ -1,6 +1,7 @@
 //! Ranked-row output contract shared by logical TopK and its implementations.
+use crate::ir::operator::arguments::Source;
 use crate::ir::operator::input::OperatorInput;
-use crate::ir::operator::{Reduction, Source};
+use crate::ir::operator::Reduction;
 use crate::ir::scalar::column_resolution::{resolve_column_ref, ResolveError};
 use crate::ir::scalar::{ColumnRef, ProjectItem};
 use crate::ir::schema::{ColumnId, DataType, FieldDataType, PROMQL_SERIES_IDENTITY};
@@ -85,7 +86,7 @@ pub(crate) fn ranked_row_projection<I: OperatorInput>(
         alias: Some(output_name.into()),
         expr: ScalarExpr::Column(value),
     });
-    let promql = reads_only_time_series(child);
+    let promql = child.scanned_sources().iter().all(Source::is_time_series);
     for (index, field) in child.schema().fields.iter().enumerate() {
         let names_item = !promql || field.dtype == FieldDataType::Plain(DataType::Utf8);
         if names_item
@@ -140,14 +141,5 @@ pub fn series_identity_item(
         items.remove(0)
     } else {
         SummaryInputExpr::Tuple(items)
-    }
-}
-
-fn reads_only_time_series<I: OperatorInput>(node: &I) -> bool {
-    match node.operator() {
-        Operator::NonASAP(NonASAPOp::Scan { source, .. }) => {
-            matches!(source, Source::TimeSeries { .. })
-        }
-        operator => operator.children().into_iter().all(reads_only_time_series),
     }
 }

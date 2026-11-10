@@ -114,7 +114,7 @@ pub struct SourceFacts {
     pub metric_type: Option<PrometheusMetricType>,
     /// The declared sign of each column's values, keyed by column name
     /// (default: none declared), e.g. `{"value": "non_negative"}` for a
-    /// latency gauge. A `Scan`'s `column_sign` reads it; an undeclared
+    /// latency gauge. A `Scan`'s `column_signs` reads it; an undeclared
     /// column is `Unknown`, except a PromQL counter's value, which is
     /// non-negative without a declaration. The deployment must ensure it.
     /// Omitted from JSON when empty.
@@ -313,26 +313,7 @@ impl DataWorkload {
         &self,
         series: &str,
     ) -> Option<(&SourceFacts, Option<PrometheusMetricType>)> {
-        use PrometheusMetricType::{Counter, Histogram, Summary};
-        for (suffix, series_type) in [
-            ("_bucket", None),
-            ("_sum", Some(Counter)),
-            ("_count", Some(Counter)),
-        ] {
-            let Some(family) = series.strip_suffix(suffix) else {
-                continue;
-            };
-            let Some(facts) = self.sources.get(family) else {
-                continue;
-            };
-            match (facts.metric_type, series_type) {
-                (Some(Histogram), None) => return Some((facts, Some(Histogram))),
-                (Some(Histogram | Summary), Some(counter)) => return Some((facts, Some(counter))),
-                _ => {}
-            }
-        }
-        let facts = self.sources.get(series)?;
-        Some((facts, facts.metric_type))
+        series_facts(&self.sources, series)
     }
 
     /// Data of unknown arrival whose `metrics` are each sampled every
@@ -425,6 +406,35 @@ impl DataWorkload {
         }
         Ok(())
     }
+}
+
+/// [`DataWorkload::series_facts`] over `sources`, a data workload's
+/// [`DataWorkload::sources`]: the facts of the source a PromQL selector over
+/// `series` reads, and that series' own type.
+pub(crate) fn series_facts<'a>(
+    sources: &'a BTreeMap<String, SourceFacts>,
+    series: &str,
+) -> Option<(&'a SourceFacts, Option<PrometheusMetricType>)> {
+    use PrometheusMetricType::{Counter, Histogram, Summary};
+    for (suffix, series_type) in [
+        ("_bucket", None),
+        ("_sum", Some(Counter)),
+        ("_count", Some(Counter)),
+    ] {
+        let Some(family) = series.strip_suffix(suffix) else {
+            continue;
+        };
+        let Some(facts) = sources.get(family) else {
+            continue;
+        };
+        match (facts.metric_type, series_type) {
+            (Some(Histogram), None) => return Some((facts, Some(Histogram))),
+            (Some(Histogram | Summary), Some(counter)) => return Some((facts, Some(counter))),
+            _ => {}
+        }
+    }
+    let facts = sources.get(series)?;
+    Some((facts, facts.metric_type))
 }
 
 fn validate_optional_rate(rate: Option<Rate>) -> Result<(), WorkloadError> {

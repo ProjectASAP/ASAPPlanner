@@ -53,6 +53,7 @@ fn view_over_samples(family: FieldDataType, scan: usize) -> [PhysicalASAPDAGNode
         guarantee: None,
         retention_ms: None,
         selected_physical_candidate: None,
+        view_coverage: None,
     };
     [
         PhysicalASAPDAGNode {
@@ -141,6 +142,7 @@ fn try_state_dag(
             guarantee: None,
             retention_ms: None,
             selected_physical_candidate: None,
+            view_coverage: None,
         });
     }
     let read_id = nodes.len();
@@ -156,6 +158,7 @@ fn try_state_dag(
         guarantee: None,
         retention_ms: None,
         selected_physical_candidate: None,
+        view_coverage: None,
     });
     if let Some(target) = target {
         nodes.push(PhysicalASAPDAGNode {
@@ -176,6 +179,7 @@ fn try_state_dag(
             guarantee: None,
             retention_ms: None,
             selected_physical_candidate: None,
+            view_coverage: None,
         });
     }
     let root = nodes.last().unwrap().id;

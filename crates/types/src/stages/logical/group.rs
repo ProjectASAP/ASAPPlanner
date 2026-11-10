@@ -1,11 +1,16 @@
 //! Group scope: memo groups, the distinct logical sub-expressions of the
 //! workload, and the properties every candidate of a group shares.
 
+use std::collections::BTreeSet;
+
+use super::column_properties::{column_signs, ValueSign};
+use crate::ir::operator::arguments::{AtModifier, Source, TimeShift};
 use crate::ir::operator::input::OperatorInput;
-use crate::ir::properties::summary_coverage::SummaryCoverage;
+use crate::ir::properties::AggregateCoverage;
 use crate::ir::schema::Schema;
 use crate::ir::ASAPOp;
 use crate::ir::SchemaDerivationError;
+use crate::ir::{NonASAPOp, ScalarExpr};
 use crate::ir::{Operator, OperatorResultKind};
 use crate::stages::{CandidateForMemoGroup, Memo};
 
@@ -25,11 +30,15 @@ pub struct MemoGroup {
     /// changes.
     pub group_properties: GroupProperties,
     /// The groups that read it ([`Self::parent_groups`]) through their
-    /// expression or a candidate's.
-    pub parents: Vec<MemoGroupId>,
+    /// expression or a candidate's: kept up to date by
+    /// [`Memo::find_or_add_group`](super::Memo::find_or_add_group) and
+    /// [`Memo::add_candidate`](super::Memo::add_candidate).
+    pub(super) parents: Vec<MemoGroupId>,
     /// The queries whose roots reach it ([`Self::reached_by_queries`]),
-    /// ascending.
-    pub queries: Vec<usize>,
+    /// ascending: kept up to date by
+    /// [`Memo::add_query`](super::Memo::add_query) and
+    /// [`Memo::add_candidate`](super::Memo::add_candidate).
+    pub(super) queries: Vec<usize>,
     /// Its candidates: empty after Stage 0, filled by Stage 1.
     pub candidates: Vec<CandidateForMemoGroup>,
 }
@@ -53,80 +62,117 @@ impl MemoGroup {
 pub struct GroupProperties {
     pub schema: Schema,
     pub result_kind: OperatorResultKind,
-    /// Per output column, in schema order: the sign of its values.
-    pub column_sign: Vec<ValueSign>,
+    /// Per output column, in schema order: the sign of its values, from the
+    /// input groups' and, for a `Scan`, the declared ones.
+    pub column_signs: Vec<ValueSign>,
     /// Whether the result changes with the evaluation time: true for a
     /// group under a `TimeRange` relative to the evaluation time
-    /// (`sum_over_time(m[5m])`), false for one under a fixed `@ T` or
-    /// reading no time. A result that does not depend on it is the same at
-    /// every evaluation, so a stored copy delivers on every grid.
+    /// (`sum_over_time(m[5m])`) or reading it (`time()`, `now()`), false
+    /// for one under a fixed `@ T` or reading no time. A result that does
+    /// not depend on it is the same at every evaluation, so a stored copy
+    /// delivers on every grid.
     pub depends_on_evaluation_time: bool,
-    /// What an aggregate group covers: a summary state, a chain, a merge
-    /// over a chain's windows, or an exact `Aggregate` result; `None` for
-    /// any other group. Derived today for summary states only; exact
-    /// `Aggregate` groups follow in #1207 PR 2.
-    pub aggregate_coverage: Option<SummaryCoverage>,
+    /// What an aggregate group covers: a summary state, a chain, a
+    /// `TimeRange`/`TimeShift` over a chain or a merge over one, or an exact
+    /// `Aggregate` result; `None` for any other group.
+    pub aggregate_coverage: Option<AggregateCoverage<MemoGroupId>>,
     /// Whether two equal expressions return the same rows for the same
     /// input rows, so they may be one group (not an unordered `LIMIT`).
     pub shareable_when_equal: bool,
+    /// The sources the `Scan`s below this group read: a `Scan`'s own, else
+    /// the union over its input groups.
+    pub scanned_sources: BTreeSet<Source>,
 }
 
-/// The sign of one column's values, a group property derived from the
-/// input groups like lineage (concepts doc, section 3, "Value sign"); a
-/// `Scan`'s are declared per column in the data workload's source facts.
-/// Error contracts that hold only for values of one sign read it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ValueSign {
-    NonNegative,
-    NonPositive,
-    Unknown,
+/// Whether `operator` is a valid expression over its input groups
+/// ([`MemoGroupAsInput`]), never a node tree: its output schema derives, its
+/// inputs pass validation, and a merge reads only states it may merge.
+/// Returns the output schema and, for a merge, the coverage its check
+/// derived.
+pub(super) fn validate_expression_over_input_groups(
+    operator: &Operator<MemoGroupAsInput<'_>>,
+) -> Result<(Schema, Option<AggregateCoverage<MemoGroupId>>), SchemaDerivationError> {
+    let schema = operator.output_schema()?;
+    operator.validate_inputs()?;
+    // A merge is valid only over states of one definition it may merge.
+    let merge_coverage = match operator {
+        Operator::ASAP(ASAPOp::SummaryMerge { .. }) => Some(operator.aggregate_coverage()?),
+        _ => None,
+    };
+    Ok((schema, merge_coverage))
 }
 
-/// The properties of a group, or a candidate, computing `expression` over
-/// its input groups: the rules that check operator nodes, reading each
-/// input group's `group_properties` and `expression`
-/// ([`MemoGroupAsInput`]), never a node tree. Fails when the expression
-/// breaks them (schema derivation, input validation, merge check).
-// `column_sign` and `depends_on_evaluation_time` are derived in #1207 PR 2;
-// until then the result is unreachable.
-#[allow(unreachable_code)]
+/// The properties of a group computing `expression` over its input
+/// groups, once it is valid over them
+/// ([`validate_expression_over_input_groups`]), reading each input group's
+/// `group_properties` and `expression`.
 pub(super) fn derive_group_properties(
     memo: &Memo,
     expression: &Operator<MemoGroupId>,
 ) -> Result<GroupProperties, SchemaDerivationError> {
     let operator = expression.map_children(|&group_id| MemoGroupAsInput { memo, group_id });
-    let schema = operator.output_schema()?;
-    operator.validate_inputs()?;
-    let aggregate_coverage = match SummaryCoverage::derive_from_inputs(&operator) {
-        Ok(coverage) => Some(coverage),
-        // A merge is valid only over states of one definition it may merge.
-        Err(error) if matches!(operator, Operator::ASAP(ASAPOp::SummaryMerge { .. })) => {
-            return Err(error.into())
-        }
-        Err(_) => None,
-    };
+    let (schema, merge_coverage) = validate_expression_over_input_groups(&operator)?;
+    let aggregate_coverage = merge_coverage.or_else(|| operator.aggregate_coverage().ok());
     Ok(GroupProperties {
+        column_signs: column_signs(&operator, &schema, &memo.source_facts),
+        depends_on_evaluation_time: depends_on_evaluation_time(&operator),
         schema,
         result_kind: operator.output_kind(),
         aggregate_coverage,
         shareable_when_equal: operator.is_shareable_when_equal(),
-        column_sign: todo!("#1207 PR 2: each output column's sign, per operator, from the input groups' and the sources' declared signs"),
-        depends_on_evaluation_time: todo!("#1207 PR 2: whether the result changes with the evaluation time, from the operator and the input groups"),
+        scanned_sources: operator.scanned_sources(),
     })
+}
+
+/// Whether `operator`'s result changes with the evaluation time: a
+/// `TimeRange` reads the window before it, and `time()` or `now()` read it
+/// directly; `@ T` pins its subtree to T. Any other operator depends on it
+/// when an input group does.
+fn depends_on_evaluation_time(operator: &Operator<MemoGroupAsInput<'_>>) -> bool {
+    fn reads_evaluation_time<C>(expr: &ScalarExpr<C>) -> bool {
+        matches!(
+            expr,
+            ScalarExpr::EvalTimestamp | ScalarExpr::CurrentTimestamp
+        ) || expr.children().into_iter().any(reads_evaluation_time)
+    }
+    let reads_it = match operator {
+        Operator::NonASAP(NonASAPOp::TimeRange { .. }) => return true,
+        Operator::NonASAP(NonASAPOp::TimeShift {
+            shift:
+                TimeShift {
+                    at: Some(AtModifier::Timestamp(_)),
+                    ..
+                },
+            ..
+        }) => return false,
+        Operator::NonASAP(op) => op.scalar_exprs().into_iter().any(reads_evaluation_time),
+        Operator::ASAP(
+            ASAPOp::SummaryAgg { filter, .. } | ASAPOp::SummaryTumblingWindowChain { filter, .. },
+        ) => filter.iter().any(|pred| reads_evaluation_time(&pred.0)),
+        Operator::ASAP(_) => false,
+    };
+    reads_it
+        || operator
+            .children()
+            .into_iter()
+            .any(|input| input.group_properties().depends_on_evaluation_time)
 }
 
 /// A memo group read as an operator's input: its `group_properties` and
 /// its `expression`, whose inputs are read the same way.
 #[derive(Clone, Copy)]
-pub(crate) struct MemoGroupAsInput<'m> {
-    pub(crate) memo: &'m Memo,
-    pub(crate) group_id: MemoGroupId,
+pub(super) struct MemoGroupAsInput<'m> {
+    pub(super) memo: &'m Memo,
+    pub(super) group_id: MemoGroupId,
 }
 
 impl<'m> MemoGroupAsInput<'m> {
     fn group(&self) -> &'m MemoGroup {
         &self.memo.groups()[self.group_id.0 as usize]
+    }
+
+    pub(super) fn group_properties(&self) -> &'m GroupProperties {
+        &self.group().group_properties
     }
 }
 
@@ -146,7 +192,17 @@ impl OperatorInput for MemoGroupAsInput<'_> {
         })
     }
 
-    fn aggregate_coverage(&self) -> Option<&SummaryCoverage> {
+    type Reference = MemoGroupId;
+
+    fn reference(&self) -> Option<MemoGroupId> {
+        Some(self.group_id)
+    }
+
+    fn aggregate_coverage(&self) -> Option<&AggregateCoverage<MemoGroupId>> {
         self.group().group_properties.aggregate_coverage.as_ref()
+    }
+
+    fn scanned_sources(&self) -> BTreeSet<Source> {
+        self.group().group_properties.scanned_sources.clone()
     }
 }

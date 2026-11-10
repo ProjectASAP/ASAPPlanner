@@ -91,6 +91,7 @@ fn plan(
         guarantee: None,
         retention_ms: None,
         selected_physical_candidate: None,
+        view_coverage: None,
     };
     let edge = |producer, consumer| {
         PhysicalASAPDAGEdge::new(
@@ -513,6 +514,7 @@ fn windowed_plan(shift_ms: Option<i64>) -> PhysicalASAPDAG {
         guarantee: None,
         retention_ms: None,
         selected_physical_candidate: None,
+        view_coverage: None,
     };
     let edge = |producer, consumer| {
         PhysicalASAPDAGEdge::new(
@@ -848,6 +850,7 @@ fn windowed_count_plan(shift_ms: Option<i64>) -> PhysicalASAPDAG {
             guarantee: None,
             retention_ms: None,
             selected_physical_candidate: None,
+            view_coverage: None,
         }
     };
     dag.nodes.push(node(

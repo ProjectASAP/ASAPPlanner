@@ -27,7 +27,7 @@ asap-stage1-pass2-reuse-candidates -p asap-stage2-physical-optimization -p asap-
   needs two timings; `split_shared_by_timing` copies it for one side first)
   or `IllegalChildDataState`. These are internal errors in a candidate the
   stages built, not bad user input.
-- A summary build's `SummaryCoverage` (which rows and time range its state
+- A summary build's `AggregateCoverage` (which rows and time range its state
   represents) is derived, never declared; a merge's inputs must be disjoint
   as its family's `MergeInputRule` requires, or coverage fails
   (`InputsOverlap`).

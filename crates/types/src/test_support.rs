@@ -4,20 +4,16 @@
 //! to the crate-private function of the same name, except the fixture
 //! [`population_over_selector`], which the executor's tests build.
 
+pub mod memo_fixtures;
+
 use crate::ir::operator::maintained_population::CurrentSeriesInput;
 use crate::ir::operator::node::Operator;
-use crate::ir::properties::summary_coverage::SummaryCoverage;
 use crate::plan::materialized_view::RawDataWindow;
 
 use crate::ir::schema::Schema;
 use crate::ir::{ASAPOp, NonASAPOp};
 use crate::ir::{OperatorNode, SchemaDerivationError};
 use std::rc::Rc;
-
-/// `SummaryCoverage::definition_id`.
-pub fn definition_id(coverage: &SummaryCoverage) -> String {
-    coverage.definition_id()
-}
 
 /// `Operator::output_schema`.
 pub fn output_schema(operator: &Operator) -> Result<Schema, SchemaDerivationError> {

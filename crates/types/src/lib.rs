@@ -6,7 +6,8 @@
 //!   [`ir::operator`] (§1 operators and their argument types),
 //!   [`ir::scalar`] (§2.2 scalar expressions), [`ir::schema`] (§2.1 the
 //!   per-edge schema) and [`ir::properties`] (§2.3 execution timing and
-//!   summary coverage), and the flat DAG form ([`ir::flat`]).
+//!   the selection algebra aggregate coverage is stated in), and the flat
+//!   DAG form ([`ir::flat`]).
 //! - [`summary_type`] — each summary type's parameters and predefined
 //!   parameter lists, the statistics read from it and its capabilities.
 //! - [`accuracy`] — accuracy targets, the error metrics they are stated in,
@@ -33,6 +34,6 @@ pub mod plan;
 pub mod serde_f64;
 pub mod stages;
 pub mod summary_type;
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 pub mod workload;
