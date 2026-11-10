@@ -3203,7 +3203,7 @@ async fn trailing_window_on_an_aliased_table_and_under_asap_rate() {
 }
 
 // An absolute timestamp filter compares the time column with a `Timestamp`
-// literal (ms since the epoch), so summary coverage lifts it into an
+// literal (ms since the epoch), so aggregate coverage lifts it into an
 // interval on the timestamp column: the cast of the string folds, and the
 // cast of the Timestamp column to DataFusion's nanosecond unit is dropped.
 #[tokio::test]

@@ -109,8 +109,8 @@ use asap_types::ir::flat::{flatten, FlatDag, FlatNode};
 use asap_types::ir::QueryRoot;
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
 use asap_types::stages::PhysicalASAPMemoCandidates;
-use asap_types::stages::{queries_rooted_at, MemoGroup, MemoGroupId};
 use asap_types::stages::{Memo, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{MemoGroup, MemoGroupId};
 use asap_types::workload::{
     DataArrival, DataWorkload, PlanningWorkload, QueryLanguage, QueryRecurrence,
     QueryWorkloadEntry, RepeatedDemand,
@@ -757,7 +757,7 @@ fn memo_groups_json(table: &mut MemoNodes, memo: &Memo, previous: Option<&Memo>)
                 "children": group.expression.children().into_iter().map(|g| g.0).collect::<Vec<_>>(),
                 "parents": ids(group.parent_groups()),
                 "queries": group.reached_by_queries(),
-                "roots_of": queries_rooted_at(memo.queries(), MemoGroupId(id as u32)),
+                "roots_of": memo.queries_rooted_at(MemoGroupId(id as u32)),
                 "node": node,
                 "candidate_count": candidates.len(),
                 "candidate_count_by_origin": by_origin,

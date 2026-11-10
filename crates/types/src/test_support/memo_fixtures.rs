@@ -4,11 +4,12 @@
 use std::time::Duration;
 
 use crate::ir::operator::arguments::{AtModifier, Reduction, Source, TimeShift};
+use crate::ir::operator::AggIntent;
 use crate::ir::scalar::ColumnRef;
 use crate::ir::schema::{DataType, Field, FieldDataType, Schema};
 use crate::ir::{ASAPOp, NonASAPOp, Operator, Predicate, ScalarExpr, TimeRangeKind};
 use crate::stages::MemoGroupId;
-use crate::summary_type::SummaryUpdate;
+use crate::summary_type::{SketchStatistic, SummaryUpdate};
 
 /// `Scan metric{predicates}`: `[ts, value, columns…]`, `ts` its time index.
 pub fn scan(
@@ -68,5 +69,40 @@ pub fn state(summary_type: FieldDataType, child: MemoGroupId) -> Operator<MemoGr
         input: SummaryUpdate::column(ColumnRef::SampleValue),
         reduction: Reduction::PerEntity,
         filter: None,
+    })
+}
+
+/// `Aggregate(reduction; measure)` over `child`, over every row.
+pub fn aggregate(
+    reduction: Reduction,
+    measure: AggIntent,
+    child: MemoGroupId,
+) -> Operator<MemoGroupId> {
+    aggregate_where(reduction, measure, None, child)
+}
+
+/// `Aggregate(reduction; measure)` over `child`, the measure over the rows
+/// `filter` keeps (`None`: every row).
+pub fn aggregate_where(
+    reduction: Reduction,
+    measure: AggIntent,
+    filter: Option<Predicate<MemoGroupId>>,
+    child: MemoGroupId,
+) -> Operator<MemoGroupId> {
+    Operator::NonASAP(NonASAPOp::Aggregate {
+        reduction,
+        measures: vec![measure],
+        output_names: vec![],
+        filters: filter.map_or_else(Vec::new, |filter| vec![Some(filter)]),
+        having: None,
+        child,
+    })
+}
+
+/// `SummaryEstimate[query](state)`: a readout of `state`.
+pub fn readout(query: SketchStatistic, state: MemoGroupId) -> Operator<MemoGroupId> {
+    Operator::ASAP(ASAPOp::SummaryEstimate {
+        summary_input: state,
+        query,
     })
 }

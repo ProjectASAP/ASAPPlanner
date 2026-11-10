@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use super::aggregate_coverage::{aggregate_coverage, AggregateCoverage};
 use super::column_properties::{column_signs, ValueSign};
 use crate::ir::operator::arguments::{AtModifier, Source, TimeShift};
-use crate::ir::operator::input::{sources_scanned_by, OperatorInput};
+use crate::ir::operator::input::OperatorInput;
 use crate::ir::schema::Schema;
 use crate::ir::ASAPOp;
 use crate::ir::SchemaDerivationError;
@@ -120,7 +120,7 @@ pub(super) fn derive_group_properties(
         result_kind: operator.output_kind(),
         aggregate_coverage,
         shareable_when_equal: operator.is_shareable_when_equal(),
-        scanned_sources: sources_scanned_by(&operator),
+        scanned_sources: operator.scanned_sources(),
     })
 }
 

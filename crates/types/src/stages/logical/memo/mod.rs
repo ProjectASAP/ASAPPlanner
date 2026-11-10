@@ -316,21 +316,23 @@ fn add_parent(group: &mut MemoGroup, parent: MemoGroupId) {
     }
 }
 
-/// The groups some query's root reads, ascending: the groups of the
-/// `queries`' roots that are a query's result or a scalar query's operand.
-pub fn root_groups(queries: &[MemoQuery]) -> BTreeSet<MemoGroupId> {
-    queries
-        .iter()
-        .flat_map(|query| query.root.operator_refs())
-        .copied()
-        .collect()
-}
+impl Memo {
+    /// The groups some query's root reads, ascending: the groups of the
+    /// queries' roots that are a query's result or a scalar query's operand.
+    pub fn root_groups(&self) -> BTreeSet<MemoGroupId> {
+        self.queries
+            .iter()
+            .flat_map(|query| query.root.operator_refs())
+            .copied()
+            .collect()
+    }
 
-/// The queries whose root reads `group`, ascending.
-pub fn queries_rooted_at(queries: &[MemoQuery], group: MemoGroupId) -> Vec<usize> {
-    (0..queries.len())
-        .filter(|&query| queries[query].root.operator_refs().contains(&&group))
-        .collect()
+    /// The queries whose root reads `group`, ascending.
+    pub fn queries_rooted_at(&self, group: MemoGroupId) -> Vec<usize> {
+        (0..self.queries.len())
+            .filter(|&query| self.queries[query].root.operator_refs().contains(&&group))
+            .collect()
+    }
 }
 
 #[cfg(test)]

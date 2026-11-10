@@ -8,20 +8,11 @@ use crate::ir::operator::AggIntent;
 use crate::ir::scalar::expr_ir::{CompareOpKind, ScalarValue};
 use crate::ir::scalar::{ProjectItem, SortKey};
 use crate::ir::schema::{DataType, Field, FieldDataType, Schema};
-use crate::ir::ASAPOp;
 use crate::ir::{ExprSemantics, NonASAPOp, Predicate, ScalarExpr};
 use crate::stages::logical::MemoGroupAsInput;
 use crate::stages::{CandidateExpression, LogicalProperties, OriginOfCandidateForMemoGroup};
 use crate::summary_type::{SketchAlgorithm, SketchParams, SketchStatistic};
-use crate::test_support::memo_fixtures::{scan, state};
-
-/// `SummaryEstimate[q](state)`.
-fn quantile_readout(state: MemoGroupId, q: f64) -> Operator<MemoGroupId> {
-    Operator::ASAP(ASAPOp::SummaryEstimate {
-        summary_input: state,
-        query: SketchStatistic::Quantile { q },
-    })
-}
+use crate::test_support::memo_fixtures::{aggregate_where, readout, scan, state};
 
 /// An unordered `LIMIT 10` over `input`, whose copies may return
 /// different rows.
@@ -252,7 +243,9 @@ fn add_candidate_maintains_parents_and_queries() {
     let g2 = memo
         .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1))
         .unwrap();
-    let g3 = memo.find_or_add_group(quantile_readout(g2, 0.95)).unwrap();
+    let g3 = memo
+        .find_or_add_group(readout(SketchStatistic::Quantile { q: 0.95 }, g2))
+        .unwrap();
     assert_eq!(memo.add_query(query(g3)), 0);
     // A rule adds a state group G5 over another scan G4: no query
     // reaches them yet.
@@ -264,8 +257,11 @@ fn add_candidate_maintains_parents_and_queries() {
         .unwrap();
     assert!(memo.groups()[g5.0 as usize].reached_by_queries().is_empty());
     // G3 gains a candidate reading G5: G5 and G4 now serve query 0.
-    memo.add_candidate(g3, candidate(quantile_readout(g5, 0.95), None))
-        .unwrap();
+    memo.add_candidate(
+        g3,
+        candidate(readout(SketchStatistic::Quantile { q: 0.95 }, g5), None),
+    )
+    .unwrap();
     assert_eq!(memo.groups()[g5.0 as usize].parent_groups(), &[g3]);
     assert_eq!(memo.groups()[g4.0 as usize].parent_groups(), &[g5]);
     assert_eq!(memo.groups()[g5.0 as usize].reached_by_queries(), &[0]);
@@ -297,7 +293,7 @@ fn add_candidate_rejects_a_candidate_whose_output_differs_from_its_group() {
         .unwrap();
     let before = format!("{memo:?}");
     assert!(matches!(
-        memo.add_candidate(g2, candidate(quantile_readout(g2, 0.5), None)),
+        memo.add_candidate(g2, candidate(readout(SketchStatistic::Quantile { q: 0.5 }, g2), None)),
         Err(CandidateError::OutputDiffersFromGroup { group }) if group == g2
     ));
     assert_eq!(
@@ -318,18 +314,26 @@ fn add_candidate_rejects_a_candidate_whose_inputs_fail_validation() {
     let g2 = memo
         .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1))
         .unwrap();
-    let g3 = memo.find_or_add_group(quantile_readout(g2, 0.95)).unwrap();
-    let over_raw_rows = quantile_readout(g1, 0.95).map_children(|&group_id| MemoGroupAsInput {
-        memo: &memo,
-        group_id,
-    });
+    let g3 = memo
+        .find_or_add_group(readout(SketchStatistic::Quantile { q: 0.95 }, g2))
+        .unwrap();
+    let over_raw_rows =
+        readout(SketchStatistic::Quantile { q: 0.95 }, g1).map_children(|&group_id| {
+            MemoGroupAsInput {
+                memo: &memo,
+                group_id,
+            }
+        });
     assert!(
         over_raw_rows.output_schema().is_ok(),
         "fixture: the schema derives; only input validation rejects it"
     );
     let before = format!("{memo:?}");
     assert!(matches!(
-        memo.add_candidate(g3, candidate(quantile_readout(g1, 0.95), None)),
+        memo.add_candidate(
+            g3,
+            candidate(readout(SketchStatistic::Quantile { q: 0.95 }, g1), None)
+        ),
         Err(CandidateError::NotValidOverInputGroups(_))
     ));
     assert_eq!(
@@ -408,14 +412,12 @@ fn quantile_agg(
     filter: Option<Predicate<MemoGroupId>>,
 ) -> impl FnOnce(&mut Memo) -> MemoGroupId {
     over_scan(move |child| {
-        Operator::NonASAP(NonASAPOp::Aggregate {
-            reduction: Reduction::by(by),
-            measures: vec![AggIntent::Quantile { col, q }],
-            output_names: vec![],
-            filters: vec![filter],
-            having: None,
+        aggregate_where(
+            Reduction::by(by),
+            AggIntent::Quantile { col, q },
+            filter,
             child,
-        })
+        )
     })
 }
 

@@ -5,11 +5,12 @@
 //! each physical candidate holds its own
 //! ([`crate::stages::PhysicalCandidate::properties`]).
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 
+use super::arguments::Source;
 use super::asap::ASAPOp;
 use super::input::OperatorInput;
 use super::non_asap::NonASAPOp;
@@ -65,6 +66,20 @@ impl<C> Operator<C> {
 /// The derivation rules, one set for every kind of input
 /// ([`OperatorInput`]): front-end node trees and memo groups.
 impl<I: OperatorInput> Operator<I> {
+    /// The sources the `Scan`s at or below this operator read: a `Scan`'s
+    /// own, else the union over its inputs'
+    /// ([`OperatorInput::scanned_sources`]).
+    pub(crate) fn scanned_sources(&self) -> BTreeSet<Source> {
+        match self {
+            Operator::NonASAP(NonASAPOp::Scan { source, .. }) => BTreeSet::from([source.clone()]),
+            operator => operator
+                .children()
+                .into_iter()
+                .flat_map(OperatorInput::scanned_sources)
+                .collect(),
+        }
+    }
+
     pub(crate) fn output_schema(&self) -> Result<Schema, SchemaDerivationError> {
         match self {
             Operator::NonASAP(op) => op.output_schema(),

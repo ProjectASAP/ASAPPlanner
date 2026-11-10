@@ -24,22 +24,9 @@ pub trait OperatorInput: Sized + Clone {
     /// `None` for any other input.
     fn aggregate_coverage(&self) -> Option<&AggregateCoverage>;
     /// The sources the `Scan`s at or below the input read
-    /// (`sources_scanned_by` of its operator): a memo group's stored
+    /// (`Operator::scanned_sources` of its operator): a memo group's stored
     /// `GroupProperties::scanned_sources`, recomputed for a node tree.
     fn scanned_sources(&self) -> BTreeSet<Source>;
-}
-
-/// The sources the `Scan`s at or below `operator` read: a `Scan`'s own,
-/// else the union over its inputs' ([`OperatorInput::scanned_sources`]).
-pub(crate) fn sources_scanned_by<I: OperatorInput>(operator: &Operator<I>) -> BTreeSet<Source> {
-    match operator {
-        Operator::NonASAP(NonASAPOp::Scan { source, .. }) => BTreeSet::from([source.clone()]),
-        operator => operator
-            .children()
-            .into_iter()
-            .flat_map(OperatorInput::scanned_sources)
-            .collect(),
-    }
 }
 
 /// A front-end node tree. Node trees carry no aggregate coverage.
@@ -61,7 +48,7 @@ impl OperatorInput for Rc<OperatorNode> {
     }
 
     fn scanned_sources(&self) -> BTreeSet<Source> {
-        sources_scanned_by(&self.operator)
+        self.operator.scanned_sources()
     }
 }
 
@@ -142,7 +129,7 @@ impl<I: OperatorInput> OperatorInput for InputOrTemporaryBuild<I> {
     fn scanned_sources(&self) -> BTreeSet<Source> {
         match self {
             Self::Input(input) => input.scanned_sources(),
-            Self::TemporaryBuild(_) => sources_scanned_by(&self.operator()),
+            Self::TemporaryBuild(_) => self.operator().scanned_sources(),
         }
     }
 }

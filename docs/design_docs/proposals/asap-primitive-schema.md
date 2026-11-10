@@ -960,7 +960,7 @@ MemoGroup.group_properties.aggregate_coverage: AggregateCoverage   §6.6
 | §6.3 Schema and field types | `Schema`, `Field`, `FieldDataType` | every node's `schema`; `SummaryAgg.summary_type` |
 | §6.4 Summary algorithms and parameters | `SketchAlgorithm`, `SketchParams`, `HydraParams`, exact/sample/wavelet/model kinds and params | the payload of each non-plain `FieldDataType` variant; θ on a candidate's `LogicalProperties` |
 | §6.5 Update input and evaluations | `SummaryUpdate`, `SketchStatistic`, `MaintainedPopulation`, `PopulationStatistic` | fields of the `ASAPOp` variants in §6.2 |
-| §6.6 Summary coverage | `AggregateCoverage`, `AggregateDefinition`, `SelectionBox`, `Constraint` | `GroupProperties::aggregate_coverage` of summary-state memo groups |
+| §6.6 Aggregate coverage | `AggregateCoverage`, `AggregateDefinition`, `SelectionBox`, `Constraint` | `GroupProperties::aggregate_coverage` of aggregate memo groups |
 
 **Example: the p99 latency state of §5.1.** The `SummaryAgg` node (§6.1) holds `ASAPOp::SummaryAgg` (§6.2) with `summary_type = Sketch(Kll)` (§6.3, §6.4) and `input = SummaryUpdate::column(latency)` (§6.5); its candidate's θ is `Kll { k: 200 }`. Its `schema` (§6.3) is `(job Utf8, state Sketch(Kll))`: the `state` field has the same type as `summary_type`. A `SummaryEstimate` above it holds `query = Quantile { q: 0.99 }` (§6.5), and its node carries the `guarantee` of the evaluation. `coverage()` on the `SummaryAgg` node returns a `AggregateCoverage` (§6.6).
 

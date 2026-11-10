@@ -514,8 +514,9 @@ impl<I: OperatorInput> ASAPOp<I> {
                     }
                 }
                 // Equal schemas cannot tell a KLL over `latency` from one over
-                // `size`, nor prove the inputs disjoint; summary coverage (#646)
-                // decides whether a structurally valid merge is semantically valid.
+                // `size`, nor prove the inputs disjoint; aggregate coverage (in
+                // the memo) decides whether a structurally valid merge is
+                // semantically valid.
                 Ok(())
             }
             SummaryEstimate {

@@ -24,7 +24,9 @@ use asap_types::ir::{
 };
 use asap_types::stages::{Memo, MemoGroupId, ValueSign};
 use asap_types::summary_type::{SketchAlgorithm, SketchStatistic};
-use asap_types::test_support::memo_fixtures::{filter, range, scan, shift, state};
+use asap_types::test_support::memo_fixtures::{
+    aggregate, filter, range, readout, scan, shift, state,
+};
 use asap_types::workload::{DataWorkload, PrometheusMetricType, SourceFacts};
 
 use ValueSign::{NonNegative, NonPositive, Unknown};
@@ -109,30 +111,8 @@ fn map_value(expr: ScalarExpr<MemoGroupId>, child: MemoGroupId) -> Operator<Memo
     })
 }
 
-fn aggregate(
-    reduction: Reduction,
-    measure: AggIntent,
-    child: MemoGroupId,
-) -> Operator<MemoGroupId> {
-    Operator::NonASAP(NonASAPOp::Aggregate {
-        reduction,
-        measures: vec![measure],
-        output_names: vec![],
-        filters: vec![],
-        having: None,
-        child,
-    })
-}
-
 fn by_host() -> Reduction {
     Reduction::by(vec![HOST])
-}
-
-fn readout(query: SketchStatistic, state: MemoGroupId) -> Operator<MemoGroupId> {
-    Operator::ASAP(ASAPOp::SummaryEstimate {
-        summary_input: state,
-        query,
-    })
 }
 
 /// Rows of the per-operator table that keep or set a column's sign:
