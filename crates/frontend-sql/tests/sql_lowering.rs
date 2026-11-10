@@ -1788,7 +1788,6 @@ async fn clickhouse_identifiers_keep_their_case() {
         "SELECT RegionID, COUNT(DISTINCT UserID) FROM hits GROUP BY RegionID",
         &hits,
         SqlDialect::ClickhouseSQL,
-        AccuracyTarget::exact(),
     )
     .await
     .unwrap_or_else(|e| panic!("mixed-case ClickHouse columns must resolve: {e}"));
@@ -1799,14 +1798,9 @@ async fn clickhouse_identifiers_keep_their_case() {
         "expected COUNT(DISTINCT UserID) over column 1, got {measures:?}"
     );
 
-    let err = lower_sql_dialect(
-        "SELECT userid FROM hits",
-        &hits,
-        SqlDialect::ClickhouseSQL,
-        AccuracyTarget::exact(),
-    )
-    .await
-    .expect_err("ClickHouse must not match `userid` to `UserID`");
+    let err = lower_sql_dialect("SELECT userid FROM hits", &hits, SqlDialect::ClickhouseSQL)
+        .await
+        .expect_err("ClickHouse must not match `userid` to `UserID`");
     assert!(
         format!("{err}").contains("userid"),
         "unexpected error: {err}"
