@@ -14,7 +14,7 @@ planner's own costing.
 | Layer | Asserts | Inputs | Where |
 |---|---|---|---|
 | Rule unit tests | one rule over a minimal memo: the candidates, edges or prune causes it adds | a one- or two-query workload planned up to the stage under test through the production frontends and Stage 0 | each stage crate's tests |
-| Contracts | invariants of every stage's output (below) | every workload of the corpus registry | one suite in `crates/integration-tests` |
+| Contracts | invariants of every stage's output (below) | every workload of the corpus registry | `crates/integration-tests/tests/contracts.rs` |
 | Oracles | the planner's cost or answers against a computation that does not use the planner's costing | canonical shapes and small synthetic data sets | `crates/integration-tests` |
 | Metamorphic relations | how the cost of two related workloads must compare | `planner_fuzz` with fixed seeds | `crates/devtools/tests/planner_fuzz.rs`, the `planner_fuzz` bin |
 | Regressions | one bug stays fixed | one minimal workload per issue | next to the code the bug was in, or `crates/integration-tests` |
@@ -59,8 +59,17 @@ Checked on every corpus registry workload:
   error contracts, is within its target.
 
 A contract that fails on one workload names the workload id and the
-violated invariant. Three contracts are consistency checks, not oracles,
-because each reuses the planner code it checks:
+violated invariant. `contracts::contract_violations(&planned, &cost_inputs)`
+checks one planned workload, so a regression test can check its own
+workload too (`milp_objective.rs` does). (K) is recomputed over the plan,
+not read from the MILP: per node and metric, the node's readout requirement
+plus β times each input's error (`LogicalRequirements::error_propagation`),
+and at each query root within the target's ε and per-value δ, as the MILP
+bounds it (no δ check without a target δ; at a scalar root no error is
+accepted).
+
+Three contracts are consistency checks, not oracles, because each reuses
+the planner code it checks:
 
 - MILP objective = `plan_cost`: Stage 3 and `plan_cost` share
   `node_resource_usage_and_cost`, so a costing bug can leave them equal
@@ -159,7 +168,8 @@ A workload added to a source is planned by every suite that reads the
 registry. Planning time in a debug build, measured 2026-11-10: under 1 s for
 most workloads, up to 7 s for the slowest outside the random mixed sets,
 and about 7 s for each random mixed workload, so the contracts run the
-random mixed sets in the full tier.
+random mixed sets in the full tier, planning workloads in parallel on every
+core (11 s for the 30 on 56 cores; 221 s one at a time).
 
 ## Naming
 
@@ -196,7 +206,8 @@ Tiers are markers only; which tier CI runs when is configured separately.
 The module name lets `cargo test` select a tier by test path; the reason
 says why the test is not fast. Both markers are kept, and a meta-test
 checks that every ignore reason starting `full tier:` or `nightly tier:`
-sits in the module of the same name, so the two cannot drift apart.
+sits in the module of the same name, so the two cannot drift apart
+(`crates/integration-tests/tests/tier_markers.rs`).
 
 Execution oracles on small synthetic data run in the fast tier, a change
 from #1253, which puts the execution oracle in nightly: they take seconds.
