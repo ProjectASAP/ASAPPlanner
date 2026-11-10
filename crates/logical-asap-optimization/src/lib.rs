@@ -33,7 +33,7 @@
 //!
 //! - `stage0` — Stage 0: hash-consing the workload's logical DAG into memo
 //!   groups through `Memo::find_or_add_group`, behind [`memo_of_queries`].
-//! - `pass1::per_computation_candidates` — Pass 1: per-computation candidate
+//! - `pass1::computation_targets` — Pass 1: per-computation candidate
 //!   generation and composition, behind
 //!   [`pass1_memo`].
 //! - `pass2::memo` — Pass 2: the rules over groups, behind
@@ -75,8 +75,8 @@ pub use stage0::memo_of_queries;
 // holds are in `asap_types::stages`.
 pub use pass1::{pass1_memo, Pass1Error, PerComputationCandidateError};
 // Pass 2: its entry and its error.
-pub use pass2::logical_memo_candidates::{
+pub use pass2::memo::rules::Pass2RuleError;
+pub use pass2::{
     generate_logical_asap_memo_candidates, pass2_after_local_window_composition,
     pass2_local_window_composition,
 };
-pub use pass2::memo::rules::Pass2RuleError;

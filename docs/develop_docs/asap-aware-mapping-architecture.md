@@ -66,7 +66,7 @@ same pipeline behind the `OptimizationPass` trait.
 
 | Concern | Where it lives |
 | --- | --- |
-| Pass 1: which computations a query has (`ComputationTarget`), how each can be computed (`HowToComputeAggregateMeasure`: `Exact`, `ExactAccumulator`, `Summary`), fused computations (`FusedComputation`), pruning (`PruneReason`) | `asap-logical-asap-optimization`, `pass1/per_computation_candidates.rs` |
+| Pass 1: which computations a query has (`ComputationTarget`), how each can be computed (`HowToComputeAggregateMeasure`: `Exact`, `ExactAccumulator`, `Summary`), fused computations (`FusedComputation`), pruning (`PruneReason`) | `asap-logical-asap-optimization`, `pass1/computation_targets.rs` |
 | Which summary families serve an intent (`summary_candidates`) | `asap-logical-asap-optimization`, `pass1/realization.rs` |
 | Pass 2 memo rules: shared producers (identical expressions by memo group identity, one build at different sizes), scan-label widening, window composition (tumbling windows), rollup, exact top-k reuse and finer-aggregate reuse | `asap-logical-asap-optimization`, `pass2/memo/rules/` and `pass2/memo/window_candidates.rs`, over the helpers in `pass2/asap_aware_cse.rs` |
 | Enumeration of the plans a memo stands for (reference pricer, DAG viewer) | `asap-logical-asap-optimization`, `pass2/memo/enumeration.rs` |

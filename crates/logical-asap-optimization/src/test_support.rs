@@ -5,7 +5,7 @@
 use std::rc::Rc;
 
 // Stage 1 internals other crates' tests call: Pass 1's working form.
-pub use crate::pass1::per_computation_candidates::{
+pub use crate::pass1::computation_targets::{
     generate_per_computation_candidates, PerComputationCandidates,
 };
 

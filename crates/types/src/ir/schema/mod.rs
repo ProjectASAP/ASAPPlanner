@@ -17,6 +17,7 @@ pub mod aggregate_schema;
 pub mod error;
 pub mod schema_support;
 pub mod sketch;
+mod sketch_parameter_lists;
 pub mod summary_type_capability;
 pub mod topk;
 
@@ -27,6 +28,7 @@ pub use sketch::{
     SummaryInputExpr, SummaryUpdate, WaveletKind, WaveletParams, WeightDomain,
     EXACT_ACCUMULATOR_STATE_BYTES,
 };
+pub use sketch_parameter_lists::parameter_list;
 pub use summary_type_capability::{
     MergeInputRule, MergedError, StatisticKind, SummaryTypeCapability, SupportedSummary,
 };

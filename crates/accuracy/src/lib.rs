@@ -16,6 +16,7 @@
 
 mod budget;
 pub mod composition;
+mod error_propagation;
 pub mod estimators;
 mod evidence;
 mod function_rules;
@@ -26,6 +27,7 @@ pub mod sizing;
 pub mod test_support;
 
 pub use budget::per_input_target;
+pub use error_propagation::{error_propagation, ErrorPropagation};
 pub use estimators::theoretical_guarantee;
 pub(crate) use evidence::PropagationStats;
 pub use model::{producer_satisfies_logical_requirements, AccuracyEvidence, NoMeasuredGuarantees};

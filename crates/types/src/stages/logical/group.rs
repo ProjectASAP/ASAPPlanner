@@ -1,13 +1,13 @@
-//! Memo groups: the distinct logical sub-expressions of the workload, each
-//! with its candidates.
+//! Group scope: memo groups, the distinct logical sub-expressions of the
+//! workload, and the properties every candidate of a group shares.
 
-use std::collections::BTreeSet;
-
-use super::{CandidateForMemoGroup, Memo, MemoQuery};
 use crate::ir::operator::input::OperatorInput;
 use crate::ir::properties::summary_coverage::SummaryCoverage;
 use crate::ir::schema::Schema;
+use crate::ir::ASAPOp;
+use crate::ir::SchemaDerivationError;
 use crate::ir::{Operator, OperatorResultKind};
+use crate::stages::{CandidateForMemoGroup, Memo};
 
 /// A group, by index in the memo's groups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
@@ -32,6 +32,18 @@ pub struct MemoGroup {
     pub queries: Vec<usize>,
     /// Its candidates: empty after Stage 0, filled by Stage 1.
     pub candidates: Vec<CandidateForMemoGroup>,
+}
+
+impl MemoGroup {
+    /// The groups that read it.
+    pub fn parent_groups(&self) -> &[MemoGroupId] {
+        &self.parents
+    }
+
+    /// The queries whose roots reach it, by index in the workload, ascending.
+    pub fn reached_by_queries(&self) -> &[usize] {
+        &self.queries
+    }
 }
 
 /// What every candidate of a group produces, derived from the group's
@@ -71,6 +83,39 @@ pub enum ValueSign {
     Unknown,
 }
 
+/// The properties of a group, or a candidate, computing `expression` over
+/// its input groups: the rules that check operator nodes, reading each
+/// input group's `group_properties` and `expression`
+/// ([`MemoGroupAsInput`]), never a node tree. Fails when the expression
+/// breaks them (schema derivation, input validation, merge check).
+// `column_sign` and `depends_on_evaluation_time` are derived in #1207 PR 2;
+// until then the result is unreachable.
+#[allow(unreachable_code)]
+pub(super) fn derive_group_properties(
+    memo: &Memo,
+    expression: &Operator<MemoGroupId>,
+) -> Result<GroupProperties, SchemaDerivationError> {
+    let operator = expression.map_children(|&group_id| MemoGroupAsInput { memo, group_id });
+    let schema = operator.output_schema()?;
+    operator.validate_inputs()?;
+    let aggregate_coverage = match SummaryCoverage::derive_from_inputs(&operator) {
+        Ok(coverage) => Some(coverage),
+        // A merge is valid only over states of one definition it may merge.
+        Err(error) if matches!(operator, Operator::ASAP(ASAPOp::SummaryMerge { .. })) => {
+            return Err(error.into())
+        }
+        Err(_) => None,
+    };
+    Ok(GroupProperties {
+        schema,
+        result_kind: operator.output_kind(),
+        aggregate_coverage,
+        shareable_when_equal: operator.is_shareable_when_equal(),
+        column_sign: todo!("#1207 PR 2: each output column's sign, per operator, from the input groups' and the sources' declared signs"),
+        depends_on_evaluation_time: todo!("#1207 PR 2: whether the result changes with the evaluation time, from the operator and the input groups"),
+    })
+}
+
 /// A memo group read as an operator's input: its `group_properties` and
 /// its `expression`, whose inputs are read the same way.
 #[derive(Clone, Copy)]
@@ -104,33 +149,4 @@ impl OperatorInput for MemoGroupAsInput<'_> {
     fn aggregate_coverage(&self) -> Option<&SummaryCoverage> {
         self.group().group_properties.aggregate_coverage.as_ref()
     }
-}
-
-impl MemoGroup {
-    /// The groups that read it.
-    pub fn parent_groups(&self) -> &[MemoGroupId] {
-        &self.parents
-    }
-
-    /// The queries whose roots reach it, by index in the workload, ascending.
-    pub fn reached_by_queries(&self) -> &[usize] {
-        &self.queries
-    }
-}
-
-/// The groups some query's root reads, ascending: the groups of the
-/// `queries`' roots that are a query's result or a scalar query's operand.
-pub fn root_groups(queries: &[MemoQuery]) -> BTreeSet<MemoGroupId> {
-    queries
-        .iter()
-        .flat_map(|query| query.root.operator_refs())
-        .copied()
-        .collect()
-}
-
-/// The queries whose root reads `group`, ascending.
-pub fn queries_rooted_at(queries: &[MemoQuery], group: MemoGroupId) -> Vec<usize> {
-    (0..queries.len())
-        .filter(|&query| queries[query].root.operator_refs().contains(&&group))
-        .collect()
 }

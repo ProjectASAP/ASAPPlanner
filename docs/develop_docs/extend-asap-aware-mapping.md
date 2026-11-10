@@ -62,7 +62,7 @@ work.
    `SummaryTypeCapability`. Shared rewrite helpers live in
    `pass2/asap_aware_cse.rs`.
 2. Declare it in `pass2/memo/rules.rs` and call it from `apply_sharing_rules`
-   (`pass2/logical_memo_candidates.rs`), after the
+   (`pass2.rs`), after the
    existing rules.
 3. Add its row to the Pass 2 rule table of the
    [design](../design_docs/proposals/planner-layering.md).

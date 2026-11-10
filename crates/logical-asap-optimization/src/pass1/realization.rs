@@ -1,4 +1,4 @@
-//! Summary realization helpers shared by Pass 1 (`per_computation_candidates`)
+//! Summary realization helpers shared by Pass 1 (`computation_targets`)
 //! and Pass 2 (`asap_aware_cse`): which sketch kinds can serve an intent,
 //! the column/tuple a summary consumes, the column a top-k ranks, and the
 //! keyed-additive rule for a heap sketch that reads a larger sub-DAG.

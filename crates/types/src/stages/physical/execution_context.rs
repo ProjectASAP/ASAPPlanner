@@ -3,7 +3,7 @@
 //! it; [`super::PhysicalCandidate::delivers_on`] reads it, so it lives with
 //! the physical candidates.
 
-use super::memo_candidates::PhysicalCandidateId;
+use super::candidate::PhysicalCandidateId;
 use crate::ir::materialized_view::RefreshWindow;
 
 /// Index of an [`ExecutionContext`] in the workload's list of distinct

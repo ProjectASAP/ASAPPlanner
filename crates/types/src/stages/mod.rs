@@ -7,24 +7,17 @@
 //! crates never depend on each other, so the types more than one stage reads
 //! live here.
 
-mod candidates;
-mod logical_memo_candidates;
-mod memo;
+mod logical;
 mod per_computation_logical_memo_candidates;
 mod physical;
 mod pruning;
 
-pub use candidates::{
-    parameter_list, CandidateError, CandidateExpression, CandidateForMemoGroup,
-    CandidateForMemoGroupId, ErrorPropagation, LogicalProperties, LogicalPropertiesError,
-    LogicalRequirements, Memo, MemoQuery, OriginOfCandidateForMemoGroup, RequiredAccuracy,
-};
-pub use logical_memo_candidates::{
-    LogicalASAPMemoCandidates, LogicalEdge, PruneCause, PrunedLogicalCandidate, RootPruneReason,
-};
-pub(crate) use memo::MemoGroupAsInput;
-pub use memo::{
-    queries_rooted_at, root_groups, GroupProperties, MemoGroup, MemoGroupId, ValueSign,
+pub(crate) use logical::MemoGroupAsInput;
+pub use logical::{
+    queries_rooted_at, root_groups, CandidateError, CandidateExpression, CandidateForMemoGroup,
+    CandidateForMemoGroupId, GroupProperties, LogicalASAPMemoCandidates, LogicalEdge,
+    LogicalProperties, LogicalPropertiesError, LogicalRequirements, Memo, MemoGroup, MemoGroupId,
+    MemoQuery, OriginOfCandidateForMemoGroup, RequiredAccuracy, ValueSign,
 };
 pub use per_computation_logical_memo_candidates::{
     ComputationTarget, FusedComputation, HavingEntry, HavingPlacement, HowToComputeAggregateMeasure,
@@ -34,4 +27,6 @@ pub use physical::{
     ExecutionContextId, PhysicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateId,
     PhysicalEdge, PhysicalEdgeId,
 };
-pub use pruning::{PruneReason, PrunedCandidate};
+pub use pruning::{
+    PruneCause, PruneReason, PrunedCandidate, PrunedLogicalCandidate, RootPruneReason,
+};
