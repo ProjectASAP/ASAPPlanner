@@ -744,7 +744,7 @@ fn get_rollup_arg_idx_for_optimization(
     args: &[Expr],
 ) -> ParseResult<Option<usize>> {
     use RollupFunction::*;
-    // This must be kept in sync with GetRollupArgIdx()
+    // This must stay in sync with GetRollupArgIdx()
     match func {
         CountValuesOverTime => Err(ParseError::ArgumentError(
             "BUG: count_values_over_time must be already handled".to_string(),

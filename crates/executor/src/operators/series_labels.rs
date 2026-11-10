@@ -712,7 +712,8 @@ async fn series_binary(
         let rows = series_rows(vector, schema)?;
         let mut seen = std::collections::BTreeSet::new();
         // Kept rows and their values; with the name dropped, their sets.
-        let (mut kept, mut computed_values, mut rendered) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut remaining, mut computed_values, mut rendered) =
+            (Vec::new(), Vec::new(), Vec::new());
         for row in 0..rows.len() {
             let value = rows.value(row);
             let (l, r) = if scalars[0] {
@@ -738,16 +739,16 @@ async fn series_binary(
                     "vector cannot contain metrics with the same labelset",
                 ));
             }
-            kept.push(row as u32);
+            remaining.push(row as u32);
             computed_values.push(computed);
         }
         work.checkpoint_rows(rows.len()).await?;
         if drops_name {
             return render(output, &rendered);
         }
-        // The kept rows as they were, with their computed values.
+        // The retained rows as they were, with their computed values.
         let layout = layout(schema)?;
-        let taken = vector.take(&arrow::array::UInt32Array::from(kept))?;
+        let taken = vector.take(&arrow::array::UInt32Array::from(remaining))?;
         let mut arrays = taken.record_batch().columns().to_vec();
         arrays[layout.value] = Arc::new(arrow::array::Float64Array::from(computed_values));
         return Batch::from_parts(

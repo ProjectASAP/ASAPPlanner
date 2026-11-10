@@ -14,7 +14,7 @@ use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 use asap_types::workload::{
     DataWorkload, Predictability, QueryRecurrence, QueryRequirements, QueryWorkloadEntry,
-    RepeatedDemand, RepetitionInterval,
+    RepeatedDemand, RepetitionInterval, TimestampMs,
 };
 use std::collections::HashSet;
 
@@ -40,9 +40,10 @@ fn entry(accuracy: &AccuracyTarget, interval_ms: u32) -> QueryWorkloadEntry {
             max_latency_ms: None,
         },
         predictability: Predictability::Predictable { known_at: None },
-        recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(
-            interval_ms,
-        ))),
+        recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+            interval: RepetitionInterval(interval_ms),
+            evaluation_phase: TimestampMs(0),
+        }),
         range_evaluation: None,
     }
 }
@@ -161,7 +162,7 @@ async fn production_sql_distinct_region_service_rollup() {
 }
 
 // Exercise multi-input operators through the production route under more than
-// three heterogeneous query schedules, not just the local pricing kernel.
+// three heterogeneous query schedules, not just the local costing kernel.
 #[test]
 fn production_binary_queries_use_joint_prices_with_mixed_schedules() {
     use asap_types::workload::{DemandEstimate, Rate};

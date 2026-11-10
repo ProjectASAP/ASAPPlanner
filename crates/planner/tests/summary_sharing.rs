@@ -4,7 +4,7 @@
 //! plan selection still selects an exact plan for at least one of their
 //! queries (#580).
 
-use asap_types::ir::{ASAPOp, OperatorNode};
+use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
 use std::rc::Rc;
 
 use asap_frontend_promql::promql_metric_names;
@@ -21,6 +21,7 @@ use asap_types::workload::SqlDialect;
 use asap_types::workload::{
     DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query, QueryLanguage,
     QueryRequirements, QueryWorkload, RepeatedDemand, RepeatingEntry, RepetitionInterval,
+    TimestampMs,
 };
 
 /// `epsilon` as a query's requested accuracy; a quantile query's target
@@ -45,7 +46,10 @@ fn requirements(query: &str, epsilon: f64) -> QueryRequirements {
 fn repeating(query: &str, epsilon: f64) -> RepeatingEntry {
     RepeatingEntry {
         query: Query(query.into()),
-        demand: RepeatedDemand::FixedInterval(RepetitionInterval(600_000)),
+        demand: RepeatedDemand::FixedIntervalAt {
+            interval: RepetitionInterval(600_000),
+            evaluation_phase: TimestampMs(0),
+        },
         requirements: requirements(query, epsilon),
         predictability: Predictability::Unknown,
         range_evaluation: None,
@@ -184,25 +188,43 @@ fn unique_deployments(output: &PlanOutput) -> usize {
     seen.len()
 }
 
-/// Two identical ungrouped queries: their identical producers (rate, then
-/// sum) are shared.
+/// Every node the second query's root reaches, past its root `Project`s,
+/// is a node the first query's root reaches: the second query computes
+/// nothing of its own.
+fn second_query_shares_every_producer(output: &PlanOutput) -> bool {
+    let roots = operator_roots(output);
+    let mut below = Rc::clone(&roots[1]);
+    while let Some(NonASAPOp::Project { child, .. }) = below.non_asap() {
+        below = Rc::clone(child);
+    }
+    let first: Vec<_> = OperatorNode::reachable(&roots[0])
+        .iter()
+        .map(Rc::as_ptr)
+        .collect();
+    OperatorNode::reachable(&below)
+        .iter()
+        .all(|node| first.contains(&Rc::as_ptr(node)))
+}
+
+/// Two identical ungrouped queries: their identical producers (the rate
+/// and the sum, one fused accumulator in the selected plan) are shared.
 #[tokio::test]
 async fn identical_ungrouped_queries_share_their_producers() {
     let query = ("sum(rate(x[5m]))", 0.01);
     let output = plan_promql(&[query, query]).await;
     assert!(same_states(&states(&output)));
-    assert_eq!(unique_deployments(&output), 2);
+    assert!(second_query_shares_every_producer(&output));
 }
 
 /// The SQL frontend reaches the same sharing for two copies of one filtered
-/// percentile.
+/// percentile (computed exactly: with the built-in cost model its
+/// query-time summary costs more than exact, #580).
 #[tokio::test]
 async fn identical_sql_percentiles_share_one_producer() {
     let query =
         "SELECT approx_percentile_cont(l_extendedprice, 0.5) FROM lineitem WHERE l_orderkey > 10";
     let output = plan_sql(&[query, query]).await;
-    assert!(same_states(&states(&output)));
-    assert_eq!(unique_deployments(&output), 1);
+    assert!(second_query_shares_every_producer(&output));
 }
 
 /// The quantile is a evaluation parameter: SQL p50 and p99 over one filtered

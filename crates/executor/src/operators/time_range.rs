@@ -14,7 +14,7 @@ impl Operator {
     /// `(window_end_ms - width_ms, window_end_ms]` in an ingestion run.
     /// With `sample_value`, a time series' value column, a stale marker is
     /// not a row. With `latest_per_series` (an instant window), only each
-    /// series' latest row in the window is kept (of rows at one time, the
+    /// series' latest row in the window is retained (of rows at one time, the
     /// last), and none when that row is a stale marker; a series is the
     /// values of those columns (its labels).
     pub fn time_range(
@@ -158,7 +158,7 @@ pub(super) fn execute<'a>(
     let (start, end) = window(end_offset_ms, width_ms, &context)?;
     // Whether each row is in the window and, for a range window, not a
     // stale marker.
-    let kept =
+    let selected_rows =
         move |batch: &Batch, drop_stale: bool| -> Result<arrow::array::BooleanArray, Error> {
             let times = batch
                 .column(time)
@@ -195,7 +195,7 @@ pub(super) fn execute<'a>(
                     return Err(Error::Cancelled);
                 }
                 let batch = batch?;
-                let keep = kept(&batch, true)?;
+                let keep = selected_rows(&batch, true)?;
                 if keep.true_count() == batch.num_rows() {
                     return Ok((*batch).clone());
                 }
@@ -208,7 +208,7 @@ pub(super) fn execute<'a>(
         let input = collect_batch(input, &operator.inputs[0], &context).await?;
         // The rows in the window, stale markers included: a series whose
         // latest sample is one has ended.
-        let in_window = input.batch.filter(&kept(&input.batch, false)?)?;
+        let in_window = input.batch.filter(&selected_rows(&input.batch, false)?)?;
         let times = in_window
             .column(time)
             .as_any()
@@ -237,7 +237,7 @@ pub(super) fn execute<'a>(
                 .collect::<Vec<_>>(),
         ))?;
         // Then a series whose latest sample is a stale marker has no row.
-        let keep = kept(&latest, true)?;
+        let keep = selected_rows(&latest, true)?;
         latest.filter(&keep)
     })
     .boxed_local())

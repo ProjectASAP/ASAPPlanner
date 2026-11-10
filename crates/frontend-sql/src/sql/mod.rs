@@ -1876,7 +1876,7 @@ fn scalar_positive_u64(value: &DfScalarValue) -> Option<u64> {
 /// no second deployment model wanting this shape, so this lowers to
 /// `AggIntent::Extension` rather than earning a first-class `ArgMax`/`ArgMin`
 /// core variant (issue #232). Core treats `Extension` opaquely: both columns
-/// are kept only as validated bare-column names in `payload` (`reducer_col`'s
+/// are retained only as validated bare-column names in `payload` (`reducer_col`'s
 /// same "no expression arguments" rule, issue #115) — they are **not** run
 /// through `resolve_agg_intent`'s positional `ColumnRef` -> `ColumnId`
 /// binding the way a real reducer's `col` is, since `Extension` carries no
@@ -2377,7 +2377,7 @@ fn agg_col_name(args: &[Expr]) -> Option<String> {
 /// variance/quantile/count-distinct). Errors if the argument is not a column:
 /// the canonical `AggIntent` reduces a column, not an arbitrary expression
 /// (`SUM(a*b)`), so silently picking a probe column would compute the wrong
-/// result. The qualifier is kept so `SUM(b.x)` over a join reads `b.x`.
+/// result. The qualifier is retained so `SUM(b.x)` over a join reads `b.x`.
 fn reducer_col(name: &str, args: &[Expr]) -> Result<ColumnRef, LoweringError> {
     fn col_ref(e: &Expr) -> Option<ColumnRef> {
         match e {

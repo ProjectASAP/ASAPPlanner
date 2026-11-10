@@ -18,7 +18,7 @@
 //! ```
 //!
 //! Only this converter reads the sketch-bench format; the planner reads the
-//! table. Rows plan selection cannot price from the table are skipped with
+//! table. Rows plan selection cannot cost from the table are skipped with
 //! the reason: exact accumulators, Hydra structures (shared across groups,
 //! measured at one label width) and sketch names with no planner sketch.
 //!
@@ -33,7 +33,7 @@ use serde_json::Value;
 pub struct SkippedRow {
     /// The row's `sketch` name, e.g. `exact-sum`.
     pub sketch_name: String,
-    /// Why plan selection cannot price from it.
+    /// Why plan selection cannot cost from it.
     pub reason: String,
 }
 
@@ -110,9 +110,9 @@ pub fn convert_rqe_atomic_costs(rows: &Value) -> Result<ConvertedCosts, String> 
 /// Why a row whose name has no planner sketch is skipped.
 fn skip_reason(sketch_name: &str) -> &'static str {
     if sketch_name.starts_with("exact-") {
-        "an exact accumulator: the table prices sketches only"
+        "an exact accumulator: the table costs sketches only"
     } else if sketch_name.starts_with("hydra-") {
-        "a Hydra structure shared across groups: the table prices one sketch per group"
+        "a Hydra structure shared across groups: the table costs one sketch per group"
     } else {
         "no planner sketch has this name"
     }

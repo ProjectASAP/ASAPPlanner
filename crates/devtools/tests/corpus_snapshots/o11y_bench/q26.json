@@ -3,18 +3,10 @@
   "materialized_views": [
     {
       "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
+        "definition_id": "34b03a4d5b8565710e05b0b0989c10a0",
         "selection": [
           {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -60000
-              },
-              {
-                "included": 0
-              }
-            ]
+            "columns": []
           }
         ]
       },
@@ -32,2342 +24,86 @@
           }
         ]
       },
-      "installed_count": 60,
-      "installed_position": 0,
-      "node_id": 2,
+      "node_id": 1,
       "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -120000
-              },
-              {
-                "included": -60000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 60000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 1,
-      "node_id": 5,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -180000
-              },
-              {
-                "included": -120000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 120000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 2,
-      "node_id": 8,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -240000
-              },
-              {
-                "included": -180000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 180000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 3,
-      "node_id": 11,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -300000
-              },
-              {
-                "included": -240000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 240000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 4,
-      "node_id": 14,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -360000
-              },
-              {
-                "included": -300000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 300000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 5,
-      "node_id": 17,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -420000
-              },
-              {
-                "included": -360000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 360000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 6,
-      "node_id": 20,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -480000
-              },
-              {
-                "included": -420000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 420000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 7,
-      "node_id": 23,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -540000
-              },
-              {
-                "included": -480000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 480000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 8,
-      "node_id": 26,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -600000
-              },
-              {
-                "included": -540000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 540000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 9,
-      "node_id": 29,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -660000
-              },
-              {
-                "included": -600000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 600000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 10,
-      "node_id": 32,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -720000
-              },
-              {
-                "included": -660000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 660000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 11,
-      "node_id": 35,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -780000
-              },
-              {
-                "included": -720000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 720000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 12,
-      "node_id": 38,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -840000
-              },
-              {
-                "included": -780000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 780000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 13,
-      "node_id": 41,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -900000
-              },
-              {
-                "included": -840000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 840000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 14,
-      "node_id": 44,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -960000
-              },
-              {
-                "included": -900000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 900000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 15,
-      "node_id": 47,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -1020000
-              },
-              {
-                "included": -960000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 960000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 16,
-      "node_id": 50,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -1080000
-              },
-              {
-                "included": -1020000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 1020000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 17,
-      "node_id": 53,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -1140000
-              },
-              {
-                "included": -1080000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 1080000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 18,
-      "node_id": 56,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -1200000
-              },
-              {
-                "included": -1140000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 1140000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 19,
-      "node_id": 59,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -1260000
-              },
-              {
-                "included": -1200000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 1200000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 20,
-      "node_id": 62,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -1320000
-              },
-              {
-                "included": -1260000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 1260000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 21,
-      "node_id": 65,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -1380000
-              },
-              {
-                "included": -1320000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 1320000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 22,
-      "node_id": 68,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -1440000
-              },
-              {
-                "included": -1380000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 1380000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 23,
-      "node_id": 71,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -1500000
-              },
-              {
-                "included": -1440000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 1440000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 24,
-      "node_id": 74,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -1560000
-              },
-              {
-                "included": -1500000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 1500000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 25,
-      "node_id": 77,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -1620000
-              },
-              {
-                "included": -1560000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 1560000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 26,
-      "node_id": 80,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -1680000
-              },
-              {
-                "included": -1620000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 1620000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 27,
-      "node_id": 83,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -1740000
-              },
-              {
-                "included": -1680000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 1680000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 28,
-      "node_id": 86,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -1800000
-              },
-              {
-                "included": -1740000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 1740000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 29,
-      "node_id": 89,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -1860000
-              },
-              {
-                "included": -1800000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 1800000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 30,
-      "node_id": 92,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -1920000
-              },
-              {
-                "included": -1860000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 1860000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 31,
-      "node_id": 95,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -1980000
-              },
-              {
-                "included": -1920000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 1920000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 32,
-      "node_id": 98,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -2040000
-              },
-              {
-                "included": -1980000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 1980000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 33,
-      "node_id": 101,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -2100000
-              },
-              {
-                "included": -2040000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 2040000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 34,
-      "node_id": 104,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -2160000
-              },
-              {
-                "included": -2100000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 2100000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 35,
-      "node_id": 107,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -2220000
-              },
-              {
-                "included": -2160000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 2160000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 36,
-      "node_id": 110,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -2280000
-              },
-              {
-                "included": -2220000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 2220000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 37,
-      "node_id": 113,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -2340000
-              },
-              {
-                "included": -2280000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 2280000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 38,
-      "node_id": 116,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -2400000
-              },
-              {
-                "included": -2340000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 2340000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 39,
-      "node_id": 119,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -2460000
-              },
-              {
-                "included": -2400000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 2400000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 40,
-      "node_id": 122,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -2520000
-              },
-              {
-                "included": -2460000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 2460000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 41,
-      "node_id": 125,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -2580000
-              },
-              {
-                "included": -2520000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 2520000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 42,
-      "node_id": 128,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -2640000
-              },
-              {
-                "included": -2580000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 2580000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 43,
-      "node_id": 131,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -2700000
-              },
-              {
-                "included": -2640000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 2640000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 44,
-      "node_id": 134,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -2760000
-              },
-              {
-                "included": -2700000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 2700000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 45,
-      "node_id": 137,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -2820000
-              },
-              {
-                "included": -2760000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 2760000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 46,
-      "node_id": 140,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -2880000
-              },
-              {
-                "included": -2820000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 2820000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 47,
-      "node_id": 143,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -2940000
-              },
-              {
-                "included": -2880000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 2880000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 48,
-      "node_id": 146,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -3000000
-              },
-              {
-                "included": -2940000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 2940000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 49,
-      "node_id": 149,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -3060000
-              },
-              {
-                "included": -3000000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 3000000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 50,
-      "node_id": 152,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -3120000
-              },
-              {
-                "included": -3060000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 3060000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 51,
-      "node_id": 155,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -3180000
-              },
-              {
-                "included": -3120000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 3120000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 52,
-      "node_id": 158,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -3240000
-              },
-              {
-                "included": -3180000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 3180000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 53,
-      "node_id": 161,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -3300000
-              },
-              {
-                "included": -3240000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 3240000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 54,
-      "node_id": 164,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -3360000
-              },
-              {
-                "included": -3300000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 3300000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 55,
-      "node_id": 167,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -3420000
-              },
-              {
-                "included": -3360000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 3360000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 56,
-      "node_id": 170,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -3480000
-              },
-              {
-                "included": -3420000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 3420000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 57,
-      "node_id": 173,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -3540000
-              },
-              {
-                "included": -3480000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 3480000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 58,
-      "node_id": 176,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
-    },
-    {
-      "coverage": {
-        "definition_id": "c2bdb67952bf1d139fefe57a0d6c2c78",
-        "selection": [
-          {
-            "columns": [],
-            "relative_time": [
-              {
-                "excluded": -3600000
-              },
-              {
-                "included": -3540000
-              }
-            ]
-          }
-        ]
-      },
-      "inputs": {
-        "materialized_views": [],
-        "raw_data_windows": [
-          {
-            "end_offset_ms": 3540000,
-            "source": {
-              "TimeSeries": {
-                "metric": "process_cpu_seconds_total"
-              }
-            },
-            "width_ms": 60000
-          }
-        ]
-      },
-      "installed_count": 60,
-      "installed_position": 59,
-      "node_id": 179,
-      "refresh": "at_ingestion",
-      "retention_ms": 7200000,
-      "stage2_node_id": 1
+      "retention_ms": 7200000
     }
   ],
-  "proven_optimal": true,
   "query": "sum(rate(process_cpu_seconds_total[1h]))",
   "selected": {
     "accepted": [
       {
         "accepted_metric": null,
-        "accepted_regardless_of_guarantee": false,
-        "guarantee_check_rejection": null,
         "sketches": [],
-        "summary": "metric not set; accepted exact",
-        "target_metric": null
+        "summary": "accepted exact"
       }
     ],
     "cost": {
-      "cost_per_second": 0.916234791682,
-      "cost_unit": "cost_per_second",
-      "cpu_core_seconds_per_second": 0.00006923435,
+      "cost_per_second": 0.977233760763,
+      "cpu_core_seconds_per_second": 0.000130233333333,
       "per_node": {
         "0": {
           "cost_per_second": 0.0042,
+          "cost_source": "analytical",
           "cpu_core_seconds_per_second": 4.2e-6,
           "detail": "scan 1000 samples; x 1.0000/s",
           "multiplier": 1,
           "operator": "Scan",
-          "price_source": "analytical",
           "timing": "ingestion_time"
         },
         "1": {
           "cost_per_second": 0.849,
+          "cost_source": "analytical",
           "cpu_core_seconds_per_second": 2e-6,
-          "detail": "build exact Rate accumulator in 60 tumbling windows of 60000 ms for 1000 groups: 1000 rows x (1 + depth 1); x 1.0000/s; keeps 6776000 bytes",
+          "detail": "build exact Rate accumulator in tumbling windows of 60000 ms for 1000 groups: 1000 rows x (1 + depth 1); x 1.0000/s; keeps 6776000 bytes",
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
-          "price_source": "analytical",
           "timing": "ingestion_time"
         },
         "2": {
-          "cost_per_second": 0.0610004412404,
+          "cost_per_second": 0.061000000427,
+          "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000061,
-          "detail": "merge 60000 states into 1000; x 1.0167/s; holds 56000 bytes for 0.1 ms",
+          "detail": "time range 3600s: 60 tumbling windows of states; x 1.0167/s; holds 56 bytes for 0.060 ms",
           "multiplier": 1,
-          "operator": "SummaryMerge",
-          "price_source": "analytical",
+          "operator": "TimeRange",
           "timing": "query_time"
         },
         "3": {
+          "cost_per_second": 0.061000427,
+          "cost_source": "analytical",
+          "cpu_core_seconds_per_second": 0.000061,
+          "detail": "merge 60000 states into 1000; x 1.0167/s; holds 56000 bytes for 0.060 ms",
+          "multiplier": 1,
+          "operator": "SummaryMerge",
+          "timing": "query_time"
+        },
+        "4": {
           "cost_per_second": 0.00101666666667,
+          "cost_source": "analytical",
           "cpu_core_seconds_per_second": 1.01666666667e-6,
           "detail": "finalize 1000 accumulators; x 1.0167/s",
           "multiplier": 1,
           "operator": "FinalizeExactAccumulator",
-          "price_source": "analytical",
-          "timing": "query_time"
-        },
-        "4": {
-          "cost_per_second": 0.00101666710791,
-          "cpu_core_seconds_per_second": 1.01666666667e-6,
-          "detail": "build exact Sum accumulator into 1 states: 1000 rows x depth 1; x 1.0167/s; holds 56 bytes for 0.1 ms",
-          "multiplier": 1,
-          "operator": "SummaryAgg",
-          "price_source": "analytical",
           "timing": "query_time"
         },
         "5": {
-          "cost_per_second": 1.01666666667e-6,
-          "cpu_core_seconds_per_second": 1.01666666667e-9,
-          "detail": "finalize 1 accumulators; x 1.0167/s",
+          "cost_per_second": 0.00101666666972,
+          "cost_source": "analytical",
+          "cpu_core_seconds_per_second": 1.01666666667e-6,
+          "detail": "hash aggregate 1000 rows into 1 groups; x 1.0167/s; holds 24 bytes for 0.001 ms",
           "multiplier": 1,
-          "operator": "FinalizeExactAccumulator",
-          "price_source": "analytical",
+          "operator": "Aggregate",
           "timing": "query_time"
         }
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 6776003.53345,
-        "cpu_ops_per_second": 66034.35,
+        "average_memory_bytes": 6776003.41944,
+        "cpu_ops_per_second": 127033.333333,
         "disk_bytes": 0,
-        "latency_per_query": [
-          {
-            "compaction_ms": 0.0,
-            "query_ms": 0.062001
-          }
-        ],
         "peak_cpu_cores": 2,
-        "peak_memory_bytes": 6832088,
+        "peak_memory_bytes": 6832112,
         "scanned_bytes_per_second": 32000.0
       }
     },
@@ -2388,24 +124,21 @@
                   "Plain": "timestamp"
                 },
                 "name": "ts",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "float64"
                 },
                 "name": "value",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "$promql_series_identity",
-                "nullable": false,
-                "table": null
+                "nullable": false
               }
             ],
             "time_index": 0,
@@ -2418,7 +151,7 @@
           },
           "producer": 0,
           "role": "Input",
-          "window": "RequiresAlignedPanePhaseOrExactBoundaryResidual"
+          "window": "NotApplicable"
         },
         {
           "consumer": 2,
@@ -2434,9 +167,8 @@
                 "dtype": {
                   "Plain": "timestamp"
                 },
-                "name": "ts",
-                "nullable": false,
-                "table": null
+                "name": "window_end",
+                "nullable": false
               },
               {
                 "dtype": {
@@ -2446,23 +178,21 @@
                   ]
                 },
                 "name": "state",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "$promql_series_identity",
-                "nullable": false,
-                "table": null
+                "nullable": false
               }
             ],
             "time_index": 0,
             "unique_keys": [
               [
-                2,
-                0
+                0,
+                2
               ]
             ]
           },
@@ -2484,9 +214,8 @@
                 "dtype": {
                   "Plain": "timestamp"
                 },
-                "name": "ts",
-                "nullable": false,
-                "table": null
+                "name": "window_end",
+                "nullable": false
               },
               {
                 "dtype": {
@@ -2496,23 +225,21 @@
                   ]
                 },
                 "name": "state",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "$promql_series_identity",
-                "nullable": false,
-                "table": null
+                "nullable": false
               }
             ],
             "time_index": 0,
             "unique_keys": [
               [
-                2,
-                0
+                0,
+                2
               ]
             ]
           },
@@ -2523,7 +250,7 @@
         {
           "consumer": 4,
           "data_state": {
-            "primitive": "Raw",
+            "primitive": "SummaryState",
             "timing": "query_time"
           },
           "grouping": "NotApplicable",
@@ -2535,24 +262,24 @@
                   "Plain": "timestamp"
                 },
                 "name": "ts",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
-                  "Plain": "float64"
+                  "ExactAggregate": [
+                    "Rate",
+                    "Rate"
+                  ]
                 },
-                "name": "value",
-                "nullable": false,
-                "table": null
+                "name": "state",
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "$promql_series_identity",
-                "nullable": false,
-                "table": null
+                "nullable": false
               }
             ],
             "time_index": 0,
@@ -2570,7 +297,7 @@
         {
           "consumer": 5,
           "data_state": {
-            "primitive": "SummaryState",
+            "primitive": "Raw",
             "timing": "query_time"
           },
           "grouping": "NotApplicable",
@@ -2579,18 +306,33 @@
             "fields": [
               {
                 "dtype": {
-                  "ExactAggregate": [
-                    "Sum",
-                    "Sum"
-                  ]
+                  "Plain": "timestamp"
                 },
-                "name": "state",
-                "nullable": false,
-                "table": null
+                "name": "ts",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false
               }
             ],
-            "time_index": null,
-            "unique_keys": []
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
           },
           "producer": 4,
           "role": "Input",
@@ -2599,24 +341,7 @@
       ],
       "nodes": [
         {
-          "guarantee": {
-            "provenance": [
-              {
-                "kind": "exact",
-                "reason": "exact over exact inputs"
-              }
-            ],
-            "spec": {
-              "accuracy_metric": "absolute",
-              "accuracy_scope": "per_value",
-              "error": {
-                "op": "zero"
-              },
-              "failure_probability": {
-                "op": "zero"
-              }
-            }
-          },
+          "guarantee": null,
           "id": 0,
           "lifetime": "None",
           "output_schema": {
@@ -2627,24 +352,21 @@
                   "Plain": "timestamp"
                 },
                 "name": "ts",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "float64"
                 },
                 "name": "value",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "$promql_series_identity",
-                "nullable": false,
-                "table": null
+                "nullable": false
               }
             ],
             "time_index": 0,
@@ -2671,24 +393,21 @@
                         "Plain": "timestamp"
                       },
                       "name": "ts",
-                      "nullable": false,
-                      "table": null
+                      "nullable": false
                     },
                     {
                       "dtype": {
                         "Plain": "float64"
                       },
                       "name": "value",
-                      "nullable": false,
-                      "table": null
+                      "nullable": false
                     },
                     {
                       "dtype": {
                         "Plain": "utf8"
                       },
                       "name": "$promql_series_identity",
-                      "nullable": false,
-                      "table": null
+                      "nullable": false
                     }
                   ],
                   "time_index": 0,
@@ -2721,9 +440,8 @@
                 "dtype": {
                   "Plain": "timestamp"
                 },
-                "name": "ts",
-                "nullable": false,
-                "table": null
+                "name": "window_end",
+                "nullable": false
               },
               {
                 "dtype": {
@@ -2733,23 +451,21 @@
                   ]
                 },
                 "name": "state",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "$promql_series_identity",
-                "nullable": false,
-                "table": null
+                "nullable": false
               }
             ],
             "time_index": 0,
             "unique_keys": [
               [
-                2,
-                0
+                0,
+                2
               ]
             ]
           },
@@ -2761,28 +477,32 @@
             "ASAP": {
               "SummaryTumblingWindowChain": {
                 "child": 0,
-                "family": {
+                "filter": null,
+                "input": {
+                  "item": null,
+                  "weight": {
+                    "Column": "SampleValue"
+                  }
+                },
+                "reduction": "PerEntity",
+                "summary_type": {
                   "ExactAggregate": [
                     "Rate",
                     "Rate"
                   ]
                 },
-                "filter": null,
-                "grouping": "PerSubpopulationInstance",
-                "input": {
-                  "item": null,
-                  "weight": {
-                    "Column": "SampleValue"
-                  },
-                  "weight_domain": {
-                    "kind": "unknown_or_signed"
-                  }
-                },
-                "reduction": "PerEntity",
-                "tumbling_window_count": 60,
                 "tumbling_window_width_ms": 60000
               }
             }
+          },
+          "retention_ms": 7200000,
+          "summary_coverage": {
+            "definition_id": "34b03a4d5b8565710e05b0b0989c10a0",
+            "selection": [
+              {
+                "columns": []
+              }
+            ]
           }
         },
         {
@@ -2796,9 +516,8 @@
                 "dtype": {
                   "Plain": "timestamp"
                 },
-                "name": "ts",
-                "nullable": false,
-                "table": null
+                "name": "window_end",
+                "nullable": false
               },
               {
                 "dtype": {
@@ -2808,16 +527,73 @@
                   ]
                 },
                 "name": "state",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "$promql_series_identity",
-                "nullable": false,
-                "table": null
+                "nullable": false
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                0,
+                2
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "TimeRange": {
+                "child": 1,
+                "kind": "range",
+                "range": {
+                  "nanos": 0,
+                  "secs": 3600
+                }
+              }
+            }
+          }
+        },
+        {
+          "guarantee": null,
+          "id": 3,
+          "lifetime": {
+            "OneEvaluation": "Memory"
+          },
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "ExactAggregate": [
+                    "Rate",
+                    "Rate"
+                  ]
+                },
+                "name": "state",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false
               }
             ],
             "time_index": 0,
@@ -2836,32 +612,15 @@
             "ASAP": {
               "SummaryMerge": {
                 "children": [
-                  1
+                  2
                 ]
               }
             }
           }
         },
         {
-          "guarantee": {
-            "provenance": [
-              {
-                "kind": "exact",
-                "reason": "exact accumulator over exact input"
-              }
-            ],
-            "spec": {
-              "accuracy_metric": "absolute",
-              "accuracy_scope": "per_value",
-              "error": {
-                "op": "zero"
-              },
-              "failure_probability": {
-                "op": "zero"
-              }
-            }
-          },
-          "id": 3,
+          "guarantee": null,
+          "id": 4,
           "lifetime": "None",
           "output_schema": {
             "closed": true,
@@ -2871,24 +630,21 @@
                   "Plain": "timestamp"
                 },
                 "name": "ts",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "float64"
                 },
                 "name": "value",
-                "nullable": false,
-                "table": null
+                "nullable": false
               },
               {
                 "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "$promql_series_identity",
-                "nullable": false,
-                "table": null
+                "nullable": false
               }
             ],
             "time_index": 0,
@@ -2906,84 +662,13 @@
           "payload": {
             "ASAP": {
               "FinalizeExactAccumulator": {
-                "child": 2
+                "child": 3
               }
             }
           }
         },
         {
           "guarantee": null,
-          "id": 4,
-          "lifetime": "None",
-          "output_schema": {
-            "closed": true,
-            "fields": [
-              {
-                "dtype": {
-                  "ExactAggregate": [
-                    "Sum",
-                    "Sum"
-                  ]
-                },
-                "name": "state",
-                "nullable": false,
-                "table": null
-              }
-            ],
-            "time_index": null,
-            "unique_keys": []
-          },
-          "output_state": {
-            "primitive": "SummaryState",
-            "timing": "query_time"
-          },
-          "payload": {
-            "ASAP": {
-              "SummaryAgg": {
-                "child": 3,
-                "family": {
-                  "ExactAggregate": [
-                    "Sum",
-                    "Sum"
-                  ]
-                },
-                "filter": null,
-                "grouping": "PerSubpopulationInstance",
-                "input": {
-                  "item": null,
-                  "weight": {
-                    "Column": "SampleValue"
-                  },
-                  "weight_domain": {
-                    "kind": "unknown_or_signed"
-                  }
-                },
-                "reduction": {
-                  "Reduce": []
-                }
-              }
-            }
-          }
-        },
-        {
-          "guarantee": {
-            "provenance": [
-              {
-                "kind": "exact",
-                "reason": "exact accumulator over exact input"
-              }
-            ],
-            "spec": {
-              "accuracy_metric": "absolute",
-              "accuracy_scope": "per_value",
-              "error": {
-                "op": "zero"
-              },
-              "failure_probability": {
-                "op": "zero"
-              }
-            }
-          },
           "id": 5,
           "lifetime": "None",
           "output_schema": {
@@ -2994,8 +679,7 @@
                   "Plain": "float64"
                 },
                 "name": "sum",
-                "nullable": false,
-                "table": null
+                "nullable": false
               }
             ],
             "time_index": null,
@@ -3006,9 +690,23 @@
             "timing": "query_time"
           },
           "payload": {
-            "ASAP": {
-              "FinalizeExactAccumulator": {
-                "child": 4
+            "NonASAP": {
+              "Aggregate": {
+                "child": 4,
+                "filters": [],
+                "having": null,
+                "measures": [
+                  {
+                    "col": null,
+                    "kind": "sum"
+                  }
+                ],
+                "output_names": [
+                  ""
+                ],
+                "reduction": {
+                  "Reduce": []
+                }
               }
             }
           }
@@ -3018,10 +716,6 @@
         5
       ],
       "scalar_roots": []
-    },
-    "display_name": "Q1 Sum acc + Rate acc ×60 tumbling windows · ingestion time: Rate acc for Q1, 60 × 1m tumbling windows"
-  },
-  "tumbling_window_retention_ms": {
-    "1": 7200000
+    }
   }
 }

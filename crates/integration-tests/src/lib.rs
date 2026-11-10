@@ -194,6 +194,62 @@ pub mod planning {
         .expect("Pass 1 accepts the query")
     }
 
+    /// The plan Stage 3 selects for the single query `root` at `accuracy`,
+    /// accuracy not enforced, when the deployment builds only sketches of
+    /// `algorithm` (with every readout one answers) and
+    /// the query repeats every second over large data (10,000,000 series,
+    /// 10,000,000 rows arriving per second), so that a summary costs less
+    /// than exact state. Test-only:
+    /// for execution tests of one summary type's plan.
+    pub fn plan_with_summary_type(
+        root: Rc<OperatorNode>,
+        accuracy: AccuracyTarget,
+        algorithm: asap_types::ir::schema::SketchAlgorithm,
+    ) -> PhysicalASAPDAG {
+        let mut data = declared_data(&root);
+        data.arrival = DataArrival::Ingesting {
+            rows_per_second: 10_000_000.0,
+            max_out_of_order_ms: None,
+        };
+        for facts in data.sources.values_mut() {
+            facts.series_count = Some(10_000_000);
+        }
+        let capabilities = asap_types::deployment_capabilities::DeploymentCapabilities {
+            supported_summaries: Some(vec![asap_types::ir::schema::SupportedSummary {
+                summary_type: algorithm,
+                readouts: asap_types::ir::schema::SummaryTypeCapability::of(
+                    &asap_types::ir::schema::FieldDataType::Sketch(algorithm),
+                )
+                .readouts()
+                .iter()
+                .map(|&(readout, _)| readout)
+                .collect(),
+            }]),
+            ..Default::default()
+        };
+        let models = asap_planner::PlanningModels::builtin()
+            .with_ignore_accuracy_guarantees(true)
+            .with_deployment_capabilities(&capabilities);
+        let entry = asap_types::workload::QueryWorkloadEntry {
+            recurrence: asap_types::workload::QueryRecurrence::Repeated(
+                asap_types::workload::RepeatedDemand::FixedIntervalAt {
+                    interval: asap_types::workload::RepetitionInterval(1_000),
+                    evaluation_phase: asap_types::workload::TimestampMs(0),
+                },
+            ),
+            ..single_query_entry(accuracy)
+        };
+        let run = asap_devtools::planning_stages::run_planning_stages_over(
+            vec![QueryRoot::Operator(root)],
+            &[entry],
+            &data,
+            models,
+        )
+        .expect("Pass 1 accepts the query");
+        let (plan, _) = run.run.selection.expect("a plan is selected");
+        plan
+    }
+
     /// The logical DAG the planner pipeline selects for the single query
     /// `root` at `accuracy`.
     pub fn selected_dag(root: Rc<OperatorNode>, accuracy: AccuracyTarget) -> Rc<OperatorNode> {

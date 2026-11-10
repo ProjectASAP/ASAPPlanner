@@ -8,7 +8,7 @@ Audience: developers moving computation from ASAPQuery-backend into
 Logical selection decides what to compute. A `PhysicalPropertiesAssignment` sets
 node timing (Stage 2 materialization chooses it per physical candidate). `physical_planner::compile` turns a timed `PhysicalASAPDAG` into physical
 operator DAGs. The backend owns ingestion, tumbling windows, storage, stored-state
-evaluation, external exact engines, pricing/selection, and execution scheduling.
+evaluation, external exact engines, costing/selection, and execution scheduling.
 
 A backend lowering is *covered* when `compile` accepts the corresponding
 `PhysicalASAPDAG` node and produces operators with the same result. The backend
@@ -162,7 +162,7 @@ Fallback and in query-time `Binary` nodes, following Prometheus'
   label-map `vector_binary` also treats `CompareBool` as its `bool` mode.
 - One-to-one matching and `group_left`/`group_right` with included labels.
   The "one" side must not repeat a match group; many-to-one results must be
-  unique. A left duplicate is an error only if more than one match is kept.
+  unique. A left duplicate is an error only if more than one match is retained.
 - `and`, `or`, and `unless` match label sets many-to-many, with `on` or
   `ignoring`, and return the original series.
 - Range functions other than `last_over_time` now drop `__name__` in the
