@@ -11,10 +11,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use asap_types::ir::operator::arguments::{AtModifier, GroupKeys, JoinKind, Reduction, Source};
-use asap_types::ir::operator::input::scans_only_time_series;
 use asap_types::ir::operator::AggIntent;
 
-use crate::memo_fixtures::{filter, range, scan, shift, state};
 use asap_types::ir::scalar::expr_ir::{ArithmeticOpKind, CompareOpKind, ScalarValue};
 use asap_types::ir::scalar::ProjectItem;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
@@ -23,6 +21,7 @@ use asap_types::ir::{
 };
 use asap_types::stages::{Memo, MemoGroupId, ValueSign};
 use asap_types::summary_type::{SketchAlgorithm, SketchStatistic};
+use asap_types::test_support::memo_fixtures::{filter, range, scan, shift, state};
 use asap_types::workload::{DataWorkload, PrometheusMetricType, SourceFacts};
 
 use ValueSign::{NonNegative, NonPositive, Unknown};
@@ -430,7 +429,7 @@ fn a_result_depends_on_the_evaluation_time_under_a_time_range_or_now() {
 /// `scanned_sources`, derived once per group: a `Scan` its source, any other
 /// group the union over its input groups. A PromQL `Scan` of a time series
 /// and a `TimeRange` over it scan only time series
-/// (`scans_only_time_series`); a SQL table `Scan` does not, nor a `Join`
+/// (`Source::is_time_series`); a SQL table `Scan` does not, nor a `Join`
 /// reading two (a SQL join reads relations only, so a time series cannot be
 /// one of its inputs).
 #[test]
@@ -475,7 +474,12 @@ fn a_group_scans_the_sources_of_the_scans_below_it() {
             metric: "latency".into()
         }])
     );
-    let reads = |group: MemoGroupId| scans_only_time_series(&properties(group).scanned_sources);
+    let reads = |group: MemoGroupId| {
+        properties(group)
+            .scanned_sources
+            .iter()
+            .all(Source::is_time_series)
+    };
     assert!(reads(series));
     assert!(reads(window));
     assert!(!reads(requests));
@@ -510,28 +514,19 @@ fn count_values_without_has_one_sign_per_output_column() {
 /// readout's value column, and whether equal copies may be one group.
 #[test]
 fn group_properties_come_from_input_groups() {
-    let mut memo = Memo::new(&DataWorkload::default());
-    let g1 = memo
-        .find_or_add_group(scan(
-            "latency",
-            &[
-                ("job", DataType::Utf8),
-                ("a", DataType::Float64),
-                ("b", DataType::Float64),
-            ],
-            vec![],
-        ))
-        .unwrap();
+    let mut memo = memo();
+    let g1 = add(&mut memo, series("latency"));
     let api = compare(
-        ScalarExpr::Column(2),
+        ScalarExpr::Column(HOST),
         CompareOpKind::Eq,
         ScalarExpr::Literal(ScalarValue::Utf8("api".into())),
     );
-    let g2 = memo.find_or_add_group(filter(api, g1)).unwrap();
-    let g3 = memo.find_or_add_group(range(MINUTE_MS, g2)).unwrap();
-    let g4 = memo
-        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g3))
-        .unwrap();
+    let g2 = add(&mut memo, filter(api, g1));
+    let g3 = add(&mut memo, range(MINUTE_MS, g2));
+    let g4 = add(
+        &mut memo,
+        state(FieldDataType::Sketch(SketchAlgorithm::Kll), g3),
+    );
     let readout = memo
         .find_or_add_group(Operator::ASAP(ASAPOp::SummaryEstimate {
             summary_input: g4,
@@ -539,7 +534,7 @@ fn group_properties_come_from_input_groups() {
         }))
         .unwrap();
     let properties = |group: MemoGroupId| &memo.groups()[group.0 as usize].group_properties;
-    assert_eq!(properties(g1).schema.fields.len(), 5);
+    assert_eq!(properties(g1).schema.fields.len(), 3);
     assert_eq!(properties(g1).aggregate_coverage, None);
     assert_eq!(properties(g4).result_kind, OperatorResultKind::State);
     assert!(properties(g4)

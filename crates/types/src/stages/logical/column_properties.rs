@@ -5,18 +5,31 @@
 
 use std::collections::BTreeMap;
 
-use super::{MemoGroupAsInput, ValueSign};
+use super::MemoGroupAsInput;
 use crate::ir::operator::arguments::{BinaryOpKind, JoinKind, PromQLVectorSetOpKind, Reduction};
 use crate::ir::operator::asap::{summary_agg_layout, summary_build};
 use crate::ir::operator::input::OperatorInput;
 use crate::ir::operator::AggIntent;
 use crate::ir::scalar::expr_ir::ScalarValue;
 use crate::ir::scalar::{resolve_column_ref, ColumnRef, ProjectItem, ScalarExpr};
-use crate::ir::schema::{aggregate_output_columns, FieldDataType, OutputColumnSource, Schema};
+use crate::ir::schema::aggregate_schema::{aggregate_output, OutputColumnSource};
+use crate::ir::schema::{FieldDataType, Schema};
 use crate::ir::{ASAPOp, NonASAPOp, Operator};
 use crate::summary_type::{ExactKind, SketchStatistic, SummaryInputExpr, SummaryUpdate};
 use crate::workload::bounds::source_name;
 use crate::workload::{series_facts, PrometheusMetricType, SourceFacts};
+
+/// The sign of one column's values, a group property derived from the
+/// input groups like lineage (concepts doc, section 3, "Value sign"); a
+/// `Scan`'s are declared per column in the data workload's source facts.
+/// Error contracts that hold only for values of one sign read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValueSign {
+    NonNegative,
+    NonPositive,
+    Unknown,
+}
 
 use ValueSign::{NonNegative, NonPositive, Unknown};
 
@@ -24,7 +37,7 @@ type Input<'m> = MemoGroupAsInput<'m>;
 
 /// The sign of each column of `output`, the output schema of `operator`,
 /// from its input groups' `column_signs` and, for a `Scan`, `source_facts`.
-pub(super) fn output_column_sign(
+pub(super) fn column_signs(
     operator: &Operator<Input<'_>>,
     output: &Schema,
     source_facts: &BTreeMap<String, SourceFacts>,
@@ -277,7 +290,7 @@ fn expression_sign<C>(expr: &ScalarExpr<C>, input: &[ValueSign]) -> ValueSign {
 }
 
 /// An aggregate's, by where each output column comes from
-/// ([`aggregate_output_columns`]): a kept input column keeps its sign, a
+/// ([`aggregate_output`]): a kept input column keeps its sign, a
 /// measure's value has [`measure_sign`] of its input column's, and a label
 /// a measure adds is `Unknown`.
 fn aggregate_signs(
@@ -286,7 +299,7 @@ fn aggregate_signs(
     measures: &[AggIntent],
     output: &Schema,
 ) -> Vec<ValueSign> {
-    let Ok(sources) = aggregate_output_columns(child.schema(), reduction, measures) else {
+    let Ok((_, sources)) = aggregate_output(child.schema(), reduction, measures, &[]) else {
         return vec![Unknown; output.fields.len()];
     };
     signs_from_sources(child, &sources, |index, input| {

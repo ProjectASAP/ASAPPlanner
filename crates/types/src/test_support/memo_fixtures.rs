@@ -1,13 +1,14 @@
-//! The memo expressions `memo_group_properties` and `memo_aggregate_coverage`
-//! build their examples from.
+//! Memo expressions over group ids that the memo's unit tests and this
+//! crate's memo integration tests (`memo_group_properties`,
+//! `memo_aggregate_coverage`) build their examples from.
 use std::time::Duration;
 
-use asap_types::ir::operator::arguments::{AtModifier, Reduction, Source, TimeShift};
-use asap_types::ir::scalar::ColumnRef;
-use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator, Predicate, ScalarExpr, TimeRangeKind};
-use asap_types::stages::MemoGroupId;
-use asap_types::summary_type::SummaryUpdate;
+use crate::ir::operator::arguments::{AtModifier, Reduction, Source, TimeShift};
+use crate::ir::scalar::ColumnRef;
+use crate::ir::schema::{DataType, Field, FieldDataType, Schema};
+use crate::ir::{ASAPOp, NonASAPOp, Operator, Predicate, ScalarExpr, TimeRangeKind};
+use crate::stages::MemoGroupId;
+use crate::summary_type::SummaryUpdate;
 
 /// `Scan metric{predicates}`: `[ts, value, columns…]`, `ts` its time index.
 pub fn scan(

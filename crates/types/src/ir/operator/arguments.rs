@@ -178,6 +178,14 @@ pub enum Source {
     Table { table_ref: String },
 }
 
+impl Source {
+    /// Whether it is a time series (PromQL rows): a PromQL top-k over rows
+    /// that scan only time series ranks one row per series.
+    pub fn is_time_series(&self) -> bool {
+        matches!(self, Self::TimeSeries { .. })
+    }
+}
+
 /// Operator on the query-level `BinaryOp` node. Reuses the scalar IR's
 /// [`ArithmeticOpKind`] / [`CompareOpKind`] so every arithmetic/comparison
 /// operator has exactly one representation (and one `Display`) across the IR.

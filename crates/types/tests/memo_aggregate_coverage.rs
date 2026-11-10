@@ -1,4 +1,4 @@
-//! Group properties and aggregate coverage, derived once per memo group
+//! Aggregate coverage (`AggregateCoverage`), derived once per memo group
 //! from its input groups (`docs/design_docs/proposals/asap-primitive-schema.md`
 //! §4.2.2). The memo of the worked example:
 //!
@@ -13,22 +13,21 @@ use std::ops::Bound;
 use asap_types::ir::operator::arguments::{AtModifier, Reduction};
 use asap_types::ir::operator::AggIntent;
 
-use crate::memo_fixtures::{filter, range, scan, shift, state};
-use asap_types::ir::properties::aggregate_coverage::{
-    AggregateCoverage, ColumnIdentity, Constraint, CoverageError, IntervalConstraintLimit,
-};
+use asap_types::ir::properties::selection::{ColumnIdentity, Constraint, IntervalConstraintLimit};
 use asap_types::ir::scalar::expr_ir::{ArithmeticOpKind, CompareOpKind, ScalarValue};
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use asap_types::ir::{
     ASAPOp, ExprSemantics, NonASAPOp, Operator, Predicate, ScalarExpr, SchemaDerivationError,
 };
+use asap_types::stages::{AggregateCoverage, CoverageError};
 use asap_types::stages::{
     CandidateExpression, CandidateForMemoGroup, LogicalProperties, LogicalRequirements, Memo,
     MemoGroupId, OriginOfCandidateForMemoGroup,
 };
 use asap_types::summary_type::{ExactKind, MergeInputRule, SketchAlgorithm, SummaryUpdate};
 use asap_types::test_support::definition_id;
+use asap_types::test_support::memo_fixtures::{filter, range, scan, shift, state};
 use asap_types::workload::DataWorkload;
 
 const TS: usize = 0;

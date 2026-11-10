@@ -10,9 +10,9 @@ use std::rc::Rc;
 use super::arguments::Source;
 use super::node::{Operator, OperatorNode, OperatorResultKind};
 use super::non_asap::NonASAPOp;
-use crate::ir::properties::aggregate_coverage::AggregateCoverage;
 use crate::ir::schema::Schema;
 use crate::ir::SchemaDerivationError;
+use crate::stages::AggregateCoverage;
 
 /// An input of an operator, as the rules read it.
 pub trait OperatorInput: Sized + Clone {
@@ -42,15 +42,7 @@ pub(crate) fn sources_scanned_by<I: OperatorInput>(operator: &Operator<I>) -> BT
     }
 }
 
-/// Whether every source in `sources` is a time series (PromQL rows): a
-/// PromQL top-k ranks one row per series.
-pub fn scans_only_time_series(sources: &BTreeSet<Source>) -> bool {
-    sources
-        .iter()
-        .all(|source| matches!(source, Source::TimeSeries { .. }))
-}
-
-/// A front-end node tree. Node trees carry no summary coverage.
+/// A front-end node tree. Node trees carry no aggregate coverage.
 impl OperatorInput for Rc<OperatorNode> {
     fn schema(&self) -> &Schema {
         &self.schema

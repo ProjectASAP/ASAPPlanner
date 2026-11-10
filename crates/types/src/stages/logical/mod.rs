@@ -10,13 +10,15 @@ mod memo;
 mod memo_candidates;
 mod requirements;
 
+pub use aggregate_coverage::{AggregateCoverage, AggregateDefinition, CoverageError};
 pub use candidate::{
     CandidateError, CandidateExpression, CandidateForMemoGroup, CandidateForMemoGroupId,
     LogicalProperties, LogicalPropertiesError, OriginOfCandidateForMemoGroup,
 };
+pub use column_properties::ValueSign;
 pub use edge::LogicalEdge;
 use group::MemoGroupAsInput;
-pub use group::{GroupProperties, MemoGroup, MemoGroupId, ValueSign};
+pub use group::{GroupProperties, MemoGroup, MemoGroupId};
 pub use memo::{queries_rooted_at, root_groups, Memo, MemoQuery};
 pub use memo_candidates::LogicalASAPMemoCandidates;
 pub use requirements::{LogicalRequirements, RequiredAccuracy};

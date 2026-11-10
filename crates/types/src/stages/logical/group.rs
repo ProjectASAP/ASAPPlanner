@@ -3,10 +3,10 @@
 
 use std::collections::BTreeSet;
 
-use super::column_properties::output_column_sign;
+use super::aggregate_coverage::{aggregate_coverage, AggregateCoverage};
+use super::column_properties::{column_signs, ValueSign};
 use crate::ir::operator::arguments::{AtModifier, Source, TimeShift};
 use crate::ir::operator::input::{sources_scanned_by, OperatorInput};
-use crate::ir::properties::aggregate_coverage::AggregateCoverage;
 use crate::ir::schema::Schema;
 use crate::ir::ASAPOp;
 use crate::ir::SchemaDerivationError;
@@ -33,12 +33,12 @@ pub struct MemoGroup {
     /// expression or a candidate's: kept up to date by
     /// [`Memo::find_or_add_group`](super::Memo::find_or_add_group) and
     /// [`Memo::add_candidate`](super::Memo::add_candidate).
-    pub parents: Vec<MemoGroupId>,
+    pub(super) parents: Vec<MemoGroupId>,
     /// The queries whose roots reach it ([`Self::reached_by_queries`]),
     /// ascending: kept up to date by
     /// [`Memo::add_query`](super::Memo::add_query) and
     /// [`Memo::add_candidate`](super::Memo::add_candidate).
-    pub queries: Vec<usize>,
+    pub(super) queries: Vec<usize>,
     /// Its candidates: empty after Stage 0, filled by Stage 1.
     pub candidates: Vec<CandidateForMemoGroup>,
 }
@@ -84,32 +84,22 @@ pub struct GroupProperties {
     pub scanned_sources: BTreeSet<Source>,
 }
 
-/// The sign of one column's values, a group property derived from the
-/// input groups like lineage (concepts doc, section 3, "Value sign"); a
-/// `Scan`'s are declared per column in the data workload's source facts.
-/// Error contracts that hold only for values of one sign read it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ValueSign {
-    NonNegative,
-    NonPositive,
-    Unknown,
-}
-
 /// Whether `operator` is a valid expression over its input groups
 /// ([`MemoGroupAsInput`]), never a node tree: its output schema derives, its
 /// inputs pass validation, and a merge reads only states it may merge.
-/// Returns the output schema.
+/// Returns the output schema and, for a merge, the coverage its check
+/// derived.
 pub(super) fn validate_expression_over_input_groups(
     operator: &Operator<MemoGroupAsInput<'_>>,
-) -> Result<Schema, SchemaDerivationError> {
+) -> Result<(Schema, Option<AggregateCoverage>), SchemaDerivationError> {
     let schema = operator.output_schema()?;
     operator.validate_inputs()?;
     // A merge is valid only over states of one definition it may merge.
-    if matches!(operator, Operator::ASAP(ASAPOp::SummaryMerge { .. })) {
-        AggregateCoverage::derive_from_inputs(operator)?;
-    }
-    Ok(schema)
+    let merge_coverage = match operator {
+        Operator::ASAP(ASAPOp::SummaryMerge { .. }) => Some(aggregate_coverage(operator)?),
+        _ => None,
+    };
+    Ok((schema, merge_coverage))
 }
 
 /// The properties of a group computing `expression` over its input
@@ -121,10 +111,10 @@ pub(super) fn derive_group_properties(
     expression: &Operator<MemoGroupId>,
 ) -> Result<GroupProperties, SchemaDerivationError> {
     let operator = expression.map_children(|&group_id| MemoGroupAsInput { memo, group_id });
-    let schema = validate_expression_over_input_groups(&operator)?;
-    let aggregate_coverage = AggregateCoverage::derive_from_inputs(&operator).ok();
+    let (schema, merge_coverage) = validate_expression_over_input_groups(&operator)?;
+    let aggregate_coverage = merge_coverage.or_else(|| aggregate_coverage(&operator).ok());
     Ok(GroupProperties {
-        column_signs: output_column_sign(&operator, &schema, &memo.source_facts),
+        column_signs: column_signs(&operator, &schema, &memo.source_facts),
         depends_on_evaluation_time: depends_on_evaluation_time(&operator),
         schema,
         result_kind: operator.output_kind(),

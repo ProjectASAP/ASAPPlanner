@@ -192,7 +192,7 @@ GROUP BY job;
 
 **Existing implementation.** The `WHERE` split is implemented for DataFusion in [`datafusion-contrib/datafusion-materialized-views`](https://github.com/datafusion-contrib/datafusion-materialized-views), `src/rewrite/normal_form.rs` (`SpjNormalForm`, `Predicate { eq_classes, ranges_by_equivalence_class, residuals }`). It rejects plans that contain an `Aggregate` or a `Join`.
 
-### 4.2 Summary Coverage = Summary definition + selection
+### 4.2 Aggregate coverage = aggregate definition + selection
 
 #### 4.2.1 Why coverage has two parts
 
@@ -1373,7 +1373,7 @@ pub struct CurrentSeriesInput {
 
 A finalized value's accuracy statement is `AccuracyGuarantee` (`accuracy/guarantee.rs`): a `spec` (`AccuracySpec`) with `accuracy_metric` (which error is measured, e.g. rank error), `error` (the error bound), `failure_probability` (the chance the bound does not hold) and `accuracy_scope` (which output values one statement covers), plus `provenance` (which estimates the bound came from). It is attached to evaluation and finalized nodes, and to `MaintainPopulation` nodes (whose population is exact); never to sketch or accumulator state.
 
-### 6.6 Summary coverage (`crates/types/src/ir/properties/aggregate_coverage.rs`)
+### 6.6 Aggregate coverage (`crates/types/src/stages/logical/aggregate_coverage.rs`; selection algebra in `crates/types/src/ir/properties/selection.rs`)
 
 The code for §4. `AggregateDefinition` is shown in §4.2.2.
 

@@ -18,7 +18,7 @@ pub mod error;
 pub mod series_identity;
 pub mod topk;
 
-pub use aggregate_schema::{aggregate_output_columns, aggregate_output_schema, OutputColumnSource};
+pub use aggregate_schema::aggregate_output_schema;
 
 use serde::{Deserialize, Serialize};
 

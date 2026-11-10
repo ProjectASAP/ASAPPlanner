@@ -33,6 +33,6 @@ pub mod plan;
 pub mod serde_f64;
 pub mod stages;
 pub mod summary_type;
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 pub mod workload;

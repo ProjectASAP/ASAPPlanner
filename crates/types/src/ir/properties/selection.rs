@@ -1,62 +1,19 @@
-//! Aggregate coverage: what an aggregate (a summary state or an exact
-//! `Aggregate`) covers: `definition` (what it computes) and `selection` (which
-//! output rows of that computation it took). Design:
-//! `docs/design_docs/proposals/asap-primitive-schema.md` §4.2, after
-//! Goldstein & Larson's view matching.
-//!
-//! Coverage is derived once for each aggregate memo group, from its input
-//! groups (`stages::logical::aggregate_coverage`); node trees carry none.
+//! The selection algebra of aggregate coverage
+//! (`stages::AggregateCoverage::selection`): which output rows of a
+//! computation a state took, as a union of boxes ([`SelectionBox`]), each a
+//! [`Constraint`] per column ([`ColumnIdentity`]): value sets and intervals,
+//! with interval limits relative to the evaluation time
+//! ([`IntervalConstraintLimit`]). A predicate conjunct becomes a constraint
+//! through `constraint_of`.
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::ops::Bound;
 
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
-use crate::ir::operator::node::Operator;
 use crate::ir::scalar::expr_ir::{CompareOpKind, ScalarValue};
 use crate::ir::scalar::ScalarExpr;
 use crate::ir::schema::ColumnId;
-use crate::stages::MemoGroupId;
-use crate::summary_type::MergeInputRule;
-
-/// What an aggregate computes, with every lifted selection removed.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AggregateDefinition {
-    /// The group the unlifted operators read: the first input under the
-    /// SummaryAgg that is not Filter / range TimeRange / TimeShift without @
-    /// / direct-column Project. `None` when that input is a `Scan` with a
-    /// liftable predicate (a PromQL label matcher): it is lifted too, and the
-    /// `Scan` with the rest of its predicates is the last unlifted operator,
-    /// so states over one source with different matchers may merge.
-    pub input_group: Option<MemoGroupId>,
-    /// The operators not lifted into the selection, listed top down from the
-    /// SummaryAgg, each with only its residual arguments. `None` marks an
-    /// operator's main input (the next unlifted operator, or input_group);
-    /// `Some(g)` is another input group it reads, such as the group a scalar
-    /// subquery in a Filter reads. Two states may merge only if input_group
-    /// and these operators are equal.
-    pub unlifted_operators: Vec<Operator<Option<MemoGroupId>>>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct AggregateCoverage {
-    pub(crate) definition: AggregateDefinition,
-    /// Union of boxes over the output rows of the unlifted operators' input.
-    pub(crate) selection: Vec<SelectionBox>,
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl AggregateCoverage {
-    pub fn definition(&self) -> &AggregateDefinition {
-        &self.definition
-    }
-
-    /// Union of boxes over the output rows of the unlifted operators' input.
-    pub fn selection(&self) -> &[SelectionBox] {
-        &self.selection
-    }
-}
 
 /// A conjunction of per-column constraints. The timestamp column is one of
 /// the columns; there is no separate time field. A column it does not
@@ -218,66 +175,6 @@ mod limit_bound {
         deserializer: D,
     ) -> Result<Bound<IntervalConstraintLimit>, D::Error> {
         Ok(WireBound::deserialize(deserializer)?.into())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum CoverageError {
-    /// The node has no coverage: it is no aggregate (`SummaryAgg`,
-    /// `Aggregate`, `SummaryTumblingWindowChain`, `SummaryMerge`), or a
-    /// `TimeRange`/`TimeShift` over a chain whose windows are not one
-    /// interval on the timestamp column. A caller bug, or bad input when it
-    /// is a merge's input.
-    #[error("coverage is derived only for aggregates and one time interval over a chain")]
-    NoCoverage,
-    /// A `SummaryMerge` without inputs: bad input.
-    #[error("summary merge requires at least one input")]
-    EmptyMerge,
-    /// The inputs of a `SummaryMerge` compute different things: bad input.
-    #[error("summary merge inputs compute different things")]
-    DefinitionMismatch,
-    /// The inputs of a `SummaryMerge` are not proven to relate as the
-    /// family's merge requires (disjoint, or disjoint in time for counter
-    /// states): bad input.
-    #[error(
-        "summary merge inputs are not proven {}, which the family's merge requires",
-        match required {
-            MergeInputRule::DisjointInTime => "disjoint in time",
-            _ => "disjoint",
-        }
-    )]
-    InputsOverlap { required: MergeInputRule },
-    /// A regrouping `SummaryMerge` key that is not one of the group keys
-    /// its input states are built by (a build grouped `without` keys has
-    /// none): bad input.
-    #[error("regrouping merge key {key} is not a group key of its input states")]
-    NotAGroupKey { key: ColumnId },
-    /// A regrouping `SummaryMerge` of states whose summary type does not
-    /// merge different groups: counter states (`Rate`, `Increase`) merge
-    /// consecutive windows of one series, a summary type without a merge
-    /// merges nothing, and a Hydra's groups share one state. Bad input.
-    #[error("the inputs' summary type cannot merge different groups")]
-    SummaryTypeCannotRegroup,
-    /// The build a regrouping `SummaryMerge` stands for does not derive:
-    /// bad input.
-    #[error("the regrouped build does not derive: {reason}")]
-    RegroupedBuild { reason: String },
-}
-
-impl AggregateCoverage {
-    /// A stable identity of `definition`: the 128-bit FNV-1a hash, in hex,
-    /// of its input group and unlifted operators. Two equal definitions
-    /// (the equality a merge requires) of one memo get equal ids, so a
-    /// summary store can key states by this id and a concrete selection.
-    pub(crate) fn definition_id(&self) -> String {
-        const OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
-        const PRIME: u128 = 0x0000000001000000000000000000013b;
-        let mut hash = OFFSET;
-        for byte in format!("{:?}", self.definition).bytes() {
-            hash ^= u128::from(byte);
-            hash = hash.wrapping_mul(PRIME);
-        }
-        format!("{hash:032x}")
     }
 }
 

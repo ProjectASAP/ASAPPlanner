@@ -18,7 +18,7 @@ use crate::ir::SchemaDerivationError;
 /// `[InputColumn(job), Measure { index: 0, input_column: Some(value) }]`. The one layout the output schema
 /// ([`aggregate_output_schema`]) and the group properties read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutputColumnSource {
+pub(crate) enum OutputColumnSource {
     InputColumn(ColumnId),
     Measure {
         index: usize,
@@ -100,17 +100,8 @@ pub fn aggregate_output_schema(
     Ok(aggregate_output(in_schema, reduction, measures, output_names)?.0)
 }
 
-/// Where each column of [`aggregate_output_schema`]'s output comes from, in
-/// its order.
-pub fn aggregate_output_columns(
-    in_schema: &Schema,
-    reduction: &Reduction,
-    measures: &[AggIntent],
-) -> Result<Vec<OutputColumnSource>, SchemaDerivationError> {
-    Ok(aggregate_output(in_schema, reduction, measures, &[])?.1)
-}
-
-/// [`aggregate_output_schema`] and [`aggregate_output_columns`] in one pass.
+/// [`aggregate_output_schema`] and where each of its columns comes from
+/// ([`OutputColumnSource`]), in one pass.
 pub(crate) fn aggregate_output(
     in_schema: &Schema,
     reduction: &Reduction,
@@ -200,8 +191,8 @@ pub(crate) fn aggregate_output(
         // Only the output *type* is read from here, so the leading column is
         // enough for the multi-column intents: `Cardinality` and `PearsonCorr`
         // both have a fixed output type that ignores it.
-        let in_col =
-            measure_input_column(in_schema, intent).map_or(&probe, |id| &in_schema.fields[id]);
+        let input_column = measure_input_column(in_schema, intent);
+        let in_col = input_column.map_or(&probe, |id| &in_schema.fields[id]);
         let mut out = intent.output_column(in_col);
         // A global extremum emits NULL for an empty input, even if its input
         // column is non-nullable. Grouped extrema only emit existing groups.
@@ -221,7 +212,7 @@ pub(crate) fn aggregate_output(
         out_cols.push(out);
         sources.push(OutputColumnSource::Measure {
             index: i,
-            input_column: measure_input_column(in_schema, intent).or(value_col_idx),
+            input_column: input_column.or(value_col_idx),
         });
     }
     // `count_values` groups by (by-keys ∪ the synthesized value label), so the
@@ -303,8 +294,8 @@ fn without_output_schema(
         // Only the output *type* is read from here, so the leading column is
         // enough for the multi-column intents: `Cardinality` and `PearsonCorr`
         // both have a fixed output type that ignores it.
-        let in_col =
-            measure_input_column(in_schema, intent).map_or(&probe, |id| &in_schema.fields[id]);
+        let input_column = measure_input_column(in_schema, intent);
+        let in_col = input_column.map_or(&probe, |id| &in_schema.fields[id]);
         let mut out = intent.output_column(in_col);
         if let Some((arg, _)) = intent
             .arg_selector_columns(in_schema)
@@ -319,8 +310,7 @@ fn without_output_schema(
         out_cols.push(out);
         sources.push(OutputColumnSource::Measure {
             index: i,
-            input_column: measure_input_column(in_schema, intent)
-                .or_else(|| in_schema.column_id("value")),
+            input_column: input_column.or_else(|| in_schema.column_id("value")),
         });
     }
     Ok((
@@ -357,8 +347,7 @@ mod tests {
     /// Each output column's source, and one source per column of
     /// `aggregate_output_schema`'s output.
     fn columns(reduction: Reduction, measures: &[AggIntent]) -> Vec<OutputColumnSource> {
-        let sources = aggregate_output_columns(&series(), &reduction, measures).unwrap();
-        let schema = aggregate_output_schema(&series(), &reduction, measures, &[]).unwrap();
+        let (schema, sources) = aggregate_output(&series(), &reduction, measures, &[]).unwrap();
         assert_eq!(sources.len(), schema.fields.len());
         sources
     }

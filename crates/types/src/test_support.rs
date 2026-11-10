@@ -4,10 +4,12 @@
 //! to the crate-private function of the same name, except the fixture
 //! [`population_over_selector`], which the executor's tests build.
 
+pub mod memo_fixtures;
+
 use crate::ir::operator::maintained_population::CurrentSeriesInput;
 use crate::ir::operator::node::Operator;
-use crate::ir::properties::aggregate_coverage::AggregateCoverage;
 use crate::plan::materialized_view::RawDataWindow;
+use crate::stages::AggregateCoverage;
 
 use crate::ir::schema::Schema;
 use crate::ir::{ASAPOp, NonASAPOp};

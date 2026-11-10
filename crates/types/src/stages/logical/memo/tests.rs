@@ -5,7 +5,6 @@
 use super::*;
 use crate::ir::operator::arguments::{GroupKeys, Reduction, Source};
 use crate::ir::operator::AggIntent;
-use crate::ir::scalar::expr_ir::ColumnRef;
 use crate::ir::scalar::expr_ir::{CompareOpKind, ScalarValue};
 use crate::ir::scalar::{ProjectItem, SortKey};
 use crate::ir::schema::{DataType, Field, FieldDataType, Schema};
@@ -13,36 +12,8 @@ use crate::ir::ASAPOp;
 use crate::ir::{ExprSemantics, NonASAPOp, Predicate, ScalarExpr};
 use crate::stages::logical::MemoGroupAsInput;
 use crate::stages::{CandidateExpression, LogicalProperties, OriginOfCandidateForMemoGroup};
-use crate::summary_type::{SketchAlgorithm, SketchParams, SketchStatistic, SummaryUpdate};
-
-/// `Scan metric[1m]`: `[ts, value]`.
-fn scan(metric: &str) -> Operator<MemoGroupId> {
-    Operator::NonASAP(NonASAPOp::Scan {
-        source: Source::TimeSeries {
-            metric: metric.into(),
-        },
-        predicates: vec![],
-        schema: Schema::with_time_index(
-            vec![
-                Field::plain("ts", DataType::Timestamp, false),
-                Field::plain("value", DataType::Float64, false),
-            ],
-            0,
-            vec![],
-        ),
-    })
-}
-
-/// `SummaryAgg[KLL](input)`: no θ in the expression.
-fn kll_state(input: MemoGroupId) -> Operator<MemoGroupId> {
-    Operator::ASAP(ASAPOp::SummaryAgg {
-        child: input,
-        summary_type: FieldDataType::Sketch(SketchAlgorithm::Kll),
-        input: SummaryUpdate::column(ColumnRef::SampleValue),
-        reduction: Reduction::PerEntity,
-        filter: None,
-    })
-}
+use crate::summary_type::{SketchAlgorithm, SketchParams, SketchStatistic};
+use crate::test_support::memo_fixtures::{scan, state};
 
 /// `SummaryEstimate[q](state)`.
 fn quantile_readout(state: MemoGroupId, q: f64) -> Operator<MemoGroupId> {
@@ -110,11 +81,26 @@ fn kll_k(k: u32) -> Option<SketchParams> {
 #[test]
 fn find_or_add_group_returns_the_group_of_an_equal_expression() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let g1 = memo.find_or_add_group(scan("latency")).unwrap();
-    let g2 = memo.find_or_add_group(kll_state(g1)).unwrap();
-    assert_eq!(memo.find_or_add_group(scan("latency")).unwrap(), g1);
-    assert_eq!(memo.find_or_add_group(kll_state(g1)).unwrap(), g2);
-    assert_ne!(memo.find_or_add_group(scan("errors")).unwrap(), g1);
+    let g1 = memo
+        .find_or_add_group(scan("latency", &[], vec![]))
+        .unwrap();
+    let g2 = memo
+        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1))
+        .unwrap();
+    assert_eq!(
+        memo.find_or_add_group(scan("latency", &[], vec![]))
+            .unwrap(),
+        g1
+    );
+    assert_eq!(
+        memo.find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1))
+            .unwrap(),
+        g2
+    );
+    assert_ne!(
+        memo.find_or_add_group(scan("errors", &[], vec![])).unwrap(),
+        g1
+    );
     assert_eq!(memo.groups().len(), 3);
     assert_eq!(
         memo.groups()[g2.0 as usize].expression.children(),
@@ -126,11 +112,15 @@ fn find_or_add_group_returns_the_group_of_an_equal_expression() {
 #[test]
 fn find_or_add_group_separates_equal_operators_over_different_inputs() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let latency = memo.find_or_add_group(scan("latency")).unwrap();
-    let errors = memo.find_or_add_group(scan("errors")).unwrap();
+    let latency = memo
+        .find_or_add_group(scan("latency", &[], vec![]))
+        .unwrap();
+    let errors = memo.find_or_add_group(scan("errors", &[], vec![])).unwrap();
     assert_ne!(
-        memo.find_or_add_group(kll_state(latency)).unwrap(),
-        memo.find_or_add_group(kll_state(errors)).unwrap()
+        memo.find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), latency))
+            .unwrap(),
+        memo.find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), errors))
+            .unwrap()
     );
 }
 
@@ -139,7 +129,9 @@ fn find_or_add_group_separates_equal_operators_over_different_inputs() {
 #[test]
 fn find_or_add_group_never_returns_an_unshareable_group() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let g1 = memo.find_or_add_group(scan("latency")).unwrap();
+    let g1 = memo
+        .find_or_add_group(scan("latency", &[], vec![]))
+        .unwrap();
     assert_ne!(
         memo.find_or_add_group(unordered_limit(g1)).unwrap(),
         memo.find_or_add_group(unordered_limit(g1)).unwrap()
@@ -150,9 +142,14 @@ fn find_or_add_group_never_returns_an_unshareable_group() {
 #[test]
 fn find_or_add_group_lists_the_new_group_among_its_inputs_parents() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let g1 = memo.find_or_add_group(scan("latency")).unwrap();
-    let g2 = memo.find_or_add_group(kll_state(g1)).unwrap();
-    memo.find_or_add_group(kll_state(g1)).unwrap();
+    let g1 = memo
+        .find_or_add_group(scan("latency", &[], vec![]))
+        .unwrap();
+    let g2 = memo
+        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1))
+        .unwrap();
+    memo.find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1))
+        .unwrap();
     assert_eq!(memo.groups()[g1.0 as usize].parent_groups(), &[g2]);
     assert!(memo.groups()[g2.0 as usize].parent_groups().is_empty());
 }
@@ -162,14 +159,32 @@ fn find_or_add_group_lists_the_new_group_among_its_inputs_parents() {
 #[test]
 fn kll_builds_with_k_200_and_k_345_share_one_group() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let g1 = memo.find_or_add_group(scan("latency")).unwrap();
-    let k200_group = memo.find_or_add_group(kll_state(g1)).unwrap();
-    let k200 = memo
-        .add_candidate(k200_group, candidate(kll_state(g1), kll_k(200)))
+    let g1 = memo
+        .find_or_add_group(scan("latency", &[], vec![]))
         .unwrap();
-    let k345_group = memo.find_or_add_group(kll_state(g1)).unwrap();
+    let k200_group = memo
+        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1))
+        .unwrap();
+    let k200 = memo
+        .add_candidate(
+            k200_group,
+            candidate(
+                state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1),
+                kll_k(200),
+            ),
+        )
+        .unwrap();
+    let k345_group = memo
+        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1))
+        .unwrap();
     let k345 = memo
-        .add_candidate(k345_group, candidate(kll_state(g1), kll_k(345)))
+        .add_candidate(
+            k345_group,
+            candidate(
+                state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1),
+                kll_k(345),
+            ),
+        )
         .unwrap();
     assert_eq!(k200_group, k345_group);
     assert_ne!(k200, k345);
@@ -185,13 +200,29 @@ fn kll_builds_with_k_200_and_k_345_share_one_group() {
 #[test]
 fn add_candidate_returns_the_existing_candidate_for_a_duplicate() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let g1 = memo.find_or_add_group(scan("latency")).unwrap();
-    let g2 = memo.find_or_add_group(kll_state(g1)).unwrap();
+    let g1 = memo
+        .find_or_add_group(scan("latency", &[], vec![]))
+        .unwrap();
+    let g2 = memo
+        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1))
+        .unwrap();
     let first = memo
-        .add_candidate(g2, candidate(kll_state(g1), kll_k(200)))
+        .add_candidate(
+            g2,
+            candidate(
+                state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1),
+                kll_k(200),
+            ),
+        )
         .unwrap();
     let again = memo
-        .add_candidate(g2, candidate(kll_state(g1), kll_k(200)))
+        .add_candidate(
+            g2,
+            candidate(
+                state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1),
+                kll_k(200),
+            ),
+        )
         .unwrap();
     assert_eq!(first, again);
     assert_eq!(
@@ -201,7 +232,10 @@ fn add_candidate_returns_the_existing_candidate_for_a_duplicate() {
             index_in_group: 0
         }
     );
-    let other_size = candidate(kll_state(g1), kll_k(345));
+    let other_size = candidate(
+        state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1),
+        kll_k(345),
+    );
     assert_ne!(memo.add_candidate(g2, other_size).unwrap(), first);
     assert_eq!(memo.groups()[g2.0 as usize].candidates.len(), 2);
 }
@@ -212,14 +246,22 @@ fn add_candidate_returns_the_existing_candidate_for_a_duplicate() {
 fn add_candidate_maintains_parents_and_queries() {
     // Query 0 is G3 = SummaryEstimate[q=0.95](G2) over G2 = KLL(G1).
     let mut memo = Memo::new(&DataWorkload::default());
-    let g1 = memo.find_or_add_group(scan("latency")).unwrap();
-    let g2 = memo.find_or_add_group(kll_state(g1)).unwrap();
+    let g1 = memo
+        .find_or_add_group(scan("latency", &[], vec![]))
+        .unwrap();
+    let g2 = memo
+        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1))
+        .unwrap();
     let g3 = memo.find_or_add_group(quantile_readout(g2, 0.95)).unwrap();
     assert_eq!(memo.add_query(query(g3)), 0);
     // A rule adds a state group G5 over another scan G4: no query
     // reaches them yet.
-    let g4 = memo.find_or_add_group(scan("latency_copy")).unwrap();
-    let g5 = memo.find_or_add_group(kll_state(g4)).unwrap();
+    let g4 = memo
+        .find_or_add_group(scan("latency_copy", &[], vec![]))
+        .unwrap();
+    let g5 = memo
+        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g4))
+        .unwrap();
     assert!(memo.groups()[g5.0 as usize].reached_by_queries().is_empty());
     // G3 gains a candidate reading G5: G5 and G4 now serve query 0.
     memo.add_candidate(g3, candidate(quantile_readout(g5, 0.95), None))
@@ -247,8 +289,12 @@ fn add_candidate_maintains_parents_and_queries() {
 #[test]
 fn add_candidate_rejects_a_candidate_whose_output_differs_from_its_group() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let g1 = memo.find_or_add_group(scan("latency")).unwrap();
-    let g2 = memo.find_or_add_group(kll_state(g1)).unwrap();
+    let g1 = memo
+        .find_or_add_group(scan("latency", &[], vec![]))
+        .unwrap();
+    let g2 = memo
+        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1))
+        .unwrap();
     let before = format!("{memo:?}");
     assert!(matches!(
         memo.add_candidate(g2, candidate(quantile_readout(g2, 0.5), None)),
@@ -266,8 +312,12 @@ fn add_candidate_rejects_a_candidate_whose_output_differs_from_its_group() {
 #[test]
 fn add_candidate_rejects_a_candidate_whose_inputs_fail_validation() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let g1 = memo.find_or_add_group(scan("latency")).unwrap();
-    let g2 = memo.find_or_add_group(kll_state(g1)).unwrap();
+    let g1 = memo
+        .find_or_add_group(scan("latency", &[], vec![]))
+        .unwrap();
+    let g2 = memo
+        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1))
+        .unwrap();
     let g3 = memo.find_or_add_group(quantile_readout(g2, 0.95)).unwrap();
     let over_raw_rows = quantile_readout(g1, 0.95).map_children(|&group_id| MemoGroupAsInput {
         memo: &memo,
@@ -294,7 +344,9 @@ fn add_candidate_rejects_a_candidate_whose_inputs_fail_validation() {
 #[test]
 fn find_or_add_group_returns_an_error_for_an_expression_with_no_schema() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let g1 = memo.find_or_add_group(scan("latency")).unwrap();
+    let g1 = memo
+        .find_or_add_group(scan("latency", &[], vec![]))
+        .unwrap();
     let out_of_range = Operator::NonASAP(NonASAPOp::Aggregate {
         reduction: Reduction::by(vec![9]),
         measures: vec![crate::ir::operator::agg_intent::AggIntent::Sum { col: Some(1) }],

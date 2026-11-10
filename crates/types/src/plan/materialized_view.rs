@@ -76,9 +76,10 @@ use crate::ir::operator::arguments::Source;
 use crate::ir::operator::asap::ASAPOp;
 use crate::ir::operator::node::{Operator, OperatorNode};
 use crate::ir::operator::non_asap::NonASAPOp;
-use crate::ir::properties::aggregate_coverage::{AggregateCoverage, CoverageError, SelectionBox};
 use crate::ir::properties::execution_data_state::ExecutionTiming;
+use crate::ir::properties::selection::SelectionBox;
 use crate::stages::Lifetime;
+use crate::stages::{AggregateCoverage, CoverageError};
 
 /// One materialized view of a DAG: what its stored state is, what it is
 /// refreshed from, when, and for how long it is retained.
@@ -89,7 +90,7 @@ pub struct MaterializedView {
     pub node_id: PhysicalASAPNodeId,
     /// Which run refreshes it.
     pub(crate) refresh: MaterializedViewRefresh,
-    /// What the stored state is: the node's summary coverage.
+    /// What the stored state is: the node's aggregate coverage.
     pub(crate) coverage: ViewCoverage,
     /// What its refresh reads.
     pub inputs: MaterializedViewInputs,
@@ -119,7 +120,7 @@ impl MaterializedView {
     }
 }
 
-/// A view's summary coverage
+/// A view's aggregate coverage
 /// ([`AggregateCoverage`], `docs/design_docs/proposals/asap-primitive-schema.md`
 /// §4.2): what it computes and which rows went in.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -349,7 +350,7 @@ pub enum InstallableDagError {
     ViewReadsUnwindowedSource { node_id: PhysicalASAPNodeId },
     /// Unsatisfiable request: view `node_id` is not a summary state with a
     /// coverage (`reason`), so a runtime cannot say what it stores.
-    #[error("materialized view {node_id} has no summary coverage: {reason}")]
+    #[error("materialized view {node_id} has no aggregate coverage: {reason}")]
     ViewWithoutCoverage {
         node_id: PhysicalASAPNodeId,
         reason: String,

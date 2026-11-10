@@ -1,5 +1,6 @@
 //! Ranked-row output contract shared by logical TopK and its implementations.
-use crate::ir::operator::input::{scans_only_time_series, OperatorInput};
+use crate::ir::operator::arguments::Source;
+use crate::ir::operator::input::OperatorInput;
 use crate::ir::operator::Reduction;
 use crate::ir::scalar::column_resolution::{resolve_column_ref, ResolveError};
 use crate::ir::scalar::{ColumnRef, ProjectItem};
@@ -55,6 +56,8 @@ pub fn ranked_column<I: OperatorInput>(child: &I) -> Result<ColumnId, ResolveErr
     }
 }
 
+/// Ordered projection of ranked rows: partition keys, ranked value, then
+/// item identity. TopK retains rows; partition keys alone are not unique.
 pub(crate) fn ranked_row_projection<I: OperatorInput>(
     child: &I,
     reduction: &Reduction,
@@ -83,7 +86,7 @@ pub(crate) fn ranked_row_projection<I: OperatorInput>(
         alias: Some(output_name.into()),
         expr: ScalarExpr::Column(value),
     });
-    let promql = scans_only_time_series(&child.scanned_sources());
+    let promql = child.scanned_sources().iter().all(Source::is_time_series);
     for (index, field) in child.schema().fields.iter().enumerate() {
         let names_item = !promql || field.dtype == FieldDataType::Plain(DataType::Utf8);
         if names_item

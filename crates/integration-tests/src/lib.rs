@@ -302,7 +302,7 @@ pub mod planning {
             .iter()
             .enumerate()
             .filter(|(group, _)| {
-                memo.queries[q]
+                memo.queries()[q]
                     .root
                     .operator_refs()
                     .contains(&&asap_types::stages::MemoGroupId(*group as u32))

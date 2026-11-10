@@ -165,7 +165,7 @@ mod tests {
 
     /// Query `query`'s root group.
     fn root(memo: &Memo, query: usize) -> MemoGroupId {
-        match &memo.queries[query].root {
+        match &memo.queries()[query].root {
             QueryRoot::Operator(group) => *group,
             QueryRoot::Scalar(_) => panic!("expected an operator root"),
         }
@@ -247,8 +247,8 @@ mod tests {
         let memo = memo_of_queries(&roots, &targets, &DataWorkload::default()).unwrap();
         assert_eq!(root(&memo, 0), root(&memo, 1));
         assert_eq!(memo.groups().len(), 2);
-        assert_eq!(memo.queries[0].accuracy_target, targets[0]);
-        assert_eq!(memo.queries[1].accuracy_target, targets[1]);
+        assert_eq!(memo.queries()[0].accuracy_target, targets[0]);
+        assert_eq!(memo.queries()[1].accuracy_target, targets[1]);
     }
 
     /// `vector(scalar(sum by (service) (m)))`.
@@ -282,7 +282,7 @@ mod tests {
         assert_eq!(memo.groups().len(), 3);
         assert_eq!(root(&memo, 0), root(&memo, 1));
         let sum = MemoGroupId(1);
-        assert_eq!(memo.queries[2].root.operator_refs(), vec![&sum]);
+        assert_eq!(memo.queries()[2].root.operator_refs(), vec![&sum]);
         assert_eq!(
             memo.groups()[sum.0 as usize].reached_by_queries(),
             &[0, 1, 2]
@@ -368,16 +368,16 @@ mod tests {
         };
         let memo = memo_of_queries(&roots, &[None, None], &declared).unwrap();
         assert_eq!(
-            memo.queries[0].number_of_values_per_query_evaluation,
+            memo.queries()[0].number_of_values_per_query_evaluation,
             Some(1000)
         );
         assert_eq!(
-            memo.queries[1].number_of_values_per_query_evaluation,
+            memo.queries()[1].number_of_values_per_query_evaluation,
             Some(1)
         );
         let undeclared = memo_of_roots(&roots).unwrap();
         assert_eq!(
-            undeclared.queries[0].number_of_values_per_query_evaluation,
+            undeclared.queries()[0].number_of_values_per_query_evaluation,
             None
         );
     }

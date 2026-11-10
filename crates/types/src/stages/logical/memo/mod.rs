@@ -20,7 +20,7 @@ use crate::stages::{
 use crate::workload::{DataWorkload, SourceFacts};
 use hash_consing::{
     expression_hash, same_expression_and_logical_properties, same_serialized_expression,
-    serialized_operator,
+    serialized_expression,
 };
 
 /// The memo, Stage 0's and Stage 1's one type: the memo groups, each with
@@ -31,12 +31,13 @@ pub struct Memo {
     /// The groups, by id ([`Self::groups`]); added only through
     /// [`Self::find_or_add_group`].
     groups: Vec<MemoGroup>,
-    /// The queries, by index in the workload.
-    pub queries: Vec<MemoQuery>,
+    /// The queries, by index in the workload ([`Self::queries`]); added only
+    /// through [`Self::add_query`].
+    queries: Vec<MemoQuery>,
     /// The groups [`Self::find_or_add_group`] may return, by
     /// [`expression_hash`] of their expression: every group whose sharing
     /// is legal ([`GroupProperties::shareable_when_equal`](crate::stages::GroupProperties::shareable_when_equal)).
-    groups_by_expression_hash: HashMap<u64, Vec<(MemoGroupId, Option<String>)>>,
+    groups_by_expression_hash: HashMap<u64, Vec<(MemoGroupId, String)>>,
     /// The data workload's facts per source (`DataWorkload::sources`), fixed
     /// at construction: a `Scan` group's column signs read them.
     pub(super) source_facts: BTreeMap<String, SourceFacts>,
@@ -74,6 +75,11 @@ impl Memo {
         &self.groups
     }
 
+    /// The queries, by index in the workload.
+    pub fn queries(&self) -> &[MemoQuery] {
+        &self.queries
+    }
+
     /// Adds `query` and returns its index: its root's groups and every
     /// group below them list it ([`MemoGroup::reached_by_queries`]). Stage 0
     /// adds each query once.
@@ -85,8 +91,9 @@ impl Memo {
         index
     }
 
-    /// Hash-consing: the group whose expression is `expression`
-    /// (`same_expression`: operator, arguments and input groups), else a
+    /// Hash-consing: the group whose expression is `expression` (operator,
+    /// arguments and input groups by typed equality, confirmed by equal
+    /// serializations: `same_serialized_expression`), else a
     /// new group for it, with the `GroupProperties` `derive_group_properties`
     /// derives from its input groups, listed as a parent of each input
     /// group. A group whose copies may return different rows (an unordered
@@ -99,8 +106,8 @@ impl Memo {
         &mut self,
         expression: Operator<MemoGroupId>,
     ) -> Result<MemoGroupId, SchemaDerivationError> {
-        let serialized = serialized_operator(&expression);
-        let hash = expression_hash(&expression, serialized.as_deref());
+        let serialized = serialized_expression(&expression);
+        let hash = expression_hash(&serialized);
         // Only shareable groups are listed by hash, and an equal expression
         // is as shareable as the group it equals, which was validated.
         if let Some((group, _)) = self
@@ -109,8 +116,8 @@ impl Memo {
             .and_then(|groups| {
                 groups.iter().find(|(group, known)| {
                     same_serialized_expression(
-                        (&self.groups[group.0 as usize].expression, known.as_deref()),
-                        (&expression, serialized.as_deref()),
+                        (&self.groups[group.0 as usize].expression, known),
+                        (&expression, &serialized),
                     )
                 })
             })
@@ -175,7 +182,7 @@ impl Memo {
                 memo: self,
                 group_id,
             });
-        let schema = validate_expression_over_input_groups(&operator)
+        let (schema, _) = validate_expression_over_input_groups(&operator)
             .map_err(CandidateError::NotValidOverInputGroups)?;
         let result_kind = operator.output_kind();
         let group_properties = &self.groups[group.0 as usize].group_properties;
