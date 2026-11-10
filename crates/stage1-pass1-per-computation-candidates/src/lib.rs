@@ -30,18 +30,18 @@
 /// (`PerComputationCandidates`) is Pass 1's working form, public only to
 /// tests (`crate::test_support`, feature `test-support`).
 mod computation_targets;
-/// Frontend-to-Pass-1 acceptance tests over Pass 1's working form.
-#[cfg(test)]
-mod computation_targets_tests;
 /// The summary families that can serve an aggregate intent, the input a
 /// summary consumes and the column a top-k ranks.
-mod realization;
+mod summary_realization;
 /// Fixtures this crate's own tests share.
 #[cfg(test)]
 mod test_fixtures;
 /// Test helpers other crates' tests call (feature `test-support`).
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
+/// Frontend-to-Pass-1 acceptance tests over Pass 1's working form.
+#[cfg(test)]
+mod tests;
 
 use asap_types::deployment_capabilities::SupportedSummary;
 use asap_types::stages::Memo;

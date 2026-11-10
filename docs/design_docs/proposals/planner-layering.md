@@ -517,7 +517,7 @@ The memo rules are in `crates/stage1-pass2-reuse-candidates/src/` (module
 `memo`, crate-private: the crate root re-exports each entry point); the memo types Stage 1 hands Stage 2 are in
 `crates/types/src/stages/` (`asap_types::stages`); the facade that runs the
 stages is in `crates/planner/src/run.rs`; the search over Stage 2's
-candidates is in `crates/stage3-plan-selection/src/` (`select.rs`, `groups/`, `milp/`).
+candidates is in `crates/stage3-plan-selection/src/` (`lib.rs`, `groups/`, `milp/`).
 
 | Step | Entry point | Path |
 |---|---|---|
@@ -526,7 +526,7 @@ candidates is in `crates/stage3-plan-selection/src/` (`select.rs`, `groups/`, `m
 | Memo types | `DagOfLogicalMemoGroups`, `PerComputationLogicalMemoCandidates`, `HowToComputeAggregateMeasure`, Pass 1's working types (`ComputationTarget`, `FusedComputation`, `HavingEntry`, `HavingPlacement`), `Memo`, `CandidateForMemoGroup`, `OriginOfCandidateForMemoGroup`, `LogicalASAPMemoCandidates`, `CandidateGenerationTimeout`, `root_groups`, `queries_rooted_at` | `crates/types/src/stages/` (`asap_types::stages`) |
 | Pass 2 | `generate_logical_asap_memo_candidates` → `LogicalASAPMemoCandidates`, from Pass 1's output. It calls in this order: 1. window composition for every legal tumbling-window width (`add_local_window_composition`); 2–9. the rules in `pass2/memo/rules/`: scan widening, summary inputs, top-k reuse, finer aggregate, rollup, window rollup, summary results, state configurations; 10. `add_shared_summary_state_groups`, the shared builds | `stage1-pass2-reuse-candidates/src/lib.rs` (`LogicalASAPMemoCandidates` itself: `asap_types::stages`); `pass2/memo/window_candidates.rs`, `pass2/memo/rules/`, `pass2/memo/state_groups.rs`, `pass2/memo/shared_configurations.rs` |
 | Memo to candidate DAGs | `enumerate`, `build_logical_asap_dags_from_chosen_candidates`, `ChosenCandidatePerMemoGroup`, `AllChosenCandidatesPerMemoGroup`, `ErrorBuildingLogicalASAPDagsFromChosenCandidates` | `pass2/memo/enumeration.rs` (re-exported at the crate root) |
-| Production memo build and search | The facade's `run_planning` builds the DAG of logical memo groups and runs Pass 1 (`pass1_memo`) once; then `generate_logical_asap_memo_candidates`, `generate_physical_asap_memo_candidates` and Stage 3's `select_plan`, once each; `select_plan` builds the plan. Behind `select_plan`: the group selection MILP (#1095), `groups/` and `milp/` | `crates/planner/src/run.rs`; `crates/stage3-plan-selection/src/select.rs` |
+| Production memo build and search | The facade's `run_planning` builds the DAG of logical memo groups and runs Pass 1 (`pass1_memo`) once; then `generate_logical_asap_memo_candidates`, `generate_physical_asap_memo_candidates` and Stage 3's `select_plan`, once each; `select_plan` builds the plan. Behind `select_plan`: the group selection MILP (#1095), `groups/` and `milp/` | `crates/planner/src/run.rs`; `crates/stage3-plan-selection/src/lib.rs` |
 
 ## ASAPPlanner Detailed Design: Planning Stages and their decisions/Strategies
 

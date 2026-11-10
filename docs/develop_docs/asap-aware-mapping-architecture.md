@@ -71,8 +71,8 @@ same pipeline behind the `OptimizationPass` trait.
 | Concern | Where it lives |
 | --- | --- |
 | Pass 1: which computations a query has (`ComputationTarget`), how each can be computed (`HowToComputeAggregateMeasure`: `Exact`, `ExactAccumulator`, `Summary`), fused computations (`FusedComputation`), pruning (`PruneReason`) | `asap-stage1-pass1-per-computation-candidates`, `computation_targets.rs` |
-| Which summary families serve an intent (`summary_candidates`) | `asap-stage1-pass1-per-computation-candidates`, `realization.rs` |
-| Pass 2 memo rules: shared producers (identical expressions by memo group identity, one build at different sizes), scan-label widening, window composition (tumbling windows), rollup, exact top-k reuse and finer-aggregate reuse | `asap-stage1-pass2-reuse-candidates`, `memo/rules/` and `memo/window_candidates.rs` |
+| Which summary families serve an intent (`summary_candidates`) | `asap-stage1-pass1-per-computation-candidates`, `summary_realization.rs` |
+| Pass 2 steps: rollup from the finest common group (shared producers across group keys), top-k reuse, readout requirements, dead-candidate elimination, chain groups (tumbling windows) and the logical edges | `asap-stage1-pass2-reuse-candidates`, `lib.rs` (the steps in order) and `rules/` (`rollup.rs`, `topk.rs`, `chains.rs`) |
 | Enumeration of the plans a memo stands for (reference pricer, DAG viewer) | none today (deleted in #1207 PR 0) |
 | What each summary type can merge and answer (`SummaryTypeCapability::of`: `merge_inputs`, `readouts`) | `asap-types`, `summary_type/capability.rs` |
 | Stage 2: physical properties options per summary build (not materialized; materialized at ingestion time `AcrossEvaluations`; materialized at query time `OneEvaluation` or `AcrossEvaluations`), ingestion-time eligibility, physical operator implementation | `asap-stage2-physical-optimization` |
@@ -81,7 +81,7 @@ same pipeline behind the `OptimizationPass` trait.
 | The analytical per-operator resource model Stage 3 measures with | `asap-cost`, `analytical.rs` and `operator_statistics.rs` |
 | The accuracy algebra: per-family guarantees, composition, budget split; guarantee propagation through a DAG; sizing a summary for its target, (ε, δ) budget and default sizes | `asap-accuracy` (`AccuracyEvidence`, `theoretical_guarantee`, `guarantee/`, `evidence.rs`, `requirements.rs`, `error_propagation.rs`, `composition.rs`, `budget.rs`, `propagation.rs`, `sizing.rs`) |
 | What the executor supports (`DeploymentCapabilities`) | `asap-types`, `deployment_capabilities.rs`; Pass 1 receives only `supported_summaries` and Stage 2 only `query_time_results_retained` and `raw_data_retained` (`bool` arguments, so Stage 2 does not depend on the Stage 1 crate); Stage 3 reads none of it |
-| The inputs every stage reads (`PlanningModels`: accuracy evidence, cost inputs, deployment capabilities) and the `OptimizationPass` trait | `asap-planner`, `pass.rs`; the facade gives Pass 2 the evidence and Stage 3 only `CostInputs` |
+| The inputs every stage reads (`PlanningModels`: accuracy evidence, cost inputs, deployment capabilities) and the `OptimizationPass` trait | `asap-planner`, `models.rs` (`PlanningModels`) and `pass.rs` (the trait); the facade gives Pass 2 the evidence and Stage 3 only `CostInputs` |
 
 The current production search organizes these computations in memo result/state
 groups and jointly selects physical candidates and connections; it does not

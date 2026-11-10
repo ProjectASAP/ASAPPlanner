@@ -25,11 +25,13 @@ use asap_frontend_metricsql::{lower_metricsql_query_workload, MetricsqlError};
 use asap_frontend_promql::{lower_promql_query_workload, PromqlError};
 use asap_frontend_sql::{lower_sql_dialect, SqlError};
 
+mod models;
 mod pass;
 mod run;
+pub use models::PlanningModels;
 pub use pass::{
     optimize, OptimizationInput, OptimizationInputError, OptimizationPass, OptimizeError,
-    PassNameConflict, PassRegistry, PlanOutput, PlanningModels,
+    PassNameConflict, PassRegistry, PlanOutput,
 };
 pub use run::{
     run_planning, PlanSearchSettings, PlanningReport, PlanningRun, SelectionError,

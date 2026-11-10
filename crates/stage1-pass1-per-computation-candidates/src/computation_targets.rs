@@ -56,7 +56,7 @@ use thiserror::Error;
 
 use asap_accuracy::sizing::sketch_statistic;
 
-use crate::realization::summary_candidates;
+use crate::summary_realization::summary_candidates;
 use asap_types::deployment_capabilities::{summary_supported, SupportedSummary};
 use asap_types::stages::{
     ComputationTarget, FusedComputation, HavingEntry, HavingPlacement,
@@ -762,7 +762,7 @@ fn reads_only_time_series(node: &OperatorNode) -> bool {
 pub(super) fn whole_expression_input(
     target: &OperatorNode,
 ) -> Option<(Rc<OperatorNode>, SummaryUpdate, Reduction)> {
-    use crate::realization::realize_keyed_additive_summary_input;
+    use crate::summary_realization::realize_keyed_additive_summary_input;
     let Some(NonASAPOp::Aggregate {
         child,
         reduction,

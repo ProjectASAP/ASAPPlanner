@@ -24,7 +24,7 @@ A new sketch that Pass 1 can offer for an intent.
    evaluates is its own declaration, `EVALUATED_READOUTS`
    (`crates/executor/src/capability.rs`); add the family's readouts there
    once the executor answers them.
-3. **Offer and size.** Place it in `realization::FAMILY_PREFERENCE`
+3. **Offer and size.** Place it in `summary_realization::FAMILY_PREFERENCE`
    (`crates/stage1-pass1-per-computation-candidates`): `summary_candidates` offers it, in
    that order, for every intent whose statistic its capability row answers.
    Size it in `asap_accuracy::sizing::default_size_params`.
@@ -61,7 +61,7 @@ work.
    existing candidate. Read summary families only through
    `SummaryTypeCapability`. Shared rewrite helpers live in
    `pass2/asap_aware_cse.rs`.
-2. Declare it in `pass2/memo/rules.rs` and call it from `apply_sharing_rules`
+2. Declare it in `rules.rs` and call it from `generate_logical_asap_memo_candidates`
    (`stage1-pass2-reuse-candidates/src/lib.rs`), after the
    existing rules.
 3. Add its row to the Pass 2 rule table of the

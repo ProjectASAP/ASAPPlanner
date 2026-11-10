@@ -21,7 +21,8 @@ use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
 use asap_types::stages::{LogicalASAPMemoCandidates, Memo, PhysicalASAPMemoCandidates};
 use asap_types::workload::{DataWorkload, QueryLanguage, QueryWorkloadEntry};
 
-use crate::pass::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, PlanningModels};
+use crate::models::PlanningModels;
+use crate::pass::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput};
 
 /// How the facade searches.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

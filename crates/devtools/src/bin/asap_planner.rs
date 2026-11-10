@@ -76,9 +76,8 @@
 //   - memo: `nodes`, one node table for the section (each distinct node
 //     once, children as indices before their parents), and `steps`, the
 //     memo after each step run (`stage0`: the frontends' DAG hash-consed,
-//     groups without candidates; `pass1`; `pass2_local_window_composition`:
-//     local window composition's tumbling-window candidates; `pass2`: Pass
-//     2's output, the memo Stage 2 implements). Each
+//     groups without candidates; `pass1`; `pass2`: Pass 2's output, the memo
+//     Stage 2 implements). Each
 //     step lists its groups (`id`, `label`, `children`, `parents`,
 //     `queries`, `roots_of`, `node`) and their candidates (`index`,
 //     `implements`, `children`, `origin`, `accuracy_budget_parts`, `added`
@@ -379,13 +378,6 @@ fn memo_json(run: &PlanningStagesRun) -> Value {
     let mut named = vec![("stage0", "Stage 0, the frontends' DAG hash-consed", stage0)];
     if let Some(pass1) = &run.run.pass1_memo {
         named.push(("pass1", "Stage 1, Pass 1", pass1));
-    }
-    if let Some(pass2) = &run.pass2_local_window_composition {
-        named.push((
-            "pass2_local_window_composition",
-            "Stage 1, Pass 2: local window composition",
-            pass2,
-        ));
     }
     if let Some(logical) = &run.run.logical_asap_candidates {
         named.push(("pass2", "Stage 1, Pass 2", &logical.memo));

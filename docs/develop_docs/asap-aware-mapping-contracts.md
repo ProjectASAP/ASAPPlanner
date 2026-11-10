@@ -37,7 +37,7 @@ asap-stage1-pass2-reuse-candidates -p asap-stage2-physical-optimization -p asap-
 - **Targets.** `ComputationTarget` is one measure of one `Aggregate`. Its
   `ways_to_compute` list the exact option first (`ExactAccumulator` when the intent
   has a mergeable exact state, else `Exact`), then each `Summary(family)` from
-  `realization::summary_candidates`. Candidates are unranked: Pass 1 never
+  `summary_realization::summary_candidates`. Candidates are unranked: Pass 1 never
   compares cost.
 - **Pruning.** A candidate that cannot meet the target is moved to the
   inventory's `pruned_ways_to_compute` (with its target) with a `PruneReason` (`RequiresExact`,
