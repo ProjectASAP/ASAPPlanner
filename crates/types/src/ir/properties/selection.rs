@@ -1,5 +1,5 @@
 //! The selection algebra of aggregate coverage
-//! (`stages::AggregateCoverage::selection`): which output rows of a
+//! ([`AggregateCoverage`](super::AggregateCoverage)'s `selection`): which output rows of a
 //! computation a state took, as a union of boxes ([`SelectionBox`]), each a
 //! [`Constraint`] per column ([`ColumnIdentity`]): value sets and intervals,
 //! with interval limits relative to the evaluation time

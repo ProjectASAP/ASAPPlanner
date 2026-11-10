@@ -13,11 +13,10 @@ mod physical;
 mod pruning;
 
 pub use logical::{
-    AggregateCoverage, AggregateDefinition, CandidateError, CandidateExpression,
-    CandidateForMemoGroup, CandidateForMemoGroupId, CoverageError, GroupProperties,
-    LogicalASAPMemoCandidates, LogicalEdge, LogicalProperties, LogicalPropertiesError,
-    LogicalRequirements, Memo, MemoGroup, MemoGroupId, MemoQuery, OriginOfCandidateForMemoGroup,
-    RequiredAccuracy, ValueSign,
+    view_coverage, CandidateError, CandidateExpression, CandidateForMemoGroup,
+    CandidateForMemoGroupId, GroupProperties, LogicalASAPMemoCandidates, LogicalEdge,
+    LogicalProperties, LogicalPropertiesError, LogicalRequirements, Memo, MemoGroup, MemoGroupId,
+    MemoQuery, OriginOfCandidateForMemoGroup, RequiredAccuracy, ValueSign,
 };
 pub use per_computation_logical_memo_candidates::{
     ComputationTarget, FusedComputation, HavingEntry, HavingPlacement, HowToComputeAggregateMeasure,

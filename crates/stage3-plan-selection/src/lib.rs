@@ -29,7 +29,8 @@ pub use report::{
 /// (module documentation) under `cost_inputs`, and build it: one
 /// `PhysicalASAPDAG` node per selected execution, its inputs from the
 /// selected edges, each node's `selected_physical_candidate` set and each
-/// materialized view node's `view_coverage` from its memo group.
+/// materialized view node's `view_coverage` from its memo group
+/// (`asap_types::stages::view_coverage`).
 /// `entries[q]` is query `q`'s workload entry; `data` the data workload
 /// with its bounds.
 ///
@@ -45,5 +46,5 @@ pub fn select_plan(
         .validate()
         .map_err(ErrorSelectingPlan::InvalidSettings)?;
     let _ = (physical, entries, data);
-    todo!("#1207 PR 6: the baseline MILP over x, y, z, t, and the PhysicalASAPDAG of its solution, each materialized view node's view_coverage from its memo group's aggregate_coverage, with definition_id the content id of the expanded definition")
+    todo!("#1207 PR 6: the baseline MILP over x, y, z, t, and the PhysicalASAPDAG of its solution, each materialized view node's view_coverage = asap_types::stages::view_coverage(memo, its group)")
 }

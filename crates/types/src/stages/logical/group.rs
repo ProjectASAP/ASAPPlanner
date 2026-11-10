@@ -3,10 +3,10 @@
 
 use std::collections::BTreeSet;
 
-use super::aggregate_coverage::{aggregate_coverage, AggregateCoverage};
 use super::column_properties::{column_signs, ValueSign};
 use crate::ir::operator::arguments::{AtModifier, Source, TimeShift};
 use crate::ir::operator::input::OperatorInput;
+use crate::ir::properties::AggregateCoverage;
 use crate::ir::schema::Schema;
 use crate::ir::ASAPOp;
 use crate::ir::SchemaDerivationError;
@@ -75,7 +75,7 @@ pub struct GroupProperties {
     /// What an aggregate group covers: a summary state, a chain, a
     /// `TimeRange`/`TimeShift` over a chain or a merge over one, or an exact
     /// `Aggregate` result; `None` for any other group.
-    pub aggregate_coverage: Option<AggregateCoverage>,
+    pub aggregate_coverage: Option<AggregateCoverage<MemoGroupId>>,
     /// Whether two equal expressions return the same rows for the same
     /// input rows, so they may be one group (not an unordered `LIMIT`).
     pub shareable_when_equal: bool,
@@ -91,12 +91,12 @@ pub struct GroupProperties {
 /// derived.
 pub(super) fn validate_expression_over_input_groups(
     operator: &Operator<MemoGroupAsInput<'_>>,
-) -> Result<(Schema, Option<AggregateCoverage>), SchemaDerivationError> {
+) -> Result<(Schema, Option<AggregateCoverage<MemoGroupId>>), SchemaDerivationError> {
     let schema = operator.output_schema()?;
     operator.validate_inputs()?;
     // A merge is valid only over states of one definition it may merge.
     let merge_coverage = match operator {
-        Operator::ASAP(ASAPOp::SummaryMerge { .. }) => Some(aggregate_coverage(operator)?),
+        Operator::ASAP(ASAPOp::SummaryMerge { .. }) => Some(operator.aggregate_coverage()?),
         _ => None,
     };
     Ok((schema, merge_coverage))
@@ -112,7 +112,7 @@ pub(super) fn derive_group_properties(
 ) -> Result<GroupProperties, SchemaDerivationError> {
     let operator = expression.map_children(|&group_id| MemoGroupAsInput { memo, group_id });
     let (schema, merge_coverage) = validate_expression_over_input_groups(&operator)?;
-    let aggregate_coverage = merge_coverage.or_else(|| aggregate_coverage(&operator).ok());
+    let aggregate_coverage = merge_coverage.or_else(|| operator.aggregate_coverage().ok());
     Ok(GroupProperties {
         column_signs: column_signs(&operator, &schema, &memo.source_facts),
         depends_on_evaluation_time: depends_on_evaluation_time(&operator),
@@ -192,7 +192,13 @@ impl OperatorInput for MemoGroupAsInput<'_> {
         })
     }
 
-    fn aggregate_coverage(&self) -> Option<&AggregateCoverage> {
+    type Reference = MemoGroupId;
+
+    fn reference(&self) -> Option<MemoGroupId> {
+        Some(self.group_id)
+    }
+
+    fn aggregate_coverage(&self) -> Option<&AggregateCoverage<MemoGroupId>> {
         self.group().group_properties.aggregate_coverage.as_ref()
     }
 

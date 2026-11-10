@@ -15,7 +15,6 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::materialized_view::ViewCoverage;
 use crate::ir::flat::NodeId;
 use crate::ir::operator::asap::ASAPOp;
 use crate::ir::operator::node::Operator;
@@ -26,6 +25,7 @@ use crate::ir::scalar::ScalarExpr;
 
 use crate::accuracy::AccuracyGuarantee;
 use crate::ir::properties::execution_data_state::{ExecutionDataState, ExecutionTiming};
+use crate::ir::properties::selection::SelectionBox;
 use crate::ir::schema::Schema;
 use crate::stages::PhysicalCandidateId;
 use crate::stages::{Lifetime, PhysicalPropertiesError};
@@ -107,6 +107,42 @@ pub struct PhysicalASAPDAGNode {
     /// on every other node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view_coverage: Option<ViewCoverage>,
+}
+
+/// A view's aggregate coverage
+/// ([`AggregateCoverage`](crate::ir::properties::AggregateCoverage), `docs/design_docs/proposals/asap-primitive-schema.md`
+/// §4.2): what it computes and which rows went in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewCoverage {
+    /// The plan-scope content id of what the view computes: its memo
+    /// coverage's `AggregateDefinition` with every input group expanded
+    /// recursively to its expression, down to the `Scan`s, holding no
+    /// memo group or plan node ids, canonically serialized and hashed
+    /// (`stages::view_coverage`).
+    /// Equal across plans and processes that compute the same thing,
+    /// whatever the selection, and different when they do not (a rollup to
+    /// a coarser grouping computes something else and has its own). Inside
+    /// one memo, coverages compare by `AggregateDefinition` `==` instead
+    /// and need no id.
+    pub(crate) definition_id: String,
+    /// The rows that went in: a union of boxes of value sets, value ranges
+    /// and time relative to the evaluation time. A merge's is the union of
+    /// its inputs'.
+    pub(crate) selection: Vec<SelectionBox>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl ViewCoverage {
+    /// The plan-scope content id of what the view computes.
+    pub fn definition_id(&self) -> &str {
+        &self.definition_id
+    }
+
+    /// The rows that went in.
+    pub fn selection(&self) -> &[SelectionBox] {
+        &self.selection
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

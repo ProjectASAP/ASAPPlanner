@@ -70,13 +70,13 @@ use thiserror::Error;
 
 use super::physical_asap_dag::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPDAGValidationError, PhysicalASAPNodeId,
+    ViewCoverage,
 };
 use crate::ir::operator::arguments::Source;
 use crate::ir::operator::asap::ASAPOp;
 use crate::ir::operator::node::Operator;
 use crate::ir::operator::non_asap::NonASAPOp;
 use crate::ir::properties::execution_data_state::ExecutionTiming;
-use crate::ir::properties::selection::SelectionBox;
 use crate::stages::Lifetime;
 
 /// One materialized view of a DAG: what its stored state is, what it is
@@ -115,41 +115,6 @@ impl MaterializedView {
     /// What the stored state is.
     pub fn coverage(&self) -> &ViewCoverage {
         &self.coverage
-    }
-}
-
-/// A view's aggregate coverage
-/// ([`AggregateCoverage`](crate::stages::AggregateCoverage), `docs/design_docs/proposals/asap-primitive-schema.md`
-/// §4.2): what it computes and which rows went in.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ViewCoverage {
-    /// The plan-scope content id of what the view computes: its memo
-    /// coverage's `AggregateDefinition` with every input group expanded
-    /// recursively to its expression, down to the `Scan`s, holding no
-    /// memo group or plan node ids, canonically serialized and hashed.
-    /// Equal across plans and processes that compute the same thing,
-    /// whatever the selection, and different when they do not (a rollup to
-    /// a coarser grouping computes something else and has its own). Inside
-    /// one memo, coverages compare by `AggregateDefinition` `==` instead
-    /// and need no id.
-    pub(crate) definition_id: String,
-    /// The rows that went in: a union of boxes of value sets, value ranges
-    /// and time relative to the evaluation time. A merge's is the union of
-    /// its inputs'.
-    pub(crate) selection: Vec<SelectionBox>,
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl ViewCoverage {
-    /// The plan-scope content id of what the view computes.
-    pub fn definition_id(&self) -> &str {
-        &self.definition_id
-    }
-
-    /// The rows that went in.
-    pub fn selection(&self) -> &[SelectionBox] {
-        &self.selection
     }
 }
 

@@ -14,16 +14,16 @@ use asap_types::ir::operator::arguments::{AtModifier, Reduction};
 use asap_types::ir::operator::AggIntent;
 
 use asap_types::ir::properties::selection::{ColumnIdentity, Constraint, IntervalConstraintLimit};
+use asap_types::ir::properties::{AggregateCoverage, CoverageError};
 use asap_types::ir::scalar::expr_ir::{ArithmeticOpKind, CompareOpKind, ScalarValue};
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use asap_types::ir::{
     ASAPOp, ExprSemantics, NonASAPOp, Operator, Predicate, ScalarExpr, SchemaDerivationError,
 };
-use asap_types::stages::{AggregateCoverage, CoverageError};
 use asap_types::stages::{
-    CandidateExpression, CandidateForMemoGroup, LogicalProperties, LogicalRequirements, Memo,
-    MemoGroupId, OriginOfCandidateForMemoGroup,
+    view_coverage, CandidateExpression, CandidateForMemoGroup, LogicalProperties,
+    LogicalRequirements, Memo, MemoGroupId, OriginOfCandidateForMemoGroup,
 };
 use asap_types::summary_type::{ExactKind, MergeInputRule, SketchAlgorithm, SummaryUpdate};
 use asap_types::test_support::memo_fixtures::{filter, range, scan, shift, state};
@@ -112,7 +112,7 @@ fn kll_of_last_minute_where(
     memo.find_or_add_group(kll(last_minute)).unwrap()
 }
 
-fn coverage(memo: &Memo, group: MemoGroupId) -> &AggregateCoverage {
+fn coverage(memo: &Memo, group: MemoGroupId) -> &AggregateCoverage<MemoGroupId> {
     memo.groups()[group.0 as usize]
         .group_properties
         .aggregate_coverage
@@ -167,7 +167,7 @@ fn a_summary_agg_over_a_job_filter_lifts_it_into_the_selection() {
     let g1 = memo.find_or_add_group(latency(vec![])).unwrap();
     let g4 = kll_of_last_minute_where(&mut memo, g1, job_is("api"));
     let coverage = coverage(&memo, g4);
-    assert_eq!(coverage.definition().input_group, Some(g1));
+    assert_eq!(coverage.definition().input, Some(g1));
     assert_eq!(
         coverage.definition().unlifted_operators,
         vec![kll_unlifted()]
@@ -196,7 +196,7 @@ fn states_with_equal_definitions_and_disjoint_selections_merge() {
     );
     let merged = memo.find_or_add_group(merge(vec![g4, g7])).unwrap();
     let coverage = coverage(&memo, merged);
-    assert_eq!(coverage.definition().input_group, Some(g1));
+    assert_eq!(coverage.definition().input, Some(g1));
     let [selection] = coverage.selection() else {
         panic!("one box: {coverage:?}")
     };
@@ -238,7 +238,7 @@ fn a_filter_that_is_no_selection_stays_unlifted() {
         ScalarExpr::BoolAnd(vec![job_is("api"), a_plus_b_above_10()]),
     );
     let coverage_of_g10 = coverage(&memo, g10);
-    assert_eq!(coverage_of_g10.definition().input_group, Some(g1));
+    assert_eq!(coverage_of_g10.definition().input, Some(g1));
     assert_eq!(
         coverage_of_g10.definition().unlifted_operators,
         vec![
@@ -288,7 +288,7 @@ fn states_whose_definitions_read_the_same_subquery_merge() {
     let api = state_of_job(&mut memo, "api");
     let web = state_of_job(&mut memo, "web");
     let definition = coverage(&memo, api).definition();
-    assert_eq!(definition.input_group, Some(g1));
+    assert_eq!(definition.input, Some(g1));
     assert_eq!(
         definition.unlifted_operators,
         vec![
@@ -321,7 +321,7 @@ fn scan_predicates_lift_and_their_states_merge() {
     let api = state_of_job(&mut memo, "api");
     let web = state_of_job(&mut memo, "web");
     let definition = coverage(&memo, api).definition();
-    assert_eq!(definition.input_group, None);
+    assert_eq!(definition.input, None);
     assert_eq!(
         definition.unlifted_operators,
         vec![kll_unlifted(), latency(vec![]).map_children(|_| None)]
@@ -457,7 +457,7 @@ fn at_end_and_at_start_share_the_subtree_they_anchor_and_stay_unlifted() {
         );
         let state = memo.find_or_add_group(kll(pinned)).unwrap();
         let coverage = coverage(&memo, state);
-        assert_eq!(coverage.definition().input_group, Some(pinned));
+        assert_eq!(coverage.definition().input, Some(pinned));
         assert_eq!(coverage.definition().unlifted_operators, [kll_unlifted()]);
         assert!(coverage.selection()[0].columns().is_empty());
     }
@@ -570,7 +570,7 @@ fn an_exact_aggregate_has_coverage() {
     let g3 = memo.find_or_add_group(range(MINUTE_MS, g2)).unwrap();
     let g4 = memo.find_or_add_group(sum_by_job(g3)).unwrap();
     let coverage = coverage(&memo, g4);
-    assert_eq!(coverage.definition().input_group, Some(g1));
+    assert_eq!(coverage.definition().input, Some(g1));
     assert_eq!(
         coverage.definition().unlifted_operators,
         vec![sum_by_job(MemoGroupId(0)).map_children(|_| None)]
@@ -583,4 +583,64 @@ fn an_exact_aggregate_has_coverage() {
         jobs(&["api"])
     );
     assert_eq!(selection.columns()[&ts()], last_minute());
+}
+
+/// KLL over the last minute of `metric{job="api"}` (`scan` → `filter` →
+/// `range` → `kll`), in `memo`: its scan group and its state group.
+fn kll_of_last_minute_of(memo: &mut Memo, metric: &str) -> (MemoGroupId, MemoGroupId) {
+    let scan = memo
+        .find_or_add_group(scan(
+            metric,
+            &[
+                ("job", DataType::Utf8),
+                ("a", DataType::Float64),
+                ("b", DataType::Float64),
+            ],
+            vec![],
+        ))
+        .unwrap();
+    (scan, kll_of_last_minute_where(memo, scan, job_is("api")))
+}
+
+/// The plan's view of a state's coverage names no memo group: the same
+/// state in two memos whose `Scan` groups have different ids has one
+/// `definition_id` and one selection.
+#[test]
+fn a_view_coverage_is_equal_across_memos_whatever_the_group_ids() {
+    let mut first = Memo::new(&DataWorkload::default());
+    let (first_scan, first_state) = kll_of_last_minute_of(&mut first, "latency");
+    let mut second = Memo::new(&DataWorkload::default());
+    // An unrelated query first, so `latency`'s scan gets another id.
+    kll_of_last_minute_of(&mut second, "requests");
+    let (second_scan, second_state) = kll_of_last_minute_of(&mut second, "latency");
+    assert_ne!(first_scan, second_scan);
+    assert_eq!(
+        coverage(&first, first_state).definition().input,
+        Some(first_scan)
+    );
+    let first_view = view_coverage(&first, first_state).unwrap();
+    let second_view = view_coverage(&second, second_state).unwrap();
+    assert_eq!(first_view.definition_id(), second_view.definition_id());
+    assert_eq!(first_view.selection(), second_view.selection());
+}
+
+/// The same shape over another source computes something else: another
+/// `definition_id`.
+#[test]
+fn a_view_coverage_over_another_source_has_another_definition_id() {
+    let mut memo = Memo::new(&DataWorkload::default());
+    let (_, over_latency) = kll_of_last_minute_of(&mut memo, "latency");
+    let (_, over_requests) = kll_of_last_minute_of(&mut memo, "requests");
+    assert_ne!(
+        view_coverage(&memo, over_latency).unwrap().definition_id(),
+        view_coverage(&memo, over_requests).unwrap().definition_id()
+    );
+}
+
+/// A group without aggregate coverage (a scan) has no view coverage.
+#[test]
+fn a_group_without_aggregate_coverage_has_no_view_coverage() {
+    let mut memo = Memo::new(&DataWorkload::default());
+    let (scan, _) = kll_of_last_minute_of(&mut memo, "latency");
+    assert_eq!(view_coverage(&memo, scan), None);
 }

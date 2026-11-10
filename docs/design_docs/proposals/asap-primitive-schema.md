@@ -117,7 +117,7 @@ A node in the physical data will represent the data or summary instance, so a no
 | How is it computed? | by the planner, from the memo group's input groups, in one walk that yields both the definition and the selection | §4.2.2 |
 | How expensive is it? | proportional to the few operators directly under the `SummaryAgg`, not to the whole sub-DAG; derived once per memo group | §4.2.3 |
 | What uses it? | merge (in #646), rollup; slice, reuse (planned); subtract (reserved) | §5.6, §5.7 |
-| Where is it in the code? | `GroupProperties::aggregate_coverage`, `AggregateCoverage::derive_from_inputs` | §6.6 |
+| Where is it in the code? | `GroupProperties::aggregate_coverage`, `Operator::aggregate_coverage` | §6.6 |
 | What is left out? | the deployment and runtime implementation, e.g. SDS | §4.3 |
 
 **Why coverage is not part of the schema.**
@@ -237,35 +237,39 @@ Formally, a state means `family(input(σ(C)))` for each group of `G`, where `C` 
 
 #### 4.2.2 Deriving the definition and the selection
 
-Coverage is derived for memo groups, never declared and never computed on operator-node trees. When `Memo::find_or_add_group` creates an aggregate group (a summary state or an exact `Aggregate`), `AggregateCoverage::derive_from_inputs` walks down from the group's `SummaryAgg` or `Aggregate` through its input groups' `expression`s in the memo and stores the result once in the group's `GroupProperties::aggregate_coverage`. One walk produces both parts: every filter condition either moves into the `selection` or stays in the `definition`. A `SummaryMerge` group reads its input groups' stored coverage; it is a valid group only when their definitions are equal and their selections are disjoint (disjoint in time, for counter states).
+Coverage is an IR property, derived like an output schema and never declared: `Operator::aggregate_coverage` (`crates/types/src/ir/properties/aggregate_coverage.rs`) walks down from a `SummaryAgg` or `Aggregate` through its inputs' operators, generic over how a definition names an input (`OperatorInput::Reference`). The memo derives it once, when `Memo::find_or_add_group` creates an aggregate group (a summary state or an exact `Aggregate`), over the input groups' `expression`s (`R` = `MemoGroupId`), and stores it in the group's `GroupProperties::aggregate_coverage`; node trees store none. One walk produces both parts: every filter condition either moves into the `selection` or stays in the `definition`. A `SummaryMerge` group reads its input groups' stored coverage; it is a valid group only when their definitions are equal and their selections are disjoint (disjoint in time, for counter states).
 
 ```rust
-/// What a summary state computes, with every lifted selection removed.
-pub struct AggregateDefinition {
-    /// The group the unlifted operators read: the first input under the
+/// What a summary state computes, with every lifted selection removed;
+/// `R` names an input (a memo group's id in the memo).
+pub struct AggregateDefinition<R> {
+    /// The input the unlifted operators read: the first input under the
     /// SummaryAgg or Aggregate that is not Filter / range TimeRange /
     /// TimeShift / direct-column Project. `None` when that input is a `Scan` with a
     /// liftable predicate (a PromQL label matcher): it is lifted too, and the
     /// `Scan` with the rest of its predicates is the last unlifted operator.
-    pub input_group: Option<MemoGroupId>,
+    pub input: Option<R>,
     /// The operators not lifted into the selection, listed top down from the
     /// SummaryAgg, each with only its residual arguments. `None` marks an
-    /// operator's main input (the next unlifted operator, or input_group);
-    /// `Some(g)` is another input group it reads, such as the group a scalar
+    /// operator's main input (the next unlifted operator, or `input`);
+    /// `Some(r)` is another input it reads, such as the input a scalar
     /// subquery in a Filter reads.
-    pub unlifted_operators: Vec<Operator<Option<MemoGroupId>>>,
+    pub unlifted_operators: Vec<Operator<Option<R>>>,
 }
 
-pub struct AggregateCoverage {
-    pub(crate) definition: AggregateDefinition,
+pub struct AggregateCoverage<R> {
+    pub(crate) definition: AggregateDefinition<R>,
     /// Union of boxes over the output rows of the unlifted operators' input.
     pub(crate) selection: Vec<SelectionBox>,
 }
 
-impl AggregateCoverage {
-    pub(crate) fn derive_from_inputs(
-        operator: &Operator<MemoGroupAsInput<'_>>,
-    ) -> Result<Self, CoverageError>;
+impl<R: Clone> AggregateCoverage<R> {
+    /// The same coverage with each input reference `r` replaced by `f(r)`.
+    pub fn map_references<S>(self, f: impl FnMut(R) -> S) -> AggregateCoverage<S>;
+}
+
+impl<I: OperatorInput> Operator<I> {
+    pub fn aggregate_coverage(&self) -> Result<AggregateCoverage<I::Reference>, CoverageError>;
 }
 ```
 
@@ -285,26 +289,26 @@ G8  Filter(job = "api" ∧ a + b > 10)(G1);  G9 TimeRange[1m](G8);  G10 SummaryA
 | 1 | G4 | `SummaryAgg[KLL](G3)` | the first unlifted operator, with no filter of its own |
 | 2 | G3 | `TimeRange[1m](G2)` | the one range window: lifted as `ts ∈ (t − 60 s, t]` (t the evaluation time) |
 | 3 | G2 | `Filter(job = "api")(G1)` | `job = "api"` is a value set on one column: lifted, nothing of the `Filter` remains |
-| 4 | G1 | `Scan latency` | not liftable, no predicate to lift: the walk stops; G1 is the `input_group` |
+| 4 | G1 | `Scan latency` | not liftable, no predicate to lift: the walk stops; G1 is the `input` |
 
 ```text
 G4.aggregate_coverage = AggregateCoverage {
     definition: AggregateDefinition {
-        input_group: Some(G1),
+        input: Some(G1),
         unlifted_operators: [SummaryAgg[KLL]],
     },
     selection: [ { job ∈ {api}, ts ∈ (t − 60 s, t] } ],
 }
 ```
 
-**Case 2, G7: the same definition, a disjoint selection.** The walk over G6 and G5 lifts `job = "web"` and the same minute, so G7's definition is G4's (`input_group: Some(G1)`, `unlifted_operators: [SummaryAgg[KLL]]`) (`==`); its selection is `{ job ∈ {web}, ts ∈ (t − 60 s, t] }`. The two selections are disjoint, so `SummaryMerge(G4, G7)` is a valid candidate (and group), covering `{ job ∈ {api, web}, ts ∈ (t − 60 s, t] }`.
+**Case 2, G7: the same definition, a disjoint selection.** The walk over G6 and G5 lifts `job = "web"` and the same minute, so G7's definition is G4's (`input: Some(G1)`, `unlifted_operators: [SummaryAgg[KLL]]`) (`==`); its selection is `{ job ∈ {web}, ts ∈ (t − 60 s, t] }`. The two selections are disjoint, so `SummaryMerge(G4, G7)` is a valid candidate (and group), covering `{ job ∈ {api, web}, ts ∈ (t − 60 s, t] }`.
 
 **Case 3, G10: `a + b > 10` cannot be lifted.** It spans two columns, so it is no selection. At G8 the walk lifts `job = "api"` and keeps the rest:
 
 ```text
 G10.aggregate_coverage = AggregateCoverage {
     definition: AggregateDefinition {
-        input_group: Some(G1),
+        input: Some(G1),
         unlifted_operators: [SummaryAgg[KLL], Filter(a + b > 10)],
     },
     selection: [ { job ∈ {api}, ts ∈ (t − 60 s, t] } ],
@@ -315,10 +319,10 @@ Its definition differs from G4's, so G10 cannot merge with G4, even though both 
 
 **The fields.**
 
-- `input_group`: the group the definition reads, below everything the walk passed (`None` when the walk lifted a predicate out of a `Scan`).
-- `unlifted_operators`: what the state computes over `input_group`, top down from the `SummaryAgg`, each operator with only the conditions that stayed. Each operator's main input is `None`; any other group it reads, such as the group of a scalar subquery in a `Filter`'s condition, is `Some(group)`.
+- `input`: the group the definition reads, below everything the walk passed (`None` when the walk lifted a predicate out of a `Scan`).
+- `unlifted_operators`: what the state computes over `input`, top down from the `SummaryAgg`, each operator with only the conditions that stayed. Each operator's main input is `None`; any other group it reads, such as the group of a scalar subquery in a `Filter`'s condition, is `Some(group)`.
 - `selection`: which output rows of that computation the state took, as a union of boxes.
-- Identity, in two scopes. In the memo, coverages compare by `AggregateDefinition` `==` (it holds `MemoGroupId`s); nothing in the memo needs an id. The plan carries the view's content id, [`ViewCoverage::definition_id`](../../../crates/types/src/plan/materialized_view.rs) (defined there), on the view's plan node (`PhysicalASAPDAGNode::view_coverage`); a summary store files states under it together with a concrete selection.
+- Identity, in two scopes. In the memo, coverages compare by `AggregateDefinition` `==` (it holds `MemoGroupId`s); nothing in the memo needs an id. The plan carries the view's content id, [`ViewCoverage::definition_id`](../../../crates/types/src/plan/physical_asap_dag.rs) (defined there), on the view's plan node (`PhysicalASAPDAGNode::view_coverage`), made by `view_coverage(memo, group)`, which expands the memo's coverage (`map_references` to each input group's expression, down to the `Scan`s) rather than re-deriving it; a summary store files states under it together with a concrete selection.
 
 ##### The definition
 
@@ -332,8 +336,8 @@ The `definition` is what remains of the operators the walk passed, with every co
 | the one range `TimeRange`, and every `TimeShift` (an offset or `@ T`; not `@ start()` or `@ end()`, which stay unlifted), when they become one interval on the timestamp column | removed |
 | a `TimeShift` with no range `TimeRange`, two or more range `TimeRange`s, two `@`s, or an interval that does not combine with a timestamp condition already lifted | unchanged: no time is taken out |
 | a direct-column `Project` | unchanged |
-| a `Scan` with a predicate that moves into `selection` (a PromQL label matcher) | the last operator, with only the predicates that stay; `input_group` is `None` |
-| any other operator (the first group the walk cannot pass) | not in the list: it is the `input_group` |
+| a `Scan` with a predicate that moves into `selection` (a PromQL label matcher) | the last operator, with only the predicates that stay; `input` is `None` |
+| any other operator (the first group the walk cannot pass) | not in the list: it is the `input` |
 
 An exact `Aggregate` is the first unlifted operator, kept whole (its per-measure filters and `HAVING` read its input or output, not the rows it reads). A `SummaryTumblingWindowChain[w](X)` has the definition of a build over X, and its selection leaves the timestamp column unconstrained: a chain has no range. A `TimeRange` or `TimeShift` over a chain (a group whose output is the chain's state with a time index) has the chain's coverage with the interval they select on the timestamp column of X, computed as over raw rows. A `SummaryMerge` over that group reads it, so `SummaryMerge(TimeRange(W, TimeShift(o, Chain[w](X))))` covers exactly what `SummaryAgg(TimeRange(W, TimeShift(o, X)))` does, and `Memo::add_candidate` accepts the merge as a candidate of the direct build's group:
 
@@ -347,7 +351,7 @@ G4 candidate: SummaryMerge(G7)                                           the sam
 
 A rollup (`SummaryMerge` with `group_by`) has its input's definition with the `SummaryAgg` grouped by the rollup's keys.
 
-**When two definitions are equal.** Merging (§5.6) requires equal definitions: the same `input_group` and the same `unlifted_operators`, compared as values. A definition with a scalar subquery compares like any other: two states whose `Filter(a > (SELECT threshold))` read the same group are equal there. Timing is not part of a group, so a tumbling window built at ingestion time can merge with one built at query time. States over different tables never merge: a KLL over `m1` and one over `m2` read different groups. To combine tables, put a `UNION ALL` with a column that marks the source table below one `SummaryAgg`; that column can then be used in `selection` or in the grouping.
+**When two definitions are equal.** Merging (§5.6) requires equal definitions: the same `input` and the same `unlifted_operators`, compared as values. A definition with a scalar subquery compares like any other: two states whose `Filter(a > (SELECT threshold))` read the same group are equal there. Timing is not part of a group, so a tumbling window built at ingestion time can merge with one built at query time. States over different tables never merge: a KLL over `m1` and one over `m2` read different groups. To combine tables, put a `UNION ALL` with a column that marks the source table below one `SummaryAgg`; that column can then be used in `selection` or in the grouping.
 
 ##### The selection
 
@@ -433,13 +437,13 @@ Any other shape stays in `definition`:
 - Values of different types are never treated as different: `1` and `1.0` might be equal, so `x = 1` and `x = 1.0` are treated as possibly overlapping.
 - A constant may come from a cast: type coercion turns `latency < 100` on a `DOUBLE` column into `latency < CAST(100 AS DOUBLE)`, and the SQL front end folds a numeric cast of a literal as DataFusion's constant folding does, so the condition reads `latency < 100.0`.
 
-**Time.** The timestamp column is a column like any other: a selection constrains it with an interval whose ends are `IntervalConstraintLimit`s, `EvaluationTimePlusMs(ms)` (relative to the evaluation time t) or `FixedValue(Timestamp(ms since the epoch))` (absolute). The walk turns the one range `TimeRange(W)` and the `TimeShift`s on its path, whose offsets sum to o, into `ts ∈ (anchor − o − W, anchor − o]` on the timestamp column of the `TimeRange`'s input. Like a PromQL range, which `m[r]` evaluated at t reads as (t − r, t], the interval is left-open and right-closed. The anchor is t, or T for `@ T`. `@ end()` and `@ start()` pin a subtree to one end of the request: the PromQL front end lowers the subtree X without them and puts `TimeShift { at: End | Start }(X)` above it, so X is the group of the same expression without `@`. That `TimeShift` is not lifted: the walk stops at it, and it is the definition's `input_group`. Example: `quantile_over_time(0.99, m[1m] offset 2m)` lowers to `TimeRange(1m)` over `TimeShift(2m)` over `Scan m`; its KLL state has `definition` = the `SummaryAgg` over `Scan m`, and `selection` = `ts ∈ (t − 3m, t − 2m]`.
+**Time.** The timestamp column is a column like any other: a selection constrains it with an interval whose ends are `IntervalConstraintLimit`s, `EvaluationTimePlusMs(ms)` (relative to the evaluation time t) or `FixedValue(Timestamp(ms since the epoch))` (absolute). The walk turns the one range `TimeRange(W)` and the `TimeShift`s on its path, whose offsets sum to o, into `ts ∈ (anchor − o − W, anchor − o]` on the timestamp column of the `TimeRange`'s input. Like a PromQL range, which `m[r]` evaluated at t reads as (t − r, t], the interval is left-open and right-closed. The anchor is t, or T for `@ T`. `@ end()` and `@ start()` pin a subtree to one end of the request: the PromQL front end lowers the subtree X without them and puts `TimeShift { at: End | Start }(X)` above it, so X is the group of the same expression without `@`. That `TimeShift` is not lifted: the walk stops at it, and it is the definition's `input`. Example: `quantile_over_time(0.99, m[1m] offset 2m)` lowers to `TimeRange(1m)` over `TimeShift(2m)` over `Scan m`; its KLL state has `definition` = the `SummaryAgg` over `Scan m`, and `selection` = `ts ∈ (t − 3m, t − 2m]`.
 
 | Query fragment | `lower` | `upper` |
 |---|---|---|
 | PromQL `m[5m]` | `Excluded(EvaluationTimePlusMs(-300_000))` | `Included(EvaluationTimePlusMs(0))` |
 | PromQL `m[5m] offset 1h` | `Excluded(EvaluationTimePlusMs(-3_900_000))` | `Included(EvaluationTimePlusMs(-3_600_000))` |
-| PromQL `m[5m] @ end()` or `@ start()` | the subtree `m[5m]` is the group of `m[5m]`; the `TimeShift { at: End \| Start }` above it is not lifted (it is `input_group`) | |
+| PromQL `m[5m] @ end()` or `@ start()` | the subtree `m[5m]` is the group of `m[5m]`; the `TimeShift { at: End \| Start }` above it is not lifted (it is `input`) | |
 | PromQL `m[5m] @ 1700000000` | `Excluded(FixedValue(Timestamp(1_699_999_700_000)))` | `Included(FixedValue(Timestamp(1_700_000_000_000)))` |
 | SQL `WHERE ts >= now() - INTERVAL '5 minutes'` | lowers to `TimeRange(5m)`: as `m[5m]` | |
 | SQL `WHERE ts >= '2026-11-01'` | `Included(FixedValue(Timestamp(1_793_491_200_000)))` | `Unbounded` |
@@ -950,7 +954,7 @@ OperatorNode                                         §6.1
 └── guarantee: AccuracyGuarantee                       §6.5  (accuracy of an evaluation)
 
 MemoGroup.group_properties.aggregate_coverage: AggregateCoverage   §6.6
-      └── definition: AggregateDefinition { input_group, unlifted_operators }
+      └── definition: AggregateDefinition { input, unlifted_operators }
 ```
 
 | Subsection | Defines | Used by |
@@ -1371,15 +1375,15 @@ pub struct CurrentSeriesInput {
 
 A finalized value's accuracy statement is `AccuracyGuarantee` (`accuracy/guarantee.rs`): a `spec` (`AccuracySpec`) with `accuracy_metric` (which error is measured, e.g. rank error), `error` (the error bound), `failure_probability` (the chance the bound does not hold) and `accuracy_scope` (which output values one statement covers), plus `provenance` (which estimates the bound came from). It is attached to evaluation and finalized nodes, and to `MaintainPopulation` nodes (whose population is exact); never to sketch or accumulator state.
 
-### 6.6 Aggregate coverage (`crates/types/src/stages/logical/aggregate_coverage.rs`; selection algebra in `crates/types/src/ir/properties/selection.rs`)
+### 6.6 Aggregate coverage (`crates/types/src/ir/properties/aggregate_coverage.rs`; selection algebra in `crates/types/src/ir/properties/selection.rs`; the plan's content id in `crates/types/src/stages/logical/aggregate_coverage.rs`)
 
 The code for §4. `AggregateDefinition` is shown in §4.2.2.
 
 ```rust
-pub struct AggregateCoverage {
-    /// What the state computes: its input group and the operators the walk
-    /// did not lift (§4.2.2).
-    pub(crate) definition: AggregateDefinition,
+pub struct AggregateCoverage<R> {
+    /// What the state computes: its input and the operators the walk did
+    /// not lift (§4.2.2).
+    pub(crate) definition: AggregateDefinition<R>,
     /// Which rows went in: a union of boxes. A row is in the state if it is
     /// in at least one box.
     pub(crate) selection: Vec<SelectionBox>,
@@ -1435,9 +1439,9 @@ A PromQL range `m[r]` evaluated at t reads the samples in (t − r, t]: left-ope
 | SQL `WHERE price > 10` | `Excluded(FixedValue(Float64(10.0)))` | `Unbounded` |
 
 ```rust
-impl AggregateCoverage {
-    /// The coverage of a summary-state group computed by `operator` over its
-    /// input groups (§4.2.2). Errors: `NoCoverage` for an operator that is
+impl<I: OperatorInput> Operator<I> {
+    /// The coverage of what this operator computes over its inputs
+    /// (§4.2.2). Errors: `NoCoverage` for an operator that is
     /// not a `SummaryAgg`, `SummaryTumblingWindowChain`, `SummaryMerge` or a
     /// `Filter` keeping whole states; `TumblingWindowChainExpansion` for a `SummaryTumblingWindowChain`
     /// that does not expand to one build over its whole window; for a
@@ -1449,10 +1453,14 @@ impl AggregateCoverage {
     /// not a group key of the inputs' build), `FamilyCannotRegroup` (counter
     /// states, a family without a merge, or a Hydra) or `RegroupedBuild`
     /// (the coarse build it stands for does not derive).
-    pub(crate) fn derive_from_inputs(
-        operator: &Operator<MemoGroupAsInput<'_>>,
-    ) -> Result<Self, CoverageError>;
+    pub fn aggregate_coverage(&self) -> Result<AggregateCoverage<I::Reference>, CoverageError>;
 }
+
+/// The plan-scope coverage of `group`: the content id of its expanded
+/// definition and its selection; `None` for a group without aggregate
+/// coverage. Each input group is expanded to its expression, recursively
+/// down to the `Scan`s (`map_references`), so the id names no group.
+pub fn view_coverage(memo: &Memo, group: MemoGroupId) -> Option<ViewCoverage>;
 ```
 
 - `find_or_add_group` and `add_candidate` reject an invalid `SummaryMerge` (different definitions, or selections that may overlap, per the family's `MergeInputRule`). Operator-node trees have no coverage and no merge check.

@@ -10,7 +10,7 @@ mod memo;
 mod memo_candidates;
 mod requirements;
 
-pub use aggregate_coverage::{AggregateCoverage, AggregateDefinition, CoverageError};
+pub use aggregate_coverage::view_coverage;
 pub use candidate::{
     CandidateError, CandidateExpression, CandidateForMemoGroup, CandidateForMemoGroupId,
     LogicalProperties, LogicalPropertiesError, OriginOfCandidateForMemoGroup,

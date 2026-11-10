@@ -667,7 +667,7 @@ The deployment matches a view to stored states by its coverage
 coverages by `AggregateDefinition` `==` (its definitions hold memo group ids)
 and needs no id; the plan carries the view's content id on its node
 (`PhysicalASAPDAGNode::view_coverage`), defined at
-[`ViewCoverage::definition_id`](../../crates/types/src/plan/materialized_view.rs).
+[`ViewCoverage::definition_id`](../../crates/types/src/plan/physical_asap_dag.rs).
 At execution time it checks their actual
 coverage, revisions and readiness. A compiled plan cannot establish future
 readiness. The deployment does not replace `NativeKllMerge`, choose another
@@ -688,7 +688,7 @@ sketch, or maintain different windows: such changes require replanning.
 
 Mapping the materialized-views extension's terms: its `query()` is the sub-DAG
 under the view's node, and `coverage.definition_id` (the content id,
-[`ViewCoverage::definition_id`](../../crates/types/src/plan/materialized_view.rs))
+[`ViewCoverage::definition_id`](../../crates/types/src/plan/physical_asap_dag.rs))
 identifies it.
 Its readiness is the summary store's status, which the deployment owns. Its
 `mv_dependencies` build graph is `MaterializedView.inputs`.
