@@ -129,7 +129,6 @@ mod tests {
                 alias: Some("s".into()),
                 expr: ScalarExpr::ScalarSubquery(Rc::clone(&v)),
             }],
-            qualifier: None,
             child: Rc::clone(&v),
         }))
         .unwrap();

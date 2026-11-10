@@ -10,9 +10,11 @@
 //!   boxes of per-column constraints, the selection algebra aggregate
 //!   coverage is built from.
 pub mod aggregate_coverage;
+pub mod column_lineage;
 pub mod execution_data_state;
 pub mod selection;
 
 pub use aggregate_coverage::{AggregateCoverage, AggregateDefinition, CoverageError};
+pub use column_lineage::ColumnLineage;
 
 pub use execution_data_state::{DataPrimitive, ExecutionDataState, ExecutionTiming};

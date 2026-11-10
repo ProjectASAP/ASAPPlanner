@@ -704,7 +704,6 @@ mod tests {
                         else_expr: Some(Box::new(otherwise)),
                     },
                 }],
-                qualifier: None,
                 child: joined.clone(),
             }))
         };

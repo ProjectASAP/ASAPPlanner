@@ -15,7 +15,10 @@
 //! predicate conjunct moves into `selection` when it can be lifted to the
 //! top (through `Filter`, a range `TimeRange`, a `TimeShift` and
 //! direct-column `Project` items) and it is a value set or an interval on
-//! one column. The `TimeRange` and `TimeShift`s become one interval on the
+//! one column whose lineage is a source column: a selection names the
+//! column by that [`SourceColumn`] (`OperatorInput::column_lineage`; an
+//! input without lineage lifts nothing). The `TimeRange` and `TimeShift`s
+//! become one interval on the
 //! timestamp column ([`IntervalConstraintLimit`]). Everything else stays in
 //! `definition` as a residual, so two states are merged only when they
 //! compute the same thing over disjoint rows.
@@ -25,17 +28,16 @@ use std::ops::Bound;
 
 use thiserror::Error;
 
-use super::selection::{
-    constraint_of, union, ColumnIdentity, Constraint, IntervalConstraintLimit, SelectionBox,
-};
-use crate::ir::operator::arguments::{AtModifier, Reduction};
+use super::column_lineage::ColumnLineage;
+use super::selection::{constraint_of, union, Constraint, IntervalConstraintLimit, SelectionBox};
+use crate::ir::operator::arguments::{AtModifier, Reduction, SourceColumn};
 use crate::ir::operator::asap::{selected_from, summary_agg_layout, ASAPOp};
 use crate::ir::operator::input::{InputOrTemporaryBuild, OperatorInput};
 use crate::ir::operator::node::{Operator, OperatorResultKind};
 use crate::ir::operator::non_asap::{NonASAPOp, TimeRangeKind};
 use crate::ir::scalar::expr_ir::ScalarValue;
 use crate::ir::scalar::{Predicate, ScalarExpr};
-use crate::ir::schema::{ColumnId, Schema};
+use crate::ir::schema::ColumnId;
 use crate::ir::SchemaDerivationError;
 use crate::summary_type::{MergeInputRule, SummaryTypeCapability};
 
@@ -273,7 +275,7 @@ fn selected_build<I: OperatorInput>(
 /// rows with timestamp column `time_column`.
 fn of_merge<R: Clone + PartialEq>(
     inputs: &[AggregateCoverage<R>],
-    time_column: Option<&ColumnIdentity>,
+    time_column: Option<&SourceColumn>,
 ) -> Result<AggregateCoverage<R>, CoverageError> {
     let first = inputs.first().ok_or(CoverageError::EmptyMerge)?;
     if inputs
@@ -347,8 +349,11 @@ fn regrouped<I: OperatorInput>(
         return Err(CoverageError::SummaryTypeCannotRegroup);
     }
     let state = first.schema();
-    let rows = build_input_schema(first).ok_or(CoverageError::NoCoverage)?;
-    // The build's input column each key of the state names.
+    let state_lineage = first.column_lineage().unwrap_or_default();
+    let rows = build_input(first).ok_or(CoverageError::NoCoverage)?;
+    let rows_lineage = rows.column_lineage().unwrap_or_default();
+    // The build's input column each key of the state names: the column of
+    // the key's lineage.
     let mapped = keys
         .iter()
         .map(|&key| {
@@ -360,20 +365,15 @@ fn regrouped<I: OperatorInput>(
             };
             column
                 .filter(|&column| {
-                    let (Some(at_state), Some(at_input)) =
-                        (state.fields.get(key), rows.fields.get(column))
-                    else {
-                        return false;
-                    };
-                    at_state.is_plain()
-                        && at_state.name == at_input.name
-                        && at_state.table == at_input.table
+                    state.fields.get(key).is_some_and(|field| field.is_plain())
+                        && state_lineage.get(key).is_some()
+                        && state_lineage.get(key) == rows_lineage.get(column)
                 })
                 .ok_or(CoverageError::NotAGroupKey { key })
         })
         .collect::<Result<Vec<_>, _>>()?;
     let reduction = Reduction::by(mapped);
-    summary_agg_layout(&rows, family, &reduction).map_err(|error| {
+    summary_agg_layout(rows.schema(), family, &reduction).map_err(|error| {
         CoverageError::RegroupedBuild {
             reason: error.to_string(),
         }
@@ -393,30 +393,28 @@ fn regrouped<I: OperatorInput>(
     })
 }
 
-/// The schema of the rows the build of summary state `state` reads (its
-/// `SummaryAgg`'s input; one build over a chain's window reads its range of
-/// the chain's input, which has the input's schema). `None` when `state`
+/// The input the build of summary state `state` reads (its `SummaryAgg`'s
+/// input; one build over a chain's window reads its range of the chain's
+/// input, which has the input's schema and lineage). `None` when `state`
 /// is no summary state.
-fn build_input_schema<I: OperatorInput>(state: &I) -> Option<Schema> {
+fn build_input<I: OperatorInput>(state: &I) -> Option<I> {
     if let Some(states) = selected_from(state) {
-        return build_input_schema(&states);
+        return build_input(&states);
     }
     match state.operator() {
         Operator::ASAP(
             ASAPOp::SummaryAgg { child, .. } | ASAPOp::SummaryTumblingWindowChain { child, .. },
-        ) => Some(child.schema().clone()),
-        Operator::ASAP(ASAPOp::SummaryMerge { children, .. }) => {
-            build_input_schema(children.first()?)
-        }
+        ) => Some(child),
+        Operator::ASAP(ASAPOp::SummaryMerge { children, .. }) => build_input(children.first()?),
         _ => None,
     }
 }
 
 /// The timestamp column of the rows the build of summary state `state`
-/// reads ([`build_input_schema`]), as a selection names it.
-fn time_column_of_build_input<I: OperatorInput>(state: &I) -> Option<ColumnIdentity> {
-    let rows = build_input_schema(state)?;
-    column_identity(&rows, rows.time_index?)
+/// reads ([`build_input`]), as a selection names it.
+fn time_column_of_build_input<I: OperatorInput>(state: &I) -> Option<SourceColumn> {
+    let rows = build_input(state)?;
+    source_column(rows.column_lineage()?, rows.schema().time_index?)
 }
 
 /// The coverage of `build`, a `SummaryAgg` or `SummaryTumblingWindowChain`
@@ -490,7 +488,8 @@ fn of_aggregate<I: OperatorInput>(
     let InputOrTemporaryBuild::Input(base_input) = &base else {
         unreachable!("a rule builds only liftable operators over real inputs");
     };
-    let top = child.schema();
+    let top = lineage_at_top(base_input.column_lineage(), &chain);
+    let top = top.as_slice();
     // Top-down: decide which conjuncts are lifted. `kept[d]` is the residual
     // of `chain[d]` when it is a `Filter`.
     let mut lifted = BTreeMap::new();
@@ -537,7 +536,7 @@ fn of_aggregate<I: OperatorInput>(
             .position(|link| matches!(link, Operator::NonASAP(NonASAPOp::TimeRange { .. })))?;
         let column = chain[depth].children()[0].schema().time_index?;
         let column = column_at_top(column, &chain[..=depth])?;
-        column_identity(top, column)?;
+        source_column(top, column)?;
         Some((column, combined_with(lifted.get(&column), constraint)?))
     });
     let lift_time = time.is_some();
@@ -570,7 +569,7 @@ fn of_aggregate<I: OperatorInput>(
     let selection = SelectionBox {
         columns: lifted
             .into_iter()
-            .filter_map(|(column, constraint)| Some((column_identity(top, column)?, constraint)))
+            .filter_map(|(column, constraint)| Some((source_column(top, column)?, constraint)))
             .collect(),
     };
     Ok(AggregateCoverage {
@@ -583,13 +582,13 @@ fn of_aggregate<I: OperatorInput>(
 }
 
 /// Lift what `pred`'s conjuncts can into `lifted` (keyed by the column of
-/// `top`, the agg child's schema) and return the rest, each scalar subquery
+/// the agg child, whose lineage is `top`) and return the rest, each scalar subquery
 /// naming the input it reads. `above`
 /// are the operators between the predicate and the `SummaryAgg`, top to
-/// bottom. A column [`column_identity`] cannot name stays.
+/// bottom. A conjunct on a column [`source_column`] cannot name stays.
 fn residual<I: OperatorInput>(
     pred: &Predicate<InputOrTemporaryBuild<I>>,
-    top: &Schema,
+    top: &[ColumnLineage],
     above: &[Operator<InputOrTemporaryBuild<I>>],
     lifted: &mut BTreeMap<ColumnId, Constraint>,
 ) -> Option<Predicate<Option<I::Reference>>> {
@@ -597,7 +596,7 @@ fn residual<I: OperatorInput>(
     for conjunct in pred.0.conjuncts() {
         let lift = constraint_of(conjunct).and_then(|(column, constraint)| {
             let column = column_at_top(column, above)?;
-            column_identity(top, column)?;
+            source_column(top, column)?;
             Some((column, combined_with(lifted.get(&column), constraint)?))
         });
         match lift {
@@ -655,19 +654,47 @@ fn column_at_top<C>(mut column: ColumnId, above: &[Operator<C>]) -> Option<Colum
     Some(column)
 }
 
-/// The identity of `schema`'s column `column`; `None` when its
-/// `(table, name)` is not unique in `schema`, so a selection cannot name it.
-fn column_identity(schema: &Schema, column: ColumnId) -> Option<ColumnIdentity> {
-    let field = schema.fields.get(column)?;
-    let namesakes = schema
-        .fields
+/// The lineage of the aggregate's input columns: the lineage of `base`,
+/// the first input below the liftable `chain` (top down), carried up
+/// through it: a `Filter`, `TimeRange` or `TimeShift` keeps its input's, a
+/// `Project`'s column item copies its input column's and an expression item
+/// is `Computed`. Empty, so no column can be named, when `base`'s lineage is
+/// unknown (a node tree).
+fn lineage_at_top<C>(base: Option<&[ColumnLineage]>, chain: &[Operator<C>]) -> Vec<ColumnLineage> {
+    let Some(base) = base else {
+        return Vec::new();
+    };
+    let mut lineage = base.to_vec();
+    for link in chain.iter().rev() {
+        if let Operator::NonASAP(NonASAPOp::Project { cols, .. }) = link {
+            lineage = cols
+                .iter()
+                .map(|item| match item.expr {
+                    ScalarExpr::Column(column) => lineage
+                        .get(column)
+                        .cloned()
+                        .unwrap_or(ColumnLineage::Computed),
+                    _ => ColumnLineage::Computed,
+                })
+                .collect();
+        }
+    }
+    lineage
+}
+
+/// The source column a selection names column `column` by: its lineage, one
+/// of `lineage` (per column). `None` when the column is `Computed`, or
+/// another column has the same lineage (`Project [a AS k, a AS k2]`), so a
+/// selection cannot name it apart.
+fn source_column(lineage: &[ColumnLineage], column: ColumnId) -> Option<SourceColumn> {
+    let ColumnLineage::SourceColumn(source_column) = lineage.get(column)? else {
+        return None;
+    };
+    let namesakes = lineage
         .iter()
-        .filter(|f| f.name == field.name && f.table == field.table)
+        .filter(|other| *other == &lineage[column])
         .count();
-    (namesakes == 1).then(|| ColumnIdentity {
-        table: field.table.clone(),
-        name: field.name.clone(),
-    })
+    (namesakes == 1).then(|| source_column.clone())
 }
 
 /// The interval on the timestamp column that `links` (top down, the

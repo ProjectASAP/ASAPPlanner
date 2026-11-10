@@ -10,7 +10,7 @@ use std::rc::Rc;
 use super::arguments::Source;
 use super::node::{Operator, OperatorNode, OperatorResultKind};
 use super::non_asap::NonASAPOp;
-use crate::ir::properties::AggregateCoverage;
+use crate::ir::properties::{AggregateCoverage, ColumnLineage};
 use crate::ir::schema::Schema;
 use crate::ir::SchemaDerivationError;
 
@@ -29,6 +29,10 @@ pub trait OperatorInput: Sized + Clone {
     /// What the input covers when its coverage is stored (an aggregate
     /// group in the memo); `None` for any other input.
     fn aggregate_coverage(&self) -> Option<&AggregateCoverage<Self::Reference>>;
+    /// Where each output column's values come from, in schema order, when
+    /// it is known (a memo group's `GroupProperties::column_lineage`);
+    /// `None` for any other input.
+    fn column_lineage(&self) -> Option<&[ColumnLineage]>;
     /// The sources the `Scan`s at or below the input read
     /// (`Operator::scanned_sources` of its operator): a memo group's stored
     /// `GroupProperties::scanned_sources`, recomputed for a node tree.
@@ -58,6 +62,10 @@ impl OperatorInput for Rc<OperatorNode> {
     }
 
     fn aggregate_coverage(&self) -> Option<&AggregateCoverage<()>> {
+        None
+    }
+
+    fn column_lineage(&self) -> Option<&[ColumnLineage]> {
         None
     }
 
@@ -145,6 +153,13 @@ impl<I: OperatorInput> OperatorInput for InputOrTemporaryBuild<I> {
     fn aggregate_coverage(&self) -> Option<&AggregateCoverage<I::Reference>> {
         match self {
             Self::Input(input) => input.aggregate_coverage(),
+            Self::TemporaryBuild(_) => None,
+        }
+    }
+
+    fn column_lineage(&self) -> Option<&[ColumnLineage]> {
+        match self {
+            Self::Input(input) => input.column_lineage(),
             Self::TemporaryBuild(_) => None,
         }
     }

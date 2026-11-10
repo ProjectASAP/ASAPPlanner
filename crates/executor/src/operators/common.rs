@@ -15,7 +15,6 @@ pub(super) fn result_field(name: &str, dtype: DataType, nullable: bool) -> Summa
         name: name.into(),
         dtype: SummaryFamilyType::Plain(dtype),
         nullable,
-        table: None,
     }
 }
 

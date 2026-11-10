@@ -499,9 +499,11 @@ impl<C: Clone> AggIntent<C> {
             ),
             // Ranked rows retain the ranked value's type; the enclosing
             // operator also preserves item identity via schema::topk.
-            AggIntent::TopK { k, .. } => {
-                col(&format!("topk_{k}"), input.dtype.clone(), input.nullable)
-            }
+            AggIntent::TopK { k, .. } => col(
+                &crate::ir::schema::topk::topk_output_name(*k, &[]),
+                input.dtype.clone(),
+                input.nullable,
+            ),
             AggIntent::Cardinality { .. } => col("cardinality", DataType::Int64, false),
             AggIntent::FrequencyL2 { .. } => col("frequency_l2", DataType::Float64, false),
             AggIntent::FrequencyEntropy { .. } => {
