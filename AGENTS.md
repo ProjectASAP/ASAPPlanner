@@ -1,8 +1,14 @@
 # ProjectASAP agent policy
 
 - Work in a dedicated Git worktree unless the user explicitly says otherwise.
+- Create the dedicated Git worktree inside the repository root at
+  `.worktrees/<worktree-name>`. Do not create worktrees as sibling directories
+  outside the repository root.
 - Create new worktrees from `origin/main` unless another base is specified.
-  Fetch the base first, and never disturb an existing dirty working DAG.
+  Fetch the base first, and never disturb an existing dirty working tree.
+- Do not use `git add -A` or other broad staging commands; stage only the files
+  relevant to the requested change.
+- Do not amend commits unless the user explicitly asks you to.
 - Keep communication and generated prose concise.
 - Prefer the minimally complex implementation that satisfies the requirement.
 - Do not introduce a conceptual layer, abstraction, or public interface without
@@ -22,14 +28,13 @@
 - For correctness fixes, first establish a regression test that fails for the
   original behavior, then confirm it passes after the fix.
 - Commit at incremental logical boundaries when commits are requested.
-- Keep pull-request descriptions top-down and concise. Explain why, what, and
-  how, and list the **Key code interfaces added / modified** (or "None") and the
-  **Major algorithm changes** (or "None").
-  Explicitly describe **Before this PR** and **After this PR**, using an
-  end-to-end example, screenshot, measurement, or diagram appropriate to the
-  change.
+- Keep pull-request descriptions top-down and concise, in the sections of the
+  `asap-pr-authoring` skill: **Summary**, **Review guide**, **Behavior: before
+  → after** (one end-to-end example), **Interfaces** (diff blocks, or "None"),
+  **Algorithm changes** (or "None"), **Decisions and open questions**,
+  **Verification**, and **Follow-ups**.
 - A PR that changes planner snapshots
-  (`crates/devtools/tests/corpus_snapshots/`) says under **Snapshot changes**
+  (`crates/devtools/tests/corpus_snapshots/`) says under **Verification**
   which queries changed and why; a person confirms the why.
 - Agents must not complete fields reserved for human judgment, approval, or
   attestation.

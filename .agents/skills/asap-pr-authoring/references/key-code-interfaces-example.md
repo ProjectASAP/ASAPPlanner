@@ -1,121 +1,125 @@
-# Example: Key code interfaces section
+# Example: Interfaces section
 
 An excerpt from ASAPPlanner #715 (HLL sized from (ε, δ)) in the expected layout:
-links per file group at a fixed commit, real declarations with every member
-listed and marked, a `///` on every interface, and an end-to-end usage example
+links per file group at a fixed commit, real declarations in a `diff` block with
+every member listed (`+` added, `-` removed, a space for unchanged context, a
+changed item as its `-` old line then its `+` new line), a `///` on every interface, and an end-to-end usage example
 whose every variable is commented and whose numbers come from running it.
 
-## Key code interfaces added / modified
+## Interfaces
 
 [`crates/types/src/post_asap/sketch.rs`](https://github.com/ProjectASAP/ASAPPlanner/blob/1b5d9577705c7664e711eef9a83ba4f2def0c1da/crates/types/src/post_asap/sketch.rs)
 
-```rust
-/// Concrete parameters of one sketch instance; equality compares the built shape.
-/// The type stays; this PR adds a field to `Hll` and `Kmv`.
-pub enum SketchParams {
-    /// A UnivMon universal sketch (frequency moments, entropy, distinct count).
-    UnivMon {                                        // unchanged
-        /// Top-k heap entries per layer.
-        heap_size: u32,                              // unchanged
-        /// Rows of each layer's Count Sketch.
-        sketch_rows: u32,                            // unchanged
-        /// Columns of each layer's Count Sketch.
-        sketch_cols: u32,                            // unchanged
-        /// Number of sampling layers.
-        layers: u8,                                  // unchanged
-        /// The δ the heap was sized for when it answers a distinct count; None = no distinct guarantee.
-        distinct_failure_probability: Option<f64>,   // unchanged
-    },
-    /// A KLL quantile sketch.
-    Kll {                                            // unchanged
-        /// Compactor capacity.
-        k: u32,                                      // unchanged
-        /// The δ `k` was sized for when below 0.01; None = the empirical 99% calibration.
-        failure_probability: Option<f64>,            // unchanged
-    },
-    /// A Count-Min sketch.
-    Cms {                                            // unchanged
-        /// Counters per row.
-        width: u32,                                  // unchanged
-        /// Rows.
-        depth: u32,                                  // unchanged
-    },
-    /// A HyperLogLog distinct-count sketch.
-    Hll {                                            // unchanged variant; gains relative_error
-        /// `m = 2^precision` registers.
-        precision: u8,                               // unchanged
-        /// The relative error `precision` was sized for: its guarantee's error bound,
-        /// at which its failure probability is evaluated.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        relative_error: Option<f64>,   // new: the ε precision was sized for; None = RSE 1.04/√m; ignored by equality
-    },
-    /// A DDSketch relative-error quantile sketch.
-    DDSketch {                                       // unchanged
-        /// Relative accuracy of each bucket.
-        alpha: f64,                                  // unchanged
-    },
-    /// A Count-Min sketch with a top-k heap.
-    CmsWithHeap {                                    // unchanged
-        /// Counters per row.
-        width: u32,                                  // unchanged
-        /// Rows.
-        depth: u32,                                  // unchanged
-        /// Heap entries.
-        heap_size: u32,                              // unchanged
-    },
-    /// A KMV (k minimum values) distinct-count sketch.
-    Kmv {                                            // unchanged variant; gains relative_error
-        /// The number of smallest hashes kept.
-        k: u32,                                      // unchanged
-        /// The relative error `k` was sized for: its guarantee's error bound, at which
-        /// its failure probability is evaluated.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        relative_error: Option<f64>,   // new: the ε k was sized for; None = RSE 1/√(k-2); ignored by equality
-    },
-    /// A Theta distinct-count sketch.
-    Theta {                                          // unchanged
-        /// Nominal entries.
-        k: u32,                                      // unchanged
-    },
-    /// A Count Sketch.
-    CountSketch {                                    // unchanged
-        /// Counters per row.
-        width: u32,                                  // unchanged
-        /// Rows.
-        depth: u32,                                  // unchanged
-    },
-    /// A Count Sketch with a top-k heap.
-    CountSketchWithHeap {                            // unchanged
-        /// Counters per row.
-        width: u32,                                  // unchanged
-        /// Rows.
-        depth: u32,                                  // unchanged
-        /// Heap entries.
-        heap_size: u32,                              // unchanged
-    },
-}
+```diff
+ /// Concrete parameters of one sketch instance; equality compares the built shape.
+ /// The type stays; this PR adds a field to `Hll` and `Kmv`.
+ pub enum SketchParams {
+     /// A UnivMon universal sketch (frequency moments, entropy, distinct count).
+     UnivMon {
+         /// Top-k heap entries per layer.
+         heap_size: u32,
+         /// Rows of each layer's Count Sketch.
+         sketch_rows: u32,
+         /// Columns of each layer's Count Sketch.
+         sketch_cols: u32,
+         /// Number of sampling layers.
+         layers: u8,
+         /// The δ the heap was sized for when it answers a distinct count; None = no distinct guarantee.
+         distinct_failure_probability: Option<f64>,
+     },
+     /// A KLL quantile sketch.
+     Kll {
+         /// Compactor capacity.
+         k: u32,
+         /// The δ `k` was sized for when below 0.01; None = the empirical 99% calibration.
+         failure_probability: Option<f64>,
+     },
+     /// A Count-Min sketch.
+     Cms {
+         /// Counters per row.
+         width: u32,
+         /// Rows.
+         depth: u32,
+     },
+     /// A HyperLogLog distinct-count sketch.
+     Hll {
+         /// `m = 2^precision` registers.
+         precision: u8,
++        /// The relative error `precision` was sized for: its guarantee's error bound, at which
++        /// its failure probability is evaluated. None = RSE 1.04/√m; ignored by equality.
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        relative_error: Option<f64>,
+     },
+     /// A DDSketch relative-error quantile sketch.
+     DDSketch {
+         /// Relative accuracy of each bucket.
+         alpha: f64,
+     },
+     /// A Count-Min sketch with a top-k heap.
+     CmsWithHeap {
+         /// Counters per row.
+         width: u32,
+         /// Rows.
+         depth: u32,
+         /// Heap entries.
+         heap_size: u32,
+     },
+     /// A KMV (k minimum values) distinct-count sketch.
+     Kmv {
+         /// The number of smallest hashes kept.
+         k: u32,
++        /// The relative error `k` was sized for: its guarantee's error bound, at which
++        /// its failure probability is evaluated. None = RSE 1/√(k-2); ignored by equality.
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        relative_error: Option<f64>,
+     },
+     /// A Theta distinct-count sketch.
+     Theta {
+         /// Nominal entries.
+         k: u32,
+     },
+     /// A Count Sketch.
+     CountSketch {
+         /// Counters per row.
+         width: u32,
+         /// Rows.
+         depth: u32,
+     },
+     /// A Count Sketch with a top-k heap.
+     CountSketchWithHeap {
+         /// Counters per row.
+         width: u32,
+         /// Rows.
+         depth: u32,
+         /// Heap entries.
+         heap_size: u32,
+     },
+ }
 ```
 
 [`crates/asap-aware-mapping/src/accuracy/estimators/hll.rs`](https://github.com/ProjectASAP/ASAPPlanner/blob/1b5d9577705c7664e711eef9a83ba4f2def0c1da/crates/asap-aware-mapping/src/accuracy/estimators/hll.rs)
 
-```rust
-/// Pass 1's classic HLL precision for relative error `eps` at failure probability
-/// `delta`, without data; plan selection later enlarges it for the source's bound.
-pub(crate) fn hll_precision(eps: f64, delta: f64) -> u8;   // was hll_precision(eps)
-/// Classic HLL's distinct-count guarantee over `source`'s own rows, with δ left
-/// symbolic in the source's distinct bound; `None` for a precision outside the contract.
-pub(crate) fn classic_guarantee(
-    precision: u8,
-    relative_error: Option<f64>,   // new parameter
-    source: &str,
-) -> Option<AccuracyGuarantee>;
-/// The failure probability given the source's distinct bound; 1 (no certificate)
-/// outside the contract's range. Plan selection calls it to bind the symbol.
-pub(crate) fn classic_failure_probability(
-    precision: u8,
-    relative_error: f64,   // new parameter
-    max_distinct: u64,
-) -> f64;
+```diff
+ /// Pass 1's classic HLL precision for relative error `eps` at failure probability
+ /// `delta`, without data; plan selection later enlarges it for the source's bound.
+-pub(crate) fn hll_precision(eps: f64) -> u8;
++pub(crate) fn hll_precision(eps: f64, delta: f64) -> u8;
+ /// Classic HLL's distinct-count guarantee over `source`'s own rows, with δ left
+ /// symbolic in the source's distinct bound; `None` for a precision outside the contract.
+-pub(crate) fn classic_guarantee(precision: u8, source: &str) -> Option<AccuracyGuarantee>;
++pub(crate) fn classic_guarantee(
++    precision: u8,
++    relative_error: Option<f64>,
++    source: &str,
++) -> Option<AccuracyGuarantee>;
+ /// The failure probability given the source's distinct bound; 1 (no certificate)
+ /// outside the contract's range. Plan selection calls it to bind the symbol.
+-pub(crate) fn classic_failure_probability(precision: u8, max_distinct: u64) -> f64;
++pub(crate) fn classic_failure_probability(
++    precision: u8,
++    relative_error: f64,
++    max_distinct: u64,
++) -> f64;
 ```
 
 Usage, end to end: one SQL distinct count with ε = 0.05 and δ = 0.01, planned
