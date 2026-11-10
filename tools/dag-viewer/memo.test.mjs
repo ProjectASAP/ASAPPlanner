@@ -104,6 +104,8 @@ test('each candidate sits inside its group, colored by origin, with θ, and an e
   assert.equal(call('memoClip', 'abcdef', 4), 'abc…');
   assert.ok(byId(elements, 'g3c5>g1'));
   assert.ok(byId(elements, 'g3c7>g6'));
+  // G5's three candidates all read G0: one edge, from the group.
+  assert.deepEqual(edgesOf(elements).filter((e) => e.data.source.startsWith('g5')).map((e) => e.data.id), ['g5>g0']);
   const cy = cytoscape(elements);
   assert.equal(cy.getElementById('g3').children().length, 8);
   assert.equal(cy.edges().length, edgesOf(elements).length);

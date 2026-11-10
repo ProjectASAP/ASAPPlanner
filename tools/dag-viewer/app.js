@@ -343,6 +343,14 @@
   $('queryPick').addEventListener('change', (e) => highlightQuery(e.target.value));
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', restyle);
   new MutationObserver(restyle).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+  // Light unless the viewer picked dark (remembered per browser).
+  const setTheme = (dark) => {
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+    $('themeToggle').setAttribute('aria-pressed', String(dark));
+    try { localStorage.setItem('dagViewerTheme', dark ? 'dark' : 'light'); } catch (e) { /* storage blocked */ }
+  };
+  try { if (localStorage.getItem('dagViewerTheme') === 'dark') setTheme(true); } catch (e) { /* storage blocked */ }
+  $('themeToggle').addEventListener('click', () => setTheme(document.documentElement.dataset.theme !== 'dark'));
   $('details').innerHTML = HINT;
 
   window.StageViewer = { planWorkload };

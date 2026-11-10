@@ -79,7 +79,9 @@ To run it, see [RUNNING.md](RUNNING.md).
   until at most 12 remain, which are then drawn one by one; the group's
   label shows the path (`origin=Pass1 › depth=5`), clicking the group goes
   back one level, and the group's details offer the other varying
-  dimensions to split by instead. Each candidate box shows its parameters θ. On the last
+  dimensions to split by instead. An arrow goes from a candidate (or count) to
+  each group it reads, or once from the group when all its candidates read the
+  same groups; a line above the drawing says how to read it. Each candidate box shows its parameters θ. On the last
   tab the selected plan's candidates are filled green with `✓ selected` (a
   group may have several, one per execution context). Clicking a group
   shows its operator, children, parents, queries, its candidates with θ,
@@ -94,6 +96,8 @@ To run it, see [RUNNING.md](RUNNING.md).
   physical edges per input (`✓ C<producer>`, or `✗ C<producer>: α^phys =
   0: …`; `selected` when the plan uses it), and the physical candidates of
   it Stage 2 and Stage 3 pruned.
+- **Theme**: light by default; **Dark theme** switches it and is remembered
+  in the browser.
 - **Details**: click a node for its operator, the queries reaching it,
   timing, lifetime, output schema, guarantee and Stage 3 cost; click
   an edge for its schema and data state.

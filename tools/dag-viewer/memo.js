@@ -319,7 +319,8 @@ function memoGroupDrill(candidates, state, collapseAbove) {
 // when it has none, as at Stage 0); a candidate is `g<id>c<index>`; a large
 // group holds one node per value of the dimension it splits by
 // (memoGroupDrill), `g<id>b<k>`. An edge goes from a candidate (or bucket
-// node, or a group without candidates) to each child group it reads.
+// node, or a group without candidates) to each child group it reads; when
+// all of a group's items read the same groups, from the group instead.
 // Options: `drill` (per group id, its memoGroupDrill state),
 // `collapseAbove` (default MEMO_COLLAPSE_ABOVE), `queryIds` (the workload's
 // query ids). The selected plan's candidates are marked at the last step
@@ -429,6 +430,8 @@ function memoStepElements(memo, s, options) {
 
   boxes.forEach((box) => {
     const { group, items } = box;
+    const key = (item) => [...new Set(item.children)].sort().join(',');
+    const shared = items.every((item) => key(item) === key(items[0]));
     const data = { id: `g${group.id}`, kind: 'group', groupId: group.id, label: box.label, queries: box.queries,
       drilled: box.drilled, w: box.width, h: box.height };
     const chosenGroup = Object.prototype.hasOwnProperty.call(selected, String(group.id));
@@ -447,9 +450,11 @@ function memoStepElements(memo, s, options) {
       });
       // Only the selected candidate's own edges are marked, not those of
       // the other candidates sharing its bucket.
-      item.children.forEach((child) => edge(item.data.id, child, item.chosenChildren.includes(child), box.queries));
+      if (!shared) item.children.forEach((child) => edge(item.data.id, child, item.chosenChildren.includes(child), box.queries));
     });
-    if (!items.length) group.children.forEach((child) => edge(`g${group.id}`, child, false, box.queries));
+    // When every item reads the same groups, one edge per child from the group says it all.
+    if (shared) (items.length ? items[0].children : group.children)
+      .forEach((child) => edge(`g${group.id}`, child, items.some((i) => i.chosenChildren.includes(child)), box.queries));
   });
   return nodes.concat(edges);
 }

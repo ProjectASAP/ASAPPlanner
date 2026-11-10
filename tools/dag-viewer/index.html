@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -138,6 +138,7 @@ tr.clickable:focus-visible td { outline: 2px solid var(--accent); outline-offset
       <button class="btn" id="openFile" type="button" title="A stage document is shown; a PlanningWorkload JSON is planned by the local server">Open stage document or workload…</button>
       <input id="fileInput" type="file" accept="application/json" hidden />
       <button class="btn" id="setsToggle" type="button" aria-pressed="false" hidden>Workload sets</button>
+      <button class="btn" id="themeToggle" type="button" aria-pressed="false">Dark theme</button>
       <span class="status" id="docName"></span>
     </div>
     <section class="panel" id="workloadSets" aria-labelledby="sets-title" hidden>
@@ -192,6 +193,7 @@ tr.clickable:focus-visible td { outline: 2px solid var(--accent); outline-offset
           <div class="panel-head"><div><div class="eyebrow">Stage 0 and Stage 1 · memo after each step, with the edges and pruned candidates of each stage</div><h2 id="memoView-title">Memo</h2></div>
             <nav class="tabs" id="memoTabs" aria-label="Memo step"></nav></div>
           <div class="lane-meta" id="memoView-meta"></div>
+          <div class="lane-meta"><b>How to read it:</b> a big box is a <b>group</b>, one sub-result (an e-class); the small boxes in it are its <b>candidates</b>, interchangeable ways to compute that result (e-nodes), bordered by origin; an <b>arrow</b> points to the group a candidate reads as input, drawn once from the group when all its candidates read the same groups.</div>
           <div class="cy" id="cyMemo"></div>
         </section>
       </div>
