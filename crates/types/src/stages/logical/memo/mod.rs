@@ -82,8 +82,7 @@ impl Memo {
 
     /// The candidate `id`.
     pub fn candidate(&self, id: CandidateForMemoGroupId) -> &CandidateForMemoGroup {
-        let _ = id;
-        todo!("#1207 PR 2")
+        &self.groups[id.group.0 as usize].candidates[id.index_in_group]
     }
 
     /// Replaces candidate `id`'s input requirements $r^{\log}_{c,i}$, one

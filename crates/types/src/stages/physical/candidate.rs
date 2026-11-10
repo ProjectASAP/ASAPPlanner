@@ -2,8 +2,9 @@
 //! valid $p^{\mathrm{phys}} = (\tau, \ell)$ (#1200).
 
 use crate::ir::properties::ExecutionTiming;
-use crate::stages::PhysicalProperties;
+use crate::ir::{ASAPOp, Operator};
 use crate::stages::{CandidateForMemoGroupId, ExecutionContext, PhysicalASAPMemoCandidates};
+use crate::stages::{Lifetime, PhysicalProperties};
 
 /// Index into [`PhysicalASAPMemoCandidates::physical_candidates`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
@@ -20,24 +21,70 @@ pub struct PhysicalCandidate {
 
 impl PhysicalCandidate {
     /// Whether a consumer running in `context` can read this producer (the
-    /// concepts doc's alignment table, section 2). True for $\ell$ = None,
-    /// and for `OneEvaluation` in the same context. A chain producer
-    /// (`SummaryTumblingWindowChain`) with $\ell$ = `AcrossEvaluations`, with
-    /// $w$ the chain operator's width, needs every time of the context on
-    /// its grid: $w$ divides the context's period and phase. Any other
-    /// producer with $\ell$ = `AcrossEvaluations` is stored on its group's
-    /// evaluation grid (`evaluation_grid_of_group`): it delivers on every
-    /// context when the group does not depend on the evaluation time, else
-    /// when that grid holds every time of the context. In
-    /// `Materialized(v)`, the context's times are v's, read from
-    /// `candidates`.
+    /// concepts doc's alignment table, section 2): true for $\ell$ = None,
+    /// which runs in the consumer's own context; for `OneEvaluation` only in
+    /// an `Evaluation` context, the one evaluation its result belongs to.
+    /// With $\ell$ = `AcrossEvaluations`, every execution time of the
+    /// context must be a time the producer has stored: for a chain
+    /// (`SummaryTumblingWindowChain`) of width $w$, $w$ divides an
+    /// evaluation grid's period and phase, or a refresh window's width and
+    /// phase; any other result is stored on its group's evaluation grid
+    /// (`evaluation_grid_of_group`), which must hold every time of the
+    /// context, unless the group does not depend on the evaluation time
+    /// (then it delivers on every context).
     pub fn delivers_on(
         &self,
         candidates: &PhysicalASAPMemoCandidates,
         context: &ExecutionContext,
     ) -> bool {
-        let _ = (candidates, context);
-        todo!("#1207 PR 1: the alignment table of section 2")
+        match self.physical_properties.lifetime() {
+            Lifetime::None => true,
+            Lifetime::OneEvaluation(_) => matches!(context, ExecutionContext::Evaluation { .. }),
+            Lifetime::AcrossEvaluations(_) => {
+                let logical = &candidates.logical_candidates;
+                let group = self.logical_candidate_id.group;
+                let chain_width_ms = match logical
+                    .memo
+                    .candidate(self.logical_candidate_id)
+                    .expression
+                    .operator
+                {
+                    Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                        tumbling_window_width_ms,
+                        ..
+                    }) => Some(tumbling_window_width_ms),
+                    _ => None,
+                };
+                let depends_on_evaluation_time = logical.memo.groups()[group.0 as usize]
+                    .group_properties
+                    .depends_on_evaluation_time;
+                if chain_width_ms.is_none() && !depends_on_evaluation_time {
+                    return true;
+                }
+                let (period_ms, phase_ms) = match context {
+                    ExecutionContext::Evaluation { grid } => (grid.period_ms, grid.phase_ms),
+                    ExecutionContext::IngestionPipeline(window) => {
+                        (window.width_ms, window.phase_ms)
+                    }
+                    ExecutionContext::Materialized(_) => {
+                        todo!(
+                            "#1207 PR 7: the times of a Materialized(v) context, v's own schedule"
+                        )
+                    }
+                };
+                match chain_width_ms {
+                    Some(width_ms) => {
+                        period_ms.is_multiple_of(width_ms) && phase_ms.is_multiple_of(width_ms)
+                    }
+                    None => {
+                        logical.evaluation_grid_of_group[group.0 as usize].is_some_and(|grid| {
+                            period_ms.is_multiple_of(grid.period_ms)
+                                && phase_ms % grid.period_ms == grid.phase_ms % grid.period_ms
+                        })
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -48,6 +95,17 @@ pub fn producer_satisfies_physical_requirements(
     producer: &PhysicalCandidate,
     consumer_timing: ExecutionTiming,
 ) -> bool {
-    let _ = (producer, consumer_timing);
-    todo!("#1207 PR 1: the timing x lifetime table of section 2")
+    use ExecutionTiming::{IngestionTime, QueryTime};
+    match (
+        producer.physical_properties.timing(),
+        producer.physical_properties.lifetime(),
+    ) {
+        (QueryTime, _) => consumer_timing == QueryTime,
+        (IngestionTime, Lifetime::None) => consumer_timing == IngestionTime,
+        // Materialized at ingestion: read at ingestion time and at query time.
+        (IngestionTime, Lifetime::AcrossEvaluations(_)) => true,
+        (IngestionTime, Lifetime::OneEvaluation(_)) => {
+            unreachable!("rejected by `PhysicalProperties::new`")
+        }
+    }
 }
