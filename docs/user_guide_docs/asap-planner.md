@@ -34,7 +34,7 @@ minutes in a debug build.
 
 ```text
 asap_planner (--workload <file>)... --run-until stage0|stage1_pass1|stage1_pass2|stage2|stage3
-  [--format text|json] [--printing-full-candidates] [--out <file>] [--sql-catalog-table <json>]...
+  [--format text|json] [--verbose] [--out <file>] [--sql-catalog-table <json>]...
   [--cost-inputs <file>] [--deployment-capabilities <file>]
   [--ignore-accuracy-guarantees]
 ```
@@ -44,7 +44,7 @@ asap_planner (--workload <file>)... --run-until stage0|stage1_pass1|stage1_pass2
 | `--workload <file>` | A `PlanningWorkload` JSON file: the queries, their requirements and recurrence, and the data-source facts. Repeat it to plan several files together, including PromQL and SQL files; sources they share must have the same facts. Required. |
 | `--run-until <stage>` | The last stage to run. Every stage up to and including it is printed. Required. |
 | `--format text\|json` | `text` (the default) for reading; `json` for an `asap-stage-pipeline/v2` document. |
-| `--printing-full-candidates` | Text only: print every candidate, edge and pruned candidate. By default the candidates of a memo group that differ only in θ are folded into one line (their indices, each θ parameter's values, and how many Pass 2 pruned, by cause), the candidates Pass 2 kept are printed in full with their edges, and the pruned lists of Pass 2 and Stage 2 are counts per cause. |
+| `--verbose` | Text only: print every candidate, edge and pruned candidate in full. By default each stage starts with a legend; memo groups show the groups that read them, the queries that reach them and (from Pass 2) their evaluation grid, without their column properties; candidates that differ only in θ are folded into one line; each input lists its producers' ids by whether they meet its requirement, without the reasons; Stage 2 lists each logical candidate once with its physical candidates under it (`★` marks the selected plan's); and the pruned lists are counts per cause. |
 | `--out <file>` | Write to this file instead of standard output. |
 | `--sql-catalog-table <json>` | One SQL table a SQL workload reads, as `{"name", "columns": [{"name", "type", "nullable"}], "time_index"}`. Repeat it per table. |
 | `--cost-inputs <file>` | The cost model and its costs (`CostInputs` JSON). The files in `tools/dag-viewer/cost-inputs/` are ready to use. Without it, the built-in usage-over-time model is used. Stage 3 costs only usage-over-time models (`aws-fargate-us-east-1.json` is one); a provisioned- or cluster-capacity model ends Stage 3 with an `UnsupportedCostModel` error. |

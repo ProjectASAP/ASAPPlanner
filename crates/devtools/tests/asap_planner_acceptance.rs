@@ -134,7 +134,8 @@ fn pass2_holds_tumbling_windows_at_the_gcd_of_ranges_and_steps() {
 }
 
 /// Stage 3 selects among the candidates Stage 2 lists: every candidate a
-/// plan node runs (`n<k>:  C<c> = ...`) is a line of Stage 2's output.
+/// plan node runs (`n<k>:  C<c> = ...`) is a line of Stage 2's output
+/// (`    C<c>  (timing, lifetime)`).
 #[test]
 fn stage3_selects_candidates_stage2_lists() {
     let text = stdout(planner(&rate_workload(), &["--run-until", "stage3"]));
@@ -149,7 +150,7 @@ fn stage3_selects_candidates_stage2_lists() {
     assert!(!selected.is_empty(), "{stage3}");
     for candidate in selected {
         assert!(
-            stage2.contains(&format!("\n    {candidate} = ")),
+            stage2.contains(&format!("\n    {candidate}  (")),
             "{candidate} is not in Stage 2's output"
         );
     }
