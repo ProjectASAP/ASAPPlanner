@@ -73,8 +73,13 @@ To run it, see [RUNNING.md](RUNNING.md).
   Pass 2 pruned) and the queries it is the root of; its candidates sit
   inside it, bordered by origin, marked `✚ new` when the step added them
   and `✗ pruned` (dashed) when Pass 2 pruned them. A group with more than
-  12 candidates is drawn as one node per origin with its count; clicking a
-  count lists them. Each candidate box shows its parameters θ. On the last
+  12 candidates is split into counts by its first dimension that varies:
+  origin, sketch family, each θ field (e.g. `k`, `depth`, `width`), then
+  tumbling-window width. Clicking a count drills into it, splitting again
+  until at most 12 remain, which are then drawn one by one; the group's
+  label shows the path (`origin=Pass1 › depth=5`), clicking the group goes
+  back one level, and the group's details offer the other varying
+  dimensions to split by instead. Each candidate box shows its parameters θ. On the last
   tab the selected plan's candidates are filled green with `✓ selected` (a
   group may have several, one per execution context). Clicking a group
   shows its operator, children, parents, queries, its candidates with θ,

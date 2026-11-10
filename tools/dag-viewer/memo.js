@@ -271,18 +271,61 @@ function memoGroupRanks(groups) {
 // Sizes of the drawing, in cytoscape pixels.
 const MEMO_ITEM = { width: 190, height: 56, gap: 10, columns: 3, pad: 12, label: 34, rowGap: 70, groupGap: 36, rowWidth: 2200 };
 
+// A candidate's dimensions as [name, value] pairs, values as text: its
+// origin, its sketch family and each θ field, and its tumbling-window width.
+// A candidate without a dimension has the value "none" for it.
+function memoCandidateDims(c) {
+  const dims = [['origin', MEMO_ORIGINS[c.origin].name]];
+  Object.entries(c.parameters || {}).forEach(([family, fields]) => {
+    dims.push(['sketch', family]);
+    if (memoIsObject(fields)) Object.entries(fields).forEach(([name, v]) => dims.push([name, compactWire(v)]));
+  });
+  const op = memoIsObject(c.operator) ? Object.values(Object.values(c.operator)[0] || {})[0] : null;
+  if (memoIsObject(op) && op.tumbling_window_width_ms != null) dims.push(['window_ms', compactWire(op.tumbling_window_width_ms)]);
+  return dims;
+}
+
+// How a group with `candidates` is drawn under `state` (`{path, next}`: the
+// [dimension, value] pairs the user drilled into, and the dimension to
+// split by next). `shown` are the candidates matching `path`; `choices` the
+// dimensions that still vary among them. While more than `collapseAbove`
+// remain and a dimension varies, they split by `dim` (`next` when it
+// varies, else the first that does) into `buckets` ([value, candidates],
+// numeric values ascending with "none" last); otherwise `dim` is null and
+// `shown` are drawn one by one.
+function memoGroupDrill(candidates, state, collapseAbove) {
+  const path = (state && state.path) || [];
+  const dimsOf = new Map(candidates.map((c) => [c.index, new Map(memoCandidateDims(c))]));
+  const valueOf = (c, dim) => dimsOf.get(c.index).get(dim) ?? 'none';
+  const shown = candidates.filter((c) => path.every(([dim, value]) => valueOf(c, dim) === value));
+  const choices = [...new Set(shown.flatMap((c) => [...dimsOf.get(c.index).keys()]))]
+    .filter((dim) => !path.some(([d]) => d === dim) && new Set(shown.map((c) => valueOf(c, dim))).size > 1);
+  if (shown.length <= collapseAbove || !choices.length) return { path, shown, choices, dim: null, buckets: [] };
+  const dim = choices.includes(state && state.next) ? state.next : choices[0];
+  const byValue = new Map();
+  shown.forEach((c) => {
+    const value = valueOf(c, dim);
+    if (!byValue.has(value)) byValue.set(value, []);
+    byValue.get(value).push(c);
+  });
+  const buckets = [...byValue];
+  const rank = (v) => (v === 'none' ? Infinity : Number(v));
+  if (buckets.every(([v]) => v === 'none' || (v !== '' && !Number.isNaN(Number(v))))) buckets.sort(([a], [b]) => rank(a) - rank(b));
+  return { path, shown, choices, dim, buckets };
+}
+
 // Step `s` of `memo` as cytoscape elements with preset positions. A group
 // is node `g<id>` (a compound node holding its candidates, or a plain box
-// when it has none, as at Stage 0); a candidate is `g<id>c<index>`; a
-// collapsed group holds one node per origin, `g<id>o<origin>`. An edge goes
-// from a candidate (or origin node, or a group without candidates) to each
-// child group it reads. Options: `expanded` (ids of large groups drawn with
-// every candidate), `collapseAbove` (default MEMO_COLLAPSE_ABOVE),
-// `queryIds` (the workload's query ids). The selected plan's candidates
-// are marked at the last step only; Pass 2's eliminated candidates are
-// marked `pruned`.
+// when it has none, as at Stage 0); a candidate is `g<id>c<index>`; a large
+// group holds one node per value of the dimension it splits by
+// (memoGroupDrill), `g<id>b<k>`. An edge goes from a candidate (or bucket
+// node, or a group without candidates) to each child group it reads.
+// Options: `drill` (per group id, its memoGroupDrill state),
+// `collapseAbove` (default MEMO_COLLAPSE_ABOVE), `queryIds` (the workload's
+// query ids). The selected plan's candidates are marked at the last step
+// only; Pass 2's eliminated candidates are marked `pruned`.
 function memoStepElements(memo, s, options) {
-  const { expanded = [], collapseAbove = MEMO_COLLAPSE_ABOVE, queryIds = [] } = options || {};
+  const { drill = {}, collapseAbove = MEMO_COLLAPSE_ABOVE, queryIds = [] } = options || {};
   const step = memo.steps[s];
   const last = s === memo.steps.length - 1;
   const selected = last && memo.selected_candidates ? memo.selected_candidates : {};
@@ -298,37 +341,31 @@ function memoStepElements(memo, s, options) {
     edges.push({ data: { id, source, target: `g${child}`, queries }, classes: chosen ? 'chosen' : '' });
   };
 
-  // Each group's items (candidates or origin counts), laid out below.
+  // Each group's items (candidates or bucket counts), laid out below.
   const boxes = step.groups.map((group) => {
     const chosenIndices = selected[String(group.id)] || [];
-    const collapsible = group.candidates.length > collapseAbove;
-    const collapsed = collapsible && !expanded.includes(group.id);
+    const split = memoGroupDrill(group.candidates, drill[group.id], collapseAbove);
     const queries = group.queries;
     let items = [];
-    if (collapsed) {
-      const byOrigin = new Map();
-      group.candidates.forEach((c) => {
-        if (!byOrigin.has(c.origin)) byOrigin.set(c.origin, { added: 0, pruned: 0, children: new Set(), chosen: false, chosenChildren: [] });
-        const entry = byOrigin.get(c.origin);
-        if (c.added) entry.added += 1;
-        if (c.pruned) entry.pruned += 1;
-        c.children.forEach((child) => entry.children.add(child));
-        if (chosenIndices.includes(c.index)) { entry.chosen = true; entry.chosenChildren.push(...c.children); }
-      });
-      items = Object.entries(group.candidate_count_by_origin).filter(([, count]) => count > 0).map(([origin, count]) => {
-        const entry = byOrigin.get(origin);
-        const lines = [`${count} ${MEMO_ORIGINS[origin].name}`];
-        const notes = [entry.added ? `✚ ${entry.added} new` : '', entry.pruned ? `✗ ${entry.pruned} pruned` : '', entry.chosen ? '✓ selected' : ''].filter(Boolean);
+    if (split.dim) {
+      items = split.buckets.map(([value, cs], k) => {
+        const chosen = cs.filter((c) => chosenIndices.includes(c.index));
+        const added = cs.filter((c) => c.added).length;
+        const pruned = cs.filter((c) => c.pruned).length;
+        const origins = new Set(cs.map((c) => c.origin));
+        const lines = [split.dim === 'origin' ? `${cs.length} ${value}` : `${cs.length} · ${split.dim}=${value}`];
+        const notes = [added ? `✚ ${added} new` : '', pruned ? `✗ ${pruned} pruned` : '', chosen.length ? '✓ selected' : ''].filter(Boolean);
         lines.push(notes.length ? notes.join(' · ') : 'click to expand');
         return {
-          data: { id: `g${group.id}o${origin}`, kind: 'origin', groupId: group.id, origin, count, color: MEMO_ORIGINS[origin].color,
+          data: { id: `g${group.id}b${k}`, kind: 'bucket', groupId: group.id, dim: split.dim, value, count: cs.length,
+            color: origins.size === 1 ? MEMO_ORIGINS[cs[0].origin].color : '#848b98',
             label: lines.join('\n'), queries, w: MEMO_ITEM.width, h: MEMO_ITEM.height },
-          classes: ['memoItem', entry.chosen ? 'chosen' : '', entry.added ? 'added' : ''].filter(Boolean).join(' '),
-          children: [...entry.children], chosenChildren: entry.chosenChildren, chosen: entry.chosen,
+          classes: ['memoItem', chosen.length ? 'chosen' : '', added ? 'added' : ''].filter(Boolean).join(' '),
+          children: [...new Set(cs.flatMap((c) => c.children))], chosenChildren: chosen.flatMap((c) => c.children), chosen: chosen.length > 0,
         };
       });
     } else {
-      items = group.candidates.map((c) => {
+      items = split.shown.map((c) => {
         const chosen = chosenIndices.includes(c.index);
         const notes = [MEMO_ORIGINS[c.origin].name, c.added ? '✚ new' : '', c.pruned ? '✗ pruned' : '', chosen ? '✓ selected' : ''].filter(Boolean);
         return {
@@ -342,13 +379,14 @@ function memoStepElements(memo, s, options) {
     const pruned = group.candidates.filter((c) => c.pruned).length;
     const count = `${group.candidate_count} candidate${group.candidate_count === 1 ? '' : 's'}${pruned ? ` (${pruned} pruned by Pass 2)` : ''}`;
     const roots = group.roots_of.length ? ` · root of ${group.roots_of.map(queryName).join(', ')}` : '';
-    const toggle = collapsible ? (collapsed ? ' · click a count to expand' : ' · click the group to collapse') : '';
-    const label = `G${group.id} · ${memoClip(group.label, 40)}\n${step.step !== 'stage0' ? count : 'no candidates yet'}${roots}${toggle}`;
+    const where = split.path.length ? `\n${split.path.map(([dim, value]) => `${dim}=${value}`).join(' › ')} (${split.shown.length})` : '';
+    const toggle = (split.dim ? ' · click a count to expand' : '') + (split.path.length ? ' · click the group to go back' : '');
+    const label = `G${group.id} · ${memoClip(group.label, 40)}\n${step.step !== 'stage0' ? count : 'no candidates yet'}${roots}${toggle}${where}`;
     const columns = Math.min(Math.max(items.length, 1), MEMO_ITEM.columns);
     const rows = Math.max(1, Math.ceil(items.length / MEMO_ITEM.columns));
     const width = items.length ? columns * MEMO_ITEM.width + (columns - 1) * MEMO_ITEM.gap + 2 * MEMO_ITEM.pad : 230;
-    const height = items.length ? rows * MEMO_ITEM.height + (rows - 1) * MEMO_ITEM.gap + 2 * MEMO_ITEM.pad + MEMO_ITEM.label : 56;
-    return { group, items, label, width, height, collapsible, collapsed, queries };
+    const height = items.length ? rows * MEMO_ITEM.height + (rows - 1) * MEMO_ITEM.gap + 2 * MEMO_ITEM.pad + MEMO_ITEM.label + (where ? 14 : 0) : 56;
+    return { group, items, label, width, height, drilled: split.path.length > 0, queries };
   });
 
   // Rank rows, highest rank on top; a rank wider than the row width wraps.
@@ -388,7 +426,7 @@ function memoStepElements(memo, s, options) {
   boxes.forEach((box) => {
     const { group, items } = box;
     const data = { id: `g${group.id}`, kind: 'group', groupId: group.id, label: box.label, queries: box.queries,
-      collapsible: box.collapsible, collapsed: box.collapsed, w: box.width, h: box.height };
+      drilled: box.drilled, w: box.width, h: box.height };
     const chosenGroup = Object.prototype.hasOwnProperty.call(selected, String(group.id));
     const node = { data, classes: ['memoGroup', items.length ? 'compound' : '', chosenGroup ? 'chosenGroup' : ''].filter(Boolean).join(' ') };
     if (!items.length) node.position = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
@@ -404,7 +442,7 @@ function memoStepElements(memo, s, options) {
         },
       });
       // Only the selected candidate's own edges are marked, not those of
-      // the other candidates sharing its origin count.
+      // the other candidates sharing its bucket.
       item.children.forEach((child) => edge(item.data.id, child, item.chosenChildren.includes(child), box.queries));
     });
     if (!items.length) group.children.forEach((child) => edge(`g${group.id}`, child, false, box.queries));
@@ -441,8 +479,8 @@ function memoViewController() {
   let cy = null;
   let elements = [];
   let highlighted = '';
-  // Per step, the large groups the user expanded.
-  let expanded = [];
+  // Per step, per group id, its memoGroupDrill state.
+  let drill = [];
 
   function style() {
     return [
@@ -466,7 +504,7 @@ function memoViewController() {
 
   function draw() {
     if (cy) { cy.destroy(); cy = null; }
-    elements = memoStepElements(memo, stepIndex, { expanded: expanded[stepIndex], queryIds });
+    elements = memoStepElements(memo, stepIndex, { drill: drill[stepIndex], queryIds });
     cy = cytoscape({
       container: $('cyMemo'), elements, style: style(), layout: { name: 'preset', fit: true, padding: 16 },
       wheelSensitivity: 0.25, minZoom: 0.05, maxZoom: 2.5, boxSelectionEnabled: false,
@@ -484,7 +522,7 @@ function memoViewController() {
     $('memoTabs').querySelectorAll('button').forEach((b) => b.addEventListener('click', () => selectStep(Number(b.dataset.step))));
   }
 
-  const HINT = '<p class="hint">Click a memo candidate to see its properties, its logical edges (Pass 2 tab) and its physical candidates; click a count to expand its group.</p>';
+  const HINT = '<p class="hint">Click a memo candidate to see its properties, its logical edges (Pass 2 tab) and its physical candidates; click a count to split its group further, and the group to go back.</p>';
 
   function dim() {
     if (!cy || !cy.batch) return;
@@ -498,10 +536,19 @@ function memoViewController() {
   const groupList = (ids) => (ids.length ? ids.map((id) => `G${id}`).join(', ') : 'none');
   const queryList = (ids) => (ids.length ? ids.map((q) => queryIds[q] || `query #${q + 1}`).join(', ') : 'none');
 
+  const drillOf = (id) => drill[stepIndex][id] || { path: [], next: null };
+  // Sets group `id`'s drill state, redraws and shows the group.
+  function setDrill(id, state) {
+    drill[stepIndex] = { ...drill[stepIndex], [id]: state };
+    draw();
+    showGroup(groupOf(id));
+  }
+
   function tap(d) {
     const group = groupOf(d.groupId);
-    if (d.kind === 'origin') { expanded[stepIndex] = [...expanded[stepIndex], d.groupId]; draw(); showGroup(group); return; }
-    if (d.kind === 'group' && d.collapsible && !d.collapsed) { expanded[stepIndex] = expanded[stepIndex].filter((id) => id !== d.groupId); draw(); showGroup(group); return; }
+    const state = drillOf(d.groupId);
+    if (d.kind === 'bucket') { setDrill(d.groupId, { path: [...state.path, [d.dim, d.value]], next: null }); return; }
+    if (d.kind === 'group' && d.drilled) { setDrill(d.groupId, { path: state.path.slice(0, -1), next: null }); return; }
     if (d.kind === 'candidate') showCandidate(group, group.candidates.find((c) => c.index === d.index));
     else showGroup(group);
   }
@@ -528,10 +575,20 @@ function memoViewController() {
 
   const section = (title, items) => (items.length ? `<div class="eyebrow">${esc(title)}</div>${list(items)}` : '');
 
+  // While the group is split into counts, a button per dimension that still
+  // varies, to split by it instead.
+  function splitButtons(group) {
+    const state = drillOf(group.id);
+    const split = memoGroupDrill(group.candidates, state, MEMO_COLLAPSE_ABOVE);
+    if (!split.dim) return '';
+    const buttons = split.choices.map((dim) => `<button type="button" data-dim="${esc(dim)}" aria-pressed="${dim === split.dim}">${esc(dim)}</button>`).join(' ');
+    return `<div class="eyebrow">split by</div><div class="memo-split">${buttons}</div>`;
+  }
+
   function showGroup(group) {
     const origins = Object.entries(group.candidate_count_by_origin).map(([o, n]) => `${n} ${MEMO_ORIGINS[o].name}`).join(', ');
     const pruned = memoPrunedLines(doc, group.id);
-    $('details').innerHTML = `<h3>Memo group G${esc(group.id)} <span class="eyebrow">${esc(memo.steps[stepIndex].title)}</span></h3>${kv([
+    $('details').innerHTML = `<h3>Memo group G${esc(group.id)} <span class="eyebrow">${esc(memo.steps[stepIndex].title)}</span></h3>${splitButtons(group)}${kv([
       ['label', group.label], ['operator', stageNodeLines(group.operator).join(' · ')],
       ['reads', groupList(group.children)], ['read by', groupList(group.parents)],
       ['queries reaching it', queryList(group.queries)], ['root of', queryList(group.roots_of)],
@@ -543,6 +600,9 @@ function memoViewController() {
     ])}${list(group.candidates.map(candidateLine))}
       ${section('pruned by Pass 2', pruned.pass2)}${section('pruned by Stage 2', pruned.stage2)}${section('pruned by Stage 3', pruned.stage3)}
       <details><summary>Group operator (JSON)</summary><pre>${esc(JSON.stringify(group.operator, null, 2))}</pre></details>`;
+    $('details').querySelectorAll('.memo-split button').forEach((b) => b.addEventListener('click', () => {
+      setDrill(group.id, { ...drillOf(group.id), next: b.dataset.dim });
+    }));
   }
 
   // At the Pass 2 step (the memo Stage 2 expands): why Pass 2 pruned the
@@ -585,7 +645,7 @@ function memoViewController() {
     highlighted = '';
     $('memoView').hidden = !memo;
     if (!memo) { $('memoTabs').innerHTML = ''; $('memoView-meta').textContent = ''; return; }
-    expanded = memo.steps.map(() => []);
+    drill = memo.steps.map(() => ({}));
     // The last step first: it is the memo the selected plan was chosen from.
     selectStep(memo.steps.length - 1);
   }

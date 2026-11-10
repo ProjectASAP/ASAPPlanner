@@ -889,19 +889,28 @@ class AppTests(unittest.TestCase):
         self.assertIn("3 groups · 0 candidates", self.text(js, "memoView-meta"))
         self.assertIn("shown on the last tab", self.text(js, "memoView-meta"))
 
-    def test_tapping_a_count_expands_its_group_and_the_group_collapses_it(self):
-        """Tapping an origin count expands its group; tapping the group collapses it."""
+    def test_tapping_counts_drills_down_to_candidates_and_the_group_goes_back(self):
+        """Tapping a count drills into it until the group shows candidates
+        (at most 12); the details offer the dimensions to split by; tapping
+        the group goes back one level at a time."""
         doc = example1()
         js = self.memo_page(doc)
         pass2 = doc["memo"]["steps"][-1]
         big = next(g for g in pass2["groups"] if g["candidate_count"] > 12)
-        counts = self.memo_ids(js, f"g{big['id']}")
-        self.assertEqual(len(counts), len([n for n in big["candidate_count_by_origin"].values() if n]))
-        self.tap_memo(js, counts[0])
-        self.assertEqual(len(self.memo_ids(js, f"g{big['id']}")), big["candidate_count"])
+        group = f"g{big['id']}"
+        levels = [self.memo_ids(js, group)]
+        self.assertTrue(all("b" in i for i in levels[0]))
+        self.tap_memo(js, group)
+        self.assertIn('data-dim="', js.eval("__els.details.innerHTML"))
+        while "b" in levels[-1][0]:
+            self.tap_memo(js, levels[-1][0])
+            levels.append(self.memo_ids(js, group))
+        self.assertTrue(all("c" in i for i in levels[-1]))
+        self.assertLessEqual(len(levels[-1]), 12)
         self.assertIn(f"Memo group G{big['id']}", self.text(js, "details"))
-        self.tap_memo(js, f"g{big['id']}")
-        self.assertEqual(self.memo_ids(js, f"g{big['id']}"), counts)
+        for level in reversed(levels[:-1]):
+            self.tap_memo(js, group)
+            self.assertEqual(self.memo_ids(js, group), level)
 
     def test_tapping_a_candidate_lists_its_logical_edges_and_physical_candidates(self):
         """Tapping a memo candidate shows its θ and required accuracy, its
