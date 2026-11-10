@@ -7,19 +7,21 @@
 
 use std::path::Path;
 
+use asap_devtools::corpus_registry::fuzz_seed_workloads;
 use asap_devtools::planner_fuzz::generate::{
     OuterAggregation, OuterOp, PromqlSpec, QuerySpec, RangeFunction, SqlAggregate, SqlSpec,
 };
 use asap_devtools::planner_fuzz::relations::{evaluate, Check, Outcome, Relation, Witness};
-use asap_devtools::planner_fuzz::{read_seed_file, FuzzSettings, FuzzWorkload, Planner};
+use asap_devtools::planner_fuzz::{FuzzSettings, FuzzWorkload, Planner};
 
+/// The corpus registry's seed `fuzz_seeds/<name>`.
 fn seed(name: &str) -> FuzzWorkload {
-    read_seed_file(
-        &Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/planner_fuzz_seeds")
-            .join(name),
-    )
-    .expect("the seed file reads")
+    let id = format!("fuzz_seeds/{name}");
+    fuzz_seed_workloads()
+        .expect("the seeds read")
+        .into_iter()
+        .find_map(|(seed_id, workload)| (seed_id == id).then_some(workload))
+        .unwrap_or_else(|| panic!("no registry seed {id}"))
 }
 
 fn check(relation: Relation, workload: FuzzWorkload, target: usize) -> Outcome {
@@ -41,7 +43,7 @@ fn check(relation: Relation, workload: FuzzWorkload, target: usize) -> Outcome {
 /// finer-aggregate reuse (#950), and is now its regression test.
 #[test]
 fn finds_issue_902_filter_on_group_key_not_reading_the_grouped_result() {
-    let mut workload = seed("issue902.json");
+    let mut workload = seed("issue902");
     let per_city = SqlSpec {
         table: "metrics".into(),
         aggregate: SqlAggregate::Quantile(0.9),
@@ -64,7 +66,7 @@ fn finds_issue_902_filter_on_group_key_not_reading_the_grouped_result() {
 /// the grouped rate result. Open bug: flip to `Holds` when #891 is fixed.
 #[test]
 fn finds_issue_891_filtered_rate_not_reading_the_grouped_rate() {
-    let mut workload = seed("issue891.workload.json");
+    let mut workload = seed("issue891");
     let grouped = PromqlSpec {
         metric: "container_cpu_usage_seconds_total".into(),
         matchers: vec![],
@@ -99,7 +101,7 @@ fn finds_issue_891_filtered_rate_not_reading_the_grouped_rate() {
 /// A relation that holds: an exact duplicate of a query the planner shares.
 #[test]
 fn exact_duplicate_of_a_shared_query_holds() {
-    let mut workload = seed("issue903.workload.json");
+    let mut workload = seed("issue903");
     workload.queries.truncate(1);
     assert!(
         matches!(
@@ -123,7 +125,7 @@ fn campaign_writes_summary_coverage_and_drafts() {
         cases: 2,
         time_budget_s: 600.0,
         relations: vec![Relation::ExactDuplicate, Relation::OtherRepeatInterval],
-        seeds: vec![seed("issue903.workload.json")],
+        seeds: vec![seed("issue903")],
         out_dir: out.clone(),
         max_shrink_attempts: 5,
         // The report test must honor case_timeout_s even when an individual
@@ -408,7 +410,7 @@ fn other_frequency_statistic_witness_costs_from_one_univmon() {
 /// selected it for: the witness's reference point is on the same footing.
 #[test]
 fn the_selected_plan_costs_what_the_search_selected_it_for() {
-    let mut workload = seed("issue903.workload.json");
+    let mut workload = seed("issue903");
     workload.queries.truncate(1);
     let mut planner = Planner::new(FuzzSettings::default());
     let planned = planner.plan(&workload).expect("W plans");
